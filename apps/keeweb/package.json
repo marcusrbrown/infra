@@ -1,0 +1,9 @@
+{
+  "name": "@marcusrbrown/infra-keeweb",
+  "private": true,
+  "scripts": {
+    "build": "bun run src/build.ts",
+    "deploy": "bash deploy.sh",
+    "deploy:nginx": "bash deploy.sh --nginx"
+  }
+}

@@ -1,0 +1,72 @@
+name: Deploy
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      keeweb: ${{ steps.filter.outputs.keeweb }}
+      nginx: ${{ steps.filter.outputs.nginx }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            keeweb:
+              - 'apps/keeweb/**'
+            nginx:
+              - 'apps/keeweb/config/kw.igg.ms.conf'
+
+  deploy-keeweb:
+    needs: detect-changes
+    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.keeweb == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: apps/keeweb
+
+      - name: Build KeeWeb dist
+        run: bun run build
+        working-directory: apps/keeweb
+        env:
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+
+      - name: Configure SSH known_hosts
+        run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Deploy content
+        run: bash apps/keeweb/deploy.sh
+
+      - name: Deploy nginx config
+        if: needs.detect-changes.outputs.nginx == 'true' || github.event_name == 'workflow_dispatch'
+        run: bash apps/keeweb/deploy.sh --nginx
+
+      - name: Post-deploy health check
+        run: curl -sf -o /dev/null -w "%{http_code}" https://kw.igg.ms/ | grep -q "^200"

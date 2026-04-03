@@ -1,0 +1,13 @@
+{
+  "name": "@marcusrbrown/infra",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Infrastructure management CLI",
+  "type": "module",
+  "bin": {
+    "infra": "src/cli.ts"
+  },
+  "scripts": {
+    "cli": "bun run src/cli.ts"
+  }
+}

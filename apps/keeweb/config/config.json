@@ -1,0 +1,34 @@
+{
+  "settings": {
+    "autoSave": true,
+    "idleMinutes": 5,
+    "generatorPresets": {
+      "default": "Custom1",
+      "user": [
+        {
+          "name": "Custom1",
+          "title": "20 chars / symbols",
+          "length": 20,
+          "digits": true,
+          "lower": true,
+          "special": true,
+          "upper": true
+        }
+      ]
+    },
+
+    "canOpenDemo": false,
+    "canOpenSettings": true,
+    "canImportXml": false,
+
+    "dropbox": true,
+    "dropboxAppKey": "15is6fpy9muu1vo",
+    "dropboxSecret": "",
+
+    "webdav": true,
+
+    "gdrive": false,
+    "onedrive": false,
+    "msteams": false
+  }
+}

@@ -1,45 +1,28 @@
 #!/usr/bin/env bun
 
-const VERSION = '0.0.0'
+import {goke} from 'goke'
+import pkg from '../package.json' with {type: 'json'}
+import {registerKeewebDeploy} from './commands/keeweb-deploy'
+import {registerKeewebStatus} from './commands/keeweb-status'
+import {registerMcp} from './commands/mcp'
 
-function showHelp() {
-  console.log(`infra ${VERSION}
+const cli = goke('infra')
 
-Infrastructure management CLI
+cli.option('--verbose', 'Enable verbose output for all commands')
 
-USAGE:
-  infra [COMMAND] [OPTIONS]
+registerKeewebStatus(cli)
+registerKeewebDeploy(cli)
+registerMcp(cli)
 
-COMMANDS:
-  keeweb      KeeWeb deployment management
-  help        Show this help message
-  --help      Show this help message
-  --version   Show version
+cli.help()
+cli.version(pkg.version)
 
-EXAMPLES:
-  infra --help
-  infra --version
-  infra keeweb
-`)
-}
-
-function showVersion() {
-  console.log(`infra ${VERSION}`)
-}
-
-const args = process.argv.slice(2)
-const command = args[0]
-
-if (!command || command === '--help' || command === 'help') {
-  showHelp()
-} else if (command === '--version') {
-  showVersion()
-} else if (command === 'keeweb') {
-  console.error('keeweb: not yet implemented')
-  process.exit(1)
-} else {
-  console.error(`error: unknown command '${command}'`)
-  console.error('')
-  showHelp()
+try {
+  cli.parse(process.argv, {run: false})
+  await cli.runMatchedCommand()
+} catch (error) {
+  if (error instanceof Error) {
+    console.error(error.message)
+  }
   process.exit(1)
 }

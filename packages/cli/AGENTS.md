@@ -1,6 +1,6 @@
 # @marcusrbrown/infra CLI
 
-Operational CLI built with [goke](https://github.com/remorses/goke) + Zod. Exposes commands as MCP tools via `@goke/mcp`.
+Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra). Run via `bunx @marcusrbrown/infra`. Built with [goke](https://github.com/remorses/goke) + Zod. Exposes commands as MCP tools via `@goke/mcp`.
 
 ## WHERE TO LOOK
 

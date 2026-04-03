@@ -25,8 +25,8 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation 
 | --- | --- | --- |
 | Add new app | `apps/<name>/` | Copy keeweb structure, add to workspace |
 | Add CLI command | `packages/cli/src/commands/` | goke command module, register in cli.ts |
-| Check deploy health | `bun run packages/cli/src/cli.ts keeweb status` | HTTP, last deploy, content hash |
-| Trigger deploy | `bun run packages/cli/src/cli.ts keeweb deploy` | Remote (default) or `--local` |
+| Check deploy health | `bunx @marcusrbrown/infra keeweb status` | HTTP, last deploy, content hash |
+| Trigger deploy | `bunx @marcusrbrown/infra keeweb deploy` | Remote (default) or `--local` |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
 | Configure TypeScript | `tsconfig.json` | Extends `@bfra.me/tsconfig`, Bun types |
@@ -74,9 +74,9 @@ bunx tsc --noEmit                              # Type check
 bun run --cwd apps/keeweb build                # Build KeeWeb dist
 bash apps/keeweb/deploy.sh                     # Deploy content only
 bash apps/keeweb/deploy.sh --nginx             # Deploy content + nginx config
-bun run packages/cli/src/cli.ts keeweb status  # Check deploy health
-bun run packages/cli/src/cli.ts keeweb deploy  # Trigger deploy (GitHub Actions)
-bun run packages/cli/src/cli.ts mcp            # Start MCP server
+bunx @marcusrbrown/infra keeweb status          # Check deploy health
+bunx @marcusrbrown/infra keeweb deploy          # Trigger deploy (GitHub Actions)
+bunx @marcusrbrown/infra mcp                    # Start MCP server
 bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on server
 ```
 

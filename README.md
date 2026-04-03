@@ -51,10 +51,17 @@ bash apps/keeweb/deploy.sh --nginx   # content + nginx config
 
 ## CLI
 
-The `@marcusrbrown/infra` CLI provides operational commands for managing infrastructure.
+The [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI provides operational commands for managing infrastructure.
 
 ```bash
-bun run packages/cli/src/cli.ts --help
+bunx @marcusrbrown/infra --help
+```
+
+Or install globally:
+
+```bash
+bun add -g @marcusrbrown/infra
+infra --help
 ```
 
 ### Commands
@@ -66,16 +73,16 @@ bun run packages/cli/src/cli.ts --help
 - Content hash comparison (SHA-256 of live site vs local `dist/`)
 
 ```bash
-bun run packages/cli/src/cli.ts keeweb status
+bunx @marcusrbrown/infra keeweb status
 ```
 
 **`infra keeweb deploy`** — trigger a deployment:
 
 ```bash
-bun run packages/cli/src/cli.ts keeweb deploy              # trigger GitHub Actions workflow
-bun run packages/cli/src/cli.ts keeweb deploy --dry-run     # preview without executing
-bun run packages/cli/src/cli.ts keeweb deploy --local       # deploy directly via SSH
-bun run packages/cli/src/cli.ts keeweb deploy --local --nginx  # include nginx config
+bunx @marcusrbrown/infra keeweb deploy              # trigger GitHub Actions workflow
+bunx @marcusrbrown/infra keeweb deploy --dry-run     # preview without executing
+bunx @marcusrbrown/infra keeweb deploy --local       # deploy directly via SSH
+bunx @marcusrbrown/infra keeweb deploy --local --nginx  # include nginx config
 ```
 
 Local deploy requires `ssh-agent` running with the deploy key loaded (`SSH_AUTH_SOCK`).
@@ -83,7 +90,7 @@ Local deploy requires `ssh-agent` running with the deploy key loaded (`SSH_AUTH_
 **`infra mcp`** — start a stdio MCP server exposing all CLI commands as tools:
 
 ```bash
-bun run packages/cli/src/cli.ts mcp
+bunx @marcusrbrown/infra mcp
 ```
 
 This lets coding agents (Fro Bot, Copilot) call `keeweb status` and `keeweb deploy` programmatically via the [Model Context Protocol](https://modelcontextprotocol.io).
@@ -127,6 +134,7 @@ Deploys require approval through the `production` GitHub Environment.
 | `APPLICATION_PRIVATE_KEY` | GitHub App private key                                             |
 | `FRO_BOT_PAT`             | PAT for the fro-bot user (AI agent identity for @fro-bot mentions) |
 | `OPENCODE_AUTH_JSON`      | LLM provider auth JSON (e.g. `{"anthropic":{"apiKey":"..."}}}`)    |
+| `NPM_TOKEN`               | npm publish token for `@marcusrbrown/infra` package                |
 | `OMO_PROVIDERS`           | OhMyOpenCode provider configuration                                |
 
 **Repository variables:**

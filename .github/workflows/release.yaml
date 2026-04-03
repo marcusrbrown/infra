@@ -56,11 +56,13 @@ jobs:
         run: bun install --frozen-lockfile --ignore-scripts
 
       - id: changesets
-        name: Create Release Pull Request
+        name: Create Release Pull Request or Publish
         uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
         env:
           GITHUB_TOKEN: ${{ steps.get-app-token.outputs.token }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         with:
           commit: 'chore(changesets): version packages'
           title: 'chore(🦋📦): version packages'
           version: bun run version-changesets
+          publish: bunx changeset publish

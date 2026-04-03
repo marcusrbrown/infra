@@ -1,20 +1,21 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-04-02
-**Commit:** c342666
+**Generated:** 2026-04-03
+**Commit:** d820e4d
 **Branch:** main
 
 ## OVERVIEW
 
-Bun workspace monorepo for personal infrastructure — currently KeeWeb deploy automation + CLI scaffold. Deploys static sites to `box.heatvision.co` via SSH/rsync.
+Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation + operational CLI with MCP bridge. Deploys static sites to `box.heatvision.co` via SSH/rsync.
 
 ## STRUCTURE
 
 ```text
 ├── apps/keeweb/        KeeWeb deploy package (see apps/keeweb/AGENTS.md)
-├── packages/cli/       @marcusrbrown/infra CLI stub (single file, no framework yet)
+├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
-├── .github/            Workflows, pinned host keys, Renovate config, repo settings
+├── .changeset/         Changesets config for versioning
+├── .github/            Workflows, pinned host keys, Renovate, Copilot instructions
 └── .opencode/          OpenCode slash commands (generate-readme)
 ```
 
@@ -23,12 +24,15 @@ Bun workspace monorepo for personal infrastructure — currently KeeWeb deploy a
 | Task | Location | Notes |
 | --- | --- | --- |
 | Add new app | `apps/<name>/` | Copy keeweb structure, add to workspace |
-| Add CLI command | `packages/cli/src/cli.ts` | Plain arg parsing, no framework |
+| Add CLI command | `packages/cli/src/commands/` | goke command module, register in cli.ts |
+| Check deploy health | `bun run packages/cli/src/cli.ts keeweb status` | HTTP, last deploy, content hash |
+| Trigger deploy | `bun run packages/cli/src/cli.ts keeweb deploy` | Remote (default) or `--local` |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
 | Configure TypeScript | `tsconfig.json` | Extends `@bfra.me/tsconfig`, Bun types |
 | Renovate config | `.github/renovate.json5` | Extends `marcusrbrown/renovate-config` |
 | Repo settings | `.github/settings.yml` | Synced by `bfra-me/.github` reusable workflow |
+| Copilot instructions | `.github/copilot-instructions.md` | References this file |
 | OpenCode commands | `.opencode/commands/` | Markdown slash commands |
 | Document solved problem | `docs/solutions/` | Compound learning with YAML frontmatter |
 
@@ -41,6 +45,7 @@ Bun workspace monorepo for personal infrastructure — currently KeeWeb deploy a
 - **CI install**: `bun install --frozen-lockfile --ignore-scripts` (skip simple-git-hooks postinstall).
 - **Cross-org reusable workflows**: Pass secrets explicitly (never `secrets: inherit` with `bfra-me/.github`).
 - **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root.
+- **Changesets**: `@changesets/cli` for versioning. Renovate PRs get auto-generated changeset files.
 - **No tests yet**: CI checks lint + typecheck only.
 
 ## ANTI-PATTERNS (THIS PROJECT)
@@ -56,6 +61,7 @@ Bun workspace monorepo for personal infrastructure — currently KeeWeb deploy a
 - Download-based build: KeeWeb v1.18.7 release zip cached in `.cache/`, `dist/` rebuilt every run (source build infeasible — 2017-era tooling).
 - Deploy separation: content-only by default, `--nginx` flag for config deploy (requires explicit flag + environment approval).
 - Scoped deploy user: `deploy-kw` on server has write access to site dir only + sudo for single activation script.
+- CLI framework: `goke` with Zod schemas, space-separated subcommands, `@goke/mcp` bridge for MCP tool exposure.
 - `bun.lock` (text format) committed for reproducible CI; `bun.lockb` (binary) is not used.
 
 ## COMMANDS
@@ -68,8 +74,10 @@ bunx tsc --noEmit                              # Type check
 bun run --cwd apps/keeweb build                # Build KeeWeb dist
 bash apps/keeweb/deploy.sh                     # Deploy content only
 bash apps/keeweb/deploy.sh --nginx             # Deploy content + nginx config
+bun run packages/cli/src/cli.ts keeweb status  # Check deploy health
+bun run packages/cli/src/cli.ts keeweb deploy  # Trigger deploy (GitHub Actions)
+bun run packages/cli/src/cli.ts mcp            # Start MCP server
 bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on server
-bun run packages/cli/src/cli.ts --help         # CLI usage
 ```
 
 ## NOTES

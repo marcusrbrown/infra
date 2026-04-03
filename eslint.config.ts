@@ -3,7 +3,7 @@ import {defineConfig} from '@bfra.me/eslint-config'
 export default defineConfig(
   {
     name: '@marcusrbrown/infra',
-    ignores: ['.agents/', 'docs/', 'dist/', '.cache/'],
+    ignores: ['.agents/', 'docs/', 'dist/', '.cache/', '.github/renovate.json5'],
     typescript: true,
   },
   {

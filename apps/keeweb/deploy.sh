@@ -47,11 +47,13 @@ fi
 
 log "Deploying KeeWeb v1.18.7 to $HOST"
 
-# Backup existing site
+# Backup existing site to deploy user's home
+BACKUP_DIR="/home/${REMOTE_USER}/backups"
 log "Backing up current site on remote"
 ssh "${REMOTE_USER}@${HOST}" "
+    mkdir -p '$BACKUP_DIR'
     if [ -d '$SITE_DIR' ]; then
-        cp -a '$SITE_DIR' '${SITE_DIR}.bak.$(date +%Y%m%d)'
+        rsync -a '$SITE_DIR/' '$BACKUP_DIR/kw.igg.ms.$(date +%Y%m%d%H%M)/'
     fi
 "
 

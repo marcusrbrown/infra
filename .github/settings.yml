@@ -1,0 +1,23 @@
+---
+_extends: .github:common-settings.yaml
+
+repository:
+  name: infra
+  description: Personal infrastructure management
+  topics: infra, keeweb, deploy, bun, github-actions
+
+branches:
+  - name: main
+    protection:
+      required_status_checks:
+        strict: false
+        contexts:
+          - CI
+          - Lint
+          - Type Check
+          - Renovate / Renovate
+
+      enforce_admins: true
+      required_pull_request_reviews: null
+      restrictions: null
+      required_linear_history: true

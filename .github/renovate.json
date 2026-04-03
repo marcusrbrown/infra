@@ -1,0 +1,8 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>marcusrbrown/renovate-config#4.5.2", "group:allNonMajor"],
+  "postUpgradeTasks": {
+    "commands": ["bun install", "bun run fix", "bun run fix"],
+    "executionMode": "branch"
+  }
+}

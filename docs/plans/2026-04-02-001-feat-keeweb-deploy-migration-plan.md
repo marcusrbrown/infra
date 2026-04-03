@@ -1,7 +1,7 @@
 ---
 title: "feat: Migrate KeeWeb deploy to infra repo with CI/CD"
 type: feat
-status: active
+status: completed
 date: 2026-04-02
 origin: docs/brainstorms/2026-04-02-infra-repo-requirements.md
 deepened: 2026-04-02

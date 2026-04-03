@@ -1,0 +1,66 @@
+---
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force-release:
+        description: Force release if checks pass
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    steps:
+      - id: get-app-token
+        name: Get Workflow Access Token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.APPLICATION_ID }}
+          private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+
+      - name: Setup Git user
+        env:
+          GH_TOKEN: ${{ steps.get-app-token.outputs.token }}
+          GIT_USER_NAME: ${{ steps.get-app-token.outputs.app-slug }}[bot]
+        run: |
+          USER_ID=$(gh api "/users/${GIT_USER_NAME}" --jq .id)
+          git config --global user.email "${USER_ID}+${GIT_USER_NAME}@users.noreply.github.com"
+          git config --global user.name "${GIT_USER_NAME}"
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          token: ${{ steps.get-app-token.outputs.token }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - id: changesets
+        name: Create Release Pull Request
+        uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
+        env:
+          GITHUB_TOKEN: ${{ steps.get-app-token.outputs.token }}
+        with:
+          commit: 'chore(changesets): version packages'
+          title: 'chore(🦋📦): version packages'
+          version: bun run version-changesets

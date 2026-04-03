@@ -1,0 +1,17 @@
+---
+name: Renovate Changesets
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: read
+
+jobs:
+  renovate-changesets:
+    if: github.actor == 'renovate[bot]' || github.actor == 'mrbro-bot[bot]'
+    name: Create Renovate Changeset
+    secrets:
+      APPLICATION_ID: ${{ secrets.APPLICATION_ID }}
+      APPLICATION_PRIVATE_KEY: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+    uses: bfra-me/.github/.github/workflows/renovate-changeset.yaml@969b04c4bf2f4ed610e1618dcd19eb95ecdfd497 # v4.14.6

@@ -44,8 +44,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
-        run: bun install
-        working-directory: apps/keeweb
+        run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Build KeeWeb dist
         run: bun run build

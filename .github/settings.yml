@@ -13,10 +13,8 @@ branches:
         strict: false
         contexts:
           - CI
-          - Create Renovate Changeset
           - Fro Bot
           - Lint
-          - Release
           - Type Check
           - Renovate / Renovate
 

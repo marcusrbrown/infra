@@ -1,21 +1,22 @@
 # @marcusrbrown/infra
 
-Personal infrastructure management — deploy automation, configuration, and tooling.
+Personal infrastructure management — deploy automation, operational CLI, and tooling.
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/marcusrbrown/infra/badge?style=flat-square)](https://scorecard.dev/viewer/?uri=github.com/marcusrbrown/infra)
 
 ## Overview
 
-Bun workspace monorepo for managing personal infrastructure. Currently hosts KeeWeb deploy automation with CI/CD, with a CLI scaffold for future tooling.
+Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation with CI/CD, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
 
 | Package        | Description                                  |
 | -------------- | -------------------------------------------- |
 | `apps/keeweb`  | KeeWeb v1.18.7 static site deploy automation |
-| `packages/cli` | `@marcusrbrown/infra` CLI (stub)             |
+| `packages/cli` | `@marcusrbrown/infra` CLI                    |
 
 ## Prerequisites
 
 - [Bun](https://bun.sh) v1.0+
+- [GitHub CLI](https://cli.github.com) (`gh`) — required for `keeweb status` and `keeweb deploy`
 
 ## Quick Start
 
@@ -50,11 +51,42 @@ bash apps/keeweb/deploy.sh --nginx   # content + nginx config
 
 ## CLI
 
-The `@marcusrbrown/infra` CLI (`packages/cli`) is a stub scaffold for future infrastructure commands.
+The `@marcusrbrown/infra` CLI provides operational commands for managing infrastructure.
 
 ```bash
 bun run packages/cli/src/cli.ts --help
 ```
+
+### Commands
+
+**`infra keeweb status`** — operational health check:
+
+- HTTP reachability of kw.igg.ms (status code + response time)
+- Last successful deploy timestamp (via GitHub Actions API)
+- Content hash comparison (SHA-256 of live site vs local `dist/`)
+
+```bash
+bun run packages/cli/src/cli.ts keeweb status
+```
+
+**`infra keeweb deploy`** — trigger a deployment:
+
+```bash
+bun run packages/cli/src/cli.ts keeweb deploy              # trigger GitHub Actions workflow
+bun run packages/cli/src/cli.ts keeweb deploy --dry-run     # preview without executing
+bun run packages/cli/src/cli.ts keeweb deploy --local       # deploy directly via SSH
+bun run packages/cli/src/cli.ts keeweb deploy --local --nginx  # include nginx config
+```
+
+Local deploy requires `ssh-agent` running with the deploy key loaded (`SSH_AUTH_SOCK`).
+
+**`infra mcp`** — start a stdio MCP server exposing all CLI commands as tools:
+
+```bash
+bun run packages/cli/src/cli.ts mcp
+```
+
+This lets coding agents (Fro Bot, Copilot) call `keeweb status` and `keeweb deploy` programmatically via the [Model Context Protocol](https://modelcontextprotocol.io).
 
 ## CI/CD
 
@@ -64,8 +96,11 @@ bun run packages/cli/src/cli.ts --help
 | --- | --- | --- |
 | **CI** | PRs to `main` | Lint + type check |
 | **Deploy** | Push to `main` (keeweb changes), `workflow_dispatch` | Build and deploy KeeWeb |
+| **Release** | Push to `main` | Version packages via Changesets |
 | **Renovate** | Push, issue/PR edits, post-deploy | Automated dependency updates |
+| **Renovate Changesets** | PRs from Renovate | Auto-create changeset files for dependency updates |
 | **Fro Bot** | PRs, @mentions, daily schedule, `workflow_dispatch` | AI code review + autohealing |
+| **Copilot Setup Steps** | `workflow_dispatch`, changes to workflow file | Prepare environment for Copilot coding agent |
 | **Scorecard** | Weekly, push to `main` | OpenSSF security analysis |
 | **Update Repo Settings** | Daily, push to `main` | Sync repo settings from `.github/settings.yml` |
 
@@ -116,9 +151,15 @@ bun run apps/keeweb/server/setup-deploy-user.ts
 │   ├── config/              Config templates (nginx, app config)
 │   ├── server/              Server provisioning scripts
 │   └── deploy.sh            SSH/rsync deploy script
-├── packages/cli/            @marcusrbrown/infra CLI (stub)
-│   └── src/cli.ts           Entry point
+├── packages/cli/            @marcusrbrown/infra CLI
+│   └── src/
+│       ├── cli.ts           Entry point (goke framework)
+│       └── commands/        Command modules
+│           ├── keeweb-status.ts
+│           ├── keeweb-deploy.ts
+│           └── mcp.ts
 ├── .github/
+│   ├── copilot-instructions.md  Copilot coding agent instructions
 │   ├── known_hosts          Pinned SSH host keys
 │   ├── renovate.json5       Renovate configuration
 │   ├── settings.yml         Repository settings definition
@@ -149,6 +190,8 @@ Pre-commit hook runs `lint-staged` → `eslint --fix` on staged files via `simpl
 | Prettier   | `@bfra.me/prettier-config/120-proof`            |
 | TypeScript | `tsconfig.json` via `@bfra.me/tsconfig`         |
 | Git hooks  | `simple-git-hooks` + `lint-staged`              |
+| CLI        | [goke](https://github.com/remorses/goke) + Zod  |
+| Changesets | `@changesets/cli` for versioning                |
 
 ## License
 

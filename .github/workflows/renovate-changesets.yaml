@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   renovate-changesets:
-    if: github.actor == 'renovate[bot]' || github.actor == 'bfra-me[bot]'
+    if: github.actor == 'renovate[bot]' || github.actor == 'mrbro[bot]'
     name: Renovate Changesets
     secrets:
       APPLICATION_ID: ${{ secrets.APPLICATION_ID }}

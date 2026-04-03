@@ -40,6 +40,16 @@ deploy.sh [--nginx]
 - Backup dir: `/home/deploy-kw/backups/`
 - Activation: `chmod -R 775` + `find -type d -exec chmod g+s` for group-write persistence
 
+## CLI COMMANDS
+
+The `packages/cli/` provides wrapper commands for keeweb operations:
+
+- `infra keeweb status` — HTTP check, last deploy, content hash comparison
+- `infra keeweb deploy` — triggers GitHub Actions workflow or local deploy.sh
+- `infra keeweb deploy --local` — runs deploy.sh directly (requires ssh-agent)
+
+See `packages/cli/AGENTS.md` for CLI conventions.
+
 ## ANTI-PATTERNS
 
 - Never commit real `dropboxSecret` — template stays empty, CI injects from env.

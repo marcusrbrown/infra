@@ -1,12 +1,29 @@
 {
   "name": "@marcusrbrown/infra",
   "version": "0.0.0",
-  "private": true,
-  "description": "Infrastructure management CLI",
+  "description": "Infrastructure management CLI — deploy automation, health checks, and MCP bridge",
+  "keywords": [
+    "infra",
+    "cli",
+    "keeweb",
+    "deploy",
+    "mcp",
+    "bun"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marcusrbrown/infra.git",
+    "directory": "packages/cli"
+  },
+  "license": "MIT",
+  "author": "Marcus R. Brown <contact@marcusrbrown.com>",
   "type": "module",
   "bin": {
     "infra": "src/cli.ts"
   },
+  "files": [
+    "src/"
+  ],
   "scripts": {
     "cli": "bun run src/cli.ts"
   },
@@ -15,5 +32,9 @@
     "goke": "^6.3.2",
     "string-dedent": "^3.0.2",
     "zod": "^4.3.6"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

@@ -44,9 +44,9 @@ deploy.sh [--nginx]
 
 The `packages/cli/` provides wrapper commands for keeweb operations:
 
-- `infra keeweb status` — HTTP check, last deploy, content hash comparison
-- `infra keeweb deploy` — triggers GitHub Actions workflow or local deploy.sh
-- `infra keeweb deploy --local` — runs deploy.sh directly (requires ssh-agent)
+- `bunx @marcusrbrown/infra keeweb status` — HTTP check, last deploy, content hash comparison
+- `bunx @marcusrbrown/infra keeweb deploy` — triggers GitHub Actions workflow or local deploy.sh
+- `bunx @marcusrbrown/infra keeweb deploy --local` — runs deploy.sh directly (requires ssh-agent)
 
 See `packages/cli/AGENTS.md` for CLI conventions.
 

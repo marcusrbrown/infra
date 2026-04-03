@@ -65,6 +65,7 @@ bun run packages/cli/src/cli.ts --help
 | **CI** | PRs to `main` | Lint + type check |
 | **Deploy** | Push to `main` (keeweb changes), `workflow_dispatch` | Build and deploy KeeWeb |
 | **Renovate** | Push, issue/PR edits, post-deploy | Automated dependency updates |
+| **Fro Bot** | PRs, @mentions, daily schedule, `workflow_dispatch` | AI code review + autohealing |
 | **Scorecard** | Weekly, push to `main` | OpenSSF security analysis |
 | **Update Repo Settings** | Daily, push to `main` | Sync repo settings from `.github/settings.yml` |
 
@@ -83,12 +84,21 @@ Deploys require approval through the `production` GitHub Environment.
 | `DEPLOY_SSH_KEY`     | Ed25519 private key for `deploy-kw@box.heatvision.co` |
 | `DROPBOX_APP_SECRET` | Dropbox app client credential for KeeWeb config       |
 
-**Repository secrets** (`APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`):
+**Repository secrets** (`APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `FRO_BOT_PAT`, `OPENCODE_AUTH_JSON`, `OMO_PROVIDERS`):
 
-| Secret                    | Description                                       |
-| ------------------------- | ------------------------------------------------- |
-| `APPLICATION_ID`          | GitHub App ID for Renovate and repo settings sync |
-| `APPLICATION_PRIVATE_KEY` | GitHub App private key                            |
+| Secret                    | Description                                                        |
+| ------------------------- | ------------------------------------------------------------------ |
+| `APPLICATION_ID`          | GitHub App ID for Renovate and repo settings sync                  |
+| `APPLICATION_PRIVATE_KEY` | GitHub App private key                                             |
+| `FRO_BOT_PAT`             | PAT for the fro-bot user (AI agent identity for @fro-bot mentions) |
+| `OPENCODE_AUTH_JSON`      | LLM provider auth JSON (e.g. `{"anthropic":{"apiKey":"..."}}}`)    |
+| `OMO_PROVIDERS`           | OhMyOpenCode provider configuration                                |
+
+**Repository variables:**
+
+| Variable        | Description                        |
+| --------------- | ---------------------------------- |
+| `FRO_BOT_MODEL` | LLM model ID for the Fro Bot agent |
 
 ### Server Setup
 

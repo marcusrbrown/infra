@@ -13,6 +13,7 @@ branches:
         strict: false
         contexts:
           - CI
+          - Fro Bot
           - Lint
           - Type Check
           - Renovate / Renovate

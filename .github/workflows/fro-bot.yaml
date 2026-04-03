@@ -1,0 +1,313 @@
+---
+name: Fro Bot
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, edited]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, review_requested]
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: Custom prompt for the Fro Bot agent
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    fro-bot-${{
+      github.event.issue.number ||
+      github.event.pull_request.number ||
+      github.run_id
+    }}
+  cancel-in-progress: false
+
+env:
+  PR_REVIEW_PROMPT: |
+    You are reviewing a pull request for marcusrbrown/infra — a Bun workspace
+    monorepo that deploys KeeWeb to box.heatvision.co via SSH/rsync.
+    Read AGENTS.md for full project conventions before reviewing.
+
+    Focus your review on:
+    - Correctness and edge cases
+    - Security implications (secret exposure, SSH config, deploy safety)
+    - Deploy pipeline impact (will this break the deploy workflow?)
+    - TypeScript strictness (no `any`, no `@ts-ignore`, no `@ts-expect-error`)
+    - Convention compliance (see AGENTS.md: .yaml not .yml, SHA-pinned
+      actions, no secrets: inherit with cross-org workflows, only deploy.sh
+      is bash — all other scripts must be TypeScript)
+
+    Skip style nits — ESLint + Prettier handle formatting on commit.
+
+    Do NOT push commits, modify code, or create branches. Review only.
+    Use inline comments for file-specific issues. Reserve the review body
+    for the structured summary below.
+
+    You MUST structure your review using exactly these headings:
+    ## Verdict: [PASS | CONDITIONAL | REJECT]
+    CONDITIONAL = can merge after addressing the listed blocking issues.
+    ### Blocking issues
+    ### Non-blocking concerns
+    ### Missing tests
+    ### Risk assessment (LOW/MED/HIGH) + rationale
+    Evaluate likelihood of regression, security exposure, or blast radius.
+    If a section has no items, write "None" under the heading.
+    Do not omit any heading.
+
+  SCHEDULE_PROMPT: |
+    Perform daily repository autohealing for marcusrbrown/infra — a Bun
+    workspace monorepo that deploys KeeWeb v1.18.7 to box.heatvision.co
+    via SSH/rsync with a dedicated deploy-kw user.
+    Read AGENTS.md for full project conventions before making changes.
+
+    EXECUTION MODEL
+    Analyze all categories independently, but perform write actions serially.
+    Do not keep multiple branches checked out at once. Complete one mutation,
+    return to a clean working tree, then continue.
+
+    DEDUPLICATION (applies to ALL categories)
+    Before creating any new PR or issue, search for an existing open
+    bot-authored PR/issue for the same root cause. Reuse or update the
+    existing item instead of creating a duplicate.
+
+    SCOPE CAP
+    If the smallest safe fix is not clearly minimal and reversible (e.g.,
+    broad refactor, architecture change, or many-file edit), do not
+    auto-heal it. Open or update an issue and log it under "Needs Human
+    Attention".
+
+    DEPENDENCY OWNERSHIP
+    Renovate owns routine dependency/version bumps (configured via
+    marcusrbrown/renovate-config preset). You may change dependency
+    versions only when remediating a confirmed security advisory
+    (critical/high) or repairing an existing security-update PR. Do not
+    create non-security version-bump PRs, and do not batch unrelated
+    dependency changes into a security fix. Do NOT modify package.json
+    versions outside category 2 security remediation.
+
+    1. ERRORED PRs
+       Find open PRs with failing CI checks. Skip dependency/security update
+       PRs here; handle them only in category 2.
+       Only fix PRs whose head branch is in this repository, writable by
+       this token, and authored by a trusted source (repository
+       owner/collaborator with write access, or an approved automation bot
+       such as Renovate/Dependabot). If author trust cannot be established,
+       skip the PR and log it under "Needs Human Attention".
+       If the PR touches workflows, automation prompts, package-manager
+       config, lockfiles, or execution scripts, do not run project commands
+       from that branch. Skip it and log why.
+       For each fixable PR:
+       a. Check out the PR branch.
+       b. Read the failing check logs to diagnose the root cause.
+       c. Fix the issue (type errors, lint failures, test regressions,
+          build breaks).
+       d. Commit with a clear message and push to the PR branch.
+       e. Comment on the PR explaining what failed and what was fixed.
+
+    2. SECURITY
+       Review Dependabot/Renovate alerts and open PRs for vulnerable deps.
+       - If a security update PR exists but has conflicts or failures,
+         fix and push to that PR branch.
+       - For unaddressed critical/high advisories with no existing PR,
+         create a new PR with the remediation.
+       - Do NOT bulk-update unrelated deps in a security PR.
+       If security advisory/alert data is unavailable to the token or CLI,
+       skip this category and note "security alerts unavailable" under
+       "Needs Human Attention". Do not guess.
+
+    3. CODE QUALITY & REPO HYGIENE
+       This category is primarily report-only. Focus on things only a
+       code-aware agent can catch:
+       - Run `bun run lint` and report any failures.
+       - Run `bunx tsc --noEmit` and report any type errors.
+       - Run `bun run --cwd apps/keeweb build` and verify the build
+         succeeds (dist/ contains index.html and config.json).
+       - Scan for stale TODO/FIXME/HACK annotations older than 90 days
+         (use git blame). Collect them into a single issue or update an
+         existing "Stale TODOs" issue.
+       - Verify convention compliance:
+         * No `as any`, `@ts-ignore`, or `@ts-expect-error` in source
+         * GitHub Actions use .yaml extension (not .yml)
+         * All actions are SHA-pinned with version comments
+         * No `secrets: inherit` with cross-org reusable workflows
+         * Only deploy.sh is bash; all other scripts are TypeScript
+         * config/config.json template has empty dropboxSecret
+       - Check that AGENTS.md files accurately reflect the current
+         directory structure. If drift is found, open a PR with corrections.
+       Report findings but put actual code fixes into category 4.
+
+    4. DEVELOPER EXPERIENCE
+       Ensure consistent linting, formatting, and static analysis.
+       Run `bun run lint`; fix any failures, including convention
+       violations found in category 3.
+       Open a PR for all fixes — never commit directly to the default
+       branch. Group related lint/format/convention fixes into a single PR.
+
+    5. DEPLOY PIPELINE HEALTH
+       Verify the deploy infrastructure is operational:
+       - Check the most recent Deploy workflow run on main. If it failed,
+         diagnose the root cause from logs and open an issue.
+       - Verify kw.igg.ms is reachable: `curl -sf -o /dev/null -w
+         "%{http_code}" https://kw.igg.ms` should return 200.
+       - Verify the production environment exists and has required secrets
+         configured (DEPLOY_SSH_KEY, DROPBOX_APP_SECRET).
+       - Check that .github/known_hosts contains valid host keys for
+         box.heatvision.co.
+       Report findings as issues only for this category. Do NOT modify
+       deploy scripts or workflow files.
+
+    Hard boundaries:
+    - Never force-push, rewrite history, or delete branches.
+    - Never push directly to the default branch. Direct pushes are allowed
+      only to an existing non-default PR branch you are repairing under
+      category 1 or category 2.
+    - Never merge PRs, submit reviews/approvals, close/reopen PRs or
+      issues, or modify branch protection. This workflow may only push
+      fixes, open/update PRs, open/update issues, and comment on PRs when
+      a fix was pushed.
+    - Never modify secrets, org settings, environments, or branch
+      protection.
+    - Never make checks pass by disabling tests, deleting failing
+      assertions, weakening lint/type rules, or editing workflows/
+      configuration only to suppress failures.
+    - Do not modify .github/workflows/, lint/test/build config, hook
+      config, or automation prompt files unless the failing run is caused
+      by a genuine bug in that file, the change is narrowly scoped, and
+      the summary explains why.
+    - If the smallest safe fix would weaken a guardrail or reduce
+      validation, skip it and log it under "Needs Human Attention".
+    - Do not create multiple summary issues.
+
+    Project conventions (MUST follow for code changes):
+    - TypeScript strict mode: no `any`, no `@ts-ignore`, no `@ts-expect-error`
+    - Only deploy.sh is bash; all other scripts are TypeScript via Bun
+    - Package manager: bun (not npm/pnpm/yarn)
+    - YAML extension: .yaml, not .yml
+    - SHA-pin all GitHub Actions with `# vX.Y.Z` version comment
+    - Never `secrets: inherit` with cross-org reusable workflows
+    - Never commit real secret values; config/config.json stays empty
+
+    OUTPUT FORMAT — SINGLE SUMMARY ISSUE
+    After completing all work, find an existing open issue titled
+    "Daily Autohealing Report — YYYY-MM-DD" (using today's UTC date).
+    If it exists, update its body. If not, create it.
+
+    The issue body MUST use this structure. If a section has no rows, do
+    not emit an empty table — write "None." directly under that heading.
+
+    ## Daily Autohealing Report — YYYY-MM-DD (UTC)
+
+    ### Errored PRs
+    | PR | Failure | Fix | Status |
+    | --- | --- | --- | --- |
+    | #N | [root cause] | [what was fixed] | ✅ Fixed / ⚠️ Needs review |
+
+    ### Security
+    | Advisory / PR | Severity | Action Taken |
+    | --- | --- | --- |
+    | [advisory or #N] | Critical/High/Medium | [fix pushed / PR created / skipped] |
+
+    ### Code Quality & Repo Hygiene
+    | Check | Result | Action |
+    | --- | --- | --- |
+    | Lint | ✅ Clean / ❌ Errors | [details or #N] |
+    | Type check | ✅ Clean / ❌ Errors | [details or #N] |
+    | KeeWeb build | ✅ Pass / ❌ Fail | [details or #N] |
+    | Stale TODOs | N found | [#N or None] |
+    | Convention drift | ✅ Clean / ⚠️ Issues | [details or #N] |
+    | AGENTS.md accuracy | ✅ Current / ⚠️ Drifted | [#N or None] |
+
+    ### Developer Experience
+    - [list of each PR or commit-sized fix with summary link]
+
+    ### Deploy Pipeline Health
+    | Check | Status | Details |
+    | --- | --- | --- |
+    | Last deploy run | ✅ Pass / ❌ Fail | [run link] |
+    | kw.igg.ms reachable | ✅ 200 / ❌ Error | [HTTP status] |
+    | Production env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | Host keys valid | ✅ Current / ⚠️ Stale | [details] |
+
+    ### Needs Human Attention
+    - [items that could not be auto-fixed, with context]
+
+    Do NOT create multiple issues. Do NOT comment on individual issues.
+    Produce exactly one summary issue per run.
+
+jobs:
+  fro-bot:
+    name: Fro Bot
+    runs-on: ubuntu-latest
+    if: >-
+      (
+        github.event.pull_request == null ||
+        (
+          !github.event.pull_request.head.repo.fork &&
+          !endsWith(github.event.pull_request.user.login || '', '[bot]')
+        )
+      ) && (
+        (
+          github.event_name == 'issues' &&
+          !endsWith(github.event.issue.user.login || '', '[bot]') &&
+          (github.event.issue.user.login || '') != 'fro-bot'
+        ) ||
+        (
+          github.event_name == 'pull_request' &&
+          !endsWith(github.event.pull_request.user.login || '', '[bot]') &&
+          (github.event.pull_request.user.login || '') != 'fro-bot'
+        ) ||
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (
+          (github.event_name == 'issue_comment' ||
+           github.event_name == 'pull_request_review_comment') &&
+          contains(github.event.comment.body || '', '@fro-bot') &&
+          (github.event.comment.user.login || '') != 'fro-bot' &&
+          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association || '')
+        )
+      )
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: >-
+            ${{
+              (github.event.issue.pull_request && format('refs/pull/{0}/head', github.event.issue.number))
+              || github.event.pull_request.head.sha
+              || ''
+            }}
+          token: ${{ secrets.FRO_BOT_PAT }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Run Fro Bot
+        uses: fro-bot/agent@ebf158cdf8af0f0fb1bb18e4a2635d4856903651 # v0.36.1
+        env:
+          OPENCODE_PROMPT_ARTIFACT: 'true'
+          PROMPT: >-
+            ${{
+              (github.event_name == 'workflow_dispatch' && (github.event.inputs.prompt || ''))
+              || (github.event_name == 'schedule' && env.SCHEDULE_PROMPT)
+              || (github.event_name == 'pull_request' && env.PR_REVIEW_PROMPT)
+              || ''
+            }}
+        with:
+          github-token: ${{ secrets.FRO_BOT_PAT }}
+          auth-json: ${{ secrets.OPENCODE_AUTH_JSON }}
+          model: ${{ vars.FRO_BOT_MODEL }}
+          omo-providers: ${{ secrets.OMO_PROVIDERS }}
+          prompt: ${{ env.PROMPT }}
+          timeout: 0

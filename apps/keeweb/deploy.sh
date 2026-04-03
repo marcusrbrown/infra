@@ -59,7 +59,7 @@ ssh "${REMOTE_USER}@${HOST}" "
 
 # Upload site files (exclude nginx conf)
 log "Uploading site files"
-rsync -avz --delete \
+rsync -rlvz --delete --no-times --no-perms \
     --exclude='kw.igg.ms.conf' \
     --exclude='.DS_Store' \
     "$DEPLOY_DIR/" "${REMOTE_USER}@${HOST}:${SITE_DIR}/"

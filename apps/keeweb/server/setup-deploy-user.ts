@@ -32,8 +32,8 @@ err() { printf "\\033[1;31mERROR:\\033[0m %s\\n" "$1" >&2; }
 
 log "Setting site ownership to www-data:www-data"
 chown -R www-data:www-data "$SITE_DIR"
-chmod -R 755 "$SITE_DIR"
-chmod g+ws "$SITE_DIR"
+chmod -R 775 "$SITE_DIR"
+find "$SITE_DIR" -type d -exec chmod g+s {} +
 
 if [[ "\${1:-}" == "--nginx" ]]; then
     STAGED_CONF="$STAGING_DIR/kw.igg.ms.conf"

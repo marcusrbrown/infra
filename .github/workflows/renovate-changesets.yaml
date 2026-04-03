@@ -2,17 +2,57 @@
 name: Renovate Changesets
 
 on:
-  merge_group:
   pull_request_target:
 
 permissions:
   contents: read
 
 jobs:
-  renovate-changesets:
-    if: github.actor == 'renovate[bot]' || github.actor == 'mrbro[bot]'
-    name: Renovate Changesets
-    secrets:
-      APPLICATION_ID: ${{ secrets.APPLICATION_ID }}
-      APPLICATION_PRIVATE_KEY: ${{ secrets.APPLICATION_PRIVATE_KEY }}
-    uses: bfra-me/.github/.github/workflows/renovate-changeset.yaml@c4cade281dd6d6e4c40af0f2d642afe6fb150e2e # v4.14.5
+  create-changeset:
+    name: Create Renovate Changeset
+    if: >-
+      (github.actor == 'renovate[bot]' || github.actor == 'mrbro-bot[bot]') &&
+      !startsWith(github.head_ref, 'chore/update-action-pins-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: get-app-token
+        name: Get Workflow Access Token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.APPLICATION_ID }}
+          private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+
+      - name: Setup Git user
+        env:
+          GH_TOKEN: ${{ steps.get-app-token.outputs.token }}
+          GIT_USER_NAME: ${{ steps.get-app-token.outputs.app-slug }}[bot]
+        run: |
+          USER_ID=$(gh api "/users/${GIT_USER_NAME}" --jq .id)
+          git config --global user.email "${USER_ID}+${GIT_USER_NAME}@users.noreply.github.com"
+          git config --global user.name "${GIT_USER_NAME}"
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          ref: ${{ github.head_ref }}
+          token: ${{ steps.get-app-token.outputs.token }}
+
+      - name: Checkout renovate-changesets action
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: bfra-me/.github
+          ref: c4cade281dd6d6e4c40af0f2d642afe6fb150e2e # v4.14.5
+          token: ${{ steps.get-app-token.outputs.token }}
+          path: .bfra-me-github
+          sparse-checkout: .github/actions/renovate-changesets
+
+      - name: Generate Renovate changesets
+        uses: ./.bfra-me-github/.github/actions/renovate-changesets
+        with:
+          token: ${{ steps.get-app-token.outputs.token }}
+          commit-back: 'true'
+          max-retries: '3'

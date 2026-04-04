@@ -6,6 +6,8 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  discussion_comment:
+    types: [created]
   issues:
     types: [opened, edited]
   pull_request:
@@ -26,6 +28,7 @@ concurrency:
     fro-bot-${{
       github.event.issue.number ||
       github.event.pull_request.number ||
+      github.event.discussion.number ||
       github.run_id
     }}
   cancel-in-progress: false
@@ -164,6 +167,89 @@ env:
        Report findings as issues only for this category. Do NOT modify
        deploy scripts or workflow files.
 
+    6. PRODUCTION SITE REVIEW
+       Use `npx agent-browser` to verify the live KeeWeb deployment at
+       https://kw.igg.ms.
+
+       Steps:
+       a. Navigate: `npx agent-browser open "https://kw.igg.ms"`
+       b. Wait for load: `npx agent-browser wait --load networkidle`
+       c. Full screenshot: `npx agent-browser screenshot --full`
+       d. Snapshot interactive elements: `npx agent-browser snapshot -i`
+
+       Checks to perform:
+       - Page loads without errors or blank content.
+       - KeeWeb app initializes (main UI container renders, no spinner
+         stuck indefinitely).
+       - Dropbox storage option is visible in the open-file dialog.
+       - No console errors or failed network requests to Dropbox API
+         endpoints.
+       - Service worker registers successfully.
+       - Security headers present: X-Frame-Options, X-Content-Type-Options,
+         Content-Security-Policy (check response headers with
+         `npx agent-browser evaluate "JSON.stringify(performance.getEntriesByType('resource').slice(0,3))"`).
+       - Mobile responsiveness: resize viewport to 375px width, verify
+         layout is not broken (no horizontal overflow, no clipped UI
+         elements, no inaccessible controls).
+
+       Retry logic: before creating an issue for a browser finding, rerun
+       the failing check once in a fresh page/session. Only file an issue
+       if the problem reproduces twice or is a hard failure (blank page,
+       broken app init, 4xx/5xx).
+
+       Before creating an issue for a finding, search open issues for an
+       existing report matching the same symptom. If a matching open issue
+       exists, reference it in the summary instead of creating a duplicate.
+
+       For new issues, create a GitHub issue with:
+       - Page URL and description of the problem.
+       - Screenshot filename/path and a short text description of what it
+         shows.
+       - Label: `bug` for broken functionality, `enhancement` for UX.
+       Do NOT push code changes for site review findings. Issues only.
+
+       If `npx agent-browser` is not available or fails to launch, skip
+       this category and note "agent-browser unavailable" under
+       "Needs Human Attention" in the summary. Do not fail the workflow.
+       Close the browser when done: `npx agent-browser close`.
+
+    7. CROSS-PROJECT PROGRESSIVE IMPROVEMENT
+       This category is strictly observation-only. Survey marcusrbrown repos
+       to identify opportunities for progressive improvement across the
+       portfolio. Use `gh` CLI for all queries.
+
+       Scope: Only repos owned by marcusrbrown (not forks, not archived).
+       Run: `gh repo list marcusrbrown --no-archived --source -L 50 --json name,defaultBranchRef,pushedAt`
+
+       For each active repo (pushed within 90 days), check:
+       a. CI health: `gh run list -R marcusrbrown/{repo} -b {default_branch} -L 3 --json conclusion`
+          Flag repos with 2+ consecutive failures on the default branch.
+       b. Fro Bot workflow presence: check if `.github/workflows/fro-bot.yaml`
+          exists. Flag repos without one.
+       c. AGENTS.md presence: check if `AGENTS.md` exists at repo root.
+          Flag repos without one.
+       d. Security alerts: `gh api repos/marcusrbrown/{repo}/vulnerability-alerts`
+          Flag repos with unaddressed critical/high advisories.
+          If the API is unavailable for a repo, note "alerts unavailable"
+          and continue.
+       e. Stale PRs: `gh pr list -R marcusrbrown/{repo} --json number,title,updatedAt -L 10`
+          Flag PRs with no activity >14 days.
+       f. Action version drift: if fro-bot.yaml exists, check the
+          `fro-bot/agent@` version. Flag repos using a version older than
+          this repo's pinned version.
+
+       Hard boundaries for this category:
+       - NEVER modify other repositories. Observation only.
+       - NEVER open PRs, issues, or comments in other repositories.
+       - NEVER clone or check out other repositories.
+       - All findings go into the summary issue in THIS repository only.
+       - If `gh` queries fail for a repo (permissions, rate limits), skip
+         it and note why.
+
+       Purpose: Create a single dashboard of portfolio health so Marcus
+       can prioritize which repos to improve next. This category drives
+       progressive improvement by surfacing drift and decay early.
+
     Hard boundaries:
     - Never force-push, rewrite history, or delete branches.
     - Never push directly to the default branch. Direct pushes are allowed
@@ -184,6 +270,9 @@ env:
       the summary explains why.
     - If the smallest safe fix would weaken a guardrail or reduce
       validation, skip it and log it under "Needs Human Attention".
+    - Site review (category 6) is observation-only: create issues, never
+      push fixes for visual or functional findings.
+    - Cross-project monitoring (category 7) MUST NOT modify other repos.
     - Do not create multiple summary issues.
 
     Project conventions (MUST follow for code changes):
@@ -236,6 +325,22 @@ env:
     | Production env secrets | ✅ Set / ⚠️ Missing | [details] |
     | Host keys valid | ✅ Current / ⚠️ Stale | [details] |
 
+    ### Production Site Review
+    | Check | Status | Details |
+    | --- | --- | --- |
+    | Page load | ✅ OK / ❌ Error | [load time or error] |
+    | App init | ✅ Rendered / ❌ Stuck | [details] |
+    | Dropbox option visible | ✅ Yes / ❌ No | [details] |
+    | Console errors | ✅ None / ⚠️ Errors | [count and summary] |
+    | Service worker | ✅ Registered / ❌ Failed | [details] |
+    | Security headers | ✅ Present / ⚠️ Missing | [list missing] |
+    | Mobile layout (375px) | ✅ OK / ⚠️ Broken | [details] |
+
+    ### Cross-Project Health
+    | Repo | CI | Fro Bot | AGENTS.md | Alerts | Stale PRs |
+    | --- | --- | --- | --- | --- | --- |
+    | [repo] | ✅/❌ | ✅/❌ [version] | ✅/❌ | N alerts | N stale |
+
     ### Needs Human Attention
     - [items that could not be auto-fixed, with context]
 
@@ -268,7 +373,8 @@ jobs:
         github.event_name == 'workflow_dispatch' ||
         (
           (github.event_name == 'issue_comment' ||
-           github.event_name == 'pull_request_review_comment') &&
+           github.event_name == 'pull_request_review_comment' ||
+           github.event_name == 'discussion_comment') &&
           contains(github.event.comment.body || '', '@fro-bot') &&
           (github.event.comment.user.login || '') != 'fro-bot' &&
           contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association || '')

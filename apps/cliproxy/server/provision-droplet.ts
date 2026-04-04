@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import {randomBytes} from 'node:crypto'
+import {appendFileSync, readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 
 const DROPLET_NAME = 'cliproxy'
@@ -188,12 +189,36 @@ async function waitForSsh(host: string): Promise<void> {
   throw new Error('Timed out waiting for SSH connectivity to droplet')
 }
 
+async function pinHostKeys(dropletIp: string): Promise<void> {
+  const knownHostsPath = resolve(import.meta.dir, '..', '..', '..', '.github', 'known_hosts')
+
+  const hostKeys = await runCapture(local(['ssh-keyscan', '-H', dropletIp]))
+  if (!hostKeys) {
+    console.warn('Warning: Could not retrieve host keys from droplet. Pin them manually before CI deploy.')
+    return
+  }
+
+  const existing = readFileSync(knownHostsPath, 'utf-8')
+  const marker = `# cliproxy droplet (${dropletIp})`
+
+  if (existing.includes(marker)) {
+    console.log(`\u001B[1;34m==>\u001B[0m Host keys already pinned for ${dropletIp}`)
+    return
+  }
+
+  const newBlock = `\n${marker}\n${hostKeys}\n`
+  appendFileSync(knownHostsPath, newBlock)
+  console.log(`\u001B[1;32m✓\u001B[0m Pinned host keys for ${dropletIp} in .github/known_hosts`)
+  console.log('  Commit the updated .github/known_hosts before running CI deploy.')
+}
+
 async function provision(): Promise<void> {
   await validateDoctl()
   await createDropletIfMissing()
 
   const dropletIp = await getDropletIpWithWait()
   await waitForSsh(dropletIp)
+  await pinHostKeys(dropletIp)
   await validateDns(dropletIp)
   await copyComposeFiles(dropletIp)
   const managementPassword = await writeRemoteEnvFile(dropletIp)
@@ -203,6 +228,7 @@ async function provision(): Promise<void> {
   console.log(`Droplet IP: ${dropletIp}`)
   console.log(`Management key: ${managementPassword}`)
   console.log('\nSave the management key now. It is only shown once by this script.')
+  console.log('Commit the updated .github/known_hosts before triggering a CI deploy.')
 }
 
 provision().catch((error: unknown) => {

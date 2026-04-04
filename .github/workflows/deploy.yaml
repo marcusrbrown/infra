@@ -89,9 +89,7 @@ jobs:
         run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Configure SSH known_hosts
-        run: mkdir -p ~/.ssh && ssh-keyscan -H $(echo $CLIPROXY_HOST) >> ~/.ssh/known_hosts
-        env:
-          CLIPROXY_HOST: ${{ secrets.CLIPROXY_HOST }}
+        run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
 
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0

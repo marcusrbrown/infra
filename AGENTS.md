@@ -15,6 +15,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation 
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
 ├── .changeset/         Changesets config for versioning
+├── .agents/skills/     Agent skills (goke, etc.) — load before working with that domain
 ├── .github/            Workflows, pinned host keys, Renovate, Copilot instructions
 └── .opencode/          OpenCode slash commands (generate-readme)
 ```

@@ -12,7 +12,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation 
 
 ```text
 ├── apps/keeweb/        KeeWeb deploy package (see apps/keeweb/AGENTS.md)
-├── apps/cliproxy/      CLIProxyAPI deployment (scaffolded, not yet deployed)
+├── apps/cliproxy/      CLIProxyAPI deploy package (see apps/cliproxy/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
 ├── .changeset/         Changesets config for versioning
@@ -29,6 +29,9 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation 
 | Add CLI command | `packages/cli/src/commands/` | goke command module, register in cli.ts |
 | Check deploy health | `bunx @marcusrbrown/infra keeweb status` | HTTP, last deploy, content hash |
 | Trigger deploy | `bunx @marcusrbrown/infra keeweb deploy` | Remote (default) or `--local` |
+| Check proxy health | `bunx @marcusrbrown/infra cliproxy status` | HTTP, usage stats, version |
+| Manage proxy | `bunx @marcusrbrown/infra cliproxy config|keys|login` | Management API |
+| Trigger proxy deploy | `bunx @marcusrbrown/infra cliproxy deploy` | Remote (default) or `--local` |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
 | Configure TypeScript | `tsconfig.json` | Extends `@bfra.me/tsconfig`, Bun types |
@@ -80,6 +83,8 @@ bash apps/keeweb/deploy.sh                     # Deploy content only
 bash apps/keeweb/deploy.sh --nginx             # Deploy content + nginx config
 bunx @marcusrbrown/infra keeweb status          # Check deploy health
 bunx @marcusrbrown/infra keeweb deploy          # Trigger deploy (GitHub Actions)
+bunx @marcusrbrown/infra cliproxy status        # Check proxy health
+bunx @marcusrbrown/infra cliproxy deploy        # Trigger proxy deploy (GitHub Actions)
 bunx @marcusrbrown/infra mcp                    # Start MCP server
 bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on server
 ```
@@ -87,6 +92,7 @@ bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on serve
 ## NOTES
 
 - `DROPBOX_APP_SECRET` and `DEPLOY_SSH_KEY` are GitHub Actions secrets scoped to `production` environment. `APPLICATION_ID` and `APPLICATION_PRIVATE_KEY` are repo-level secrets.
+- `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are GitHub Actions secrets scoped to the `cliproxy` environment. `DIGITALOCEAN_ACCESS_TOKEN` is a repo-level secret.
 - Deploy target: `box.heatvision.co` (Mail-In-A-Box server). Site path: `/home/user-data/www/kw.igg.ms/`.
 - Activation script on server (`/usr/local/bin/kw-deploy-activate`) sets permissions to 775 with setgid to preserve group-write for deploy user.
 - `dorny/paths-filter@v3` used for change detection because native `paths:` breaks `workflow_dispatch`. Deploy condition: `workflow_dispatch || keeweb-changed`.

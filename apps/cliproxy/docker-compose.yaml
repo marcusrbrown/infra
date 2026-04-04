@@ -1,0 +1,29 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./config/Caddyfile:/etc/caddy/Caddyfile
+
+  cli-proxy-api:
+    image: eceasy/cli-proxy-api:latest
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD:-}
+    volumes:
+      - cliproxy_auth:/root/.cli-proxy-api
+      - ./config/config.yaml:/CLIProxyAPI/config.yaml
+
+volumes:
+  caddy_data:
+  caddy_config:
+  cliproxy_auth:

@@ -1,0 +1,16 @@
+# Real values injected at deploy time via env vars. Do not commit secrets.
+host: ''
+port: 8317
+
+remote-management:
+  allow-remote: true
+  secret-key: ''
+
+api-keys:
+  - your-api-key-here
+
+claude-api-key: []
+
+debug: false
+request-retry: 3
+usage-statistics-enabled: true

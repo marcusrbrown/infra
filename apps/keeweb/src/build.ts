@@ -4,6 +4,7 @@ import path from 'node:path'
 
 const KEEWEB_VERSION = '1.18.7'
 const DOWNLOAD_URL = 'https://github.com/keeweb/keeweb/releases/download/v1.18.7/KeeWeb-1.18.7.html.zip'
+const EXPECTED_SHA256 = '6f3d06891117072e62b43b08a84bdaf4fc43c0aae6127ac6c2e7564299d8a890'
 
 const ZIP_FILENAME = `KeeWeb-${KEEWEB_VERSION}.html.zip`
 
@@ -71,12 +72,30 @@ async function ensureRequiredFiles(): Promise<void> {
   }
 }
 
+async function verifyArchiveHash(filePath: string): Promise<void> {
+  logStep('Verifying archive SHA-256')
+  const buffer = await Bun.file(filePath).arrayBuffer()
+  const hasher = new Bun.CryptoHasher('sha256')
+  hasher.update(new Uint8Array(buffer))
+  const actual = hasher.digest('hex')
+
+  if (actual !== EXPECTED_SHA256) {
+    await Bun.file(filePath).unlink()
+    throw new Error(
+      `SHA-256 mismatch for ${ZIP_FILENAME}\n  expected: ${EXPECTED_SHA256}\n  actual:   ${actual}\nCorrupt or tampered archive deleted. Re-run to download a fresh copy.`,
+    )
+  }
+
+  logSuccess('SHA-256 verified')
+}
+
 async function ensureCachedArchive(): Promise<void> {
   logStep('Ensuring cache directory exists')
   await runCommand(['mkdir', '-p', cacheDir], 'Creating cache directory')
 
   if (await Bun.file(zipPath).exists()) {
     logStep(`Using cached archive: ${ZIP_FILENAME}`)
+    await verifyArchiveHash(zipPath)
     return
   }
 
@@ -88,6 +107,7 @@ async function ensureCachedArchive(): Promise<void> {
 
   await Bun.write(zipPath, response)
   logSuccess(`Downloaded and cached ${ZIP_FILENAME}`)
+  await verifyArchiveHash(zipPath)
 }
 
 async function extractArchive(): Promise<void> {

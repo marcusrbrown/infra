@@ -1,6 +1,5 @@
-import {mkdir, rm, writeFile} from 'node:fs/promises'
-import {dirname, resolve} from 'node:path'
-import {afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn} from 'bun:test'
+import {resolve} from 'node:path'
+import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {
   getLocalDeployEnv,
@@ -163,17 +162,6 @@ describe('keeweb deploy', () => {
   })
 
   describe('CLI flag interactions', () => {
-    const distIndexPath = resolveDistIndexPath()
-
-    beforeAll(async () => {
-      await mkdir(dirname(distIndexPath), {recursive: true})
-      await writeFile(distIndexPath, '<html></html>')
-    })
-
-    afterAll(async () => {
-      await rm(distIndexPath, {force: true})
-    })
-
     it('rejects --nginx without --local', async () => {
       const {stdout, stderr, exitCode} = await runDeployCommand(['--nginx'])
 

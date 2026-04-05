@@ -1,7 +1,7 @@
 ---
 title: "feat: Add test infrastructure and coverage for CLI and KeeWeb"
 type: feat
-status: active
+status: completed
 date: 2026-04-04
 origin: docs/brainstorms/2026-04-04-cli-keeweb-testing-requirements.md
 deepened: 2026-04-04

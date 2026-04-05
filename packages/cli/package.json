@@ -25,7 +25,8 @@
     "src/"
   ],
   "scripts": {
-    "cli": "bun run src/cli.ts"
+    "cli": "bun run src/cli.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "@goke/mcp": "^0.0.9",

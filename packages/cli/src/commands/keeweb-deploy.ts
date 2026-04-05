@@ -13,7 +13,7 @@ const DEFAULT_SITE_DIR = '/home/user-data/www/kw.igg.ms'
 
 type CliInstance = ReturnType<typeof goke>
 
-function resolveDeployScriptPath(): string {
+export function resolveDeployScriptPath(): string {
   const instructedPath = resolve(import.meta.dir, '../../../apps/keeweb/deploy.sh')
 
   if (existsSync(instructedPath)) {
@@ -25,11 +25,11 @@ function resolveDeployScriptPath(): string {
   return fallbackPath
 }
 
-function resolveDistIndexPath(): string {
+export function resolveDistIndexPath(): string {
   return resolve(import.meta.dir, '../../../../apps/keeweb/dist/index.html')
 }
 
-function getLocalDeployEnv(): Record<string, string> {
+export function getLocalDeployEnv(): Record<string, string> {
   const path = process.env.PATH
   const home = process.env.HOME
   const sshAuthSock = process.env.SSH_AUTH_SOCK
@@ -56,7 +56,10 @@ function getLocalDeployEnv(): Record<string, string> {
   }
 }
 
-function validateLocalPreconditions(options: {nginx?: boolean}): {deployScriptPath: string; distIndexPath: string} {
+export function validateLocalPreconditions(options: {nginx?: boolean}): {
+  deployScriptPath: string
+  distIndexPath: string
+} {
   const deployScriptPath = resolveDeployScriptPath()
   if (!existsSync(deployScriptPath)) {
     throw new Error(`deploy.sh not found at expected path: ${deployScriptPath}`)
@@ -76,7 +79,7 @@ function validateLocalPreconditions(options: {nginx?: boolean}): {deployScriptPa
   return {deployScriptPath, distIndexPath}
 }
 
-function validateRemotePreconditions(): void {
+export function validateRemotePreconditions(): void {
   if (!Bun.which('gh')) {
     throw new Error('gh CLI is required for remote deploy. Install gh and run `gh auth login`.')
   }

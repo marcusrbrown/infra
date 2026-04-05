@@ -113,12 +113,12 @@ export function registerKeewebDeploy(cli: CliInstance): void {
         .boolean()
         .default(false)
         .describe(
-          'Validate preconditions and print planned actions without executing deploy.sh or triggering GitHub Actions.',
+          'Print planned actions without validating preconditions, executing deploy.sh, or triggering GitHub Actions.',
         ),
     )
     .example('# Trigger GitHub Deploy workflow (default mode)')
     .example('infra keeweb deploy')
-    .example('# Validate local deploy preconditions without side effects')
+    .example('# Preview local deploy plan without side effects')
     .example('infra keeweb deploy --local --dry-run')
     .example('# Run local deploy including nginx config update')
     .example('infra keeweb deploy --local --nginx')
@@ -128,23 +128,25 @@ export function registerKeewebDeploy(cli: CliInstance): void {
       }
 
       if (options.local) {
+        if (options.dryRun) {
+          const deployScriptPath = resolveDeployScriptPath()
+          const args = ['bash', deployScriptPath]
+          if (options.nginx) {
+            args.push('--nginx')
+          }
+          console.log('Dry run: local KeeWeb deploy')
+          console.log(`- deploy script: ${deployScriptPath}`)
+          console.log(`- dist check: ${resolveDistIndexPath()}`)
+          console.log(`- command: ${args.join(' ')}`)
+          return
+        }
+
         const {deployScriptPath} = validateLocalPreconditions({nginx: options.nginx})
         const env = getLocalDeployEnv()
         const args = ['bash', deployScriptPath]
 
         if (options.nginx) {
           args.push('--nginx')
-        }
-
-        if (options.dryRun) {
-          console.log('Dry run: local KeeWeb deploy')
-          console.log(`- deploy script: ${deployScriptPath}`)
-          console.log(`- dist check: ${resolveDistIndexPath()}`)
-          console.log(`- command: ${args.join(' ')}`)
-          console.log(`- HOST=${env.HOST}`)
-          console.log(`- REMOTE_USER=${env.REMOTE_USER}`)
-          console.log(`- SITE_DIR=${env.SITE_DIR}`)
-          return
         }
 
         const child = Bun.spawn(args, {
@@ -161,17 +163,17 @@ export function registerKeewebDeploy(cli: CliInstance): void {
         return
       }
 
-      validateRemotePreconditions()
-
-      console.warn('Warning: the Deploy workflow includes nginx config deployment as part of workflow_dispatch logic.')
-      console.warn('Warning: the workflow requires production environment approval before jobs execute.')
-
       if (options.dryRun) {
         console.log('Dry run: remote KeeWeb deploy')
         console.log(`- command: gh workflow run ${WORKFLOW_NAME} --repo ${REPO}`)
         console.log(`- workflow URL: ${WORKFLOW_URL}`)
         return
       }
+
+      validateRemotePreconditions()
+
+      console.warn('Warning: the Deploy workflow includes nginx config deployment as part of workflow_dispatch logic.')
+      console.warn('Warning: the workflow requires production environment approval before jobs execute.')
 
       const child = Bun.spawn(['gh', 'workflow', 'run', WORKFLOW_NAME, '--repo', REPO], {
         stdout: 'inherit',

@@ -1,6 +1,6 @@
 services:
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:fce4f15aad23222c0ac78a1220adf63bae7b94355d5ea28eee53910624acedfa
     ports:
       - '80:80'
       - '443:443'
@@ -13,7 +13,7 @@ services:
       - ./config/Caddyfile:/etc/caddy/Caddyfile
 
   cli-proxy-api:
-    image: eceasy/cli-proxy-api:latest
+    image: eceasy/cli-proxy-api:latest@sha256:cc2995db70092dd8e504742748e85e34144416a485a0b0f094ed4c4f9b0bf0f0
     env_file:
       - path: .env
         required: false

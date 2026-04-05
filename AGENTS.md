@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-04-03
-**Commit:** d820e4d
+**Generated:** 2026-04-05
+**Commit:** main
 **Branch:** main
 
 ## OVERVIEW
@@ -12,6 +12,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation 
 
 ```text
 ├── apps/keeweb/        KeeWeb deploy package (see apps/keeweb/AGENTS.md)
+├── apps/cliproxy/      CLIProxyAPI deployment (scaffolded, not yet deployed)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
 ├── .changeset/         Changesets config for versioning
@@ -47,7 +48,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation 
 - **Cross-org reusable workflows**: Pass secrets explicitly (never `secrets: inherit` with `bfra-me/.github`).
 - **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root.
 - **Changesets**: `@changesets/cli` for versioning. Renovate PRs get auto-generated changeset files.
-- **No tests yet**: CI checks lint + typecheck only.
+- **Tests**: Colocated `*.test.ts` alongside source. Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic snapshots. Mock at boundaries (fetch, Bun.spawn), not internals. CI runs `bun test --recursive` as a parallel job alongside lint/type-check.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
@@ -72,6 +73,8 @@ bun install                                    # Install dependencies
 bun run lint                                   # ESLint check
 bun run fix                                    # ESLint --fix (includes Prettier)
 bunx tsc --noEmit                              # Type check
+bun test --recursive                           # Run all tests (from repo root)
+bun test                                       # Run tests in current package
 bun run --cwd apps/keeweb build                # Build KeeWeb dist
 bash apps/keeweb/deploy.sh                     # Deploy content only
 bash apps/keeweb/deploy.sh --nginx             # Deploy content + nginx config

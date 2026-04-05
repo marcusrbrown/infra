@@ -11,6 +11,7 @@ Self-hosted KeeWeb v1.18.7 password manager at `kw.igg.ms`. Download-based build
 | Change app config template | `config/config.json` | Never put real secrets here |
 | Modify deploy behavior | `deploy.sh` | Content-only by default |
 | Re-provision server user | `server/setup-deploy-user.ts` | Run via `bun run` locally, SSHes into server |
+| Build tests | `src/build.test.ts` | Colocated alongside `build.ts` |
 
 ## BUILD FLOW
 
@@ -21,6 +22,8 @@ Self-hosted KeeWeb v1.18.7 password manager at `kw.igg.ms`. Download-based build
 5. `config/kw.igg.ms.conf` copied to `dist/`
 
 **Critical**: `config/config.json` (template) is never modified. Secret only goes into `dist/config.json`.
+
+**Testability**: `build.ts` exports `buildKeeweb(options?)` and guards its top-level execution with `import.meta.main` so tests can import it without triggering a build. Fixtures in `src/__fixtures__/` (e.g., `test-archive.zip`) stand in for real downloads.
 
 ## DEPLOY FLOW
 

@@ -9,6 +9,8 @@ Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcu
 | Add new command | `src/commands/<name>.ts` | Export `register<Name>(cli)`, import in cli.ts |
 | Modify CLI skeleton | `src/cli.ts` | Global options, parse pattern, command registration |
 | Change goke patterns | goke SKILL.md | `https://raw.githubusercontent.com/remorses/goke/refs/heads/main/goke/SKILL.md` |
+| CLI tests | `src/cli.test.ts` | Snapshots in `src/__snapshots__/` |
+| Command tests | `src/commands/<name>.test.ts` | Colocated alongside each command |
 
 ## COMMAND PATTERN
 
@@ -30,6 +32,8 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - Parse `gh` JSON output through Zod schemas before use
 - SHA-256 via `Bun.CryptoHasher('sha256')`, not crypto module
 - Resolve paths with `import.meta.dir` + `path.resolve()` — validate existence before use
+- **`--dry-run` semantics**: prints the plan/action that would be taken without executing it. Does NOT validate preconditions (e.g., build artifacts, env vars, ssh-agent). Safe to run anywhere.
+- **Tests**: colocated `*.test.ts` files. Snapshots in `src/__snapshots__/`. Use `NO_COLOR=1` in subprocess env when spawning the CLI to get deterministic output. Mock `fetch` and `Bun.spawn` at the boundary, not internals.
 
 ## ANTI-PATTERNS
 

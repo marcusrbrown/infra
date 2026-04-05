@@ -8,10 +8,11 @@ Personal infrastructure management — deploy automation, operational CLI, and t
 
 Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation with CI/CD, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
 
-| Package        | Description                                  |
-| -------------- | -------------------------------------------- |
-| `apps/keeweb`  | KeeWeb v1.18.7 static site deploy automation |
-| `packages/cli` | `@marcusrbrown/infra` CLI                    |
+| Package         | Description                                  |
+| --------------- | -------------------------------------------- |
+| `apps/keeweb`   | KeeWeb v1.18.7 static site deploy automation |
+| `apps/cliproxy` | CLIProxyAPI deployment (scaffolded)          |
+| `packages/cli`  | `@marcusrbrown/infra` CLI                    |
 
 ## Prerequisites
 
@@ -22,6 +23,9 @@ Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy
 
 ```bash
 bun install
+bun run lint
+bunx tsc --noEmit
+bun test --recursive
 ```
 
 ## Apps
@@ -80,7 +84,7 @@ bunx @marcusrbrown/infra keeweb status
 
 ```bash
 bunx @marcusrbrown/infra keeweb deploy              # trigger GitHub Actions workflow
-bunx @marcusrbrown/infra keeweb deploy --dry-run     # preview without executing
+bunx @marcusrbrown/infra keeweb deploy --dry-run     # preview plan without validating preconditions
 bunx @marcusrbrown/infra keeweb deploy --local       # deploy directly via SSH
 bunx @marcusrbrown/infra keeweb deploy --local --nginx  # include nginx config
 ```
@@ -101,7 +105,7 @@ This lets coding agents (Fro Bot, Copilot) call `keeweb status` and `keeweb depl
 
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
-| **CI** | PRs to `main` | Lint + type check |
+| **CI** | PRs to `main` | Lint, type check, and test |
 | **Deploy** | Push to `main` (keeweb changes), `workflow_dispatch` | Build and deploy KeeWeb |
 | **Release** | Push to `main` | Version packages via Changesets |
 | **Renovate** | Push, issue/PR edits, post-deploy | Automated dependency updates |
@@ -128,14 +132,15 @@ Deploys require approval through the `production` GitHub Environment.
 
 **Repository secrets** (`APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `FRO_BOT_PAT`, `OPENCODE_AUTH_JSON`, `OMO_PROVIDERS`):
 
-| Secret                    | Description                                                        |
-| ------------------------- | ------------------------------------------------------------------ |
-| `APPLICATION_ID`          | GitHub App ID for Renovate and repo settings sync                  |
-| `APPLICATION_PRIVATE_KEY` | GitHub App private key                                             |
-| `FRO_BOT_PAT`             | PAT for the fro-bot user (AI agent identity for @fro-bot mentions) |
-| `OPENCODE_AUTH_JSON`      | LLM provider auth JSON (e.g. `{"anthropic":{"apiKey":"..."}}}`)    |
-| `NPM_TOKEN`               | npm publish token for `@marcusrbrown/infra` package                |
-| `OMO_PROVIDERS`           | OhMyOpenCode provider configuration                                |
+| Secret                      | Description                                                        |
+| --------------------------- | ------------------------------------------------------------------ |
+| `APPLICATION_ID`            | GitHub App ID for Renovate and repo settings sync                  |
+| `APPLICATION_PRIVATE_KEY`   | GitHub App private key                                             |
+| `FRO_BOT_PAT`               | PAT for the fro-bot user (AI agent identity for @fro-bot mentions) |
+| `OPENCODE_AUTH_JSON`        | LLM provider auth JSON (e.g. `{"anthropic":{"apiKey":"..."}}}`)    |
+| `NPM_TOKEN`                 | npm publish token for `@marcusrbrown/infra` package                |
+| `OMO_PROVIDERS`             | OhMyOpenCode provider configuration                                |
+| `DIGITALOCEAN_ACCESS_TOKEN` | API token for DigitalOcean management                              |
 
 **Repository variables:**
 
@@ -159,13 +164,17 @@ bun run apps/keeweb/server/setup-deploy-user.ts
 │   ├── config/              Config templates (nginx, app config)
 │   ├── server/              Server provisioning scripts
 │   └── deploy.sh            SSH/rsync deploy script
+├── apps/cliproxy/           CLIProxyAPI deployment (scaffolded)
 ├── packages/cli/            @marcusrbrown/infra CLI
 │   └── src/
 │       ├── cli.ts           Entry point (goke framework)
+│       ├── cli.test.ts      CLI snapshot + discovery tests
 │       └── commands/        Command modules
 │           ├── keeweb-status.ts
 │           ├── keeweb-deploy.ts
 │           └── mcp.ts
+├── .agents/
+│   └── skills/              Agent skill context packets
 ├── .github/
 │   ├── copilot-instructions.md  Copilot coding agent instructions
 │   ├── known_hosts          Pinned SSH host keys
@@ -179,6 +188,15 @@ bun run apps/keeweb/server/setup-deploy-user.ts
 └── .opencode/
     └── commands/            OpenCode slash commands
 ```
+
+## Testing
+
+```bash
+bun test --recursive  # Run all tests from repo root
+bun test              # Run tests in current package
+```
+
+Tests are colocated alongside source files (`*.test.ts`). Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Tests mock at boundaries (fetch, Bun.spawn) and use `NO_COLOR=1` for deterministic subprocess output. CI runs tests as a parallel job alongside lint and type-check.
 
 ## Development
 

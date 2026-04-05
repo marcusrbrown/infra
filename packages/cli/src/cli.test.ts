@@ -6,6 +6,7 @@ const cliDir = resolve(import.meta.dir, '..')
 async function runCli(...args: string[]) {
   const proc = Bun.spawn(['bun', 'src/cli.ts', ...args], {
     cwd: cliDir,
+    env: {...process.env, NO_COLOR: '1'},
     stdout: 'pipe',
     stderr: 'pipe',
   })

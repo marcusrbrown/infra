@@ -1,5 +1,6 @@
-import {resolve} from 'node:path'
-import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
+import {mkdir, rm, writeFile} from 'node:fs/promises'
+import {dirname, resolve} from 'node:path'
+import {afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {
   getLocalDeployEnv,
@@ -61,6 +62,7 @@ async function runDeployCommand(
     cwd: cliDir,
     env: {
       ...env,
+      NO_COLOR: '1',
       SSH_AUTH_SOCK: env.SSH_AUTH_SOCK ?? '/tmp/test-sock',
     },
     stdout: 'pipe',
@@ -161,6 +163,17 @@ describe('keeweb deploy', () => {
   })
 
   describe('CLI flag interactions', () => {
+    const distIndexPath = resolveDistIndexPath()
+
+    beforeAll(async () => {
+      await mkdir(dirname(distIndexPath), {recursive: true})
+      await writeFile(distIndexPath, '<html></html>')
+    })
+
+    afterAll(async () => {
+      await rm(distIndexPath, {force: true})
+    })
+
     it('rejects --nginx without --local', async () => {
       const {stdout, stderr, exitCode} = await runDeployCommand(['--nginx'])
 

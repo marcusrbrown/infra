@@ -13,7 +13,7 @@ function resolveBaseUrl(input?: string): string {
   return stripTrailingSlash(input ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
 }
 
-function resolveManagementKey(input?: string): string {
+export function resolveManagementKey(input?: string): string {
   const key = input ?? process.env.CLIPROXY_MANAGEMENT_KEY
 
   if (!key) {
@@ -49,7 +49,7 @@ async function requestJson(endpoint: string, init: RequestInit): Promise<unknown
   }
 }
 
-function parseBoolean(value: string): boolean {
+export function parseBoolean(value: string): boolean {
   const normalized = value.toLowerCase()
   if (normalized === 'true') {
     return true
@@ -62,7 +62,7 @@ function parseBoolean(value: string): boolean {
   throw new Error('debug expects a boolean value: true or false')
 }
 
-function parseNumber(value: string, field: string): number {
+export function parseNumber(value: string, field: string): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) {
     throw new TypeError(`${field} expects a numeric value`)
@@ -71,7 +71,7 @@ function parseNumber(value: string, field: string): number {
   return parsed
 }
 
-function buildSetRequest(baseUrl: string, field: string, rawValue: string): {endpoint: string; body: string} {
+export function buildSetRequest(baseUrl: string, field: string, rawValue: string): {endpoint: string; body: string} {
   if (field === 'debug') {
     return {
       endpoint: `${baseUrl}/v0/management/debug`,

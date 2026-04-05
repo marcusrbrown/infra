@@ -14,7 +14,7 @@ interface CheckResult {
   details?: string[]
 }
 
-function levelLabel(level: CheckLevel): string {
+export function levelLabel(level: CheckLevel): string {
   if (level === 'ok') {
     return 'OK'
   }
@@ -26,11 +26,11 @@ function levelLabel(level: CheckLevel): string {
   return 'ERROR'
 }
 
-function formatDurationMs(durationMs: number): string {
+export function formatDurationMs(durationMs: number): string {
   return `${Math.max(0, Math.round(durationMs))}ms`
 }
 
-function stripTrailingSlash(value: string): string {
+export function stripTrailingSlash(value: string): string {
   return value.endsWith('/') ? value.slice(0, -1) : value
 }
 
@@ -49,11 +49,11 @@ async function parseJsonResponse(response: Response): Promise<unknown> {
   }
 }
 
-function toNumber(value: unknown): number | null {
+export function toNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-async function checkHttpReachability(url: string, verbose: boolean): Promise<CheckResult> {
+export async function checkHttpReachability(url: string, verbose: boolean): Promise<CheckResult> {
   const startedAt = performance.now()
 
   try {
@@ -90,7 +90,7 @@ async function checkHttpReachability(url: string, verbose: boolean): Promise<Che
   }
 }
 
-async function checkUsageStats(baseUrl: string, key: string): Promise<CheckResult> {
+export async function checkUsageStats(baseUrl: string, key: string): Promise<CheckResult> {
   const endpoint = `${baseUrl}/v0/management/usage`
 
   try {
@@ -146,7 +146,7 @@ async function checkUsageStats(baseUrl: string, key: string): Promise<CheckResul
   }
 }
 
-async function checkVersion(baseUrl: string, key: string): Promise<CheckResult> {
+export async function checkVersion(baseUrl: string, key: string): Promise<CheckResult> {
   const endpoint = `${baseUrl}/v0/management/latest-version`
 
   try {

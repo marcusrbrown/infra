@@ -49,7 +49,7 @@ async function requestJson(endpoint: string, init: RequestInit): Promise<unknown
   }
 }
 
-function toStringArray(payload: unknown): string[] {
+export function toStringArray(payload: unknown): string[] {
   if (Array.isArray(payload)) {
     return payload.filter(item => typeof item === 'string')
   }

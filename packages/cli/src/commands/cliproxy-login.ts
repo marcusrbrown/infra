@@ -5,7 +5,7 @@ import {z} from 'zod'
 const DEFAULT_HOST = 'cliproxy.fro.bot'
 const DEFAULT_REMOTE_USER = 'root'
 
-function resolveHost(input?: string): string {
+export function resolveHost(input?: string): string {
   const host = input ?? process.env.CLIPROXY_HOST ?? DEFAULT_HOST
 
   if (!host) {
@@ -15,7 +15,7 @@ function resolveHost(input?: string): string {
   return host
 }
 
-function requireSshAuthSock(): string {
+export function requireSshAuthSock(): string {
   const sshAuthSock = process.env.SSH_AUTH_SOCK
   if (!sshAuthSock) {
     throw new Error('SSH_AUTH_SOCK is required. Start ssh-agent and load your SSH key before running cliproxy login.')

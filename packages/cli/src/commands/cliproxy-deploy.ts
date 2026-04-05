@@ -10,7 +10,7 @@ const WORKFLOW_URL = 'https://github.com/marcusrbrown/infra/actions/workflows/de
 
 type CliInstance = ReturnType<typeof goke>
 
-function resolveLocalDeployScriptPath(): string {
+export function resolveLocalDeployScriptPath(): string {
   const primary = resolve(import.meta.dir, '../../../../apps/cliproxy/src/deploy.ts')
   if (existsSync(primary)) {
     return primary
@@ -19,7 +19,7 @@ function resolveLocalDeployScriptPath(): string {
   return resolve(import.meta.dir, '../../../apps/cliproxy/src/deploy.ts')
 }
 
-function getLocalDeployEnv(): Record<string, string> {
+export function getLocalDeployEnv(): Record<string, string> {
   const path = process.env.PATH
   const home = process.env.HOME
   const sshAuthSock = process.env.SSH_AUTH_SOCK
@@ -46,7 +46,7 @@ function getLocalDeployEnv(): Record<string, string> {
   }
 }
 
-function validateLocalPreconditions(): {deployScriptPath: string} {
+export function validateLocalPreconditions(): {deployScriptPath: string} {
   const deployScriptPath = resolveLocalDeployScriptPath()
   if (!existsSync(deployScriptPath)) {
     throw new Error(`Local deploy script not found at expected path: ${deployScriptPath}`)
@@ -57,7 +57,7 @@ function validateLocalPreconditions(): {deployScriptPath: string} {
   return {deployScriptPath}
 }
 
-function validateRemotePreconditions(): void {
+export function validateRemotePreconditions(): void {
   if (!Bun.which('gh')) {
     throw new Error('gh CLI is required for remote deploy. Install gh and run `gh auth login`.')
   }

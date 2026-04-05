@@ -1,0 +1,4 @@
+# Caddy automatically provisions and renews HTTPS certificates via Let's Encrypt.
+{$CLIPROXY_DOMAIN} {
+  reverse_proxy cli-proxy-api:8317
+}

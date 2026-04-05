@@ -1,0 +1,8 @@
+{
+  "name": "@marcusrbrown/infra-cliproxy",
+  "private": true,
+  "scripts": {
+    "deploy": "bun run src/deploy.ts",
+    "provision": "bun run server/provision-droplet.ts"
+  }
+}

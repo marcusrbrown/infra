@@ -19,6 +19,11 @@ Each command lives in `src/commands/` and exports a registration function:
 ```text
 src/commands/keeweb-status.ts  →  registerKeewebStatus(cli)
 src/commands/keeweb-deploy.ts  →  registerKeewebDeploy(cli)
+src/commands/cliproxy-status.ts → registerCliproxyStatus(cli)
+src/commands/cliproxy-config.ts → registerCliproxyConfig(cli)
+src/commands/cliproxy-keys.ts   → registerCliproxyKeys(cli)
+src/commands/cliproxy-login.ts  → registerCliproxyLogin(cli)
+src/commands/cliproxy-deploy.ts → registerCliproxyDeploy(cli)
 src/commands/mcp.ts            →  registerMcp(cli)
 ```
 

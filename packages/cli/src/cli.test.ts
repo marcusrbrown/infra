@@ -28,7 +28,9 @@ describe('infra CLI', () => {
     expect(stderr).toBe('')
     expect(stdout).toContain('keeweb')
     expect(stdout).toContain('mcp')
-    expect(stdout).toMatchSnapshot()
+    // Normalize version so snapshot survives changeset bumps
+    const stableOutput = stdout.replace(/infra\/\d+\.\d+\.\d+/, 'infra/x.x.x')
+    expect(stableOutput).toMatchSnapshot()
   })
 
   it('shows keeweb deploy help with expected flags', async () => {

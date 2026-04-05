@@ -1,7 +1,7 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`infra CLI shows root help with registered top-level commands 1`] = `
-"infra/0.1.0
+"infra/x.x.x
 
 
 Usage:

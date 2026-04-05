@@ -4,6 +4,7 @@
   "scripts": {
     "build": "bun run src/build.ts",
     "deploy": "bash deploy.sh",
-    "deploy:nginx": "bash deploy.sh --nginx"
+    "deploy:nginx": "bash deploy.sh --nginx",
+    "test": "bun test"
   }
 }

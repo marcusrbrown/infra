@@ -62,7 +62,7 @@ async function runCommand(command: string[], context: string): Promise<void> {
   throw new Error(`${context} failed (exit ${exitCode})${details ? `:\n${details}` : ''}`)
 }
 
-async function ensureRequiredFiles(): Promise<void> {
+export async function ensureRequiredFiles(): Promise<void> {
   if (!(await Bun.file(configTemplatePath).exists())) {
     throw new Error(`Missing required file: ${configTemplatePath}`)
   }
@@ -72,30 +72,32 @@ async function ensureRequiredFiles(): Promise<void> {
   }
 }
 
-async function verifyArchiveHash(filePath: string): Promise<void> {
+export async function verifyArchiveHash(filePath: string, expectedHash = EXPECTED_SHA256): Promise<void> {
   logStep('Verifying archive SHA-256')
   const buffer = await Bun.file(filePath).arrayBuffer()
   const hasher = new Bun.CryptoHasher('sha256')
   hasher.update(new Uint8Array(buffer))
   const actual = hasher.digest('hex')
 
-  if (actual !== EXPECTED_SHA256) {
+  if (actual !== expectedHash) {
     await Bun.file(filePath).unlink()
     throw new Error(
-      `SHA-256 mismatch for ${ZIP_FILENAME}\n  expected: ${EXPECTED_SHA256}\n  actual:   ${actual}\nCorrupt or tampered archive deleted. Re-run to download a fresh copy.`,
+      `SHA-256 mismatch for ${ZIP_FILENAME}\n  expected: ${expectedHash}\n  actual:   ${actual}\nCorrupt or tampered archive deleted. Re-run to download a fresh copy.`,
     )
   }
 
   logSuccess('SHA-256 verified')
 }
 
-async function ensureCachedArchive(): Promise<void> {
+export async function ensureCachedArchive(overrides: {cacheDir?: string; zipPath?: string} = {}): Promise<void> {
+  const _cacheDir = overrides.cacheDir ?? cacheDir
+  const _zipPath = overrides.zipPath ?? zipPath
   logStep('Ensuring cache directory exists')
-  await runCommand(['mkdir', '-p', cacheDir], 'Creating cache directory')
+  await runCommand(['mkdir', '-p', _cacheDir], 'Creating cache directory')
 
-  if (await Bun.file(zipPath).exists()) {
+  if (await Bun.file(_zipPath).exists()) {
     logStep(`Using cached archive: ${ZIP_FILENAME}`)
-    await verifyArchiveHash(zipPath)
+    await verifyArchiveHash(_zipPath)
     return
   }
 
@@ -105,35 +107,43 @@ async function ensureCachedArchive(): Promise<void> {
     throw new Error(`Download failed: ${response.status} ${response.statusText} (${DOWNLOAD_URL})`)
   }
 
-  await Bun.write(zipPath, response)
+  await Bun.write(_zipPath, response)
   logSuccess(`Downloaded and cached ${ZIP_FILENAME}`)
-  await verifyArchiveHash(zipPath)
+  await verifyArchiveHash(_zipPath)
 }
 
-async function extractArchive(): Promise<void> {
+export async function extractArchive(overrides: {zipPath?: string; distDir?: string} = {}): Promise<void> {
+  const _zipPath = overrides.zipPath ?? zipPath
+  const _distDir = overrides.distDir ?? distDir
+
   logStep('Rebuilding dist directory')
-  await runCommand(['rm', '-rf', distDir], 'Clearing dist directory')
-  await runCommand(['mkdir', '-p', distDir], 'Creating dist directory')
+  await runCommand(['rm', '-rf', _distDir], 'Clearing dist directory')
+  await runCommand(['mkdir', '-p', _distDir], 'Creating dist directory')
 
   logStep('Extracting KeeWeb archive')
-  await runCommand(['unzip', '-q', '-o', zipPath, '-d', distDir], 'Extracting archive')
+  await runCommand(['unzip', '-q', '-o', _zipPath, '-d', _distDir], 'Extracting archive')
 
-  if (!(await Bun.file(path.join(distDir, 'index.html')).exists())) {
+  if (!(await Bun.file(path.join(_distDir, 'index.html')).exists())) {
     throw new Error('Archive extracted, but dist/index.html is missing')
   }
 }
 
-async function writeConfigWithSecret(): Promise<void> {
+export async function writeConfigWithSecret(
+  overrides: {configTemplatePath?: string; distConfigPath?: string} = {},
+): Promise<void> {
+  const _configTemplatePath = overrides.configTemplatePath ?? configTemplatePath
+  const _distConfigPath = overrides.distConfigPath ?? distConfigPath
+
   logStep('Injecting DROPBOX_APP_SECRET into dist/config.json')
 
-  const raw = await Bun.file(configTemplatePath).text()
+  const raw = await Bun.file(_configTemplatePath).text()
   let config: Record<string, unknown>
 
   try {
     config = JSON.parse(raw) as Record<string, unknown>
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    throw new Error(`Failed to parse ${configTemplatePath}: ${message}`)
+    throw new Error(`Failed to parse ${_configTemplatePath}: ${message}`)
   }
 
   const settings =
@@ -142,12 +152,17 @@ async function writeConfigWithSecret(): Promise<void> {
   settings.dropboxSecret = process.env.DROPBOX_APP_SECRET || ''
   config.settings = settings
 
-  await Bun.write(distConfigPath, `${JSON.stringify(config, null, 2)}\n`)
+  await Bun.write(_distConfigPath, `${JSON.stringify(config, null, 2)}\n`)
 }
 
-async function copyNginxConfig(): Promise<void> {
+export async function copyNginxConfig(
+  overrides: {nginxTemplatePath?: string; distNginxPath?: string} = {},
+): Promise<void> {
+  const _nginxTemplatePath = overrides.nginxTemplatePath ?? nginxTemplatePath
+  const _distNginxPath = overrides.distNginxPath ?? distNginxPath
+
   logStep('Copying nginx config into dist')
-  await Bun.write(distNginxPath, Bun.file(nginxTemplatePath))
+  await Bun.write(_distNginxPath, Bun.file(_nginxTemplatePath))
 }
 
 async function main(): Promise<void> {
@@ -162,8 +177,10 @@ async function main(): Promise<void> {
   logSuccess(`Build complete: ${distDir}`)
 }
 
-main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error)
-  logError(message)
-  process.exit(1)
-})
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error)
+    logError(message)
+    process.exit(1)
+  })
+}

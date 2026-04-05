@@ -35,11 +35,11 @@ function levelLabel(level: CheckLevel): string {
   return 'ERROR'
 }
 
-function formatDurationMs(durationMs: number): string {
+export function formatDurationMs(durationMs: number): string {
   return `${Math.max(0, Math.round(durationMs))}ms`
 }
 
-function formatDate(value: string): string {
+export function formatDate(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
     return value
@@ -48,7 +48,7 @@ function formatDate(value: string): string {
   return date.toLocaleString()
 }
 
-function hashSha256(value: string): string {
+export function hashSha256(value: string): string {
   const hasher = new Bun.CryptoHasher('sha256')
   hasher.update(value)
   return hasher.digest('hex')
@@ -62,7 +62,7 @@ async function streamToText(stream?: ReadableStream<Uint8Array> | null): Promise
   return await new Response(stream).text()
 }
 
-async function checkHttpReachability(verbose: boolean): Promise<CheckResult> {
+export async function checkHttpReachability(verbose: boolean): Promise<CheckResult> {
   const startedAt = performance.now()
 
   try {
@@ -104,7 +104,7 @@ async function checkHttpReachability(verbose: boolean): Promise<CheckResult> {
   }
 }
 
-async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
+export async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
   try {
     const proc = Bun.spawn(
       [
@@ -189,7 +189,7 @@ async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
   }
 }
 
-async function checkContentHash(verbose: boolean): Promise<CheckResult> {
+export async function checkContentHash(verbose: boolean): Promise<CheckResult> {
   const distIndexPath = path.resolve(import.meta.dir, '../../../../apps/keeweb/dist/index.html')
   const localFile = Bun.file(distIndexPath)
   const localExists = await localFile.exists()

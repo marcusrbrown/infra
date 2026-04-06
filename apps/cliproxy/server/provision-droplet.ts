@@ -212,23 +212,27 @@ async function waitForSsh(host: string): Promise<void> {
 async function pinHostKeys(dropletIp: string): Promise<void> {
   const knownHostsPath = resolve(import.meta.dir, '..', '..', '..', '.github', 'known_hosts')
 
-  const hostKeys = await runCapture(local(['ssh-keyscan', '-H', dropletIp]))
-  if (!hostKeys) {
+  // Pin unhashed domain-name keys (for CI, which connects by domain)
+  const domainKeys = await runCapture(local(['ssh-keyscan', CLIPROXY_DOMAIN]))
+  // Pin hashed IP keys (for local provisioning)
+  const ipKeys = await runCapture(local(['ssh-keyscan', '-H', dropletIp]))
+
+  if (!domainKeys && !ipKeys) {
     console.warn('Warning: Could not retrieve host keys from droplet. Pin them manually before CI deploy.')
     return
   }
 
   const existing = readFileSync(knownHostsPath, 'utf-8')
-  const marker = `# cliproxy droplet (${dropletIp})`
+  const marker = `# cliproxy droplet (${dropletIp} / ${CLIPROXY_DOMAIN})`
 
   if (existing.includes(marker)) {
     console.log(`\u001B[1;34m==>\u001B[0m Host keys already pinned for ${dropletIp}`)
     return
   }
 
-  const newBlock = `\n${marker}\n${hostKeys}\n`
+  const newBlock = `\n${marker}\n${domainKeys}\n${ipKeys}\n`
   appendFileSync(knownHostsPath, newBlock)
-  console.log(`\u001B[1;32m✓\u001B[0m Pinned host keys for ${dropletIp} in .github/known_hosts`)
+  console.log(`\u001B[1;32m✓\u001B[0m Pinned host keys for ${dropletIp} / ${CLIPROXY_DOMAIN} in .github/known_hosts`)
   console.log('  Commit the updated .github/known_hosts before running CI deploy.')
 }
 

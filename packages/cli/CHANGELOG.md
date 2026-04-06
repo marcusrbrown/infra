@@ -1,5 +1,17 @@
 # @marcusrbrown/infra
 
+## 0.3.0
+### Minor Changes
+
+
+- Add CLIProxyAPI deployment and management support ([#35](https://github.com/marcusrbrown/infra/pull/35))
+  
+  - New CLI commands: `cliproxy status`, `cliproxy deploy`, `cliproxy config get/set`, `cliproxy keys list/add/remove`, `cliproxy login`
+  - Docker Compose deployment to DigitalOcean with Caddy TLS
+  - Management API integration for config, API keys, and usage stats
+  - GitHub Actions deploy workflow with `cliproxy` environment
+  - MCP bridge auto-exposes all new commands as tools
+
 ## 0.2.0
 ### Minor Changes
 

@@ -34,12 +34,9 @@
     "string-dedent": "^3.0.2",
     "zod": "^4.3.6"
   },
-  "bundledDependencies": [
-    "@goke/mcp",
-    "goke",
-    "string-dedent",
-    "zod"
-  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
   "publishConfig": {
     "access": "public",
     "provenance": true

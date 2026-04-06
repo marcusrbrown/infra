@@ -59,14 +59,18 @@ export function registerCliproxyLogin(cli: ReturnType<typeof goke>): void {
       const remoteCommand =
         'cd /opt/cliproxy && docker compose exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI --no-browser --claude-login'
 
+      // Login is interactive (paste callback URL prompt) — need TTY allocation.
+      // -tt forces pseudo-terminal even when stdin isn't a terminal.
+      // No BatchMode — interactive session requires keyboard input.
       const child = Bun.spawn(
-        ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', `${DEFAULT_REMOTE_USER}@${host}`, remoteCommand],
+        ['ssh', '-tt', '-o', 'ConnectTimeout=10', `${DEFAULT_REMOTE_USER}@${host}`, remoteCommand],
         {
           env: {
             PATH: path,
             HOME: home,
             SSH_AUTH_SOCK: sshAuthSock,
           },
+          stdin: 'inherit',
           stdout: 'inherit',
           stderr: 'inherit',
         },

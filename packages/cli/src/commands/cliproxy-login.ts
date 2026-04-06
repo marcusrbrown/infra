@@ -56,7 +56,8 @@ export function registerCliproxyLogin(cli: ReturnType<typeof goke>): void {
         throw new Error('HOME is required to invoke ssh')
       }
 
-      const remoteCommand = 'docker compose exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI --no-browser --claude-login'
+      const remoteCommand =
+        'cd /opt/cliproxy && docker compose exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI --no-browser --claude-login'
 
       const child = Bun.spawn(
         ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', `${DEFAULT_REMOTE_USER}@${host}`, remoteCommand],

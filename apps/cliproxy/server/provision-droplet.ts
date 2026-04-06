@@ -17,11 +17,31 @@ function local(command: string[]): string[] {
 }
 
 function ssh(host: string, command: string): string[] {
-  return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', `${REMOTE_USER}@${host}`, command]
+  return [
+    'ssh',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'StrictHostKeyChecking=accept-new',
+    '-o',
+    'ConnectTimeout=10',
+    `${REMOTE_USER}@${host}`,
+    command,
+  ]
 }
 
 function scp(host: string, source: string, target: string): string[] {
-  return ['scp', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', source, `${REMOTE_USER}@${host}:${target}`]
+  return [
+    'scp',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'StrictHostKeyChecking=accept-new',
+    '-o',
+    'ConnectTimeout=10',
+    source,
+    `${REMOTE_USER}@${host}:${target}`,
+  ]
 }
 
 async function run(label: string, command: string[]) {

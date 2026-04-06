@@ -63,7 +63,7 @@ Commands:
 
   cliproxy login <provider>          Run provider login on the remote CLIProxyAPI host and print OAuth URL output.
 
-    --host [host]                    CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_HOST or cliproxy.fro.bot.
+    --host [host]                    CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
 
 
   mcp                                Start a stdio MCP server exposing all CLI commands as tools for coding agents

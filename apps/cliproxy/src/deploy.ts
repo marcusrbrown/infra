@@ -11,7 +11,6 @@ interface DeployEnv {
   PATH: string
   HOME: string
   SSH_AUTH_SOCK: string
-  CLIPROXY_HOST: string
   CLIPROXY_DOMAIN: string
   CLIPROXY_MANAGEMENT_KEY: string
 }
@@ -30,7 +29,7 @@ function getDeployEnv(): DeployEnv {
   const path = process.env.PATH
   const home = process.env.HOME
   const sshAuthSock = process.env.SSH_AUTH_SOCK
-  const host = process.env.CLIPROXY_HOST
+  const host = process.env.CLIPROXY_DOMAIN
 
   if (!path) {
     throw new Error('PATH is required for deploy')
@@ -45,15 +44,14 @@ function getDeployEnv(): DeployEnv {
   }
 
   if (!host) {
-    throw new Error('CLIPROXY_HOST is required for deploy.')
+    throw new Error('CLIPROXY_DOMAIN is required for deploy.')
   }
 
   return {
     PATH: path,
     HOME: home,
     SSH_AUTH_SOCK: sshAuthSock,
-    CLIPROXY_HOST: host,
-    CLIPROXY_DOMAIN: process.env.CLIPROXY_DOMAIN ?? '',
+    CLIPROXY_DOMAIN: host,
     CLIPROXY_MANAGEMENT_KEY: process.env.CLIPROXY_MANAGEMENT_KEY ?? '',
   }
 }
@@ -121,7 +119,7 @@ function scpCommand(host: string, source: string, destination: string): string[]
 }
 
 async function healthCheck(env: DeployEnv): Promise<void> {
-  const host = env.CLIPROXY_DOMAIN || env.CLIPROXY_HOST
+  const host = env.CLIPROXY_DOMAIN
   const url = `https://${host}/v0/management/latest-version`
 
   const headers = new Headers()
@@ -142,7 +140,7 @@ async function healthCheck(env: DeployEnv): Promise<void> {
 async function deploy(): Promise<void> {
   const files = validatePreconditions()
   const env = getDeployEnv()
-  const host = env.CLIPROXY_HOST
+  const host = env.CLIPROXY_DOMAIN
 
   await runCommand('Creating remote directories', sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`), env)
   await runCommand(

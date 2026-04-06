@@ -40,7 +40,6 @@ export function getLocalDeployEnv(): Record<string, string> {
     PATH: path,
     HOME: home,
     SSH_AUTH_SOCK: sshAuthSock,
-    CLIPROXY_HOST: process.env.CLIPROXY_HOST ?? '',
     CLIPROXY_DOMAIN: process.env.CLIPROXY_DOMAIN ?? '',
     CLIPROXY_MANAGEMENT_KEY: process.env.CLIPROXY_MANAGEMENT_KEY ?? '',
   }
@@ -103,7 +102,7 @@ export function registerCliproxyDeploy(cli: CliInstance): void {
           console.log('Dry run: local CLIProxyAPI deploy')
           console.log(`- deploy script: ${deployScriptPath}`)
           console.log(`- command: ${command.join(' ')}`)
-          console.log(`- CLIPROXY_HOST=${env.CLIPROXY_HOST || '(unset)'}`)
+          console.log(`- CLIPROXY_DOMAIN=${env.CLIPROXY_DOMAIN || '(unset)'}`)
           return
         }
 

@@ -6,10 +6,10 @@ const DEFAULT_HOST = 'cliproxy.fro.bot'
 const DEFAULT_REMOTE_USER = 'root'
 
 export function resolveHost(input?: string): string {
-  const host = input ?? process.env.CLIPROXY_HOST ?? DEFAULT_HOST
+  const host = input ?? process.env.CLIPROXY_DOMAIN ?? DEFAULT_HOST
 
   if (!host) {
-    throw new Error('CLIPROXY_HOST is required. Pass --host or set CLIPROXY_HOST.')
+    throw new Error('CLIPROXY_DOMAIN is required. Pass --host or set CLIPROXY_DOMAIN.')
   }
 
   return host
@@ -34,7 +34,7 @@ export function registerCliproxyLogin(cli: ReturnType<typeof goke>): void {
       '--host [host]',
       z
         .string()
-        .describe('CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_HOST or cliproxy.fro.bot.'),
+        .describe('CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.'),
     )
     .example('# Start Claude login flow on remote CLIProxyAPI instance')
     .example('infra cliproxy login claude')

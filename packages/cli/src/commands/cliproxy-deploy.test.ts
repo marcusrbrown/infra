@@ -5,14 +5,7 @@ import {getLocalDeployEnv, resolveLocalDeployScriptPath, validateRemotePrecondit
 
 const cliDir = resolve(import.meta.dir, '../..')
 
-const envKeys = [
-  'CLIPROXY_DOMAIN',
-  'CLIPROXY_HOST',
-  'CLIPROXY_MANAGEMENT_KEY',
-  'HOME',
-  'PATH',
-  'SSH_AUTH_SOCK',
-] as const
+const envKeys = ['CLIPROXY_DOMAIN', 'CLIPROXY_MANAGEMENT_KEY', 'HOME', 'PATH', 'SSH_AUTH_SOCK'] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
 
@@ -103,7 +96,6 @@ describe('cliproxy deploy', () => {
     it('returns the expected deploy environment when required variables are present', () => {
       setManagedEnv({
         CLIPROXY_DOMAIN: 'cliproxy.example.com',
-        CLIPROXY_HOST: 'example-host',
         CLIPROXY_MANAGEMENT_KEY: 'test-management-key',
         HOME: '/tmp/test-home',
         PATH: '/usr/bin:/bin',
@@ -112,7 +104,6 @@ describe('cliproxy deploy', () => {
 
       expect(getLocalDeployEnv()).toEqual({
         CLIPROXY_DOMAIN: 'cliproxy.example.com',
-        CLIPROXY_HOST: 'example-host',
         CLIPROXY_MANAGEMENT_KEY: 'test-management-key',
         HOME: '/tmp/test-home',
         PATH: '/usr/bin:/bin',
@@ -178,7 +169,7 @@ describe('cliproxy deploy', () => {
       expect(stderr).toBe('')
       expect(stdout).toContain('Dry run: local CLIProxyAPI deploy')
       expect(stdout).toContain(deployScriptPath)
-      expect(stdout).toContain('CLIPROXY_HOST=')
+      expect(stdout).toContain('CLIPROXY_DOMAIN=')
     })
 
     it('rejects invalid options with a non-zero exit code', async () => {

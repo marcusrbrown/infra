@@ -122,28 +122,28 @@ describe('cliproxy keys helpers', () => {
 
 describe('cliproxy login helpers', () => {
   describe('resolveHost', () => {
-    const originalHost = process.env.CLIPROXY_HOST
+    const originalHost = process.env.CLIPROXY_DOMAIN
 
     beforeEach(() => {
-      delete process.env.CLIPROXY_HOST
+      delete process.env.CLIPROXY_DOMAIN
     })
 
     afterEach(() => {
       if (originalHost === undefined) {
-        delete process.env.CLIPROXY_HOST
+        delete process.env.CLIPROXY_DOMAIN
       } else {
-        process.env.CLIPROXY_HOST = originalHost
+        process.env.CLIPROXY_DOMAIN = originalHost
       }
     })
 
     it('returns explicit input when provided', () => {
-      process.env.CLIPROXY_HOST = 'env.example.com'
+      process.env.CLIPROXY_DOMAIN = 'env.example.com'
 
       expect(resolveHost('explicit.example.com')).toBe('explicit.example.com')
     })
 
-    it('falls back to CLIPROXY_HOST', () => {
-      process.env.CLIPROXY_HOST = 'env.example.com'
+    it('falls back to CLIPROXY_DOMAIN', () => {
+      process.env.CLIPROXY_DOMAIN = 'env.example.com'
 
       expect(resolveHost()).toBe('env.example.com')
     })

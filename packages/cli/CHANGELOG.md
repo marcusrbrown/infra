@@ -1,5 +1,14 @@
 # @marcusrbrown/infra
 
+## 0.3.1
+### Patch Changes
+
+
+- Fix cliproxy login command and bunx dependency resolution ([#42](https://github.com/marcusrbrown/infra/pull/42))
+  
+  - Fix `cliproxy login claude` failing with "no configuration file provided" by running docker compose from `/opt/cliproxy/` on the remote host
+  - Fix `bunx @marcusrbrown/infra` failing with "Cannot find package 'zod'" by bundling all runtime dependencies in the published tarball
+
 ## 0.3.0
 ### Minor Changes
 

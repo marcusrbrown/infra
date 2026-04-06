@@ -99,7 +99,7 @@ jobs:
       - name: Deploy cliproxy
         run: bun run --cwd apps/cliproxy deploy
         env:
-          CLIPROXY_HOST: ${{ secrets.CLIPROXY_HOST }}
+          CLIPROXY_HOST: ${{ secrets.CLIPROXY_DOMAIN }}
           CLIPROXY_DOMAIN: ${{ secrets.CLIPROXY_DOMAIN }}
           CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
 

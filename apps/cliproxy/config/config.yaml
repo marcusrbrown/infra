@@ -1,6 +1,7 @@
 # Real values injected at deploy time via env vars. Do not commit secrets.
 host: ''
 port: 8317
+auth-dir: /root/.cli-proxy-api
 
 remote-management:
   allow-remote: true

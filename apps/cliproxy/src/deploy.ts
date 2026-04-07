@@ -119,7 +119,7 @@ function scpCommand(host: string, source: string, destination: string): string[]
 }
 
 async function remoteFileExists(host: string, path: string, env: DeployEnv): Promise<boolean> {
-  const proc = Bun.spawn(sshCommand(host, `test -f ${path}`), {env, stdout: 'pipe', stderr: 'pipe'})
+  const proc = Bun.spawn(sshCommand(host, `test -f '${path}'`), {env, stdout: 'pipe', stderr: 'pipe'})
   const exitCode = await proc.exited
   return exitCode === 0
 }

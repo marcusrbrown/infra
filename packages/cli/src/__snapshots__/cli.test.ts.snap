@@ -28,6 +28,7 @@ Commands:
   cliproxy deploy                      Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.
 
     --local                            Run local deployment with Bun using apps/cliproxy/src/deploy.ts instead of triggering GitHub Actions. (default: false)
+    --force-config                     Force upload config.yaml even if it exists on the server. WARNING: overwrites runtime API keys and settings. (default: false)
     --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
 
 

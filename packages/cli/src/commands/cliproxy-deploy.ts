@@ -78,6 +78,15 @@ export function registerCliproxyDeploy(cli: CliInstance): void {
         ),
     )
     .option(
+      '--force-config',
+      z
+        .boolean()
+        .default(false)
+        .describe(
+          'Force upload config.yaml even if it exists on the server. WARNING: overwrites runtime API keys and settings.',
+        ),
+    )
+    .option(
       '--dry-run',
       z
         .boolean()
@@ -96,12 +105,15 @@ export function registerCliproxyDeploy(cli: CliInstance): void {
       if (options.local) {
         const {deployScriptPath} = validateLocalPreconditions()
         const env = getLocalDeployEnv()
-        const command = ['bun', deployScriptPath]
+        const command = ['bun', deployScriptPath, ...(options.forceConfig ? ['--force-config'] : [])]
 
         if (options.dryRun) {
           console.log('Dry run: local CLIProxyAPI deploy')
           console.log(`- deploy script: ${deployScriptPath}`)
           console.log(`- command: ${command.join(' ')}`)
+          if (options.forceConfig) {
+            console.log('- WARNING: --force-config will overwrite server config.yaml (wipes API keys)')
+          }
           console.log(`- CLIPROXY_DOMAIN=${env.CLIPROXY_DOMAIN || '(unset)'}`)
           return
         }

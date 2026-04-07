@@ -147,6 +147,51 @@ export async function checkUsageStats(baseUrl: string, key: string): Promise<Che
   }
 }
 
+export async function checkVersion(baseUrl: string, key: string): Promise<CheckResult> {
+  const endpoint = `${baseUrl}/v0/management/latest-version`
+
+  try {
+    const response = await fetch(endpoint, {
+      headers: managementHeaders(key),
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    })
+
+    if (response.status === 429) {
+      return {
+        title: 'Latest version',
+        level: 'warning',
+        summary: 'Rate limited by management API (HTTP 429). Retry in a few moments.',
+      }
+    }
+
+    if (!response.ok) {
+      return {
+        title: 'Latest version',
+        level: 'error',
+        summary: `GET /v0/management/latest-version failed with HTTP ${response.status}`,
+      }
+    }
+
+    const payload = await parseJsonResponse(response)
+
+    if (payload && typeof payload === 'object') {
+      const version = (payload as Record<string, unknown>)['latest-version']
+      if (typeof version === 'string' && version.length > 0) {
+        return {title: 'Latest version', level: 'ok', summary: version}
+      }
+    }
+
+    return {
+      title: 'Latest version',
+      level: 'warning',
+      summary: 'Response did not include a latest-version string.',
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {title: 'Latest version', level: 'error', summary: `Unable to check latest version: ${message}`}
+  }
+}
+
 function printCheckResult(result: CheckResult): void {
   console.log(`[${levelLabel(result.level)}] ${result.title}`)
   console.log(`  ${result.summary}`)
@@ -182,12 +227,18 @@ export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
       const results: CheckResult[] = [await checkHttpReachability(baseUrl, verbose)]
 
       if (managementKey) {
-        results.push(await checkUsageStats(baseUrl, managementKey))
+        const [usageResult, versionResult] = await Promise.all([
+          checkUsageStats(baseUrl, managementKey),
+          checkVersion(baseUrl, managementKey),
+        ])
+
+        results.push(usageResult, versionResult)
       } else {
         results.push({
           title: 'Management checks',
           level: 'warning',
-          summary: 'CLIPROXY_MANAGEMENT_KEY is not set. Skipping usage stats. Provide --key or set env var.',
+          summary:
+            'CLIPROXY_MANAGEMENT_KEY is not set. Skipping usage stats and version checks. Provide --key or set env var.',
         })
       }
 

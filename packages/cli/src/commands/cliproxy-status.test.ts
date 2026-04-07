@@ -3,6 +3,7 @@ import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 import {
   checkHttpReachability,
   checkUsageStats,
+  checkVersion,
   formatDurationMs,
   levelLabel,
   stripTrailingSlash,
@@ -200,6 +201,56 @@ describe('cliproxy status helpers', () => {
 
       expect(result.level).toBe('error')
       expect(result.summary).toContain('Unable to read usage stats: socket hang up')
+    })
+  })
+
+  describe('checkVersion', () => {
+    it('returns ok with latest-version from response', async () => {
+      globalThis.fetch = createFetchImplementation(
+        async () =>
+          new Response(JSON.stringify({'latest-version': 'v6.9.15'}), {
+            status: 200,
+            headers: {'content-type': 'application/json'},
+          }),
+      )
+
+      const result = await checkVersion('https://cliproxy.example.com', 'secret')
+
+      expect(result.level).toBe('ok')
+      expect(result.summary).toBe('v6.9.15')
+    })
+
+    it('returns warning when latest-version key is missing', async () => {
+      globalThis.fetch = createFetchImplementation(
+        async () =>
+          new Response(JSON.stringify({}), {
+            status: 200,
+            headers: {'content-type': 'application/json'},
+          }),
+      )
+
+      const result = await checkVersion('https://cliproxy.example.com', 'secret')
+
+      expect(result.level).toBe('warning')
+      expect(result.summary).toContain('latest-version')
+    })
+
+    it('returns warning when rate limited', async () => {
+      globalThis.fetch = createFetchImplementation(async () => new Response('rate limited', {status: 429}))
+
+      const result = await checkVersion('https://cliproxy.example.com', 'secret')
+
+      expect(result.level).toBe('warning')
+      expect(result.summary).toContain('Rate limited')
+    })
+
+    it('returns error for non-200 responses', async () => {
+      globalThis.fetch = createFetchImplementation(async () => new Response('boom', {status: 500}))
+
+      const result = await checkVersion('https://cliproxy.example.com', 'secret')
+
+      expect(result.level).toBe('error')
+      expect(result.summary).toContain('HTTP 500')
     })
   })
 })

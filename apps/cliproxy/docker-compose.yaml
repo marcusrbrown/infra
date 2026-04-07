@@ -13,7 +13,7 @@ services:
       - ./config/Caddyfile:/etc/caddy/Caddyfile
 
   cli-proxy-api:
-    image: eceasy/cli-proxy-api:latest@sha256:cc2995db70092dd8e504742748e85e34144416a485a0b0f094ed4c4f9b0bf0f0
+    image: eceasy/cli-proxy-api:latest@sha256:c88f90af12ba0fb2eb2302f31633c3bfaeeca9e863c115c374cf2a25d7939ba2
     env_file:
       - path: .env
         required: false

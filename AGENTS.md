@@ -1,12 +1,12 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-04-05
+**Generated:** 2026-04-07
 **Commit:** main
 **Branch:** main
 
 ## OVERVIEW
 
-Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation + operational CLI with MCP bridge. Deploys static sites to `box.heatvision.co` via SSH/rsync.
+Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb) and `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean).
 
 ## STRUCTURE
 
@@ -91,8 +91,11 @@ bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on serve
 
 ## NOTES
 
-- `DROPBOX_APP_SECRET` and `DEPLOY_SSH_KEY` are GitHub Actions secrets scoped to `production` environment. `APPLICATION_ID` and `APPLICATION_PRIVATE_KEY` are repo-level secrets.
-- `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are GitHub Actions secrets scoped to the `cliproxy` environment. `DIGITALOCEAN_ACCESS_TOKEN` is a repo-level secret.
+- `DROPBOX_APP_SECRET` and `DEPLOY_SSH_KEY` are GitHub Actions secrets scoped to `production` environment.
+- `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are scoped to `cliproxy` environment.
+- `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `OMO_PROVIDERS`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
+- `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.
+- `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets.
 - Deploy target: `box.heatvision.co` (Mail-In-A-Box server). Site path: `/home/user-data/www/kw.igg.ms/`.
 - Activation script on server (`/usr/local/bin/kw-deploy-activate`) sets permissions to 775 with setgid to preserve group-write for deploy user.
-- `dorny/paths-filter@v3` used for change detection because native `paths:` breaks `workflow_dispatch`. Deploy condition: `workflow_dispatch || keeweb-changed`.
+- `dorny/paths-filter` used for change detection because native `paths:` breaks `workflow_dispatch`. Deploy condition: `workflow_dispatch || keeweb-changed`.

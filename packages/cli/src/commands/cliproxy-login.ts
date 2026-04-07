@@ -43,6 +43,10 @@ export function registerCliproxyLogin(cli: ReturnType<typeof goke>): void {
         throw new Error(`Unsupported provider "${provider}". Currently only "claude" is supported.`)
       }
 
+      if (!process.stdin.isTTY) {
+        throw new Error('cliproxy login requires an interactive terminal. Run from a shell with TTY attached.')
+      }
+
       const host = resolveHost(options.host)
       const sshAuthSock = requireSshAuthSock()
       const path = process.env.PATH
@@ -59,11 +63,17 @@ export function registerCliproxyLogin(cli: ReturnType<typeof goke>): void {
       const remoteCommand =
         'cd /opt/cliproxy && docker compose exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI --no-browser --claude-login'
 
-      // Login is interactive (paste callback URL prompt) — need TTY allocation.
-      // -tt forces pseudo-terminal even when stdin isn't a terminal.
-      // No BatchMode — interactive session requires keyboard input.
       const child = Bun.spawn(
-        ['ssh', '-tt', '-o', 'ConnectTimeout=10', `${DEFAULT_REMOTE_USER}@${host}`, remoteCommand],
+        [
+          'ssh',
+          '-tt',
+          '-o',
+          'BatchMode=yes',
+          '-o',
+          'ConnectTimeout=10',
+          `${DEFAULT_REMOTE_USER}@${host}`,
+          remoteCommand,
+        ],
         {
           env: {
             PATH: path,

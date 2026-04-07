@@ -8,7 +8,6 @@ Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcu
 | --- | --- | --- |
 | Add new command | `src/commands/<name>.ts` | Export `register<Name>(cli)`, import in cli.ts |
 | Modify CLI skeleton | `src/cli.ts` | Global options, parse pattern, command registration |
-| Change goke patterns | goke SKILL.md | `https://raw.githubusercontent.com/remorses/goke/refs/heads/main/goke/SKILL.md` |
 | CLI tests | `src/cli.test.ts` | Snapshots in `src/__snapshots__/` |
 | Command tests | `src/commands/<name>.test.ts` | Colocated alongside each command |
 
@@ -37,12 +36,16 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - Parse `gh` JSON output through Zod schemas before use
 - SHA-256 via `Bun.CryptoHasher('sha256')`, not crypto module
 - Resolve paths with `import.meta.dir` + `path.resolve()` — validate existence before use
-- **`--dry-run` semantics**: prints the plan/action that would be taken without executing it. Does NOT validate preconditions (e.g., build artifacts, env vars, ssh-agent). Safe to run anywhere.
-- **Tests**: colocated `*.test.ts` files. Snapshots in `src/__snapshots__/`. Use `NO_COLOR=1` in subprocess env when spawning the CLI to get deterministic output. Mock `fetch` and `Bun.spawn` at the boundary, not internals.
+- **Management API**: Commands use local helpers for authenticated JSON requests and management key resolution (see `cliproxy-keys.ts` for the pattern). No shared module — helpers are per-file.
+- **Packaging**: `bundledDependencies` does NOT work with Bun's .bun/ symlink layout. Published package ships TypeScript source with `#!/usr/bin/env bun` shebang, requires `engines.bun >= 1.0.0`.
+- **`--dry-run` semantics**: Prints the planned action without validating preconditions or executing side effects. Safe to run anywhere.
+- **Tests**: colocated `*.test.ts`. Snapshots in `src/__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic output. Mock `fetch` and `Bun.spawn` at the boundary.
 
 ## ANTI-PATTERNS
 
-- Never inherit full parent env when spawning deploy.sh — use explicit env allowlist (`HOST`, `REMOTE_USER`, `SITE_DIR`, `SSH_AUTH_SOCK`, `PATH`, `HOME`).
-- Never check for `DEPLOY_SSH_KEY` env var for local deploy — check `SSH_AUTH_SOCK` (deploy.sh needs ssh-agent, not raw key).
+- Never use `bundledDependencies` — Bun's .bun/ symlinks create `../../` paths that npm rejects.
+- Never assume CLI proxy API body format — test empirically against live API (e.g., api-keys PUT expects bare array, not wrapped object).
+- Never use `BatchMode=yes` without `-tt` when stdin forwarding is needed (login command).
+- Never inherit full parent env when spawning deploy.sh — use explicit env allowlist.
+- Never check for `DEPLOY_SSH_KEY` env var for local deploy — check `SSH_AUTH_SOCK`.
 - Never add `GITHUB_TOKEN` raw fetch fallback — require `gh` CLI.
-- The `mcp` command is auto-excluded from MCP tool list by `@goke/mcp` default. Don't manually filter it.

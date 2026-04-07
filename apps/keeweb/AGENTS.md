@@ -23,6 +23,7 @@ Self-hosted KeeWeb v1.18.7 password manager at `kw.igg.ms`. Download-based build
 
 **Critical**: `config/config.json` (template) is never modified. Secret only goes into `dist/config.json`.
 
+**Integrity**: SHA-256 of the release zip is verified on every build (cache hit and fresh download) via `Bun.CryptoHasher('sha256')`. Mismatch deletes the corrupt file and aborts.
 **Testability**: `build.ts` exports `buildKeeweb(options?)` and guards its top-level execution with `import.meta.main` so tests can import it without triggering a build. Fixtures in `src/__fixtures__/` (e.g., `test-archive.zip`) stand in for real downloads.
 
 ## DEPLOY FLOW

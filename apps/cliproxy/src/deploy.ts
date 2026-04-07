@@ -118,13 +118,19 @@ function scpCommand(host: string, source: string, destination: string): string[]
   ]
 }
 
+async function remoteFileExists(host: string, path: string, env: DeployEnv): Promise<boolean> {
+  const proc = Bun.spawn(sshCommand(host, `test -f ${path}`), {env, stdout: 'pipe', stderr: 'pipe'})
+  const exitCode = await proc.exited
+  return exitCode === 0
+}
+
 async function healthCheck(env: DeployEnv): Promise<void> {
   const host = env.CLIPROXY_DOMAIN
   const url = `https://${host}/v0/management/latest-version`
 
   const headers = new Headers()
   if (env.CLIPROXY_MANAGEMENT_KEY) {
-    headers.set('authorization', `Bearer ${env.CLIPROXY_MANAGEMENT_KEY}`)
+    headers.set('x-management-key', env.CLIPROXY_MANAGEMENT_KEY)
   }
 
   const response = await fetch(url, {headers})
@@ -141,6 +147,7 @@ async function deploy(): Promise<void> {
   const files = validatePreconditions()
   const env = getDeployEnv()
   const host = env.CLIPROXY_DOMAIN
+  const forceConfig = process.argv.includes('--force-config')
 
   await runCommand('Creating remote directories', sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`), env)
   await runCommand(
@@ -148,12 +155,19 @@ async function deploy(): Promise<void> {
     scpCommand(host, files.compose, `${REMOTE_DIR}/docker-compose.yaml`),
     env,
   )
-  await runCommand(
-    'Uploading config/config.yaml',
-    scpCommand(host, files.config, `${REMOTE_DIR}/config/config.yaml`),
-    env,
-  )
   await runCommand('Uploading config/Caddyfile', scpCommand(host, files.caddy, `${REMOTE_DIR}/config/Caddyfile`), env)
+
+  // config.yaml contains runtime state (API keys, settings) managed via the management API.
+  // Only upload on first deploy or when explicitly forced. Overwriting would wipe API keys.
+  const configExists = await remoteFileExists(host, `${REMOTE_DIR}/config/config.yaml`, env)
+  if (!configExists || forceConfig) {
+    const label = forceConfig ? 'Uploading config/config.yaml (forced)' : 'Uploading config/config.yaml (first deploy)'
+    await runCommand(label, scpCommand(host, files.config, `${REMOTE_DIR}/config/config.yaml`), env)
+  } else {
+    console.log(
+      '\u001B[1;34m==>\u001B[0m Skipping config/config.yaml (exists on server, use --force-config to overwrite)',
+    )
+  }
 
   await runCommand(
     'Updating Docker Compose stack',

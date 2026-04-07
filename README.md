@@ -139,7 +139,8 @@ Deploys require approval through the `production` GitHub Environment.
 | `FRO_BOT_PAT`               | PAT for the fro-bot user (AI agent identity for @fro-bot mentions) |
 | `OPENCODE_AUTH_JSON`        | LLM provider auth JSON (e.g. `{"anthropic":{"apiKey":"..."}}}`)    |
 | `NPM_TOKEN`                 | npm publish token for `@marcusrbrown/infra` package                |
-| `OMO_PROVIDERS`             | OhMyOpenCode provider configuration                                |
+| `OMO_PROVIDERS`             | Comma-separated oMo provider list (e.g. `claude`)                  |
+| `OPENCODE_CONFIG`           | OpenCode provider config JSON (e.g. anthropic baseURL override)    |
 | `DIGITALOCEAN_ACCESS_TOKEN` | API token for DigitalOcean management                              |
 
 **Repository variables:**

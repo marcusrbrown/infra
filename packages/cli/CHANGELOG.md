@@ -1,5 +1,15 @@
 # @marcusrbrown/infra
 
+## 0.3.2
+### Patch Changes
+
+
+- Fix cliproxy login hanging after pasting callback URL ([#45](https://github.com/marcusrbrown/infra/pull/45))
+  
+  - Allocate TTY with `-tt` so the paste prompt works interactively
+  - Remove `BatchMode=yes` which blocks keyboard input
+  - Explicitly inherit stdin for the SSH subprocess
+
 ## 0.3.1
 ### Patch Changes
 

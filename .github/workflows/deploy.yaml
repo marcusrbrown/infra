@@ -105,7 +105,7 @@ jobs:
       - name: Post-deploy health check
         run: >-
           curl -sf -o /dev/null -w "%{http_code}" "https://${CLIPROXY_DOMAIN}/v0/management/latest-version"
-          -H "Authorization: Bearer ${CLIPROXY_MANAGEMENT_KEY}" | grep -q "^200"
+          -H "x-management-key: ${CLIPROXY_MANAGEMENT_KEY}" | grep -q "^200"
         env:
           CLIPROXY_DOMAIN: ${{ secrets.CLIPROXY_DOMAIN }}
           CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}

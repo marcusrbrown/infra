@@ -59,48 +59,62 @@ export function parseBoolean(value: string): boolean {
     return false
   }
 
-  throw new Error('debug expects a boolean value: true or false')
+  throw new Error(`Expected a boolean value (true/false), got: "${value}"`)
 }
 
 export function parseNumber(value: string, field: string): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) {
-    throw new TypeError(`${field} expects a numeric value`)
+    throw new TypeError(`${field} expects a numeric value, got: "${value}"`)
   }
 
   return parsed
 }
 
+type FieldType = 'boolean' | 'number' | 'string'
+
+interface FieldSpec {
+  path: string
+  type: FieldType
+}
+
+const MUTABLE_FIELDS: Record<string, FieldSpec> = {
+  debug: {path: '/debug', type: 'boolean'},
+  'request-retry': {path: '/request-retry', type: 'number'},
+  'max-retry-interval': {path: '/max-retry-interval', type: 'number'},
+  'proxy-url': {path: '/proxy-url', type: 'string'},
+  'request-log': {path: '/request-log', type: 'boolean'},
+  'ws-auth': {path: '/ws-auth', type: 'boolean'},
+  'logging-to-file': {path: '/logging-to-file', type: 'boolean'},
+  'usage-statistics-enabled': {path: '/usage-statistics-enabled', type: 'boolean'},
+  'force-model-prefix': {path: '/force-model-prefix', type: 'boolean'},
+}
+
 export function buildSetRequest(baseUrl: string, field: string, rawValue: string): {endpoint: string; body: string} {
-  if (field === 'debug') {
-    return {
-      endpoint: `${baseUrl}/v0/management/debug`,
-      body: JSON.stringify({debug: parseBoolean(rawValue)}),
-    }
+  const spec = MUTABLE_FIELDS[field]
+  if (!spec) {
+    const supported = Object.keys(MUTABLE_FIELDS).join(', ')
+    throw new Error(`"${field}" is not a supported mutable field. Supported: ${supported}`)
   }
 
-  if (field === 'request-retry') {
-    return {
-      endpoint: `${baseUrl}/v0/management/request-retry`,
-      body: JSON.stringify({request_retry: parseNumber(rawValue, 'request-retry')}),
-    }
+  let value: boolean | number | string
+  if (spec.type === 'boolean') {
+    value = parseBoolean(rawValue)
+  } else if (spec.type === 'number') {
+    value = parseNumber(rawValue, field)
+  } else {
+    value = rawValue
   }
 
-  if (field === 'proxy-url') {
-    return {
-      endpoint: `${baseUrl}/v0/management/proxy-url`,
-      body: JSON.stringify({proxy_url: rawValue}),
-    }
+  return {
+    endpoint: `${baseUrl}/v0/management${spec.path}`,
+    body: JSON.stringify({value}),
   }
-
-  throw new Error(
-    `Key "${field}" is not mutable via API. Only debug, request-retry, and proxy-url are supported. Edit config.yaml directly for other keys.`,
-  )
 }
 
 export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
   cli
-    .command('cliproxy config get', 'Fetch current CLIProxyAPI management config and print it as formatted JSON.')
+    .command('cliproxy config get', 'Fetch current CLIProxyAPI config as JSON.')
     .option(
       '--url [url]',
       z
@@ -127,8 +141,8 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
 
   cli
     .command(
-      'cliproxy config set <key> <value>',
-      'Update mutable CLIProxyAPI config values through management endpoints (debug, request-retry, proxy-url).',
+      'cliproxy config set <field> <value>',
+      'Update a mutable CLIProxyAPI config field via its dedicated management endpoint.',
     )
     .option(
       '--url [url]',
@@ -142,12 +156,9 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
       '--key [key]',
       z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
-    .example('# Enable debug mode via management API')
     .example('infra cliproxy config set debug true')
-    .example('# Update request retry budget to 3')
-    .example('infra cliproxy config set request-retry 3')
-    .example('# Point proxy upstream to a different URL')
-    .example('infra cliproxy config set proxy-url https://example.com')
+    .example('infra cliproxy config set request-retry 5')
+    .example('infra cliproxy config set proxy-url https://proxy.example.com')
     .action(async (field, value, options) => {
       const baseUrl = resolveBaseUrl(options.url)
       const managementKey = resolveManagementKey(options.key)

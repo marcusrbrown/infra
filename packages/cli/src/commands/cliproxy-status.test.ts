@@ -128,7 +128,22 @@ describe('cliproxy status helpers', () => {
   })
 
   describe('checkUsageStats', () => {
-    it('returns ok when failures are zero', async () => {
+    it('returns ok when failures are zero (nested usage object)', async () => {
+      globalThis.fetch = createFetchImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({failed_requests: 0, usage: {total_requests: 10, failure_count: 0, success_count: 10}}),
+            {status: 200, headers: {'content-type': 'application/json'}},
+          ),
+      )
+
+      const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
+
+      expect(result.level).toBe('ok')
+      expect(result.summary).toBe('total_requests=10, failure_count=0')
+    })
+
+    it('returns ok with flat payload (backwards compat)', async () => {
       globalThis.fetch = createFetchImplementation(
         async () =>
           new Response(JSON.stringify({total_requests: 10, failure_count: 0}), {
@@ -146,10 +161,10 @@ describe('cliproxy status helpers', () => {
     it('returns warning when token refresh is likely needed', async () => {
       globalThis.fetch = createFetchImplementation(
         async () =>
-          new Response(JSON.stringify({total_requests: 10, failure_count: 3}), {
-            status: 200,
-            headers: {'content-type': 'application/json'},
-          }),
+          new Response(
+            JSON.stringify({failed_requests: 3, usage: {total_requests: 10, failure_count: 3, success_count: 7}}),
+            {status: 200, headers: {'content-type': 'application/json'}},
+          ),
       )
 
       const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
@@ -190,10 +205,10 @@ describe('cliproxy status helpers', () => {
   })
 
   describe('checkVersion', () => {
-    it('returns ok for JSON string payloads', async () => {
+    it('returns ok with latest-version from response', async () => {
       globalThis.fetch = createFetchImplementation(
         async () =>
-          new Response(JSON.stringify('1.2.3'), {
+          new Response(JSON.stringify({'latest-version': 'v6.9.15'}), {
             status: 200,
             headers: {'content-type': 'application/json'},
           }),
@@ -202,40 +217,10 @@ describe('cliproxy status helpers', () => {
       const result = await checkVersion('https://cliproxy.example.com', 'secret')
 
       expect(result.level).toBe('ok')
-      expect(result.summary).toBe('1.2.3')
+      expect(result.summary).toBe('v6.9.15')
     })
 
-    it('returns ok for object payloads with version', async () => {
-      globalThis.fetch = createFetchImplementation(
-        async () =>
-          new Response(JSON.stringify({version: '1.2.3'}), {
-            status: 200,
-            headers: {'content-type': 'application/json'},
-          }),
-      )
-
-      const result = await checkVersion('https://cliproxy.example.com', 'secret')
-
-      expect(result.level).toBe('ok')
-      expect(result.summary).toBe('1.2.3')
-    })
-
-    it('returns warning for empty version strings', async () => {
-      globalThis.fetch = createFetchImplementation(
-        async () =>
-          new Response(JSON.stringify({version: ''}), {
-            status: 200,
-            headers: {'content-type': 'application/json'},
-          }),
-      )
-
-      const result = await checkVersion('https://cliproxy.example.com', 'secret')
-
-      expect(result.level).toBe('warning')
-      expect(result.summary).toContain('did not include a usable version string')
-    })
-
-    it('returns warning for missing version fields', async () => {
+    it('returns warning when latest-version key is missing', async () => {
       globalThis.fetch = createFetchImplementation(
         async () =>
           new Response(JSON.stringify({}), {
@@ -247,7 +232,7 @@ describe('cliproxy status helpers', () => {
       const result = await checkVersion('https://cliproxy.example.com', 'secret')
 
       expect(result.level).toBe('warning')
-      expect(result.summary).toContain('did not include a usable version string')
+      expect(result.summary).toContain('latest-version')
     })
 
     it('returns warning when rate limited', async () => {

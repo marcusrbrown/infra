@@ -55,7 +55,8 @@ export function toStringArray(payload: unknown): string[] {
   }
 
   if (payload && typeof payload === 'object') {
-    const value = (payload as Record<string, unknown>).api_keys
+    const obj = payload as Record<string, unknown>
+    const value = obj['api-keys'] ?? obj.api_keys
     if (Array.isArray(value)) {
       return value.filter(item => typeof item === 'string')
     }
@@ -127,13 +128,13 @@ export function registerCliproxyKeys(cli: ReturnType<typeof goke>): void {
       }
 
       const nextKeys = [...currentKeys, apiKeyToAdd]
-      const updatedPayload = await requestJson(endpoint, {
+      await requestJson(endpoint, {
         method: 'PUT',
         headers: managementHeaders(managementKey),
-        body: JSON.stringify({api_keys: nextKeys}),
+        body: JSON.stringify(nextKeys),
       })
 
-      console.log(JSON.stringify(updatedPayload ?? {api_keys: nextKeys}, null, 2))
+      console.log(JSON.stringify(nextKeys, null, 2))
     })
 
   cli

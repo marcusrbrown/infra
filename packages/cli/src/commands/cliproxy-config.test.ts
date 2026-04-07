@@ -42,28 +42,28 @@ describe('cliproxy config helpers', () => {
   })
 
   describe('buildSetRequest', () => {
-    it('builds a boolean debug request', () => {
+    it('builds a boolean debug request with {value} body', () => {
       const request = buildSetRequest('https://cliproxy.example.com', 'debug', 'true')
 
-      expect(request.endpoint.endsWith('/debug')).toBe(true)
-      expect(JSON.parse(request.body)).toEqual({debug: true})
+      expect(request.endpoint).toBe('https://cliproxy.example.com/v0/management/debug')
+      expect(JSON.parse(request.body)).toEqual({value: true})
     })
 
-    it('builds a numeric request-retry request', () => {
+    it('builds a numeric request-retry request with {value} body', () => {
       const request = buildSetRequest('https://cliproxy.example.com', 'request-retry', '3')
 
-      expect(request.endpoint.endsWith('/request-retry')).toBe(true)
-      expect(JSON.parse(request.body)).toEqual({request_retry: 3})
+      expect(request.endpoint).toBe('https://cliproxy.example.com/v0/management/request-retry')
+      expect(JSON.parse(request.body)).toEqual({value: 3})
     })
 
-    it('builds a string proxy-url request', () => {
+    it('builds a string proxy-url request with {value} body', () => {
       const request = buildSetRequest('https://cliproxy.example.com', 'proxy-url', 'https://x.com')
 
-      expect(request.endpoint.endsWith('/proxy-url')).toBe(true)
-      expect(JSON.parse(request.body)).toEqual({proxy_url: 'https://x.com'})
+      expect(request.endpoint).toBe('https://cliproxy.example.com/v0/management/proxy-url')
+      expect(JSON.parse(request.body)).toEqual({value: 'https://x.com'})
     })
 
-    it('throws for immutable fields', () => {
+    it('throws for unsupported fields', () => {
       expect(() => buildSetRequest('https://cliproxy.example.com', 'provider', 'claude')).toThrow()
     })
   })
@@ -108,8 +108,16 @@ describe('cliproxy keys helpers', () => {
       expect(toStringArray(['a', 1, 'b', false])).toEqual(['a', 'b'])
     })
 
-    it('reads api_keys from objects', () => {
+    it('reads api-keys (hyphenated) from objects', () => {
+      expect(toStringArray({'api-keys': ['a', 'b']})).toEqual(['a', 'b'])
+    })
+
+    it('reads api_keys (underscored) from objects', () => {
       expect(toStringArray({api_keys: ['a', 'b']})).toEqual(['a', 'b'])
+    })
+
+    it('prefers api-keys over api_keys', () => {
+      expect(toStringArray({'api-keys': ['x'], api_keys: ['y']})).toEqual(['x'])
     })
 
     it('returns an empty array for unsupported payloads', () => {

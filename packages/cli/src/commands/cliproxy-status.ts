@@ -116,9 +116,10 @@ export async function checkUsageStats(baseUrl: string, key: string): Promise<Che
     }
 
     const payload = await parseJsonResponse(response)
-    const record = payload && typeof payload === 'object' ? payload : {}
-    const totalRequests = toNumber((record as Record<string, unknown>).total_requests)
-    const failureCount = toNumber((record as Record<string, unknown>).failure_count)
+    const top = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    const usage = top.usage && typeof top.usage === 'object' ? (top.usage as Record<string, unknown>) : top
+    const totalRequests = toNumber(usage.total_requests)
+    const failureCount = toNumber(usage.failure_count)
 
     if (totalRequests === null || failureCount === null) {
       return {
@@ -157,7 +158,7 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
 
     if (response.status === 429) {
       return {
-        title: 'Current version',
+        title: 'Latest version',
         level: 'warning',
         summary: 'Rate limited by management API (HTTP 429). Retry in a few moments.',
       }
@@ -165,7 +166,7 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
 
     if (!response.ok) {
       return {
-        title: 'Current version',
+        title: 'Latest version',
         level: 'error',
         summary: `GET /v0/management/latest-version failed with HTTP ${response.status}`,
       }
@@ -173,37 +174,21 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
 
     const payload = await parseJsonResponse(response)
 
-    if (typeof payload === 'string' && payload.length > 0) {
-      return {
-        title: 'Current version',
-        level: 'ok',
-        summary: payload,
-      }
-    }
-
     if (payload && typeof payload === 'object') {
-      const version = (payload as Record<string, unknown>).version
+      const version = (payload as Record<string, unknown>)['latest-version']
       if (typeof version === 'string' && version.length > 0) {
-        return {
-          title: 'Current version',
-          level: 'ok',
-          summary: version,
-        }
+        return {title: 'Latest version', level: 'ok', summary: version}
       }
     }
 
     return {
-      title: 'Current version',
+      title: 'Latest version',
       level: 'warning',
-      summary: 'Management version payload did not include a usable version string.',
+      summary: 'Response did not include a latest-version string.',
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return {
-      title: 'Current version',
-      level: 'error',
-      summary: `Unable to read current version: ${message}`,
-    }
+    return {title: 'Latest version', level: 'error', summary: `Unable to check latest version: ${message}`}
   }
 }
 

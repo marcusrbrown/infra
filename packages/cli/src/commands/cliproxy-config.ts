@@ -49,58 +49,12 @@ async function requestJson(endpoint: string, init: RequestInit): Promise<unknown
   }
 }
 
-export function parseBoolean(value: string): boolean {
-  const normalized = value.toLowerCase()
-  if (normalized === 'true') {
-    return true
-  }
-
-  if (normalized === 'false') {
-    return false
-  }
-
-  throw new Error('debug expects a boolean value: true or false')
-}
-
-export function parseNumber(value: string, field: string): number {
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed)) {
-    throw new TypeError(`${field} expects a numeric value`)
-  }
-
-  return parsed
-}
-
-export function buildSetRequest(baseUrl: string, field: string, rawValue: string): {endpoint: string; body: string} {
-  if (field === 'debug') {
-    return {
-      endpoint: `${baseUrl}/v0/management/debug`,
-      body: JSON.stringify({debug: parseBoolean(rawValue)}),
-    }
-  }
-
-  if (field === 'request-retry') {
-    return {
-      endpoint: `${baseUrl}/v0/management/request-retry`,
-      body: JSON.stringify({request_retry: parseNumber(rawValue, 'request-retry')}),
-    }
-  }
-
-  if (field === 'proxy-url') {
-    return {
-      endpoint: `${baseUrl}/v0/management/proxy-url`,
-      body: JSON.stringify({proxy_url: rawValue}),
-    }
-  }
-
-  throw new Error(
-    `Key "${field}" is not mutable via API. Only debug, request-retry, and proxy-url are supported. Edit config.yaml directly for other keys.`,
-  )
-}
-
 export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
   cli
-    .command('cliproxy config get', 'Fetch current CLIProxyAPI management config and print it as formatted JSON.')
+    .command(
+      'cliproxy config get',
+      'Fetch current CLIProxyAPI config (read-only). To modify, edit config.yaml on the server and restart the container.',
+    )
     .option(
       '--url [url]',
       z
@@ -120,43 +74,6 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
       const payload = await requestJson(endpoint, {
         method: 'GET',
         headers: managementHeaders(managementKey),
-      })
-
-      console.log(JSON.stringify(payload, null, 2))
-    })
-
-  cli
-    .command(
-      'cliproxy config set <key> <value>',
-      'Update mutable CLIProxyAPI config values through management endpoints (debug, request-retry, proxy-url).',
-    )
-    .option(
-      '--url [url]',
-      z
-        .string()
-        .describe(
-          'Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.',
-        ),
-    )
-    .option(
-      '--key [key]',
-      z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
-    )
-    .example('# Enable debug mode via management API')
-    .example('infra cliproxy config set debug true')
-    .example('# Update request retry budget to 3')
-    .example('infra cliproxy config set request-retry 3')
-    .example('# Point proxy upstream to a different URL')
-    .example('infra cliproxy config set proxy-url https://example.com')
-    .action(async (field, value, options) => {
-      const baseUrl = resolveBaseUrl(options.url)
-      const managementKey = resolveManagementKey(options.key)
-      const request = buildSetRequest(baseUrl, field, value)
-
-      const payload = await requestJson(request.endpoint, {
-        method: 'PUT',
-        headers: managementHeaders(managementKey),
-        body: request.body,
       })
 
       console.log(JSON.stringify(payload, null, 2))

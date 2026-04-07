@@ -116,9 +116,10 @@ export async function checkUsageStats(baseUrl: string, key: string): Promise<Che
     }
 
     const payload = await parseJsonResponse(response)
-    const record = payload && typeof payload === 'object' ? payload : {}
-    const totalRequests = toNumber((record as Record<string, unknown>).total_requests)
-    const failureCount = toNumber((record as Record<string, unknown>).failure_count)
+    const top = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    const usage = top.usage && typeof top.usage === 'object' ? (top.usage as Record<string, unknown>) : top
+    const totalRequests = toNumber(usage.total_requests)
+    const failureCount = toNumber(usage.failure_count)
 
     if (totalRequests === null || failureCount === null) {
       return {
@@ -142,67 +143,6 @@ export async function checkUsageStats(baseUrl: string, key: string): Promise<Che
       title: 'Usage stats',
       level: 'error',
       summary: `Unable to read usage stats: ${message}`,
-    }
-  }
-}
-
-export async function checkVersion(baseUrl: string, key: string): Promise<CheckResult> {
-  const endpoint = `${baseUrl}/v0/management/latest-version`
-
-  try {
-    const response = await fetch(endpoint, {
-      headers: managementHeaders(key),
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    })
-
-    if (response.status === 429) {
-      return {
-        title: 'Current version',
-        level: 'warning',
-        summary: 'Rate limited by management API (HTTP 429). Retry in a few moments.',
-      }
-    }
-
-    if (!response.ok) {
-      return {
-        title: 'Current version',
-        level: 'error',
-        summary: `GET /v0/management/latest-version failed with HTTP ${response.status}`,
-      }
-    }
-
-    const payload = await parseJsonResponse(response)
-
-    if (typeof payload === 'string' && payload.length > 0) {
-      return {
-        title: 'Current version',
-        level: 'ok',
-        summary: payload,
-      }
-    }
-
-    if (payload && typeof payload === 'object') {
-      const version = (payload as Record<string, unknown>).version
-      if (typeof version === 'string' && version.length > 0) {
-        return {
-          title: 'Current version',
-          level: 'ok',
-          summary: version,
-        }
-      }
-    }
-
-    return {
-      title: 'Current version',
-      level: 'warning',
-      summary: 'Management version payload did not include a usable version string.',
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return {
-      title: 'Current version',
-      level: 'error',
-      summary: `Unable to read current version: ${message}`,
     }
   }
 }
@@ -242,18 +182,12 @@ export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
       const results: CheckResult[] = [await checkHttpReachability(baseUrl, verbose)]
 
       if (managementKey) {
-        const [usageResult, versionResult] = await Promise.all([
-          checkUsageStats(baseUrl, managementKey),
-          checkVersion(baseUrl, managementKey),
-        ])
-
-        results.push(usageResult, versionResult)
+        results.push(await checkUsageStats(baseUrl, managementKey))
       } else {
         results.push({
           title: 'Management checks',
           level: 'warning',
-          summary:
-            'CLIPROXY_MANAGEMENT_KEY is not set. Skipping usage stats and version checks. Provide --key or set env var.',
+          summary: 'CLIPROXY_MANAGEMENT_KEY is not set. Skipping usage stats. Provide --key or set env var.',
         })
       }
 

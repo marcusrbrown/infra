@@ -9,64 +9,58 @@ Usage:
 
 
 Commands:
-  keeweb status                      Show operational health of the KeeWeb deployment
+  keeweb status               Show operational health of the KeeWeb deployment
 
 
-  keeweb deploy                      Trigger KeeWeb deployment. Default mode dispatches the GitHub Deploy workflow. Use --local to run apps/keeweb/deploy.sh directly from this repo.
+  keeweb deploy               Trigger KeeWeb deployment. Default mode dispatches the GitHub Deploy workflow. Use --local to run apps/keeweb/deploy.sh directly from this repo.
 
-    --local                          Run local deployment using apps/keeweb/deploy.sh instead of triggering GitHub Actions. (default: false)
-    --nginx                          Include nginx config deployment. Valid only with --local and passed through to deploy.sh as --nginx. (default: false)
-    --dry-run                        Print planned actions without validating preconditions, executing deploy.sh, or triggering GitHub Actions. (default: false)
-
-
-  cliproxy status                    Show operational health of CLIProxyAPI and its management endpoints.
-
-    --url [url]                      Base URL for CLIProxyAPI health checks. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                      Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --local                   Run local deployment using apps/keeweb/deploy.sh instead of triggering GitHub Actions. (default: false)
+    --nginx                   Include nginx config deployment. Valid only with --local and passed through to deploy.sh as --nginx. (default: false)
+    --dry-run                 Print planned actions without validating preconditions, executing deploy.sh, or triggering GitHub Actions. (default: false)
 
 
-  cliproxy deploy                    Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.
+  cliproxy status             Show operational health of CLIProxyAPI and its management endpoints.
 
-    --local                          Run local deployment with Bun using apps/cliproxy/src/deploy.ts instead of triggering GitHub Actions. (default: false)
-    --dry-run                        Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
-
-
-  cliproxy config get                Fetch current CLIProxyAPI management config and print it as formatted JSON.
-
-    --url [url]                      Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                      Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --url [url]               Base URL for CLIProxyAPI health checks. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
+    --key [key]               Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
 
-  cliproxy config set <key> <value>  Update mutable CLIProxyAPI config values through management endpoints (debug, request-retry, proxy-url).
+  cliproxy deploy             Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.
 
-    --url [url]                      Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                      Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
-
-
-  cliproxy keys list                 List CLIProxyAPI API keys from the management API.
-
-    --url [url]                      Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                      Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --local                   Run local deployment with Bun using apps/cliproxy/src/deploy.ts instead of triggering GitHub Actions. (default: false)
+    --dry-run                 Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
 
 
-  cliproxy keys add <key>            Add an API key by fetching current keys, appending the value, and replacing full key set.
+  cliproxy config get         Fetch current CLIProxyAPI config (read-only). To modify, edit config.yaml on the server and restart the container.
 
-    --url [url]                      Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                      Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
-
-
-  cliproxy keys remove <key>         Remove an API key via management API endpoint query parameter.
-
-    --url [url]                      Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                      Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --url [url]               Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
+    --key [key]               Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
 
-  cliproxy login <provider>          Run provider login on the remote CLIProxyAPI host and print OAuth URL output.
+  cliproxy keys list          List CLIProxyAPI API keys from the management API.
 
-    --host [host]                    CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
+    --url [url]               Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
+    --key [key]               Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
 
-  mcp                                Start a stdio MCP server exposing all CLI commands as tools for coding agents
+  cliproxy keys add <key>     Add an API key by fetching current keys, appending the value, and replacing full key set.
+
+    --url [url]               Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
+    --key [key]               Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+
+
+  cliproxy keys remove <key>  Remove an API key via management API endpoint query parameter.
+
+    --url [url]               Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
+    --key [key]               Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+
+
+  cliproxy login <provider>   Run provider login on the remote CLIProxyAPI host and print OAuth URL output.
+
+    --host [host]             CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
+
+
+  mcp                         Start a stdio MCP server exposing all CLI commands as tools for coding agents
 
 
 Options:

@@ -4,5 +4,14 @@
   "postUpgradeTasks": {
     "commands": ["bun install", "bun run fix", "bun run fix"],
     "executionMode": "branch"
-  }
+  },
+  "packageRules": [
+    {
+      "description": "Add changelog context for CLIProxyAPI Docker digest updates",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["eceasy/cli-proxy-api"],
+      "sourceUrl": "https://github.com/router-for-me/CLIProxyAPI",
+      "changelogUrl": "https://github.com/router-for-me/CLIProxyAPI/releases"
+    }
+  ]
 }

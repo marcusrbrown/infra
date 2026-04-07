@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.3.4
+### Patch Changes
+
+
+- Improve `cliproxy keys add` output with human-readable success message ([#51](https://github.com/marcusrbrown/infra/pull/51))
+
 ## 0.3.3
 ### Patch Changes
 

@@ -134,7 +134,7 @@ export function registerCliproxyKeys(cli: ReturnType<typeof goke>): void {
         body: JSON.stringify(nextKeys),
       })
 
-      console.log(JSON.stringify(nextKeys, null, 2))
+      console.log(`Added key "${apiKeyToAdd}". Current key count: ${nextKeys.length}.`)
     })
 
   cli

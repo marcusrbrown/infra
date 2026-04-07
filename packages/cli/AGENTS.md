@@ -36,8 +36,9 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - Parse `gh` JSON output through Zod schemas before use
 - SHA-256 via `Bun.CryptoHasher('sha256')`, not crypto module
 - Resolve paths with `import.meta.dir` + `path.resolve()` — validate existence before use
-- **Management API**: `requestJson()` for authenticated requests, `resolveManagementKey()` for key resolution.
+- **Management API**: Commands use local helpers for authenticated JSON requests and management key resolution (see `cliproxy-keys.ts` for the pattern). No shared module — helpers are per-file.
 - **Packaging**: `bundledDependencies` does NOT work with Bun's .bun/ symlink layout. Published package ships TypeScript source with `#!/usr/bin/env bun` shebang, requires `engines.bun >= 1.0.0`.
+- **`--dry-run` semantics**: Prints the planned action without validating preconditions or executing side effects. Safe to run anywhere.
 - **Tests**: colocated `*.test.ts`. Snapshots in `src/__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic output. Mock `fetch` and `Bun.spawn` at the boundary.
 
 ## ANTI-PATTERNS

@@ -1,6 +1,7 @@
 services:
   caddy:
     image: caddy:2-alpine@sha256:fce4f15aad23222c0ac78a1220adf63bae7b94355d5ea28eee53910624acedfa
+    restart: unless-stopped
     ports:
       - '80:80'
       - '443:443'
@@ -14,16 +15,26 @@ services:
 
   cli-proxy-api:
     image: eceasy/cli-proxy-api:latest@sha256:c795ef57e9a300b96c7ab0bb7f1329186411ecb28da9bbb595a157f0e8c3aacf
+    restart: unless-stopped
     env_file:
       - path: .env
         required: false
     environment:
       MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD:-}
+    healthcheck:
+      test: [CMD, wget, --spider, -q, 'http://localhost:8317/']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - cliproxy_auth:/root/.cli-proxy-api
       - ./config/config.yaml:/CLIProxyAPI/config.yaml
+      # - cliproxy_logs:/var/log/cliproxy
 
 volumes:
   caddy_data:
   caddy_config:
   cliproxy_auth:
+  # Uncomment to persist logs when logging-to-file is enabled:
+  # cliproxy_logs:

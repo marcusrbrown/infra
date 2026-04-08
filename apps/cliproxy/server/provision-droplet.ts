@@ -107,11 +107,11 @@ async function dropletExists(): Promise<boolean> {
   return names.includes(DROPLET_NAME)
 }
 
-async function createDropletIfMissing(): Promise<void> {
+async function createDropletIfMissing(): Promise<boolean> {
   const exists = await dropletExists()
   if (exists) {
     console.log(`\u001B[1;34m==>\u001B[0m Droplet ${DROPLET_NAME} already exists — skipping creation`)
-    return
+    return true
   }
 
   const fingerprint = await getSshFingerprint()
@@ -134,6 +134,7 @@ async function createDropletIfMissing(): Promise<void> {
       '--wait',
     ]),
   )
+  return false
 }
 
 async function getDropletIpWithWait(): Promise<string> {
@@ -238,7 +239,16 @@ async function pinHostKeys(dropletIp: string): Promise<void> {
 
 async function provision(): Promise<void> {
   await validateDoctl()
-  await createDropletIfMissing()
+  const dropletAlreadyExisted = await createDropletIfMissing()
+
+  if (dropletAlreadyExisted && !process.argv.includes('--force')) {
+    console.log('Droplet already exists. Use --force to overwrite remote config and secrets.')
+    process.exit(0)
+  }
+
+  if (dropletAlreadyExisted && process.argv.includes('--force')) {
+    console.warn('⚠️  --force: Overwriting remote config and .env on existing droplet')
+  }
 
   const dropletIp = await getDropletIpWithWait()
   await waitForSsh(dropletIp)
@@ -251,8 +261,10 @@ async function provision(): Promise<void> {
   console.log('\n\u001B[1;32m✓\u001B[0m CLIProxy droplet provisioned\n')
   console.log(`Droplet IP: ${dropletIp}`)
   console.log(`Management key: ${managementPassword}`)
-  console.log('\nSave the management key now. It is only shown once by this script.')
-  console.log('Commit the updated .github/known_hosts before triggering a CI deploy.')
+  console.log(
+    '\n⚠️  Save this key — it cannot be recovered. Set it as CLIPROXY_MANAGEMENT_KEY in GitHub secrets and local .env',
+  )
+  console.log('\nCommit the updated .github/known_hosts before triggering a CI deploy.')
 }
 
 provision().catch((error: unknown) => {

@@ -1,5 +1,6 @@
 import type {goke} from 'goke'
 
+import {chmodSync} from 'node:fs'
 import {z} from 'zod'
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
@@ -25,7 +26,6 @@ export function resolveManagementKey(input?: string): string {
 
 function managementHeaders(key: string): Headers {
   const headers = new Headers()
-  headers.set('authorization', `Bearer ${key}`)
   headers.set('x-management-key', key)
   headers.set('content-type', 'application/json')
   return headers
@@ -125,7 +125,13 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
     )
     .option(
       '--key [key]',
-      z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+      z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+    )
+    .option(
+      '--output [file]',
+      z
+        .string()
+        .describe('Write config JSON to a file instead of stdout. File permissions set to 0600 (owner-read-only).'),
     )
     .action(async options => {
       const baseUrl = resolveBaseUrl(options.url)
@@ -136,7 +142,21 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
         headers: managementHeaders(managementKey),
       })
 
-      console.log(JSON.stringify(payload, null, 2))
+      const jsonOutput = JSON.stringify(payload, null, 2)
+
+      if (options.output) {
+        try {
+          await Bun.write(options.output, jsonOutput)
+          chmodSync(options.output, 0o600)
+          console.log(`✓ Config written to ${options.output}`)
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          throw new Error(`Failed to write config to ${options.output}: ${message}`)
+        }
+      } else {
+        console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
+        console.log(jsonOutput)
+      }
     })
 
   cli
@@ -154,7 +174,7 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
     )
     .option(
       '--key [key]',
-      z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+      z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
     .example('infra cliproxy config set debug true')
     .example('infra cliproxy config set request-retry 5')

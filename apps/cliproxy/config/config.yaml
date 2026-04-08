@@ -7,8 +7,7 @@ remote-management:
   allow-remote: true
   secret-key: ''
 
-api-keys:
-  - your-api-key-here
+api-keys: []
 
 claude-api-key: []
 

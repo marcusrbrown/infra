@@ -18,11 +18,12 @@ CLIProxyAPI (OAuth-authenticated Claude proxy) deployed to DigitalOcean Droplet 
 
 ## DOCKER STACK
 - **Caddy**: HTTPS termination, auto Let's Encrypt.
-- **CLIProxyAPI**: `eceasy/cli-proxy-api` (pinned tags).
+- **CLIProxyAPI**: `eceasy/cli-proxy-api` (pinned tags). Alpine 3.22 base.
 - **Volumes**: `caddy_data`, `caddy_config`, `cliproxy_auth`. Env file for secrets.
+- **Healthcheck**: `wget --spider -q http://localhost:8317/` — root `/` returns HTTP 200 with `{"message":"CLI Proxy API Server"}`. `wget` available in Alpine base; `curl` is not.
 
 ## MANAGEMENT API
-Verified endpoint surface (Auth: Bearer token or `x-management-key` header):
+Verified endpoint surface. Auth: `x-management-key` header (management key). `Authorization: Bearer` is for API key auth (client requests to the proxy), not management endpoints.
 - `GET/PUT /v0/management/api-keys`: PUT expects bare JSON array of keys.
 - `GET /v0/management/config`: Read-only via HTTP.
 - `PUT /v0/management/{field}`: Per-field updates with `{"value": <val>}` body.

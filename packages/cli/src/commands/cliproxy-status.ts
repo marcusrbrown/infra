@@ -36,7 +36,6 @@ export function stripTrailingSlash(value: string): string {
 
 function managementHeaders(key: string): Headers {
   const headers = new Headers()
-  headers.set('authorization', `Bearer ${key}`)
   headers.set('x-management-key', key)
   return headers
 }
@@ -214,7 +213,7 @@ export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
     )
     .option(
       '--key [key]',
-      z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+      z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
     .action(async options => {
       const verbose = options.verbose === true

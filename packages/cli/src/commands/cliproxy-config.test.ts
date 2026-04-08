@@ -1,3 +1,4 @@
+import {chmodSync, existsSync, statSync} from 'node:fs'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {buildSetRequest, parseBoolean, parseNumber, resolveManagementKey} from './cliproxy-config'
@@ -97,6 +98,95 @@ describe('cliproxy config helpers', () => {
 
     it('throws when no key is available', () => {
       expect(() => resolveManagementKey()).toThrow()
+    })
+  })
+
+  describe('config get --output', () => {
+    it('writes config JSON to file with 0600 permissions', async () => {
+      const testFile = '/tmp/test-config-output.json'
+      const mockConfig = {debug: true, 'api-keys': ['key1', 'key2']}
+
+      const originalFetch = globalThis.fetch as typeof fetch
+      ;(globalThis.fetch as unknown) = async () => {
+        return new Response(JSON.stringify(mockConfig), {status: 200})
+      }
+
+      try {
+        const baseUrl = 'https://cliproxy.example.com'
+        const managementKey = 'test-key'
+        const endpoint = `${baseUrl}/v0/management/config`
+        const response = await fetch(endpoint, {
+          method: 'GET',
+          headers: new Headers({
+            'x-management-key': managementKey,
+            'content-type': 'application/json',
+          }),
+        })
+        const payload = await response.json()
+        const jsonOutput = JSON.stringify(payload, null, 2)
+
+        await Bun.write(testFile, jsonOutput)
+        chmodSync(testFile, 0o600)
+        const {mode} = statSync(testFile)
+        const permissions = mode & 0o777
+
+        expect(existsSync(testFile)).toBe(true)
+        expect(permissions).toBe(0o600)
+
+        const content = await Bun.file(testFile).text()
+        expect(JSON.parse(content)).toEqual(mockConfig)
+      } finally {
+        ;(globalThis.fetch as unknown) = originalFetch
+        if (existsSync(testFile)) {
+          const fs = await import('node:fs/promises')
+          await fs.unlink(testFile).catch(() => {})
+        }
+      }
+    })
+
+    it('prints API key warning to stderr when writing to stdout', async () => {
+      const mockConfig = {debug: true, 'api-keys': ['secret-key']}
+      const stderrLines: string[] = []
+      const stdoutLines: string[] = []
+
+      const originalError = console.error
+      const originalLog = console.log
+      console.error = (...args: unknown[]) => {
+        stderrLines.push(String(args[0]))
+      }
+      console.log = (...args: unknown[]) => {
+        stdoutLines.push(String(args[0]))
+      }
+
+      const originalFetch = globalThis.fetch as typeof fetch
+      ;(globalThis.fetch as unknown) = async () => {
+        return new Response(JSON.stringify(mockConfig), {status: 200})
+      }
+
+      try {
+        const baseUrl = 'https://cliproxy.example.com'
+        const managementKey = 'test-key'
+        const endpoint = `${baseUrl}/v0/management/config`
+        const response = await fetch(endpoint, {
+          method: 'GET',
+          headers: new Headers({
+            'x-management-key': managementKey,
+            'content-type': 'application/json',
+          }),
+        })
+        const payload = await response.json()
+        const jsonOutput = JSON.stringify(payload, null, 2)
+
+        console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
+        console.log(jsonOutput)
+
+        expect(stderrLines.some(line => line.includes('API keys'))).toBe(true)
+        expect(stdoutLines.some(line => line.includes('debug'))).toBe(true)
+      } finally {
+        console.error = originalError
+        console.log = originalLog
+        ;(globalThis.fetch as unknown) = originalFetch
+      }
     })
   })
 })

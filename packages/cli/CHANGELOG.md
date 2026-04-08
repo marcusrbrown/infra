@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.3.5
+### Patch Changes
+
+
+- Fix cliproxy deploy wiping API keys by skipping config.yaml upload when it already exists on server ([#56](https://github.com/marcusrbrown/infra/pull/56))
+
 ## 0.3.4
 ### Patch Changes
 

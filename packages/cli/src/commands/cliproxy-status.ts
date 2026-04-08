@@ -36,7 +36,6 @@ export function stripTrailingSlash(value: string): string {
 
 function managementHeaders(key: string): Headers {
   const headers = new Headers()
-  headers.set('authorization', `Bearer ${key}`)
   headers.set('x-management-key', key)
   return headers
 }

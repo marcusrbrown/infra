@@ -36,6 +36,7 @@ Commands:
 
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --output [file]                    Write config JSON to a file instead of stdout. File permissions set to 0600 (owner-read-only).
 
 
   cliproxy config set <field> <value>  Update a mutable CLIProxyAPI config field via its dedicated management endpoint.

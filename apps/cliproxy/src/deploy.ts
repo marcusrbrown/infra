@@ -126,7 +126,7 @@ async function remoteFileExists(host: string, path: string, env: DeployEnv): Pro
 
 async function healthCheck(env: DeployEnv): Promise<void> {
   const host = env.CLIPROXY_DOMAIN
-  const url = `https://${host}/v0/management/latest-version`
+  const url = `https://${host}/v0/management/config`
 
   const headers = new Headers()
   if (env.CLIPROXY_MANAGEMENT_KEY) {
@@ -143,6 +143,46 @@ async function healthCheck(env: DeployEnv): Promise<void> {
   console.log(`\u001B[1;32m✓\u001B[0m Health check passed: ${url}`)
 }
 
+async function preflightManagementKeyCheck(env: DeployEnv): Promise<void> {
+  const key = env.CLIPROXY_MANAGEMENT_KEY
+  const host = env.CLIPROXY_DOMAIN
+
+  if (!key) {
+    console.warn('\u001B[1;33m⚠\u001B[0m  CLIPROXY_MANAGEMENT_KEY not set — skipping pre-deploy validation')
+    return
+  }
+
+  const url = `https://${host}/v0/management/config`
+  const headers = new Headers()
+  headers.set('x-management-key', key)
+
+  try {
+    const response = await fetch(url, {headers, signal: AbortSignal.timeout(10_000)})
+
+    if (response.ok) {
+      console.log('\u001B[1;32m✓\u001B[0m Pre-deploy validation passed: management key accepted')
+      return
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(
+        "Management key is invalid. Verify CLIPROXY_MANAGEMENT_KEY matches MANAGEMENT_PASSWORD in the server's /opt/cliproxy/.env",
+      )
+    }
+
+    throw new Error(`Proxy is unhealthy (HTTP ${response.status}). Resolve before deploying.`)
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message.includes('Management key')) {
+      throw error
+    }
+    if (error instanceof Error && error.message.includes('Proxy is unhealthy')) {
+      throw error
+    }
+    // Network errors (ECONNREFUSED, DNS failure, timeout) — server not yet running
+    console.warn('\u001B[1;33m⚠\u001B[0m  Could not reach proxy — skipping pre-deploy validation (first deploy?)')
+  }
+}
+
 async function deploy(): Promise<void> {
   const files = validatePreconditions()
   const env = getDeployEnv()
@@ -150,6 +190,10 @@ async function deploy(): Promise<void> {
   const forceConfig = process.argv.includes('--force-config')
 
   await runCommand('Creating remote directories', sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`), env)
+
+  // Validate management key before uploading files or restarting containers
+  await preflightManagementKeyCheck(env)
+
   await runCommand(
     'Uploading docker-compose.yaml',
     scpCommand(host, files.compose, `${REMOTE_DIR}/docker-compose.yaml`),

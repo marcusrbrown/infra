@@ -145,9 +145,14 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
       const jsonOutput = JSON.stringify(payload, null, 2)
 
       if (options.output) {
-        await Bun.write(options.output, jsonOutput)
-        chmodSync(options.output, 0o600)
-        console.log(`✓ Config written to ${options.output}`)
+        try {
+          await Bun.write(options.output, jsonOutput)
+          chmodSync(options.output, 0o600)
+          console.log(`✓ Config written to ${options.output}`)
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          throw new Error(`Failed to write config to ${options.output}: ${message}`)
+        }
       } else {
         console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
         console.log(jsonOutput)

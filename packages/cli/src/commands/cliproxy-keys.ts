@@ -77,7 +77,7 @@ export function registerCliproxyKeys(cli: ReturnType<typeof goke>): void {
     )
     .option(
       '--key [key]',
-      z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+      z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
     .action(async options => {
       const baseUrl = resolveBaseUrl(options.url)
@@ -106,7 +106,7 @@ export function registerCliproxyKeys(cli: ReturnType<typeof goke>): void {
     )
     .option(
       '--key [key]',
-      z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+      z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
     .example('# Add a new API key to the current key set')
     .example('infra cliproxy keys add sk-live-123')
@@ -148,7 +148,7 @@ export function registerCliproxyKeys(cli: ReturnType<typeof goke>): void {
     )
     .option(
       '--key [key]',
-      z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+      z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
     .example('# Remove an API key from CLIProxyAPI')
     .example('infra cliproxy keys remove sk-live-123')

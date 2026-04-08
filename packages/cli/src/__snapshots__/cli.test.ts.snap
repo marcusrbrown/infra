@@ -22,7 +22,7 @@ Commands:
   cliproxy status                      Show operational health of CLIProxyAPI and its management endpoints.
 
     --url [url]                        Base URL for CLIProxyAPI health checks. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                        Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
 
   cliproxy deploy                      Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.
@@ -35,32 +35,32 @@ Commands:
   cliproxy config get                  Fetch current CLIProxyAPI config as JSON.
 
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                        Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
     --output [file]                    Write config JSON to a file instead of stdout. File permissions set to 0600 (owner-read-only).
 
 
   cliproxy config set <field> <value>  Update a mutable CLIProxyAPI config field via its dedicated management endpoint.
 
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                        Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
 
   cliproxy keys list                   List CLIProxyAPI API keys from the management API.
 
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                        Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
 
   cliproxy keys add <key>              Add an API key by fetching current keys, appending the value, and replacing full key set.
 
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                        Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
 
   cliproxy keys remove <key>           Remove an API key via management API endpoint query parameter.
 
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
-    --key [key]                        Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
 
   cliproxy login <provider>            Run provider login on the remote CLIProxyAPI host and print OAuth URL output.

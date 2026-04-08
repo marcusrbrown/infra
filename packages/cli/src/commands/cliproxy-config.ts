@@ -125,7 +125,7 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
     )
     .option(
       '--key [key]',
-      z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+      z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
     .option(
       '--output [file]',
@@ -169,7 +169,7 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
     )
     .option(
       '--key [key]',
-      z.string().describe('Management API bearer token. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+      z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
     .example('infra cliproxy config set debug true')
     .example('infra cliproxy config set request-retry 5')

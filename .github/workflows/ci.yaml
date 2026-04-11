@@ -21,6 +21,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # Pin Node.js because the ESLint binary spawns via `#!/usr/bin/env node`
+      # and ubuntu-latest ships an older Node that lacks ES2024 APIs (e.g.
+      # `Object.groupBy`) used by transitive deps like eslint-flat-config-utils.
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
@@ -46,6 +54,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Pin Node.js for the same reason as the Lint job: `bunx tsc` resolves
+      # the tsc binary via its `#!/usr/bin/env node` shebang, so it needs a
+      # Node version new enough to satisfy any ES2024 APIs used by the
+      # TypeScript compiler or its dependencies.
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0

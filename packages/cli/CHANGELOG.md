@@ -1,5 +1,20 @@
 # @marcusrbrown/infra
 
+## 0.3.7
+### Patch Changes
+
+
+- Fix cliproxy deploy race condition where the post-deploy health check fired before the `cli-proxy-api` container finished booting (~3-5s startup). The `docker compose up -d` now uses `--wait --wait-timeout 90` to block until the container's Docker-level healthcheck reports `healthy` before continuing. The existing app-level HTTP health check remains as the second verification layer. ([#82](https://github.com/marcusrbrown/infra/pull/82))
+
+
+- Exclude docs, tests, and fixtures from deploy workflow filter so AGENTS.md and test-only changes under `apps/keeweb/` and `apps/cliproxy/` no longer trigger unnecessary production/cliproxy deployments. Adds `predicate-quantifier: every` to make dorny/paths-filter negation patterns actually take effect (default `some` uses OR logic and silently ignores negations). ([#81](https://github.com/marcusrbrown/infra/pull/81))
+
+
+- ⚙️ Update GitHub Actions workflow dependency `actions/create-github-app-token` from `v3.1.0` to `v3.1.1` ([#87](https://github.com/marcusrbrown/infra/pull/87))
+
+
+- ⚙️ Update GitHub Actions workflow dependency `bfra-me/.github` from `4.16.2` to `4.16.3` ([#85](https://github.com/marcusrbrown/infra/pull/85))
+
 ## 0.3.6
 ### Patch Changes
 

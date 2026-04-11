@@ -48,7 +48,7 @@ bun run --cwd apps/keeweb build
 
 - Never commit secret values to tracked files.
 - `config/config.json` must never be modified by CI or build scripts. Secrets are injected only into `dist/config.json`.
-- `DEPLOY_SSH_KEY` and `DROPBOX_APP_SECRET` are scoped to the `production` GitHub Environment.
+- `DEPLOY_SSH_KEY` and `DROPBOX_APP_SECRET` are scoped to the `keeweb` GitHub Environment.
 - Host keys are pinned in `.github/known_hosts`. Never use `ssh-keyscan`.
 
 ## Collaboration

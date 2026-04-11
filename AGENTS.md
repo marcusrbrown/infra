@@ -93,7 +93,7 @@ bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on serve
 
 ## NOTES
 
-- `DROPBOX_APP_SECRET` and `DEPLOY_SSH_KEY` are GitHub Actions secrets scoped to `production` environment.
+- `DROPBOX_APP_SECRET` and `DEPLOY_SSH_KEY` are GitHub Actions secrets scoped to `keeweb` environment.
 - `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are scoped to `cliproxy` environment.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `OMO_PROVIDERS`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.

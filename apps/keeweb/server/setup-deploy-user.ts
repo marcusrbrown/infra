@@ -203,7 +203,7 @@ async function provision() {
   console.log()
   console.log('  Next steps:')
   console.log("    1. Retrieve the private key: ssh root@%s 'cat /home/%s/.ssh/id_ed25519'", HOST, DEPLOY_USER)
-  console.log('    2. Store it as DEPLOY_SSH_KEY in GitHub (scoped to production Environment)')
+  console.log('    2. Store it as DEPLOY_SSH_KEY in GitHub (scoped to keeweb Environment)')
   console.log("    3. Verify: ssh %s@%s 'id'", DEPLOY_USER, HOST)
 }
 

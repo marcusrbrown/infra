@@ -160,7 +160,7 @@ env:
          diagnose the root cause from logs and open an issue.
        - Verify kw.igg.ms is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://kw.igg.ms` should return 200.
-       - Verify the production environment exists and has required secrets
+       - Verify the keeweb environment exists and has required secrets
          configured (DEPLOY_SSH_KEY, DROPBOX_APP_SECRET).
        - Check that .github/known_hosts contains valid host keys for
          box.heatvision.co.

@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-04-07
-**Commit:** main
+**Generated:** 2026-04-10
+**Commit:** 49f7d6e
 **Branch:** main
 
 ## OVERVIEW
@@ -58,8 +58,10 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **No `as any` / `@ts-ignore` / `@ts-expect-error`** — fix the types.
 - **No secret values in tracked files** — `config/config.json` template has empty `dropboxSecret`; real value injected at build time from env var.
 - **Never modify `config/config.json` in CI** — secret goes into `dist/config.json` only.
+- **Never overwrite `config.yaml` on cliproxy server** — runtime API keys live there. Deploy skips upload when file exists; `--force-config` is the explicit override.
 - **Never use `ssh-keyscan`** — host keys pinned in `.github/known_hosts`.
 - **Never `secrets: inherit`** with cross-org reusable workflows.
+- **Never use `bundledDependencies`** — Bun's `.bun/` symlink layout creates `../../` paths that npm rejects with E415.
 
 ## UNIQUE STYLES
 

@@ -61,6 +61,23 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
 
+      # Workaround for bfra-me/.github renovate-changesets action bug:
+      # the action's getRootPackageName() returns the workspace root package name
+      # (@marcusrbrown/infra-workspace) for github-actions updates because those
+      # files don't belong to any workspace member. The root package is private
+      # and not in manypkg's workspace list, so `changeset version` fails with
+      # "package not in the workspace". Rewrite any such entries to target the
+      # published CLI package before running changesets/action.
+      - name: Normalize changeset targets
+        run: |
+          shopt -s nullglob
+          for file in .changeset/*.md; do
+            if grep -q "'@marcusrbrown/infra-workspace':" "$file"; then
+              sed -i "s|'@marcusrbrown/infra-workspace':|'@marcusrbrown/infra':|g" "$file"
+              echo "Rewrote changeset target in $file"
+            fi
+          done
+
       - id: changesets
         name: Create Release Pull Request or Publish
         uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0

@@ -26,13 +26,22 @@ jobs:
         id: filter
         uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         with:
+          predicate-quantifier: every
           filters: |
             keeweb:
               - 'apps/keeweb/**'
+              - '!apps/keeweb/**/*.md'
+              - '!apps/keeweb/**/*.test.ts'
+              - '!apps/keeweb/**/__fixtures__/**'
+              - '!apps/keeweb/**/__snapshots__/**'
             nginx:
               - 'apps/keeweb/config/kw.igg.ms.conf'
             cliproxy:
               - 'apps/cliproxy/**'
+              - '!apps/cliproxy/**/*.md'
+              - '!apps/cliproxy/**/*.test.ts'
+              - '!apps/cliproxy/**/__fixtures__/**'
+              - '!apps/cliproxy/**/__snapshots__/**'
 
   deploy-keeweb:
     needs: detect-changes

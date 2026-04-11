@@ -1,22 +1,22 @@
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>marcusrbrown/renovate-config#4.5.7", "group:allNonMajor"],
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: ['github>marcusrbrown/renovate-config#4.5.7', 'group:allNonMajor'],
+  packageRules: [
+    {
+      description: 'Add changelog context for CLIProxyAPI Docker digest updates',
+      matchDatasources: ['docker'],
+      matchPackageNames: ['eceasy/cli-proxy-api'],
+      sourceUrl: 'https://github.com/router-for-me/CLIProxyAPI',
+      changelogUrl: 'https://github.com/router-for-me/CLIProxyAPI/releases',
+    },
+  ],
   // postUpgradeTasks run after Renovate applies file changes but before the commit.
   // For github-actions manager updates (workflow SHA pins), Renovate does NOT run
   // any install step, so node_modules is empty and eslint is not available. We
   // explicitly install with --ignore-scripts (simple-git-hooks postinstall crashes
   // in the Renovate sandbox because .git/ is not present) before running the linter.
-  "postUpgradeTasks": {
-    "commands": ["bun install --ignore-scripts", "bun run fix"],
-    "executionMode": "branch"
+  postUpgradeTasks: {
+    commands: ['bun install --ignore-scripts', 'bun run fix'],
+    executionMode: 'branch',
   },
-  "packageRules": [
-    {
-      "description": "Add changelog context for CLIProxyAPI Docker digest updates",
-      "matchDatasources": ["docker"],
-      "matchPackageNames": ["eceasy/cli-proxy-api"],
-      "sourceUrl": "https://github.com/router-for-me/CLIProxyAPI",
-      "changelogUrl": "https://github.com/router-for-me/CLIProxyAPI/releases"
-    }
-  ]
 }

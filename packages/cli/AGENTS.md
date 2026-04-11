@@ -1,6 +1,6 @@
 # @marcusrbrown/infra CLI
 
-Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra). Run via `bunx @marcusrbrown/infra`. Built with [goke](https://github.com/remorses/goke) + Zod. Exposes commands as MCP tools via `@goke/mcp`.
+Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra). Run via `bunx @marcusrbrown/infra`. Built with [goke](https://github.com/remorses/goke) + Zod. Exposes commands as MCP tools via `@goke/mcp` (see `.agents/skills/goke/SKILL.md`).
 
 ## WHERE TO LOOK
 
@@ -16,14 +16,14 @@ Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcu
 Each command lives in `src/commands/` and exports a registration function:
 
 ```text
-src/commands/keeweb-status.ts  →  registerKeewebStatus(cli)
-src/commands/keeweb-deploy.ts  →  registerKeewebDeploy(cli)
-src/commands/cliproxy-status.ts → registerCliproxyStatus(cli)
-src/commands/cliproxy-config.ts → registerCliproxyConfig(cli)
-src/commands/cliproxy-keys.ts   → registerCliproxyKeys(cli)
-src/commands/cliproxy-login.ts  → registerCliproxyLogin(cli)
-src/commands/cliproxy-deploy.ts → registerCliproxyDeploy(cli)
-src/commands/mcp.ts            →  registerMcp(cli)
+src/commands/keeweb-status.ts   →  registerKeewebStatus(cli)
+src/commands/keeweb-deploy.ts   →  registerKeewebDeploy(cli)
+src/commands/cliproxy-status.ts →  registerCliproxyStatus(cli)
+src/commands/cliproxy-config.ts →  registerCliproxyConfig(cli)
+src/commands/cliproxy-keys.ts   →  registerCliproxyKeys(cli)
+src/commands/cliproxy-login.ts  →  registerCliproxyLogin(cli)
+src/commands/cliproxy-deploy.ts →  registerCliproxyDeploy(cli)
+src/commands/mcp.ts             →  registerMcp(cli)
 ```
 
 Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas for typed options. Global `--verbose` accessible in all command actions.
@@ -36,16 +36,19 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - Parse `gh` JSON output through Zod schemas before use
 - SHA-256 via `Bun.CryptoHasher('sha256')`, not crypto module
 - Resolve paths with `import.meta.dir` + `path.resolve()` — validate existence before use
-- **Management API**: Commands use local helpers for authenticated JSON requests and management key resolution (see `cliproxy-keys.ts` for the pattern). No shared module — helpers are per-file.
-- **Packaging**: `bundledDependencies` does NOT work with Bun's .bun/ symlink layout. Published package ships TypeScript source with `#!/usr/bin/env bun` shebang, requires `engines.bun >= 1.0.0`.
+- **Management API**: Commands use local helpers for authenticated JSON requests. Auth header is `x-management-key` (not `Authorization: Bearer`). Helpers are per-file — no shared module. See `cliproxy-keys.ts` for the pattern.
+- **Packaging**: Published package ships TypeScript source with `#!/usr/bin/env bun` shebang, requires `engines.bun >= 1.0.0`.
 - **`--dry-run` semantics**: Prints the planned action without validating preconditions or executing side effects. Safe to run anywhere.
+- **`--force-config` (cliproxy deploy)**: Override the safe default that skips uploading `config.yaml` when it exists on the server. Wipes runtime API keys — print a WARNING when set.
+- **`--output <file>` (cliproxy config get)**: Write JSON to a file with `0600` perms instead of stdout. Wraps `Bun.write` + `chmod` in try/catch.
 - **Tests**: colocated `*.test.ts`. Snapshots in `src/__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic output. Mock `fetch` and `Bun.spawn` at the boundary.
 
 ## ANTI-PATTERNS
 
-- Never use `bundledDependencies` — Bun's .bun/ symlinks create `../../` paths that npm rejects.
-- Never assume CLI proxy API body format — test empirically against live API (e.g., api-keys PUT expects bare array, not wrapped object).
+- Never use `bundledDependencies` — Bun's `.bun/` symlinks create `../../` paths that npm rejects with E415.
+- Never assume CLIProxyAPI body format — test empirically against the live API (e.g., `api-keys` PUT expects bare array, not wrapped object).
 - Never use `BatchMode=yes` without `-tt` when stdin forwarding is needed (login command).
-- Never inherit full parent env when spawning deploy.sh — use explicit env allowlist.
+- Never inherit full parent env when spawning `deploy.sh` — use explicit env allowlist.
 - Never check for `DEPLOY_SSH_KEY` env var for local deploy — check `SSH_AUTH_SOCK`.
 - Never add `GITHUB_TOKEN` raw fetch fallback — require `gh` CLI.
+- Never use `Authorization: Bearer` for cliproxy management endpoints — that header is for client API key auth, not management.

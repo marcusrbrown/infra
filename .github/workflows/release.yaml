@@ -61,6 +61,32 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
 
+      # Workaround for bfra-me/.github#2012: renovate-changesets action's
+      # getRootPackageName() returns the workspace root package name
+      # (@marcusrbrown/infra-workspace) for github-actions updates because those
+      # files don't belong to any workspace member. The root package is private
+      # and not in manypkg's workspace list, so `changeset version` fails with
+      # "package not in the workspace". Rewrite any such entries to target the
+      # published CLI package before running changesets/action. Remove this step
+      # when bfra-me/.github#2012 is fixed upstream.
+      - name: Normalize changeset targets
+        run: |
+          shopt -s nullglob
+          # Match the package name at the start of a line (YAML frontmatter key),
+          # tolerating single-quoted, double-quoted, or unquoted forms so the
+          # workaround survives if upstream changes its serialization style. The
+          # line-start anchor and trailing colon scope the match to frontmatter
+          # keys, leaving prose in the changeset body untouched. We don't back-
+          # reference the opening quote because BSD sed doesn't support \1 in
+          # ERE; mismatched quotes (e.g. '"...) don't occur in valid YAML.
+          pattern="^['\"]?@marcusrbrown/infra-workspace['\"]?:"
+          for file in .changeset/*.md; do
+            if grep -Eq "$pattern" "$file"; then
+              sed -i -E "s|$pattern|'@marcusrbrown/infra':|" "$file"
+              echo "Rewrote changeset target in $file"
+            fi
+          done
+
       - id: changesets
         name: Create Release Pull Request or Publish
         uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0

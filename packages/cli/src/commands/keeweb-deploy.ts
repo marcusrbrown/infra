@@ -173,7 +173,7 @@ export function registerKeewebDeploy(cli: CliInstance): void {
       validateRemotePreconditions()
 
       console.warn('Warning: the Deploy workflow includes nginx config deployment as part of workflow_dispatch logic.')
-      console.warn('Warning: the workflow requires production environment approval before jobs execute.')
+      console.warn('Warning: the workflow requires keeweb environment approval before jobs execute.')
 
       const child = Bun.spawn(['gh', 'workflow', 'run', WORKFLOW_NAME, '--repo', REPO], {
         stdout: 'inherit',
@@ -186,6 +186,6 @@ export function registerKeewebDeploy(cli: CliInstance): void {
       }
 
       console.log(`Workflow triggered: ${WORKFLOW_URL}`)
-      console.log('Approve the production environment deployment in GitHub Actions to continue.')
+      console.log('Approve the keeweb environment deployment in GitHub Actions to continue.')
     })
 }

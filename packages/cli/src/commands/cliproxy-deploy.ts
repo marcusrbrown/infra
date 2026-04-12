@@ -152,6 +152,6 @@ export function registerCliproxyDeploy(cli: CliInstance): void {
       }
 
       console.log(`Workflow triggered: ${WORKFLOW_URL}`)
-      console.log('Approve the production environment deployment in GitHub Actions to continue.')
+      console.log('Approve the cliproxy environment deployment in GitHub Actions to continue.')
     })
 }

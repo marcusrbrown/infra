@@ -167,7 +167,7 @@ env:
        Report findings as issues only for this category. Do NOT modify
        deploy scripts or workflow files.
 
-    6. PRODUCTION SITE REVIEW
+    6. LIVE SITE REVIEW
        Use `npx agent-browser` to verify the live KeeWeb deployment at
        https://kw.igg.ms.
 
@@ -322,10 +322,10 @@ env:
     | --- | --- | --- |
     | Last deploy run | ✅ Pass / ❌ Fail | [run link] |
     | kw.igg.ms reachable | ✅ 200 / ❌ Error | [HTTP status] |
-    | Production env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | Keeweb env secrets | ✅ Set / ⚠️ Missing | [details] |
     | Host keys valid | ✅ Current / ⚠️ Stale | [details] |
 
-    ### Production Site Review
+    ### Live Site Review
     | Check | Status | Details |
     | --- | --- | --- |
     | Page load | ✅ OK / ❌ Error | [load time or error] |

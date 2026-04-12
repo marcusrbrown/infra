@@ -1,5 +1,17 @@
 # @marcusrbrown/infra
 
+## 0.3.8
+### Patch Changes
+
+
+- ⚠️ Update Docker image `eceasy/cli-proxy-api` to v6 (6) ([#91](https://github.com/marcusrbrown/infra/pull/91))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.9.23` to `6.9.24` ([#97](https://github.com/marcusrbrown/infra/pull/97))
+
+
+- ⚙️ Update GitHub Actions workflow dependency `bfra-me/.github` from `4.16.3` to `4.16.4` ([#90](https://github.com/marcusrbrown/infra/pull/90))
+
 ## 0.3.7
 ### Patch Changes
 

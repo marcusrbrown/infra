@@ -264,26 +264,39 @@ async function listExistingGhNames(repo: string, kind: 'secret' | 'variable'): P
 }
 
 async function assertProxyReachable(baseUrl: string): Promise<void> {
-  const response = await fetch(baseUrl, {
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-  })
+  try {
+    const response = await fetch(baseUrl, {
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    })
 
-  if (!response.ok) {
-    throw new Error(`Proxy check failed for ${baseUrl}: HTTP ${response.status}. Is the proxy running and reachable?`)
+    if (!response.ok) {
+      throw new Error(`Proxy check failed for ${baseUrl}: HTTP ${response.status}. Is the proxy running and reachable?`)
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Proxy check failed')) {
+      throw error
+    }
+    throw new Error(`Unable to reach proxy at ${baseUrl}: ${extractErrorMessage(error)}`)
   }
 }
 
 async function assertProxyKeyWorks(baseUrl: string, keyValue: string): Promise<void> {
-  const response = await fetch(`${baseUrl}/v1/models`, {
-    headers: {
-      authorization: `Bearer ${keyValue}`,
-    },
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-  })
+  try {
+    const response = await fetch(`${baseUrl}/v1/models`, {
+      headers: {
+        authorization: `Bearer ${keyValue}`,
+      },
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    })
 
-  if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`Proxy key verification failed with HTTP ${response.status}: ${body}`)
+    if (!response.ok) {
+      throw new Error(`Proxy key verification failed with HTTP ${response.status}`)
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Proxy key verification')) {
+      throw error
+    }
+    throw new Error(`Unable to verify proxy key at ${baseUrl}: ${extractErrorMessage(error)}`)
   }
 }
 

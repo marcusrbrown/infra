@@ -90,6 +90,7 @@ export function registerCliproxyKeys(cli: ReturnType<typeof goke>): void {
       })
 
       const keys = toStringArray(payload)
+      console.error('⚠️  Output contains API keys — avoid logging or storing in shared locations')
 
       if (options.json) {
         console.log(JSON.stringify(keys, null, 2))

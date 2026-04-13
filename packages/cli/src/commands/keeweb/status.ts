@@ -195,7 +195,7 @@ export async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
 }
 
 export async function checkContentHash(verbose: boolean): Promise<CheckResult> {
-  const distIndexPath = path.resolve(import.meta.dir, '../../../../apps/keeweb/dist/index.html')
+  const distIndexPath = path.resolve(import.meta.dir, '../../../../../apps/keeweb/dist/index.html')
   const localFile = Bun.file(distIndexPath)
   const localExists = await localFile.exists()
 

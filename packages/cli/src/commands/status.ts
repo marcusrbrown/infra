@@ -27,7 +27,7 @@ interface StatusDependencies {
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
 const ERROR_PREFIX = '❌'
-const TABLE_COLUMNS: {key: keyof StatusSummary | 'app'; label: string}[] = [
+const TABLE_COLUMNS: {key: keyof StatusSummary; label: string}[] = [
   {key: 'app', label: 'App'},
   {key: 'http', label: 'HTTP'},
   {key: 'lastDeploy', label: 'Last Deploy'},

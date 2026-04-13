@@ -14,15 +14,13 @@ const DEFAULT_SITE_DIR = '/home/user-data/www/kw.igg.ms'
 type CliInstance = ReturnType<typeof goke>
 
 export function resolveDeployScriptPath(): string {
-  const instructedPath = resolve(import.meta.dir, '../../../../apps/keeweb/deploy.sh')
+  const primary = resolve(import.meta.dir, '../../../../../apps/keeweb/deploy.sh')
 
-  if (existsSync(instructedPath)) {
-    return instructedPath
+  if (existsSync(primary)) {
+    return primary
   }
 
-  const fallbackPath = resolve(import.meta.dir, '../../../../../apps/keeweb/deploy.sh')
-
-  return fallbackPath
+  return resolve(import.meta.dir, '../../../../apps/keeweb/deploy.sh')
 }
 
 export function resolveDistIndexPath(): string {

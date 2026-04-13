@@ -27,6 +27,7 @@ describe('infra CLI', () => {
     expect(exitCode).toBe(0)
     expect(stderr).toBe('')
     expect(stdout).toContain('keeweb')
+    expect(stdout).toContain('status')
     expect(stdout).toContain('mcp')
     // Normalize version so snapshot survives changeset bumps
     const stableOutput = stdout.replace(/infra\/\d+\.\d+\.\d+/, 'infra/x.x.x')

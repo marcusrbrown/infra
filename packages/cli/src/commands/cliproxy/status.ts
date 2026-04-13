@@ -1,5 +1,7 @@
 import type {goke} from 'goke'
+import type {StatusSummary} from '../status'
 
+import process from 'node:process'
 import {z} from 'zod'
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
@@ -202,6 +204,45 @@ function printCheckResult(result: CheckResult): void {
   }
 }
 
+function formatCheckSummary(result: CheckResult): string {
+  return `${levelLabel(result.level)}: ${result.summary}`
+}
+
+export function formatUsageSummaryLine(result: CheckResult): string | null {
+  const totalMatch = /total_requests=(\d+)/.exec(result.summary)
+  const failureMatch = /failure_count=(\d+)/.exec(result.summary)
+
+  if (!totalMatch || !failureMatch) {
+    return null
+  }
+
+  const total = Number(totalMatch[1])
+  const failed = Number(failureMatch[1])
+  const failureRate = total === 0 ? 0 : (failed / total) * 100
+
+  return `Requests: ${total} total, ${failed} failed (${failureRate.toFixed(1)}% failure rate)`
+}
+
+export async function getCliproxyStatusSummary(baseUrl: string, key: string, verbose: boolean): Promise<StatusSummary> {
+  const normalizedBaseUrl = stripTrailingSlash(baseUrl)
+  const httpPromise = checkHttpReachability(normalizedBaseUrl, verbose)
+  const managementResultsPromise = key
+    ? Promise.all([checkUsageStats(normalizedBaseUrl, key), checkVersion(normalizedBaseUrl, key)])
+    : Promise.resolve(null)
+
+  const [httpResult, managementResults] = await Promise.all([httpPromise, managementResultsPromise])
+  const [usageResult, versionResult] = managementResults ?? [null, null]
+
+  return {
+    app: 'cliproxy',
+    http: formatCheckSummary(httpResult),
+    lastDeploy: '—',
+    version: versionResult ? formatCheckSummary(versionResult) : '— (no key)',
+    contentHash: '—',
+    usageStats: usageResult ? formatCheckSummary(usageResult) : '— (no key)',
+  }
+}
+
 export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
   cli
     .command('cliproxy status', 'Show operational health of CLIProxyAPI and its management endpoints.')
@@ -225,12 +266,15 @@ export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
 
       const results: CheckResult[] = [await checkHttpReachability(baseUrl, verbose)]
 
+      let capturedUsageResult: CheckResult | undefined
+
       if (managementKey) {
         const [usageResult, versionResult] = await Promise.all([
           checkUsageStats(baseUrl, managementKey),
           checkVersion(baseUrl, managementKey),
         ])
 
+        capturedUsageResult = usageResult
         results.push(usageResult, versionResult)
       } else {
         results.push({
@@ -250,6 +294,13 @@ export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
       const warningCount = results.filter(result => result.level === 'warning').length
 
       console.log(`Summary: ${results.length} checks, ${errorCount} errors, ${warningCount} warnings`)
+
+      if (capturedUsageResult) {
+        const usageLine = formatUsageSummaryLine(capturedUsageResult)
+        if (usageLine) {
+          console.log(usageLine)
+        }
+      }
 
       if (errorCount > 0) {
         process.exitCode = 1

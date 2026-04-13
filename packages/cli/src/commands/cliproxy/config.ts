@@ -112,6 +112,26 @@ export function buildSetRequest(baseUrl: string, field: string, rawValue: string
   }
 }
 
+export function formatConfigAsColumns(payload: unknown): string {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return JSON.stringify(payload, null, 2)
+  }
+
+  const entries = Object.entries(payload as Record<string, unknown>)
+  if (entries.length === 0) {
+    return ''
+  }
+
+  const maxKeyLength = Math.max(...entries.map(([k]) => k.length))
+  return entries
+    .map(([key, value]) => {
+      const paddedKey = key.padEnd(maxKeyLength)
+      const displayValue = typeof value === 'object' ? JSON.stringify(value) : String(value)
+      return `${paddedKey}: ${displayValue}`
+    })
+    .join('\n')
+}
+
 export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
   cli
     .command('cliproxy config get', 'Fetch current CLIProxyAPI config as JSON.')
@@ -133,6 +153,7 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
         .string()
         .describe('Write config JSON to a file instead of stdout. File permissions set to 0600 (owner-read-only).'),
     )
+    .option('--json', 'Output raw JSON instead of aligned key: value columns.')
     .action(async options => {
       const baseUrl = resolveBaseUrl(options.url)
       const managementKey = resolveManagementKey(options.key)
@@ -153,9 +174,12 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
           const message = error instanceof Error ? error.message : String(error)
           throw new Error(`Failed to write config to ${options.output}: ${message}`)
         }
-      } else {
+      } else if (options.json) {
         console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
         console.log(jsonOutput)
+      } else {
+        console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
+        console.log(formatConfigAsColumns(payload))
       }
     })
 

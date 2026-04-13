@@ -1,6 +1,8 @@
 import type {goke} from 'goke'
+import type {StatusSummary} from '../status'
 
 import path from 'node:path'
+import process from 'node:process'
 import {z} from 'zod'
 
 const SITE_URL = 'https://kw.igg.ms/'
@@ -257,6 +259,27 @@ function printCheckResult(result: CheckResult): void {
     for (const detail of result.details) {
       console.log(`  - ${detail}`)
     }
+  }
+}
+
+function formatCheckSummary(result: CheckResult): string {
+  return `${levelLabel(result.level)}: ${result.summary}`
+}
+
+export async function getKeewebStatusSummary(verbose: boolean): Promise<StatusSummary> {
+  const [httpResult, lastDeployResult, contentHashResult] = await Promise.all([
+    checkHttpReachability(verbose),
+    checkLastDeploy(verbose),
+    checkContentHash(verbose),
+  ])
+
+  return {
+    app: 'keeweb',
+    http: formatCheckSummary(httpResult),
+    lastDeploy: formatCheckSummary(lastDeployResult),
+    version: '—',
+    contentHash: formatCheckSummary(contentHashResult),
+    usageStats: '—',
   }
 }
 

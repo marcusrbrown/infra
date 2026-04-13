@@ -5,6 +5,7 @@ import {
   checkUsageStats,
   checkVersion,
   formatDurationMs,
+  formatUsageSummaryLine,
   levelLabel,
   stripTrailingSlash,
   toNumber,
@@ -251,6 +252,58 @@ describe('cliproxy status helpers', () => {
 
       expect(result.level).toBe('error')
       expect(result.summary).toContain('HTTP 500')
+    })
+  })
+
+  describe('formatUsageSummaryLine', () => {
+    it('formats zero-failure summary', () => {
+      const result = formatUsageSummaryLine({
+        title: 'Usage stats',
+        level: 'ok',
+        summary: 'total_requests=10, failure_count=0',
+      })
+
+      expect(result).toBe('Requests: 10 total, 0 failed (0.0% failure rate)')
+    })
+
+    it('formats non-zero failure summary with correct rate', () => {
+      const result = formatUsageSummaryLine({
+        title: 'Usage stats',
+        level: 'warning',
+        summary: 'total_requests=10, failure_count=3 (token refresh likely needed)',
+      })
+
+      expect(result).toBe('Requests: 10 total, 3 failed (30.0% failure rate)')
+    })
+
+    it('returns null when summary has no numeric fields', () => {
+      const result = formatUsageSummaryLine({
+        title: 'Usage stats',
+        level: 'warning',
+        summary: 'Rate limited by management API (HTTP 429). Retry in a few moments.',
+      })
+
+      expect(result).toBeNull()
+    })
+
+    it('returns null for error summaries without numeric fields', () => {
+      const result = formatUsageSummaryLine({
+        title: 'Usage stats',
+        level: 'error',
+        summary: 'Unable to read usage stats: socket hang up',
+      })
+
+      expect(result).toBeNull()
+    })
+
+    it('handles zero total requests without division by zero', () => {
+      const result = formatUsageSummaryLine({
+        title: 'Usage stats',
+        level: 'ok',
+        summary: 'total_requests=0, failure_count=0',
+      })
+
+      expect(result).toBe('Requests: 0 total, 0 failed (0.0% failure rate)')
     })
   })
 })

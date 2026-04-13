@@ -5,6 +5,7 @@ import pkg from '../package.json' with {type: 'json'}
 import {registerCliproxyCommands} from './commands/cliproxy'
 import {registerKeewebCommands} from './commands/keeweb'
 import {registerMcp} from './commands/mcp'
+import {registerStatus} from './commands/status'
 
 const cli = goke('infra')
 
@@ -12,6 +13,7 @@ cli.option('--verbose', 'Enable verbose output for all commands')
 
 registerKeewebCommands(cli)
 registerCliproxyCommands(cli)
+registerStatus(cli)
 registerMcp(cli)
 
 cli.help()

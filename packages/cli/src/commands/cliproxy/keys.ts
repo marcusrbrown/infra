@@ -79,6 +79,7 @@ export function registerCliproxyKeys(cli: ReturnType<typeof goke>): void {
       '--key [key]',
       z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
+    .option('--json', 'Output raw JSON array instead of a numbered list.')
     .action(async options => {
       const baseUrl = resolveBaseUrl(options.url)
       const managementKey = resolveManagementKey(options.key)
@@ -88,7 +89,17 @@ export function registerCliproxyKeys(cli: ReturnType<typeof goke>): void {
         headers: managementHeaders(managementKey),
       })
 
-      console.log(JSON.stringify(toStringArray(payload), null, 2))
+      const keys = toStringArray(payload)
+
+      if (options.json) {
+        console.log(JSON.stringify(keys, null, 2))
+      } else if (keys.length === 0) {
+        console.log('No API keys configured')
+      } else {
+        for (const [index, key] of keys.entries()) {
+          console.log(`${index + 1}. ${key}`)
+        }
+      }
     })
 
   cli

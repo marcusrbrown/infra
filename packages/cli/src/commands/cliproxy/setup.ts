@@ -358,6 +358,22 @@ async function createManagementApiKey(baseUrl: string, managementKey: string, ke
 }
 
 async function applyGhValue(kind: 'secret' | 'variable', name: string, repo: string, value: string): Promise<void> {
+  if (kind === 'secret') {
+    const child = Bun.spawn(['gh', 'secret', 'set', name, '--repo', repo], {
+      stdin: new Blob([value]).stream(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: process.env,
+    })
+
+    const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited])
+
+    if (exitCode !== 0) {
+      throw new Error(`gh secret set ${name} failed: ${stderr.trim()}`.trim())
+    }
+    return
+  }
+
   const result = await runGh([kind, 'set', name, '--repo', repo, '--body', value])
   if (result.exitCode !== 0) {
     throw new Error(`gh ${kind} set ${name} failed: ${result.stderr.trim()}`.trim())

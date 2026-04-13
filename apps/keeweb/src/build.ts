@@ -149,7 +149,11 @@ export async function writeConfigWithSecret(
   const settings =
     typeof config.settings === 'object' && config.settings !== null ? (config.settings as Record<string, unknown>) : {}
 
-  settings.dropboxSecret = process.env.DROPBOX_APP_SECRET || ''
+  const dropboxSecret = process.env.DROPBOX_APP_SECRET || ''
+  if (process.env.CI && !dropboxSecret) {
+    throw new Error('DROPBOX_APP_SECRET is required in CI — deployed KeeWeb cannot connect to Dropbox without it')
+  }
+  settings.dropboxSecret = dropboxSecret
   config.settings = settings
 
   await Bun.write(_distConfigPath, `${JSON.stringify(config, null, 2)}\n`)

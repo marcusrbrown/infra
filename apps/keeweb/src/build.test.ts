@@ -123,7 +123,7 @@ describe('writeConfigWithSecret', () => {
     expect(await Bun.file(realConfigTemplatePath).text()).toBe(originalRealTemplate)
   })
 
-  it('writes an empty secret when DROPBOX_APP_SECRET is unset', async () => {
+  it('writes an empty secret when DROPBOX_APP_SECRET is unset (non-CI)', async () => {
     const tempDir = await createTempDir()
     const tempTemplatePath = join(tempDir, 'config.template.json')
     const outputPath = join(tempDir, 'dist-config.json')
@@ -131,16 +131,40 @@ describe('writeConfigWithSecret', () => {
 
     await Bun.write(tempTemplatePath, Bun.file(realConfigTemplatePath))
     delete process.env.DROPBOX_APP_SECRET
+    const savedCI = process.env.CI
+    delete process.env.CI
 
-    await writeConfigWithSecret({configTemplatePath: tempTemplatePath, distConfigPath: outputPath})
+    try {
+      await writeConfigWithSecret({configTemplatePath: tempTemplatePath, distConfigPath: outputPath})
 
-    const output = JSON.parse(await Bun.file(outputPath).text()) as {
-      settings?: {dropboxSecret?: string}
+      const output = JSON.parse(await Bun.file(outputPath).text()) as {
+        settings?: {dropboxSecret?: string}
+      }
+
+      expect(output.settings?.dropboxSecret).toBe('')
+      expect(await Bun.file(tempTemplatePath).text()).toBe(await Bun.file(realConfigTemplatePath).text())
+      expect(await Bun.file(realConfigTemplatePath).text()).toBe(originalRealTemplate)
+    } finally {
+      if (savedCI !== undefined) process.env.CI = savedCI
     }
+  })
 
-    expect(output.settings?.dropboxSecret).toBe('')
-    expect(await Bun.file(tempTemplatePath).text()).toBe(await Bun.file(realConfigTemplatePath).text())
-    expect(await Bun.file(realConfigTemplatePath).text()).toBe(originalRealTemplate)
+  it('throws in CI when DROPBOX_APP_SECRET is unset', async () => {
+    const tempDir = await createTempDir()
+    const tempTemplatePath = join(tempDir, 'config.template.json')
+    const outputPath = join(tempDir, 'dist-config.json')
+
+    await Bun.write(tempTemplatePath, Bun.file(realConfigTemplatePath))
+    delete process.env.DROPBOX_APP_SECRET
+    process.env.CI = 'true'
+
+    try {
+      await expect(
+        writeConfigWithSecret({configTemplatePath: tempTemplatePath, distConfigPath: outputPath}),
+      ).rejects.toThrow('DROPBOX_APP_SECRET is required in CI')
+    } finally {
+      delete process.env.CI
+    }
   })
 })
 

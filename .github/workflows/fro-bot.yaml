@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
     inputs:
       prompt:
-        description: Custom prompt for the Fro Bot agent
-        required: true
+        description: Custom prompt (leave empty to run the daily autohealing schedule)
+        required: false
 
 permissions:
   contents: read
@@ -406,8 +406,8 @@ jobs:
           OPENCODE_PROMPT_ARTIFACT: 'true'
           PROMPT: >-
             ${{
-              (github.event_name == 'workflow_dispatch' && (github.event.inputs.prompt || ''))
-              || (github.event_name == 'schedule' && env.SCHEDULE_PROMPT)
+              (github.event_name == 'workflow_dispatch' && github.event.inputs.prompt)
+              || ((github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !github.event.inputs.prompt)) && env.SCHEDULE_PROMPT)
               || (github.event_name == 'pull_request' && env.PR_REVIEW_PROMPT)
               || ''
             }}

@@ -560,6 +560,10 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
           ? await buildInteractivePlan(options, baseUrl)
           : buildNonInteractivePlan(options, baseUrl)
 
+        if (plan.createKey) {
+          resolveManagementKey()
+        }
+
         await withSpinner(`Checking GitHub access for ${plan.repo}`, async () => {
           await assertRepoAccess(plan.repo)
         })

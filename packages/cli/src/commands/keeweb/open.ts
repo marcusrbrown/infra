@@ -20,11 +20,11 @@ export function registerKeewebOpen(cli: CliInstance): void {
       return
     }
 
-    const child = Bun.spawn([opener, KEEWEB_URL], {
-      stdout: 'inherit',
-      stderr: 'inherit',
+    // Fire-and-forget — don't await. macOS `open` returns immediately but
+    // Linux `xdg-open` may block until the browser closes.
+    Bun.spawn([opener, KEEWEB_URL], {
+      stdout: 'ignore',
+      stderr: 'ignore',
     })
-
-    await child.exited
   })
 }

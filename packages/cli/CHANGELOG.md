@@ -1,5 +1,19 @@
 # @marcusrbrown/infra
 
+## 0.4.1
+### Patch Changes
+
+
+- fix(cli): hardening fixes for setup wizard, build, and browser launch ([#104](https://github.com/marcusrbrown/infra/pull/104))
+  
+  - CI build now throws when DROPBOX_APP_SECRET is unset (closes #95)
+  - `keeweb open` uses fire-and-forget to avoid hanging on Linux xdg-open
+  - Setup wizard validates management key early (before prompts, not step 8/10)
+  - `gh secret set` pipes values via stdin instead of --body CLI argument
+  - Setup wizard rolls back newly created proxy keys on partial failure
+
+- ⚙️ Update GitHub Actions workflow dependency `fro-bot/agent` from `v0.39.0` to `v0.39.1` ([#109](https://github.com/marcusrbrown/infra/pull/109))
+
 ## 0.4.0
 ### Minor Changes
 

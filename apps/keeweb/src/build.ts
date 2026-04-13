@@ -14,8 +14,10 @@ const zipPath = path.join(cacheDir, ZIP_FILENAME)
 const distDir = path.join(rootDir, 'dist')
 const configTemplatePath = path.join(rootDir, 'config', 'config.json')
 const nginxTemplatePath = path.join(rootDir, 'config', 'kw.igg.ms.conf')
+const headersTemplatePath = path.join(rootDir, 'config', 'kw-security-headers.conf')
 const distConfigPath = path.join(distDir, 'config.json')
 const distNginxPath = path.join(distDir, 'kw.igg.ms.conf')
+const distHeadersPath = path.join(distDir, 'kw-security-headers.conf')
 
 const ANSI = {
   blue: '\u001B[1;34m',
@@ -169,6 +171,16 @@ export async function copyNginxConfig(
   await Bun.write(_distNginxPath, Bun.file(_nginxTemplatePath))
 }
 
+export async function copySecurityHeaders(
+  overrides: {headersTemplatePath?: string; distHeadersPath?: string} = {},
+): Promise<void> {
+  const _headersTemplatePath = overrides.headersTemplatePath ?? headersTemplatePath
+  const _distHeadersPath = overrides.distHeadersPath ?? distHeadersPath
+
+  logStep('Copying security headers snippet into dist')
+  await Bun.write(_distHeadersPath, Bun.file(_headersTemplatePath))
+}
+
 async function main(): Promise<void> {
   logStep(`Starting KeeWeb build for v${KEEWEB_VERSION}`)
 
@@ -177,6 +189,7 @@ async function main(): Promise<void> {
   await extractArchive()
   await writeConfigWithSecret()
   await copyNginxConfig()
+  await copySecurityHeaders()
 
   logSuccess(`Build complete: ${distDir}`)
 }

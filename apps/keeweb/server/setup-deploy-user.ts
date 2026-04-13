@@ -25,6 +25,7 @@ set -euo pipefail
 
 SITE_DIR="${SITE_DIR}"
 NGINX_CONF="${NGINX_CONF}"
+SNIPPETS_DIR="/etc/nginx/snippets"
 STAGING_DIR="/home/${DEPLOY_USER}/staging"
 
 log() { printf "\\033[1;34m==>\\033[0m %s\\n" "$1"; }
@@ -37,6 +38,7 @@ find "$SITE_DIR" -type d -exec chmod g+s {} +
 
 if [[ "\${1:-}" == "--nginx" ]]; then
     STAGED_CONF="$STAGING_DIR/kw.igg.ms.conf"
+    STAGED_HEADERS="$STAGING_DIR/kw-security-headers.conf"
 
     if [[ ! -f "$STAGED_CONF" ]]; then
         err "No staged nginx config at $STAGED_CONF"
@@ -50,6 +52,17 @@ if [[ "\${1:-}" == "--nginx" ]]; then
         log "Backed up current config to \${NGINX_CONF}.bak"
     fi
 
+    # Install security headers snippet if staged
+    if [[ -f "$STAGED_HEADERS" ]]; then
+        if [[ -f "$SNIPPETS_DIR/kw-security-headers.conf" ]]; then
+            cp "$SNIPPETS_DIR/kw-security-headers.conf" "$SNIPPETS_DIR/kw-security-headers.conf.bak"
+        fi
+        cp "$STAGED_HEADERS" "$SNIPPETS_DIR/kw-security-headers.conf"
+        chown root:root "$SNIPPETS_DIR/kw-security-headers.conf"
+        chmod 644 "$SNIPPETS_DIR/kw-security-headers.conf"
+        log "Installed security headers snippet"
+    fi
+
     cp "$STAGED_CONF" "$NGINX_CONF"
     chown user-data:user-data "$NGINX_CONF"
     chmod 644 "$NGINX_CONF"
@@ -58,13 +71,17 @@ if [[ "\${1:-}" == "--nginx" ]]; then
         log "nginx config valid — reloading"
         systemctl reload nginx
         log "nginx reloaded successfully"
-        rm -f "$STAGED_CONF"
+        rm -f "$STAGED_CONF" "$STAGED_HEADERS"
     else
         err "nginx config validation FAILED — rolling back"
         if [[ -f "\${NGINX_CONF}.bak" ]]; then
             cp "\${NGINX_CONF}.bak" "$NGINX_CONF"
             chown user-data:user-data "$NGINX_CONF"
-            log "Restored backup config"
+            log "Restored backup site config"
+        fi
+        if [[ -f "$SNIPPETS_DIR/kw-security-headers.conf.bak" ]]; then
+            cp "$SNIPPETS_DIR/kw-security-headers.conf.bak" "$SNIPPETS_DIR/kw-security-headers.conf"
+            log "Restored backup security headers snippet"
         fi
         exit 1
     fi

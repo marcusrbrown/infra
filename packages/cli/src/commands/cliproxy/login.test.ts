@@ -1,7 +1,7 @@
 import {resolve} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-const cliDir = resolve(import.meta.dir, '../..')
+const cliDir = resolve(import.meta.dir, '../../..')
 
 const envKeys = ['CLIPROXY_DOMAIN', 'HOME', 'PATH', 'SSH_AUTH_SOCK'] as const
 
@@ -101,19 +101,19 @@ describe('cliproxy login', () => {
 
   describe('unit: resolveHost', () => {
     it('returns input when provided', async () => {
-      const {resolveHost} = await import('./cliproxy-login')
+      const {resolveHost} = await import('./login')
       expect(resolveHost('test.example.com')).toBe('test.example.com')
     })
 
     it('falls back to CLIPROXY_DOMAIN', async () => {
       process.env.CLIPROXY_DOMAIN = 'env.example.com'
-      const {resolveHost} = await import('./cliproxy-login')
+      const {resolveHost} = await import('./login')
       expect(resolveHost()).toBe('env.example.com')
     })
 
     it('falls back to default host', async () => {
       delete process.env.CLIPROXY_DOMAIN
-      const {resolveHost} = await import('./cliproxy-login')
+      const {resolveHost} = await import('./login')
       expect(resolveHost()).toBe('cliproxy.fro.bot')
     })
   })
@@ -121,13 +121,13 @@ describe('cliproxy login', () => {
   describe('unit: requireSshAuthSock', () => {
     it('returns SSH_AUTH_SOCK when set', async () => {
       process.env.SSH_AUTH_SOCK = '/tmp/test-agent.sock'
-      const {requireSshAuthSock} = await import('./cliproxy-login')
+      const {requireSshAuthSock} = await import('./login')
       expect(requireSshAuthSock()).toBe('/tmp/test-agent.sock')
     })
 
     it('throws when SSH_AUTH_SOCK is not set', async () => {
       delete process.env.SSH_AUTH_SOCK
-      const {requireSshAuthSock} = await import('./cliproxy-login')
+      const {requireSshAuthSock} = await import('./login')
       expect(() => requireSshAuthSock()).toThrow('SSH_AUTH_SOCK is required')
     })
   })

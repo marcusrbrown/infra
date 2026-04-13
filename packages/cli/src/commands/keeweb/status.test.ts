@@ -7,7 +7,7 @@ import {
   formatDate,
   formatDurationMs,
   hashSha256,
-} from './keeweb-status'
+} from './status'
 
 const originalFetch = globalThis.fetch
 

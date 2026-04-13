@@ -8,7 +8,7 @@ import {
   levelLabel,
   stripTrailingSlash,
   toNumber,
-} from './cliproxy-status'
+} from './status'
 
 const originalFetch = globalThis.fetch
 

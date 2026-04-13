@@ -1,9 +1,9 @@
 import {chmodSync, existsSync, statSync} from 'node:fs'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {buildSetRequest, parseBoolean, parseNumber, resolveManagementKey} from './cliproxy-config'
-import {toStringArray} from './cliproxy-keys'
-import {requireSshAuthSock, resolveHost} from './cliproxy-login'
+import {buildSetRequest, parseBoolean, parseNumber, resolveManagementKey} from './config'
+import {toStringArray} from './keys'
+import {requireSshAuthSock, resolveHost} from './login'
 
 describe('cliproxy config helpers', () => {
   describe('parseBoolean', () => {

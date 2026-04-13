@@ -10,7 +10,7 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 | Docker stack | `docker-compose.yaml` | Caddy + cli-proxy-api, restart: unless-stopped, healthcheck on root |
 | Provision droplet | `server/provision-droplet.ts` | One-time. Refuses re-run on existing droplet without `--force` |
 | Deploy updates | `src/deploy.ts` | Preserves `config.yaml`, preflight management key check |
-| CLI commands | `packages/cli/src/commands/cliproxy-*.ts` | Wrapper commands (see packages/cli/AGENTS.md) |
+| CLI commands | `packages/cli/src/commands/cliproxy/` | See packages/cli/AGENTS.md for command pattern |
 
 ## DEPLOY FLOW
 
@@ -30,7 +30,7 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 
 ## MANAGEMENT API
 
-Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/src/commands/cliproxy-*.ts`). Auth: `x-management-key` header **only**. The `Authorization: Bearer` header is for client API key auth (proxied requests to Claude), not management endpoints.
+Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/src/commands/cliproxy/`). Auth: `x-management-key` header **only**. The `Authorization: Bearer` header is for client API key auth (proxied requests to Claude), not management endpoints.
 
 | Endpoint | Method | Body | Notes |
 | --- | --- | --- | --- |

@@ -54,6 +54,9 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - **`--dry-run` semantics**: Prints the planned action without validating preconditions or executing side effects. Safe to run anywhere.
 - **`--force-config` (cliproxy deploy)**: Override the safe default that skips uploading `config.yaml` when it exists on the server. Wipes runtime API keys — print a WARNING when set.
 - **`--output <file>` (cliproxy config get)**: Write JSON to a file with `0600` perms instead of stdout. Wraps `Bun.write` + `chmod` in try/catch.
+- **Fire-and-forget opens**: `keeweb open` and `cliproxy open` spawn the child process without awaiting `child.exited` — prevents blocking on Linux `xdg-open` or long-lived SSH sessions. Close stdin immediately after spawn.
+- **Stdin piping for secrets**: When `cliproxy setup` passes an API key to `gh secret set`, use `Bun.spawn` stdin pipe instead of `--body` CLI arg. The key never appears in `ps` output.
+- **Compensating delete**: `cliproxy setup` wraps key creation in try/catch. On failure after a key was created, best-effort `DELETE /v0/management/api-keys?value=<key>` to avoid phantom keys. Error messages scrub key material.
 - **Tests**: colocated `*.test.ts`. Snapshots in `src/__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic output. Mock `fetch` and `Bun.spawn` at the boundary. Never spawn the real CLI for commands that launch browser (`keeweb open`) or SSH (`cliproxy open`) — test exported helpers and `--help` output only.
 
 ## ANTI-PATTERNS

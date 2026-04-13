@@ -19,6 +19,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Setup Node.js
+        # Pin Node.js because bun run lint/tsc spawn the eslint/tsc binary via
+        # #!/usr/bin/env node shebang — ubuntu-latest's default Node may lack
+        # ES2024 APIs (Object.groupBy) used by eslint-flat-config-utils 3.1.0+.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v6.3.0
+        with:
+          node-version: 24
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 

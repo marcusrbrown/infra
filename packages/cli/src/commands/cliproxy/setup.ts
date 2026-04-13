@@ -357,6 +357,26 @@ async function createManagementApiKey(baseUrl: string, managementKey: string, ke
   })
 }
 
+async function deleteManagementApiKey(baseUrl: string, managementKey: string, keyValue: string): Promise<void> {
+  const endpoint = `${baseUrl}/v0/management/api-keys`
+  const currentPayload = await requestJson(endpoint, {
+    method: 'GET',
+    headers: managementHeaders(managementKey),
+  })
+  const currentKeys = toStringArray(currentPayload)
+  const filtered = currentKeys.filter(k => k !== keyValue)
+
+  if (filtered.length === currentKeys.length) {
+    return
+  }
+
+  await requestJson(endpoint, {
+    method: 'PUT',
+    headers: managementHeaders(managementKey),
+    body: JSON.stringify(filtered),
+  })
+}
+
 async function applyGhValue(kind: 'secret' | 'variable', name: string, repo: string, value: string): Promise<void> {
   if (kind === 'secret') {
     const child = Bun.spawn(['gh', 'secret', 'set', name, '--repo', repo], {
@@ -645,28 +665,45 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
           }
         }
 
-        if (plan.createKey) {
+        let keyCreatedByThisRun = false
+        const managementKey = plan.createKey ? resolveManagementKey() : undefined
+
+        if (plan.createKey && managementKey) {
           await withSpinner('Creating a new CLIProxyAPI key', async () => {
-            const managementKey = resolveManagementKey()
             await createManagementApiKey(baseUrl, managementKey, plan.keyValue)
+            keyCreatedByThisRun = true
           })
         }
 
-        await withSpinner('Writing GitHub secrets and variables', async spinnerInstance => {
-          for (const secret of plan.template.secrets) {
-            spinnerInstance.message(`Setting secret ${secret.name}`)
-            await applyGhValue('secret', secret.name, plan.repo, secret.value)
-          }
+        try {
+          await withSpinner('Writing GitHub secrets and variables', async spinnerInstance => {
+            for (const secret of plan.template.secrets) {
+              spinnerInstance.message(`Setting secret ${secret.name}`)
+              await applyGhValue('secret', secret.name, plan.repo, secret.value)
+            }
 
-          for (const variable of plan.template.variables) {
-            spinnerInstance.message(`Setting variable ${variable.name}`)
-            await applyGhValue('variable', variable.name, plan.repo, variable.value)
-          }
-        })
+            for (const variable of plan.template.variables) {
+              spinnerInstance.message(`Setting variable ${variable.name}`)
+              await applyGhValue('variable', variable.name, plan.repo, variable.value)
+            }
+          })
 
-        await withSpinner('Verifying the new key through the proxy', async () => {
-          await assertProxyKeyWorks(baseUrl, plan.keyValue)
-        })
+          await withSpinner('Verifying the new key through the proxy', async () => {
+            await assertProxyKeyWorks(baseUrl, plan.keyValue)
+          })
+        } catch (mutationError) {
+          if (keyCreatedByThisRun && managementKey) {
+            try {
+              await deleteManagementApiKey(baseUrl, managementKey, plan.keyValue)
+              log.warn('Rolled back the newly created CLIProxyAPI key after failure.')
+            } catch {
+              log.warn(
+                'Failed to roll back the newly created CLIProxyAPI key. Remove it manually via: infra cliproxy keys remove',
+              )
+            }
+          }
+          throw mutationError
+        }
 
         if (interactive) {
           outro(`Setup complete for ${plan.repo}. The ${plan.harness} harness can now use ${baseUrl}/v1.`)

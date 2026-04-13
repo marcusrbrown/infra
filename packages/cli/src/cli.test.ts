@@ -1,6 +1,10 @@
 import {resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 
+declare const process: {
+  env: Record<string, string | undefined>
+}
+
 const cliDir = resolve(import.meta.dir, '..')
 
 async function runCli(...args: string[]) {
@@ -27,6 +31,7 @@ describe('infra CLI', () => {
     expect(exitCode).toBe(0)
     expect(stderr).toBe('')
     expect(stdout).toContain('keeweb')
+    expect(stdout).toContain('status')
     expect(stdout).toContain('mcp')
     // Normalize version so snapshot survives changeset bumps
     const stableOutput = stdout.replace(/infra\/\d+\.\d+\.\d+/, 'infra/x.x.x')

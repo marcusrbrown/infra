@@ -7,7 +7,7 @@ import {
   formatDate,
   formatDurationMs,
   hashSha256,
-} from './keeweb-status'
+} from './status'
 
 const originalFetch = globalThis.fetch
 
@@ -179,6 +179,22 @@ describe('keeweb status helpers', () => {
   })
 
   describe('checkContentHash', () => {
+    it('resolves dist path at correct depth from restructured location', async () => {
+      // Regression test for P1 path depth bug: after restructure from
+      // commands/keeweb-status.ts to commands/keeweb/status.ts, the path
+      // needs 5 levels of ../ to reach apps/keeweb/dist/index.html
+      let capturedPath = ''
+      fileSpy = spyOn(Bun, 'file').mockImplementation((...args: unknown[]) => {
+        capturedPath = String(args[0])
+        return {exists: async () => false} as ReturnType<typeof Bun.file>
+      })
+
+      await checkContentHash(false)
+
+      expect(capturedPath).toContain('apps/keeweb/dist/index.html')
+      expect(capturedPath).not.toContain('commands/keeweb/apps')
+    })
+
     it('returns warning when the local dist file does not exist', async () => {
       fileSpy = spyOn(Bun, 'file').mockImplementation(
         () =>

@@ -1,9 +1,9 @@
 import {chmodSync, existsSync, statSync} from 'node:fs'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {buildSetRequest, parseBoolean, parseNumber, resolveManagementKey} from './cliproxy-config'
-import {toStringArray} from './cliproxy-keys'
-import {requireSshAuthSock, resolveHost} from './cliproxy-login'
+import {buildSetRequest, formatConfigAsColumns, parseBoolean, parseNumber, resolveManagementKey} from './config'
+import {toStringArray} from './keys'
+import {requireSshAuthSock, resolveHost} from './login'
 
 describe('cliproxy config helpers', () => {
   describe('parseBoolean', () => {
@@ -188,6 +188,32 @@ describe('cliproxy config helpers', () => {
         ;(globalThis.fetch as unknown) = originalFetch
       }
     })
+  })
+})
+
+describe('formatConfigAsColumns', () => {
+  it('formats flat object as aligned key: value lines', () => {
+    const result = formatConfigAsColumns({debug: true, 'request-retry': 3, 'proxy-url': 'https://x.com'})
+    const lines = result.split('\n')
+
+    expect(lines[0]).toBe('debug        : true')
+    expect(lines[1]).toBe('request-retry: 3')
+    expect(lines[2]).toBe('proxy-url    : https://x.com')
+  })
+
+  it('serializes nested objects as JSON', () => {
+    const result = formatConfigAsColumns({nested: {a: 1}})
+
+    expect(result).toBe('nested: {"a":1}')
+  })
+
+  it('returns empty string for empty object', () => {
+    expect(formatConfigAsColumns({})).toBe('')
+  })
+
+  it('falls back to JSON.stringify for non-objects', () => {
+    expect(formatConfigAsColumns(null)).toBe('null')
+    expect(formatConfigAsColumns([1, 2])).toBe('[\n  1,\n  2\n]')
   })
 })
 

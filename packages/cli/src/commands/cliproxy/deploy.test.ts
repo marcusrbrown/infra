@@ -1,16 +1,11 @@
 import {resolve} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
-import {
-  getLocalDeployEnv,
-  resolveDeployScriptPath,
-  resolveDistIndexPath,
-  validateRemotePreconditions,
-} from './keeweb-deploy'
+import {getLocalDeployEnv, resolveLocalDeployScriptPath, validateRemotePreconditions} from './deploy'
 
-const cliDir = resolve(import.meta.dir, '../..')
+const cliDir = resolve(import.meta.dir, '../../..')
 
-const envKeys = ['HOST', 'HOME', 'PATH', 'REMOTE_USER', 'SITE_DIR', 'SSH_AUTH_SOCK'] as const
+const envKeys = ['CLIPROXY_DOMAIN', 'CLIPROXY_MANAGEMENT_KEY', 'HOME', 'PATH', 'SSH_AUTH_SOCK'] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
 
@@ -38,7 +33,7 @@ function setManagedEnv(overrides: Partial<Record<ManagedEnvKey, string | undefin
       continue
     }
 
-    process.env[key] = value
+    process.env[key as ManagedEnvKey] = value
   }
 }
 
@@ -57,11 +52,13 @@ async function runDeployCommand(
     env[key] = value
   }
 
-  const proc = Bun.spawn(['bun', 'src/cli.ts', 'keeweb', 'deploy', ...args], {
+  const proc = Bun.spawn(['bun', 'src/cli.ts', 'cliproxy', 'deploy', ...args], {
     cwd: cliDir,
     env: {
       ...env,
+      HOME: env.HOME ?? '/tmp/test-home',
       NO_COLOR: '1',
+      PATH: env.PATH ?? '/usr/bin:/bin',
       SSH_AUTH_SOCK: env.SSH_AUTH_SOCK ?? '/tmp/test-sock',
     },
     stdout: 'pipe',
@@ -77,7 +74,7 @@ async function runDeployCommand(
   return {stdout, stderr, exitCode}
 }
 
-describe('keeweb deploy', () => {
+describe('cliproxy deploy', () => {
   beforeEach(() => {
     originalEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]))
   })
@@ -86,50 +83,32 @@ describe('keeweb deploy', () => {
     restoreManagedEnv()
   })
 
-  describe('resolveDeployScriptPath', () => {
-    it('returns a string path containing deploy.sh', () => {
-      const deployScriptPath = resolveDeployScriptPath()
+  describe('resolveLocalDeployScriptPath', () => {
+    it('returns a string path containing deploy.ts', () => {
+      const deployScriptPath = resolveLocalDeployScriptPath()
 
       expect(typeof deployScriptPath).toBe('string')
-      expect(deployScriptPath).toContain('deploy.sh')
-    })
-  })
-
-  describe('resolveDistIndexPath', () => {
-    it('returns a string path ending with dist/index.html', () => {
-      const distIndexPath = resolveDistIndexPath()
-
-      expect(typeof distIndexPath).toBe('string')
-      expect(distIndexPath).toEndWith('dist/index.html')
+      expect(deployScriptPath).toContain('deploy.ts')
     })
   })
 
   describe('getLocalDeployEnv', () => {
     it('returns the expected deploy environment when required variables are present', () => {
       setManagedEnv({
+        CLIPROXY_DOMAIN: 'cliproxy.example.com',
+        CLIPROXY_MANAGEMENT_KEY: 'test-management-key',
         HOME: '/tmp/test-home',
         PATH: '/usr/bin:/bin',
         SSH_AUTH_SOCK: '/tmp/test-sock',
       })
 
       expect(getLocalDeployEnv()).toEqual({
+        CLIPROXY_DOMAIN: 'cliproxy.example.com',
+        CLIPROXY_MANAGEMENT_KEY: 'test-management-key',
         HOME: '/tmp/test-home',
-        HOST: 'box.heatvision.co',
         PATH: '/usr/bin:/bin',
-        REMOTE_USER: 'deploy-kw',
-        SITE_DIR: '/home/user-data/www/kw.igg.ms',
         SSH_AUTH_SOCK: '/tmp/test-sock',
       })
-    })
-
-    it('throws when SSH_AUTH_SOCK is missing', () => {
-      setManagedEnv({
-        HOME: '/tmp/test-home',
-        PATH: '/usr/bin:/bin',
-        SSH_AUTH_SOCK: undefined,
-      })
-
-      expect(() => getLocalDeployEnv()).toThrow(/SSH_AUTH_SOCK/)
     })
 
     it('throws when PATH is missing', () => {
@@ -140,6 +119,26 @@ describe('keeweb deploy', () => {
       })
 
       expect(() => getLocalDeployEnv()).toThrow(/PATH/)
+    })
+
+    it('throws when HOME is missing', () => {
+      setManagedEnv({
+        HOME: undefined,
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+
+      expect(() => getLocalDeployEnv()).toThrow(/HOME/)
+    })
+
+    it('throws when SSH_AUTH_SOCK is missing', () => {
+      setManagedEnv({
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: undefined,
+      })
+
+      expect(() => getLocalDeployEnv()).toThrow(/SSH_AUTH_SOCK/)
     })
   })
 
@@ -162,21 +161,21 @@ describe('keeweb deploy', () => {
   })
 
   describe('CLI flag interactions', () => {
-    it('rejects --nginx without --local', async () => {
-      const {stdout, stderr, exitCode} = await runDeployCommand(['--nginx'])
-
-      expect(exitCode).not.toBe(0)
-      expect(`${stdout}${stderr}`).toContain('only valid with --local')
-    })
-
-    it('prints the local dry-run plan without executing deploy.sh', async () => {
-      const deployScriptPath = resolveDeployScriptPath()
+    it('prints the local dry-run plan', async () => {
+      const deployScriptPath = resolveLocalDeployScriptPath()
       const {stdout, stderr, exitCode} = await runDeployCommand(['--local', '--dry-run'])
 
       expect(exitCode).toBe(0)
       expect(stderr).toBe('')
-      expect(stdout).toContain('Dry run: local KeeWeb deploy')
+      expect(stdout).toContain('Dry run: local CLIProxyAPI deploy')
       expect(stdout).toContain(deployScriptPath)
+      expect(stdout).toContain('CLIPROXY_DOMAIN=')
+    })
+
+    it('rejects invalid options with a non-zero exit code', async () => {
+      const {exitCode} = await runDeployCommand(['--bogus'])
+
+      expect(exitCode).not.toBe(0)
     })
   })
 })

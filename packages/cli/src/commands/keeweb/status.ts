@@ -1,7 +1,12 @@
 import type {goke} from 'goke'
+import type {StatusSummary} from '../status'
 
 import path from 'node:path'
 import {z} from 'zod'
+
+declare const process: {
+  exitCode?: number
+}
 
 const SITE_URL = 'https://kw.igg.ms/'
 const GH_REPO = 'marcusrbrown/infra'
@@ -190,7 +195,7 @@ export async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
 }
 
 export async function checkContentHash(verbose: boolean): Promise<CheckResult> {
-  const distIndexPath = path.resolve(import.meta.dir, '../../../../apps/keeweb/dist/index.html')
+  const distIndexPath = path.resolve(import.meta.dir, '../../../../../apps/keeweb/dist/index.html')
   const localFile = Bun.file(distIndexPath)
   const localExists = await localFile.exists()
 
@@ -257,6 +262,27 @@ function printCheckResult(result: CheckResult): void {
     for (const detail of result.details) {
       console.log(`  - ${detail}`)
     }
+  }
+}
+
+function formatCheckSummary(result: CheckResult): string {
+  return `${levelLabel(result.level)}: ${result.summary}`
+}
+
+export async function getKeewebStatusSummary(verbose: boolean): Promise<StatusSummary> {
+  const [httpResult, lastDeployResult, contentHashResult] = await Promise.all([
+    checkHttpReachability(verbose),
+    checkLastDeploy(verbose),
+    checkContentHash(verbose),
+  ])
+
+  return {
+    app: 'keeweb',
+    http: formatCheckSummary(httpResult),
+    lastDeploy: formatCheckSummary(lastDeployResult),
+    version: '—',
+    contentHash: formatCheckSummary(contentHashResult),
+    usageStats: '—',
   }
 }
 

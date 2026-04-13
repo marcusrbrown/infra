@@ -19,6 +19,9 @@ Commands:
     --dry-run                          Print planned actions without validating preconditions, executing deploy.sh, or triggering GitHub Actions. (default: false)
 
 
+  keeweb open                          Open KeeWeb in the default browser
+
+
   cliproxy status                      Show operational health of CLIProxyAPI and its management endpoints.
 
     --url [url]                        Base URL for CLIProxyAPI health checks. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
@@ -37,6 +40,7 @@ Commands:
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
     --output [file]                    Write config JSON to a file instead of stdout. File permissions set to 0600 (owner-read-only).
+    --json                             Output raw JSON instead of aligned key: value columns.
 
 
   cliproxy config set <field> <value>  Update a mutable CLIProxyAPI config field via its dedicated management endpoint.
@@ -49,6 +53,7 @@ Commands:
 
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --json                             Output raw JSON array instead of a numbered list.
 
 
   cliproxy keys add <key>              Add an API key by fetching current keys, appending the value, and replacing full key set.
@@ -66,6 +71,24 @@ Commands:
   cliproxy login <provider>            Run provider login on the remote CLIProxyAPI host and print OAuth URL output.
 
     --host [host]                      CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
+
+
+  cliproxy open                        Launch CLIProxyAPI TUI dashboard via SSH.
+
+    --host [host]                      SSH host for CLIProxyAPI server. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
+
+
+  cliproxy setup                       Interactively onboard a GitHub repository to CLIProxyAPI by creating or reusing a key and wiring the required GitHub secrets and variables.
+
+    --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
+    --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
+    --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
+
+
+  status                               Show status of all deployments
+
+    --json                             Output machine-readable JSON with keeweb and cliproxy summary objects.
+    --verbose                          Include verbose per-app health check details when building the summary rows.
 
 
   mcp                                  Start a stdio MCP server exposing all CLI commands as tools for coding agents

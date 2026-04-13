@@ -394,6 +394,15 @@ jobs:
             }}
           token: ${{ secrets.FRO_BOT_PAT }}
 
+      # Pin Node.js because Fro Bot runs `bun run lint` / `bunx tsc` which
+      # spawn eslint/tsc via #!/usr/bin/env node shebang. ubuntu-latest
+      # ships Node 20 which lacks ES2024 APIs (Object.groupBy) used by
+      # eslint-flat-config-utils 3.1.0+.
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 

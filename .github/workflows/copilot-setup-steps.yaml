@@ -33,9 +33,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
 
-      - name: Build
-        run: bun run --cwd apps/keeweb build
-
       - name: Verify environment
         run: |
           bun --version

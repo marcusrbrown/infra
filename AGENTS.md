@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-04-10
-**Commit:** 49f7d6e
+**Generated:** 2026-04-13
+**Commit:** 1331fda
 **Branch:** main
 
 ## OVERVIEW
@@ -29,9 +29,13 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Add CLI command | `packages/cli/src/commands/` | goke command module, register in cli.ts |
 | Check deploy health | `bunx @marcusrbrown/infra keeweb status` | HTTP, last deploy, content hash |
 | Trigger deploy | `bunx @marcusrbrown/infra keeweb deploy` | Remote (default) or `--local` |
+| Open KeeWeb | `bunx @marcusrbrown/infra keeweb open` | Opens in browser, fire-and-forget |
 | Check proxy health | `bunx @marcusrbrown/infra cliproxy status` | HTTP, usage stats, version |
 | Manage proxy | `bunx @marcusrbrown/infra cliproxy config|keys|login` | Management API |
 | Trigger proxy deploy | `bunx @marcusrbrown/infra cliproxy deploy` | Remote (default) or `--local` |
+| Open proxy TUI | `bunx @marcusrbrown/infra cliproxy open` | SSH + interactive TUI |
+| Onboard repo | `bunx @marcusrbrown/infra cliproxy setup` | Interactive wizard with @clack/prompts |
+| Unified status | `bunx @marcusrbrown/infra status` | All deployments, `--json` for machine output |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
 | Configure TypeScript | `tsconfig.json` | Extends `@bfra.me/tsconfig`, Bun types |
@@ -52,6 +56,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root.
 - **Changesets**: `@changesets/cli` for versioning. Renovate PRs get auto-generated changeset files.
 - **Tests**: Colocated `*.test.ts` alongside source. Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic snapshots. Mock at boundaries (fetch, Bun.spawn), not internals. CI runs `bun test --recursive` as a parallel job alongside lint/type-check.
+- **CI Node pin**: All workflows running `bun run lint` or `bunx tsc` must pin Node 24 via `actions/setup-node` — ESLint binary shebang uses system Node, which on ubuntu-latest is Node 20 (lacks ES2024 APIs like `Object.groupBy`).
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
@@ -85,9 +90,14 @@ bash apps/keeweb/deploy.sh                     # Deploy content only
 bash apps/keeweb/deploy.sh --nginx             # Deploy content + nginx config
 bunx @marcusrbrown/infra keeweb status          # Check deploy health
 bunx @marcusrbrown/infra keeweb deploy          # Trigger deploy (GitHub Actions)
-bunx @marcusrbrown/infra cliproxy status        # Check proxy health
-bunx @marcusrbrown/infra cliproxy deploy        # Trigger proxy deploy (GitHub Actions)
-bunx @marcusrbrown/infra mcp                    # Start MCP server
+bunx @marcusrbrown/infra keeweb open              # Open KeeWeb in browser
+bunx @marcusrbrown/infra cliproxy status          # Check proxy health
+bunx @marcusrbrown/infra cliproxy deploy          # Trigger proxy deploy (GitHub Actions)
+bunx @marcusrbrown/infra cliproxy open            # Open proxy TUI via SSH
+bunx @marcusrbrown/infra cliproxy setup           # Onboard repo to CLIProxyAPI
+bunx @marcusrbrown/infra status                   # Unified status (all deployments)
+bunx @marcusrbrown/infra status --json            # Machine-readable status
+bunx @marcusrbrown/infra mcp                      # Start MCP server
 bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on server
 ```
 

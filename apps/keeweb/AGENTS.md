@@ -52,6 +52,7 @@ The `packages/cli/` provides wrapper commands for keeweb operations:
 - `bunx @marcusrbrown/infra keeweb status` — HTTP check, last deploy, content hash comparison
 - `bunx @marcusrbrown/infra keeweb deploy` — triggers GitHub Actions workflow or local deploy.sh
 - `bunx @marcusrbrown/infra keeweb deploy --local` — runs deploy.sh directly (requires ssh-agent)
+- `bunx @marcusrbrown/infra keeweb open` — opens https://kw.igg.ms/ in default browser (fire-and-forget)
 
 See `packages/cli/AGENTS.md` for CLI conventions.
 
@@ -61,3 +62,4 @@ See `packages/cli/AGENTS.md` for CLI conventions.
 - Never run `deploy.sh` without building first — it validates `dist/` contents.
 - Never deploy nginx config without `--nginx` flag — content-only is the safe default.
 - `rsync` uses `--no-times --no-perms` to avoid permission errors with the deploy user.
+- In CI, `DROPBOX_APP_SECRET` must be set and non-empty — `build.ts` throws. Locally, empty secret is tolerated (Dropbox storage disabled).

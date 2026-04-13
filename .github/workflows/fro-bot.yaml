@@ -213,42 +213,43 @@ env:
        "Needs Human Attention" in the summary. Do not fail the workflow.
        Close the browser when done: `npx agent-browser close`.
 
-    7. CROSS-PROJECT PROGRESSIVE IMPROVEMENT
-       This category is strictly observation-only. Survey marcusrbrown repos
-       to identify opportunities for progressive improvement across the
-       portfolio. Use `gh` CLI for all queries.
+    7. CROSS-PROJECT INTELLIGENCE (INBOUND)
+       Survey Marcus's other repos for patterns, tooling, and conventions
+       that could improve THIS repo. The goal is inbound intelligence —
+       what can we learn from the portfolio to make infra better?
 
-       Scope: Only repos owned by marcusrbrown (not forks, not archived).
-       Run: `gh repo list marcusrbrown --no-archived --source -L 50 --json name,defaultBranchRef,pushedAt`
+       Use `gh` CLI for all queries. Observation only — never modify
+       other repos.
 
-       For each active repo (pushed within 90 days), check:
-       a. CI health: `gh run list -R marcusrbrown/{repo} -b {default_branch} -L 3 --json conclusion`
-          Flag repos with 2+ consecutive failures on the default branch.
-       b. Fro Bot workflow presence: check if `.github/workflows/fro-bot.yaml`
-          exists. Flag repos without one.
-       c. AGENTS.md presence: check if `AGENTS.md` exists at repo root.
-          Flag repos without one.
-       d. Security alerts: `gh api repos/marcusrbrown/{repo}/vulnerability-alerts`
-          Flag repos with unaddressed critical/high advisories.
-          If the API is unavailable for a repo, note "alerts unavailable"
-          and continue.
-       e. Stale PRs: `gh pr list -R marcusrbrown/{repo} --json number,title,updatedAt -L 10`
-          Flag PRs with no activity >14 days.
-       f. Action version drift: if fro-bot.yaml exists, check the
-          `fro-bot/agent@` version. Flag repos using a version older than
-          this repo's pinned version.
+       Focus repos (check these every run, update the list if repos
+       become stale or new ones become relevant):
+       - `marcusrbrown/containers` — Docker patterns, base images
+       - `marcusrbrown/sparkle` — @bfra.me config versions, monorepo patterns
+       - `marcusrbrown/gpt` — Vitest/Playwright testing, AI patterns
+       - `marcusrbrown/copiloting` — @bfra.me config versions, AI patterns
+       - `marcusrbrown/renovate-config` — Renovate preset evolution
+       - `marcusrbrown/.github` — Shared workflows, templates
 
-       Hard boundaries for this category:
+       For each focus repo, check:
+       a. @bfra.me config versions: compare eslint-config, prettier-config,
+          tsconfig versions against this repo. Flag if they're ahead.
+       b. Tooling patterns: any build/test/CI tools we don't use?
+          (e.g., Turbo, Vitest, Playwright, Biome)
+       c. Fro Bot version: compare `fro-bot/agent@` SHA if present.
+       d. CI patterns: any workflow improvements we could adopt?
+       e. New dependencies or conventions worth evaluating.
+
+       Keep findings actionable and specific to infra. Skip repos with
+       nothing notable. The list of focus repos should evolve — drop
+       repos that consistently have nothing actionable, add repos that
+       become relevant.
+
+       Hard boundaries:
        - NEVER modify other repositories. Observation only.
        - NEVER open PRs, issues, or comments in other repositories.
        - NEVER clone or check out other repositories.
        - All findings go into the summary issue in THIS repository only.
-       - If `gh` queries fail for a repo (permissions, rate limits), skip
-         it and note why.
-
-       Purpose: Create a single dashboard of portfolio health so Marcus
-       can prioritize which repos to improve next. This category drives
-       progressive improvement by surfacing drift and decay early.
+       - If `gh` queries fail for a repo, skip it and note why.
 
     Hard boundaries:
     - Never force-push, rewrite history, or delete branches.
@@ -336,10 +337,10 @@ env:
     | Security headers | ✅ Present / ⚠️ Missing | [list missing] |
     | Mobile layout (375px) | ✅ OK / ⚠️ Broken | [details] |
 
-    ### Cross-Project Health
-    | Repo | CI | Fro Bot | AGENTS.md | Alerts | Stale PRs |
-    | --- | --- | --- | --- | --- | --- |
-    | [repo] | ✅/❌ | ✅/❌ [version] | ✅/❌ | N alerts | N stale |
+    ### Cross-Project Intelligence (Inbound)
+    | Repo | Finding | Actionable for infra? | Priority |
+    | --- | --- | --- | --- |
+    | [repo] | [what they do that we don't] | [specific action or "monitor"] | High/Med/Low |
 
     ### Needs Human Attention
     - [items that could not be auto-fixed, with context]

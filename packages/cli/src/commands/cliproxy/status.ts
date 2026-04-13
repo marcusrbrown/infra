@@ -1,8 +1,12 @@
 import type {goke} from 'goke'
 import type {StatusSummary} from '../status'
 
-import process from 'node:process'
 import {z} from 'zod'
+
+declare const process: {
+  env: Record<string, string | undefined>
+  exitCode?: number
+}
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
 const HTTP_TIMEOUT_MS = 10_000

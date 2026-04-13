@@ -1,6 +1,10 @@
 import {resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 
+declare const process: {
+  env: Record<string, string | undefined>
+}
+
 const cliDir = resolve(import.meta.dir, '..')
 
 async function runCli(...args: string[]) {

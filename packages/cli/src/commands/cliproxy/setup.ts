@@ -1,0 +1,651 @@
+/// <reference types="bun" />
+
+import type {SpinnerResult} from '@clack/prompts'
+import type {goke} from 'goke'
+
+import {cancel, confirm, intro, isCancel, log, note, outro, select, spinner, text} from '@clack/prompts'
+import {z} from 'zod'
+
+import {resolveManagementKey} from './config'
+import {toStringArray} from './keys'
+
+const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
+const HTTP_TIMEOUT_MS = 10_000
+const DEFAULT_OMO_PROVIDERS = 'claude-max20'
+const DEFAULT_FRO_BOT_MODEL = 'claude-sonnet-4-6'
+
+const harnessSchema = z.enum(['opencode', 'claude-code', 'generic'])
+const ghRepoViewSchema = z.object({
+  nameWithOwner: z.string(),
+  viewerPermission: z.string(),
+})
+const ghNameListSchema = z.array(z.object({name: z.string()}))
+
+export type Harness = z.infer<typeof harnessSchema>
+
+export interface SetupOptions {
+  key?: string
+  repo?: string
+  harness?: Harness
+}
+
+export interface SecretAssignment {
+  name: string
+  value: string
+}
+
+export interface VariableAssignment {
+  name: string
+  value: string
+}
+
+export interface HarnessTemplate {
+  secrets: SecretAssignment[]
+  variables: VariableAssignment[]
+}
+
+interface GenericSecretNames {
+  apiKeySecretName: string
+  baseUrlSecretName: string
+}
+
+interface SetupPlan {
+  repo: string
+  harness: Harness
+  keyValue: string
+  keyName?: string
+  createKey: boolean
+  template: HarnessTemplate
+}
+
+interface CommandResult {
+  stdout: string
+  stderr: string
+  exitCode: number
+}
+
+function stripTrailingSlash(value: string): string {
+  return value.endsWith('/') ? value.slice(0, -1) : value
+}
+
+function resolveBaseUrl(input?: string): string {
+  return stripTrailingSlash(input ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
+}
+
+export function validateSetupOptions(options: SetupOptions, isInteractive: boolean): void {
+  if (isInteractive) {
+    return
+  }
+
+  if (!options.key) {
+    throw new Error('--key is required when stdin is not a TTY. Provide an existing CLIProxyAPI key value.')
+  }
+
+  if (!options.repo) {
+    throw new Error('--repo is required when stdin is not a TTY. Provide the target GitHub repository as owner/repo.')
+  }
+
+  if (!options.harness) {
+    throw new Error('--harness is required when stdin is not a TTY. Choose opencode or claude-code.')
+  }
+
+  if (options.harness === 'generic') {
+    throw new Error('--harness generic is interactive-only because it requires custom secret names.')
+  }
+}
+
+export function getHarnessTemplate(
+  harness: Harness,
+  values: {
+    keyValue?: string
+    baseUrl?: string
+    genericSecretNames?: GenericSecretNames
+  } = {},
+): HarnessTemplate {
+  const keyValue = values.keyValue ?? 'sk-placeholder'
+  const baseUrl = stripTrailingSlash(values.baseUrl ?? DEFAULT_CLIPROXY_URL)
+
+  if (harness === 'opencode') {
+    return {
+      secrets: [
+        {
+          name: 'OPENCODE_AUTH_JSON',
+          value: JSON.stringify({anthropic: {type: 'api', key: keyValue}}),
+        },
+        {
+          name: 'OPENCODE_CONFIG',
+          value: JSON.stringify({provider: {anthropic: {options: {baseURL: `${baseUrl}/v1`}}}}),
+        },
+        {
+          name: 'OMO_PROVIDERS',
+          value: DEFAULT_OMO_PROVIDERS,
+        },
+      ],
+      variables: [
+        {
+          name: 'FRO_BOT_MODEL',
+          value: DEFAULT_FRO_BOT_MODEL,
+        },
+      ],
+    }
+  }
+
+  if (harness === 'claude-code') {
+    return {
+      secrets: [
+        {
+          name: 'ANTHROPIC_API_KEY',
+          value: keyValue,
+        },
+      ],
+      variables: [],
+    }
+  }
+
+  if (!values.genericSecretNames) {
+    throw new Error('Generic harness requires custom secret names.')
+  }
+
+  return {
+    secrets: [
+      {name: values.genericSecretNames.apiKeySecretName, value: keyValue},
+      {name: values.genericSecretNames.baseUrlSecretName, value: `${baseUrl}/v1`},
+    ],
+    variables: [],
+  }
+}
+
+function extractErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function ensureRepoFormat(value: string): string {
+  const trimmed = value.trim()
+  if (!/^[^/\s]+\/[^/\s]+$/.test(trimmed)) {
+    throw new Error('Repository must be in owner/repo format.')
+  }
+  return trimmed
+}
+
+function ensureSecretName(value: string, label: string): string {
+  const trimmed = value.trim()
+  if (!/^[A-Z][A-Z0-9_]*$/.test(trimmed)) {
+    throw new Error(`${label} must be SCREAMING_SNAKE_CASE.`)
+  }
+  return trimmed
+}
+
+function cancelAndExit(message = 'Setup cancelled.'): never {
+  cancel(message)
+  process.exit(0)
+}
+
+async function promptValue<T extends string | boolean>(
+  promise: Promise<T | symbol>,
+  cancelMessage?: string,
+): Promise<T> {
+  const value = await promise
+  if (isCancel(value)) {
+    cancelAndExit(cancelMessage)
+  }
+  return value
+}
+
+async function withSpinner<T>(message: string, run: (spinnerInstance: SpinnerResult) => Promise<T>): Promise<T> {
+  const spinnerInstance = spinner()
+  spinnerInstance.start(message)
+
+  try {
+    const result = await run(spinnerInstance)
+    spinnerInstance.stop(message)
+    return result
+  } catch (error) {
+    spinnerInstance.error(`${message} failed`)
+    throw error
+  }
+}
+
+async function runCommand(command: string, args: string[]): Promise<CommandResult> {
+  const child = Bun.spawn([command, ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: process.env,
+  })
+
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+
+  return {stdout, stderr, exitCode}
+}
+
+async function runGh(args: string[]): Promise<CommandResult> {
+  return runCommand('gh', args)
+}
+
+async function assertGhInstalled(): Promise<void> {
+  if (!Bun.which('gh')) {
+    throw new Error('GitHub CLI is required for cliproxy setup. Install gh first: https://cli.github.com/')
+  }
+}
+
+async function assertGhAuthenticated(): Promise<void> {
+  const result = await runGh(['auth', 'status'])
+  if (result.exitCode !== 0) {
+    throw new Error(`GitHub CLI is not authenticated. Run "gh auth login" first. ${result.stderr.trim()}`.trim())
+  }
+}
+
+async function assertRepoAccess(repo: string): Promise<void> {
+  const result = await runGh(['repo', 'view', repo, '--json', 'nameWithOwner,viewerPermission'])
+  if (result.exitCode !== 0) {
+    throw new Error(`Unable to access ${repo}. ${result.stderr.trim()}`.trim())
+  }
+
+  const parsed = ghRepoViewSchema.parse(JSON.parse(result.stdout))
+  const writePermissions = new Set(['ADMIN', 'MAINTAIN', 'WRITE'])
+
+  if (!writePermissions.has(parsed.viewerPermission)) {
+    throw new Error(
+      `GitHub CLI does not have write access to ${parsed.nameWithOwner}. Current permission: ${parsed.viewerPermission}.`,
+    )
+  }
+}
+
+async function listExistingGhNames(repo: string, kind: 'secret' | 'variable'): Promise<string[]> {
+  const result = await runGh([kind, 'list', '--repo', repo, '--json', 'name'])
+  if (result.exitCode !== 0) {
+    throw new Error(`Unable to list existing GitHub ${kind}s for ${repo}. ${result.stderr.trim()}`.trim())
+  }
+
+  return ghNameListSchema.parse(JSON.parse(result.stdout)).map(entry => entry.name)
+}
+
+async function assertProxyReachable(baseUrl: string): Promise<void> {
+  const response = await fetch(baseUrl, {
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Proxy check failed for ${baseUrl}: HTTP ${response.status}. Is the proxy running and reachable?`)
+  }
+}
+
+async function assertProxyKeyWorks(baseUrl: string, keyValue: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/v1/models`, {
+    headers: {
+      authorization: `Bearer ${keyValue}`,
+    },
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`Proxy key verification failed with HTTP ${response.status}: ${body}`)
+  }
+}
+
+async function requestJson(endpoint: string, init: RequestInit): Promise<unknown> {
+  const response = await fetch(endpoint, {
+    ...init,
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`${init.method ?? 'GET'} ${endpoint} failed with HTTP ${response.status}: ${body}`)
+  }
+
+  try {
+    return await response.json()
+  } catch {
+    return null
+  }
+}
+
+function managementHeaders(key: string): Headers {
+  const headers = new Headers()
+  headers.set('x-management-key', key)
+  headers.set('content-type', 'application/json')
+  return headers
+}
+
+function buildApiKeyValue(keyName: string): string {
+  const slug = (
+    keyName
+      .trim()
+      .toLowerCase()
+      .match(/[a-z0-9]+/g) ?? []
+  )
+    .join('-')
+    .slice(0, 24)
+  const random = crypto.randomUUID().split('-').join('')
+  return `sk-${slug || 'cliproxy'}-${random}`
+}
+
+async function createManagementApiKey(baseUrl: string, managementKey: string, keyValue: string): Promise<void> {
+  const endpoint = `${baseUrl}/v0/management/api-keys`
+  const currentPayload = await requestJson(endpoint, {
+    method: 'GET',
+    headers: managementHeaders(managementKey),
+  })
+  const currentKeys = toStringArray(currentPayload)
+
+  if (currentKeys.includes(keyValue)) {
+    return
+  }
+
+  await requestJson(endpoint, {
+    method: 'PUT',
+    headers: managementHeaders(managementKey),
+    body: JSON.stringify([...currentKeys, keyValue]),
+  })
+}
+
+async function applyGhValue(kind: 'secret' | 'variable', name: string, repo: string, value: string): Promise<void> {
+  const result = await runGh([kind, 'set', name, '--repo', repo, '--body', value])
+  if (result.exitCode !== 0) {
+    throw new Error(`gh ${kind} set ${name} failed: ${result.stderr.trim()}`.trim())
+  }
+}
+
+function formatTemplateSummary(template: HarnessTemplate): string {
+  const secretLines = template.secrets.map(secret => `- secret ${secret.name}`)
+  const variableLines = template.variables.map(variable => `- variable ${variable.name}`)
+  return [...secretLines, ...variableLines].join('\n')
+}
+
+function collectCollisions(
+  template: HarnessTemplate,
+  existingSecrets: string[],
+  existingVariables: string[],
+): string[] {
+  const collisions: string[] = []
+
+  for (const secret of template.secrets) {
+    if (existingSecrets.includes(secret.name)) {
+      collisions.push(`secret ${secret.name}`)
+    }
+  }
+
+  for (const variable of template.variables) {
+    if (existingVariables.includes(variable.name)) {
+      collisions.push(`variable ${variable.name}`)
+    }
+  }
+
+  return collisions
+}
+
+async function promptGenericSecretNames(): Promise<GenericSecretNames> {
+  const apiKeySecretName = ensureSecretName(
+    await promptValue(
+      text({
+        message: 'Name for the API key secret',
+        placeholder: 'CLIPROXY_API_KEY',
+        validate: value => {
+          try {
+            ensureSecretName(value ?? '', 'API key secret name')
+            return undefined
+          } catch (error) {
+            return extractErrorMessage(error)
+          }
+        },
+      }),
+      'Setup cancelled before choosing the generic API key secret name.',
+    ),
+    'API key secret name',
+  )
+
+  const baseUrlSecretName = ensureSecretName(
+    await promptValue(
+      text({
+        message: 'Name for the proxy base URL secret',
+        placeholder: 'CLIPROXY_BASE_URL',
+        validate: value => {
+          try {
+            ensureSecretName(value ?? '', 'Base URL secret name')
+            return undefined
+          } catch (error) {
+            return extractErrorMessage(error)
+          }
+        },
+      }),
+      'Setup cancelled before choosing the generic base URL secret name.',
+    ),
+    'Base URL secret name',
+  )
+
+  return {apiKeySecretName, baseUrlSecretName}
+}
+
+async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Promise<SetupPlan> {
+  const createKey = !options.key
+  const keyName = createKey
+    ? await promptValue(
+        text({
+          message: 'Name this new CLIProxyAPI key',
+          placeholder: 'my-repo-ci',
+          validate: value => ((value ?? '').trim().length > 0 ? undefined : 'Key name is required.'),
+        }),
+        'Setup cancelled before naming the key.',
+      )
+    : undefined
+
+  const harness =
+    options.harness ??
+    (await promptValue(
+      select<Harness>({
+        message: 'Choose the harness to configure',
+        options: [
+          {value: 'opencode', label: 'OpenCode'},
+          {value: 'claude-code', label: 'Claude Code'},
+          {value: 'generic', label: 'Generic'},
+        ],
+      }),
+      'Setup cancelled before selecting a harness.',
+    ))
+
+  const repo = options.repo
+    ? ensureRepoFormat(options.repo)
+    : ensureRepoFormat(
+        await promptValue(
+          text({
+            message: 'Target GitHub repository',
+            placeholder: 'owner/repo',
+            validate: value => {
+              try {
+                ensureRepoFormat(value ?? '')
+                return undefined
+              } catch (error) {
+                return extractErrorMessage(error)
+              }
+            },
+          }),
+          'Setup cancelled before choosing a repository.',
+        ),
+      )
+
+  const keyValue = options.key ?? buildApiKeyValue(keyName ?? 'cliproxy')
+  const genericSecretNames = harness === 'generic' ? await promptGenericSecretNames() : undefined
+
+  return {
+    repo,
+    harness,
+    keyValue,
+    keyName,
+    createKey,
+    template: getHarnessTemplate(harness, {keyValue, baseUrl, genericSecretNames}),
+  }
+}
+
+function buildNonInteractivePlan(options: SetupOptions, baseUrl: string): SetupPlan {
+  const harness = harnessSchema.parse(options.harness)
+  const repo = ensureRepoFormat(options.repo ?? '')
+  const keyValue = options.key ?? ''
+
+  return {
+    repo,
+    harness,
+    keyValue,
+    createKey: false,
+    template: getHarnessTemplate(harness, {keyValue, baseUrl}),
+  }
+}
+
+export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
+  cli
+    .command(
+      'cliproxy setup',
+      'Interactively onboard a GitHub repository to CLIProxyAPI by creating or reusing a key and wiring the required GitHub secrets and variables.',
+    )
+    .option(
+      '--key [key]',
+      z
+        .string()
+        .describe(
+          'Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.',
+        ),
+    )
+    .option(
+      '--repo [repo]',
+      z.string().describe('Target GitHub repository in owner/repo format. Skips the repository prompt when provided.'),
+    )
+    .option(
+      '--harness [harness]',
+      harnessSchema.describe(
+        'Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.',
+      ),
+    )
+    .example('# Run the interactive onboarding wizard')
+    .example('infra cliproxy setup')
+    .example('# Run non-interactively with an existing key')
+    .example('infra cliproxy setup --key sk-test --repo owner/repo --harness opencode')
+    .action(async options => {
+      const interactive = Boolean(process.stdin.isTTY)
+      const baseUrl = resolveBaseUrl()
+
+      validateSetupOptions(options, interactive)
+
+      if (interactive) {
+        intro('CLIProxyAPI setup wizard')
+      }
+
+      try {
+        await withSpinner('Checking GitHub CLI availability', async () => {
+          await assertGhInstalled()
+          await assertGhAuthenticated()
+        })
+
+        await withSpinner('Checking CLIProxyAPI reachability', async () => {
+          await assertProxyReachable(baseUrl)
+        })
+
+        const plan = interactive
+          ? await buildInteractivePlan(options, baseUrl)
+          : buildNonInteractivePlan(options, baseUrl)
+
+        await withSpinner(`Checking GitHub access for ${plan.repo}`, async () => {
+          await assertRepoAccess(plan.repo)
+        })
+
+        if (options.key) {
+          log.info('Using the provided API key value directly. No new CLIProxyAPI key will be created.')
+        }
+
+        if (interactive) {
+          note(
+            [
+              `Proxy: ${baseUrl}`,
+              `Repository: ${plan.repo}`,
+              `Harness: ${plan.harness}`,
+              plan.createKey ? `New key name: ${plan.keyName}` : 'Using existing key value',
+              'GitHub values to write:',
+              formatTemplateSummary(plan.template),
+            ].join('\n'),
+            'Setup summary',
+          )
+
+          const shouldContinue = await promptValue(
+            confirm({
+              message: 'Proceed with GitHub secret and variable updates?',
+              active: 'yes',
+              inactive: 'no',
+              initialValue: true,
+            }),
+            'Setup cancelled before applying GitHub values.',
+          )
+
+          if (!shouldContinue) {
+            cancelAndExit('No changes applied.')
+          }
+        }
+
+        const [existingSecrets, existingVariables] = await Promise.all([
+          listExistingGhNames(plan.repo, 'secret'),
+          listExistingGhNames(plan.repo, 'variable'),
+        ])
+        const collisions = collectCollisions(plan.template, existingSecrets, existingVariables)
+
+        if (collisions.length > 0) {
+          if (!interactive) {
+            throw new Error(
+              `Refusing to overwrite existing GitHub values in non-interactive mode: ${collisions.join(', ')}`,
+            )
+          }
+
+          log.warn(`Existing GitHub values will be overwritten: ${collisions.join(', ')}`)
+          const overwrite = await promptValue(
+            confirm({
+              message: 'Overwrite the existing GitHub values?',
+              active: 'overwrite',
+              inactive: 'cancel',
+              initialValue: false,
+            }),
+            'Setup cancelled instead of overwriting existing values.',
+          )
+
+          if (!overwrite) {
+            cancelAndExit('Existing GitHub values left unchanged.')
+          }
+        }
+
+        if (plan.createKey) {
+          await withSpinner('Creating a new CLIProxyAPI key', async () => {
+            const managementKey = resolveManagementKey()
+            await createManagementApiKey(baseUrl, managementKey, plan.keyValue)
+          })
+        }
+
+        await withSpinner('Writing GitHub secrets and variables', async spinnerInstance => {
+          for (const secret of plan.template.secrets) {
+            spinnerInstance.message(`Setting secret ${secret.name}`)
+            await applyGhValue('secret', secret.name, plan.repo, secret.value)
+          }
+
+          for (const variable of plan.template.variables) {
+            spinnerInstance.message(`Setting variable ${variable.name}`)
+            await applyGhValue('variable', variable.name, plan.repo, variable.value)
+          }
+        })
+
+        await withSpinner('Verifying the new key through the proxy', async () => {
+          await assertProxyKeyWorks(baseUrl, plan.keyValue)
+        })
+
+        if (interactive) {
+          outro(`Setup complete for ${plan.repo}. The ${plan.harness} harness can now use ${baseUrl}/v1.`)
+        } else {
+          log.success(`Setup complete for ${plan.repo}.`)
+        }
+      } catch (error) {
+        const message = extractErrorMessage(error)
+        if (interactive) {
+          cancel(message)
+        }
+        throw error
+      }
+    })
+}

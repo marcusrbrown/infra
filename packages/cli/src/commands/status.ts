@@ -1,10 +1,13 @@
 import type {goke} from 'goke'
 
-import process from 'node:process'
 import {z} from 'zod'
 
 import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getKeewebStatusSummary} from './keeweb/status'
+
+declare const process: {
+  env: Record<string, string | undefined>
+}
 
 export interface StatusSummary {
   app: 'keeweb' | 'cliproxy'

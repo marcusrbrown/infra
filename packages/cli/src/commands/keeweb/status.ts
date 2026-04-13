@@ -2,8 +2,11 @@ import type {goke} from 'goke'
 import type {StatusSummary} from '../status'
 
 import path from 'node:path'
-import process from 'node:process'
 import {z} from 'zod'
+
+declare const process: {
+  exitCode?: number
+}
 
 const SITE_URL = 'https://kw.igg.ms/'
 const GH_REPO = 'marcusrbrown/infra'

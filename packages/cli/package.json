@@ -29,6 +29,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@clack/prompts": "^1.2.0",
     "@goke/mcp": "^0.0.9",
     "goke": "^6.3.2",
     "string-dedent": "^3.0.2",

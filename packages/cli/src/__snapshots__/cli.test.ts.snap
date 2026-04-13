@@ -78,6 +78,13 @@ Commands:
     --host [host]                      SSH host for CLIProxyAPI server. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
 
 
+  cliproxy setup                       Interactively onboard a GitHub repository to CLIProxyAPI by creating or reusing a key and wiring the required GitHub secrets and variables.
+
+    --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
+    --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
+    --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
+
+
   status                               Show status of all deployments
 
     --json                             Output machine-readable JSON with keeweb and cliproxy summary objects.

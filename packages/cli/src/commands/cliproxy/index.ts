@@ -5,6 +5,7 @@ import {registerCliproxyDeploy} from './deploy'
 import {registerCliproxyKeys} from './keys'
 import {registerCliproxyLogin} from './login'
 import {registerCliproxyOpen} from './open'
+import {registerCliproxySetup} from './setup'
 import {registerCliproxyStatus} from './status'
 
 export function registerCliproxyCommands(cli: ReturnType<typeof goke>): void {
@@ -14,4 +15,5 @@ export function registerCliproxyCommands(cli: ReturnType<typeof goke>): void {
   registerCliproxyKeys(cli)
   registerCliproxyLogin(cli)
   registerCliproxyOpen(cli)
+  registerCliproxySetup(cli)
 }

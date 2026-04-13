@@ -7,6 +7,11 @@ import {registerKeewebCommands} from './commands/keeweb'
 import {registerMcp} from './commands/mcp'
 import {registerStatus} from './commands/status'
 
+declare const process: {
+  argv: string[]
+  exit: (code?: number) => never
+}
+
 const cli = goke('infra')
 
 cli.option('--verbose', 'Enable verbose output for all commands')

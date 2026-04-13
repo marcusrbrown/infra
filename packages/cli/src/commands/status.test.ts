@@ -3,8 +3,12 @@ import {goke} from 'goke'
 
 import {registerStatus} from './status'
 
+declare const process: {
+  exitCode?: number
+}
+
 describe('top-level status command', () => {
-  let logSpy: ReturnType<typeof spyOn<typeof console, 'log'>>
+  let logSpy: {mockRestore: () => void; mock: {calls: unknown[][]}}
 
   beforeEach(() => {
     logSpy = spyOn(console, 'log').mockImplementation(() => undefined)
@@ -96,7 +100,10 @@ describe('top-level status command', () => {
 
     expect(lines).toHaveLength(1)
 
-    const parsed = JSON.parse(lines[0]!) as {
+    const [jsonOutput] = lines
+    expect(jsonOutput).toBeDefined()
+
+    const parsed = JSON.parse(jsonOutput ?? '{}') as {
       keeweb: {http: string}
       cliproxy: {version: string}
     }

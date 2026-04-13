@@ -8,11 +8,11 @@ Personal infrastructure management — deploy automation, operational CLI, and t
 
 Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
 
-| Package         | Description                                                                |
-| --------------- | -------------------------------------------------------------------------- |
-| `apps/keeweb`   | KeeWeb v1.18.7 static site deploy automation (`kw.igg.ms`)                 |
-| `apps/cliproxy` | CLIProxyAPI Docker Compose stack behind Caddy (`cliproxy.fro.bot`)         |
-| `packages/cli`  | [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) |
+| Package | Description |
+| --- | --- |
+| `apps/keeweb` | KeeWeb v1.18.7 static site deploy automation (`kw.igg.ms`) |
+| `apps/cliproxy` | CLIProxyAPI Docker Compose stack behind Caddy (`cliproxy.fro.bot`) |
+| `packages/cli` | [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI — health checks, deploy triggers, onboarding wizard, MCP bridge |
 
 ## Prerequisites
 
@@ -84,6 +84,15 @@ bun add -g @marcusrbrown/infra
 infra --help
 ```
 
+### Unified status
+
+**`infra status`** — parallel health checks for all active deployments:
+
+```bash
+bunx @marcusrbrown/infra status          # human-readable table
+bunx @marcusrbrown/infra status --json   # machine-readable JSON
+```
+
 ### KeeWeb commands
 
 **`infra keeweb status`** — operational health check (HTTP reachability, last successful deploy timestamp via GitHub Actions API, SHA-256 content hash comparison vs local `dist/`).
@@ -102,6 +111,12 @@ bunx @marcusrbrown/infra keeweb deploy --local --nginx  # include nginx config d
 ```
 
 Local deploy requires `ssh-agent` running with the deploy key loaded (`SSH_AUTH_SOCK`).
+
+**`infra keeweb open`** — open KeeWeb in the default browser (fire-and-forget, won't block the terminal):
+
+```bash
+bunx @marcusrbrown/infra keeweb open
+```
 
 ### CLIProxyAPI commands
 
@@ -143,6 +158,21 @@ bunx @marcusrbrown/infra cliproxy keys remove "fro-bot-<repo>"
 ```bash
 bunx @marcusrbrown/infra cliproxy login claude
 ```
+
+**`infra cliproxy open`** — launch the CLIProxyAPI built-in terminal dashboard via SSH (requires TTY):
+
+```bash
+bunx @marcusrbrown/infra cliproxy open
+```
+
+**`infra cliproxy setup`** — interactive onboarding wizard for connecting a new repo to CLIProxyAPI:
+
+```bash
+bunx @marcusrbrown/infra cliproxy setup                                    # interactive wizard
+bunx @marcusrbrown/infra cliproxy setup --key sk-... --repo owner/repo --harness opencode  # non-interactive
+```
+
+Generates an API key, sets `OPENCODE_AUTH_JSON` and `OPENCODE_CONFIG` secrets on the target repo, and verifies the connection.
 
 ### MCP bridge
 
@@ -242,15 +272,11 @@ Host keys for `box.heatvision.co` and `cliproxy.fro.bot` are pinned in `.github/
 │   └── src/
 │       ├── cli.ts               Entry point (goke framework)
 │       ├── cli.test.ts          CLI snapshot + discovery tests
-│       └── commands/            Command modules
-│           ├── keeweb-status.ts
-│           ├── keeweb-deploy.ts
-│           ├── cliproxy-status.ts
-│           ├── cliproxy-deploy.ts
-│           ├── cliproxy-config.ts
-│           ├── cliproxy-keys.ts
-│           ├── cliproxy-login.ts
-│           └── mcp.ts
+│       └── commands/            Command modules (subdirectory per app)
+│           ├── keeweb/          status, deploy, open + barrel
+│           ├── cliproxy/        status, deploy, config, keys, login, open, setup + barrel
+│           ├── status.ts        Unified cross-app status dashboard
+│           └── mcp.ts           MCP bridge (stdio server)
 ├── .agents/
 │   └── skills/                  Agent skill context packets (goke)
 ├── .github/
@@ -288,14 +314,15 @@ Pre-commit hook runs `lint-staged` → `eslint --fix` on staged files via `simpl
 
 ### Tooling
 
-| Tool       | Config                                                          |
-| ---------- | --------------------------------------------------------------- |
-| ESLint     | `eslint.config.ts` via `@bfra.me/eslint-config`                 |
-| Prettier   | `@bfra.me/prettier-config/120-proof`                            |
-| TypeScript | `tsconfig.json` via `@bfra.me/tsconfig`                         |
-| Git hooks  | `simple-git-hooks` + `lint-staged`                              |
-| CLI        | [goke](https://github.com/remorses/goke) + Zod Standard Schemas |
-| Changesets | `@changesets/cli` for versioning                                |
+| Tool       | Config                                                                                         |
+| ---------- | ---------------------------------------------------------------------------------------------- |
+| ESLint     | `eslint.config.ts` via `@bfra.me/eslint-config`                                                |
+| Prettier   | `@bfra.me/prettier-config/120-proof`                                                           |
+| TypeScript | `tsconfig.json` via `@bfra.me/tsconfig`                                                        |
+| Git hooks  | `simple-git-hooks` + `lint-staged`                                                             |
+| CLI        | [goke](https://github.com/remorses/goke) + Zod Standard Schemas                                |
+| Prompts    | [`@clack/prompts`](https://github.com/bombshell-dev/clack) — scoped to `cliproxy setup` wizard |
+| Changesets | `@changesets/cli` for versioning                                                               |
 
 ## License
 

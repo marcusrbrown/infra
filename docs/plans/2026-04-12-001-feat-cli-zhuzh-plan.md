@@ -1,7 +1,7 @@
 ---
 title: "feat: CLI zhuzh — structure, interactivity, and management polish"
 type: feat
-status: active
+status: completed
 date: 2026-04-12
 origin: docs/brainstorms/2026-04-07-cli-zhuzh-requirements.md
 deepened: 2026-04-12

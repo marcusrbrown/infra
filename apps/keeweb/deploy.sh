@@ -44,6 +44,10 @@ if [ "$WITH_NGINX" = true ] && [ ! -f "$DEPLOY_DIR/kw.igg.ms.conf" ]; then
     echo "ERROR: dist directory missing kw.igg.ms.conf for --nginx deploy" >&2
     exit 1
 fi
+if [ "$WITH_NGINX" = true ] && [ ! -f "$DEPLOY_DIR/kw-security-headers.conf" ]; then
+    echo "ERROR: dist directory missing kw-security-headers.conf for --nginx deploy" >&2
+    exit 1
+fi
 
 log "Deploying KeeWeb v1.18.7 to $HOST"
 
@@ -61,12 +65,14 @@ ssh "${REMOTE_USER}@${HOST}" "
 log "Uploading site files"
 rsync -rlvz --delete --no-times --no-perms \
     --exclude='kw.igg.ms.conf' \
+    --exclude='kw-security-headers.conf' \
     --exclude='.DS_Store' \
     "$DEPLOY_DIR/" "${REMOTE_USER}@${HOST}:${SITE_DIR}/"
 
 if [ "$WITH_NGINX" = true ]; then
-    log "Staging nginx config for activation"
+    log "Staging nginx config and security headers snippet for activation"
     scp "$DEPLOY_DIR/kw.igg.ms.conf" "${REMOTE_USER}@${HOST}:${STAGING_DIR}/kw.igg.ms.conf"
+    scp "$DEPLOY_DIR/kw-security-headers.conf" "${REMOTE_USER}@${HOST}:${STAGING_DIR}/kw-security-headers.conf"
 
     log "Activating site content and nginx config"
     ssh "${REMOTE_USER}@${HOST}" "sudo '$ACTIVATE_CMD' --nginx"

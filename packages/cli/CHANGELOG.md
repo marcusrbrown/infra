@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.4.2
+### Patch Changes
+
+
+- 📦 Update GitHub Actions workflow dependencies: `fro-bot/agent`, `github/codeql-action`, `github/codeql-action/upload-sarif` ([#117](https://github.com/marcusrbrown/infra/pull/117))
+
 ## 0.4.1
 ### Patch Changes
 

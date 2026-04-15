@@ -11,6 +11,8 @@ Usage:
 Commands:
   keeweb status                        Show operational health of the KeeWeb deployment
 
+    --verbose                          Enable verbose output for all commands
+
 
   keeweb deploy                        Trigger KeeWeb deployment. Default mode dispatches the GitHub Deploy workflow. Use --local to run apps/keeweb/deploy.sh directly from this repo.
 
@@ -26,6 +28,7 @@ Commands:
 
     --url [url]                        Base URL for CLIProxyAPI health checks. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --verbose                          Enable verbose output for all commands
 
 
   cliproxy deploy                      Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.

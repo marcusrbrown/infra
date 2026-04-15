@@ -23,10 +23,13 @@
     ]
   },
   "prettier": "@bfra.me/prettier-config/120-proof",
+  "dependencies": {
+    "goke": "^6.8.0"
+  },
   "devDependencies": {
-    "@bfra.me/eslint-config": "^0.50.3",
+    "@bfra.me/eslint-config": "^0.51.0",
     "@bfra.me/prettier-config": "^0.16.0",
-    "@bfra.me/tsconfig": "^0.12.0",
+    "@bfra.me/tsconfig": "^0.13.0",
     "@changesets/cli": "^2.30.0",
     "@svitejs/changesets-changelog-github-compact": "^1.2.0",
     "@types/bun": "^1.3.11",

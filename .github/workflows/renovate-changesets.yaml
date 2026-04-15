@@ -4,14 +4,40 @@ name: Renovate Changesets
 on:
   pull_request_target:
 
-permissions:
-  contents: read
-
 jobs:
   renovate-changesets:
-    if: github.actor == 'renovate[bot]' || github.actor == 'mrbro-bot[bot]'
     name: Create Renovate Changeset
-    secrets:
-      APPLICATION_ID: ${{ secrets.APPLICATION_ID }}
-      APPLICATION_PRIVATE_KEY: ${{ secrets.APPLICATION_PRIVATE_KEY }}
-    uses: bfra-me/.github/.github/workflows/renovate-changeset.yaml@06b5ae65dfda1716812439469af0729d759adedd # v4.16.5
+    runs-on: ubuntu-latest
+    if: github.actor == 'renovate[bot]' || github.actor == 'mrbro-bot[bot]'
+    steps:
+      - id: get-app-token
+        name: Get Workflow Access Token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          app-id: ${{ secrets.APPLICATION_ID }}
+          private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+
+      - name: Setup Git user
+        env:
+          GH_TOKEN: ${{ steps.get-app-token.outputs.token }}
+          GIT_USER_NAME: ${{ steps.get-app-token.outputs.app-slug }}[bot]
+        run: |
+          USER_ID=$(gh api "/users/${GIT_USER_NAME}" --jq .id)
+          git config --global user.email "${USER_ID}+${GIT_USER_NAME}@users.noreply.github.com"
+          git config --global user.name "${GIT_USER_NAME}"
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          ref: ${{ github.head_ref }}
+          token: ${{ steps.get-app-token.outputs.token }}
+
+      - name: Generate Renovate changesets
+        uses: bfra-me/.github/.github/actions/renovate-changesets@06b5ae65dfda1716812439469af0729d759adedd # renovate-changesets@0.2.31
+        with:
+          token: ${{ steps.get-app-token.outputs.token }}
+          commit-back: 'true'
+          max-retries: '3'
+          target-package: '@marcusrbrown/infra'
+          exclude-patterns: '.github/**,apps/**,bun.lock,package.json'

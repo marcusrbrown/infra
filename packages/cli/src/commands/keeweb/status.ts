@@ -287,30 +287,33 @@ export async function getKeewebStatusSummary(verbose: boolean): Promise<StatusSu
 }
 
 export function registerKeewebStatus(cli: ReturnType<typeof goke>): void {
-  cli.command('keeweb status', 'Show operational health of the KeeWeb deployment').action(async options => {
-    const verbose = options.verbose === true
+  cli
+    .command('keeweb status', 'Show operational health of the KeeWeb deployment')
+    .option('--verbose', 'Enable verbose output for all commands')
+    .action(async options => {
+      const verbose = options.verbose === true
 
-    console.log('KeeWeb status')
-    console.log('')
-
-    const results = await Promise.all([
-      checkHttpReachability(verbose),
-      checkLastDeploy(verbose),
-      checkContentHash(verbose),
-    ])
-
-    for (const result of results) {
-      printCheckResult(result)
+      console.log('KeeWeb status')
       console.log('')
-    }
 
-    const errorCount = results.filter(result => result.level === 'error').length
-    const warningCount = results.filter(result => result.level === 'warning').length
+      const results = await Promise.all([
+        checkHttpReachability(verbose),
+        checkLastDeploy(verbose),
+        checkContentHash(verbose),
+      ])
 
-    console.log(`Summary: ${results.length} checks, ${errorCount} errors, ${warningCount} warnings`)
+      for (const result of results) {
+        printCheckResult(result)
+        console.log('')
+      }
 
-    if (errorCount > 0) {
-      process.exitCode = 1
-    }
-  })
+      const errorCount = results.filter(result => result.level === 'error').length
+      const warningCount = results.filter(result => result.level === 'warning').length
+
+      console.log(`Summary: ${results.length} checks, ${errorCount} errors, ${warningCount} warnings`)
+
+      if (errorCount > 0) {
+        process.exitCode = 1
+      }
+    })
 }

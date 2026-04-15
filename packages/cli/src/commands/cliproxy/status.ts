@@ -260,6 +260,7 @@ export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
       '--key [key]',
       z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
+    .option('--verbose', 'Enable verbose output for all commands')
     .action(async options => {
       const verbose = options.verbose === true
       const baseUrl = stripTrailingSlash(options.url ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)

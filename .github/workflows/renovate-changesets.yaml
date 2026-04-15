@@ -4,19 +4,11 @@ name: Renovate Changesets
 on:
   pull_request_target:
 
-permissions:
-  contents: read
-
 jobs:
   renovate-changesets:
     name: Create Renovate Changeset
     runs-on: ubuntu-latest
-    if: >-
-      (github.actor == 'renovate[bot]' || github.actor == 'mrbro-bot[bot]') &&
-      !startsWith(github.head_ref, 'chore/update-action-pins-')
-    permissions:
-      contents: write
-      pull-requests: write
+    if: github.actor == 'renovate[bot]' || github.actor == 'mrbro-bot[bot]'
     steps:
       - id: get-app-token
         name: Get Workflow Access Token

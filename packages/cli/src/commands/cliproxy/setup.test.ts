@@ -4,12 +4,65 @@ import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 
 import {
+  analyzeFroBotWorkflow,
   getHarnessTemplate,
   registerCliproxySetup,
   validateSetupOptions,
   type SecretAssignment,
   type VariableAssignment,
 } from './setup'
+
+const COMPLETE_WORKFLOW = `      - uses: fro-bot/agent@abc123
+        with:
+          github-token: \${{ secrets.FRO_BOT_PAT }}
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          model: \${{ vars.FRO_BOT_MODEL }}
+          omo-providers: \${{ secrets.OMO_PROVIDERS }}
+          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
+          prompt: \${{ env.PROMPT }}
+`
+
+const MISSING_OPENCODE_CONFIG_WORKFLOW = `      - uses: fro-bot/agent@abc123
+        with:
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          github-token: \${{ secrets.FRO_BOT_PAT }}
+          model: \${{ vars.FRO_BOT_MODEL }}
+          omo-providers: \${{ secrets.OMO_PROVIDERS }}
+          prompt: \${{ env.PROMPT }}
+`
+
+// Regression fixture for PR #125 review: a sibling step has `model:` as an input,
+// but the fro-bot/agent step is missing it. The step-scoped scan must still flag
+// `model` as missing, otherwise the diagnostic is silently suppressed.
+const SIBLING_STEP_SHADOWS_MODEL_INPUT = `name: ci
+on: [push]
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        model: [opus, sonnet]
+    steps:
+      - uses: actions/some-ai-step@abc
+        with:
+          model: \${{ matrix.model }}
+      - name: Run Fro Bot
+        uses: fro-bot/agent@def
+        with:
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
+          omo-providers: \${{ secrets.OMO_PROVIDERS }}
+`
+
+const WORKFLOW_WITHOUT_FRO_BOT_AGENT = `name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo hello
+`
 
 describe('cliproxy setup helpers', () => {
   describe('validateSetupOptions', () => {
@@ -72,6 +125,43 @@ describe('cliproxy setup helpers', () => {
       const parsed = JSON.parse(authEntry?.value ?? '{}')
 
       expect(parsed.anthropic).toEqual({type: 'api', key: 'sk-test-key'})
+    })
+  })
+
+  describe('analyzeFroBotWorkflow', () => {
+    it('returns no missing inputs when all four are wired', () => {
+      const result = analyzeFroBotWorkflow(COMPLETE_WORKFLOW)
+
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual([])
+    })
+
+    it('detects a missing opencode-config input', () => {
+      const result = analyzeFroBotWorkflow(MISSING_OPENCODE_CONFIG_WORKFLOW)
+
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual(['opencode-config'])
+    })
+
+    it('returns all four inputs as missing for empty content', () => {
+      const result = analyzeFroBotWorkflow('')
+
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual(['auth-json', 'opencode-config', 'omo-providers', 'model'])
+    })
+
+    it('flags model as missing even when a sibling step uses model: as an input', () => {
+      const result = analyzeFroBotWorkflow(SIBLING_STEP_SHADOWS_MODEL_INPUT)
+
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual(['model'])
+    })
+
+    it('returns all inputs as missing when the workflow has no fro-bot/agent step', () => {
+      const result = analyzeFroBotWorkflow(WORKFLOW_WITHOUT_FRO_BOT_AGENT)
+
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual(['auth-json', 'opencode-config', 'omo-providers', 'model'])
     })
   })
 

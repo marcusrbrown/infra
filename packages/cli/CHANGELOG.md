@@ -1,5 +1,50 @@
 # @marcusrbrown/infra
 
+## 0.4.3
+### Patch Changes
+
+
+- `cliproxy setup --harness opencode` workflow check now handles workflows ([#133](https://github.com/marcusrbrown/infra/pull/133))
+  with multiple `fro-bot/agent` steps, reports per-step gaps with a step
+  ordinal, renders the paste snippet at the canonical 10-space indent
+  (drop-in under the `with:` key), and distinguishes four workflow states
+  via a discriminated union (`missing` / `unreachable` / `no-agent-step` /
+  `analyzed`) so the caller can't forget a case. A workflow that exists
+  but has no `fro-bot/agent` step now surfaces a dedicated warning
+  ("exists but has no `fro-bot/agent` step") instead of the generic
+  missing-input list. Observation-only — the target repo workflow is
+  never modified. Addresses Fro Bot's non-blocking concerns from the
+  PR #125 follow-up review.
+
+- Add post-setup check that warns when the target repository's ([#125](https://github.com/marcusrbrown/infra/pull/125))
+  `.github/workflows/fro-bot.yaml` is missing required Fro Bot inputs. After
+  `cliproxy setup --harness opencode` completes, the wizard fetches the
+  target repo's workflow file, locates the `fro-bot/agent` step, and
+  verifies the four required inputs (`auth-json`, `opencode-config`,
+  `omo-providers`, `model`) are wired to that specific step. Missing
+  inputs produce a warning with the exact snippet to add under the `with:`
+  block. The scan is step-scoped (not whole-file), so a same-named input
+  in a sibling step (e.g. `strategy.matrix.model:` or a custom action
+  with `model:`) cannot mask a genuine gap in `fro-bot/agent`'s wiring.
+  
+  If the workflow file is missing the check distinguishes 404 from other
+  `gh api` failures (auth, rate limit, 5xx, network): a 404 points the
+  user at `marcusrbrown/infra` as a reference template, while a non-404
+  surfaces the stderr so the user can diagnose transport issues instead
+  of chasing a missing-file red herring. Non-fatal in both cases —
+  setup itself still completes.
+  
+  Without `opencode-config` the baseURL override is ignored and Fro Bot
+  hits `api.anthropic.com` with the proxy key, which fails with 401 —
+  this check catches the gap before the user discovers it in a failed
+  run. Observation-only: the target repo's workflow is never modified.
+
+- Fix `cliproxy setup` wizard to default `FRO_BOT_MODEL` to `anthropic/claude-sonnet-4-6` ([#124](https://github.com/marcusrbrown/infra/pull/124))
+  instead of the unprefixed `claude-sonnet-4-6`. OpenCode requires provider-qualified model
+  identifiers. Added regression tests that lock in the provider prefix, the `OMO_PROVIDERS`
+  value, the `OPENCODE_CONFIG` baseURL `/v1` suffix, and the `OPENCODE_AUTH_JSON` shape so
+  the same default drift cannot recur silently.
+
 ## 0.4.2
 ### Patch Changes
 

@@ -10,6 +10,14 @@
       changelogUrl: 'https://github.com/router-for-me/CLIProxyAPI/releases',
       groupName: null,
     },
+    {
+      description: ['Add changelog context for Caddy Docker image updates'],
+      matchDatasources: ['docker'],
+      matchPackageNames: ['caddy'],
+      sourceUrl: 'https://github.com/caddyserver/caddy',
+      changelogUrl: 'https://github.com/caddyserver/caddy/releases',
+      groupName: null,
+    },
   ],
   // postUpgradeTasks run after Renovate applies file changes but before the commit.
   // For github-actions manager updates (workflow SHA pins), Renovate does NOT run

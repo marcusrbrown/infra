@@ -265,16 +265,58 @@ async function listExistingGhNames(repo: string, kind: 'secret' | 'variable'): P
 
 export interface FroBotWorkflowCheck {
   exists: boolean
+  /** Populated when exists is false AND the cause was not a 404 (e.g. auth, rate limit, 5xx). */
+  unreachableReason?: string
   missingInputs: string[]
 }
 
 const REQUIRED_OPENCODE_INPUTS = ['auth-json', 'opencode-config', 'omo-providers', 'model'] as const
 
+/**
+ * Slice the workflow content down to just the body of the step whose `uses:`
+ * starts with `fro-bot/agent@`. Handles both the `- name:\n  uses: ...` and
+ * `- uses: ...` step shapes. Returns null if no fro-bot/agent step is present.
+ *
+ * We scope the input-key scan to this slice so a same-named key in a different
+ * step (strategy matrix, custom action, reusable workflow with: block) can't
+ * mask a genuine gap in fro-bot/agent's inputs.
+ */
+function findFroBotAgentStepBody(content: string): string | null {
+  const match = content.match(/^(\s*(?:-\s+)?)uses:\s*fro-bot\/agent@/m)
+  if (!match || match.index === undefined || match[1] === undefined) return null
+
+  const stepBodyIndent = match[1].length
+  const dashIndent = Math.max(0, stepBodyIndent - 2)
+  const lines = content.slice(match.index).split('\n')
+  const stepLines: string[] = [lines[0] ?? '']
+
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? ''
+    if (!line.trim()) {
+      stepLines.push(line)
+      continue
+    }
+    const firstNonSpace = line.search(/\S/)
+    if (firstNonSpace === dashIndent && line.trimStart().startsWith('-')) break
+    if (firstNonSpace < dashIndent) break
+    stepLines.push(line)
+  }
+
+  return stepLines.join('\n')
+}
+
 export function analyzeFroBotWorkflow(workflowContent: string): FroBotWorkflowCheck {
+  const stepBody = findFroBotAgentStepBody(workflowContent)
+
+  if (stepBody === null) {
+    return {exists: true, missingInputs: [...REQUIRED_OPENCODE_INPUTS]}
+  }
+
   const missingInputs = REQUIRED_OPENCODE_INPUTS.filter(input => {
     const pattern = new RegExp(String.raw`^\s+${input}:`, 'm')
-    return !pattern.test(workflowContent)
+    return !pattern.test(stepBody)
   })
+
   return {exists: true, missingInputs}
 }
 
@@ -287,7 +329,16 @@ async function checkFroBotWorkflow(repo: string): Promise<FroBotWorkflowCheck> {
   ])
 
   if (result.exitCode !== 0) {
-    return {exists: false, missingInputs: [...REQUIRED_OPENCODE_INPUTS]}
+    // gh prints `gh: Not Found (HTTP 404)` on 404; anything else is auth/network/5xx.
+    const is404 = /HTTP 404/.test(result.stderr)
+    if (is404) {
+      return {exists: false, missingInputs: [...REQUIRED_OPENCODE_INPUTS]}
+    }
+    return {
+      exists: false,
+      unreachableReason: result.stderr.trim() || `gh api exited with code ${result.exitCode}`,
+      missingInputs: [...REQUIRED_OPENCODE_INPUTS],
+    }
   }
 
   return analyzeFroBotWorkflow(result.stdout)
@@ -740,9 +791,15 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
             })
 
             if (!workflow.exists) {
-              log.warn(
-                `No .github/workflows/fro-bot.yaml found in ${plan.repo}. The secrets and variables are set, but Fro Bot won't run until the workflow exists and passes them as inputs. See marcusrbrown/infra/.github/workflows/fro-bot.yaml for a reference.`,
-              )
+              if (workflow.unreachableReason) {
+                log.warn(
+                  `Could not check .github/workflows/fro-bot.yaml in ${plan.repo}: ${workflow.unreachableReason}. The secrets and variables are set, but the workflow wiring was not verified. Re-run 'infra cliproxy setup' later to confirm, or inspect the file directly.`,
+                )
+              } else {
+                log.warn(
+                  `No .github/workflows/fro-bot.yaml found in ${plan.repo}. The secrets and variables are set, but Fro Bot won't run until the workflow exists and passes them as inputs. See marcusrbrown/infra/.github/workflows/fro-bot.yaml for a reference.`,
+                )
+              }
             } else if (workflow.missingInputs.length > 0) {
               log.warn(
                 [

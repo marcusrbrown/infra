@@ -31,6 +31,39 @@ const MISSING_OPENCODE_CONFIG_WORKFLOW = `      - uses: fro-bot/agent@abc123
           prompt: \${{ env.PROMPT }}
 `
 
+// Regression fixture for PR #125 review: a sibling step has `model:` as an input,
+// but the fro-bot/agent step is missing it. The step-scoped scan must still flag
+// `model` as missing, otherwise the diagnostic is silently suppressed.
+const SIBLING_STEP_SHADOWS_MODEL_INPUT = `name: ci
+on: [push]
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        model: [opus, sonnet]
+    steps:
+      - uses: actions/some-ai-step@abc
+        with:
+          model: \${{ matrix.model }}
+      - name: Run Fro Bot
+        uses: fro-bot/agent@def
+        with:
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
+          omo-providers: \${{ secrets.OMO_PROVIDERS }}
+`
+
+const WORKFLOW_WITHOUT_FRO_BOT_AGENT = `name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo hello
+`
+
 describe('cliproxy setup helpers', () => {
   describe('validateSetupOptions', () => {
     it('requires --key in non-interactive mode', () => {
@@ -117,12 +150,18 @@ describe('cliproxy setup helpers', () => {
       expect(result.missingInputs).toEqual(['auth-json', 'opencode-config', 'omo-providers', 'model'])
     })
 
-    it('ignores inputs that appear only in unrelated positions (e.g. comments or text)', () => {
-      const content = `This doc mentions opencode-config but the fro-bot/agent step is missing it.`
+    it('flags model as missing even when a sibling step uses model: as an input', () => {
+      const result = analyzeFroBotWorkflow(SIBLING_STEP_SHADOWS_MODEL_INPUT)
 
-      const result = analyzeFroBotWorkflow(content)
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual(['model'])
+    })
 
-      expect(result.missingInputs).toContain('opencode-config')
+    it('returns all inputs as missing when the workflow has no fro-bot/agent step', () => {
+      const result = analyzeFroBotWorkflow(WORKFLOW_WITHOUT_FRO_BOT_AGENT)
+
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual(['auth-json', 'opencode-config', 'omo-providers', 'model'])
     })
   })
 

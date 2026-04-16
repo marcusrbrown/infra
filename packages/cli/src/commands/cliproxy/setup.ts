@@ -12,7 +12,7 @@ import {toStringArray} from './keys'
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
 const HTTP_TIMEOUT_MS = 10_000
 const DEFAULT_OMO_PROVIDERS = 'claude-max20'
-const DEFAULT_FRO_BOT_MODEL = 'claude-sonnet-4-6'
+const DEFAULT_FRO_BOT_MODEL = 'anthropic/claude-sonnet-4-6'
 
 const harnessSchema = z.enum(['opencode', 'claude-code', 'generic'])
 const ghRepoViewSchema = z.object({

@@ -4,12 +4,32 @@ import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 
 import {
+  analyzeFroBotWorkflow,
   getHarnessTemplate,
   registerCliproxySetup,
   validateSetupOptions,
   type SecretAssignment,
   type VariableAssignment,
 } from './setup'
+
+const COMPLETE_WORKFLOW = `      - uses: fro-bot/agent@abc123
+        with:
+          github-token: \${{ secrets.FRO_BOT_PAT }}
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          model: \${{ vars.FRO_BOT_MODEL }}
+          omo-providers: \${{ secrets.OMO_PROVIDERS }}
+          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
+          prompt: \${{ env.PROMPT }}
+`
+
+const MISSING_OPENCODE_CONFIG_WORKFLOW = `      - uses: fro-bot/agent@abc123
+        with:
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          github-token: \${{ secrets.FRO_BOT_PAT }}
+          model: \${{ vars.FRO_BOT_MODEL }}
+          omo-providers: \${{ secrets.OMO_PROVIDERS }}
+          prompt: \${{ env.PROMPT }}
+`
 
 describe('cliproxy setup helpers', () => {
   describe('validateSetupOptions', () => {
@@ -72,6 +92,37 @@ describe('cliproxy setup helpers', () => {
       const parsed = JSON.parse(authEntry?.value ?? '{}')
 
       expect(parsed.anthropic).toEqual({type: 'api', key: 'sk-test-key'})
+    })
+  })
+
+  describe('analyzeFroBotWorkflow', () => {
+    it('returns no missing inputs when all four are wired', () => {
+      const result = analyzeFroBotWorkflow(COMPLETE_WORKFLOW)
+
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual([])
+    })
+
+    it('detects a missing opencode-config input', () => {
+      const result = analyzeFroBotWorkflow(MISSING_OPENCODE_CONFIG_WORKFLOW)
+
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual(['opencode-config'])
+    })
+
+    it('returns all four inputs as missing for empty content', () => {
+      const result = analyzeFroBotWorkflow('')
+
+      expect(result.exists).toBe(true)
+      expect(result.missingInputs).toEqual(['auth-json', 'opencode-config', 'omo-providers', 'model'])
+    })
+
+    it('ignores inputs that appear only in unrelated positions (e.g. comments or text)', () => {
+      const content = `This doc mentions opencode-config but the fro-bot/agent step is missing it.`
+
+      const result = analyzeFroBotWorkflow(content)
+
+      expect(result.missingInputs).toContain('opencode-config')
     })
   })
 

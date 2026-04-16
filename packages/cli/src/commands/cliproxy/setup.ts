@@ -263,6 +263,48 @@ async function listExistingGhNames(repo: string, kind: 'secret' | 'variable'): P
   return ghNameListSchema.parse(JSON.parse(result.stdout)).map(entry => entry.name)
 }
 
+export interface FroBotWorkflowCheck {
+  exists: boolean
+  missingInputs: string[]
+}
+
+const REQUIRED_OPENCODE_INPUTS = ['auth-json', 'opencode-config', 'omo-providers', 'model'] as const
+
+export function analyzeFroBotWorkflow(workflowContent: string): FroBotWorkflowCheck {
+  const missingInputs = REQUIRED_OPENCODE_INPUTS.filter(input => {
+    const pattern = new RegExp(String.raw`^\s+${input}:`, 'm')
+    return !pattern.test(workflowContent)
+  })
+  return {exists: true, missingInputs}
+}
+
+async function checkFroBotWorkflow(repo: string): Promise<FroBotWorkflowCheck> {
+  const result = await runGh([
+    'api',
+    '--header',
+    'Accept: application/vnd.github.raw',
+    `/repos/${repo}/contents/.github/workflows/fro-bot.yaml`,
+  ])
+
+  if (result.exitCode !== 0) {
+    return {exists: false, missingInputs: [...REQUIRED_OPENCODE_INPUTS]}
+  }
+
+  return analyzeFroBotWorkflow(result.stdout)
+}
+
+function formatWorkflowSnippet(missingInputs: string[]): string {
+  /* eslint-disable no-template-curly-in-string -- GitHub Actions expression syntax, not JS template literals */
+  const inputMap: Record<string, string> = {
+    'auth-json': 'auth-json: ${{ secrets.OPENCODE_AUTH_JSON }}',
+    'opencode-config': 'opencode-config: ${{ secrets.OPENCODE_CONFIG }}',
+    'omo-providers': 'omo-providers: ${{ secrets.OMO_PROVIDERS }}',
+    model: 'model: ${{ vars.FRO_BOT_MODEL }}',
+  }
+  /* eslint-enable no-template-curly-in-string */
+  return missingInputs.map(input => `  ${inputMap[input]}`).join('\n')
+}
+
 async function assertProxyReachable(baseUrl: string): Promise<void> {
   try {
     const response = await fetch(baseUrl, {
@@ -691,6 +733,30 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
           await withSpinner('Verifying the new key through the proxy', async () => {
             await assertProxyKeyWorks(baseUrl, plan.keyValue)
           })
+
+          if (plan.harness === 'opencode') {
+            const workflow = await withSpinner(`Checking ${plan.repo} fro-bot.yaml wiring`, async () => {
+              return checkFroBotWorkflow(plan.repo)
+            })
+
+            if (!workflow.exists) {
+              log.warn(
+                `No .github/workflows/fro-bot.yaml found in ${plan.repo}. The secrets and variables are set, but Fro Bot won't run until the workflow exists and passes them as inputs. See marcusrbrown/infra/.github/workflows/fro-bot.yaml for a reference.`,
+              )
+            } else if (workflow.missingInputs.length > 0) {
+              log.warn(
+                [
+                  `${plan.repo} .github/workflows/fro-bot.yaml is missing ${workflow.missingInputs.length} required input${
+                    workflow.missingInputs.length > 1 ? 's' : ''
+                  } (${workflow.missingInputs.join(', ')}).`,
+                  `Without ${workflow.missingInputs.includes('opencode-config') ? 'opencode-config, the baseURL override is ignored and Fro Bot hits api.anthropic.com with the proxy key, which fails with 401' : 'these, the secrets you just wrote will not reach OpenCode'}.`,
+                  '',
+                  `Add under the 'with:' block of the 'fro-bot/agent' step:`,
+                  formatWorkflowSnippet(workflow.missingInputs),
+                ].join('\n'),
+              )
+            }
+          }
         } catch (mutationError) {
           if (keyCreatedByThisRun && managementKey) {
             try {

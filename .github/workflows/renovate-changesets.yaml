@@ -34,7 +34,7 @@ jobs:
           token: ${{ steps.get-app-token.outputs.token }}
 
       - name: Generate Renovate changesets
-        uses: bfra-me/.github/.github/actions/renovate-changesets@06b5ae65dfda1716812439469af0729d759adedd # renovate-changesets@0.2.31
+        uses: bfra-me/.github/.github/actions/renovate-changesets@bac4291f168bbc3807bd8775c6a032fcc20ddd9e # renovate-changesets@0.2.31
         with:
           token: ${{ steps.get-app-token.outputs.token }}
           commit-back: 'true'

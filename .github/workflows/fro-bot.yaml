@@ -155,17 +155,47 @@ env:
        branch. Group related lint/format/convention fixes into a single PR.
 
     5. DEPLOY PIPELINE HEALTH
-       Verify the deploy infrastructure is operational:
-       - Check the most recent Deploy workflow run on main. If it failed,
-         diagnose the root cause from logs and open an issue.
+       Verify deploy infrastructure for BOTH apps is operational.
+
+       KeeWeb:
+       - Check the most recent Deploy workflow run (deploy-keeweb job)
+         on main. If it failed, diagnose from logs and open an issue.
        - Verify kw.igg.ms is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://kw.igg.ms` should return 200.
-       - Verify the keeweb environment exists and has required secrets
-         configured (DEPLOY_SSH_KEY, DROPBOX_APP_SECRET).
-       - Check that .github/known_hosts contains valid host keys for
-         box.heatvision.co.
+       - Verify the keeweb environment exists with DEPLOY_SSH_KEY and
+         DROPBOX_APP_SECRET configured.
+       - Check .github/known_hosts contains valid host keys for
+         box.heatvision.co (ed25519, ecdsa, rsa entries).
+
+       CLIProxy:
+       - Check the most recent Deploy workflow run (deploy-cliproxy job)
+         on main. If it failed, diagnose from logs and open an issue.
+         Note: if the last cliproxy deploy succeeded, the post-deploy
+         management-key health gate (PUT /v0/management/config) passed,
+         which means the management API and the OAuth token were both
+         healthy at deploy time.
+       - Verify cliproxy.fro.bot is reachable: `curl -sf -o /dev/null -w
+         "%{http_code}" https://cliproxy.fro.bot/v1/models` should
+         return 401 (auth required) or 200 — NOT a 5xx, a connection
+         error, or a timeout. A 5xx or transport failure means the
+         proxy is down. Do not interpret 401 as a failure — it confirms
+         the proxy is up and enforcing auth.
+       - Verify the cliproxy environment exists with CLIPROXY_SSH_KEY,
+         CLIPROXY_MANAGEMENT_KEY, and CLIPROXY_DOMAIN configured.
+       - Check .github/known_hosts contains host keys for
+         cliproxy.fro.bot (both domain and droplet IP entries).
+       - Indirect OAuth signal: this autoheal workflow reaches Anthropic
+         through https://cliproxy.fro.bot/v1 using OPENCODE_AUTH_JSON. If
+         this run is executing, the OAuth token is refreshing correctly
+         right now. Scan the three most recent schedule-triggered Fro Bot
+         workflow runs on main — if any failed specifically with an
+         Anthropic 401 / invalid-api-key error (as distinct from an
+         OpenCode / Bun / network failure), flag OAuth expiry and note
+         that recovery requires manual
+         `bunx @marcusrbrown/infra cliproxy login claude`.
+
        Report findings as issues only for this category. Do NOT modify
-       deploy scripts or workflow files.
+       deploy scripts, workflow files, or the CLIProxyAPI server.
 
     6. LIVE SITE REVIEW
        Use `npx agent-browser` to verify the live KeeWeb deployment at
@@ -319,12 +349,17 @@ env:
     - [list of each PR or commit-sized fix with summary link]
 
     ### Deploy Pipeline Health
-    | Check | Status | Details |
-    | --- | --- | --- |
-    | Last deploy run | ✅ Pass / ❌ Fail | [run link] |
-    | kw.igg.ms reachable | ✅ 200 / ❌ Error | [HTTP status] |
-    | Keeweb env secrets | ✅ Set / ⚠️ Missing | [details] |
-    | Host keys valid | ✅ Current / ⚠️ Stale | [details] |
+    | App | Check | Status | Details |
+    | --- | --- | --- | --- |
+    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail | [run link] |
+    | keeweb | kw.igg.ms reachable | ✅ 200 / ❌ Error | [HTTP status] |
+    | keeweb | Env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | keeweb | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / — Skipped | [run link] |
+    | cliproxy | cliproxy.fro.bot reachable | ✅ 401/200 / ❌ 5xx/timeout | [HTTP status] |
+    | cliproxy | Env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | cliproxy | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | cliproxy | OAuth token (indirect) | ✅ Fresh / ⚠️ Recent 401s | [this run's status or prior run links] |
 
     ### Live Site Review
     | Check | Status | Details |

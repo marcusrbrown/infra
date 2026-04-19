@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.4.4
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.9.29` to `6.9.30` ([#159](https://github.com/marcusrbrown/infra/pull/159))
+
 ## 0.4.3
 ### Patch Changes
 

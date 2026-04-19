@@ -136,15 +136,11 @@ env:
        - Scan for stale TODO/FIXME/HACK annotations older than 90 days
          (use git blame). Collect them into a single issue or update an
          existing "Stale TODOs" issue.
-       - Verify convention compliance:
-         * No `as any`, `@ts-ignore`, or `@ts-expect-error` in source
-         * GitHub Actions use .yaml extension (not .yml)
-         * All actions are SHA-pinned with version comments
-         * No `secrets: inherit` with cross-org reusable workflows
-         * Only deploy.sh is bash; all other scripts are TypeScript
-         * config/config.json template has empty dropboxSecret
        - Check that AGENTS.md files accurately reflect the current
          directory structure. If drift is found, open a PR with corrections.
+         Structural convention rules (see root AGENTS.md bullets marked
+         `(enforced)`) are mechanically gated pre-merge by ESLint and
+         `packages/cli/src/conventions.test.ts`; do not re-check them here.
        Report findings but put actual code fixes into category 4.
 
     4. DEVELOPER EXPERIENCE

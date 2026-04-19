@@ -13,6 +13,23 @@ export default defineConfig(
     },
   },
   {
+    name: 'infra-conventions',
+    rules: {
+      // R1: Enforce no explicit `any` — AGENTS.md forbids `as any` and broader uses.
+      '@typescript-eslint/no-explicit-any': 'error',
+      // R2: Ban all TS directive comments outright — no description carveouts.
+      '@typescript-eslint/ban-ts-comment': [
+        'error',
+        {
+          'ts-expect-error': true,
+          'ts-ignore': true,
+          'ts-nocheck': true,
+          'ts-check': false,
+        },
+      ],
+    },
+  },
+  {
     name: 'cli-and-scripts',
     files: ['**/cli.ts', '**/build.ts', '**/setup-*.ts'],
     rules: {

@@ -47,12 +47,12 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 
 ## CONVENTIONS
 
-- **Only bash script**: `apps/keeweb/deploy.sh`. All other scripts are TypeScript run via `bun run`.
-- **GitHub Actions**: `.yaml` extension (not `.yml`). SHA-pin all actions with `# vX.Y.Z` version comment.
+- **Only bash script**: `apps/keeweb/deploy.sh`. All other scripts are TypeScript run via `bun run`. (enforced)
+- **GitHub Actions**: `.yaml` extension (not `.yml`). SHA-pin all actions with `# vX.Y.Z` version comment. (enforced)
 - **Shared configs**: `@bfra.me/eslint-config`, `@bfra.me/prettier-config/120-proof`, `@bfra.me/tsconfig`.
 - **Git hooks**: `simple-git-hooks` + `lint-staged` → `eslint --fix` on commit.
 - **CI install**: `bun install --frozen-lockfile --ignore-scripts` (skip simple-git-hooks postinstall).
-- **Cross-org reusable workflows**: Pass secrets explicitly (never `secrets: inherit` with `bfra-me/.github`).
+- **Cross-org reusable workflows**: Pass secrets explicitly (never `secrets: inherit` with `bfra-me/.github`). (enforced)
 - **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root.
 - **Changesets**: `@changesets/cli` for versioning. Renovate PRs get auto-generated changeset files.
 - **Tests**: Colocated `*.test.ts` alongside source. Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic snapshots. Mock at boundaries (fetch, Bun.spawn), not internals. CI runs `bun test --recursive` as a parallel job alongside lint/type-check.
@@ -60,13 +60,13 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
-- **No `as any` / `@ts-ignore` / `@ts-expect-error`** — fix the types.
-- **No secret values in tracked files** — `config/config.json` template has empty `dropboxSecret`; real value injected at build time from env var.
+- **No `as any` / `@ts-ignore` / `@ts-expect-error`** — fix the types. (enforced)
+- **No secret values in tracked files** — `config/config.json` template has empty `dropboxSecret`; real value injected at build time from env var. (enforced)
 - **Never modify `config/config.json` in CI** — secret goes into `dist/config.json` only.
 - **Never overwrite `config.yaml` on cliproxy server** — runtime API keys live there. Deploy skips upload when file exists; `--force-config` is the explicit override.
-- **Never use `ssh-keyscan`** — host keys pinned in `.github/known_hosts`.
-- **Never `secrets: inherit`** with cross-org reusable workflows.
-- **Never use `bundledDependencies`** — Bun's `.bun/` symlink layout creates `../../` paths that npm rejects with E415.
+- **Never use `ssh-keyscan` in CI workflows** — host keys are pinned in `.github/known_hosts`. Provisioning scripts may use `ssh-keyscan` locally; `apps/cliproxy/server/provision-droplet.ts` is the current example. (enforced)
+- **Never `secrets: inherit`** with cross-org reusable workflows. (enforced)
+- **Never use `bundledDependencies`** — Bun's `.bun/` symlink layout creates `../../` paths that npm rejects with E415. (enforced)
 
 ## UNIQUE STYLES
 

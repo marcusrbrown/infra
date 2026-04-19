@@ -216,7 +216,7 @@ describe('repo conventions', () => {
 - Test expectation: none — pure documentation edit, no behavior change.
 
 **Verification:**
-- `rg --hidden -F '(enforced)' AGENTS.md` returns exactly 9 matches — one per R1-R9 bullet. The ssh-keyscan narrowed bullet carries R6's single marker (the R6 marker *is* the one on the narrowed bullet, not an additional one).
+- `rg --hidden -F '(enforced)' AGENTS.md` returns exactly 8 matches. Mapping: R9, R7+R8 (one shared bullet), R5 convention side, R1+R2 (one shared bullet), R4, R6 (narrowed bullet), R5 anti-pattern side, R3. Every rule in R1-R9 is covered by at least one marker; R5 has two (stated in both Conventions and Anti-Patterns sections).
 - Visual diff review: the only changes are trailing `(enforced)` appends on the expected bullets and the ssh-keyscan prose narrowing.
 - Re-read root `AGENTS.md` end-to-end after edit to confirm the prose still reads naturally with markers appended.
 

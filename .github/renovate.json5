@@ -3,6 +3,13 @@
   extends: ['github>marcusrbrown/renovate-config#4.5.8', 'group:allNonMajor'],
   packageRules: [
     {
+      description: ['Disable digest updates for bfra-me GitHub Actions'],
+      matchManagers: ['github-actions'],
+      matchPackageNames: ['bfra-me/.github'],
+      matchUpdateTypes: ['digest'],
+      enabled: false,
+    },
+    {
       description: ['Add changelog context for CLIProxyAPI Docker digest updates'],
       matchDatasources: ['docker'],
       matchPackageNames: ['eceasy/cli-proxy-api'],

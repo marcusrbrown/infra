@@ -4,8 +4,8 @@ import {resolve} from 'node:path'
 import {z} from 'zod'
 
 const REPO = 'marcusrbrown/infra'
-const WORKFLOW_NAME = 'Deploy'
-const WORKFLOW_URL = 'https://github.com/marcusrbrown/infra/actions/workflows/deploy.yaml'
+const WORKFLOW_NAME = 'Deploy KeeWeb'
+const WORKFLOW_URL = 'https://github.com/marcusrbrown/infra/actions/workflows/deploy-keeweb.yaml'
 
 const DEFAULT_HOST = 'box.heatvision.co'
 const DEFAULT_REMOTE_USER = 'deploy-kw'
@@ -87,7 +87,7 @@ export function registerKeewebDeploy(cli: CliInstance): void {
   cli
     .command(
       'keeweb deploy',
-      'Trigger KeeWeb deployment. Default mode dispatches the GitHub Deploy workflow. Use --local to run apps/keeweb/deploy.sh directly from this repo.',
+      'Trigger KeeWeb deployment. Default mode dispatches the GitHub Deploy KeeWeb workflow. Use --local to run apps/keeweb/deploy.sh directly from this repo.',
     )
     .option(
       '--local',
@@ -114,7 +114,7 @@ export function registerKeewebDeploy(cli: CliInstance): void {
           'Print planned actions without validating preconditions, executing deploy.sh, or triggering GitHub Actions.',
         ),
     )
-    .example('# Trigger GitHub Deploy workflow (default mode)')
+    .example('# Trigger GitHub Deploy KeeWeb workflow (default mode)')
     .example('infra keeweb deploy')
     .example('# Preview local deploy plan without side effects')
     .example('infra keeweb deploy --local --dry-run')
@@ -170,7 +170,9 @@ export function registerKeewebDeploy(cli: CliInstance): void {
 
       validateRemotePreconditions()
 
-      console.warn('Warning: the Deploy workflow includes nginx config deployment as part of workflow_dispatch logic.')
+      console.warn(
+        'Warning: the Deploy KeeWeb workflow includes nginx config deployment as part of workflow_dispatch logic.',
+      )
       console.warn('Warning: the workflow requires keeweb environment approval before jobs execute.')
 
       const child = Bun.spawn(['gh', 'workflow', 'run', WORKFLOW_NAME, '--repo', REPO], {
@@ -180,7 +182,7 @@ export function registerKeewebDeploy(cli: CliInstance): void {
 
       const exitCode = await child.exited
       if (exitCode !== 0) {
-        throw new Error(`Failed to trigger Deploy workflow (exit code ${exitCode})`)
+        throw new Error(`Failed to trigger Deploy KeeWeb workflow (exit code ${exitCode})`)
       }
 
       console.log(`Workflow triggered: ${WORKFLOW_URL}`)

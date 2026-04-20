@@ -5,8 +5,8 @@ import {resolve} from 'node:path'
 import {z} from 'zod'
 
 const REPO = 'marcusrbrown/infra'
-const WORKFLOW_NAME = 'Deploy'
-const WORKFLOW_URL = 'https://github.com/marcusrbrown/infra/actions/workflows/deploy.yaml'
+const WORKFLOW_NAME = 'Deploy CLIProxy'
+const WORKFLOW_URL = 'https://github.com/marcusrbrown/infra/actions/workflows/deploy-cliproxy.yaml'
 
 type CliInstance = ReturnType<typeof goke>
 
@@ -66,7 +66,7 @@ export function registerCliproxyDeploy(cli: CliInstance): void {
   cli
     .command(
       'cliproxy deploy',
-      'Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.',
+      'Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy CLIProxy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.',
     )
     .option(
       '--local',

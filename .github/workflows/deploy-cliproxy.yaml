@@ -32,7 +32,6 @@ jobs:
         id: filter
         uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         with:
-          predicate-quantifier: every
           filters: |
             cliproxy:
               - 'apps/cliproxy/**'
@@ -58,6 +57,21 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Validate required secrets
+        env:
+          CLIPROXY_SSH_KEY: ${{ secrets.CLIPROXY_SSH_KEY }}
+          CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
+          CLIPROXY_DOMAIN: ${{ secrets.CLIPROXY_DOMAIN }}
+        run: |
+          missing=()
+          [[ -n "${CLIPROXY_SSH_KEY}" ]] || missing+=("CLIPROXY_SSH_KEY")
+          [[ -n "${CLIPROXY_MANAGEMENT_KEY}" ]] || missing+=("CLIPROXY_MANAGEMENT_KEY")
+          [[ -n "${CLIPROXY_DOMAIN}" ]] || missing+=("CLIPROXY_DOMAIN")
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required secret(s): ${missing[*]}"
+            exit 1
+          fi
 
       - name: Configure SSH known_hosts
         run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts

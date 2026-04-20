@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Keep deploys independent by design: one app failing should not block the other.
   deploy-keeweb:
     uses: ./.github/workflows/deploy-keeweb.yaml
     with:

@@ -191,7 +191,9 @@ Lets coding agents (Fro Bot, Copilot) call commands programmatically via the [Mo
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
 | **CI** | PRs to `main` | Lint, type check, and test |
-| **Deploy** | Push to `main`, `workflow_dispatch` | Build and deploy KeeWeb and/or CLIProxyAPI (path-filtered) |
+| **Deploy KeeWeb** | Push to `main`, `workflow_dispatch` | Build and deploy KeeWeb (path-filtered) |
+| **Deploy CLIProxy** | Push to `main`, `workflow_dispatch` | Deploy CLIProxyAPI (path-filtered) |
+| **Deploy** | `workflow_dispatch` | Manual umbrella dispatch that triggers both deploy workflows |
 | **Release** | Push to `main` | Version and publish `@marcusrbrown/infra` via Changesets |
 | **Renovate** | Schedule, issue/PR edits, post-deploy | Automated dependency updates |
 | **Renovate Changesets** | Renovate PRs | Auto-create changeset files for dependency updates |
@@ -202,12 +204,12 @@ Lets coding agents (Fro Bot, Copilot) call commands programmatically via the [Mo
 
 ### Deploy Pipeline
 
-The Deploy workflow uses `dorny/paths-filter` to detect changes under `apps/keeweb/**` and `apps/cliproxy/**` (docs, tests, fixtures, and snapshots are excluded from the filter). Each app has a dedicated job gated by the matching sub-filter and GitHub Environment approval.
+`Deploy KeeWeb` and `Deploy CLIProxy` use `dorny/paths-filter` to deploy only when app files change (docs, tests, fixtures, and snapshots are excluded from the filter). Each deploy runs in its own GitHub Environment and requires approval.
 
-- **`deploy-keeweb`** runs in the `keeweb` environment and requires approval.
-- **`deploy-cliproxy`** runs in the `cliproxy` environment and requires approval.
+- **Deploy KeeWeb** runs in the `keeweb` environment.
+- **Deploy CLIProxy** runs in the `cliproxy` environment.
 
-Manual deploys are available via `workflow_dispatch` and trigger both jobs.
+Manual deploys are available either per-app (`workflow_dispatch` on each dedicated workflow) or together via the umbrella `Deploy` workflow.
 
 ### Required Secrets
 

@@ -116,7 +116,7 @@ export async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
         'gh',
         'run',
         'list',
-        '--workflow=Deploy',
+        '--workflow=Deploy KeeWeb',
         '--status=success',
         '--limit=1',
         '--json',
@@ -164,7 +164,7 @@ export async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
       return {
         title: 'Last successful deploy',
         level: 'warning',
-        summary: 'No successful Deploy workflow runs found',
+        summary: 'No successful Deploy KeeWeb workflow runs found',
       }
     }
 

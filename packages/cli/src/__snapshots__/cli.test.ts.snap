@@ -14,7 +14,7 @@ Commands:
     --verbose                          Enable verbose output for all commands
 
 
-  keeweb deploy                        Trigger KeeWeb deployment. Default mode dispatches the GitHub Deploy workflow. Use --local to run apps/keeweb/deploy.sh directly from this repo.
+  keeweb deploy                        Trigger KeeWeb deployment. Default mode dispatches the GitHub Deploy KeeWeb workflow. Use --local to run apps/keeweb/deploy.sh directly from this repo.
 
     --local                            Run local deployment using apps/keeweb/deploy.sh instead of triggering GitHub Actions. (default: false)
     --nginx                            Include nginx config deployment. Valid only with --local and passed through to deploy.sh as --nginx. (default: false)
@@ -31,7 +31,7 @@ Commands:
     --verbose                          Enable verbose output for all commands
 
 
-  cliproxy deploy                      Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.
+  cliproxy deploy                      Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy CLIProxy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.
 
     --local                            Run local deployment with Bun using apps/cliproxy/src/deploy.ts instead of triggering GitHub Actions. (default: false)
     --force-config                     Force upload config.yaml even if it exists on the server. WARNING: overwrites runtime API keys and settings. (default: false)

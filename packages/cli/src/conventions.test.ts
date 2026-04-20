@@ -71,13 +71,13 @@ export function findCrossOrgSecretsInherit(parsed: unknown): {jobId: string; use
   return violations
 }
 
-describe('repo conventions (v1)', () => {
+describe('repo conventions', () => {
   it('tripwire: workflow glob resolves to at least one file (catches dot-dir glob regressions)', () => {
     const workflows = listWorkflowFiles('.yaml')
     expect(workflows.length).toBeGreaterThan(0)
   })
 
-  it('R3: no `bundledDependencies` in any package.json', async () => {
+  it('no `bundledDependencies` in any package.json', async () => {
     const files = listPackageJsonFiles()
     const offenders: string[] = []
     for (const file of files) {
@@ -89,7 +89,7 @@ describe('repo conventions (v1)', () => {
     expect(offenders).toEqual([])
   })
 
-  it("R4: apps/keeweb/config/config.json has settings.dropboxSecret === ''", async () => {
+  it("apps/keeweb/config/config.json has settings.dropboxSecret === ''", async () => {
     const configPath = resolve(REPO_ROOT, 'apps/keeweb/config/config.json')
     const config = (await Bun.file(configPath).json()) as {
       settings?: {dropboxSecret?: unknown}
@@ -97,7 +97,7 @@ describe('repo conventions (v1)', () => {
     expect(config.settings?.dropboxSecret).toBe('')
   })
 
-  it('R5: no `secrets: inherit` on any job whose `uses:` points to a cross-org workflow', async () => {
+  it('no `secrets: inherit` on any job whose `uses:` points to a cross-org workflow', async () => {
     const files = listWorkflowFiles('.yaml')
     const violations: Violation[] = []
     for (const file of files) {
@@ -113,7 +113,7 @@ describe('repo conventions (v1)', () => {
     expect(violations).toEqual([])
   })
 
-  it('R6: no `ssh-keyscan` under .github/workflows/**', async () => {
+  it('no `ssh-keyscan` under .github/workflows/**', async () => {
     const files = listWorkflowFiles('.yaml')
     const violations: Violation[] = []
     for (const file of files) {
@@ -131,7 +131,7 @@ describe('repo conventions (v1)', () => {
     expect(violations).toEqual([])
   })
 
-  it('R7: every `uses: …@<sha>` has a trailing `# vX.Y.Z` or `# scope@X.Y.Z` comment', async () => {
+  it('every SHA-pinned `uses:` line has a trailing `# vX.Y.Z` or `# scope@X.Y.Z` comment', async () => {
     const files = listWorkflowFiles('.yaml')
     const violations: Violation[] = []
     for (const file of files) {
@@ -158,12 +158,12 @@ describe('repo conventions (v1)', () => {
     expect(violations).toEqual([])
   })
 
-  it('R8: no `.yml` files under .github/workflows/ (use `.yaml`)', () => {
+  it('no `.yml` files under .github/workflows/ (use `.yaml`)', () => {
     const files = listWorkflowFiles('.yml')
     expect(files.map(f => relative(REPO_ROOT, f))).toEqual([])
   })
 
-  it('R9: no `.sh` files outside `apps/keeweb/deploy.sh`', () => {
+  it('no `.sh` files outside `apps/keeweb/deploy.sh`', () => {
     const files = listShellScriptFiles()
     const offenders = files.map(f => relative(REPO_ROOT, f)).filter(f => !ALLOWED_SHELL_SCRIPTS.has(f))
     expect(offenders).toEqual([])

@@ -15,9 +15,9 @@ export default defineConfig(
   {
     name: 'infra-conventions',
     rules: {
-      // R1: Enforce no explicit `any` — AGENTS.md forbids `as any` and broader uses.
+      // AGENTS.md: forbid explicit `any` / `as any` — fix the types.
       '@typescript-eslint/no-explicit-any': 'error',
-      // R2: Ban all TS directive comments outright — no description carveouts.
+      // AGENTS.md: ban all TS directive comments — fix the types, do not suppress errors.
       '@typescript-eslint/ban-ts-comment': [
         'error',
         {

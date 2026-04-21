@@ -170,6 +170,89 @@ describe('repo conventions', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// (enforced) marker drift detection
+// ---------------------------------------------------------------------------
+//
+// Every bullet in AGENTS.md tagged `(enforced)` must map to a known
+// enforcement mechanism (test or ESLint rule). Adding `(enforced)` without
+// backing enforcement, or deleting the enforcement while keeping the marker,
+// both cause a test failure here.
+//
+// Manifest keys are unique substrings of the AGENTS.md bullet text.
+// Values describe where the enforcement lives — they are documentation only.
+const ENFORCED_MANIFEST: Record<string, string> = {
+  'Only bash script': 'conventions.test.ts: no .sh files outside apps/keeweb/deploy.sh',
+  'GitHub Actions': 'conventions.test.ts: .yaml extension + SHA-pin version comment',
+  'Cross-org reusable workflows': 'conventions.test.ts: no secrets: inherit on cross-org jobs',
+  'as any': 'eslint.config.ts: @typescript-eslint/no-explicit-any + ban-ts-comment at error',
+  'No secret values in tracked files': 'conventions.test.ts: settings.dropboxSecret === empty string',
+  'ssh-keyscan': 'conventions.test.ts: no ssh-keyscan under .github/workflows/**',
+  'Never `secrets: inherit`': 'conventions.test.ts: no secrets: inherit on cross-org jobs',
+  bundledDependencies: 'conventions.test.ts: no bundledDependencies in any package.json',
+}
+
+describe('(enforced) marker drift', () => {
+  it('every (enforced) bullet in AGENTS.md is accounted for in the enforcement manifest', async () => {
+    const agentsMd = await Bun.file(resolve(REPO_ROOT, 'AGENTS.md')).text()
+    const enforcedLines = agentsMd.split(/\r?\n/).filter((l: string) => /\(enforced\)/.test(l))
+
+    // Tripwire — if the grep logic breaks, the whole suite silently passes with 0 checks
+    expect(enforcedLines.length).toBeGreaterThan(0)
+
+    const unmatched = enforcedLines.filter(
+      (line: string) => !Object.keys(ENFORCED_MANIFEST).some((key: string) => line.includes(key)),
+    )
+    expect(unmatched, 'New (enforced) bullet has no manifest entry — add enforcement before tagging').toEqual([])
+  })
+
+  it('every manifest entry corresponds to an actual (enforced) bullet in AGENTS.md', async () => {
+    const agentsMd = await Bun.file(resolve(REPO_ROOT, 'AGENTS.md')).text()
+    const enforcedLines = agentsMd.split(/\r?\n/).filter((l: string) => /\(enforced\)/.test(l))
+
+    const stale = Object.keys(ENFORCED_MANIFEST).filter(
+      (key: string) => !enforcedLines.some((l: string) => l.includes(key)),
+    )
+    expect(stale, 'Manifest entry has no matching (enforced) bullet in AGENTS.md — remove or update').toEqual([])
+  })
+
+  it('@typescript-eslint/no-explicit-any is configured at error severity in eslint.config.ts', async () => {
+    const eslintConfig = await Bun.file(resolve(REPO_ROOT, 'eslint.config.ts')).text()
+    // Matches: '@typescript-eslint/no-explicit-any': 'error'
+    expect(eslintConfig).toMatch(/'@typescript-eslint\/no-explicit-any'\s*:\s*'error'/)
+  })
+
+  it('@typescript-eslint/ban-ts-comment is configured in eslint.config.ts', async () => {
+    const eslintConfig = await Bun.file(resolve(REPO_ROOT, 'eslint.config.ts')).text()
+    expect(eslintConfig).toContain('@typescript-eslint/ban-ts-comment')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Per-app invariants
+// ---------------------------------------------------------------------------
+//
+// Guard that critical safety mechanisms in each app are not accidentally
+// removed. These are the runtime equivalents of (enforced) markers: code that
+// must remain present for the documented behaviour to hold.
+
+describe('per-app invariants', () => {
+  it('cliproxy deploy.ts guards config.yaml upload with a remoteFileExists() check', async () => {
+    const deployTs = await Bun.file(resolve(REPO_ROOT, 'apps/cliproxy/src/deploy.ts')).text()
+    // The guard: remoteFileExists(host, `${REMOTE_DIR}/config/config.yaml`, env)
+    // This prevents overwriting runtime API keys on the server.
+    expect(deployTs).toContain('remoteFileExists')
+    expect(deployTs).toContain('config.yaml')
+  })
+
+  it('keeweb build.ts defines an EXPECTED_SHA256 constant for archive integrity', async () => {
+    const buildTs = await Bun.file(resolve(REPO_ROOT, 'apps/keeweb/src/build.ts')).text()
+    // EXPECTED_SHA256 is the KeeWeb release zip checksum; its presence proves
+    // SHA verification is wired in and was not accidentally stripped.
+    expect(buildTs).toMatch(/const\s+EXPECTED_SHA256\s*=/)
+  })
+})
+
 describe('findCrossOrgSecretsInherit', () => {
   it('flags a cross-org reusable workflow that uses `secrets: inherit`', () => {
     const parsed = parseYaml(`

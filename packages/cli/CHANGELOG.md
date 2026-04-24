@@ -1,5 +1,20 @@
 # @marcusrbrown/infra
 
+## 0.4.5
+### Patch Changes
+
+
+- Handle GitHub API rate limit errors in `cliproxy setup` wizard — all `gh` CLI calls now retry with a user-confirm prompt (interactive) or re-throw with reset time (non-interactive) instead of failing immediately. ([#176](https://github.com/marcusrbrown/infra/pull/176))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.9.34` to `6.9.35` ([#175](https://github.com/marcusrbrown/infra/pull/175))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.9.31` to `6.9.34` ([#172](https://github.com/marcusrbrown/infra/pull/172))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.9.30` to `6.9.31` ([#169](https://github.com/marcusrbrown/infra/pull/169))
+
 ## 0.4.4
 ### Patch Changes
 

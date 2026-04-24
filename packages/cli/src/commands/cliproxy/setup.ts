@@ -225,6 +225,75 @@ async function runGh(args: string[]): Promise<CommandResult> {
   return runCommand('gh', args)
 }
 
+export function isGhRateLimitError(text: string): boolean {
+  return /rate limit/i.test(text)
+}
+
+/**
+ * Query the GitHub API rate limit reset time. The `rate_limit` endpoint is
+ * exempt from rate limiting itself, so this should succeed even when the
+ * primary GraphQL limit is exhausted. Returns a formatted local time string
+ * or a fallback phrase when the endpoint is unreachable.
+ */
+async function queryRateLimitReset(): Promise<string> {
+  try {
+    const result = await runGh(['api', 'rate_limit'])
+    if (result.exitCode === 0) {
+      const parsed = JSON.parse(result.stdout) as {
+        resources?: {graphql?: {reset?: number}; core?: {reset?: number}}
+      }
+      const reset = parsed.resources?.graphql?.reset ?? parsed.resources?.core?.reset
+      if (reset) {
+        return new Date(reset * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
+      }
+    }
+  } catch {
+    // Fall through to generic phrase
+  }
+  return 'an unknown time'
+}
+
+/**
+ * Run a GitHub API operation wrapped in a spinner, retrying indefinitely on
+ * rate-limit errors when in interactive mode. In non-interactive mode the
+ * error is re-thrown with the reset time appended so the caller can surface
+ * it without prompting.
+ */
+export async function withGhRetry<T>(
+  label: string,
+  fn: (spinnerInstance: SpinnerResult) => Promise<T>,
+  interactive: boolean,
+  queryReset: () => Promise<string> = queryRateLimitReset,
+): Promise<T> {
+  for (;;) {
+    try {
+      return await withSpinner(label, fn)
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      if (!isGhRateLimitError(message)) {
+        throw error
+      }
+      const reset = await queryReset()
+      if (!interactive) {
+        throw new Error(`${message} — GitHub API rate limit resets at ${reset}. Re-run when ready.`)
+      }
+      log.warn(`GitHub API rate limit exceeded. Resets at ${reset}.`)
+      const retry = await promptValue(
+        confirm({
+          message: 'Retry this step when ready?',
+          active: 'retry',
+          inactive: 'abort',
+          initialValue: true,
+        }),
+        'Setup aborted after rate limit.',
+      )
+      if (!retry) {
+        cancelAndExit('Setup aborted after GitHub API rate limit.')
+      }
+    }
+  }
+}
+
 async function assertGhInstalled(): Promise<void> {
   if (!Bun.which('gh')) {
     throw new Error('GitHub CLI is required for cliproxy setup. Install gh first: https://cli.github.com/')
@@ -720,9 +789,13 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
           resolveManagementKey()
         }
 
-        await withSpinner(`Checking GitHub access for ${plan.repo}`, async () => {
-          await assertRepoAccess(plan.repo)
-        })
+        await withGhRetry(
+          `Checking GitHub access for ${plan.repo}`,
+          async () => {
+            await assertRepoAccess(plan.repo)
+          },
+          interactive,
+        )
 
         if (options.key) {
           log.info('Using the provided API key value directly. No new CLIProxyAPI key will be created.')
@@ -756,10 +829,12 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
           }
         }
 
-        const [existingSecrets, existingVariables] = await Promise.all([
-          listExistingGhNames(plan.repo, 'secret'),
-          listExistingGhNames(plan.repo, 'variable'),
-        ])
+        const [existingSecrets, existingVariables] = await withGhRetry(
+          'Checking existing GitHub secrets and variables',
+          async () =>
+            Promise.all([listExistingGhNames(plan.repo, 'secret'), listExistingGhNames(plan.repo, 'variable')]),
+          interactive,
+        )
         const collisions = collectCollisions(plan.template, existingSecrets, existingVariables)
 
         if (collisions.length > 0) {
@@ -796,26 +871,34 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
         }
 
         try {
-          await withSpinner('Writing GitHub secrets and variables', async spinnerInstance => {
-            for (const secret of plan.template.secrets) {
-              spinnerInstance.message(`Setting secret ${secret.name}`)
-              await applyGhValue('secret', secret.name, plan.repo, secret.value)
-            }
+          await withGhRetry(
+            'Writing GitHub secrets and variables',
+            async spinnerInstance => {
+              for (const secret of plan.template.secrets) {
+                spinnerInstance.message(`Setting secret ${secret.name}`)
+                await applyGhValue('secret', secret.name, plan.repo, secret.value)
+              }
 
-            for (const variable of plan.template.variables) {
-              spinnerInstance.message(`Setting variable ${variable.name}`)
-              await applyGhValue('variable', variable.name, plan.repo, variable.value)
-            }
-          })
+              for (const variable of plan.template.variables) {
+                spinnerInstance.message(`Setting variable ${variable.name}`)
+                await applyGhValue('variable', variable.name, plan.repo, variable.value)
+              }
+            },
+            interactive,
+          )
 
           await withSpinner('Verifying the new key through the proxy', async () => {
             await assertProxyKeyWorks(baseUrl, plan.keyValue)
           })
 
           if (plan.harness === 'opencode') {
-            const workflow = await withSpinner(`Checking ${plan.repo} fro-bot.yaml wiring`, async () => {
-              return checkFroBotWorkflow(plan.repo)
-            })
+            const workflow = await withGhRetry(
+              `Checking ${plan.repo} fro-bot.yaml wiring`,
+              async () => {
+                return checkFroBotWorkflow(plan.repo)
+              },
+              interactive,
+            )
 
             switch (workflow.kind) {
               case 'missing': {

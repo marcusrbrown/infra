@@ -7,7 +7,7 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 | Task | Location | Notes |
 | --- | --- | --- |
 | Config templates | `config/config.yaml`, `config/Caddyfile` | Server template — runtime keys live on the droplet |
-| Docker stack | `docker-compose.yaml` | Caddy + cli-proxy-api, restart: unless-stopped, healthcheck on root |
+| Docker stack | `docker-compose.yaml` | Caddy + cli-proxy-api, restart: unless-stopped, healthcheck on `/healthz` |
 | Provision droplet | `server/provision-droplet.ts` | One-time. Refuses re-run on existing droplet without `--force` |
 | Deploy updates | `src/deploy.ts` | Preserves `config.yaml`, preflight management key check |
 | CLI commands | `packages/cli/src/commands/cliproxy/` | See packages/cli/AGENTS.md for command pattern |
@@ -24,7 +24,7 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 ## DOCKER STACK
 
 - **Caddy**: HTTPS termination, auto Let's Encrypt. `restart: unless-stopped`.
-- **cli-proxy-api**: `eceasy/cli-proxy-api` (pinned digest, Renovate-managed). Alpine 3.22 base. `restart: unless-stopped`. Healthcheck: `wget --spider -q http://localhost:8317/` (root `/` returns 200; `wget` is available, `curl` is not).
+- **cli-proxy-api**: `eceasy/cli-proxy-api` (pinned digest, Renovate-managed). Alpine 3.22 base. `restart: unless-stopped`. Healthcheck: `wget --spider -q http://localhost:8317/healthz` (purpose-built liveness endpoint, available since v6.9.31; `wget` is in the base, `curl` is not).
 - **Volumes**: `caddy_data`, `caddy_config`, `cliproxy_auth` (OAuth tokens persist here across container recreates).
 - **Env file**: `MANAGEMENT_PASSWORD` injected from host `.env` into the container.
 

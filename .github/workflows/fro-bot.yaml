@@ -277,6 +277,75 @@ env:
        - All findings go into the summary issue in THIS repository only.
        - If `gh` queries fail for a repo, skip it and note why.
 
+    8. UPSTREAM MODERNIZATION WATCH
+       Track release notes of pinned upstream dependencies and identify
+       config or feature opportunities we have not yet adopted. The goal
+       is to keep our deployment current with upstream evolution without
+       chasing every release.
+
+       Cadence: run this category fully on Sundays UTC, and whenever
+       manually dispatched via workflow_dispatch with empty or omitted
+       prompt. On other days, skip with no output and omit the
+       corresponding section from the daily summary.
+
+       Pinned upstreams to review:
+       - `eceasy/cli-proxy-api` in apps/cliproxy/docker-compose.yaml
+         → upstream repo: router-for-me/CLIProxyAPI
+       - `caddy` in apps/cliproxy/docker-compose.yaml
+         → upstream repo: caddyserver/caddy
+       - `fro-bot/agent` in .github/workflows/fro-bot.yaml
+       - `bfra-me/.github` action set referenced from
+         renovate.yaml, renovate-changesets.yaml,
+         update-repo-settings.yaml
+
+       For each upstream, in order:
+       a. Parse the workflow or compose file to extract the currently
+          pinned version (semver tag preferred; fall back to digest).
+       b. List GitHub releases newer than the pinned version via
+          `gh api repos/<owner>/<repo>/releases`.
+       c. Read each release body. Filter for changes that touch:
+          - new config keys we could enable
+          - new endpoints, healthchecks, or operational hooks
+          - new sidecars or services that materially improve operations
+          - security or hardening features with config knobs
+          - default behavior changes that affect us
+       d. Skip provider-specific changes for products we do not use.
+          For CLIProxyAPI specifically, skip Codex, Gemini, OpenAI,
+          Vertex, Antigravity, Kimi, Qwen, and GPT-5.x changes — we use
+          Claude only.
+
+       Output: file findings under a single tracking issue titled
+       "Upstream Modernization Watch — YYYY-MM-DD" (using the most
+       recent Sunday UTC date as YYYY-MM-DD). If an open issue with the
+       prefix "Upstream Modernization Watch —" already exists, update
+       its body in place rather than creating a new issue. Close the
+       prior issue only if the new scan finds no actionable items and
+       the prior issue's recommendations were all merged (verify via
+       commit history, not issue comments).
+
+       Action policy:
+       - For mechanical, low-risk changes that touch only
+         apps/<app>/docker-compose.yaml, apps/<app>/config/*, or
+         AGENTS.md files (NOT workflow or build-config files), open a
+         draft PR titled "feat(<app>): adopt <feature> from <upstream>
+         <version>". Link the PR from the tracking issue.
+       - For changes that would touch .github/workflows/, lint/test/
+         build config, or any file gated by the global hard boundary,
+         document in the tracking issue only — never open a PR.
+       - For subjective or multi-option changes (sidecar adoption,
+         model selection, optional config tradeoffs), document in the
+         tracking issue only.
+       - At most one draft PR per scan. Batch multiple low-risk
+         mechanical changes into the single PR.
+
+       Hard boundaries:
+       - NEVER bump pinned versions in this category. Renovate owns
+         version bumps. Adopt new config or features only at the
+         version we are already on or above.
+       - NEVER modify upstream repositories.
+       - If a release-notes API call fails for an upstream, skip it
+         and note "release notes unreachable" in the tracking issue.
+
     Hard boundaries:
     - Never force-push, rewrite history, or delete branches.
     - Never push directly to the default branch. Direct pushes are allowed
@@ -372,6 +441,11 @@ env:
     | Repo | Finding | Actionable for infra? | Priority |
     | --- | --- | --- | --- |
     | [repo] | [what they do that we don't] | [specific action or "monitor"] | High/Med/Low |
+
+    ### Upstream Modernization Watch
+    [Sunday-only section. On Sundays UTC, link to the tracking issue
+    if findings exist, or write "Scan clean" if no actionable items.
+    On other days, omit this entire section from the daily summary.]
 
     ### Needs Human Attention
     - [items that could not be auto-fixed, with context]

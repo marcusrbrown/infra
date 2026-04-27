@@ -294,9 +294,11 @@ env:
        - `caddy` in apps/cliproxy/docker-compose.yaml
          → upstream repo: caddyserver/caddy
        - `fro-bot/agent` in .github/workflows/fro-bot.yaml
+         → upstream repo: fro-bot/agent
        - `bfra-me/.github` action set referenced from
          renovate.yaml, renovate-changesets.yaml,
          update-repo-settings.yaml
+         → upstream repo: bfra-me/.github
 
        For each upstream, in order:
        a. Parse the workflow or compose file to extract the currently
@@ -369,6 +371,8 @@ env:
     - Site review (category 6) is observation-only: create issues, never
       push fixes for visual or functional findings.
     - Cross-project monitoring (category 7) MUST NOT modify other repos.
+    - Upstream modernization watch (category 8) MUST NOT bump pinned versions
+      (Renovate-owned) or modify upstream repositories.
     - Do not create multiple summary issues.
 
     Project conventions (MUST follow for code changes):

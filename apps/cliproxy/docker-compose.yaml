@@ -14,7 +14,7 @@ services:
       - ./config/Caddyfile:/etc/caddy/Caddyfile
 
   cli-proxy-api:
-    image: eceasy/cli-proxy-api:v6.10.4@sha256:6343bb2c034f5c00f57b0d8dd4b3ebd5dce3fd849f74732811e40b38da43f0ba
+    image: eceasy/cli-proxy-api:v6.10.6@sha256:f593b68cb242ae85fb8fb93d60f386b0dc741e2ae271bd507d41162521f39fb7
     restart: unless-stopped
     env_file:
       - path: .env

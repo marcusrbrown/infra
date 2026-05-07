@@ -1,5 +1,35 @@
 # @marcusrbrown/infra
 
+## 0.4.8
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.10.2` to `6.10.4` ([#216](https://github.com/marcusrbrown/infra/pull/216))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.10.1` to `6.10.2` ([#215](https://github.com/marcusrbrown/infra/pull/215))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.9.45` to `6.9.47` ([#204](https://github.com/marcusrbrown/infra/pull/204))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.9.49` to `6.10.0` ([#208](https://github.com/marcusrbrown/infra/pull/208))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.10.0` to `6.10.1` ([#211](https://github.com/marcusrbrown/infra/pull/211))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.9.47` to `6.9.49` ([#207](https://github.com/marcusrbrown/infra/pull/207))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.10.4` to `6.10.6` ([#219](https://github.com/marcusrbrown/infra/pull/219))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.10.8` to `6.10.9` ([#225](https://github.com/marcusrbrown/infra/pull/225))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `6.10.6` to `6.10.8` ([#220](https://github.com/marcusrbrown/infra/pull/220))
+
 ## 0.4.7
 ### Patch Changes
 

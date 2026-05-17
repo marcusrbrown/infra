@@ -1,13 +1,17 @@
 ---
 title: "feat: Add CLIProxyAPI deployment and management"
 type: feat
-status: active
+status: completed
 date: 2026-04-03
 deepened: 2026-04-03
+completed: 2026-04-06
 origin: docs/brainstorms/2026-04-03-cliproxy-deployment-requirements.md
 ---
 
 # feat: Add CLIProxyAPI deployment and management
+
+> **Status note (reconciled 2026-05-18):** All 8 units shipped through PR #23 (initial 8-unit implementation) followed by remediation PRs #37 (CLIPROXY_HOST → CLIPROXY_DOMAIN), #38 (pinned host keys), #39 (auth-dir config). First successful deploy on 2026-04-06; documented in `docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md`. Subsequent stability/feature work is tracked in `docs/plans/2026-04-07-001-fix-cliproxy-stability-hardening-plan.md` and the CLI zhuzh plan; do not extend this plan further.
+
 
 ## Overview
 

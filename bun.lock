@@ -10,7 +10,7 @@
       "devDependencies": {
         "@bfra.me/eslint-config": "^0.51.0",
         "@bfra.me/prettier-config": "^0.16.0",
-        "@bfra.me/tsconfig": "^0.13.0",
+        "@bfra.me/tsconfig": "0.13.1",
         "@changesets/cli": "^2.30.0",
         "@svitejs/changesets-changelog-github-compact": "^1.2.0",
         "@types/bun": "^1.3.11",
@@ -32,7 +32,7 @@
     },
     "packages/cli": {
       "name": "@marcusrbrown/infra",
-      "version": "0.4.4",
+      "version": "0.4.8",
       "bin": {
         "infra": "src/cli.ts",
       },
@@ -59,7 +59,7 @@
 
     "@bfra.me/prettier-config": ["@bfra.me/prettier-config@0.16.7", "", { "peerDependencies": { "prettier": "^3.0.0" } }, "sha512-WBNnEzlTcsaQ0C82jmF88iuDxke3S3ZP6PyMWldh/PTN/1JLoFAb/54M5PMn2qg+BEC1Xe/5pLAE0MnIWue3KQ=="],
 
-    "@bfra.me/tsconfig": ["@bfra.me/tsconfig@0.13.0", "", {}, "sha512-OxM0MSVis41XffI2K3Ydmc1SS9oV+Viad6i3Kp/fiqpGwf/qKr0cKca9ScJxqYtNTwBs6rD20a8nUzvZTljDKg=="],
+    "@bfra.me/tsconfig": ["@bfra.me/tsconfig@0.13.1", "", {}, "sha512-GyMAvOLBFtxbUjZru5VMoIXY21HTPYZcI5jKm3c1gojEx7Hss1nyGth3pd2t4v4pIQBAlJQASe9o0C8rnFa0VA=="],
 
     "@changesets/apply-release-plan": ["@changesets/apply-release-plan@7.1.0", "", { "dependencies": { "@changesets/config": "^3.1.3", "@changesets/get-version-range-type": "^0.4.0", "@changesets/git": "^3.0.4", "@changesets/should-skip-package": "^0.1.2", "@changesets/types": "^6.1.0", "@manypkg/get-packages": "^1.1.3", "detect-indent": "^6.0.0", "fs-extra": "^7.0.1", "lodash.startcase": "^4.4.0", "outdent": "^0.5.0", "prettier": "^2.7.1", "resolve-from": "^5.0.0", "semver": "^7.5.3" } }, "sha512-yq8ML3YS7koKQ/9bk1PqO0HMzApIFNwjlwCnwFEXMzNe8NpzeeYYKCmnhWJGkN8g7E51MnWaSbqRcTcdIxUgnQ=="],
 

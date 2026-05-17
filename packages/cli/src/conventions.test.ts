@@ -469,6 +469,42 @@ jobs:
 `
     expect(findPathsFilterQuantifierViolations(yaml)).toEqual([])
   })
+
+  it('bare-string negation filter without predicate-quantifier → 1 violation', () => {
+    const yaml = `
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          filters: |
+            cliproxy: '!apps/cliproxy/**/*.md'
+`
+    const violations = findPathsFilterQuantifierViolations(yaml)
+    expect(violations).toEqual([
+      {
+        jobId: 'detect',
+        stepIndex: 0,
+        reason: `job 'detect' step 0 uses dorny/paths-filter with negation patterns but is missing predicate-quantifier: every`,
+      },
+    ])
+  })
+
+  it('bare-string negation filter with predicate-quantifier: every → 0 violations', () => {
+    const yaml = `
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          predicate-quantifier: every
+          filters: |
+            cliproxy: '!apps/cliproxy/**/*.md'
+`
+    expect(findPathsFilterQuantifierViolations(yaml)).toEqual([])
+  })
 })
 
 describe('dorny/paths-filter quantifier guard', () => {
@@ -480,8 +516,7 @@ describe('dorny/paths-filter quantifier guard', () => {
   })
 
   it('all workflow files using dorny/paths-filter with negations declare predicate-quantifier: every', async () => {
-    const glob = new Bun.Glob('.github/workflows/**')
-    const files = [...glob.scanSync({cwd: REPO_ROOT, absolute: true, dot: true})].filter(f => f.endsWith('.yaml'))
+    const files = listWorkflowFiles('.yaml')
     expect(files.length).toBeGreaterThan(0)
 
     const violations: PathsFilterQuantifierViolation[] = []

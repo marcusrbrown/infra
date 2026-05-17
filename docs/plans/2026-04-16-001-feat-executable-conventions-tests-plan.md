@@ -1,12 +1,16 @@
 ---
 title: 'feat: Enforce root AGENTS.md conventions with ESLint config and conventions test'
 type: feat
-status: active
+status: completed
 date: 2026-04-16
+completed: 2026-04-20
 origin: docs/brainstorms/2026-04-16-executable-conventions-tests-requirements.md
 ---
 
 # Enforce root AGENTS.md conventions with ESLint config and conventions test
+
+> **Status note (reconciled 2026-05-18):** Shipped via PR #161 (ESLint enforcement + 7 structural rules in `packages/cli/src/conventions.test.ts` + `(enforced)` markers in `AGENTS.md` + Fro Bot category 3 trim). Follow-up PR #167 added `(enforced)` marker drift detection and per-app invariants. Live state: 175 tests pass, ESLint `no-explicit-any` and `ban-ts-comment` at error severity. A known follow-up — guard `dorny/paths-filter` for `predicate-quantifier: every` whenever `!` negations are used — is tracked in project memory ID 2388 but not yet shipped; that work is out of scope for this plan.
+
 
 ## Overview
 

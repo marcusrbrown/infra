@@ -1,5 +1,14 @@
 # @marcusrbrown/infra
 
+## 0.4.9
+### Patch Changes
+
+
+- 🐳 Update Docker image `caddy` from `2.11.2-alpine` to `2.11.3-alpine` ([#236](https://github.com/marcusrbrown/infra/pull/236))
+
+
+- ⚠️ Update Docker image `caddy` to v86 ([#244](https://github.com/marcusrbrown/infra/pull/244))
+
 ## 0.4.8
 ### Patch Changes
 

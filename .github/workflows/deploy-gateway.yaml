@@ -1,0 +1,125 @@
+name: Deploy Gateway
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      GATEWAY_SSH_KEY:
+        required: true
+      DISCORD_TOKEN:
+        required: true
+      DISCORD_APPLICATION_ID:
+        required: true
+      DISCORD_GUILD_ID:
+        required: true
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      S3_BUCKET:
+        required: true
+      S3_REGION:
+        required: true
+      GATEWAY_HOST:
+        required: true
+      S3_ENDPOINT:
+        required: false
+      OBJECT_STORE_HOSTS:
+        required: false
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      gateway: ${{ steps.filter.outputs.gateway }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          predicate-quantifier: every
+          filters: |
+            gateway:
+              - 'apps/gateway/**'
+              - '!apps/gateway/**/*.md'
+              - '!apps/gateway/**/*.test.ts'
+              - '!apps/gateway/**/__fixtures__/**'
+              - '!apps/gateway/**/__snapshots__/**'
+
+  deploy-gateway:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
+      needs.detect-changes.outputs.gateway == 'true'
+    runs-on: ubuntu-latest
+    environment: gateway
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Validate required secrets
+        env:
+          GATEWAY_SSH_KEY: ${{ secrets.GATEWAY_SSH_KEY }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
+          DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_REGION: ${{ secrets.S3_REGION }}
+          GATEWAY_HOST: ${{ secrets.GATEWAY_HOST }}
+        run: |
+          missing=()
+          [[ -n "${GATEWAY_SSH_KEY}" ]] || missing+=("GATEWAY_SSH_KEY")
+          [[ -n "${DISCORD_TOKEN}" ]] || missing+=("DISCORD_TOKEN")
+          [[ -n "${DISCORD_APPLICATION_ID}" ]] || missing+=("DISCORD_APPLICATION_ID")
+          [[ -n "${DISCORD_GUILD_ID}" ]] || missing+=("DISCORD_GUILD_ID")
+          [[ -n "${AWS_ACCESS_KEY_ID}" ]] || missing+=("AWS_ACCESS_KEY_ID")
+          [[ -n "${AWS_SECRET_ACCESS_KEY}" ]] || missing+=("AWS_SECRET_ACCESS_KEY")
+          [[ -n "${S3_BUCKET}" ]] || missing+=("S3_BUCKET")
+          [[ -n "${S3_REGION}" ]] || missing+=("S3_REGION")
+          [[ -n "${GATEWAY_HOST}" ]] || missing+=("GATEWAY_HOST")
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required secret(s): ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Configure SSH known_hosts
+        run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.GATEWAY_SSH_KEY }}
+
+      - name: Deploy gateway
+        run: bun run --cwd apps/gateway deploy
+        env:
+          GATEWAY_HOST: ${{ secrets.GATEWAY_HOST }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
+          DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_REGION: ${{ secrets.S3_REGION }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          OBJECT_STORE_HOSTS: ${{ secrets.OBJECT_STORE_HOSTS }}

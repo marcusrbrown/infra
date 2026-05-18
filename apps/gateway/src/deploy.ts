@@ -31,6 +31,7 @@ export interface PollRegistrationOpts {
   sleep?: (ms: number) => Promise<void>
   maxAttempts?: number
   intervalMs?: number
+  perAttemptTimeoutMs?: number
 }
 
 /** Minimal subset of Bun.Subprocess used by this script. */
@@ -286,17 +287,36 @@ export async function pollRegistration(opts: PollRegistrationOpts): Promise<{com
     sleep = (ms: number) => new Promise(r => setTimeout(r, ms)),
     maxAttempts = 10,
     intervalMs = 3000,
+    perAttemptTimeoutMs = Math.max(6000, intervalMs * 2),
   } = opts
 
   const url = `https://discord.com/api/v10/applications/${applicationId}/guilds/${guildId}/commands`
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const response = await fetchFn(url, {
-      headers: {
-        Authorization: `Bot ${token}`,
-        'Content-Type': 'application/json',
-      },
-    })
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), perAttemptTimeoutMs)
+
+    let response: Response
+    try {
+      response = await fetchFn(url, {
+        headers: {
+          Authorization: `Bot ${token}`,
+          'Content-Type': 'application/json',
+        },
+        signal: ac.signal,
+      })
+    } catch (error) {
+      clearTimeout(timer)
+      // AbortError from per-attempt timeout — treat as transient, retry with normal backoff
+      if (error instanceof Error && error.name === 'AbortError') {
+        if (attempt < maxAttempts) {
+          await sleep(intervalMs)
+        }
+        continue
+      }
+      throw error
+    }
+    clearTimeout(timer)
 
     const status = response.status
 

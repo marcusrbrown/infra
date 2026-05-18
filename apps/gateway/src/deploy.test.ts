@@ -607,9 +607,9 @@ describe('main', () => {
     expect(calls).toHaveLength(0)
   })
 
-  // ── R2: checksum persists AFTER compose + registration succeed ──────────────
+  // ── checksum persists only after compose + registration both succeed ──────────────
 
-  test('R2: compose failure → checksum NOT written, next deploy still force-recreates', async () => {
+  test('compose failure leaves checksum unwritten so next deploy still force-recreates', async () => {
     const {main} = await import('./deploy')
     const checksumWrites: string[] = []
 
@@ -641,7 +641,7 @@ describe('main', () => {
     expect(checksumWrites).toHaveLength(0)
   })
 
-  test('R2: pollRegistration failure → checksum NOT written', async () => {
+  test('pollRegistration failure leaves checksum unwritten', async () => {
     const {main} = await import('./deploy')
     const checksumWrites: string[] = []
 
@@ -673,7 +673,7 @@ describe('main', () => {
     expect(checksumWrites).toHaveLength(0)
   })
 
-  test('R2: checksum written AFTER successful compose + registration', async () => {
+  test('checksum written only after successful compose + registration', async () => {
     const {main} = await import('./deploy')
     const eventLog: string[] = []
 
@@ -877,9 +877,95 @@ describe('T1 secret-write failure token confidentiality', () => {
   })
 })
 
-// ─── R1: pollRegistration status branching ───────────────────────────────────
+// ─── per-attempt timeout (AbortController) ───────────────────────────────────
 
-describe('R1 pollRegistration status branching', () => {
+describe('pollRegistration per-attempt timeout', () => {
+  test('never-resolving fetch: exhausts maxAttempts via per-attempt timeout, resolves in bounded time', async () => {
+    const {pollRegistration} = await import('./deploy')
+
+    // fetch that respects the abort signal — simulates a stalled connection that
+    // eventually gets cut by the AbortController
+    const hangingFetch = (_url: string, opts?: RequestInit): Promise<Response> => {
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = opts?.signal
+        if (signal) {
+          if (signal.aborted) {
+            const err = new Error('The operation was aborted.')
+            err.name = 'AbortError'
+            reject(err)
+            return
+          }
+          signal.addEventListener('abort', () => {
+            const err = new Error('The operation was aborted.')
+            err.name = 'AbortError'
+            reject(err)
+          })
+        }
+        // Otherwise hangs forever (signal will abort it)
+      })
+    }
+
+    const start = Date.now()
+    await expect(
+      pollRegistration({
+        applicationId: 'app1',
+        guildId: 'guild1',
+        token: 'tok',
+        fetch: hangingFetch as unknown as typeof fetch,
+        sleep: async () => {},
+        maxAttempts: 2,
+        intervalMs: 0,
+        perAttemptTimeoutMs: 50,
+      }),
+    ).rejects.toThrow(/timed out after 2 attempts/)
+
+    const elapsed = Date.now() - start
+    // Should complete well under 5s (2 attempts × 50ms timeout each + overhead)
+    expect(elapsed).toBeLessThan(5000)
+  })
+
+  test('single hang then recovery: first fetch hangs, subsequent returns 200 + commands', async () => {
+    const {pollRegistration} = await import('./deploy')
+    let callCount = 0
+
+    const fetchMock = (_url: string, opts?: RequestInit): Promise<Response> => {
+      callCount++
+      if (callCount === 1) {
+        // First call hangs until aborted
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = opts?.signal
+          if (signal) {
+            signal.addEventListener('abort', () => {
+              const err = new Error('The operation was aborted.')
+              err.name = 'AbortError'
+              reject(err)
+            })
+          }
+        })
+      }
+      return Promise.resolve(new Response(JSON.stringify([{name: 'ping'}]), {status: 200}))
+    }
+
+    const result = await pollRegistration({
+      applicationId: 'app1',
+      guildId: 'guild1',
+      token: 'tok',
+      fetch: fetchMock as unknown as typeof fetch,
+      sleep: async () => {},
+      maxAttempts: 3,
+      intervalMs: 0,
+      perAttemptTimeoutMs: 50,
+    })
+
+    expect(result.commands).toEqual(['ping'])
+    // First call hung and was aborted; second call succeeded
+    expect(callCount).toBeGreaterThanOrEqual(2)
+  })
+})
+
+// ─── pollRegistration status branching ───────────────────────────────────
+
+describe('pollRegistration status branching', () => {
   test('429 with Retry-After ≤ 60s: waits and retries without counting against maxAttempts', async () => {
     const {pollRegistration} = await import('./deploy')
     let callCount = 0

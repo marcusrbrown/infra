@@ -50,11 +50,20 @@ describe('top-level status command', () => {
         contentHash: '—',
         usageStats: '12 req / 0 fail',
       }),
+      getGatewayStatusSummary: async () => ({
+        app: 'gateway',
+        http: 'OK: gateway:running/healthy',
+        lastDeploy: '—',
+        version: '—',
+        contentHash: '—',
+        usageStats: '—',
+      }),
     })
 
     expect(lines).toContain('| App | HTTP | Last Deploy | Version | Content Hash | Usage Stats |')
     expect(lines).toContain('| keeweb | OK | 2026-04-12 10:00 | — | match | — |')
     expect(lines).toContain('| cliproxy | OK | — | v1.2.3 | — | 12 req / 0 fail |')
+    expect(lines).toContain('| gateway | OK: gateway:running/healthy | — | — | — | — |')
   })
 
   it('shows an error row when one app fails and keeps the other result', async () => {
@@ -69,6 +78,14 @@ describe('top-level status command', () => {
         version: 'v1.2.3',
         contentHash: '—',
         usageStats: '12 req / 0 fail',
+      }),
+      getGatewayStatusSummary: async () => ({
+        app: 'gateway',
+        http: 'OK: gateway:running/healthy',
+        lastDeploy: '—',
+        version: '—',
+        contentHash: '—',
+        usageStats: '—',
       }),
     })
 
@@ -95,6 +112,14 @@ describe('top-level status command', () => {
         version: 'v1.2.3',
         contentHash: '—',
         usageStats: '12 req / 0 fail',
+      }),
+      getGatewayStatusSummary: async () => ({
+        app: 'gateway',
+        http: 'OK: gateway:running/healthy',
+        lastDeploy: '—',
+        version: '—',
+        contentHash: '—',
+        usageStats: '—',
       }),
     })
 

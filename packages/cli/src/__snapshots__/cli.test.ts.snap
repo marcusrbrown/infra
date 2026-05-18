@@ -88,9 +88,28 @@ Commands:
     --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
 
 
+  gateway status                       Show operational health of the gateway deployment via docker compose ps.
+
+    --key [key]                        Environment variable name holding the SSH host. Falls back to GATEWAY_HOST when omitted.
+
+
+  gateway deploy                       Deploy the gateway. Default mode triggers the GitHub Deploy Gateway workflow, while --local runs apps/gateway deploy directly with Bun.
+
+    --local                            Run local deployment with Bun using apps/gateway instead of triggering GitHub Actions. (default: false)
+    --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
+    --force-recreate                   Force recreate containers. Forwarded only in local mode. (default: false)
+
+
+  gateway logs [service]               Stream logs from a gateway service via SSH and docker compose.
+
+    --tail [n]                         Number of log lines to tail from each service. (default: 100)
+    --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive credentials. (default: false)
+    --key [key]                        Environment variable name holding the SSH host. Falls back to GATEWAY_HOST when omitted.
+
+
   status                               Show status of all deployments
 
-    --json                             Output machine-readable JSON with keeweb and cliproxy summary objects.
+    --json                             Output machine-readable JSON with keeweb, cliproxy, and gateway summary objects.
     --verbose                          Include verbose per-app health check details when building the summary rows.
 
 

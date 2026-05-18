@@ -3,6 +3,7 @@
 import {goke} from 'goke'
 import pkg from '../package.json' with {type: 'json'}
 import {registerCliproxyCommands} from './commands/cliproxy'
+import {registerGatewayCommands} from './commands/gateway'
 import {registerKeewebCommands} from './commands/keeweb'
 import {registerMcp} from './commands/mcp'
 import {registerStatus} from './commands/status'
@@ -18,6 +19,7 @@ cli.option('--verbose', 'Enable verbose output for all commands')
 
 registerKeewebCommands(cli)
 registerCliproxyCommands(cli)
+registerGatewayCommands(cli)
 registerStatus(cli)
 registerMcp(cli)
 

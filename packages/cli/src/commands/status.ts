@@ -3,6 +3,7 @@ import type {goke} from 'goke'
 import {z} from 'zod'
 
 import {getCliproxyStatusSummary} from './cliproxy/status'
+import {getGatewayStatusSummary} from './gateway'
 import {getKeewebStatusSummary} from './keeweb/status'
 
 declare const process: {
@@ -10,7 +11,7 @@ declare const process: {
 }
 
 export interface StatusSummary {
-  app: 'keeweb' | 'cliproxy'
+  app: 'keeweb' | 'cliproxy' | 'gateway'
   http: string
   lastDeploy: string
   version: string
@@ -23,6 +24,7 @@ type AppName = StatusSummary['app']
 interface StatusDependencies {
   getKeewebStatusSummary: (verbose: boolean) => Promise<StatusSummary>
   getCliproxyStatusSummary: (baseUrl: string, key: string, verbose: boolean) => Promise<StatusSummary>
+  getGatewayStatusSummary: (host: string) => Promise<StatusSummary>
 }
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
@@ -58,6 +60,7 @@ function toJsonPayload(rows: StatusSummary[]): Record<AppName, StatusSummary> {
   return {
     keeweb: rows.find(row => row.app === 'keeweb') ?? errorSummary('keeweb', 'missing result'),
     cliproxy: rows.find(row => row.app === 'cliproxy') ?? errorSummary('cliproxy', 'missing result'),
+    gateway: rows.find(row => row.app === 'gateway') ?? errorSummary('gateway', 'missing result'),
   }
 }
 
@@ -71,11 +74,15 @@ export function registerStatus(
   dependencies: StatusDependencies = {
     getKeewebStatusSummary,
     getCliproxyStatusSummary,
+    getGatewayStatusSummary,
   },
 ): void {
   cli
     .command('status', 'Show status of all deployments')
-    .option('--json', z.boolean().describe('Output machine-readable JSON with keeweb and cliproxy summary objects.'))
+    .option(
+      '--json',
+      z.boolean().describe('Output machine-readable JSON with keeweb, cliproxy, and gateway summary objects.'),
+    )
     .option(
       '--verbose',
       z.boolean().describe('Include verbose per-app health check details when building the summary rows.'),
@@ -84,14 +91,17 @@ export function registerStatus(
       const verbose = options.verbose === true
       const cliproxyBaseUrl = stripTrailingSlash(process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
       const cliproxyKey = process.env.CLIPROXY_MANAGEMENT_KEY ?? ''
+      const gatewayHost = process.env.GATEWAY_HOST ?? ''
 
       const results = await Promise.allSettled([
         dependencies.getKeewebStatusSummary(verbose),
         dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey, verbose),
+        dependencies.getGatewayStatusSummary(gatewayHost),
       ])
 
+      const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway']
       const rows: StatusSummary[] = results.map((result, index) => {
-        const app: AppName = index === 0 ? 'keeweb' : 'cliproxy'
+        const app = appNames[index] ?? 'keeweb'
         return result.status === 'fulfilled' ? result.value : errorSummary(app, result.reason)
       })
 

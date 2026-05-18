@@ -6,13 +6,14 @@
 
 ## OVERVIEW
 
-Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb) and `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean).
+Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, Fro Bot gateway deployment, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), and `gateway.fro.bot` (Fro Bot gateway on DigitalOcean).
 
 ## STRUCTURE
 
 ```text
 ├── apps/keeweb/        KeeWeb deploy package (see apps/keeweb/AGENTS.md)
 ├── apps/cliproxy/      CLIProxyAPI deploy package (see apps/cliproxy/AGENTS.md)
+├── apps/gateway/       Fro Bot gateway deploy package (see apps/gateway/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
 ├── .changeset/         Changesets config for versioning
@@ -35,6 +36,9 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Trigger proxy deploy | `bunx @marcusrbrown/infra cliproxy deploy` | Remote (default) or `--local` |
 | Open proxy TUI | `bunx @marcusrbrown/infra cliproxy open` | SSH + interactive TUI |
 | Onboard repo | `bunx @marcusrbrown/infra cliproxy setup` | Interactive wizard with @clack/prompts |
+| Check gateway health | `bunx @marcusrbrown/infra gateway status` | SSH, docker compose ps, service states |
+| Trigger gateway deploy | `bunx @marcusrbrown/infra gateway deploy` | Remote (default) or `--local` |
+| Gateway operator docs | `apps/gateway/AGENTS.md` | Deploy flow, provisioning, CA restore, anti-patterns |
 | Unified status | `bunx @marcusrbrown/infra status` | All deployments, `--json` for machine output |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
@@ -67,6 +71,9 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **Never use `ssh-keyscan` in CI workflows** — host keys are pinned in `.github/known_hosts`. Provisioning scripts may use `ssh-keyscan` locally; `apps/cliproxy/server/provision-droplet.ts` is the current example. (enforced)
 - **Never `secrets: inherit`** with cross-org reusable workflows. (enforced)
 - **Never use `bundledDependencies`** — Bun's `.bun/` symlink layout creates `../../` paths that npm rejects with E415. (enforced)
+- **Never pass gateway secret bytes via argv** — `writeRemoteFile` pipes bytes through SSH stdin only; `--body <value>` patterns are banned.
+- **Never skip `validateGatewayHost`** — it rejects `-`-prefixed values and characters outside the allowed alphabet. SSH treats `-`-prefixed hostnames as flags (including `-oProxyCommand=`).
+- **Never restart the gateway in-place to rotate the CA** — workspaces lose trust in the egress proxy. Restore from backup instead.
 
 ## UNIQUE STYLES
 
@@ -95,6 +102,11 @@ bunx @marcusrbrown/infra cliproxy status          # Check proxy health
 bunx @marcusrbrown/infra cliproxy deploy          # Trigger proxy deploy (GitHub Actions)
 bunx @marcusrbrown/infra cliproxy open            # Open proxy TUI via SSH
 bunx @marcusrbrown/infra cliproxy setup           # Onboard repo to CLIProxyAPI
+bunx @marcusrbrown/infra gateway status           # SSH, docker compose ps, service states
+bunx @marcusrbrown/infra gateway deploy           # Trigger gateway deploy (GitHub Actions)
+bunx @marcusrbrown/infra gateway logs gateway     # Stream gateway service logs (--tail N)
+bunx @marcusrbrown/infra gateway backup --include-ca  # Pull mitmproxy CA cert + key as tarball
+bunx @marcusrbrown/infra gateway restore --include-ca --input FILE  # Restore CA from tarball
 bunx @marcusrbrown/infra status                   # Unified status (all deployments)
 bunx @marcusrbrown/infra status --json            # Machine-readable status
 bunx @marcusrbrown/infra mcp                      # Start MCP server
@@ -105,6 +117,7 @@ bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on serve
 
 - `DROPBOX_APP_SECRET` and `DEPLOY_SSH_KEY` are GitHub Actions secrets scoped to `keeweb` environment.
 - `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are scoped to `cliproxy` environment.
+- `GATEWAY_SSH_KEY`, `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, and `GATEWAY_HOST` are scoped to `gateway` environment. Optional: `S3_ENDPOINT`, `OBJECT_STORE_HOSTS`.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `OMO_PROVIDERS`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.
 - `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets.

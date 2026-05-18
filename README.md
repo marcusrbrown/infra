@@ -6,12 +6,13 @@ Personal infrastructure management — deploy automation, operational CLI, and t
 
 ## Overview
 
-Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
+Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
 
 | Package | Description |
 | --- | --- |
 | `apps/keeweb` | KeeWeb v1.18.7 static site deploy automation (`kw.igg.ms`) |
 | `apps/cliproxy` | CLIProxyAPI Docker Compose stack behind Caddy (`cliproxy.fro.bot`) |
+| `apps/gateway` | Fro Bot gateway Docker Compose stack (`gateway.fro.bot`) |
 | `packages/cli` | [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI — health checks, deploy triggers, onboarding wizard, MCP bridge |
 
 ## Prerequisites
@@ -69,9 +70,33 @@ bun run --cwd apps/cliproxy provision
 bun run --cwd apps/cliproxy deploy
 ```
 
+### Gateway (`apps/gateway`)
+
+Fro Bot Discord client and workspace runner at [gateway.fro.bot](https://gateway.fro.bot). A 3-service Docker Compose stack (gateway daemon, workspace executor, mitmproxy egress filter) on a dedicated DigitalOcean droplet. Pinned to `fro-bot/agent v0.44.0` via `apps/gateway/upstream.json`. No public HTTP surface — the gateway connects outbound to Discord and S3 only.
+
+**Prerequisites** — before provisioning:
+
+- `DIGITALOCEAN_ACCESS_TOKEN` in `.env`; `doctl auth init` run locally
+- Discord application created at <https://discord.com/developers/applications> with bot scope; token + application ID + guild ID captured
+- S3 or R2 bucket created; access key, secret key, bucket name, and region captured
+
+**Provision** — creates the DigitalOcean droplet and bootstraps Docker + firewall (one-time, `--force` required to rerun against an existing droplet):
+
+```bash
+bun run --cwd apps/gateway provision
+```
+
+After provisioning, commit the updated `.github/known_hosts` (the script appends the new droplet's host keys). See [`apps/gateway/AGENTS.md`](apps/gateway/AGENTS.md) for the full provisioning checklist.
+
+**Deploy** — materializes secrets on the droplet, brings up the Compose stack, and gates on Discord command registration:
+
+```bash
+bun run --cwd apps/gateway deploy
+```
+
 ## CLI
 
-The [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI exposes operational commands for both apps plus an MCP bridge.
+The [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI exposes operational commands for KeeWeb, CLIProxyAPI, and Gateway plus an MCP bridge.
 
 ```bash
 bunx @marcusrbrown/infra --help
@@ -174,6 +199,42 @@ bunx @marcusrbrown/infra cliproxy setup --key sk-... --repo owner/repo --harness
 
 Generates an API key, sets `OPENCODE_AUTH_JSON` and `OPENCODE_CONFIG` secrets on the target repo, and verifies the connection.
 
+### Gateway commands
+
+**`infra gateway status`** — SSH to the droplet, run `docker compose ps`, show service states, ages, and healthchecks.
+
+```bash
+bunx @marcusrbrown/infra gateway status
+```
+
+**`infra gateway deploy`** — trigger a deployment (remote by default, `--local` for direct SSH):
+
+```bash
+bunx @marcusrbrown/infra gateway deploy             # trigger GitHub Actions workflow
+bunx @marcusrbrown/infra gateway deploy --dry-run   # validate without triggering
+bunx @marcusrbrown/infra gateway deploy --local     # deploy directly via SSH (requires SSH_AUTH_SOCK)
+```
+
+**`infra gateway logs`** — stream `docker compose logs` from the droplet:
+
+```bash
+bunx @marcusrbrown/infra gateway logs gateway        # gateway daemon logs
+bunx @marcusrbrown/infra gateway logs mitmproxy      # egress filter logs
+bunx @marcusrbrown/infra gateway logs gateway --tail 100
+```
+
+**`infra gateway backup`** — pull the mitmproxy CA cert + key as a tarball (mode 0600):
+
+```bash
+bunx @marcusrbrown/infra gateway backup --include-ca --output ./gateway-ca.tar
+```
+
+**`infra gateway restore`** — validate and restore a CA tarball to the droplet:
+
+```bash
+bunx @marcusrbrown/infra gateway restore --include-ca --input ./gateway-ca.tar
+```
+
 ### MCP bridge
 
 **`infra mcp`** — start a stdio MCP server exposing all CLI commands as tools:
@@ -193,7 +254,8 @@ Lets coding agents (Fro Bot, Copilot) call commands programmatically via the [Mo
 | **CI** | PRs to `main` | Lint, type check, and test |
 | **Deploy KeeWeb** | Push to `main`, `workflow_dispatch` | Build and deploy KeeWeb (path-filtered) |
 | **Deploy CLIProxy** | Push to `main`, `workflow_dispatch` | Deploy CLIProxyAPI (path-filtered) |
-| **Deploy** | `workflow_dispatch` | Manual umbrella dispatch that triggers both deploy workflows |
+| **Deploy Gateway** | Push to `main`, `workflow_dispatch` | Deploy gateway stack (path-filtered) |
+| **Deploy** | `workflow_dispatch` | Manual umbrella dispatch that triggers all three deploy workflows |
 | **Release** | Push to `main` | Version and publish `@marcusrbrown/infra` via Changesets |
 | **Renovate** | Schedule, issue/PR edits, post-deploy | Automated dependency updates |
 | **Renovate Changesets** | Renovate PRs | Auto-create changeset files for dependency updates |
@@ -204,10 +266,11 @@ Lets coding agents (Fro Bot, Copilot) call commands programmatically via the [Mo
 
 ### Deploy Pipeline
 
-`Deploy KeeWeb` and `Deploy CLIProxy` use `dorny/paths-filter` to deploy only when app files change (docs, tests, fixtures, and snapshots are excluded from the filter). Each deploy runs in its own GitHub Environment and requires approval.
+`Deploy KeeWeb`, `Deploy CLIProxy`, and `Deploy Gateway` use `dorny/paths-filter` to deploy only when app files change (docs, tests, fixtures, and snapshots are excluded from the filter). Each deploy runs in its own GitHub Environment and requires approval.
 
 - **Deploy KeeWeb** runs in the `keeweb` environment.
 - **Deploy CLIProxy** runs in the `cliproxy` environment.
+- **Deploy Gateway** runs in the `gateway` environment.
 
 Manual deploys are available either per-app (`workflow_dispatch` on each dedicated workflow) or together via the umbrella `Deploy` workflow.
 
@@ -227,6 +290,22 @@ Manual deploys are available either per-app (`workflow_dispatch` on each dedicat
 | `CLIPROXY_SSH_KEY`        | Ed25519 private key for the `cliproxy.fro.bot` DO droplet    |
 | `CLIPROXY_MANAGEMENT_KEY` | Management API bearer token for runtime config / key updates |
 | `CLIPROXY_DOMAIN`         | FQDN of the CLIProxyAPI instance                             |
+
+**`gateway` environment:**
+
+| Secret                   | Required | Description                                                       |
+| ------------------------ | -------- | ----------------------------------------------------------------- |
+| `GATEWAY_SSH_KEY`        | ✓        | Ed25519 private key for the `gateway.fro.bot` droplet             |
+| `DISCORD_TOKEN`          | ✓        | Discord bot token                                                 |
+| `DISCORD_APPLICATION_ID` | ✓        | Discord application ID                                            |
+| `DISCORD_GUILD_ID`       | ✓        | Discord guild (server) ID                                         |
+| `AWS_ACCESS_KEY_ID`      | ✓        | S3/R2 access key                                                  |
+| `AWS_SECRET_ACCESS_KEY`  | ✓        | S3/R2 secret key                                                  |
+| `S3_BUCKET`              | ✓        | Bucket name                                                       |
+| `S3_REGION`              | ✓        | Bucket region                                                     |
+| `GATEWAY_HOST`           | ✓        | FQDN or IP of the droplet                                         |
+| `S3_ENDPOINT`            |          | Custom endpoint URL (R2, MinIO, etc.)                             |
+| `OBJECT_STORE_HOSTS`     |          | Comma-separated hostnames allowed through mitmproxy egress filter |
 
 **Repository secrets:**
 
@@ -255,7 +334,7 @@ The KeeWeb deploy target uses a dedicated `deploy-kw` user with scoped sudo for 
 bun run apps/keeweb/server/setup-deploy-user.ts
 ```
 
-Host keys for `box.heatvision.co` and `cliproxy.fro.bot` are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`.
+Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, and `gateway.fro.bot` are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`.
 
 ## Repository Structure
 
@@ -270,6 +349,10 @@ Host keys for `box.heatvision.co` and `cliproxy.fro.bot` are pinned in `.github/
 │       ├── config/              docker-compose.yaml, Caddyfile, config.yaml template
 │       ├── server/              Droplet provisioning script
 │       └── src/deploy.ts        Deploy script
+│   └── gateway/                 Fro Bot gateway deployment package
+│       ├── server/              Droplet provisioning script
+│       ├── src/deploy.ts        Deploy script (secrets materialization, compose up, registration poll)
+│       └── upstream.json        Pinned fro-bot/agent ref
 ├── packages/cli/                @marcusrbrown/infra CLI
 │   └── src/
 │       ├── cli.ts               Entry point (goke framework)
@@ -277,6 +360,7 @@ Host keys for `box.heatvision.co` and `cliproxy.fro.bot` are pinned in `.github/
 │       └── commands/            Command modules (subdirectory per app)
 │           ├── keeweb/          status, deploy, open + barrel
 │           ├── cliproxy/        status, deploy, config, keys, login, open, setup + barrel
+│           ├── gateway/         status, deploy, logs, backup, restore + barrel
 │           ├── status.ts        Unified cross-app status dashboard
 │           └── mcp.ts           MCP bridge (stdio server)
 ├── .agents/

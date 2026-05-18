@@ -27,12 +27,16 @@
     "apps/cliproxy": {
       "name": "@marcusrbrown/infra-cliproxy",
     },
+    "apps/gateway": {
+      "name": "@marcusrbrown/infra-gateway",
+      "version": "0.0.0",
+    },
     "apps/keeweb": {
       "name": "@marcusrbrown/infra-keeweb",
     },
     "packages/cli": {
       "name": "@marcusrbrown/infra",
-      "version": "0.4.8",
+      "version": "0.4.9",
       "bin": {
         "infra": "src/cli.ts",
       },
@@ -152,6 +156,8 @@
     "@marcusrbrown/infra": ["@marcusrbrown/infra@workspace:packages/cli"],
 
     "@marcusrbrown/infra-cliproxy": ["@marcusrbrown/infra-cliproxy@workspace:apps/cliproxy"],
+
+    "@marcusrbrown/infra-gateway": ["@marcusrbrown/infra-gateway@workspace:apps/gateway"],
 
     "@marcusrbrown/infra-keeweb": ["@marcusrbrown/infra-keeweb@workspace:apps/keeweb"],
 

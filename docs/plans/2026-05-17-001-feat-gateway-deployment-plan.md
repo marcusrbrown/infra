@@ -1,7 +1,7 @@
 ---
 title: Gateway Deployment App (v1)
 type: feat
-status: active
+status: completed
 date: 2026-05-17
 origin: docs/brainstorms/2026-05-17-gateway-deployment-requirements.md
 ---
@@ -847,7 +847,7 @@ gates; add coverage where it isn't.
 
 ---
 
-- [ ] **Unit 8: Documentation**
+- [x] **Unit 8: Documentation**
 
 **Goal:** Operator and contributor documentation reflecting the
 shipped surface.

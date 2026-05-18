@@ -1,0 +1,10 @@
+{
+  "name": "@marcusrbrown/infra-gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "bun run src/deploy.ts",
+    "test": "bun test"
+  }
+}

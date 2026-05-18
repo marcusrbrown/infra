@@ -38,7 +38,7 @@ export type RestoreResult = {ok: true; confirmed: true} | {ok: false; error: str
 
 /** Returns the argv array for an SSH command to the given host. */
 function sshCommand(host: string, remote: string): string[] {
-  return ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', host, remote]
+  return ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', `root@${host}`, remote]
 }
 
 async function spawnText(
@@ -144,7 +144,7 @@ export async function restoreGatewayCa(
     '-o',
     'StrictHostKeyChecking=yes',
     opts.input,
-    `${opts.host}:${tmpRemote}`,
+    `root@${opts.host}:${tmpRemote}`,
   ]
 
   let primaryError: RestoreResult | undefined

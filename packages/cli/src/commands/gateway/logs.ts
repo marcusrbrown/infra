@@ -88,7 +88,7 @@ export async function streamGatewayLogs(
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
-    opts.host,
+    `root@${opts.host}`,
     `docker compose --project-directory ${COMPOSE_PROJECT_DIR} logs --no-color --tail=${opts.tail} ${opts.service}`,
   ]
 

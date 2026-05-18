@@ -88,7 +88,7 @@ export async function getGatewayComposeStatus(
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
-    host,
+    `root@${host}`,
     `docker compose --project-directory ${COMPOSE_PROJECT_DIR} ps --format json`,
   ]
 

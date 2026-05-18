@@ -681,8 +681,8 @@ describe('main', () => {
       const cmdStr = cmd.join(' ')
       if (cmdStr.includes('docker compose')) {
         eventLog.push('compose')
-      } else if (cmdStr.includes('.secrets-checksum') && cmdStr.includes('> /opt/gateway/.secrets-checksum')) {
-        // Only the write: `echo <checksum> > /opt/gateway/.secrets-checksum`
+      } else if (cmdStr.includes("cat > '/opt/gateway/.secrets-checksum'")) {
+        // Only the write: `umask 077; cat > '/opt/gateway/.secrets-checksum'` (content arrives via stdin)
         eventLog.push('checksum-write')
       }
       return undefined
@@ -1140,5 +1140,82 @@ describe('pollRegistration status branching', () => {
     expect(errorMessage).toContain('422')
     expect(errorMessage).toContain('app1')
     expect(errorMessage).toContain('guild1')
+  })
+})
+
+// ─── B1: validateGatewayHost in main() ───────────────────────────────────────
+
+describe('main() — GATEWAY_HOST validation (B1)', () => {
+  test('valid host passes validation and proceeds to SSH phase', async () => {
+    const {main} = await import('./deploy')
+
+    // A valid host should not throw from the validation step itself.
+    // It will fail later when SSH is attempted (no spawn mock), but that's fine —
+    // we just need to confirm the validator doesn't reject it.
+    let thrownMessage = ''
+    try {
+      await main({
+        env: makeEnv({GATEWAY_HOST: 'gateway.fro.bot'}),
+        args: [],
+        spawn: () => {
+          throw new Error('spawn-reached')
+        },
+      })
+    } catch (error) {
+      thrownMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    // Should reach spawn (SSH phase), not throw from host validation
+    expect(thrownMessage).toContain('spawn-reached')
+  })
+
+  test('leading-hyphen host is rejected before any SSH invocation', async () => {
+    const {main} = await import('./deploy')
+
+    let spawnCalled = false
+    let thrownMessage = ''
+
+    try {
+      await main({
+        env: makeEnv({GATEWAY_HOST: '-oProxyCommand=touch /tmp/sec-deploy-pwned'}),
+        args: [],
+        spawn: () => {
+          spawnCalled = true
+          throw new Error('spawn must not be called')
+        },
+      })
+    } catch (error) {
+      thrownMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(spawnCalled).toBe(false)
+    expect(thrownMessage).toMatch(/Invalid GATEWAY_HOST/)
+
+    // Behavioral verification: the attack file must not exist
+    const {existsSync} = await import('node:fs')
+    expect(existsSync('/tmp/sec-deploy-pwned')).toBe(false)
+  })
+
+  test('shell-metacharacter host is rejected before any SSH invocation', async () => {
+    const {main} = await import('./deploy')
+
+    let spawnCalled = false
+    let thrownMessage = ''
+
+    try {
+      await main({
+        env: makeEnv({GATEWAY_HOST: 'host;rm -rf /'}),
+        args: [],
+        spawn: () => {
+          spawnCalled = true
+          throw new Error('spawn must not be called')
+        },
+      })
+    } catch (error) {
+      thrownMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(spawnCalled).toBe(false)
+    expect(thrownMessage).toMatch(/Invalid GATEWAY_HOST/)
   })
 })

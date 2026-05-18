@@ -387,7 +387,7 @@ describe('restoreGatewayCa — SEC2: unguessable remote tmp path via mktemp', ()
     // SCP destination must use the unguessable path
     const scpCmd = capturedCmds.find(c => c[0] === 'scp')
     expect(scpCmd).toBeDefined()
-    expect(scpCmd?.at(-1)).toBe(`gateway.example.com:${unguessablePath}`)
+    expect(scpCmd?.at(-1)).toBe(`root@gateway.example.com:${unguessablePath}`)
 
     // chmod 600 must be called on the unguessable path before docker run
     const chmodIdx = capturedCmds.findIndex(c => c.join(' ').includes('chmod 600'))

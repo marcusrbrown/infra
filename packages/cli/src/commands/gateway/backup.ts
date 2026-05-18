@@ -64,7 +64,7 @@ export async function backupGatewayCa(
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
-    opts.host,
+    `root@${opts.host}`,
     `docker run --rm -v ${MITMPROXY_CERTS_VOLUME}:/src:ro alpine tar -cf - -C /src ${CA_CERT_FILE} ${CA_KEY_FILE}`,
   ]
 

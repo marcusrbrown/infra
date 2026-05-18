@@ -3,6 +3,8 @@
 import {readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 
+import {validateGatewayHost} from './host'
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface DeployEnv {
@@ -376,7 +378,17 @@ export async function pollRegistration(opts: PollRegistrationOpts): Promise<{com
 // ─── SSH helpers ──────────────────────────────────────────────────────────────
 
 function sshCommand(host: string, command: string): string[] {
-  return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', `${DEFAULT_REMOTE_USER}@${host}`, command]
+  return [
+    'ssh',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'ConnectTimeout=10',
+    '-o',
+    'StrictHostKeyChecking=yes',
+    `${DEFAULT_REMOTE_USER}@${host}`,
+    command,
+  ]
 }
 
 function buildDeployEnv(env: Record<string, string>): DeployEnv {
@@ -544,6 +556,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   }
 
   const host = env.GATEWAY_HOST!
+  validateGatewayHost(host)
   const deployEnv = buildDeployEnv(env)
 
   // Phase 4: Ensure droplet workspace
@@ -664,11 +677,14 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   // Phase 10: Persist checksum AFTER compose + registration succeed
   // If either phase 8 or 9 threw, we never reach here — prior checksum stays in place
   // so the next deploy correctly detects secrets as changed and forces recreate.
-  await runCommand(
+  await writeRemoteFile(
     'Persisting secrets checksum',
-    sshCommand(host, `echo ${currentChecksum} > ${CHECKSUM_PATH}`),
+    host,
+    CHECKSUM_PATH,
+    currentChecksum,
     deployEnv,
     spawnFn,
+    secrets,
   )
 
   console.warn(`\u001B[1;32m✓\u001B[0m Registered commands: ${commands.join(', ')}`)

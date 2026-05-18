@@ -107,6 +107,18 @@ Commands:
     --key [key]                        Environment variable name holding the SSH host. Falls back to GATEWAY_HOST when omitted.
 
 
+  gateway backup                       Back up the mitmproxy CA certificate and private key from the gateway Docker volume to a local tarball. The output contains the CA private trust anchor — treat it as sensitive material.
+
+    --output [file]                    Local path to write the CA tarball. File permissions are set to 0600 after writing. (default: apps/gateway/.local/mitmproxy-ca.tar)
+    --include-ca                       Include the mitmproxy CA certificate and private key in the backup. Currently the only supported backup target. (default: true)
+
+
+  gateway restore                      Restore the mitmproxy CA certificate and private key from a local tarball into the gateway Docker volume. Restarts mitmproxy and gateway services after restore and confirms byte-equal content before reporting success.
+
+    --input <file>                     Path to the tarball produced by \`gateway backup --include-ca\`. Required.
+    --include-ca                       Restore the mitmproxy CA certificate and private key. Currently the only supported restore target. (default: true)
+
+
   status                               Show status of all deployments
 
     --json                             Output machine-readable JSON with keeweb, cliproxy, and gateway summary objects.

@@ -256,6 +256,23 @@ describe('computeSecretsChecksum', () => {
   })
 })
 
+// ─── parseDeployArgs ──────────────────────────────────────────────────────────
+
+describe('parseDeployArgs', () => {
+  test('parses supported boolean flags', async () => {
+    const {parseDeployArgs} = await import('./deploy')
+
+    expect(parseDeployArgs(['--dry-run', '--force-recreate'])).toEqual({dryRun: true, forceRecreate: true})
+    expect(parseDeployArgs([])).toEqual({dryRun: false, forceRecreate: false})
+  })
+
+  test('rejects unknown arguments instead of silently ignoring them', async () => {
+    const {parseDeployArgs} = await import('./deploy')
+
+    expect(() => parseDeployArgs(['--dryrun'])).toThrow(/Unknown deploy argument/)
+  })
+})
+
 // ─── pollRegistration ─────────────────────────────────────────────────────────
 
 describe('pollRegistration', () => {

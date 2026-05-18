@@ -9,6 +9,16 @@ const DROPLET_SIZE = 's-1vcpu-2gb'
 const DROPLET_REGION = 'nyc1'
 const REMOTE_USER = process.env.REMOTE_USER ?? 'root'
 
+export interface ProvisionArgs {
+  force: boolean
+  checkExists: boolean
+}
+
+export interface DropletExistenceState {
+  name: string
+  exists: boolean
+}
+
 // ---------------------------------------------------------------------------
 // Pure-logic helpers (exported for testability)
 // ---------------------------------------------------------------------------
@@ -52,6 +62,33 @@ export async function dropletExists(name: string): Promise<boolean> {
     .map(line => line.trim())
     .filter(Boolean)
   return names.includes(name)
+}
+
+/**
+ * Non-mutating state probe for agents/CI. This intentionally only lists
+ * droplets; it does not validate provision-only environment, create anything,
+ * pin host keys, or wait for SSH.
+ */
+export async function checkDropletExistence(name = DROPLET_NAME): Promise<DropletExistenceState> {
+  return {name, exists: await dropletExists(name)}
+}
+
+/**
+ * Parses provisioning arguments. Unknown flags are rejected so automated callers
+ * don't accidentally get a default mutating run after a typo.
+ */
+export function parseProvisionArgs(args: string[]): ProvisionArgs {
+  const known = new Set(['--force', '--check-exists'])
+  const unknown = args.filter(arg => !known.has(arg))
+
+  if (unknown.length > 0) {
+    throw new Error(`Unknown provision argument(s): ${unknown.join(', ')}. Supported: --force, --check-exists`)
+  }
+
+  return {
+    force: args.includes('--force'),
+    checkExists: args.includes('--check-exists'),
+  }
 }
 
 /**
@@ -199,9 +236,14 @@ function printOperatorSetupMessage(dropletIp: string, gatewayHost: string): void
 // ---------------------------------------------------------------------------
 
 export async function main(): Promise<void> {
-  const force = process.argv.includes('--force')
+  const {force, checkExists} = parseProvisionArgs(process.argv.slice(2))
 
   validateDoctl()
+
+  if (checkExists) {
+    console.log(JSON.stringify(await checkDropletExistence()))
+    return
+  }
 
   const missing = validateRequiredEnv(process.env as Record<string, string>)
   if (missing.length > 0) {

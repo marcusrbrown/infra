@@ -53,6 +53,11 @@ export interface MainOpts {
   intervalMs?: number
 }
 
+export interface DeployArgs {
+  dryRun: boolean
+  forceRecreate: boolean
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const REMOTE_DIR = '/opt/gateway'
@@ -199,6 +204,25 @@ export function computeSecretsChecksum(secrets: SecretFile[]): string {
 }
 
 /**
+ * Parses deploy CLI arguments into explicit booleans and rejects unknown flags.
+ * Keeping this as a pure helper makes agent/CI invocations predictable instead
+ * of silently ignoring a misspelled destructive-ish flag.
+ */
+export function parseDeployArgs(args: string[]): DeployArgs {
+  const known = new Set(['--dry-run', '--force-recreate'])
+  const unknown = args.filter(arg => !known.has(arg))
+
+  if (unknown.length > 0) {
+    throw new Error(`Unknown deploy argument(s): ${unknown.join(', ')}. Supported: --dry-run, --force-recreate`)
+  }
+
+  return {
+    dryRun: args.includes('--dry-run'),
+    forceRecreate: args.includes('--force-recreate'),
+  }
+}
+
+/**
  * Polls the Discord API for slash command registration.
  * Returns { commands: string[] } on success; throws on timeout.
  * Token is passed via Authorization header only — never in URLs or errors.
@@ -324,8 +348,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   const maxAttempts = opts.maxAttempts ?? 10
   const intervalMs = opts.intervalMs ?? 3000
 
-  const isDryRun = args.includes('--dry-run')
-  const forceRecreate = args.includes('--force-recreate')
+  const {dryRun: isDryRun, forceRecreate} = parseDeployArgs(args)
 
   // Phase 1: Validate env
   // SSH_AUTH_SOCK check in local mode (not CI)

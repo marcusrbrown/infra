@@ -3,7 +3,14 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
-import {dropletExists, pinHostKeys, validateDoctl, validateRequiredEnv} from './provision-droplet'
+import {
+  checkDropletExistence,
+  dropletExists,
+  parseProvisionArgs,
+  pinHostKeys,
+  validateDoctl,
+  validateRequiredEnv,
+} from './provision-droplet'
 
 // ---------------------------------------------------------------------------
 // Env helpers
@@ -182,6 +189,49 @@ describe('provision-droplet', () => {
 
       expect(result).toBe(false)
       spawnSpy.mockRestore()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // checkDropletExistence
+  // -------------------------------------------------------------------------
+
+  describe('checkDropletExistence', () => {
+    it('returns machine-readable existence state without provisioning side effects', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult('gateway\n', 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const state = await checkDropletExistence('gateway')
+
+      expect(state).toEqual({name: 'gateway', exists: true})
+      expect(spawnSpy).toHaveBeenCalledTimes(1)
+      expect(spawnSpy.mock.calls[0]?.[0]).toEqual([
+        'doctl',
+        'compute',
+        'droplet',
+        'list',
+        '--format',
+        'Name',
+        '--no-header',
+      ])
+
+      spawnSpy.mockRestore()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // parseProvisionArgs
+  // -------------------------------------------------------------------------
+
+  describe('parseProvisionArgs', () => {
+    it('parses supported flags', () => {
+      expect(parseProvisionArgs(['--force', '--check-exists'])).toEqual({force: true, checkExists: true})
+      expect(parseProvisionArgs([])).toEqual({force: false, checkExists: false})
+    })
+
+    it('rejects unknown arguments instead of silently ignoring them', () => {
+      expect(() => parseProvisionArgs(['--check'])).toThrow(/Unknown provision argument/)
     })
   })
 

@@ -321,7 +321,7 @@ cli.test.ts.snap` (CLI help), root `AGENTS.md`, root `README.md`,
 
 ## Implementation Units
 
-- [ ] **Unit 1: Workspace scaffolding & upstream pin**
+- [x] **Unit 1: Workspace scaffolding & upstream pin**
 
 **Goal:** Bring up the `apps/gateway/` package skeleton and pin the
 `fro-bot/agent` baseline ref to `v0.44.0`.
@@ -360,7 +360,7 @@ cli.test.ts.snap` (CLI help), root `AGENTS.md`, root `README.md`,
 
 ---
 
-- [ ] **Unit 2: Droplet provisioning script**
+- [x] **Unit 2: Droplet provisioning script**
 
 **Goal:** A TypeScript provisioning script that creates the gateway
 DO droplet, pins host keys, and refuses to re-run against an
@@ -435,7 +435,7 @@ The droplet-create step is mocked at the `Bun.spawn` boundary.
 
 ---
 
-- [ ] **Unit 3: Deploy script (`apps/gateway/src/deploy.ts`)**
+- [x] **Unit 3: Deploy script (`apps/gateway/src/deploy.ts`)**
 
 **Goal:** A TypeScript deploy script that runs locally or in CI, SSHs
 into the droplet, clones/checks-out the pinned ref, materializes
@@ -547,7 +547,7 @@ loop logic). Phases that shell out are tested with
 
 ---
 
-- [ ] **Unit 4: CLI commands — status, deploy, logs**
+- [x] **Unit 4: CLI commands — status, deploy, logs**
 
 **Goal:** Three core CLI commands under
 `packages/cli/src/commands/gateway/`.
@@ -655,7 +655,7 @@ logic. Subprocess invocations mocked via `Bun.spawn`.
 
 ---
 
-- [ ] **Unit 5: CLI commands — backup, restore**
+- [x] **Unit 5: CLI commands — backup, restore**
 
 **Goal:** Symmetric `backup` and `restore` commands with
 `--include-ca` (or `--include=ca`), establishing the include-list
@@ -742,7 +742,7 @@ extensibility pattern for future state types.
 
 ---
 
-- [ ] **Unit 6: Deploy workflow**
+- [x] **Unit 6: Deploy workflow**
 
 **Goal:** `.github/workflows/deploy-gateway.yaml`, modeled on
 `deploy-cliproxy.yaml`.
@@ -808,7 +808,7 @@ extensibility pattern for future state types.
 
 ---
 
-- [ ] **Unit 7: Pre-merge gates & conventions coverage**
+- [x] **Unit 7: Pre-merge gates & conventions coverage**
 
 **Goal:** Confirm the new app is covered by existing pre-merge
 gates; add coverage where it isn't.

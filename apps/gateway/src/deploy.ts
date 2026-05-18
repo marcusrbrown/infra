@@ -37,11 +37,19 @@ export interface PollRegistrationOpts {
 export interface SpawnResult {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
+  stdin?: {write: (data: Uint8Array) => void; end: () => void}
   exited: Promise<number>
 }
 
+export interface SpawnOpts {
+  env: DeployEnv
+  stdout: 'pipe'
+  stderr: 'pipe'
+  stdin?: 'pipe'
+}
+
 /** Injectable spawn function — defaults to Bun.spawn. */
-export type SpawnFn = (cmd: string[], opts: {env: DeployEnv; stdout: 'pipe'; stderr: 'pipe'}) => SpawnResult
+export type SpawnFn = (cmd: string[], opts: SpawnOpts) => SpawnResult
 
 export interface MainOpts {
   env?: Record<string, string>
@@ -63,9 +71,13 @@ export interface DeployArgs {
 const REMOTE_DIR = '/opt/gateway'
 const DEPLOY_DIR = `${REMOTE_DIR}/deploy`
 const SECRETS_DIR = `${DEPLOY_DIR}/secrets`
-const CHECKSUM_PATH = `${DEPLOY_DIR}/.secrets-checksum`
+// Checksum lives OUTSIDE deploy/ so git clean -xfd doesn't destroy it
+const CHECKSUM_PATH = `${REMOTE_DIR}/.secrets-checksum`
 const ENV_PATH = `${DEPLOY_DIR}/.env`
 const DEFAULT_REMOTE_USER = 'root'
+
+/** Allowlist for OBJECT_STORE_HOSTS: hostnames + commas only, no shell metacharacters. */
+const OBJECT_STORE_HOSTS_RE = /^[\w.,\-]+$/
 
 const REQUIRED_ENV_VARS = [
   'DISCORD_TOKEN',
@@ -78,7 +90,7 @@ const REQUIRED_ENV_VARS = [
   'GATEWAY_HOST',
 ] as const
 
-// ─── Pure helpers ─────────────────────────────────────────────────────────────
+// ─── Exported helpers ─────────────────────────────────────────────────────────
 
 /**
  * Validates required environment variables are present.
@@ -161,6 +173,19 @@ export function computeObjectStoreHosts(env: Record<string, string>): string {
 }
 
 /**
+ * Validates that OBJECT_STORE_HOSTS contains only safe hostname characters.
+ * Throws a clear error if the value contains shell metacharacters.
+ */
+export function validateObjectStoreHosts(value: string): void {
+  if (!OBJECT_STORE_HOSTS_RE.test(value)) {
+    throw new Error(
+      `OBJECT_STORE_HOSTS value contains invalid characters: "${value}". ` +
+        'Only hostname characters (A-Z, a-z, 0-9, ., _, -) and commas are allowed.',
+    )
+  }
+}
+
+/**
  * Builds the list of secret files to materialize on the droplet.
  * Required secrets get the actual value; optional secrets that are
  * unset get '' (empty placeholder).
@@ -223,9 +248,34 @@ export function parseDeployArgs(args: string[]): DeployArgs {
 }
 
 /**
+ * Sanitizes an error by replacing any occurrence of a secret value with a
+ * redacted placeholder. Used to prevent secret leakage in spawn error messages.
+ */
+export function redactSecretsFromError(error: unknown, secrets: SecretFile[]): Error {
+  const base = error instanceof Error ? error.message : String(error)
+  let sanitized = base
+  for (const secret of secrets) {
+    if (secret.content) {
+      // Escape the secret content for use in a regex
+      const escaped = secret.content.replaceAll(/[$()*+.?[\\\]^{|}]/g, String.raw`\$&`)
+      sanitized = sanitized.replaceAll(new RegExp(escaped, 'g'), `<redacted:${secret.name}>`)
+    }
+  }
+  return new Error(sanitized)
+}
+
+/**
  * Polls the Discord API for slash command registration.
  * Returns { commands: string[] } on success; throws on timeout.
  * Token is passed via Authorization header only — never in URLs or errors.
+ *
+ * Status handling:
+ *   200 + non-empty commands → success
+ *   200 + empty commands     → keep polling
+ *   429                      → honor Retry-After header; abort if wait > 60s
+ *   5xx                      → retry with normal interval; counts against maxAttempts
+ *   401/403/404              → abort immediately (naming app/guild, never token)
+ *   other 4xx                → abort immediately with status + IDs
  */
 export async function pollRegistration(opts: PollRegistrationOpts): Promise<{commands: string[]}> {
   const {
@@ -248,19 +298,54 @@ export async function pollRegistration(opts: PollRegistrationOpts): Promise<{com
       },
     })
 
-    if (!response.ok) {
-      throw new Error(`Discord API returned HTTP ${response.status} for application=${applicationId} guild=${guildId}`)
+    const status = response.status
+
+    if (status === 200) {
+      const commands = (await response.json()) as {name: string}[]
+      if (commands.length > 0) {
+        return {commands: commands.map(c => c.name)}
+      }
+      // Empty list — keep polling
+      if (attempt < maxAttempts) {
+        await sleep(intervalMs)
+      }
+      continue
     }
 
-    const commands = (await response.json()) as {name: string}[]
+    if (status === 429) {
+      const retryAfterHeader = response.headers.get('Retry-After')
+      const retryAfterSec = retryAfterHeader ? Number.parseFloat(retryAfterHeader) : Number.NaN
+      const retryAfterMs = Number.isFinite(retryAfterSec) ? retryAfterSec * 1000 : intervalMs
 
-    if (commands.length > 0) {
-      return {commands: commands.map(c => c.name)}
+      if (retryAfterMs > 60_000) {
+        throw new Error(
+          `Discord rate-limit too long to wait (Retry-After: ${retryAfterSec}s) for application=${applicationId} guild=${guildId}`,
+        )
+      }
+
+      // Don't count this attempt against maxAttempts — just wait and retry
+      attempt--
+      await sleep(retryAfterMs)
+      continue
     }
 
-    if (attempt < maxAttempts) {
-      await sleep(intervalMs)
+    if (status >= 500) {
+      // Transient server error — retry with normal interval
+      if (attempt < maxAttempts) {
+        await sleep(intervalMs)
+      }
+      continue
     }
+
+    if (status === 401 || status === 403 || status === 404) {
+      throw new Error(
+        `Discord API returned HTTP ${status} for application=${applicationId} guild=${guildId}. ` +
+          'Check that the bot token and application/guild IDs are correct.',
+      )
+    }
+
+    // Other 4xx — abort immediately
+    throw new Error(`Discord API returned HTTP ${status} for application=${applicationId} guild=${guildId}`)
   }
 
   throw new Error(
@@ -283,7 +368,7 @@ function buildDeployEnv(env: Record<string, string>): DeployEnv {
   }
 }
 
-function defaultSpawn(cmd: string[], opts: {env: DeployEnv; stdout: 'pipe'; stderr: 'pipe'}): SpawnResult {
+function defaultSpawn(cmd: string[], opts: SpawnOpts): SpawnResult {
   return Bun.spawn(cmd, opts)
 }
 
@@ -314,6 +399,61 @@ async function runCommand(
   }
 
   return {stdout, stderr}
+}
+
+/**
+ * Writes content to a remote path via SSH stdin pipe.
+ * The content is never placed in the shell command argv — it flows through stdin only.
+ * On failure, any captured stderr/stdout is sanitized to remove secret values.
+ */
+async function writeRemoteFile(
+  label: string,
+  host: string,
+  remotePath: string,
+  content: string,
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  secrets: SecretFile[],
+): Promise<void> {
+  console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
+
+  // umask 077 ensures the file is created with 600 permissions.
+  // Content arrives via stdin — never in the shell command string.
+  const proc = spawnFn(sshCommand(host, `umask 077; cat > '${remotePath}'`), {
+    env: deployEnv,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    stdin: 'pipe',
+  })
+
+  if (!proc.stdin) {
+    throw new Error(`Spawn did not provide stdin pipe for: ${label}`)
+  }
+
+  proc.stdin.write(new TextEncoder().encode(content))
+  proc.stdin.end()
+
+  const stdout = await new Response(proc.stdout).text()
+  const stderr = await new Response(proc.stderr).text()
+  const exitCode = await proc.exited
+
+  if (exitCode !== 0) {
+    console.error(`\u001B[1;31mFAILED:\u001B[0m ${label}`)
+    // Sanitize captured output before logging — it may contain secret bytes
+    const sanitizedStderr = secrets.reduce(
+      (acc, s) => (s.content ? acc.replaceAll(s.content, `<redacted:${s.name}>`) : acc),
+      stderr.trim(),
+    )
+    if (sanitizedStderr) {
+      console.error(sanitizedStderr)
+    }
+    const rawError = new Error(`Command failed with exit code ${exitCode}: ${label}`)
+    throw redactSecretsFromError(rawError, secrets)
+  }
+
+  if (stdout.trim()) {
+    console.warn(stdout.trim())
+  }
 }
 
 async function remoteGitExists(host: string, deployEnv: DeployEnv, spawnFn: SpawnFn): Promise<boolean> {
@@ -364,10 +504,14 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   // Phase 2: Resolve upstream pin
   const {repo, ref} = resolveUpstreamPin()
 
+  // Phase 3 (pre-flight): Validate OBJECT_STORE_HOSTS before any SSH
+  const objectStoreHosts = computeObjectStoreHosts(env)
+  validateObjectStoreHosts(objectStoreHosts)
+
   if (isDryRun) {
     console.warn('\u001B[1;33m[dry-run]\u001B[0m Planned actions:')
     console.warn(`  1. Ensure droplet workspace at ${REMOTE_DIR} (clone ${repo}@${ref} or fetch+reset)`)
-    console.warn(`  2. Compute OBJECT_STORE_HOSTS: ${computeObjectStoreHosts(env)}`)
+    console.warn(`  2. Compute OBJECT_STORE_HOSTS: ${objectStoreHosts}`)
     console.warn(`  3. Materialize ${buildSecretFileList(env).length} secret files under ${SECRETS_DIR}`)
     console.warn(`  4. Write .env to ${ENV_PATH}`)
     console.warn(`  5. Run init-certs.sh (idempotent)`)
@@ -382,7 +526,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   const host = env.GATEWAY_HOST!
   const deployEnv = buildDeployEnv(env)
 
-  // Phase 3: Ensure droplet workspace
+  // Phase 4: Ensure droplet workspace
   await runCommand(
     'Creating remote workspace directory',
     sshCommand(host, `mkdir -p ${REMOTE_DIR}`),
@@ -420,43 +564,36 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     )
   }
 
-  // Phase 4: Compute OBJECT_STORE_HOSTS
-  const objectStoreHosts = computeObjectStoreHosts(env)
-
   // Phase 5: Materialize secrets
   const secrets = buildSecretFileList(env)
   await runCommand('Creating secrets directory', sshCommand(host, `mkdir -p ${SECRETS_DIR}`), deployEnv, spawnFn)
 
   for (const secret of secrets) {
-    await runCommand(
+    await writeRemoteFile(
       `Writing secret: ${secret.name}`,
-      sshCommand(host, `umask 077; cat > ${SECRETS_DIR}/${secret.name} << 'SECRETEOF'\n${secret.content}\nSECRETEOF`),
+      host,
+      `${SECRETS_DIR}/${secret.name}`,
+      secret.content,
       deployEnv,
       spawnFn,
+      secrets,
     )
   }
 
-  // Compute current checksum
+  // Compute current checksum and read prior checksum to detect rotation
   const currentChecksum = computeSecretsChecksum(secrets)
-
-  // Read prior checksum BEFORE overwriting, to detect rotation
   const priorChecksum = await readRemoteChecksum(host, deployEnv, spawnFn)
   const checksumChanged = priorChecksum !== currentChecksum
 
-  // Persist new checksum
-  await runCommand(
-    'Persisting secrets checksum',
-    sshCommand(host, `echo ${currentChecksum} > ${CHECKSUM_PATH}`),
-    deployEnv,
-    spawnFn,
-  )
-
-  // Phase 6: Materialize .env
-  await runCommand(
+  // Phase 6: Materialize .env via stdin pipe (OBJECT_STORE_HOSTS already validated above)
+  await writeRemoteFile(
     'Writing .env',
-    sshCommand(host, `echo 'OBJECT_STORE_HOSTS=${objectStoreHosts}' > ${ENV_PATH}`),
+    host,
+    ENV_PATH,
+    `OBJECT_STORE_HOSTS=${objectStoreHosts}\n`,
     deployEnv,
     spawnFn,
+    secrets,
   )
 
   // Phase 7: Run init-certs.sh (idempotent)
@@ -504,9 +641,19 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     intervalMs,
   })
 
+  // Phase 10: Persist checksum AFTER compose + registration succeed
+  // If either phase 8 or 9 threw, we never reach here — prior checksum stays in place
+  // so the next deploy correctly detects secrets as changed and forces recreate.
+  await runCommand(
+    'Persisting secrets checksum',
+    sshCommand(host, `echo ${currentChecksum} > ${CHECKSUM_PATH}`),
+    deployEnv,
+    spawnFn,
+  )
+
   console.warn(`\u001B[1;32m✓\u001B[0m Registered commands: ${commands.join(', ')}`)
 
-  // Phase 10: Auth-tier warning
+  // Phase 11: Auth-tier warning
   const nonPingCommands = commands.filter(c => c !== 'ping')
   if (nonPingCommands.length > 0 && !env.DISCORD_OPERATOR_ROLE_ID) {
     console.warn(

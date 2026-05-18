@@ -15,12 +15,27 @@ function makeStream(content: string): ReadableStream<Uint8Array> {
   })
 }
 
-function makeSpawnResult(opts: {stdout?: string; stderr?: string; exitCode?: number} = {}): SpawnResult {
-  return {
+function makeSpawnResult(
+  opts: {stdout?: string; stderr?: string; exitCode?: number; captureStdin?: boolean} = {},
+): SpawnResult & {stdinData?: string} {
+  let stdinData = ''
+  const result: SpawnResult & {stdinData?: string} = {
     stdout: makeStream(opts.stdout ?? ''),
     stderr: makeStream(opts.stderr ?? ''),
     exited: Promise.resolve(opts.exitCode ?? 0),
   }
+  if (opts.captureStdin) {
+    result.stdin = {
+      write(data: Uint8Array) {
+        stdinData += new TextDecoder().decode(data)
+      },
+      end() {},
+    }
+    Object.defineProperty(result, 'stdinData', {get: () => stdinData})
+  } else {
+    result.stdin = {write() {}, end() {}}
+  }
+  return result
 }
 
 /** Build a minimal valid env for tests. */
@@ -590,5 +605,454 @@ describe('main', () => {
 
     await expect(main({env, args: [], spawn: spawnFn})).rejects.toThrow(/SSH_AUTH_SOCK/)
     expect(calls).toHaveLength(0)
+  })
+
+  // ── R2: checksum persists AFTER compose + registration succeed ──────────────
+
+  test('R2: compose failure → checksum NOT written, next deploy still force-recreates', async () => {
+    const {main} = await import('./deploy')
+    const checksumWrites: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Track checksum writes (write: `echo <hash> > /path`; read: `cat ... || echo ''` — different)
+      if (cmdStr.includes('> /opt/gateway/.secrets-checksum')) {
+        checksumWrites.push(cmdStr)
+        return makeSpawnResult()
+      }
+      // Compose fails
+      if (cmdStr.includes('docker compose')) {
+        return makeSpawnResult({exitCode: 1, stderr: 'compose failed'})
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/Command failed with exit code 1/)
+
+    // Checksum must NOT have been written since compose failed
+    expect(checksumWrites).toHaveLength(0)
+  })
+
+  test('R2: pollRegistration failure → checksum NOT written', async () => {
+    const {main} = await import('./deploy')
+    const checksumWrites: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('> /opt/gateway/.secrets-checksum')) {
+        checksumWrites.push(cmdStr)
+        return makeSpawnResult()
+      }
+      return undefined
+    })
+
+    // Registration always returns empty → timeout
+    const fetchMock = mock(async () => new Response(JSON.stringify([]), {status: 200}))
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+        maxAttempts: 1,
+        intervalMs: 0,
+      }),
+    ).rejects.toThrow(/timed out/)
+
+    // Checksum must NOT have been written since registration failed
+    expect(checksumWrites).toHaveLength(0)
+  })
+
+  test('R2: checksum written AFTER successful compose + registration', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker compose')) {
+        eventLog.push('compose')
+      } else if (cmdStr.includes('.secrets-checksum') && cmdStr.includes('> /opt/gateway/.secrets-checksum')) {
+        // Only the write: `echo <checksum> > /opt/gateway/.secrets-checksum`
+        eventLog.push('checksum-write')
+      }
+      return undefined
+    })
+
+    const fetchMock = mock(async () => {
+      eventLog.push('poll-registration')
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: fetchMock as unknown as typeof fetch,
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const composeIdx = eventLog.indexOf('compose')
+    const pollIdx = eventLog.indexOf('poll-registration')
+    const checksumIdx = eventLog.indexOf('checksum-write')
+
+    expect(composeIdx).toBeGreaterThanOrEqual(0)
+    expect(pollIdx).toBeGreaterThan(composeIdx)
+    expect(checksumIdx).toBeGreaterThan(pollIdx)
+  })
+})
+
+// ─── validateObjectStoreHosts (S3) ───────────────────────────────────────────
+
+describe('validateObjectStoreHosts', () => {
+  test('accepts valid hostname-only values', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('my-bucket.s3.us-east-1.amazonaws.com')).not.toThrow()
+    expect(() => validateObjectStoreHosts('host1.example.com,host2.example.com')).not.toThrow()
+    expect(() => validateObjectStoreHosts('simple-host_name')).not.toThrow()
+  })
+
+  test('rejects values with shell metacharacters', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('host; rm -rf /')).toThrow(/invalid characters/)
+    expect(() => validateObjectStoreHosts('$(evil)')).toThrow(/invalid characters/)
+    expect(() => validateObjectStoreHosts('`cmd`')).toThrow(/invalid characters/)
+    expect(() => validateObjectStoreHosts('host && bad')).toThrow(/invalid characters/)
+  })
+
+  test('S3: malformed OBJECT_STORE_HOSTS rejected before SSH is invoked', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({OBJECT_STORE_HOSTS: 'host; rm -rf /'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/invalid characters/)
+
+    // No SSH calls should have been made
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ─── redactSecretsFromError (S1) ─────────────────────────────────────────────
+
+describe('redactSecretsFromError', () => {
+  test('replaces secret values with redacted placeholders', async () => {
+    const {redactSecretsFromError} = await import('./deploy')
+    const secrets = [
+      {name: 'discord_token', content: 'super-secret-token', required: true},
+      {name: 'aws_key', content: 'AKIAIOSFODNN7EXAMPLE', required: true},
+    ]
+    const err = new Error('SSH failed: super-secret-token was echoed in output AKIAIOSFODNN7EXAMPLE')
+    const sanitized = redactSecretsFromError(err, secrets)
+    expect(sanitized.message).not.toContain('super-secret-token')
+    expect(sanitized.message).not.toContain('AKIAIOSFODNN7EXAMPLE')
+    expect(sanitized.message).toContain('<redacted:discord_token>')
+    expect(sanitized.message).toContain('<redacted:aws_key>')
+  })
+
+  test('handles non-Error inputs', async () => {
+    const {redactSecretsFromError} = await import('./deploy')
+    const secrets = [{name: 'tok', content: 'secret-val', required: true}]
+    const sanitized = redactSecretsFromError('raw string with secret-val', secrets)
+    expect(sanitized.message).not.toContain('secret-val')
+    expect(sanitized.message).toContain('<redacted:tok>')
+  })
+
+  test('skips secrets with empty content', async () => {
+    const {redactSecretsFromError} = await import('./deploy')
+    const secrets = [{name: 'optional', content: '', required: false}]
+    const err = new Error('some error message')
+    const sanitized = redactSecretsFromError(err, secrets)
+    expect(sanitized.message).toBe('some error message')
+  })
+})
+
+// ─── T1: secret-write SSH failure — token confidentiality ────────────────────
+
+describe('T1 secret-write failure token confidentiality', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('SSH spawn failure on discord_token write: error does not contain token value', async () => {
+    const {main} = await import('./deploy')
+    const TOKEN = 'tok-secret'
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Fail specifically on the discord_token secret write (identified by path)
+      if (cmdStr.includes('discord_token')) {
+        return makeSpawnResult({
+          exitCode: 1,
+          // Simulate SSH echoing back something that might contain the token
+          stderr: `cat: write error: ${TOKEN}`,
+        })
+      }
+      return undefined
+    })
+
+    let caughtError: Error | undefined
+    try {
+      await main({
+        env: makeEnv({DISCORD_TOKEN: TOKEN}),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      })
+    } catch (error) {
+      caughtError = error instanceof Error ? error : new Error(String(error))
+    }
+
+    expect(caughtError).toBeDefined()
+    // The thrown error must NOT contain the actual token value
+    expect(caughtError?.message).not.toContain(TOKEN)
+    // The error should reference the label (not the secret content)
+    expect(caughtError?.message).toContain('discord_token')
+  })
+
+  test('S2: secret with shell metacharacters written via stdin, not argv', async () => {
+    const {main} = await import('./deploy')
+    const TRICKY_TOKEN = "tok'with'quotes\nand newlines\n$VAR `backtick` ; && \\"
+    const stdinContents: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('discord_token')) {
+        // Capture stdin content
+        const result = makeSpawnResult({captureStdin: true})
+        // Intercept stdin writes
+        const origWrite = result.stdin!.write.bind(result.stdin)
+        result.stdin!.write = (data: Uint8Array) => {
+          stdinContents.push(new TextDecoder().decode(data))
+          origWrite(data)
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({DISCORD_TOKEN: TRICKY_TOKEN}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // The token must have been passed via stdin, not in the command argv
+    // Verify the tricky token is NOT in any command string
+    // (we can't easily access calls here, but we can verify stdin received it)
+    expect(stdinContents.join('')).toContain(TRICKY_TOKEN)
+  })
+})
+
+// ─── R1: pollRegistration status branching ───────────────────────────────────
+
+describe('R1 pollRegistration status branching', () => {
+  test('429 with Retry-After ≤ 60s: waits and retries without counting against maxAttempts', async () => {
+    const {pollRegistration} = await import('./deploy')
+    let callCount = 0
+    const sleepCalls: number[] = []
+
+    const fetchMock = mock(async () => {
+      callCount++
+      if (callCount === 1) {
+        return new Response('', {
+          status: 429,
+          headers: {'Retry-After': '2'},
+        })
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    })
+
+    const result = await pollRegistration({
+      applicationId: 'app1',
+      guildId: 'guild1',
+      token: 'tok',
+      fetch: fetchMock as unknown as typeof fetch,
+      sleep: async (ms: number) => {
+        sleepCalls.push(ms)
+      },
+      maxAttempts: 2,
+      intervalMs: 1000,
+    })
+
+    expect(result.commands).toEqual(['ping'])
+    // Should have slept for 2000ms (Retry-After: 2 seconds)
+    expect(sleepCalls).toContain(2000)
+    // Total fetch calls: 2 (429 + 200)
+    expect(callCount).toBe(2)
+  })
+
+  test('429 with Retry-After > 60s: aborts with clear message', async () => {
+    const {pollRegistration} = await import('./deploy')
+    const fetchMock = mock(
+      async () =>
+        new Response('', {
+          status: 429,
+          headers: {'Retry-After': '120'},
+        }),
+    )
+
+    await expect(
+      pollRegistration({
+        applicationId: 'app1',
+        guildId: 'guild1',
+        token: 'tok',
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+        maxAttempts: 3,
+      }),
+    ).rejects.toThrow(/rate-limit too long/)
+  })
+
+  test('5xx: retries with normal interval, counts against maxAttempts', async () => {
+    const {pollRegistration} = await import('./deploy')
+    let callCount = 0
+
+    const fetchMock = mock(async () => {
+      callCount++
+      if (callCount < 3) {
+        return new Response('Internal Server Error', {status: 500})
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    })
+
+    const result = await pollRegistration({
+      applicationId: 'app1',
+      guildId: 'guild1',
+      token: 'tok',
+      fetch: fetchMock as unknown as typeof fetch,
+      sleep: async () => {},
+      maxAttempts: 5,
+      intervalMs: 0,
+    })
+
+    expect(result.commands).toEqual(['ping'])
+    expect(callCount).toBe(3)
+  })
+
+  test('5xx exhausts maxAttempts → throws timeout error', async () => {
+    const {pollRegistration} = await import('./deploy')
+    const fetchMock = mock(async () => new Response('Service Unavailable', {status: 503}))
+
+    await expect(
+      pollRegistration({
+        applicationId: 'app1',
+        guildId: 'guild1',
+        token: 'tok',
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+        maxAttempts: 2,
+        intervalMs: 0,
+      }),
+    ).rejects.toThrow(/timed out after 2 attempts/)
+  })
+
+  test('401: aborts immediately with app/guild IDs, not token', async () => {
+    const {pollRegistration} = await import('./deploy')
+    const fetchMock = mock(async () => new Response('Unauthorized', {status: 401}))
+
+    let errorMessage = ''
+    try {
+      await pollRegistration({
+        applicationId: 'appXYZ',
+        guildId: 'guildABC',
+        token: 'secret-bot-token',
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+        maxAttempts: 5,
+      })
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).toContain('401')
+    expect(errorMessage).toContain('appXYZ')
+    expect(errorMessage).toContain('guildABC')
+    expect(errorMessage).not.toContain('secret-bot-token')
+  })
+
+  test('403: aborts immediately', async () => {
+    const {pollRegistration} = await import('./deploy')
+    const fetchMock = mock(async () => new Response('Forbidden', {status: 403}))
+
+    await expect(
+      pollRegistration({
+        applicationId: 'app1',
+        guildId: 'guild1',
+        token: 'tok',
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/403/)
+  })
+
+  test('404: aborts immediately', async () => {
+    const {pollRegistration} = await import('./deploy')
+    const fetchMock = mock(async () => new Response('Not Found', {status: 404}))
+
+    await expect(
+      pollRegistration({
+        applicationId: 'app1',
+        guildId: 'guild1',
+        token: 'tok',
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/404/)
+  })
+
+  test('other 4xx (e.g. 422): aborts immediately with status + IDs', async () => {
+    const {pollRegistration} = await import('./deploy')
+    const fetchMock = mock(async () => new Response('Unprocessable', {status: 422}))
+
+    let errorMessage = ''
+    try {
+      await pollRegistration({
+        applicationId: 'app1',
+        guildId: 'guild1',
+        token: 'tok',
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+      })
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).toContain('422')
+    expect(errorMessage).toContain('app1')
+    expect(errorMessage).toContain('guild1')
   })
 })

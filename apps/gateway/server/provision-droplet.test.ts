@@ -6,6 +6,7 @@ import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 import {
   checkDropletExistence,
   dropletExists,
+  getSshFingerprint,
   parseProvisionArgs,
   pinHostKeys,
   validateDoctl,
@@ -16,7 +17,7 @@ import {
 // Env helpers
 // ---------------------------------------------------------------------------
 
-const managedEnvKeys = ['DIGITALOCEAN_ACCESS_TOKEN', 'GATEWAY_HOST'] as const
+const managedEnvKeys = ['DIGITALOCEAN_ACCESS_TOKEN', 'GATEWAY_HOST', 'GATEWAY_SSH_KEY_NAME'] as const
 type ManagedEnvKey = (typeof managedEnvKeys)[number]
 
 let savedEnv: Partial<Record<ManagedEnvKey, string | undefined>>
@@ -294,6 +295,140 @@ describe('provision-droplet', () => {
       )
 
       await expect(pinHostKeys('gateway.example.com', '1.2.3.4', knownHostsPath)).rejects.toThrow()
+
+      spawnSpy.mockRestore()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // getSshFingerprint
+  // -------------------------------------------------------------------------
+
+  // Real doctl output uses multi-space padding between Name and FingerPrint columns.
+  // The Name column can contain spaces, @, and dots — so we parse last-field-is-fingerprint.
+  const MULTI_KEY_OUTPUT = [
+    'UltraVisor                                            91:53:2a:06:50:89:54:68:e6:c5:fd:c4:1a:c5:87:c9',
+    'ShellFish@Marcus-iPad-01052022                        d4:a0:81:f4:7c:ba:17:f5:71:6a:17:75:e3:20:19:2e',
+    'id_rsa-root@monica.marcusrbrown.com via hypervisor    b8:02:e3:70:3a:6a:60:45:09:e0:8b:01:d8:09:43:22',
+    'fro-bot-gateway                                       e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b',
+  ].join('\n')
+
+  describe('getSshFingerprint', () => {
+    it('matches gateway-specific key when multiple keys exist', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(MULTI_KEY_OUTPUT, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getSshFingerprint('fro-bot-gateway')
+
+      expect(fp).toBe('e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b')
+      // Must NOT return the first key's fingerprint
+      expect(fp).not.toBe('91:53:2a:06:50:89:54:68:e6:c5:fd:c4:1a:c5:87:c9')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('picks the named key even when it is the only row', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(
+          'fro-bot-gateway                                       e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b',
+          0,
+        ) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getSshFingerprint('fro-bot-gateway')
+
+      expect(fp).toBe('e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('throws with a clear message when the named key is not found', async () => {
+      const threeOtherKeys = [
+        'UltraVisor                                            91:53:2a:06:50:89:54:68:e6:c5:fd:c4:1a:c5:87:c9',
+        'ShellFish@Marcus-iPad-01052022                        d4:a0:81:f4:7c:ba:17:f5:71:6a:17:75:e3:20:19:2e',
+        'id_rsa-root@monica.marcusrbrown.com via hypervisor    b8:02:e3:70:3a:6a:60:45:09:e0:8b:01:d8:09:43:22',
+      ].join('\n')
+
+      const spawnSpy = spyOn(Bun, 'spawn')
+        .mockReturnValueOnce(makeSpawnResult(threeOtherKeys, 0) as ReturnType<typeof Bun.spawn>)
+        .mockReturnValueOnce(makeSpawnResult(threeOtherKeys, 0) as ReturnType<typeof Bun.spawn>)
+        .mockReturnValueOnce(makeSpawnResult(threeOtherKeys, 0) as ReturnType<typeof Bun.spawn>)
+
+      await expect(getSshFingerprint('fro-bot-gateway')).rejects.toThrow(/not found/)
+      await expect(getSshFingerprint('fro-bot-gateway')).rejects.toThrow(/GATEWAY_SSH_KEY_NAME/)
+      await expect(getSshFingerprint('fro-bot-gateway')).rejects.toThrow(/fro-bot-gateway/)
+
+      spawnSpy.mockRestore()
+    })
+
+    it('throws with a clear message when the key list is empty', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(makeSpawnResult('', 0) as ReturnType<typeof Bun.spawn>)
+
+      await expect(getSshFingerprint('fro-bot-gateway')).rejects.toThrow(/not found/)
+
+      spawnSpy.mockRestore()
+    })
+
+    it('throws on doctl non-zero exit', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResultWithStderr('unauthorized', 1) as ReturnType<typeof Bun.spawn>,
+      )
+
+      await expect(getSshFingerprint('fro-bot-gateway')).rejects.toThrow(/unauthorized/)
+
+      spawnSpy.mockRestore()
+    })
+
+    it('uses fro-bot-gateway as the default key name when no argument is provided', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(MULTI_KEY_OUTPUT, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getSshFingerprint()
+
+      expect(fp).toBe('e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('uses GATEWAY_SSH_KEY_NAME env var when no argument is passed', async () => {
+      process.env.GATEWAY_SSH_KEY_NAME = 'custom-key-name'
+
+      const customKeyOutput = [
+        'fro-bot-gateway                                       e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b',
+        'custom-key-name                                       aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99',
+      ].join('\n')
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(customKeyOutput, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getSshFingerprint()
+
+      expect(fp).toBe('aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99')
+      // Must NOT return the fro-bot-gateway fingerprint
+      expect(fp).not.toBe('e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('looks up a key whose name contains spaces', async () => {
+      const spacedKeyOutput = [
+        'fro-bot-gateway                                       e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b',
+        'my key with spaces                                    11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00',
+        'another-key                                           ff:ee:dd:cc:bb:aa:99:88:77:66:55:44:33:22:11:00',
+      ].join('\n')
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(spacedKeyOutput, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getSshFingerprint('my key with spaces')
+
+      expect(fp).toBe('11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00')
+      // Must NOT return the next row's fingerprint
+      expect(fp).not.toBe('ff:ee:dd:cc:bb:aa:99:88:77:66:55:44:33:22:11:00')
 
       spawnSpy.mockRestore()
     })

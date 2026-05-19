@@ -4,7 +4,7 @@ import {appendFileSync, readFileSync} from 'node:fs'
 import {join, resolve} from 'node:path'
 
 const DROPLET_NAME = 'gateway'
-const DROPLET_IMAGE = 'docker-24-04'
+const DROPLET_IMAGE = 'docker-20-04'
 const DROPLET_SIZE = 's-1vcpu-2gb'
 const DROPLET_REGION = 'nyc1'
 const REMOTE_USER = process.env.REMOTE_USER ?? 'root'

@@ -573,7 +573,11 @@ async function readRemoteChecksum(
     stderr: 'pipe',
   })
   const stdout = await new Response(proc.stdout).text()
-  await proc.exited
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    const stderr = await new Response(proc.stderr).text()
+    throw new Error(`Failed to read remote checksum from ${CHECKSUM_PATH} (exit ${exitCode}): ${stderr.trim()}`)
+  }
   return stdout.trim()
 }
 

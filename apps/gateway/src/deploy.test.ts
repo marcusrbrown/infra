@@ -598,6 +598,67 @@ describe('main', () => {
     expect(composeCall?.join(' ')).toContain('--force-recreate')
   })
 
+  test('readRemoteChecksum: SSH exits 0 with checksum → returns checksum string', async () => {
+    const {main, buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const env = makeEnv()
+    const expectedChecksum = computeSecretsChecksum(buildSecretFileList(env))
+
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    // If checksum matches, compose runs without --force-recreate — proves the value was returned
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes("cat '")) {
+        return makeSpawnResult({stdout: expectedChecksum, exitCode: 0})
+      }
+      return undefined
+    })
+    await main({env, args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+    const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
+    expect(composeCall?.join(' ')).not.toContain('--force-recreate')
+  })
+
+  test('readRemoteChecksum: SSH exits 0 with empty stdout (first deploy) → returns empty string, no force-recreate suppressed', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes("cat '")) {
+        // File doesn't exist on droplet: SSH exits 0, stdout is empty (via 2>/dev/null || echo '')
+        return makeSpawnResult({stdout: '', exitCode: 0})
+      }
+      return undefined
+    })
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    // Empty prior checksum != current checksum → --force-recreate
+    const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
+    expect(composeCall?.join(' ')).toContain('--force-recreate')
+  })
+
+  test('readRemoteChecksum: SSH exits non-zero → throws with exit code and stderr', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Match the read command: `cat '.secrets-checksum'` (not the write: `cat >`)
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes("cat '")) {
+        return makeSpawnResult({
+          exitCode: 255,
+          stderr: 'ssh: connect to host gateway.fro.bot port 22: Connection refused',
+        })
+      }
+      return undefined
+    })
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await expect(
+      main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn}),
+    ).rejects.toThrow(/Failed to read remote checksum.*exit 255.*Connection refused/)
+  })
+
   test('error path (missing env): fails fast, no spawn invoked', async () => {
     const {main} = await import('./deploy')
     const {spawnFn, calls} = makeSpawnMock()

@@ -195,16 +195,16 @@ export function validateObjectStoreHosts(value: string): void {
  */
 export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
   const required: {name: string; envKey: string}[] = [
-    {name: 'discord_token', envKey: 'DISCORD_TOKEN'},
-    {name: 'aws_access_key_id', envKey: 'AWS_ACCESS_KEY_ID'},
-    {name: 'aws_secret_access_key', envKey: 'AWS_SECRET_ACCESS_KEY'},
-    {name: 'discord_application_id', envKey: 'DISCORD_APPLICATION_ID'},
-    {name: 'discord_guild_id', envKey: 'DISCORD_GUILD_ID'},
+    {name: 'discord-token', envKey: 'DISCORD_TOKEN'},
+    {name: 'discord-application-id', envKey: 'DISCORD_APPLICATION_ID'},
+    {name: 'discord-guild-id', envKey: 'DISCORD_GUILD_ID'},
+    {name: 'aws-access-key-id', envKey: 'AWS_ACCESS_KEY_ID'},
+    {name: 'aws-secret-access-key', envKey: 'AWS_SECRET_ACCESS_KEY'},
+    {name: 's3-bucket', envKey: 'S3_BUCKET'},
+    {name: 's3-region', envKey: 'S3_REGION'},
   ]
 
-  const optional: {name: string; envKey: string}[] = [
-    {name: 'discord_operator_role_id', envKey: 'DISCORD_OPERATOR_ROLE_ID'},
-  ]
+  const optional: {name: string; envKey: string}[] = [{name: 's3-endpoint', envKey: 'S3_ENDPOINT'}]
 
   const secrets: SecretFile[] = []
 

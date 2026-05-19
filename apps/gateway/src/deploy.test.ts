@@ -211,31 +211,115 @@ describe('computeObjectStoreHosts', () => {
 // ─── buildSecretFileList ──────────────────────────────────────────────────────
 
 describe('buildSecretFileList', () => {
-  test('returns required secrets with actual values', async () => {
+  test('returns exactly 8 secret entries', async () => {
     const {buildSecretFileList} = await import('./deploy')
     const secrets = buildSecretFileList(makeEnv())
-    const token = secrets.find(s => s.name === 'discord_token')
+    expect(secrets).toHaveLength(8)
+  })
+
+  test('uses kebab-case file names matching upstream compose contract', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const names = secrets.map(s => s.name)
+    expect(names).toContain('discord-token')
+    expect(names).toContain('discord-application-id')
+    expect(names).toContain('discord-guild-id')
+    expect(names).toContain('aws-access-key-id')
+    expect(names).toContain('aws-secret-access-key')
+    expect(names).toContain('s3-bucket')
+    expect(names).toContain('s3-region')
+    expect(names).toContain('s3-endpoint')
+  })
+
+  test('does not use snake_case file names', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const names = secrets.map(s => s.name)
+    expect(names).not.toContain('discord_token')
+    expect(names).not.toContain('discord_application_id')
+    expect(names).not.toContain('discord_guild_id')
+    expect(names).not.toContain('aws_access_key_id')
+    expect(names).not.toContain('aws_secret_access_key')
+  })
+
+  test('discord-token maps to DISCORD_TOKEN env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const token = secrets.find(s => s.name === 'discord-token')
     expect(token).toBeDefined()
     expect(token?.content).toBe('tok-secret')
     expect(token?.required).toBe(true)
   })
 
-  test('optional secret unset → content is empty string, required false', async () => {
+  test('discord-application-id maps to DISCORD_APPLICATION_ID env var', async () => {
     const {buildSecretFileList} = await import('./deploy')
-    const env = makeEnv()
-    delete (env as Record<string, string>).DISCORD_OPERATOR_ROLE_ID
-    const secrets = buildSecretFileList(env)
-    const roleSecret = secrets.find(s => s.name === 'discord_operator_role_id')
-    expect(roleSecret).toBeDefined()
-    expect(roleSecret?.content).toBe('')
-    expect(roleSecret?.required).toBe(false)
+    const secrets = buildSecretFileList(makeEnv())
+    const appId = secrets.find(s => s.name === 'discord-application-id')
+    expect(appId).toBeDefined()
+    expect(appId?.content).toBe('app123')
+    expect(appId?.required).toBe(true)
   })
 
-  test('optional secret set → content is the value', async () => {
+  test('discord-guild-id maps to DISCORD_GUILD_ID env var', async () => {
     const {buildSecretFileList} = await import('./deploy')
-    const secrets = buildSecretFileList(makeEnv({DISCORD_OPERATOR_ROLE_ID: 'role-999'}))
-    const roleSecret = secrets.find(s => s.name === 'discord_operator_role_id')
-    expect(roleSecret?.content).toBe('role-999')
+    const secrets = buildSecretFileList(makeEnv())
+    const guildId = secrets.find(s => s.name === 'discord-guild-id')
+    expect(guildId).toBeDefined()
+    expect(guildId?.content).toBe('guild456')
+  })
+
+  test('aws-access-key-id maps to AWS_ACCESS_KEY_ID env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const key = secrets.find(s => s.name === 'aws-access-key-id')
+    expect(key).toBeDefined()
+    expect(key?.content).toBe('AKIAIOSFODNN7EXAMPLE')
+    expect(key?.required).toBe(true)
+  })
+
+  test('aws-secret-access-key maps to AWS_SECRET_ACCESS_KEY env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const secretKey = secrets.find(s => s.name === 'aws-secret-access-key')
+    expect(secretKey).toBeDefined()
+    expect(secretKey?.content).toBe('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')
+    expect(secretKey?.required).toBe(true)
+  })
+
+  test('s3-bucket maps to S3_BUCKET env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const bucket = secrets.find(s => s.name === 's3-bucket')
+    expect(bucket).toBeDefined()
+    expect(bucket?.content).toBe('my-bucket')
+    expect(bucket?.required).toBe(true)
+  })
+
+  test('s3-region maps to S3_REGION env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const region = secrets.find(s => s.name === 's3-region')
+    expect(region).toBeDefined()
+    expect(region?.content).toBe('us-east-1')
+    expect(region?.required).toBe(true)
+  })
+
+  test('s3-endpoint is optional: unset → empty content, required false', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).S3_ENDPOINT
+    const secrets = buildSecretFileList(env)
+    const endpoint = secrets.find(s => s.name === 's3-endpoint')
+    expect(endpoint).toBeDefined()
+    expect(endpoint?.content).toBe('')
+    expect(endpoint?.required).toBe(false)
+  })
+
+  test('s3-endpoint set → content is the value', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv({S3_ENDPOINT: 'https://abc123.r2.cloudflarestorage.com'}))
+    const endpoint = secrets.find(s => s.name === 's3-endpoint')
+    expect(endpoint?.content).toBe('https://abc123.r2.cloudflarestorage.com')
   })
 })
 
@@ -804,14 +888,14 @@ describe('T1 secret-write failure token confidentiality', () => {
     }
   })
 
-  test('SSH spawn failure on discord_token write: error does not contain token value', async () => {
+  test('SSH spawn failure on discord-token write: error does not contain token value', async () => {
     const {main} = await import('./deploy')
     const TOKEN = 'tok-secret'
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
-      // Fail specifically on the discord_token secret write (identified by path)
-      if (cmdStr.includes('discord_token')) {
+      // Fail specifically on the discord-token secret write (identified by path)
+      if (cmdStr.includes('discord-token')) {
         return makeSpawnResult({
           exitCode: 1,
           // Simulate SSH echoing back something that might contain the token
@@ -838,7 +922,7 @@ describe('T1 secret-write failure token confidentiality', () => {
     // The thrown error must NOT contain the actual token value
     expect(caughtError?.message).not.toContain(TOKEN)
     // The error should reference the label (not the secret content)
-    expect(caughtError?.message).toContain('discord_token')
+    expect(caughtError?.message).toContain('discord-token')
   })
 
   test('S2: secret with shell metacharacters written via stdin, not argv', async () => {
@@ -848,7 +932,7 @@ describe('T1 secret-write failure token confidentiality', () => {
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
-      if (cmdStr.includes('discord_token')) {
+      if (cmdStr.includes('discord-token')) {
         // Capture stdin content
         const result = makeSpawnResult({captureStdin: true})
         // Intercept stdin writes

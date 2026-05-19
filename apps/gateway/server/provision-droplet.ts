@@ -160,18 +160,30 @@ function ssh(host: string, command: string): string[] {
   ]
 }
 
-async function getSshFingerprint(): Promise<string> {
-  const raw = await runCapture(['doctl', 'compute', 'ssh-key', 'list', '--format', 'FingerPrint', '--no-header'])
-  const first = raw
-    .split('\n')
-    .map(line => line.trim())
-    .find(Boolean)
+export async function getSshFingerprint(keyName?: string): Promise<string> {
+  const name = keyName ?? process.env.GATEWAY_SSH_KEY_NAME ?? 'fro-bot-gateway'
+  const raw = await runCapture(['doctl', 'compute', 'ssh-key', 'list', '--format', 'Name,FingerPrint', '--no-header'])
 
-  if (!first) {
-    throw new Error('No SSH keys found in DigitalOcean account. Add at least one key before provisioning.')
+  // Each row: "<Name padded with spaces>  <FingerPrint>"
+  // The Name column can contain spaces, @, and dots, so we treat the last
+  // whitespace-delimited token as the fingerprint and everything before it as the name.
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const lastSpace = trimmed.lastIndexOf(' ')
+    if (lastSpace === -1) continue
+    const rowName = trimmed.slice(0, lastSpace).trim()
+    const fingerprint = trimmed.slice(lastSpace + 1).trim()
+    if (rowName === name) {
+      return fingerprint
+    }
   }
 
-  return first
+  throw new Error(
+    `SSH key named "${name}" not found in DigitalOcean account. ` +
+      `Run \`doctl compute ssh-key list\` to see available keys, ` +
+      `or set GATEWAY_SSH_KEY_NAME to override the default ("fro-bot-gateway").`,
+  )
 }
 
 async function getDropletIpWithWait(): Promise<string> {

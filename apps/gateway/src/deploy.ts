@@ -166,9 +166,10 @@ export function computeObjectStoreHosts(env: Record<string, string>): string {
   const bucket = env.S3_BUCKET ?? ''
 
   if (env.S3_ENDPOINT) {
-    // Strip scheme and path from endpoint URL
+    // S3 client uses forcePathStyle: true — requests go to hostname/bucket, not bucket.hostname.
+    // Return hostname only (no bucket prefix) so mitmproxy allowlist matches the actual request host.
     const url = new URL(env.S3_ENDPOINT)
-    return `${bucket}.${url.hostname}`
+    return url.hostname
   }
 
   const region = env.S3_REGION ?? ''

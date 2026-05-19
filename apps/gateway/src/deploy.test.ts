@@ -173,20 +173,30 @@ describe('computeObjectStoreHosts', () => {
     expect(result).toBe('custom.host.example.com')
   })
 
-  test('derives object-store endpoint pattern when S3_ENDPOINT is set', async () => {
+  test('R2 custom endpoint: path-style access uses hostname only (no bucket prefix)', async () => {
     const {computeObjectStoreHosts} = await import('./deploy')
     const result = computeObjectStoreHosts(
       makeEnv({S3_ENDPOINT: 'https://abc123.r2.cloudflarestorage.com', S3_BUCKET: 'my-bucket'}),
     )
-    expect(result).toBe('my-bucket.abc123.r2.cloudflarestorage.com')
+    // S3 client uses forcePathStyle: true — requests go to hostname/bucket, not bucket.hostname
+    expect(result).toBe('abc123.r2.cloudflarestorage.com')
   })
 
-  test('strips scheme and path from S3_ENDPOINT for object-store endpoint pattern', async () => {
+  test('MinIO custom endpoint: path-style access uses hostname only (no bucket prefix)', async () => {
+    const {computeObjectStoreHosts} = await import('./deploy')
+    const result = computeObjectStoreHosts(
+      makeEnv({S3_ENDPOINT: 'https://minio.example.com:9000', S3_BUCKET: 'my-bucket'}),
+    )
+    // S3 client uses forcePathStyle: true — hostname only, port stripped (mitmproxy matches on hostname)
+    expect(result).toBe('minio.example.com')
+  })
+
+  test('strips scheme, port, and path from S3_ENDPOINT for path-style hostname', async () => {
     const {computeObjectStoreHosts} = await import('./deploy')
     const result = computeObjectStoreHosts(
       makeEnv({S3_ENDPOINT: 'https://endpoint.example.com/some/path', S3_BUCKET: 'bucket'}),
     )
-    expect(result).toBe('bucket.endpoint.example.com')
+    expect(result).toBe('endpoint.example.com')
   })
 
   test('derives AWS pattern when S3_ENDPOINT is not set', async () => {

@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
-import {readFileSync} from 'node:fs'
-import {resolve} from 'node:path'
+import {chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join, resolve} from 'node:path'
 
 import {validateGatewayHost} from './host'
 
@@ -378,9 +379,22 @@ export async function pollRegistration(opts: PollRegistrationOpts): Promise<{com
 
 // ─── SSH helpers ──────────────────────────────────────────────────────────────
 
-function sshCommand(host: string, command: string): string[] {
+/**
+ * Returns the SSH option flags for the given key path.
+ * When keyPath is set (CI mode): uses -i <path> + IdentitiesOnly=yes exclusively.
+ * When keyPath is undefined (local mode): no -i flags; relies on SSH_AUTH_SOCK.
+ */
+function sshIdentityOptions(keyPath: string | undefined): string[] {
+  if (keyPath) {
+    return ['-i', keyPath, '-o', 'IdentitiesOnly=yes']
+  }
+  return []
+}
+
+function sshCommand(host: string, command: string, keyPath?: string): string[] {
   return [
     'ssh',
+    ...sshIdentityOptions(keyPath),
     '-o',
     'BatchMode=yes',
     '-o',
@@ -447,12 +461,13 @@ async function writeRemoteFile(
   deployEnv: DeployEnv,
   spawnFn: SpawnFn,
   secrets: SecretFile[],
+  keyPath?: string,
 ): Promise<void> {
   console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
 
   // umask 077 ensures the file is created with 600 permissions.
   // Content arrives via stdin — never in the shell command string.
-  const proc = spawnFn(sshCommand(host, `umask 077; cat > '${remotePath}'`), {
+  const proc = spawnFn(sshCommand(host, `umask 077; cat > '${remotePath}'`, keyPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -489,8 +504,13 @@ async function writeRemoteFile(
   }
 }
 
-async function remoteGitExists(host: string, deployEnv: DeployEnv, spawnFn: SpawnFn): Promise<boolean> {
-  const proc = spawnFn(sshCommand(host, `test -d '${REMOTE_DIR}/.git'`), {
+async function remoteGitExists(
+  host: string,
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  keyPath?: string,
+): Promise<boolean> {
+  const proc = spawnFn(sshCommand(host, `test -d '${REMOTE_DIR}/.git'`, keyPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -499,8 +519,13 @@ async function remoteGitExists(host: string, deployEnv: DeployEnv, spawnFn: Spaw
   return exitCode === 0
 }
 
-async function readRemoteChecksum(host: string, deployEnv: DeployEnv, spawnFn: SpawnFn): Promise<string> {
-  const proc = spawnFn(sshCommand(host, `cat '${CHECKSUM_PATH}' 2>/dev/null || echo ''`), {
+async function readRemoteChecksum(
+  host: string,
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  keyPath?: string,
+): Promise<string> {
+  const proc = spawnFn(sshCommand(host, `cat '${CHECKSUM_PATH}' 2>/dev/null || echo ''`, keyPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -560,146 +585,179 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   validateGatewayHost(host)
   const deployEnv = buildDeployEnv(env)
 
-  // Phase 4: Ensure droplet workspace
-  await runCommand(
-    'Creating remote workspace directory',
-    sshCommand(host, `mkdir -p ${REMOTE_DIR}`),
-    deployEnv,
-    spawnFn,
-  )
+  // CI mode: write GATEWAY_SSH_KEY to a tmp file with mode 0o600.
+  // Local mode: keyPath stays undefined; SSH_AUTH_SOCK is forwarded via deployEnv.
+  let keyPath: string | undefined
+  let keyTmpDir: string | undefined
 
-  const gitExists = await remoteGitExists(host, deployEnv, spawnFn)
-
-  if (gitExists) {
-    await runCommand(
-      `Fetching latest from ${repo}`,
-      sshCommand(host, `cd ${REMOTE_DIR} && git fetch --tags`),
-      deployEnv,
-      spawnFn,
-    )
-    await runCommand(
-      `Resetting to ${ref}`,
-      sshCommand(host, `cd ${REMOTE_DIR} && git reset --hard ${ref}`),
-      deployEnv,
-      spawnFn,
-    )
-    await runCommand(
-      'Cleaning untracked files',
-      sshCommand(host, `cd ${REMOTE_DIR} && git clean -xfd`),
-      deployEnv,
-      spawnFn,
-    )
-  } else {
-    await runCommand(
-      `Cloning ${repo} at ${ref}`,
-      sshCommand(host, `git clone --depth 1 --branch ${ref} https://github.com/${repo}.git ${REMOTE_DIR}`),
-      deployEnv,
-      spawnFn,
-    )
+  if (env.CI === 'true' && env.GATEWAY_SSH_KEY) {
+    keyTmpDir = mkdtempSync(join(tmpdir(), 'gateway-deploy-key-'))
+    keyPath = join(keyTmpDir, 'id')
+    writeFileSync(keyPath, env.GATEWAY_SSH_KEY, {mode: 0o600})
+    // Defensive chmod in case umask narrowed the initial mode
+    chmodSync(keyPath, 0o600)
   }
 
-  // Phase 5: Materialize secrets
-  const secrets = buildSecretFileList(env)
-  await runCommand('Creating secrets directory', sshCommand(host, `mkdir -p ${SECRETS_DIR}`), deployEnv, spawnFn)
+  try {
+    // Phase 4: Ensure droplet workspace
+    await runCommand(
+      'Creating remote workspace directory',
+      sshCommand(host, `mkdir -p ${REMOTE_DIR}`, keyPath),
+      deployEnv,
+      spawnFn,
+    )
 
-  for (const secret of secrets) {
+    const gitExists = await remoteGitExists(host, deployEnv, spawnFn, keyPath)
+
+    if (gitExists) {
+      await runCommand(
+        `Fetching latest from ${repo}`,
+        sshCommand(host, `cd ${REMOTE_DIR} && git fetch --tags`, keyPath),
+        deployEnv,
+        spawnFn,
+      )
+      await runCommand(
+        `Resetting to ${ref}`,
+        sshCommand(host, `cd ${REMOTE_DIR} && git reset --hard ${ref}`, keyPath),
+        deployEnv,
+        spawnFn,
+      )
+      await runCommand(
+        'Cleaning untracked files',
+        sshCommand(host, `cd ${REMOTE_DIR} && git clean -xfd`, keyPath),
+        deployEnv,
+        spawnFn,
+      )
+    } else {
+      await runCommand(
+        `Cloning ${repo} at ${ref}`,
+        sshCommand(host, `git clone --depth 1 --branch ${ref} https://github.com/${repo}.git ${REMOTE_DIR}`, keyPath),
+        deployEnv,
+        spawnFn,
+      )
+    }
+
+    // Phase 5: Materialize secrets
+    const secrets = buildSecretFileList(env)
+    await runCommand(
+      'Creating secrets directory',
+      sshCommand(host, `mkdir -p ${SECRETS_DIR}`, keyPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    for (const secret of secrets) {
+      await writeRemoteFile(
+        `Writing secret: ${secret.name}`,
+        host,
+        `${SECRETS_DIR}/${secret.name}`,
+        secret.content,
+        deployEnv,
+        spawnFn,
+        secrets,
+        keyPath,
+      )
+    }
+
+    // Compute current checksum and read prior checksum to detect rotation
+    const currentChecksum = computeSecretsChecksum(secrets)
+    const priorChecksum = await readRemoteChecksum(host, deployEnv, spawnFn, keyPath)
+    const checksumChanged = priorChecksum !== currentChecksum
+
+    // Phase 6: Materialize .env via stdin pipe (OBJECT_STORE_HOSTS already validated above)
     await writeRemoteFile(
-      `Writing secret: ${secret.name}`,
+      'Writing .env',
       host,
-      `${SECRETS_DIR}/${secret.name}`,
-      secret.content,
+      ENV_PATH,
+      `OBJECT_STORE_HOSTS=${objectStoreHosts}\n`,
       deployEnv,
       spawnFn,
       secrets,
+      keyPath,
     )
-  }
 
-  // Compute current checksum and read prior checksum to detect rotation
-  const currentChecksum = computeSecretsChecksum(secrets)
-  const priorChecksum = await readRemoteChecksum(host, deployEnv, spawnFn)
-  const checksumChanged = priorChecksum !== currentChecksum
+    // Phase 7: Run init-certs.sh (idempotent)
+    await runCommand(
+      'Running init-certs.sh',
+      sshCommand(host, `cd ${DEPLOY_DIR} && bash init-certs.sh`, keyPath),
+      deployEnv,
+      spawnFn,
+    )
 
-  // Phase 6: Materialize .env via stdin pipe (OBJECT_STORE_HOSTS already validated above)
-  await writeRemoteFile(
-    'Writing .env',
-    host,
-    ENV_PATH,
-    `OBJECT_STORE_HOSTS=${objectStoreHosts}\n`,
-    deployEnv,
-    spawnFn,
-    secrets,
-  )
+    // Phase 8: docker compose up
+    const composeArgs = [
+      'docker',
+      'compose',
+      '--project-directory',
+      DEPLOY_DIR,
+      'up',
+      '-d',
+      '--wait',
+      '--wait-timeout',
+      '120',
+    ]
+    if (forceRecreate || checksumChanged) {
+      composeArgs.push('--force-recreate')
+    }
 
-  // Phase 7: Run init-certs.sh (idempotent)
-  await runCommand(
-    'Running init-certs.sh',
-    sshCommand(host, `cd ${DEPLOY_DIR} && bash init-certs.sh`),
-    deployEnv,
-    spawnFn,
-  )
+    await runCommand(
+      'Starting Docker Compose stack',
+      sshCommand(host, composeArgs.join(' '), keyPath),
+      deployEnv,
+      spawnFn,
+    )
 
-  // Phase 8: docker compose up
-  const composeArgs = [
-    'docker',
-    'compose',
-    '--project-directory',
-    DEPLOY_DIR,
-    'up',
-    '-d',
-    '--wait',
-    '--wait-timeout',
-    '120',
-  ]
-  if (forceRecreate || checksumChanged) {
-    composeArgs.push('--force-recreate')
-  }
+    // Phase 9: Post-deploy probe — poll Discord slash command registration
+    const applicationId = env.DISCORD_APPLICATION_ID!
+    const guildId = env.DISCORD_GUILD_ID!
+    const token = env.DISCORD_TOKEN!
 
-  await runCommand('Starting Docker Compose stack', sshCommand(host, composeArgs.join(' ')), deployEnv, spawnFn)
-
-  // Phase 9: Post-deploy probe — poll Discord slash command registration
-  const applicationId = env.DISCORD_APPLICATION_ID!
-  const guildId = env.DISCORD_GUILD_ID!
-  const token = env.DISCORD_TOKEN!
-
-  console.warn(
-    `\u001B[1;34m==>\u001B[0m Polling slash command registration (application=${applicationId} guild=${guildId})`,
-  )
-
-  const {commands} = await pollRegistration({
-    applicationId,
-    guildId,
-    token,
-    fetch: fetchFn,
-    sleep: sleepFn,
-    maxAttempts,
-    intervalMs,
-  })
-
-  // Phase 10: Persist checksum AFTER compose + registration succeed
-  // If either phase 8 or 9 threw, we never reach here — prior checksum stays in place
-  // so the next deploy correctly detects secrets as changed and forces recreate.
-  await writeRemoteFile(
-    'Persisting secrets checksum',
-    host,
-    CHECKSUM_PATH,
-    currentChecksum,
-    deployEnv,
-    spawnFn,
-    secrets,
-  )
-
-  console.warn(`\u001B[1;32m✓\u001B[0m Registered commands: ${commands.join(', ')}`)
-
-  // Phase 11: Auth-tier warning
-  const nonPingCommands = commands.filter(c => c !== 'ping')
-  if (nonPingCommands.length > 0 && !env.DISCORD_OPERATOR_ROLE_ID) {
     console.warn(
-      `\u001B[1;33m⚠\u001B[0m  Non-ping commands registered (${nonPingCommands.join(', ')}) but DISCORD_OPERATOR_ROLE_ID is not set. ` +
-        'Operator-tier authorization is not enforced. Set DISCORD_OPERATOR_ROLE_ID when upstream ships role-gating.',
+      `\u001B[1;34m==>\u001B[0m Polling slash command registration (application=${applicationId} guild=${guildId})`,
     )
-  }
 
-  console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
+    const {commands} = await pollRegistration({
+      applicationId,
+      guildId,
+      token,
+      fetch: fetchFn,
+      sleep: sleepFn,
+      maxAttempts,
+      intervalMs,
+    })
+
+    // Phase 10: Persist checksum AFTER compose + registration succeed
+    // If either phase 8 or 9 threw, we never reach here — prior checksum stays in place
+    // so the next deploy correctly detects secrets as changed and forces recreate.
+    await writeRemoteFile(
+      'Persisting secrets checksum',
+      host,
+      CHECKSUM_PATH,
+      currentChecksum,
+      deployEnv,
+      spawnFn,
+      secrets,
+      keyPath,
+    )
+
+    console.warn(`\u001B[1;32m✓\u001B[0m Registered commands: ${commands.join(', ')}`)
+
+    // Phase 11: Auth-tier warning
+    const nonPingCommands = commands.filter(c => c !== 'ping')
+    if (nonPingCommands.length > 0 && !env.DISCORD_OPERATOR_ROLE_ID) {
+      console.warn(
+        `\u001B[1;33m⚠\u001B[0m  Non-ping commands registered (${nonPingCommands.join(', ')}) but DISCORD_OPERATOR_ROLE_ID is not set. ` +
+          'Operator-tier authorization is not enforced. Set DISCORD_OPERATOR_ROLE_ID when upstream ships role-gating.',
+      )
+    }
+
+    console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
+  } finally {
+    // Clean up the tmp key directory regardless of success or failure
+    if (keyTmpDir) {
+      rmSync(keyTmpDir, {recursive: true, force: true})
+    }
+  }
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────

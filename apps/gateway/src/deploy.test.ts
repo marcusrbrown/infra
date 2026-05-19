@@ -1313,3 +1313,156 @@ describe('main() — GATEWAY_HOST validation (B1)', () => {
     expect(thrownMessage).toMatch(/Invalid GATEWAY_HOST/)
   })
 })
+
+// ─── CI key-file contract ─────────────────────────────────────────────────────
+
+describe('CI key-file contract', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('CI mode: tmp key file written with mode 0o600', async () => {
+    const {main} = await import('./deploy')
+    const KEY_CONTENT = 'fake-ssh-private-key-content'
+    let writtenKeyPath: string | undefined
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      // Capture the -i path from the first ssh call
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1 && writtenKeyPath === undefined) {
+        writtenKeyPath = cmd[iIdx + 1]
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: KEY_CONTENT}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(writtenKeyPath).toBeDefined()
+    // File should have been cleaned up after main() completes
+    expect(existsSync(writtenKeyPath!)).toBe(false)
+  })
+
+  test('CI mode: -i <path> and -o IdentitiesOnly=yes appear in every ssh argv', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Every ssh call must have -i and IdentitiesOnly=yes
+    const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
+    expect(sshCalls.length).toBeGreaterThan(0)
+
+    for (const cmd of sshCalls) {
+      expect(cmd).toContain('-i')
+      expect(cmd).toContain('IdentitiesOnly=yes')
+    }
+  })
+
+  test('CI mode: key bytes do not appear in any ssh argv', async () => {
+    const {main} = await import('./deploy')
+    const KEY_CONTENT = 'SUPER_SECRET_KEY_BYTES_THAT_MUST_NOT_LEAK'
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: KEY_CONTENT}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    for (const cmd of calls) {
+      const cmdStr = cmd.join(' ')
+      expect(cmdStr).not.toContain(KEY_CONTENT)
+    }
+  })
+
+  test('CI mode: tmp file cleaned up even when main() throws mid-deploy', async () => {
+    const {main} = await import('./deploy')
+    let capturedKeyPath: string | undefined
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1 && capturedKeyPath === undefined) {
+        capturedKeyPath = cmd[iIdx + 1]
+      }
+      // Fail on first mkdir (first SSH call)
+      return makeSpawnResult({exitCode: 255, stderr: 'Connection refused'})
+    })
+
+    await expect(
+      main({
+        env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
+        args: [],
+        fetch: makeDiscordFetch([]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    // Key file must be cleaned up even though main() threw
+    expect(capturedKeyPath).toBeDefined()
+    expect(existsSync(capturedKeyPath!)).toBe(false)
+  })
+
+  test('local mode: no -i flag in ssh argv, SSH_AUTH_SOCK forwarded', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: '', SSH_AUTH_SOCK: '/tmp/ssh-agent.sock', GATEWAY_SSH_KEY: ''}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
+    expect(sshCalls.length).toBeGreaterThan(0)
+
+    for (const cmd of sshCalls) {
+      expect(cmd).not.toContain('-i')
+      expect(cmd).not.toContain('IdentitiesOnly=yes')
+    }
+  })
+
+  test('local mode: SSH_AUTH_SOCK absent → fails fast before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const env = makeEnv({CI: ''})
+    delete (env as Record<string, string>).SSH_AUTH_SOCK
+    delete (env as Record<string, string>).GATEWAY_SSH_KEY
+
+    await expect(main({env, args: [], spawn: spawnFn})).rejects.toThrow(/SSH_AUTH_SOCK/)
+    expect(calls).toHaveLength(0)
+  })
+})

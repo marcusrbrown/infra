@@ -17,7 +17,7 @@ import {
 // Env helpers
 // ---------------------------------------------------------------------------
 
-const managedEnvKeys = ['DIGITALOCEAN_ACCESS_TOKEN', 'GATEWAY_HOST'] as const
+const managedEnvKeys = ['DIGITALOCEAN_ACCESS_TOKEN', 'GATEWAY_HOST', 'GATEWAY_SSH_KEY_NAME'] as const
 type ManagedEnvKey = (typeof managedEnvKeys)[number]
 
 let savedEnv: Partial<Record<ManagedEnvKey, string | undefined>>
@@ -388,6 +388,47 @@ describe('provision-droplet', () => {
       const fp = await getSshFingerprint()
 
       expect(fp).toBe('e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('uses GATEWAY_SSH_KEY_NAME env var when no argument is passed', async () => {
+      process.env.GATEWAY_SSH_KEY_NAME = 'custom-key-name'
+
+      const customKeyOutput = [
+        'fro-bot-gateway                                       e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b',
+        'custom-key-name                                       aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99',
+      ].join('\n')
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(customKeyOutput, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getSshFingerprint()
+
+      expect(fp).toBe('aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99')
+      // Must NOT return the fro-bot-gateway fingerprint
+      expect(fp).not.toBe('e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('looks up a key whose name contains spaces', async () => {
+      const spacedKeyOutput = [
+        'fro-bot-gateway                                       e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b',
+        'my key with spaces                                    11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00',
+        'another-key                                           ff:ee:dd:cc:bb:aa:99:88:77:66:55:44:33:22:11:00',
+      ].join('\n')
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(spacedKeyOutput, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getSshFingerprint('my key with spaces')
+
+      expect(fp).toBe('11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00')
+      // Must NOT return the next row's fingerprint
+      expect(fp).not.toBe('ff:ee:dd:cc:bb:aa:99:88:77:66:55:44:33:22:11:00')
 
       spawnSpy.mockRestore()
     })

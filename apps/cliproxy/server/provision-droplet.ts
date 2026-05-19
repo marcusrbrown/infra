@@ -5,7 +5,7 @@ import {appendFileSync, readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 
 const DROPLET_NAME = 'cliproxy'
-const DROPLET_IMAGE = 'docker-24-04'
+const DROPLET_IMAGE = 'docker-20-04'
 const DROPLET_SIZE = 's-1vcpu-1gb'
 const DROPLET_REGION = 'nyc1'
 const CLIPROXY_DOMAIN = process.env.CLIPROXY_DOMAIN ?? 'cliproxy.fro.bot'

@@ -80,8 +80,11 @@ const CHECKSUM_PATH = `${REMOTE_DIR}/.secrets-checksum`
 const ENV_PATH = `${DEPLOY_DIR}/.env`
 const DEFAULT_REMOTE_USER = 'root'
 
-/** Allowlist for OBJECT_STORE_HOSTS: hostnames + commas only, no shell metacharacters. */
-const OBJECT_STORE_HOSTS_RE = /^[\w.,\-]+$/
+/**
+ * RFC1123 label: lowercase letters, digits, hyphens; 1-63 chars; no leading/trailing hyphen.
+ * Uppercase is rejected up front to avoid mitmproxy normalization surprises.
+ */
+const RFC1123_LABEL_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/
 
 const REQUIRED_ENV_VARS = [
   'DISCORD_TOKEN',
@@ -178,15 +181,54 @@ export function computeObjectStoreHosts(env: Record<string, string>): string {
 }
 
 /**
- * Validates that OBJECT_STORE_HOSTS contains only safe hostname characters.
- * Throws a clear error if the value contains shell metacharacters.
+ * Validates that OBJECT_STORE_HOSTS is a comma-separated list of RFC1123 hostnames.
+ * Empty string is allowed (treated as "no override").
+ * Throws with the offending host name when validation fails.
+ *
+ * Rules per label: [a-z0-9-], length 1-63, no leading/trailing hyphen.
+ * Uppercase is rejected up front to avoid mitmproxy normalization surprises.
  */
 export function validateObjectStoreHosts(value: string): void {
-  if (!OBJECT_STORE_HOSTS_RE.test(value)) {
-    throw new Error(
-      `OBJECT_STORE_HOSTS value contains invalid characters: "${value}". ` +
-        'Only hostname characters (A-Z, a-z, 0-9, ., _, -) and commas are allowed.',
-    )
+  if (!value) return
+
+  const hosts = value.split(',').map(h => h.trim())
+
+  for (const host of hosts) {
+    if (!host) {
+      throw new Error(`OBJECT_STORE_HOSTS contains an empty hostname (check for leading/trailing commas): "${value}"`)
+    }
+
+    const labels = host.split('.')
+
+    for (const label of labels) {
+      if (!label) {
+        throw new Error(
+          `OBJECT_STORE_HOSTS hostname "${host}" contains an empty label (double dot or leading/trailing dot): "${value}"`,
+        )
+      }
+
+      if (!RFC1123_LABEL_RE.test(label)) {
+        let reason: string
+        if (/[A-Z]/.test(label)) {
+          reason = 'contains uppercase letter (RFC1123 hostnames must be lowercase)'
+        } else if (/_/.test(label)) {
+          reason = 'contains underscore (not allowed in RFC1123 hostnames)'
+        } else if (label.startsWith('-')) {
+          reason = 'label starts with a hyphen'
+        } else if (label.endsWith('-')) {
+          reason = 'label ends with a hyphen'
+        } else if (label.length > 63) {
+          reason = `label exceeds 63 characters (${label.length} chars)`
+        } else {
+          reason = 'contains invalid characters (only [a-z0-9-] allowed per label)'
+        }
+        throw new Error(`OBJECT_STORE_HOSTS hostname "${host}" is invalid: ${reason}. Full value: "${value}"`)
+      }
+    }
+
+    if (host.length > 253) {
+      throw new Error(`OBJECT_STORE_HOSTS hostname "${host}" exceeds 253 characters. Full value: "${value}"`)
+    }
   }
 }
 

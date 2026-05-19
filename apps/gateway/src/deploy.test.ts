@@ -808,20 +808,108 @@ describe('main', () => {
 // ─── validateObjectStoreHosts (S3) ───────────────────────────────────────────
 
 describe('validateObjectStoreHosts', () => {
-  test('accepts valid hostname-only values', async () => {
+  // ── valid inputs ────────────────────────────────────────────────────────────
+
+  test('accepts valid AWS S3 hostname', async () => {
     const {validateObjectStoreHosts} = await import('./deploy')
-    expect(() => validateObjectStoreHosts('my-bucket.s3.us-east-1.amazonaws.com')).not.toThrow()
+    expect(() => validateObjectStoreHosts('bucket.s3.us-east-1.amazonaws.com')).not.toThrow()
+  })
+
+  test('accepts valid R2 hostname', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('abc123.r2.cloudflarestorage.com')).not.toThrow()
+  })
+
+  test('accepts valid plain hostname', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('minio.example.com')).not.toThrow()
+  })
+
+  test('accepts valid comma-separated list', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
     expect(() => validateObjectStoreHosts('host1.example.com,host2.example.com')).not.toThrow()
-    expect(() => validateObjectStoreHosts('simple-host_name')).not.toThrow()
+  })
+
+  test('accepts empty string (no override)', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('')).not.toThrow()
+  })
+
+  test('accepts all-numeric label (RFC1123 allows it)', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('123.com')).not.toThrow()
+  })
+
+  test('accepts hostnames with whitespace trimmed per entry', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('host1.example.com, host2.example.com')).not.toThrow()
+  })
+
+  // ── invalid inputs ──────────────────────────────────────────────────────────
+
+  test('rejects hostname with underscore', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('host_underscore.com')).toThrow()
+  })
+
+  test('rejects simple-host_name (previously blessed — now invalid)', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('simple-host_name')).toThrow()
+  })
+
+  test('rejects hostname with uppercase letter', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('Host.example.com')).toThrow()
+  })
+
+  test('rejects label with leading hyphen', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('-leading-hyphen.com')).toThrow()
+  })
+
+  test('rejects label with trailing hyphen', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('trailing-hyphen-.com')).toThrow()
+  })
+
+  test('rejects double-dot (empty label)', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('..double.dot.com')).toThrow()
+  })
+
+  test('rejects label exceeding 63 chars', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() =>
+      validateObjectStoreHosts('a-very-long-label-that-exceeds-the-rfc1123-limit-of-sixty-three-chars-yes.com'),
+    ).toThrow()
+  })
+
+  test('rejects mixed list where one host is invalid', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('valid.example.com,bad_one.com')).toThrow()
   })
 
   test('rejects values with shell metacharacters', async () => {
     const {validateObjectStoreHosts} = await import('./deploy')
-    expect(() => validateObjectStoreHosts('host; rm -rf /')).toThrow(/invalid characters/)
-    expect(() => validateObjectStoreHosts('$(evil)')).toThrow(/invalid characters/)
-    expect(() => validateObjectStoreHosts('`cmd`')).toThrow(/invalid characters/)
-    expect(() => validateObjectStoreHosts('host && bad')).toThrow(/invalid characters/)
+    expect(() => validateObjectStoreHosts('host; rm -rf /')).toThrow()
+    expect(() => validateObjectStoreHosts('$(evil)')).toThrow()
+    expect(() => validateObjectStoreHosts('`cmd`')).toThrow()
+    expect(() => validateObjectStoreHosts('host && bad')).toThrow()
   })
+
+  // ── error message quality ───────────────────────────────────────────────────
+
+  test('error message names the offending host', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('bad_one.com')).toThrow(/bad_one\.com/)
+  })
+
+  test('error message names the offending host in a mixed list', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('valid.example.com,bad_one.com')).toThrow(/bad_one\.com/)
+  })
+
+  // ── integration: rejected before SSH ───────────────────────────────────────
 
   test('S3: malformed OBJECT_STORE_HOSTS rejected before SSH is invoked', async () => {
     const {main} = await import('./deploy')
@@ -829,11 +917,11 @@ describe('validateObjectStoreHosts', () => {
 
     await expect(
       main({
-        env: makeEnv({OBJECT_STORE_HOSTS: 'host; rm -rf /'}),
+        env: makeEnv({OBJECT_STORE_HOSTS: 'host_underscore.com'}),
         args: [],
         spawn: spawnFn,
       }),
-    ).rejects.toThrow(/invalid characters/)
+    ).rejects.toThrow()
 
     // No SSH calls should have been made
     expect(calls).toHaveLength(0)

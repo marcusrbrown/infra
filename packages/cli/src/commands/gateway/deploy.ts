@@ -44,6 +44,8 @@ export function getGatewayDeployEnv(): Record<string, string> {
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ?? '',
     S3_BUCKET: process.env.S3_BUCKET ?? '',
     S3_REGION: process.env.S3_REGION ?? '',
+    S3_ENDPOINT: process.env.S3_ENDPOINT ?? '',
+    OBJECT_STORE_HOSTS: process.env.OBJECT_STORE_HOSTS ?? '',
   }
 }
 

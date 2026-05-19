@@ -121,6 +121,34 @@ export function validateRequiredEnv(env: Record<string, string>): string[] {
 }
 
 /**
+ * Narrows a validated env record to a typed object with required keys as non-optional strings.
+ * Assumes validateRequiredEnv(env) === [] has already been called.
+ */
+export interface ValidatedDeployEnv {
+  GATEWAY_HOST: string
+  DISCORD_TOKEN: string
+  DISCORD_APPLICATION_ID: string
+  DISCORD_GUILD_ID: string
+  S3_BUCKET: string
+  S3_REGION: string
+  AWS_ACCESS_KEY_ID: string
+  AWS_SECRET_ACCESS_KEY: string
+}
+
+export function narrowValidatedEnv(env: Record<string, string>): ValidatedDeployEnv {
+  return {
+    GATEWAY_HOST: env.GATEWAY_HOST as string,
+    DISCORD_TOKEN: env.DISCORD_TOKEN as string,
+    DISCORD_APPLICATION_ID: env.DISCORD_APPLICATION_ID as string,
+    DISCORD_GUILD_ID: env.DISCORD_GUILD_ID as string,
+    S3_BUCKET: env.S3_BUCKET as string,
+    S3_REGION: env.S3_REGION as string,
+    AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID as string,
+    AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY as string,
+  }
+}
+
+/**
  * Reads apps/gateway/upstream.json and returns { repo, ref }.
  * Throws on missing or malformed file.
  * Path is parameterizable for tests.
@@ -605,6 +633,8 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`)
   }
 
+  const validated = narrowValidatedEnv(env)
+
   // Phase 2: Resolve upstream pin
   const {repo, ref} = resolveUpstreamPin()
 
@@ -627,7 +657,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     return
   }
 
-  const host = env.GATEWAY_HOST!
+  const host = validated.GATEWAY_HOST
   validateGatewayHost(host)
   const deployEnv = buildDeployEnv(env)
 
@@ -636,15 +666,23 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   let keyPath: string | undefined
   let keyTmpDir: string | undefined
 
-  if (env.CI === 'true' && env.GATEWAY_SSH_KEY) {
-    keyTmpDir = mkdtempSync(join(tmpdir(), 'gateway-deploy-key-'))
-    keyPath = join(keyTmpDir, 'id')
-    writeFileSync(keyPath, env.GATEWAY_SSH_KEY, {mode: 0o600})
-    // Defensive chmod in case umask narrowed the initial mode
-    chmodSync(keyPath, 0o600)
-  }
-
   try {
+    if (env.CI === 'true' && env.GATEWAY_SSH_KEY) {
+      try {
+        keyTmpDir = mkdtempSync(join(tmpdir(), 'gateway-deploy-key-'))
+        keyPath = join(keyTmpDir, 'id')
+        writeFileSync(keyPath, env.GATEWAY_SSH_KEY, {mode: 0o600})
+        // Defensive chmod in case umask narrowed the initial mode
+        chmodSync(keyPath, 0o600)
+      } catch (error) {
+        if (keyTmpDir) {
+          rmSync(keyTmpDir, {recursive: true, force: true})
+          keyTmpDir = undefined
+        }
+        throw error
+      }
+    }
+
     // Phase 4: Ensure droplet workspace
     await runCommand(
       'Creating remote workspace directory',
@@ -754,9 +792,9 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     )
 
     // Phase 9: Post-deploy probe — poll Discord slash command registration
-    const applicationId = env.DISCORD_APPLICATION_ID!
-    const guildId = env.DISCORD_GUILD_ID!
-    const token = env.DISCORD_TOKEN!
+    const applicationId = validated.DISCORD_APPLICATION_ID
+    const guildId = validated.DISCORD_GUILD_ID
+    const token = validated.DISCORD_TOKEN
 
     console.warn(
       `\u001B[1;34m==>\u001B[0m Polling slash command registration (application=${applicationId} guild=${guildId})`,
@@ -787,15 +825,6 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     )
 
     console.warn(`\u001B[1;32m✓\u001B[0m Registered commands: ${commands.join(', ')}`)
-
-    // Phase 11: Auth-tier warning
-    const nonPingCommands = commands.filter(c => c !== 'ping')
-    if (nonPingCommands.length > 0 && !env.DISCORD_OPERATOR_ROLE_ID) {
-      console.warn(
-        `\u001B[1;33m⚠\u001B[0m  Non-ping commands registered (${nonPingCommands.join(', ')}) but DISCORD_OPERATOR_ROLE_ID is not set. ` +
-          'Operator-tier authorization is not enforced. Set DISCORD_OPERATOR_ROLE_ID when upstream ships role-gating.',
-      )
-    }
 
     console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
   } finally {

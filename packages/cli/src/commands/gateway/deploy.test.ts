@@ -13,8 +13,10 @@ const envKeys = [
   'DISCORD_TOKEN',
   'GATEWAY_HOST',
   'HOME',
+  'OBJECT_STORE_HOSTS',
   'PATH',
   'S3_BUCKET',
+  'S3_ENDPOINT',
   'S3_REGION',
   'SSH_AUTH_SOCK',
 ] as const
@@ -158,8 +160,10 @@ describe('gateway deploy', () => {
         DISCORD_TOKEN: 'test-token',
         GATEWAY_HOST: 'gateway.example.com',
         HOME: '/tmp/test-home',
+        OBJECT_STORE_HOSTS: undefined,
         PATH: '/usr/bin:/bin',
         S3_BUCKET: 'test-bucket',
+        S3_ENDPOINT: undefined,
         S3_REGION: 'us-east-1',
         SSH_AUTH_SOCK: '/tmp/test-sock',
       })
@@ -174,10 +178,29 @@ describe('gateway deploy', () => {
       expect(env.S3_BUCKET).toBe('test-bucket')
       expect(env.S3_REGION).toBe('us-east-1')
       expect(env.GATEWAY_HOST).toBe('gateway.example.com')
+      // Optional vars present (empty string when unset)
+      expect(env.S3_ENDPOINT).toBe('')
+      expect(env.OBJECT_STORE_HOSTS).toBe('')
       // Core vars still present
       expect(env.PATH).toBe('/usr/bin:/bin')
       expect(env.HOME).toBe('/tmp/test-home')
       expect(env.SSH_AUTH_SOCK).toBe('/tmp/test-sock')
+    })
+
+    it('forwards S3_ENDPOINT and OBJECT_STORE_HOSTS when present in process.env', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        OBJECT_STORE_HOSTS: 'r2.example.com minio.example.com',
+        PATH: '/usr/bin:/bin',
+        S3_ENDPOINT: 'https://r2.example.com',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+
+      const env = getGatewayDeployEnv()
+
+      expect(env.S3_ENDPOINT).toBe('https://r2.example.com')
+      expect(env.OBJECT_STORE_HOSTS).toBe('r2.example.com minio.example.com')
     })
   })
 

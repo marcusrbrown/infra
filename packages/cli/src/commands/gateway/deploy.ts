@@ -37,6 +37,13 @@ export function getGatewayDeployEnv(): Record<string, string> {
     HOME: home,
     SSH_AUTH_SOCK: sshAuthSock,
     GATEWAY_HOST: process.env.GATEWAY_HOST ?? '',
+    DISCORD_TOKEN: process.env.DISCORD_TOKEN ?? '',
+    DISCORD_APPLICATION_ID: process.env.DISCORD_APPLICATION_ID ?? '',
+    DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID ?? '',
+    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID ?? '',
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ?? '',
+    S3_BUCKET: process.env.S3_BUCKET ?? '',
+    S3_REGION: process.env.S3_REGION ?? '',
   }
 }
 

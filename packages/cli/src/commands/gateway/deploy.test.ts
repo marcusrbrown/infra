@@ -5,7 +5,19 @@ import {getGatewayDeployEnv, validateGatewayRemotePreconditions} from './deploy'
 
 const cliDir = resolve(import.meta.dir, '../../..')
 
-const envKeys = ['GATEWAY_HOST', 'HOME', 'PATH', 'SSH_AUTH_SOCK'] as const
+const envKeys = [
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'DISCORD_APPLICATION_ID',
+  'DISCORD_GUILD_ID',
+  'DISCORD_TOKEN',
+  'GATEWAY_HOST',
+  'HOME',
+  'PATH',
+  'S3_BUCKET',
+  'S3_REGION',
+  'SSH_AUTH_SOCK',
+] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
 
@@ -135,6 +147,37 @@ describe('gateway deploy', () => {
       })
 
       expect(() => getGatewayDeployEnv()).toThrow('PATH')
+    })
+
+    it('passes required gateway env vars to the child process', () => {
+      setManagedEnv({
+        AWS_ACCESS_KEY_ID: 'test-key-id',
+        AWS_SECRET_ACCESS_KEY: 'test-secret',
+        DISCORD_APPLICATION_ID: 'test-app-id',
+        DISCORD_GUILD_ID: 'test-guild-id',
+        DISCORD_TOKEN: 'test-token',
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        S3_BUCKET: 'test-bucket',
+        S3_REGION: 'us-east-1',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+
+      const env = getGatewayDeployEnv()
+
+      expect(env.DISCORD_TOKEN).toBe('test-token')
+      expect(env.AWS_ACCESS_KEY_ID).toBe('test-key-id')
+      expect(env.AWS_SECRET_ACCESS_KEY).toBe('test-secret')
+      expect(env.DISCORD_APPLICATION_ID).toBe('test-app-id')
+      expect(env.DISCORD_GUILD_ID).toBe('test-guild-id')
+      expect(env.S3_BUCKET).toBe('test-bucket')
+      expect(env.S3_REGION).toBe('us-east-1')
+      expect(env.GATEWAY_HOST).toBe('gateway.example.com')
+      // Core vars still present
+      expect(env.PATH).toBe('/usr/bin:/bin')
+      expect(env.HOME).toBe('/tmp/test-home')
+      expect(env.SSH_AUTH_SOCK).toBe('/tmp/test-sock')
     })
   })
 

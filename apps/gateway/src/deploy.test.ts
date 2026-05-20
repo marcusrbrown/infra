@@ -1606,6 +1606,66 @@ describe('CI key-file contract', () => {
     // Calling rmSync again (as the outer finally would) must not throw
     expect(() => realRmSync(keyTmpDir, {recursive: true, force: true})).not.toThrow()
   })
+  test('CI mode: key file gets trailing newline appended when GH Actions strips it', async () => {
+    const {main} = await import('./deploy')
+    // Simulate GitHub Actions stripping the trailing newline from the secret
+    const KEY_WITHOUT_NEWLINE = '-----BEGIN OPENSSH PRIVATE KEY-----\nfake-key-bytes\n-----END OPENSSH PRIVATE KEY-----'
+    let writtenKeyPath: string | undefined
+    let capturedContents: string | undefined
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1 && writtenKeyPath === undefined) {
+        writtenKeyPath = cmd[iIdx + 1]
+        if (writtenKeyPath) capturedContents = readFileSync(writtenKeyPath, 'utf-8')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: KEY_WITHOUT_NEWLINE}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(writtenKeyPath).toBeDefined()
+    // File must end with exactly one newline
+    expect(capturedContents).toBe(`${KEY_WITHOUT_NEWLINE}\n`)
+    expect(capturedContents!.endsWith('\n')).toBe(true)
+  })
+
+  test('CI mode: key file is not double-newlined when secret already has trailing newline', async () => {
+    const {main} = await import('./deploy')
+    // Key already has a trailing newline (e.g. from a local .env file)
+    const KEY_WITH_NEWLINE = '-----BEGIN OPENSSH PRIVATE KEY-----\nfake-key-bytes\n-----END OPENSSH PRIVATE KEY-----\n'
+    let writtenKeyPath: string | undefined
+    let capturedContents: string | undefined
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1 && writtenKeyPath === undefined) {
+        writtenKeyPath = cmd[iIdx + 1]
+        if (writtenKeyPath) capturedContents = readFileSync(writtenKeyPath, 'utf-8')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: KEY_WITH_NEWLINE}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(writtenKeyPath).toBeDefined()
+    // Must not double-newline — exactly one trailing newline
+    expect(capturedContents).toBe(KEY_WITH_NEWLINE)
+    expect(capturedContents!.endsWith('\n\n')).toBe(false)
+  })
+
   test('local mode: no -i flag in ssh argv, SSH_AUTH_SOCK forwarded', async () => {
     const {main} = await import('./deploy')
     const {spawnFn, calls} = makeSpawnMock()

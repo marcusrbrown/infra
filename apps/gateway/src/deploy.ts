@@ -674,7 +674,8 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       try {
         keyTmpDir = mkdtempSync(join(tmpdir(), 'gateway-deploy-key-'))
         keyPath = join(keyTmpDir, 'id')
-        writeFileSync(keyPath, env.GATEWAY_SSH_KEY, {mode: 0o600})
+        const keyContent = env.GATEWAY_SSH_KEY.endsWith('\n') ? env.GATEWAY_SSH_KEY : `${env.GATEWAY_SSH_KEY}\n`
+        writeFileSync(keyPath, keyContent, {mode: 0o600})
         // Defensive chmod in case umask narrowed the initial mode
         chmodSync(keyPath, 0o600)
       } catch (error) {

@@ -464,7 +464,7 @@ function sshIdentityOptions(keyPath: string | undefined): string[] {
   return []
 }
 
-function sshCommand(host: string, command: string, keyPath?: string): string[] {
+function sshCommand(host: string, command: string, keyPath?: string, controlPath?: string): string[] {
   return [
     'ssh',
     ...sshIdentityOptions(keyPath),
@@ -474,6 +474,9 @@ function sshCommand(host: string, command: string, keyPath?: string): string[] {
     'ConnectTimeout=10',
     '-o',
     'StrictHostKeyChecking=yes',
+    ...(controlPath
+      ? ['-o', `ControlMaster=auto`, '-o', `ControlPath=${controlPath}`, '-o', `ControlPersist=300`]
+      : []),
     `${DEFAULT_REMOTE_USER}@${host}`,
     command,
   ]
@@ -535,12 +538,13 @@ async function writeRemoteFile(
   spawnFn: SpawnFn,
   secrets: SecretFile[],
   keyPath?: string,
+  controlPath?: string,
 ): Promise<void> {
   console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
 
   // umask 077 ensures the file is created with 600 permissions.
   // Content arrives via stdin — never in the shell command string.
-  const proc = spawnFn(sshCommand(host, `umask 077; cat > '${remotePath}'`, keyPath), {
+  const proc = spawnFn(sshCommand(host, `umask 077; cat > '${remotePath}'`, keyPath, controlPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -582,8 +586,9 @@ async function remoteGitExists(
   deployEnv: DeployEnv,
   spawnFn: SpawnFn,
   keyPath?: string,
+  controlPath?: string,
 ): Promise<boolean> {
-  const proc = spawnFn(sshCommand(host, `test -d '${REMOTE_DIR}/.git'`, keyPath), {
+  const proc = spawnFn(sshCommand(host, `test -d '${REMOTE_DIR}/.git'`, keyPath, controlPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -597,8 +602,9 @@ async function readRemoteChecksum(
   deployEnv: DeployEnv,
   spawnFn: SpawnFn,
   keyPath?: string,
+  controlPath?: string,
 ): Promise<string> {
-  const proc = spawnFn(sshCommand(host, `cat '${CHECKSUM_PATH}' 2>/dev/null || echo ''`, keyPath), {
+  const proc = spawnFn(sshCommand(host, `cat '${CHECKSUM_PATH}' 2>/dev/null || echo ''`, keyPath, controlPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -666,13 +672,16 @@ export async function main(opts: MainOpts = {}): Promise<void> {
 
   // CI mode: write GATEWAY_SSH_KEY to a tmp file with mode 0o600.
   // Local mode: keyPath stays undefined; SSH_AUTH_SOCK is forwarded via deployEnv.
+  // A tmpdir is always created (CI or local) to hold the ControlMaster socket.
   let keyPath: string | undefined
   let keyTmpDir: string | undefined
 
   try {
+    // Always create a tmpdir — used for ControlPath socket in both CI and local mode.
+    keyTmpDir = mkdtempSync(join(tmpdir(), 'gateway-deploy-key-'))
+
     if (env.CI === 'true' && env.GATEWAY_SSH_KEY) {
       try {
-        keyTmpDir = mkdtempSync(join(tmpdir(), 'gateway-deploy-key-'))
         keyPath = join(keyTmpDir, 'id')
         const keyContent = env.GATEWAY_SSH_KEY.endsWith('\n') ? env.GATEWAY_SSH_KEY : `${env.GATEWAY_SSH_KEY}\n`
         writeFileSync(keyPath, keyContent, {mode: 0o600})
@@ -687,39 +696,47 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       }
     }
 
+    // ControlPath socket lives inside keyTmpDir; %C expands to a hash of the connection tuple.
+    const controlPath = join(keyTmpDir, 'cm-%C')
+
     // Phase 4: Ensure droplet workspace
     await runCommand(
       'Creating remote workspace directory',
-      sshCommand(host, `mkdir -p ${REMOTE_DIR}`, keyPath),
+      sshCommand(host, `mkdir -p ${REMOTE_DIR}`, keyPath, controlPath),
       deployEnv,
       spawnFn,
     )
 
-    const gitExists = await remoteGitExists(host, deployEnv, spawnFn, keyPath)
+    const gitExists = await remoteGitExists(host, deployEnv, spawnFn, keyPath, controlPath)
 
     if (gitExists) {
       await runCommand(
         `Fetching latest from ${repo}`,
-        sshCommand(host, `cd ${REMOTE_DIR} && git fetch --tags`, keyPath),
+        sshCommand(host, `cd ${REMOTE_DIR} && git fetch --tags`, keyPath, controlPath),
         deployEnv,
         spawnFn,
       )
       await runCommand(
         `Resetting to ${ref}`,
-        sshCommand(host, `cd ${REMOTE_DIR} && git reset --hard ${ref}`, keyPath),
+        sshCommand(host, `cd ${REMOTE_DIR} && git reset --hard ${ref}`, keyPath, controlPath),
         deployEnv,
         spawnFn,
       )
       await runCommand(
         'Cleaning untracked files',
-        sshCommand(host, `cd ${REMOTE_DIR} && git clean -xfd`, keyPath),
+        sshCommand(host, `cd ${REMOTE_DIR} && git clean -xfd`, keyPath, controlPath),
         deployEnv,
         spawnFn,
       )
     } else {
       await runCommand(
         `Cloning ${repo} at ${ref}`,
-        sshCommand(host, `git clone --depth 1 --branch ${ref} https://github.com/${repo}.git ${REMOTE_DIR}`, keyPath),
+        sshCommand(
+          host,
+          `git clone --depth 1 --branch ${ref} https://github.com/${repo}.git ${REMOTE_DIR}`,
+          keyPath,
+          controlPath,
+        ),
         deployEnv,
         spawnFn,
       )
@@ -729,7 +746,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     const secrets = buildSecretFileList(env)
     await runCommand(
       'Creating secrets directory',
-      sshCommand(host, `mkdir -p ${SECRETS_DIR}`, keyPath),
+      sshCommand(host, `mkdir -p ${SECRETS_DIR}`, keyPath, controlPath),
       deployEnv,
       spawnFn,
     )
@@ -744,12 +761,13 @@ export async function main(opts: MainOpts = {}): Promise<void> {
         spawnFn,
         secrets,
         keyPath,
+        controlPath,
       )
     }
 
     // Compute current checksum and read prior checksum to detect rotation
     const currentChecksum = computeSecretsChecksum(secrets)
-    const priorChecksum = await readRemoteChecksum(host, deployEnv, spawnFn, keyPath)
+    const priorChecksum = await readRemoteChecksum(host, deployEnv, spawnFn, keyPath, controlPath)
     const checksumChanged = priorChecksum !== currentChecksum
 
     // Phase 6: Materialize .env via stdin pipe (OBJECT_STORE_HOSTS already validated above)
@@ -762,12 +780,13 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       spawnFn,
       secrets,
       keyPath,
+      controlPath,
     )
 
     // Phase 7: Run init-certs.sh (idempotent)
     await runCommand(
       'Running init-certs.sh',
-      sshCommand(host, `cd ${DEPLOY_DIR} && bash init-certs.sh`, keyPath),
+      sshCommand(host, `cd ${DEPLOY_DIR} && bash init-certs.sh`, keyPath, controlPath),
       deployEnv,
       spawnFn,
     )
@@ -790,7 +809,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
 
     await runCommand(
       'Starting Docker Compose stack',
-      sshCommand(host, composeArgs.join(' '), keyPath),
+      sshCommand(host, composeArgs.join(' '), keyPath, controlPath),
       deployEnv,
       spawnFn,
     )
@@ -826,6 +845,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       spawnFn,
       secrets,
       keyPath,
+      controlPath,
     )
 
     console.warn(`\u001B[1;32m✓\u001B[0m Registered commands: ${commands.join(', ')}`)

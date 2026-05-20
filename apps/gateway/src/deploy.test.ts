@@ -221,10 +221,10 @@ describe('computeObjectStoreHosts', () => {
 // ─── buildSecretFileList ──────────────────────────────────────────────────────
 
 describe('buildSecretFileList', () => {
-  test('returns exactly 8 secret entries', async () => {
+  test('returns exactly 9 secret entries', async () => {
     const {buildSecretFileList} = await import('./deploy')
     const secrets = buildSecretFileList(makeEnv())
-    expect(secrets).toHaveLength(8)
+    expect(secrets).toHaveLength(9)
   })
 
   test('uses kebab-case file names matching upstream compose contract', async () => {
@@ -239,6 +239,7 @@ describe('buildSecretFileList', () => {
     expect(names).toContain('s3-bucket')
     expect(names).toContain('s3-region')
     expect(names).toContain('s3-endpoint')
+    expect(names).toContain('aws-session-token')
   })
 
   test('does not use snake_case file names', async () => {
@@ -330,6 +331,25 @@ describe('buildSecretFileList', () => {
     const secrets = buildSecretFileList(makeEnv({S3_ENDPOINT: 'https://abc123.r2.cloudflarestorage.com'}))
     const endpoint = secrets.find(s => s.name === 's3-endpoint')
     expect(endpoint?.content).toBe('https://abc123.r2.cloudflarestorage.com')
+  })
+
+  test('aws-session-token is optional: unset → empty content, required false', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).AWS_SESSION_TOKEN
+    const secrets = buildSecretFileList(env)
+    const sessionToken = secrets.find(s => s.name === 'aws-session-token')
+    expect(sessionToken).toBeDefined()
+    expect(sessionToken?.content).toBe('')
+    expect(sessionToken?.required).toBe(false)
+  })
+
+  test('aws-session-token set → content is the value', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv({AWS_SESSION_TOKEN: 'AQoXnyc4lcK4w=='}))
+    const sessionToken = secrets.find(s => s.name === 'aws-session-token')
+    expect(sessionToken?.content).toBe('AQoXnyc4lcK4w==')
+    expect(sessionToken?.required).toBe(false)
   })
 })
 

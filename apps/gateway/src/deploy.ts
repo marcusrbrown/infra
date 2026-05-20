@@ -276,7 +276,10 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
     {name: 's3-region', envKey: 'S3_REGION'},
   ]
 
-  const optional: {name: string; envKey: string}[] = [{name: 's3-endpoint', envKey: 'S3_ENDPOINT'}]
+  const optional: {name: string; envKey: string}[] = [
+    {name: 's3-endpoint', envKey: 'S3_ENDPOINT'},
+    {name: 'aws-session-token', envKey: 'AWS_SESSION_TOKEN'},
+  ]
 
   const secrets: SecretFile[] = []
 

@@ -1698,3 +1698,179 @@ describe('CI key-file contract', () => {
     expect(calls).toHaveLength(0)
   })
 })
+
+// ─── SSH ControlMaster multiplexing ──────────────────────────────────────────
+
+describe('SSH ControlMaster multiplexing', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('CI mode: every ssh argv includes ControlMaster=auto', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
+    expect(sshCalls.length).toBeGreaterThan(0)
+
+    for (const cmd of sshCalls) {
+      expect(cmd).toContain('ControlMaster=auto')
+    }
+  })
+
+  test('CI mode: every ssh argv includes ControlPath under the key tmpdir', async () => {
+    const {main} = await import('./deploy')
+    let capturedKeyDir: string | undefined
+
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      // Capture the tmpdir from the -i path on the first ssh call
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1 && capturedKeyDir === undefined) {
+        const keyPath = cmd[iIdx + 1]
+        if (keyPath) capturedKeyDir = keyPath.replace(/\/id$/, '')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(capturedKeyDir).toBeDefined()
+
+    const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
+    expect(sshCalls.length).toBeGreaterThan(0)
+
+    for (const cmd of sshCalls) {
+      const controlPathArg = cmd.find(arg => arg.startsWith('ControlPath='))
+      expect(controlPathArg).toBeDefined()
+      if (capturedKeyDir) {
+        expect(controlPathArg).toContain(capturedKeyDir)
+      }
+    }
+  })
+
+  test('CI mode: every ssh argv includes ControlPersist=300', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
+    expect(sshCalls.length).toBeGreaterThan(0)
+
+    for (const cmd of sshCalls) {
+      expect(cmd).toContain('ControlPersist=300')
+    }
+  })
+
+  test('local mode: ssh argv still includes ControlMaster=auto when CI is unset', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: '', SSH_AUTH_SOCK: '/tmp/ssh-agent.sock', GATEWAY_SSH_KEY: ''}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
+    expect(sshCalls.length).toBeGreaterThan(0)
+
+    for (const cmd of sshCalls) {
+      expect(cmd).toContain('ControlMaster=auto')
+      expect(cmd).toContain('ControlPersist=300')
+    }
+  })
+
+  test('local mode: ControlPath is set even without a CI key file', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: '', SSH_AUTH_SOCK: '/tmp/ssh-agent.sock', GATEWAY_SSH_KEY: ''}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
+    expect(sshCalls.length).toBeGreaterThan(0)
+
+    for (const cmd of sshCalls) {
+      const controlPathArg = cmd.find(arg => arg.startsWith('ControlPath='))
+      expect(controlPathArg).toBeDefined()
+    }
+  })
+
+  test('deploy failure mid-way: tmpdir (and ControlPath socket) is cleaned up by finally', async () => {
+    const {main} = await import('./deploy')
+    let capturedControlPath: string | undefined
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (capturedControlPath === undefined) {
+        const controlPathArg = cmd.find(arg => arg.startsWith('ControlPath='))
+        if (controlPathArg) {
+          // Extract the directory portion from ControlPath=<dir>/cm-%C
+          capturedControlPath = controlPathArg.replace(/^ControlPath=/, '').replace(/\/cm-%C$/, '')
+        }
+      }
+      // Fail on the first SSH call to simulate mid-deploy failure
+      return makeSpawnResult({exitCode: 255, stderr: 'Connection refused'})
+    })
+
+    await expect(
+      main({
+        env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
+        args: [],
+        fetch: makeDiscordFetch([]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    // The tmpdir containing the ControlPath socket must be cleaned up
+    expect(capturedControlPath).toBeDefined()
+    if (capturedControlPath) {
+      expect(existsSync(capturedControlPath)).toBe(false)
+    }
+  })
+})

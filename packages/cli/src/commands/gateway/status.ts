@@ -45,6 +45,24 @@ export type SpawnFn = (
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
+export function parseComposePsOutput(stdoutText: string): ComposePsEntry[] {
+  const trimmed = stdoutText.trim()
+  if (trimmed.length === 0) return []
+
+  // Legacy compose may emit a single JSON array; current versions emit NDJSON.
+  if (trimmed.startsWith('[')) {
+    const parsed: unknown = JSON.parse(trimmed)
+    return Array.isArray(parsed) ? (parsed as ComposePsEntry[]) : []
+  }
+
+  // NDJSON: one JSON object per non-empty line.
+  return trimmed
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .map(line => JSON.parse(line) as ComposePsEntry)
+}
+
 function normalizeHealth(raw: string): HealthStatus {
   if (raw === 'healthy' || raw === 'unhealthy' || raw === 'starting') {
     return raw
@@ -117,8 +135,7 @@ export async function getGatewayComposeStatus(
   let entries: ComposePsEntry[]
 
   try {
-    const parsed: unknown = JSON.parse(stdoutText)
-    entries = Array.isArray(parsed) ? (parsed as ComposePsEntry[]) : []
+    entries = parseComposePsOutput(stdoutText)
   } catch {
     return {ok: false, services: [], error: `Failed to parse docker compose ps output: ${stdoutText.slice(0, 200)}`}
   }

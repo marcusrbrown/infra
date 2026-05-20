@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {parseComposePs, type ComposePsEntry, type ServiceRow} from './status'
+import {parseComposePs, parseComposePsOutput, type ComposePsEntry, type ServiceRow} from './status'
 
 // ─── parseComposePs ──────────────────────────────────────────────────────────
 
@@ -255,5 +255,100 @@ describe('getGatewayComposeStatus', () => {
 
     expect(result.ok).toBe(false)
     expect(result.error).toContain('SSH')
+  })
+})
+
+// ─── parseComposePsOutput ─────────────────────────────────────────────────────
+
+// Realistic fixture shape matching live droplet output
+const ndjsonFixture = [
+  String.raw`{"Command":"\"docker-entrypoint.sh\"","CreatedAt":"2026-05-20 08:20:18 +0000 UTC","ExitCode":0,"Health":"healthy","ID":"01e1a16f5752","Image":"fro-bot-gateway","Labels":"","LocalVolumes":"0","Mounts":"","Name":"fro-bot-gateway-1","Names":"fro-bot-gateway-1","Networks":"gateway_default","Ports":"","Project":"gateway","Publishers":null,"RunningFor":"2 hours ago","Service":"gateway","Size":"0B","State":"running","Status":"Up 2 hours (healthy)"}`,
+  String.raw`{"Command":"\"mitmproxy\"","CreatedAt":"2026-05-20 08:20:18 +0000 UTC","ExitCode":0,"Health":"healthy","ID":"02b2c27f6863","Image":"fro-bot-mitmproxy","Labels":"","LocalVolumes":"0","Mounts":"","Name":"fro-bot-mitmproxy-1","Names":"fro-bot-mitmproxy-1","Networks":"gateway_default","Ports":"","Project":"gateway","Publishers":null,"RunningFor":"2 hours ago","Service":"mitmproxy","Size":"0B","State":"running","Status":"Up 2 hours (healthy)"}`,
+  String.raw`{"Command":"\"sleep infinity\"","CreatedAt":"2026-05-20 08:20:18 +0000 UTC","ExitCode":0,"Health":"","ID":"03c3d38g7974","Image":"fro-bot-workspace","Labels":"","LocalVolumes":"0","Mounts":"","Name":"fro-bot-workspace-1","Names":"fro-bot-workspace-1","Networks":"gateway_default","Ports":"","Project":"gateway","Publishers":null,"RunningFor":"2 hours ago","Service":"workspace","Size":"0B","State":"running","Status":"Up 2 hours"}`,
+]
+
+describe('parseComposePsOutput', () => {
+  it('parses NDJSON with 3 lines into 3 entries with correct Name/State/Health', () => {
+    const raw = ndjsonFixture.join('\n')
+    const entries = parseComposePsOutput(raw)
+
+    expect(entries).toHaveLength(3)
+    expect(entries[0]?.Name).toBe('fro-bot-gateway-1')
+    expect(entries[0]?.State).toBe('running')
+    expect(entries[0]?.Health).toBe('healthy')
+    expect(entries[1]?.Name).toBe('fro-bot-mitmproxy-1')
+    expect(entries[1]?.State).toBe('running')
+    expect(entries[1]?.Health).toBe('healthy')
+    expect(entries[2]?.Name).toBe('fro-bot-workspace-1')
+    expect(entries[2]?.State).toBe('running')
+    expect(entries[2]?.Health).toBe('')
+  })
+
+  it('parses legacy single JSON array format', () => {
+    const raw = JSON.stringify([
+      {Name: 'fro-bot-gateway-1', State: 'running', Health: 'healthy'},
+      {Name: 'fro-bot-mitmproxy-1', State: 'running', Health: 'healthy'},
+    ])
+    const entries = parseComposePsOutput(raw)
+
+    expect(entries).toHaveLength(2)
+    expect(entries[0]?.Name).toBe('fro-bot-gateway-1')
+    expect(entries[1]?.Name).toBe('fro-bot-mitmproxy-1')
+  })
+
+  it('returns empty array for empty string', () => {
+    expect(parseComposePsOutput('')).toEqual([])
+  })
+
+  it('returns empty array for whitespace-only input', () => {
+    expect(parseComposePsOutput('   \n  \n  ')).toEqual([])
+  })
+
+  it('parses a single NDJSON line', () => {
+    const raw = ndjsonFixture.at(0) ?? ''
+    const entries = parseComposePsOutput(raw)
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]?.Name).toBe('fro-bot-gateway-1')
+  })
+
+  it('handles trailing newline correctly', () => {
+    const raw = `${ndjsonFixture.join('\n')}\n`
+    const entries = parseComposePsOutput(raw)
+
+    expect(entries).toHaveLength(3)
+  })
+
+  it('throws on a malformed NDJSON line', () => {
+    const raw = `${ndjsonFixture[0]}\nnot-valid-json\n${ndjsonFixture[2]}`
+
+    expect(() => parseComposePsOutput(raw)).toThrow()
+  })
+})
+
+// ─── getGatewayComposeStatus — NDJSON integration ────────────────────────────
+
+describe('getGatewayComposeStatus — NDJSON stdout', () => {
+  it('parses NDJSON docker compose ps output and returns correct services', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+
+    const ndjsonOutput = ndjsonFixture.join('\n')
+    const result = await getGatewayComposeStatus('gateway.example.com', makeSpawnOk(ndjsonOutput))
+
+    expect(result.ok).toBe(true)
+    expect(result.services).toHaveLength(3)
+    expect(result.services[0]).toEqual({service: 'fro-bot-gateway-1', state: 'running', health: 'healthy'})
+    expect(result.services[1]).toEqual({service: 'fro-bot-mitmproxy-1', state: 'running', health: 'healthy'})
+    expect(result.services[2]).toEqual({service: 'fro-bot-workspace-1', state: 'running', health: 'n-a'})
+  })
+
+  it('returns ok=false with error message when NDJSON contains a malformed line', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+
+    const badOutput = `${ndjsonFixture[0]}\nnot-valid-json`
+    const result = await getGatewayComposeStatus('gateway.example.com', makeSpawnOk(badOutput))
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('Failed to parse docker compose ps output')
   })
 })

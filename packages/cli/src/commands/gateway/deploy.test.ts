@@ -8,6 +8,7 @@ const cliDir = resolve(import.meta.dir, '../../..')
 const envKeys = [
   'AWS_ACCESS_KEY_ID',
   'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
   'DISCORD_APPLICATION_ID',
   'DISCORD_GUILD_ID',
   'DISCORD_TOKEN',
@@ -155,6 +156,7 @@ describe('gateway deploy', () => {
       setManagedEnv({
         AWS_ACCESS_KEY_ID: 'test-key-id',
         AWS_SECRET_ACCESS_KEY: 'test-secret',
+        AWS_SESSION_TOKEN: undefined,
         DISCORD_APPLICATION_ID: 'test-app-id',
         DISCORD_GUILD_ID: 'test-guild-id',
         DISCORD_TOKEN: 'test-token',
@@ -181,6 +183,7 @@ describe('gateway deploy', () => {
       // Optional vars present (empty string when unset)
       expect(env.S3_ENDPOINT).toBe('')
       expect(env.OBJECT_STORE_HOSTS).toBe('')
+      expect(env.AWS_SESSION_TOKEN).toBe('')
       // Core vars still present
       expect(env.PATH).toBe('/usr/bin:/bin')
       expect(env.HOME).toBe('/tmp/test-home')
@@ -201,6 +204,20 @@ describe('gateway deploy', () => {
 
       expect(env.S3_ENDPOINT).toBe('https://r2.example.com')
       expect(env.OBJECT_STORE_HOSTS).toBe('r2.example.com minio.example.com')
+    })
+
+    it('forwards AWS_SESSION_TOKEN when present in process.env', () => {
+      setManagedEnv({
+        AWS_SESSION_TOKEN: 'sts-temporary-token-value',
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+
+      const env = getGatewayDeployEnv()
+
+      expect(env.AWS_SESSION_TOKEN).toBe('sts-temporary-token-value')
     })
   })
 

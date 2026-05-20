@@ -42,6 +42,7 @@ export function getGatewayDeployEnv(): Record<string, string> {
     DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID ?? '',
     AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID ?? '',
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ?? '',
+    AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN ?? '',
     S3_BUCKET: process.env.S3_BUCKET ?? '',
     S3_REGION: process.env.S3_REGION ?? '',
     S3_ENDPOINT: process.env.S3_ENDPOINT ?? '',

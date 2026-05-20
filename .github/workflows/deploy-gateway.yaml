@@ -32,6 +32,8 @@ on:
         required: false
       OBJECT_STORE_HOSTS:
         required: false
+      AWS_SESSION_TOKEN:
+        required: false
 
 jobs:
   detect-changes:
@@ -105,20 +107,17 @@ jobs:
       - name: Configure SSH known_hosts
         run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
 
-      - name: Setup SSH agent
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.GATEWAY_SSH_KEY }}
-
       - name: Deploy gateway
         run: bun run --cwd apps/gateway deploy
         env:
+          GATEWAY_SSH_KEY: ${{ secrets.GATEWAY_SSH_KEY }}
           GATEWAY_HOST: ${{ secrets.GATEWAY_HOST }}
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
           DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           S3_REGION: ${{ secrets.S3_REGION }}
           S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}

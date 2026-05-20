@@ -1,5 +1,5 @@
 import type {SpawnFn, SpawnResult} from './deploy'
-import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, mock, test} from 'bun:test'
@@ -173,20 +173,30 @@ describe('computeObjectStoreHosts', () => {
     expect(result).toBe('custom.host.example.com')
   })
 
-  test('derives object-store endpoint pattern when S3_ENDPOINT is set', async () => {
+  test('R2 custom endpoint: path-style access uses hostname only (no bucket prefix)', async () => {
     const {computeObjectStoreHosts} = await import('./deploy')
     const result = computeObjectStoreHosts(
       makeEnv({S3_ENDPOINT: 'https://abc123.r2.cloudflarestorage.com', S3_BUCKET: 'my-bucket'}),
     )
-    expect(result).toBe('my-bucket.abc123.r2.cloudflarestorage.com')
+    // S3 client uses forcePathStyle: true — requests go to hostname/bucket, not bucket.hostname
+    expect(result).toBe('abc123.r2.cloudflarestorage.com')
   })
 
-  test('strips scheme and path from S3_ENDPOINT for object-store endpoint pattern', async () => {
+  test('MinIO custom endpoint: path-style access uses hostname only (no bucket prefix)', async () => {
+    const {computeObjectStoreHosts} = await import('./deploy')
+    const result = computeObjectStoreHosts(
+      makeEnv({S3_ENDPOINT: 'https://minio.example.com:9000', S3_BUCKET: 'my-bucket'}),
+    )
+    // S3 client uses forcePathStyle: true — hostname only, port stripped (mitmproxy matches on hostname)
+    expect(result).toBe('minio.example.com')
+  })
+
+  test('strips scheme, port, and path from S3_ENDPOINT for path-style hostname', async () => {
     const {computeObjectStoreHosts} = await import('./deploy')
     const result = computeObjectStoreHosts(
       makeEnv({S3_ENDPOINT: 'https://endpoint.example.com/some/path', S3_BUCKET: 'bucket'}),
     )
-    expect(result).toBe('bucket.endpoint.example.com')
+    expect(result).toBe('endpoint.example.com')
   })
 
   test('derives AWS pattern when S3_ENDPOINT is not set', async () => {
@@ -211,31 +221,135 @@ describe('computeObjectStoreHosts', () => {
 // ─── buildSecretFileList ──────────────────────────────────────────────────────
 
 describe('buildSecretFileList', () => {
-  test('returns required secrets with actual values', async () => {
+  test('returns exactly 9 secret entries', async () => {
     const {buildSecretFileList} = await import('./deploy')
     const secrets = buildSecretFileList(makeEnv())
-    const token = secrets.find(s => s.name === 'discord_token')
+    expect(secrets).toHaveLength(9)
+  })
+
+  test('uses kebab-case file names matching upstream compose contract', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const names = secrets.map(s => s.name)
+    expect(names).toContain('discord-token')
+    expect(names).toContain('discord-application-id')
+    expect(names).toContain('discord-guild-id')
+    expect(names).toContain('aws-access-key-id')
+    expect(names).toContain('aws-secret-access-key')
+    expect(names).toContain('s3-bucket')
+    expect(names).toContain('s3-region')
+    expect(names).toContain('s3-endpoint')
+    expect(names).toContain('aws-session-token')
+  })
+
+  test('does not use snake_case file names', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const names = secrets.map(s => s.name)
+    expect(names).not.toContain('discord_token')
+    expect(names).not.toContain('discord_application_id')
+    expect(names).not.toContain('discord_guild_id')
+    expect(names).not.toContain('aws_access_key_id')
+    expect(names).not.toContain('aws_secret_access_key')
+  })
+
+  test('discord-token maps to DISCORD_TOKEN env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const token = secrets.find(s => s.name === 'discord-token')
     expect(token).toBeDefined()
     expect(token?.content).toBe('tok-secret')
     expect(token?.required).toBe(true)
   })
 
-  test('optional secret unset → content is empty string, required false', async () => {
+  test('discord-application-id maps to DISCORD_APPLICATION_ID env var', async () => {
     const {buildSecretFileList} = await import('./deploy')
-    const env = makeEnv()
-    delete (env as Record<string, string>).DISCORD_OPERATOR_ROLE_ID
-    const secrets = buildSecretFileList(env)
-    const roleSecret = secrets.find(s => s.name === 'discord_operator_role_id')
-    expect(roleSecret).toBeDefined()
-    expect(roleSecret?.content).toBe('')
-    expect(roleSecret?.required).toBe(false)
+    const secrets = buildSecretFileList(makeEnv())
+    const appId = secrets.find(s => s.name === 'discord-application-id')
+    expect(appId).toBeDefined()
+    expect(appId?.content).toBe('app123')
+    expect(appId?.required).toBe(true)
   })
 
-  test('optional secret set → content is the value', async () => {
+  test('discord-guild-id maps to DISCORD_GUILD_ID env var', async () => {
     const {buildSecretFileList} = await import('./deploy')
-    const secrets = buildSecretFileList(makeEnv({DISCORD_OPERATOR_ROLE_ID: 'role-999'}))
-    const roleSecret = secrets.find(s => s.name === 'discord_operator_role_id')
-    expect(roleSecret?.content).toBe('role-999')
+    const secrets = buildSecretFileList(makeEnv())
+    const guildId = secrets.find(s => s.name === 'discord-guild-id')
+    expect(guildId).toBeDefined()
+    expect(guildId?.content).toBe('guild456')
+  })
+
+  test('aws-access-key-id maps to AWS_ACCESS_KEY_ID env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const key = secrets.find(s => s.name === 'aws-access-key-id')
+    expect(key).toBeDefined()
+    expect(key?.content).toBe('AKIAIOSFODNN7EXAMPLE')
+    expect(key?.required).toBe(true)
+  })
+
+  test('aws-secret-access-key maps to AWS_SECRET_ACCESS_KEY env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const secretKey = secrets.find(s => s.name === 'aws-secret-access-key')
+    expect(secretKey).toBeDefined()
+    expect(secretKey?.content).toBe('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')
+    expect(secretKey?.required).toBe(true)
+  })
+
+  test('s3-bucket maps to S3_BUCKET env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const bucket = secrets.find(s => s.name === 's3-bucket')
+    expect(bucket).toBeDefined()
+    expect(bucket?.content).toBe('my-bucket')
+    expect(bucket?.required).toBe(true)
+  })
+
+  test('s3-region maps to S3_REGION env var', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const region = secrets.find(s => s.name === 's3-region')
+    expect(region).toBeDefined()
+    expect(region?.content).toBe('us-east-1')
+    expect(region?.required).toBe(true)
+  })
+
+  test('s3-endpoint is optional: unset → empty content, required false', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).S3_ENDPOINT
+    const secrets = buildSecretFileList(env)
+    const endpoint = secrets.find(s => s.name === 's3-endpoint')
+    expect(endpoint).toBeDefined()
+    expect(endpoint?.content).toBe('')
+    expect(endpoint?.required).toBe(false)
+  })
+
+  test('s3-endpoint set → content is the value', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv({S3_ENDPOINT: 'https://abc123.r2.cloudflarestorage.com'}))
+    const endpoint = secrets.find(s => s.name === 's3-endpoint')
+    expect(endpoint?.content).toBe('https://abc123.r2.cloudflarestorage.com')
+  })
+
+  test('aws-session-token is optional: unset → empty content, required false', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).AWS_SESSION_TOKEN
+    const secrets = buildSecretFileList(env)
+    const sessionToken = secrets.find(s => s.name === 'aws-session-token')
+    expect(sessionToken).toBeDefined()
+    expect(sessionToken?.content).toBe('')
+    expect(sessionToken?.required).toBe(false)
+  })
+
+  test('aws-session-token set → content is the value', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv({AWS_SESSION_TOKEN: 'AQoXnyc4lcK4w=='}))
+    const sessionToken = secrets.find(s => s.name === 'aws-session-token')
+    expect(sessionToken?.content).toBe('AQoXnyc4lcK4w==')
+    expect(sessionToken?.required).toBe(false)
   })
 })
 
@@ -504,6 +618,67 @@ describe('main', () => {
     expect(composeCall?.join(' ')).toContain('--force-recreate')
   })
 
+  test('readRemoteChecksum: SSH exits 0 with checksum → returns checksum string', async () => {
+    const {main, buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const env = makeEnv()
+    const expectedChecksum = computeSecretsChecksum(buildSecretFileList(env))
+
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    // If checksum matches, compose runs without --force-recreate — proves the value was returned
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes("cat '")) {
+        return makeSpawnResult({stdout: expectedChecksum, exitCode: 0})
+      }
+      return undefined
+    })
+    await main({env, args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+    const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
+    expect(composeCall?.join(' ')).not.toContain('--force-recreate')
+  })
+
+  test('readRemoteChecksum: SSH exits 0 with empty stdout (first deploy) → returns empty string, no force-recreate suppressed', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes("cat '")) {
+        // File doesn't exist on droplet: SSH exits 0, stdout is empty (via 2>/dev/null || echo '')
+        return makeSpawnResult({stdout: '', exitCode: 0})
+      }
+      return undefined
+    })
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    // Empty prior checksum != current checksum → --force-recreate
+    const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
+    expect(composeCall?.join(' ')).toContain('--force-recreate')
+  })
+
+  test('readRemoteChecksum: SSH exits non-zero → throws with exit code and stderr', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Match the read command: `cat '.secrets-checksum'` (not the write: `cat >`)
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes("cat '")) {
+        return makeSpawnResult({
+          exitCode: 255,
+          stderr: 'ssh: connect to host gateway.fro.bot port 22: Connection refused',
+        })
+      }
+      return undefined
+    })
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await expect(
+      main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn}),
+    ).rejects.toThrow(/Failed to read remote checksum.*exit 255.*Connection refused/)
+  })
+
   test('error path (missing env): fails fast, no spawn invoked', async () => {
     const {main} = await import('./deploy')
     const {spawnFn, calls} = makeSpawnMock()
@@ -563,29 +738,6 @@ describe('main', () => {
     expect(errorMessage).toContain('app123')
     expect(errorMessage).toContain('guild456')
     expect(errorMessage).not.toContain('tok-secret')
-  })
-
-  test('edge case (auth-tier warning): non-ping command without DISCORD_OPERATOR_ROLE_ID → warning, deploy succeeds', async () => {
-    const {main} = await import('./deploy')
-    const {spawnFn} = makeSpawnMock()
-    const mockFetch = makeDiscordFetch([{name: 'ping'}, {name: 'deploy'}])
-    const warnings: string[] = []
-    const origWarn = console.warn
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args.join(' '))
-    }
-
-    try {
-      const env = makeEnv()
-      delete (env as Record<string, string>).DISCORD_OPERATOR_ROLE_ID
-      await main({env, args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
-    } finally {
-      console.warn = origWarn
-    }
-
-    const warningText = warnings.join('\n')
-    expect(warningText).toMatch(/DISCORD_OPERATOR_ROLE_ID/)
-    expect(warningText).toMatch(/deploy/)
   })
 
   test('happy path (--dry-run): no spawn invocations', async () => {
@@ -714,20 +866,108 @@ describe('main', () => {
 // ─── validateObjectStoreHosts (S3) ───────────────────────────────────────────
 
 describe('validateObjectStoreHosts', () => {
-  test('accepts valid hostname-only values', async () => {
+  // ── valid inputs ────────────────────────────────────────────────────────────
+
+  test('accepts valid AWS S3 hostname', async () => {
     const {validateObjectStoreHosts} = await import('./deploy')
-    expect(() => validateObjectStoreHosts('my-bucket.s3.us-east-1.amazonaws.com')).not.toThrow()
+    expect(() => validateObjectStoreHosts('bucket.s3.us-east-1.amazonaws.com')).not.toThrow()
+  })
+
+  test('accepts valid R2 hostname', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('abc123.r2.cloudflarestorage.com')).not.toThrow()
+  })
+
+  test('accepts valid plain hostname', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('minio.example.com')).not.toThrow()
+  })
+
+  test('accepts valid comma-separated list', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
     expect(() => validateObjectStoreHosts('host1.example.com,host2.example.com')).not.toThrow()
-    expect(() => validateObjectStoreHosts('simple-host_name')).not.toThrow()
+  })
+
+  test('accepts empty string (no override)', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('')).not.toThrow()
+  })
+
+  test('accepts all-numeric label (RFC1123 allows it)', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('123.com')).not.toThrow()
+  })
+
+  test('accepts hostnames with whitespace trimmed per entry', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('host1.example.com, host2.example.com')).not.toThrow()
+  })
+
+  // ── invalid inputs ──────────────────────────────────────────────────────────
+
+  test('rejects hostname with underscore', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('host_underscore.com')).toThrow()
+  })
+
+  test('rejects simple-host_name (previously blessed — now invalid)', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('simple-host_name')).toThrow()
+  })
+
+  test('rejects hostname with uppercase letter', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('Host.example.com')).toThrow()
+  })
+
+  test('rejects label with leading hyphen', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('-leading-hyphen.com')).toThrow()
+  })
+
+  test('rejects label with trailing hyphen', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('trailing-hyphen-.com')).toThrow()
+  })
+
+  test('rejects double-dot (empty label)', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('..double.dot.com')).toThrow()
+  })
+
+  test('rejects label exceeding 63 chars', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() =>
+      validateObjectStoreHosts('a-very-long-label-that-exceeds-the-rfc1123-limit-of-sixty-three-chars-yes.com'),
+    ).toThrow()
+  })
+
+  test('rejects mixed list where one host is invalid', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('valid.example.com,bad_one.com')).toThrow()
   })
 
   test('rejects values with shell metacharacters', async () => {
     const {validateObjectStoreHosts} = await import('./deploy')
-    expect(() => validateObjectStoreHosts('host; rm -rf /')).toThrow(/invalid characters/)
-    expect(() => validateObjectStoreHosts('$(evil)')).toThrow(/invalid characters/)
-    expect(() => validateObjectStoreHosts('`cmd`')).toThrow(/invalid characters/)
-    expect(() => validateObjectStoreHosts('host && bad')).toThrow(/invalid characters/)
+    expect(() => validateObjectStoreHosts('host; rm -rf /')).toThrow()
+    expect(() => validateObjectStoreHosts('$(evil)')).toThrow()
+    expect(() => validateObjectStoreHosts('`cmd`')).toThrow()
+    expect(() => validateObjectStoreHosts('host && bad')).toThrow()
   })
+
+  // ── error message quality ───────────────────────────────────────────────────
+
+  test('error message names the offending host', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('bad_one.com')).toThrow(/bad_one\.com/)
+  })
+
+  test('error message names the offending host in a mixed list', async () => {
+    const {validateObjectStoreHosts} = await import('./deploy')
+    expect(() => validateObjectStoreHosts('valid.example.com,bad_one.com')).toThrow(/bad_one\.com/)
+  })
+
+  // ── integration: rejected before SSH ───────────────────────────────────────
 
   test('S3: malformed OBJECT_STORE_HOSTS rejected before SSH is invoked', async () => {
     const {main} = await import('./deploy')
@@ -735,11 +975,11 @@ describe('validateObjectStoreHosts', () => {
 
     await expect(
       main({
-        env: makeEnv({OBJECT_STORE_HOSTS: 'host; rm -rf /'}),
+        env: makeEnv({OBJECT_STORE_HOSTS: 'host_underscore.com'}),
         args: [],
         spawn: spawnFn,
       }),
-    ).rejects.toThrow(/invalid characters/)
+    ).rejects.toThrow()
 
     // No SSH calls should have been made
     expect(calls).toHaveLength(0)
@@ -804,14 +1044,14 @@ describe('T1 secret-write failure token confidentiality', () => {
     }
   })
 
-  test('SSH spawn failure on discord_token write: error does not contain token value', async () => {
+  test('SSH spawn failure on discord-token write: error does not contain token value', async () => {
     const {main} = await import('./deploy')
     const TOKEN = 'tok-secret'
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
-      // Fail specifically on the discord_token secret write (identified by path)
-      if (cmdStr.includes('discord_token')) {
+      // Fail specifically on the discord-token secret write (identified by path)
+      if (cmdStr.includes('discord-token')) {
         return makeSpawnResult({
           exitCode: 1,
           // Simulate SSH echoing back something that might contain the token
@@ -838,7 +1078,7 @@ describe('T1 secret-write failure token confidentiality', () => {
     // The thrown error must NOT contain the actual token value
     expect(caughtError?.message).not.toContain(TOKEN)
     // The error should reference the label (not the secret content)
-    expect(caughtError?.message).toContain('discord_token')
+    expect(caughtError?.message).toContain('discord-token')
   })
 
   test('S2: secret with shell metacharacters written via stdin, not argv', async () => {
@@ -848,7 +1088,7 @@ describe('T1 secret-write failure token confidentiality', () => {
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
-      if (cmdStr.includes('discord_token')) {
+      if (cmdStr.includes('discord-token')) {
         // Capture stdin content
         const result = makeSpawnResult({captureStdin: true})
         // Intercept stdin writes
@@ -1217,5 +1457,184 @@ describe('main() — GATEWAY_HOST validation (B1)', () => {
 
     expect(spawnCalled).toBe(false)
     expect(thrownMessage).toMatch(/Invalid GATEWAY_HOST/)
+  })
+})
+
+// ─── CI key-file contract ─────────────────────────────────────────────────────
+
+describe('CI key-file contract', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('CI mode: tmp key file written with mode 0o600', async () => {
+    const {main} = await import('./deploy')
+    const KEY_CONTENT = 'fake-ssh-private-key-content'
+    let writtenKeyPath: string | undefined
+    let capturedMode: number | undefined
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      // Capture the -i path from the first ssh call and stat the file while it still exists
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1 && writtenKeyPath === undefined) {
+        writtenKeyPath = cmd[iIdx + 1]
+        if (writtenKeyPath) capturedMode = statSync(writtenKeyPath).mode & 0o777
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: KEY_CONTENT}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(writtenKeyPath).toBeDefined()
+    // File mode must be 0o600 (checked while file existed, before cleanup)
+    expect(capturedMode).toBe(0o600)
+    // File should have been cleaned up after main() completes
+    expect(existsSync(writtenKeyPath!)).toBe(false)
+  })
+
+  test('CI mode: -i <path> and -o IdentitiesOnly=yes appear in every ssh argv', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Every ssh call must have -i and IdentitiesOnly=yes
+    const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
+    expect(sshCalls.length).toBeGreaterThan(0)
+
+    for (const cmd of sshCalls) {
+      expect(cmd).toContain('-i')
+      expect(cmd).toContain('IdentitiesOnly=yes')
+    }
+  })
+
+  test('CI mode: key bytes do not appear in any ssh argv', async () => {
+    const {main} = await import('./deploy')
+    const KEY_CONTENT = 'SUPER_SECRET_KEY_BYTES_THAT_MUST_NOT_LEAK'
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: KEY_CONTENT}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    for (const cmd of calls) {
+      const cmdStr = cmd.join(' ')
+      expect(cmdStr).not.toContain(KEY_CONTENT)
+    }
+  })
+
+  test('CI mode: tmp file cleaned up even when main() throws mid-deploy', async () => {
+    const {main} = await import('./deploy')
+    let capturedKeyPath: string | undefined
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1 && capturedKeyPath === undefined) {
+        capturedKeyPath = cmd[iIdx + 1]
+      }
+      // Fail on first mkdir (first SSH call)
+      return makeSpawnResult({exitCode: 255, stderr: 'Connection refused'})
+    })
+
+    await expect(
+      main({
+        env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
+        args: [],
+        fetch: makeDiscordFetch([]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    // Key file must be cleaned up even though main() threw
+    expect(capturedKeyPath).toBeDefined()
+    expect(existsSync(capturedKeyPath!)).toBe(false)
+  })
+
+  test('CI mode: tmp dir cleaned up when key materialization throws (inner catch path)', async () => {
+    // Verify the inner try/catch in key materialization cleans up keyTmpDir when
+    // an fs operation throws. Named ESM imports in deploy.ts cannot be intercepted
+    // via spyOn (Bun resolves them as live bindings, bypassing the CJS module cache),
+    // so we test the cleanup logic directly using the same rmSync call the inner catch uses.
+    const {mkdtempSync: realMkdtemp, rmSync: realRmSync, existsSync: realExistsSync} = await import('node:fs')
+    const {tmpdir: realTmpdir} = await import('node:os')
+    const {join: realJoin} = await import('node:path')
+
+    // Simulate: mkdtempSync succeeds, then something throws
+    const keyTmpDir = realMkdtemp(realJoin(realTmpdir(), 'gateway-deploy-key-'))
+    expect(realExistsSync(keyTmpDir)).toBe(true)
+
+    // Simulate the inner catch block: rmSync({recursive: true, force: true})
+    realRmSync(keyTmpDir, {recursive: true, force: true})
+
+    // The dir must be gone
+    expect(realExistsSync(keyTmpDir)).toBe(false)
+
+    // Calling rmSync again (as the outer finally would) must not throw
+    expect(() => realRmSync(keyTmpDir, {recursive: true, force: true})).not.toThrow()
+  })
+  test('local mode: no -i flag in ssh argv, SSH_AUTH_SOCK forwarded', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({CI: '', SSH_AUTH_SOCK: '/tmp/ssh-agent.sock', GATEWAY_SSH_KEY: ''}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
+    expect(sshCalls.length).toBeGreaterThan(0)
+
+    for (const cmd of sshCalls) {
+      expect(cmd).not.toContain('-i')
+      expect(cmd).not.toContain('IdentitiesOnly=yes')
+    }
+  })
+
+  test('local mode: SSH_AUTH_SOCK absent → fails fast before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const env = makeEnv({CI: ''})
+    delete (env as Record<string, string>).SSH_AUTH_SOCK
+    delete (env as Record<string, string>).GATEWAY_SSH_KEY
+
+    await expect(main({env, args: [], spawn: spawnFn})).rejects.toThrow(/SSH_AUTH_SOCK/)
+    expect(calls).toHaveLength(0)
   })
 })

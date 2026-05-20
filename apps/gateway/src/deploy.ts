@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
-import {readFileSync} from 'node:fs'
-import {resolve} from 'node:path'
+import {chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join, resolve} from 'node:path'
 
 import {validateGatewayHost} from './host'
 
@@ -79,8 +80,11 @@ const CHECKSUM_PATH = `${REMOTE_DIR}/.secrets-checksum`
 const ENV_PATH = `${DEPLOY_DIR}/.env`
 const DEFAULT_REMOTE_USER = 'root'
 
-/** Allowlist for OBJECT_STORE_HOSTS: hostnames + commas only, no shell metacharacters. */
-const OBJECT_STORE_HOSTS_RE = /^[\w.,\-]+$/
+/**
+ * RFC1123 label: lowercase letters, digits, hyphens; 1-63 chars; no leading/trailing hyphen.
+ * Uppercase is rejected up front to avoid mitmproxy normalization surprises.
+ */
+const RFC1123_LABEL_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/
 
 const REQUIRED_ENV_VARS = [
   'DISCORD_TOKEN',
@@ -114,6 +118,34 @@ export function validateRequiredEnv(env: Record<string, string>): string[] {
   }
 
   return missing
+}
+
+/**
+ * Narrows a validated env record to a typed object with required keys as non-optional strings.
+ * Assumes validateRequiredEnv(env) === [] has already been called.
+ */
+export interface ValidatedDeployEnv {
+  GATEWAY_HOST: string
+  DISCORD_TOKEN: string
+  DISCORD_APPLICATION_ID: string
+  DISCORD_GUILD_ID: string
+  S3_BUCKET: string
+  S3_REGION: string
+  AWS_ACCESS_KEY_ID: string
+  AWS_SECRET_ACCESS_KEY: string
+}
+
+export function narrowValidatedEnv(env: Record<string, string>): ValidatedDeployEnv {
+  return {
+    GATEWAY_HOST: env.GATEWAY_HOST as string,
+    DISCORD_TOKEN: env.DISCORD_TOKEN as string,
+    DISCORD_APPLICATION_ID: env.DISCORD_APPLICATION_ID as string,
+    DISCORD_GUILD_ID: env.DISCORD_GUILD_ID as string,
+    S3_BUCKET: env.S3_BUCKET as string,
+    S3_REGION: env.S3_REGION as string,
+    AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID as string,
+    AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY as string,
+  }
 }
 
 /**
@@ -166,9 +198,10 @@ export function computeObjectStoreHosts(env: Record<string, string>): string {
   const bucket = env.S3_BUCKET ?? ''
 
   if (env.S3_ENDPOINT) {
-    // Strip scheme and path from endpoint URL
+    // S3 client uses forcePathStyle: true — requests go to hostname/bucket, not bucket.hostname.
+    // Return hostname only (no bucket prefix) so mitmproxy allowlist matches the actual request host.
     const url = new URL(env.S3_ENDPOINT)
-    return `${bucket}.${url.hostname}`
+    return url.hostname
   }
 
   const region = env.S3_REGION ?? ''
@@ -176,15 +209,54 @@ export function computeObjectStoreHosts(env: Record<string, string>): string {
 }
 
 /**
- * Validates that OBJECT_STORE_HOSTS contains only safe hostname characters.
- * Throws a clear error if the value contains shell metacharacters.
+ * Validates that OBJECT_STORE_HOSTS is a comma-separated list of RFC1123 hostnames.
+ * Empty string is allowed (treated as "no override").
+ * Throws with the offending host name when validation fails.
+ *
+ * Rules per label: [a-z0-9-], length 1-63, no leading/trailing hyphen.
+ * Uppercase is rejected up front to avoid mitmproxy normalization surprises.
  */
 export function validateObjectStoreHosts(value: string): void {
-  if (!OBJECT_STORE_HOSTS_RE.test(value)) {
-    throw new Error(
-      `OBJECT_STORE_HOSTS value contains invalid characters: "${value}". ` +
-        'Only hostname characters (A-Z, a-z, 0-9, ., _, -) and commas are allowed.',
-    )
+  if (!value) return
+
+  const hosts = value.split(',').map(h => h.trim())
+
+  for (const host of hosts) {
+    if (!host) {
+      throw new Error(`OBJECT_STORE_HOSTS contains an empty hostname (check for leading/trailing commas): "${value}"`)
+    }
+
+    const labels = host.split('.')
+
+    for (const label of labels) {
+      if (!label) {
+        throw new Error(
+          `OBJECT_STORE_HOSTS hostname "${host}" contains an empty label (double dot or leading/trailing dot): "${value}"`,
+        )
+      }
+
+      if (!RFC1123_LABEL_RE.test(label)) {
+        let reason: string
+        if (/[A-Z]/.test(label)) {
+          reason = 'contains uppercase letter (RFC1123 hostnames must be lowercase)'
+        } else if (/_/.test(label)) {
+          reason = 'contains underscore (not allowed in RFC1123 hostnames)'
+        } else if (label.startsWith('-')) {
+          reason = 'label starts with a hyphen'
+        } else if (label.endsWith('-')) {
+          reason = 'label ends with a hyphen'
+        } else if (label.length > 63) {
+          reason = `label exceeds 63 characters (${label.length} chars)`
+        } else {
+          reason = 'contains invalid characters (only [a-z0-9-] allowed per label)'
+        }
+        throw new Error(`OBJECT_STORE_HOSTS hostname "${host}" is invalid: ${reason}. Full value: "${value}"`)
+      }
+    }
+
+    if (host.length > 253) {
+      throw new Error(`OBJECT_STORE_HOSTS hostname "${host}" exceeds 253 characters. Full value: "${value}"`)
+    }
   }
 }
 
@@ -195,15 +267,18 @@ export function validateObjectStoreHosts(value: string): void {
  */
 export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
   const required: {name: string; envKey: string}[] = [
-    {name: 'discord_token', envKey: 'DISCORD_TOKEN'},
-    {name: 'aws_access_key_id', envKey: 'AWS_ACCESS_KEY_ID'},
-    {name: 'aws_secret_access_key', envKey: 'AWS_SECRET_ACCESS_KEY'},
-    {name: 'discord_application_id', envKey: 'DISCORD_APPLICATION_ID'},
-    {name: 'discord_guild_id', envKey: 'DISCORD_GUILD_ID'},
+    {name: 'discord-token', envKey: 'DISCORD_TOKEN'},
+    {name: 'discord-application-id', envKey: 'DISCORD_APPLICATION_ID'},
+    {name: 'discord-guild-id', envKey: 'DISCORD_GUILD_ID'},
+    {name: 'aws-access-key-id', envKey: 'AWS_ACCESS_KEY_ID'},
+    {name: 'aws-secret-access-key', envKey: 'AWS_SECRET_ACCESS_KEY'},
+    {name: 's3-bucket', envKey: 'S3_BUCKET'},
+    {name: 's3-region', envKey: 'S3_REGION'},
   ]
 
   const optional: {name: string; envKey: string}[] = [
-    {name: 'discord_operator_role_id', envKey: 'DISCORD_OPERATOR_ROLE_ID'},
+    {name: 's3-endpoint', envKey: 'S3_ENDPOINT'},
+    {name: 'aws-session-token', envKey: 'AWS_SESSION_TOKEN'},
   ]
 
   const secrets: SecretFile[] = []
@@ -377,9 +452,22 @@ export async function pollRegistration(opts: PollRegistrationOpts): Promise<{com
 
 // ─── SSH helpers ──────────────────────────────────────────────────────────────
 
-function sshCommand(host: string, command: string): string[] {
+/**
+ * Returns the SSH option flags for the given key path.
+ * When keyPath is set (CI mode): uses -i <path> + IdentitiesOnly=yes exclusively.
+ * When keyPath is undefined (local mode): no -i flags; relies on SSH_AUTH_SOCK.
+ */
+function sshIdentityOptions(keyPath: string | undefined): string[] {
+  if (keyPath) {
+    return ['-i', keyPath, '-o', 'IdentitiesOnly=yes']
+  }
+  return []
+}
+
+function sshCommand(host: string, command: string, keyPath?: string): string[] {
   return [
     'ssh',
+    ...sshIdentityOptions(keyPath),
     '-o',
     'BatchMode=yes',
     '-o',
@@ -446,12 +534,13 @@ async function writeRemoteFile(
   deployEnv: DeployEnv,
   spawnFn: SpawnFn,
   secrets: SecretFile[],
+  keyPath?: string,
 ): Promise<void> {
   console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
 
   // umask 077 ensures the file is created with 600 permissions.
   // Content arrives via stdin — never in the shell command string.
-  const proc = spawnFn(sshCommand(host, `umask 077; cat > '${remotePath}'`), {
+  const proc = spawnFn(sshCommand(host, `umask 077; cat > '${remotePath}'`, keyPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -488,8 +577,13 @@ async function writeRemoteFile(
   }
 }
 
-async function remoteGitExists(host: string, deployEnv: DeployEnv, spawnFn: SpawnFn): Promise<boolean> {
-  const proc = spawnFn(sshCommand(host, `test -d '${REMOTE_DIR}/.git'`), {
+async function remoteGitExists(
+  host: string,
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  keyPath?: string,
+): Promise<boolean> {
+  const proc = spawnFn(sshCommand(host, `test -d '${REMOTE_DIR}/.git'`, keyPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -498,14 +592,23 @@ async function remoteGitExists(host: string, deployEnv: DeployEnv, spawnFn: Spaw
   return exitCode === 0
 }
 
-async function readRemoteChecksum(host: string, deployEnv: DeployEnv, spawnFn: SpawnFn): Promise<string> {
-  const proc = spawnFn(sshCommand(host, `cat '${CHECKSUM_PATH}' 2>/dev/null || echo ''`), {
+async function readRemoteChecksum(
+  host: string,
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  keyPath?: string,
+): Promise<string> {
+  const proc = spawnFn(sshCommand(host, `cat '${CHECKSUM_PATH}' 2>/dev/null || echo ''`, keyPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
   })
   const stdout = await new Response(proc.stdout).text()
-  await proc.exited
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    const stderr = await new Response(proc.stderr).text()
+    throw new Error(`Failed to read remote checksum from ${CHECKSUM_PATH} (exit ${exitCode}): ${stderr.trim()}`)
+  }
   return stdout.trim()
 }
 
@@ -533,6 +636,8 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`)
   }
 
+  const validated = narrowValidatedEnv(env)
+
   // Phase 2: Resolve upstream pin
   const {repo, ref} = resolveUpstreamPin()
 
@@ -555,150 +660,182 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     return
   }
 
-  const host = env.GATEWAY_HOST!
+  const host = validated.GATEWAY_HOST
   validateGatewayHost(host)
   const deployEnv = buildDeployEnv(env)
 
-  // Phase 4: Ensure droplet workspace
-  await runCommand(
-    'Creating remote workspace directory',
-    sshCommand(host, `mkdir -p ${REMOTE_DIR}`),
-    deployEnv,
-    spawnFn,
-  )
+  // CI mode: write GATEWAY_SSH_KEY to a tmp file with mode 0o600.
+  // Local mode: keyPath stays undefined; SSH_AUTH_SOCK is forwarded via deployEnv.
+  let keyPath: string | undefined
+  let keyTmpDir: string | undefined
 
-  const gitExists = await remoteGitExists(host, deployEnv, spawnFn)
+  try {
+    if (env.CI === 'true' && env.GATEWAY_SSH_KEY) {
+      try {
+        keyTmpDir = mkdtempSync(join(tmpdir(), 'gateway-deploy-key-'))
+        keyPath = join(keyTmpDir, 'id')
+        writeFileSync(keyPath, env.GATEWAY_SSH_KEY, {mode: 0o600})
+        // Defensive chmod in case umask narrowed the initial mode
+        chmodSync(keyPath, 0o600)
+      } catch (error) {
+        if (keyTmpDir) {
+          rmSync(keyTmpDir, {recursive: true, force: true})
+          keyTmpDir = undefined
+        }
+        throw error
+      }
+    }
 
-  if (gitExists) {
+    // Phase 4: Ensure droplet workspace
     await runCommand(
-      `Fetching latest from ${repo}`,
-      sshCommand(host, `cd ${REMOTE_DIR} && git fetch --tags`),
+      'Creating remote workspace directory',
+      sshCommand(host, `mkdir -p ${REMOTE_DIR}`, keyPath),
       deployEnv,
       spawnFn,
     )
-    await runCommand(
-      `Resetting to ${ref}`,
-      sshCommand(host, `cd ${REMOTE_DIR} && git reset --hard ${ref}`),
-      deployEnv,
-      spawnFn,
-    )
-    await runCommand(
-      'Cleaning untracked files',
-      sshCommand(host, `cd ${REMOTE_DIR} && git clean -xfd`),
-      deployEnv,
-      spawnFn,
-    )
-  } else {
-    await runCommand(
-      `Cloning ${repo} at ${ref}`,
-      sshCommand(host, `git clone --depth 1 --branch ${ref} https://github.com/${repo}.git ${REMOTE_DIR}`),
-      deployEnv,
-      spawnFn,
-    )
-  }
 
-  // Phase 5: Materialize secrets
-  const secrets = buildSecretFileList(env)
-  await runCommand('Creating secrets directory', sshCommand(host, `mkdir -p ${SECRETS_DIR}`), deployEnv, spawnFn)
+    const gitExists = await remoteGitExists(host, deployEnv, spawnFn, keyPath)
 
-  for (const secret of secrets) {
+    if (gitExists) {
+      await runCommand(
+        `Fetching latest from ${repo}`,
+        sshCommand(host, `cd ${REMOTE_DIR} && git fetch --tags`, keyPath),
+        deployEnv,
+        spawnFn,
+      )
+      await runCommand(
+        `Resetting to ${ref}`,
+        sshCommand(host, `cd ${REMOTE_DIR} && git reset --hard ${ref}`, keyPath),
+        deployEnv,
+        spawnFn,
+      )
+      await runCommand(
+        'Cleaning untracked files',
+        sshCommand(host, `cd ${REMOTE_DIR} && git clean -xfd`, keyPath),
+        deployEnv,
+        spawnFn,
+      )
+    } else {
+      await runCommand(
+        `Cloning ${repo} at ${ref}`,
+        sshCommand(host, `git clone --depth 1 --branch ${ref} https://github.com/${repo}.git ${REMOTE_DIR}`, keyPath),
+        deployEnv,
+        spawnFn,
+      )
+    }
+
+    // Phase 5: Materialize secrets
+    const secrets = buildSecretFileList(env)
+    await runCommand(
+      'Creating secrets directory',
+      sshCommand(host, `mkdir -p ${SECRETS_DIR}`, keyPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    for (const secret of secrets) {
+      await writeRemoteFile(
+        `Writing secret: ${secret.name}`,
+        host,
+        `${SECRETS_DIR}/${secret.name}`,
+        secret.content,
+        deployEnv,
+        spawnFn,
+        secrets,
+        keyPath,
+      )
+    }
+
+    // Compute current checksum and read prior checksum to detect rotation
+    const currentChecksum = computeSecretsChecksum(secrets)
+    const priorChecksum = await readRemoteChecksum(host, deployEnv, spawnFn, keyPath)
+    const checksumChanged = priorChecksum !== currentChecksum
+
+    // Phase 6: Materialize .env via stdin pipe (OBJECT_STORE_HOSTS already validated above)
     await writeRemoteFile(
-      `Writing secret: ${secret.name}`,
+      'Writing .env',
       host,
-      `${SECRETS_DIR}/${secret.name}`,
-      secret.content,
+      ENV_PATH,
+      `OBJECT_STORE_HOSTS=${objectStoreHosts}\n`,
       deployEnv,
       spawnFn,
       secrets,
+      keyPath,
     )
-  }
 
-  // Compute current checksum and read prior checksum to detect rotation
-  const currentChecksum = computeSecretsChecksum(secrets)
-  const priorChecksum = await readRemoteChecksum(host, deployEnv, spawnFn)
-  const checksumChanged = priorChecksum !== currentChecksum
+    // Phase 7: Run init-certs.sh (idempotent)
+    await runCommand(
+      'Running init-certs.sh',
+      sshCommand(host, `cd ${DEPLOY_DIR} && bash init-certs.sh`, keyPath),
+      deployEnv,
+      spawnFn,
+    )
 
-  // Phase 6: Materialize .env via stdin pipe (OBJECT_STORE_HOSTS already validated above)
-  await writeRemoteFile(
-    'Writing .env',
-    host,
-    ENV_PATH,
-    `OBJECT_STORE_HOSTS=${objectStoreHosts}\n`,
-    deployEnv,
-    spawnFn,
-    secrets,
-  )
+    // Phase 8: docker compose up
+    const composeArgs = [
+      'docker',
+      'compose',
+      '--project-directory',
+      DEPLOY_DIR,
+      'up',
+      '-d',
+      '--wait',
+      '--wait-timeout',
+      '120',
+    ]
+    if (forceRecreate || checksumChanged) {
+      composeArgs.push('--force-recreate')
+    }
 
-  // Phase 7: Run init-certs.sh (idempotent)
-  await runCommand(
-    'Running init-certs.sh',
-    sshCommand(host, `cd ${DEPLOY_DIR} && bash init-certs.sh`),
-    deployEnv,
-    spawnFn,
-  )
+    await runCommand(
+      'Starting Docker Compose stack',
+      sshCommand(host, composeArgs.join(' '), keyPath),
+      deployEnv,
+      spawnFn,
+    )
 
-  // Phase 8: docker compose up
-  const composeArgs = [
-    'docker',
-    'compose',
-    '--project-directory',
-    DEPLOY_DIR,
-    'up',
-    '-d',
-    '--wait',
-    '--wait-timeout',
-    '120',
-  ]
-  if (forceRecreate || checksumChanged) {
-    composeArgs.push('--force-recreate')
-  }
+    // Phase 9: Post-deploy probe — poll Discord slash command registration
+    const applicationId = validated.DISCORD_APPLICATION_ID
+    const guildId = validated.DISCORD_GUILD_ID
+    const token = validated.DISCORD_TOKEN
 
-  await runCommand('Starting Docker Compose stack', sshCommand(host, composeArgs.join(' ')), deployEnv, spawnFn)
-
-  // Phase 9: Post-deploy probe — poll Discord slash command registration
-  const applicationId = env.DISCORD_APPLICATION_ID!
-  const guildId = env.DISCORD_GUILD_ID!
-  const token = env.DISCORD_TOKEN!
-
-  console.warn(
-    `\u001B[1;34m==>\u001B[0m Polling slash command registration (application=${applicationId} guild=${guildId})`,
-  )
-
-  const {commands} = await pollRegistration({
-    applicationId,
-    guildId,
-    token,
-    fetch: fetchFn,
-    sleep: sleepFn,
-    maxAttempts,
-    intervalMs,
-  })
-
-  // Phase 10: Persist checksum AFTER compose + registration succeed
-  // If either phase 8 or 9 threw, we never reach here — prior checksum stays in place
-  // so the next deploy correctly detects secrets as changed and forces recreate.
-  await writeRemoteFile(
-    'Persisting secrets checksum',
-    host,
-    CHECKSUM_PATH,
-    currentChecksum,
-    deployEnv,
-    spawnFn,
-    secrets,
-  )
-
-  console.warn(`\u001B[1;32m✓\u001B[0m Registered commands: ${commands.join(', ')}`)
-
-  // Phase 11: Auth-tier warning
-  const nonPingCommands = commands.filter(c => c !== 'ping')
-  if (nonPingCommands.length > 0 && !env.DISCORD_OPERATOR_ROLE_ID) {
     console.warn(
-      `\u001B[1;33m⚠\u001B[0m  Non-ping commands registered (${nonPingCommands.join(', ')}) but DISCORD_OPERATOR_ROLE_ID is not set. ` +
-        'Operator-tier authorization is not enforced. Set DISCORD_OPERATOR_ROLE_ID when upstream ships role-gating.',
+      `\u001B[1;34m==>\u001B[0m Polling slash command registration (application=${applicationId} guild=${guildId})`,
     )
-  }
 
-  console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
+    const {commands} = await pollRegistration({
+      applicationId,
+      guildId,
+      token,
+      fetch: fetchFn,
+      sleep: sleepFn,
+      maxAttempts,
+      intervalMs,
+    })
+
+    // Phase 10: Persist checksum AFTER compose + registration succeed
+    // If either phase 8 or 9 threw, we never reach here — prior checksum stays in place
+    // so the next deploy correctly detects secrets as changed and forces recreate.
+    await writeRemoteFile(
+      'Persisting secrets checksum',
+      host,
+      CHECKSUM_PATH,
+      currentChecksum,
+      deployEnv,
+      spawnFn,
+      secrets,
+      keyPath,
+    )
+
+    console.warn(`\u001B[1;32m✓\u001B[0m Registered commands: ${commands.join(', ')}`)
+
+    console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
+  } finally {
+    // Clean up the tmp key directory regardless of success or failure
+    if (keyTmpDir) {
+      rmSync(keyTmpDir, {recursive: true, force: true})
+    }
+  }
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────

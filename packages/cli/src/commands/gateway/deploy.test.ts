@@ -5,7 +5,22 @@ import {getGatewayDeployEnv, validateGatewayRemotePreconditions} from './deploy'
 
 const cliDir = resolve(import.meta.dir, '../../..')
 
-const envKeys = ['GATEWAY_HOST', 'HOME', 'PATH', 'SSH_AUTH_SOCK'] as const
+const envKeys = [
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'DISCORD_APPLICATION_ID',
+  'DISCORD_GUILD_ID',
+  'DISCORD_TOKEN',
+  'GATEWAY_HOST',
+  'HOME',
+  'OBJECT_STORE_HOSTS',
+  'PATH',
+  'S3_BUCKET',
+  'S3_ENDPOINT',
+  'S3_REGION',
+  'SSH_AUTH_SOCK',
+] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
 
@@ -135,6 +150,74 @@ describe('gateway deploy', () => {
       })
 
       expect(() => getGatewayDeployEnv()).toThrow('PATH')
+    })
+
+    it('passes required gateway env vars to the child process', () => {
+      setManagedEnv({
+        AWS_ACCESS_KEY_ID: 'test-key-id',
+        AWS_SECRET_ACCESS_KEY: 'test-secret',
+        AWS_SESSION_TOKEN: undefined,
+        DISCORD_APPLICATION_ID: 'test-app-id',
+        DISCORD_GUILD_ID: 'test-guild-id',
+        DISCORD_TOKEN: 'test-token',
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        OBJECT_STORE_HOSTS: undefined,
+        PATH: '/usr/bin:/bin',
+        S3_BUCKET: 'test-bucket',
+        S3_ENDPOINT: undefined,
+        S3_REGION: 'us-east-1',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+
+      const env = getGatewayDeployEnv()
+
+      expect(env.DISCORD_TOKEN).toBe('test-token')
+      expect(env.AWS_ACCESS_KEY_ID).toBe('test-key-id')
+      expect(env.AWS_SECRET_ACCESS_KEY).toBe('test-secret')
+      expect(env.DISCORD_APPLICATION_ID).toBe('test-app-id')
+      expect(env.DISCORD_GUILD_ID).toBe('test-guild-id')
+      expect(env.S3_BUCKET).toBe('test-bucket')
+      expect(env.S3_REGION).toBe('us-east-1')
+      expect(env.GATEWAY_HOST).toBe('gateway.example.com')
+      // Optional vars present (empty string when unset)
+      expect(env.S3_ENDPOINT).toBe('')
+      expect(env.OBJECT_STORE_HOSTS).toBe('')
+      expect(env.AWS_SESSION_TOKEN).toBe('')
+      // Core vars still present
+      expect(env.PATH).toBe('/usr/bin:/bin')
+      expect(env.HOME).toBe('/tmp/test-home')
+      expect(env.SSH_AUTH_SOCK).toBe('/tmp/test-sock')
+    })
+
+    it('forwards S3_ENDPOINT and OBJECT_STORE_HOSTS when present in process.env', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        OBJECT_STORE_HOSTS: 'r2.example.com minio.example.com',
+        PATH: '/usr/bin:/bin',
+        S3_ENDPOINT: 'https://r2.example.com',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+
+      const env = getGatewayDeployEnv()
+
+      expect(env.S3_ENDPOINT).toBe('https://r2.example.com')
+      expect(env.OBJECT_STORE_HOSTS).toBe('r2.example.com minio.example.com')
+    })
+
+    it('forwards AWS_SESSION_TOKEN when present in process.env', () => {
+      setManagedEnv({
+        AWS_SESSION_TOKEN: 'sts-temporary-token-value',
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+
+      const env = getGatewayDeployEnv()
+
+      expect(env.AWS_SESSION_TOKEN).toBe('sts-temporary-token-value')
     })
   })
 

@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.4.11
+### Patch Changes
+
+
+- Fix `gateway status` crash on NDJSON output from docker compose ps v2.21+ ([#278](https://github.com/marcusrbrown/infra/pull/278))
+
 ## 0.4.10
 ### Patch Changes
 

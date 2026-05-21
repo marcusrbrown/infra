@@ -24,7 +24,7 @@ Secret files live on the droplet under `/opt/gateway/deploy/secrets/`. Each file
 
 **Kebab-case ↔ snake_case ↔ env var mapping:**
 
-The upstream compose contract maps kebab-case host files to snake_case container paths and exposes them via `${NAME}_FILE` env vars. The upstream `readOptionalSecret` helper (in `fro-bot/agent@v0.44.3/packages/gateway/src/config.ts`) reads `${NAME}_FILE` first (file path), falls back to the bare env var, and treats an empty file as absent.
+The upstream compose contract maps kebab-case host files to snake_case container paths and exposes them via `${NAME}_FILE` env vars. The upstream `readOptionalSecret` helper (in `fro-bot/agent@v0.44.2/packages/gateway/src/config.ts`) reads `${NAME}_FILE` first (file path), falls back to the bare env var, and treats an empty file as absent.
 
 | Host file (kebab) | Compose mount (snake) | Container env var (`_FILE`) | Bare env var fallback | Required? |
 |---|---|---|---|---|
@@ -46,7 +46,7 @@ The secrets checksum lives at `/opt/gateway/.secrets-checksum` (outside `deploy/
 
 Rotation is a linear, containment-first sequence. Do not skip steps or reorder them. The old token is invalidated the moment you click "Reset Token" — treat everything after that as a race to get the new token deployed before the gateway's next WebSocket reconnect attempt.
 
-**Total operator time: ~3 min for the deploy poll alone** (the deploy waits up to ~3 min total for slash command registration, polling every 3s with a 6s per-attempt timeout — defaults from [`apps/gateway/src/deploy.ts` lines 344–368](../apps/gateway/src/deploy.ts)). Budget 10–15 min end-to-end including portal steps and verification.
+**Total operator time: ~90s for the deploy poll alone by default** — the deploy makes 10 attempts to register slash commands with Discord at 3s interval and 6s per-attempt timeout (defaults from [`apps/gateway/src/deploy.ts` lines 344–368](../apps/gateway/src/deploy.ts)). If Discord returns 429 rate-limits, each retry adds up to 60s and doesn't count against the attempt budget, stretching the wall-clock to as much as ~11 minutes in the pathological all-429 case. Budget 10–15 min end-to-end including portal steps and verification.
 
 1. **Reset Token in the Developer Portal.** Go to [discord.com/developers/applications/1505811646956830781/bot](https://discord.com/developers/applications/1505811646956830781/bot) → Bot → Reset Token → confirm. The previous token is invalidated immediately. The gateway will start failing on its next WebSocket reconnect.
 
@@ -78,7 +78,7 @@ Rotation is a linear, containment-first sequence. Do not skip steps or reorder t
 6. **Observe the deploy.** The deploy script:
    - Writes new secret files to the droplet
    - Detects the checksum change → adds `--force-recreate` to `docker compose up`
-   - Polls Discord slash command registration (~3 min ceiling, 3s interval, 6s per-attempt timeout)
+   - Polls Discord slash command registration (~90s default; up to ~11 min if Discord returns 429 rate-limits; 3s interval, 6s per-attempt timeout, 10 attempts)
    - Writes the new checksum to `/opt/gateway/.secrets-checksum` only after compose + registration both succeed
 
    If the poll exceeds the budget the deploy aborts and the old checksum stays in place — safe to retry from step 4.
@@ -129,6 +129,7 @@ Rotation is a linear, containment-first sequence. Do not skip steps or reorder t
 - **Gateway logs** — last 500 lines of normal traffic to see what actions ran with the leaked token before revocation; look for `4004 Authentication failed` (expected after revocation):
 
   ```bash
+  # --allow-ci required: this command is intentionally headless during incident audit
   bunx @marcusrbrown/infra gateway logs gateway --tail 500 --allow-ci
   ```
 
@@ -207,4 +208,4 @@ The Discord bot token is the only credential the gateway holds today. If upstrea
 
 ---
 
-_Last verified against: `fro-bot/agent@v0.44.3` on 2026-05-20_
+_Last verified against: `fro-bot/agent@v0.44.2` (the current `apps/gateway/upstream.json` pin) on 2026-05-20_

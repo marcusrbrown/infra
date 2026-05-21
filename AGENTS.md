@@ -48,6 +48,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Copilot instructions | `.github/copilot-instructions.md` | References this file |
 | OpenCode commands | `.opencode/commands/` | Markdown slash commands |
 | Document solved problem | `docs/solutions/` | Compound learning with YAML frontmatter |
+| Find operational runbook | `docs/runbooks/` | Operator-facing day-2 procedures (rotation, revocation, restore) |
 
 ## CONVENTIONS
 

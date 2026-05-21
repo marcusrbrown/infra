@@ -1,6 +1,6 @@
 # Gateway Deploy Package
 
-The gateway is the Fro Bot Discord client and workspace runner — a 3-service Docker Compose stack (gateway daemon, workspace executor, mitmproxy egress filter) deployed on a dedicated DigitalOcean droplet at `gateway.fro.bot`. The upstream source is `fro-bot/agent`, pinned to `v0.44.0` in `apps/gateway/upstream.json`. There is no public HTTP surface; the gateway connects outbound to Discord and S3 only. Management happens via SSH and the `bunx @marcusrbrown/infra gateway *` CLI commands.
+The gateway is the Fro Bot Discord client and workspace runner — a 3-service Docker Compose stack (gateway daemon, workspace executor, mitmproxy egress filter) deployed on a dedicated DigitalOcean droplet at `gateway.fro.bot`. The upstream source is `fro-bot/agent`, pinned to `v0.44.2` in `apps/gateway/upstream.json`. There is no public HTTP surface; the gateway connects outbound to Discord and S3 only. Management happens via SSH and the `bunx @marcusrbrown/infra gateway *` CLI commands.
 
 The deploy script materializes secrets as files on the droplet (never via argv), bootstraps the mitmproxy CA on first run, brings up the Compose stack, and gates completion on Discord command registration. A secrets checksum written only after a fully successful deploy prevents silent stale-credentials states across retries.
 
@@ -18,10 +18,10 @@ The deploy script materializes secrets as files on the droplet (never via argv),
 1. **Validate host** — `validateGatewayHost` rejects `-`-prefixed values and characters outside the allowed alphabet. SSH treats `-`-prefixed hostnames as flags (including `-oProxyCommand=`); this check is mandatory before any SSH invocation.
 2. **Checksum computation** — SHA-256 of all secret values is computed locally. The result is compared against `/opt/gateway/.secrets-checksum` on the droplet. If the checksums differ, `--force-recreate` is added to `docker compose up` so containers pick up the new secret files. If they match, containers are still restarted by `docker compose up -d --wait` but without `--force-recreate` (faster). In both cases the deploy continues — there is no early exit. The checksum file lives outside the deploy clone so `git clean -xfd` on subsequent deploys doesn't wipe it.
 3. **Source materialization** — SSH to the droplet; clone or fetch `fro-bot/agent` at the pinned ref from `upstream.json`, then `git reset --hard && git clean -xfd` to the pinned SHA.
-4. **Secret files** — 5 required files written atomically under `/opt/gateway/deploy/secrets/` (`discord_token`, `aws_access_key_id`, `aws_secret_access_key`, `discord_application_id`, `discord_guild_id`) plus 1 optional file (`discord_operator_role_id`, written as empty if unset) and 1 env var in `/opt/gateway/deploy/.env` (`OBJECT_STORE_HOSTS`, computed from `S3_BUCKET`/`S3_REGION`/`S3_ENDPOINT`). Secret bytes enter via SSH stdin only — never via argv.
+4. **Secret files** — 7 required files written atomically under `/opt/gateway/deploy/secrets/` (`discord-token`, `discord-application-id`, `discord-guild-id`, `aws-access-key-id`, `aws-secret-access-key`, `s3-bucket`, `s3-region`) plus 2 optional files (`s3-endpoint`, `aws-session-token`, both written as 0-byte placeholders when the env var is unset) and 1 env var in `/opt/gateway/deploy/.env` (`OBJECT_STORE_HOSTS`, computed from `S3_BUCKET`/`S3_REGION`/`S3_ENDPOINT`). Secret bytes enter via SSH stdin only — never via argv. Filenames on disk are kebab-case; the compose contract maps each to `/run/secrets/<snake_case>` and exposes via `${NAME}_FILE` env vars. See `docs/runbooks/discord-token-lifecycle.md` for the full mapping table.
 5. **CA bootstrap** — `init-certs.sh` runs on the droplet (idempotent; skips if the CA already exists in the `mitmproxy-certs` named volume).
 6. **Compose up** — `docker compose up -d --wait --wait-timeout 120`. mitmproxy starts first, then the gateway daemon.
-7. **Registration poll** — `GET /applications/{app_id}/guilds/{guild_id}/commands` on the Discord API. 30-second hard gate per attempt via `AbortController` (defaults to `max(6000, intervalMs * 2)`). 10 attempts. 429 honors `Retry-After`. 401/403/404 abort immediately with token-sanitized errors. 5xx retries.
+7. **Registration poll** — `GET /applications/{app_id}/guilds/{guild_id}/commands` on the Discord API. Polls Discord registration with ~90s default budget (10 attempts × (3s interval + 6s per-attempt timeout); defaults from `apps/gateway/src/deploy.ts:344-368`). 429 honors `Retry-After` and doesn't count against the attempt budget (each 429 retry adds up to 60s; pathological all-429 ceiling ~11 min). 401/403/404 abort immediately with token-sanitized errors. 5xx retries.
 8. **Checksum write** — `/opt/gateway/.secrets-checksum` is written only after compose + registration both succeed. If either fails mid-rotation, the old checksum persists and the next deploy force-recreates again.
 
 ## DAY-2 OPERATIONS
@@ -120,6 +120,8 @@ The CLI validates the archive locally first — it must contain exactly the two 
 3. The deploy script writes the new value to the droplet, recomputes the secrets checksum, force-recreates affected containers via `docker compose up -d --force-recreate <service>`, polls Discord for command registration, and writes the new checksum on success.
 
 The checksum-after-success invariant means: if compose or polling fail mid-rotation, the old checksum persists and the next deploy will force-recreate again — no silent stale-credentials state.
+
+For the full operator-facing rotation and emergency revocation procedure (including Keychain sync, shell-history hygiene, and audit surfaces), see [`docs/runbooks/discord-token-lifecycle.md`](../../docs/runbooks/discord-token-lifecycle.md).
 
 ## ANTI-PATTERNS
 

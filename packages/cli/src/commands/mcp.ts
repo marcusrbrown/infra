@@ -14,7 +14,7 @@ import {createMcpAction} from '@goke/mcp'
  * - `gateway restore`  — destructive policy (replaces mitmproxy CA on live gateway, deferred to MCP v2 #292)
  * - `keeweb open`      — host-machine side effect (spawns local browser, requires user intent)
  */
-const MCP_ALLOWLIST = new Set<string>([
+export const MCP_ALLOWLIST: ReadonlySet<string> = new Set([
   'gateway status',
   'gateway backup',
   'cliproxy status',

@@ -73,7 +73,7 @@ The MCP server (`mcp.ts`) exposes a curated subset of commands as MCP tools via 
 - `process.stderr.write(...)` → `ctx.process.stderr.write(...)`
 - `process.exit(code)` → `ctx.process.exit(code)`
 
-Use the shared `ActionCtx` type from `src/__test__/mcp-ctx-fixture.ts` — a structural subtype of `GokeExecutionContext` that captures exactly the surface actions consume. Action bodies are exported as named functions (e.g., `gatewayStatusAction`, `cliproxyKeysListAction`) and the `.action(...)` callback delegates to them, so Tier-2 tests invoke actions directly with `createCapturedCtx()`.
+Use the shared `ActionCtx` type from `src/lib/action-ctx.ts` — a structural subtype of `GokeExecutionContext` that captures exactly the surface actions consume. `createCapturedCtx()`, `expectCapturedToInclude()`, and `MockProcessExit` remain in `src/__test__/mcp-ctx-fixture.ts` for test use only. Action bodies are exported as named functions (e.g., `gatewayStatusAction`, `cliproxyKeysListAction`) and the `.action(...)` callback delegates to them, so Tier-2 tests invoke actions directly with `createCapturedCtx()`.
 
 **Mode C (structured-return commands).** Two commands return structured data alongside ctx-printed text so MCP consumers get both formatted output AND parseable JSON in the `CallToolResult`:
 
@@ -81,6 +81,12 @@ Use the shared `ActionCtx` type from `src/__test__/mcp-ctx-fixture.ts` — a str
 - `cliproxy config get` returns the parsed config object (the `--output` path still returns the object even when also writing to disk)
 
 Return values are plain data (arrays, objects) — never `{content: [...]}` shapes. `@goke/mcp` stringifies them and emits one text block per data plus one per captured stream. Extending Mode C: a command qualifies only if it wraps a single management-API call returning structured data the agent will likely parse (mutations and complex orchestrations stay Mode A — text only). When in doubt, leave it Mode A; opening Mode C creates a contract MCP consumers may come to depend on.
+
+**Failure-path parity for capturable actions.** Every allowlisted action must catch its expected operational failures (missing env vars, HTTP non-2xx, JSON parse errors, unsupported config fields) and write the reason to `ctx.console.error` before `ctx.process.exit(1)`. Do not rely on thrown exceptions for MCP-visible content — @goke/mcp may surface the exception text in the CallToolResult, but the format isn't guaranteed and operators looking at captured.stderr see nothing useful. Wrap the action body in try/catch when adding a new capturable command.
+
+**Mode C eligibility is data-shape based, not transport-source based.** A command qualifies for Mode C when it produces bounded structured data the agent will parse, regardless of whether the data comes from a management API, an SSH command, a local file read, or a docker query. `cliproxy keys list` (management API) and `gateway status` (SSH + docker compose ps) are both candidates by this rule. The criterion that matters: would re-parsing the formatted text be lossy or fragile? If yes, return the structured form alongside the text.
+
+**Mutating tools must verify the mutation.** When an MCP tool changes state (e.g., `cliproxy keys add`, `cliproxy keys remove`, `cliproxy config set`), the action must verify the mutation succeeded before reporting success via ctx. For `keys remove`, this means confirming the key existed before the DELETE; for `keys add`, confirming the management API echoed the new key in the response or in a follow-up list call. Returning the raw API response without verification means MCP can report success on a no-op deletion or a silently-failed add.
 
 **Tier-1 + Tier-2 test bar.** Every MCP-capturable command has Tier-2 unit tests using `createCapturedCtx()` to verify output flows through ctx, plus one Tier-1 integration test in `commands/mcp.test.ts` that spins up the real `@goke/mcp` server via `InMemoryTransport` and asserts the tool surface matches `MCP_ALLOWLIST`. The Tier-1 test re-derives the expected tool names from a list of strings rather than importing `MCP_ALLOWLIST`, so allowlist drift surfaces as a test failure.
 

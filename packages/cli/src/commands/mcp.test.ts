@@ -35,24 +35,13 @@ import {goke} from 'goke'
 import {registerCliproxyCommands} from './cliproxy'
 import {registerGatewayCommands} from './gateway'
 import {registerKeewebCommands} from './keeweb'
-import {registerMcp} from './mcp'
+import {MCP_ALLOWLIST, registerMcp} from './mcp'
 import {registerStatus} from './status'
 
-// ─── Tool name constants (re-derived here, not imported from mcp.ts) ──────────
+// ─── Tool name constants ──────────────────────────────────────────────────────
 
-/** The 10 commands exposed via MCP (MCP_ALLOWLIST), with spaces replaced by underscores. */
-const EXPECTED_TOOLS = [
-  'cliproxy_config_get',
-  'cliproxy_config_set',
-  'cliproxy_keys_add',
-  'cliproxy_keys_list',
-  'cliproxy_keys_remove',
-  'cliproxy_status',
-  'gateway_backup',
-  'gateway_status',
-  'keeweb_status',
-  'status',
-].sort()
+/** Derived from the production MCP_ALLOWLIST — spaces replaced by underscores. */
+const EXPECTED_TOOLS = [...MCP_ALLOWLIST].map(name => name.replaceAll(' ', '_')).sort()
 
 /** The 9 CLI-only commands that must NOT appear in the MCP tool list. */
 const CLI_ONLY_TOOLS = [
@@ -66,20 +55,6 @@ const CLI_ONLY_TOOLS = [
   'keeweb_deploy',
   'keeweb_open',
 ].sort()
-
-/** The MCP allowlist (mirrors mcp.ts — re-declared here to avoid coupling). */
-const MCP_ALLOWLIST = new Set<string>([
-  'gateway status',
-  'gateway backup',
-  'cliproxy status',
-  'cliproxy keys list',
-  'cliproxy keys add',
-  'cliproxy keys remove',
-  'cliproxy config get',
-  'cliproxy config set',
-  'keeweb status',
-  'status',
-])
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -177,9 +152,59 @@ describe('mcp integration (Tier-1, in-process)', () => {
 
   // Re-enable after Unit 4 lands (cliproxy keys list refactor to return
   // structured data alongside ctx-printed text).
-  test.skip('cliproxy_keys_list returns BOTH stdout block AND structured return block (Mode C contract)', async () => {
-    // TODO(Unit 4): assert result contains BOTH a stdout text block AND a
-    // stringified return-value text block once cliproxy keys list returns
-    // structured data alongside ctx-printed text.
+  test('cliproxy_keys_list returns BOTH stdout block AND structured return block (Mode C contract)', async () => {
+    const originalFetch = globalThis.fetch
+    const originalKey = process.env.CLIPROXY_MANAGEMENT_KEY
+
+    try {
+      process.env.CLIPROXY_MANAGEMENT_KEY = 'test-management-key'
+
+      globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+        return new Response(JSON.stringify(['fro-bot-test1', 'fro-bot-test2']), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      }) as typeof fetch
+
+      const rawResult = await client.callTool(
+        {
+          name: 'cliproxy_keys_list',
+          arguments: {},
+        },
+        CallToolResultSchema,
+      )
+
+      const result: CallToolResult = CallToolResultSchema.parse(rawResult)
+
+      // Mode C contract: at least 2 content blocks (stdout text + structured return)
+      expect(result.content.length).toBeGreaterThanOrEqual(2)
+
+      const allText = result.content
+        .filter((block): block is {type: 'text'; text: string} => block.type === 'text')
+        .map(block => block.text)
+        .join('\n')
+
+      // One block must contain the formatted stdout (key names printed by the action)
+      expect(allText).toContain('fro-bot-test1')
+
+      // One block must contain the stringified return value (JSON array of key names)
+      const hasStructuredReturn = result.content.some(block => {
+        if (block.type !== 'text') return false
+        try {
+          const parsed = JSON.parse(block.text) as unknown
+          return Array.isArray(parsed) && parsed.includes('fro-bot-test1') && parsed.includes('fro-bot-test2')
+        } catch {
+          return false
+        }
+      })
+      expect(hasStructuredReturn).toBe(true)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (originalKey === undefined) {
+        delete process.env.CLIPROXY_MANAGEMENT_KEY
+      } else {
+        process.env.CLIPROXY_MANAGEMENT_KEY = originalKey
+      }
+    }
   })
 })

@@ -1,6 +1,6 @@
 import type {goke} from 'goke'
 
-import type {ActionCtx} from '../../__test__/mcp-ctx-fixture'
+import type {ActionCtx} from '../../lib/action-ctx'
 
 import {closeSync, constants as fsConstants, openSync, renameSync, unlinkSync, writeSync} from 'node:fs'
 
@@ -15,7 +15,7 @@ declare const process: {
 
 // ─── Minimal ctx interface (subset of GokeExecutionContext used by this action) ─
 
-// ActionCtx imported from fixture — single source of truth for action ctx shape
+// ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
 const MITMPROXY_CERTS_VOLUME = 'mitmproxy-certs'
 const CA_CERT_FILE = 'mitmproxy-ca-cert.pem'
@@ -199,5 +199,5 @@ export function registerGatewayBackup(cli: ReturnType<typeof goke>): void {
     .example('infra gateway backup --include-ca')
     .example('# Back up the CA to a custom path')
     .example('infra gateway backup --output /secure/backup/mitmproxy-ca.tar')
-    .action((options, ctx) => gatewayBackupAction(options, ctx))
+    .action(gatewayBackupAction)
 }

@@ -1,12 +1,12 @@
 import type {goke} from 'goke'
 
-import type {ActionCtx} from '../../__test__/mcp-ctx-fixture'
+import type {ActionCtx} from '../../lib/action-ctx'
 import {chmodSync} from 'node:fs'
 
 import {z} from 'zod'
 
 /** Minimal ctx surface consumed by cliproxy config actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
-// ActionCtx imported from fixture — single source of truth for action ctx shape
+// ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
 const HTTP_TIMEOUT_MS = 10_000
@@ -144,6 +144,11 @@ export interface ConfigGetOptions {
   json?: boolean
 }
 
+/**
+ * Mode C: prints formatted config via ctx AND returns the parsed config object so MCP consumers
+ * receive both formatted text and parseable structured data. Return type is `Promise<unknown>`
+ * because the config shape is server-defined and genuinely loose at the TypeScript boundary.
+ */
 export async function cliproxyConfigGetAction(options: ConfigGetOptions, ctx: ActionCtx): Promise<unknown> {
   const baseUrl = resolveBaseUrl(options.url)
   const managementKey = resolveManagementKey(options.key)

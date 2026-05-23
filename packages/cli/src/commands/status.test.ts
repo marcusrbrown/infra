@@ -74,6 +74,8 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
       ),
     ).toBe(true)
     expect(expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 | — | 12 req / 0 fail |')).toBe(true)
+    // Rejection reason must also appear in stderr so MCP consumers can see it
+    expect(captured.stderr.join('')).toContain('keeweb status check failed: Keeweb exploded')
   })
 
   it('prints valid json with all app keys when --json is passed', async () => {

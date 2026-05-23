@@ -1,6 +1,6 @@
 import type {goke} from 'goke'
 
-import type {ActionCtx} from '../__test__/mcp-ctx-fixture'
+import type {ActionCtx} from '../lib/action-ctx'
 
 import {z} from 'zod'
 
@@ -94,7 +94,13 @@ export async function unifiedStatusAction(
   const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway']
   const rows: StatusSummary[] = results.map((result, index) => {
     const app = appNames[index] ?? 'keeweb'
-    return result.status === 'fulfilled' ? result.value : errorSummary(app, result.reason)
+    if (result.status === 'fulfilled') {
+      return result.value
+    }
+    const reason = result.reason
+    const message = reason instanceof Error ? reason.message : String(reason)
+    ctx.console.error(`${app} status check failed: ${message}`)
+    return errorSummary(app, reason)
   })
 
   if (options.json === true) {

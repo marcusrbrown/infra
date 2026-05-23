@@ -1,11 +1,11 @@
 import type {goke} from 'goke'
-import type {ActionCtx} from '../../__test__/mcp-ctx-fixture'
+import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
 
 import {z} from 'zod'
 
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
-// ActionCtx imported from fixture — single source of truth for action ctx shape
+// ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
 declare const process: {
   env: Record<string, string | undefined>

@@ -1,5 +1,5 @@
 import type {goke} from 'goke'
-import type {ActionCtx} from '../../__test__/mcp-ctx-fixture'
+import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
 
 import {z} from 'zod'

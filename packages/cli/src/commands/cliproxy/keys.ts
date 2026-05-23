@@ -1,11 +1,11 @@
 import type {goke} from 'goke'
 
-import type {ActionCtx} from '../../__test__/mcp-ctx-fixture'
+import type {ActionCtx} from '../../lib/action-ctx'
 
 import {z} from 'zod'
 
 /** Minimal ctx surface consumed by cliproxy keys actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
-// ActionCtx imported from fixture — single source of truth for action ctx shape
+// ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
 const HTTP_TIMEOUT_MS = 10_000
@@ -75,6 +75,10 @@ export interface KeysListOptions {
   json?: boolean
 }
 
+/**
+ * Mode C: prints formatted table via ctx AND returns the parsed key array so MCP consumers
+ * receive both formatted text and parseable structured data.
+ */
 export async function cliproxyKeysListAction(options: KeysListOptions, ctx: ActionCtx): Promise<string[]> {
   const baseUrl = resolveBaseUrl(options.url)
   const managementKey = resolveManagementKey(options.key)

@@ -1,6 +1,7 @@
 import {dropletExists} from '@marcusrbrown/infra-shared/server/droplet-helpers'
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
+import {validateGatewayHost} from '../src/host'
 import {
   checkDropletExistence,
   getGatewaySshFingerprint,
@@ -262,6 +263,40 @@ describe('provision-droplet', () => {
       await expect(getGatewaySshFingerprint('fro-bot-gateway')).rejects.toThrow(/not found/)
 
       spawnSpy.mockRestore()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // validateGatewayHost — provision script must call this before pinHostKeys
+  // -------------------------------------------------------------------------
+
+  describe('validateGatewayHost (provision security invariant)', () => {
+    it('accepts a valid hostname', () => {
+      expect(validateGatewayHost('gateway.example.com')).toBe('gateway.example.com')
+    })
+
+    it('throws on empty string', () => {
+      expect(() => validateGatewayHost('')).toThrow(/empty/)
+    })
+
+    it('throws on a value starting with a dash (ssh flag injection)', () => {
+      expect(() => validateGatewayHost('-oProxyCommand=evil')).toThrow(/Invalid GATEWAY_HOST/)
+    })
+
+    it('throws on a value containing shell metacharacters (semicolon)', () => {
+      expect(() => validateGatewayHost('host;rm -rf /')).toThrow(/Invalid GATEWAY_HOST/)
+    })
+
+    it('throws on a value containing a space', () => {
+      expect(() => validateGatewayHost('host name')).toThrow(/Invalid GATEWAY_HOST/)
+    })
+
+    it('throws on a value containing backtick command substitution', () => {
+      expect(() => validateGatewayHost('host`id`')).toThrow(/Invalid GATEWAY_HOST/)
+    })
+
+    it('throws on a value containing a newline', () => {
+      expect(() => validateGatewayHost('host\nENVFILE\nevil')).toThrow(/Invalid GATEWAY_HOST/)
     })
   })
 

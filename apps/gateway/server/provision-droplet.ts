@@ -12,6 +12,8 @@ import {
   waitForSsh,
 } from '@marcusrbrown/infra-shared/server/droplet-helpers'
 
+import {validateGatewayHost} from '../src/host'
+
 const DROPLET_NAME = 'gateway'
 const DROPLET_IMAGE = 'docker-20-04'
 const DROPLET_SIZE = 's-1vcpu-2gb'
@@ -122,7 +124,7 @@ export async function main(): Promise<void> {
     process.exit(1)
   }
 
-  const gatewayHost = process.env.GATEWAY_HOST ?? ''
+  const gatewayHost = validateGatewayHost(process.env.GATEWAY_HOST ?? '')
 
   const exists = await dropletExists(DROPLET_NAME)
 

@@ -20,6 +20,23 @@ const DROPLET_IMAGE = 'docker-20-04'
 const DROPLET_SIZE = 's-1vcpu-1gb'
 const DROPLET_REGION = 'nyc1'
 const CLIPROXY_DOMAIN = process.env.CLIPROXY_DOMAIN ?? 'cliproxy.fro.bot'
+
+// Disallowed characters in CLIPROXY_DOMAIN: newlines (heredoc termination),
+// shell metacharacters ($, `, |, ;, &), and quotes/backslash.
+const DOMAIN_DISALLOWED_RE = /[\n`$|;&'"\\]/
+
+/**
+ * Validates a CLIPROXY_DOMAIN value. Throws if it contains characters that
+ * could terminate a heredoc early or inject shell commands.
+ */
+export function validateCliproxyDomain(domain: string): string {
+  if (DOMAIN_DISALLOWED_RE.test(domain)) {
+    throw new Error(`CLIPROXY_DOMAIN contains disallowed characters: ${JSON.stringify(domain.slice(0, 40))}`)
+  }
+
+  return domain
+}
+
 const REMOTE_USER = process.env.REMOTE_USER ?? 'root'
 const REMOTE_DIR = '/opt/cliproxy'
 
@@ -90,10 +107,24 @@ async function writeRemoteEnvFile(host: string): Promise<string> {
   const managementPassword = randomBytes(32).toString('hex')
   const envFile = `CLIPROXY_DOMAIN=${CLIPROXY_DOMAIN}\nMANAGEMENT_PASSWORD=${managementPassword}\n`
 
-  await run(
-    'Writing remote .env file',
-    ssh(host, `cat > ${REMOTE_DIR}/.env << 'ENVFILE'\n${envFile}ENVFILE`, REMOTE_USER),
-  )
+  // Pipe contents through stdin — never embed in the command string.
+  // This prevents heredoc-termination injection if any env var contains newlines.
+  const proc = Bun.spawn(ssh(host, `cat > ${REMOTE_DIR}/.env`, REMOTE_USER), {
+    stdin: 'pipe',
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+
+  proc.stdin.write(envFile)
+  proc.stdin.end()
+
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    console.error(`\u001B[1;31mFAILED:\u001B[0m Writing remote .env file (exit ${exitCode})`)
+    process.exit(1)
+  }
+
+  console.log('\u001B[1;34m==>\u001B[0m Writing remote .env file')
 
   return managementPassword
 }
@@ -137,7 +168,10 @@ async function provision(): Promise<void> {
   console.log('\nCommit the updated .github/known_hosts before triggering a CI deploy.')
 }
 
-provision().catch((error: unknown) => {
-  console.error(error)
-  process.exit(1)
-})
+if (import.meta.main) {
+  validateCliproxyDomain(CLIPROXY_DOMAIN)
+  provision().catch((error: unknown) => {
+    console.error(error)
+    process.exit(1)
+  })
+}

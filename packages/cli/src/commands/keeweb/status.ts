@@ -1,12 +1,10 @@
 import type {goke} from 'goke'
+
+import type {ActionCtx} from '../../__test__/mcp-ctx-fixture'
 import type {StatusSummary} from '../status'
 
 import path from 'node:path'
 import {z} from 'zod'
-
-declare const process: {
-  exitCode?: number
-}
 
 const SITE_URL = 'https://kw.igg.ms/'
 const GH_REPO = 'marcusrbrown/infra'
@@ -254,13 +252,13 @@ export async function checkContentHash(verbose: boolean): Promise<CheckResult> {
   }
 }
 
-function printCheckResult(result: CheckResult): void {
-  console.log(`[${levelLabel(result.level)}] ${result.title}`)
-  console.log(`  ${result.summary}`)
+function printCheckResult(result: CheckResult, ctx: ActionCtx): void {
+  ctx.console.log(`[${levelLabel(result.level)}] ${result.title}`)
+  ctx.console.log(`  ${result.summary}`)
 
   if (result.details && result.details.length > 0) {
     for (const detail of result.details) {
-      console.log(`  - ${detail}`)
+      ctx.console.log(`  - ${detail}`)
     }
   }
 }
@@ -286,34 +284,36 @@ export async function getKeewebStatusSummary(verbose: boolean): Promise<StatusSu
   }
 }
 
+export async function keewebStatusAction(options: {verbose?: boolean}, ctx: ActionCtx): Promise<void> {
+  const verbose = options.verbose === true
+
+  ctx.console.log('KeeWeb status')
+  ctx.console.log('')
+
+  const results = await Promise.all([
+    checkHttpReachability(verbose),
+    checkLastDeploy(verbose),
+    checkContentHash(verbose),
+  ])
+
+  for (const result of results) {
+    printCheckResult(result, ctx)
+    ctx.console.log('')
+  }
+
+  const errorCount = results.filter(result => result.level === 'error').length
+  const warningCount = results.filter(result => result.level === 'warning').length
+
+  ctx.console.log(`Summary: ${results.length} checks, ${errorCount} errors, ${warningCount} warnings`)
+
+  if (errorCount > 0) {
+    ctx.process.exit(1)
+  }
+}
+
 export function registerKeewebStatus(cli: ReturnType<typeof goke>): void {
   cli
     .command('keeweb status', 'Show operational health of the KeeWeb deployment')
     .option('--verbose', 'Enable verbose output for all commands')
-    .action(async options => {
-      const verbose = options.verbose === true
-
-      console.log('KeeWeb status')
-      console.log('')
-
-      const results = await Promise.all([
-        checkHttpReachability(verbose),
-        checkLastDeploy(verbose),
-        checkContentHash(verbose),
-      ])
-
-      for (const result of results) {
-        printCheckResult(result)
-        console.log('')
-      }
-
-      const errorCount = results.filter(result => result.level === 'error').length
-      const warningCount = results.filter(result => result.level === 'warning').length
-
-      console.log(`Summary: ${results.length} checks, ${errorCount} errors, ${warningCount} warnings`)
-
-      if (errorCount > 0) {
-        process.exitCode = 1
-      }
-    })
+    .action(keewebStatusAction)
 }

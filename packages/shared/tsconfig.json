@@ -1,0 +1,14 @@
+{
+  "extends": "@bfra.me/tsconfig",
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["bun"],
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["dist", "node_modules", ".cache"]
+}

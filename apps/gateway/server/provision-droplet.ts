@@ -1,7 +1,16 @@
 #!/usr/bin/env bun
 
-import {appendFileSync, readFileSync} from 'node:fs'
 import {join, resolve} from 'node:path'
+
+import {
+  dropletExists,
+  getDropletIpWithWait,
+  getSshFingerprint,
+  pinHostKeys,
+  run,
+  validateDoctl,
+  waitForSsh,
+} from '@marcusrbrown/infra-shared/server/droplet-helpers'
 
 const DROPLET_NAME = 'gateway'
 const DROPLET_IMAGE = 'docker-20-04'
@@ -20,19 +29,8 @@ export interface DropletExistenceState {
 }
 
 // ---------------------------------------------------------------------------
-// Pure-logic helpers (exported for testability)
+// Gateway-specific helpers (exported for testability)
 // ---------------------------------------------------------------------------
-
-/**
- * Checks that doctl is available on PATH. Throws with install instructions if not.
- */
-export function validateDoctl(): void {
-  if (!Bun.which('doctl')) {
-    throw new Error(
-      'doctl is required. Install it first: https://docs.digitalocean.com/reference/doctl/how-to/install/',
-    )
-  }
-}
 
 /**
  * Validates that all required environment variables are present.
@@ -41,27 +39,6 @@ export function validateDoctl(): void {
 export function validateRequiredEnv(env: Partial<Record<string, string>>): string[] {
   const required = ['DIGITALOCEAN_ACCESS_TOKEN', 'GATEWAY_HOST']
   return required.filter(key => !env[key])
-}
-
-/**
- * Checks whether a droplet with the given name exists in the DigitalOcean account.
- * Runs `doctl compute droplet list` via Bun.spawn.
- */
-export async function dropletExists(name: string): Promise<boolean> {
-  const proc = Bun.spawn(['doctl', 'compute', 'droplet', 'list', '--format', 'Name', '--no-header'], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  const stdout = await new Response(proc.stdout).text()
-  const code = await proc.exited
-  if (code !== 0) {
-    throw new Error(`Failed to list droplets`)
-  }
-  const names = stdout
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-  return names.includes(name)
 }
 
 /**
@@ -92,132 +69,13 @@ export function parseProvisionArgs(args: string[]): ProvisionArgs {
 }
 
 /**
- * Appends domain (unhashed) and IP (hashed) host key entries to the given known_hosts file.
- * Idempotent: if entries for this host are already present, skips the append.
+ * Returns the SSH key fingerprint for the gateway key.
+ * Accepts an optional keyName override; falls back to GATEWAY_SSH_KEY_NAME env var,
+ * then to the default 'fro-bot-gateway'.
  */
-export async function pinHostKeys(domain: string, ip: string, knownHostsPath: string): Promise<void> {
-  const existing = readFileSync(knownHostsPath, 'utf-8')
-  const marker = `# gateway droplet (${ip} / ${domain})`
-
-  if (existing.includes(marker)) {
-    console.log(`\u001B[1;34m==>\u001B[0m Host keys already pinned for ${ip}`)
-    return
-  }
-
-  const domainKeys = await runCapture(['ssh-keyscan', domain])
-  const ipKeys = await runCapture(['ssh-keyscan', '-H', ip])
-
-  const newBlock = `\n${marker}\n${domainKeys}\n${ipKeys}\n`
-  appendFileSync(knownHostsPath, newBlock)
-  console.log(`\u001B[1;32m✓\u001B[0m Pinned host keys for ${ip} / ${domain} in .github/known_hosts`)
-  console.log('  Commit the updated .github/known_hosts before running CI deploy.')
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-async function runCapture(command: string[]): Promise<string> {
-  const proc = Bun.spawn(command, {stdout: 'pipe', stderr: 'pipe'})
-  const stdout = await new Response(proc.stdout).text()
-  const stderr = await new Response(proc.stderr).text()
-  const code = await proc.exited
-  if (code !== 0) {
-    throw new Error(stderr.trim() || `Command failed: ${command.join(' ')}`)
-  }
-  return stdout.trim()
-}
-
-async function run(label: string, command: string[]): Promise<void> {
-  console.log(`\u001B[1;34m==>\u001B[0m ${label}`)
-  const proc = Bun.spawn(command, {stdout: 'pipe', stderr: 'pipe'})
-  const stdout = await new Response(proc.stdout).text()
-  const stderr = await new Response(proc.stderr).text()
-  const code = await proc.exited
-  if (stdout.trim()) console.log(stdout.trim())
-  if (code !== 0) {
-    console.error(`\u001B[1;31mFAILED:\u001B[0m ${label}`)
-    if (stderr.trim()) console.error(stderr.trim())
-    process.exit(1)
-  }
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise(resolvePromise => setTimeout(resolvePromise, ms))
-}
-
-function ssh(host: string, command: string): string[] {
-  return [
-    'ssh',
-    '-o',
-    'BatchMode=yes',
-    '-o',
-    'StrictHostKeyChecking=accept-new',
-    '-o',
-    'ConnectTimeout=10',
-    `${REMOTE_USER}@${host}`,
-    command,
-  ]
-}
-
-export async function getSshFingerprint(keyName?: string): Promise<string> {
+export async function getGatewaySshFingerprint(keyName?: string): Promise<string> {
   const name = keyName ?? process.env.GATEWAY_SSH_KEY_NAME ?? 'fro-bot-gateway'
-  const raw = await runCapture(['doctl', 'compute', 'ssh-key', 'list', '--format', 'Name,FingerPrint', '--no-header'])
-
-  // Each row: "<Name padded with spaces>  <FingerPrint>"
-  // The Name column can contain spaces, @, and dots, so we treat the last
-  // whitespace-delimited token as the fingerprint and everything before it as the name.
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    const lastSpace = trimmed.lastIndexOf(' ')
-    if (lastSpace === -1) continue
-    const rowName = trimmed.slice(0, lastSpace).trim()
-    const fingerprint = trimmed.slice(lastSpace + 1).trim()
-    if (rowName === name) {
-      return fingerprint
-    }
-  }
-
-  throw new Error(
-    `SSH key named "${name}" not found in DigitalOcean account. ` +
-      `Run \`doctl compute ssh-key list\` to see available keys, ` +
-      `or set GATEWAY_SSH_KEY_NAME to override the default ("fro-bot-gateway").`,
-  )
-}
-
-async function getDropletIpWithWait(): Promise<string> {
-  for (let attempt = 1; attempt <= 20; attempt += 1) {
-    const ip = await runCapture([
-      'doctl',
-      'compute',
-      'droplet',
-      'get',
-      DROPLET_NAME,
-      '--format',
-      'PublicIPv4',
-      '--no-header',
-    ])
-    if (ip) {
-      return ip
-    }
-    await sleep(5_000)
-  }
-
-  throw new Error('Timed out waiting for droplet IPv4 address')
-}
-
-async function waitForSsh(host: string): Promise<void> {
-  for (let attempt = 1; attempt <= 24; attempt += 1) {
-    const proc = Bun.spawn(ssh(host, 'echo ready'), {stdout: 'pipe', stderr: 'pipe'})
-    const code = await proc.exited
-    if (code === 0) {
-      return
-    }
-    await sleep(5_000)
-  }
-
-  throw new Error('Timed out waiting for SSH connectivity to droplet')
+  return getSshFingerprint(name, {envVarName: 'GATEWAY_SSH_KEY_NAME', defaultKeyName: 'fro-bot-gateway'})
 }
 
 function printOperatorSetupMessage(dropletIp: string, gatewayHost: string): void {
@@ -250,7 +108,7 @@ function printOperatorSetupMessage(dropletIp: string, gatewayHost: string): void
 export async function main(): Promise<void> {
   const {force, checkExists} = parseProvisionArgs(process.argv.slice(2))
 
-  validateDoctl()
+  await validateDoctl({checkAuth: true})
 
   if (checkExists) {
     console.log(JSON.stringify(await checkDropletExistence()))
@@ -266,8 +124,6 @@ export async function main(): Promise<void> {
 
   const gatewayHost = process.env.GATEWAY_HOST ?? ''
 
-  await run('Validating doctl authentication', ['doctl', 'account', 'get'])
-
   const exists = await dropletExists(DROPLET_NAME)
 
   if (exists && !force) {
@@ -282,7 +138,7 @@ export async function main(): Promise<void> {
   }
 
   if (!exists) {
-    const fingerprint = await getSshFingerprint()
+    const fingerprint = await getGatewaySshFingerprint()
     await run(`Creating droplet ${DROPLET_NAME}`, [
       'doctl',
       'compute',
@@ -301,11 +157,13 @@ export async function main(): Promise<void> {
     ])
   }
 
-  const dropletIp = await getDropletIpWithWait()
-  await waitForSsh(dropletIp)
+  const dropletIp = await getDropletIpWithWait(DROPLET_NAME)
+  await waitForSsh(dropletIp, REMOTE_USER)
 
   const knownHostsPath = resolve(join(import.meta.dir, '..', '..', '..', '.github', 'known_hosts'))
-  await pinHostKeys(gatewayHost, dropletIp, knownHostsPath)
+  await pinHostKeys(gatewayHost, dropletIp, knownHostsPath, {
+    marker: `# gateway droplet (${dropletIp} / ${gatewayHost})`,
+  })
 
   printOperatorSetupMessage(dropletIp, gatewayHost)
 }

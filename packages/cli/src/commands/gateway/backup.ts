@@ -1,9 +1,10 @@
 import type {goke} from 'goke'
 
+import type {ActionCtx} from '../../__test__/mcp-ctx-fixture'
+
 import {closeSync, constants as fsConstants, openSync, renameSync, unlinkSync, writeSync} from 'node:fs'
 
 import {z} from 'zod'
-
 import {validateGatewayHost} from './host'
 
 declare const process: {
@@ -11,6 +12,10 @@ declare const process: {
   exitCode?: number
   stderr: {write: (msg: string) => void}
 }
+
+// ─── Minimal ctx interface (subset of GokeExecutionContext used by this action) ─
+
+// ActionCtx imported from fixture — single source of truth for action ctx shape
 
 const MITMPROXY_CERTS_VOLUME = 'mitmproxy-certs'
 const CA_CERT_FILE = 'mitmproxy-ca-cert.pem'
@@ -134,6 +139,38 @@ export async function backupGatewayCa(
   return {ok: true, output: opts.output, bytesWritten: tarBytes.byteLength}
 }
 
+// ─── Action (exported for direct testing) ────────────────────────────────────
+
+export async function gatewayBackupAction(
+  options: {output?: string | undefined; includeCa?: boolean | undefined},
+  ctx: ActionCtx,
+  spawn?: BackupSpawnFn,
+): Promise<void> {
+  const hostEnvKey = 'GATEWAY_HOST'
+  const host = process.env[hostEnvKey]
+
+  if (!host) {
+    ctx.console.error(`Gateway host not set. Export ${hostEnvKey} before running backup.`)
+    ctx.process.exit(1)
+    return
+  }
+
+  const output = typeof options.output === 'string' ? options.output : DEFAULT_OUTPUT
+  const includeCa = options.includeCa !== false
+
+  const result = await backupGatewayCa({host, output, includeCa}, spawn, (msg: string) =>
+    ctx.process.stderr.write(`${msg}\n`),
+  )
+
+  if (!result.ok) {
+    ctx.console.error(`Backup failed: ${result.error}`)
+    ctx.process.exit(1)
+    return
+  }
+
+  ctx.console.log(`CA backup written to: ${output}`)
+}
+
 // ─── Command registration ─────────────────────────────────────────────────────
 
 export function registerGatewayBackup(cli: ReturnType<typeof goke>): void {
@@ -162,27 +199,5 @@ export function registerGatewayBackup(cli: ReturnType<typeof goke>): void {
     .example('infra gateway backup --include-ca')
     .example('# Back up the CA to a custom path')
     .example('infra gateway backup --output /secure/backup/mitmproxy-ca.tar')
-    .action(async options => {
-      const hostEnvKey = 'GATEWAY_HOST'
-      const host = process.env[hostEnvKey]
-
-      if (!host) {
-        console.error(`Gateway host not set. Export ${hostEnvKey} before running backup.`)
-        process.exitCode = 1
-        return
-      }
-
-      const output = typeof options.output === 'string' ? options.output : DEFAULT_OUTPUT
-      const includeCa = options.includeCa !== false
-
-      const result = await backupGatewayCa({host, output, includeCa})
-
-      if (!result.ok) {
-        console.error(`Backup failed: ${result.error}`)
-        process.exitCode = 1
-        return
-      }
-
-      console.log(`CA backup written to: ${output}`)
-    })
+    .action((options, ctx) => gatewayBackupAction(options, ctx))
 }

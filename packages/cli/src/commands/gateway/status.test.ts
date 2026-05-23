@@ -1,6 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {parseComposePs, parseComposePsOutput, type ComposePsEntry, type ServiceRow} from './status'
+import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
+import {gatewayStatusAction, parseComposePs, parseComposePsOutput, type ComposePsEntry, type ServiceRow} from './status'
 
 // ─── parseComposePs ──────────────────────────────────────────────────────────
 
@@ -350,5 +351,133 @@ describe('getGatewayComposeStatus — NDJSON stdout', () => {
 
     expect(result.ok).toBe(false)
     expect(result.error).toContain('Failed to parse docker compose ps output')
+  })
+})
+
+// ─── Tier-2: gatewayStatusAction ctx capture ─────────────────────────────────
+
+type StatusSpawnFn = (
+  cmd: string[],
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+) => {
+  stdout: ReadableStream<Uint8Array>
+  stderr: ReadableStream<Uint8Array>
+  exited: Promise<number>
+}
+
+function makeStatusSpawnOk(jsonOutput: string): StatusSpawnFn {
+  return (_cmd, _opts) => {
+    const encoder = new TextEncoder()
+    return {
+      stdout: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(jsonOutput))
+          controller.close()
+        },
+      }),
+      stderr: new ReadableStream({
+        start(controller) {
+          controller.close()
+        },
+      }),
+      exited: Promise.resolve(0),
+    }
+  }
+}
+
+function makeStatusSpawnError(message: string): StatusSpawnFn {
+  return (_cmd, _opts) => {
+    const encoder = new TextEncoder()
+    return {
+      stdout: new ReadableStream({
+        start(controller) {
+          controller.close()
+        },
+      }),
+      stderr: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(message))
+          controller.close()
+        },
+      }),
+      exited: Promise.resolve(1),
+    }
+  }
+}
+
+describe('gatewayStatusAction — ctx capture (Tier-2)', () => {
+  let originalEnv: Record<string, string | undefined>
+
+  beforeEach(() => {
+    originalEnv = {GATEWAY_HOST: process.env.GATEWAY_HOST}
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalEnv.GATEWAY_HOST === undefined) {
+      delete process.env.GATEWAY_HOST
+    } else {
+      process.env.GATEWAY_HOST = originalEnv.GATEWAY_HOST
+    }
+  })
+
+  it('routes "Status: OK" to ctx.console.log when all services are running', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    const psOutput = JSON.stringify([
+      {Name: 'gateway', State: 'running', Health: 'healthy'},
+      {Name: 'mitmproxy', State: 'running', Health: 'healthy'},
+    ])
+
+    await gatewayStatusAction({key: undefined}, ctx, makeStatusSpawnOk(psOutput))
+
+    expect(expectCapturedToInclude(captured, 'Status: OK')).toBe(true)
+  })
+
+  it('routes "Gateway status" header to ctx.console.log', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    const psOutput = JSON.stringify([{Name: 'gateway', State: 'running', Health: 'healthy'}])
+
+    await gatewayStatusAction({key: undefined}, ctx, makeStatusSpawnOk(psOutput))
+
+    expect(expectCapturedToInclude(captured, 'Gateway status')).toBe(true)
+  })
+
+  it('routes error to ctx.console.error and calls ctx.process.exit(1) when SSH fails', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await expect(
+      gatewayStatusAction({key: undefined}, ctx, makeStatusSpawnError('Connection refused')),
+    ).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(captured.stderr.join('').includes('Error')).toBe(true)
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  it('routes error to ctx.console.error and calls ctx.process.exit(1) when GATEWAY_HOST is unset', async () => {
+    delete process.env.GATEWAY_HOST
+    const {ctx, captured} = createCapturedCtx()
+
+    await expect(gatewayStatusAction({key: undefined}, ctx)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(captured.stderr.join('').includes('GATEWAY_HOST')).toBe(true)
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  it('routes "Status: DEGRADED" to ctx.console.log and exits 1 when a service is not running', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    const psOutput = JSON.stringify([
+      {Name: 'gateway', State: 'exited', Health: ''},
+      {Name: 'mitmproxy', State: 'running', Health: 'healthy'},
+    ])
+
+    await expect(gatewayStatusAction({key: undefined}, ctx, makeStatusSpawnOk(psOutput))).rejects.toBeInstanceOf(
+      MockProcessExit,
+    )
+
+    expect(expectCapturedToInclude(captured, 'DEGRADED')).toBe(true)
+    expect(captured.exit?.code).toBe(1)
   })
 })

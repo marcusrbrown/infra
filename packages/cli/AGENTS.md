@@ -59,6 +59,39 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - **Compensating delete**: `cliproxy setup` wraps key creation in try/catch. On failure after a key was created, best-effort `DELETE /v0/management/api-keys?value=<key>` to avoid phantom keys. Error messages scrub key material.
 - **Tests**: colocated `*.test.ts`. Snapshots in `src/__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic output. Mock `fetch` and `Bun.spawn` at the boundary. Never spawn the real CLI for commands that launch browser (`keeweb open`) or SSH (`cliproxy open`) — test exported helpers and `--help` output only.
 
+## MCP FIDELITY
+
+The MCP server (`mcp.ts`) exposes a curated subset of commands as MCP tools via `@goke/mcp`. Two rules govern that surface and how actions must be written to participate in it.
+
+**Allowlist authority (`src/commands/mcp.ts`).** The `MCP_ALLOWLIST` `Set` in `mcp.ts` is the **single source of truth** for which commands appear as MCP tools. Every excluded command has a one-line reason in the JSDoc block above the allowlist (subprocess streaming → deferred to MCP v2 #291, interactive TTY requirement, destructive policy → deferred to #292, host-machine side effect). Adding a new MCP-capturable command means adding its name to the `Set` and confirming the action threads `ctx`; adding a CLI-only command means leaving the allowlist alone and documenting the exclusion reason in the JSDoc.
+
+**Ctx threading for capturable commands.** Each command in the allowlist receives goke's per-action execution context as the last positional argument and **must** route every byte of output through `ctx`:
+
+- `console.log(...)` → `ctx.console.log(...)`
+- `console.error(...)` → `ctx.console.error(...)`
+- `process.stdout.write(...)` → `ctx.process.stdout.write(...)`
+- `process.stderr.write(...)` → `ctx.process.stderr.write(...)`
+- `process.exit(code)` → `ctx.process.exit(code)`
+
+Use the shared `ActionCtx` type from `src/__test__/mcp-ctx-fixture.ts` — a structural subtype of `GokeExecutionContext` that captures exactly the surface actions consume. Action bodies are exported as named functions (e.g., `gatewayStatusAction`, `cliproxyKeysListAction`) and the `.action(...)` callback delegates to them, so Tier-2 tests invoke actions directly with `createCapturedCtx()`.
+
+**Mode C (structured-return commands).** Two commands return structured data alongside ctx-printed text so MCP consumers get both formatted output AND parseable JSON in the `CallToolResult`:
+
+- `cliproxy keys list` returns the parsed API-key array
+- `cliproxy config get` returns the parsed config object (the `--output` path still returns the object even when also writing to disk)
+
+Return values are plain data (arrays, objects) — never `{content: [...]}` shapes. `@goke/mcp` stringifies them and emits one text block per data plus one per captured stream. Extending Mode C: a command qualifies only if it wraps a single management-API call returning structured data the agent will likely parse (mutations and complex orchestrations stay Mode A — text only). When in doubt, leave it Mode A; opening Mode C creates a contract MCP consumers may come to depend on.
+
+**Tier-1 + Tier-2 test bar.** Every MCP-capturable command has Tier-2 unit tests using `createCapturedCtx()` to verify output flows through ctx, plus one Tier-1 integration test in `commands/mcp.test.ts` that spins up the real `@goke/mcp` server via `InMemoryTransport` and asserts the tool surface matches `MCP_ALLOWLIST`. The Tier-1 test re-derives the expected tool names from a list of strings rather than importing `MCP_ALLOWLIST`, so allowlist drift surfaces as a test failure.
+
+**`@goke/mcp` upgrade discipline.** This package is pre-1.0; semver does not apply. Bumping `@goke/mcp` is a **manual-review** change — never automerge. Confirm before merging:
+
+1. `mcp.ts` still compiles against the new `createMcpAction` signature.
+2. The Tier-1 integration test still spins up the in-process MCP server (no API breakage on `commandFilter`, `createTransport`, or the action ctx shape).
+3. The full test suite passes (`bun test --recursive`).
+
+A future `@goke/mcp` may rename `commandFilter`, change ctx's shape, or break `InMemoryTransport` injection — all three are observable failures the test suite catches, but only if the upgrade ran through CI before merge.
+
 ## ANTI-PATTERNS
 
 - Never use `bundledDependencies` — Bun's `.bun/` symlinks create `../../` paths that npm rejects with E415.

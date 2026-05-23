@@ -1,7 +1,12 @@
 import type {goke} from 'goke'
 
+import type {ActionCtx} from '../../__test__/mcp-ctx-fixture'
 import {chmodSync} from 'node:fs'
+
 import {z} from 'zod'
+
+/** Minimal ctx surface consumed by cliproxy config actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
+// ActionCtx imported from fixture — single source of truth for action ctx shape
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
 const HTTP_TIMEOUT_MS = 10_000
@@ -132,6 +137,68 @@ export function formatConfigAsColumns(payload: unknown): string {
     .join('\n')
 }
 
+export interface ConfigGetOptions {
+  url?: string
+  key?: string
+  output?: string
+  json?: boolean
+}
+
+export async function cliproxyConfigGetAction(options: ConfigGetOptions, ctx: ActionCtx): Promise<unknown> {
+  const baseUrl = resolveBaseUrl(options.url)
+  const managementKey = resolveManagementKey(options.key)
+  const endpoint = `${baseUrl}/v0/management/config`
+  const payload = await requestJson(endpoint, {
+    method: 'GET',
+    headers: managementHeaders(managementKey),
+  })
+
+  const jsonOutput = JSON.stringify(payload, null, 2)
+
+  if (options.output) {
+    try {
+      await Bun.write(options.output, jsonOutput)
+      chmodSync(options.output, 0o600)
+      ctx.console.log(`✓ Config written to ${options.output}`)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Failed to write config to ${options.output}: ${message}`)
+    }
+  } else if (options.json) {
+    ctx.console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
+    ctx.console.log(jsonOutput)
+  } else {
+    ctx.console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
+    ctx.console.log(formatConfigAsColumns(payload))
+  }
+
+  return payload
+}
+
+export interface ConfigSetOptions {
+  url?: string
+  key?: string
+}
+
+export async function cliproxyConfigSetAction(
+  field: string,
+  value: string,
+  options: ConfigSetOptions,
+  ctx: ActionCtx,
+): Promise<void> {
+  const baseUrl = resolveBaseUrl(options.url)
+  const managementKey = resolveManagementKey(options.key)
+  const request = buildSetRequest(baseUrl, field, value)
+
+  const payload = await requestJson(request.endpoint, {
+    method: 'PUT',
+    headers: managementHeaders(managementKey),
+    body: request.body,
+  })
+
+  ctx.console.log(JSON.stringify(payload, null, 2))
+}
+
 export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
   cli
     .command('cliproxy config get', 'Fetch current CLIProxyAPI config as JSON.')
@@ -154,34 +221,7 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
         .describe('Write config JSON to a file instead of stdout. File permissions set to 0600 (owner-read-only).'),
     )
     .option('--json', 'Output raw JSON instead of aligned key: value columns.')
-    .action(async options => {
-      const baseUrl = resolveBaseUrl(options.url)
-      const managementKey = resolveManagementKey(options.key)
-      const endpoint = `${baseUrl}/v0/management/config`
-      const payload = await requestJson(endpoint, {
-        method: 'GET',
-        headers: managementHeaders(managementKey),
-      })
-
-      const jsonOutput = JSON.stringify(payload, null, 2)
-
-      if (options.output) {
-        try {
-          await Bun.write(options.output, jsonOutput)
-          chmodSync(options.output, 0o600)
-          console.log(`✓ Config written to ${options.output}`)
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error)
-          throw new Error(`Failed to write config to ${options.output}: ${message}`)
-        }
-      } else if (options.json) {
-        console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
-        console.log(jsonOutput)
-      } else {
-        console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
-        console.log(formatConfigAsColumns(payload))
-      }
-    })
+    .action(cliproxyConfigGetAction)
 
   cli
     .command(
@@ -203,17 +243,5 @@ export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {
     .example('infra cliproxy config set debug true')
     .example('infra cliproxy config set request-retry 5')
     .example('infra cliproxy config set proxy-url https://proxy.example.com')
-    .action(async (field, value, options) => {
-      const baseUrl = resolveBaseUrl(options.url)
-      const managementKey = resolveManagementKey(options.key)
-      const request = buildSetRequest(baseUrl, field, value)
-
-      const payload = await requestJson(request.endpoint, {
-        method: 'PUT',
-        headers: managementHeaders(managementKey),
-        body: request.body,
-      })
-
-      console.log(JSON.stringify(payload, null, 2))
-    })
+    .action(cliproxyConfigSetAction)
 }

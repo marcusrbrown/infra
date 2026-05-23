@@ -1,9 +1,11 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
+import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
 import {
   checkHttpReachability,
   checkUsageStats,
   checkVersion,
+  cliproxyStatusAction,
   formatDurationMs,
   formatUsageSummaryLine,
   levelLabel,
@@ -305,5 +307,53 @@ describe('cliproxy status helpers', () => {
 
       expect(result).toBe('Requests: 0 total, 0 failed (0.0% failure rate)')
     })
+  })
+})
+
+describe('cliproxyStatusAction (Tier-2 ctx capture)', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('Mode A: captures CLIProxyAPI status header to ctx.stdout', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('ok', {status: 200}))
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+
+    expect(expectCapturedToInclude(captured, 'CLIProxyAPI status')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'HTTP reachability')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'Summary:')).toBe(true)
+  })
+
+  it('Mode A: calls ctx.process.exit(1) on HTTP error', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('error', {status: 500}))
+
+    const {ctx, captured} = createCapturedCtx()
+    let threw: unknown
+    try {
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+    } catch (error) {
+      threw = error
+    }
+
+    expect(threw).toBeInstanceOf(MockProcessExit)
+    expect(captured.exit?.code).toBe(1)
+    expect(expectCapturedToInclude(captured, 'ERROR')).toBe(true)
+  })
+
+  it('Mode A: shows management key warning when no key provided', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('ok', {status: 200}))
+
+    const savedKey = process.env.CLIPROXY_MANAGEMENT_KEY
+    delete process.env.CLIPROXY_MANAGEMENT_KEY
+    try {
+      const {ctx, captured} = createCapturedCtx()
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+
+      expect(expectCapturedToInclude(captured, 'CLIPROXY_MANAGEMENT_KEY')).toBe(true)
+    } finally {
+      if (savedKey !== undefined) process.env.CLIPROXY_MANAGEMENT_KEY = savedKey
+    }
   })
 })

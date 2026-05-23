@@ -15,6 +15,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── apps/cliproxy/      CLIProxyAPI deploy package (see apps/cliproxy/AGENTS.md)
 ├── apps/gateway/       Fro Bot gateway deploy package (see apps/gateway/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
+├── packages/shared/    Shared provisioning helpers (see packages/shared/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
 ├── .changeset/         Changesets config for versioning
 ├── .agents/skills/     Agent skills (goke, etc.) — load before working with that domain
@@ -69,7 +70,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **No secret values in tracked files** — `config/config.json` template has empty `dropboxSecret`; real value injected at build time from env var. (enforced)
 - **Never modify `config/config.json` in CI** — secret goes into `dist/config.json` only.
 - **Never overwrite `config.yaml` on cliproxy server** — runtime API keys live there. Deploy skips upload when file exists; `--force-config` is the explicit override.
-- **Never use `ssh-keyscan` in CI workflows** — host keys are pinned in `.github/known_hosts`. Provisioning scripts may use `ssh-keyscan` locally; `apps/cliproxy/server/provision-droplet.ts` is the current example. (enforced)
+- **Never use `ssh-keyscan` in CI workflows** — host keys are pinned in `.github/known_hosts`. Provisioning scripts may use `ssh-keyscan` locally via the shared `pinHostKeys` helper in `packages/shared/server/droplet-helpers.ts`. (enforced)
 - **Never `secrets: inherit`** with cross-org reusable workflows. (enforced)
 - **Never use `bundledDependencies`** — Bun's `.bun/` symlink layout creates `../../` paths that npm rejects with E415. (enforced)
 - **Never pass gateway secret bytes via argv** — `writeRemoteFile` pipes bytes through SSH stdin only; `--body <value>` patterns are banned.

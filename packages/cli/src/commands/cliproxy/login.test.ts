@@ -1,13 +1,13 @@
-import {resolve} from 'node:path'
-import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
+import type {LoginOptions, SpawnFn} from './login'
 
-const cliDir = resolve(import.meta.dir, '../../..')
+import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 const envKeys = ['CLIPROXY_DOMAIN', 'HOME', 'PATH', 'SSH_AUTH_SOCK'] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
 
 let originalEnv: Partial<Record<ManagedEnvKey, string | undefined>>
+let originalIsTTY: boolean | undefined
 
 function restoreManagedEnv(): void {
   for (const key of envKeys) {
@@ -22,80 +22,73 @@ function restoreManagedEnv(): void {
   }
 }
 
-async function runLoginCommand(
-  args: string[],
-  envOverrides: Partial<Record<ManagedEnvKey, string | undefined>> = {},
-): Promise<{stdout: string; stderr: string; exitCode: number}> {
-  const env = {...process.env}
-
-  for (const [key, value] of Object.entries(envOverrides)) {
-    if (value === undefined) {
-      delete env[key]
-      continue
-    }
-
-    env[key] = value
+/** Minimal SpawnFn mock for inherit-stdio calls — records invocations and resolves with exitCode. */
+function makeSpawnOk(exitCode = 0): {spawnFn: SpawnFn; calls: {cmd: string[]; opts: unknown}[]} {
+  const calls: {cmd: string[]; opts: unknown}[] = []
+  const spawnFn: SpawnFn = (cmd, opts) => {
+    calls.push({cmd, opts})
+    return {exited: Promise.resolve(exitCode)}
   }
 
-  const proc = Bun.spawn(['bun', 'src/cli.ts', 'cliproxy', 'login', ...args], {
-    cwd: cliDir,
-    env: {
-      ...env,
-      HOME: env.HOME ?? '/tmp/test-home',
-      NO_COLOR: '1',
-      PATH: env.PATH ?? '/usr/bin:/bin',
-      SSH_AUTH_SOCK: env.SSH_AUTH_SOCK ?? '/tmp/test-sock',
-    },
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
-
-  return {stdout, stderr, exitCode}
+  return {spawnFn, calls}
 }
 
 describe('cliproxy login', () => {
   beforeEach(() => {
     originalEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]))
+    originalIsTTY = process.stdin.isTTY
   })
 
   afterEach(() => {
     restoreManagedEnv()
+    Object.defineProperty(process.stdin, 'isTTY', {value: originalIsTTY, configurable: true})
   })
 
   describe('validation', () => {
     it('rejects unsupported providers', async () => {
-      const {stderr, exitCode} = await runLoginCommand(['openai'])
-      expect(exitCode).not.toBe(0)
-      expect(stderr).toContain('Unsupported provider')
-      expect(stderr).toContain('only "claude" is supported')
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk()
+
+      // Provider check happens before TTY check — no need to set isTTY
+      await expect(cliproxyLoginAction('openai', {}, spawnFn)).rejects.toThrow('Unsupported provider')
+      await expect(cliproxyLoginAction('openai', {}, spawnFn)).rejects.toThrow('only "claude" is supported')
     })
 
     it('requires interactive terminal (checked before SSH_AUTH_SOCK)', async () => {
-      const {stderr, exitCode} = await runLoginCommand(['claude'], {SSH_AUTH_SOCK: undefined})
-      expect(exitCode).not.toBe(0)
-      expect(stderr).toContain('interactive terminal')
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk()
+
+      // Simulate non-TTY environment (as subprocess tests did)
+      Object.defineProperty(process.stdin, 'isTTY', {value: false, configurable: true})
+
+      await expect(cliproxyLoginAction('claude', {SSH_AUTH_SOCK: undefined} as LoginOptions, spawnFn)).rejects.toThrow(
+        'interactive terminal',
+      )
     })
   })
 
   describe('host resolution', () => {
     it('uses CLIPROXY_DOMAIN env var', async () => {
-      const {stderr, exitCode} = await runLoginCommand(['claude'], {
-        CLIPROXY_DOMAIN: 'custom.host.example',
-      })
-      expect(exitCode).not.toBe(0)
-      expect(stderr).toContain('interactive terminal')
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk()
+
+      Object.defineProperty(process.stdin, 'isTTY', {value: false, configurable: true})
+      process.env.CLIPROXY_DOMAIN = 'custom.host.example'
+
+      // TTY check fires before host resolution — error is about TTY
+      await expect(cliproxyLoginAction('claude', {}, spawnFn)).rejects.toThrow('interactive terminal')
     })
 
     it('uses --host flag', async () => {
-      const {stderr, exitCode} = await runLoginCommand(['claude', '--host', 'custom.host.example'])
-      expect(exitCode).not.toBe(0)
-      expect(stderr).toContain('interactive terminal')
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk()
+
+      Object.defineProperty(process.stdin, 'isTTY', {value: false, configurable: true})
+
+      // TTY check fires before host resolution — error is about TTY
+      await expect(cliproxyLoginAction('claude', {host: 'custom.host.example'}, spawnFn)).rejects.toThrow(
+        'interactive terminal',
+      )
     })
   })
 

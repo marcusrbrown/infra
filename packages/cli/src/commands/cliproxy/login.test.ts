@@ -1,4 +1,4 @@
-import type {LoginOptions, SpawnFn} from './login'
+import type {SpawnFn} from './login'
 
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
@@ -74,9 +74,7 @@ describe('cliproxy login', () => {
       // Simulate non-TTY environment (as subprocess tests did)
       Object.defineProperty(process.stdin, 'isTTY', {value: false, configurable: true})
 
-      await expect(cliproxyLoginAction('claude', {SSH_AUTH_SOCK: undefined} as LoginOptions, spawnFn)).rejects.toThrow(
-        'interactive terminal',
-      )
+      await expect(cliproxyLoginAction('claude', {}, spawnFn)).rejects.toThrow('interactive terminal')
     })
   })
 
@@ -187,32 +185,55 @@ describe('cliproxy login', () => {
         'Unsupported provider "../../../etc/passwd". Supported: claude, codex.',
       )
     })
+
+    it('error path — prototype-chain bypass "__proto__": rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('__proto__', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "__proto__". Supported: claude, codex.',
+      )
+    })
+
+    it('error path — prototype-chain bypass "constructor": rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('constructor', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "constructor". Supported: claude, codex.',
+      )
+    })
+
+    it('error path — prototype-chain bypass "hasOwnProperty": rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('hasOwnProperty', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "hasOwnProperty". Supported: claude, codex.',
+      )
+    })
   })
 
   describe('anti-phishing notice', () => {
-    let stdoutChunks: string[]
-    let originalWrite: typeof process.stdout.write
+    let logLines: string[]
+    let originalLog: typeof console.log
 
     beforeEach(() => {
-      stdoutChunks = []
-      originalWrite = process.stdout.write.bind(process.stdout)
-      process.stdout.write = (chunk: string | Uint8Array) => {
-        stdoutChunks.push(String(chunk))
-        return true
+      logLines = []
+      originalLog = console.log
+      console.log = (...args: unknown[]) => {
+        logLines.push(args.map(String).join(' '))
       }
     })
 
     afterEach(() => {
-      process.stdout.write = originalWrite
+      console.log = originalLog
     })
 
     it('codex: anti-phishing notice appears before spawn', async () => {
       const {cliproxyLoginAction} = await import('./login')
-      const chunksBeforeSpawn: string[] = []
+      const linesBeforeSpawn: string[] = []
       let spawnCalled = false
 
       const trackingSpawn: SpawnFn = (_cmd, _opts) => {
-        chunksBeforeSpawn.push(...stdoutChunks)
+        linesBeforeSpawn.push(...logLines)
         spawnCalled = true
         return {exited: Promise.resolve(0)}
       }
@@ -221,7 +242,7 @@ describe('cliproxy login', () => {
       await cliproxyLoginAction('codex', {}, trackingSpawn)
 
       expect(spawnCalled).toBe(true)
-      const allOutput = chunksBeforeSpawn.join('\n')
+      const allOutput = linesBeforeSpawn.join('\n')
       expect(allOutput).toMatch(/openai\.com/i)
     })
 
@@ -232,7 +253,7 @@ describe('cliproxy login', () => {
 
       await cliproxyLoginAction('claude', {}, spawnFn)
 
-      const allOutput = stdoutChunks.join('\n')
+      const allOutput = logLines.join('\n')
       expect(allOutput).not.toMatch(/openai\.com/)
     })
   })

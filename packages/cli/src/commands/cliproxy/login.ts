@@ -1,15 +1,16 @@
 import type {goke} from 'goke'
 
-import {note} from '@clack/prompts'
 import {z} from 'zod'
 
 const DEFAULT_HOST = 'cliproxy.fro.bot'
 const DEFAULT_REMOTE_USER = 'root'
 
-const PROVIDER_FLAGS: Record<string, string> = {
+const PROVIDER_FLAGS = {
   claude: '--claude-login',
   codex: '--codex-device-login',
-}
+} as const satisfies Record<string, string>
+
+const SUPPORTED_PROVIDERS_DISPLAY = Object.keys(PROVIDER_FLAGS).join(', ')
 
 export type SpawnFn = (
   cmd: string[],
@@ -44,10 +45,10 @@ export async function cliproxyLoginAction(
   options: LoginOptions,
   spawnFn: SpawnFn = Bun.spawn,
 ): Promise<void> {
-  const providerFlag = PROVIDER_FLAGS[provider]
-  if (!providerFlag) {
-    throw new Error(`Unsupported provider "${provider}". Supported: claude, codex.`)
+  if (!Object.prototype.hasOwnProperty.call(PROVIDER_FLAGS, provider)) {
+    throw new Error(`Unsupported provider "${provider}". Supported: ${SUPPORTED_PROVIDERS_DISPLAY}.`)
   }
+  const providerFlag = PROVIDER_FLAGS[provider as keyof typeof PROVIDER_FLAGS]
 
   if (!process.stdin.isTTY) {
     throw new Error('cliproxy login requires an interactive terminal. Run from a shell with TTY attached.')
@@ -67,10 +68,13 @@ export async function cliproxyLoginAction(
   }
 
   if (provider === 'codex') {
-    note(
-      "Codex login uses OpenAI's device-code flow. The droplet will print a code and a URL. Before entering the code, verify the URL points to openai.com — only complete the flow on the official OpenAI domain.",
-      'Verify the URL',
-    )
+    console.log()
+    console.log('  Verify the URL')
+    console.log('  ─────────────')
+    console.log("  Codex login uses OpenAI's device-code flow. The droplet will print a code")
+    console.log('  and a URL. Before entering the code, verify the URL points to openai.com —')
+    console.log('  only complete the flow on the official OpenAI domain.')
+    console.log()
   }
 
   const remoteCommand = `cd /opt/cliproxy && docker compose exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI --no-browser ${providerFlag}`
@@ -101,7 +105,7 @@ export function registerCliproxyLogin(cli: ReturnType<typeof goke>): void {
   cli
     .command(
       'cliproxy login <provider>',
-      'Run provider login on the remote CLIProxyAPI host. Supported providers: claude, codex.',
+      `Run provider login on the remote CLIProxyAPI host. Supported providers: ${SUPPORTED_PROVIDERS_DISPLAY}.`,
     )
     .option(
       '--host [host]',

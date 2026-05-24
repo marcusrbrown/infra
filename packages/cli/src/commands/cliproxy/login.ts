@@ -1,9 +1,15 @@
 import type {goke} from 'goke'
 
+import {note} from '@clack/prompts'
 import {z} from 'zod'
 
 const DEFAULT_HOST = 'cliproxy.fro.bot'
 const DEFAULT_REMOTE_USER = 'root'
+
+const PROVIDER_FLAGS: Record<string, string> = {
+  claude: '--claude-login',
+  codex: '--codex-device-login',
+}
 
 export type SpawnFn = (
   cmd: string[],
@@ -38,8 +44,9 @@ export async function cliproxyLoginAction(
   options: LoginOptions,
   spawnFn: SpawnFn = Bun.spawn,
 ): Promise<void> {
-  if (provider !== 'claude') {
-    throw new Error(`Unsupported provider "${provider}". Currently only "claude" is supported.`)
+  const providerFlag = PROVIDER_FLAGS[provider]
+  if (!providerFlag) {
+    throw new Error(`Unsupported provider "${provider}". Supported: claude, codex.`)
   }
 
   if (!process.stdin.isTTY) {
@@ -59,8 +66,14 @@ export async function cliproxyLoginAction(
     throw new Error('HOME is required to invoke ssh')
   }
 
-  const remoteCommand =
-    'cd /opt/cliproxy && docker compose exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI --no-browser --claude-login'
+  if (provider === 'codex') {
+    note(
+      "Codex login uses OpenAI's device-code flow. The droplet will print a code and a URL. Before entering the code, verify the URL points to openai.com — only complete the flow on the official OpenAI domain.",
+      'Verify the URL',
+    )
+  }
+
+  const remoteCommand = `cd /opt/cliproxy && docker compose exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI --no-browser ${providerFlag}`
 
   const child = spawnFn(
     ['ssh', '-tt', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', `${DEFAULT_REMOTE_USER}@${host}`, remoteCommand],
@@ -88,7 +101,7 @@ export function registerCliproxyLogin(cli: ReturnType<typeof goke>): void {
   cli
     .command(
       'cliproxy login <provider>',
-      'Run provider login on the remote CLIProxyAPI host and print OAuth URL output.',
+      'Run provider login on the remote CLIProxyAPI host. Supported providers: claude, codex.',
     )
     .option(
       '--host [host]',
@@ -98,5 +111,7 @@ export function registerCliproxyLogin(cli: ReturnType<typeof goke>): void {
     )
     .example('# Start Claude login flow on remote CLIProxyAPI instance')
     .example('infra cliproxy login claude')
+    .example('# Start ChatGPT Pro login flow via device-code')
+    .example('infra cliproxy login codex')
     .action((provider, options) => cliproxyLoginAction(provider, options))
 }

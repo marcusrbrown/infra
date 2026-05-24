@@ -33,6 +33,19 @@ function makeSpawnOk(exitCode = 0): {spawnFn: SpawnFn; calls: {cmd: string[]; op
   return {spawnFn, calls}
 }
 
+// Helper: a SpawnFn that must never be called (proves provider check fires before spawn)
+const neverSpawn: SpawnFn = () => {
+  throw new Error('spawn must not be called for invalid provider')
+}
+
+// Helper: set up a valid TTY + env so spawn-path tests can reach the spawn call
+function setValidEnv(): void {
+  Object.defineProperty(process.stdin, 'isTTY', {value: true, configurable: true})
+  process.env.SSH_AUTH_SOCK = '/tmp/test-agent.sock'
+  process.env.PATH = process.env.PATH ?? '/usr/bin'
+  process.env.HOME = process.env.HOME ?? '/root'
+}
+
 describe('cliproxy login', () => {
   beforeEach(() => {
     originalEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]))
@@ -51,7 +64,7 @@ describe('cliproxy login', () => {
 
       // Provider check happens before TTY check — no need to set isTTY
       await expect(cliproxyLoginAction('openai', {}, spawnFn)).rejects.toThrow('Unsupported provider')
-      await expect(cliproxyLoginAction('openai', {}, spawnFn)).rejects.toThrow('only "claude" is supported')
+      await expect(cliproxyLoginAction('openai', {}, spawnFn)).rejects.toThrow('Supported: claude, codex.')
     })
 
     it('requires interactive terminal (checked before SSH_AUTH_SOCK)', async () => {
@@ -122,6 +135,105 @@ describe('cliproxy login', () => {
       delete process.env.SSH_AUTH_SOCK
       const {requireSshAuthSock} = await import('./login')
       expect(() => requireSshAuthSock()).toThrow('SSH_AUTH_SOCK is required')
+    })
+  })
+
+  describe('provider flags', () => {
+    it('happy path — codex: spawn args contain --codex-device-login and --no-browser', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn, calls} = makeSpawnOk(0)
+      setValidEnv()
+
+      await cliproxyLoginAction('codex', {}, spawnFn)
+
+      const cmd = calls[0]!.cmd
+      expect(cmd.join(' ')).toContain('--codex-device-login')
+      expect(cmd.join(' ')).toContain('--no-browser')
+      expect(cmd.join(' ')).not.toContain('--codex-login ')
+    })
+
+    it('happy path — claude regression: spawn args contain --claude-login and --no-browser', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn, calls} = makeSpawnOk(0)
+      setValidEnv()
+
+      await cliproxyLoginAction('claude', {}, spawnFn)
+
+      const cmd = calls[0]!.cmd
+      expect(cmd.join(' ')).toContain('--claude-login')
+      expect(cmd.join(' ')).toContain('--no-browser')
+    })
+
+    it('error path — unknown provider "chatgpt": rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('chatgpt', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "chatgpt". Supported: claude, codex.',
+      )
+    })
+
+    it('error path — empty provider: rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "". Supported: claude, codex.',
+      )
+    })
+
+    it('error path — malformed provider path traversal: rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('../../../etc/passwd', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "../../../etc/passwd". Supported: claude, codex.',
+      )
+    })
+  })
+
+  describe('anti-phishing notice', () => {
+    let stdoutChunks: string[]
+    let originalWrite: typeof process.stdout.write
+
+    beforeEach(() => {
+      stdoutChunks = []
+      originalWrite = process.stdout.write.bind(process.stdout)
+      process.stdout.write = (chunk: string | Uint8Array) => {
+        stdoutChunks.push(String(chunk))
+        return true
+      }
+    })
+
+    afterEach(() => {
+      process.stdout.write = originalWrite
+    })
+
+    it('codex: anti-phishing notice appears before spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const chunksBeforeSpawn: string[] = []
+      let spawnCalled = false
+
+      const trackingSpawn: SpawnFn = (_cmd, _opts) => {
+        chunksBeforeSpawn.push(...stdoutChunks)
+        spawnCalled = true
+        return {exited: Promise.resolve(0)}
+      }
+
+      setValidEnv()
+      await cliproxyLoginAction('codex', {}, trackingSpawn)
+
+      expect(spawnCalled).toBe(true)
+      const allOutput = chunksBeforeSpawn.join('\n')
+      expect(allOutput).toMatch(/openai\.com/i)
+    })
+
+    it('claude: anti-phishing notice does NOT appear', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk(0)
+      setValidEnv()
+
+      await cliproxyLoginAction('claude', {}, spawnFn)
+
+      const allOutput = stdoutChunks.join('\n')
+      expect(allOutput).not.toMatch(/openai\.com/)
     })
   })
 })

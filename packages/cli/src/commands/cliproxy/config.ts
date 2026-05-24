@@ -144,40 +144,44 @@ export interface ConfigGetOptions {
   json?: boolean
 }
 
-/**
- * Mode C: prints formatted config via ctx AND returns the parsed config object so MCP consumers
- * receive both formatted text and parseable structured data. Return type is `Promise<unknown>`
- * because the config shape is server-defined and genuinely loose at the TypeScript boundary.
- */
 export async function cliproxyConfigGetAction(options: ConfigGetOptions, ctx: ActionCtx): Promise<unknown> {
-  const baseUrl = resolveBaseUrl(options.url)
-  const managementKey = resolveManagementKey(options.key)
-  const endpoint = `${baseUrl}/v0/management/config`
-  const payload = await requestJson(endpoint, {
-    method: 'GET',
-    headers: managementHeaders(managementKey),
-  })
+  try {
+    const baseUrl = resolveBaseUrl(options.url)
+    const managementKey = resolveManagementKey(options.key)
+    const endpoint = `${baseUrl}/v0/management/config`
+    const payload = await requestJson(endpoint, {
+      method: 'GET',
+      headers: managementHeaders(managementKey),
+    })
 
-  const jsonOutput = JSON.stringify(payload, null, 2)
+    const jsonOutput = JSON.stringify(payload, null, 2)
 
-  if (options.output) {
-    try {
-      await Bun.write(options.output, jsonOutput)
-      chmodSync(options.output, 0o600)
-      ctx.console.log(`✓ Config written to ${options.output}`)
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error)
-      throw new Error(`Failed to write config to ${options.output}: ${message}`)
+    if (options.output) {
+      try {
+        await Bun.write(options.output, jsonOutput)
+        chmodSync(options.output, 0o600)
+        ctx.console.log(`✓ Config written to ${options.output}`)
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        ctx.console.error(`Failed to write config to ${options.output}: ${message}`)
+        ctx.process.exit(1)
+        return undefined // unreachable
+      }
+    } else if (options.json) {
+      ctx.console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
+      ctx.console.log(jsonOutput)
+    } else {
+      ctx.console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
+      ctx.console.log(formatConfigAsColumns(payload))
     }
-  } else if (options.json) {
-    ctx.console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
-    ctx.console.log(jsonOutput)
-  } else {
-    ctx.console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
-    ctx.console.log(formatConfigAsColumns(payload))
-  }
 
-  return payload
+    return payload
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.console.error(message)
+    ctx.process.exit(1)
+    return undefined // unreachable; satisfies TS that all paths return
+  }
 }
 
 export interface ConfigSetOptions {
@@ -191,17 +195,23 @@ export async function cliproxyConfigSetAction(
   options: ConfigSetOptions,
   ctx: ActionCtx,
 ): Promise<void> {
-  const baseUrl = resolveBaseUrl(options.url)
-  const managementKey = resolveManagementKey(options.key)
-  const request = buildSetRequest(baseUrl, field, value)
+  try {
+    const baseUrl = resolveBaseUrl(options.url)
+    const managementKey = resolveManagementKey(options.key)
+    const request = buildSetRequest(baseUrl, field, value)
 
-  const payload = await requestJson(request.endpoint, {
-    method: 'PUT',
-    headers: managementHeaders(managementKey),
-    body: request.body,
-  })
+    const payload = await requestJson(request.endpoint, {
+      method: 'PUT',
+      headers: managementHeaders(managementKey),
+      body: request.body,
+    })
 
-  ctx.console.log(JSON.stringify(payload, null, 2))
+    ctx.console.log(JSON.stringify(payload, null, 2))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.console.error(message)
+    ctx.process.exit(1)
+  }
 }
 
 export function registerCliproxyConfig(cli: ReturnType<typeof goke>): void {

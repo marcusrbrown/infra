@@ -258,49 +258,57 @@ export interface StatusOptions {
 }
 
 export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCtx): Promise<void> {
-  const verbose = options.verbose === true
-  const baseUrl = stripTrailingSlash(options.url ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
-  const managementKey = options.key ?? process.env.CLIPROXY_MANAGEMENT_KEY
+  let errorCount = 0
+  try {
+    const verbose = options.verbose === true
+    const baseUrl = stripTrailingSlash(options.url ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
+    const managementKey = options.key ?? process.env.CLIPROXY_MANAGEMENT_KEY
 
-  ctx.console.log('CLIProxyAPI status')
-  ctx.console.log('')
-
-  const results: CheckResult[] = [await checkHttpReachability(baseUrl, verbose)]
-
-  let capturedUsageResult: CheckResult | undefined
-
-  if (managementKey) {
-    const [usageResult, versionResult] = await Promise.all([
-      checkUsageStats(baseUrl, managementKey),
-      checkVersion(baseUrl, managementKey),
-    ])
-
-    capturedUsageResult = usageResult
-    results.push(usageResult, versionResult)
-  } else {
-    results.push({
-      title: 'Management checks',
-      level: 'warning',
-      summary:
-        'CLIPROXY_MANAGEMENT_KEY is not set. Skipping usage stats and version checks. Provide --key or set env var.',
-    })
-  }
-
-  for (const result of results) {
-    printCheckResult(result, ctx)
+    ctx.console.log('CLIProxyAPI status')
     ctx.console.log('')
-  }
 
-  const errorCount = results.filter(result => result.level === 'error').length
-  const warningCount = results.filter(result => result.level === 'warning').length
+    const results: CheckResult[] = [await checkHttpReachability(baseUrl, verbose)]
 
-  ctx.console.log(`Summary: ${results.length} checks, ${errorCount} errors, ${warningCount} warnings`)
+    let capturedUsageResult: CheckResult | undefined
 
-  if (capturedUsageResult) {
-    const usageLine = formatUsageSummaryLine(capturedUsageResult)
-    if (usageLine) {
-      ctx.console.log(usageLine)
+    if (managementKey) {
+      const [usageResult, versionResult] = await Promise.all([
+        checkUsageStats(baseUrl, managementKey),
+        checkVersion(baseUrl, managementKey),
+      ])
+
+      capturedUsageResult = usageResult
+      results.push(usageResult, versionResult)
+    } else {
+      results.push({
+        title: 'Management checks',
+        level: 'warning',
+        summary:
+          'CLIPROXY_MANAGEMENT_KEY is not set. Skipping usage stats and version checks. Provide --key or set env var.',
+      })
     }
+
+    for (const result of results) {
+      printCheckResult(result, ctx)
+      ctx.console.log('')
+    }
+
+    errorCount = results.filter(result => result.level === 'error').length
+    const warningCount = results.filter(result => result.level === 'warning').length
+
+    ctx.console.log(`Summary: ${results.length} checks, ${errorCount} errors, ${warningCount} warnings`)
+
+    if (capturedUsageResult) {
+      const usageLine = formatUsageSummaryLine(capturedUsageResult)
+      if (usageLine) {
+        ctx.console.log(usageLine)
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.console.error(message)
+    ctx.process.exit(1)
+    return
   }
 
   if (errorCount > 0) {

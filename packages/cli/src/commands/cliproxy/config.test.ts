@@ -272,11 +272,118 @@ describe('cliproxyConfigSetAction (Mode A, two positional args, Tier-2 ctx captu
     expect(expectCapturedToInclude(captured, 'true')).toBe(true)
   })
 
-  it('Mode A: throws for unsupported field', async () => {
-    const {ctx} = createCapturedCtx()
+  it('Mode A: routes unsupported field error through ctx.console.error + exit(1)', async () => {
+    const {ctx, captured} = createCapturedCtx()
     await expect(
       cliproxyConfigSetAction('unsupported-field', 'val', {url: 'https://cliproxy.example.com', key: 'mgmt-key'}, ctx),
-    ).rejects.toThrow('not a supported mutable field')
+    ).rejects.toMatchObject({name: 'MockProcessExit', code: 1})
+    expect(captured.stderr.join('')).toContain('not a supported mutable field')
+    expect(captured.exit).toEqual({code: 1})
+  })
+})
+
+describe('cliproxyConfigGetAction (Tier-2 failure-path parity)', () => {
+  const originalManagementKey = process.env.CLIPROXY_MANAGEMENT_KEY
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    if (originalManagementKey === undefined) {
+      delete process.env.CLIPROXY_MANAGEMENT_KEY
+    } else {
+      process.env.CLIPROXY_MANAGEMENT_KEY = originalManagementKey
+    }
+  })
+
+  it('Tier-2: missing CLIPROXY_MANAGEMENT_KEY routes to ctx.console.error + exit(1)', async () => {
+    delete process.env.CLIPROXY_MANAGEMENT_KEY
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(cliproxyConfigGetAction({url: 'https://cliproxy.example.com'}, ctx)).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('Management API key')
+    expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('Tier-2: HTTP 500 response routes to ctx.console.error + exit(1)', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('server error', {status: 500}))
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyConfigGetAction({url: 'https://cliproxy.example.com', key: 'mgmt-key'}, ctx),
+    ).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('HTTP 500')
+    expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('Tier-2: --output write failure routes to ctx.console.error + exit(1)', async () => {
+    const mockConfig = {debug: true}
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(mockConfig), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    // Use a path that cannot be written (directory as file path)
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyConfigGetAction(
+        {url: 'https://cliproxy.example.com', key: 'mgmt-key', output: '/dev/null/cannot-write'},
+        ctx,
+      ),
+    ).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('Failed to write config')
+    expect(captured.exit).toEqual({code: 1})
+  })
+})
+
+describe('cliproxyConfigSetAction (Tier-2 failure-path parity)', () => {
+  const originalManagementKey = process.env.CLIPROXY_MANAGEMENT_KEY
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    if (originalManagementKey === undefined) {
+      delete process.env.CLIPROXY_MANAGEMENT_KEY
+    } else {
+      process.env.CLIPROXY_MANAGEMENT_KEY = originalManagementKey
+    }
+  })
+
+  it('Tier-2: missing CLIPROXY_MANAGEMENT_KEY routes to ctx.console.error + exit(1)', async () => {
+    delete process.env.CLIPROXY_MANAGEMENT_KEY
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyConfigSetAction('debug', 'true', {url: 'https://cliproxy.example.com'}, ctx),
+    ).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('Management API key')
+    expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('Tier-2: HTTP 500 response routes to ctx.console.error + exit(1)', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('server error', {status: 500}))
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyConfigSetAction('debug', 'true', {url: 'https://cliproxy.example.com', key: 'mgmt-key'}, ctx),
+    ).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('HTTP 500')
+    expect(captured.exit).toEqual({code: 1})
   })
 })
 

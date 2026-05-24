@@ -75,33 +75,36 @@ export interface KeysListOptions {
   json?: boolean
 }
 
-/**
- * Mode C: prints formatted table via ctx AND returns the parsed key array so MCP consumers
- * receive both formatted text and parseable structured data.
- */
 export async function cliproxyKeysListAction(options: KeysListOptions, ctx: ActionCtx): Promise<string[]> {
-  const baseUrl = resolveBaseUrl(options.url)
-  const managementKey = resolveManagementKey(options.key)
-  const endpoint = `${baseUrl}/v0/management/api-keys`
-  const payload = await requestJson(endpoint, {
-    method: 'GET',
-    headers: managementHeaders(managementKey),
-  })
+  try {
+    const baseUrl = resolveBaseUrl(options.url)
+    const managementKey = resolveManagementKey(options.key)
+    const endpoint = `${baseUrl}/v0/management/api-keys`
+    const payload = await requestJson(endpoint, {
+      method: 'GET',
+      headers: managementHeaders(managementKey),
+    })
 
-  const keys = toStringArray(payload)
-  ctx.console.error('⚠️  Output contains API keys — avoid logging or storing in shared locations')
+    const keys = toStringArray(payload)
+    ctx.console.error('⚠️  Output contains API keys — avoid logging or storing in shared locations')
 
-  if (options.json) {
-    ctx.console.log(JSON.stringify(keys, null, 2))
-  } else if (keys.length === 0) {
-    ctx.console.log('No API keys configured')
-  } else {
-    for (const [index, apiKey] of keys.entries()) {
-      ctx.console.log(`${index + 1}. ${apiKey}`)
+    if (options.json) {
+      ctx.console.log(JSON.stringify(keys, null, 2))
+    } else if (keys.length === 0) {
+      ctx.console.log('No API keys configured')
+    } else {
+      for (const [index, apiKey] of keys.entries()) {
+        ctx.console.log(`${index + 1}. ${apiKey}`)
+      }
     }
-  }
 
-  return keys
+    return keys
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.console.error(message)
+    ctx.process.exit(1)
+    return [] // unreachable; satisfies TS that all paths return
+  }
 }
 
 export interface KeysAddOptions {
@@ -114,29 +117,35 @@ export async function cliproxyKeysAddAction(
   options: KeysAddOptions,
   ctx: ActionCtx,
 ): Promise<void> {
-  const baseUrl = resolveBaseUrl(options.url)
-  const managementKey = resolveManagementKey(options.key)
-  const endpoint = `${baseUrl}/v0/management/api-keys`
+  try {
+    const baseUrl = resolveBaseUrl(options.url)
+    const managementKey = resolveManagementKey(options.key)
+    const endpoint = `${baseUrl}/v0/management/api-keys`
 
-  const currentPayload = await requestJson(endpoint, {
-    method: 'GET',
-    headers: managementHeaders(managementKey),
-  })
-  const currentKeys = toStringArray(currentPayload)
+    const currentPayload = await requestJson(endpoint, {
+      method: 'GET',
+      headers: managementHeaders(managementKey),
+    })
+    const currentKeys = toStringArray(currentPayload)
 
-  if (currentKeys.includes(apiKeyToAdd)) {
-    ctx.console.log('Key already present; no update required.')
-    return
+    if (currentKeys.includes(apiKeyToAdd)) {
+      ctx.console.log('Key already present; no update required.')
+      return
+    }
+
+    const nextKeys = [...currentKeys, apiKeyToAdd]
+    await requestJson(endpoint, {
+      method: 'PUT',
+      headers: managementHeaders(managementKey),
+      body: JSON.stringify(nextKeys),
+    })
+
+    ctx.console.log(`Added key "${apiKeyToAdd}". Current key count: ${nextKeys.length}.`)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.console.error(message)
+    ctx.process.exit(1)
   }
-
-  const nextKeys = [...currentKeys, apiKeyToAdd]
-  await requestJson(endpoint, {
-    method: 'PUT',
-    headers: managementHeaders(managementKey),
-    body: JSON.stringify(nextKeys),
-  })
-
-  ctx.console.log(`Added key "${apiKeyToAdd}". Current key count: ${nextKeys.length}.`)
 }
 
 export interface KeysRemoveOptions {
@@ -149,17 +158,23 @@ export async function cliproxyKeysRemoveAction(
   options: KeysRemoveOptions,
   ctx: ActionCtx,
 ): Promise<void> {
-  const baseUrl = resolveBaseUrl(options.url)
-  const managementKey = resolveManagementKey(options.key)
-  const params = new URLSearchParams({value: apiKeyToRemove})
-  const endpoint = `${baseUrl}/v0/management/api-keys?${params.toString()}`
+  try {
+    const baseUrl = resolveBaseUrl(options.url)
+    const managementKey = resolveManagementKey(options.key)
+    const params = new URLSearchParams({value: apiKeyToRemove})
+    const endpoint = `${baseUrl}/v0/management/api-keys?${params.toString()}`
 
-  const payload = await requestJson(endpoint, {
-    method: 'DELETE',
-    headers: managementHeaders(managementKey),
-  })
+    const payload = await requestJson(endpoint, {
+      method: 'DELETE',
+      headers: managementHeaders(managementKey),
+    })
 
-  ctx.console.log(JSON.stringify(payload, null, 2))
+    ctx.console.log(JSON.stringify(payload, null, 2))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.console.error(message)
+    ctx.process.exit(1)
+  }
 }
 
 export function registerCliproxyKeys(cli: ReturnType<typeof goke>): void {

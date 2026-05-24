@@ -310,6 +310,36 @@ describe('cliproxy status helpers', () => {
   })
 })
 
+describe('cliproxyStatusAction (Tier-2 ctx capture, failure-path parity)', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('Tier-2: routes unexpected thrown error through ctx.console.error + ctx.process.exit(1)', async () => {
+    // Trigger an unexpected error by having ctx.console.log throw on first call
+    const {ctx, captured} = createCapturedCtx()
+    let callCount = 0
+    const originalLog = ctx.console.log
+    ctx.console.log = (...args: unknown[]) => {
+      callCount++
+      if (callCount === 1) {
+        throw new Error('Unexpected internal error during status output')
+      }
+
+      originalLog(...args)
+    }
+
+    globalThis.fetch = createFetchImplementation(async () => new Response('ok', {status: 200}))
+
+    await expect(cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('Unexpected internal error')
+    expect(captured.exit).toEqual({code: 1})
+  })
+})
+
 describe('cliproxyStatusAction (Tier-2 ctx capture)', () => {
   afterEach(() => {
     globalThis.fetch = originalFetch

@@ -2,6 +2,8 @@ import type {goke} from 'goke'
 
 import {z} from 'zod'
 
+import {validateCliproxyHost} from './host'
+
 const DEFAULT_HOST = 'cliproxy.fro.bot'
 const DEFAULT_REMOTE_USER = 'root'
 
@@ -27,11 +29,12 @@ export function registerCliproxyOpen(cli: ReturnType<typeof goke>): void {
     .example('# Open on a custom host')
     .example('infra cliproxy open --host custom.example.com')
     .action(async options => {
+      const host = validateCliproxyHost(resolveHost(options.host))
+
       if (!process.stdin.isTTY) {
         throw new Error('cliproxy open requires an interactive terminal. Run from a shell with TTY attached.')
       }
 
-      const host = resolveHost(options.host)
       const path = process.env.PATH
       const home = process.env.HOME
 

@@ -1,13 +1,13 @@
-import {resolve} from 'node:path'
-import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
+import type {SpawnFn} from './login'
 
-const cliDir = resolve(import.meta.dir, '../../..')
+import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 const envKeys = ['CLIPROXY_DOMAIN', 'HOME', 'PATH', 'SSH_AUTH_SOCK'] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
 
 let originalEnv: Partial<Record<ManagedEnvKey, string | undefined>>
+let originalIsTTY: boolean | undefined
 
 function restoreManagedEnv(): void {
   for (const key of envKeys) {
@@ -22,80 +22,84 @@ function restoreManagedEnv(): void {
   }
 }
 
-async function runLoginCommand(
-  args: string[],
-  envOverrides: Partial<Record<ManagedEnvKey, string | undefined>> = {},
-): Promise<{stdout: string; stderr: string; exitCode: number}> {
-  const env = {...process.env}
-
-  for (const [key, value] of Object.entries(envOverrides)) {
-    if (value === undefined) {
-      delete env[key]
-      continue
-    }
-
-    env[key] = value
+/** Minimal SpawnFn mock for inherit-stdio calls — records invocations and resolves with exitCode. */
+function makeSpawnOk(exitCode = 0): {spawnFn: SpawnFn; calls: {cmd: string[]; opts: unknown}[]} {
+  const calls: {cmd: string[]; opts: unknown}[] = []
+  const spawnFn: SpawnFn = (cmd, opts) => {
+    calls.push({cmd, opts})
+    return {exited: Promise.resolve(exitCode)}
   }
 
-  const proc = Bun.spawn(['bun', 'src/cli.ts', 'cliproxy', 'login', ...args], {
-    cwd: cliDir,
-    env: {
-      ...env,
-      HOME: env.HOME ?? '/tmp/test-home',
-      NO_COLOR: '1',
-      PATH: env.PATH ?? '/usr/bin:/bin',
-      SSH_AUTH_SOCK: env.SSH_AUTH_SOCK ?? '/tmp/test-sock',
-    },
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
+  return {spawnFn, calls}
+}
 
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
+// Helper: a SpawnFn that must never be called (proves provider check fires before spawn)
+const neverSpawn: SpawnFn = () => {
+  throw new Error('spawn must not be called for invalid provider')
+}
 
-  return {stdout, stderr, exitCode}
+// Helper: set up a valid TTY + env so spawn-path tests can reach the spawn call
+function setValidEnv(): void {
+  Object.defineProperty(process.stdin, 'isTTY', {value: true, configurable: true})
+  process.env.SSH_AUTH_SOCK = '/tmp/test-agent.sock'
+  process.env.PATH = process.env.PATH ?? '/usr/bin'
+  process.env.HOME = process.env.HOME ?? '/root'
 }
 
 describe('cliproxy login', () => {
   beforeEach(() => {
     originalEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]))
+    originalIsTTY = process.stdin.isTTY
   })
 
   afterEach(() => {
     restoreManagedEnv()
+    Object.defineProperty(process.stdin, 'isTTY', {value: originalIsTTY, configurable: true})
   })
 
   describe('validation', () => {
     it('rejects unsupported providers', async () => {
-      const {stderr, exitCode} = await runLoginCommand(['openai'])
-      expect(exitCode).not.toBe(0)
-      expect(stderr).toContain('Unsupported provider')
-      expect(stderr).toContain('only "claude" is supported')
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk()
+
+      // Provider check happens before TTY check — no need to set isTTY
+      await expect(cliproxyLoginAction('openai', {}, spawnFn)).rejects.toThrow('Unsupported provider')
+      await expect(cliproxyLoginAction('openai', {}, spawnFn)).rejects.toThrow('Supported: claude, codex.')
     })
 
     it('requires interactive terminal (checked before SSH_AUTH_SOCK)', async () => {
-      const {stderr, exitCode} = await runLoginCommand(['claude'], {SSH_AUTH_SOCK: undefined})
-      expect(exitCode).not.toBe(0)
-      expect(stderr).toContain('interactive terminal')
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk()
+
+      // Simulate non-TTY environment (as subprocess tests did)
+      Object.defineProperty(process.stdin, 'isTTY', {value: false, configurable: true})
+
+      await expect(cliproxyLoginAction('claude', {}, spawnFn)).rejects.toThrow('interactive terminal')
     })
   })
 
   describe('host resolution', () => {
     it('uses CLIPROXY_DOMAIN env var', async () => {
-      const {stderr, exitCode} = await runLoginCommand(['claude'], {
-        CLIPROXY_DOMAIN: 'custom.host.example',
-      })
-      expect(exitCode).not.toBe(0)
-      expect(stderr).toContain('interactive terminal')
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk()
+
+      Object.defineProperty(process.stdin, 'isTTY', {value: false, configurable: true})
+      process.env.CLIPROXY_DOMAIN = 'custom.host.example'
+
+      // TTY check fires before host resolution — error is about TTY
+      await expect(cliproxyLoginAction('claude', {}, spawnFn)).rejects.toThrow('interactive terminal')
     })
 
     it('uses --host flag', async () => {
-      const {stderr, exitCode} = await runLoginCommand(['claude', '--host', 'custom.host.example'])
-      expect(exitCode).not.toBe(0)
-      expect(stderr).toContain('interactive terminal')
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk()
+
+      Object.defineProperty(process.stdin, 'isTTY', {value: false, configurable: true})
+
+      // TTY check fires before host resolution — error is about TTY
+      await expect(cliproxyLoginAction('claude', {host: 'custom.host.example'}, spawnFn)).rejects.toThrow(
+        'interactive terminal',
+      )
     })
   })
 
@@ -129,6 +133,156 @@ describe('cliproxy login', () => {
       delete process.env.SSH_AUTH_SOCK
       const {requireSshAuthSock} = await import('./login')
       expect(() => requireSshAuthSock()).toThrow('SSH_AUTH_SOCK is required')
+    })
+  })
+
+  describe('provider flags', () => {
+    it('happy path — codex: spawn args contain --codex-device-login and --no-browser', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn, calls} = makeSpawnOk(0)
+      setValidEnv()
+
+      await cliproxyLoginAction('codex', {}, spawnFn)
+
+      const cmd = calls[0]!.cmd
+      expect(cmd.join(' ')).toContain('--codex-device-login')
+      expect(cmd.join(' ')).toContain('--no-browser')
+      expect(cmd.join(' ')).not.toContain('--codex-login ')
+    })
+
+    it('happy path — claude regression: spawn args contain --claude-login and --no-browser', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn, calls} = makeSpawnOk(0)
+      setValidEnv()
+
+      await cliproxyLoginAction('claude', {}, spawnFn)
+
+      const cmd = calls[0]!.cmd
+      expect(cmd.join(' ')).toContain('--claude-login')
+      expect(cmd.join(' ')).toContain('--no-browser')
+    })
+
+    it('error path — unknown provider "chatgpt": rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('chatgpt', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "chatgpt". Supported: claude, codex.',
+      )
+    })
+
+    it('error path — empty provider: rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "". Supported: claude, codex.',
+      )
+    })
+
+    it('error path — malformed provider path traversal: rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('../../../etc/passwd', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "../../../etc/passwd". Supported: claude, codex.',
+      )
+    })
+
+    it('error path — prototype-chain bypass "__proto__": rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('__proto__', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "__proto__". Supported: claude, codex.',
+      )
+    })
+
+    it('error path — prototype-chain bypass "constructor": rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('constructor', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "constructor". Supported: claude, codex.',
+      )
+    })
+
+    it('error path — prototype-chain bypass "hasOwnProperty": rejects with correct message, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+
+      await expect(cliproxyLoginAction('hasOwnProperty', {}, neverSpawn)).rejects.toThrow(
+        'Unsupported provider "hasOwnProperty". Supported: claude, codex.',
+      )
+    })
+  })
+
+  describe('host validation', () => {
+    it('rejects --host with a leading dash (ProxyCommand injection vector), no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      setValidEnv()
+
+      await expect(cliproxyLoginAction('codex', {host: '-oProxyCommand=evil'}, neverSpawn)).rejects.toThrow(
+        'Invalid CLIPROXY_DOMAIN',
+      )
+    })
+
+    it('rejects CLIPROXY_DOMAIN env with a leading dash, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      setValidEnv()
+      process.env.CLIPROXY_DOMAIN = '-oProxyCommand=evil'
+
+      await expect(cliproxyLoginAction('codex', {}, neverSpawn)).rejects.toThrow('Invalid CLIPROXY_DOMAIN')
+    })
+
+    it('rejects --host with shell metacharacters (semicolon), no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      setValidEnv()
+
+      await expect(cliproxyLoginAction('codex', {host: 'gateway.example.com;rm -rf'}, neverSpawn)).rejects.toThrow(
+        'Invalid CLIPROXY_DOMAIN',
+      )
+    })
+  })
+
+  describe('anti-phishing notice', () => {
+    let logLines: string[]
+    let originalLog: typeof console.log
+
+    beforeEach(() => {
+      logLines = []
+      originalLog = console.log
+      console.log = (...args: unknown[]) => {
+        logLines.push(args.map(String).join(' '))
+      }
+    })
+
+    afterEach(() => {
+      console.log = originalLog
+    })
+
+    it('codex: anti-phishing notice appears before spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const linesBeforeSpawn: string[] = []
+      let spawnCalled = false
+
+      const trackingSpawn: SpawnFn = (_cmd, _opts) => {
+        linesBeforeSpawn.push(...logLines)
+        spawnCalled = true
+        return {exited: Promise.resolve(0)}
+      }
+
+      setValidEnv()
+      await cliproxyLoginAction('codex', {}, trackingSpawn)
+
+      expect(spawnCalled).toBe(true)
+      const allOutput = linesBeforeSpawn.join('\n')
+      expect(allOutput).toMatch(/openai\.com/i)
+    })
+
+    it('claude: anti-phishing notice does NOT appear', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk(0)
+      setValidEnv()
+
+      await cliproxyLoginAction('claude', {}, spawnFn)
+
+      const allOutput = logLines.join('\n')
+      expect(allOutput).not.toMatch(/openai\.com/)
     })
   })
 })

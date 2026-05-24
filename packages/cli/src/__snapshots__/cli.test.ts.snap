@@ -71,7 +71,7 @@ Commands:
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
 
-  cliproxy login <provider>            Run provider login on the remote CLIProxyAPI host and print OAuth URL output.
+  cliproxy login <provider>            Run provider login on the remote CLIProxyAPI host. Supported providers: claude, codex.
 
     --host [host]                      CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
 

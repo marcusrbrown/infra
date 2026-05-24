@@ -1,7 +1,11 @@
 import type {goke} from 'goke'
+import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
 
 import {z} from 'zod'
+
+/** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
+// ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
 declare const process: {
   env: Record<string, string | undefined>
@@ -197,13 +201,13 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
   }
 }
 
-function printCheckResult(result: CheckResult): void {
-  console.log(`[${levelLabel(result.level)}] ${result.title}`)
-  console.log(`  ${result.summary}`)
+function printCheckResult(result: CheckResult, ctx: ActionCtx): void {
+  ctx.console.log(`[${levelLabel(result.level)}] ${result.title}`)
+  ctx.console.log(`  ${result.summary}`)
 
   if (result.details && result.details.length > 0) {
     for (const detail of result.details) {
-      console.log(`  - ${detail}`)
+      ctx.console.log(`  - ${detail}`)
     }
   }
 }
@@ -247,6 +251,71 @@ export async function getCliproxyStatusSummary(baseUrl: string, key: string, ver
   }
 }
 
+export interface StatusOptions {
+  url?: string
+  key?: string
+  verbose?: boolean
+}
+
+export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCtx): Promise<void> {
+  let errorCount = 0
+  try {
+    const verbose = options.verbose === true
+    const baseUrl = stripTrailingSlash(options.url ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
+    const managementKey = options.key ?? process.env.CLIPROXY_MANAGEMENT_KEY
+
+    ctx.console.log('CLIProxyAPI status')
+    ctx.console.log('')
+
+    const results: CheckResult[] = [await checkHttpReachability(baseUrl, verbose)]
+
+    let capturedUsageResult: CheckResult | undefined
+
+    if (managementKey) {
+      const [usageResult, versionResult] = await Promise.all([
+        checkUsageStats(baseUrl, managementKey),
+        checkVersion(baseUrl, managementKey),
+      ])
+
+      capturedUsageResult = usageResult
+      results.push(usageResult, versionResult)
+    } else {
+      results.push({
+        title: 'Management checks',
+        level: 'warning',
+        summary:
+          'CLIPROXY_MANAGEMENT_KEY is not set. Skipping usage stats and version checks. Provide --key or set env var.',
+      })
+    }
+
+    for (const result of results) {
+      printCheckResult(result, ctx)
+      ctx.console.log('')
+    }
+
+    errorCount = results.filter(result => result.level === 'error').length
+    const warningCount = results.filter(result => result.level === 'warning').length
+
+    ctx.console.log(`Summary: ${results.length} checks, ${errorCount} errors, ${warningCount} warnings`)
+
+    if (capturedUsageResult) {
+      const usageLine = formatUsageSummaryLine(capturedUsageResult)
+      if (usageLine) {
+        ctx.console.log(usageLine)
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.console.error(message)
+    ctx.process.exit(1)
+    return
+  }
+
+  if (errorCount > 0) {
+    ctx.process.exit(1)
+  }
+}
+
 export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
   cli
     .command('cliproxy status', 'Show operational health of CLIProxyAPI and its management endpoints.')
@@ -261,54 +330,5 @@ export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
       z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
     )
     .option('--verbose', 'Enable verbose output for all commands')
-    .action(async options => {
-      const verbose = options.verbose === true
-      const baseUrl = stripTrailingSlash(options.url ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
-      const managementKey = options.key ?? process.env.CLIPROXY_MANAGEMENT_KEY
-
-      console.log('CLIProxyAPI status')
-      console.log('')
-
-      const results: CheckResult[] = [await checkHttpReachability(baseUrl, verbose)]
-
-      let capturedUsageResult: CheckResult | undefined
-
-      if (managementKey) {
-        const [usageResult, versionResult] = await Promise.all([
-          checkUsageStats(baseUrl, managementKey),
-          checkVersion(baseUrl, managementKey),
-        ])
-
-        capturedUsageResult = usageResult
-        results.push(usageResult, versionResult)
-      } else {
-        results.push({
-          title: 'Management checks',
-          level: 'warning',
-          summary:
-            'CLIPROXY_MANAGEMENT_KEY is not set. Skipping usage stats and version checks. Provide --key or set env var.',
-        })
-      }
-
-      for (const result of results) {
-        printCheckResult(result)
-        console.log('')
-      }
-
-      const errorCount = results.filter(result => result.level === 'error').length
-      const warningCount = results.filter(result => result.level === 'warning').length
-
-      console.log(`Summary: ${results.length} checks, ${errorCount} errors, ${warningCount} warnings`)
-
-      if (capturedUsageResult) {
-        const usageLine = formatUsageSummaryLine(capturedUsageResult)
-        if (usageLine) {
-          console.log(usageLine)
-        }
-      }
-
-      if (errorCount > 0) {
-        process.exitCode = 1
-      }
-    })
+    .action(cliproxyStatusAction)
 }

@@ -2,7 +2,8 @@ import {statSync, writeFileSync} from 'node:fs'
 
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {backupGatewayCa, type BackupSpawnFn} from './backup'
+import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
+import {backupGatewayCa, gatewayBackupAction, type BackupSpawnFn} from './backup'
 
 // ─── SpawnFn helpers ──────────────────────────────────────────────────────────
 
@@ -284,5 +285,69 @@ describe('backupGatewayCa — SEC1: tmp file created with mode 0600 atomically',
     } finally {
       Bun.spawnSync(['rm', '-f', output])
     }
+  })
+})
+
+// ─── Tier-2: gatewayBackupAction ctx capture ─────────────────────────────────
+
+describe('gatewayBackupAction — ctx capture (Tier-2)', () => {
+  let originalEnv: Record<string, string | undefined>
+  let tmpOutput: string
+
+  beforeEach(() => {
+    originalEnv = {GATEWAY_HOST: process.env.GATEWAY_HOST}
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+    tmpOutput = `/tmp/test-action-backup-${Date.now()}.tar`
+  })
+
+  afterEach(async () => {
+    if (originalEnv.GATEWAY_HOST === undefined) {
+      delete process.env.GATEWAY_HOST
+    } else {
+      process.env.GATEWAY_HOST = originalEnv.GATEWAY_HOST
+    }
+    try {
+      ;(await Bun.file(tmpOutput).exists()) && Bun.spawnSync(['rm', '-f', tmpOutput])
+    } catch {
+      // ignore
+    }
+  })
+
+  it('routes success message to ctx.console.log (stdout)', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await gatewayBackupAction({output: tmpOutput, includeCa: true}, ctx, makeSpawnOk(new Uint8Array([1, 2, 3])))
+
+    expect(expectCapturedToInclude(captured, 'CA backup written to')).toBe(true)
+  })
+
+  it('routes sensitive-content warning to ctx.process.stderr.write', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await gatewayBackupAction({output: tmpOutput, includeCa: true}, ctx, makeSpawnOk(new Uint8Array([1, 2, 3])))
+
+    const stderrText = captured.stderr.join('')
+    expect(stderrText.toLowerCase().includes('sensitive')).toBe(true)
+  })
+
+  it('routes error to ctx.console.error and calls ctx.process.exit(1) when GATEWAY_HOST is unset', async () => {
+    delete process.env.GATEWAY_HOST
+    const {ctx, captured} = createCapturedCtx()
+
+    await expect(gatewayBackupAction({output: tmpOutput, includeCa: true}, ctx)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(captured.stderr.join('').includes('GATEWAY_HOST')).toBe(true)
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  it('routes backup failure to ctx.console.error and calls ctx.process.exit(1)', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await expect(
+      gatewayBackupAction({output: tmpOutput, includeCa: true}, ctx, makeSpawnError('Connection refused')),
+    ).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(captured.stderr.join('').toLowerCase().includes('backup failed')).toBe(true)
+    expect(captured.exit?.code).toBe(1)
   })
 })

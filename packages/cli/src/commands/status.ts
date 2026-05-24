@@ -1,5 +1,7 @@
 import type {goke} from 'goke'
 
+import type {ActionCtx} from '../lib/action-ctx'
+
 import {z} from 'zod'
 
 import {getCliproxyStatusSummary} from './cliproxy/status'
@@ -69,6 +71,49 @@ function formatRow(row: StatusSummary): string {
   return `| ${values.join(' | ')} |`
 }
 
+export async function unifiedStatusAction(
+  options: {json?: boolean; verbose?: boolean},
+  ctx: ActionCtx,
+  dependencies: StatusDependencies = {
+    getKeewebStatusSummary,
+    getCliproxyStatusSummary,
+    getGatewayStatusSummary,
+  },
+): Promise<void> {
+  const verbose = options.verbose === true
+  const cliproxyBaseUrl = stripTrailingSlash(process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
+  const cliproxyKey = process.env.CLIPROXY_MANAGEMENT_KEY ?? ''
+  const gatewayHost = process.env.GATEWAY_HOST ?? ''
+
+  const results = await Promise.allSettled([
+    dependencies.getKeewebStatusSummary(verbose),
+    dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey, verbose),
+    dependencies.getGatewayStatusSummary(gatewayHost),
+  ])
+
+  const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway']
+  const rows: StatusSummary[] = results.map((result, index) => {
+    const app = appNames[index] ?? 'keeweb'
+    if (result.status === 'fulfilled') {
+      return result.value
+    }
+    const reason = result.reason
+    const message = reason instanceof Error ? reason.message : String(reason)
+    ctx.console.error(`${app} status check failed: ${message}`)
+    return errorSummary(app, reason)
+  })
+
+  if (options.json === true) {
+    ctx.console.log(JSON.stringify(toJsonPayload(rows)))
+    return
+  }
+
+  ctx.console.log('| App | HTTP | Last Deploy | Version | Content Hash | Usage Stats |')
+  for (const row of rows) {
+    ctx.console.log(formatRow(row))
+  }
+}
+
 export function registerStatus(
   cli: ReturnType<typeof goke>,
   dependencies: StatusDependencies = {
@@ -87,32 +132,5 @@ export function registerStatus(
       '--verbose',
       z.boolean().describe('Include verbose per-app health check details when building the summary rows.'),
     )
-    .action(async options => {
-      const verbose = options.verbose === true
-      const cliproxyBaseUrl = stripTrailingSlash(process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
-      const cliproxyKey = process.env.CLIPROXY_MANAGEMENT_KEY ?? ''
-      const gatewayHost = process.env.GATEWAY_HOST ?? ''
-
-      const results = await Promise.allSettled([
-        dependencies.getKeewebStatusSummary(verbose),
-        dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey, verbose),
-        dependencies.getGatewayStatusSummary(gatewayHost),
-      ])
-
-      const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway']
-      const rows: StatusSummary[] = results.map((result, index) => {
-        const app = appNames[index] ?? 'keeweb'
-        return result.status === 'fulfilled' ? result.value : errorSummary(app, result.reason)
-      })
-
-      if (options.json === true) {
-        console.log(JSON.stringify(toJsonPayload(rows)))
-        return
-      }
-
-      console.log('| App | HTTP | Last Deploy | Version | Content Hash | Usage Stats |')
-      for (const row of rows) {
-        console.log(formatRow(row))
-      }
-    })
+    .action((options, ctx) => unifiedStatusAction(options, ctx, dependencies))
 }

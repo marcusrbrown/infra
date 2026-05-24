@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, mock, spyOn} from 'bun:test'
 
+import {createCapturedCtx, expectCapturedToInclude} from '../../__test__/mcp-ctx-fixture'
 import {
   checkContentHash,
   checkHttpReachability,
@@ -7,6 +8,7 @@ import {
   formatDate,
   formatDurationMs,
   hashSha256,
+  keewebStatusAction,
 } from './status'
 
 const originalFetch = globalThis.fetch
@@ -208,5 +210,149 @@ describe('keeweb status helpers', () => {
       expect(result.level).toBe('warning')
       expect(result.summary).toContain('not found')
     })
+  })
+})
+
+describe('keewebStatusAction (Tier-2 ctx capture)', () => {
+  let fetchMock: ReturnType<typeof mock<typeof fetch>>
+  let fileSpy: ReturnType<typeof spyOn<typeof Bun, 'file'>> | undefined
+  let spawnSpy: ReturnType<typeof spyOn<typeof Bun, 'spawn'>> | undefined
+
+  beforeEach(() => {
+    fetchMock = mock(
+      createFetchImplementation(async () => {
+        throw new Error('Unexpected fetch call')
+      }),
+    )
+    globalThis.fetch = Object.assign(fetchMock, {preconnect: originalFetch.preconnect})
+  })
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    fileSpy?.mockRestore()
+    fileSpy = undefined
+    spawnSpy?.mockRestore()
+    spawnSpy = undefined
+  })
+
+  it('writes "KeeWeb status" header to ctx.console.log (not global console)', async () => {
+    // Mock HTTP 200
+    fetchMock.mockImplementation(createFetchImplementation(async () => new Response('ok', {status: 200})))
+
+    // Mock gh CLI returning a successful run
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
+      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
+    )
+
+    // Mock local dist file as missing (avoids filesystem dependency)
+    fileSpy = spyOn(Bun, 'file').mockImplementation(
+      () =>
+        ({
+          exists: async () => false,
+        }) as ReturnType<typeof Bun.file>,
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+
+    await keewebStatusAction({verbose: false}, ctx)
+
+    // 'KeeWeb status' is the header line in the formatted output — the contract
+    // marker confirming the action printed to ctx.console.log (captured) rather
+    // than the real global console (which would not appear in `captured`).
+    expect(expectCapturedToInclude(captured, 'KeeWeb status')).toBe(true)
+    // Summary footer is always emitted; pairing it with the header proves both
+    // ends of the formatted output flow through ctx capture.
+    expect(expectCapturedToInclude(captured, 'Summary:')).toBe(true)
+  })
+
+  it('writes HTTP check result to captured stdout', async () => {
+    fetchMock.mockImplementation(createFetchImplementation(async () => new Response('ok', {status: 200})))
+
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
+      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
+    )
+
+    fileSpy = spyOn(Bun, 'file').mockImplementation(
+      () =>
+        ({
+          exists: async () => false,
+        }) as ReturnType<typeof Bun.file>,
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+
+    await keewebStatusAction({verbose: false}, ctx)
+
+    expect(expectCapturedToInclude(captured, 'HTTP reachability')).toBe(true)
+    expect(expectCapturedToInclude(captured, '[OK]')).toBe(true)
+  })
+
+  it('writes summary line to captured stdout', async () => {
+    fetchMock.mockImplementation(createFetchImplementation(async () => new Response('ok', {status: 200})))
+
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
+      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
+    )
+
+    fileSpy = spyOn(Bun, 'file').mockImplementation(
+      () =>
+        ({
+          exists: async () => false,
+        }) as ReturnType<typeof Bun.file>,
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+
+    await keewebStatusAction({verbose: false}, ctx)
+
+    expect(expectCapturedToInclude(captured, 'Summary:')).toBe(true)
+    expect(expectCapturedToInclude(captured, '3 checks')).toBe(true)
+  })
+
+  it('calls ctx.process.exit(1) when there are errors', async () => {
+    // HTTP 500 → error level
+    fetchMock.mockImplementation(createFetchImplementation(async () => new Response('error', {status: 500})))
+
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
+      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
+    )
+
+    fileSpy = spyOn(Bun, 'file').mockImplementation(
+      () =>
+        ({
+          exists: async () => false,
+        }) as ReturnType<typeof Bun.file>,
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+
+    // ctx.process.exit throws MockProcessExit — catch it
+    await expect(keewebStatusAction({verbose: false}, ctx)).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+
+    expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('does not call ctx.process.exit when all checks pass', async () => {
+    fetchMock.mockImplementation(createFetchImplementation(async () => new Response('ok', {status: 200})))
+
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
+      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
+    )
+
+    fileSpy = spyOn(Bun, 'file').mockImplementation(
+      () =>
+        ({
+          exists: async () => false,
+        }) as ReturnType<typeof Bun.file>,
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+
+    await keewebStatusAction({verbose: false}, ctx)
+
+    expect(captured.exit).toBeNull()
   })
 })

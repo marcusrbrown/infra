@@ -1,9 +1,35 @@
-import {chmodSync, existsSync, statSync} from 'node:fs'
+import {existsSync, statSync} from 'node:fs'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {buildSetRequest, formatConfigAsColumns, parseBoolean, parseNumber, resolveManagementKey} from './config'
+import {createCapturedCtx, expectCapturedToInclude} from '../../__test__/mcp-ctx-fixture'
+import {
+  buildSetRequest,
+  cliproxyConfigGetAction,
+  cliproxyConfigSetAction,
+  formatConfigAsColumns,
+  parseBoolean,
+  parseNumber,
+  resolveManagementKey,
+} from './config'
 import {toStringArray} from './keys'
 import {requireSshAuthSock, resolveHost} from './login'
+
+const originalFetch = globalThis.fetch
+
+type FetchReplacement = (url: string, init?: RequestInit) => Promise<Response>
+
+function createFetchImplementation(handler: FetchReplacement): typeof fetch {
+  return Object.assign(
+    (input: string | URL | Request, init?: RequestInit) => {
+      if (typeof input !== 'string') {
+        throw new TypeError(`Unexpected non-string fetch input: ${String(input)}`)
+      }
+
+      return handler(input, init)
+    },
+    {preconnect: originalFetch.preconnect},
+  )
+}
 
 describe('cliproxy config helpers', () => {
   describe('parseBoolean', () => {
@@ -100,95 +126,6 @@ describe('cliproxy config helpers', () => {
       expect(() => resolveManagementKey()).toThrow()
     })
   })
-
-  describe('config get --output', () => {
-    it('writes config JSON to file with 0600 permissions', async () => {
-      const testFile = '/tmp/test-config-output.json'
-      const mockConfig = {debug: true, 'api-keys': ['key1', 'key2']}
-
-      const originalFetch = globalThis.fetch as typeof fetch
-      ;(globalThis.fetch as unknown) = async () => {
-        return new Response(JSON.stringify(mockConfig), {status: 200})
-      }
-
-      try {
-        const baseUrl = 'https://cliproxy.example.com'
-        const managementKey = 'test-key'
-        const endpoint = `${baseUrl}/v0/management/config`
-        const response = await fetch(endpoint, {
-          method: 'GET',
-          headers: new Headers({
-            'x-management-key': managementKey,
-            'content-type': 'application/json',
-          }),
-        })
-        const payload = await response.json()
-        const jsonOutput = JSON.stringify(payload, null, 2)
-
-        await Bun.write(testFile, jsonOutput)
-        chmodSync(testFile, 0o600)
-        const {mode} = statSync(testFile)
-        const permissions = mode & 0o777
-
-        expect(existsSync(testFile)).toBe(true)
-        expect(permissions).toBe(0o600)
-
-        const content = await Bun.file(testFile).text()
-        expect(JSON.parse(content)).toEqual(mockConfig)
-      } finally {
-        ;(globalThis.fetch as unknown) = originalFetch
-        if (existsSync(testFile)) {
-          const fs = await import('node:fs/promises')
-          await fs.unlink(testFile).catch(() => {})
-        }
-      }
-    })
-
-    it('prints API key warning to stderr when writing to stdout', async () => {
-      const mockConfig = {debug: true, 'api-keys': ['secret-key']}
-      const stderrLines: string[] = []
-      const stdoutLines: string[] = []
-
-      const originalError = console.error
-      const originalLog = console.log
-      console.error = (...args: unknown[]) => {
-        stderrLines.push(String(args[0]))
-      }
-      console.log = (...args: unknown[]) => {
-        stdoutLines.push(String(args[0]))
-      }
-
-      const originalFetch = globalThis.fetch as typeof fetch
-      ;(globalThis.fetch as unknown) = async () => {
-        return new Response(JSON.stringify(mockConfig), {status: 200})
-      }
-
-      try {
-        const baseUrl = 'https://cliproxy.example.com'
-        const managementKey = 'test-key'
-        const endpoint = `${baseUrl}/v0/management/config`
-        const response = await fetch(endpoint, {
-          method: 'GET',
-          headers: new Headers({
-            'x-management-key': managementKey,
-            'content-type': 'application/json',
-          }),
-        })
-        const payload = await response.json()
-        const jsonOutput = JSON.stringify(payload, null, 2)
-
-        console.error('⚠️  Output may contain API keys — avoid logging or storing in shared locations')
-        console.log(jsonOutput)
-
-        expect(stderrLines.some(line => line.includes('API keys'))).toBe(true)
-        expect(stdoutLines.some(line => line.includes('debug'))).toBe(true)
-      } finally {
-        console.error = originalError
-        console.log = originalLog
-        ;(globalThis.fetch as unknown) = originalFetch
-      }
-    })
-  })
 })
 
 describe('formatConfigAsColumns', () => {
@@ -214,6 +151,239 @@ describe('formatConfigAsColumns', () => {
   it('falls back to JSON.stringify for non-objects', () => {
     expect(formatConfigAsColumns(null)).toBe('null')
     expect(formatConfigAsColumns([1, 2])).toBe('[\n  1,\n  2\n]')
+  })
+})
+
+describe('cliproxyConfigGetAction (Mode C, Tier-2 ctx capture)', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('Mode C: captures formatted config to ctx.stdout and returns config object', async () => {
+    const mockConfig = {debug: true, 'request-retry': 3}
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(mockConfig), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    const result = await cliproxyConfigGetAction({url: 'https://cliproxy.example.com', key: 'mgmt-key'}, ctx)
+
+    // Tier-2: stdout contains formatted config
+    expect(expectCapturedToInclude(captured, 'debug')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'request-retry')).toBe(true)
+
+    // Mode C: action returns the config object
+    expect(result).toEqual(mockConfig)
+  })
+
+  it('Mode C: security warning goes to ctx.stderr', async () => {
+    const mockConfig = {debug: false}
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(mockConfig), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyConfigGetAction({url: 'https://cliproxy.example.com', key: 'mgmt-key'}, ctx)
+
+    const stderrText = captured.stderr.join('')
+    expect(stderrText).toContain('API keys')
+  })
+
+  it('Mode C: --json flag outputs raw JSON to ctx.stdout', async () => {
+    const mockConfig = {debug: true}
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(mockConfig), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    const result = await cliproxyConfigGetAction(
+      {url: 'https://cliproxy.example.com', key: 'mgmt-key', json: true},
+      ctx,
+    )
+
+    const stdoutText = captured.stdout.join('')
+    expect(JSON.parse(stdoutText)).toEqual(mockConfig)
+    expect(result).toEqual(mockConfig)
+  })
+
+  it('Mode C: --output writes file and prints confirmation to ctx.stdout', async () => {
+    const testFile = '/tmp/test-cliproxy-config-get-action.json'
+    const mockConfig = {debug: true, 'api-keys': ['key1', 'key2']}
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(mockConfig), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    try {
+      const result = await cliproxyConfigGetAction(
+        {url: 'https://cliproxy.example.com', key: 'mgmt-key', output: testFile},
+        ctx,
+      )
+
+      expect(existsSync(testFile)).toBe(true)
+      const {mode} = statSync(testFile)
+      expect(mode & 0o777).toBe(0o600)
+      expect(JSON.parse(await Bun.file(testFile).text())).toEqual(mockConfig)
+      expect(expectCapturedToInclude(captured, '✓ Config written to')).toBe(true)
+      expect(result).toEqual(mockConfig)
+    } finally {
+      if (existsSync(testFile)) {
+        const fs = await import('node:fs/promises')
+        await fs.unlink(testFile).catch(() => {})
+      }
+    }
+  })
+})
+
+describe('cliproxyConfigSetAction (Mode A, two positional args, Tier-2 ctx capture)', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('Mode A: captures PUT response to ctx.stdout', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify({value: true}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyConfigSetAction('debug', 'true', {url: 'https://cliproxy.example.com', key: 'mgmt-key'}, ctx)
+
+    expect(expectCapturedToInclude(captured, 'value')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'true')).toBe(true)
+  })
+
+  it('Mode A: routes unsupported field error through ctx.console.error + exit(1)', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyConfigSetAction('unsupported-field', 'val', {url: 'https://cliproxy.example.com', key: 'mgmt-key'}, ctx),
+    ).rejects.toMatchObject({name: 'MockProcessExit', code: 1})
+    expect(captured.stderr.join('')).toContain('not a supported mutable field')
+    expect(captured.exit).toEqual({code: 1})
+  })
+})
+
+describe('cliproxyConfigGetAction (Tier-2 failure-path parity)', () => {
+  const originalManagementKey = process.env.CLIPROXY_MANAGEMENT_KEY
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    if (originalManagementKey === undefined) {
+      delete process.env.CLIPROXY_MANAGEMENT_KEY
+    } else {
+      process.env.CLIPROXY_MANAGEMENT_KEY = originalManagementKey
+    }
+  })
+
+  it('Tier-2: missing CLIPROXY_MANAGEMENT_KEY routes to ctx.console.error + exit(1)', async () => {
+    delete process.env.CLIPROXY_MANAGEMENT_KEY
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(cliproxyConfigGetAction({url: 'https://cliproxy.example.com'}, ctx)).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('Management API key')
+    expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('Tier-2: HTTP 500 response routes to ctx.console.error + exit(1)', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('server error', {status: 500}))
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyConfigGetAction({url: 'https://cliproxy.example.com', key: 'mgmt-key'}, ctx),
+    ).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('HTTP 500')
+    expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('Tier-2: --output write failure routes to ctx.console.error + exit(1)', async () => {
+    const mockConfig = {debug: true}
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(mockConfig), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    // Use a path that cannot be written (directory as file path)
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyConfigGetAction(
+        {url: 'https://cliproxy.example.com', key: 'mgmt-key', output: '/dev/null/cannot-write'},
+        ctx,
+      ),
+    ).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('Failed to write config')
+    expect(captured.exit).toEqual({code: 1})
+  })
+})
+
+describe('cliproxyConfigSetAction (Tier-2 failure-path parity)', () => {
+  const originalManagementKey = process.env.CLIPROXY_MANAGEMENT_KEY
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    if (originalManagementKey === undefined) {
+      delete process.env.CLIPROXY_MANAGEMENT_KEY
+    } else {
+      process.env.CLIPROXY_MANAGEMENT_KEY = originalManagementKey
+    }
+  })
+
+  it('Tier-2: missing CLIPROXY_MANAGEMENT_KEY routes to ctx.console.error + exit(1)', async () => {
+    delete process.env.CLIPROXY_MANAGEMENT_KEY
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyConfigSetAction('debug', 'true', {url: 'https://cliproxy.example.com'}, ctx),
+    ).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('Management API key')
+    expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('Tier-2: HTTP 500 response routes to ctx.console.error + exit(1)', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('server error', {status: 500}))
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyConfigSetAction('debug', 'true', {url: 'https://cliproxy.example.com', key: 'mgmt-key'}, ctx),
+    ).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('HTTP 500')
+    expect(captured.exit).toEqual({code: 1})
   })
 })
 

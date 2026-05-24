@@ -1,9 +1,11 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
+import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
 import {
   checkHttpReachability,
   checkUsageStats,
   checkVersion,
+  cliproxyStatusAction,
   formatDurationMs,
   formatUsageSummaryLine,
   levelLabel,
@@ -305,5 +307,83 @@ describe('cliproxy status helpers', () => {
 
       expect(result).toBe('Requests: 0 total, 0 failed (0.0% failure rate)')
     })
+  })
+})
+
+describe('cliproxyStatusAction (Tier-2 ctx capture, failure-path parity)', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('Tier-2: routes unexpected thrown error through ctx.console.error + ctx.process.exit(1)', async () => {
+    // Trigger an unexpected error by having ctx.console.log throw on first call
+    const {ctx, captured} = createCapturedCtx()
+    let callCount = 0
+    const originalLog = ctx.console.log
+    ctx.console.log = (...args: unknown[]) => {
+      callCount++
+      if (callCount === 1) {
+        throw new Error('Unexpected internal error during status output')
+      }
+
+      originalLog(...args)
+    }
+
+    globalThis.fetch = createFetchImplementation(async () => new Response('ok', {status: 200}))
+
+    await expect(cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)).rejects.toMatchObject({
+      name: 'MockProcessExit',
+      code: 1,
+    })
+    expect(captured.stderr.join('')).toContain('Unexpected internal error')
+    expect(captured.exit).toEqual({code: 1})
+  })
+})
+
+describe('cliproxyStatusAction (Tier-2 ctx capture)', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('Mode A: captures CLIProxyAPI status header to ctx.stdout', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('ok', {status: 200}))
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+
+    expect(expectCapturedToInclude(captured, 'CLIProxyAPI status')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'HTTP reachability')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'Summary:')).toBe(true)
+  })
+
+  it('Mode A: calls ctx.process.exit(1) on HTTP error', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('error', {status: 500}))
+
+    const {ctx, captured} = createCapturedCtx()
+    let threw: unknown
+    try {
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+    } catch (error) {
+      threw = error
+    }
+
+    expect(threw).toBeInstanceOf(MockProcessExit)
+    expect(captured.exit?.code).toBe(1)
+    expect(expectCapturedToInclude(captured, 'ERROR')).toBe(true)
+  })
+
+  it('Mode A: shows management key warning when no key provided', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('ok', {status: 200}))
+
+    const savedKey = process.env.CLIPROXY_MANAGEMENT_KEY
+    delete process.env.CLIPROXY_MANAGEMENT_KEY
+    try {
+      const {ctx, captured} = createCapturedCtx()
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+
+      expect(expectCapturedToInclude(captured, 'CLIPROXY_MANAGEMENT_KEY')).toBe(true)
+    } finally {
+      if (savedKey !== undefined) process.env.CLIPROXY_MANAGEMENT_KEY = savedKey
+    }
   })
 })

@@ -1,7 +1,10 @@
 import type {goke} from 'goke'
+import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
 
 import {z} from 'zod'
+
+// ─── Minimal ctx interface (subset of GokeExecutionContext used by this action) ─
 
 import {validateGatewayHost} from './host'
 
@@ -175,6 +178,52 @@ export async function getGatewayStatusSummary(host: string): Promise<StatusSumma
   }
 }
 
+// ─── Action (exported for direct testing) ────────────────────────────────────
+
+export async function gatewayStatusAction(
+  options: {key?: string | undefined},
+  ctx: ActionCtx,
+  spawn?: SpawnFn,
+): Promise<void> {
+  const hostEnvKey = options.key ?? 'GATEWAY_HOST'
+  const host = process.env[hostEnvKey]
+
+  if (!host) {
+    ctx.console.error(`Gateway host not set. Export ${hostEnvKey} or pass --key <env-name> pointing to a set variable.`)
+    ctx.process.exit(1)
+    return
+  }
+
+  ctx.console.log('Gateway status')
+  ctx.console.log('')
+
+  const result = await getGatewayComposeStatus(host, spawn)
+
+  if (!result.ok && result.services.length === 0) {
+    ctx.console.error(`Error: ${result.error ?? 'Unknown error'}`)
+    ctx.process.exit(1)
+    return
+  }
+
+  ctx.console.log('Service          State      Health')
+  ctx.console.log('─────────────────────────────────────')
+
+  for (const row of result.services) {
+    const svc = row.service.padEnd(16)
+    const state = row.state.padEnd(10)
+    ctx.console.log(`${svc} ${state} ${row.health}`)
+  }
+
+  ctx.console.log('')
+
+  if (result.ok) {
+    ctx.console.log('Status: OK')
+  } else {
+    ctx.console.log('Status: DEGRADED (one or more services not running)')
+    ctx.process.exit(1)
+  }
+}
+
 // ─── Command registration ─────────────────────────────────────────────────────
 
 export function registerGatewayStatus(cli: ReturnType<typeof goke>): void {
@@ -184,43 +233,5 @@ export function registerGatewayStatus(cli: ReturnType<typeof goke>): void {
       '--key [key]',
       z.string().describe('Environment variable name holding the SSH host. Falls back to GATEWAY_HOST when omitted.'),
     )
-    .action(async options => {
-      const hostEnvKey = options.key ?? 'GATEWAY_HOST'
-      const host = process.env[hostEnvKey]
-
-      if (!host) {
-        console.error(`Gateway host not set. Export ${hostEnvKey} or pass --key <env-name> pointing to a set variable.`)
-        process.exitCode = 1
-        return
-      }
-
-      console.log('Gateway status')
-      console.log('')
-
-      const result = await getGatewayComposeStatus(host)
-
-      if (!result.ok && result.services.length === 0) {
-        console.error(`Error: ${result.error ?? 'Unknown error'}`)
-        process.exitCode = 1
-        return
-      }
-
-      console.log('Service          State      Health')
-      console.log('─────────────────────────────────────')
-
-      for (const row of result.services) {
-        const svc = row.service.padEnd(16)
-        const state = row.state.padEnd(10)
-        console.log(`${svc} ${state} ${row.health}`)
-      }
-
-      console.log('')
-
-      if (result.ok) {
-        console.log('Status: OK')
-      } else {
-        console.log('Status: DEGRADED (one or more services not running)')
-        process.exitCode = 1
-      }
-    })
+    .action((options, ctx) => gatewayStatusAction(options, ctx))
 }

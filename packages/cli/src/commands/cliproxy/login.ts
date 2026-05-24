@@ -2,6 +2,8 @@ import type {goke} from 'goke'
 
 import {z} from 'zod'
 
+import {validateCliproxyHost} from './host'
+
 const DEFAULT_HOST = 'cliproxy.fro.bot'
 const DEFAULT_REMOTE_USER = 'root'
 
@@ -54,7 +56,7 @@ export async function cliproxyLoginAction(
     throw new Error('cliproxy login requires an interactive terminal. Run from a shell with TTY attached.')
   }
 
-  const host = resolveHost(options.host)
+  const host = validateCliproxyHost(resolveHost(options.host))
   const sshAuthSock = requireSshAuthSock()
   const path = process.env.PATH
   const home = process.env.HOME

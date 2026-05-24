@@ -211,6 +211,34 @@ describe('cliproxy login', () => {
     })
   })
 
+  describe('host validation', () => {
+    it('rejects --host with a leading dash (ProxyCommand injection vector), no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      setValidEnv()
+
+      await expect(cliproxyLoginAction('codex', {host: '-oProxyCommand=evil'}, neverSpawn)).rejects.toThrow(
+        'Invalid CLIPROXY_DOMAIN',
+      )
+    })
+
+    it('rejects CLIPROXY_DOMAIN env with a leading dash, no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      setValidEnv()
+      process.env.CLIPROXY_DOMAIN = '-oProxyCommand=evil'
+
+      await expect(cliproxyLoginAction('codex', {}, neverSpawn)).rejects.toThrow('Invalid CLIPROXY_DOMAIN')
+    })
+
+    it('rejects --host with shell metacharacters (semicolon), no spawn', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      setValidEnv()
+
+      await expect(cliproxyLoginAction('codex', {host: 'gateway.example.com;rm -rf'}, neverSpawn)).rejects.toThrow(
+        'Invalid CLIPROXY_DOMAIN',
+      )
+    })
+  })
+
   describe('anti-phishing notice', () => {
     let logLines: string[]
     let originalLog: typeof console.log

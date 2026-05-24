@@ -91,6 +91,26 @@ describe('cliproxy open', () => {
     })
   })
 
+  describe('host validation', () => {
+    it('rejects CLIPROXY_DOMAIN env with a leading dash (ProxyCommand injection vector)', async () => {
+      const {stderr, exitCode} = await runOpenCommand([], {CLIPROXY_DOMAIN: '-oProxyCommand=evil'})
+      expect(exitCode).not.toBe(0)
+      expect(stderr).toContain('Invalid CLIPROXY_DOMAIN')
+    })
+
+    it('rejects CLIPROXY_DOMAIN env with shell metacharacters (semicolon)', async () => {
+      const {stderr, exitCode} = await runOpenCommand([], {CLIPROXY_DOMAIN: 'gateway.example.com;rm -rf'})
+      expect(exitCode).not.toBe(0)
+      expect(stderr).toContain('Invalid CLIPROXY_DOMAIN')
+    })
+
+    it('rejects CLIPROXY_DOMAIN env with an at-sign', async () => {
+      const {stderr, exitCode} = await runOpenCommand([], {CLIPROXY_DOMAIN: 'user@cliproxy.fro.bot'})
+      expect(exitCode).not.toBe(0)
+      expect(stderr).toContain('Invalid CLIPROXY_DOMAIN')
+    })
+  })
+
   describe('unit: resolveHost', () => {
     it('returns input when provided', async () => {
       const {resolveHost} = await import('./open')

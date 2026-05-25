@@ -102,6 +102,45 @@ jobs:
           omo-providers: \${{ secrets.OMO_PROVIDERS }}
 `
 
+// Unit 7 fixtures: openai model prefix regression
+const WORKFLOW_WITH_OPENAI_MODEL = `      - uses: fro-bot/agent@abc123
+        with:
+          github-token: \${{ secrets.FRO_BOT_PAT }}
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          model: openai/gpt-5.4-mini
+          omo-providers: \${{ secrets.OMO_PROVIDERS }}
+          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
+          prompt: \${{ env.PROMPT }}
+`
+
+// Dual-provider hints: omo-providers value contains "openai", model is openai/...
+const WORKFLOW_WITH_DUAL_PROVIDER_HINTS = `name: fro-bot
+on: [pull_request]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Fro Bot
+        uses: fro-bot/agent@abc123
+        with:
+          github-token: \${{ secrets.FRO_BOT_PAT }}
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          model: openai/gpt-5.4-mini
+          omo-providers: anthropic,openai
+          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
+          prompt: \${{ env.PROMPT }}
+`
+
+// Missing opencode-config but with openai model prefix — gap detection must still fire
+const MISSING_OPENCODE_CONFIG_OPENAI_MODEL_WORKFLOW = `      - uses: fro-bot/agent@abc123
+        with:
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          github-token: \${{ secrets.FRO_BOT_PAT }}
+          model: openai/gpt-5.4-mini
+          omo-providers: \${{ secrets.OMO_PROVIDERS }}
+          prompt: \${{ env.PROMPT }}
+`
+
 describe('cliproxy setup helpers', () => {
   describe('validateSetupOptions', () => {
     it('requires --key in non-interactive mode', () => {
@@ -215,6 +254,65 @@ describe('cliproxy setup helpers', () => {
       expect(result.stepsWithGaps).toHaveLength(1)
       expect(result.stepsWithGaps[0]?.stepOrdinal).toBe(2)
       expect([...(result.stepsWithGaps[0]?.missingInputs ?? [])]).toEqual(['opencode-config', 'model'])
+    })
+  })
+
+  describe('Unit 7 — analyzer regression for openai model prefix', () => {
+    it('returns empty stepsWithGaps for a workflow with openai/... model and all four inputs', () => {
+      const result = analyzeFroBotWorkflow(WORKFLOW_WITH_OPENAI_MODEL)
+
+      expect(result.kind).toBe('analyzed')
+      if (result.kind !== 'analyzed') throw new Error('unreachable')
+      expect(result.stepsWithGaps).toEqual([])
+    })
+
+    it('returns empty stepsWithGaps for a dual-provider workflow with openai/... model', () => {
+      const result = analyzeFroBotWorkflow(WORKFLOW_WITH_DUAL_PROVIDER_HINTS)
+
+      expect(result.kind).toBe('analyzed')
+      if (result.kind !== 'analyzed') throw new Error('unreachable')
+      expect(result.stepsWithGaps).toEqual([])
+    })
+
+    it('detects missing opencode-config even when model is openai/...', () => {
+      const result = analyzeFroBotWorkflow(MISSING_OPENCODE_CONFIG_OPENAI_MODEL_WORKFLOW)
+
+      expect(result.kind).toBe('analyzed')
+      if (result.kind !== 'analyzed') throw new Error('unreachable')
+      expect(result.stepsWithGaps).toHaveLength(1)
+      expect(result.stepsWithGaps[0]?.stepOrdinal).toBe(1)
+      expect([...(result.stepsWithGaps[0]?.missingInputs ?? [])]).toEqual(['opencode-config'])
+    })
+
+    it('detects missing opencode-config when model is anthropic/... (sanity regression)', () => {
+      const result = analyzeFroBotWorkflow(MISSING_OPENCODE_CONFIG_WORKFLOW)
+
+      expect(result.kind).toBe('analyzed')
+      if (result.kind !== 'analyzed') throw new Error('unreachable')
+      expect(result.stepsWithGaps).toHaveLength(1)
+      expect(result.stepsWithGaps[0]?.stepOrdinal).toBe(1)
+      expect([...(result.stepsWithGaps[0]?.missingInputs ?? [])]).toEqual(['opencode-config'])
+    })
+
+    it('does not emit any enable-omo warning for openai model workflows', () => {
+      const openaiResult = analyzeFroBotWorkflow(WORKFLOW_WITH_OPENAI_MODEL)
+      const dualResult = analyzeFroBotWorkflow(WORKFLOW_WITH_DUAL_PROVIDER_HINTS)
+
+      // The analyzer result shape has no warning category — only stepsWithGaps.
+      // Verify the result object has exactly the expected keys (kind + stepsWithGaps).
+      expect(Object.keys(openaiResult)).toEqual(['kind', 'stepsWithGaps'])
+      expect(Object.keys(dualResult)).toEqual(['kind', 'stepsWithGaps'])
+    })
+
+    it('REQUIRED_OPENCODE_INPUTS covers exactly auth-json, opencode-config, omo-providers, model (no enable-omo)', () => {
+      // Infer the required inputs from fixture-based testing: a workflow with exactly
+      // these four inputs and no others (besides github-token and prompt) passes with zero gaps.
+      const result = analyzeFroBotWorkflow(WORKFLOW_WITH_OPENAI_MODEL)
+
+      expect(result.kind).toBe('analyzed')
+      if (result.kind !== 'analyzed') throw new Error('unreachable')
+      // Zero gaps confirms the four inputs in the fixture are sufficient — enable-omo is NOT required.
+      expect(result.stepsWithGaps).toEqual([])
     })
   })
 

@@ -982,6 +982,53 @@ async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Pro
   }
 }
 
+/**
+ * Returns true when the provider list includes anything beyond anthropic-only.
+ * Anthropic-only repos see no behavior change (G7 invariant).
+ */
+export function mustConfirmDestructive(providers: ProviderId[]): boolean {
+  return !(providers.length === 1 && providers[0] === 'anthropic')
+}
+
+export interface DryRunPreviewOptions {
+  repo: string
+  harness: Harness
+  providers: ProviderId[]
+  model: string
+  template: HarnessTemplate
+}
+
+/**
+ * Format a dry-run preview string. The proxy key value is NEVER included —
+ * it is rendered as `<proxy-key>` in all positions.
+ */
+export function formatDryRunPreview(opts: DryRunPreviewOptions): string {
+  const {repo, harness, providers, model, template} = opts
+
+  const lines: string[] = [
+    `Dry run: cliproxy setup --harness ${harness}`,
+    `Repository: ${repo}`,
+    `Providers: ${providers.join(', ')}`,
+    `Model: ${model}`,
+    'Planned secrets:',
+  ]
+
+  for (const secret of template.secrets) {
+    const size = new TextEncoder().encode(secret.value).byteLength
+    lines.push(`  - ${secret.name} (${size} bytes)`)
+  }
+
+  lines.push('Planned variables:')
+  for (const variable of template.variables) {
+    lines.push(`  - ${variable.name} = ${variable.value}`)
+  }
+
+  lines.push('Proxy key (redacted): <proxy-key>')
+  lines.push('No mutations will be performed.')
+
+  return lines.join('\n')
+}
+
 export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: string): Promise<SetupPlan> {
   const harness = harnessSchema.parse(options.harness)
   const repo = ensureRepoFormat(options.repo ?? '')
@@ -993,14 +1040,32 @@ export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: st
   if (options.model) {
     model = options.model
   } else if (providers.length === 1) {
-    model = PROVIDER_DEFAULTS[providers[0]!]
+    model = PROVIDER_DEFAULTS[providers[0] as ProviderId]
   } else {
     // Unreachable: validateSetupOptions enforces model when providers.length > 1
     throw new Error('Pass --model <provider/model-id> when selecting multiple providers.')
   }
 
+  // --dry-run: skip verifyModelsAvailable and force check; return plan for preview
+  if (options.dryRun) {
+    return {
+      repo,
+      harness,
+      keyValue,
+      createKey: false,
+      template: getHarnessTemplate(harness, {keyValue: keyValue || 'sk-placeholder', baseUrl, providers, model}),
+    }
+  }
+
   if (providers.includes('openai')) {
     await verifyModelsAvailable(baseUrl, keyValue, providers, model)
+  }
+
+  // Destructive overwrite gate: non-anthropic-only requires --force in non-interactive mode
+  if (mustConfirmDestructive(providers) && !options.force) {
+    throw new Error(
+      'Pass `--force` to confirm overwriting existing OPENCODE_AUTH_JSON/OPENCODE_CONFIG/OMO_PROVIDERS/FRO_BOT_MODEL. Run with `--dry-run` first to preview.',
+    )
   }
 
   return {

@@ -6,10 +6,12 @@ import {goke} from 'goke'
 import {
   analyzeFroBotWorkflow,
   buildNonInteractivePlan,
+  formatDryRunPreview,
   formatWorkflowSnippet,
   getHarnessTemplate,
   interpretGhContentResult,
   isGhRateLimitError,
+  mustConfirmDestructive,
   parseProviders,
   promptForModel,
   promptForProviders,
@@ -1077,7 +1079,14 @@ describe('Unit 5 — validation matrix + non-interactive plan', () => {
       globalThis.fetch = fetchMock as unknown as typeof fetch
 
       const plan = await buildNonInteractivePlan(
-        {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+        },
         BASE_URL,
       )
 
@@ -1101,6 +1110,7 @@ describe('Unit 5 — validation matrix + non-interactive plan', () => {
           harness: 'opencode',
           providers: 'anthropic,openai',
           model: 'openai/gpt-5.4-mini',
+          force: true,
         },
         BASE_URL,
       )
@@ -1117,7 +1127,7 @@ describe('Unit 5 — validation matrix + non-interactive plan', () => {
       globalThis.fetch = fetchMock as unknown as typeof fetch
 
       const plan = await buildNonInteractivePlan(
-        {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai'},
+        {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai', force: true},
         BASE_URL,
       )
 
@@ -1143,6 +1153,281 @@ describe('Unit 5 — validation matrix + non-interactive plan', () => {
       await buildNonInteractivePlan({key: KEY, repo: 'owner/repo', harness: 'opencode'}, BASE_URL)
 
       expect(fetchMock.mock.calls.length).toBe(0)
+    })
+  })
+})
+
+describe('Unit 8 — destructive overwrite UX', () => {
+  const BASE_URL = 'https://cliproxy.fro.bot'
+  const KEY = 'sk-test-key'
+
+  const MODELS_FIXTURE = {
+    data: [
+      {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+      {id: 'gpt-5.4-mini', owned_by: 'openai'},
+    ],
+  }
+
+  let originalFetch: typeof globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  originalFetch = globalThis.fetch
+
+  // ── mustConfirmDestructive ────────────────────────────────────────────────
+
+  describe('mustConfirmDestructive', () => {
+    it("['anthropic'] → false (anthropic-only is safe, no confirm needed)", () => {
+      expect(mustConfirmDestructive(['anthropic'])).toBe(false)
+    })
+
+    it("['openai'] → true (non-anthropic provider requires confirm)", () => {
+      expect(mustConfirmDestructive(['openai'])).toBe(true)
+    })
+
+    it("['anthropic', 'openai'] → true (multi-provider requires confirm)", () => {
+      expect(mustConfirmDestructive(['anthropic', 'openai'])).toBe(true)
+    })
+
+    it("['openai', 'anthropic'] → true (order does not matter)", () => {
+      expect(mustConfirmDestructive(['openai', 'anthropic'])).toBe(true)
+    })
+  })
+
+  // ── formatDryRunPreview ───────────────────────────────────────────────────
+
+  describe('formatDryRunPreview', () => {
+    it('renders the dry-run header with repo and providers', () => {
+      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
+      const preview = formatDryRunPreview({
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: ['anthropic'],
+        model: 'anthropic/claude-sonnet-4-6',
+        template,
+      })
+
+      expect(preview).toContain('Dry run: cliproxy setup --harness opencode')
+      expect(preview).toContain('Repository: owner/repo')
+      expect(preview).toContain('Providers: anthropic')
+    })
+
+    it('renders planned secrets with byte sizes', () => {
+      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
+      const preview = formatDryRunPreview({
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: ['anthropic'],
+        model: 'anthropic/claude-sonnet-4-6',
+        template,
+      })
+
+      expect(preview).toContain('Planned secrets:')
+      expect(preview).toContain('OPENCODE_AUTH_JSON')
+      expect(preview).toContain('OPENCODE_CONFIG')
+      expect(preview).toContain('OMO_PROVIDERS')
+    })
+
+    it('renders planned variables', () => {
+      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
+      const preview = formatDryRunPreview({
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: ['anthropic'],
+        model: 'anthropic/claude-sonnet-4-6',
+        template,
+      })
+
+      expect(preview).toContain('Planned variables:')
+      expect(preview).toContain('FRO_BOT_MODEL')
+    })
+
+    it('renders proxy key as <proxy-key> placeholder, NOT the actual key value', () => {
+      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
+      const preview = formatDryRunPreview({
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: ['anthropic'],
+        model: 'anthropic/claude-sonnet-4-6',
+        template,
+      })
+
+      expect(preview).toContain('<proxy-key>')
+      expect(preview).not.toContain(KEY)
+    })
+
+    it('renders "No mutations will be performed." footer', () => {
+      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
+      const preview = formatDryRunPreview({
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: ['anthropic'],
+        model: 'anthropic/claude-sonnet-4-6',
+        template,
+      })
+
+      expect(preview).toContain('No mutations will be performed.')
+    })
+
+    it('dual-provider preview lists both providers', () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: KEY,
+        baseUrl: BASE_URL,
+        providers: ['anthropic', 'openai'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const preview = formatDryRunPreview({
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: ['anthropic', 'openai'],
+        model: 'openai/gpt-5.4-mini',
+        template,
+      })
+
+      expect(preview).toContain('anthropic')
+      expect(preview).toContain('openai')
+      expect(preview).not.toContain(KEY)
+    })
+
+    it('secret values in preview do NOT contain the actual key value', () => {
+      // Even if the template has the key embedded in JSON, the preview must redact it
+      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
+      const preview = formatDryRunPreview({
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: ['anthropic'],
+        model: 'anthropic/claude-sonnet-4-6',
+        template,
+      })
+
+      // The actual key must not appear anywhere in the preview output
+      expect(preview).not.toContain(KEY)
+    })
+  })
+
+  // ── non-interactive gate: --force / --dry-run ─────────────────────────────
+
+  describe('buildNonInteractivePlan — force/dry-run gate', () => {
+    it('anthropic-only + no --force → plan builds without error (G7 invariant)', async () => {
+      // Anthropic-only should never require --force
+      await expect(
+        buildNonInteractivePlan({key: KEY, repo: 'owner/repo', harness: 'opencode'}, BASE_URL),
+      ).resolves.toBeDefined()
+    })
+
+    it('openai-only + --force → plan builds without error', async () => {
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+      await expect(
+        buildNonInteractivePlan(
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'openai',
+            model: 'openai/gpt-5.4-mini',
+            force: true,
+          },
+          BASE_URL,
+        ),
+      ).resolves.toBeDefined()
+    })
+
+    it('openai-only + no --force + no --dry-run → throws "Pass --force" error', async () => {
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+      await expect(
+        buildNonInteractivePlan(
+          {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
+          BASE_URL,
+        ),
+      ).rejects.toThrow(/Pass `--force`/)
+    })
+
+    it('openai-only + no --force + no --dry-run → error message mentions --dry-run', async () => {
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+      let errorMessage = ''
+      try {
+        await buildNonInteractivePlan(
+          {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
+          BASE_URL,
+        )
+      } catch (error) {
+        errorMessage = error instanceof Error ? error.message : String(error)
+      }
+
+      expect(errorMessage).toContain('--dry-run')
+    })
+
+    it('dual-provider + no --force + no --dry-run → throws "Pass --force" error', async () => {
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+      await expect(
+        buildNonInteractivePlan(
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'anthropic,openai',
+            model: 'openai/gpt-5.4-mini',
+          },
+          BASE_URL,
+        ),
+      ).rejects.toThrow(/Pass `--force`/)
+    })
+
+    it('openai-only + --dry-run → plan builds without error (dry-run bypasses force check)', async () => {
+      // dry-run skips verifyModelsAvailable too, so no fetch mock needed
+      await expect(
+        buildNonInteractivePlan(
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'openai',
+            model: 'openai/gpt-5.4-mini',
+            dryRun: true,
+          },
+          BASE_URL,
+        ),
+      ).resolves.toBeDefined()
+    })
+
+    it('--dry-run does NOT call verifyModelsAvailable (no fetch calls)', async () => {
+      const fetchMock = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE)))
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      await buildNonInteractivePlan(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          dryRun: true,
+        },
+        BASE_URL,
+      )
+
+      expect(fetchMock.mock.calls.length).toBe(0)
+    })
+
+    it('--dry-run + openai + missing --key → plan still builds (renders <proxy-key> placeholder)', async () => {
+      // dry-run with empty key should not throw; key renders as placeholder
+      await expect(
+        buildNonInteractivePlan(
+          {
+            key: '',
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'openai',
+            model: 'openai/gpt-5.4-mini',
+            dryRun: true,
+          },
+          BASE_URL,
+        ),
+      ).resolves.toBeDefined()
     })
   })
 })

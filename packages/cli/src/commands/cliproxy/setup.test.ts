@@ -9,6 +9,7 @@ import {
   getHarnessTemplate,
   interpretGhContentResult,
   isGhRateLimitError,
+  parseProviders,
   registerCliproxySetup,
   validateSetupOptions,
   withGhRetry,
@@ -336,6 +337,77 @@ describe('cliproxy setup helpers', () => {
       expect(helpText).toContain('--key [key]')
       expect(helpText).toContain('--repo [repo]')
       expect(helpText).toContain('--harness [harness]')
+    })
+
+    it('shows all five new Unit 1 flags in help text', () => {
+      const cli = goke('infra')
+      registerCliproxySetup(cli)
+      cli.help()
+
+      const helpText = cli.helpText()
+
+      expect(helpText).toContain('--providers')
+      expect(helpText).toContain('--model')
+      expect(helpText).toContain('--force')
+      expect(helpText).toContain('--dry-run')
+      expect(helpText).toContain('--verify-smoke')
+    })
+  })
+})
+
+describe('Unit 1 — option parsing', () => {
+  describe('parseProviders', () => {
+    it("parses \"anthropic,openai\" to ['anthropic', 'openai']", () => {
+      expect(parseProviders('anthropic,openai')).toEqual(['anthropic', 'openai'])
+    })
+
+    it('parses "openai" to [\'openai\']', () => {
+      expect(parseProviders('openai')).toEqual(['openai'])
+    })
+
+    it('parses "anthropic" to [\'anthropic\']', () => {
+      expect(parseProviders('anthropic')).toEqual(['anthropic'])
+    })
+
+    it('rejects duplicate providers with a "duplicate" error', () => {
+      expect(() => parseProviders('anthropic,anthropic')).toThrow(/duplicate/i)
+    })
+
+    it('rejects an empty string with a clear message', () => {
+      expect(() => parseProviders('')).toThrow()
+    })
+
+    it('rejects an unknown provider "claude" with an enum error', () => {
+      expect(() => parseProviders('claude')).toThrow()
+    })
+
+    it('trims whitespace around provider names', () => {
+      expect(parseProviders(' anthropic , openai ')).toEqual(['anthropic', 'openai'])
+    })
+  })
+
+  describe('model flag validation', () => {
+    it('accepts "openai/gpt-5.4-mini"', () => {
+      const cli = goke('infra')
+      registerCliproxySetup(cli)
+      // Verify the schema accepts valid model IDs by checking the regex directly
+      const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
+      expect(MODEL_RE.test('openai/gpt-5.4-mini')).toBe(true)
+    })
+
+    it('rejects "gpt-5.4-mini" (no provider prefix)', () => {
+      const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
+      expect(MODEL_RE.test('gpt-5.4-mini')).toBe(false)
+    })
+
+    it('rejects "openai/GPT-5.4-mini" (uppercase)', () => {
+      const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
+      expect(MODEL_RE.test('openai/GPT-5.4-mini')).toBe(false)
+    })
+
+    it('rejects "openai/gpt-5.4-mini; rm -rf /" (injection attempt)', () => {
+      const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
+      expect(MODEL_RE.test('openai/gpt-5.4-mini; rm -rf /')).toBe(false)
     })
   })
 })

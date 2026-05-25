@@ -23,10 +23,51 @@ const ghNameListSchema = z.array(z.object({name: z.string()}))
 
 export type Harness = z.infer<typeof harnessSchema>
 
+const providerIdSchema = z.enum(['anthropic', 'openai'])
+export type ProviderId = z.infer<typeof providerIdSchema>
+
+const MODEL_ID_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
+
+/**
+ * Parse a comma-separated provider list string into a validated ProviderId array.
+ * Rejects empty input, unknown providers, and duplicates.
+ */
+export function parseProviders(input: string): ProviderId[] {
+  const parts = input
+    .split(',')
+    .map(p => p.trim())
+    .filter(Boolean)
+
+  if (parts.length === 0) {
+    throw new Error('--providers must not be empty. Supported values: anthropic, openai')
+  }
+
+  const parsed = parts.map(p => {
+    const result = providerIdSchema.safeParse(p)
+    if (!result.success) {
+      throw new Error(`Unknown provider "${p}". Supported values: anthropic, openai`)
+    }
+    return result.data
+  })
+
+  const deduped = new Set(parsed)
+  if (deduped.size < parsed.length) {
+    throw new Error(`--providers contains duplicate values: ${parsed.join(',')}`)
+  }
+
+  return parsed
+}
+
 export interface SetupOptions {
   key?: string
   repo?: string
   harness?: Harness
+  /** Raw comma-separated provider list string (e.g. "anthropic,openai"). Use parseProviders() to validate. */
+  providers?: string
+  model?: string
+  force?: boolean
+  dryRun?: boolean
+  verifySmoke?: boolean
 }
 
 export interface SecretAssignment {
@@ -757,10 +798,38 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
         'Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.',
       ),
     )
+    .option(
+      '--providers [providers]',
+      z
+        .string()
+        .describe(
+          'Comma-separated list of providers to enable. Supported values: anthropic, openai. Example: --providers anthropic,openai',
+        ),
+    )
+    .option(
+      '--model [model]',
+      z
+        .string()
+        .regex(MODEL_ID_RE)
+        .describe(
+          'Override the default model. Must be provider-prefixed and lowercase. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o',
+        ),
+    )
+    .option(
+      '--force',
+      z.boolean().optional().describe('Overwrite existing GitHub secrets and variables without prompting.'),
+    )
+    .option('--dry-run', z.boolean().optional().describe('Print the plan without applying any changes.'))
+    .option(
+      '--verify-smoke',
+      z.boolean().optional().describe('Run a smoke test against the proxy after setup completes.'),
+    )
     .example('# Run the interactive onboarding wizard')
     .example('infra cliproxy setup')
     .example('# Run non-interactively with an existing key')
     .example('infra cliproxy setup --key sk-test --repo owner/repo --harness opencode')
+    .example('# Enable both providers non-interactively')
+    .example('infra cliproxy setup --key sk-test --repo owner/repo --harness opencode --providers anthropic,openai')
     .action(async options => {
       const interactive = Boolean(process.stdin.isTTY)
       const baseUrl = resolveBaseUrl()

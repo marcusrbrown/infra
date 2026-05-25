@@ -679,7 +679,11 @@ export async function verifyModelsAvailable(
 
   if (!response.ok) {
     const rawBody = await response.text()
-    const excerpt = rawBody.slice(0, 200)
+    // Redact any Authorization headers or sk-* token-shaped strings that the server might echo
+    const redacted = rawBody
+      .replaceAll(/Bearer\s+[^\s"]+/g, 'Bearer <redacted>')
+      .replaceAll(/sk-[\w.-]{8,}/g, 'sk-<redacted>')
+    const excerpt = redacted.slice(0, 200)
     throw new Error(`/v1/models returned HTTP ${response.status}: ${excerpt}`)
   }
 
@@ -974,6 +978,14 @@ async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Pro
         ),
       )
 
+  let providers: ProviderId[] | undefined
+  let model: string | undefined
+
+  if (harness === 'opencode') {
+    providers = await promptForProviders()
+    model = await promptForModel(providers)
+  }
+
   const keyValue = options.key ?? buildApiKeyValue(keyName ?? 'cliproxy')
   const genericSecretNames = harness === 'generic' ? await promptGenericSecretNames() : undefined
 
@@ -983,7 +995,7 @@ async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Pro
     keyValue,
     keyName,
     createKey,
-    template: getHarnessTemplate(harness, {keyValue, baseUrl, genericSecretNames}),
+    template: getHarnessTemplate(harness, {keyValue, baseUrl, genericSecretNames, providers, model}),
   }
 }
 
@@ -1365,6 +1377,21 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
           ? await buildInteractivePlan(options, baseUrl)
           : await buildNonInteractivePlan(options, baseUrl)
 
+        if (options.dryRun) {
+          const providers: ProviderId[] = options.providers ? parseProviders(options.providers) : ['anthropic']
+          const model = options.model ?? PROVIDER_DEFAULTS[providers[0] as ProviderId]
+          console.log(
+            formatDryRunPreview({
+              repo: plan.repo,
+              harness: plan.harness,
+              providers,
+              model,
+              template: plan.template,
+            }),
+          )
+          return
+        }
+
         if (plan.createKey) {
           resolveManagementKey()
         }
@@ -1418,25 +1445,32 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
         const collisions = collectCollisions(plan.template, existingSecrets, existingVariables)
 
         if (collisions.length > 0) {
-          if (!interactive) {
+          if (!interactive && !options.force) {
             throw new Error(
-              `Refusing to overwrite existing GitHub values in non-interactive mode: ${collisions.join(', ')}`,
+              `Refusing to overwrite existing GitHub values in non-interactive mode: ${collisions.join(', ')}. Pass --force to confirm.`,
             )
           }
 
-          log.warn(`Existing GitHub values will be overwritten: ${collisions.join(', ')}`)
-          const overwrite = await promptValue(
-            confirm({
-              message: 'Overwrite the existing GitHub values?',
-              active: 'overwrite',
-              inactive: 'cancel',
-              initialValue: false,
-            }),
-            'Setup cancelled instead of overwriting existing values.',
-          )
+          if (!interactive && options.force) {
+            log.warn(`Overwriting existing GitHub values: ${collisions.join(', ')}`)
+            // proceed
+          }
 
-          if (!overwrite) {
-            cancelAndExit('Existing GitHub values left unchanged.')
+          if (interactive) {
+            log.warn(`Existing GitHub values will be overwritten: ${collisions.join(', ')}`)
+            const overwrite = await promptValue(
+              confirm({
+                message: 'Overwrite the existing GitHub values?',
+                active: 'overwrite',
+                inactive: 'cancel',
+                initialValue: false,
+              }),
+              'Setup cancelled instead of overwriting existing values.',
+            )
+
+            if (!overwrite) {
+              cancelAndExit('Existing GitHub values left unchanged.')
+            }
           }
         }
 
@@ -1567,6 +1601,10 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
             case 'unverified': {
               log.warn(`⚠ ${smokeResult.message}${smokeResult.runUrl ? ` — ${smokeResult.runUrl}` : ''}`)
               break
+            }
+            default: {
+              const _exhaustive: never = smokeResult
+              throw new Error(`Unhandled SmokeResult kind: ${JSON.stringify(_exhaustive)}`)
             }
           }
         }

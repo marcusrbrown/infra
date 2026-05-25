@@ -624,6 +624,78 @@ export function formatWorkflowSnippet(missingInputs: readonly string[]): string 
   return missingInputs.map(input => `          ${inputMap[input]}`).join('\n')
 }
 
+/**
+ * Pre-mutation validator: probes /v1/models to assert the resolved model is
+ * available and (when providers includes openai) that at least one OpenAI model
+ * is present on the proxy.
+ *
+ * Short-circuits immediately for anthropic-only setups — no fetch is made.
+ * Never echoes the Authorization header in any error message.
+ */
+export async function verifyModelsAvailable(
+  baseUrl: string,
+  key: string,
+  providers: ProviderId[],
+  model: string,
+): Promise<void> {
+  // Anthropic-only: no fetch needed
+  if (providers.length === 1 && providers[0] === 'anthropic') {
+    return
+  }
+
+  const endpoint = `${baseUrl}/v1/models`
+  const response = await fetch(endpoint, {
+    headers: {Authorization: `Bearer ${key}`},
+    signal: AbortSignal.timeout(10_000),
+  })
+
+  if (response.status === 401 || response.status === 403) {
+    throw new Error('Proxy key rejected. Verify with `cliproxy keys list` or rerun setup to create a new one.')
+  }
+
+  if (!response.ok) {
+    const rawBody = await response.text()
+    const excerpt = rawBody.slice(0, 200)
+    throw new Error(`/v1/models returned HTTP ${response.status}: ${excerpt}`)
+  }
+
+  const json = (await response.json()) as unknown
+  const data = (json as Record<string, unknown>)?.data
+
+  if (!Array.isArray(data)) {
+    throw new TypeError('Unexpected response from /v1/models: data is not an array.')
+  }
+
+  interface ModelEntry {
+    id: string
+    owned_by: string
+  }
+  const entries = data as ModelEntry[]
+
+  // OpenAI presence check
+  if (providers.includes('openai')) {
+    const hasOpenAi = entries.some(e => e.owned_by === 'openai')
+    if (!hasOpenAi) {
+      throw new Error('No OpenAI models on proxy — is the Codex token loaded? Try `cliproxy login codex`.')
+    }
+  }
+
+  // Model presence check: strip provider prefix to get bare id
+  const slashIndex = model.indexOf('/')
+  const bareId = slashIndex === -1 ? model : model.slice(slashIndex + 1)
+  const providerPrefix = slashIndex >= 0 ? model.slice(0, slashIndex) : undefined
+
+  const modelPresent = entries.some(e => e.id === bareId)
+  if (!modelPresent) {
+    // List available ids for the matching provider only
+    const matchingIds = providerPrefix
+      ? entries.filter(e => e.owned_by === providerPrefix).map(e => e.id)
+      : entries.map(e => e.id)
+    const available = matchingIds.length > 0 ? matchingIds.join(', ') : '(none)'
+    throw new Error(`Model "${bareId}" not found on proxy. Available ${providerPrefix ?? 'models'}: ${available}`)
+  }
+}
+
 async function assertProxyReachable(baseUrl: string): Promise<void> {
   try {
     const response = await fetch(baseUrl, {

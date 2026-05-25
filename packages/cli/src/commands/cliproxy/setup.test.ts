@@ -1,6 +1,6 @@
 /// <reference types="bun" />
 
-import {describe, expect, it, spyOn} from 'bun:test'
+import {afterEach, describe, expect, it, mock, spyOn} from 'bun:test'
 import {goke} from 'goke'
 
 import {
@@ -14,6 +14,7 @@ import {
   promptForProviders,
   registerCliproxySetup,
   validateSetupOptions,
+  verifyModelsAvailable,
   withGhRetry,
   type SecretAssignment,
   type VariableAssignment,
@@ -794,5 +795,163 @@ describe('Unit 3 — getHarnessTemplate provider-aware', () => {
       expect(template.secrets).toHaveLength(1)
       expect(template.secrets[0]?.name).toBe('ANTHROPIC_API_KEY')
     })
+  })
+})
+
+describe('Unit 4 — verifyModelsAvailable', () => {
+  // Realistic fixture matching the plan spec
+  const MODELS_FIXTURE = {
+    data: [
+      {id: 'claude-3-7-sonnet-20250219', owned_by: 'anthropic'},
+      {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+      {id: 'gpt-5.4-mini', owned_by: 'openai'},
+      {id: 'gpt-5.5', owned_by: 'openai'},
+    ],
+  }
+
+  const BASE_URL = 'https://cliproxy.fro.bot'
+  const KEY = 'sk-test-key'
+
+  // Save and restore globalThis.fetch around each test
+  let originalFetch: typeof globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  // Capture original before any test runs
+  originalFetch = globalThis.fetch
+
+  it('anthropic-only short-circuit: returns immediately without calling fetch', async () => {
+    const fetchSpy = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE)))
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+
+    await verifyModelsAvailable(BASE_URL, KEY, ['anthropic'], 'anthropic/claude-sonnet-4-6')
+
+    expect(fetchSpy.mock.calls.length).toBe(0)
+  })
+
+  it('happy path: openai-only, model present, owned_by openai — passes without throw', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).resolves.toBeUndefined()
+  })
+
+  it('happy path: dual providers, anthropic model present, openai entries exist — passes', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    await expect(
+      verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'openai'], 'anthropic/claude-sonnet-4-6'),
+    ).resolves.toBeUndefined()
+  })
+
+  it('error path: 401 throws "Proxy key rejected" message', async () => {
+    globalThis.fetch = mock(async () => new Response('Unauthorized', {status: 401})) as unknown as typeof fetch
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
+      'Proxy key rejected',
+    )
+  })
+
+  it('error path: 401 error message does NOT contain the Authorization header value', async () => {
+    globalThis.fetch = mock(async () => new Response('Unauthorized', {status: 401})) as unknown as typeof fetch
+
+    let errorMessage = ''
+    try {
+      await verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).not.toContain(KEY)
+    expect(errorMessage).not.toContain('Bearer')
+  })
+
+  it('error path: 403 throws "Proxy key rejected" message', async () => {
+    globalThis.fetch = mock(async () => new Response('Forbidden', {status: 403})) as unknown as typeof fetch
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
+      'Proxy key rejected',
+    )
+  })
+
+  it('error path: 500 throws with status and truncated body; no Authorization header in message', async () => {
+    const body = 'Internal Server Error — something went wrong on the proxy'
+    globalThis.fetch = mock(async () => new Response(body, {status: 500})) as unknown as typeof fetch
+
+    let errorMessage = ''
+    try {
+      await verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).toContain('500')
+    expect(errorMessage).not.toContain(KEY)
+    expect(errorMessage).not.toContain('Bearer')
+  })
+
+  it('error path: 200 with data:[] and openai in providers throws no-openai-models message', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify({data: []}))) as unknown as typeof fetch
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
+      'No OpenAI models on proxy',
+    )
+  })
+
+  it('error path: model not present in data — throws and lists available openai ids', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    let errorMessage = ''
+    try {
+      await verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-99-unknown')
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).toContain('gpt-99-unknown')
+    // Should list available openai models
+    expect(errorMessage).toContain('gpt-5.4-mini')
+    expect(errorMessage).toContain('gpt-5.5')
+    // Should NOT list anthropic models
+    expect(errorMessage).not.toContain('claude')
+  })
+
+  it('error path: model not present and provider is anthropic — lists available anthropic ids', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    let errorMessage = ''
+    try {
+      await verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'openai'], 'anthropic/claude-unknown-model')
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).toContain('claude-unknown-model')
+    // Should list available anthropic models
+    expect(errorMessage).toContain('claude-3-7-sonnet-20250219')
+    expect(errorMessage).toContain('claude-sonnet-4-6')
+    // Should NOT list openai models
+    expect(errorMessage).not.toContain('gpt-')
+  })
+
+  it('error path: data is missing (response is {}) — throws clean error', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify({}))) as unknown as typeof fetch
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
+      /data.*array|unexpected.*response/i,
+    )
+  })
+
+  it('error path: dual providers, no owned_by=openai entries — throws no-openai-models message', async () => {
+    const anthropicOnlyData = {
+      data: [
+        {id: 'claude-3-7-sonnet-20250219', owned_by: 'anthropic'},
+        {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+      ],
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(anthropicOnlyData))) as unknown as typeof fetch
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
+      'No OpenAI models on proxy',
+    )
   })
 })

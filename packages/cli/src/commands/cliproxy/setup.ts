@@ -211,6 +211,25 @@ export function validateSetupOptions(options: SetupOptions, isInteractive: boole
     return
   }
 
+  // Validate providers/model first (independent of key/repo/harness)
+  if (options.providers) {
+    const providers = parseProviders(options.providers)
+
+    if (providers.length > 1 && !options.model) {
+      throw new Error('Pass --model <provider/model-id> when selecting multiple providers.')
+    }
+
+    if (options.model) {
+      const slashIndex = options.model.indexOf('/')
+      const prefix = slashIndex === -1 ? options.model : options.model.slice(0, slashIndex)
+      if (!providers.includes(prefix as ProviderId)) {
+        throw new Error(
+          `Model prefix ${prefix} does not match selected providers (${providers.join(', ')}). Valid prefixes: ${providers.join(', ')}/`,
+        )
+      }
+    }
+  }
+
   if (!options.key) {
     throw new Error('--key is required when stdin is not a TTY. Provide an existing CLIProxyAPI key value.')
   }
@@ -963,17 +982,33 @@ async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Pro
   }
 }
 
-function buildNonInteractivePlan(options: SetupOptions, baseUrl: string): SetupPlan {
+export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: string): Promise<SetupPlan> {
   const harness = harnessSchema.parse(options.harness)
   const repo = ensureRepoFormat(options.repo ?? '')
   const keyValue = options.key ?? ''
+
+  const providers: ProviderId[] = options.providers ? parseProviders(options.providers) : ['anthropic']
+
+  let model: string
+  if (options.model) {
+    model = options.model
+  } else if (providers.length === 1) {
+    model = PROVIDER_DEFAULTS[providers[0]!]
+  } else {
+    // Unreachable: validateSetupOptions enforces model when providers.length > 1
+    throw new Error('Pass --model <provider/model-id> when selecting multiple providers.')
+  }
+
+  if (providers.includes('openai')) {
+    await verifyModelsAvailable(baseUrl, keyValue, providers, model)
+  }
 
   return {
     repo,
     harness,
     keyValue,
     createKey: false,
-    template: getHarnessTemplate(harness, {keyValue, baseUrl}),
+    template: getHarnessTemplate(harness, {keyValue, baseUrl, providers, model}),
   }
 }
 
@@ -1055,7 +1090,7 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
 
         const plan = interactive
           ? await buildInteractivePlan(options, baseUrl)
-          : buildNonInteractivePlan(options, baseUrl)
+          : await buildNonInteractivePlan(options, baseUrl)
 
         if (plan.createKey) {
           resolveManagementKey()

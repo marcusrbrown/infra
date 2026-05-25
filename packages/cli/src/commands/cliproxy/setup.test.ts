@@ -5,6 +5,7 @@ import {goke} from 'goke'
 
 import {
   analyzeFroBotWorkflow,
+  buildNonInteractivePlan,
   formatWorkflowSnippet,
   getHarnessTemplate,
   interpretGhContentResult,
@@ -953,5 +954,195 @@ describe('Unit 4 — verifyModelsAvailable', () => {
     await expect(verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
       'No OpenAI models on proxy',
     )
+  })
+})
+
+describe('Unit 5 — validation matrix + non-interactive plan', () => {
+  const MODELS_FIXTURE = {
+    data: [
+      {id: 'claude-3-7-sonnet-20250219', owned_by: 'anthropic'},
+      {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+      {id: 'gpt-5.4-mini', owned_by: 'openai'},
+      {id: 'gpt-5.5', owned_by: 'openai'},
+    ],
+  }
+
+  const BASE_URL = 'https://cliproxy.fro.bot'
+  const KEY = 'sk-test-key'
+
+  let originalFetch: typeof globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  originalFetch = globalThis.fetch
+
+  // ── validateSetupOptions ──────────────────────────────────────────────────
+
+  describe('validateSetupOptions — providers/model validation', () => {
+    it('regression: no providers/model passes unchanged (anthropic-only default)', () => {
+      expect(() => validateSetupOptions({key: 'sk-test', repo: 'owner/repo', harness: 'opencode'}, false)).not.toThrow()
+    })
+
+    it('happy path: single provider anthropic, no model — passes', () => {
+      expect(() =>
+        validateSetupOptions({key: 'sk-test', repo: 'owner/repo', harness: 'opencode', providers: 'anthropic'}, false),
+      ).not.toThrow()
+    })
+
+    it('happy path: openai + model with openai prefix — passes', () => {
+      expect(() =>
+        validateSetupOptions(
+          {key: 'sk-test', repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
+          false,
+        ),
+      ).not.toThrow()
+    })
+
+    it('happy path: anthropic,openai + model with openai prefix — passes', () => {
+      expect(() =>
+        validateSetupOptions(
+          {
+            key: 'sk-test',
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'anthropic,openai',
+            model: 'openai/gpt-5.4-mini',
+          },
+          false,
+        ),
+      ).not.toThrow()
+    })
+
+    it('error: multiple providers without --model throws "Pass --model" error', () => {
+      expect(() => validateSetupOptions({harness: 'opencode', providers: 'anthropic,openai'}, false)).toThrow(
+        'Pass --model <provider/model-id> when selecting multiple providers.',
+      )
+    })
+
+    it('error: model prefix does not match single provider (anthropic provider, openai model)', () => {
+      expect(() =>
+        validateSetupOptions({harness: 'opencode', providers: 'anthropic', model: 'openai/gpt-5.4-mini'}, false),
+      ).toThrow(/Model prefix openai does not match selected providers/)
+    })
+
+    it('error: model prefix does not match single provider (openai provider, anthropic model)', () => {
+      expect(() =>
+        validateSetupOptions({harness: 'opencode', providers: 'openai', model: 'anthropic/claude-sonnet-4-6'}, false),
+      ).toThrow(/Model prefix anthropic does not match selected providers/)
+    })
+
+    it('error: duplicate providers throws from parseProviders', () => {
+      expect(() => validateSetupOptions({harness: 'opencode', providers: 'anthropic,anthropic'}, false)).toThrow(
+        /duplicate/,
+      )
+    })
+
+    it('error: unknown provider throws from parseProviders', () => {
+      expect(() => validateSetupOptions({harness: 'opencode', providers: 'claude'}, false)).toThrow(/Unknown provider/)
+    })
+
+    it('interactive mode: providers/model checks are skipped even with invalid combo', () => {
+      // Multiple providers without model — would fail in non-interactive, but interactive skips all checks
+      expect(() => validateSetupOptions({providers: 'anthropic,openai'}, true)).not.toThrow()
+    })
+  })
+
+  // ── buildNonInteractivePlan ───────────────────────────────────────────────
+
+  describe('buildNonInteractivePlan', () => {
+    it('regression: no providers/model → byte-identical plan to existing behavior', async () => {
+      const plan = await buildNonInteractivePlan({key: KEY, repo: 'owner/repo', harness: 'opencode'}, BASE_URL)
+
+      expect(plan.createKey).toBe(false)
+      expect(plan.keyValue).toBe(KEY)
+      expect(plan.repo).toBe('owner/repo')
+      expect(plan.harness).toBe('opencode')
+      // Template must match what getHarnessTemplate('opencode', {keyValue, baseUrl}) produces
+      const expected = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
+      expect(plan.template).toEqual(expected)
+    })
+
+    it('explicit providers: anthropic → byte-identical to no-providers case', async () => {
+      const planDefault = await buildNonInteractivePlan({key: KEY, repo: 'owner/repo', harness: 'opencode'}, BASE_URL)
+      const planExplicit = await buildNonInteractivePlan(
+        {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'anthropic'},
+        BASE_URL,
+      )
+
+      expect(planExplicit.template).toEqual(planDefault.template)
+    })
+
+    it('openai-only + model → correct template; verifyModelsAvailable IS called', async () => {
+      const fetchMock = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE)))
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      const plan = await buildNonInteractivePlan(
+        {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
+        BASE_URL,
+      )
+
+      // verifyModelsAvailable should have called fetch
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
+      // Template should have openai provider
+      const authEntry = plan.template.secrets.find(s => s.name === 'OPENCODE_AUTH_JSON')
+      const parsed = JSON.parse(authEntry?.value ?? '{}')
+      expect(parsed.openai).toBeDefined()
+      expect(parsed.anthropic).toBeUndefined()
+    })
+
+    it('dual providers + model → verifyModelsAvailable IS called', async () => {
+      const fetchMock = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE)))
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      const plan = await buildNonInteractivePlan(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'anthropic,openai',
+          model: 'openai/gpt-5.4-mini',
+        },
+        BASE_URL,
+      )
+
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
+      const authEntry = plan.template.secrets.find(s => s.name === 'OPENCODE_AUTH_JSON')
+      const parsed = JSON.parse(authEntry?.value ?? '{}')
+      expect(parsed.anthropic).toBeDefined()
+      expect(parsed.openai).toBeDefined()
+    })
+
+    it('openai-only without model → uses PROVIDER_DEFAULTS openai/gpt-5.4-mini', async () => {
+      const fetchMock = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE)))
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      const plan = await buildNonInteractivePlan(
+        {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai'},
+        BASE_URL,
+      )
+
+      const modelEntry = plan.template.variables.find(v => v.name === 'FRO_BOT_MODEL')
+      expect(modelEntry?.value).toBe('openai/gpt-5.4-mini')
+    })
+
+    it('verifyModelsAvailable throws → buildNonInteractivePlan propagates the error', async () => {
+      globalThis.fetch = mock(async () => new Response('Unauthorized', {status: 401})) as unknown as typeof fetch
+
+      await expect(
+        buildNonInteractivePlan(
+          {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
+          BASE_URL,
+        ),
+      ).rejects.toThrow('Proxy key rejected')
+    })
+
+    it('anthropic-only: verifyModelsAvailable is NOT called (no fetch)', async () => {
+      const fetchMock = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE)))
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      await buildNonInteractivePlan({key: KEY, repo: 'owner/repo', harness: 'opencode'}, BASE_URL)
+
+      expect(fetchMock.mock.calls.length).toBe(0)
+    })
   })
 })

@@ -11,8 +11,6 @@ import {toStringArray} from './keys'
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
 const HTTP_TIMEOUT_MS = 10_000
-const DEFAULT_OMO_PROVIDERS = 'claude-max20'
-const DEFAULT_FRO_BOT_MODEL = 'anthropic/claude-sonnet-4-6'
 
 const harnessSchema = z.enum(['opencode', 'claude-code', 'generic'])
 const ghRepoViewSchema = z.object({
@@ -236,31 +234,69 @@ export function getHarnessTemplate(
     keyValue?: string
     baseUrl?: string
     genericSecretNames?: GenericSecretNames
+    providers?: ProviderId[]
+    model?: string
   } = {},
 ): HarnessTemplate {
   const keyValue = values.keyValue ?? 'sk-placeholder'
   const baseUrl = stripTrailingSlash(values.baseUrl ?? DEFAULT_CLIPROXY_URL)
 
   if (harness === 'opencode') {
+    // Normalize provider list: default to anthropic-only, always sort anthropic first
+    const rawProviders = values.providers ?? ['anthropic']
+    // Stable ordering: anthropic always before openai regardless of input order
+    const PROVIDER_ORDER: ProviderId[] = ['anthropic', 'openai']
+    const providers = PROVIDER_ORDER.filter(p => rawProviders.includes(p))
+
+    // Resolve model
+    let model: string
+    if (values.model) {
+      model = values.model
+    } else if (providers.length === 1) {
+      model = PROVIDER_DEFAULTS[providers[0] as ProviderId]
+    } else {
+      throw new Error('model required when multiple providers selected')
+    }
+
+    // OMO_PROVIDERS token map
+    const OMO_TOKEN: Record<ProviderId, string> = {
+      anthropic: 'claude-max20',
+      openai: 'openai',
+    }
+
+    // Build auth JSON object (anthropic-first insertion order)
+    const authObj: Record<string, {type: string; key: string}> = {}
+    for (const p of providers) {
+      authObj[p] = {type: 'api', key: keyValue}
+    }
+
+    // Build config JSON object (anthropic-first insertion order)
+    const providerConfig: Record<string, {options: {baseURL: string}}> = {}
+    for (const p of providers) {
+      providerConfig[p] = {options: {baseURL: `${baseUrl}/v1`}}
+    }
+
+    const omoProviders = providers.map(p => OMO_TOKEN[p]).join(',')
+
     return {
       secrets: [
         {
           name: 'OPENCODE_AUTH_JSON',
-          value: JSON.stringify({anthropic: {type: 'api', key: keyValue}}),
+          value: JSON.stringify(authObj),
         },
         {
           name: 'OPENCODE_CONFIG',
-          value: JSON.stringify({provider: {anthropic: {options: {baseURL: `${baseUrl}/v1`}}}}),
+          value: JSON.stringify({provider: providerConfig}),
         },
         {
           name: 'OMO_PROVIDERS',
-          value: DEFAULT_OMO_PROVIDERS,
+          value: omoProviders,
         },
       ],
       variables: [
         {
           name: 'FRO_BOT_MODEL',
-          value: DEFAULT_FRO_BOT_MODEL,
+          value: model,
         },
       ],
     }

@@ -600,3 +600,199 @@ describe('Unit 2 — interactive provider/model prompts', () => {
   })
 })
 /* eslint-enable @typescript-eslint/no-explicit-any */
+
+describe('Unit 3 — getHarnessTemplate provider-aware', () => {
+  // Frozen byte-identical string for the anthropic-only regression test.
+  // This is the EXACT output of getHarnessTemplate('opencode', {keyValue: 'test-key'})
+  // as of the Unit 2 baseline. Any change to this string is a breaking regression.
+  const ANTHROPIC_ONLY_AUTH_JSON = '{"anthropic":{"type":"api","key":"test-key"}}'
+  const ANTHROPIC_ONLY_CONFIG = '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}'
+
+  describe('regression — anthropic-only (byte-identical)', () => {
+    it('no providers/model args → OPENCODE_AUTH_JSON is byte-identical to baseline', () => {
+      const template = getHarnessTemplate('opencode', {keyValue: 'test-key'})
+      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
+
+      expect(authEntry?.value).toBe(ANTHROPIC_ONLY_AUTH_JSON)
+    })
+
+    it('no providers/model args → OPENCODE_CONFIG is byte-identical to baseline', () => {
+      const template = getHarnessTemplate('opencode', {keyValue: 'test-key'})
+      const configEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
+
+      expect(configEntry?.value).toBe(ANTHROPIC_ONLY_CONFIG)
+    })
+
+    it('no providers/model args → OMO_PROVIDERS is claude-max20', () => {
+      const template = getHarnessTemplate('opencode', {keyValue: 'test-key'})
+      const entry = template.secrets.find((e: SecretAssignment) => e.name === 'OMO_PROVIDERS')
+
+      expect(entry?.value).toBe('claude-max20')
+    })
+
+    it('no providers/model args → FRO_BOT_MODEL is anthropic/claude-sonnet-4-6', () => {
+      const template = getHarnessTemplate('opencode', {keyValue: 'test-key'})
+      const entry = template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')
+
+      expect(entry?.value).toBe('anthropic/claude-sonnet-4-6')
+    })
+
+    it("explicit providers: ['anthropic'] → byte-identical to no-providers output", () => {
+      const baseline = getHarnessTemplate('opencode', {keyValue: 'test-key'})
+      const explicit = getHarnessTemplate('opencode', {keyValue: 'test-key', providers: ['anthropic']})
+
+      const baselineAuth = baseline.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
+      const explicitAuth = explicit.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
+      expect(explicitAuth?.value).toBe(baselineAuth?.value)
+
+      const baselineConfig = baseline.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
+      const explicitConfig = explicit.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
+      expect(explicitConfig?.value).toBe(baselineConfig?.value)
+    })
+  })
+
+  describe('openai-only provider', () => {
+    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → correct OPENCODE_AUTH_JSON", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-openai-key',
+        providers: ['openai'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
+
+      expect(authEntry?.value).toBe('{"openai":{"type":"api","key":"sk-openai-key"}}')
+    })
+
+    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → correct OPENCODE_CONFIG", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-openai-key',
+        providers: ['openai'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const configEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
+
+      expect(configEntry?.value).toBe('{"provider":{"openai":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}')
+    })
+
+    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → OMO_PROVIDERS is openai", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-openai-key',
+        providers: ['openai'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const entry = template.secrets.find((e: SecretAssignment) => e.name === 'OMO_PROVIDERS')
+
+      expect(entry?.value).toBe('openai')
+    })
+
+    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → FRO_BOT_MODEL is openai/gpt-5.4-mini", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-openai-key',
+        providers: ['openai'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const entry = template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')
+
+      expect(entry?.value).toBe('openai/gpt-5.4-mini')
+    })
+
+    it("providers: ['openai'] with no model → uses PROVIDER_DEFAULTS openai/gpt-5.4-mini", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-openai-key',
+        providers: ['openai'],
+      })
+      const entry = template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')
+
+      expect(entry?.value).toBe('openai/gpt-5.4-mini')
+    })
+  })
+
+  describe('dual-provider (anthropic + openai)', () => {
+    it("providers: ['anthropic', 'openai'] → OPENCODE_AUTH_JSON has anthropic-first key order", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-dual',
+        providers: ['anthropic', 'openai'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
+
+      expect(authEntry?.value).toBe(
+        '{"anthropic":{"type":"api","key":"sk-dual"},"openai":{"type":"api","key":"sk-dual"}}',
+      )
+    })
+
+    it("providers: ['anthropic', 'openai'] → OPENCODE_CONFIG has anthropic-first key order", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-dual',
+        providers: ['anthropic', 'openai'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const configEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
+
+      expect(configEntry?.value).toBe(
+        '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}},"openai":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
+      )
+    })
+
+    it("providers: ['anthropic', 'openai'] → OMO_PROVIDERS is claude-max20,openai", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-dual',
+        providers: ['anthropic', 'openai'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const entry = template.secrets.find((e: SecretAssignment) => e.name === 'OMO_PROVIDERS')
+
+      expect(entry?.value).toBe('claude-max20,openai')
+    })
+
+    it("providers: ['anthropic', 'openai'] → FRO_BOT_MODEL is the supplied model", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-dual',
+        providers: ['anthropic', 'openai'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const entry = template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')
+
+      expect(entry?.value).toBe('openai/gpt-5.4-mini')
+    })
+
+    it("providers: ['openai', 'anthropic'] (openai first) → output is still anthropic-first in JSON", () => {
+      const template = getHarnessTemplate('opencode', {
+        keyValue: 'sk-dual',
+        providers: ['openai', 'anthropic'],
+        model: 'openai/gpt-5.4-mini',
+      })
+      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
+
+      expect(authEntry?.value).toBe(
+        '{"anthropic":{"type":"api","key":"sk-dual"},"openai":{"type":"api","key":"sk-dual"}}',
+      )
+    })
+
+    it('multiple providers with no model → throws "model required when multiple providers selected"', () => {
+      expect(() =>
+        getHarnessTemplate('opencode', {
+          keyValue: 'sk-dual',
+          providers: ['anthropic', 'openai'],
+        }),
+      ).toThrow('model required when multiple providers selected')
+    })
+  })
+
+  describe('edge cases', () => {
+    it('keyValue: undefined → auth-json key is sk-placeholder', () => {
+      const template = getHarnessTemplate('opencode', {providers: ['anthropic']})
+      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
+      const parsed = JSON.parse(authEntry?.value ?? '{}')
+
+      expect(parsed.anthropic.key).toBe('sk-placeholder')
+    })
+
+    it('claude-code harness is unaffected by providers/model args', () => {
+      const template = getHarnessTemplate('claude-code', {keyValue: 'sk-cc'})
+
+      expect(template.secrets).toHaveLength(1)
+      expect(template.secrets[0]?.name).toBe('ANTHROPIC_API_KEY')
+    })
+  })
+})

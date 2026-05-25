@@ -43,6 +43,34 @@ Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/s
 | `/v0/management/latest-version` | GET | — | Returns `{"latest-version": "vX.Y.Z"}` |
 | `/` | GET | — | Health endpoint, no auth |
 
+## OPENCODE_CONFIG AND OPENCODE_AUTH_JSON SHAPES
+
+The proxy uses a **single bearer key per consumer repo**. The same key authenticates both `anthropic` and `openai` provider routes for that repo — there are no per-provider keys.
+
+For proxy-routed providers configured via `OPENCODE_CONFIG.provider.<name>.options.baseURL`, the `fro-bot/agent` action does **NOT** require `enable-omo: true` to honor the auth.json. Source: `fro-bot/agent@v0.44.3+` `action.yaml:99-104`. Librarian-verified 2026-05-25.
+
+**Dual-provider `OPENCODE_CONFIG`:**
+
+```json
+{
+  "provider": {
+    "anthropic": {"options": {"baseURL": "https://cliproxy.fro.bot/v1"}},
+    "openai":    {"options": {"baseURL": "https://cliproxy.fro.bot/v1"}}
+  }
+}
+```
+
+**Dual-provider `OPENCODE_AUTH_JSON`** (same proxy key for both providers):
+
+```json
+{
+  "anthropic": {"type": "api", "key": "<proxy-key>"},
+  "openai":    {"type": "api", "key": "<proxy-key>"}
+}
+```
+
+Anthropic-only repos use the single-provider subset of these shapes (unchanged from pre-opt-in behavior).
+
 ## ANTI-PATTERNS
 
 - **Never overwrite `config.yaml` on the server** without `--force-config` — it wipes runtime API keys (incident: 2026-04-06).

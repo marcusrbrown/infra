@@ -102,7 +102,7 @@ jobs:
           omo-providers: \${{ secrets.OMO_PROVIDERS }}
 `
 
-// Unit 7 fixtures: openai model prefix regression
+// openai model prefix regression fixtures
 const WORKFLOW_WITH_OPENAI_MODEL = `      - uses: fro-bot/agent@abc123
         with:
           github-token: \${{ secrets.FRO_BOT_PAT }}
@@ -257,7 +257,7 @@ describe('cliproxy setup helpers', () => {
     })
   })
 
-  describe('Unit 7 — analyzer regression for openai model prefix', () => {
+  describe('analyzer regression for openai model prefix', () => {
     it('returns empty stepsWithGaps for a workflow with openai/... model and all four inputs', () => {
       const result = analyzeFroBotWorkflow(WORKFLOW_WITH_OPENAI_MODEL)
 
@@ -444,7 +444,7 @@ describe('cliproxy setup helpers', () => {
       expect(helpText).toContain('--harness [harness]')
     })
 
-    it('shows all five new Unit 1 flags in help text', () => {
+    it('shows the five new provider/model/force/dry-run/verify-smoke flags in help text', () => {
       const cli = goke('infra')
       registerCliproxySetup(cli)
       cli.help()
@@ -460,7 +460,7 @@ describe('cliproxy setup helpers', () => {
   })
 })
 
-describe('Unit 1 — option parsing', () => {
+describe('option parsing', () => {
   describe('parseProviders', () => {
     it("parses \"anthropic,openai\" to ['anthropic', 'openai']", () => {
       expect(parseProviders('anthropic,openai')).toEqual(['anthropic', 'openai'])
@@ -518,7 +518,7 @@ describe('Unit 1 — option parsing', () => {
 })
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- spyOn mock return values require `any` casts */
-describe('Unit 2 — interactive provider/model prompts', () => {
+describe('interactive provider/model prompts', () => {
   // We spy on @clack/prompts functions directly since Bun's mock.module
   // requires static hoisting. Instead we use spyOn on the imported module.
   // The helpers call the clack functions via the module binding, so we
@@ -704,10 +704,10 @@ describe('Unit 2 — interactive provider/model prompts', () => {
 })
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
-describe('Unit 3 — getHarnessTemplate provider-aware', () => {
+describe('getHarnessTemplate provider-aware', () => {
   // Frozen byte-identical string for the anthropic-only regression test.
   // This is the EXACT output of getHarnessTemplate('opencode', {keyValue: 'test-key'})
-  // as of the Unit 2 baseline. Any change to this string is a breaking regression.
+  // baseline anthropic-only output. Any change to this string is a breaking regression.
   const ANTHROPIC_ONLY_AUTH_JSON = '{"anthropic":{"type":"api","key":"test-key"}}'
   const ANTHROPIC_ONLY_CONFIG = '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}'
 
@@ -900,7 +900,7 @@ describe('Unit 3 — getHarnessTemplate provider-aware', () => {
   })
 })
 
-describe('Unit 4 — verifyModelsAvailable', () => {
+describe('verifyModelsAvailable', () => {
   // Realistic fixture matching the plan spec
   const MODELS_FIXTURE = {
     data: [
@@ -1058,7 +1058,7 @@ describe('Unit 4 — verifyModelsAvailable', () => {
   })
 })
 
-describe('Unit 5 — validation matrix + non-interactive plan', () => {
+describe('validation matrix + non-interactive plan', () => {
   const MODELS_FIXTURE = {
     data: [
       {id: 'claude-3-7-sonnet-20250219', owned_by: 'anthropic'},
@@ -1256,7 +1256,7 @@ describe('Unit 5 — validation matrix + non-interactive plan', () => {
   })
 })
 
-describe('Unit 8 — destructive overwrite UX', () => {
+describe('destructive overwrite UX', () => {
   const BASE_URL = 'https://cliproxy.fro.bot'
   const KEY = 'sk-test-key'
 
@@ -1549,7 +1549,7 @@ function makeSmokeRunList(
   return JSON.stringify(runs)
 }
 
-describe('Unit 6 — smoke test runner', () => {
+describe('smoke test runner', () => {
   const REPO = 'owner/test-repo'
   const MODEL = 'anthropic/claude-sonnet-4-6'
   const RUN_URL = 'https://github.com/owner/test-repo/actions/runs/105'

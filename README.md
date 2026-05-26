@@ -199,6 +199,27 @@ bunx @marcusrbrown/infra cliproxy setup --key sk-... --repo owner/repo --harness
 
 Generates an API key, sets `OPENCODE_AUTH_JSON` and `OPENCODE_CONFIG` secrets on the target repo, and verifies the connection.
 
+#### Selecting providers
+
+`cliproxy setup --harness opencode` wires one or both of `anthropic` and `openai`. Both providers authenticate with the same proxy bearer key; the selection determines which entries land in `OPENCODE_CONFIG` and `OPENCODE_AUTH_JSON`.
+
+```sh
+bunx @marcusrbrown/infra cliproxy setup --harness opencode \
+  --providers anthropic,openai \
+  --model openai/gpt-5.4-mini \
+  --force
+```
+
+Flags:
+
+- `--providers` — comma-separated list (`anthropic`, `openai`). Default: `anthropic`. Interactive mode shows a multiselect with `anthropic` pre-checked.
+- `--model` — model identifier for `FRO_BOT_MODEL`. Required when multiple providers are selected in non-interactive mode.
+- `--force` — confirm overwriting existing GitHub secrets in non-interactive mode. Interactive mode shows a confirm prompt instead.
+- `--dry-run` — print the planned secrets without probing the proxy or writing anything.
+- `--verify-smoke` — trigger a `fro-bot.yaml` smoke run after setup with a 5-minute bounded poll. Non-blocking.
+
+OpenAI routing requires a Codex Pro OAuth token loaded on the proxy (`cliproxy login codex`).
+
 ### Gateway commands
 
 **`infra gateway status`** — SSH to the droplet, run `docker compose ps`, show service states, ages, and healthchecks.

@@ -24,7 +24,7 @@ export type Harness = z.infer<typeof harnessSchema>
 const providerIdSchema = z.enum(['anthropic', 'openai'])
 export type ProviderId = z.infer<typeof providerIdSchema>
 
-const MODEL_ID_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
+const MODEL_ID_RE = /^(?:anthropic|openai)\/[a-z\d](?:[a-z\d.\-]*[a-z\d])?$/
 
 /**
  * Parse a comma-separated provider list string into a validated ProviderId array.
@@ -230,7 +230,7 @@ export function validateSetupOptions(options: SetupOptions, isInteractive: boole
     }
   }
 
-  if (!options.key) {
+  if (!options.dryRun && !options.key) {
     throw new Error('--key is required when stdin is not a TTY. Provide an existing CLIProxyAPI key value.')
   }
 
@@ -1074,9 +1074,7 @@ export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: st
     }
   }
 
-  if (providers.includes('openai')) {
-    await verifyModelsAvailable(baseUrl, keyValue, providers, model)
-  }
+  await verifyModelsAvailable(baseUrl, keyValue, providers, model)
 
   // Destructive overwrite gate: non-anthropic-only requires --force in non-interactive mode
   if (mustConfirmDestructive(providers) && !options.force) {
@@ -1364,14 +1362,16 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
       }
 
       try {
-        await withSpinner('Checking GitHub CLI availability', async () => {
-          await assertGhInstalled()
-          await assertGhAuthenticated()
-        })
+        if (!options.dryRun) {
+          await withSpinner('Checking GitHub CLI availability', async () => {
+            await assertGhInstalled()
+            await assertGhAuthenticated()
+          })
 
-        await withSpinner('Checking CLIProxyAPI reachability', async () => {
-          await assertProxyReachable(baseUrl)
-        })
+          await withSpinner('Checking CLIProxyAPI reachability', async () => {
+            await assertProxyReachable(baseUrl)
+          })
+        }
 
         const plan = interactive
           ? await buildInteractivePlan(options, baseUrl)

@@ -492,27 +492,48 @@ describe('option parsing', () => {
   })
 
   describe('model flag validation', () => {
+    // Tightened regex: trailing dot/hyphen rejected; single-char tail accepted
+    const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d](?:[a-z\d.\-]*[a-z\d])?$/
+
     it('accepts "openai/gpt-5.4-mini"', () => {
-      const cli = goke('infra')
-      registerCliproxySetup(cli)
-      // Verify the schema accepts valid model IDs by checking the regex directly
-      const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
       expect(MODEL_RE.test('openai/gpt-5.4-mini')).toBe(true)
     })
 
     it('rejects "gpt-5.4-mini" (no provider prefix)', () => {
-      const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
       expect(MODEL_RE.test('gpt-5.4-mini')).toBe(false)
     })
 
     it('rejects "openai/GPT-5.4-mini" (uppercase)', () => {
-      const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
       expect(MODEL_RE.test('openai/GPT-5.4-mini')).toBe(false)
     })
 
     it('rejects "openai/gpt-5.4-mini; rm -rf /" (injection attempt)', () => {
-      const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d][a-z\d.\-]*$/
       expect(MODEL_RE.test('openai/gpt-5.4-mini; rm -rf /')).toBe(false)
+    })
+
+    // Fix 5 — trailing dot/hyphen rejection
+    it('rejects "openai/gpt-4o." (trailing dot)', () => {
+      expect(MODEL_RE.test('openai/gpt-4o.')).toBe(false)
+    })
+
+    it('rejects "openai/gpt-4o-" (trailing hyphen)', () => {
+      expect(MODEL_RE.test('openai/gpt-4o-')).toBe(false)
+    })
+
+    it('accepts "openai/gpt-4o" (regression — still works)', () => {
+      expect(MODEL_RE.test('openai/gpt-4o')).toBe(true)
+    })
+
+    it('accepts "anthropic/claude-sonnet-4-6" (regression)', () => {
+      expect(MODEL_RE.test('anthropic/claude-sonnet-4-6')).toBe(true)
+    })
+
+    it('accepts "openai/a" (single-char tail)', () => {
+      expect(MODEL_RE.test('openai/a')).toBe(true)
+    })
+
+    it('rejects "openai/" (empty tail)', () => {
+      expect(MODEL_RE.test('openai/')).toBe(false)
     })
   })
 })
@@ -2237,3 +2258,106 @@ describe('safe_auto #2 regression — /v1/models body Bearer token redaction', (
     expect(errorMessage.match(/<redacted>/g)?.length).toBeGreaterThanOrEqual(2)
   })
 })
+
+/* eslint-disable @typescript-eslint/no-explicit-any -- spyOn mock return values require `any` casts */
+
+// Fix 3 — dry-run isolation regression tests
+//
+// The action handler in registerCliproxySetup is not exported, so we test the
+// dry-run contract at the boundary level:
+//   - validateSetupOptions: verifies --key is not required under --dry-run
+//   - buildNonInteractivePlan: verifies no fetch is called (verifyModelsAvailable
+//     is skipped by the dry-run early return inside buildNonInteractivePlan)
+//
+// The preflight calls (assertGhInstalled, assertGhAuthenticated, assertProxyReachable)
+// live inside the action handler and are gated by `!options.dryRun` (Fix 1). We verify
+// this contract by confirming Bun.spawn is NOT called during a dry-run
+// buildNonInteractivePlan invocation (the only Bun.spawn calls in the non-interactive
+// path come from gh CLI invocations, which are all in the preflight or post-plan phase).
+describe('cliproxy setup --dry-run is offline-safe (action handler contract)', () => {
+  const BASE_URL = 'https://cliproxy.fro.bot'
+
+  let originalFetch: typeof globalThis.fetch
+  let spawnSpy: ReturnType<typeof spyOn> | undefined
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    spawnSpy?.mockRestore()
+    spawnSpy = undefined
+  })
+  originalFetch = globalThis.fetch
+
+  it('dry-run skips gh auth check — Bun.spawn not called during buildNonInteractivePlan', async () => {
+    // Spy Bun.spawn to fail hard if called (simulates unauthenticated environment)
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+      throw new Error('gh auth status called during dry-run — should be skipped')
+    })
+
+    // Should complete without throwing (dry-run early return in buildNonInteractivePlan)
+    const plan = await buildNonInteractivePlan({repo: 'owner/repo', harness: 'opencode', dryRun: true}, BASE_URL)
+    expect(plan).toBeDefined()
+    expect(spawnSpy).not.toHaveBeenCalled()
+  })
+
+  it('dry-run skips proxy reachability — fetch not called during buildNonInteractivePlan', async () => {
+    // Set fetch to throw (simulates proxy being down)
+    const fetchMock = mock(async () => {
+      throw new TypeError('fetch failed — proxy is down')
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    // Should complete without throwing
+    const plan = await buildNonInteractivePlan({repo: 'owner/repo', harness: 'opencode', dryRun: true}, BASE_URL)
+    expect(plan).toBeDefined()
+    // fetch was never called (verifyModelsAvailable skipped by dry-run early return)
+    expect(fetchMock.mock.calls.length).toBe(0)
+  })
+
+  it('dry-run does not require --key (validateSetupOptions)', () => {
+    // Should not throw even without --key
+    expect(() => validateSetupOptions({repo: 'owner/repo', harness: 'opencode', dryRun: true}, false)).not.toThrow()
+  })
+
+  it('dry-run does not require --key (buildNonInteractivePlan uses sk-placeholder)', async () => {
+    const plan = await buildNonInteractivePlan({repo: 'owner/repo', harness: 'opencode', dryRun: true}, BASE_URL)
+    expect(plan).toBeDefined()
+    // Template uses sk-placeholder when no key provided
+    const authJsonSecret = plan.template.secrets.find(s => s.name === 'OPENCODE_AUTH_JSON')
+    expect(authJsonSecret?.value).toContain('sk-placeholder')
+  })
+
+  it('dry-run still requires --repo (ensureRepoFormat rejects empty string)', async () => {
+    await expect(buildNonInteractivePlan({harness: 'opencode', dryRun: true}, BASE_URL)).rejects.toThrow(/owner\/repo/)
+  })
+
+  it('dry-run still requires --harness (validateSetupOptions)', () => {
+    expect(() => validateSetupOptions({repo: 'owner/repo', dryRun: true}, false)).toThrow(
+      '--harness is required when stdin is not a TTY',
+    )
+  })
+
+  it('non-dry-run still runs preflights — fetch IS called for verifyModelsAvailable (openai provider)', async () => {
+    // buildNonInteractivePlan calls verifyModelsAvailable (via fetch) for openai provider.
+    // The action handler (not exported) calls Bun.spawn for gh checks — that layer is
+    // tested indirectly: Fix 1 gates those calls behind !options.dryRun in the action handler.
+    // Here we confirm the non-dry-run path reaches verifyModelsAvailable (fetch called).
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const fetchMock = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE)))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const plan = await buildNonInteractivePlan(
+      {
+        key: 'sk-test',
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: 'openai',
+        model: 'openai/gpt-5.4-mini',
+        force: true,
+      },
+      BASE_URL,
+    )
+    expect(plan).toBeDefined()
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
+  })
+})
+/* eslint-enable @typescript-eslint/no-explicit-any */

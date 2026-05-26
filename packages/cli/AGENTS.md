@@ -54,7 +54,7 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - **Packaging**: Published package ships TypeScript source with `#!/usr/bin/env bun` shebang, requires `engines.bun >= 1.0.0`.
 - **`--dry-run` semantics**: Prints the planned action without validating preconditions or executing side effects. Safe to run anywhere.
 - **`cliproxy setup --providers <list>`**: Comma-separated provider list — `anthropic` and/or `openai`. Default: `anthropic`. Multi-provider requires `--model`. Interactive mode shows a multiselect (anthropic pre-checked; openai opt-in).
-- **`cliproxy setup --model <provider/model-id>`**: Explicit model override. Format: `<provider>/<model-id>` (strict regex). Required when `--providers` includes `openai` in non-interactive mode.
+- **`cliproxy setup --model <provider/model-id>`**: Explicit model override. Format: `<provider>/<model-id>` (strict regex, trailing dot/hyphen rejected). Required in non-interactive mode when `--providers` selects multiple providers. Single-provider non-interactive runs use the provider's default (`anthropic/claude-sonnet-4-6` or `openai/gpt-5.4-mini`).
 - **`cliproxy setup --force`**: Required in non-interactive mode to confirm destructive overwrite of existing secrets. Interactive mode shows a confirm prompt instead.
 - **`cliproxy setup --dry-run`**: Preview planned secrets without probing the proxy or mutating any secrets. Safe to run anywhere.
 - **`cliproxy setup --verify-smoke`**: Opt-in post-mutation smoke test. Triggers the target repo's workflow and polls for completion with a 5-minute bounded poll. Non-blocking — setup succeeds even if smoke test fails.

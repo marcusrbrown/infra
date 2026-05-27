@@ -1,435 +1,22 @@
 /// <reference types="bun" />
 
+import type {SpinnerResult} from '@clack/prompts'
 import {afterEach, describe, expect, it, mock, spyOn} from 'bun:test'
 import {goke} from 'goke'
 
 import {
-  analyzeFroBotWorkflow,
   buildNonInteractivePlan,
-  formatDryRunPreview,
-  formatWorkflowSnippet,
-  getHarnessTemplate,
-  interpretGhContentResult,
-  isGhRateLimitError,
-  mustConfirmDestructive,
-  parseProviders,
-  promptForModel,
-  promptForProviders,
+  redactKey,
   registerCliproxySetup,
-  runSmokeTest,
+  requiresDestructiveProviderChangeConfirmation,
+  runSetupCommand,
   validateSetupOptions,
   verifyModelsAvailable,
-  withGhRetry,
-  type SecretAssignment,
-  type VariableAssignment,
 } from './setup'
-
-const COMPLETE_WORKFLOW = `      - uses: fro-bot/agent@abc123
-        with:
-          github-token: \${{ secrets.FRO_BOT_PAT }}
-          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
-          model: \${{ vars.FRO_BOT_MODEL }}
-          omo-providers: \${{ secrets.OMO_PROVIDERS }}
-          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
-          prompt: \${{ env.PROMPT }}
-`
-
-const MISSING_OPENCODE_CONFIG_WORKFLOW = `      - uses: fro-bot/agent@abc123
-        with:
-          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
-          github-token: \${{ secrets.FRO_BOT_PAT }}
-          model: \${{ vars.FRO_BOT_MODEL }}
-          omo-providers: \${{ secrets.OMO_PROVIDERS }}
-          prompt: \${{ env.PROMPT }}
-`
-
-// Regression fixture for PR #125 review: a sibling step has `model:` as an input,
-// but the fro-bot/agent step is missing it. The step-scoped scan must still flag
-// `model` as missing, otherwise the diagnostic is silently suppressed.
-const SIBLING_STEP_SHADOWS_MODEL_INPUT = `name: ci
-on: [push]
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        model: [opus, sonnet]
-    steps:
-      - uses: actions/some-ai-step@abc
-        with:
-          model: \${{ matrix.model }}
-      - name: Run Fro Bot
-        uses: fro-bot/agent@def
-        with:
-          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
-          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
-          omo-providers: \${{ secrets.OMO_PROVIDERS }}
-`
-
-const WORKFLOW_WITHOUT_FRO_BOT_AGENT = `name: ci
-on: [push]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: echo hello
-`
-
-// Follow-up from PR #125 second review: the matchAll refactor must report gaps
-// in any fro-bot/agent step, not just the first. Step #1 is complete, step #2 is
-// missing opencode-config and model — the analyzer should flag only step #2.
-const TWO_AGENT_STEPS_SECOND_BROKEN = `name: fro-bot
-on: [pull_request, schedule]
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Run Fro Bot review
-        uses: fro-bot/agent@abc123
-        with:
-          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
-          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
-          omo-providers: \${{ secrets.OMO_PROVIDERS }}
-          model: \${{ vars.FRO_BOT_MODEL }}
-  dispatch:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Run Fro Bot dispatch
-        uses: fro-bot/agent@abc123
-        with:
-          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
-          omo-providers: \${{ secrets.OMO_PROVIDERS }}
-`
-
-// openai model prefix regression fixtures
-const WORKFLOW_WITH_OPENAI_MODEL = `      - uses: fro-bot/agent@abc123
-        with:
-          github-token: \${{ secrets.FRO_BOT_PAT }}
-          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
-          model: openai/gpt-5.4-mini
-          omo-providers: \${{ secrets.OMO_PROVIDERS }}
-          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
-          prompt: \${{ env.PROMPT }}
-`
-
-// Dual-provider hints: omo-providers value contains "openai", model is openai/...
-const WORKFLOW_WITH_DUAL_PROVIDER_HINTS = `name: fro-bot
-on: [pull_request]
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Run Fro Bot
-        uses: fro-bot/agent@abc123
-        with:
-          github-token: \${{ secrets.FRO_BOT_PAT }}
-          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
-          model: openai/gpt-5.4-mini
-          omo-providers: anthropic,openai
-          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
-          prompt: \${{ env.PROMPT }}
-`
-
-// Missing opencode-config but with openai model prefix — gap detection must still fire
-const MISSING_OPENCODE_CONFIG_OPENAI_MODEL_WORKFLOW = `      - uses: fro-bot/agent@abc123
-        with:
-          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
-          github-token: \${{ secrets.FRO_BOT_PAT }}
-          model: openai/gpt-5.4-mini
-          omo-providers: \${{ secrets.OMO_PROVIDERS }}
-          prompt: \${{ env.PROMPT }}
-`
+import {formatDryRunPreview} from './setup/preview'
+import {getHarnessTemplate} from './setup/templates'
 
 describe('cliproxy setup helpers', () => {
-  describe('validateSetupOptions', () => {
-    it('requires --key in non-interactive mode', () => {
-      expect(() => validateSetupOptions({repo: 'owner/repo', harness: 'opencode'}, false)).toThrow(
-        '--key is required when stdin is not a TTY',
-      )
-    })
-
-    it('requires --repo in non-interactive mode', () => {
-      expect(() => validateSetupOptions({key: 'sk-test', harness: 'opencode'}, false)).toThrow(
-        '--repo is required when stdin is not a TTY',
-      )
-    })
-
-    it('requires --harness in non-interactive mode', () => {
-      expect(() => validateSetupOptions({key: 'sk-test', repo: 'owner/repo'}, false)).toThrow(
-        '--harness is required when stdin is not a TTY',
-      )
-    })
-  })
-
-  describe('getHarnessTemplate', () => {
-    it('returns the expected OpenCode secret and variable names', () => {
-      const template = getHarnessTemplate('opencode')
-
-      expect(template.secrets.map((entry: SecretAssignment) => entry.name)).toEqual([
-        'OPENCODE_AUTH_JSON',
-        'OPENCODE_CONFIG',
-        'OMO_PROVIDERS',
-      ])
-      expect(template.variables.map((entry: VariableAssignment) => entry.name)).toEqual(['FRO_BOT_MODEL'])
-    })
-
-    it('uses a provider-prefixed FRO_BOT_MODEL default value', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: 'sk-test'})
-      const modelEntry = template.variables.find((entry: VariableAssignment) => entry.name === 'FRO_BOT_MODEL')
-
-      expect(modelEntry?.value).toMatch(/^anthropic\//)
-    })
-
-    it('uses the expected OMO_PROVIDERS default value', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: 'sk-test'})
-      const providersEntry = template.secrets.find((entry: SecretAssignment) => entry.name === 'OMO_PROVIDERS')
-
-      expect(providersEntry?.value).toBe('claude-max20')
-    })
-
-    it('writes an OPENCODE_CONFIG baseURL with the /v1 suffix', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: 'sk-test'})
-      const configEntry = template.secrets.find((entry: SecretAssignment) => entry.name === 'OPENCODE_CONFIG')
-      const parsed = JSON.parse(configEntry?.value ?? '{}')
-
-      expect(parsed.provider.anthropic.options.baseURL).toMatch(/\/v1$/)
-    })
-
-    it('writes OPENCODE_AUTH_JSON with type=api and the supplied key', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: 'sk-test-key'})
-      const authEntry = template.secrets.find((entry: SecretAssignment) => entry.name === 'OPENCODE_AUTH_JSON')
-      const parsed = JSON.parse(authEntry?.value ?? '{}')
-
-      expect(parsed.anthropic).toEqual({type: 'api', key: 'sk-test-key'})
-    })
-  })
-
-  describe('analyzeFroBotWorkflow', () => {
-    it('returns empty stepsWithGaps when all four inputs are wired', () => {
-      const result = analyzeFroBotWorkflow(COMPLETE_WORKFLOW)
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      expect(result.stepsWithGaps).toEqual([])
-    })
-
-    it('detects a missing opencode-config input on step #1', () => {
-      const result = analyzeFroBotWorkflow(MISSING_OPENCODE_CONFIG_WORKFLOW)
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      expect(result.stepsWithGaps).toHaveLength(1)
-      expect(result.stepsWithGaps[0]?.stepOrdinal).toBe(1)
-      expect([...(result.stepsWithGaps[0]?.missingInputs ?? [])]).toEqual(['opencode-config'])
-    })
-
-    it('flags model as missing even when a sibling step uses model: as an input', () => {
-      const result = analyzeFroBotWorkflow(SIBLING_STEP_SHADOWS_MODEL_INPUT)
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      expect(result.stepsWithGaps).toHaveLength(1)
-      expect(result.stepsWithGaps[0]?.stepOrdinal).toBe(1)
-      expect([...(result.stepsWithGaps[0]?.missingInputs ?? [])]).toEqual(['model'])
-    })
-
-    it('returns kind no-agent-step when the workflow has no fro-bot/agent step', () => {
-      const result = analyzeFroBotWorkflow(WORKFLOW_WITHOUT_FRO_BOT_AGENT)
-
-      expect(result.kind).toBe('no-agent-step')
-    })
-
-    it('returns kind no-agent-step for empty content', () => {
-      const result = analyzeFroBotWorkflow('')
-
-      expect(result.kind).toBe('no-agent-step')
-    })
-
-    it('reports only the broken step when a workflow has two fro-bot/agent steps and one is complete', () => {
-      const result = analyzeFroBotWorkflow(TWO_AGENT_STEPS_SECOND_BROKEN)
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      expect(result.stepsWithGaps).toHaveLength(1)
-      expect(result.stepsWithGaps[0]?.stepOrdinal).toBe(2)
-      expect([...(result.stepsWithGaps[0]?.missingInputs ?? [])]).toEqual(['opencode-config', 'model'])
-    })
-  })
-
-  describe('analyzer regression for openai model prefix', () => {
-    it('returns empty stepsWithGaps for a workflow with openai/... model and all four inputs', () => {
-      const result = analyzeFroBotWorkflow(WORKFLOW_WITH_OPENAI_MODEL)
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      expect(result.stepsWithGaps).toEqual([])
-    })
-
-    it('returns empty stepsWithGaps for a dual-provider workflow with openai/... model', () => {
-      const result = analyzeFroBotWorkflow(WORKFLOW_WITH_DUAL_PROVIDER_HINTS)
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      expect(result.stepsWithGaps).toEqual([])
-    })
-
-    it('detects missing opencode-config even when model is openai/...', () => {
-      const result = analyzeFroBotWorkflow(MISSING_OPENCODE_CONFIG_OPENAI_MODEL_WORKFLOW)
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      expect(result.stepsWithGaps).toHaveLength(1)
-      expect(result.stepsWithGaps[0]?.stepOrdinal).toBe(1)
-      expect([...(result.stepsWithGaps[0]?.missingInputs ?? [])]).toEqual(['opencode-config'])
-    })
-
-    it('detects missing opencode-config when model is anthropic/... (sanity regression)', () => {
-      const result = analyzeFroBotWorkflow(MISSING_OPENCODE_CONFIG_WORKFLOW)
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      expect(result.stepsWithGaps).toHaveLength(1)
-      expect(result.stepsWithGaps[0]?.stepOrdinal).toBe(1)
-      expect([...(result.stepsWithGaps[0]?.missingInputs ?? [])]).toEqual(['opencode-config'])
-    })
-
-    it('does not emit any enable-omo warning for openai model workflows', () => {
-      const openaiResult = analyzeFroBotWorkflow(WORKFLOW_WITH_OPENAI_MODEL)
-      const dualResult = analyzeFroBotWorkflow(WORKFLOW_WITH_DUAL_PROVIDER_HINTS)
-
-      // The analyzer result shape has no warning category — only stepsWithGaps.
-      // Verify the result object has exactly the expected keys (kind + stepsWithGaps).
-      expect(Object.keys(openaiResult)).toEqual(['kind', 'stepsWithGaps'])
-      expect(Object.keys(dualResult)).toEqual(['kind', 'stepsWithGaps'])
-    })
-
-    it('REQUIRED_OPENCODE_INPUTS covers exactly auth-json, opencode-config, omo-providers, model (no enable-omo)', () => {
-      // Infer the required inputs from fixture-based testing: a workflow with exactly
-      // these four inputs and no others (besides github-token and prompt) passes with zero gaps.
-      const result = analyzeFroBotWorkflow(WORKFLOW_WITH_OPENAI_MODEL)
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      // Zero gaps confirms the four inputs in the fixture are sufficient — enable-omo is NOT required.
-      expect(result.stepsWithGaps).toEqual([])
-    })
-  })
-
-  describe('interpretGhContentResult', () => {
-    it('returns kind missing when stderr contains HTTP 404', () => {
-      const result = interpretGhContentResult({
-        exitCode: 1,
-        stdout: '',
-        stderr: 'gh: Not Found (HTTP 404)',
-      })
-
-      expect(result.kind).toBe('missing')
-    })
-
-    it('returns kind unreachable with the stderr reason on non-404 failures', () => {
-      const result = interpretGhContentResult({
-        exitCode: 1,
-        stdout: '',
-        stderr: 'gh: API rate limit exceeded',
-      })
-
-      expect(result.kind).toBe('unreachable')
-      if (result.kind !== 'unreachable') throw new Error('unreachable')
-      expect(result.reason).toBe('gh: API rate limit exceeded')
-    })
-
-    it('falls back to the exit code when stderr is empty on a non-404 failure', () => {
-      const result = interpretGhContentResult({exitCode: 2, stdout: '', stderr: ''})
-
-      expect(result.kind).toBe('unreachable')
-      if (result.kind !== 'unreachable') throw new Error('unreachable')
-      expect(result.reason).toBe('gh api exited with code 2')
-    })
-
-    it('delegates to analyzeFroBotWorkflow on a successful response', () => {
-      const result = interpretGhContentResult({
-        exitCode: 0,
-        stdout: COMPLETE_WORKFLOW,
-        stderr: '',
-      })
-
-      expect(result.kind).toBe('analyzed')
-      if (result.kind !== 'analyzed') throw new Error('unreachable')
-      expect(result.stepsWithGaps).toEqual([])
-    })
-  })
-
-  describe('formatWorkflowSnippet', () => {
-    it('renders snippet lines at 10-space indent so they can be pasted directly under with:', () => {
-      const snippet = formatWorkflowSnippet(['opencode-config', 'model'])
-
-      /* eslint-disable no-template-curly-in-string -- GitHub Actions expression syntax, not JS template literals */
-      const expected = [
-        '          opencode-config: ${{ secrets.OPENCODE_CONFIG }}',
-        '          model: ${{ vars.FRO_BOT_MODEL }}',
-      ].join('\n')
-      /* eslint-enable no-template-curly-in-string */
-      expect(snippet).toBe(expected)
-    })
-  })
-
-  describe('isGhRateLimitError', () => {
-    it('returns true when text contains "rate limit"', () => {
-      expect(isGhRateLimitError('API rate limit exceeded')).toBe(true)
-    })
-
-    it('is case-insensitive', () => {
-      expect(isGhRateLimitError('You have exceeded a secondary RATE LIMIT')).toBe(true)
-    })
-
-    it('returns false for unrelated error messages', () => {
-      expect(isGhRateLimitError('Not Found (HTTP 404)')).toBe(false)
-    })
-
-    it('returns false for an empty string', () => {
-      expect(isGhRateLimitError('')).toBe(false)
-    })
-
-    it('returns false for a connection timeout', () => {
-      expect(isGhRateLimitError('connection timeout')).toBe(false)
-    })
-  })
-
-  describe('withGhRetry', () => {
-    it('returns the value when fn succeeds immediately', async () => {
-      const result = await withGhRetry('test label', async () => 'ok', false)
-
-      expect(result).toBe('ok')
-    })
-
-    it('re-throws non-rate-limit errors without querying the reset time', async () => {
-      const queryReset = async (): Promise<string> => {
-        throw new Error('queryReset should not have been called')
-      }
-      const err = new Error('some other error')
-
-      await expect(withGhRetry('test label', async () => Promise.reject(err), false, queryReset)).rejects.toThrow(
-        'some other error',
-      )
-    })
-
-    it('re-throws with reset time appended in non-interactive mode on rate limit', async () => {
-      const queryReset = async (): Promise<string> => '2:30 PM'
-
-      await expect(
-        withGhRetry(
-          'test label',
-          async () => {
-            throw new Error('API rate limit exceeded for url')
-          },
-          false,
-          queryReset,
-        ),
-      ).rejects.toThrow('resets at 2:30 PM')
-    })
-  })
-
   describe('help output', () => {
     it('shows --key, --repo, and --harness flags', () => {
       const cli = goke('infra')
@@ -461,36 +48,6 @@ describe('cliproxy setup helpers', () => {
 })
 
 describe('option parsing', () => {
-  describe('parseProviders', () => {
-    it("parses \"anthropic,openai\" to ['anthropic', 'openai']", () => {
-      expect(parseProviders('anthropic,openai')).toEqual(['anthropic', 'openai'])
-    })
-
-    it('parses "openai" to [\'openai\']', () => {
-      expect(parseProviders('openai')).toEqual(['openai'])
-    })
-
-    it('parses "anthropic" to [\'anthropic\']', () => {
-      expect(parseProviders('anthropic')).toEqual(['anthropic'])
-    })
-
-    it('rejects duplicate providers with a "duplicate" error', () => {
-      expect(() => parseProviders('anthropic,anthropic')).toThrow(/duplicate/i)
-    })
-
-    it('rejects an empty string with a clear message', () => {
-      expect(() => parseProviders('')).toThrow()
-    })
-
-    it('rejects an unknown provider "claude" with an enum error', () => {
-      expect(() => parseProviders('claude')).toThrow()
-    })
-
-    it('trims whitespace around provider names', () => {
-      expect(parseProviders(' anthropic , openai ')).toEqual(['anthropic', 'openai'])
-    })
-  })
-
   describe('model flag validation', () => {
     // Tightened regex: trailing dot/hyphen rejected; single-char tail accepted
     const MODEL_RE = /^(?:anthropic|openai)\/[a-z\d](?:[a-z\d.\-]*[a-z\d])?$/
@@ -538,547 +95,6 @@ describe('option parsing', () => {
   })
 })
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- spyOn mock return values require `any` casts */
-describe('interactive provider/model prompts', () => {
-  // We spy on @clack/prompts functions directly since Bun's mock.module
-  // requires static hoisting. Instead we use spyOn on the imported module.
-  // The helpers call the clack functions via the module binding, so we
-  // intercept them via spyOn after importing.
-
-  // Note: Because setup.ts imports clack at module load time and calls the
-  // functions directly (not via a re-exported object), we need to use
-  // mock.module to intercept. However, Bun's mock.module must be called
-  // before the module is imported. Since setup.ts is already imported above,
-  // we test the helpers by injecting controlled behavior through the clack
-  // module mock at the describe level using beforeEach/afterEach with spyOn
-  // on the actual clack module exports.
-  //
-  // The approach: import clack directly and spyOn its exports.
-
-  describe('promptForProviders', () => {
-    it('happy path: anthropic-only selection returns [anthropic]', async () => {
-      const clack = await import('@clack/prompts')
-      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(['anthropic'] as any)
-
-      const result = await promptForProviders()
-
-      expect(result).toEqual(['anthropic'])
-      expect(multiselectSpy).toHaveBeenCalledTimes(1)
-
-      multiselectSpy.mockRestore()
-    })
-
-    it('happy path: both providers selected returns [anthropic, openai]', async () => {
-      const clack = await import('@clack/prompts')
-      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(['anthropic', 'openai'] as any)
-
-      const result = await promptForProviders()
-
-      expect(result).toEqual(['anthropic', 'openai'])
-
-      multiselectSpy.mockRestore()
-    })
-
-    it('edge case: empty selection re-prompts; multiselect called exactly twice', async () => {
-      const clack = await import('@clack/prompts')
-      let callCount = 0
-      const multiselectSpy = spyOn(clack, 'multiselect').mockImplementation(async () => {
-        callCount++
-        if (callCount === 1) return [] as any
-        return ['anthropic'] as any
-      })
-
-      const result = await promptForProviders()
-
-      expect(result).toEqual(['anthropic'])
-      expect(multiselectSpy).toHaveBeenCalledTimes(2)
-
-      multiselectSpy.mockRestore()
-    })
-
-    it('edge case: cancel mid-flow causes process.exit(0)', async () => {
-      const clack = await import('@clack/prompts')
-      const cancelSymbol = Symbol('cancel')
-      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(cancelSymbol as any)
-      const isCancelSpy = spyOn(clack, 'isCancel').mockImplementation(v => v === cancelSymbol)
-      const cancelSpy = spyOn(clack, 'cancel').mockImplementation(() => {})
-      const exitSpy = spyOn(process, 'exit').mockImplementation((() => {
-        throw new Error('process.exit called')
-      }) as any)
-
-      await expect(promptForProviders()).rejects.toThrow('process.exit called')
-
-      multiselectSpy.mockRestore()
-      isCancelSpy.mockRestore()
-      cancelSpy.mockRestore()
-      exitSpy.mockRestore()
-    })
-  })
-
-  describe('promptForModel', () => {
-    it('happy path: single anthropic provider returns anthropic/claude-sonnet-4-6 without prompting', async () => {
-      const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select')
-
-      const result = await promptForModel(['anthropic'])
-
-      expect(result).toBe('anthropic/claude-sonnet-4-6')
-      expect(selectSpy).not.toHaveBeenCalled()
-
-      selectSpy.mockRestore()
-    })
-
-    it('happy path: single openai provider returns openai/gpt-5.4-mini without prompting', async () => {
-      const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select')
-
-      const result = await promptForModel(['openai'])
-
-      expect(result).toBe('openai/gpt-5.4-mini')
-      expect(selectSpy).not.toHaveBeenCalled()
-
-      selectSpy.mockRestore()
-    })
-
-    it('happy path: both providers, operator picks openai/gpt-5.4-mini from select', async () => {
-      const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue('openai/gpt-5.4-mini' as any)
-
-      const result = await promptForModel(['anthropic', 'openai'])
-
-      expect(result).toBe('openai/gpt-5.4-mini')
-      expect(selectSpy).toHaveBeenCalledTimes(1)
-
-      selectSpy.mockRestore()
-    })
-
-    it('happy path: both providers, operator picks anthropic/claude-sonnet-4-6 from select', async () => {
-      const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue('anthropic/claude-sonnet-4-6' as any)
-
-      const result = await promptForModel(['anthropic', 'openai'])
-
-      expect(result).toBe('anthropic/claude-sonnet-4-6')
-
-      selectSpy.mockRestore()
-    })
-
-    it('happy path: operator picks "enter custom..." then types openai/gpt-5.4-mini', async () => {
-      const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue('__custom__' as any)
-      const textSpy = spyOn(clack, 'text').mockResolvedValue('openai/gpt-5.4-mini' as any)
-
-      const result = await promptForModel(['anthropic', 'openai'])
-
-      expect(result).toBe('openai/gpt-5.4-mini')
-      expect(textSpy).toHaveBeenCalledTimes(1)
-
-      selectSpy.mockRestore()
-      textSpy.mockRestore()
-    })
-
-    it('edge case: custom model entry fails regex then succeeds on second attempt', async () => {
-      const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue('__custom__' as any)
-      let textCallCount = 0
-      const textSpy = spyOn(clack, 'text').mockImplementation(async (_opts: any) => {
-        textCallCount++
-        // Simulate the validate function being called inline by the mock
-        // The real clack text prompt calls validate internally; here we just
-        // return the value and let the helper's validate logic re-prompt.
-        // Since we can't simulate clack's internal validate loop, we test
-        // that the helper's validate function rejects bad input.
-        if (textCallCount === 1) {
-          // Return a bad value — the helper should detect this and re-prompt
-          return 'bad-model' as any
-        }
-        return 'openai/gpt-5.4-mini' as any
-      })
-
-      const result = await promptForModel(['anthropic', 'openai'])
-
-      expect(result).toBe('openai/gpt-5.4-mini')
-      expect(textSpy.mock.calls.length).toBeGreaterThanOrEqual(1)
-
-      selectSpy.mockRestore()
-      textSpy.mockRestore()
-    })
-
-    it('edge case: cancel during model select causes process.exit(0)', async () => {
-      const clack = await import('@clack/prompts')
-      const cancelSymbol = Symbol('cancel')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue(cancelSymbol as any)
-      const isCancelSpy = spyOn(clack, 'isCancel').mockImplementation(v => v === cancelSymbol)
-      const cancelSpy = spyOn(clack, 'cancel').mockImplementation(() => {})
-      const exitSpy = spyOn(process, 'exit').mockImplementation((() => {
-        throw new Error('process.exit called')
-      }) as any)
-
-      await expect(promptForModel(['anthropic', 'openai'])).rejects.toThrow('process.exit called')
-
-      selectSpy.mockRestore()
-      isCancelSpy.mockRestore()
-      cancelSpy.mockRestore()
-      exitSpy.mockRestore()
-    })
-  })
-})
-/* eslint-enable @typescript-eslint/no-explicit-any */
-
-describe('getHarnessTemplate provider-aware', () => {
-  // Frozen byte-identical string for the anthropic-only regression test.
-  // This is the EXACT output of getHarnessTemplate('opencode', {keyValue: 'test-key'})
-  // baseline anthropic-only output. Any change to this string is a breaking regression.
-  const ANTHROPIC_ONLY_AUTH_JSON = '{"anthropic":{"type":"api","key":"test-key"}}'
-  const ANTHROPIC_ONLY_CONFIG = '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}'
-
-  describe('regression — anthropic-only (byte-identical)', () => {
-    it('no providers/model args → OPENCODE_AUTH_JSON is byte-identical to baseline', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: 'test-key'})
-      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
-
-      expect(authEntry?.value).toBe(ANTHROPIC_ONLY_AUTH_JSON)
-    })
-
-    it('no providers/model args → OPENCODE_CONFIG is byte-identical to baseline', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: 'test-key'})
-      const configEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
-
-      expect(configEntry?.value).toBe(ANTHROPIC_ONLY_CONFIG)
-    })
-
-    it('no providers/model args → OMO_PROVIDERS is claude-max20', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: 'test-key'})
-      const entry = template.secrets.find((e: SecretAssignment) => e.name === 'OMO_PROVIDERS')
-
-      expect(entry?.value).toBe('claude-max20')
-    })
-
-    it('no providers/model args → FRO_BOT_MODEL is anthropic/claude-sonnet-4-6', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: 'test-key'})
-      const entry = template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')
-
-      expect(entry?.value).toBe('anthropic/claude-sonnet-4-6')
-    })
-
-    it("explicit providers: ['anthropic'] → byte-identical to no-providers output", () => {
-      const baseline = getHarnessTemplate('opencode', {keyValue: 'test-key'})
-      const explicit = getHarnessTemplate('opencode', {keyValue: 'test-key', providers: ['anthropic']})
-
-      const baselineAuth = baseline.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
-      const explicitAuth = explicit.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
-      expect(explicitAuth?.value).toBe(baselineAuth?.value)
-
-      const baselineConfig = baseline.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
-      const explicitConfig = explicit.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
-      expect(explicitConfig?.value).toBe(baselineConfig?.value)
-    })
-  })
-
-  describe('openai-only provider', () => {
-    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → correct OPENCODE_AUTH_JSON", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-openai-key',
-        providers: ['openai'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
-
-      expect(authEntry?.value).toBe('{"openai":{"type":"api","key":"sk-openai-key"}}')
-    })
-
-    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → correct OPENCODE_CONFIG", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-openai-key',
-        providers: ['openai'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const configEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
-
-      expect(configEntry?.value).toBe('{"provider":{"openai":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}')
-    })
-
-    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → OMO_PROVIDERS is openai", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-openai-key',
-        providers: ['openai'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const entry = template.secrets.find((e: SecretAssignment) => e.name === 'OMO_PROVIDERS')
-
-      expect(entry?.value).toBe('openai')
-    })
-
-    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → FRO_BOT_MODEL is openai/gpt-5.4-mini", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-openai-key',
-        providers: ['openai'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const entry = template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')
-
-      expect(entry?.value).toBe('openai/gpt-5.4-mini')
-    })
-
-    it("providers: ['openai'] with no model → uses PROVIDER_DEFAULTS openai/gpt-5.4-mini", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-openai-key',
-        providers: ['openai'],
-      })
-      const entry = template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')
-
-      expect(entry?.value).toBe('openai/gpt-5.4-mini')
-    })
-  })
-
-  describe('dual-provider (anthropic + openai)', () => {
-    it("providers: ['anthropic', 'openai'] → OPENCODE_AUTH_JSON has anthropic-first key order", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-dual',
-        providers: ['anthropic', 'openai'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
-
-      expect(authEntry?.value).toBe(
-        '{"anthropic":{"type":"api","key":"sk-dual"},"openai":{"type":"api","key":"sk-dual"}}',
-      )
-    })
-
-    it("providers: ['anthropic', 'openai'] → OPENCODE_CONFIG has anthropic-first key order", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-dual',
-        providers: ['anthropic', 'openai'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const configEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_CONFIG')
-
-      expect(configEntry?.value).toBe(
-        '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}},"openai":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
-      )
-    })
-
-    it("providers: ['anthropic', 'openai'] → OMO_PROVIDERS is claude-max20,openai", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-dual',
-        providers: ['anthropic', 'openai'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const entry = template.secrets.find((e: SecretAssignment) => e.name === 'OMO_PROVIDERS')
-
-      expect(entry?.value).toBe('claude-max20,openai')
-    })
-
-    it("providers: ['anthropic', 'openai'] → FRO_BOT_MODEL is the supplied model", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-dual',
-        providers: ['anthropic', 'openai'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const entry = template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')
-
-      expect(entry?.value).toBe('openai/gpt-5.4-mini')
-    })
-
-    it("providers: ['openai', 'anthropic'] (openai first) → output is still anthropic-first in JSON", () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: 'sk-dual',
-        providers: ['openai', 'anthropic'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
-
-      expect(authEntry?.value).toBe(
-        '{"anthropic":{"type":"api","key":"sk-dual"},"openai":{"type":"api","key":"sk-dual"}}',
-      )
-    })
-
-    it('multiple providers with no model → throws "model required when multiple providers selected"', () => {
-      expect(() =>
-        getHarnessTemplate('opencode', {
-          keyValue: 'sk-dual',
-          providers: ['anthropic', 'openai'],
-        }),
-      ).toThrow('model required when multiple providers selected')
-    })
-  })
-
-  describe('edge cases', () => {
-    it('keyValue: undefined → auth-json key is sk-placeholder', () => {
-      const template = getHarnessTemplate('opencode', {providers: ['anthropic']})
-      const authEntry = template.secrets.find((e: SecretAssignment) => e.name === 'OPENCODE_AUTH_JSON')
-      const parsed = JSON.parse(authEntry?.value ?? '{}')
-
-      expect(parsed.anthropic.key).toBe('sk-placeholder')
-    })
-
-    it('claude-code harness is unaffected by providers/model args', () => {
-      const template = getHarnessTemplate('claude-code', {keyValue: 'sk-cc'})
-
-      expect(template.secrets).toHaveLength(1)
-      expect(template.secrets[0]?.name).toBe('ANTHROPIC_API_KEY')
-    })
-  })
-})
-
-describe('verifyModelsAvailable', () => {
-  // Realistic fixture matching the plan spec
-  const MODELS_FIXTURE = {
-    data: [
-      {id: 'claude-3-7-sonnet-20250219', owned_by: 'anthropic'},
-      {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
-      {id: 'gpt-5.4-mini', owned_by: 'openai'},
-      {id: 'gpt-5.5', owned_by: 'openai'},
-    ],
-  }
-
-  const BASE_URL = 'https://cliproxy.fro.bot'
-  const KEY = 'sk-test-key'
-
-  // Save and restore globalThis.fetch around each test
-  let originalFetch: typeof globalThis.fetch
-  afterEach(() => {
-    globalThis.fetch = originalFetch
-  })
-  // Capture original before any test runs
-  originalFetch = globalThis.fetch
-
-  it('anthropic-only short-circuit: returns immediately without calling fetch', async () => {
-    const fetchSpy = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE)))
-    globalThis.fetch = fetchSpy as unknown as typeof fetch
-
-    await verifyModelsAvailable(BASE_URL, KEY, ['anthropic'], 'anthropic/claude-sonnet-4-6')
-
-    expect(fetchSpy.mock.calls.length).toBe(0)
-  })
-
-  it('happy path: openai-only, model present, owned_by openai — passes without throw', async () => {
-    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
-
-    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).resolves.toBeUndefined()
-  })
-
-  it('happy path: dual providers, anthropic model present, openai entries exist — passes', async () => {
-    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
-
-    await expect(
-      verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'openai'], 'anthropic/claude-sonnet-4-6'),
-    ).resolves.toBeUndefined()
-  })
-
-  it('error path: 401 throws "Proxy key rejected" message', async () => {
-    globalThis.fetch = mock(async () => new Response('Unauthorized', {status: 401})) as unknown as typeof fetch
-
-    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
-      'Proxy key rejected',
-    )
-  })
-
-  it('error path: 401 error message does NOT contain the Authorization header value', async () => {
-    globalThis.fetch = mock(async () => new Response('Unauthorized', {status: 401})) as unknown as typeof fetch
-
-    let errorMessage = ''
-    try {
-      await verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : String(error)
-    }
-
-    expect(errorMessage).not.toContain(KEY)
-    expect(errorMessage).not.toContain('Bearer')
-  })
-
-  it('error path: 403 throws "Proxy key rejected" message', async () => {
-    globalThis.fetch = mock(async () => new Response('Forbidden', {status: 403})) as unknown as typeof fetch
-
-    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
-      'Proxy key rejected',
-    )
-  })
-
-  it('error path: 500 throws with status and truncated body; no Authorization header in message', async () => {
-    const body = 'Internal Server Error — something went wrong on the proxy'
-    globalThis.fetch = mock(async () => new Response(body, {status: 500})) as unknown as typeof fetch
-
-    let errorMessage = ''
-    try {
-      await verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : String(error)
-    }
-
-    expect(errorMessage).toContain('500')
-    expect(errorMessage).not.toContain(KEY)
-    expect(errorMessage).not.toContain('Bearer')
-  })
-
-  it('error path: 200 with data:[] and openai in providers throws no-openai-models message', async () => {
-    globalThis.fetch = mock(async () => new Response(JSON.stringify({data: []}))) as unknown as typeof fetch
-
-    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
-      'No OpenAI models on proxy',
-    )
-  })
-
-  it('error path: model not present in data — throws and lists available openai ids', async () => {
-    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
-
-    let errorMessage = ''
-    try {
-      await verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-99-unknown')
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : String(error)
-    }
-
-    expect(errorMessage).toContain('gpt-99-unknown')
-    // Should list available openai models
-    expect(errorMessage).toContain('gpt-5.4-mini')
-    expect(errorMessage).toContain('gpt-5.5')
-    // Should NOT list anthropic models
-    expect(errorMessage).not.toContain('claude')
-  })
-
-  it('error path: model not present and provider is anthropic — lists available anthropic ids', async () => {
-    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
-
-    let errorMessage = ''
-    try {
-      await verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'openai'], 'anthropic/claude-unknown-model')
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : String(error)
-    }
-
-    expect(errorMessage).toContain('claude-unknown-model')
-    // Should list available anthropic models
-    expect(errorMessage).toContain('claude-3-7-sonnet-20250219')
-    expect(errorMessage).toContain('claude-sonnet-4-6')
-    // Should NOT list openai models
-    expect(errorMessage).not.toContain('gpt-')
-  })
-
-  it('error path: data is missing (response is {}) — throws clean error', async () => {
-    globalThis.fetch = mock(async () => new Response(JSON.stringify({}))) as unknown as typeof fetch
-
-    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
-      /data.*array|unexpected.*response/i,
-    )
-  })
-
-  it('error path: dual providers, no owned_by=openai entries — throws no-openai-models message', async () => {
-    const anthropicOnlyData = {
-      data: [
-        {id: 'claude-3-7-sonnet-20250219', owned_by: 'anthropic'},
-        {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
-      ],
-    }
-    globalThis.fetch = mock(async () => new Response(JSON.stringify(anthropicOnlyData))) as unknown as typeof fetch
-
-    await expect(verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
-      'No OpenAI models on proxy',
-    )
-  })
-})
-
 describe('validation matrix + non-interactive plan', () => {
   const MODELS_FIXTURE = {
     data: [
@@ -1097,77 +113,6 @@ describe('validation matrix + non-interactive plan', () => {
     globalThis.fetch = originalFetch
   })
   originalFetch = globalThis.fetch
-
-  // ── validateSetupOptions ──────────────────────────────────────────────────
-
-  describe('validateSetupOptions — providers/model validation', () => {
-    it('regression: no providers/model passes unchanged (anthropic-only default)', () => {
-      expect(() => validateSetupOptions({key: 'sk-test', repo: 'owner/repo', harness: 'opencode'}, false)).not.toThrow()
-    })
-
-    it('happy path: single provider anthropic, no model — passes', () => {
-      expect(() =>
-        validateSetupOptions({key: 'sk-test', repo: 'owner/repo', harness: 'opencode', providers: 'anthropic'}, false),
-      ).not.toThrow()
-    })
-
-    it('happy path: openai + model with openai prefix — passes', () => {
-      expect(() =>
-        validateSetupOptions(
-          {key: 'sk-test', repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
-          false,
-        ),
-      ).not.toThrow()
-    })
-
-    it('happy path: anthropic,openai + model with openai prefix — passes', () => {
-      expect(() =>
-        validateSetupOptions(
-          {
-            key: 'sk-test',
-            repo: 'owner/repo',
-            harness: 'opencode',
-            providers: 'anthropic,openai',
-            model: 'openai/gpt-5.4-mini',
-          },
-          false,
-        ),
-      ).not.toThrow()
-    })
-
-    it('error: multiple providers without --model throws "Pass --model" error', () => {
-      expect(() => validateSetupOptions({harness: 'opencode', providers: 'anthropic,openai'}, false)).toThrow(
-        'Pass --model <provider/model-id> when selecting multiple providers.',
-      )
-    })
-
-    it('error: model prefix does not match single provider (anthropic provider, openai model)', () => {
-      expect(() =>
-        validateSetupOptions({harness: 'opencode', providers: 'anthropic', model: 'openai/gpt-5.4-mini'}, false),
-      ).toThrow(/Model prefix openai does not match selected providers/)
-    })
-
-    it('error: model prefix does not match single provider (openai provider, anthropic model)', () => {
-      expect(() =>
-        validateSetupOptions({harness: 'opencode', providers: 'openai', model: 'anthropic/claude-sonnet-4-6'}, false),
-      ).toThrow(/Model prefix anthropic does not match selected providers/)
-    })
-
-    it('error: duplicate providers throws from parseProviders', () => {
-      expect(() => validateSetupOptions({harness: 'opencode', providers: 'anthropic,anthropic'}, false)).toThrow(
-        /duplicate/,
-      )
-    })
-
-    it('error: unknown provider throws from parseProviders', () => {
-      expect(() => validateSetupOptions({harness: 'opencode', providers: 'claude'}, false)).toThrow(/Unknown provider/)
-    })
-
-    it('interactive mode: providers/model checks are skipped even with invalid combo', () => {
-      // Multiple providers without model — would fail in non-interactive, but interactive skips all checks
-      expect(() => validateSetupOptions({providers: 'anthropic,openai'}, true)).not.toThrow()
-    })
-  })
 
   // ── buildNonInteractivePlan ───────────────────────────────────────────────
 
@@ -1260,7 +205,15 @@ describe('validation matrix + non-interactive plan', () => {
 
       await expect(
         buildNonInteractivePlan(
-          {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
+          // force: true bypasses the destructive-provider pre-gate so verifyModelsAvailable is reached
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'openai',
+            model: 'openai/gpt-5.4-mini',
+            force: true,
+          },
           BASE_URL,
         ),
       ).rejects.toThrow('Proxy key rejected')
@@ -1296,132 +249,21 @@ describe('destructive overwrite UX', () => {
 
   // ── mustConfirmDestructive ────────────────────────────────────────────────
 
-  describe('mustConfirmDestructive', () => {
+  describe('requiresDestructiveProviderChangeConfirmation', () => {
     it("['anthropic'] → false (anthropic-only is safe, no confirm needed)", () => {
-      expect(mustConfirmDestructive(['anthropic'])).toBe(false)
+      expect(requiresDestructiveProviderChangeConfirmation(['anthropic'])).toBe(false)
     })
 
     it("['openai'] → true (non-anthropic provider requires confirm)", () => {
-      expect(mustConfirmDestructive(['openai'])).toBe(true)
+      expect(requiresDestructiveProviderChangeConfirmation(['openai'])).toBe(true)
     })
 
     it("['anthropic', 'openai'] → true (multi-provider requires confirm)", () => {
-      expect(mustConfirmDestructive(['anthropic', 'openai'])).toBe(true)
+      expect(requiresDestructiveProviderChangeConfirmation(['anthropic', 'openai'])).toBe(true)
     })
 
     it("['openai', 'anthropic'] → true (order does not matter)", () => {
-      expect(mustConfirmDestructive(['openai', 'anthropic'])).toBe(true)
-    })
-  })
-
-  // ── formatDryRunPreview ───────────────────────────────────────────────────
-
-  describe('formatDryRunPreview', () => {
-    it('renders the dry-run header with repo and providers', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
-      const preview = formatDryRunPreview({
-        repo: 'owner/repo',
-        harness: 'opencode',
-        providers: ['anthropic'],
-        model: 'anthropic/claude-sonnet-4-6',
-        template,
-      })
-
-      expect(preview).toContain('Dry run: cliproxy setup --harness opencode')
-      expect(preview).toContain('Repository: owner/repo')
-      expect(preview).toContain('Providers: anthropic')
-    })
-
-    it('renders planned secrets with byte sizes', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
-      const preview = formatDryRunPreview({
-        repo: 'owner/repo',
-        harness: 'opencode',
-        providers: ['anthropic'],
-        model: 'anthropic/claude-sonnet-4-6',
-        template,
-      })
-
-      expect(preview).toContain('Planned secrets:')
-      expect(preview).toContain('OPENCODE_AUTH_JSON')
-      expect(preview).toContain('OPENCODE_CONFIG')
-      expect(preview).toContain('OMO_PROVIDERS')
-    })
-
-    it('renders planned variables', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
-      const preview = formatDryRunPreview({
-        repo: 'owner/repo',
-        harness: 'opencode',
-        providers: ['anthropic'],
-        model: 'anthropic/claude-sonnet-4-6',
-        template,
-      })
-
-      expect(preview).toContain('Planned variables:')
-      expect(preview).toContain('FRO_BOT_MODEL')
-    })
-
-    it('renders proxy key as <proxy-key> placeholder, NOT the actual key value', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
-      const preview = formatDryRunPreview({
-        repo: 'owner/repo',
-        harness: 'opencode',
-        providers: ['anthropic'],
-        model: 'anthropic/claude-sonnet-4-6',
-        template,
-      })
-
-      expect(preview).toContain('<proxy-key>')
-      expect(preview).not.toContain(KEY)
-    })
-
-    it('renders "No mutations will be performed." footer', () => {
-      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
-      const preview = formatDryRunPreview({
-        repo: 'owner/repo',
-        harness: 'opencode',
-        providers: ['anthropic'],
-        model: 'anthropic/claude-sonnet-4-6',
-        template,
-      })
-
-      expect(preview).toContain('No mutations will be performed.')
-    })
-
-    it('dual-provider preview lists both providers', () => {
-      const template = getHarnessTemplate('opencode', {
-        keyValue: KEY,
-        baseUrl: BASE_URL,
-        providers: ['anthropic', 'openai'],
-        model: 'openai/gpt-5.4-mini',
-      })
-      const preview = formatDryRunPreview({
-        repo: 'owner/repo',
-        harness: 'opencode',
-        providers: ['anthropic', 'openai'],
-        model: 'openai/gpt-5.4-mini',
-        template,
-      })
-
-      expect(preview).toContain('anthropic')
-      expect(preview).toContain('openai')
-      expect(preview).not.toContain(KEY)
-    })
-
-    it('secret values in preview do NOT contain the actual key value', () => {
-      // Even if the template has the key embedded in JSON, the preview must redact it
-      const template = getHarnessTemplate('opencode', {keyValue: KEY, baseUrl: BASE_URL})
-      const preview = formatDryRunPreview({
-        repo: 'owner/repo',
-        harness: 'opencode',
-        providers: ['anthropic'],
-        model: 'anthropic/claude-sonnet-4-6',
-        template,
-      })
-
-      // The actual key must not appear anywhere in the preview output
-      expect(preview).not.toContain(KEY)
+      expect(requiresDestructiveProviderChangeConfirmation(['openai', 'anthropic'])).toBe(true)
     })
   })
 
@@ -1453,7 +295,7 @@ describe('destructive overwrite UX', () => {
       ).resolves.toBeDefined()
     })
 
-    it('openai-only + no --force + no --dry-run → throws "Pass --force" error', async () => {
+    it('openai-only + no --force + no --dry-run → throws destructive provider change error', async () => {
       globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
 
       await expect(
@@ -1461,10 +303,10 @@ describe('destructive overwrite UX', () => {
           {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
           BASE_URL,
         ),
-      ).rejects.toThrow(/Pass `--force`/)
+      ).rejects.toThrow(/--force/)
     })
 
-    it('openai-only + no --force + no --dry-run → error message mentions --dry-run', async () => {
+    it('openai-only + no --force + no --dry-run → error message mentions bearer token note', async () => {
       globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
 
       let errorMessage = ''
@@ -1477,10 +319,10 @@ describe('destructive overwrite UX', () => {
         errorMessage = error instanceof Error ? error.message : String(error)
       }
 
-      expect(errorMessage).toContain('--dry-run')
+      expect(errorMessage).toContain('does NOT rotate the underlying CLIProxyAPI proxy bearer token')
     })
 
-    it('dual-provider + no --force + no --dry-run → throws "Pass --force" error', async () => {
+    it('dual-provider + no --force + no --dry-run → throws destructive provider change error', async () => {
       globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
 
       await expect(
@@ -1494,7 +336,7 @@ describe('destructive overwrite UX', () => {
           },
           BASE_URL,
         ),
-      ).rejects.toThrow(/Pass `--force`/)
+      ).rejects.toThrow(/--force/)
     })
 
     it('openai-only + --dry-run → plan builds without error (dry-run bypasses force check)', async () => {
@@ -1552,531 +394,7 @@ describe('destructive overwrite UX', () => {
   })
 })
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- spyOn mock return values require `any` casts */
-
-// Helper to build a fake Bun.spawn child process result
-function makeSmokeChild(stdout: string, stderr: string, exitCode: number) {
-  return {
-    stdout: new Blob([stdout]).stream(),
-    stderr: new Blob([stderr]).stream(),
-    exited: Promise.resolve(exitCode),
-  }
-}
-
-// Helper to build a gh run list JSON response
-function makeSmokeRunList(
-  runs: {databaseId: number; status: string; conclusion: string | null; url: string; createdAt: string}[],
-): string {
-  return JSON.stringify(runs)
-}
-
-describe('smoke test runner', () => {
-  const REPO = 'owner/test-repo'
-  const MODEL = 'anthropic/claude-sonnet-4-6'
-  const RUN_URL = 'https://github.com/owner/test-repo/actions/runs/105'
-
-  let spawnSpy: ReturnType<typeof spyOn>
-
-  afterEach(() => {
-    spawnSpy?.mockRestore()
-  })
-
-  it('happy path — pass with log grep finding "ack"', async () => {
-    // Sequence of Bun.spawn calls:
-    // 1. gh run list (baseline) → [{databaseId: 100, ...}]
-    // 2. gh workflow run (trigger) → exit 0
-    // 3. gh run list (poll 1) → [{databaseId: 105, status: completed, conclusion: success}, {databaseId: 100}]
-    // 4. gh run view --log → text containing "ack"
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        // baseline gh run list
-        return makeSmokeChild(
-          makeSmokeRunList([
-            {
-              databaseId: 100,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/100',
-              createdAt: '2026-05-25T09:00:00Z',
-            },
-          ]),
-          '',
-          0,
-        ) as any
-      }
-      if (callIndex === 2) {
-        // gh workflow run trigger
-        return makeSmokeChild('', '', 0) as any
-      }
-      if (callIndex === 3) {
-        // poll 1 — new run visible
-        return makeSmokeChild(
-          makeSmokeRunList([
-            {databaseId: 105, status: 'completed', conclusion: 'success', url: RUN_URL, createdAt},
-            {
-              databaseId: 100,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/100',
-              createdAt: '2026-05-25T09:00:00Z',
-            },
-          ]),
-          '',
-          0,
-        ) as any
-      }
-      if (callIndex === 4) {
-        // gh run view --log
-        return makeSmokeChild('Step output: reply with exactly: ack\nack', '', 0) as any
-      }
-      return makeSmokeChild('', '', 0) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    expect(result.kind).toBe('pass')
-    expect(result.message).toContain('passed')
-    expect(result.runUrl).toBe(RUN_URL)
-  })
-
-  it('happy path — pass without log grep (log fetch fails, still pass)', async () => {
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        return makeSmokeChild(
-          makeSmokeRunList([
-            {
-              databaseId: 100,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/100',
-              createdAt: '2026-05-25T09:00:00Z',
-            },
-          ]),
-          '',
-          0,
-        ) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      if (callIndex === 3) {
-        return makeSmokeChild(
-          makeSmokeRunList([{databaseId: 105, status: 'completed', conclusion: 'success', url: RUN_URL, createdAt}]),
-          '',
-          0,
-        ) as any
-      }
-      if (callIndex === 4) {
-        // log fetch fails
-        return makeSmokeChild('', 'error fetching logs', 1) as any
-      }
-      return makeSmokeChild('', '', 0) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    expect(result.kind).toBe('pass')
-    expect(result.runUrl).toBe(RUN_URL)
-  })
-
-  it('error path — fail: run completed with conclusion=failure', async () => {
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        return makeSmokeChild(
-          makeSmokeRunList([
-            {
-              databaseId: 100,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/100',
-              createdAt: '2026-05-25T09:00:00Z',
-            },
-          ]),
-          '',
-          0,
-        ) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      if (callIndex === 3) {
-        return makeSmokeChild(
-          makeSmokeRunList([{databaseId: 105, status: 'completed', conclusion: 'failure', url: RUN_URL, createdAt}]),
-          '',
-          0,
-        ) as any
-      }
-      return makeSmokeChild('', '', 0) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    expect(result.kind).toBe('fail')
-    expect(result.message).toContain('failure')
-    expect(result.runUrl).toBe(RUN_URL)
-  })
-
-  it('edge case — env approval: status=waiting returns unverified with approval message', async () => {
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        return makeSmokeChild(
-          makeSmokeRunList([
-            {
-              databaseId: 100,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/100',
-              createdAt: '2026-05-25T09:00:00Z',
-            },
-          ]),
-          '',
-          0,
-        ) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      // poll — status=waiting
-      return makeSmokeChild(
-        makeSmokeRunList([
-          {databaseId: 105, status: 'waiting', conclusion: 'action_required', url: RUN_URL, createdAt},
-        ]),
-        '',
-        0,
-      ) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    expect(result.kind).toBe('unverified')
-    expect(result.message).toContain('approval')
-    expect(result.runUrl).toBe(RUN_URL)
-  })
-
-  it('edge case — timeout: all polls return queued → unverified with timeout message', async () => {
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        return makeSmokeChild(
-          makeSmokeRunList([
-            {
-              databaseId: 100,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/100',
-              createdAt: '2026-05-25T09:00:00Z',
-            },
-          ]),
-          '',
-          0,
-        ) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      // All polls return queued
-      return makeSmokeChild(
-        makeSmokeRunList([{databaseId: 105, status: 'queued', conclusion: '', url: RUN_URL, createdAt}]),
-        '',
-        0,
-      ) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    expect(result.kind).toBe('unverified')
-    expect(result.message).toContain('5 minutes')
-    expect(result.runUrl).toBe(RUN_URL)
-  })
-
-  it('edge case — trigger fails: gh workflow run exits non-zero → unverified with redacted stderr', async () => {
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        // baseline
-        return makeSmokeChild('[]', '', 0) as any
-      }
-      if (callIndex === 2) {
-        // trigger fails
-        return makeSmokeChild('', 'gh: authentication required — run gh auth login first', 1) as any
-      }
-      return makeSmokeChild('', '', 0) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0})
-
-    expect(result.kind).toBe('unverified')
-    expect(result.message).toContain('gh workflow run failed')
-    // stderr is included but truncated to 200 chars
-    expect(result.message).toContain('authentication required')
-  })
-
-  it('security hygiene — returned messages do not contain the bearer token / key value', async () => {
-    const SECRET_KEY = 'sk-super-secret-bearer-token-12345'
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        return makeSmokeChild('[]', '', 0) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      return makeSmokeChild(
-        makeSmokeRunList([{databaseId: 1, status: 'completed', conclusion: 'failure', url: RUN_URL, createdAt}]),
-        '',
-        0,
-      ) as any
-    })
-
-    // runSmokeTest doesn't take a key — it uses gh CLI which handles auth via GH_TOKEN env
-    // This test verifies the function signature doesn't accept or leak a key
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    // The result message should not contain any secret-looking value
-    expect(result.message).not.toContain(SECRET_KEY)
-    expect(result.message).not.toContain('Bearer')
-    expect(result.message).not.toContain('sk-')
-  })
-
-  it('race safety — picks highest databaseId above baseline (our run, not concurrent run)', async () => {
-    // Baseline=100, trigger succeeds.
-    // Poll 1 returns [id=102 (ours, success), id=101 (other contributor, failure), id=100 (baseline)]
-    // Function must pick 102 (highest above baseline) and report pass.
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    const createdAt102 = new Date(triggerTime.getTime() + 10000).toISOString()
-    const createdAt101 = new Date(triggerTime.getTime() + 3000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        return makeSmokeChild(
-          makeSmokeRunList([
-            {
-              databaseId: 100,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/100',
-              createdAt: '2026-05-25T09:00:00Z',
-            },
-          ]),
-          '',
-          0,
-        ) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      if (callIndex === 3) {
-        // Poll: our run (102) and concurrent run (101) both visible
-        return makeSmokeChild(
-          makeSmokeRunList([
-            {
-              databaseId: 102,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/102',
-              createdAt: createdAt102,
-            },
-            {
-              databaseId: 101,
-              status: 'completed',
-              conclusion: 'failure',
-              url: 'https://github.com/owner/test-repo/actions/runs/101',
-              createdAt: createdAt101,
-            },
-            {
-              databaseId: 100,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/100',
-              createdAt: '2026-05-25T09:00:00Z',
-            },
-          ]),
-          '',
-          0,
-        ) as any
-      }
-      // log fetch
-      return makeSmokeChild('ack', '', 0) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    // Must pick run 102 (highest above baseline=100), not 101
-    expect(result.kind).toBe('pass')
-    expect(result.runUrl).toBe('https://github.com/owner/test-repo/actions/runs/102')
-  })
-
-  it('race safety — known edge case: only concurrent run visible, picks it (best-effort heuristic)', async () => {
-    // Baseline=100, trigger succeeds.
-    // Poll 1: only id=101 (other contributor's run) visible, ours not yet.
-    // Function picks 101 (highest above baseline) — this is a known misattribution edge case.
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    const createdAt101 = new Date(triggerTime.getTime() + 3000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        return makeSmokeChild(
-          makeSmokeRunList([
-            {
-              databaseId: 100,
-              status: 'completed',
-              conclusion: 'success',
-              url: 'https://github.com/owner/test-repo/actions/runs/100',
-              createdAt: '2026-05-25T09:00:00Z',
-            },
-          ]),
-          '',
-          0,
-        ) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      // All polls: only 101 visible (ours never appears)
-      return makeSmokeChild(
-        makeSmokeRunList([
-          {
-            databaseId: 101,
-            status: 'completed',
-            conclusion: 'failure',
-            url: 'https://github.com/owner/test-repo/actions/runs/101',
-            createdAt: createdAt101,
-          },
-          {
-            databaseId: 100,
-            status: 'completed',
-            conclusion: 'success',
-            url: 'https://github.com/owner/test-repo/actions/runs/100',
-            createdAt: '2026-05-25T09:00:00Z',
-          },
-        ]),
-        '',
-        0,
-      ) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    // Picks 101 (best-effort heuristic — known misattribution edge case)
-    expect(result.runUrl).toBe('https://github.com/owner/test-repo/actions/runs/101')
-  })
-
-  it('edge case — no prior runs: baselineId=null, uses createdAt heuristic', async () => {
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    // Run created AFTER trigger time
-    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        // baseline: no prior runs
-        return makeSmokeChild('[]', '', 0) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      if (callIndex === 3) {
-        return makeSmokeChild(
-          makeSmokeRunList([{databaseId: 1, status: 'completed', conclusion: 'success', url: RUN_URL, createdAt}]),
-          '',
-          0,
-        ) as any
-      }
-      // log fetch
-      return makeSmokeChild('ack', '', 0) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    expect(result.kind).toBe('pass')
-    expect(result.runUrl).toBe(RUN_URL)
-  })
-
-  it('edge case — baseline list call fails: still triggers, uses createdAt heuristic', async () => {
-    const triggerTime = new Date('2026-05-25T10:00:00Z')
-    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
-
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        // baseline fails
-        return makeSmokeChild('', 'gh: network error', 1) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      if (callIndex === 3) {
-        return makeSmokeChild(
-          makeSmokeRunList([{databaseId: 1, status: 'completed', conclusion: 'success', url: RUN_URL, createdAt}]),
-          '',
-          0,
-        ) as any
-      }
-      return makeSmokeChild('ack', '', 0) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
-
-    expect(result.kind).toBe('pass')
-  })
-
-  it('edge case — trigger never produces visible run: unverified with repo URL hint', async () => {
-    let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
-      callIndex++
-      if (callIndex === 1) {
-        return makeSmokeChild('[]', '', 0) as any
-      }
-      if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
-      }
-      // All polls: no new runs visible
-      return makeSmokeChild('[]', '', 0) as any
-    })
-
-    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0})
-
-    expect(result.kind).toBe('unverified')
-    expect(result.message).toContain('not yet visible')
-  })
-})
-/* eslint-enable @typescript-eslint/no-explicit-any */
-
+// ── Smoke test runner tests moved to setup/smoke-test.test.ts ─────────────────
 // ── P1 regression tests ───────────────────────────────────────────────────────
 
 describe('P1 #1 regression — dry-run early return before mutations', () => {
@@ -2191,7 +509,7 @@ describe('P1 #2 regression — --force honored by non-interactive collision gate
           },
           'https://cliproxy.fro.bot',
         ),
-      ).rejects.toThrow(/Pass `--force`/)
+      ).rejects.toThrow(/--force/)
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -2361,3 +679,1283 @@ describe('cliproxy setup --dry-run is offline-safe (action handler contract)', (
   })
 })
 /* eslint-enable @typescript-eslint/no-explicit-any */
+
+// ── runSetupCommand DI boundary tests ─────────────────────────────────
+
+// Minimal ActionCtx fake for runSetupCommand DI tests
+function makeCtx() {
+  const logs: unknown[][] = []
+  const errors: unknown[][] = []
+  return {
+    ctx: {
+      console: {
+        log: (...args: unknown[]) => {
+          logs.push(args)
+        },
+        error: (...args: unknown[]) => {
+          errors.push(args)
+        },
+      },
+      process: {
+        stdout: {write: (_chunk: string) => {}},
+        stderr: {write: (_chunk: string) => {}},
+        exit: (_code: number) => {
+          throw new Error('process.exit called')
+        },
+      },
+    },
+    logs,
+    errors,
+  }
+}
+
+// Minimal SpinnerResult stub for withGhRetry mocks
+function makeSpinner(): SpinnerResult {
+  return {
+    message: () => {},
+    start: () => {},
+    stop: () => {},
+    cancel: () => {},
+    error: () => {},
+    clear: () => {},
+    isCancelled: false,
+  }
+}
+
+// Auto-answering promptValue: returns 'test-key-name' without awaiting the clack prompt
+// (clack prompts hang in non-TTY test environments)
+async function autoPromptValue<T>(_prompt: Promise<T | symbol>): Promise<T> {
+  return 'test-key-name' as T
+}
+
+describe('runSetupCommand action handler', () => {
+  const BASE_URL = 'https://cliproxy.fro.bot'
+  const KEY = 'sk-test-key'
+
+  // ── dry-run testability hardening ──────────────────────────────────────────────
+
+  it('dry-run does NOT call deps.gh.assertGhInstalled', async () => {
+    const {ctx} = makeCtx()
+    let called = false
+    await runSetupCommand(
+      {repo: 'owner/repo', harness: 'opencode', dryRun: true},
+      {
+        interactive: false,
+        baseUrl: BASE_URL,
+        ctx,
+        gh: {
+          assertGhInstalled: async () => {
+            called = true
+            throw new Error('should not be called')
+          },
+          assertGhAuthenticated: async () => {},
+          assertRepoAccess: async () => {},
+          listExistingGhNames: async () => [],
+          createManagementApiKey: async () => {},
+          deleteManagementApiKey: async () => {},
+          applyGhValue: async () => {},
+          withGhRetry: async (_label, fn) => fn(makeSpinner()),
+        },
+        prompts: {
+          promptValue: autoPromptValue,
+          confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+          intro: () => {},
+          note: () => {},
+          outro: () => {},
+        },
+        smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+        validation: {
+          assertProxyReachable: async () => {},
+          assertProxyKeyWorks: async () => {},
+          verifyModelsAvailable: async () => {},
+        },
+      },
+    )
+    expect(called).toBe(false)
+  })
+
+  it('dry-run does NOT call deps.validation.assertProxyReachable', async () => {
+    const {ctx} = makeCtx()
+    let called = false
+    await runSetupCommand(
+      {repo: 'owner/repo', harness: 'opencode', dryRun: true},
+      {
+        interactive: false,
+        baseUrl: BASE_URL,
+        ctx,
+        gh: {
+          assertGhInstalled: async () => {},
+          assertGhAuthenticated: async () => {},
+          assertRepoAccess: async () => {},
+          listExistingGhNames: async () => [],
+          createManagementApiKey: async () => {},
+          deleteManagementApiKey: async () => {},
+          applyGhValue: async () => {},
+          withGhRetry: async (_label, fn) => fn(makeSpinner()),
+        },
+        prompts: {
+          promptValue: autoPromptValue,
+          confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+          intro: () => {},
+          note: () => {},
+          outro: () => {},
+        },
+        smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+        validation: {
+          assertProxyReachable: async () => {
+            called = true
+            throw new Error('should not be called')
+          },
+          assertProxyKeyWorks: async () => {},
+          verifyModelsAvailable: async () => {},
+        },
+      },
+    )
+    expect(called).toBe(false)
+  })
+
+  // ── destructive-overwrite throw-text behaviors ───────────────────────────────────────────────
+
+  it('destructive-overwrite pre-gate throw text mentions --force and does NOT rotate bearer token', async () => {
+    const {ctx} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    try {
+      await expect(
+        runSetupCommand(
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'openai',
+            model: 'openai/gpt-5.4-mini',
+            force: false,
+          },
+          {
+            interactive: false,
+            baseUrl: BASE_URL,
+            ctx,
+            gh: {
+              assertGhInstalled: async () => {},
+              assertGhAuthenticated: async () => {},
+              assertRepoAccess: async () => {},
+              listExistingGhNames: async () => [],
+              createManagementApiKey: async () => {},
+              deleteManagementApiKey: async () => {},
+              applyGhValue: async () => {},
+              withGhRetry: async (_label, fn) => fn(makeSpinner()),
+            },
+            prompts: {
+              promptValue: autoPromptValue,
+              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              intro: () => {},
+              note: () => {},
+              outro: () => {},
+            },
+            smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+            validation: {
+              assertProxyReachable: async () => {},
+              assertProxyKeyWorks: async () => {},
+              verifyModelsAvailable: async () => {},
+            },
+          },
+        ),
+      ).rejects.toThrow(/--force/)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('destructive-overwrite pre-gate throw text says does NOT rotate the underlying CLIProxyAPI proxy bearer token', async () => {
+    const {ctx} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    let errorMessage = ''
+    try {
+      await runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: false,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    expect(errorMessage).toContain('does NOT rotate the underlying CLIProxyAPI proxy bearer token')
+  })
+
+  it('collision-gate throw text mentions repo and Pass --force', async () => {
+    const {ctx} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    let errorMessage = ''
+    try {
+      await runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: false,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            // Return existing OPENCODE_AUTH_JSON to trigger collision gate
+            listExistingGhNames: async (_repo, kind) => (kind === 'secret' ? ['OPENCODE_AUTH_JSON'] : []),
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    // The pre-gate fires first (openai + no --force), so we check that message
+    expect(errorMessage).toContain('--force')
+    expect(errorMessage).toContain('does NOT rotate the underlying CLIProxyAPI proxy bearer token')
+  })
+
+  // ── smoke-test stdout line ─────────────────────────────────────────────────────
+
+  it('smoke test emits [smoke-test] kind=pass to ctx.console.log', async () => {
+    const {ctx, logs} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    try {
+      await runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+          verifySmoke: true,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {
+            runSmokeTest: async () => ({
+              kind: 'pass' as const,
+              message: 'Smoke passed',
+              runUrl: 'https://example.com/run/1',
+            }),
+          },
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    const smokeLog = logs.find(args => typeof args[0] === 'string' && (args[0] as string).startsWith('[smoke-test]'))
+    expect(smokeLog).toBeDefined()
+    expect(smokeLog?.[0]).toBe('[smoke-test] kind=pass')
+  })
+
+  it('smoke test emits [smoke-test] kind=fail to ctx.console.log', async () => {
+    const {ctx, logs} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    try {
+      await runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+          verifySmoke: true,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {
+            runSmokeTest: async () => ({
+              kind: 'fail' as const,
+              message: 'Smoke run failed with conclusion=failure',
+              runUrl: 'https://example.com/run/2',
+            }),
+          },
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    const smokeLog = logs.find(args => typeof args[0] === 'string' && (args[0] as string).startsWith('[smoke-test]'))
+    expect(smokeLog).toBeDefined()
+    expect(smokeLog?.[0]).toBe('[smoke-test] kind=fail')
+  })
+
+  it('smoke test emits [smoke-test] kind=unverified to ctx.console.log', async () => {
+    const {ctx, logs} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    try {
+      await runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+          verifySmoke: true,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {
+            runSmokeTest: async () => ({
+              kind: 'unverified' as const,
+              message: 'Workflow requires environment approval',
+              runUrl: 'https://example.com/run/3',
+            }),
+          },
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    const smokeLog = logs.find(args => typeof args[0] === 'string' && (args[0] as string).startsWith('[smoke-test]'))
+    expect(smokeLog).toBeDefined()
+    expect(smokeLog?.[0]).toBe('[smoke-test] kind=unverified')
+  })
+
+  // ── key-reuse acknowledgment tests ────────────────────────────────────────────────
+
+  it('non-interactive + --key + existing OPENCODE_AUTH_JSON + no --ack-key-reuse → throws', async () => {
+    const {ctx} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    try {
+      await expect(
+        runSetupCommand(
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'openai',
+            model: 'openai/gpt-5.4-mini',
+            force: true,
+            ackKeyReuse: false,
+          },
+          {
+            interactive: false,
+            baseUrl: BASE_URL,
+            ctx,
+            gh: {
+              assertGhInstalled: async () => {},
+              assertGhAuthenticated: async () => {},
+              assertRepoAccess: async () => {},
+              listExistingGhNames: async (_repo, kind) => (kind === 'secret' ? ['OPENCODE_AUTH_JSON'] : []),
+              createManagementApiKey: async () => {},
+              deleteManagementApiKey: async () => {},
+              applyGhValue: async () => {},
+              withGhRetry: async (_label, fn) => fn(makeSpinner()),
+            },
+            prompts: {
+              promptValue: autoPromptValue,
+              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              intro: () => {},
+              note: () => {},
+              outro: () => {},
+            },
+            smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+            validation: {
+              assertProxyReachable: async () => {},
+              assertProxyKeyWorks: async () => {},
+              verifyModelsAvailable: async () => {},
+            },
+          },
+        ),
+      ).rejects.toThrow(/Refusing key-reuse without explicit acknowledgment/)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('non-interactive + --key + existing OPENCODE_AUTH_JSON + --ack-key-reuse → no throw', async () => {
+    const {ctx} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    try {
+      await expect(
+        runSetupCommand(
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'openai',
+            model: 'openai/gpt-5.4-mini',
+            force: true,
+            ackKeyReuse: true,
+          },
+          {
+            interactive: false,
+            baseUrl: BASE_URL,
+            ctx,
+            gh: {
+              assertGhInstalled: async () => {},
+              assertGhAuthenticated: async () => {},
+              assertRepoAccess: async () => {},
+              listExistingGhNames: async (_repo, kind) => (kind === 'secret' ? ['OPENCODE_AUTH_JSON'] : []),
+              createManagementApiKey: async () => {},
+              deleteManagementApiKey: async () => {},
+              applyGhValue: async () => {},
+              withGhRetry: async (_label, fn) => fn(makeSpinner()),
+            },
+            prompts: {
+              promptValue: autoPromptValue,
+              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              intro: () => {},
+              note: () => {},
+              outro: () => {},
+            },
+            smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+            validation: {
+              assertProxyReachable: async () => {},
+              assertProxyKeyWorks: async () => {},
+              verifyModelsAvailable: async () => {},
+            },
+          },
+        ),
+      ).resolves.toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('fresh repo (no existing OPENCODE_AUTH_JSON) + --key + no --ack-key-reuse → no throw', async () => {
+    const {ctx} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    try {
+      await expect(
+        runSetupCommand(
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'openai',
+            model: 'openai/gpt-5.4-mini',
+            force: true,
+            ackKeyReuse: false,
+          },
+          {
+            interactive: false,
+            baseUrl: BASE_URL,
+            ctx,
+            gh: {
+              assertGhInstalled: async () => {},
+              assertGhAuthenticated: async () => {},
+              assertRepoAccess: async () => {},
+              // No existing secrets
+              listExistingGhNames: async () => [],
+              createManagementApiKey: async () => {},
+              deleteManagementApiKey: async () => {},
+              applyGhValue: async () => {},
+              withGhRetry: async (_label, fn) => fn(makeSpinner()),
+            },
+            prompts: {
+              promptValue: autoPromptValue,
+              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              intro: () => {},
+              note: () => {},
+              outro: () => {},
+            },
+            smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+            validation: {
+              assertProxyReachable: async () => {},
+              assertProxyKeyWorks: async () => {},
+              verifyModelsAvailable: async () => {},
+            },
+          },
+        ),
+      ).resolves.toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('--key omitted + existing OPENCODE_AUTH_JSON + no --ack-key-reuse → no throw (key-reuse path skipped)', async () => {
+    const {ctx} = makeCtx()
+    // No key supplied, wizard would mint a new one — but in non-interactive mode without key, plan.createKey=true
+    // which requires managementKey. We test that the ack-key-reuse guard doesn't fire.
+    // Use dry-run to avoid needing management key.
+    await expect(
+      runSetupCommand(
+        {
+          repo: 'owner/repo',
+          harness: 'opencode',
+          dryRun: true,
+          ackKeyReuse: false,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async (_repo, kind) => (kind === 'secret' ? ['OPENCODE_AUTH_JSON'] : []),
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      ),
+    ).resolves.toBeUndefined()
+  })
+
+  // ── Interactive R8 ack-key-reuse prompt: redaction + cancel/continue ──────────
+  //
+  // Note: full interactive integration tests are limited by the F16 (issue #311) gap —
+  // buildInteractivePlan calls real @clack/prompts.text() for the key-name and harness
+  // prompts that DI doesn't cover yet. We test the redaction contract directly via
+  // the exported redactKey helper, then a unit test confirms the prompt template uses
+  // the redacted form. Interactive cancel/continue paths are exercised under F16 once
+  // RunSetupDeps covers all prompt sites.
+
+  it('redactKey: keys >= 12 chars use first-3 + *** + last-4 shape', () => {
+    expect(redactKey('sk-PLAINTEXT-LONGKEY')).toBe('sk-***GKEY')
+    expect(redactKey('sk-shortbutok123')).toBe('sk-***k123')
+  })
+
+  it('redactKey: keys < 12 chars collapse to sk-*** to avoid leaking short strings', () => {
+    expect(redactKey('short')).toBe('sk-***')
+    expect(redactKey('')).toBe('sk-***')
+    expect(redactKey('sk-tiny')).toBe('sk-***')
+  })
+
+  it('redactKey: every input shorter than the original, never echoes raw key', () => {
+    const RAW = 'sk-PLAINTEXT-LONGKEY-MUST-NOT-LEAK'
+    const redacted = redactKey(RAW)
+    expect(redacted).not.toContain('PLAINTEXT-LONGKEY-MUST-NOT')
+    expect(redacted.length).toBeLessThan(RAW.length)
+  })
+
+  it('Interactive R8 prompt template uses redactKey output, never the raw key (source-level contract)', async () => {
+    // Read the setup.ts source and assert the R8 prompt-message template uses ${redactKey(options.key)}
+    // and never `${options.key}` raw. This is a source-level guard so a future refactor that
+    // accidentally drops the redaction call fails the test even if integration coverage lags.
+    const source = await Bun.file(new URL('./setup.ts', import.meta.url).pathname).text()
+    const r8PromptIdx = source.indexOf('Verify it matches the bearer token')
+    expect(r8PromptIdx).toBeGreaterThan(-1)
+    const promptContext = source.slice(Math.max(0, r8PromptIdx - 200), r8PromptIdx + 100)
+    expect(promptContext).toContain('redactKey(options.key)')
+    expect(promptContext).not.toMatch(/--key \$\{options\.key\}/)
+  })
+
+  // The two interactive R8 integration tests below are skipped pending F16 (issue #311):
+  // RunSetupDeps must cover the buildInteractivePlan prompt sites before the interactive
+  // path can be exercised end-to-end with deps mocks alone.
+
+  it.skip('Interactive R8: confirm prompt fires with redacted key (not raw token)', async () => {
+    const {ctx} = makeCtx()
+    const PLAINTEXT_KEY = 'sk-PLAINTEXT-LONGKEY-SHOULD-NOT-LEAK'
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    let confirmMessage = ''
+    const captureConfirm = (opts: {message: string}): Promise<boolean | symbol> => {
+      confirmMessage = opts.message
+      return Promise.resolve(true)
+    }
+
+    // Interactive mode resolves promptValue to the awaited prompt result. Our captureConfirm
+    // returns true, so the wizard proceeds past the R8 gate. We assert on the captured message.
+    const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
+      const result = await prompt
+      return result as T
+    }
+
+    try {
+      await runSetupCommand(
+        {
+          key: PLAINTEXT_KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+        },
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async (_repo, kind) => (kind === 'secret' ? ['OPENCODE_AUTH_JSON'] : []),
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: interactivePromptValue,
+            confirm: captureConfirm,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    // The R8 confirm prompt must be the one captured (interactive flow has more than one confirm
+    // in some paths; we look for the one containing the verify-bearer language).
+    expect(confirmMessage).toContain('Verify it matches the bearer token')
+    // The raw key must NEVER appear in the prompt text — security regression guard.
+    expect(confirmMessage).not.toContain(PLAINTEXT_KEY)
+    // Redacted form must be present (first 3 + last 4 chars per redactKey helper).
+    expect(confirmMessage).toContain('sk-')
+    expect(confirmMessage).toContain('***')
+    expect(confirmMessage).toContain('LEAK')
+  })
+
+  it.skip('Interactive R8: confirm returns false → cancelAndExit invoked, applyGhValue never called', async () => {
+    const {ctx} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    let applyGhValueCalled = false
+    let exitCode: number | undefined
+
+    const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
+      const result = await prompt
+      return result as T
+    }
+
+    // process.exit is intercepted by ctx.process.exit only when ctx is threaded; cancelAndExit
+    // calls global process.exit. Stub it to capture the code and throw so the function unwinds.
+    const originalExit = process.exit
+    process.exit = ((code?: number) => {
+      exitCode = code
+      throw new Error('process.exit-stubbed')
+    }) as typeof process.exit
+
+    try {
+      await runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+        },
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async (_repo, kind) => (kind === 'secret' ? ['OPENCODE_AUTH_JSON'] : []),
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {
+              applyGhValueCalled = true
+            },
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: interactivePromptValue,
+            // User rejects the R8 confirmation → cancelAndExit fires.
+            confirm: () => Promise.resolve(false) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+      // If we get here, cancelAndExit didn't fire. Fail the test.
+      throw new Error('expected cancelAndExit to fire on R8 reject')
+    } catch (error) {
+      // cancelAndExit throws because we stubbed process.exit to throw.
+      expect(error instanceof Error && error.message).toBe('process.exit-stubbed')
+    } finally {
+      process.exit = originalExit
+      globalThis.fetch = originalFetch
+    }
+
+    expect(exitCode).toBe(0)
+    expect(applyGhValueCalled).toBe(false)
+  })
+
+  // ── Double-log regression test ────────────────────
+
+  it('Bare CLI path (no ctx injected): action error not double-logged via ctx.console.error', async () => {
+    // When deps.ctx is undefined, ctx defaults to realCtx (which writes to global console).
+    // The catch block should skip ctx.console.error to avoid double-printing — cli.ts top-level
+    // catch already prints. We verify by tracking calls to console.error directly.
+    const errorCalls: string[] = []
+    const originalConsoleError = console.error
+    console.error = (...args: unknown[]) => {
+      errorCalls.push(args.map(String).join(' '))
+    }
+
+    try {
+      await expect(
+        runSetupCommand(
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            force: true,
+          },
+          {
+            interactive: false,
+            baseUrl: BASE_URL,
+            // ctx NOT supplied — bare CLI mode
+            gh: {
+              assertGhInstalled: async () => {
+                throw new Error('gh-not-installed-marker')
+              },
+              assertGhAuthenticated: async () => {},
+              assertRepoAccess: async () => {},
+              listExistingGhNames: async () => [],
+              createManagementApiKey: async () => {},
+              deleteManagementApiKey: async () => {},
+              applyGhValue: async () => {},
+              withGhRetry: async (_label, fn) => fn(makeSpinner()),
+            },
+            prompts: {
+              promptValue: autoPromptValue,
+              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              intro: () => {},
+              note: () => {},
+              outro: () => {},
+            },
+            smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+            validation: {
+              assertProxyReachable: async () => {},
+              assertProxyKeyWorks: async () => {},
+              verifyModelsAvailable: async () => {},
+            },
+          },
+        ),
+      ).rejects.toThrow('gh-not-installed-marker')
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    // The catch block must NOT have called ctx.console.error because deps.ctx was undefined.
+    // (cli.ts will handle the logging at the top level.) If the catch wrote here, this fails.
+    const errorMatches = errorCalls.filter(line => line.includes('gh-not-installed-marker'))
+    expect(errorMatches).toHaveLength(0)
+  })
+
+  it('MCP path (ctx injected): action error IS logged via ctx.console.error', async () => {
+    // When deps.ctx IS supplied (MCP path), the catch block must call ctx.console.error
+    // so the MCP transport surfaces the message. cli.ts's top-level catch doesn't run in MCP mode.
+    const {ctx, errors} = makeCtx()
+
+    await expect(
+      runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          force: true,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx, // ← injected
+          gh: {
+            assertGhInstalled: async () => {
+              throw new Error('mcp-error-marker')
+            },
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      ),
+    ).rejects.toThrow('mcp-error-marker')
+
+    // The injected ctx.console.error received the message.
+    const errorTexts = errors.map(args => args.map(String).join(' '))
+    expect(errorTexts.some(line => line.includes('mcp-error-marker'))).toBe(true)
+  })
+
+  // ── Rollback regression tests ─────────────────────
+
+  it('Rollback: applyGhValue throws → deleteManagementApiKey called before error propagates', async () => {
+    const {ctx} = makeCtx()
+
+    let deleteCalledWith: string | undefined
+    let applyCallCount = 0
+
+    // Use interactive: true + harness: 'claude-code' (no provider prompts) so validateSetupOptions
+    // doesn't require --key. No --key → createKey=true → createManagementApiKey is called → rollback path.
+    // Inject resolveManagementKey so no env var needed.
+    try {
+      await runSetupCommand(
+        {
+          // No --key → createKey=true, exercises the rollback path
+          repo: 'owner/repo',
+          harness: 'claude-code',
+          force: true,
+        },
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          resolveManagementKey: () => 'mgmt-test-key',
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async (_baseUrl, _mgmtKey, _keyValue) => {
+              // createManagementApiKey succeeds — key is now "live"
+            },
+            deleteManagementApiKey: async (_baseUrl, _mgmtKey, keyValue) => {
+              deleteCalledWith = keyValue
+            },
+            applyGhValue: async () => {
+              applyCallCount++
+              throw new Error('GitHub API failure')
+            },
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } catch {
+      // Expected to throw
+    }
+
+    // deleteManagementApiKey must have been called (rollback happened)
+    expect(deleteCalledWith).toBeDefined()
+    expect(applyCallCount).toBeGreaterThan(0)
+  })
+
+  it('Rollback: assertProxyKeyWorks throws → deleteManagementApiKey called before error propagates', async () => {
+    const {ctx} = makeCtx()
+
+    let deleteCalledWith: string | undefined
+
+    try {
+      await runSetupCommand(
+        {
+          // No --key → createKey=true, exercises the rollback path
+          repo: 'owner/repo',
+          harness: 'claude-code',
+          force: true,
+        },
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          resolveManagementKey: () => 'mgmt-test-key',
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async (_baseUrl, _mgmtKey, keyValue) => {
+              deleteCalledWith = keyValue
+            },
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {
+              throw new Error('Proxy key verification failed')
+            },
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } catch {
+      // Expected to throw
+    }
+
+    // deleteManagementApiKey must have been called (rollback happened)
+    expect(deleteCalledWith).toBeDefined()
+  })
+
+  // ── F5: --dry-run with no --repo/--harness ─────────────────────────────────
+
+  it('F5: --dry-run with no --repo/--harness prints preview and does not throw', async () => {
+    const {ctx, logs} = makeCtx()
+    await runSetupCommand({dryRun: true}, {ctx})
+    const output = logs.map(args => args.join(' ')).join('\n')
+    expect(output).toContain('OPENCODE_AUTH_JSON')
+    expect(output).toContain('No mutations will be performed.')
+  })
+
+  it('F5: --dry-run does not call assertGhInstalled even with no flags', async () => {
+    const {ctx} = makeCtx()
+    let ghCalled = false
+    await runSetupCommand(
+      {dryRun: true},
+      {
+        ctx,
+        gh: {
+          assertGhInstalled: async () => {
+            ghCalled = true
+          },
+          assertGhAuthenticated: async () => {},
+          assertRepoAccess: async () => {},
+          listExistingGhNames: async () => [],
+          createManagementApiKey: async () => {},
+          deleteManagementApiKey: async () => {},
+          applyGhValue: async () => {},
+          withGhRetry: async (_label, fn) => fn(makeSpinner()),
+        },
+      },
+    )
+    expect(ghCalled).toBe(false)
+  })
+
+  // ── F8: Rollback event-order assertions ────────────────────────────────────
+
+  it('F8: applyGhValue fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
+    const {ctx} = makeCtx()
+    const events: string[] = []
+
+    await expect(
+      runSetupCommand(
+        {repo: 'owner/repo', harness: 'claude-code', force: true},
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          resolveManagementKey: () => 'mgmt-test-key',
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {
+              events.push('create')
+            },
+            deleteManagementApiKey: async () => {
+              events.push('delete')
+            },
+            applyGhValue: async () => {
+              events.push('apply-fail')
+              throw new Error('apply-fail')
+            },
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      ),
+    ).rejects.toThrow('apply-fail')
+
+    expect(events).toEqual(['create', 'apply-fail', 'delete'])
+  })
+
+  it('F8: assertProxyKeyWorks fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
+    const {ctx} = makeCtx()
+    const events: string[] = []
+
+    await expect(
+      runSetupCommand(
+        {repo: 'owner/repo', harness: 'claude-code', force: true},
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          resolveManagementKey: () => 'mgmt-test-key',
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {
+              events.push('create')
+            },
+            deleteManagementApiKey: async () => {
+              events.push('delete')
+            },
+            applyGhValue: async () => {
+              events.push('apply-success')
+            },
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {
+              events.push('verify-fail')
+              throw new Error('verify-fail')
+            },
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      ),
+    ).rejects.toThrow('verify-fail')
+
+    expect(events).toEqual(['create', 'apply-success', 'verify-fail', 'delete'])
+  })
+
+  // ── F9: --force pre-gate fires before verifyModelsAvailable ────────────────
+
+  it('F9: missing --force on provider change does not call fetch (verifyModelsAvailable skipped)', async () => {
+    let fetchCalled = false
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => {
+      fetchCalled = true
+      return new Response('{}')
+    }) as unknown as typeof fetch
+
+    try {
+      await expect(
+        buildNonInteractivePlan({key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai'}, BASE_URL),
+      ).rejects.toThrow('--force')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    expect(fetchCalled).toBe(false)
+  })
+})

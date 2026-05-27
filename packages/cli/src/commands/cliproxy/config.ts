@@ -5,11 +5,12 @@ import {chmodSync} from 'node:fs'
 
 import {z} from 'zod'
 
+import {managementHeaders, requestJson} from './shared'
+
 /** Minimal ctx surface consumed by cliproxy config actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
-const HTTP_TIMEOUT_MS = 10_000
 
 function stripTrailingSlash(value: string): string {
   return value.endsWith('/') ? value.slice(0, -1) : value
@@ -27,31 +28,6 @@ export function resolveManagementKey(input?: string): string {
   }
 
   return key
-}
-
-function managementHeaders(key: string): Headers {
-  const headers = new Headers()
-  headers.set('x-management-key', key)
-  headers.set('content-type', 'application/json')
-  return headers
-}
-
-async function requestJson(endpoint: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(endpoint, {
-    ...init,
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-  })
-
-  if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`${init.method ?? 'GET'} ${endpoint} failed with HTTP ${response.status}: ${body}`)
-  }
-
-  try {
-    return await response.json()
-  } catch {
-    return null
-  }
 }
 
 export function parseBoolean(value: string): boolean {

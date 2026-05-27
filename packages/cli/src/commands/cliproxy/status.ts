@@ -4,6 +4,8 @@ import type {StatusSummary} from '../status'
 
 import {z} from 'zod'
 
+import {HTTP_TIMEOUT_MS, managementHeaders} from './shared'
+
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
@@ -13,7 +15,6 @@ declare const process: {
 }
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
-const HTTP_TIMEOUT_MS = 10_000
 
 type CheckLevel = 'ok' | 'warning' | 'error'
 
@@ -42,12 +43,6 @@ export function formatDurationMs(durationMs: number): string {
 
 export function stripTrailingSlash(value: string): string {
   return value.endsWith('/') ? value.slice(0, -1) : value
-}
-
-function managementHeaders(key: string): Headers {
-  const headers = new Headers()
-  headers.set('x-management-key', key)
-  return headers
 }
 
 async function parseJsonResponse(response: Response): Promise<unknown> {

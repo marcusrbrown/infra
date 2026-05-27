@@ -48,14 +48,15 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - Parse `gh` JSON output through Zod schemas before use
 - SHA-256 via `Bun.CryptoHasher('sha256')`, not crypto module
 - Resolve paths with `import.meta.dir` + `path.resolve()` — validate existence before use
-- **Management API**: Commands use local helpers for authenticated JSON requests. Auth header is `x-management-key` (not `Authorization: Bearer`). Helpers are per-file local (exception: `cliproxy/shared.ts` may consolidate common helpers if duplication across 4+ files becomes painful — but only within the cliproxy group, never cross-app).
+- **Management API**: Commands use shared helpers from `cliproxy/shared.ts` (`managementHeaders`, `requestJson`, `HTTP_TIMEOUT_MS`) for authenticated JSON requests against `/v0/management/*`. Auth header is `x-management-key` (not `Authorization: Bearer`). The `shared.ts` consolidation is scoped strictly to the cliproxy command group; never cross-app. Other per-file local helpers (e.g., `extractErrorMessage` 1-liners) stay local until they hit the same 4-caller threshold.
 - **`@clack/prompts`**: Scoped to `cliproxy setup` only. All other commands remain non-interactive for CI/script compatibility. Import `intro`, `outro`, `text`, `select`, `confirm`, `spinner`, `note`, `isCancel`, `cancel` from `@clack/prompts`. Every prompt result MUST be checked with `isCancel()` — `cancel()` + `process.exit(0)` on cancellation. `multiselect` from `@clack/prompts` is also used in `cliproxy setup` for the provider selection step — this is the only command that imports `multiselect`. Other commands needing operator-facing notices (e.g., `cliproxy login codex`'s anti-phishing reminder) emit plain `console.log` blocks — keeps the CI/script-safe surface uniform.
 - **`cliproxy login codex`**: Supported providers are `claude` and `codex`, derived from a single `PROVIDER_FLAGS` constant. Codex uses the device-code flow (`--codex-device-login`); the browser-OAuth callback can't traverse SSH without port forwarding. Before establishing SSH for the codex provider, the action prints an anti-phishing notice instructing the operator to verify the device-code URL points to `openai.com`. Provider validation uses `Object.prototype.hasOwnProperty.call()` to reject prototype-chain keys (`__proto__`, `constructor`, `hasOwnProperty`). Login remains excluded from the MCP allowlist (interactive OAuth + TTY requirement).
 - **Packaging**: Published package ships TypeScript source with `#!/usr/bin/env bun` shebang, requires `engines.bun >= 1.0.0`.
 - **`--dry-run` semantics**: Prints the planned action without validating preconditions or executing side effects. Safe to run anywhere.
 - **`cliproxy setup --providers <list>`**: Comma-separated provider list — `anthropic` and/or `openai`. Default: `anthropic`. Multi-provider requires `--model`. Interactive mode shows a multiselect (anthropic pre-checked; openai opt-in).
 - **`cliproxy setup --model <provider/model-id>`**: Explicit model override. Format: `<provider>/<model-id>` (strict regex, trailing dot/hyphen rejected). Required in non-interactive mode when `--providers` selects multiple providers. Single-provider non-interactive runs use the provider's default (`anthropic/claude-sonnet-4-6` or `openai/gpt-5.4-mini`).
-- **`cliproxy setup --force`**: Required in non-interactive mode to confirm destructive overwrite of existing secrets. Interactive mode shows a confirm prompt instead.
+- **`cliproxy setup --force`**: Authorizes overwriting existing GitHub secret values (OPENCODE_AUTH_JSON, OPENCODE_CONFIG, OMO_PROVIDERS, FRO_BOT_MODEL) in non-interactive mode. Does NOT rotate the underlying CLIProxyAPI proxy bearer token — that's preserved byte-for-byte when `--key` is supplied. Both gate paths (the provider-change pre-gate `confirmDestructiveProviderChange` and the collision-check gate) thread the same wording.
+- **`cliproxy setup --ack-key-reuse`**: Required in non-interactive mode when `--key` is supplied for a repo that already has `OPENCODE_AUTH_JSON` set. The CLI cannot verify the supplied bearer token matches the one inside the existing secret (GitHub secrets are write-only); the flag is the explicit operator acknowledgment. Interactive mode prompts for the same confirmation instead. No-op on fresh-repo bootstrap (no existing OPENCODE_AUTH_JSON) and when `--key` is omitted (wizard mints a new key).
 - **`cliproxy setup --dry-run`**: Preview planned secrets without probing the proxy or mutating any secrets. Safe to run anywhere.
 - **`cliproxy setup --verify-smoke`**: Opt-in post-mutation smoke test. Triggers the target repo's workflow and polls for completion with a 5-minute bounded poll. Non-blocking — setup succeeds even if smoke test fails.
 - **`--force-config` (cliproxy deploy)**: Override the safe default that skips uploading `config.yaml` when it exists on the server. Wipes runtime API keys — print a WARNING when set.
@@ -103,6 +104,23 @@ Return values are plain data (arrays, objects) — never `{content: [...]}` shap
 3. The full test suite passes (`bun test --recursive`).
 
 A future `@goke/mcp` may rename `commandFilter`, change ctx's shape, or break `InMemoryTransport` injection — all three are observable failures the test suite catches, but only if the upgrade ran through CI before merge.
+
+## MIGRATING AN ANTHROPIC-ONLY REPO TO DUAL-PROVIDER ROUTING
+
+A repo wired anthropic-only via an earlier `cliproxy setup --harness opencode` run can add OpenAI routing alongside Anthropic without rotating its CLIProxyAPI bearer token. Pass the existing key via `--key` and use `--force` to authorize overwriting the GitHub secret blobs; the bearer token is preserved byte-for-byte and `--ack-key-reuse` is the explicit acknowledgment that `--key` matches the token GitHub already has.
+
+```bash
+bunx @marcusrbrown/infra cliproxy setup \
+  --repo OWNER/REPO \
+  --harness opencode \
+  --providers anthropic,openai \
+  --model openai/MODEL_ID \
+  --key EXISTING_PROXY_KEY \
+  --ack-key-reuse \
+  --force
+```
+
+GitHub's secrets API is write-only, so the CLI cannot verify `--key` matches the bearer token inside the existing `OPENCODE_AUTH_JSON`. Verify the match before running with `--ack-key-reuse`. Interactive mode prompts for the same confirmation instead of requiring the flag.
 
 ## ANTI-PATTERNS
 

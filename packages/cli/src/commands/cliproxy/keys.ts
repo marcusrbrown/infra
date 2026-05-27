@@ -4,11 +4,14 @@ import type {ActionCtx} from '../../lib/action-ctx'
 
 import {z} from 'zod'
 
+import {managementHeaders, parseManagementKeyList, requestJson, toStringArray} from './shared'
+
+export {toStringArray} from './shared'
+
 /** Minimal ctx surface consumed by cliproxy keys actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
-const HTTP_TIMEOUT_MS = 10_000
 
 function stripTrailingSlash(value: string): string {
   return value.endsWith('/') ? value.slice(0, -1) : value
@@ -26,47 +29,6 @@ function resolveManagementKey(input?: string): string {
   }
 
   return key
-}
-
-function managementHeaders(key: string): Headers {
-  const headers = new Headers()
-  headers.set('x-management-key', key)
-  headers.set('content-type', 'application/json')
-  return headers
-}
-
-async function requestJson(endpoint: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(endpoint, {
-    ...init,
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-  })
-
-  if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`${init.method ?? 'GET'} ${endpoint} failed with HTTP ${response.status}: ${body}`)
-  }
-
-  try {
-    return await response.json()
-  } catch {
-    return null
-  }
-}
-
-export function toStringArray(payload: unknown): string[] {
-  if (Array.isArray(payload)) {
-    return payload.filter(item => typeof item === 'string')
-  }
-
-  if (payload && typeof payload === 'object') {
-    const obj = payload as Record<string, unknown>
-    const value = obj['api-keys'] ?? obj.api_keys
-    if (Array.isArray(value)) {
-      return value.filter(item => typeof item === 'string')
-    }
-  }
-
-  return []
 }
 
 export interface KeysListOptions {
@@ -126,7 +88,10 @@ export async function cliproxyKeysAddAction(
       method: 'GET',
       headers: managementHeaders(managementKey),
     })
-    const currentKeys = toStringArray(currentPayload)
+    // Strict parse: a malformed or unexpected GET response must fail closed before the
+    // destructive PUT replaces the entire key list. Permissive parsing would collapse
+    // unknown shapes to [] and overwrite existing keys.
+    const currentKeys = parseManagementKeyList(currentPayload)
 
     if (currentKeys.includes(apiKeyToAdd)) {
       ctx.console.log('Key already present; no update required.')

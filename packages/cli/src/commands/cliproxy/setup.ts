@@ -3,11 +3,19 @@
 import type {SpinnerResult} from '@clack/prompts'
 import type {goke} from 'goke'
 
-import {cancel, confirm, intro, isCancel, log, note, outro, select, spinner, text} from '@clack/prompts'
+import {cancel, confirm, intro, log, note, outro, select, spinner, text} from '@clack/prompts'
 import {z} from 'zod'
 
 import {resolveManagementKey} from './config'
 import {toStringArray} from './keys'
+import {
+  buildApiKeyValue,
+  cancelAndExit,
+  ensureRepoFormat,
+  promptGenericSecretNames,
+  promptValue,
+  type GenericSecretNames,
+} from './setup/prompts'
 import {parseProviders, promptForModel, promptForProviders, PROVIDER_DEFAULTS, type ProviderId} from './setup/providers'
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
@@ -49,11 +57,6 @@ export interface VariableAssignment {
 export interface HarnessTemplate {
   secrets: SecretAssignment[]
   variables: VariableAssignment[]
-}
-
-interface GenericSecretNames {
-  apiKeySecretName: string
-  baseUrlSecretName: string
 }
 
 interface SetupPlan {
@@ -221,38 +224,6 @@ export function getHarnessTemplate(
 
 function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function ensureRepoFormat(value: string): string {
-  const trimmed = value.trim()
-  if (!/^[^/\s]+\/[^/\s]+$/.test(trimmed)) {
-    throw new Error('Repository must be in owner/repo format.')
-  }
-  return trimmed
-}
-
-function ensureSecretName(value: string, label: string): string {
-  const trimmed = value.trim()
-  if (!/^[A-Z][A-Z0-9_]*$/.test(trimmed)) {
-    throw new Error(`${label} must be SCREAMING_SNAKE_CASE.`)
-  }
-  return trimmed
-}
-
-function cancelAndExit(message = 'Setup cancelled.'): never {
-  cancel(message)
-  process.exit(0)
-}
-
-async function promptValue<T extends string | boolean>(
-  promise: Promise<T | symbol>,
-  cancelMessage?: string,
-): Promise<T> {
-  const value = await promise
-  if (isCancel(value)) {
-    cancelAndExit(cancelMessage)
-  }
-  return value
 }
 
 async function withSpinner<T>(message: string, run: (spinnerInstance: SpinnerResult) => Promise<T>): Promise<T> {
@@ -659,19 +630,6 @@ function managementHeaders(key: string): Headers {
   return headers
 }
 
-function buildApiKeyValue(keyName: string): string {
-  const slug = (
-    keyName
-      .trim()
-      .toLowerCase()
-      .match(/[a-z0-9]+/g) ?? []
-  )
-    .join('-')
-    .slice(0, 24)
-  const random = crypto.randomUUID().split('-').join('')
-  return `sk-${slug || 'cliproxy'}-${random}`
-}
-
 async function createManagementApiKey(baseUrl: string, managementKey: string, keyValue: string): Promise<void> {
   const endpoint = `${baseUrl}/v0/management/api-keys`
   const currentPayload = await requestJson(endpoint, {
@@ -760,48 +718,6 @@ function collectCollisions(
   }
 
   return collisions
-}
-
-async function promptGenericSecretNames(): Promise<GenericSecretNames> {
-  const apiKeySecretName = ensureSecretName(
-    await promptValue(
-      text({
-        message: 'Name for the API key secret',
-        placeholder: 'CLIPROXY_API_KEY',
-        validate: value => {
-          try {
-            ensureSecretName(value ?? '', 'API key secret name')
-            return undefined
-          } catch (error) {
-            return extractErrorMessage(error)
-          }
-        },
-      }),
-      'Setup cancelled before choosing the generic API key secret name.',
-    ),
-    'API key secret name',
-  )
-
-  const baseUrlSecretName = ensureSecretName(
-    await promptValue(
-      text({
-        message: 'Name for the proxy base URL secret',
-        placeholder: 'CLIPROXY_BASE_URL',
-        validate: value => {
-          try {
-            ensureSecretName(value ?? '', 'Base URL secret name')
-            return undefined
-          } catch (error) {
-            return extractErrorMessage(error)
-          }
-        },
-      }),
-      'Setup cancelled before choosing the generic base URL secret name.',
-    ),
-    'Base URL secret name',
-  )
-
-  return {apiKeySecretName, baseUrlSecretName}
 }
 
 async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Promise<SetupPlan> {

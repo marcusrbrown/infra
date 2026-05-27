@@ -1,7 +1,9 @@
 /// <reference types="bun" />
 
-import {cancel, isCancel, multiselect, select, text} from '@clack/prompts'
+import {isCancel, multiselect, select, text} from '@clack/prompts'
 import {z} from 'zod'
+
+import {cancelAndExit} from './prompts'
 
 const providerIdSchema = z.enum(['anthropic', 'openai'])
 export type ProviderId = z.infer<typeof providerIdSchema>
@@ -44,11 +46,6 @@ export const PROVIDER_DEFAULTS: Record<ProviderId, string> = {
 }
 
 const CUSTOM_MODEL_SENTINEL = '__custom__'
-
-function cancelAndExit(message = 'Setup cancelled.'): never {
-  cancel(message)
-  process.exit(0)
-}
 
 /**
  * Interactively prompt the user to select one or more providers.

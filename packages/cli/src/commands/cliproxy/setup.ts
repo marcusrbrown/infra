@@ -8,27 +8,26 @@ import {z} from 'zod'
 
 import {resolveManagementKey} from './config'
 import {toStringArray} from './keys'
-import {
-  buildApiKeyValue,
-  cancelAndExit,
-  ensureRepoFormat,
-  promptGenericSecretNames,
-  promptValue,
-  type GenericSecretNames,
-} from './setup/prompts'
+import {buildApiKeyValue, cancelAndExit, ensureRepoFormat, promptGenericSecretNames, promptValue} from './setup/prompts'
 import {parseProviders, promptForModel, promptForProviders, PROVIDER_DEFAULTS, type ProviderId} from './setup/providers'
+import {
+  collectCollisions,
+  formatTemplateSummary,
+  getHarnessTemplate,
+  harnessSchema,
+  stripTrailingSlash,
+  type Harness,
+  type HarnessTemplate,
+} from './setup/templates'
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
 const HTTP_TIMEOUT_MS = 10_000
 
-const harnessSchema = z.enum(['opencode', 'claude-code', 'generic'])
 const ghRepoViewSchema = z.object({
   nameWithOwner: z.string(),
   viewerPermission: z.string(),
 })
 const ghNameListSchema = z.array(z.object({name: z.string()}))
-
-export type Harness = z.infer<typeof harnessSchema>
 
 const MODEL_ID_RE = /^(?:anthropic|openai)\/[a-z\d](?:[a-z\d.\-]*[a-z\d])?$/
 
@@ -44,21 +43,6 @@ export interface SetupOptions {
   verifySmoke?: boolean
 }
 
-export interface SecretAssignment {
-  name: string
-  value: string
-}
-
-export interface VariableAssignment {
-  name: string
-  value: string
-}
-
-export interface HarnessTemplate {
-  secrets: SecretAssignment[]
-  variables: VariableAssignment[]
-}
-
 interface SetupPlan {
   repo: string
   harness: Harness
@@ -72,10 +56,6 @@ interface CommandResult {
   stdout: string
   stderr: string
   exitCode: number
-}
-
-function stripTrailingSlash(value: string): string {
-  return value.endsWith('/') ? value.slice(0, -1) : value
 }
 
 function resolveBaseUrl(input?: string): string {
@@ -120,105 +100,6 @@ export function validateSetupOptions(options: SetupOptions, isInteractive: boole
 
   if (options.harness === 'generic') {
     throw new Error('--harness generic is interactive-only because it requires custom secret names.')
-  }
-}
-
-export function getHarnessTemplate(
-  harness: Harness,
-  values: {
-    keyValue?: string
-    baseUrl?: string
-    genericSecretNames?: GenericSecretNames
-    providers?: ProviderId[]
-    model?: string
-  } = {},
-): HarnessTemplate {
-  const keyValue = values.keyValue ?? 'sk-placeholder'
-  const baseUrl = stripTrailingSlash(values.baseUrl ?? DEFAULT_CLIPROXY_URL)
-
-  if (harness === 'opencode') {
-    // Normalize provider list: default to anthropic-only, always sort anthropic first
-    const rawProviders = values.providers ?? ['anthropic']
-    // Stable ordering: anthropic always before openai regardless of input order
-    const PROVIDER_ORDER: ProviderId[] = ['anthropic', 'openai']
-    const providers = PROVIDER_ORDER.filter(p => rawProviders.includes(p))
-
-    // Resolve model
-    let model: string
-    if (values.model) {
-      model = values.model
-    } else if (providers.length === 1) {
-      model = PROVIDER_DEFAULTS[providers[0] as ProviderId]
-    } else {
-      throw new Error('model required when multiple providers selected')
-    }
-
-    // OMO_PROVIDERS token map
-    const OMO_TOKEN: Record<ProviderId, string> = {
-      anthropic: 'claude-max20',
-      openai: 'openai',
-    }
-
-    // Build auth JSON object (anthropic-first insertion order)
-    const authObj: Record<string, {type: string; key: string}> = {}
-    for (const p of providers) {
-      authObj[p] = {type: 'api', key: keyValue}
-    }
-
-    // Build config JSON object (anthropic-first insertion order)
-    const providerConfig: Record<string, {options: {baseURL: string}}> = {}
-    for (const p of providers) {
-      providerConfig[p] = {options: {baseURL: `${baseUrl}/v1`}}
-    }
-
-    const omoProviders = providers.map(p => OMO_TOKEN[p]).join(',')
-
-    return {
-      secrets: [
-        {
-          name: 'OPENCODE_AUTH_JSON',
-          value: JSON.stringify(authObj),
-        },
-        {
-          name: 'OPENCODE_CONFIG',
-          value: JSON.stringify({provider: providerConfig}),
-        },
-        {
-          name: 'OMO_PROVIDERS',
-          value: omoProviders,
-        },
-      ],
-      variables: [
-        {
-          name: 'FRO_BOT_MODEL',
-          value: model,
-        },
-      ],
-    }
-  }
-
-  if (harness === 'claude-code') {
-    return {
-      secrets: [
-        {
-          name: 'ANTHROPIC_API_KEY',
-          value: keyValue,
-        },
-      ],
-      variables: [],
-    }
-  }
-
-  if (!values.genericSecretNames) {
-    throw new Error('Generic harness requires custom secret names.')
-  }
-
-  return {
-    secrets: [
-      {name: values.genericSecretNames.apiKeySecretName, value: keyValue},
-      {name: values.genericSecretNames.baseUrlSecretName, value: `${baseUrl}/v1`},
-    ],
-    variables: [],
   }
 }
 
@@ -690,34 +571,6 @@ async function applyGhValue(kind: 'secret' | 'variable', name: string, repo: str
   if (result.exitCode !== 0) {
     throw new Error(`gh ${kind} set ${name} failed: ${result.stderr.trim()}`.trim())
   }
-}
-
-function formatTemplateSummary(template: HarnessTemplate): string {
-  const secretLines = template.secrets.map(secret => `- secret ${secret.name}`)
-  const variableLines = template.variables.map(variable => `- variable ${variable.name}`)
-  return [...secretLines, ...variableLines].join('\n')
-}
-
-function collectCollisions(
-  template: HarnessTemplate,
-  existingSecrets: string[],
-  existingVariables: string[],
-): string[] {
-  const collisions: string[] = []
-
-  for (const secret of template.secrets) {
-    if (existingSecrets.includes(secret.name)) {
-      collisions.push(`secret ${secret.name}`)
-    }
-  }
-
-  for (const variable of template.variables) {
-    if (existingVariables.includes(variable.name)) {
-      collisions.push(`variable ${variable.name}`)
-    }
-  }
-
-  return collisions
 }
 
 async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Promise<SetupPlan> {

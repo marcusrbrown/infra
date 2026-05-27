@@ -213,12 +213,42 @@ describe('verifyModelsAvailable', () => {
     expect(errorMessage).not.toContain('gpt-')
   })
 
-  it('error path: data is missing (response is {}) — throws clean error', async () => {
-    globalThis.fetch = mock(async () => new Response(JSON.stringify({}))) as unknown as typeof fetch
+  it('error path: data is a string (not array) — throws Zod-derived error mentioning "data" and array/Expected', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify({data: 'not-an-array'}))) as unknown as typeof fetch
 
     await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(
-      /data.*array|unexpected.*response/i,
+      /data.*Expected|Expected.*data|data.*array/i,
     )
+  })
+
+  it('error path: data is missing (response is {}) — throws Zod-derived error indicating data is required', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify({}))) as unknown as typeof fetch
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).rejects.toThrow(/data/i)
+  })
+
+  it('happy path (passthrough): extra top-level field ignored — passes', async () => {
+    const fixtureWithExtra = {
+      data: [
+        {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+        {id: 'gpt-5.4-mini', owned_by: 'openai'},
+      ],
+      extraField: 'ignored',
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(fixtureWithExtra))) as unknown as typeof fetch
+
+    await expect(
+      verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'openai'], 'openai/gpt-5.4-mini'),
+    ).resolves.toBeUndefined()
+  })
+
+  it('happy path (passthrough on entries): extra entry field ignored — passes', async () => {
+    const fixtureWithEntryExtra = {
+      data: [{id: 'gpt-5.4-mini', owned_by: 'openai', extraEntryField: 'ignored'}],
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(fixtureWithEntryExtra))) as unknown as typeof fetch
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).resolves.toBeUndefined()
   })
 
   it('error path: dual providers, no owned_by=openai entries — throws no-openai-models message', async () => {

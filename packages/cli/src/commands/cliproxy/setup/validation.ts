@@ -1,5 +1,22 @@
 import type {SetupOptions} from '../setup'
+
+import {z} from 'zod'
+
 import {parseProviders, type ProviderId} from './providers'
+
+// Permissive schema: unknown fields preserved via passthrough()
+const modelEntrySchema = z
+  .object({
+    id: z.string(),
+    owned_by: z.string(),
+  })
+  .passthrough()
+
+const modelsResponseSchema = z
+  .object({
+    data: z.array(modelEntrySchema),
+  })
+  .passthrough()
 
 export const MODEL_ID_RE = /^(?:anthropic|openai)\/[a-z\d](?:[a-z\d.\-]*[a-z\d])?$/
 
@@ -89,17 +106,19 @@ export async function verifyModelsAvailable(
   }
 
   const json = (await response.json()) as unknown
-  const data = (json as Record<string, unknown>)?.data
 
-  if (!Array.isArray(data)) {
-    throw new TypeError('Unexpected response from /v1/models: data is not an array.')
+  let parsed: z.infer<typeof modelsResponseSchema>
+  try {
+    parsed = modelsResponseSchema.parse(json)
+  } catch (error) {
+    const message =
+      error instanceof z.ZodError
+        ? error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')
+        : extractErrorMessage(error)
+    throw new Error(`Malformed /v1/models response: ${message}`)
   }
 
-  interface ModelEntry {
-    id: string
-    owned_by: string
-  }
-  const entries = data as ModelEntry[]
+  const entries = parsed.data
 
   // OpenAI presence check
   if (providers.includes('openai')) {

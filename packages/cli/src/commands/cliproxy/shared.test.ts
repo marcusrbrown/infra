@@ -1,5 +1,5 @@
 import {describe, expect, mock, test} from 'bun:test'
-import {managementHeaders, requestJson} from './shared'
+import {managementHeaders, parseManagementKeyList, requestJson} from './shared'
 
 describe('managementHeaders', () => {
   test('sets x-management-key header', () => {
@@ -52,15 +52,67 @@ describe('requestJson', () => {
     }
   })
 
-  test('returns null when response body is not valid JSON', async () => {
-    const mockFetch = mock(() => Promise.resolve(new Response('', {status: 200})))
+  test('throws on 200 with malformed JSON body so mutating callers fail closed', async () => {
+    const mockFetch = mock(() =>
+      Promise.resolve(
+        new Response('not-json-content', {
+          status: 200,
+          headers: {'content-type': 'text/plain'},
+        }),
+      ),
+    )
     const original = globalThis.fetch
     globalThis.fetch = mockFetch as unknown as typeof fetch
     try {
-      const result = await requestJson('https://example.com/api', {method: 'GET'})
+      await expect(requestJson('https://example.com/api', {method: 'GET'})).rejects.toThrow(/returned malformed JSON/)
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test('returns null on 204 No Content', async () => {
+    const mockFetch = mock(() => Promise.resolve(new Response(null, {status: 204})))
+    const original = globalThis.fetch
+    globalThis.fetch = mockFetch as unknown as typeof fetch
+    try {
+      const result = await requestJson('https://example.com/api', {method: 'DELETE'})
       expect(result).toBeNull()
     } finally {
       globalThis.fetch = original
     }
+  })
+})
+
+describe('parseManagementKeyList', () => {
+  test('accepts top-level string array', () => {
+    expect(parseManagementKeyList(['k1', 'k2'])).toEqual(['k1', 'k2'])
+  })
+
+  test('accepts {api-keys: string[]}', () => {
+    expect(parseManagementKeyList({'api-keys': ['k1']})).toEqual(['k1'])
+  })
+
+  test('accepts {api_keys: string[]}', () => {
+    expect(parseManagementKeyList({api_keys: ['k1']})).toEqual(['k1'])
+  })
+
+  test('throws on null payload so destructive PUTs fail closed', () => {
+    expect(() => parseManagementKeyList(null)).toThrow(/Unexpected management key-list shape/)
+  })
+
+  test('throws on empty object', () => {
+    expect(() => parseManagementKeyList({})).toThrow(/Unexpected management key-list shape/)
+  })
+
+  test('throws on array of non-strings', () => {
+    expect(() => parseManagementKeyList([1, 2, 3])).toThrow(/Unexpected management key-list shape/)
+  })
+
+  test('throws on string scalar', () => {
+    expect(() => parseManagementKeyList('not-an-array')).toThrow(/Unexpected management key-list shape/)
+  })
+
+  test('throws on object with non-array api-keys field', () => {
+    expect(() => parseManagementKeyList({'api-keys': 'k1'})).toThrow(/Unexpected management key-list shape/)
   })
 })

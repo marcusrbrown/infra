@@ -110,7 +110,9 @@ function extractErrorMessage(error: unknown): string {
 }
 
 // Redact a bearer token for display in interactive prompts — never show raw key values.
-function redactKey(key: string): string {
+// Exported for direct unit testing of the redaction contract. The redacted form is
+// what gets shown in the interactive R8 prompt; the raw key must never reach the prompt UI.
+export function redactKey(key: string): string {
   if (key.length < 12) return 'sk-***'
   return `${key.slice(0, 3)}***${key.slice(-4)}`
 }
@@ -301,6 +303,10 @@ const realCtx: ActionCtx = {
 export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps = {}): Promise<void> {
   const interactive = deps.interactive ?? Boolean(process.stdin.isTTY)
   const baseUrl = deps.baseUrl ?? resolveBaseUrl()
+  // ctxInjected distinguishes MCP-mounted callers (which need ctx.console.error to surface errors
+  // through the MCP transport) from bare CLI callers (where cli.ts top-level catch already logs).
+  // Without this distinction, CLI users see the error twice.
+  const ctxInjected = deps.ctx !== undefined
   const ctx = deps.ctx ?? realCtx
   const gh = deps.gh ?? realGh
   const prompts = deps.prompts ?? realPrompts
@@ -592,7 +598,11 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
     }
   } catch (error) {
     const message = extractErrorMessage(error)
-    ctx.console.error(message)
+    // MCP-mounted callers need ctx.console.error to surface the message through the MCP transport.
+    // Bare CLI callers leave it to cli.ts's top-level catch — emitting here too would double-log.
+    if (ctxInjected) {
+      ctx.console.error(message)
+    }
     if (interactive) {
       cancel(message)
     }

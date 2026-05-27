@@ -4,7 +4,7 @@ import type {ActionCtx} from '../../lib/action-ctx'
 
 import {z} from 'zod'
 
-import {managementHeaders, requestJson, toStringArray} from './shared'
+import {managementHeaders, parseManagementKeyList, requestJson, toStringArray} from './shared'
 
 export {toStringArray} from './shared'
 
@@ -88,7 +88,10 @@ export async function cliproxyKeysAddAction(
       method: 'GET',
       headers: managementHeaders(managementKey),
     })
-    const currentKeys = toStringArray(currentPayload)
+    // Strict parse: a malformed or unexpected GET response must fail closed before the
+    // destructive PUT replaces the entire key list. Permissive parsing would collapse
+    // unknown shapes to [] and overwrite existing keys.
+    const currentKeys = parseManagementKeyList(currentPayload)
 
     if (currentKeys.includes(apiKeyToAdd)) {
       ctx.console.log('Key already present; no update required.')

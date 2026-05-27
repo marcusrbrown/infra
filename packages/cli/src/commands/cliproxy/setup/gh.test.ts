@@ -166,4 +166,53 @@ describe('management API key helpers — response shape handling', () => {
     expect(body).toContain('existing-key')
     expect(body).toContain('new-key')
   })
+
+  it('createManagementApiKey THROWS without making a destructive PUT when GET returns unexpected payload shape', async () => {
+    const {createManagementApiKey} = await import('./gh')
+
+    // Mock fetch: GET returns 200 with payload `null` (valid JSON but unexpected shape).
+    // Pre-fix silent-failure path: requestJson would have returned null, toStringArray(null)
+    // would have collapsed to [], the PUT would have replaced the entire key list with
+    // just the new key — deleting all existing repo keys.
+    // Post-fix: parseManagementKeyList throws on null, the PUT is never made.
+    let putCallCount = 0
+    globalThis.fetch = mock(async (_url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      if (method === 'PUT') putCallCount++
+      if (method === 'GET') {
+        return new Response(JSON.stringify(null), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      }
+      return new Response('{}', {status: 200})
+    }) as unknown as typeof fetch
+
+    await expect(createManagementApiKey('https://cliproxy.fro.bot', 'mgmt-key', 'new-key')).rejects.toThrow(
+      /Unexpected management key-list shape/,
+    )
+    expect(putCallCount).toBe(0)
+  })
+
+  it('createManagementApiKey THROWS without PUT when GET returns malformed JSON', async () => {
+    const {createManagementApiKey} = await import('./gh')
+
+    let putCallCount = 0
+    globalThis.fetch = mock(async (_url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      if (method === 'PUT') putCallCount++
+      if (method === 'GET') {
+        return new Response('not-json-content', {
+          status: 200,
+          headers: {'content-type': 'text/plain'},
+        })
+      }
+      return new Response('{}', {status: 200})
+    }) as unknown as typeof fetch
+
+    await expect(createManagementApiKey('https://cliproxy.fro.bot', 'mgmt-key', 'new-key')).rejects.toThrow(
+      /returned malformed JSON/,
+    )
+    expect(putCallCount).toBe(0)
+  })
 })

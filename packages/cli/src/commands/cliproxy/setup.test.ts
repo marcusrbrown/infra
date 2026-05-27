@@ -6,6 +6,7 @@ import {goke} from 'goke'
 
 import {
   buildNonInteractivePlan,
+  redactKey,
   registerCliproxySetup,
   requiresDestructiveProviderChangeConfirmation,
   runSetupCommand,
@@ -1043,6 +1044,128 @@ describe('runSetupCommand action handler', () => {
     expect(smokeLog?.[0]).toBe('[smoke-test] kind=pass')
   })
 
+  it('smoke test emits [smoke-test] kind=fail to ctx.console.log', async () => {
+    const {ctx, logs} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    try {
+      await runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+          verifySmoke: true,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {
+            runSmokeTest: async () => ({
+              kind: 'fail' as const,
+              message: 'Smoke run failed with conclusion=failure',
+              runUrl: 'https://example.com/run/2',
+            }),
+          },
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    const smokeLog = logs.find(args => typeof args[0] === 'string' && (args[0] as string).startsWith('[smoke-test]'))
+    expect(smokeLog).toBeDefined()
+    expect(smokeLog?.[0]).toBe('[smoke-test] kind=fail')
+  })
+
+  it('smoke test emits [smoke-test] kind=unverified to ctx.console.log', async () => {
+    const {ctx, logs} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    try {
+      await runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+          verifySmoke: true,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {
+            runSmokeTest: async () => ({
+              kind: 'unverified' as const,
+              message: 'Workflow requires environment approval',
+              runUrl: 'https://example.com/run/3',
+            }),
+          },
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    const smokeLog = logs.find(args => typeof args[0] === 'string' && (args[0] as string).startsWith('[smoke-test]'))
+    expect(smokeLog).toBeDefined()
+    expect(smokeLog?.[0]).toBe('[smoke-test] kind=unverified')
+  })
+
   // ── key-reuse acknowledgment tests ────────────────────────────────────────────────
 
   it('non-interactive + --key + existing OPENCODE_AUTH_JSON + no --ack-key-reuse → throws', async () => {
@@ -1248,6 +1371,315 @@ describe('runSetupCommand action handler', () => {
         },
       ),
     ).resolves.toBeUndefined()
+  })
+
+  // ── Interactive R8 ack-key-reuse prompt: redaction + cancel/continue ──────────
+  //
+  // Note: full interactive integration tests are limited by the F16 (issue #311) gap —
+  // buildInteractivePlan calls real @clack/prompts.text() for the key-name and harness
+  // prompts that DI doesn't cover yet. We test the redaction contract directly via
+  // the exported redactKey helper, then a unit test confirms the prompt template uses
+  // the redacted form. Interactive cancel/continue paths are exercised under F16 once
+  // RunSetupDeps covers all prompt sites.
+
+  it('redactKey: keys >= 12 chars use first-3 + *** + last-4 shape', () => {
+    expect(redactKey('sk-PLAINTEXT-LONGKEY')).toBe('sk-***GKEY')
+    expect(redactKey('sk-shortbutok123')).toBe('sk-***k123')
+  })
+
+  it('redactKey: keys < 12 chars collapse to sk-*** to avoid leaking short strings', () => {
+    expect(redactKey('short')).toBe('sk-***')
+    expect(redactKey('')).toBe('sk-***')
+    expect(redactKey('sk-tiny')).toBe('sk-***')
+  })
+
+  it('redactKey: every input shorter than the original, never echoes raw key', () => {
+    const RAW = 'sk-PLAINTEXT-LONGKEY-MUST-NOT-LEAK'
+    const redacted = redactKey(RAW)
+    expect(redacted).not.toContain('PLAINTEXT-LONGKEY-MUST-NOT')
+    expect(redacted.length).toBeLessThan(RAW.length)
+  })
+
+  it('Interactive R8 prompt template uses redactKey output, never the raw key (source-level contract)', async () => {
+    // Read the setup.ts source and assert the R8 prompt-message template uses ${redactKey(options.key)}
+    // and never `${options.key}` raw. This is a source-level guard so a future refactor that
+    // accidentally drops the redaction call fails the test even if integration coverage lags.
+    const source = await Bun.file(new URL('./setup.ts', import.meta.url).pathname).text()
+    const r8PromptIdx = source.indexOf('Verify it matches the bearer token')
+    expect(r8PromptIdx).toBeGreaterThan(-1)
+    const promptContext = source.slice(Math.max(0, r8PromptIdx - 200), r8PromptIdx + 100)
+    expect(promptContext).toContain('redactKey(options.key)')
+    expect(promptContext).not.toMatch(/--key \$\{options\.key\}/)
+  })
+
+  // The two interactive R8 integration tests below are skipped pending F16 (issue #311):
+  // RunSetupDeps must cover the buildInteractivePlan prompt sites before the interactive
+  // path can be exercised end-to-end with deps mocks alone.
+
+  it.skip('Interactive R8: confirm prompt fires with redacted key (not raw token)', async () => {
+    const {ctx} = makeCtx()
+    const PLAINTEXT_KEY = 'sk-PLAINTEXT-LONGKEY-SHOULD-NOT-LEAK'
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    let confirmMessage = ''
+    const captureConfirm = (opts: {message: string}): Promise<boolean | symbol> => {
+      confirmMessage = opts.message
+      return Promise.resolve(true)
+    }
+
+    // Interactive mode resolves promptValue to the awaited prompt result. Our captureConfirm
+    // returns true, so the wizard proceeds past the R8 gate. We assert on the captured message.
+    const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
+      const result = await prompt
+      return result as T
+    }
+
+    try {
+      await runSetupCommand(
+        {
+          key: PLAINTEXT_KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+        },
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async (_repo, kind) => (kind === 'secret' ? ['OPENCODE_AUTH_JSON'] : []),
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: interactivePromptValue,
+            confirm: captureConfirm,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    // The R8 confirm prompt must be the one captured (interactive flow has more than one confirm
+    // in some paths; we look for the one containing the verify-bearer language).
+    expect(confirmMessage).toContain('Verify it matches the bearer token')
+    // The raw key must NEVER appear in the prompt text — security regression guard.
+    expect(confirmMessage).not.toContain(PLAINTEXT_KEY)
+    // Redacted form must be present (first 3 + last 4 chars per redactKey helper).
+    expect(confirmMessage).toContain('sk-')
+    expect(confirmMessage).toContain('***')
+    expect(confirmMessage).toContain('LEAK')
+  })
+
+  it.skip('Interactive R8: confirm returns false → cancelAndExit invoked, applyGhValue never called', async () => {
+    const {ctx} = makeCtx()
+    const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
+
+    let applyGhValueCalled = false
+    let exitCode: number | undefined
+
+    const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
+      const result = await prompt
+      return result as T
+    }
+
+    // process.exit is intercepted by ctx.process.exit only when ctx is threaded; cancelAndExit
+    // calls global process.exit. Stub it to capture the code and throw so the function unwinds.
+    const originalExit = process.exit
+    process.exit = ((code?: number) => {
+      exitCode = code
+      throw new Error('process.exit-stubbed')
+    }) as typeof process.exit
+
+    try {
+      await runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'openai',
+          model: 'openai/gpt-5.4-mini',
+          force: true,
+        },
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async (_repo, kind) => (kind === 'secret' ? ['OPENCODE_AUTH_JSON'] : []),
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {
+              applyGhValueCalled = true
+            },
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: interactivePromptValue,
+            // User rejects the R8 confirmation → cancelAndExit fires.
+            confirm: () => Promise.resolve(false) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      )
+      // If we get here, cancelAndExit didn't fire. Fail the test.
+      throw new Error('expected cancelAndExit to fire on R8 reject')
+    } catch (error) {
+      // cancelAndExit throws because we stubbed process.exit to throw.
+      expect(error instanceof Error && error.message).toBe('process.exit-stubbed')
+    } finally {
+      process.exit = originalExit
+      globalThis.fetch = originalFetch
+    }
+
+    expect(exitCode).toBe(0)
+    expect(applyGhValueCalled).toBe(false)
+  })
+
+  // ── Double-log regression test ────────────────────
+
+  it('Bare CLI path (no ctx injected): action error not double-logged via ctx.console.error', async () => {
+    // When deps.ctx is undefined, ctx defaults to realCtx (which writes to global console).
+    // The catch block should skip ctx.console.error to avoid double-printing — cli.ts top-level
+    // catch already prints. We verify by tracking calls to console.error directly.
+    const errorCalls: string[] = []
+    const originalConsoleError = console.error
+    console.error = (...args: unknown[]) => {
+      errorCalls.push(args.map(String).join(' '))
+    }
+
+    try {
+      await expect(
+        runSetupCommand(
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            force: true,
+          },
+          {
+            interactive: false,
+            baseUrl: BASE_URL,
+            // ctx NOT supplied — bare CLI mode
+            gh: {
+              assertGhInstalled: async () => {
+                throw new Error('gh-not-installed-marker')
+              },
+              assertGhAuthenticated: async () => {},
+              assertRepoAccess: async () => {},
+              listExistingGhNames: async () => [],
+              createManagementApiKey: async () => {},
+              deleteManagementApiKey: async () => {},
+              applyGhValue: async () => {},
+              withGhRetry: async (_label, fn) => fn(makeSpinner()),
+            },
+            prompts: {
+              promptValue: autoPromptValue,
+              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              intro: () => {},
+              note: () => {},
+              outro: () => {},
+            },
+            smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+            validation: {
+              assertProxyReachable: async () => {},
+              assertProxyKeyWorks: async () => {},
+              verifyModelsAvailable: async () => {},
+            },
+          },
+        ),
+      ).rejects.toThrow('gh-not-installed-marker')
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    // The catch block must NOT have called ctx.console.error because deps.ctx was undefined.
+    // (cli.ts will handle the logging at the top level.) If the catch wrote here, this fails.
+    const errorMatches = errorCalls.filter(line => line.includes('gh-not-installed-marker'))
+    expect(errorMatches).toHaveLength(0)
+  })
+
+  it('MCP path (ctx injected): action error IS logged via ctx.console.error', async () => {
+    // When deps.ctx IS supplied (MCP path), the catch block must call ctx.console.error
+    // so the MCP transport surfaces the message. cli.ts's top-level catch doesn't run in MCP mode.
+    const {ctx, errors} = makeCtx()
+
+    await expect(
+      runSetupCommand(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          force: true,
+        },
+        {
+          interactive: false,
+          baseUrl: BASE_URL,
+          ctx, // ← injected
+          gh: {
+            assertGhInstalled: async () => {
+              throw new Error('mcp-error-marker')
+            },
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {},
+            deleteManagementApiKey: async () => {},
+            applyGhValue: async () => {},
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      ),
+    ).rejects.toThrow('mcp-error-marker')
+
+    // The injected ctx.console.error received the message.
+    const errorTexts = errors.map(args => args.map(String).join(' '))
+    expect(errorTexts.some(line => line.includes('mcp-error-marker'))).toBe(true)
   })
 
   // ── Rollback regression tests ─────────────────────

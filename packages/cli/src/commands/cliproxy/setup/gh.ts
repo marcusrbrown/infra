@@ -4,7 +4,7 @@ import type {SpinnerResult} from '@clack/prompts'
 
 import {confirm, log, spinner} from '@clack/prompts'
 
-import {managementHeaders, requestJson, toStringArray} from '../shared'
+import {managementHeaders, parseManagementKeyList, requestJson} from '../shared'
 import {cancelAndExit, promptValue} from './prompts'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -186,7 +186,7 @@ export async function createManagementApiKey(baseUrl: string, managementKey: str
     method: 'GET',
     headers: managementHeaders(managementKey),
   })
-  const currentKeys = toStringArray(currentPayload)
+  const currentKeys = parseManagementKeyList(currentPayload)
 
   if (currentKeys.includes(keyValue)) {
     return
@@ -205,7 +205,7 @@ export async function deleteManagementApiKey(baseUrl: string, managementKey: str
     method: 'GET',
     headers: managementHeaders(managementKey),
   })
-  const currentKeys = toStringArray(currentPayload)
+  const currentKeys = parseManagementKeyList(currentPayload)
   const filtered = currentKeys.filter(k => k !== keyValue)
 
   if (filtered.length === currentKeys.length) {

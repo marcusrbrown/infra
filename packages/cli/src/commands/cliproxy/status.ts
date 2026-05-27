@@ -4,6 +4,8 @@ import type {StatusSummary} from '../status'
 
 import {z} from 'zod'
 
+import {managementHeaders} from './shared'
+
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
@@ -42,12 +44,6 @@ export function formatDurationMs(durationMs: number): string {
 
 export function stripTrailingSlash(value: string): string {
   return value.endsWith('/') ? value.slice(0, -1) : value
-}
-
-function managementHeaders(key: string): Headers {
-  const headers = new Headers()
-  headers.set('x-management-key', key)
-  return headers
 }
 
 async function parseJsonResponse(response: Response): Promise<unknown> {

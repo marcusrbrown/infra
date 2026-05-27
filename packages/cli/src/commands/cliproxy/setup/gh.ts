@@ -2,6 +2,7 @@ import type {SpinnerResult} from '@clack/prompts'
 
 import {confirm, log, spinner} from '@clack/prompts'
 
+import {managementHeaders, requestJson} from '../shared'
 import {cancelAndExit, promptValue} from './prompts'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -17,37 +18,6 @@ export interface CommandResult {
 /** Local copy — avoids a circular import with setup.ts (gh → setup → gh). */
 function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-/**
- * Private copies of requestJson + managementHeaders.
- * Unit 10 will consolidate these into shared.ts and remove these copies.
- */
-const HTTP_TIMEOUT_MS = 10_000
-
-async function requestJson(endpoint: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(endpoint, {
-    ...init,
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-  })
-
-  if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`${init.method ?? 'GET'} ${endpoint} failed with HTTP ${response.status}: ${body}`)
-  }
-
-  try {
-    return await response.json()
-  } catch {
-    return null
-  }
-}
-
-function managementHeaders(key: string): Headers {
-  const headers = new Headers()
-  headers.set('x-management-key', key)
-  headers.set('content-type', 'application/json')
-  return headers
 }
 
 // ─── Spawn helpers ────────────────────────────────────────────────────────────

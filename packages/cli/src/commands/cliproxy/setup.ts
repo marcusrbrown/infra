@@ -17,6 +17,7 @@ import {
   withGhRetry,
   withSpinner,
 } from './setup/gh'
+import {formatDryRunPreview} from './setup/preview'
 import {buildApiKeyValue, cancelAndExit, ensureRepoFormat, promptGenericSecretNames, promptValue} from './setup/prompts'
 import {parseProviders, promptForModel, promptForProviders, PROVIDER_DEFAULTS, type ProviderId} from './setup/providers'
 import {runSmokeTest} from './setup/smoke-test'
@@ -38,6 +39,7 @@ import {
 } from './setup/validation'
 import {checkFroBotWorkflow, formatWorkflowSnippet} from './setup/workflow-analyzer'
 
+export {formatDryRunPreview, type DryRunPreviewOptions} from './setup/preview'
 export {validateSetupOptions, verifyModelsAvailable} from './setup/validation'
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
@@ -145,45 +147,6 @@ async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Pro
  */
 export function mustConfirmDestructive(providers: ProviderId[]): boolean {
   return !(providers.length === 1 && providers[0] === 'anthropic')
-}
-
-export interface DryRunPreviewOptions {
-  repo: string
-  harness: Harness
-  providers: ProviderId[]
-  model: string
-  template: HarnessTemplate
-}
-
-/**
- * Format a dry-run preview string. The proxy key value is NEVER included —
- * it is rendered as `<proxy-key>` in all positions.
- */
-export function formatDryRunPreview(opts: DryRunPreviewOptions): string {
-  const {repo, harness, providers, model, template} = opts
-
-  const lines: string[] = [
-    `Dry run: cliproxy setup --harness ${harness}`,
-    `Repository: ${repo}`,
-    `Providers: ${providers.join(', ')}`,
-    `Model: ${model}`,
-    'Planned secrets:',
-  ]
-
-  for (const secret of template.secrets) {
-    const size = new TextEncoder().encode(secret.value).byteLength
-    lines.push(`  - ${secret.name} (${size} bytes)`)
-  }
-
-  lines.push('Planned variables:')
-  for (const variable of template.variables) {
-    lines.push(`  - ${variable.name} = ${variable.value}`)
-  }
-
-  lines.push('Proxy key (redacted): <proxy-key>')
-  lines.push('No mutations will be performed.')
-
-  return lines.join('\n')
 }
 
 export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: string): Promise<SetupPlan> {

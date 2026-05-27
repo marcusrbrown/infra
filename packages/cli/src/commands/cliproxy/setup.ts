@@ -68,6 +68,7 @@ interface SetupPlan {
   template: HarnessTemplate
 }
 
+// Internal: test-only DI surface. Not part of the published API.
 export interface RunSetupDeps {
   interactive?: boolean
   baseUrl?: string
@@ -106,6 +107,12 @@ function resolveBaseUrl(input?: string): string {
 
 function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+// Redact a bearer token for display in interactive prompts — never show raw key values.
+function redactKey(key: string): string {
+  if (key.length < 12) return 'sk-***'
+  return `${key.slice(0, 3)}***${key.slice(-4)}`
 }
 
 async function buildInteractivePlan(
@@ -184,13 +191,18 @@ async function buildInteractivePlan(
  * Returns true when the provider list includes anything beyond anthropic-only.
  * Anthropic-only repos see no behavior change (G7 invariant).
  */
-export function confirmDestructiveProviderChange(providers: ProviderId[]): boolean {
+export function requiresDestructiveProviderChangeConfirmation(providers: ProviderId[]): boolean {
   return !(providers.length === 1 && providers[0] === 'anthropic')
 }
 
-// Keep old name as alias for backward compatibility with any external callers
+// Deprecated: use requiresDestructiveProviderChangeConfirmation. Will be removed in a future major.
+export const mustConfirmDestructive = requiresDestructiveProviderChangeConfirmation
 
-export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: string): Promise<SetupPlan> {
+export async function buildNonInteractivePlan(
+  options: SetupOptions,
+  baseUrl: string,
+  deps?: Pick<RunSetupDeps, 'validation'>,
+): Promise<SetupPlan> {
   const harness = harnessSchema.parse(options.harness)
   const repo = ensureRepoFormat(options.repo ?? '')
   const keyValue = options.key ?? ''
@@ -218,14 +230,17 @@ export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: st
     }
   }
 
-  await verifyModelsAvailable(baseUrl, keyValue, providers, model)
+  const verifyModels = deps?.validation?.verifyModelsAvailable ?? verifyModelsAvailable
 
-  // Destructive overwrite gate: non-anthropic-only requires --force in non-interactive mode
-  if (confirmDestructiveProviderChange(providers) && !options.force) {
+  // Destructive overwrite gate: non-anthropic-only requires --force in non-interactive mode.
+  // Check BEFORE verifyModelsAvailable to avoid a network call when the gate will reject anyway.
+  if (requiresDestructiveProviderChangeConfirmation(providers) && !options.force) {
     throw new Error(
       `Refusing destructive provider change on ${options.repo ?? ''} without --force. Selected providers ${providers.join(', ')} would overwrite existing GitHub secret values (OPENCODE_AUTH_JSON, OPENCODE_CONFIG, OMO_PROVIDERS, FRO_BOT_MODEL). Note: --force authorizes overwriting these GitHub secret values; it does NOT rotate the underlying CLIProxyAPI proxy bearer token (which is preserved byte-for-byte when --key is supplied).`,
     )
   }
+
+  await verifyModels(baseUrl, keyValue, providers, model)
 
   return {
     repo,
@@ -282,6 +297,7 @@ const realCtx: ActionCtx = {
   },
 }
 
+// Internal: test-only DI surface. Not part of the published API.
 export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps = {}): Promise<void> {
   const interactive = deps.interactive ?? Boolean(process.stdin.isTTY)
   const baseUrl = deps.baseUrl ?? resolveBaseUrl()
@@ -292,6 +308,26 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
   const validation = deps.validation ?? realValidation
   const mgmtKeyResolver = deps.resolveManagementKey ?? resolveManagementKey
 
+  // --dry-run: short-circuit before validation so it works with no flags.
+  // Never blocks on stdin — safe to run anywhere.
+  if (options.dryRun) {
+    const providers: ProviderId[] = options.providers ? parseProviders(options.providers) : ['anthropic']
+    const model = options.model ?? PROVIDER_DEFAULTS[providers[0] as ProviderId]
+    const harness = options.harness ?? 'opencode'
+    const repo = options.repo ?? '<repo not specified>'
+    const keyValue = options.key ?? 'sk-placeholder'
+    ctx.console.log(
+      formatDryRunPreview({
+        repo,
+        harness,
+        providers,
+        model,
+        template: getHarnessTemplate(harness, {keyValue, baseUrl, providers, model}),
+      }),
+    )
+    return
+  }
+
   validateSetupOptions(options, interactive)
 
   if (interactive) {
@@ -299,35 +335,18 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
   }
 
   try {
-    if (!options.dryRun) {
-      await withSpinner('Checking GitHub CLI availability', async () => {
-        await gh.assertGhInstalled()
-        await gh.assertGhAuthenticated()
-      })
+    await withSpinner('Checking GitHub CLI availability', async () => {
+      await gh.assertGhInstalled()
+      await gh.assertGhAuthenticated()
+    })
 
-      await withSpinner('Checking CLIProxyAPI reachability', async () => {
-        await validation.assertProxyReachable(baseUrl)
-      })
-    }
+    await withSpinner('Checking CLIProxyAPI reachability', async () => {
+      await validation.assertProxyReachable(baseUrl)
+    })
 
     const plan = interactive
       ? await buildInteractivePlan(options, baseUrl, prompts)
-      : await buildNonInteractivePlan(options, baseUrl)
-
-    if (options.dryRun) {
-      const providers: ProviderId[] = options.providers ? parseProviders(options.providers) : ['anthropic']
-      const model = options.model ?? PROVIDER_DEFAULTS[providers[0] as ProviderId]
-      ctx.console.log(
-        formatDryRunPreview({
-          repo: plan.repo,
-          harness: plan.harness,
-          providers,
-          model,
-          template: plan.template,
-        }),
-      )
-      return
-    }
+      : await buildNonInteractivePlan(options, baseUrl, {validation})
 
     if (plan.createKey) {
       mgmtKeyResolver()
@@ -380,12 +399,12 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
       interactive,
     )
 
-    // R8: key-reuse acknowledgment guard
+    // Key-reuse acknowledgment guard: bearer token must not appear in prompt text
     if (options.key && existingSecrets.includes('OPENCODE_AUTH_JSON')) {
       if (interactive) {
         const proceed = await prompts.promptValue(
           prompts.confirm({
-            message: `You supplied --key ${options.key}. Verify ${options.key} matches the bearer token inside the existing OPENCODE_AUTH_JSON on ${plan.repo}. Continue?`,
+            message: `You supplied --key ${redactKey(options.key)}. Verify it matches the bearer token inside the existing OPENCODE_AUTH_JSON on ${plan.repo}. Continue?`,
             active: 'yes',
             inactive: 'no',
             initialValue: false,
@@ -549,7 +568,7 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
         }
       })
 
-      // R5/4d: machine-parseable hook for MCP/agent consumers
+      // Machine-parseable hook for MCP/agent consumers
       ctx.console.log(`[smoke-test] kind=${smokeResult.kind}`)
 
       switch (smokeResult.kind) {
@@ -573,6 +592,7 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
     }
   } catch (error) {
     const message = extractErrorMessage(error)
+    ctx.console.error(message)
     if (interactive) {
       cancel(message)
     }
@@ -639,12 +659,16 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
           'Acknowledge that --key matches the bearer token inside the existing OPENCODE_AUTH_JSON. Required in non-interactive mode when --key is supplied for a repo with existing OPENCODE_AUTH_JSON.',
         ),
     )
+    .example('# Preview planned actions without applying any changes (no flags required)')
+    .example('infra cliproxy setup --dry-run')
     .example('# Run the interactive onboarding wizard')
     .example('infra cliproxy setup')
-    .example('# Run non-interactively with an existing key')
-    .example('infra cliproxy setup --key sk-test --repo owner/repo --harness opencode')
-    .example('# Enable both providers non-interactively')
-    .example('infra cliproxy setup --key sk-test --repo owner/repo --harness opencode --providers anthropic,openai')
+    .example('# Run non-interactively with an existing key (anthropic-only)')
+    .example('infra cliproxy setup --repo owner/repo --harness opencode --key sk-existing --force')
+    .example('# Enable both providers non-interactively (requires --force and --model)')
+    .example(
+      'infra cliproxy setup --repo owner/repo --harness opencode --providers anthropic,openai --model openai/gpt-5.4-mini --key sk-existing --ack-key-reuse --force',
+    )
     .action(async (options, ctx) => {
       await runSetupCommand(options, {ctx})
     })

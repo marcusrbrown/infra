@@ -4,7 +4,9 @@ import type {ActionCtx} from '../../lib/action-ctx'
 
 import {z} from 'zod'
 
-import {managementHeaders, requestJson} from './shared'
+import {managementHeaders, requestJson, toStringArray} from './shared'
+
+export {toStringArray} from './shared'
 
 /** Minimal ctx surface consumed by cliproxy keys actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
@@ -27,22 +29,6 @@ function resolveManagementKey(input?: string): string {
   }
 
   return key
-}
-
-export function toStringArray(payload: unknown): string[] {
-  if (Array.isArray(payload)) {
-    return payload.filter(item => typeof item === 'string')
-  }
-
-  if (payload && typeof payload === 'object') {
-    const obj = payload as Record<string, unknown>
-    const value = obj['api-keys'] ?? obj.api_keys
-    if (Array.isArray(value)) {
-      return value.filter(item => typeof item === 'string')
-    }
-  }
-
-  return []
 }
 
 export interface KeysListOptions {

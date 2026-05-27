@@ -6,8 +6,8 @@ import {goke} from 'goke'
 
 import {
   buildNonInteractivePlan,
-  confirmDestructiveProviderChange,
   registerCliproxySetup,
+  requiresDestructiveProviderChangeConfirmation,
   runSetupCommand,
   validateSetupOptions,
   verifyModelsAvailable,
@@ -204,7 +204,15 @@ describe('validation matrix + non-interactive plan', () => {
 
       await expect(
         buildNonInteractivePlan(
-          {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai', model: 'openai/gpt-5.4-mini'},
+          // force: true bypasses the destructive-provider pre-gate so verifyModelsAvailable is reached
+          {
+            key: KEY,
+            repo: 'owner/repo',
+            harness: 'opencode',
+            providers: 'openai',
+            model: 'openai/gpt-5.4-mini',
+            force: true,
+          },
           BASE_URL,
         ),
       ).rejects.toThrow('Proxy key rejected')
@@ -240,21 +248,21 @@ describe('destructive overwrite UX', () => {
 
   // ── mustConfirmDestructive ────────────────────────────────────────────────
 
-  describe('confirmDestructiveProviderChange', () => {
+  describe('requiresDestructiveProviderChangeConfirmation', () => {
     it("['anthropic'] → false (anthropic-only is safe, no confirm needed)", () => {
-      expect(confirmDestructiveProviderChange(['anthropic'])).toBe(false)
+      expect(requiresDestructiveProviderChangeConfirmation(['anthropic'])).toBe(false)
     })
 
     it("['openai'] → true (non-anthropic provider requires confirm)", () => {
-      expect(confirmDestructiveProviderChange(['openai'])).toBe(true)
+      expect(requiresDestructiveProviderChangeConfirmation(['openai'])).toBe(true)
     })
 
     it("['anthropic', 'openai'] → true (multi-provider requires confirm)", () => {
-      expect(confirmDestructiveProviderChange(['anthropic', 'openai'])).toBe(true)
+      expect(requiresDestructiveProviderChangeConfirmation(['anthropic', 'openai'])).toBe(true)
     })
 
     it("['openai', 'anthropic'] → true (order does not matter)", () => {
-      expect(confirmDestructiveProviderChange(['openai', 'anthropic'])).toBe(true)
+      expect(requiresDestructiveProviderChangeConfirmation(['openai', 'anthropic'])).toBe(true)
     })
   })
 
@@ -671,7 +679,7 @@ describe('cliproxy setup --dry-run is offline-safe (action handler contract)', (
 })
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
-// ── Unit 9: runSetupCommand DI boundary tests ─────────────────────────────────
+// ── runSetupCommand DI boundary tests ─────────────────────────────────
 
 // Minimal ActionCtx fake for runSetupCommand DI tests
 function makeCtx() {
@@ -719,13 +727,13 @@ async function autoPromptValue<T>(_prompt: Promise<T | symbol>): Promise<T> {
   return 'test-key-name' as T
 }
 
-describe('runSetupCommand — DI boundary (Unit 9)', () => {
+describe('runSetupCommand action handler', () => {
   const BASE_URL = 'https://cliproxy.fro.bot'
   const KEY = 'sk-test-key'
 
-  // ── R2 testability hardening ──────────────────────────────────────────────
+  // ── dry-run testability hardening ──────────────────────────────────────────────
 
-  it('R2: dry-run does NOT call deps.gh.assertGhInstalled', async () => {
+  it('dry-run does NOT call deps.gh.assertGhInstalled', async () => {
     const {ctx} = makeCtx()
     let called = false
     await runSetupCommand(
@@ -765,7 +773,7 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     expect(called).toBe(false)
   })
 
-  it('R2: dry-run does NOT call deps.validation.assertProxyReachable', async () => {
+  it('dry-run does NOT call deps.validation.assertProxyReachable', async () => {
     const {ctx} = makeCtx()
     let called = false
     await runSetupCommand(
@@ -805,9 +813,9 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     expect(called).toBe(false)
   })
 
-  // ── R3 throw-text behaviors ───────────────────────────────────────────────
+  // ── destructive-overwrite throw-text behaviors ───────────────────────────────────────────────
 
-  it('R3: pre-gate throw text mentions --force and does NOT rotate bearer token', async () => {
+  it('destructive-overwrite pre-gate throw text mentions --force and does NOT rotate bearer token', async () => {
     const {ctx} = makeCtx()
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
@@ -859,7 +867,7 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     }
   })
 
-  it('R3: pre-gate throw text says does NOT rotate the underlying CLIProxyAPI proxy bearer token', async () => {
+  it('destructive-overwrite pre-gate throw text says does NOT rotate the underlying CLIProxyAPI proxy bearer token', async () => {
     const {ctx} = makeCtx()
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
@@ -914,7 +922,7 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     expect(errorMessage).toContain('does NOT rotate the underlying CLIProxyAPI proxy bearer token')
   })
 
-  it('R3: collision-gate throw text mentions repo and Pass --force', async () => {
+  it('collision-gate throw text mentions repo and Pass --force', async () => {
     const {ctx} = makeCtx()
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
@@ -972,9 +980,9 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     expect(errorMessage).toContain('does NOT rotate the underlying CLIProxyAPI proxy bearer token')
   })
 
-  // ── R5/4d stdout line ─────────────────────────────────────────────────────
+  // ── smoke-test stdout line ─────────────────────────────────────────────────────
 
-  it('R5/4d: smoke test emits [smoke-test] kind=pass to ctx.console.log', async () => {
+  it('smoke test emits [smoke-test] kind=pass to ctx.console.log', async () => {
     const {ctx, logs} = makeCtx()
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
@@ -1035,9 +1043,9 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     expect(smokeLog?.[0]).toBe('[smoke-test] kind=pass')
   })
 
-  // ── R8 ack-key-reuse tests ────────────────────────────────────────────────
+  // ── key-reuse acknowledgment tests ────────────────────────────────────────────────
 
-  it('R8: non-interactive + --key + existing OPENCODE_AUTH_JSON + no --ack-key-reuse → throws', async () => {
+  it('non-interactive + --key + existing OPENCODE_AUTH_JSON + no --ack-key-reuse → throws', async () => {
     const {ctx} = makeCtx()
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
@@ -1090,7 +1098,7 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     }
   })
 
-  it('R8: non-interactive + --key + existing OPENCODE_AUTH_JSON + --ack-key-reuse → no throw', async () => {
+  it('non-interactive + --key + existing OPENCODE_AUTH_JSON + --ack-key-reuse → no throw', async () => {
     const {ctx} = makeCtx()
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
@@ -1143,7 +1151,7 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     }
   })
 
-  it('R8: fresh repo (no existing OPENCODE_AUTH_JSON) + --key + no --ack-key-reuse → no throw', async () => {
+  it('fresh repo (no existing OPENCODE_AUTH_JSON) + --key + no --ack-key-reuse → no throw', async () => {
     const {ctx} = makeCtx()
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
@@ -1197,7 +1205,7 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     }
   })
 
-  it('R8: --key omitted + existing OPENCODE_AUTH_JSON + no --ack-key-reuse → no throw (key-reuse path skipped)', async () => {
+  it('--key omitted + existing OPENCODE_AUTH_JSON + no --ack-key-reuse → no throw (key-reuse path skipped)', async () => {
     const {ctx} = makeCtx()
     // No key supplied, wizard would mint a new one — but in non-interactive mode without key, plan.createKey=true
     // which requires managementKey. We test that the ack-key-reuse guard doesn't fire.
@@ -1242,7 +1250,7 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
     ).resolves.toBeUndefined()
   })
 
-  // ── Rollback regression tests (deferred from Unit 5) ─────────────────────
+  // ── Rollback regression tests ─────────────────────
 
   it('Rollback: applyGhValue throws → deleteManagementApiKey called before error propagates', async () => {
     const {ctx} = makeCtx()
@@ -1360,5 +1368,162 @@ describe('runSetupCommand — DI boundary (Unit 9)', () => {
 
     // deleteManagementApiKey must have been called (rollback happened)
     expect(deleteCalledWith).toBeDefined()
+  })
+
+  // ── F5: --dry-run with no --repo/--harness ─────────────────────────────────
+
+  it('F5: --dry-run with no --repo/--harness prints preview and does not throw', async () => {
+    const {ctx, logs} = makeCtx()
+    await runSetupCommand({dryRun: true}, {ctx})
+    const output = logs.map(args => args.join(' ')).join('\n')
+    expect(output).toContain('OPENCODE_AUTH_JSON')
+    expect(output).toContain('No mutations will be performed.')
+  })
+
+  it('F5: --dry-run does not call assertGhInstalled even with no flags', async () => {
+    const {ctx} = makeCtx()
+    let ghCalled = false
+    await runSetupCommand(
+      {dryRun: true},
+      {
+        ctx,
+        gh: {
+          assertGhInstalled: async () => {
+            ghCalled = true
+          },
+          assertGhAuthenticated: async () => {},
+          assertRepoAccess: async () => {},
+          listExistingGhNames: async () => [],
+          createManagementApiKey: async () => {},
+          deleteManagementApiKey: async () => {},
+          applyGhValue: async () => {},
+          withGhRetry: async (_label, fn) => fn(makeSpinner()),
+        },
+      },
+    )
+    expect(ghCalled).toBe(false)
+  })
+
+  // ── F8: Rollback event-order assertions ────────────────────────────────────
+
+  it('F8: applyGhValue fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
+    const {ctx} = makeCtx()
+    const events: string[] = []
+
+    await expect(
+      runSetupCommand(
+        {repo: 'owner/repo', harness: 'claude-code', force: true},
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          resolveManagementKey: () => 'mgmt-test-key',
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {
+              events.push('create')
+            },
+            deleteManagementApiKey: async () => {
+              events.push('delete')
+            },
+            applyGhValue: async () => {
+              events.push('apply-fail')
+              throw new Error('apply-fail')
+            },
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {},
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      ),
+    ).rejects.toThrow('apply-fail')
+
+    expect(events).toEqual(['create', 'apply-fail', 'delete'])
+  })
+
+  it('F8: assertProxyKeyWorks fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
+    const {ctx} = makeCtx()
+    const events: string[] = []
+
+    await expect(
+      runSetupCommand(
+        {repo: 'owner/repo', harness: 'claude-code', force: true},
+        {
+          interactive: true,
+          baseUrl: BASE_URL,
+          ctx,
+          resolveManagementKey: () => 'mgmt-test-key',
+          gh: {
+            assertGhInstalled: async () => {},
+            assertGhAuthenticated: async () => {},
+            assertRepoAccess: async () => {},
+            listExistingGhNames: async () => [],
+            createManagementApiKey: async () => {
+              events.push('create')
+            },
+            deleteManagementApiKey: async () => {
+              events.push('delete')
+            },
+            applyGhValue: async () => {
+              events.push('apply-success')
+            },
+            withGhRetry: async (_label, fn) => fn(makeSpinner()),
+          },
+          prompts: {
+            promptValue: autoPromptValue,
+            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            intro: () => {},
+            note: () => {},
+            outro: () => {},
+          },
+          smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
+          validation: {
+            assertProxyReachable: async () => {},
+            assertProxyKeyWorks: async () => {
+              events.push('verify-fail')
+              throw new Error('verify-fail')
+            },
+            verifyModelsAvailable: async () => {},
+          },
+        },
+      ),
+    ).rejects.toThrow('verify-fail')
+
+    expect(events).toEqual(['create', 'apply-success', 'verify-fail', 'delete'])
+  })
+
+  // ── F9: --force pre-gate fires before verifyModelsAvailable ────────────────
+
+  it('F9: missing --force on provider change does not call fetch (verifyModelsAvailable skipped)', async () => {
+    let fetchCalled = false
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async () => {
+      fetchCalled = true
+      return new Response('{}')
+    }) as unknown as typeof fetch
+
+    try {
+      await expect(
+        buildNonInteractivePlan({key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'openai'}, BASE_URL),
+      ).rejects.toThrow('--force')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    expect(fetchCalled).toBe(false)
   })
 })

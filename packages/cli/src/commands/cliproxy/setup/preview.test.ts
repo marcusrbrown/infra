@@ -116,7 +116,7 @@ describe('formatDryRunPreview', () => {
     expect(preview).not.toContain(KEY)
   })
 
-  // ── byte-count contract tests (plan Unit 8 scenarios) ────────────────────
+  // ── byte-count contract tests ────────────────────
 
   it('anthropic-only: OPENCODE_AUTH_JSON is 51 bytes with sk-placeholder key', () => {
     const template = getHarnessTemplate('opencode', {

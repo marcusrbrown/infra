@@ -1,8 +1,10 @@
+/// <reference types="bun" />
+
 import type {SpinnerResult} from '@clack/prompts'
 
 import {confirm, log, spinner} from '@clack/prompts'
 
-import {managementHeaders, requestJson} from '../shared'
+import {managementHeaders, requestJson, toStringArray} from '../shared'
 import {cancelAndExit, promptValue} from './prompts'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -177,11 +179,6 @@ export async function listExistingGhNames(repo: string, kind: 'secret' | 'variab
 }
 
 // ─── Management API key helpers ───────────────────────────────────────────────
-
-function toStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value.filter((v): v is string => typeof v === 'string')
-}
 
 export async function createManagementApiKey(baseUrl: string, managementKey: string, keyValue: string): Promise<void> {
   const endpoint = `${baseUrl}/v0/management/api-keys`

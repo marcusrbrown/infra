@@ -113,3 +113,57 @@ describe('applyGhValue', () => {
     spawnSpy.mockRestore()
   })
 })
+
+// ─── createManagementApiKey / deleteManagementApiKey toStringArray parity ─────
+
+describe('management API key helpers — response shape handling', () => {
+  afterEach(() => {
+    mock.restore()
+  })
+
+  it('createManagementApiKey handles top-level array response from GET', async () => {
+    const {createManagementApiKey} = await import('./gh')
+
+    const calls: {method: string; body?: string}[] = []
+    globalThis.fetch = mock(async (_url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      calls.push({method, body: init?.body as string | undefined})
+      if (method === 'GET') {
+        // Top-level array response
+        return new Response(JSON.stringify(['existing-key']), {status: 200})
+      }
+      return new Response('{}', {status: 200})
+    }) as unknown as typeof fetch
+
+    await createManagementApiKey('https://cliproxy.fro.bot', 'mgmt-key', 'new-key')
+
+    const putCall = calls.find(c => c.method === 'PUT')
+    expect(putCall).toBeDefined()
+    const body = JSON.parse(putCall?.body ?? '[]') as string[]
+    expect(body).toContain('existing-key')
+    expect(body).toContain('new-key')
+  })
+
+  it('createManagementApiKey handles object-shaped {api-keys:[...]} response from GET', async () => {
+    const {createManagementApiKey} = await import('./gh')
+
+    const calls: {method: string; body?: string}[] = []
+    globalThis.fetch = mock(async (_url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      calls.push({method, body: init?.body as string | undefined})
+      if (method === 'GET') {
+        // Object-shaped response — the form CLIProxyAPI actually returns
+        return new Response(JSON.stringify({'api-keys': ['existing-key']}), {status: 200})
+      }
+      return new Response('{}', {status: 200})
+    }) as unknown as typeof fetch
+
+    await createManagementApiKey('https://cliproxy.fro.bot', 'mgmt-key', 'new-key')
+
+    const putCall = calls.find(c => c.method === 'PUT')
+    expect(putCall).toBeDefined()
+    const body = JSON.parse(putCall?.body ?? '[]') as string[]
+    expect(body).toContain('existing-key')
+    expect(body).toContain('new-key')
+  })
+})

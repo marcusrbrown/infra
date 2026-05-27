@@ -4,7 +4,7 @@ import type {StatusSummary} from '../status'
 
 import {z} from 'zod'
 
-import {managementHeaders} from './shared'
+import {HTTP_TIMEOUT_MS, managementHeaders} from './shared'
 
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
@@ -15,7 +15,6 @@ declare const process: {
 }
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
-const HTTP_TIMEOUT_MS = 10_000
 
 type CheckLevel = 'ok' | 'warning' | 'error'
 

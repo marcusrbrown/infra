@@ -4,15 +4,15 @@ import {afterEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {runSmokeTest} from './smoke-test'
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- spyOn mock return values require `any` casts */
-
 // Helper to build a fake Bun.spawn child process result
-function makeSmokeChild(stdout: string, stderr: string, exitCode: number) {
+type MockSpawnResult = ReturnType<typeof Bun.spawn>
+
+function makeSmokeChild(stdout: string, stderr: string, exitCode: number): MockSpawnResult {
   return {
     stdout: new Blob([stdout]).stream(),
     stderr: new Blob([stderr]).stream(),
     exited: Promise.resolve(exitCode),
-  }
+  } as unknown as MockSpawnResult
 }
 
 // Helper to build a gh run list JSON response
@@ -43,7 +43,7 @@ describe('smoke test runner', () => {
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         // baseline gh run list
@@ -59,11 +59,11 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 2) {
         // gh workflow run trigger
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       if (callIndex === 3) {
         // poll 1 — new run visible
@@ -80,13 +80,13 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 4) {
         // gh run view --log
-        return makeSmokeChild('Step output: reply with exactly: ack\nack', '', 0) as any
+        return makeSmokeChild('Step output: reply with exactly: ack\nack', '', 0)
       }
-      return makeSmokeChild('', '', 0) as any
+      return makeSmokeChild('', '', 0)
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -101,7 +101,7 @@ describe('smoke test runner', () => {
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         return makeSmokeChild(
@@ -116,23 +116,23 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       if (callIndex === 3) {
         return makeSmokeChild(
           makeSmokeRunList([{databaseId: 105, status: 'completed', conclusion: 'success', url: RUN_URL, createdAt}]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 4) {
         // log fetch fails
-        return makeSmokeChild('', 'error fetching logs', 1) as any
+        return makeSmokeChild('', 'error fetching logs', 1)
       }
-      return makeSmokeChild('', '', 0) as any
+      return makeSmokeChild('', '', 0)
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -146,7 +146,7 @@ describe('smoke test runner', () => {
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         return makeSmokeChild(
@@ -161,19 +161,19 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       if (callIndex === 3) {
         return makeSmokeChild(
           makeSmokeRunList([{databaseId: 105, status: 'completed', conclusion: 'failure', url: RUN_URL, createdAt}]),
           '',
           0,
-        ) as any
+        )
       }
-      return makeSmokeChild('', '', 0) as any
+      return makeSmokeChild('', '', 0)
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -188,7 +188,7 @@ describe('smoke test runner', () => {
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         return makeSmokeChild(
@@ -203,10 +203,10 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       // poll — status=waiting
       return makeSmokeChild(
@@ -215,7 +215,7 @@ describe('smoke test runner', () => {
         ]),
         '',
         0,
-      ) as any
+      )
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -225,9 +225,9 @@ describe('smoke test runner', () => {
     expect(result.runUrl).toBe(RUN_URL)
   })
 
-  // R5/4a: dead env-approval branch removed — status=pending with approval-like conclusion
+  // dead env-approval branch removed — status=pending with approval-like conclusion
   // does NOT trigger the unverified gate (the old dead branch is gone).
-  it('R5/4a — status=pending with conclusion=approval_pending does NOT return unverified from env-approval gate', async () => {
+  it('status=pending with conclusion=approval_pending does NOT return unverified from env-approval gate', async () => {
     // The old code had: status === 'waiting' || (status === 'pending' && /approval/i.test(conclusion ?? ''))
     // The second OR branch was dead: when status=pending, gh returns conclusion=null, so /approval/i.test('') = false.
     // After simplification, only status=waiting triggers the env-approval gate.
@@ -236,7 +236,7 @@ describe('smoke test runner', () => {
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         return makeSmokeChild(
@@ -251,11 +251,11 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 2) {
         // trigger succeeds
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       // poll — status=pending, conclusion='approval_pending' (the formerly dead branch scenario)
       // After simplification, this should NOT return unverified from the env-approval gate.
@@ -267,7 +267,7 @@ describe('smoke test runner', () => {
         ]),
         '',
         0,
-      ) as any
+      )
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -285,7 +285,7 @@ describe('smoke test runner', () => {
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         return makeSmokeChild(
@@ -300,17 +300,17 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       // All polls return queued
       return makeSmokeChild(
         makeSmokeRunList([{databaseId: 105, status: 'queued', conclusion: '', url: RUN_URL, createdAt}]),
         '',
         0,
-      ) as any
+      )
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -322,17 +322,17 @@ describe('smoke test runner', () => {
 
   it('edge case — trigger fails: gh workflow run exits non-zero → unverified with redacted stderr', async () => {
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         // baseline
-        return makeSmokeChild('[]', '', 0) as any
+        return makeSmokeChild('[]', '', 0)
       }
       if (callIndex === 2) {
         // trigger fails
-        return makeSmokeChild('', 'gh: authentication required — run gh auth login first', 1) as any
+        return makeSmokeChild('', 'gh: authentication required — run gh auth login first', 1)
       }
-      return makeSmokeChild('', '', 0) as any
+      return makeSmokeChild('', '', 0)
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0})
@@ -349,19 +349,19 @@ describe('smoke test runner', () => {
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
-        return makeSmokeChild('[]', '', 0) as any
+        return makeSmokeChild('[]', '', 0)
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       return makeSmokeChild(
         makeSmokeRunList([{databaseId: 1, status: 'completed', conclusion: 'failure', url: RUN_URL, createdAt}]),
         '',
         0,
-      ) as any
+      )
     })
 
     // runSmokeTest doesn't take a key — it uses gh CLI which handles auth via GH_TOKEN env
@@ -383,7 +383,7 @@ describe('smoke test runner', () => {
     const createdAt101 = new Date(triggerTime.getTime() + 3000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         return makeSmokeChild(
@@ -398,10 +398,10 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       if (callIndex === 3) {
         // Poll: our run (102) and concurrent run (101) both visible
@@ -431,10 +431,10 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       // log fetch
-      return makeSmokeChild('ack', '', 0) as any
+      return makeSmokeChild('ack', '', 0)
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -452,7 +452,7 @@ describe('smoke test runner', () => {
     const createdAt101 = new Date(triggerTime.getTime() + 3000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         return makeSmokeChild(
@@ -467,10 +467,10 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       // All polls: only 101 visible (ours never appears)
       return makeSmokeChild(
@@ -492,7 +492,7 @@ describe('smoke test runner', () => {
         ]),
         '',
         0,
-      ) as any
+      )
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -507,24 +507,24 @@ describe('smoke test runner', () => {
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         // baseline: no prior runs
-        return makeSmokeChild('[]', '', 0) as any
+        return makeSmokeChild('[]', '', 0)
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       if (callIndex === 3) {
         return makeSmokeChild(
           makeSmokeRunList([{databaseId: 1, status: 'completed', conclusion: 'success', url: RUN_URL, createdAt}]),
           '',
           0,
-        ) as any
+        )
       }
       // log fetch
-      return makeSmokeChild('ack', '', 0) as any
+      return makeSmokeChild('ack', '', 0)
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -538,23 +538,23 @@ describe('smoke test runner', () => {
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         // baseline fails
-        return makeSmokeChild('', 'gh: network error', 1) as any
+        return makeSmokeChild('', 'gh: network error', 1)
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       if (callIndex === 3) {
         return makeSmokeChild(
           makeSmokeRunList([{databaseId: 1, status: 'completed', conclusion: 'success', url: RUN_URL, createdAt}]),
           '',
           0,
-        ) as any
+        )
       }
-      return makeSmokeChild('ack', '', 0) as any
+      return makeSmokeChild('ack', '', 0)
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -564,16 +564,16 @@ describe('smoke test runner', () => {
 
   it('edge case — trigger never produces visible run: unverified with repo URL hint', async () => {
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
-        return makeSmokeChild('[]', '', 0) as any
+        return makeSmokeChild('[]', '', 0)
       }
       if (callIndex === 2) {
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       // All polls: no new runs visible
-      return makeSmokeChild('[]', '', 0) as any
+      return makeSmokeChild('[]', '', 0)
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0})
@@ -582,9 +582,9 @@ describe('smoke test runner', () => {
     expect(result.message).toContain('not yet visible')
   })
 
-  // R5/4f: Race-attribution documentation test.
+  // Race-attribution documentation test.
   // This test documents a KNOWN LIMITATION of the current heuristic.
-  it('R5/4f — race attribution: concurrent run with createdAt < triggerTime but databaseId > baseline is picked (known limitation)', async () => {
+  it('race attribution: concurrent run with createdAt < triggerTime but databaseId > baseline is picked (known limitation)', async () => {
     // Scenario: baselineId = 100. Trigger time = 2026-05-26T12:00:00Z.
     // A concurrent contributor's run started just before us (createdAt < triggerTime)
     // but got a higher databaseId (105) due to clock skew or out-of-order ID assignment.
@@ -595,7 +595,7 @@ describe('smoke test runner', () => {
     const concurrentCreatedAt = '2026-05-26T11:59:59Z'
 
     let callIndex = 0
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
       callIndex++
       if (callIndex === 1) {
         // baseline: run 100 exists
@@ -611,11 +611,11 @@ describe('smoke test runner', () => {
           ]),
           '',
           0,
-        ) as any
+        )
       }
       if (callIndex === 2) {
         // trigger succeeds
-        return makeSmokeChild('', '', 0) as any
+        return makeSmokeChild('', '', 0)
       }
       // poll — concurrent contributor's run: databaseId=105 > baseline=100, but createdAt < triggerTime
       return makeSmokeChild(
@@ -630,7 +630,7 @@ describe('smoke test runner', () => {
         ]),
         '',
         0,
-      ) as any
+      )
     })
 
     const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
@@ -641,5 +641,3 @@ describe('smoke test runner', () => {
     expect(result.runUrl).toBe('https://github.com/owner/test-repo/actions/runs/105')
   })
 })
-
-/* eslint-enable @typescript-eslint/no-explicit-any */

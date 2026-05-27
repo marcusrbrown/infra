@@ -150,7 +150,7 @@ export async function runSmokeTest(
 
     const {status, conclusion, url: runUrl} = matched
 
-    // Environment approval gate (R5/4a: simplified — the pending+approval branch was dead).
+    // Environment approval gate (simplified — the pending+approval branch was dead).
     // When status=pending, gh returns conclusion=null, so /approval/i.test('') = false.
     // Only status=waiting triggers the env-approval gate.
     if (status === 'waiting') {

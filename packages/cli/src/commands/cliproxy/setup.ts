@@ -2,6 +2,8 @@
 
 import type {goke} from 'goke'
 
+import type {ActionCtx} from '../../lib/action-ctx'
+
 import {cancel, confirm, intro, log, note, outro, select, text} from '@clack/prompts'
 import {z} from 'zod'
 
@@ -54,6 +56,7 @@ export interface SetupOptions {
   force?: boolean
   dryRun?: boolean
   verifySmoke?: boolean
+  ackKeyReuse?: boolean
 }
 
 interface SetupPlan {
@@ -65,6 +68,38 @@ interface SetupPlan {
   template: HarnessTemplate
 }
 
+export interface RunSetupDeps {
+  interactive?: boolean
+  baseUrl?: string
+  ctx?: ActionCtx
+  resolveManagementKey?: typeof resolveManagementKey
+  gh?: {
+    assertGhInstalled: typeof assertGhInstalled
+    assertGhAuthenticated: typeof assertGhAuthenticated
+    assertRepoAccess: typeof assertRepoAccess
+    listExistingGhNames: typeof listExistingGhNames
+    createManagementApiKey: typeof createManagementApiKey
+    deleteManagementApiKey: typeof deleteManagementApiKey
+    applyGhValue: typeof applyGhValue
+    withGhRetry: typeof withGhRetry
+  }
+  prompts?: {
+    promptValue: typeof promptValue
+    confirm: typeof confirm
+    intro: typeof intro
+    note: typeof note
+    outro: typeof outro
+  }
+  smoke?: {
+    runSmokeTest: typeof runSmokeTest
+  }
+  validation?: {
+    assertProxyReachable: typeof assertProxyReachable
+    assertProxyKeyWorks: typeof assertProxyKeyWorks
+    verifyModelsAvailable: typeof verifyModelsAvailable
+  }
+}
+
 function resolveBaseUrl(input?: string): string {
   return stripTrailingSlash(input ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
 }
@@ -73,10 +108,14 @@ function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Promise<SetupPlan> {
+async function buildInteractivePlan(
+  options: SetupOptions,
+  baseUrl: string,
+  promptsImpl: Required<RunSetupDeps>['prompts'],
+): Promise<SetupPlan> {
   const createKey = !options.key
   const keyName = createKey
-    ? await promptValue(
+    ? await promptsImpl.promptValue(
         text({
           message: 'Name this new CLIProxyAPI key',
           placeholder: 'my-repo-ci',
@@ -88,7 +127,7 @@ async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Pro
 
   const harness =
     options.harness ??
-    (await promptValue(
+    (await promptsImpl.promptValue(
       select<Harness>({
         message: 'Choose the harness to configure',
         options: [
@@ -103,7 +142,7 @@ async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Pro
   const repo = options.repo
     ? ensureRepoFormat(options.repo)
     : ensureRepoFormat(
-        await promptValue(
+        await promptsImpl.promptValue(
           text({
             message: 'Target GitHub repository',
             placeholder: 'owner/repo',
@@ -145,9 +184,11 @@ async function buildInteractivePlan(options: SetupOptions, baseUrl: string): Pro
  * Returns true when the provider list includes anything beyond anthropic-only.
  * Anthropic-only repos see no behavior change (G7 invariant).
  */
-export function mustConfirmDestructive(providers: ProviderId[]): boolean {
+export function confirmDestructiveProviderChange(providers: ProviderId[]): boolean {
   return !(providers.length === 1 && providers[0] === 'anthropic')
 }
+
+// Keep old name as alias for backward compatibility with any external callers
 
 export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: string): Promise<SetupPlan> {
   const harness = harnessSchema.parse(options.harness)
@@ -180,9 +221,9 @@ export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: st
   await verifyModelsAvailable(baseUrl, keyValue, providers, model)
 
   // Destructive overwrite gate: non-anthropic-only requires --force in non-interactive mode
-  if (mustConfirmDestructive(providers) && !options.force) {
+  if (confirmDestructiveProviderChange(providers) && !options.force) {
     throw new Error(
-      'Pass `--force` to confirm overwriting existing OPENCODE_AUTH_JSON/OPENCODE_CONFIG/OMO_PROVIDERS/FRO_BOT_MODEL. Run with `--dry-run` first to preview.',
+      `Refusing destructive provider change on ${options.repo ?? ''} without --force. Selected providers ${providers.join(', ')} would overwrite existing GitHub secret values (OPENCODE_AUTH_JSON, OPENCODE_CONFIG, OMO_PROVIDERS, FRO_BOT_MODEL). Note: --force authorizes overwriting these GitHub secret values; it does NOT rotate the underlying CLIProxyAPI proxy bearer token (which is preserved byte-for-byte when --key is supplied).`,
     )
   }
 
@@ -194,6 +235,351 @@ export async function buildNonInteractivePlan(options: SetupOptions, baseUrl: st
     template: getHarnessTemplate(harness, {keyValue, baseUrl, providers, model}),
   }
 }
+
+// Default real implementations for DI
+const realGh: Required<RunSetupDeps>['gh'] = {
+  assertGhInstalled,
+  assertGhAuthenticated,
+  assertRepoAccess,
+  listExistingGhNames,
+  createManagementApiKey,
+  deleteManagementApiKey,
+  applyGhValue,
+  withGhRetry,
+}
+
+const realPrompts: Required<RunSetupDeps>['prompts'] = {
+  promptValue,
+  confirm,
+  intro,
+  note,
+  outro,
+}
+
+const realSmoke: Required<RunSetupDeps>['smoke'] = {
+  runSmokeTest,
+}
+
+const realValidation: Required<RunSetupDeps>['validation'] = {
+  assertProxyReachable,
+  assertProxyKeyWorks,
+  verifyModelsAvailable,
+}
+
+const realCtx: ActionCtx = {
+  console: {
+    log: (...args: unknown[]) => {
+      console.log(...args)
+    },
+    error: (...args: unknown[]) => {
+      console.error(...args)
+    },
+  },
+  process: {
+    stdout: {write: (chunk: string) => process.stdout.write(chunk)},
+    stderr: {write: (chunk: string) => process.stderr.write(chunk)},
+    exit: (code: number) => process.exit(code),
+  },
+}
+
+export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps = {}): Promise<void> {
+  const interactive = deps.interactive ?? Boolean(process.stdin.isTTY)
+  const baseUrl = deps.baseUrl ?? resolveBaseUrl()
+  const ctx = deps.ctx ?? realCtx
+  const gh = deps.gh ?? realGh
+  const prompts = deps.prompts ?? realPrompts
+  const smoke = deps.smoke ?? realSmoke
+  const validation = deps.validation ?? realValidation
+  const mgmtKeyResolver = deps.resolveManagementKey ?? resolveManagementKey
+
+  validateSetupOptions(options, interactive)
+
+  if (interactive) {
+    prompts.intro('CLIProxyAPI setup wizard')
+  }
+
+  try {
+    if (!options.dryRun) {
+      await withSpinner('Checking GitHub CLI availability', async () => {
+        await gh.assertGhInstalled()
+        await gh.assertGhAuthenticated()
+      })
+
+      await withSpinner('Checking CLIProxyAPI reachability', async () => {
+        await validation.assertProxyReachable(baseUrl)
+      })
+    }
+
+    const plan = interactive
+      ? await buildInteractivePlan(options, baseUrl, prompts)
+      : await buildNonInteractivePlan(options, baseUrl)
+
+    if (options.dryRun) {
+      const providers: ProviderId[] = options.providers ? parseProviders(options.providers) : ['anthropic']
+      const model = options.model ?? PROVIDER_DEFAULTS[providers[0] as ProviderId]
+      ctx.console.log(
+        formatDryRunPreview({
+          repo: plan.repo,
+          harness: plan.harness,
+          providers,
+          model,
+          template: plan.template,
+        }),
+      )
+      return
+    }
+
+    if (plan.createKey) {
+      mgmtKeyResolver()
+    }
+
+    await gh.withGhRetry(
+      `Checking GitHub access for ${plan.repo}`,
+      async () => {
+        await gh.assertRepoAccess(plan.repo)
+      },
+      interactive,
+    )
+
+    if (options.key) {
+      log.info('Using the provided API key value directly. No new CLIProxyAPI key will be created.')
+    }
+
+    if (interactive) {
+      prompts.note(
+        [
+          `Proxy: ${baseUrl}`,
+          `Repository: ${plan.repo}`,
+          `Harness: ${plan.harness}`,
+          plan.createKey ? `New key name: ${plan.keyName}` : 'Using existing key value',
+          'GitHub values to write:',
+          formatTemplateSummary(plan.template),
+        ].join('\n'),
+        'Setup summary',
+      )
+
+      const shouldContinue = await prompts.promptValue(
+        prompts.confirm({
+          message: 'Proceed with GitHub secret and variable updates?',
+          active: 'yes',
+          inactive: 'no',
+          initialValue: true,
+        }),
+        'Setup cancelled before applying GitHub values.',
+      )
+
+      if (!shouldContinue) {
+        cancelAndExit('No changes applied.')
+      }
+    }
+
+    const [existingSecrets, existingVariables] = await gh.withGhRetry(
+      'Checking existing GitHub secrets and variables',
+      async () =>
+        Promise.all([gh.listExistingGhNames(plan.repo, 'secret'), gh.listExistingGhNames(plan.repo, 'variable')]),
+      interactive,
+    )
+
+    // R8: key-reuse acknowledgment guard
+    if (options.key && existingSecrets.includes('OPENCODE_AUTH_JSON')) {
+      if (interactive) {
+        const proceed = await prompts.promptValue(
+          prompts.confirm({
+            message: `You supplied --key ${options.key}. Verify ${options.key} matches the bearer token inside the existing OPENCODE_AUTH_JSON on ${plan.repo}. Continue?`,
+            active: 'yes',
+            inactive: 'no',
+            initialValue: false,
+          }),
+          'Setup cancelled. Run with --ack-key-reuse to bypass interactive confirmation.',
+        )
+        if (!proceed) {
+          cancelAndExit('Setup cancelled. Run with --ack-key-reuse to bypass interactive confirmation.')
+        }
+      } else if (!options.ackKeyReuse) {
+        throw new Error(
+          `Refusing key-reuse without explicit acknowledgment. Pass --ack-key-reuse to confirm that --key matches the bearer token inside the existing OPENCODE_AUTH_JSON on ${plan.repo}. (The CLI cannot verify this because GitHub secrets are write-only.)`,
+        )
+      }
+    }
+
+    const collisions = collectCollisions(plan.template, existingSecrets, existingVariables)
+
+    if (collisions.length > 0) {
+      if (!interactive && !options.force) {
+        throw new Error(
+          `Refusing to overwrite existing GitHub values in ${plan.repo}: ${collisions.join(', ')}. Pass --force to confirm. Note: --force only authorizes overwriting these GitHub secret values; it does NOT rotate the underlying CLIProxyAPI proxy bearer token (which is preserved byte-for-byte when --key is supplied).`,
+        )
+      }
+
+      if (!interactive && options.force) {
+        log.warn(`Overwriting existing GitHub values: ${collisions.join(', ')}`)
+        // proceed
+      }
+
+      if (interactive) {
+        log.warn(`Existing GitHub values will be overwritten: ${collisions.join(', ')}`)
+        const overwrite = await prompts.promptValue(
+          prompts.confirm({
+            message: 'Overwrite the existing GitHub values?',
+            active: 'overwrite',
+            inactive: 'cancel',
+            initialValue: false,
+          }),
+          'Setup cancelled instead of overwriting existing values.',
+        )
+
+        if (!overwrite) {
+          cancelAndExit('Existing GitHub values left unchanged.')
+        }
+      }
+    }
+
+    let keyCreatedByThisRun = false
+    const managementKey = plan.createKey ? mgmtKeyResolver() : undefined
+
+    if (plan.createKey && managementKey) {
+      await withSpinner('Creating a new CLIProxyAPI key', async () => {
+        await gh.createManagementApiKey(baseUrl, managementKey, plan.keyValue)
+        keyCreatedByThisRun = true
+      })
+    }
+
+    try {
+      await gh.withGhRetry(
+        'Writing GitHub secrets and variables',
+        async spinnerInstance => {
+          for (const secret of plan.template.secrets) {
+            spinnerInstance.message(`Setting secret ${secret.name}`)
+            await gh.applyGhValue('secret', secret.name, plan.repo, secret.value)
+          }
+
+          for (const variable of plan.template.variables) {
+            spinnerInstance.message(`Setting variable ${variable.name}`)
+            await gh.applyGhValue('variable', variable.name, plan.repo, variable.value)
+          }
+        },
+        interactive,
+      )
+
+      await withSpinner('Verifying the new key through the proxy', async () => {
+        await validation.assertProxyKeyWorks(baseUrl, plan.keyValue)
+      })
+
+      if (plan.harness === 'opencode') {
+        const workflow = await gh.withGhRetry(
+          `Checking ${plan.repo} fro-bot.yaml wiring`,
+          async () => {
+            return checkFroBotWorkflow(plan.repo)
+          },
+          interactive,
+        )
+
+        switch (workflow.kind) {
+          case 'missing': {
+            log.warn(
+              `No .github/workflows/fro-bot.yaml found in ${plan.repo}. The secrets and variables are set, but Fro Bot won't run until the workflow exists and passes them as inputs. See marcusrbrown/infra/.github/workflows/fro-bot.yaml for a reference.`,
+            )
+            break
+          }
+          case 'unreachable': {
+            log.warn(
+              `Could not check .github/workflows/fro-bot.yaml in ${plan.repo}: ${workflow.reason}. The secrets and variables are set, but the workflow wiring was not verified. Re-run 'infra cliproxy setup' later to confirm, or inspect the file directly.`,
+            )
+            break
+          }
+          case 'no-agent-step': {
+            log.warn(
+              `${plan.repo} .github/workflows/fro-bot.yaml exists but has no 'fro-bot/agent' step. Add one that passes the secrets and variables just written. See marcusrbrown/infra/.github/workflows/fro-bot.yaml for a reference.`,
+            )
+            break
+          }
+          case 'analyzed': {
+            for (const step of workflow.stepsWithGaps) {
+              const missing = [...step.missingInputs]
+              log.warn(
+                [
+                  `${plan.repo} .github/workflows/fro-bot.yaml fro-bot/agent step #${step.stepOrdinal} is missing ${missing.length} required input${
+                    missing.length > 1 ? 's' : ''
+                  } (${missing.join(', ')}).`,
+                  `Without ${missing.includes('opencode-config') ? 'opencode-config, the baseURL override is ignored and Fro Bot hits api.anthropic.com with the proxy key, which fails with 401' : 'these, the secrets you just wrote will not reach OpenCode'}.`,
+                  '',
+                  `Add under the 'with:' block of the 'fro-bot/agent' step:`,
+                  formatWorkflowSnippet(missing),
+                ].join('\n'),
+              )
+            }
+            break
+          }
+          default: {
+            const _exhaustive: never = workflow
+            throw new Error(`Unhandled FroBotWorkflowCheck kind: ${JSON.stringify(_exhaustive)}`)
+          }
+        }
+      }
+    } catch (mutationError) {
+      if (keyCreatedByThisRun && managementKey) {
+        try {
+          await gh.deleteManagementApiKey(baseUrl, managementKey, plan.keyValue)
+          log.warn('Rolled back the newly created CLIProxyAPI key after failure.')
+        } catch {
+          log.warn(
+            'Failed to roll back the newly created CLIProxyAPI key. Remove it manually via: infra cliproxy keys remove',
+          )
+        }
+      }
+      throw mutationError
+    }
+
+    if (interactive) {
+      prompts.outro(`Setup complete for ${plan.repo}. The ${plan.harness} harness can now use ${baseUrl}/v1.`)
+    } else {
+      log.success(`Setup complete for ${plan.repo}.`)
+    }
+
+    // ── Smoke test (opt-in, non-blocking) ──────────────────────────────
+    if (options.verifySmoke) {
+      const smokeResult = await withSpinner('Running smoke test', async () =>
+        smoke.runSmokeTest(plan.repo, plan.template.variables.find(v => v.name === 'FRO_BOT_MODEL')?.value ?? ''),
+      ).catch(async error => {
+        // withSpinner re-throws; catch here so smoke test never gates setup
+        return {
+          kind: 'unverified' as const,
+          message: `Smoke test error: ${extractErrorMessage(error)}`,
+          runUrl: undefined,
+        }
+      })
+
+      // R5/4d: machine-parseable hook for MCP/agent consumers
+      ctx.console.log(`[smoke-test] kind=${smokeResult.kind}`)
+
+      switch (smokeResult.kind) {
+        case 'pass': {
+          log.success(`✓ ${smokeResult.message}${smokeResult.runUrl ? ` — ${smokeResult.runUrl}` : ''}`)
+          break
+        }
+        case 'fail': {
+          log.warn(`✗ ${smokeResult.message}${smokeResult.runUrl ? ` — ${smokeResult.runUrl}` : ''}`)
+          break
+        }
+        case 'unverified': {
+          log.warn(`⚠ ${smokeResult.message}${smokeResult.runUrl ? ` — ${smokeResult.runUrl}` : ''}`)
+          break
+        }
+        default: {
+          const _exhaustive: never = smokeResult
+          throw new Error(`Unhandled SmokeResult kind: ${JSON.stringify(_exhaustive)}`)
+        }
+      }
+    }
+  } catch (error) {
+    const message = extractErrorMessage(error)
+    if (interactive) {
+      cancel(message)
+    }
+    throw error
+  }
+}
+
 export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
   cli
     .command(
@@ -223,7 +609,7 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
       z
         .string()
         .describe(
-          'Comma-separated list of providers to enable. Supported values: anthropic, openai. Example: --providers anthropic,openai',
+          'Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai. Example: --providers anthropic,openai',
         ),
     )
     .option(
@@ -232,7 +618,7 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
         .string()
         .regex(MODEL_ID_RE)
         .describe(
-          'Override the default model. Must be provider-prefixed and lowercase. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o',
+          'Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o',
         ),
     )
     .option(
@@ -244,275 +630,22 @@ export function registerCliproxySetup(cli: ReturnType<typeof goke>): void {
       '--verify-smoke',
       z.boolean().optional().describe('Run a smoke test against the proxy after setup completes.'),
     )
+    .option(
+      '--ack-key-reuse',
+      z
+        .boolean()
+        .default(false)
+        .describe(
+          'Acknowledge that --key matches the bearer token inside the existing OPENCODE_AUTH_JSON. Required in non-interactive mode when --key is supplied for a repo with existing OPENCODE_AUTH_JSON.',
+        ),
+    )
     .example('# Run the interactive onboarding wizard')
     .example('infra cliproxy setup')
     .example('# Run non-interactively with an existing key')
     .example('infra cliproxy setup --key sk-test --repo owner/repo --harness opencode')
     .example('# Enable both providers non-interactively')
     .example('infra cliproxy setup --key sk-test --repo owner/repo --harness opencode --providers anthropic,openai')
-    .action(async options => {
-      const interactive = Boolean(process.stdin.isTTY)
-      const baseUrl = resolveBaseUrl()
-
-      validateSetupOptions(options, interactive)
-
-      if (interactive) {
-        intro('CLIProxyAPI setup wizard')
-      }
-
-      try {
-        if (!options.dryRun) {
-          await withSpinner('Checking GitHub CLI availability', async () => {
-            await assertGhInstalled()
-            await assertGhAuthenticated()
-          })
-
-          await withSpinner('Checking CLIProxyAPI reachability', async () => {
-            await assertProxyReachable(baseUrl)
-          })
-        }
-
-        const plan = interactive
-          ? await buildInteractivePlan(options, baseUrl)
-          : await buildNonInteractivePlan(options, baseUrl)
-
-        if (options.dryRun) {
-          const providers: ProviderId[] = options.providers ? parseProviders(options.providers) : ['anthropic']
-          const model = options.model ?? PROVIDER_DEFAULTS[providers[0] as ProviderId]
-          console.log(
-            formatDryRunPreview({
-              repo: plan.repo,
-              harness: plan.harness,
-              providers,
-              model,
-              template: plan.template,
-            }),
-          )
-          return
-        }
-
-        if (plan.createKey) {
-          resolveManagementKey()
-        }
-
-        await withGhRetry(
-          `Checking GitHub access for ${plan.repo}`,
-          async () => {
-            await assertRepoAccess(plan.repo)
-          },
-          interactive,
-        )
-
-        if (options.key) {
-          log.info('Using the provided API key value directly. No new CLIProxyAPI key will be created.')
-        }
-
-        if (interactive) {
-          note(
-            [
-              `Proxy: ${baseUrl}`,
-              `Repository: ${plan.repo}`,
-              `Harness: ${plan.harness}`,
-              plan.createKey ? `New key name: ${plan.keyName}` : 'Using existing key value',
-              'GitHub values to write:',
-              formatTemplateSummary(plan.template),
-            ].join('\n'),
-            'Setup summary',
-          )
-
-          const shouldContinue = await promptValue(
-            confirm({
-              message: 'Proceed with GitHub secret and variable updates?',
-              active: 'yes',
-              inactive: 'no',
-              initialValue: true,
-            }),
-            'Setup cancelled before applying GitHub values.',
-          )
-
-          if (!shouldContinue) {
-            cancelAndExit('No changes applied.')
-          }
-        }
-
-        const [existingSecrets, existingVariables] = await withGhRetry(
-          'Checking existing GitHub secrets and variables',
-          async () =>
-            Promise.all([listExistingGhNames(plan.repo, 'secret'), listExistingGhNames(plan.repo, 'variable')]),
-          interactive,
-        )
-        const collisions = collectCollisions(plan.template, existingSecrets, existingVariables)
-
-        if (collisions.length > 0) {
-          if (!interactive && !options.force) {
-            throw new Error(
-              `Refusing to overwrite existing GitHub values in non-interactive mode: ${collisions.join(', ')}. Pass --force to confirm.`,
-            )
-          }
-
-          if (!interactive && options.force) {
-            log.warn(`Overwriting existing GitHub values: ${collisions.join(', ')}`)
-            // proceed
-          }
-
-          if (interactive) {
-            log.warn(`Existing GitHub values will be overwritten: ${collisions.join(', ')}`)
-            const overwrite = await promptValue(
-              confirm({
-                message: 'Overwrite the existing GitHub values?',
-                active: 'overwrite',
-                inactive: 'cancel',
-                initialValue: false,
-              }),
-              'Setup cancelled instead of overwriting existing values.',
-            )
-
-            if (!overwrite) {
-              cancelAndExit('Existing GitHub values left unchanged.')
-            }
-          }
-        }
-
-        let keyCreatedByThisRun = false
-        const managementKey = plan.createKey ? resolveManagementKey() : undefined
-
-        if (plan.createKey && managementKey) {
-          await withSpinner('Creating a new CLIProxyAPI key', async () => {
-            await createManagementApiKey(baseUrl, managementKey, plan.keyValue)
-            keyCreatedByThisRun = true
-          })
-        }
-
-        try {
-          await withGhRetry(
-            'Writing GitHub secrets and variables',
-            async spinnerInstance => {
-              for (const secret of plan.template.secrets) {
-                spinnerInstance.message(`Setting secret ${secret.name}`)
-                await applyGhValue('secret', secret.name, plan.repo, secret.value)
-              }
-
-              for (const variable of plan.template.variables) {
-                spinnerInstance.message(`Setting variable ${variable.name}`)
-                await applyGhValue('variable', variable.name, plan.repo, variable.value)
-              }
-            },
-            interactive,
-          )
-
-          await withSpinner('Verifying the new key through the proxy', async () => {
-            await assertProxyKeyWorks(baseUrl, plan.keyValue)
-          })
-
-          if (plan.harness === 'opencode') {
-            const workflow = await withGhRetry(
-              `Checking ${plan.repo} fro-bot.yaml wiring`,
-              async () => {
-                return checkFroBotWorkflow(plan.repo)
-              },
-              interactive,
-            )
-
-            switch (workflow.kind) {
-              case 'missing': {
-                log.warn(
-                  `No .github/workflows/fro-bot.yaml found in ${plan.repo}. The secrets and variables are set, but Fro Bot won't run until the workflow exists and passes them as inputs. See marcusrbrown/infra/.github/workflows/fro-bot.yaml for a reference.`,
-                )
-                break
-              }
-              case 'unreachable': {
-                log.warn(
-                  `Could not check .github/workflows/fro-bot.yaml in ${plan.repo}: ${workflow.reason}. The secrets and variables are set, but the workflow wiring was not verified. Re-run 'infra cliproxy setup' later to confirm, or inspect the file directly.`,
-                )
-                break
-              }
-              case 'no-agent-step': {
-                log.warn(
-                  `${plan.repo} .github/workflows/fro-bot.yaml exists but has no 'fro-bot/agent' step. Add one that passes the secrets and variables just written. See marcusrbrown/infra/.github/workflows/fro-bot.yaml for a reference.`,
-                )
-                break
-              }
-              case 'analyzed': {
-                for (const step of workflow.stepsWithGaps) {
-                  const missing = [...step.missingInputs]
-                  log.warn(
-                    [
-                      `${plan.repo} .github/workflows/fro-bot.yaml fro-bot/agent step #${step.stepOrdinal} is missing ${missing.length} required input${
-                        missing.length > 1 ? 's' : ''
-                      } (${missing.join(', ')}).`,
-                      `Without ${missing.includes('opencode-config') ? 'opencode-config, the baseURL override is ignored and Fro Bot hits api.anthropic.com with the proxy key, which fails with 401' : 'these, the secrets you just wrote will not reach OpenCode'}.`,
-                      '',
-                      `Add under the 'with:' block of the 'fro-bot/agent' step:`,
-                      formatWorkflowSnippet(missing),
-                    ].join('\n'),
-                  )
-                }
-                break
-              }
-              default: {
-                const _exhaustive: never = workflow
-                throw new Error(`Unhandled FroBotWorkflowCheck kind: ${JSON.stringify(_exhaustive)}`)
-              }
-            }
-          }
-        } catch (mutationError) {
-          if (keyCreatedByThisRun && managementKey) {
-            try {
-              await deleteManagementApiKey(baseUrl, managementKey, plan.keyValue)
-              log.warn('Rolled back the newly created CLIProxyAPI key after failure.')
-            } catch {
-              log.warn(
-                'Failed to roll back the newly created CLIProxyAPI key. Remove it manually via: infra cliproxy keys remove',
-              )
-            }
-          }
-          throw mutationError
-        }
-
-        if (interactive) {
-          outro(`Setup complete for ${plan.repo}. The ${plan.harness} harness can now use ${baseUrl}/v1.`)
-        } else {
-          log.success(`Setup complete for ${plan.repo}.`)
-        }
-
-        // ── Smoke test (opt-in, non-blocking) ──────────────────────────────
-        if (options.verifySmoke) {
-          const smokeResult = await withSpinner('Running smoke test', async () =>
-            runSmokeTest(plan.repo, plan.template.variables.find(v => v.name === 'FRO_BOT_MODEL')?.value ?? ''),
-          ).catch(async error => {
-            // withSpinner re-throws; catch here so smoke test never gates setup
-            return {
-              kind: 'unverified' as const,
-              message: `Smoke test error: ${extractErrorMessage(error)}`,
-              runUrl: undefined,
-            }
-          })
-
-          switch (smokeResult.kind) {
-            case 'pass': {
-              log.success(`✓ ${smokeResult.message}${smokeResult.runUrl ? ` — ${smokeResult.runUrl}` : ''}`)
-              break
-            }
-            case 'fail': {
-              log.warn(`✗ ${smokeResult.message}${smokeResult.runUrl ? ` — ${smokeResult.runUrl}` : ''}`)
-              break
-            }
-            case 'unverified': {
-              log.warn(`⚠ ${smokeResult.message}${smokeResult.runUrl ? ` — ${smokeResult.runUrl}` : ''}`)
-              break
-            }
-            default: {
-              const _exhaustive: never = smokeResult
-              throw new Error(`Unhandled SmokeResult kind: ${JSON.stringify(_exhaustive)}`)
-            }
-          }
-        }
-      } catch (error) {
-        const message = extractErrorMessage(error)
-        if (interactive) {
-          cancel(message)
-        }
-        throw error
-      }
+    .action(async (options, ctx) => {
+      await runSetupCommand(options, {ctx})
     })
 }

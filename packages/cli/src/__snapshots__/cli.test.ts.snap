@@ -140,11 +140,12 @@ Commands:
 
     --tail [n]                         Number of log lines to tail from each service. (default: 100)
     --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive credentials. (default: false)
+    --key [key]                        Environment variable name holding the SSH host. Falls back to UMAMI_DOMAIN when omitted.
 
 
   status                               Show status of all deployments
 
-    --json                             Output machine-readable JSON with keeweb, cliproxy, and gateway summary objects.
+    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, and umami summary objects.
     --verbose                          Include verbose per-app health check details when building the summary rows.
 
 

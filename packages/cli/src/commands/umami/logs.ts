@@ -117,6 +117,10 @@ export function registerUmamiLogs(cli: ReturnType<typeof goke>): void {
         .default(false)
         .describe('Allow log streaming in CI environments. Logs may contain sensitive credentials.'),
     )
+    .option(
+      '--key [key]',
+      z.string().describe('Environment variable name holding the SSH host. Falls back to UMAMI_DOMAIN when omitted.'),
+    )
     .action(async (service, options) => {
       const targetService = (service as string | undefined) ?? 'umami'
 
@@ -128,10 +132,11 @@ export function registerUmamiLogs(cli: ReturnType<typeof goke>): void {
         return
       }
 
-      const host = process.env.UMAMI_DOMAIN
+      const hostEnvKey = options.key ?? 'UMAMI_DOMAIN'
+      const host = process.env[hostEnvKey]
 
       if (!host) {
-        console.error('Umami host not set. Export UMAMI_DOMAIN to the hostname of your Umami deployment.')
+        console.error('Umami host not set. Export UMAMI_DOMAIN or pass --key <env-name> pointing to a set variable.')
         process.exitCode = 1
         return
       }

@@ -55,6 +55,8 @@ const CLI_ONLY_TOOLS = [
   'gateway_restore',
   'keeweb_deploy',
   'keeweb_open',
+  'umami_deploy',
+  'umami_logs',
 ].sort()
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

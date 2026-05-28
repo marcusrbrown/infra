@@ -133,7 +133,7 @@ export function registerStatus(
     .command('status', 'Show status of all deployments')
     .option(
       '--json',
-      z.boolean().describe('Output machine-readable JSON with keeweb, cliproxy, and gateway summary objects.'),
+      z.boolean().describe('Output machine-readable JSON with keeweb, cliproxy, gateway, and umami summary objects.'),
     )
     .option(
       '--verbose',

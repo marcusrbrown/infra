@@ -183,7 +183,7 @@ describe('status command', () => {
   let originalEnv: Record<string, string | undefined>
 
   beforeEach(() => {
-    originalEnv = {UMAMI_DOMAIN: process.env.UMAMI_DOMAIN}
+    originalEnv = {UMAMI_DOMAIN: process.env.UMAMI_DOMAIN, MY_UMAMI_HOST: process.env.MY_UMAMI_HOST}
   })
 
   afterEach(() => {
@@ -191,6 +191,12 @@ describe('status command', () => {
       delete process.env.UMAMI_DOMAIN
     } else {
       process.env.UMAMI_DOMAIN = originalEnv.UMAMI_DOMAIN
+    }
+
+    if (originalEnv.MY_UMAMI_HOST === undefined) {
+      delete process.env.MY_UMAMI_HOST
+    } else {
+      process.env.MY_UMAMI_HOST = originalEnv.MY_UMAMI_HOST
     }
   })
 
@@ -260,6 +266,43 @@ describe('status command', () => {
     }
 
     expect(captured.stderr.join('')).toContain('Invalid UMAMI_DOMAIN')
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  it('reads host from the env var named by --key instead of UMAMI_DOMAIN', async () => {
+    delete process.env.UMAMI_DOMAIN
+    process.env.MY_UMAMI_HOST = 'metrics.fro.bot'
+
+    const ndjson = [
+      JSON.stringify({Name: 'umami', State: 'running', Health: 'healthy'}),
+      JSON.stringify({Name: 'db', State: 'running', Health: ''}),
+    ].join('\n')
+
+    const {ctx, captured} = createCapturedCtx()
+
+    try {
+      await umamiStatusAction({key: 'MY_UMAMI_HOST'}, ctx, makeSpawn(ndjson))
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+    }
+
+    const output = captured.stdout.join('\n')
+    expect(output).toContain('umami')
+    expect(captured.exit).toBeNull()
+  })
+
+  it('exits 1 with a clear message when docker compose ps returns empty output', async () => {
+    process.env.UMAMI_DOMAIN = 'metrics.fro.bot'
+
+    const {ctx, captured} = createCapturedCtx()
+
+    try {
+      await umamiStatusAction({}, ctx, makeSpawn(''))
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+    }
+
+    expect(captured.stderr.join('')).toMatch(/no services|empty/i)
     expect(captured.exit?.code).toBe(1)
   })
 })

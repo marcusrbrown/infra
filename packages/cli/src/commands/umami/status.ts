@@ -188,14 +188,15 @@ export async function getUmamiStatusSummary(host: string): Promise<StatusSummary
 // ─── Action (exported for direct testing) ────────────────────────────────────
 
 export async function umamiStatusAction(
-  _options: Record<string, unknown>,
+  options: {key?: string | undefined},
   ctx: ActionCtx,
   spawn?: SpawnFn,
 ): Promise<void> {
-  const host = process.env.UMAMI_DOMAIN
+  const hostEnvKey = options.key ?? 'UMAMI_DOMAIN'
+  const host = process.env[hostEnvKey]
 
   if (!host) {
-    ctx.console.error('Umami host not set. Export UMAMI_DOMAIN to the hostname of your Umami deployment.')
+    ctx.console.error('Umami host not set. Export UMAMI_DOMAIN or pass --key <env-name> pointing to a set variable.')
     ctx.process.exit(1)
     return
   }
@@ -213,8 +214,8 @@ export async function umamiStatusAction(
     return
   }
 
-  if (!result.ok && result.services.length === 0) {
-    ctx.console.error(`Error: ${result.error ?? 'Unknown error'}`)
+  if (result.services.length === 0) {
+    ctx.console.error(`Error: No services reported by docker compose ps`)
     ctx.process.exit(1)
     return
   }

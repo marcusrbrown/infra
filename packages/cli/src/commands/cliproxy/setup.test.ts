@@ -2148,6 +2148,73 @@ describe('post-write readback verification', () => {
     expect(deleteCalledWith).toBeUndefined()
   })
 
+  it('createKey:true path — post-write readback throws → command resolves, key created, rollback suppressed', async () => {
+    // This test drives the createKey:true path (no --key supplied, wizard mints a key).
+    // The post-write readback throws after the key is created and secrets are written.
+    // Asserts: (1) createManagementApiKey WAS called, (2) command resolves, (3) deleteManagementApiKey NOT called.
+    const {ctx} = makeCtx()
+
+    let createCalled = false
+    let deleteCalled = false
+    let listCallCount = 0
+
+    await runSetupCommand(
+      {
+        // No --key → createKey=true
+        repo: 'owner/repo',
+        harness: 'claude-code',
+        force: true,
+      },
+      {
+        interactive: true,
+        baseUrl: BASE_URL,
+        ctx,
+        resolveManagementKey: () => 'mgmt-test-key',
+        gh: {
+          assertGhInstalled: async () => {},
+          assertGhAuthenticated: async () => {},
+          assertRepoAccess: async () => {},
+          listExistingGhNames: async (_repo, _kind) => {
+            listCallCount++
+            if (listCallCount <= 2) return [] // Pre-write calls succeed (empty repo)
+            // Post-write readback throws
+            throw new Error('gh: post-write readback failed')
+          },
+          createManagementApiKey: async () => {
+            createCalled = true
+          },
+          deleteManagementApiKey: async () => {
+            deleteCalled = true
+          },
+          applyGhValue: async () => {},
+          withGhRetry: async (_label, fn) => fn(makeSpinner()),
+        },
+        prompts: {
+          promptValue: autoPromptValue,
+          confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+          intro: () => {},
+          note: () => {},
+          outro: () => {},
+        },
+        smoke: {
+          runSmokeTest: async () => ({kind: 'pass' as const, message: 'ok', runUrl: 'https://example.com/run/1'}),
+        },
+        validation: {
+          assertProxyReachable: async () => {},
+          assertProxyKeyWorks: async () => {},
+          verifyModelsAvailable: async () => {},
+        },
+      },
+    )
+
+    // Key was created this run
+    expect(createCalled).toBe(true)
+    // Command resolved (did not throw)
+    // (implicit — if it threw, the test would fail above)
+    // Rollback must NOT have fired — post-write readback failure must not trigger key deletion
+    expect(deleteCalled).toBe(false)
+  })
+
   it('whole-block guard: throw during diff/warning path → command does NOT throw, rollback NOT fired', async () => {
     // Simulate a throw that occurs after the gh calls succeed but during processing.
     // We do this by making the post-write secret readback return a value that causes

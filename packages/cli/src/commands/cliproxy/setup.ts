@@ -106,6 +106,35 @@ function resolveBaseUrl(input?: string): string {
 }
 
 /**
+ * Emit a warning without ever throwing. Used inside verifyWrittenNamesVisible so that a
+ * failure in warning emission itself cannot escape to the outer write catch and wrongly
+ * roll back a key whose secrets are already written.
+ */
+function safeWarn(message: string): void {
+  try {
+    log.warn(message)
+  } catch {
+    // Warning emission must never escape the post-write readback — a throw here would
+    // reach the outer write catch and wrongly roll back a key whose secrets are written.
+  }
+}
+
+function buildCannotVerifyMessage(repo: string, writtenSecretNames: string[], writtenVariableNames: string[]): string {
+  const secretPart =
+    writtenSecretNames.length > 0
+      ? `gh secret list --repo ${repo} (expect: ${writtenSecretNames.join(', ')})`
+      : `gh secret list --repo ${repo}`
+  const variablePart =
+    writtenVariableNames.length > 0
+      ? `gh variable list --repo ${repo} (expect: ${writtenVariableNames.join(', ')})`
+      : `gh variable list --repo ${repo}`
+  return (
+    `Post-write readback: could not verify the written names are visible in ${repo} ` +
+    `(the GitHub list call failed). Verify manually: ${secretPart}; ${variablePart}.`
+  )
+}
+
+/**
  * After a successful write, re-list secret and variable names and warn if any written name
  * is absent on readback — signaling an unreliable token list view that may have bypassed
  * the pre-write safety gates.
@@ -119,7 +148,7 @@ function resolveBaseUrl(input?: string): string {
  * A throw here would propagate to the mutationError rollback and wrongly delete a key whose
  * secrets are already written.
  */
-async function verifyWrittenValuesVisible(
+async function verifyWrittenNamesVisible(
   repo: string,
   writtenSecretNames: string[],
   writtenVariableNames: string[],
@@ -149,10 +178,7 @@ async function verifyWrittenValuesVisible(
     }
 
     if (readbackFailed) {
-      log.warn(
-        `Post-write readback: could not verify written values are visible in ${repo}. ` +
-          `The GitHub list call failed. Re-run 'infra cliproxy setup' later to confirm, or inspect directly.`,
-      )
+      safeWarn(buildCannotVerifyMessage(repo, writtenSecretNames, writtenVariableNames))
       return
     }
 
@@ -179,14 +205,11 @@ async function verifyWrittenValuesVisible(
       lines.push(`  Verify manually: gh variable list --repo ${repo}`)
     }
 
-    log.warn(lines.join('\n'))
+    safeWarn(lines.join('\n'))
   } catch {
     // Any failure in the entire verification block (readback, diff, or warning emission)
     // degrades to this softer cannot-verify warning. Never re-throw.
-    log.warn(
-      `Post-write readback: could not verify written values are visible in ${repo}. ` +
-        `The GitHub list call failed. Re-run 'infra cliproxy setup' later to confirm, or inspect directly.`,
-    )
+    safeWarn(buildCannotVerifyMessage(repo, writtenSecretNames, writtenVariableNames))
   }
 }
 
@@ -574,7 +597,7 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
         interactive,
       )
 
-      await verifyWrittenValuesVisible(
+      await verifyWrittenNamesVisible(
         plan.repo,
         plan.template.secrets.map(s => s.name),
         plan.template.variables.map(v => v.name),

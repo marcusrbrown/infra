@@ -519,13 +519,12 @@ describe('public HTTPS probe', () => {
 // ─── admin password rotation ──────────────────────────────────────────────────
 
 describe('admin password rotation', () => {
-  it('skips rotation when default login fails (already rotated)', async () => {
+  it('skips rotation when default login returns no token (already rotated)', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    // The admin rotation SSH call returns exit code 1 (login failed)
+    // idx 7: login returns exit 0 with no token → treated as already rotated (skip)
     const responses = Array.from({length: 15}, () => makeSpawnResult())
     responses[1] = makeSpawnResult(matchingFingerprint)
-    // Admin rotation call: login fails (non-zero exit or empty token in stdout)
-    responses[8] = makeSpawnResult('{"token":null}', '', 0)
+    responses[7] = makeSpawnResult('{"token":null}', '', 0)
 
     const {spawnFn} = makeFakeSpawn(responses)
 
@@ -542,10 +541,18 @@ describe('admin password rotation', () => {
 
   it('does not place admin password in any argv', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 15}, () => makeSpawnResult())
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
     responses[1] = makeSpawnResult(matchingFingerprint)
-    // Simulate successful login returning a token
-    responses[8] = makeSpawnResult(JSON.stringify({token: 'test-jwt-token'}), '', 0)
+    // idx 7: login succeeds with token
+    responses[7] = makeSpawnResult(JSON.stringify({token: 'test-jwt-token'}), '', 0)
+    // idx 8: write curl config (token via stdin)
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify new password login succeeds
+    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    // idx 11: verify default login fails
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -588,5 +595,464 @@ describe('CI mode with UMAMI_SSH_KEY', () => {
     for (const call of calls) {
       expect(call.cmd.join(' ')).not.toContain('AAAA-UNIQUE-KEY-CONTENT')
     }
+  })
+})
+
+// ─── exec-reachability: rotation runs inside the umami container ──────────────
+//
+// New call order (with matching fingerprint, already-rotated login):
+//   0: mkdir
+//   1: cat fingerprint
+//   2: write .env
+//   3: scp compose
+//   4: scp Caddyfile
+//   5: compose pull
+//   6: compose up db umami
+//   7: rotation login curl  ← rotation starts here
+//   8: compose up caddy     ← after rotation
+//   9: write sentinel
+//
+// With full rotation (login succeeds):
+//   7: rotation login curl
+//   8: write curl config (token via stdin)
+//   9: update curl
+//  10: verify new password login
+//  11: verify default login fails
+//  12: compose up caddy
+//  13: write sentinel
+
+describe('rotation runs inside the umami container via docker compose exec', () => {
+  it('login curl runs inside the umami container, not on the droplet host', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login already rotated (exit 22)
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    const loginCall = calls.find(c => c.cmd.join(' ').includes('/api/auth/login'))
+    expect(loginCall).toBeDefined()
+    // Must use docker compose exec -T umami, not bare ssh curl on host
+    const cmdStr = loginCall?.cmd.join(' ') ?? ''
+    expect(cmdStr).toContain('docker compose exec')
+    expect(cmdStr).toContain('-T')
+    expect(cmdStr).toContain('umami')
+  })
+
+  it('password-update curl runs inside the umami container, not on the droplet host', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds with token
+    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    // idx 8: write curl config file (token via stdin)
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update curl succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify: re-login with new password succeeds
+    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    // idx 11: verify: re-login with default umami fails (exit 22)
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    const updateCall = calls.find(c => c.cmd.join(' ').includes('/api/users/me/password'))
+    expect(updateCall).toBeDefined()
+    const cmdStr = updateCall?.cmd.join(' ') ?? ''
+    expect(cmdStr).toContain('docker compose exec')
+    expect(cmdStr).toContain('-T')
+    expect(cmdStr).toContain('umami')
+  })
+})
+
+// ─── G1: rotation fails closed ────────────────────────────────────────────────
+
+describe('rotation fails closed on connection/transport failure', () => {
+  it('throws when login curl cannot reach umami (connection refused, exit 7)', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login curl: connection refused (exit 7)
+    responses[7] = makeSpawnResult('', 'curl: (7) Failed to connect', 7)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/cannot reach umami|admin credentials/)
+  })
+
+  it('skips rotation (idempotent) when login is cleanly rejected with HTTP 401 (exit 22)', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login curl: HTTP 401 → --fail-with-body exits 22
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('throws when password-update curl fails (non-zero exit)', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds
+    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    // idx 8: write curl config file
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update curl fails
+    responses[9] = makeSpawnResult('', 'error', 1)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow()
+  })
+
+  it('throws when post-rotation verification fails (new password login rejected)', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login with default succeeds
+    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    // idx 8: write curl config file
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify: re-login with new password FAILS (exit 22 — bad creds)
+    responses[10] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/verification|rotate|password/)
+  })
+
+  it('throws when post-rotation verification finds default password still works', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login with default succeeds
+    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    // idx 8: write curl config file
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify: re-login with new password succeeds
+    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    // idx 11: verify: re-login with default umami STILL succeeds (rotation didn't stick)
+    responses[11] = makeSpawnResult(JSON.stringify({token: 'tok-default-still-works'}), '', 0)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/verification|rotate|password/)
+  })
+})
+
+// ─── G2: Caddy starts after rotation (no public default-credential window) ────
+
+describe('Caddy starts after admin rotation completes', () => {
+  it('caddy up spawn happens after the rotation login curl spawn', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login already rotated (exit 22)
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    const caddyUpIdx = calls.findIndex(c => {
+      const s = c.cmd.join(' ')
+      return s.includes('docker compose up') && s.includes('caddy')
+    })
+    const loginCurlIdx = calls.findIndex(c => c.cmd.join(' ').includes('/api/auth/login'))
+
+    expect(caddyUpIdx).toBeGreaterThan(-1)
+    expect(loginCurlIdx).toBeGreaterThan(-1)
+    // caddy up must come AFTER the login curl
+    expect(caddyUpIdx).toBeGreaterThan(loginCurlIdx)
+  })
+
+  it('db and umami start before caddy (internal-only phase)', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login already rotated
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    const dbUmamiUpIdx = calls.findIndex(c => {
+      const s = c.cmd.join(' ')
+      return s.includes('docker compose up') && s.includes('db') && s.includes('umami') && !s.includes('caddy')
+    })
+    const caddyUpIdx = calls.findIndex(c => {
+      const s = c.cmd.join(' ')
+      return s.includes('docker compose up') && s.includes('caddy')
+    })
+
+    expect(dbUmamiUpIdx).toBeGreaterThan(-1)
+    expect(caddyUpIdx).toBeGreaterThan(-1)
+    expect(dbUmamiUpIdx).toBeLessThan(caddyUpIdx)
+  })
+})
+
+// ─── G3: fingerprint guard must not bypass on read error ─────────────────────
+
+describe('fingerprint guard does not bypass on SSH/read error', () => {
+  it('proceeds on first deploy when sentinel is absent (file-not-found exit)', async () => {
+    // cat returns exit 1 with "No such file" — treated as first deploy
+    // Call order: mkdir(0), cat-absent(1), write-env(2), scp-compose(3),
+    //   scp-Caddyfile(4), compose-pull(5), compose-up-db-umami(6),
+    //   rotation-login-exit22(7), compose-up-caddy(8), write-sentinel(9)
+    const responses = [
+      makeSpawnResult(), // 0: mkdir
+      makeSpawnResult('cat: /opt/umami/.db-password-fingerprint: No such file or directory', '', 1), // 1: cat absent
+      makeSpawnResult(), // 2: write .env
+      makeSpawnResult(), // 3: scp compose
+      makeSpawnResult(), // 4: scp Caddyfile
+      makeSpawnResult(), // 5: compose pull
+      makeSpawnResult(), // 6: compose up db umami
+      makeSpawnResult('{"message":"Incorrect username or password"}', '', 22), // 7: rotation login (already rotated)
+      makeSpawnResult(), // 8: compose up caddy
+      makeSpawnResult(), // 9: write sentinel
+    ]
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('aborts with a distinct message when SSH transport fails reading sentinel (non-missing error)', async () => {
+    // exit 255 = SSH connection failure (not file-not-found)
+    const responses = [
+      makeSpawnResult(), // mkdir
+      makeSpawnResult('ssh: connect to host metrics.fro.bot port 22: Connection refused', '', 255), // ssh failure
+    ]
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/fingerprint|sentinel|read|ssh/i)
+  })
+
+  it('proceeds when sentinel is present and fingerprint matches', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint, '', 0)
+    // idx 7: login already rotated
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('aborts when sentinel is present and fingerprint mismatches', async () => {
+    const wrongFingerprint = computeDbPasswordFingerprint('completely-different-password')
+    const responses = [
+      makeSpawnResult(), // mkdir
+      makeSpawnResult(wrongFingerprint, '', 0), // cat sentinel (mismatch)
+    ]
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/fingerprint|rotation runbook|password/)
+  })
+})
+
+// ─── G4: URL-encode DB password in DATABASE_URL ───────────────────────────────
+
+describe('DATABASE_URL percent-encodes URL-reserved characters in the password', () => {
+  it('encodes @ : / # % in the DATABASE_URL userinfo but keeps POSTGRES_PASSWORD raw', () => {
+    const specialPassword = 'p@ss:w/o#r%d'
+    const contents = buildEnvFileContents({
+      appSecret: 'secret',
+      dbPassword: specialPassword,
+      domain: 'metrics.fro.bot',
+    })
+
+    // POSTGRES_PASSWORD must be the raw value
+    expect(contents).toContain(`POSTGRES_PASSWORD=${specialPassword}\n`)
+
+    // DATABASE_URL must percent-encode the reserved chars
+    const urlLine = contents.split('\n').find(l => l.startsWith('DATABASE_URL=')) ?? ''
+    expect(urlLine).toBeTruthy()
+    // Extract the userinfo portion (between :// and @db)
+    const match = urlLine.match(/DATABASE_URL=postgresql:\/\/umami:(.+)@db:5432\/umami/)
+    expect(match).toBeDefined()
+    const encodedPassword = match?.[1] ?? ''
+    expect(encodedPassword).toBeTruthy()
+
+    // Must not contain raw reserved chars
+    expect(encodedPassword).not.toContain('@')
+    expect(encodedPassword).not.toContain(':')
+    expect(encodedPassword).not.toContain('/')
+    expect(encodedPassword).not.toContain('#')
+    // % is only allowed as part of percent-encoding sequences
+    expect(encodedPassword).toMatch(/^[\w\-.~!$&'()*+,;=%]+$/)
+    // Must decode back to the original password
+    expect(decodeURIComponent(encodedPassword)).toBe(specialPassword)
+  })
+
+  it('leaves a plain alphanumeric password unchanged in DATABASE_URL', () => {
+    const plainPassword = 'plainpassword123'
+    const contents = buildEnvFileContents({
+      appSecret: 'secret',
+      dbPassword: plainPassword,
+      domain: 'metrics.fro.bot',
+    })
+    expect(contents).toContain(`DATABASE_URL=postgresql://umami:${plainPassword}@db:5432/umami\n`)
+  })
+})
+
+// ─── G5: bearer token never in argv ──────────────────────────────────────────
+
+describe('bearer token never appears in any spawned argv', () => {
+  it('does not place the JWT bearer token in any argv during rotation', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    const fakeToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.UNIQUE-TOKEN-VALUE'
+    // idx 7: login succeeds with token
+    responses[7] = makeSpawnResult(JSON.stringify({token: fakeToken}), '', 0)
+    // idx 8: write curl config file (token via stdin)
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update curl succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify: new password login succeeds
+    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    // idx 11: verify: default umami login fails
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    for (const call of calls) {
+      expect(call.cmd.join(' ')).not.toContain(fakeToken)
+      expect(call.cmd.join(' ')).not.toContain('UNIQUE-TOKEN-VALUE')
+    }
+  })
+
+  it('passes the bearer token via stdin (curl config file), not argv', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    const fakeToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.UNIQUE-TOKEN-VALUE'
+    // idx 7: login succeeds with token
+    responses[7] = makeSpawnResult(JSON.stringify({token: fakeToken}), '', 0)
+    // idx 8: write curl config file
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update curl succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify: new password login succeeds
+    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    // idx 11: verify: default umami login fails
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    // The token must appear in stdin of some call (the curl config write)
+    const tokenInStdin = calls.some(c => c.stdinData.includes(fakeToken))
+    expect(tokenInStdin).toBe(true)
   })
 })

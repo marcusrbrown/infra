@@ -162,12 +162,17 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
 /**
  * Builds the contents of the remote .env file.
  * Secrets travel via SSH stdin — this function only assembles the string.
+ *
+ * G4: The DB password is percent-encoded in DATABASE_URL (URL-reserved chars
+ * like @ : / # % would corrupt the connection string if left raw).
+ * POSTGRES_PASSWORD stays raw — Postgres reads it literally from env.
  */
 export function buildEnvFileContents(opts: {appSecret: string; dbPassword: string; domain: string}): string {
+  const encodedDbPassword = encodeURIComponent(opts.dbPassword)
   return (
     `APP_SECRET=${opts.appSecret}\n` +
     `POSTGRES_PASSWORD=${opts.dbPassword}\n` +
-    `DATABASE_URL=postgresql://umami:${opts.dbPassword}@db:5432/umami\n` +
+    `DATABASE_URL=postgresql://umami:${encodedDbPassword}@db:5432/umami\n` +
     `UMAMI_DOMAIN=${opts.domain}\n`
   )
 }
@@ -322,7 +327,13 @@ async function writeRemoteFile(
 
 /**
  * Reads the remote DB-password fingerprint sentinel.
- * Returns empty string if the sentinel does not exist.
+ *
+ * G3: Distinguishes three states:
+ *   - Sentinel absent (file-not-found, exit 1 with "No such file") → returns '' (first deploy)
+ *   - Sentinel present (exit 0) → returns its hash
+ *   - SSH/read failure (exit non-zero for a reason other than missing file) → throws
+ *
+ * Runs `cat <path>` WITHOUT `|| echo ''` so the exit code is meaningful.
  */
 async function readRemoteFingerprint(
   host: string,
@@ -331,21 +342,53 @@ async function readRemoteFingerprint(
   keyPath?: string,
   controlPath?: string,
 ): Promise<string> {
-  const proc = spawnFn(
-    sshCommand(host, `cat '${REMOTE_FINGERPRINT_PATH}' 2>/dev/null || echo ''`, keyPath, controlPath),
-    {env: deployEnv, stdout: 'pipe', stderr: 'pipe'},
-  )
+  const proc = spawnFn(sshCommand(host, `cat '${REMOTE_FINGERPRINT_PATH}'`, keyPath, controlPath), {
+    env: deployEnv,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
   const stdout = await new Response(proc.stdout).text()
-  await proc.exited
-  return stdout.trim()
+  const stderr = await new Response(proc.stderr).text()
+  const exitCode = await proc.exited
+
+  if (exitCode === 0) {
+    return stdout.trim()
+  }
+
+  // Distinguish file-not-found (first deploy) from SSH/permission failures.
+  // "No such file" covers both Linux and macOS cat error messages.
+  const combinedOutput = (stdout + stderr).toLowerCase()
+  if (combinedOutput.includes('no such file')) {
+    // Sentinel absent — legitimate first deploy
+    return ''
+  }
+
+  // Any other non-zero exit is a transport or permission failure — fail closed.
+  throw new Error(
+    `Failed to read fingerprint sentinel from remote (exit ${exitCode}). ` +
+      'This may indicate an SSH transport failure or permission error. ' +
+      'Resolve the SSH connectivity issue before deploying.',
+  )
 }
 
 /**
  * Attempts to rotate the Umami admin password from the default 'umami' to
- * UMAMI_ADMIN_PASSWORD. Idempotent: if the default login fails, the password
- * is assumed to already be rotated and the step is skipped.
+ * UMAMI_ADMIN_PASSWORD. Idempotent: if the default login is cleanly rejected
+ * (HTTP 401/403 → curl exit 22), the password is already rotated — skip.
  *
- * All secret bytes travel via SSH stdin (curl --data @-), never argv.
+ * G1 — fails CLOSED:
+ *   - Connection/transport failure (curl exit 7, or docker exec failure) → THROW.
+ *     We cannot determine cred state; deploy must fail.
+ *   - HTTP auth rejection (curl exit 22 with auth body) → skip (already rotated).
+ *   - Login succeeds (exit 0 + token) → proceed to update + verify.
+ *
+ * G2 — called BEFORE Caddy starts (no public default-credential window).
+ *
+ * G5 — bearer token travels via stdin (curl config file), never argv.
+ *
+ * Exec reachability: curls run inside the umami container via
+ * `docker compose exec -T umami curl ...` so port 3000 is reachable on the
+ * internal compose network. The -T flag disables TTY so stdin piping works.
  */
 async function rotateAdminPassword(
   host: string,
@@ -357,17 +400,16 @@ async function rotateAdminPassword(
 ): Promise<void> {
   console.warn('\u001B[1;34m==>\u001B[0m Attempting admin password rotation (idempotent)')
 
-  // Step 1: Try default login. Body travels via stdin.
+  // Step 1: Try default login with --fail-with-body so HTTP >=400 → non-zero exit.
+  // Body travels via stdin; curl runs inside the umami container.
   const loginBody = JSON.stringify({username: 'admin', password: 'umami'})
-  const loginProc = spawnFn(
-    sshCommand(
-      host,
-      `curl -s -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
-      keyPath,
-      controlPath,
-    ),
-    {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'},
+  const loginCmd = sshCommand(
+    host,
+    `cd ${REMOTE_DIR} && docker compose exec -T umami curl -s --fail-with-body -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
+    keyPath,
+    controlPath,
   )
+  const loginProc = spawnFn(loginCmd, {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'})
 
   if (!loginProc.stdin) {
     throw new Error('Spawn did not provide stdin pipe for admin login')
@@ -377,33 +419,82 @@ async function rotateAdminPassword(
   loginProc.stdin.end()
 
   const loginStdout = await new Response(loginProc.stdout).text()
-  await loginProc.exited
+  const loginExit = await loginProc.exited
 
+  // Exit 22 = HTTP error (--fail-with-body) → clean auth rejection → already rotated.
+  // Exit 0 = HTTP 200 → check for token.
+  // Any other non-zero (7 = connection refused, 255 = ssh failure, etc.) → throw.
+  if (loginExit !== 0 && loginExit !== 22) {
+    throw new Error(
+      `Cannot reach umami to verify/rotate admin credentials (exit ${loginExit}). ` +
+        'Ensure the umami container is healthy before deploying.',
+    )
+  }
+
+  if (loginExit === 22) {
+    // Clean HTTP auth rejection — password already rotated.
+    console.warn('\u001B[1;33m[info]\u001B[0m Default admin login rejected — password already rotated, skipping.')
+    return
+  }
+
+  // Exit 0 — parse token from response.
   let token: string | null = null
   try {
     const parsed = JSON.parse(loginStdout) as {token?: string | null}
     token = parsed.token ?? null
   } catch {
-    // Non-JSON response — treat as failed login
     token = null
   }
 
   if (!token) {
-    console.warn('\u001B[1;33m[info]\u001B[0m Default admin login failed — password already rotated, skipping.')
+    // Exit 0 but no token — treat as already rotated (unexpected but safe to skip).
+    console.warn(
+      '\u001B[1;33m[info]\u001B[0m Default admin login returned no token — password already rotated, skipping.',
+    )
     return
   }
 
-  // Step 2: Update password. New password travels via stdin.
-  const updateBody = JSON.stringify({password: adminPassword})
-  const updateProc = spawnFn(
-    sshCommand(
-      host,
-      `curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${token}' --data @- http://localhost:3000${UMAMI_PASSWORD_PATH}`,
-      keyPath,
-      controlPath,
-    ),
-    {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'},
+  // Step 2: Write a curl config file inside the container via stdin so the
+  // bearer token never appears in argv (G5). The config file is written to
+  // /tmp/uc inside the umami container, used for the update curl, then removed.
+  const curlConfigContent = `header = "Authorization: Bearer ${token}"\n`
+  const writeCurlConfigCmd = sshCommand(
+    host,
+    `cd ${REMOTE_DIR} && docker compose exec -T umami sh -c 'umask 077; cat > /tmp/uc'`,
+    keyPath,
+    controlPath,
   )
+  const writeCurlConfigProc = spawnFn(writeCurlConfigCmd, {
+    env: deployEnv,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    stdin: 'pipe',
+  })
+
+  if (!writeCurlConfigProc.stdin) {
+    throw new Error('Spawn did not provide stdin pipe for curl config write')
+  }
+
+  writeCurlConfigProc.stdin.write(new TextEncoder().encode(curlConfigContent))
+  writeCurlConfigProc.stdin.end()
+
+  await new Response(writeCurlConfigProc.stdout).text()
+  const writeCurlConfigExit = await writeCurlConfigProc.exited
+
+  if (writeCurlConfigExit !== 0) {
+    throw new Error('Failed to write curl config file inside umami container for password update')
+  }
+
+  // Step 3: Update password. New password travels via stdin; token via curl config file.
+  // Cleanup of /tmp/uc happens in the same sh -c regardless of curl exit code.
+  const updateBody = JSON.stringify({password: adminPassword})
+  const updateCmd = sshCommand(
+    host,
+    `cd ${REMOTE_DIR} && docker compose exec -T umami sh -c 'curl -s --fail-with-body -X POST -H '"'"'Content-Type: application/json'"'"' -K /tmp/uc --data @- http://localhost:3000${UMAMI_PASSWORD_PATH}; rc=$?; rm -f /tmp/uc; exit $rc'`,
+    keyPath,
+    controlPath,
+  )
+  const updateProc = spawnFn(updateCmd, {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'})
 
   if (!updateProc.stdin) {
     throw new Error('Spawn did not provide stdin pipe for password update')
@@ -415,11 +506,80 @@ async function rotateAdminPassword(
   await new Response(updateProc.stdout).text()
   const updateExit = await updateProc.exited
 
-  if (updateExit === 0) {
-    console.warn('\u001B[1;32m✓\u001B[0m Admin password rotated successfully.')
-  } else {
-    console.warn('\u001B[1;33m[warn]\u001B[0m Admin password update returned non-zero exit — verify manually.')
+  if (updateExit !== 0) {
+    throw new Error(`Admin password update failed (exit ${updateExit}). Deploy aborted.`)
   }
+
+  // Step 4: Verify — re-login with the NEW password must succeed.
+  const verifyNewBody = JSON.stringify({username: 'admin', password: adminPassword})
+  const verifyNewCmd = sshCommand(
+    host,
+    `cd ${REMOTE_DIR} && docker compose exec -T umami curl -s --fail-with-body -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
+    keyPath,
+    controlPath,
+  )
+  const verifyNewProc = spawnFn(verifyNewCmd, {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'})
+
+  if (!verifyNewProc.stdin) {
+    throw new Error('Spawn did not provide stdin pipe for rotation verification (new password)')
+  }
+
+  verifyNewProc.stdin.write(new TextEncoder().encode(verifyNewBody))
+  verifyNewProc.stdin.end()
+
+  const verifyNewStdout = await new Response(verifyNewProc.stdout).text()
+  const verifyNewExit = await verifyNewProc.exited
+
+  if (verifyNewExit !== 0) {
+    throw new Error(
+      'Admin password rotation verification failed: new password login was rejected. ' +
+        'The password may not have been updated correctly. Investigate manually.',
+    )
+  }
+
+  let verifyNewToken: string | null = null
+  try {
+    const parsed = JSON.parse(verifyNewStdout) as {token?: string | null}
+    verifyNewToken = parsed.token ?? null
+  } catch {
+    verifyNewToken = null
+  }
+
+  if (!verifyNewToken) {
+    throw new Error(
+      'Admin password rotation verification failed: new password login returned no token. ' + 'Investigate manually.',
+    )
+  }
+
+  // Step 5: Verify — re-login with the DEFAULT password must now FAIL (exit 22).
+  const verifyDefaultBody = JSON.stringify({username: 'admin', password: 'umami'})
+  const verifyDefaultCmd = sshCommand(
+    host,
+    `cd ${REMOTE_DIR} && docker compose exec -T umami curl -s --fail-with-body -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
+    keyPath,
+    controlPath,
+  )
+  const verifyDefaultProc = spawnFn(verifyDefaultCmd, {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'})
+
+  if (!verifyDefaultProc.stdin) {
+    throw new Error('Spawn did not provide stdin pipe for rotation verification (default password)')
+  }
+
+  verifyDefaultProc.stdin.write(new TextEncoder().encode(verifyDefaultBody))
+  verifyDefaultProc.stdin.end()
+
+  await new Response(verifyDefaultProc.stdout).text()
+  const verifyDefaultExit = await verifyDefaultProc.exited
+
+  if (verifyDefaultExit === 0) {
+    // Default password still works — rotation did not stick.
+    throw new Error(
+      'Admin password rotation verification failed: default password still accepted after rotation. ' +
+        'The password update may not have persisted. Investigate manually.',
+    )
+  }
+
+  console.warn('\u001B[1;32m✓\u001B[0m Admin password rotated and verified successfully.')
 }
 
 /**
@@ -442,13 +602,15 @@ async function defaultResolve(host: string): Promise<void> {
  * 2. DNS preflight
  * 3. ControlMaster SSH multiplexing setup
  * 4. Remote prep: mkdir -p /opt/umami/config
- * 5. DB-password fingerprint guard
+ * 5. DB-password fingerprint guard (G3: fails on SSH error, not just mismatch)
  * 6. Materialize /opt/umami/.env via SSH stdin
  * 7. scp docker-compose.yaml + Caddyfile
- * 8. docker compose pull && up -d --wait
- * 9. Write fingerprint sentinel (hash only, never password)
- * 10. Public HTTPS probe (warning-only on failure)
- * 11. Admin password rotation (idempotent)
+ * 8. docker compose pull (all images)
+ * 9. docker compose up -d --wait db umami (internal only — Caddy NOT started yet)
+ * 10. Admin password rotation (G1: fail-closed; G2: before Caddy; G5: token via stdin)
+ * 11. docker compose up -d --wait caddy (now expose publicly)
+ * 12. Write DB-password fingerprint sentinel (hash only, never password)
+ * 13. Public HTTPS probe (warning-only on failure — Caddy ACME cert may still be issuing)
  */
 export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
@@ -511,7 +673,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 4: DB-password fingerprint guard
+    // Phase 4: DB-password fingerprint guard (G3: SSH errors throw, not bypass)
     const currentFingerprint = computeDbPasswordFingerprint(dbPassword)
     const existingFingerprint = await readRemoteFingerprint(host, deployEnv, spawnFn, keyPath, controlPath)
 
@@ -554,7 +716,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 7: docker compose pull && up -d --wait
+    // Phase 7: docker compose pull (all images)
     await runCommand(
       'Pulling Docker images',
       sshCommand(host, `cd ${REMOTE_DIR} && docker compose pull`, keyPath, controlPath),
@@ -562,14 +724,40 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
+    // Phase 8: Start db + umami only (Caddy NOT started — no public exposure yet).
+    // G2: Caddy is withheld until after admin rotation so there is no window
+    // where the default admin credentials are reachable from the public internet.
     await runCommand(
-      'Starting Docker Compose stack',
-      sshCommand(host, `cd ${REMOTE_DIR} && docker compose up -d --wait --wait-timeout 180`, keyPath, controlPath),
+      'Starting db and umami (internal only)',
+      sshCommand(
+        host,
+        `cd ${REMOTE_DIR} && docker compose up -d --wait --wait-timeout 180 db umami`,
+        keyPath,
+        controlPath,
+      ),
       deployEnv,
       spawnFn,
     )
 
-    // Phase 8: Write fingerprint sentinel AFTER healthy compose up
+    // Phase 9: Admin password rotation (G1: fail-closed; G2: before Caddy; G5: token via stdin)
+    // Rotation curls run inside the umami container via `docker compose exec -T umami`
+    // so port 3000 is reachable on the internal compose network.
+    await rotateAdminPassword(host, adminPassword, deployEnv, spawnFn, keyPath, controlPath)
+
+    // Phase 10: Start Caddy — now safe to expose publicly (rotation complete).
+    await runCommand(
+      'Starting Caddy (public exposure)',
+      sshCommand(
+        host,
+        `cd ${REMOTE_DIR} && docker compose up -d --wait --wait-timeout 180 caddy`,
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+
+    // Phase 11: Write fingerprint sentinel AFTER db+umami healthy
     await writeRemoteFile(
       'Writing DB password fingerprint sentinel',
       host,
@@ -581,7 +769,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       controlPath,
     )
 
-    // Phase 9: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
+    // Phase 12: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
     let probeOk = false
     for (let attempt = 1; attempt <= probeAttempts; attempt++) {
       try {
@@ -612,9 +800,6 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
           `verify at https://${host}/api/heartbeat`,
       )
     }
-
-    // Phase 10: Admin password rotation (idempotent)
-    await rotateAdminPassword(host, adminPassword, deployEnv, spawnFn, keyPath, controlPath)
 
     console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
   } finally {

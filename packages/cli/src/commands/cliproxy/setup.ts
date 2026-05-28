@@ -90,6 +90,8 @@ export interface RunSetupDeps {
     intro: typeof intro
     note: typeof note
     outro: typeof outro
+    promptForProviders?: typeof promptForProviders
+    promptForModel?: typeof promptForModel
   }
   smoke?: {
     runSmokeTest: typeof runSmokeTest
@@ -219,7 +221,7 @@ function extractErrorMessage(error: unknown): string {
 
 // Redact a bearer token for display in interactive prompts — never show raw key values.
 // Exported for direct unit testing of the redaction contract. The redacted form is
-// what gets shown in the interactive R8 prompt; the raw key must never reach the prompt UI.
+// what gets shown in the interactive key-reuse prompt; the raw key must never reach the prompt UI.
 export function redactKey(key: string): string {
   if (key.length < 12) return 'sk-***'
   return `${key.slice(0, 3)}***${key.slice(-4)}`
@@ -280,8 +282,10 @@ async function buildInteractivePlan(
   let model: string | undefined
 
   if (harness === 'opencode') {
-    providers = await promptForProviders()
-    model = await promptForModel(providers)
+    const doPromptForProviders = promptsImpl.promptForProviders ?? promptForProviders
+    const doPromptForModel = promptsImpl.promptForModel ?? promptForModel
+    providers = await doPromptForProviders()
+    model = await doPromptForModel(providers)
   }
 
   const keyValue = options.key ?? buildApiKeyValue(keyName ?? 'cliproxy')
@@ -379,6 +383,8 @@ const realPrompts: Required<RunSetupDeps>['prompts'] = {
   intro,
   note,
   outro,
+  promptForProviders,
+  promptForModel,
 }
 
 const realSmoke: Required<RunSetupDeps>['smoke'] = {

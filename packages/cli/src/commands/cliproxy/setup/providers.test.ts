@@ -1,8 +1,22 @@
 /// <reference types="bun" />
 
+import type {MultiSelectOptions, TextOptions} from '@clack/prompts'
 import {describe, expect, it, spyOn} from 'bun:test'
 
 import {parseProviders, promptForModel, promptForProviders} from './providers'
+
+// Type helper: cast a concrete-typed clack implementation to the generic spy type.
+// clack's multiselect/text/select are generic functions; Bun's spyOn preserves the
+// generic signature, so mockImplementation requires the same generic. We provide a
+// concrete instantiation and widen through `unknown` — this is safe because the
+// concrete type is a structural subtype of the generic at the call site.
+function asMultiselectImpl<V>(fn: (opts: MultiSelectOptions<V>) => Promise<V[] | symbol>) {
+  return fn as unknown as <Value>(opts: MultiSelectOptions<Value>) => Promise<Value[] | symbol>
+}
+
+function asTextImpl(fn: (opts: TextOptions) => Promise<string | symbol>) {
+  return fn as unknown as (opts: TextOptions) => Promise<string | symbol>
+}
 
 describe('option parsing', () => {
   describe('parseProviders', () => {
@@ -40,7 +54,6 @@ describe('option parsing', () => {
   })
 })
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- spyOn mock return values require `any` casts */
 describe('interactive provider/model prompts', () => {
   // We spy on @clack/prompts functions directly since Bun's mock.module
   // requires static hoisting. Instead we use spyOn on the imported module.
@@ -60,7 +73,8 @@ describe('interactive provider/model prompts', () => {
   describe('promptForProviders', () => {
     it('happy path: anthropic-only selection returns [anthropic]', async () => {
       const clack = await import('@clack/prompts')
-      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(['anthropic'] as any)
+      // multiselect<Value> returns Promise<Value[] | symbol>; resolved value is string[] | symbol
+      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(['anthropic'])
 
       const result = await promptForProviders()
 
@@ -72,7 +86,7 @@ describe('interactive provider/model prompts', () => {
 
     it('happy path: both providers selected returns [anthropic, openai]', async () => {
       const clack = await import('@clack/prompts')
-      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(['anthropic', 'openai'] as any)
+      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(['anthropic', 'openai'])
 
       const result = await promptForProviders()
 
@@ -84,11 +98,13 @@ describe('interactive provider/model prompts', () => {
     it('edge case: empty selection re-prompts; multiselect called exactly twice', async () => {
       const clack = await import('@clack/prompts')
       let callCount = 0
-      const multiselectSpy = spyOn(clack, 'multiselect').mockImplementation(async () => {
-        callCount++
-        if (callCount === 1) return [] as any
-        return ['anthropic'] as any
-      })
+      const multiselectSpy = spyOn(clack, 'multiselect').mockImplementation(
+        asMultiselectImpl<string>(async () => {
+          callCount++
+          if (callCount === 1) return []
+          return ['anthropic']
+        }),
+      )
 
       const result = await promptForProviders()
 
@@ -101,12 +117,12 @@ describe('interactive provider/model prompts', () => {
     it('edge case: cancel mid-flow causes process.exit(0)', async () => {
       const clack = await import('@clack/prompts')
       const cancelSymbol = Symbol('cancel')
-      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(cancelSymbol as any)
+      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(cancelSymbol)
       const isCancelSpy = spyOn(clack, 'isCancel').mockImplementation(v => v === cancelSymbol)
       const cancelSpy = spyOn(clack, 'cancel').mockImplementation(() => {})
-      const exitSpy = spyOn(process, 'exit').mockImplementation((() => {
+      const exitSpy = spyOn(process, 'exit').mockImplementation((_code?: number): never => {
         throw new Error('process.exit called')
-      }) as any)
+      })
 
       await expect(promptForProviders()).rejects.toThrow('process.exit called')
 
@@ -144,7 +160,7 @@ describe('interactive provider/model prompts', () => {
 
     it('happy path: both providers, operator picks openai/gpt-5.4-mini from select', async () => {
       const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue('openai/gpt-5.4-mini' as any)
+      const selectSpy = spyOn(clack, 'select').mockResolvedValue('openai/gpt-5.4-mini')
 
       const result = await promptForModel(['anthropic', 'openai'])
 
@@ -156,7 +172,7 @@ describe('interactive provider/model prompts', () => {
 
     it('happy path: both providers, operator picks anthropic/claude-sonnet-4-6 from select', async () => {
       const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue('anthropic/claude-sonnet-4-6' as any)
+      const selectSpy = spyOn(clack, 'select').mockResolvedValue('anthropic/claude-sonnet-4-6')
 
       const result = await promptForModel(['anthropic', 'openai'])
 
@@ -167,8 +183,8 @@ describe('interactive provider/model prompts', () => {
 
     it('happy path: operator picks "enter custom..." then types openai/gpt-5.4-mini', async () => {
       const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue('__custom__' as any)
-      const textSpy = spyOn(clack, 'text').mockResolvedValue('openai/gpt-5.4-mini' as any)
+      const selectSpy = spyOn(clack, 'select').mockResolvedValue('__custom__')
+      const textSpy = spyOn(clack, 'text').mockResolvedValue('openai/gpt-5.4-mini')
 
       const result = await promptForModel(['anthropic', 'openai'])
 
@@ -181,21 +197,23 @@ describe('interactive provider/model prompts', () => {
 
     it('edge case: custom model entry fails regex then succeeds on second attempt', async () => {
       const clack = await import('@clack/prompts')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue('__custom__' as any)
+      const selectSpy = spyOn(clack, 'select').mockResolvedValue('__custom__')
       let textCallCount = 0
-      const textSpy = spyOn(clack, 'text').mockImplementation(async (_opts: any) => {
-        textCallCount++
-        // Simulate the validate function being called inline by the mock
-        // The real clack text prompt calls validate internally; here we just
-        // return the value and let the helper's validate logic re-prompt.
-        // Since we can't simulate clack's internal validate loop, we test
-        // that the helper's validate function rejects bad input.
-        if (textCallCount === 1) {
-          // Return a bad value — the helper should detect this and re-prompt
-          return 'bad-model' as any
-        }
-        return 'openai/gpt-5.4-mini' as any
-      })
+      const textSpy = spyOn(clack, 'text').mockImplementation(
+        asTextImpl(async () => {
+          textCallCount++
+          // Simulate the validate function being called inline by the mock
+          // The real clack text prompt calls validate internally; here we just
+          // return the value and let the helper's validate logic re-prompt.
+          // Since we can't simulate clack's internal validate loop, we test
+          // that the helper's validate function rejects bad input.
+          if (textCallCount === 1) {
+            // Return a bad value — the helper should detect this and re-prompt
+            return 'bad-model'
+          }
+          return 'openai/gpt-5.4-mini'
+        }),
+      )
 
       const result = await promptForModel(['anthropic', 'openai'])
 
@@ -209,12 +227,12 @@ describe('interactive provider/model prompts', () => {
     it('edge case: cancel during model select causes process.exit(0)', async () => {
       const clack = await import('@clack/prompts')
       const cancelSymbol = Symbol('cancel')
-      const selectSpy = spyOn(clack, 'select').mockResolvedValue(cancelSymbol as any)
+      const selectSpy = spyOn(clack, 'select').mockResolvedValue(cancelSymbol)
       const isCancelSpy = spyOn(clack, 'isCancel').mockImplementation(v => v === cancelSymbol)
       const cancelSpy = spyOn(clack, 'cancel').mockImplementation(() => {})
-      const exitSpy = spyOn(process, 'exit').mockImplementation((() => {
+      const exitSpy = spyOn(process, 'exit').mockImplementation((_code?: number): never => {
         throw new Error('process.exit called')
-      }) as any)
+      })
 
       await expect(promptForModel(['anthropic', 'openai'])).rejects.toThrow('process.exit called')
 
@@ -225,4 +243,3 @@ describe('interactive provider/model prompts', () => {
     })
   })
 })
-/* eslint-enable @typescript-eslint/no-explicit-any */

@@ -1,10 +1,10 @@
 /// <reference types="bun" />
 
 import type {SpinnerResult} from '@clack/prompts'
+import type {ProviderId} from './setup/providers'
 import {log} from '@clack/prompts'
 import {afterEach, beforeEach, describe, expect, it, mock, spyOn} from 'bun:test'
 import {goke} from 'goke'
-
 import {
   buildNonInteractivePlan,
   redactKey,
@@ -396,9 +396,9 @@ describe('destructive overwrite UX', () => {
 })
 
 // ── Smoke test runner tests moved to setup/smoke-test.test.ts ─────────────────
-// ── P1 regression tests ───────────────────────────────────────────────────────
+// ── regression tests ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-describe('P1 #1 regression — dry-run early return before mutations', () => {
+describe('dry-run early return before mutations', () => {
   const BASE_URL = 'https://cliproxy.fro.bot'
   const KEY = 'sk-test-key'
 
@@ -445,7 +445,7 @@ describe('P1 #1 regression — dry-run early return before mutations', () => {
   })
 })
 
-describe('P1 #2 regression — --force honored by non-interactive collision gate', () => {
+describe('--force honored by non-interactive collision gate', () => {
   // The collision gate lives in runSetupCommand (not exported), so we test the
   // surrounding logic: buildNonInteractivePlan succeeds with --force, and the
   // collision gate behavior is verified via the error message shape.
@@ -517,7 +517,7 @@ describe('P1 #2 regression — --force honored by non-interactive collision gate
   })
 })
 
-describe('safe_auto #2 regression — /v1/models body Bearer token redaction', () => {
+describe('/v1/models body Bearer token redaction', () => {
   const BASE_URL = 'https://cliproxy.fro.bot'
   const KEY = 'sk-test-key'
 
@@ -578,8 +578,6 @@ describe('safe_auto #2 regression — /v1/models body Bearer token redaction', (
   })
 })
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- spyOn mock return values require `any` casts */
-
 // Fix 3 — dry-run isolation regression tests
 //
 // The action handler in registerCliproxySetup is not exported, so we test the
@@ -608,9 +606,9 @@ describe('cliproxy setup --dry-run is offline-safe (action handler contract)', (
 
   it('dry-run skips gh auth check — Bun.spawn not called during buildNonInteractivePlan', async () => {
     // Spy Bun.spawn to fail hard if called (simulates unauthenticated environment)
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((_cmds: string[]) => {
       throw new Error('gh auth status called during dry-run — should be skipped')
-    })
+    }) as unknown as typeof Bun.spawn)
 
     // Should complete without throwing (dry-run early return in buildNonInteractivePlan)
     const plan = await buildNonInteractivePlan({repo: 'owner/repo', harness: 'opencode', dryRun: true}, BASE_URL)
@@ -679,7 +677,6 @@ describe('cliproxy setup --dry-run is offline-safe (action handler contract)', (
     expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
   })
 })
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 // ── runSetupCommand DI boundary tests ─────────────────────────────────
 
@@ -1374,14 +1371,7 @@ describe('runSetupCommand action handler', () => {
     ).resolves.toBeUndefined()
   })
 
-  // ── Interactive R8 ack-key-reuse prompt: redaction + cancel/continue ──────────
-  //
-  // Note: full interactive integration tests are limited by the F16 (issue #311) gap —
-  // buildInteractivePlan calls real @clack/prompts.text() for the key-name and harness
-  // prompts that DI doesn't cover yet. We test the redaction contract directly via
-  // the exported redactKey helper, then a unit test confirms the prompt template uses
-  // the redacted form. Interactive cancel/continue paths are exercised under F16 once
-  // RunSetupDeps covers all prompt sites.
+  // ── Interactive key-reuse confirm prompt: redaction + cancel/continue ──────────
 
   it('redactKey: keys >= 12 chars use first-3 + *** + last-4 shape', () => {
     expect(redactKey('sk-PLAINTEXT-LONGKEY')).toBe('sk-***GKEY')
@@ -1401,8 +1391,8 @@ describe('runSetupCommand action handler', () => {
     expect(redacted.length).toBeLessThan(RAW.length)
   })
 
-  it('Interactive R8 prompt template uses redactKey output, never the raw key (source-level contract)', async () => {
-    // Read the setup.ts source and assert the R8 prompt-message template uses ${redactKey(options.key)}
+  it('interactive key-reuse prompt template uses redactKey output, never the raw key (source-level contract)', async () => {
+    // Read the setup.ts source and assert the key-reuse prompt-message template uses ${redactKey(options.key)}
     // and never `${options.key}` raw. This is a source-level guard so a future refactor that
     // accidentally drops the redaction call fails the test even if integration coverage lags.
     const source = await Bun.file(new URL('./setup.ts', import.meta.url).pathname).text()
@@ -1413,25 +1403,21 @@ describe('runSetupCommand action handler', () => {
     expect(promptContext).not.toMatch(/--key \$\{options\.key\}/)
   })
 
-  // The two interactive R8 integration tests below are skipped pending F16 (issue #311):
-  // RunSetupDeps must cover the buildInteractivePlan prompt sites before the interactive
-  // path can be exercised end-to-end with deps mocks alone.
-
-  it.skip('Interactive R8: confirm prompt fires with redacted key (not raw token)', async () => {
+  it('interactive key-reuse confirm shows a redacted key, never the raw token', async () => {
     const {ctx} = makeCtx()
     const PLAINTEXT_KEY = 'sk-PLAINTEXT-LONGKEY-SHOULD-NOT-LEAK'
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
     globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
 
-    let confirmMessage = ''
+    const confirmMessages: string[] = []
     const captureConfirm = (opts: {message: string}): Promise<boolean | symbol> => {
-      confirmMessage = opts.message
+      confirmMessages.push(opts.message)
       return Promise.resolve(true)
     }
 
     // Interactive mode resolves promptValue to the awaited prompt result. Our captureConfirm
-    // returns true, so the wizard proceeds past the R8 gate. We assert on the captured message.
+    // returns true, so the wizard proceeds past the key-reuse gate. We assert on the captured message.
     const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
       const result = await prompt
       return result as T
@@ -1467,6 +1453,8 @@ describe('runSetupCommand action handler', () => {
             intro: () => {},
             note: () => {},
             outro: () => {},
+            promptForProviders: (): Promise<ProviderId[]> => Promise.resolve(['openai']),
+            promptForModel: (_providers: ProviderId[]): Promise<string> => Promise.resolve('openai/gpt-5.4-mini'),
           },
           smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
           validation: {
@@ -1480,18 +1468,19 @@ describe('runSetupCommand action handler', () => {
       globalThis.fetch = originalFetch
     }
 
-    // The R8 confirm prompt must be the one captured (interactive flow has more than one confirm
-    // in some paths; we look for the one containing the verify-bearer language).
-    expect(confirmMessage).toContain('Verify it matches the bearer token')
+    // The key-reuse confirm prompt must appear among the captured confirms (interactive flow
+    // has more than one confirm in some paths; we find the one with the verify-bearer language).
+    const keyReuseMessage = confirmMessages.find(m => m.includes('Verify it matches the bearer token'))
+    expect(keyReuseMessage).toBeDefined()
     // The raw key must NEVER appear in the prompt text — security regression guard.
-    expect(confirmMessage).not.toContain(PLAINTEXT_KEY)
+    expect(keyReuseMessage).not.toContain(PLAINTEXT_KEY)
     // Redacted form must be present (first 3 + last 4 chars per redactKey helper).
-    expect(confirmMessage).toContain('sk-')
-    expect(confirmMessage).toContain('***')
-    expect(confirmMessage).toContain('LEAK')
+    expect(keyReuseMessage).toContain('sk-')
+    expect(keyReuseMessage).toContain('***')
+    expect(keyReuseMessage).toContain('LEAK')
   })
 
-  it.skip('Interactive R8: confirm returns false → cancelAndExit invoked, applyGhValue never called', async () => {
+  it('interactive key-reuse confirm returning false cancels before any GitHub write', async () => {
     const {ctx} = makeCtx()
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
@@ -1499,6 +1488,17 @@ describe('runSetupCommand action handler', () => {
 
     let applyGhValueCalled = false
     let exitCode: number | undefined
+
+    // The interactive flow shows a generic "Proceed?" confirm BEFORE the key-reuse
+    // gate. Approve the generic prompt so the run actually reaches the key-reuse
+    // confirm, then reject only that one — otherwise the test would cancel at the
+    // first prompt and never exercise the gate it claims to cover.
+    const confirmMessages: string[] = []
+    const messageAwareConfirm = (opts: {message: string}): Promise<boolean | symbol> => {
+      confirmMessages.push(opts.message)
+      const isKeyReusePrompt = opts.message.includes('Verify it matches the bearer token')
+      return Promise.resolve(!isKeyReusePrompt)
+    }
 
     const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
       const result = await prompt
@@ -1541,11 +1541,13 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: interactivePromptValue,
-            // User rejects the R8 confirmation → cancelAndExit fires.
-            confirm: () => Promise.resolve(false) as Promise<boolean | symbol>,
+            // Approve the generic proceed confirm, reject only the key-reuse confirm.
+            confirm: messageAwareConfirm,
             intro: () => {},
             note: () => {},
             outro: () => {},
+            promptForProviders: (): Promise<ProviderId[]> => Promise.resolve(['openai']),
+            promptForModel: (_providers: ProviderId[]): Promise<string> => Promise.resolve('openai/gpt-5.4-mini'),
           },
           smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
           validation: {
@@ -1556,7 +1558,7 @@ describe('runSetupCommand action handler', () => {
         },
       )
       // If we get here, cancelAndExit didn't fire. Fail the test.
-      throw new Error('expected cancelAndExit to fire on R8 reject')
+      throw new Error('expected cancelAndExit to fire on key-reuse reject')
     } catch (error) {
       // cancelAndExit throws because we stubbed process.exit to throw.
       expect(error instanceof Error && error.message).toBe('process.exit-stubbed')
@@ -1565,6 +1567,9 @@ describe('runSetupCommand action handler', () => {
       globalThis.fetch = originalFetch
     }
 
+    // Guard against a vacuous pass: the run must have actually reached the
+    // key-reuse confirm, not cancelled at the earlier generic proceed prompt.
+    expect(confirmMessages.some(m => m.includes('Verify it matches the bearer token'))).toBe(true)
     expect(exitCode).toBe(0)
     expect(applyGhValueCalled).toBe(false)
   })
@@ -1803,9 +1808,9 @@ describe('runSetupCommand action handler', () => {
     expect(deleteCalledWith).toBeDefined()
   })
 
-  // ── F5: --dry-run with no --repo/--harness ─────────────────────────────────
+  // ── --dry-run with no --repo/--harness ─────────────────────────────────
 
-  it('F5: --dry-run with no --repo/--harness prints preview and does not throw', async () => {
+  it('--dry-run with no --repo/--harness prints preview and does not throw', async () => {
     const {ctx, logs} = makeCtx()
     await runSetupCommand({dryRun: true}, {ctx})
     const output = logs.map(args => args.join(' ')).join('\n')
@@ -1813,7 +1818,7 @@ describe('runSetupCommand action handler', () => {
     expect(output).toContain('No mutations will be performed.')
   })
 
-  it('F5: --dry-run does not call assertGhInstalled even with no flags', async () => {
+  it('--dry-run does not call assertGhInstalled even with no flags', async () => {
     const {ctx} = makeCtx()
     let ghCalled = false
     await runSetupCommand(
@@ -1837,9 +1842,9 @@ describe('runSetupCommand action handler', () => {
     expect(ghCalled).toBe(false)
   })
 
-  // ── F8: Rollback event-order assertions ────────────────────────────────────
+  // ── Rollback event-order assertions ────────────────────────────────────
 
-  it('F8: applyGhValue fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
+  it('applyGhValue fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
     const {ctx} = makeCtx()
     const events: string[] = []
 
@@ -1888,7 +1893,7 @@ describe('runSetupCommand action handler', () => {
     expect(events).toEqual(['create', 'apply-fail', 'delete'])
   })
 
-  it('F8: assertProxyKeyWorks fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
+  it('assertProxyKeyWorks fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
     const {ctx} = makeCtx()
     const events: string[] = []
 
@@ -1939,9 +1944,9 @@ describe('runSetupCommand action handler', () => {
     expect(events).toEqual(['create', 'apply-success', 'verify-fail', 'delete'])
   })
 
-  // ── F9: --force pre-gate fires before verifyModelsAvailable ────────────────
+  // ── --force pre-gate fires before verifyModelsAvailable ────────────────
 
-  it('F9: missing --force on provider change does not call fetch (verifyModelsAvailable skipped)', async () => {
+  it('missing --force on provider change does not call fetch (verifyModelsAvailable skipped)', async () => {
     let fetchCalled = false
     const originalFetch = globalThis.fetch
     globalThis.fetch = mock(async () => {

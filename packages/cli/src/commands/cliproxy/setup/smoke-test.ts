@@ -1,18 +1,25 @@
 /// <reference types="bun" />
 
+import {z} from 'zod'
+
 export type SmokeResult =
   | {kind: 'pass'; message: string; runUrl: string}
   | {kind: 'fail'; message: string; runUrl: string}
   | {kind: 'unverified'; message: string; runUrl?: string}
 
+// Zod schemas for gh CLI JSON output — single source of truth.
+const baselineRunSchema = z.array(z.object({databaseId: z.number()}))
+
+const ghRunEntrySchema = z.object({
+  databaseId: z.number(),
+  status: z.string(),
+  conclusion: z.string().nullable(),
+  url: z.string(),
+  createdAt: z.string(),
+})
+
 // Exported for tests only.
-export interface GhRunEntry {
-  databaseId: number
-  status: string
-  conclusion: string | null
-  url: string
-  createdAt: string
-}
+export type GhRunEntry = z.infer<typeof ghRunEntrySchema>
 
 // Exported for tests only. Override poll delays and trigger time.
 export interface SmokeTestInternals {
@@ -66,10 +73,11 @@ export async function runSmokeTest(
       baselineChild.exited,
     ])
     if (baselineExit === 0) {
-      const parsed = JSON.parse(baselineStdout) as {databaseId: number}[]
-      if (parsed.length > 0 && parsed[0]) {
-        baselineId = parsed[0].databaseId
+      const parseResult = baselineRunSchema.safeParse(JSON.parse(baselineStdout))
+      if (parseResult.success && parseResult.data.length > 0 && parseResult.data[0]) {
+        baselineId = parseResult.data[0].databaseId
       }
+      // If schema validation fails, baselineId stays null — we'll use createdAt heuristic
     }
     // If baseline call fails, baselineId stays null — we'll use createdAt heuristic
   } catch {
@@ -123,7 +131,17 @@ export async function runSmokeTest(
         pollChild.exited,
       ])
       if (pollExit === 0) {
-        pollRuns = JSON.parse(pollStdout) as GhRunEntry[]
+        const rawParsed: unknown = JSON.parse(pollStdout)
+        if (Array.isArray(rawParsed)) {
+          // Validate each entry independently so a single malformed row does not
+          // discard the whole batch — dropping a legitimate matching run would be
+          // worse than skipping the bad entry.
+          pollRuns = rawParsed.flatMap(entry => {
+            const entryResult = ghRunEntrySchema.safeParse(entry)
+            return entryResult.success ? [entryResult.data] : []
+          })
+        }
+        // Non-array payload or all entries malformed → pollRuns stays [] — retry on next poll
       }
     } catch {
       // Parse/network error — retry on next poll

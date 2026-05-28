@@ -640,4 +640,142 @@ describe('smoke test runner', () => {
     expect(result.kind).toBe('pass')
     expect(result.runUrl).toBe('https://github.com/owner/test-repo/actions/runs/105')
   })
+
+  // ── Zod schema validation hardening ──────────────────────────────────────
+
+  it('poll JSON validation — non-array response degrades to unverified without throwing', async () => {
+    const triggerTime = new Date('2026-05-25T10:00:00Z')
+
+    let callIndex = 0
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
+      callIndex++
+      if (callIndex === 1) {
+        // baseline: valid empty list
+        return makeSmokeChild('[]', '', 0)
+      }
+      if (callIndex === 2) {
+        // trigger succeeds
+        return makeSmokeChild('', '', 0)
+      }
+      // poll returns a non-array object instead of an array — schema rejects it
+      return makeSmokeChild('{"error":"unexpected"}', '', 0)
+    })
+
+    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
+
+    // Schema validation fails → pollRuns stays [] → no candidates → all polls exhaust → unverified
+    expect(result.kind).toBe('unverified')
+  })
+
+  it('poll JSON validation — missing required databaseId field degrades gracefully', async () => {
+    const triggerTime = new Date('2026-05-25T10:00:00Z')
+
+    let callIndex = 0
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
+      callIndex++
+      if (callIndex === 1) {
+        return makeSmokeChild('[]', '', 0)
+      }
+      if (callIndex === 2) {
+        return makeSmokeChild('', '', 0)
+      }
+      // poll returns array entries missing databaseId — schema rejects it
+      return makeSmokeChild(
+        '[{"status":"completed","conclusion":"success","url":"https://x","createdAt":"2026-05-25T10:00:05Z"}]',
+        '',
+        0,
+      )
+    })
+
+    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
+
+    expect(result.kind).toBe('unverified')
+  })
+
+  it('poll JSON validation — wrong type for databaseId (string instead of number) degrades gracefully', async () => {
+    const triggerTime = new Date('2026-05-25T10:00:00Z')
+
+    let callIndex = 0
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
+      callIndex++
+      if (callIndex === 1) {
+        return makeSmokeChild('[]', '', 0)
+      }
+      if (callIndex === 2) {
+        return makeSmokeChild('', '', 0)
+      }
+      // databaseId is a string, not a number — schema rejects it
+      return makeSmokeChild(
+        '[{"databaseId":"not-a-number","status":"completed","conclusion":"success","url":"https://x","createdAt":"2026-05-25T10:00:05Z"}]',
+        '',
+        0,
+      )
+    })
+
+    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
+
+    expect(result.kind).toBe('unverified')
+  })
+
+  it('baseline JSON validation — non-array baseline falls back to createdAt heuristic', async () => {
+    const triggerTime = new Date('2026-05-25T10:00:00Z')
+    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
+
+    let callIndex = 0
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
+      callIndex++
+      if (callIndex === 1) {
+        // baseline returns a non-array object — schema rejects it, baselineId stays null
+        return makeSmokeChild('{"databaseId":100}', '', 0)
+      }
+      if (callIndex === 2) {
+        return makeSmokeChild('', '', 0)
+      }
+      if (callIndex === 3) {
+        return makeSmokeChild(
+          makeSmokeRunList([{databaseId: 1, status: 'completed', conclusion: 'success', url: RUN_URL, createdAt}]),
+          '',
+          0,
+        )
+      }
+      return makeSmokeChild('ack', '', 0)
+    })
+
+    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
+
+    // Schema rejects non-array → baselineId stays null → createdAt heuristic → run found → pass
+    expect(result.kind).toBe('pass')
+    expect(result.runUrl).toBe(RUN_URL)
+  })
+
+  it('baseline JSON validation — missing databaseId in baseline entry falls back to createdAt heuristic', async () => {
+    const triggerTime = new Date('2026-05-25T10:00:00Z')
+    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
+
+    let callIndex = 0
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
+      callIndex++
+      if (callIndex === 1) {
+        // baseline entry missing databaseId — schema rejects it, baselineId stays null
+        return makeSmokeChild('[{"id":100}]', '', 0)
+      }
+      if (callIndex === 2) {
+        return makeSmokeChild('', '', 0)
+      }
+      if (callIndex === 3) {
+        return makeSmokeChild(
+          makeSmokeRunList([{databaseId: 1, status: 'completed', conclusion: 'success', url: RUN_URL, createdAt}]),
+          '',
+          0,
+        )
+      }
+      return makeSmokeChild('ack', '', 0)
+    })
+
+    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
+
+    // Schema rejects missing databaseId → baselineId stays null → createdAt heuristic → run found → pass
+    expect(result.kind).toBe('pass')
+    expect(result.runUrl).toBe(RUN_URL)
+  })
 })

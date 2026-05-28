@@ -1,0 +1,95 @@
+name: Deploy Umami
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      UMAMI_SSH_KEY:
+        required: true
+      UMAMI_DOMAIN:
+        required: true
+      UMAMI_APP_SECRET:
+        required: true
+      UMAMI_DB_PASSWORD:
+        required: true
+      UMAMI_ADMIN_PASSWORD:
+        required: true
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      umami: ${{ steps.filter.outputs.umami }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          predicate-quantifier: every
+          filters: |
+            umami:
+              - 'apps/umami/**'
+              - '!apps/umami/**/*.md'
+              - '!apps/umami/**/*.test.ts'
+              - '!apps/umami/**/__fixtures__/**'
+              - '!apps/umami/**/__snapshots__/**'
+
+  deploy-umami:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
+      needs.detect-changes.outputs.umami == 'true'
+    runs-on: ubuntu-latest
+    environment: umami
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Validate required secrets
+        env:
+          UMAMI_SSH_KEY: ${{ secrets.UMAMI_SSH_KEY }}
+          UMAMI_DOMAIN: ${{ secrets.UMAMI_DOMAIN }}
+          UMAMI_APP_SECRET: ${{ secrets.UMAMI_APP_SECRET }}
+          UMAMI_DB_PASSWORD: ${{ secrets.UMAMI_DB_PASSWORD }}
+          UMAMI_ADMIN_PASSWORD: ${{ secrets.UMAMI_ADMIN_PASSWORD }}
+        run: |
+          missing=()
+          [[ -n "${UMAMI_SSH_KEY}" ]] || missing+=("UMAMI_SSH_KEY")
+          [[ -n "${UMAMI_DOMAIN}" ]] || missing+=("UMAMI_DOMAIN")
+          [[ -n "${UMAMI_APP_SECRET}" ]] || missing+=("UMAMI_APP_SECRET")
+          [[ -n "${UMAMI_DB_PASSWORD}" ]] || missing+=("UMAMI_DB_PASSWORD")
+          [[ -n "${UMAMI_ADMIN_PASSWORD}" ]] || missing+=("UMAMI_ADMIN_PASSWORD")
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required secret(s): ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Configure SSH known_hosts
+        run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
+
+      - name: Deploy umami
+        run: bun run --cwd apps/umami deploy
+        env:
+          UMAMI_SSH_KEY: ${{ secrets.UMAMI_SSH_KEY }}
+          UMAMI_DOMAIN: ${{ secrets.UMAMI_DOMAIN }}
+          UMAMI_APP_SECRET: ${{ secrets.UMAMI_APP_SECRET }}
+          UMAMI_DB_PASSWORD: ${{ secrets.UMAMI_DB_PASSWORD }}
+          UMAMI_ADMIN_PASSWORD: ${{ secrets.UMAMI_ADMIN_PASSWORD }}

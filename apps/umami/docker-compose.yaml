@@ -1,0 +1,65 @@
+services:
+  caddy:
+    image: caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./config/Caddyfile:/etc/caddy/Caddyfile
+    depends_on:
+      - umami
+
+  umami:
+    image: umamisoftware/umami:3.1.0@sha256:81119aa498f910fe1bf590c0974dfd00afd3f3563dd55528bb3bd002f06f3dfb
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_TYPE: postgresql
+      APP_SECRET: ${APP_SECRET:-}
+      # Privacy posture: disable Umami's anonymous telemetry phone-home and
+      # block outbound external calls (favicon/location lookups). Both are the
+      # reason this deployment exists — do not remove.
+      DISABLE_TELEMETRY: '1'
+      PRIVATE_MODE: '1'
+    depends_on:
+      db:
+        condition: service_healthy
+    init: true
+    healthcheck:
+      test: [CMD-SHELL, 'curl -f http://localhost:3000/api/heartbeat || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  db:
+    image: postgres:15-alpine@sha256:df7bca0066e6f60cc3dd32faa70caddec20e2c22b58932f79498e5704b23854a
+    restart: unless-stopped
+    # Postgres is reachable only on the internal compose network — port 5432 is
+    # intentionally NOT published to the host. Caddy terminates TLS and proxies
+    # to umami:3000; the database has no external surface.
+    environment:
+      POSTGRES_DB: umami
+      POSTGRES_USER: umami
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    volumes:
+      - umami-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  caddy_data:
+  caddy_config:
+  umami-db-data:

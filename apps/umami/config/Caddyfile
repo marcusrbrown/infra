@@ -1,0 +1,4 @@
+# Caddy automatically provisions and renews HTTPS certificates via Let's Encrypt.
+{$UMAMI_DOMAIN} {
+  reverse_proxy umami:3000
+}

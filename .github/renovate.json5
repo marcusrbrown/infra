@@ -25,6 +25,22 @@
       changelogUrl: 'https://github.com/caddyserver/caddy/releases',
       groupName: null,
     },
+    {
+      description: ['Add changelog context for Umami Docker image updates'],
+      matchDatasources: ['docker'],
+      matchPackageNames: ['umamisoftware/umami'],
+      sourceUrl: 'https://github.com/umami-software/umami',
+      changelogUrl: 'https://github.com/umami-software/umami/releases',
+      groupName: null,
+    },
+    {
+      description: ['Add changelog context for Postgres Docker image updates'],
+      matchDatasources: ['docker'],
+      matchPackageNames: ['postgres'],
+      sourceUrl: 'https://github.com/postgres/postgres',
+      changelogUrl: 'https://www.postgresql.org/docs/release/',
+      groupName: null,
+    },
   ],
   // postUpgradeTasks run after Renovate applies file changes but before the commit.
   // For github-actions manager updates (workflow SHA pins), Renovate does NOT run

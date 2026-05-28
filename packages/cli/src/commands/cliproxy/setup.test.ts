@@ -578,8 +578,6 @@ describe('safe_auto #2 regression — /v1/models body Bearer token redaction', (
   })
 })
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- spyOn mock return values require `any` casts */
-
 // Fix 3 — dry-run isolation regression tests
 //
 // The action handler in registerCliproxySetup is not exported, so we test the
@@ -608,9 +606,9 @@ describe('cliproxy setup --dry-run is offline-safe (action handler contract)', (
 
   it('dry-run skips gh auth check — Bun.spawn not called during buildNonInteractivePlan', async () => {
     // Spy Bun.spawn to fail hard if called (simulates unauthenticated environment)
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: any[]) => {
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((_cmds: string[]) => {
       throw new Error('gh auth status called during dry-run — should be skipped')
-    })
+    }) as unknown as typeof Bun.spawn)
 
     // Should complete without throwing (dry-run early return in buildNonInteractivePlan)
     const plan = await buildNonInteractivePlan({repo: 'owner/repo', harness: 'opencode', dryRun: true}, BASE_URL)
@@ -679,7 +677,6 @@ describe('cliproxy setup --dry-run is offline-safe (action handler contract)', (
     expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
   })
 })
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 // ── runSetupCommand DI boundary tests ─────────────────────────────────
 

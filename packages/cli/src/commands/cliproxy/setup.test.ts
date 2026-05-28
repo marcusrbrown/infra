@@ -2208,3 +2208,88 @@ describe('post-write readback verification', () => {
     expect(readbackWarnings).toHaveLength(0)
   })
 })
+
+// ── concurrency caveat on the non-interactive overwrite warning ─────────────────
+
+describe('non-interactive overwrite warning concurrency caveat', () => {
+  const BASE_URL = 'https://cliproxy.fro.bot'
+  const KEY = 'sk-test-key'
+
+  let warnSpy: ReturnType<typeof spyOn>
+  let warnMessages: string[]
+
+  function makeDeps(listExistingGhNames: (repo: string, kind: 'secret' | 'variable') => Promise<string[]>) {
+    const {ctx} = makeCtx()
+    return {
+      interactive: false,
+      baseUrl: BASE_URL,
+      ctx,
+      gh: {
+        assertGhInstalled: async () => {},
+        assertGhAuthenticated: async () => {},
+        assertRepoAccess: async () => {},
+        listExistingGhNames,
+        createManagementApiKey: async () => {},
+        deleteManagementApiKey: async () => {},
+        applyGhValue: async () => {},
+        withGhRetry: async (_label, fn) => fn(makeSpinner()),
+      },
+      prompts: {
+        promptValue: autoPromptValue,
+        confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+        intro: () => {},
+        note: () => {},
+        outro: () => {},
+      },
+      smoke: {
+        runSmokeTest: async () => ({kind: 'pass' as const, message: 'ok', runUrl: 'https://example.com/run/1'}),
+      },
+      validation: {
+        assertProxyReachable: async () => {},
+        assertProxyKeyWorks: async () => {},
+        verifyModelsAvailable: async () => {},
+      },
+    } satisfies Parameters<typeof runSetupCommand>[1]
+  }
+
+  beforeEach(() => {
+    warnMessages = []
+    warnSpy = spyOn(log, 'warn').mockImplementation((msg: string) => {
+      warnMessages.push(msg)
+    })
+  })
+
+  afterEach(() => {
+    warnSpy.mockRestore()
+  })
+
+  it('--force overwrite with a collision present → warning carries the last-write-wins concurrency caveat', async () => {
+    // OPENCODE_AUTH_JSON already exists → collision on the opencode secret set → overwrite warning fires.
+    const deps = makeDeps(async (_repo, kind) => {
+      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      return ['FRO_BOT_MODEL']
+    })
+
+    await runSetupCommand({key: KEY, repo: 'owner/repo', harness: 'opencode', ackKeyReuse: true, force: true}, deps)
+
+    const overwriteWarnings = warnMessages.filter(m => m.includes('Overwriting existing GitHub values'))
+    expect(overwriteWarnings.length).toBeGreaterThan(0)
+    expect(overwriteWarnings.some(m => m.includes('last-write-wins'))).toBe(true)
+    expect(overwriteWarnings.some(m => m.includes('two places at once'))).toBe(true)
+  })
+
+  it('--force with no collision → no overwrite warning, so no concurrency caveat (fresh-run race has no signal)', async () => {
+    // Fresh repo: empty pre-write list → no collision → overwrite warning never fires.
+    // This documents that the concurrency caveat does NOT cover the fresh-run race.
+    const deps = makeDeps(async (_repo, kind) => {
+      // Pre-write empty; post-write readback returns all written names (no readback warning either).
+      if (kind === 'secret') return []
+      return []
+    })
+
+    await runSetupCommand({key: KEY, repo: 'owner/repo', harness: 'opencode', force: true}, deps)
+
+    const concurrencyWarnings = warnMessages.filter(m => m.includes('last-write-wins'))
+    expect(concurrencyWarnings).toHaveLength(0)
+  })
+})

@@ -522,7 +522,10 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
       }
 
       if (!interactive && options.force) {
-        log.warn(`Overwriting existing GitHub values: ${collisions.join(', ')}`)
+        log.warn(
+          `Overwriting existing GitHub values: ${collisions.join(', ')}. ` +
+            `Concurrent setup runs against the same repo are not coordinated and resolve last-write-wins — don't run setup against this repo from two places at once.`,
+        )
         // proceed
       }
 

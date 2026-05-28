@@ -1,10 +1,10 @@
 /// <reference types="bun" />
 
 import type {SpinnerResult} from '@clack/prompts'
+import type {ProviderId} from './setup/providers'
 import {log} from '@clack/prompts'
 import {afterEach, beforeEach, describe, expect, it, mock, spyOn} from 'bun:test'
 import {goke} from 'goke'
-
 import {
   buildNonInteractivePlan,
   redactKey,
@@ -1374,14 +1374,7 @@ describe('runSetupCommand action handler', () => {
     ).resolves.toBeUndefined()
   })
 
-  // ── Interactive R8 ack-key-reuse prompt: redaction + cancel/continue ──────────
-  //
-  // Note: full interactive integration tests are limited by the F16 (issue #311) gap —
-  // buildInteractivePlan calls real @clack/prompts.text() for the key-name and harness
-  // prompts that DI doesn't cover yet. We test the redaction contract directly via
-  // the exported redactKey helper, then a unit test confirms the prompt template uses
-  // the redacted form. Interactive cancel/continue paths are exercised under F16 once
-  // RunSetupDeps covers all prompt sites.
+  // ── Interactive key-reuse confirm prompt: redaction + cancel/continue ──────────
 
   it('redactKey: keys >= 12 chars use first-3 + *** + last-4 shape', () => {
     expect(redactKey('sk-PLAINTEXT-LONGKEY')).toBe('sk-***GKEY')
@@ -1413,20 +1406,16 @@ describe('runSetupCommand action handler', () => {
     expect(promptContext).not.toMatch(/--key \$\{options\.key\}/)
   })
 
-  // The two interactive R8 integration tests below are skipped pending F16 (issue #311):
-  // RunSetupDeps must cover the buildInteractivePlan prompt sites before the interactive
-  // path can be exercised end-to-end with deps mocks alone.
-
-  it.skip('Interactive R8: confirm prompt fires with redacted key (not raw token)', async () => {
+  it('interactive key-reuse confirm shows a redacted key, never the raw token', async () => {
     const {ctx} = makeCtx()
     const PLAINTEXT_KEY = 'sk-PLAINTEXT-LONGKEY-SHOULD-NOT-LEAK'
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
     globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
 
-    let confirmMessage = ''
+    const confirmMessages: string[] = []
     const captureConfirm = (opts: {message: string}): Promise<boolean | symbol> => {
-      confirmMessage = opts.message
+      confirmMessages.push(opts.message)
       return Promise.resolve(true)
     }
 
@@ -1467,6 +1456,8 @@ describe('runSetupCommand action handler', () => {
             intro: () => {},
             note: () => {},
             outro: () => {},
+            promptForProviders: (): Promise<ProviderId[]> => Promise.resolve(['openai']),
+            promptForModel: (_providers: ProviderId[]): Promise<string> => Promise.resolve('openai/gpt-5.4-mini'),
           },
           smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
           validation: {
@@ -1480,18 +1471,19 @@ describe('runSetupCommand action handler', () => {
       globalThis.fetch = originalFetch
     }
 
-    // The R8 confirm prompt must be the one captured (interactive flow has more than one confirm
-    // in some paths; we look for the one containing the verify-bearer language).
-    expect(confirmMessage).toContain('Verify it matches the bearer token')
+    // The key-reuse confirm prompt must appear among the captured confirms (interactive flow
+    // has more than one confirm in some paths; we find the one with the verify-bearer language).
+    const keyReuseMessage = confirmMessages.find(m => m.includes('Verify it matches the bearer token'))
+    expect(keyReuseMessage).toBeDefined()
     // The raw key must NEVER appear in the prompt text — security regression guard.
-    expect(confirmMessage).not.toContain(PLAINTEXT_KEY)
+    expect(keyReuseMessage).not.toContain(PLAINTEXT_KEY)
     // Redacted form must be present (first 3 + last 4 chars per redactKey helper).
-    expect(confirmMessage).toContain('sk-')
-    expect(confirmMessage).toContain('***')
-    expect(confirmMessage).toContain('LEAK')
+    expect(keyReuseMessage).toContain('sk-')
+    expect(keyReuseMessage).toContain('***')
+    expect(keyReuseMessage).toContain('LEAK')
   })
 
-  it.skip('Interactive R8: confirm returns false → cancelAndExit invoked, applyGhValue never called', async () => {
+  it('interactive key-reuse confirm returning false cancels before any GitHub write', async () => {
     const {ctx} = makeCtx()
     const MODELS_FIXTURE = {data: [{id: 'gpt-5.4-mini', owned_by: 'openai'}]}
     const originalFetch = globalThis.fetch
@@ -1546,6 +1538,8 @@ describe('runSetupCommand action handler', () => {
             intro: () => {},
             note: () => {},
             outro: () => {},
+            promptForProviders: (): Promise<ProviderId[]> => Promise.resolve(['openai']),
+            promptForModel: (_providers: ProviderId[]): Promise<string> => Promise.resolve('openai/gpt-5.4-mini'),
           },
           smoke: {runSmokeTest: async () => ({kind: 'pass', message: 'ok', runUrl: 'https://example.com/run/1'})},
           validation: {

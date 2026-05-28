@@ -90,6 +90,8 @@ export interface RunSetupDeps {
     intro: typeof intro
     note: typeof note
     outro: typeof outro
+    promptForProviders?: typeof promptForProviders
+    promptForModel?: typeof promptForModel
   }
   smoke?: {
     runSmokeTest: typeof runSmokeTest
@@ -280,8 +282,10 @@ async function buildInteractivePlan(
   let model: string | undefined
 
   if (harness === 'opencode') {
-    providers = await promptForProviders()
-    model = await promptForModel(providers)
+    const doPromptForProviders = promptsImpl.promptForProviders ?? promptForProviders
+    const doPromptForModel = promptsImpl.promptForModel ?? promptForModel
+    providers = await doPromptForProviders()
+    model = await doPromptForModel(providers)
   }
 
   const keyValue = options.key ?? buildApiKeyValue(keyName ?? 'cliproxy')
@@ -379,6 +383,8 @@ const realPrompts: Required<RunSetupDeps>['prompts'] = {
   intro,
   note,
   outro,
+  promptForProviders,
+  promptForModel,
 }
 
 const realSmoke: Required<RunSetupDeps>['smoke'] = {

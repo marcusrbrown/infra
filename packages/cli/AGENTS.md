@@ -122,12 +122,15 @@ bunx @marcusrbrown/infra cliproxy setup \
 
 GitHub's secrets API is write-only, so the CLI cannot verify `--key` matches the bearer token inside the existing `OPENCODE_AUTH_JSON`. Verify the match before running with `--ack-key-reuse`. Interactive mode prompts for the same confirmation instead of requiring the flag.
 
+`--ack-key-reuse` only acknowledges that `--key` is reused — it does not prove the key is the *right* key. A valid bearer token from a different repo's context passes the gate undetected and would route this repo's traffic through the wrong proxy identity. Before acknowledging, confirm the key's provenance against the CLIProxyAPI instance: run `bunx @marcusrbrown/infra cliproxy keys list` and verify the key you're reusing is the one provisioned for this repo (match it against the named key you created during the repo's original onboarding). The CLI cannot perform this check — the operator owns it.
+
 ## OPERATIONAL LIMITATIONS
 
 `cliproxy setup` drives its ack-key-reuse and collision gates off a pre-write list of the repo's existing GitHub secret/variable names. Two limitations follow from how GitHub exposes that data:
 
 - **Not concurrency-safe.** Don't run `cliproxy setup` against the same repo from two places at once. GitHub secrets are write-only with no lock or compare-and-swap, so concurrent runs resolve last-write-wins. The `--force` overwrite warning carries a concurrency note, but it only fires on the *detected-collision* path: two fresh concurrent runs that both see an empty secret list detect no collision, so neither prints a warning. That fresh-run race has no runtime signal and is mitigated solely by operator coordination — the warning does not protect against it.
 - **Transient-empty gate bypass.** A `gh secret list` that returns empty on a successful (zero-exit) call — scope-limited token, replication lag — looks identical to a genuinely fresh repo and silently disables both gates. After writing, setup re-lists secret and variable names and warns if a just-written name is not visible (the token's list view is unreliable, so the pre-write gates may have been bypassed). This readback catches token-scope blindness; it cannot detect whether a *different* value was overwritten, since the written name is present on readback either way.
+- **`/v1/models` validation requires `owned_by`.** When verifying that selected providers/models are available, setup validates each `/v1/models` entry against a schema that requires the `owned_by` field. CLIProxyAPI returns it today. If a future CLIProxyAPI version omits `owned_by` in some shards or A/B variants, model verification hard-fails for everyone hitting that variant. The fix when that happens: relax the schema to make `owned_by` optional and derive the provider from the model-id prefix (`anthropic/…`, `openai/…`) instead. Documented here so the failure mode is recognizable rather than mysterious.
 
 ## ANTI-PATTERNS
 

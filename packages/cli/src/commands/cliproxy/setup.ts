@@ -105,6 +105,114 @@ function resolveBaseUrl(input?: string): string {
   return stripTrailingSlash(input ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
 }
 
+/**
+ * Emit a warning without ever throwing. Used inside verifyWrittenNamesVisible so that a
+ * failure in warning emission itself cannot escape to the outer write catch and wrongly
+ * roll back a key whose secrets are already written.
+ */
+function safeWarn(message: string): void {
+  try {
+    log.warn(message)
+  } catch {
+    // Warning emission must never escape the post-write readback — a throw here would
+    // reach the outer write catch and wrongly roll back a key whose secrets are written.
+  }
+}
+
+function buildCannotVerifyMessage(repo: string, writtenSecretNames: string[], writtenVariableNames: string[]): string {
+  const secretPart =
+    writtenSecretNames.length > 0
+      ? `gh secret list --repo ${repo} (expect: ${writtenSecretNames.join(', ')})`
+      : `gh secret list --repo ${repo}`
+  const variablePart =
+    writtenVariableNames.length > 0
+      ? `gh variable list --repo ${repo} (expect: ${writtenVariableNames.join(', ')})`
+      : `gh variable list --repo ${repo}`
+  return (
+    `Post-write readback: could not verify the written names are visible in ${repo} ` +
+    `(the GitHub list call failed). Verify manually: ${secretPart}; ${variablePart}.`
+  )
+}
+
+/**
+ * After a successful write, re-list secret and variable names and warn if any written name
+ * is absent on readback — signaling an unreliable token list view that may have bypassed
+ * the pre-write safety gates.
+ *
+ * Distinguishes:
+ * - Verified mismatch: readback succeeded but a written name is absent (strong signal).
+ * - Cannot verify: the readback gh call itself failed (weaker signal).
+ *
+ * NEVER throws. The entire body is wrapped in a single try/catch so any failure — including
+ * errors during diff computation or warning emission — degrades to the cannot-verify warning.
+ * A throw here would propagate to the mutationError rollback and wrongly delete a key whose
+ * secrets are already written.
+ */
+async function verifyWrittenNamesVisible(
+  repo: string,
+  writtenSecretNames: string[],
+  writtenVariableNames: string[],
+  listExistingGhNames: typeof import('./setup/gh').listExistingGhNames,
+): Promise<void> {
+  try {
+    let secretReadback: string[]
+    let variableReadback: string[]
+    let readbackFailed = false
+
+    try {
+      secretReadback = await listExistingGhNames(repo, 'secret')
+    } catch {
+      readbackFailed = true
+      secretReadback = []
+    }
+
+    if (readbackFailed) {
+      variableReadback = []
+    } else {
+      try {
+        variableReadback = await listExistingGhNames(repo, 'variable')
+      } catch {
+        readbackFailed = true
+        variableReadback = []
+      }
+    }
+
+    if (readbackFailed) {
+      safeWarn(buildCannotVerifyMessage(repo, writtenSecretNames, writtenVariableNames))
+      return
+    }
+
+    const absentSecrets = writtenSecretNames.filter(name => !secretReadback.includes(name))
+    const absentVariables = writtenVariableNames.filter(name => !variableReadback.includes(name))
+
+    if (absentSecrets.length === 0 && absentVariables.length === 0) {
+      // Happy path: all written names are visible. Emit nothing.
+      return
+    }
+
+    const lines: string[] = [
+      `Post-write readback: the following written names are not visible in ${repo} — ` +
+        `the token's list view may be unreliable and the pre-write safety gates may have been bypassed.`,
+    ]
+
+    if (absentSecrets.length > 0) {
+      lines.push(`  Absent secrets: ${absentSecrets.join(', ')}`)
+      lines.push(`  Verify manually: gh secret list --repo ${repo}`)
+    }
+
+    if (absentVariables.length > 0) {
+      lines.push(`  Absent variables: ${absentVariables.join(', ')}`)
+      lines.push(`  Verify manually: gh variable list --repo ${repo}`)
+    }
+
+    safeWarn(lines.join('\n'))
+  } catch {
+    // Any failure in the entire verification block (readback, diff, or warning emission)
+    // degrades to this softer cannot-verify warning. Never re-throw.
+    safeWarn(buildCannotVerifyMessage(repo, writtenSecretNames, writtenVariableNames))
+  }
+}
+
 function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -437,7 +545,10 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
       }
 
       if (!interactive && options.force) {
-        log.warn(`Overwriting existing GitHub values: ${collisions.join(', ')}`)
+        log.warn(
+          `Overwriting existing GitHub values: ${collisions.join(', ')}. ` +
+            `Concurrent setup runs against the same repo are not coordinated and resolve last-write-wins — don't run setup against this repo from two places at once.`,
+        )
         // proceed
       }
 
@@ -484,6 +595,13 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
           }
         },
         interactive,
+      )
+
+      await verifyWrittenNamesVisible(
+        plan.repo,
+        plan.template.secrets.map(s => s.name),
+        plan.template.variables.map(v => v.name),
+        gh.listExistingGhNames,
       )
 
       await withSpinner('Verifying the new key through the proxy', async () => {

@@ -1,5 +1,5 @@
 ---
-'@marcusrbrown/infra': minor
+'@marcusrbrown/infra': patch
 ---
 
 `cliproxy setup` verifies its GitHub writes landed and warns about concurrent runs.

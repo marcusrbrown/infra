@@ -357,9 +357,10 @@ operational limitations.
 
 ## Documentation / Operational Notes
 
-- A **minor changeset** lands with the PR: Unit 1 adds a new user-facing warning to a shipped
-  command (`packages/cli/src/` runtime change). Unit 2's AGENTS.md change alone would not
-  warrant a changeset, but it ships in the same PR. Changeset describes the F4 readback
+- A **patch changeset** lands with the PR: this is a `fix` that hardens an existing command's
+  write path (a new `log.warn` on an existing flow) with no new flag, command, or machine
+  contract. Unit 2's AGENTS.md change alone would not warrant a changeset, but it ships in the
+  same PR. Changeset describes the F4 readback
   warning and the F3 concurrency caveat in present-tense, current-behavior voice — no plan-ID
   or session taxonomy in the changeset or commit messages.
 - Update issue #311: check off F4 and F3 with a one-line note pointing at the merge PR.

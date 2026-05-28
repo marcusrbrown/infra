@@ -717,6 +717,46 @@ describe('smoke test runner', () => {
     expect(result.kind).toBe('unverified')
   })
 
+  it('poll JSON validation — one malformed entry does not discard a valid matching run', async () => {
+    const triggerTime = new Date('2026-05-25T10:00:00Z')
+    const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()
+
+    let callIndex = 0
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation((..._args: unknown[]) => {
+      callIndex++
+      if (callIndex === 1) {
+        // baseline: valid empty list → createdAt heuristic
+        return makeSmokeChild('[]', '', 0)
+      }
+      if (callIndex === 2) {
+        // trigger succeeds
+        return makeSmokeChild('', '', 0)
+      }
+      if (callIndex === 3) {
+        // poll: one malformed entry (databaseId is a string) PLUS one valid matching
+        // completed-success run. Per-entry validation must drop only the bad row and
+        // keep the good one — whole-batch rejection would lose our run.
+        return makeSmokeChild(
+          `[{"databaseId":"bad","status":"completed","conclusion":"success","url":"https://x","createdAt":"${
+            createdAt
+          }"},{"databaseId":105,"status":"completed","conclusion":"success","url":"${RUN_URL}","createdAt":"${
+            createdAt
+          }"}]`,
+          '',
+          0,
+        )
+      }
+      // log view for the matched run → contains "ack"
+      return makeSmokeChild('some log output with ack in it', '', 0)
+    })
+
+    const result = await runSmokeTest(REPO, MODEL, {_testDelayMs: 0, _testTriggerTime: triggerTime})
+
+    // The valid entry survives per-entry validation and is matched → pass.
+    expect(result.kind).toBe('pass')
+    expect(result.runUrl).toBe(RUN_URL)
+  })
+
   it('baseline JSON validation — non-array baseline falls back to createdAt heuristic', async () => {
     const triggerTime = new Date('2026-05-25T10:00:00Z')
     const createdAt = new Date(triggerTime.getTime() + 5000).toISOString()

@@ -18,8 +18,6 @@ const ghRunEntrySchema = z.object({
   createdAt: z.string(),
 })
 
-const pollRunListSchema = z.array(ghRunEntrySchema)
-
 // Exported for tests only.
 export type GhRunEntry = z.infer<typeof ghRunEntrySchema>
 
@@ -133,11 +131,17 @@ export async function runSmokeTest(
         pollChild.exited,
       ])
       if (pollExit === 0) {
-        const parseResult = pollRunListSchema.safeParse(JSON.parse(pollStdout))
-        if (parseResult.success) {
-          pollRuns = parseResult.data
+        const rawParsed: unknown = JSON.parse(pollStdout)
+        if (Array.isArray(rawParsed)) {
+          // Validate each entry independently so a single malformed row does not
+          // discard the whole batch — dropping a legitimate matching run would be
+          // worse than skipping the bad entry.
+          pollRuns = rawParsed.flatMap(entry => {
+            const entryResult = ghRunEntrySchema.safeParse(entry)
+            return entryResult.success ? [entryResult.data] : []
+          })
         }
-        // If schema validation fails, pollRuns stays [] — retry on next poll
+        // Non-array payload or all entries malformed → pollRuns stays [] — retry on next poll
       }
     } catch {
       // Parse/network error — retry on next poll

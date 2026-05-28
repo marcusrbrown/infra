@@ -396,9 +396,9 @@ describe('destructive overwrite UX', () => {
 })
 
 // ── Smoke test runner tests moved to setup/smoke-test.test.ts ─────────────────
-// ── P1 regression tests ───────────────────────────────────────────────────────
+// ── regression tests ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-describe('P1 #1 regression — dry-run early return before mutations', () => {
+describe('dry-run early return before mutations', () => {
   const BASE_URL = 'https://cliproxy.fro.bot'
   const KEY = 'sk-test-key'
 
@@ -445,7 +445,7 @@ describe('P1 #1 regression — dry-run early return before mutations', () => {
   })
 })
 
-describe('P1 #2 regression — --force honored by non-interactive collision gate', () => {
+describe('--force honored by non-interactive collision gate', () => {
   // The collision gate lives in runSetupCommand (not exported), so we test the
   // surrounding logic: buildNonInteractivePlan succeeds with --force, and the
   // collision gate behavior is verified via the error message shape.
@@ -517,7 +517,7 @@ describe('P1 #2 regression — --force honored by non-interactive collision gate
   })
 })
 
-describe('safe_auto #2 regression — /v1/models body Bearer token redaction', () => {
+describe('/v1/models body Bearer token redaction', () => {
   const BASE_URL = 'https://cliproxy.fro.bot'
   const KEY = 'sk-test-key'
 
@@ -1391,8 +1391,8 @@ describe('runSetupCommand action handler', () => {
     expect(redacted.length).toBeLessThan(RAW.length)
   })
 
-  it('Interactive R8 prompt template uses redactKey output, never the raw key (source-level contract)', async () => {
-    // Read the setup.ts source and assert the R8 prompt-message template uses ${redactKey(options.key)}
+  it('interactive key-reuse prompt template uses redactKey output, never the raw key (source-level contract)', async () => {
+    // Read the setup.ts source and assert the key-reuse prompt-message template uses ${redactKey(options.key)}
     // and never `${options.key}` raw. This is a source-level guard so a future refactor that
     // accidentally drops the redaction call fails the test even if integration coverage lags.
     const source = await Bun.file(new URL('./setup.ts', import.meta.url).pathname).text()
@@ -1417,7 +1417,7 @@ describe('runSetupCommand action handler', () => {
     }
 
     // Interactive mode resolves promptValue to the awaited prompt result. Our captureConfirm
-    // returns true, so the wizard proceeds past the R8 gate. We assert on the captured message.
+    // returns true, so the wizard proceeds past the key-reuse gate. We assert on the captured message.
     const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
       const result = await prompt
       return result as T
@@ -1489,6 +1489,17 @@ describe('runSetupCommand action handler', () => {
     let applyGhValueCalled = false
     let exitCode: number | undefined
 
+    // The interactive flow shows a generic "Proceed?" confirm BEFORE the key-reuse
+    // gate. Approve the generic prompt so the run actually reaches the key-reuse
+    // confirm, then reject only that one — otherwise the test would cancel at the
+    // first prompt and never exercise the gate it claims to cover.
+    const confirmMessages: string[] = []
+    const messageAwareConfirm = (opts: {message: string}): Promise<boolean | symbol> => {
+      confirmMessages.push(opts.message)
+      const isKeyReusePrompt = opts.message.includes('Verify it matches the bearer token')
+      return Promise.resolve(!isKeyReusePrompt)
+    }
+
     const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
       const result = await prompt
       return result as T
@@ -1530,8 +1541,8 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: interactivePromptValue,
-            // User rejects the R8 confirmation → cancelAndExit fires.
-            confirm: () => Promise.resolve(false) as Promise<boolean | symbol>,
+            // Approve the generic proceed confirm, reject only the key-reuse confirm.
+            confirm: messageAwareConfirm,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1547,7 +1558,7 @@ describe('runSetupCommand action handler', () => {
         },
       )
       // If we get here, cancelAndExit didn't fire. Fail the test.
-      throw new Error('expected cancelAndExit to fire on R8 reject')
+      throw new Error('expected cancelAndExit to fire on key-reuse reject')
     } catch (error) {
       // cancelAndExit throws because we stubbed process.exit to throw.
       expect(error instanceof Error && error.message).toBe('process.exit-stubbed')
@@ -1556,6 +1567,9 @@ describe('runSetupCommand action handler', () => {
       globalThis.fetch = originalFetch
     }
 
+    // Guard against a vacuous pass: the run must have actually reached the
+    // key-reuse confirm, not cancelled at the earlier generic proceed prompt.
+    expect(confirmMessages.some(m => m.includes('Verify it matches the bearer token'))).toBe(true)
     expect(exitCode).toBe(0)
     expect(applyGhValueCalled).toBe(false)
   })
@@ -1794,9 +1808,9 @@ describe('runSetupCommand action handler', () => {
     expect(deleteCalledWith).toBeDefined()
   })
 
-  // ── F5: --dry-run with no --repo/--harness ─────────────────────────────────
+  // ── --dry-run with no --repo/--harness ─────────────────────────────────
 
-  it('F5: --dry-run with no --repo/--harness prints preview and does not throw', async () => {
+  it('--dry-run with no --repo/--harness prints preview and does not throw', async () => {
     const {ctx, logs} = makeCtx()
     await runSetupCommand({dryRun: true}, {ctx})
     const output = logs.map(args => args.join(' ')).join('\n')
@@ -1804,7 +1818,7 @@ describe('runSetupCommand action handler', () => {
     expect(output).toContain('No mutations will be performed.')
   })
 
-  it('F5: --dry-run does not call assertGhInstalled even with no flags', async () => {
+  it('--dry-run does not call assertGhInstalled even with no flags', async () => {
     const {ctx} = makeCtx()
     let ghCalled = false
     await runSetupCommand(
@@ -1828,9 +1842,9 @@ describe('runSetupCommand action handler', () => {
     expect(ghCalled).toBe(false)
   })
 
-  // ── F8: Rollback event-order assertions ────────────────────────────────────
+  // ── Rollback event-order assertions ────────────────────────────────────
 
-  it('F8: applyGhValue fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
+  it('applyGhValue fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
     const {ctx} = makeCtx()
     const events: string[] = []
 
@@ -1879,7 +1893,7 @@ describe('runSetupCommand action handler', () => {
     expect(events).toEqual(['create', 'apply-fail', 'delete'])
   })
 
-  it('F8: assertProxyKeyWorks fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
+  it('assertProxyKeyWorks fails → deleteManagementApiKey called BEFORE error propagates (event order)', async () => {
     const {ctx} = makeCtx()
     const events: string[] = []
 
@@ -1930,9 +1944,9 @@ describe('runSetupCommand action handler', () => {
     expect(events).toEqual(['create', 'apply-success', 'verify-fail', 'delete'])
   })
 
-  // ── F9: --force pre-gate fires before verifyModelsAvailable ────────────────
+  // ── --force pre-gate fires before verifyModelsAvailable ────────────────
 
-  it('F9: missing --force on provider change does not call fetch (verifyModelsAvailable skipped)', async () => {
+  it('missing --force on provider change does not call fetch (verifyModelsAvailable skipped)', async () => {
     let fetchCalled = false
     const originalFetch = globalThis.fetch
     globalThis.fetch = mock(async () => {

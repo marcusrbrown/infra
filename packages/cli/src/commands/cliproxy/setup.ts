@@ -221,7 +221,7 @@ function extractErrorMessage(error: unknown): string {
 
 // Redact a bearer token for display in interactive prompts — never show raw key values.
 // Exported for direct unit testing of the redaction contract. The redacted form is
-// what gets shown in the interactive R8 prompt; the raw key must never reach the prompt UI.
+// what gets shown in the interactive key-reuse prompt; the raw key must never reach the prompt UI.
 export function redactKey(key: string): string {
   if (key.length < 12) return 'sk-***'
   return `${key.slice(0, 3)}***${key.slice(-4)}`

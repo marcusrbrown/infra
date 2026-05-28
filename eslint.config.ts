@@ -31,7 +31,7 @@ export default defineConfig(
   },
   {
     name: 'cli-and-scripts',
-    files: ['**/cli.ts', '**/build.ts', '**/setup-*.ts'],
+    files: ['**/cli.ts', '**/build.ts', '**/setup-*.ts', '**/provision-droplet.ts'],
     rules: {
       'no-console': 'off',
     },

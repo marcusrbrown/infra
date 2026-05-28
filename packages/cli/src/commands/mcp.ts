@@ -24,6 +24,7 @@ export const MCP_ALLOWLIST: ReadonlySet<string> = new Set([
   'cliproxy config get',
   'cliproxy config set',
   'keeweb status',
+  'umami status',
   'status',
 ])
 

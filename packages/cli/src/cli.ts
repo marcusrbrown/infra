@@ -7,6 +7,7 @@ import {registerGatewayCommands} from './commands/gateway'
 import {registerKeewebCommands} from './commands/keeweb'
 import {registerMcp} from './commands/mcp'
 import {registerStatus} from './commands/status'
+import {registerUmamiCommands} from './commands/umami'
 
 declare const process: {
   argv: string[]
@@ -20,6 +21,7 @@ cli.option('--verbose', 'Enable verbose output for all commands')
 registerKeewebCommands(cli)
 registerCliproxyCommands(cli)
 registerGatewayCommands(cli)
+registerUmamiCommands(cli)
 registerStatus(cli)
 registerMcp(cli)
 

@@ -1,7 +1,8 @@
 /// <reference types="bun" />
 
 import type {SpinnerResult} from '@clack/prompts'
-import {afterEach, describe, expect, it, mock, spyOn} from 'bun:test'
+import {log} from '@clack/prompts'
+import {afterEach, beforeEach, describe, expect, it, mock, spyOn} from 'bun:test'
 import {goke} from 'goke'
 
 import {
@@ -1957,5 +1958,253 @@ describe('runSetupCommand action handler', () => {
     }
 
     expect(fetchCalled).toBe(false)
+  })
+})
+
+// ── post-write readback verification ──────────────────────────────────────────
+
+describe('post-write readback verification', () => {
+  const BASE_URL = 'https://cliproxy.fro.bot'
+  const KEY = 'sk-test-key'
+
+  // Capture log.warn calls from @clack/prompts
+  let warnSpy: ReturnType<typeof spyOn>
+  let warnMessages: string[]
+
+  // Standard DI deps for a successful non-interactive setup run.
+  // listExistingGhNames is overridden per-test to control readback behavior.
+  function makeDeps(
+    listExistingGhNames: (repo: string, kind: 'secret' | 'variable') => Promise<string[]>,
+    deleteManagementApiKey?: () => Promise<void>,
+  ) {
+    const {ctx} = makeCtx()
+    return {
+      ctx,
+      deps: {
+        interactive: false,
+        baseUrl: BASE_URL,
+        ctx,
+        gh: {
+          assertGhInstalled: async () => {},
+          assertGhAuthenticated: async () => {},
+          assertRepoAccess: async () => {},
+          listExistingGhNames,
+          createManagementApiKey: async () => {},
+          deleteManagementApiKey: deleteManagementApiKey ?? (async () => {}),
+          applyGhValue: async () => {},
+          withGhRetry: async (_label, fn) => fn(makeSpinner()),
+        },
+        prompts: {
+          promptValue: autoPromptValue,
+          confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+          intro: () => {},
+          note: () => {},
+          outro: () => {},
+        },
+        smoke: {
+          runSmokeTest: async () => ({kind: 'pass' as const, message: 'ok', runUrl: 'https://example.com/run/1'}),
+        },
+        validation: {
+          assertProxyReachable: async () => {},
+          assertProxyKeyWorks: async () => {},
+          verifyModelsAvailable: async () => {},
+        },
+      } satisfies Parameters<typeof runSetupCommand>[1],
+    }
+  }
+
+  // Standard options for a non-interactive anthropic-only setup (no --force needed)
+  const baseOptions = {
+    key: KEY,
+    repo: 'owner/repo',
+    harness: 'opencode' as const,
+  }
+
+  beforeEach(() => {
+    warnMessages = []
+    warnSpy = spyOn(log, 'warn').mockImplementation((msg: string) => {
+      warnMessages.push(msg)
+    })
+  })
+
+  afterEach(() => {
+    warnSpy.mockRestore()
+  })
+
+  it('happy path: readback returns all written names → no new warning emitted', async () => {
+    // Pre-write list is empty; post-write readback returns all written names
+    // The opencode harness writes: OPENCODE_AUTH_JSON, OPENCODE_CONFIG, OMO_PROVIDERS (secrets)
+    // and FRO_BOT_MODEL (variable)
+    let callCount = 0
+    const {deps} = makeDeps(async (_repo, kind) => {
+      callCount++
+      if (callCount <= 2) {
+        // Pre-write calls: return empty (fresh repo)
+        return []
+      }
+      // Post-write readback: return all written names
+      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      return ['FRO_BOT_MODEL']
+    })
+
+    await runSetupCommand(baseOptions, deps)
+
+    // No verified-mismatch or cannot-verify warning should have been emitted
+    const readbackWarnings = warnMessages.filter(
+      m => m.includes('not visible') || m.includes('could not verify') || m.includes('may have been bypassed'),
+    )
+    expect(readbackWarnings).toHaveLength(0)
+  })
+
+  it('verified mismatch (secret): readback succeeds but written secret absent → loud warning naming absent secret', async () => {
+    // Pre-write: empty. Post-write secret readback: missing OPENCODE_AUTH_JSON
+    let callCount = 0
+    const {deps} = makeDeps(async (_repo, kind) => {
+      callCount++
+      if (callCount <= 2) return []
+      // Post-write: secret readback missing OPENCODE_AUTH_JSON
+      if (kind === 'secret') return ['OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      return ['FRO_BOT_MODEL']
+    })
+
+    await runSetupCommand(baseOptions, deps)
+
+    const mismatchWarnings = warnMessages.filter(m => m.includes('may have been bypassed'))
+    expect(mismatchWarnings.length).toBeGreaterThan(0)
+    // Must name the absent secret
+    expect(mismatchWarnings.some(m => m.includes('OPENCODE_AUTH_JSON'))).toBe(true)
+    // Must direct operator to manual verification
+    expect(mismatchWarnings.some(m => m.includes('gh secret list'))).toBe(true)
+  })
+
+  it('verified mismatch (variable): secret readback complete but variable absent → warning lists absent variable', async () => {
+    // Pre-write: empty. Post-write: all secrets present, but FRO_BOT_MODEL missing from variables
+    let callCount = 0
+    const {deps} = makeDeps(async (_repo, kind) => {
+      callCount++
+      if (callCount <= 2) return []
+      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      // Variable readback missing FRO_BOT_MODEL
+      return []
+    })
+
+    await runSetupCommand(baseOptions, deps)
+
+    const mismatchWarnings = warnMessages.filter(m => m.includes('may have been bypassed'))
+    expect(mismatchWarnings.length).toBeGreaterThan(0)
+    expect(mismatchWarnings.some(m => m.includes('FRO_BOT_MODEL'))).toBe(true)
+    expect(mismatchWarnings.some(m => m.includes('gh variable list'))).toBe(true)
+  })
+
+  it('partial visibility: readback shows some but not all written names → warning lists exactly the absent names', async () => {
+    // Post-write: OPENCODE_CONFIG and OMO_PROVIDERS present, OPENCODE_AUTH_JSON absent
+    let callCount = 0
+    const {deps} = makeDeps(async (_repo, kind) => {
+      callCount++
+      if (callCount <= 2) return []
+      if (kind === 'secret') return ['OPENCODE_CONFIG', 'OMO_PROVIDERS'] // OPENCODE_AUTH_JSON absent
+      return ['FRO_BOT_MODEL']
+    })
+
+    await runSetupCommand(baseOptions, deps)
+
+    const mismatchWarnings = warnMessages.filter(m => m.includes('may have been bypassed'))
+    expect(mismatchWarnings.length).toBeGreaterThan(0)
+    // Must name OPENCODE_AUTH_JSON (absent)
+    expect(mismatchWarnings.some(m => m.includes('OPENCODE_AUTH_JSON'))).toBe(true)
+    // Must NOT name OPENCODE_CONFIG or OMO_PROVIDERS (they ARE present)
+    expect(mismatchWarnings.some(m => m.includes('OPENCODE_CONFIG'))).toBe(false)
+    expect(mismatchWarnings.some(m => m.includes('OMO_PROVIDERS'))).toBe(false)
+  })
+
+  it('cannot verify: listExistingGhNames throws on post-write call → softer warning, command does NOT throw, rollback NOT fired', async () => {
+    let deleteCalledWith: string | undefined
+    let callCount = 0
+
+    const {deps} = makeDeps(
+      async (_repo, _kind) => {
+        callCount++
+        if (callCount <= 2) return [] // Pre-write calls succeed
+        // Post-write readback throws
+        throw new Error('gh: command failed')
+      },
+      async () => {
+        deleteCalledWith = 'called'
+      },
+    )
+
+    // Command must NOT throw
+    await expect(runSetupCommand(baseOptions, deps)).resolves.toBeUndefined()
+
+    // Must emit the cannot-verify warning (softer wording)
+    const cannotVerifyWarnings = warnMessages.filter(m => m.includes('could not verify'))
+    expect(cannotVerifyWarnings.length).toBeGreaterThan(0)
+
+    // Must NOT emit the verified-mismatch warning
+    const mismatchWarnings = warnMessages.filter(m => m.includes('may have been bypassed'))
+    expect(mismatchWarnings).toHaveLength(0)
+
+    // Rollback must NOT have fired (key was not created by this run since --key was supplied)
+    expect(deleteCalledWith).toBeUndefined()
+  })
+
+  it('whole-block guard: throw during diff/warning path → command does NOT throw, rollback NOT fired', async () => {
+    // Simulate a throw that occurs after the gh calls succeed but during processing.
+    // We do this by making the post-write secret readback return a value that causes
+    // an error in the diff computation — specifically, we inject a non-iterable value
+    // by making listExistingGhNames return a Proxy that throws on iteration.
+    let deleteCalledWith: string | undefined
+    let callCount = 0
+
+    const {deps} = makeDeps(
+      async (_repo, _kind) => {
+        callCount++
+        if (callCount <= 2) return []
+        // Return a value that will cause an error during set-difference computation:
+        // a Proxy that throws when iterated
+        const throwingArray = new Proxy([] as string[], {
+          get(target, prop) {
+            if (prop === 'includes' || prop === Symbol.iterator || prop === 'forEach') {
+              throw new Error('injected-diff-error')
+            }
+            return Reflect.get(target, prop)
+          },
+        })
+        return throwingArray
+      },
+      async () => {
+        deleteCalledWith = 'called'
+      },
+    )
+
+    // Command must NOT throw
+    await expect(runSetupCommand(baseOptions, deps)).resolves.toBeUndefined()
+
+    // Rollback must NOT have fired
+    expect(deleteCalledWith).toBeUndefined()
+  })
+
+  it('existing secret + ack-key-reuse: readback shows all names → no new warning', async () => {
+    // Pre-write: OPENCODE_AUTH_JSON already exists (triggers ack-key-reuse path)
+    // Post-write readback: all names present
+    let callCount = 0
+    const {deps} = makeDeps(async (_repo, kind) => {
+      callCount++
+      if (callCount <= 2) {
+        // Pre-write: OPENCODE_AUTH_JSON exists
+        if (kind === 'secret') return ['OPENCODE_AUTH_JSON']
+        return []
+      }
+      // Post-write readback: all names present
+      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      return ['FRO_BOT_MODEL']
+    })
+
+    await runSetupCommand({...baseOptions, ackKeyReuse: true, force: true}, deps)
+
+    const readbackWarnings = warnMessages.filter(
+      m => m.includes('not visible') || m.includes('could not verify') || m.includes('may have been bypassed'),
+    )
+    expect(readbackWarnings).toHaveLength(0)
   })
 })

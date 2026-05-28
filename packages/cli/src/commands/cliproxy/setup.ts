@@ -105,6 +105,91 @@ function resolveBaseUrl(input?: string): string {
   return stripTrailingSlash(input ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
 }
 
+/**
+ * After a successful write, re-list secret and variable names and warn if any written name
+ * is absent on readback — signaling an unreliable token list view that may have bypassed
+ * the pre-write safety gates.
+ *
+ * Distinguishes:
+ * - Verified mismatch: readback succeeded but a written name is absent (strong signal).
+ * - Cannot verify: the readback gh call itself failed (weaker signal).
+ *
+ * NEVER throws. The entire body is wrapped in a single try/catch so any failure — including
+ * errors during diff computation or warning emission — degrades to the cannot-verify warning.
+ * A throw here would propagate to the mutationError rollback and wrongly delete a key whose
+ * secrets are already written.
+ */
+async function verifyWrittenValuesVisible(
+  repo: string,
+  writtenSecretNames: string[],
+  writtenVariableNames: string[],
+  listExistingGhNames: typeof import('./setup/gh').listExistingGhNames,
+): Promise<void> {
+  try {
+    let secretReadback: string[]
+    let variableReadback: string[]
+    let readbackFailed = false
+
+    try {
+      secretReadback = await listExistingGhNames(repo, 'secret')
+    } catch {
+      readbackFailed = true
+      secretReadback = []
+    }
+
+    if (readbackFailed) {
+      variableReadback = []
+    } else {
+      try {
+        variableReadback = await listExistingGhNames(repo, 'variable')
+      } catch {
+        readbackFailed = true
+        variableReadback = []
+      }
+    }
+
+    if (readbackFailed) {
+      log.warn(
+        `Post-write readback: could not verify written values are visible in ${repo}. ` +
+          `The GitHub list call failed. Re-run 'infra cliproxy setup' later to confirm, or inspect directly.`,
+      )
+      return
+    }
+
+    const absentSecrets = writtenSecretNames.filter(name => !secretReadback.includes(name))
+    const absentVariables = writtenVariableNames.filter(name => !variableReadback.includes(name))
+
+    if (absentSecrets.length === 0 && absentVariables.length === 0) {
+      // Happy path: all written names are visible. Emit nothing.
+      return
+    }
+
+    const lines: string[] = [
+      `Post-write readback: the following written names are not visible in ${repo} — ` +
+        `the token's list view may be unreliable and the pre-write safety gates may have been bypassed.`,
+    ]
+
+    if (absentSecrets.length > 0) {
+      lines.push(`  Absent secrets: ${absentSecrets.join(', ')}`)
+      lines.push(`  Verify manually: gh secret list --repo ${repo}`)
+    }
+
+    if (absentVariables.length > 0) {
+      lines.push(`  Absent variables: ${absentVariables.join(', ')}`)
+      lines.push(`  Verify manually: gh variable list --repo ${repo}`)
+    }
+
+    log.warn(lines.join('\n'))
+  } catch {
+    // Any failure in the entire verification block (readback, diff, or warning emission)
+    // degrades to this softer cannot-verify warning. Never re-throw.
+    log.warn(
+      `Post-write readback: could not verify written values are visible in ${repo}. ` +
+        `The GitHub list call failed. Re-run 'infra cliproxy setup' later to confirm, or inspect directly.`,
+    )
+  }
+}
+
 function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -484,6 +569,13 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
           }
         },
         interactive,
+      )
+
+      await verifyWrittenValuesVisible(
+        plan.repo,
+        plan.template.secrets.map(s => s.name),
+        plan.template.variables.map(v => v.name),
+        gh.listExistingGhNames,
       )
 
       await withSpinner('Verifying the new key through the proxy', async () => {

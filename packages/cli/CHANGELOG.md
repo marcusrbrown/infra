@@ -1,5 +1,19 @@
 # @marcusrbrown/infra
 
+## 0.8.1
+### Patch Changes
+
+
+- `cliproxy setup` verifies its GitHub writes landed and warns about concurrent runs. ([#316](https://github.com/marcusrbrown/infra/pull/316))
+  
+  After writing secrets and variables, setup re-lists the repo's secret and variable names and warns if a just-written name is not visible. An empty secret list from a successful `gh` call — a scope-limited token or replication lag — otherwise looks identical to a fresh repo and silently disables the ack-key-reuse and collision gates. The readback distinguishes a verified mismatch (the name is provably absent, so the token's list view is unreliable and the gates may have been bypassed) from a cannot-verify case (the readback call itself failed). It never throws and never rolls back a successfully created key.
+  
+  The non-interactive `--force` overwrite warning states that concurrent setup runs against the same repo resolve last-write-wins. `packages/cli/AGENTS.md` gains an Operational Limitations section covering the concurrency boundary and the transient-empty gate bypass.
+
+- `cliproxy setup --verify-smoke` tolerates malformed `gh run list` output. ([#319](https://github.com/marcusrbrown/infra/pull/319))
+  
+  The smoke test now validates the `gh run list` JSON payloads with a schema before reading them. A malformed or unexpected payload degrades to an `unverified` result instead of throwing or misreading run fields, keeping the wizard's smoke-test step on its existing pass/fail/unverified contract.
+
 ## 0.8.0
 ### Minor Changes
 

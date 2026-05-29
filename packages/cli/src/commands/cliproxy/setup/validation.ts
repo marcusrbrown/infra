@@ -38,7 +38,7 @@ const PROVIDER_ID_PATTERNS: Record<string, RegExp> = {
  * patterns when absent. Display/validation-only — never an auth or trust signal.
  */
 function entryMatchesProvider(entry: ModelEntry, provider: string): boolean {
-  if (entry.owned_by !== undefined) {
+  if (entry.owned_by !== undefined && entry.owned_by.trim() !== '') {
     return entry.owned_by === provider
   }
   const id = entry.id ?? ''
@@ -124,8 +124,8 @@ export async function verifyModelsAvailable(
 
   if (!response.ok) {
     const rawBody = await response.text()
-    // Redact any Authorization headers or sk-* token-shaped strings that the server might echo
-    const redacted = rawBody
+    // Redact the literal key value, Authorization headers, and sk-* shaped tokens
+    const redacted = (key.length > 0 ? rawBody.replaceAll(key, '<redacted>') : rawBody)
       .replaceAll(/Bearer\s+[^\s"]+/g, 'Bearer <redacted>')
       .replaceAll(/sk-[\w.-]{8,}/g, 'sk-<redacted>')
     const excerpt = redacted.slice(0, 200)
@@ -160,7 +160,7 @@ export async function verifyModelsAvailable(
   const bareId = slashIndex === -1 ? model : model.slice(slashIndex + 1)
   const providerPrefix = slashIndex >= 0 ? model.slice(0, slashIndex) : undefined
 
-  const modelPresent = entries.some(e => e.id === bareId)
+  const modelPresent = entries.some(e => e.id === bareId || e.id === model)
   if (!modelPresent) {
     // List available ids for the matching provider only
     const matchingIds = providerPrefix

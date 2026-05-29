@@ -460,6 +460,88 @@ describe('usage-queue migration', () => {
   })
 })
 
+describe('management auth failure surfaces in unified summary (FIX 4)', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('getCliproxyStatusSummary with a bad key (401) shows auth failure in version and usageStats, not "— (no key)"', async () => {
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      const hdrs = init?.headers
+      const hasKey =
+        hdrs instanceof Headers
+          ? hdrs.has('x-management-key')
+          : hdrs !== null && hdrs !== undefined && typeof hdrs === 'object' && 'x-management-key' in hdrs
+      if (url.includes('/v0/management/') && hasKey) {
+        return new Response('Unauthorized', {status: 401})
+      }
+
+      return new Response('ok', {status: 200})
+    })
+
+    const summary = await getCliproxyStatusSummary('https://cliproxy.example.com', 'bad-key', false)
+
+    // Must NOT show the no-key sentinel — a bad key is distinct from no key
+    expect(summary.version).not.toBe('— (no key)')
+    expect(summary.usageStats).not.toBe('— (no key)')
+    // Must contain some error/auth indicator
+    expect(summary.version.toLowerCase()).toMatch(/error|auth|401|management|unauthorized/i)
+    expect(summary.usageStats.toLowerCase()).toMatch(/error|auth|401|management|unauthorized/i)
+  })
+})
+
+describe('ban body word-boundary detection (FIX 5)', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('403 with body {detail:"bandwidth exceeded"} is NOT treated as a ban (generic 403)', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/v0/management/config')) {
+        return new Response(JSON.stringify({detail: 'bandwidth exceeded'}), {
+          status: 403,
+          headers: {'content-type': 'application/json'},
+        })
+      }
+
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    try {
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'any-key'}, ctx)
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+    }
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output.toLowerCase()).not.toMatch(/ip.?ban/)
+  })
+
+  it('403 with body {error:"IP banned"} IS treated as a ban', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/v0/management/config')) {
+        return new Response(JSON.stringify({error: 'IP banned'}), {
+          status: 403,
+          headers: {'content-type': 'application/json'},
+        })
+      }
+
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    try {
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'any-key'}, ctx)
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+    }
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output.toLowerCase()).toMatch(/ip.?ban/)
+  })
+})
+
 describe('management auth probe (ban-awareness)', () => {
   afterEach(() => {
     globalThis.fetch = originalFetch

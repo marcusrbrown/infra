@@ -404,6 +404,94 @@ describe('validateSetupOptions — providers/model validation', () => {
   })
 })
 
+// ── FIX 1: owned_by:'' falls back to id inference ────────────────────────────
+
+describe('verifyModelsAvailable — owned_by empty string falls back to id inference', () => {
+  let originalFetch: typeof globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  originalFetch = globalThis.fetch
+
+  it('entry with owned_by:"" and id "openai/gpt-5.4-mini" is detected as OpenAI (does not throw no-openai-models)', async () => {
+    const fixture = {
+      data: [{id: 'openai/gpt-5.4-mini', owned_by: ''}],
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(fixture))) as unknown as typeof fetch
+
+    // Must resolve — empty owned_by should fall back to id prefix inference
+    await expect(
+      verifyModelsAvailable('https://cliproxy.fro.bot', 'sk-test-key', ['openai'], 'openai/gpt-5.4-mini'),
+    ).resolves.toBeUndefined()
+  })
+})
+
+// ── FIX 2: v7-prefixed model presence ────────────────────────────────────────
+
+describe('verifyModelsAvailable — v7-prefixed model id matched without owned_by', () => {
+  let originalFetch: typeof globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  originalFetch = globalThis.fetch
+
+  it('entry with id "openai/gpt-5.4-mini" (no owned_by) resolves when requesting "openai/gpt-5.4-mini"', async () => {
+    const fixture = {
+      data: [{id: 'openai/gpt-5.4-mini'}],
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(fixture))) as unknown as typeof fetch
+
+    await expect(
+      verifyModelsAvailable('https://cliproxy.fro.bot', 'sk-test-key', ['openai'], 'openai/gpt-5.4-mini'),
+    ).resolves.toBeUndefined()
+  })
+
+  it('model not found error lists requested model and available openai id but not anthropic ids', async () => {
+    const fixture = {
+      data: [{id: 'openai/gpt-5.4-mini'}, {id: 'anthropic/claude-sonnet-4-6'}],
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(fixture))) as unknown as typeof fetch
+
+    let errorMessage = ''
+    try {
+      await verifyModelsAvailable('https://cliproxy.fro.bot', 'sk-test-key', ['openai'], 'openai/nonexistent')
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).toContain('nonexistent')
+    expect(errorMessage).toContain('openai/gpt-5.4-mini')
+    expect(errorMessage).not.toContain('anthropic')
+    expect(errorMessage).not.toContain('claude')
+  })
+})
+
+// ── FIX 3: exact key redacted in /v1/models error body ───────────────────────
+
+describe('verifyModelsAvailable — exact key redacted in error body', () => {
+  let originalFetch: typeof globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  originalFetch = globalThis.fetch
+
+  it('500 response body containing the raw key does not expose the key in thrown message', async () => {
+    const rawKey = 'my-plain-key-no-bearer-prefix'
+    const body = `Internal error: key=${rawKey} was invalid`
+    globalThis.fetch = mock(async () => new Response(body, {status: 500})) as unknown as typeof fetch
+
+    let errorMessage = ''
+    try {
+      await verifyModelsAvailable('https://cliproxy.fro.bot', rawKey, ['openai'], 'openai/gpt-5.4-mini')
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).toContain('500')
+    expect(errorMessage).not.toContain(rawKey)
+  })
+})
+
 // ── assertProxyReachable (new TDD tests) ──────────────────────────────────────
 
 describe('assertProxyReachable', () => {

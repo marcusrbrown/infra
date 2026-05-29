@@ -250,7 +250,9 @@ async function probeManagementAuth(baseUrl: string, key: string): Promise<CheckR
       const isBanBody =
         payload !== null &&
         typeof payload === 'object' &&
-        Object.values(payload as Record<string, unknown>).some(v => typeof v === 'string' && /ban/i.test(v))
+        Object.values(payload as Record<string, unknown>).some(
+          v => typeof v === 'string' && /\b(?:ip[- ]?)?bann?ed\b/i.test(v),
+        )
 
       if (isBanBody) {
         return {
@@ -290,6 +292,29 @@ async function probeManagementAuth(baseUrl: string, key: string): Promise<CheckR
   }
 }
 
+type ManagementChecks =
+  | {kind: 'no-key'}
+  | {kind: 'auth-failure'; result: CheckResult}
+  | {kind: 'checks'; usage: CheckResult; version: CheckResult}
+
+/**
+ * Run management checks with single probe + parallel data fetches.
+ * Returns a discriminated union so callers handle no-key, auth-failure, and success distinctly.
+ */
+async function runManagementChecks(baseUrl: string, key: string | undefined): Promise<ManagementChecks> {
+  if (!key) {
+    return {kind: 'no-key'}
+  }
+
+  const authFailure = await probeManagementAuth(baseUrl, key)
+  if (authFailure !== null) {
+    return {kind: 'auth-failure', result: authFailure}
+  }
+
+  const [usage, version] = await Promise.all([checkUsageStats(baseUrl, key), checkVersion(baseUrl, key)])
+  return {kind: 'checks', usage, version}
+}
+
 function printCheckResult(result: CheckResult, ctx: ActionCtx): void {
   ctx.console.log(`[${levelLabel(result.level)}] ${result.title}`)
   ctx.console.log(`  ${result.summary}`)
@@ -319,33 +344,33 @@ export function formatUsageSummaryLine(result: CheckResult): string | null {
 
 export async function getCliproxyStatusSummary(baseUrl: string, key: string, verbose: boolean): Promise<StatusSummary> {
   const normalizedBaseUrl = stripTrailingSlash(baseUrl)
-  const httpPromise = checkHttpReachability(normalizedBaseUrl, verbose)
+  const [httpResult, mgmt] = await Promise.all([
+    checkHttpReachability(normalizedBaseUrl, verbose),
+    runManagementChecks(normalizedBaseUrl, key || undefined),
+  ])
 
-  let managementResultsPromise: Promise<[CheckResult, CheckResult] | null>
+  let version: string
+  let usageStats: string
 
-  if (key) {
-    managementResultsPromise = (async () => {
-      const authFailure = await probeManagementAuth(normalizedBaseUrl, key)
-      if (authFailure !== null) {
-        return null
-      }
-
-      return Promise.all([checkUsageStats(normalizedBaseUrl, key), checkVersion(normalizedBaseUrl, key)])
-    })()
+  if (mgmt.kind === 'no-key') {
+    version = '— (no key)'
+    usageStats = '— (no key)'
+  } else if (mgmt.kind === 'auth-failure') {
+    const authSummary = formatCheckSummary(mgmt.result)
+    version = authSummary
+    usageStats = authSummary
   } else {
-    managementResultsPromise = Promise.resolve(null)
+    version = formatCheckSummary(mgmt.version)
+    usageStats = formatCheckSummary(mgmt.usage)
   }
-
-  const [httpResult, managementResults] = await Promise.all([httpPromise, managementResultsPromise])
-  const [usageResult, versionResult] = managementResults ?? [null, null]
 
   return {
     app: 'cliproxy',
     http: formatCheckSummary(httpResult),
     lastDeploy: '—',
-    version: versionResult ? formatCheckSummary(versionResult) : '— (no key)',
+    version,
     contentHash: '—',
-    usageStats: usageResult ? formatCheckSummary(usageResult) : '— (no key)',
+    usageStats,
   }
 }
 
@@ -369,28 +394,20 @@ export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCt
 
     let capturedUsageResult: CheckResult | undefined
 
-    if (managementKey) {
-      // Single auth probe first — prevents IP-ban escalation from parallel bad-key attempts
-      const authFailure = await probeManagementAuth(baseUrl, managementKey)
+    const mgmt = await runManagementChecks(baseUrl, managementKey)
 
-      if (authFailure === null) {
-        const [usageResult, versionResult] = await Promise.all([
-          checkUsageStats(baseUrl, managementKey),
-          checkVersion(baseUrl, managementKey),
-        ])
-
-        capturedUsageResult = usageResult
-        results.push(usageResult, versionResult)
-      } else {
-        results.push(authFailure)
-      }
-    } else {
+    if (mgmt.kind === 'no-key') {
       results.push({
         title: 'Management checks',
         level: 'warning',
         summary:
           'CLIPROXY_MANAGEMENT_KEY is not set. Skipping usage stats and version checks. Provide --key or set env var.',
       })
+    } else if (mgmt.kind === 'auth-failure') {
+      results.push(mgmt.result)
+    } else {
+      capturedUsageResult = mgmt.usage
+      results.push(mgmt.usage, mgmt.version)
     }
 
     for (const result of results) {

@@ -6,6 +6,7 @@ import {
   dropletExists,
   getDropletIpWithWait,
   getSshFingerprint,
+  materializeIdentityFile,
   pinHostKeys,
   run,
   validateDoctl,
@@ -104,6 +105,33 @@ function printOperatorSetupMessage(dropletIp: string, gatewayHost: string): void
 }
 
 // ---------------------------------------------------------------------------
+// SSH identity seam (exported for testability)
+// ---------------------------------------------------------------------------
+
+export interface EstablishSshAccessDeps {
+  waitForSsh?: (host: string, user: string, opts?: {identityFile?: string}) => Promise<void>
+}
+
+/**
+ * Materializes the SSH key (if provided) into a temp file and calls waitForSsh.
+ * Cleans up the temp file in a `finally` block regardless of outcome.
+ * Injectable deps allow tests to assert identity file threading without live SSH.
+ */
+export async function establishSshAccess(
+  dropletIp: string,
+  privateKey: string | undefined,
+  deps: EstablishSshAccessDeps = {},
+): Promise<void> {
+  const resolvedWaitForSsh = deps.waitForSsh ?? waitForSsh
+  const identity = privateKey ? materializeIdentityFile(privateKey) : undefined
+  try {
+    await resolvedWaitForSsh(dropletIp, REMOTE_USER, {identityFile: identity?.path})
+  } finally {
+    identity?.cleanup()
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main orchestrator
 // ---------------------------------------------------------------------------
 
@@ -160,7 +188,7 @@ export async function main(): Promise<void> {
   }
 
   const dropletIp = await getDropletIpWithWait(DROPLET_NAME)
-  await waitForSsh(dropletIp, REMOTE_USER)
+  await establishSshAccess(dropletIp, process.env.GATEWAY_SSH_KEY)
 
   const knownHostsPath = resolve(join(import.meta.dir, '..', '..', '..', '.github', 'known_hosts'))
   await pinHostKeys(gatewayHost, dropletIp, knownHostsPath, {

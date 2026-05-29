@@ -1,9 +1,12 @@
+import {existsSync} from 'node:fs'
+
 import {dropletExists} from '@marcusrbrown/infra-shared/server/droplet-helpers'
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {validateGatewayHost} from '../src/host'
 import {
   checkDropletExistence,
+  establishSshAccess,
   getGatewaySshFingerprint,
   parseProvisionArgs,
   validateRequiredEnv,
@@ -13,7 +16,7 @@ import {
 // Env helpers
 // ---------------------------------------------------------------------------
 
-const managedEnvKeys = ['DIGITALOCEAN_ACCESS_TOKEN', 'GATEWAY_HOST', 'GATEWAY_SSH_KEY_NAME'] as const
+const managedEnvKeys = ['DIGITALOCEAN_ACCESS_TOKEN', 'GATEWAY_HOST', 'GATEWAY_SSH_KEY', 'GATEWAY_SSH_KEY_NAME'] as const
 type ManagedEnvKey = (typeof managedEnvKeys)[number]
 
 let savedEnv: Partial<Record<ManagedEnvKey, string | undefined>>
@@ -60,6 +63,9 @@ function makeSpawnResult(stdout: string, exitCode: number): SpawnResult {
     exited: Promise.resolve(exitCode),
   }
 }
+
+// A fake private key for testing — not a real key, just realistic shape
+const FAKE_PRIVATE_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakebase64content\n-----END OPENSSH PRIVATE KEY-----'
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -334,6 +340,73 @@ describe('provision-droplet', () => {
       expect(wouldAbort).toBe(false)
 
       spawnSpy.mockRestore()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // establishSshAccess — SSH identity seam
+  // -------------------------------------------------------------------------
+
+  describe('SSH access establishment', () => {
+    it('passes identity file to waitForSsh when key material is provided', async () => {
+      let capturedPath: string | undefined
+      let fileExistedDuringCall = false
+
+      const fakeWaitForSsh = async (host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedPath = opts?.identityFile
+        // Assert the file actually exists at call time (before finally cleanup)
+        fileExistedDuringCall = capturedPath !== undefined && existsSync(capturedPath)
+        expect(host).toBe('1.2.3.4')
+      }
+
+      await establishSshAccess('1.2.3.4', FAKE_PRIVATE_KEY, {waitForSsh: fakeWaitForSsh})
+
+      // Path must have been a non-empty string
+      expect(capturedPath).toBeTruthy()
+      expect(capturedPath).not.toBe('')
+      // The file must have existed at the moment waitForSsh was called
+      expect(fileExistedDuringCall).toBe(true)
+      // After the call, the finally block must have cleaned it up
+      expect(existsSync(capturedPath ?? '')).toBe(false)
+    })
+
+    it('does not pass identity file to waitForSsh when no key material is given', async () => {
+      const capturedOpts: ({identityFile?: string} | undefined)[] = []
+      const fakeWaitForSsh = async (_host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedOpts.push(opts)
+      }
+
+      await establishSshAccess('1.2.3.4', undefined, {waitForSsh: fakeWaitForSsh})
+
+      expect(capturedOpts).toHaveLength(1)
+      expect(capturedOpts[0]?.identityFile).toBeUndefined()
+    })
+
+    it('cleans up the temp key file even when waitForSsh throws', async () => {
+      let capturedPath: string | undefined
+      const fakeWaitForSsh = async (_host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedPath = opts?.identityFile
+        throw new Error('SSH connection failed')
+      }
+
+      await expect(establishSshAccess('1.2.3.4', FAKE_PRIVATE_KEY, {waitForSsh: fakeWaitForSsh})).rejects.toThrow(
+        'SSH connection failed',
+      )
+
+      // File must be cleaned up even though waitForSsh threw
+      expect(capturedPath).toBeTruthy()
+      expect(existsSync(capturedPath ?? '')).toBe(false)
+    })
+
+    it('does not create a temp file when no key material is provided', async () => {
+      let capturedPath: string | undefined
+      const fakeWaitForSsh = async (_host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedPath = opts?.identityFile
+      }
+
+      await establishSshAccess('1.2.3.4', undefined, {waitForSsh: fakeWaitForSsh})
+
+      expect(capturedPath).toBeUndefined()
     })
   })
 })

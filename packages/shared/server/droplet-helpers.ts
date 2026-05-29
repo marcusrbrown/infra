@@ -1,15 +1,31 @@
-import {appendFileSync, readFileSync} from 'node:fs'
+import {appendFileSync, chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 
 // ---------------------------------------------------------------------------
 // Pure-logic helpers
 // ---------------------------------------------------------------------------
 
+/** Options shared by the SSH/SCP command builders. */
+export interface SshCommandOptions {
+  /** Path to a private-key file. When set, the command pins it with `-i` + `IdentitiesOnly=yes`. */
+  identityFile?: string
+}
+
+// When an identity file is provided, pin it and stop SSH from offering agent keys
+// (avoids MaxAuthTries lockout when many keys are loaded). Empty otherwise.
+function identityFlags(opts?: SshCommandOptions): string[] {
+  return opts?.identityFile ? ['-i', opts.identityFile, '-o', 'IdentitiesOnly=yes'] : []
+}
+
 /**
  * Builds an SSH command array with standard BatchMode/StrictHostKeyChecking/ConnectTimeout flags.
+ * When opts.identityFile is set, prepends `-i <path>` and `-o IdentitiesOnly=yes`.
  */
-export function ssh(host: string, command: string, user: string): string[] {
+export function ssh(host: string, command: string, user: string, opts?: SshCommandOptions): string[] {
   return [
     'ssh',
+    ...identityFlags(opts),
     '-o',
     'BatchMode=yes',
     '-o',
@@ -23,10 +39,12 @@ export function ssh(host: string, command: string, user: string): string[] {
 
 /**
  * Builds an SCP command array with standard BatchMode/StrictHostKeyChecking/ConnectTimeout flags.
+ * When opts.identityFile is set, prepends `-i <path>` and `-o IdentitiesOnly=yes`.
  */
-export function scp(host: string, source: string, target: string, user: string): string[] {
+export function scp(host: string, source: string, target: string, user: string, opts?: SshCommandOptions): string[] {
   return [
     'scp',
+    ...identityFlags(opts),
     '-o',
     'BatchMode=yes',
     '-o',
@@ -36,6 +54,35 @@ export function scp(host: string, source: string, target: string, user: string):
     source,
     `${user}@${host}:${target}`,
   ]
+}
+
+/** A materialized private-key file plus a best-effort cleanup callback. */
+export interface MaterializedIdentity {
+  path: string
+  cleanup: () => void
+}
+
+/**
+ * Writes a private key to a 0600 temp file (with a guaranteed single trailing newline)
+ * and returns its path plus an idempotent best-effort cleanup callback. The trailing
+ * newline guards against env/secret injection stripping it (OpenSSH rejects keys without it).
+ */
+export function materializeIdentityFile(privateKey: string): MaterializedIdentity {
+  const dir = mkdtempSync(join(tmpdir(), 'infra-ssh-key-'))
+  const path = join(dir, 'id')
+  const contents = privateKey.endsWith('\n') ? privateKey : `${privateKey}\n`
+  writeFileSync(path, contents, {mode: 0o600})
+  chmodSync(path, 0o600)
+  return {
+    path,
+    cleanup: () => {
+      try {
+        rmSync(dir, {recursive: true, force: true})
+      } catch {
+        // Best-effort: a missing temp dir (already cleaned) is fine.
+      }
+    },
+  }
 }
 
 /**
@@ -199,12 +246,13 @@ export async function getDropletIpWithWait(dropletName: string, opts?: RetryOpti
  * Waits for SSH connectivity to the given host.
  * Defaults: 24 attempts × 5000ms.
  */
-export async function waitForSsh(host: string, user: string, opts?: RetryOptions): Promise<void> {
+export async function waitForSsh(host: string, user: string, opts?: RetryOptions & SshCommandOptions): Promise<void> {
   const maxAttempts = opts?.maxAttempts ?? 24
   const intervalMs = opts?.intervalMs ?? 5_000
+  const sshOpts: SshCommandOptions = {identityFile: opts?.identityFile}
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const proc = Bun.spawn(ssh(host, 'echo ready', user), {stdout: 'pipe', stderr: 'pipe'})
+    const proc = Bun.spawn(ssh(host, 'echo ready', user, sshOpts), {stdout: 'pipe', stderr: 'pipe'})
     const code = await proc.exited
     if (code === 0) {
       return

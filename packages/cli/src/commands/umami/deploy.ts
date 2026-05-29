@@ -19,6 +19,7 @@ export function getUmamiDeployEnv(): Record<string, string> {
   const path = process.env.PATH
   const home = process.env.HOME
   const sshAuthSock = process.env.SSH_AUTH_SOCK
+  const sshKey = process.env.UMAMI_SSH_KEY
 
   if (!path) {
     throw new Error('PATH is required for local deploy')
@@ -28,19 +29,19 @@ export function getUmamiDeployEnv(): Record<string, string> {
     throw new Error('HOME is required for local deploy')
   }
 
-  if (!sshAuthSock) {
-    throw new Error('SSH_AUTH_SOCK is required for local deploy. Start ssh-agent and load your deploy key first.')
+  if (!sshAuthSock && !sshKey) {
+    throw new Error('Local deploy needs an SSH context: set SSH_AUTH_SOCK (ssh-agent) or UMAMI_SSH_KEY (key from env).')
   }
 
   return {
     PATH: path,
     HOME: home,
-    SSH_AUTH_SOCK: sshAuthSock,
+    ...(sshAuthSock ? {SSH_AUTH_SOCK: sshAuthSock} : {}),
     UMAMI_DOMAIN: process.env.UMAMI_DOMAIN ?? '',
     UMAMI_APP_SECRET: process.env.UMAMI_APP_SECRET ?? '',
     UMAMI_DB_PASSWORD: process.env.UMAMI_DB_PASSWORD ?? '',
     UMAMI_ADMIN_PASSWORD: process.env.UMAMI_ADMIN_PASSWORD ?? '',
-    UMAMI_SSH_KEY: process.env.UMAMI_SSH_KEY ?? '',
+    ...(sshKey ? {UMAMI_SSH_KEY: sshKey} : {}),
   }
 }
 

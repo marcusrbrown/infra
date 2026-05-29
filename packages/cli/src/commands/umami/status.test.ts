@@ -3,6 +3,7 @@ import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 import {createCapturedCtx, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
 import {
   getUmamiComposeStatus,
+  getUmamiStatusSummary,
   parseComposePs,
   parseComposePsOutput,
   umamiStatusAction,
@@ -174,6 +175,45 @@ describe('getUmamiComposeStatus', () => {
 
     await expect(getUmamiComposeStatus('-oProxyCommand=evil', spy)).rejects.toThrow('Invalid UMAMI_DOMAIN')
     expect(spawnCalled).toBe(false)
+  })
+})
+
+// ─── getUmamiStatusSummary ────────────────────────────────────────────────────
+
+describe('getUmamiStatusSummary', () => {
+  it('shows service rows with DEGRADED marker when services present but unhealthy', async () => {
+    const ndjson = [
+      JSON.stringify({Name: 'umami', State: 'running', Health: 'unhealthy'}),
+      JSON.stringify({Name: 'db', State: 'running', Health: 'healthy'}),
+    ].join('\n')
+
+    const summary = await getUmamiStatusSummary('metrics.fro.bot', makeSpawn(ndjson))
+
+    expect(summary.http).toContain('DEGRADED')
+    expect(summary.http).toContain('umami')
+    expect(summary.http).not.toContain('No services reported')
+  })
+
+  it('shows ERROR with no-services message when compose ps returns empty output', async () => {
+    const summary = await getUmamiStatusSummary('metrics.fro.bot', makeSpawn(''))
+
+    expect(summary.http).toContain('ERROR')
+    expect(summary.http).toContain('No services')
+    expect(summary.http).not.toContain('DEGRADED')
+  })
+
+  it('shows OK with service rows when all services are healthy', async () => {
+    const ndjson = [
+      JSON.stringify({Name: 'umami', State: 'running', Health: 'healthy'}),
+      JSON.stringify({Name: 'db', State: 'running', Health: 'healthy'}),
+    ].join('\n')
+
+    const summary = await getUmamiStatusSummary('metrics.fro.bot', makeSpawn(ndjson))
+
+    expect(summary.http).toContain('OK')
+    expect(summary.http).toContain('umami')
+    expect(summary.http).not.toContain('DEGRADED')
+    expect(summary.http).not.toContain('ERROR')
   })
 })
 

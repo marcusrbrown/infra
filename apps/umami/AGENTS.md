@@ -23,20 +23,28 @@ PRs). Postgres port `5432` is never published to the host.
 
 1. Validates env (`UMAMI_DOMAIN`, `UMAMI_APP_SECRET`, `UMAMI_DB_PASSWORD`, `UMAMI_ADMIN_PASSWORD`,
    plus SSH context) and the host string before any SSH argv is built.
-2. Opens a multiplexed SSH connection (ControlMaster) reused across all calls.
-3. Resolves `UMAMI_DOMAIN` DNS and fails fast if it does not resolve.
-4. Materializes `/opt/umami/.env` over SSH **stdin** (never argv); secret values are
+2. DNS preflight — resolves `UMAMI_DOMAIN` and fails fast if it does not resolve.
+3. ControlMaster SSH multiplexing setup — a shared socket is created; subsequent steps reuse it.
+4. Remote prep: `mkdir -p /opt/umami/config` on the droplet.
+5. **DB-password fingerprint guard** — reads the sentinel from the remote (aborts on read/transport
+   error), compares to the current password hash; aborts on mismatch to prevent volume-bricking
+   password changes.
+6. Materializes `/opt/umami/.env` over SSH **stdin** (never argv); secret values are
    boundary-validated (no newlines/shell metacharacters).
-5. Uploads `docker-compose.yaml` + `config/Caddyfile`.
-6. **DB-password fingerprint guard** (see below) — refuses a volume-bricking password change.
-7. `docker compose pull && docker compose up -d --wait --wait-timeout 180`. Container health
-   (`pg_isready` + the umami `/api/heartbeat` localhost healthcheck) via `--wait` is the
-   authoritative success signal; 180s covers first-boot DB migrations.
-8. Writes the DB-password fingerprint sentinel after a healthy `up`.
-9. **Bounded public-HTTPS probe** — retries `https://$UMAMI_DOMAIN/api/heartbeat` for `{"ok":true}`.
-   On first-deploy Caddy ACME issuance lag it emits a WARNING and still succeeds (containers are
-   already healthy); `compose up` is idempotent, so re-running once the cert lands is safe.
-10. **Automated admin-password rotation** (see below).
+7. Uploads `docker-compose.yaml` + `config/Caddyfile`.
+8. `docker compose pull` (all images).
+9. `docker compose up -d --wait --wait-timeout 180 db umami` — Caddy is **NOT** started yet;
+   container health (`pg_isready` + umami `/api/heartbeat`) via `--wait` is the authoritative
+   success signal; 180s covers first-boot DB migrations.
+10. **Automated admin-password rotation** (fail-closed; runs before Caddy to prevent any public
+    default-credential window).
+11. `docker compose up -d --wait --wait-timeout 180 caddy` — publicly exposes the service **only
+    after** rotation is complete.
+12. Writes the DB-password fingerprint sentinel (hash only, never the password itself) after a
+    healthy `up`.
+13. **Bounded public-HTTPS probe** — retries `https://$UMAMI_DOMAIN/api/heartbeat` for `{"ok":true}`.
+    On first-deploy Caddy ACME issuance lag it emits a WARNING and still succeeds (containers are
+    already healthy); `compose up` is idempotent, so re-running once the cert lands is safe.
 
 In CI the SSH key is materialized from `UMAMI_SSH_KEY` to a temp file with a trailing newline
 (GitHub strips trailing whitespace from secrets) and `chmod 600`; locally it uses the ssh-agent.

@@ -84,10 +84,43 @@ describe('getUmamiDeployEnv', () => {
     expect(() => getUmamiDeployEnv()).toThrow('HOME is required')
   })
 
-  it('throws when SSH_AUTH_SOCK is missing', () => {
-    setManagedEnv({PATH: '/usr/bin:/bin', HOME: '/home/user', SSH_AUTH_SOCK: undefined})
+  it('throws when SSH_AUTH_SOCK is missing and no UMAMI_SSH_KEY either', () => {
+    setManagedEnv({
+      PATH: '/usr/bin:/bin',
+      HOME: '/home/user',
+      SSH_AUTH_SOCK: undefined,
+      UMAMI_SSH_KEY: undefined,
+    })
 
-    expect(() => getUmamiDeployEnv()).toThrow('SSH_AUTH_SOCK is required')
+    expect(() => getUmamiDeployEnv()).toThrow('Local deploy needs an SSH context')
+  })
+
+  it('succeeds with only SSH_AUTH_SOCK set (no UMAMI_SSH_KEY)', () => {
+    setManagedEnv({
+      PATH: '/usr/bin:/bin',
+      HOME: '/home/user',
+      SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
+      UMAMI_SSH_KEY: undefined,
+    })
+
+    const env = getUmamiDeployEnv()
+
+    expect(env.SSH_AUTH_SOCK).toBe('/tmp/ssh-agent.sock')
+    expect('UMAMI_SSH_KEY' in env).toBe(false)
+  })
+
+  it('succeeds with only UMAMI_SSH_KEY set (no SSH_AUTH_SOCK) and includes the key in env', () => {
+    setManagedEnv({
+      PATH: '/usr/bin:/bin',
+      HOME: '/home/user',
+      SSH_AUTH_SOCK: undefined,
+      UMAMI_SSH_KEY: 'ssh-ed25519 AAAA...',
+    })
+
+    const env = getUmamiDeployEnv()
+
+    expect(env.UMAMI_SSH_KEY).toBe('ssh-ed25519 AAAA...')
+    expect('SSH_AUTH_SOCK' in env).toBe(false)
   })
 
   it('includes optional umami env vars when set', () => {

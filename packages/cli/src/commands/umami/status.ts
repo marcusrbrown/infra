@@ -144,11 +144,11 @@ export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defau
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
-export async function getUmamiStatusSummary(host: string): Promise<StatusSummary> {
+export async function getUmamiStatusSummary(host: string, spawn?: SpawnFn): Promise<StatusSummary> {
   let result: UmamiStatusResult
 
   try {
-    result = await getUmamiComposeStatus(host)
+    result = await getUmamiComposeStatus(host, spawn)
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error)
     return {
@@ -161,7 +161,8 @@ export async function getUmamiStatusSummary(host: string): Promise<StatusSummary
     }
   }
 
-  if (!result.ok || result.services.length === 0) {
+  // Three-way split: no services → ERROR, services present but degraded → DEGRADED, all healthy → OK
+  if (result.services.length === 0) {
     const errorMsg = result.error ?? 'No services reported'
     return {
       app: 'umami',
@@ -174,6 +175,17 @@ export async function getUmamiStatusSummary(host: string): Promise<StatusSummary
   }
 
   const rows = result.services.map(s => `${s.service}:${s.state}/${s.health}`).join(', ')
+
+  if (!result.ok) {
+    return {
+      app: 'umami',
+      http: `DEGRADED: ${rows}`,
+      lastDeploy: '—',
+      version: '—',
+      contentHash: '—',
+      usageStats: '—',
+    }
+  }
 
   return {
     app: 'umami',

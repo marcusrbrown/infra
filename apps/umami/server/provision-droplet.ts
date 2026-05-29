@@ -86,7 +86,6 @@ function printOperatorSetupMessage(dropletIp: string, umamiHost: string): void {
   console.log(`\nBefore triggering a CI deploy, set the following in the \u001B[1mumami\u001B[0m GitHub Environment:\n`)
   console.log('  Required secrets:')
   console.log('    UMAMI_SSH_KEY            — private key for SSH access to the droplet')
-  console.log('\n  Required variables:')
   console.log(`    UMAMI_DOMAIN             — ${umamiHost}`)
   console.log('\nCommit the updated .github/known_hosts before triggering a CI deploy.')
 }

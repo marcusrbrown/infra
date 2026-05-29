@@ -166,6 +166,16 @@ describe('env validation', () => {
     const env = {...VALID_ENV, SSH_AUTH_SOCK: '', UMAMI_SSH_KEY: 'ssh-ed25519 AAAA...'}
     expect(() => validateEnv(env)).not.toThrow()
   })
+
+  it('rejects UMAMI_ADMIN_PASSWORD shorter than 8 characters', () => {
+    const env = {...VALID_ENV, UMAMI_ADMIN_PASSWORD: 'short'}
+    expect(() => validateEnv(env)).toThrow(/UMAMI_ADMIN_PASSWORD.*8 characters/)
+  })
+
+  it('accepts UMAMI_ADMIN_PASSWORD of exactly 8 characters', () => {
+    const env = {...VALID_ENV, UMAMI_ADMIN_PASSWORD: 'exactly8'}
+    expect(() => validateEnv(env)).not.toThrow()
+  })
 })
 
 // ─── secret boundary validation ───────────────────────────────────────────────
@@ -671,12 +681,45 @@ describe('rotation runs inside the umami container via docker compose exec', () 
       fetch: fetchHeartbeatOk,
     })
 
-    const updateCall = calls.find(c => c.cmd.join(' ').includes('/api/users/me/password'))
+    const updateCall = calls.find(c => c.cmd.join(' ').includes('/api/me/password'))
     expect(updateCall).toBeDefined()
     const cmdStr = updateCall?.cmd.join(' ') ?? ''
     expect(cmdStr).toContain('docker compose exec')
     expect(cmdStr).toContain('-T')
     expect(cmdStr).toContain('umami')
+  })
+
+  it('sends currentPassword and newPassword in the password-update request body', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds with token
+    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    // idx 8: write curl config file (token via stdin)
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update curl succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify new password login succeeds
+    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    // idx 11: verify default login fails (exit 22)
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    // Find the update call — stdin carries the request body
+    const updateCall = calls.find(c => c.cmd.join(' ').includes('/api/me/password'))
+    expect(updateCall).toBeDefined()
+    const body = JSON.parse(updateCall?.stdinData ?? '{}') as Record<string, string>
+    expect(body.currentPassword).toBe('umami')
+    expect(body.newPassword).toBe(VALID_ENV.UMAMI_ADMIN_PASSWORD)
+    expect(body).not.toHaveProperty('password')
   })
 })
 

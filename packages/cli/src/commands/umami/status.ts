@@ -81,7 +81,7 @@ export function parseComposePs(entries: ComposePsEntry[]): ServiceRow[] {
 }
 
 export function isAllRunning(rows: ServiceRow[]): boolean {
-  return rows.every(row => row.state === 'running')
+  return rows.every(row => row.state === 'running' && (row.health === 'healthy' || row.health === 'n-a'))
 }
 
 // ─── SSH-backed status fetch ──────────────────────────────────────────────────

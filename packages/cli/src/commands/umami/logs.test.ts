@@ -116,4 +116,39 @@ describe('logs command', () => {
     expect(result.refused).toBe(false)
     expect(result.exitCode).toBe(42)
   })
+
+  it('accepts caddy as a valid service', async () => {
+    delete process.env.CI
+
+    const opts: StreamLogsOpts = {
+      host: 'metrics.fro.bot',
+      service: 'caddy',
+      tail: 100,
+      allowCi: false,
+    }
+
+    const result = await streamUmamiLogs(opts, makeLogsSpawn(0))
+    expect(result.refused).toBe(false)
+    expect(result.exitCode).toBe(0)
+  })
+
+  it('rejects an unknown service when called directly (bypassing the CLI action)', async () => {
+    delete process.env.CI
+
+    const opts: StreamLogsOpts = {
+      host: 'metrics.fro.bot',
+      service: 'notaservice',
+      tail: 100,
+      allowCi: false,
+    }
+
+    let spawnCalled = false
+    const spy: LogsSpawnFn = (_cmd, _opts) => {
+      spawnCalled = true
+      return {exited: Promise.resolve(0)}
+    }
+
+    await expect(streamUmamiLogs(opts, spy)).rejects.toThrow(/Invalid service/)
+    expect(spawnCalled).toBe(false)
+  })
 })

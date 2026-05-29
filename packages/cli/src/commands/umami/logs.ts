@@ -14,7 +14,7 @@ const COMPOSE_PROJECT_DIR = '/opt/umami'
 const SENSITIVE_WARNING =
   'Warning: Logs may contain database passwords, app secrets, or user data. Treat output as sensitive; do not capture in shared logs or chat.'
 
-export const VALID_SERVICES = ['umami', 'db'] as const
+export const VALID_SERVICES = ['umami', 'db', 'caddy'] as const
 
 export type ValidService = (typeof VALID_SERVICES)[number]
 
@@ -60,6 +60,9 @@ export async function streamUmamiLogs(
   printOut?: (msg: string) => void,
   printErr?: (msg: string) => void,
 ): Promise<StreamLogsResult> {
+  // Validate service at the top so direct callers cannot bypass the guard.
+  validateService(opts.service)
+
   const isCI = process.env.CI === 'true'
 
   if (isCI && !opts.allowCi) {

@@ -9,7 +9,7 @@ import {validateUmamiHost} from './host'
 // ─── Umami API endpoint constants ─────────────────────────────────────────────
 // TODO: verify exact v3.1.0 endpoint against running image on first deploy
 const UMAMI_LOGIN_PATH = '/api/auth/login'
-const UMAMI_PASSWORD_PATH = '/api/users/me/password'
+const UMAMI_PASSWORD_PATH = '/api/me/password'
 
 // ─── Remote paths ─────────────────────────────────────────────────────────────
 
@@ -142,6 +142,12 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
   const adminPassword = env.UMAMI_ADMIN_PASSWORD
   if (!adminPassword) {
     throw new Error('UMAMI_ADMIN_PASSWORD is required for deploy')
+  }
+
+  if (adminPassword.length < 8) {
+    throw new Error(
+      'UMAMI_ADMIN_PASSWORD must be at least 8 characters — Umami v3.1.0 rejects shorter passwords on the password-change endpoint',
+    )
   }
 
   // Validate host before any SSH argv construction
@@ -487,7 +493,7 @@ async function rotateAdminPassword(
 
   // Step 3: Update password. New password travels via stdin; token via curl config file.
   // Cleanup of /tmp/uc happens in the same sh -c regardless of curl exit code.
-  const updateBody = JSON.stringify({password: adminPassword})
+  const updateBody = JSON.stringify({currentPassword: 'umami', newPassword: adminPassword})
   const updateCmd = sshCommand(
     host,
     `cd ${REMOTE_DIR} && docker compose exec -T umami sh -c 'curl -s --fail-with-body -X POST -H '"'"'Content-Type: application/json'"'"' -K /tmp/uc --data @- http://localhost:3000${UMAMI_PASSWORD_PATH}; rc=$?; rm -f /tmp/uc; exit $rc'`,

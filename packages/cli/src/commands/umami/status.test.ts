@@ -305,4 +305,43 @@ describe('status command', () => {
     expect(captured.stderr.join('')).toMatch(/no services|empty/i)
     expect(captured.exit?.code).toBe(1)
   })
+
+  it('reports degraded when a service is running but health is unhealthy', async () => {
+    process.env.UMAMI_DOMAIN = 'metrics.fro.bot'
+
+    const ndjson = [
+      JSON.stringify({Name: 'umami', State: 'running', Health: 'unhealthy'}),
+      JSON.stringify({Name: 'db', State: 'running', Health: 'healthy'}),
+    ].join('\n')
+
+    const {ctx, captured} = createCapturedCtx()
+
+    try {
+      await umamiStatusAction({}, ctx, makeSpawn(ndjson))
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+    }
+
+    const output = captured.stdout.join('\n')
+    expect(output).toContain('DEGRADED')
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  it('reports OK when a service is running with health n-a (e.g. caddy has no healthcheck)', async () => {
+    process.env.UMAMI_DOMAIN = 'metrics.fro.bot'
+
+    const ndjson = [
+      JSON.stringify({Name: 'umami', State: 'running', Health: 'healthy'}),
+      JSON.stringify({Name: 'db', State: 'running', Health: 'healthy'}),
+      JSON.stringify({Name: 'caddy', State: 'running', Health: ''}),
+    ].join('\n')
+
+    const {ctx, captured} = createCapturedCtx()
+
+    await umamiStatusAction({}, ctx, makeSpawn(ndjson))
+
+    const output = captured.stdout.join('\n')
+    expect(output).toContain('Status: OK')
+    expect(captured.exit).toBeNull()
+  })
 })

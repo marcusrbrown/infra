@@ -50,8 +50,9 @@ password-update endpoint. If the default login fails, the password is already ro
 skipped (idempotent). After the first deploy, log in at `https://metrics.fro.bot` with `admin` /
 `UMAMI_ADMIN_PASSWORD`. The admin password travels via SSH stdin / request body, never argv.
 
-> The exact v3.1.0 auth endpoints (`/api/auth/login`, `/api/users/me/password`) are pinned as
-> constants in `src/deploy.ts`; re-verify them against the running image on a major Umami bump.
+> The exact v3.1.0 auth endpoints (`/api/auth/login`, `/api/me/password`) are pinned as
+> constants in `src/deploy.ts`; the password-change endpoint uses body `{currentPassword, newPassword}` (Bearer auth).
+> Re-verify them against the running image on a major Umami bump.
 
 ## Privacy baseline
 

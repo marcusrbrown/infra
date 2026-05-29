@@ -152,10 +152,15 @@ admin auth-endpoint constants in `src/deploy.ts` against the new image.
 
 ## Provisioning
 
-One-time: `bun run --cwd apps/umami provision` creates the `s-1vcpu-1gb` droplet (image
-`docker-20-04`), selects the SSH key by name (`UMAMI_SSH_KEY_NAME`, default `fro-bot-umami`), waits
-for SSH, and pins both the domain and droplet-IP host keys into `.github/known_hosts` (commit the
-result before the first CI deploy). Resize to `s-1vcpu-2gb` if Postgres memory pressure appears.
+One-time: `bun run provision:umami` (root wrapper — loads the repo-root `.env`; `--cwd apps/umami`
+would miss it) creates the `s-1vcpu-1gb` droplet (image `docker-20-04`), selects the SSH key by name
+(`UMAMI_SSH_KEY_NAME`, default `fro-bot-umami`), waits for SSH, and pins both the domain and
+droplet-IP host keys into `.github/known_hosts` (commit the result before the first CI deploy).
+Resize to `s-1vcpu-2gb` if Postgres memory pressure appears.
+
+SSH auth during provisioning: when `UMAMI_SSH_KEY` is set, the script materializes it to a `0600`
+temp key file and pins it with `-i` + `IdentitiesOnly=yes` (no ssh-agent needed; cleaned up after).
+When unset, it falls back to ssh-agent.
 
 ## Anti-patterns
 

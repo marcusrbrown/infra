@@ -55,8 +55,10 @@ The deploy script materializes secrets as files on the droplet (never via argv),
 **Run:**
 
 ```bash
-bun run --cwd apps/gateway provision
+bun run provision:gateway
 ```
+
+(Root wrapper — loads the repo-root `.env`; `--cwd apps/gateway` would miss it.)
 
 The script will:
 
@@ -65,6 +67,10 @@ The script will:
 3. Create an `s-1vcpu-2gb` droplet in `nyc1`, tagged `gateway`
 4. Append unhashed domain host keys and hashed IP host keys to `.github/known_hosts` (`ssh-keyscan <domain>` + `ssh-keyscan -H <ip>`)
 5. Print operator setup steps for finalizing the GitHub Environment
+
+SSH auth during provisioning: when `GATEWAY_SSH_KEY` is set, the script materializes it to a `0600`
+temp key file and pins it with `-i` + `IdentitiesOnly=yes` (no ssh-agent needed; cleaned up after).
+When unset, it falls back to ssh-agent.
 
 After provisioning: commit the updated `.github/known_hosts`.
 
@@ -106,7 +112,7 @@ The CLI validates the archive locally first — it must contain exactly the two 
 
 **Restore — full disaster recovery (droplet destroyed):**
 
-1. Set `GATEWAY_HOST` locally and run `bun run --cwd apps/gateway provision` to create a replacement droplet.
+1. Set `GATEWAY_HOST` locally and run `bun run provision:gateway` to create a replacement droplet.
 2. Commit and push the updated `.github/known_hosts`.
 3. If the host or IP changed, update `GATEWAY_HOST` (and `GATEWAY_SSH_KEY` if re-keyed) in the `gateway` GitHub Environment.
 4. Trigger a deploy (`bunx @marcusrbrown/infra gateway deploy`) and approve the environment gate. This creates `/opt/gateway/deploy/` on the new droplet.

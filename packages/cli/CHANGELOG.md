@@ -1,5 +1,13 @@
 # @marcusrbrown/infra
 
+## 0.9.0
+### Minor Changes
+
+
+- Add `umami` commands for the self-hosted Umami analytics deployment at `metrics.fro.bot`. ([#321](https://github.com/marcusrbrown/infra/pull/321))
+  
+  `infra umami status` reports the Docker Compose service health over SSH, `infra umami deploy` triggers the deploy (remote workflow by default, or `--local`), and `infra umami logs` streams container logs. The unified `infra status` now includes a `umami` row and a `umami` key under `--json`.
+
 ## 0.8.1
 ### Patch Changes
 

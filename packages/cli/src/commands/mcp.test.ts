@@ -150,12 +150,6 @@ describe('mcp integration (Tier-1, in-process)', () => {
   // Mode C: when a command returns structured data AND prints to stdout,
   // the CallToolResult must contain BOTH a stdout text block AND a
   // stringified return-value text block.
-  //
-  // Re-enable after Unit 4 lands (cliproxy keys list refactor to return
-  // structured data alongside ctx-printed text).
-
-  // Re-enable after Unit 4 lands (cliproxy keys list refactor to return
-  // structured data alongside ctx-printed text).
   test('cliproxy_keys_list returns BOTH stdout block AND structured return block (Mode C contract)', async () => {
     const originalFetch = globalThis.fetch
     const originalKey = process.env.CLIPROXY_MANAGEMENT_KEY

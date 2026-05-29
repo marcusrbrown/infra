@@ -70,19 +70,23 @@ export interface MaterializedIdentity {
 export function materializeIdentityFile(privateKey: string): MaterializedIdentity {
   const dir = mkdtempSync(join(tmpdir(), 'infra-ssh-key-'))
   const path = join(dir, 'id')
-  const contents = privateKey.endsWith('\n') ? privateKey : `${privateKey}\n`
-  writeFileSync(path, contents, {mode: 0o600})
-  chmodSync(path, 0o600)
-  return {
-    path,
-    cleanup: () => {
-      try {
-        rmSync(dir, {recursive: true, force: true})
-      } catch {
-        // Best-effort: a missing temp dir (already cleaned) is fine.
-      }
-    },
+  const cleanup = (): void => {
+    try {
+      rmSync(dir, {recursive: true, force: true})
+    } catch {
+      // Best-effort: a missing temp dir (already cleaned) is fine.
+    }
   }
+  try {
+    const contents = privateKey.endsWith('\n') ? privateKey : `${privateKey}\n`
+    writeFileSync(path, contents, {mode: 0o600})
+    chmodSync(path, 0o600)
+  } catch (error) {
+    // Don't leave a partial 0600 key (or its temp dir) behind on write failure.
+    cleanup()
+    throw error
+  }
+  return {path, cleanup}
 }
 
 /**
@@ -109,7 +113,7 @@ export async function run(label: string, command: string[]): Promise<void> {
   if (code !== 0) {
     console.error(`\u001B[1;31mFAILED:\u001B[0m ${label}`)
     if (stderr.trim()) console.error(stderr.trim())
-    process.exit(1)
+    throw new Error(`${label} failed: ${stderr.trim() || `exit code ${code}`}`)
   }
 }
 
@@ -242,11 +246,14 @@ export async function getDropletIpWithWait(dropletName: string, opts?: RetryOpti
   throw new Error('Timed out waiting for droplet IPv4 address')
 }
 
+/** Options for `waitForSsh`: retry policy plus optional SSH identity pinning. */
+export interface WaitForSshOptions extends RetryOptions, SshCommandOptions {}
+
 /**
  * Waits for SSH connectivity to the given host.
  * Defaults: 24 attempts × 5000ms.
  */
-export async function waitForSsh(host: string, user: string, opts?: RetryOptions & SshCommandOptions): Promise<void> {
+export async function waitForSsh(host: string, user: string, opts?: WaitForSshOptions): Promise<void> {
   const maxAttempts = opts?.maxAttempts ?? 24
   const intervalMs = opts?.intervalMs ?? 5_000
   const sshOpts: SshCommandOptions = {identityFile: opts?.identityFile}

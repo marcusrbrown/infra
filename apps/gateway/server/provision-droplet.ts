@@ -109,7 +109,7 @@ function printOperatorSetupMessage(dropletIp: string, gatewayHost: string): void
 // ---------------------------------------------------------------------------
 
 export interface EstablishSshAccessDeps {
-  waitForSsh?: (host: string, user: string, opts?: {identityFile?: string}) => Promise<void>
+  waitForSsh?: typeof waitForSsh
 }
 
 /**
@@ -123,7 +123,7 @@ export async function establishSshAccess(
   deps: EstablishSshAccessDeps = {},
 ): Promise<void> {
   const resolvedWaitForSsh = deps.waitForSsh ?? waitForSsh
-  const identity = privateKey ? materializeIdentityFile(privateKey) : undefined
+  const identity = privateKey && privateKey.trim().length > 0 ? materializeIdentityFile(privateKey) : undefined
   try {
     await resolvedWaitForSsh(dropletIp, REMOTE_USER, {identityFile: identity?.path})
   } finally {

@@ -408,5 +408,16 @@ describe('provision-droplet', () => {
 
       expect(capturedPath).toBeUndefined()
     })
+
+    it('treats a whitespace-only key as absent — no temp file, no SSH -i flag', async () => {
+      let capturedOpts: {identityFile?: string} | undefined
+      const fakeWaitForSsh = async (_host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedOpts = opts
+      }
+
+      await establishSshAccess('1.2.3.4', '   \n  ', {waitForSsh: fakeWaitForSsh})
+
+      expect(capturedOpts?.identityFile).toBeUndefined()
+    })
   })
 })

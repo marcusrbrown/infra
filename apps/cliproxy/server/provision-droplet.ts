@@ -58,7 +58,7 @@ export interface ProvisionIdentity {
  * key material is absent (ssh-agent path).
  */
 export function resolveProvisionIdentity(privateKey: string | undefined): ProvisionIdentity {
-  if (!privateKey) {
+  if (!privateKey || privateKey.trim().length === 0) {
     return {identityFile: undefined, cleanup: () => {}}
   }
 
@@ -158,8 +158,7 @@ export async function writeRemoteEnvFile(host: string, identityFile?: string): P
 
   const exitCode = await proc.exited
   if (exitCode !== 0) {
-    console.error(`\u001B[1;31mFAILED:\u001B[0m Writing remote .env file (exit ${exitCode})`)
-    process.exit(1)
+    throw new Error(`Writing remote .env file failed (exit ${exitCode})`)
   }
 
   console.log('\u001B[1;34m==>\u001B[0m Writing remote .env file')
@@ -177,10 +176,11 @@ export async function deployCompose(host: string, identityFile?: string): Promis
 // ---------------------------------------------------------------------------
 
 export interface PerformProvisioningDeps {
-  waitForSsh?: (host: string, user: string, opts?: {identityFile?: string}) => Promise<void>
-  copyComposeFiles?: (host: string, identityFile?: string) => Promise<void>
-  writeRemoteEnvFile?: (host: string, identityFile?: string) => Promise<string>
-  deployCompose?: (host: string, identityFile?: string) => Promise<void>
+  waitForSsh?: typeof waitForSsh
+  pinHostKeys?: typeof pinHostKeys
+  copyComposeFiles?: typeof copyComposeFiles
+  writeRemoteEnvFile?: typeof writeRemoteEnvFile
+  deployCompose?: typeof deployCompose
 }
 
 /**
@@ -197,6 +197,7 @@ export async function performProvisioning(
   deps: PerformProvisioningDeps = {},
 ): Promise<string> {
   const resolvedWaitForSsh = deps.waitForSsh ?? waitForSsh
+  const resolvedPinHostKeys = deps.pinHostKeys ?? pinHostKeys
   const resolvedCopyComposeFiles = deps.copyComposeFiles ?? copyComposeFiles
   const resolvedWriteRemoteEnvFile = deps.writeRemoteEnvFile ?? writeRemoteEnvFile
   const resolvedDeployCompose = deps.deployCompose ?? deployCompose
@@ -205,6 +206,11 @@ export async function performProvisioning(
 
   try {
     await resolvedWaitForSsh(dropletIp, REMOTE_USER, {identityFile})
+    const knownHostsPath = resolve(import.meta.dir, '..', '..', '..', '.github', 'known_hosts')
+    await resolvedPinHostKeys(CLIPROXY_DOMAIN, dropletIp, knownHostsPath, {
+      marker: `# cliproxy droplet (${dropletIp} / ${CLIPROXY_DOMAIN})`,
+    })
+    await validateDns(dropletIp)
     await resolvedCopyComposeFiles(dropletIp, identityFile)
     const managementPassword = await resolvedWriteRemoteEnvFile(dropletIp, identityFile)
     await resolvedDeployCompose(dropletIp, identityFile)
@@ -232,13 +238,6 @@ async function provision(): Promise<void> {
   }
 
   const dropletIp = await getDropletIpWithWait(DROPLET_NAME)
-
-  const knownHostsPath = resolve(import.meta.dir, '..', '..', '..', '.github', 'known_hosts')
-  await pinHostKeys(CLIPROXY_DOMAIN, dropletIp, knownHostsPath, {
-    marker: `# cliproxy droplet (${dropletIp} / ${CLIPROXY_DOMAIN})`,
-  })
-
-  await validateDns(dropletIp)
 
   const managementPassword = await performProvisioning(dropletIp, process.env.CLIPROXY_SSH_KEY)
 

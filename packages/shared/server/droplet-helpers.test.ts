@@ -9,6 +9,7 @@ import {
   getSshFingerprint,
   materializeIdentityFile,
   pinHostKeys,
+  run,
   runCapture,
   scp,
   sleep,
@@ -454,6 +455,29 @@ describe('droplet-helpers', () => {
       cleanup()
       expect(() => statSync(path)).toThrow()
       expect(() => cleanup()).not.toThrow()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // run — throws on non-zero exit (does NOT call process.exit)
+  // -------------------------------------------------------------------------
+
+  describe('run', () => {
+    it('rejects with an error containing the label and stderr when the command exits non-zero', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn')
+        .mockReturnValueOnce(makeSpawnResultWithStderr('connection refused', 1) as ReturnType<typeof Bun.spawn>)
+        .mockReturnValueOnce(makeSpawnResultWithStderr('connection refused', 1) as ReturnType<typeof Bun.spawn>)
+      spies.push(spawnSpy)
+
+      await expect(run('copy files', ['scp', 'x', 'y'])).rejects.toThrow(/copy files/)
+      await expect(run('copy files', ['scp', 'x', 'y'])).rejects.toThrow(/connection refused/)
+    })
+
+    it('resolves without throwing when the command exits zero', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(makeSpawnResult('ok', 0) as ReturnType<typeof Bun.spawn>)
+      spies.push(spawnSpy)
+
+      await expect(run('deploy', ['docker', 'compose', 'up'])).resolves.toBeUndefined()
     })
   })
 

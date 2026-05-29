@@ -1,8 +1,13 @@
 import {existsSync} from 'node:fs'
 
-import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
+import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
-import {performProvisioning, resolveProvisionIdentity, validateCliproxyDomain} from './provision-droplet'
+import {
+  performProvisioning,
+  resolveProvisionIdentity,
+  validateCliproxyDomain,
+  writeRemoteEnvFile,
+} from './provision-droplet'
 
 // ---------------------------------------------------------------------------
 // Env helpers
@@ -128,6 +133,12 @@ describe('provision-droplet', () => {
       expect(identityFile).toBeUndefined()
       expect(() => cleanup()).not.toThrow()
     })
+
+    it('treats a whitespace-only key as absent — no temp file, no-op cleanup', () => {
+      const {identityFile, cleanup} = resolveProvisionIdentity('   \n  ')
+      expect(identityFile).toBeUndefined()
+      expect(() => cleanup()).not.toThrow()
+    })
   })
 
   // ---------------------------------------------------------------------------
@@ -157,6 +168,7 @@ describe('provision-droplet', () => {
 
       await performProvisioning('1.2.3.4', FAKE_PRIVATE_KEY, {
         waitForSsh: fakeWaitForSsh,
+        pinHostKeys: async () => {},
         copyComposeFiles: fakeCopyComposeFiles,
         writeRemoteEnvFile: fakeWriteRemoteEnvFile,
         deployCompose: fakeDeployCompose,
@@ -196,6 +208,7 @@ describe('provision-droplet', () => {
 
       await performProvisioning('1.2.3.4', undefined, {
         waitForSsh: fakeWaitForSsh,
+        pinHostKeys: async () => {},
         copyComposeFiles: fakeCopyComposeFiles,
         writeRemoteEnvFile: fakeWriteRemoteEnvFile,
         deployCompose: fakeDeployCompose,
@@ -222,6 +235,7 @@ describe('provision-droplet', () => {
       await expect(
         performProvisioning('1.2.3.4', FAKE_PRIVATE_KEY, {
           waitForSsh: fakeWaitForSsh,
+          pinHostKeys: async () => {},
           copyComposeFiles: fakeCopyComposeFiles,
           writeRemoteEnvFile: fakeWriteRemoteEnvFile,
           deployCompose: fakeDeployCompose,
@@ -246,12 +260,55 @@ describe('provision-droplet', () => {
 
       await performProvisioning('1.2.3.4', undefined, {
         waitForSsh: fakeWaitForSsh,
+        pinHostKeys: async () => {},
         copyComposeFiles: fakeCopyComposeFiles,
         writeRemoteEnvFile: fakeWriteRemoteEnvFile,
         deployCompose: fakeDeployCompose,
       })
 
       expect(capturedPath).toBeUndefined()
+    })
+
+    it('calls waitForSsh before pinHostKeys when pinHostKeys is injected', async () => {
+      const callOrder: string[] = []
+
+      const fakeWaitForSsh = async () => {
+        callOrder.push('waitForSsh')
+      }
+      const fakePinHostKeys = async () => {
+        callOrder.push('pinHostKeys')
+      }
+      const fakeCopyComposeFiles = async (_host: string, _identityFile?: string) => {}
+      const fakeWriteRemoteEnvFile = async (_host: string, _identityFile?: string): Promise<string> =>
+        'fake-mgmt-password'
+      const fakeDeployCompose = async (_host: string, _identityFile?: string) => {}
+
+      await performProvisioning('1.2.3.4', undefined, {
+        waitForSsh: fakeWaitForSsh,
+        pinHostKeys: fakePinHostKeys,
+        copyComposeFiles: fakeCopyComposeFiles,
+        writeRemoteEnvFile: fakeWriteRemoteEnvFile,
+        deployCompose: fakeDeployCompose,
+      })
+
+      expect(callOrder.indexOf('waitForSsh')).toBeLessThan(callOrder.indexOf('pinHostKeys'))
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // writeRemoteEnvFile — rejects on non-zero SSH exit
+  // ---------------------------------------------------------------------------
+
+  describe('writeRemoteEnvFile', () => {
+    it('rejects with an error when the SSH .env write command fails', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
+        stdin: {write: () => {}, end: () => {}},
+        exited: Promise.resolve(255),
+      } as unknown as ReturnType<typeof Bun.spawn>)
+
+      await expect(writeRemoteEnvFile('1.2.3.4')).rejects.toThrow(/255/)
+
+      spawnSpy.mockRestore()
     })
   })
 })

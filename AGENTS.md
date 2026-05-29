@@ -63,7 +63,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **Git hooks**: `simple-git-hooks` + `lint-staged` → `eslint --fix` on commit.
 - **CI install**: `bun install --frozen-lockfile --ignore-scripts` (skip simple-git-hooks postinstall).
 - **Cross-org reusable workflows**: Pass secrets explicitly (never `secrets: inherit` with `bfra-me/.github`). (enforced)
-- **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root.
+- **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root. Exception: `provision`/`deploy` need the repo-root `.env` (Bun loads `.env` from CWD only), so run them via the root wrappers `bun run provision:<app>` / `bun run deploy:<app>` (cliproxy, gateway, umami) instead of `--cwd`.
 - **Changesets**: `@changesets/cli` for versioning. Renovate PRs get auto-generated changeset files.
 - **Tests**: Colocated `*.test.ts` alongside source. Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic snapshots. Mock at boundaries (fetch, Bun.spawn), not internals. CI runs `bun test --recursive` as a parallel job alongside lint/type-check.
 - **CI Node pin**: All workflows running `bun run lint` or `bunx tsc` must pin Node 24 via `actions/setup-node` — ESLint binary shebang uses system Node, which on ubuntu-latest is Node 20 (lacks ES2024 APIs like `Object.groupBy`).
@@ -120,6 +120,8 @@ bunx @marcusrbrown/infra status                   # Unified status (all deployme
 bunx @marcusrbrown/infra status --json            # Machine-readable status
 bunx @marcusrbrown/infra mcp                      # Start MCP server
 bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on server
+bun run provision:umami                         # Provision umami droplet (loads root .env; also :cliproxy, :gateway)
+bun run deploy:umami                            # Local umami deploy (loads root .env; also :cliproxy, :gateway)
 ```
 
 ## NOTES

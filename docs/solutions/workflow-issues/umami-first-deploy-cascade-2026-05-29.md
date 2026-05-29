@@ -27,7 +27,7 @@ The distinction this time: **five of the seven waves were caught pre-merge by th
 
 Each wave was a distinct assumption failing at a different layer:
 
-1. **Wave 1 — Image tag red herring** (implementation): every guessed versioned Postgres tag (`postgresql-v3.1.0`, 6 other forms) returned `manifest unknown`. Only `postgresql-latest` resolved — which the "never pin `latest`" rule forbids as a version substitute.
+1. **Wave 1 — Image tag red herring** (implementation): every guessed versioned Umami tag (`postgresql-v3.1.0`, 6 other forms — all for the `umamisoftware/umami` image, distinct from the separate `postgres:15-alpine`) returned `manifest unknown`. Only `postgresql-latest` resolved — which the "never pin `latest`" rule forbids as a version substitute.
 2. **Wave 2 — Admin-rotation reachability** (caught by `ce:review` autofix): rotation curled `http://localhost:3000` on the droplet **host** shell, but the compose stack never publishes `:3000` to the host — so the curl always connection-refused, producing "no token → already rotated → skip." Rotation could **never** have run.
 3. **Wave 3 — v3.1.0 password endpoint** (caught by Fro Bot review): the rotation targeted `POST /api/users/me/password` with `{password}` — a route that **does not exist** in Umami v3.1.0. With fail-closed rotation (Wave 5), every first deploy would have aborted.
 4. **Wave 4 — Auto-created ungated environment** (post-merge): merging PR #321 made GitHub auto-create the `umami` environment with **zero protection rules**, and the merge push fired the deploy with no approval gate (it failed benignly at "Validate required secrets", pre-SSH).
@@ -100,14 +100,14 @@ The auto-triggered ungated run failed benignly (secret-validation step, pre-SSH)
 
 ### Wave 5 — Fail-closed rotation + Caddy staged after rotation
 
-The deploy brings up `db` + `umami` internal-only, rotates admin over the internal network, **then** starts `caddy` — so there's never a public window with default creds. Rotation fails closed: a connection failure (curl exit 7/255) aborts; a clean auth rejection (exit 22) is the only "skip"; success requires the new password logging in **and** the default being rejected. The bearer token is passed via a stdin curl-config file, never argv (not `ps`-visible).
+The deploy brings up `db` + `umami` internal-only, rotates admin over the internal network, **then** starts `caddy` — so there's never a public window with default creds. Rotation fails closed: any non-zero login exit other than 22 aborts (`deploy.ts:433` — e.g. curl exit 7 connection-refused, 255 ssh failure); exit 22 (`--fail-with-body` clean auth rejection) is the only "skip"; success requires the new password logging in **and** the default being rejected. The bearer token is passed via a stdin curl-config file, never argv (not `ps`-visible).
 
 ### Wave 6 — DB-password fingerprint guard
 
 `POSTGRES_PASSWORD` is fixed at volume init; changing it later bricks auth. `deploy.ts` writes a fingerprint sentinel and refuses a bricking rotation structurally — and the sentinel read checks the exit code so an *unreadable* sentinel fails closed instead of masquerading as first-deploy (empty):
 
 ```ts
-const SENTINEL = '/opt/umami/.db-password-fingerprint'
+const REMOTE_FINGERPRINT_PATH = `${REMOTE_DIR}/.db-password-fingerprint`
 // read fails closed: distinguish "no such file" (first deploy) from a transport/read error
 // DATABASE_URL password is encodeURIComponent-encoded (@ : / ? # % aren't caught by the shell-metachar validator)
 ```

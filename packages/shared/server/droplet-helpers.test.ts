@@ -1,4 +1,4 @@
-import {mkdtempSync, readFileSync, writeFileSync} from 'node:fs'
+import {mkdtempSync, readFileSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
@@ -7,7 +7,9 @@ import {
   dropletExists,
   getDropletIpWithWait,
   getSshFingerprint,
+  materializeIdentityFile,
   pinHostKeys,
+  run,
   runCapture,
   scp,
   sleep,
@@ -104,6 +106,29 @@ describe('droplet-helpers', () => {
       const result = ssh('example.com', 'ls', 'deploy-user')
       expect(result[7]).toBe('deploy-user@example.com')
     })
+
+    it('prepends -i <path> and IdentitiesOnly=yes when identityFile is set', () => {
+      const result = ssh('1.2.3.4', 'echo hello', 'root', {identityFile: '/tmp/x/key'})
+      expect(result).toEqual([
+        'ssh',
+        '-i',
+        '/tmp/x/key',
+        '-o',
+        'IdentitiesOnly=yes',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        'ConnectTimeout=10',
+        'root@1.2.3.4',
+        'echo hello',
+      ])
+    })
+
+    it('is byte-identical to the no-opts form when opts omits identityFile', () => {
+      expect(ssh('1.2.3.4', 'echo hello', 'root', {})).toEqual(ssh('1.2.3.4', 'echo hello', 'root'))
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -129,6 +154,29 @@ describe('droplet-helpers', () => {
     it('uses the provided user in user@host:target', () => {
       const result = scp('host.example.com', '/src', '/dst', 'myuser')
       expect(result[8]).toBe('myuser@host.example.com:/dst')
+    })
+
+    it('prepends -i <path> and IdentitiesOnly=yes when identityFile is set', () => {
+      const result = scp('1.2.3.4', '/local/file', '/remote/path', 'root', {identityFile: '/tmp/x/key'})
+      expect(result).toEqual([
+        'scp',
+        '-i',
+        '/tmp/x/key',
+        '-o',
+        'IdentitiesOnly=yes',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        'ConnectTimeout=10',
+        '/local/file',
+        'root@1.2.3.4:/remote/path',
+      ])
+    })
+
+    it('is byte-identical to the no-opts form when opts omits identityFile', () => {
+      expect(scp('1.2.3.4', '/src', '/dst', 'root', {})).toEqual(scp('1.2.3.4', '/src', '/dst', 'root'))
     })
   })
 
@@ -359,6 +407,77 @@ describe('droplet-helpers', () => {
       spies.push(spawnSpy)
 
       await expect(waitForSsh('1.2.3.4', 'root', {maxAttempts: 2, intervalMs: 1})).rejects.toThrow(/Timed out/)
+    })
+
+    it('forwards identityFile into the spawned ssh argv', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(makeSpawnResult('ready', 0) as ReturnType<typeof Bun.spawn>)
+      spies.push(spawnSpy)
+
+      await waitForSsh('1.2.3.4', 'root', {maxAttempts: 1, intervalMs: 1, identityFile: '/tmp/x/key'})
+
+      const argv = spawnSpy.mock.calls[0]?.[0] as string[]
+      expect(argv).toContain('-i')
+      expect(argv).toContain('/tmp/x/key')
+      expect(argv).toContain('IdentitiesOnly=yes')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // materializeIdentityFile
+  // -------------------------------------------------------------------------
+
+  describe('materializeIdentityFile', () => {
+    it('writes the key to a 0600 file ending in exactly one newline', () => {
+      const key = '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----'
+      const {path, cleanup} = materializeIdentityFile(key)
+      try {
+        const contents = readFileSync(path, 'utf-8')
+        expect(contents).toBe(`${key}\n`)
+        expect(statSync(path).mode & 0o777).toBe(0o600)
+      } finally {
+        cleanup()
+      }
+    })
+
+    it('does not add a second trailing newline when the key already ends in one', () => {
+      const key = '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n'
+      const {path, cleanup} = materializeIdentityFile(key)
+      try {
+        expect(readFileSync(path, 'utf-8')).toBe(key)
+      } finally {
+        cleanup()
+      }
+    })
+
+    it('cleanup removes the file and is idempotent', () => {
+      const {path, cleanup} = materializeIdentityFile('key-bytes')
+      expect(statSync(path).isFile()).toBe(true)
+      cleanup()
+      expect(() => statSync(path)).toThrow()
+      expect(() => cleanup()).not.toThrow()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // run — throws on non-zero exit (does NOT call process.exit)
+  // -------------------------------------------------------------------------
+
+  describe('run', () => {
+    it('rejects with an error containing the label and stderr when the command exits non-zero', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn')
+        .mockReturnValueOnce(makeSpawnResultWithStderr('connection refused', 1) as ReturnType<typeof Bun.spawn>)
+        .mockReturnValueOnce(makeSpawnResultWithStderr('connection refused', 1) as ReturnType<typeof Bun.spawn>)
+      spies.push(spawnSpy)
+
+      await expect(run('copy files', ['scp', 'x', 'y'])).rejects.toThrow(/copy files/)
+      await expect(run('copy files', ['scp', 'x', 'y'])).rejects.toThrow(/connection refused/)
+    })
+
+    it('resolves without throwing when the command exits zero', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(makeSpawnResult('ok', 0) as ReturnType<typeof Bun.spawn>)
+      spies.push(spawnSpy)
+
+      await expect(run('deploy', ['docker', 'compose', 'up'])).resolves.toBeUndefined()
     })
   })
 

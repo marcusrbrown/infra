@@ -8,6 +8,7 @@ import {
   cliproxyStatusAction,
   formatDurationMs,
   formatUsageSummaryLine,
+  getCliproxyStatusSummary,
   levelLabel,
   stripTrailingSlash,
   toNumber,
@@ -131,25 +132,46 @@ describe('cliproxy status helpers', () => {
   })
 
   describe('checkUsageStats', () => {
-    it('returns ok when failures are zero (nested usage object)', async () => {
+    it('returns ok for empty array (idle)', async () => {
       globalThis.fetch = createFetchImplementation(
-        async () =>
-          new Response(
-            JSON.stringify({failed_requests: 0, usage: {total_requests: 10, failure_count: 0, success_count: 10}}),
-            {status: 200, headers: {'content-type': 'application/json'}},
-          ),
+        async () => new Response('[]', {status: 200, headers: {'content-type': 'application/json'}}),
       )
 
       const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
 
       expect(result.level).toBe('ok')
-      expect(result.summary).toBe('total_requests=10, failure_count=0')
+      expect(result.summary).toMatch(/idle|recent: 0/)
     })
 
-    it('returns ok with flat payload (backwards compat)', async () => {
+    it('returns ok for all-success queue array', async () => {
+      const queue = [{status: 200}, {status: 201}, {status: 200}]
+      globalThis.fetch = createFetchImplementation(
+        async () => new Response(JSON.stringify(queue), {status: 200, headers: {'content-type': 'application/json'}}),
+      )
+
+      const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
+
+      expect(result.level).toBe('ok')
+      expect(result.summary).toContain('recent: 3')
+    })
+
+    it('returns warning for queue with error-status records', async () => {
+      const queue = [{status: 200}, {status: 500}, {status: 200}]
+      globalThis.fetch = createFetchImplementation(
+        async () => new Response(JSON.stringify(queue), {status: 200, headers: {'content-type': 'application/json'}}),
+      )
+
+      const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
+
+      expect(result.level).toBe('warning')
+      expect(result.summary).toContain('recent: 3')
+      expect(result.summary).toContain('errors: 1')
+    })
+
+    it('returns warning when usage-queue returns a non-array object', async () => {
       globalThis.fetch = createFetchImplementation(
         async () =>
-          new Response(JSON.stringify({total_requests: 10, failure_count: 0}), {
+          new Response(JSON.stringify({unexpected: 'object'}), {
             status: 200,
             headers: {'content-type': 'application/json'},
           }),
@@ -157,24 +179,7 @@ describe('cliproxy status helpers', () => {
 
       const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
 
-      expect(result.level).toBe('ok')
-      expect(result.summary).toBe('total_requests=10, failure_count=0')
-    })
-
-    it('returns warning when token refresh is likely needed', async () => {
-      globalThis.fetch = createFetchImplementation(
-        async () =>
-          new Response(
-            JSON.stringify({failed_requests: 3, usage: {total_requests: 10, failure_count: 3, success_count: 7}}),
-            {status: 200, headers: {'content-type': 'application/json'}},
-          ),
-      )
-
-      const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
-
       expect(result.level).toBe('warning')
-      expect(result.summary).toContain('total_requests=10, failure_count=3')
-      expect(result.summary).toContain('token refresh likely needed')
     })
 
     it('returns warning when rate limited', async () => {
@@ -258,27 +263,37 @@ describe('cliproxy status helpers', () => {
   })
 
   describe('formatUsageSummaryLine', () => {
-    it('formats zero-failure summary', () => {
+    it('formats a recent-activity summary with no errors', () => {
       const result = formatUsageSummaryLine({
         title: 'Usage stats',
         level: 'ok',
-        summary: 'total_requests=10, failure_count=0',
+        summary: 'recent: 10',
       })
 
-      expect(result).toBe('Requests: 10 total, 0 failed (0.0% failure rate)')
+      expect(result).toBe('Recent requests: 10')
     })
 
-    it('formats non-zero failure summary with correct rate', () => {
+    it('formats a recent-activity summary with errors appended', () => {
       const result = formatUsageSummaryLine({
         title: 'Usage stats',
         level: 'warning',
-        summary: 'total_requests=10, failure_count=3 (token refresh likely needed)',
+        summary: 'recent: 10, errors: 3',
       })
 
-      expect(result).toBe('Requests: 10 total, 3 failed (30.0% failure rate)')
+      expect(result).toBe('Recent requests: 10, 3 errors')
     })
 
-    it('returns null when summary has no numeric fields', () => {
+    it('formats an idle recent summary', () => {
+      const result = formatUsageSummaryLine({
+        title: 'Usage stats',
+        level: 'ok',
+        summary: 'recent: 0 (idle)',
+      })
+
+      expect(result).toBe('Recent requests: 0')
+    })
+
+    it('returns null when summary has no recent-activity field', () => {
       const result = formatUsageSummaryLine({
         title: 'Usage stats',
         level: 'warning',
@@ -288,7 +303,7 @@ describe('cliproxy status helpers', () => {
       expect(result).toBeNull()
     })
 
-    it('returns null for error summaries without numeric fields', () => {
+    it('returns null for error summaries without a recent field', () => {
       const result = formatUsageSummaryLine({
         title: 'Usage stats',
         level: 'error',
@@ -296,16 +311,6 @@ describe('cliproxy status helpers', () => {
       })
 
       expect(result).toBeNull()
-    })
-
-    it('handles zero total requests without division by zero', () => {
-      const result = formatUsageSummaryLine({
-        title: 'Usage stats',
-        level: 'ok',
-        summary: 'total_requests=0, failure_count=0',
-      })
-
-      expect(result).toBe('Requests: 0 total, 0 failed (0.0% failure rate)')
     })
   })
 })
@@ -385,5 +390,213 @@ describe('cliproxyStatusAction (Tier-2 ctx capture)', () => {
     } finally {
       if (savedKey !== undefined) process.env.CLIPROXY_MANAGEMENT_KEY = savedKey
     }
+  })
+})
+
+describe('usage-queue migration', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('populated usage-queue returns recent-activity summary with correct total and error count', async () => {
+    const queue = [
+      {status: 200, model: 'claude-3-5-sonnet'},
+      {status: 500, model: 'claude-3-5-sonnet'},
+      {status: 200, model: 'claude-3-5-sonnet'},
+    ]
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/v0/management/usage-queue')) {
+        return new Response(JSON.stringify(queue), {status: 200, headers: {'content-type': 'application/json'}})
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
+
+    expect(result.level).not.toBe('error')
+    expect(result.summary).toContain('recent: 3')
+    expect(result.summary).toContain('errors: 1')
+  })
+
+  it('empty usage-queue returns ok/idle result, not an error', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/v0/management/usage-queue')) {
+        return new Response('[]', {status: 200, headers: {'content-type': 'application/json'}})
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
+
+    expect(result.level).toBe('ok')
+    expect(result.summary).toMatch(/idle|recent: 0/)
+  })
+
+  it('malformed usage-queue response returns warning, not error, and does not throw', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/v0/management/usage-queue')) {
+        return new Response('{"not":"an-array"}', {status: 200, headers: {'content-type': 'application/json'}})
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const result = await checkUsageStats('https://cliproxy.example.com', 'secret')
+
+    expect(result.level).toBe('warning')
+  })
+
+  it('formatUsageSummaryLine returns a human-friendly line for recent-window summary', () => {
+    const result = formatUsageSummaryLine({
+      title: 'Usage stats',
+      level: 'ok',
+      summary: 'recent: 5, errors: 1',
+    })
+
+    expect(result).not.toBeNull()
+    expect(result).toContain('5')
+  })
+})
+
+describe('management auth probe (ban-awareness)', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('bad management key causes at most one management fetch and skips version+usage calls', async () => {
+    const managementFetchUrls: string[] = []
+
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      const hdrs = init?.headers
+      const hasManagementKey =
+        hdrs instanceof Headers
+          ? hdrs.has('x-management-key')
+          : hdrs !== null && hdrs !== undefined && typeof hdrs === 'object' && 'x-management-key' in hdrs
+      if (url.includes('/v0/management/') && hasManagementKey) {
+        managementFetchUrls.push(url)
+        return new Response('Unauthorized', {status: 401})
+      }
+
+      if (url.includes('/healthz') || !url.includes('/v0/management/')) {
+        return new Response('ok', {status: 200})
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx} = createCapturedCtx()
+    // Auth failure yields error-level result → exit(1) → MockProcessExit thrown
+    try {
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'bad-key'}, ctx)
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+    }
+
+    expect(managementFetchUrls.length).toBe(1)
+    expect(managementFetchUrls[0]).toContain('/v0/management/config')
+  })
+
+  it('403 with ban body surfaces a distinct IP-banned message', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/v0/management/config')) {
+        return new Response(JSON.stringify({error: 'IP banned'}), {
+          status: 403,
+          headers: {'content-type': 'application/json'},
+        })
+      }
+
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    // 403+ban → error level → exit(1)
+    try {
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'any-key'}, ctx)
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+    }
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output.toLowerCase()).toMatch(/ip.?ban/)
+  })
+
+  it('auth error message does not contain the management key value', async () => {
+    const secretKey = 'super-secret-mgmt-key-12345'
+
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/v0/management/config')) {
+        return new Response('Unauthorized', {status: 401})
+      }
+
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    // 401 → error level → exit(1)
+    try {
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: secretKey}, ctx)
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+    }
+
+    const allOutput = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(allOutput).not.toContain(secretKey)
+  })
+
+  it('successful probe allows version and usage checks to proceed in parallel', async () => {
+    const fetchedUrls: string[] = []
+
+    globalThis.fetch = createFetchImplementation(async url => {
+      fetchedUrls.push(url)
+      if (url.includes('/v0/management/config')) {
+        return new Response(JSON.stringify({config: 'ok'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      }
+
+      if (url.includes('/v0/management/usage-queue')) {
+        return new Response('[]', {status: 200, headers: {'content-type': 'application/json'}})
+      }
+
+      if (url.includes('/v0/management/latest-version')) {
+        return new Response(JSON.stringify({'latest-version': 'v7.1.31'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      }
+
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx} = createCapturedCtx()
+    await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'valid-key'}, ctx)
+
+    expect(fetchedUrls.some(u => u.includes('/v0/management/latest-version'))).toBe(true)
+    expect(fetchedUrls.some(u => u.includes('/v0/management/usage-queue'))).toBe(true)
+  })
+
+  it('getCliproxyStatusSummary with bad key fires only one management fetch', async () => {
+    const managementFetchUrls: string[] = []
+
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      const hdrs = init?.headers
+      const hasKey =
+        hdrs instanceof Headers
+          ? hdrs.has('x-management-key')
+          : hdrs !== null && hdrs !== undefined && typeof hdrs === 'object' && 'x-management-key' in hdrs
+      if (url.includes('/v0/management/') && hasKey) {
+        managementFetchUrls.push(url)
+        return new Response('Unauthorized', {status: 401})
+      }
+
+      return new Response('ok', {status: 200})
+    })
+
+    await getCliproxyStatusSummary('https://cliproxy.example.com', 'bad-key', false)
+
+    expect(managementFetchUrls.length).toBe(1)
   })
 })

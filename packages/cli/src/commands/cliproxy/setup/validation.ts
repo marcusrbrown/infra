@@ -4,11 +4,12 @@ import {z} from 'zod'
 
 import {parseProviders, type ProviderId} from './providers'
 
-// Permissive schema: unknown fields preserved via passthrough()
+// Permissive schema: unknown fields preserved via passthrough().
+// owned_by is optional — CLIProxyAPI v7 may omit it; provider is inferred from id instead.
 const modelEntrySchema = z
   .object({
     id: z.string(),
-    owned_by: z.string(),
+    owned_by: z.string().optional(),
   })
   .passthrough()
 
@@ -21,6 +22,32 @@ const modelsResponseSchema = z
 export const MODEL_ID_RE = /^(?:anthropic|openai)\/[a-z\d](?:[a-z\d.\-]*[a-z\d])?$/
 
 const HTTP_TIMEOUT_MS = 10_000
+
+type ModelEntry = z.infer<typeof modelEntrySchema>
+
+// Known bare-id patterns per provider, used only when owned_by is absent
+// (e.g. CLIProxyAPI v7 omits owned_by from /v1/models entries).
+const PROVIDER_ID_PATTERNS: Record<string, RegExp> = {
+  openai: /^(?:gpt-|o1-|o3-|codex)/i,
+  anthropic: /^claude-/i,
+}
+
+/**
+ * Decides whether a /v1/models entry belongs to a provider.
+ * Prefers owned_by when present; falls back to id prefix / known bare-id
+ * patterns when absent. Display/validation-only — never an auth or trust signal.
+ */
+function entryMatchesProvider(entry: ModelEntry, provider: string): boolean {
+  if (entry.owned_by !== undefined) {
+    return entry.owned_by === provider
+  }
+  const id = entry.id ?? ''
+  if (id.startsWith(`${provider}/`)) {
+    return true
+  }
+  const pattern = PROVIDER_ID_PATTERNS[provider]
+  return pattern === undefined ? false : pattern.test(id)
+}
 
 /** Local copy — avoids a circular import with setup.ts (validation → setup → validation). */
 function extractErrorMessage(error: unknown): string {
@@ -120,9 +147,9 @@ export async function verifyModelsAvailable(
 
   const entries = parsed.data
 
-  // OpenAI presence check
+  // OpenAI presence check.
   if (providers.includes('openai')) {
-    const hasOpenAi = entries.some(e => e.owned_by === 'openai')
+    const hasOpenAi = entries.some(e => entryMatchesProvider(e, 'openai'))
     if (!hasOpenAi) {
       throw new Error('No OpenAI models on proxy — is the Codex token loaded? Try `cliproxy login codex`.')
     }
@@ -137,7 +164,7 @@ export async function verifyModelsAvailable(
   if (!modelPresent) {
     // List available ids for the matching provider only
     const matchingIds = providerPrefix
-      ? entries.filter(e => e.owned_by === providerPrefix).map(e => e.id)
+      ? entries.filter(e => entryMatchesProvider(e, providerPrefix)).map(e => e.id)
       : entries.map(e => e.id)
     const available = matchingIds.length > 0 ? matchingIds.join(', ') : '(none)'
     throw new Error(`Model "${bareId}" not found on proxy. Available ${providerPrefix ?? 'models'}: ${available}`)

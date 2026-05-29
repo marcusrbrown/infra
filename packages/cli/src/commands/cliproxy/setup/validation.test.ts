@@ -251,6 +251,73 @@ describe('verifyModelsAvailable', () => {
     await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).resolves.toBeUndefined()
   })
 
+  it('regression: entries WITH owned_by openai still parse and are detected as OpenAI', async () => {
+    const fixture = {
+      data: [
+        {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+        {id: 'gpt-5.4-mini', owned_by: 'openai'},
+      ],
+      object: 'list',
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(fixture))) as unknown as typeof fetch
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).resolves.toBeUndefined()
+  })
+
+  it('v7 compatibility: entries omitting owned_by parse without error and OpenAI is detected via id prefix', async () => {
+    // CLIProxyAPI v7 may return entries without owned_by — these must not fail Zod parse,
+    // and an entry like {id: 'openai/gpt-5.4-mini'} should be detected as an OpenAI model.
+    const v7Fixture = {
+      data: [
+        {id: 'openai/gpt-5.4-mini', object: 'model'},
+        {id: 'anthropic/claude-sonnet-4-6', object: 'model'},
+      ],
+      object: 'list',
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(v7Fixture))) as unknown as typeof fetch
+
+    // Requesting a model that doesn't exist so we can observe which check throws.
+    // The error must be "not found on proxy" — not a Zod parse error or "No OpenAI models on proxy".
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/nonexistent-model')).rejects.toThrow(
+      'not found on proxy',
+    )
+  })
+
+  it('v7 compatibility: mixed entries (some with owned_by, some without) resolve correctly', async () => {
+    const mixedFixture = {
+      data: [
+        {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+        // v7-style OpenAI entry — no owned_by, id has openai/ prefix
+        {id: 'openai/gpt-5.4-mini', object: 'model'},
+      ],
+      object: 'list',
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(mixedFixture))) as unknown as typeof fetch
+
+    // Should detect OpenAI via id inference and pass the OpenAI presence check.
+    // The error must be "not found on proxy" — not a Zod parse error or "No OpenAI models on proxy".
+    await expect(
+      verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'openai'], 'openai/nonexistent-model'),
+    ).rejects.toThrow('not found on proxy')
+  })
+
+  it('v7 compatibility: entry with unrecognizable id and no owned_by does not crash (falls through as non-OpenAI)', async () => {
+    const unknownIdFixture = {
+      data: [
+        // No owned_by, id doesn't map to any known provider
+        {id: 'some-unknown-model', object: 'model'},
+        // A real OpenAI entry with owned_by — detection should succeed via this entry
+        {id: 'gpt-5.4-mini', owned_by: 'openai'},
+      ],
+      object: 'list',
+    }
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(unknownIdFixture))) as unknown as typeof fetch
+
+    // Should still pass — openai is detected via owned_by on the second entry,
+    // and the unknown entry does not cause a crash.
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['openai'], 'openai/gpt-5.4-mini')).resolves.toBeUndefined()
+  })
+
   it('error path: dual providers, no owned_by=openai entries — throws no-openai-models message', async () => {
     const anthropicOnlyData = {
       data: [

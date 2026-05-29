@@ -94,8 +94,34 @@ export async function checkHttpReachability(url: string, verbose: boolean): Prom
   }
 }
 
+/** Count records in a usage-queue array that look like errors/failures. Defensive: only counts when a recognizable field exists. */
+function countQueueErrors(records: unknown[]): number {
+  let count = 0
+  for (const record of records) {
+    if (record === null || typeof record !== 'object') {
+      continue
+    }
+
+    const rec = record as Record<string, unknown>
+
+    // Status field >= 400 indicates an HTTP-level error
+    const status = toNumber(rec.status)
+    if (status !== null && status >= 400) {
+      count++
+      continue
+    }
+
+    // Explicit error/failure markers
+    if (rec.error !== undefined || rec.failed === true || rec.failure === true) {
+      count++
+    }
+  }
+
+  return count
+}
+
 export async function checkUsageStats(baseUrl: string, key: string): Promise<CheckResult> {
-  const endpoint = `${baseUrl}/v0/management/usage`
+  const endpoint = `${baseUrl}/v0/management/usage-queue?count=50`
 
   try {
     const response = await fetch(endpoint, {
@@ -115,31 +141,35 @@ export async function checkUsageStats(baseUrl: string, key: string): Promise<Che
       return {
         title: 'Usage stats',
         level: 'error',
-        summary: `GET /v0/management/usage failed with HTTP ${response.status}`,
+        summary: `GET /v0/management/usage-queue failed with HTTP ${response.status}`,
       }
     }
 
     const payload = await parseJsonResponse(response)
-    const top = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
-    const usage = top.usage && typeof top.usage === 'object' ? (top.usage as Record<string, unknown>) : top
-    const totalRequests = toNumber(usage.total_requests)
-    const failureCount = toNumber(usage.failure_count)
 
-    if (totalRequests === null || failureCount === null) {
+    if (!Array.isArray(payload)) {
       return {
         title: 'Usage stats',
         level: 'warning',
-        summary: 'Management usage payload is missing expected numeric fields.',
+        summary: 'Usage-queue response was not an array — cannot parse recent activity.',
+      }
+    }
+
+    const total = payload.length
+    const errors = countQueueErrors(payload)
+
+    if (total === 0) {
+      return {
+        title: 'Usage stats',
+        level: 'ok',
+        summary: 'recent: 0 (idle)',
       }
     }
 
     return {
       title: 'Usage stats',
-      level: failureCount > 0 ? 'warning' : 'ok',
-      summary:
-        failureCount > 0
-          ? `total_requests=${totalRequests}, failure_count=${failureCount} (token refresh likely needed)`
-          : `total_requests=${totalRequests}, failure_count=${failureCount}`,
+      level: errors > 0 ? 'warning' : 'ok',
+      summary: errors > 0 ? `recent: ${total}, errors: ${errors}` : `recent: ${total}`,
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -196,6 +226,70 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
   }
 }
 
+/**
+ * Probe the management API with a cheap auth check before issuing parallel calls.
+ * Returns null on success, or a CheckResult describing the auth failure.
+ * Never throws.
+ */
+async function probeManagementAuth(baseUrl: string, key: string): Promise<CheckResult | null> {
+  const endpoint = `${baseUrl}/v0/management/config`
+
+  try {
+    const response = await fetch(endpoint, {
+      headers: managementHeaders(key),
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    })
+
+    if (response.ok) {
+      return null
+    }
+
+    if (response.status === 403) {
+      // Could be an IP ban — inspect body for ban-ish markers
+      const payload = await parseJsonResponse(response)
+      const isBanBody =
+        payload !== null &&
+        typeof payload === 'object' &&
+        Object.values(payload as Record<string, unknown>).some(v => typeof v === 'string' && /ban/i.test(v))
+
+      if (isBanBody) {
+        return {
+          title: 'Management access',
+          level: 'error',
+          summary: 'IP banned — stop retrying for ~30 min. Management checks skipped.',
+        }
+      }
+
+      return {
+        title: 'Management access',
+        level: 'error',
+        summary: 'Management API returned HTTP 403. Management checks skipped.',
+      }
+    }
+
+    if (response.status === 401) {
+      return {
+        title: 'Management access',
+        level: 'error',
+        summary: 'Management API returned HTTP 401 (invalid key). Management checks skipped.',
+      }
+    }
+
+    return {
+      title: 'Management access',
+      level: 'warning',
+      summary: `Management auth probe returned HTTP ${response.status}. Management checks skipped.`,
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      title: 'Management access',
+      level: 'error',
+      summary: `Management auth probe failed: ${message}`,
+    }
+  }
+}
+
 function printCheckResult(result: CheckResult, ctx: ActionCtx): void {
   ctx.console.log(`[${levelLabel(result.level)}] ${result.title}`)
   ctx.console.log(`  ${result.summary}`)
@@ -212,26 +306,35 @@ function formatCheckSummary(result: CheckResult): string {
 }
 
 export function formatUsageSummaryLine(result: CheckResult): string | null {
-  const totalMatch = /total_requests=(\d+)/.exec(result.summary)
-  const failureMatch = /failure_count=(\d+)/.exec(result.summary)
-
-  if (!totalMatch || !failureMatch) {
+  // v7 recent-window format: "recent: N" or "recent: N, errors: M"
+  const recentMatch = /recent:\s*(\d+)/.exec(result.summary)
+  if (!recentMatch) {
     return null
   }
-
-  const total = Number(totalMatch[1])
-  const failed = Number(failureMatch[1])
-  const failureRate = total === 0 ? 0 : (failed / total) * 100
-
-  return `Requests: ${total} total, ${failed} failed (${failureRate.toFixed(1)}% failure rate)`
+  const total = Number(recentMatch[1])
+  const errorMatch = /errors:\s*(\d+)/.exec(result.summary)
+  const errors = errorMatch ? Number(errorMatch[1]) : 0
+  return `Recent requests: ${total}${errors > 0 ? `, ${errors} errors` : ''}`
 }
 
 export async function getCliproxyStatusSummary(baseUrl: string, key: string, verbose: boolean): Promise<StatusSummary> {
   const normalizedBaseUrl = stripTrailingSlash(baseUrl)
   const httpPromise = checkHttpReachability(normalizedBaseUrl, verbose)
-  const managementResultsPromise = key
-    ? Promise.all([checkUsageStats(normalizedBaseUrl, key), checkVersion(normalizedBaseUrl, key)])
-    : Promise.resolve(null)
+
+  let managementResultsPromise: Promise<[CheckResult, CheckResult] | null>
+
+  if (key) {
+    managementResultsPromise = (async () => {
+      const authFailure = await probeManagementAuth(normalizedBaseUrl, key)
+      if (authFailure !== null) {
+        return null
+      }
+
+      return Promise.all([checkUsageStats(normalizedBaseUrl, key), checkVersion(normalizedBaseUrl, key)])
+    })()
+  } else {
+    managementResultsPromise = Promise.resolve(null)
+  }
 
   const [httpResult, managementResults] = await Promise.all([httpPromise, managementResultsPromise])
   const [usageResult, versionResult] = managementResults ?? [null, null]
@@ -267,13 +370,20 @@ export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCt
     let capturedUsageResult: CheckResult | undefined
 
     if (managementKey) {
-      const [usageResult, versionResult] = await Promise.all([
-        checkUsageStats(baseUrl, managementKey),
-        checkVersion(baseUrl, managementKey),
-      ])
+      // Single auth probe first — prevents IP-ban escalation from parallel bad-key attempts
+      const authFailure = await probeManagementAuth(baseUrl, managementKey)
 
-      capturedUsageResult = usageResult
-      results.push(usageResult, versionResult)
+      if (authFailure === null) {
+        const [usageResult, versionResult] = await Promise.all([
+          checkUsageStats(baseUrl, managementKey),
+          checkVersion(baseUrl, managementKey),
+        ])
+
+        capturedUsageResult = usageResult
+        results.push(usageResult, versionResult)
+      } else {
+        results.push(authFailure)
+      }
     } else {
       results.push({
         title: 'Management checks',

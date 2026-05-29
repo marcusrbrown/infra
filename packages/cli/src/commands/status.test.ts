@@ -31,11 +31,21 @@ const healthyGateway: StatusSummary = {
   usageStats: '—',
 }
 
+const healthyUmami: StatusSummary = {
+  app: 'umami',
+  http: 'OK: umami:running/healthy',
+  lastDeploy: '—',
+  version: '—',
+  contentHash: '—',
+  usageStats: '—',
+}
+
 function makeDeps(overrides?: Partial<Parameters<typeof registerStatus>[1]>): Parameters<typeof registerStatus>[1] {
   return {
     getKeewebStatusSummary: async () => healthyKeeweb,
     getCliproxyStatusSummary: async () => healthyCliproxy,
     getGatewayStatusSummary: async () => healthyGateway,
+    getUmamiStatusSummary: async () => healthyUmami,
     ...overrides,
   }
 }
@@ -52,6 +62,30 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     expect(expectCapturedToInclude(captured, '| keeweb | OK | 2026-04-12 10:00 | — | match | — |')).toBe(true)
     expect(expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 | — | 12 req / 0 fail |')).toBe(true)
     expect(expectCapturedToInclude(captured, '| gateway | OK: gateway:running/healthy | — | — | — | — |')).toBe(true)
+    expect(expectCapturedToInclude(captured, '| umami | OK: umami:running/healthy | — | — | — | — |')).toBe(true)
+  })
+
+  it('shows an error row when umami is unreachable and keeps the other results', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await unifiedStatusAction(
+      {},
+      ctx,
+      makeDeps({
+        getUmamiStatusSummary: async () => {
+          throw new Error('UMAMI_DOMAIN not set')
+        },
+      }),
+    )
+
+    expect(
+      expectCapturedToInclude(
+        captured,
+        '| umami | ❌ UMAMI_DOMAIN not set | ❌ UMAMI_DOMAIN not set | ❌ UMAMI_DOMAIN not set | ❌ UMAMI_DOMAIN not set | ❌ UMAMI_DOMAIN not set |',
+      ),
+    ).toBe(true)
+    expect(expectCapturedToInclude(captured, '| gateway | OK: gateway:running/healthy | — | — | — | — |')).toBe(true)
+    expect(captured.stderr.join('')).toContain('umami status check failed: UMAMI_DOMAIN not set')
   })
 
   it('shows an error row when one app fails and keeps the other results', async () => {
@@ -92,11 +126,13 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
       keeweb: {http: string}
       cliproxy: {version: string}
       gateway: {http: string}
+      umami: {http: string}
     }
 
     expect(parsed.keeweb.http).toBe('OK')
     expect(parsed.cliproxy.version).toBe('v1.2.3')
     expect(parsed.gateway.http).toBe('OK: gateway:running/healthy')
+    expect(parsed.umami.http).toBe('OK: umami:running/healthy')
   })
 
   it('does not write to global console (output is captured via ctx)', async () => {

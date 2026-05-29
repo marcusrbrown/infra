@@ -1,0 +1,13 @@
+{
+  "name": "@marcusrbrown/infra-umami",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "bun run src/deploy.ts",
+    "provision": "bun run server/provision-droplet.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@marcusrbrown/infra-shared": "workspace:*"
+  }
+}

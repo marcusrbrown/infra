@@ -13,6 +13,8 @@ import {createMcpAction} from '@goke/mcp'
  * - `cliproxy setup`   — interactive (@clack/prompts wizard, requires TTY)
  * - `gateway restore`  — destructive policy (replaces mitmproxy CA on live gateway, deferred to MCP v2 #292)
  * - `keeweb open`      — host-machine side effect (spawns local browser, requires user intent)
+ * - `umami deploy`     — intentionally CLI-only: mutates live deployment and requires environment approval
+ * - `umami logs`       — intentionally CLI-only: streams logs that may emit sensitive data (DB passwords, app secrets)
  */
 export const MCP_ALLOWLIST: ReadonlySet<string> = new Set([
   'gateway status',
@@ -24,6 +26,7 @@ export const MCP_ALLOWLIST: ReadonlySet<string> = new Set([
   'cliproxy config get',
   'cliproxy config set',
   'keeweb status',
+  'umami status',
   'status',
 ])
 

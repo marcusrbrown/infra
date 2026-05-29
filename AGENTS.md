@@ -6,7 +6,7 @@
 
 ## OVERVIEW
 
-Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, Fro Bot gateway deployment, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), and `gateway.fro.bot` (Fro Bot gateway on DigitalOcean).
+Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, Fro Bot gateway deployment, Umami analytics, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), and `metrics.fro.bot` (Umami analytics on DigitalOcean).
 
 ## STRUCTURE
 
@@ -14,6 +14,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── apps/keeweb/        KeeWeb deploy package (see apps/keeweb/AGENTS.md)
 ├── apps/cliproxy/      CLIProxyAPI deploy package (see apps/cliproxy/AGENTS.md)
 ├── apps/gateway/       Fro Bot gateway deploy package (see apps/gateway/AGENTS.md)
+├── apps/umami/         Umami analytics deploy package (see apps/umami/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── packages/shared/    Shared provisioning helpers (see packages/shared/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
@@ -40,6 +41,9 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Check gateway health | `bunx @marcusrbrown/infra gateway status` | SSH, docker compose ps, service states |
 | Trigger gateway deploy | `bunx @marcusrbrown/infra gateway deploy` | Remote (default) or `--local` |
 | Gateway operator docs | `apps/gateway/AGENTS.md` | Deploy flow, provisioning, CA restore, anti-patterns |
+| Check umami health | `bunx @marcusrbrown/infra umami status` | SSH, docker compose ps, service states |
+| Trigger umami deploy | `bunx @marcusrbrown/infra umami deploy` | Remote (default) or `--local` |
+| Umami operator docs | `apps/umami/AGENTS.md` | Deploy flow, admin rotation, DB-password runbook, privacy baseline |
 | Unified status | `bunx @marcusrbrown/infra status` | All deployments, `--json` for machine output |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
@@ -109,6 +113,9 @@ bunx @marcusrbrown/infra gateway deploy           # Trigger gateway deploy (GitH
 bunx @marcusrbrown/infra gateway logs gateway     # Stream gateway service logs (--tail N)
 bunx @marcusrbrown/infra gateway backup --include-ca  # Pull mitmproxy CA cert + key as tarball
 bunx @marcusrbrown/infra gateway restore --include-ca --input FILE  # Restore CA from tarball
+bunx @marcusrbrown/infra umami status             # SSH, docker compose ps, service states
+bunx @marcusrbrown/infra umami deploy             # Trigger umami deploy (GitHub Actions)
+bunx @marcusrbrown/infra umami logs               # Stream umami service logs (--tail N)
 bunx @marcusrbrown/infra status                   # Unified status (all deployments)
 bunx @marcusrbrown/infra status --json            # Machine-readable status
 bunx @marcusrbrown/infra mcp                      # Start MCP server
@@ -120,6 +127,7 @@ bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on serve
 - `DROPBOX_APP_SECRET` and `DEPLOY_SSH_KEY` are GitHub Actions secrets scoped to `keeweb` environment.
 - `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are scoped to `cliproxy` environment.
 - `GATEWAY_SSH_KEY`, `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, and `GATEWAY_HOST` are scoped to `gateway` environment. Optional: `S3_ENDPOINT`, `OBJECT_STORE_HOSTS`.
+- `UMAMI_SSH_KEY`, `UMAMI_DOMAIN`, `UMAMI_APP_SECRET`, `UMAMI_DB_PASSWORD`, and `UMAMI_ADMIN_PASSWORD` are scoped to `umami` environment. `UMAMI_DB_PASSWORD` is volume-coupled — rotate only via the `ALTER USER` runbook in `apps/umami/AGENTS.md`.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `OMO_PROVIDERS`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.
 - `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets.

@@ -125,9 +125,27 @@ Commands:
     --include-ca                       Restore the mitmproxy CA certificate and private key. Currently the only supported restore target. (default: true)
 
 
+  umami status                         Show operational health of the Umami analytics deployment via docker compose ps.
+
+    --key [key]                        Environment variable name holding the SSH host. Falls back to UMAMI_DOMAIN when omitted.
+
+
+  umami deploy                         Deploy Umami analytics. Default mode triggers the GitHub Deploy Umami workflow, while --local runs apps/umami deploy directly with Bun.
+
+    --local                            Run local deployment with Bun using apps/umami instead of triggering GitHub Actions. (default: false)
+    --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
+
+
+  umami logs [service]                 Stream logs from an Umami service via SSH and docker compose.
+
+    --tail [n]                         Number of log lines to tail from each service. (default: 100)
+    --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive credentials. (default: false)
+    --key [key]                        Environment variable name holding the SSH host. Falls back to UMAMI_DOMAIN when omitted.
+
+
   status                               Show status of all deployments
 
-    --json                             Output machine-readable JSON with keeweb, cliproxy, and gateway summary objects.
+    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, and umami summary objects.
     --verbose                          Include verbose per-app health check details when building the summary rows.
 
 

@@ -37,6 +37,7 @@ import {registerGatewayCommands} from './gateway'
 import {registerKeewebCommands} from './keeweb'
 import {MCP_ALLOWLIST, registerMcp} from './mcp'
 import {registerStatus} from './status'
+import {registerUmamiCommands} from './umami'
 
 // ─── Tool name constants ──────────────────────────────────────────────────────
 
@@ -54,6 +55,8 @@ const CLI_ONLY_TOOLS = [
   'gateway_restore',
   'keeweb_deploy',
   'keeweb_open',
+  'umami_deploy',
+  'umami_logs',
 ].sort()
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -64,6 +67,7 @@ function buildTestCli(): ReturnType<typeof goke> {
   registerKeewebCommands(cli)
   registerCliproxyCommands(cli)
   registerGatewayCommands(cli)
+  registerUmamiCommands(cli)
   registerStatus(cli)
   registerMcp(cli)
   return cli
@@ -105,7 +109,7 @@ describe('mcp integration (Tier-1, in-process)', () => {
 
   // ── tools/list assertions ──────────────────────────────────────────────────
 
-  test('tools/list returns exactly the 10 allowlist tool names', async () => {
+  test('tools/list returns exactly the allowlist tool names', async () => {
     const result = await client.listTools()
     const names = result.tools.map((t: {name: string}) => t.name).sort()
     expect(names).toEqual(EXPECTED_TOOLS)

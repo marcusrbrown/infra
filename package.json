@@ -8,9 +8,15 @@
   ],
   "scripts": {
     "changeset": "changeset",
+    "deploy:cliproxy": "bun run apps/cliproxy/src/deploy.ts",
+    "deploy:gateway": "bun run apps/gateway/src/deploy.ts",
+    "deploy:umami": "bun run apps/umami/src/deploy.ts",
     "fix": "eslint --fix",
     "lint": "eslint",
     "prepare": "simple-git-hooks",
+    "provision:cliproxy": "bun run apps/cliproxy/server/provision-droplet.ts",
+    "provision:gateway": "bun run apps/gateway/server/provision-droplet.ts",
+    "provision:umami": "bun run apps/umami/server/provision-droplet.ts",
     "test": "bun test --recursive",
     "version-changesets": "changeset version"
   },

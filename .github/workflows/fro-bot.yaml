@@ -151,7 +151,8 @@ env:
        branch. Group related lint/format/convention fixes into a single PR.
 
     5. DEPLOY PIPELINE HEALTH
-       Verify deploy infrastructure for BOTH apps is operational.
+       Verify deploy infrastructure for all four deployed apps is
+       operational.
 
        KeeWeb:
        - Check the most recent Deploy workflow run (deploy-keeweb job)
@@ -187,12 +188,38 @@ env:
          workflow runs on main — if any failed specifically with an
          Anthropic 401 / invalid-api-key error (as distinct from an
          OpenCode / Bun / network failure), flag OAuth expiry and note
-         that recovery requires manual
-         `bunx @marcusrbrown/infra cliproxy login claude`.
+          that recovery requires manual
+          `bunx @marcusrbrown/infra cliproxy login claude`.
+
+       Gateway:
+       - Check the most recent Deploy Gateway workflow run (deploy-gateway
+         job) on main. If it failed, diagnose from logs and open an issue.
+         Note: gateway has NO public HTTP surface — it connects outbound
+         to Discord and S3 only. The deploy waits on docker compose
+         service health, so a successful deploy run IS the health signal;
+         there is no URL to curl.
+       - Verify the gateway environment exists with GATEWAY_SSH_KEY,
+         GATEWAY_HOST, DISCORD_TOKEN, DISCORD_APPLICATION_ID,
+         DISCORD_GUILD_ID, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+         S3_BUCKET, and S3_REGION configured.
+       - Check .github/known_hosts contains host keys for gateway.fro.bot
+         (both domain and droplet IP entries).
+
+       Umami:
+       - Check the most recent Deploy Umami workflow run (deploy-umami
+         job) on main. If it failed, diagnose from logs and open an issue.
+       - Verify metrics.fro.bot is reachable: `curl -sf -o /dev/null -w
+         "%{http_code}" https://metrics.fro.bot/api/heartbeat` should
+         return 200. A 5xx, connection error, or timeout means the
+         analytics app is down.
+       - Verify the umami environment exists with UMAMI_SSH_KEY,
+         UMAMI_DOMAIN, UMAMI_APP_SECRET, UMAMI_DB_PASSWORD, and
+         UMAMI_ADMIN_PASSWORD configured.
+       - Check .github/known_hosts contains host keys for metrics.fro.bot
+         (both domain and droplet IP entries).
 
        Report findings as issues only for this category. Do NOT modify
-       deploy scripts, workflow files, or the CLIProxyAPI server.
-
+       deploy scripts, workflow files, or the deployed servers.
     6. LIVE SITE REVIEW
        Use `npx agent-browser` to verify the live KeeWeb deployment at
        https://kw.igg.ms.
@@ -429,6 +456,13 @@ env:
     | cliproxy | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | cliproxy | Host keys | ✅ Current / ⚠️ Stale | [details] |
     | cliproxy | OAuth token (indirect) | ✅ Fresh / ⚠️ Recent 401s | [this run's status or prior run links] |
+    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / — Skipped | [run link] |
+    | gateway | Env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | gateway | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / — Skipped | [run link] |
+    | umami | metrics.fro.bot reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
+    | umami | Env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | umami | Host keys | ✅ Current / ⚠️ Stale | [details] |
 
     ### Live Site Review
     | Check | Status | Details |

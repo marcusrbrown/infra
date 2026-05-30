@@ -1,80 +1,70 @@
 {
-  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
-  extends: ['github>marcusrbrown/renovate-config#5.2.0', 'group:allNonMajor'],
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["github>marcusrbrown/renovate-config#5.2.0", "group:allNonMajor"],
   packageRules: [
     {
-      description: ['Disable digest updates for bfra-me GitHub Actions'],
-      matchManagers: ['github-actions'],
-      matchPackageNames: ['bfra-me/.github'],
-      matchUpdateTypes: ['digest'],
+      description: ["Disable digest updates for bfra-me GitHub Actions"],
+      matchManagers: ["github-actions"],
+      matchPackageNames: ["bfra-me/.github"],
+      matchUpdateTypes: ["digest"],
       enabled: false,
     },
     {
-      description: ['Add changelog context for CLIProxyAPI Docker digest updates'],
-      matchDatasources: ['docker'],
-      matchPackageNames: ['eceasy/cli-proxy-api'],
-      sourceUrl: 'https://github.com/router-for-me/CLIProxyAPI',
-      changelogUrl: 'https://github.com/router-for-me/CLIProxyAPI/releases',
+      description: [
+        "Add changelog context for CLIProxyAPI Docker digest updates",
+      ],
+      matchDatasources: ["docker"],
+      matchPackageNames: ["eceasy/cli-proxy-api"],
+      sourceUrl: "https://github.com/router-for-me/CLIProxyAPI",
+      changelogUrl: "https://github.com/router-for-me/CLIProxyAPI/releases",
       groupName: null,
     },
     {
-      description: ['Add changelog context for Caddy Docker image updates'],
-      matchDatasources: ['docker'],
-      matchPackageNames: ['caddy'],
-      sourceUrl: 'https://github.com/caddyserver/caddy',
-      changelogUrl: 'https://github.com/caddyserver/caddy/releases',
+      description: ["Add changelog context for Caddy Docker image updates"],
+      matchDatasources: ["docker"],
+      matchPackageNames: ["caddy"],
+      sourceUrl: "https://github.com/caddyserver/caddy",
+      changelogUrl: "https://github.com/caddyserver/caddy/releases",
       groupName: null,
     },
     {
-      description: ['Add changelog context for Umami Docker image updates'],
-      matchDatasources: ['docker'],
-      matchPackageNames: ['umamisoftware/umami'],
-      sourceUrl: 'https://github.com/umami-software/umami',
-      changelogUrl: 'https://github.com/umami-software/umami/releases',
+      description: ["Add changelog context for Umami Docker image updates"],
+      matchDatasources: ["docker"],
+      matchPackageNames: ["umamisoftware/umami"],
+      sourceUrl: "https://github.com/umami-software/umami",
+      changelogUrl: "https://github.com/umami-software/umami/releases",
       groupName: null,
     },
     {
-      description: ['Add changelog context for Postgres Docker image updates'],
-      matchDatasources: ['docker'],
-      matchPackageNames: ['postgres'],
-      sourceUrl: 'https://github.com/postgres/postgres',
-      changelogUrl: 'https://www.postgresql.org/docs/release/',
+      description: ["Add changelog context for Postgres Docker image updates"],
+      matchDatasources: ["docker"],
+      matchPackageNames: ["postgres"],
+      sourceUrl: "https://github.com/postgres/postgres",
+      changelogUrl: "https://www.postgresql.org/docs/release/",
       groupName: null,
     },
     {
-      // The github-releases datasource auto-derives source URL + release notes from depName
-      // (= the GitHub repo), so no sourceUrl/changelogUrl needed. This rule exists ONLY to keep
-      // each release a standalone PR (each fro-bot/agent bump = a gateway daemon rebuild+redeploy)
-      // instead of being grouped into group:allNonMajor.
-      description: ['Keep fro-bot/agent upstream.json releases as standalone PRs'],
-      matchDatasources: ['github-releases'],
-      matchPackageNames: ['fro-bot/agent'],
+      description: [
+        "Keep fro-bot/agent upstream.json releases as standalone PRs",
+      ],
+      matchDatasources: ["github-releases"],
+      matchPackageNames: ["fro-bot/agent"],
       groupName: null,
     },
   ],
-  // Track the upstream daemon source pin (`ref`) in each apps/*/upstream.json so new
-  // releases of the named `repo` surface as PRs. This is independent of the fro-bot/agent
-  // GitHub Action SHA-pin in .github/workflows/ (a separate consumer Renovate already tracks).
-  // depName is captured dynamically from the `repo` field, so any future apps/*/upstream.json
-  // is tracked with no additional config.
   customManagers: [
     {
-      customType: 'regex',
-      // fileMatch is a regex (not a glob) and is the current field for the renovate
-      // version this repo runs; the `managerFilePatterns` rename is renovate 40+ only.
-      fileMatch: ['apps/.+/upstream\\.json$'],
-      matchStrings: ['"repo":\\s*"(?<depName>[^"]+)"[^}]*"ref":\\s*"(?<currentValue>[^"]+)"'],
-      datasourceTemplate: 'github-releases',
-      versioningTemplate: 'semver-coerced',
+      customType: "regex",
+      managerFilePatterns: ["/apps/.+/upstream\\.json$/"],
+      matchStrings: [
+        '"repo":\\s*"(?<depName>[^"]+)"[^}]*"ref":\\s*"(?<currentValue>[^"]+)"',
+      ],
+      datasourceTemplate: "github-releases",
+      versioningTemplate: "semver-coerced",
     },
   ],
-  // postUpgradeTasks run after Renovate applies file changes but before the commit.
-  // For github-actions manager updates (workflow SHA pins), Renovate does NOT run
-  // any install step, so node_modules is empty and eslint is not available. We
-  // explicitly install with --ignore-scripts (simple-git-hooks postinstall crashes
-  // in the Renovate sandbox because .git/ is not present) before running the linter.
   postUpgradeTasks: {
-    commands: ['bun install --ignore-scripts', 'bun run fix'],
-    executionMode: 'branch',
+    commands: ["bun install --ignore-scripts", "bun run fix"],
+    executionMode: "branch",
   },
 }

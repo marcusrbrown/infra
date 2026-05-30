@@ -14,10 +14,10 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 
 ## DEPLOY FLOW
 
-1. **Preflight** (`preflightManagementKeyCheck`): GET `/v0/management/api-keys` with the local `CLIPROXY_MANAGEMENT_KEY`. Aborts on 401 (key drift), skips on missing key, fails on server errors. 10s fetch timeout.
+1. **Preflight** (`preflightManagementKeyCheck`): GET `/v0/management/config` with the local `CLIPROXY_MANAGEMENT_KEY`. Aborts on 401 (key drift), skips on missing key, fails on server errors. 10s fetch timeout.
 2. **Upload**: `Caddyfile`, `docker-compose.yaml`, and `config.yaml` (only if it does not exist on the server). `--force-config` overrides the skip.
 3. **Restart**: `docker compose pull && docker compose up -d` from `/opt/cliproxy/`.
-4. **Health gate**: GET `/v0/management/api-keys` again to confirm the proxy is up and the key still works.
+4. **Health gate**: GET `/v0/management/config` again to confirm the proxy is up and the key still works.
 
 **Critical**: `config.yaml` on the server holds runtime API keys added via the management API. The deploy must not overwrite it. The compound learning doc at `docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md` captures the original incident.
 

@@ -345,7 +345,7 @@ export function formatUsageSummaryLine(result: CheckResult): string | null {
 export async function getCliproxyStatusSummary(baseUrl: string, key: string, verbose: boolean): Promise<StatusSummary> {
   const normalizedBaseUrl = stripTrailingSlash(baseUrl)
   const [httpResult, mgmt] = await Promise.all([
-    checkHttpReachability(normalizedBaseUrl, verbose),
+    checkHttpReachability(`${normalizedBaseUrl}/healthz`, verbose),
     runManagementChecks(normalizedBaseUrl, key || undefined),
   ])
 
@@ -390,7 +390,7 @@ export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCt
     ctx.console.log('CLIProxyAPI status')
     ctx.console.log('')
 
-    const results: CheckResult[] = [await checkHttpReachability(baseUrl, verbose)]
+    const results: CheckResult[] = [await checkHttpReachability(`${baseUrl}/healthz`, verbose)]
 
     let capturedUsageResult: CheckResult | undefined
 

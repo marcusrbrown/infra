@@ -521,6 +521,19 @@ describe('assertProxyReachable', () => {
 
     await expect(assertProxyReachable('https://bad.example')).rejects.toThrow(/Proxy check failed/)
   })
+
+  it('probes /healthz: resolves when /healthz returns 200 and bare base returns 404', async () => {
+    const BASE = 'https://proxy.example'
+    let fetchedUrl: string | undefined
+    globalThis.fetch = mock(async (url: string) => {
+      fetchedUrl = url
+      if (url === `${BASE}/healthz`) return new Response('{"status":"ok"}', {status: 200})
+      return new Response('Not Found', {status: 404})
+    }) as unknown as typeof fetch
+
+    await expect(assertProxyReachable(BASE)).resolves.toBeUndefined()
+    expect(fetchedUrl).toBe(`${BASE}/healthz`)
+  })
 })
 
 // ── assertProxyKeyWorks (new TDD tests) ───────────────────────────────────────

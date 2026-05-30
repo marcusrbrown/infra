@@ -173,7 +173,7 @@ export async function verifyModelsAvailable(
 
 export async function assertProxyReachable(baseUrl: string): Promise<void> {
   try {
-    const response = await fetch(baseUrl, {
+    const response = await fetch(`${baseUrl}/healthz`, {
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
     })
 

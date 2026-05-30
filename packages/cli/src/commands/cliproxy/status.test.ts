@@ -542,6 +542,41 @@ describe('ban body word-boundary detection (FIX 5)', () => {
   })
 })
 
+describe('reachability probe targets /healthz liveness endpoint', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('cliproxyStatusAction reports HTTP reachable when /healthz returns 200 and bare base returns 404', async () => {
+    const BASE = 'https://cliproxy.example.com'
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url === `${BASE}/healthz`) return new Response('{"status":"ok"}', {status: 200})
+      if (url === BASE) return new Response('Not Found', {status: 404})
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction({url: BASE}, ctx)
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output).toContain('OK')
+    expect(output).not.toMatch(/ERROR.*HTTP reachability|HTTP reachability.*ERROR/)
+  })
+
+  it('getCliproxyStatusSummary reports http ok when /healthz returns 200 and bare base returns 404', async () => {
+    const BASE = 'https://cliproxy.example.com'
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url === `${BASE}/healthz`) return new Response('{"status":"ok"}', {status: 200})
+      if (url === BASE) return new Response('Not Found', {status: 404})
+      return new Response('ok', {status: 200})
+    })
+
+    const summary = await getCliproxyStatusSummary(BASE, '', false)
+
+    expect(summary.http).toMatch(/^OK/)
+  })
+})
+
 describe('management auth probe (ban-awareness)', () => {
   afterEach(() => {
     globalThis.fetch = originalFetch

@@ -60,9 +60,9 @@
   customManagers: [
     {
       customType: 'regex',
-      // fileMatch is a regex (not a glob) and is the current field for the renovate
-      // version this repo runs; the `managerFilePatterns` rename is renovate 40+ only.
-      fileMatch: ['apps/.+/upstream\\.json$'],
+      // managerFilePatterns treats bare strings as globs, so the path regex is wrapped in
+      // /.../ delimiters to keep regex semantics. (Renovate 40+ field; supersedes fileMatch.)
+      managerFilePatterns: ['/apps/.+/upstream\\.json$/'],
       matchStrings: ['"repo":\\s*"(?<depName>[^"]+)"[^}]*"ref":\\s*"(?<currentValue>[^"]+)"'],
       datasourceTemplate: 'github-releases',
       versioningTemplate: 'semver-coerced',

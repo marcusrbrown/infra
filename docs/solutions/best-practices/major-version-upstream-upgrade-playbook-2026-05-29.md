@@ -51,14 +51,17 @@ infer them from release notes, changelogs, or memory — confirm them.
 #  - bind-mounting a single FILE from /tmp silently creates an empty DIR at the
 #    mount point (/tmp isn't in Docker's shared paths). Use `docker create` + `docker cp`.
 #  - v7 reads config from /CLIProxyAPI/config.yaml (not /root/...).
-#  - if config omits `port`, the server binds a RANDOM port — set it or read it back.
-docker create --name probe eceasy/cli-proxy-api:v7.1.31
-docker cp ./config.yaml probe:/CLIProxyAPI/config.yaml
-docker start probe && sleep 8
-PORT=$(docker exec probe sh -c 'grep -E "^port:" /CLIProxyAPI/config.yaml')
+#  - pin `port: 8317` in config.yaml so the bind is deterministic, and publish it
+#    with -p so host curl can reach it (an unset port binds a RANDOM internal port).
+PORT=8317
+docker create --name probe -p "$PORT:$PORT" eceasy/cli-proxy-api:v7.1.31
+docker cp ./config.yaml probe:/CLIProxyAPI/config.yaml   # config.yaml sets `port: 8317`
+docker start probe
+# poll the liveness endpoint instead of a brittle sleep (reinforces the /healthz lesson)
+until curl -sf "http://localhost:$PORT/healthz" >/dev/null; do sleep 1; done
 curl -s "http://localhost:$PORT/healthz"                       # liveness shape
-curl -s "http://localhost:$PORT/v0/management/usage-queue?count=5" -H "x-management-key: …"
-curl -s "http://localhost:$PORT/v1/models" -H "Authorization: Bearer …"
+curl -s "http://localhost:$PORT/v0/management/usage-queue?count=5" -H "x-management-key: <MANAGEMENT_KEY>"
+curl -s "http://localhost:$PORT/v1/models" -H "Authorization: Bearer <BEARER_TOKEN>"
 docker rm -f probe
 ```
 
@@ -89,9 +92,19 @@ The OAuth tokens live in a named volume (`cliproxy_cliproxy_auth`). Back it up *
 image swap — that backup is the rollback anchor — and store it outside the repo.
 
 ```bash
-# rollback anchor (store OUTSIDE the repo — it contains live OAuth credentials)
-ssh root@host "docker run --rm -v cliproxy_cliproxy_auth:/v -v /tmp:/b alpine \
-  tar czf /b/auth.tgz -C /v ." && scp root@host:/tmp/auth.tgz ~/backups/ && ssh root@host "rm /tmp/auth.tgz"
+# rollback anchor — contains LIVE OAuth credentials, so treat the artifact as a secret:
+# root-only staging on the droplet, integrity-checked, 0600 everywhere, remote copy removed after pull.
+ssh root@host 'set -euo pipefail; umask 077
+  docker volume inspect cliproxy_cliproxy_auth >/dev/null            # fail fast if the volume name is wrong
+  d=$(mktemp -d); trap "rm -rf \"$d\"" EXIT                          # root-only (umask 077), auto-cleaned
+  docker run --rm -v cliproxy_cliproxy_auth:/v:ro -v "$d":/b alpine \
+    tar czf /b/auth.tgz -C /v .
+  tar -tzf "$d/auth.tgz" >/dev/null                                 # integrity check before we trust it
+  install -m600 "$d/auth.tgz" /root/auth.tgz                         # persistent 0600 staging for scp
+  echo "remote backup OK ($(stat -c%s /root/auth.tgz) bytes)" >&2'  # diagnostics to stderr, never stdout
+B=~/backups/cliproxy_auth_$(date +%Y%m%d-%H%M%S).tgz
+scp root@host:/root/auth.tgz "$B" && chmod 600 "$B" && ssh root@host 'rm -f /root/auth.tgz'
+tar -tzf "$B" >/dev/null && echo "local copy verified before cutover: $B"
 ```
 
 Then cut over via the gated deploy and smoke-test against the live result — never trust the
@@ -138,8 +151,9 @@ function entryMatchesProvider(entry: {id: string; owned_by?: string}, provider: 
 **Disproving the reachability "blocker" empirically:**
 
 ```bash
-# claim: bare / regresses on v7. reality, against the pinned image:
-docker run -d --name p eceasy/cli-proxy-api:v7.1.31 …; curl -s -o /dev/null -w '%{http_code}' http://localhost:$PORT/
+# claim: bare / regresses on v7. reality, against the pinned image
+# (reuse the probe container from step 1 — PORT=8317, published with -p):
+curl -s -o /dev/null -w '%{http_code}\n' "http://localhost:$PORT/"
 # → 200. Blocker false. Switched the probe to /healthz anyway (documented liveness contract).
 ```
 

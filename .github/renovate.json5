@@ -41,6 +41,32 @@
       changelogUrl: 'https://www.postgresql.org/docs/release/',
       groupName: null,
     },
+    {
+      // The github-releases datasource auto-derives source URL + release notes from depName
+      // (= the GitHub repo), so no sourceUrl/changelogUrl needed. This rule exists ONLY to keep
+      // each release a standalone PR (each fro-bot/agent bump = a gateway daemon rebuild+redeploy)
+      // instead of being grouped into group:allNonMajor.
+      description: ['Keep fro-bot/agent upstream.json releases as standalone PRs'],
+      matchDatasources: ['github-releases'],
+      matchPackageNames: ['fro-bot/agent'],
+      groupName: null,
+    },
+  ],
+  // Track the upstream daemon source pin (`ref`) in each apps/*/upstream.json so new
+  // releases of the named `repo` surface as PRs. This is independent of the fro-bot/agent
+  // GitHub Action SHA-pin in .github/workflows/ (a separate consumer Renovate already tracks).
+  // depName is captured dynamically from the `repo` field, so any future apps/*/upstream.json
+  // is tracked with no additional config.
+  customManagers: [
+    {
+      customType: 'regex',
+      // fileMatch is a regex (not a glob) and is the current field for the renovate
+      // version this repo runs; the `managerFilePatterns` rename is renovate 40+ only.
+      fileMatch: ['apps/.+/upstream\\.json$'],
+      matchStrings: ['"repo":\\s*"(?<depName>[^"]+)"[^}]*"ref":\\s*"(?<currentValue>[^"]+)"'],
+      datasourceTemplate: 'github-releases',
+      versioningTemplate: 'semver-coerced',
+    },
   ],
   // postUpgradeTasks run after Renovate applies file changes but before the commit.
   // For github-actions manager updates (workflow SHA pins), Renovate does NOT run

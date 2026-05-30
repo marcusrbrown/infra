@@ -14,10 +14,10 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 
 ## DEPLOY FLOW
 
-1. **Preflight** (`preflightManagementKeyCheck`): GET `/v0/management/api-keys` with the local `CLIPROXY_MANAGEMENT_KEY`. Aborts on 401 (key drift), skips on missing key, fails on server errors. 10s fetch timeout.
+1. **Preflight** (`preflightManagementKeyCheck`): GET `/v0/management/config` with the local `CLIPROXY_MANAGEMENT_KEY`. Aborts on 401 (key drift), skips on missing key, fails on server errors. 10s fetch timeout.
 2. **Upload**: `Caddyfile`, `docker-compose.yaml`, and `config.yaml` (only if it does not exist on the server). `--force-config` overrides the skip.
 3. **Restart**: `docker compose pull && docker compose up -d` from `/opt/cliproxy/`.
-4. **Health gate**: GET `/v0/management/api-keys` again to confirm the proxy is up and the key still works.
+4. **Health gate**: GET `/v0/management/config` again to confirm the proxy is up and the key still works.
 
 **Critical**: `config.yaml` on the server holds runtime API keys added via the management API. The deploy must not overwrite it. The compound learning doc at `docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md` captures the original incident.
 
@@ -39,9 +39,9 @@ Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/s
 | `/v0/management/api-keys?value=x` | DELETE | — | |
 | `/v0/management/config` | GET | — | Read-only via HTTP |
 | `/v0/management/{field}` | PUT | `{"value": <val>}` | Per-field updates: `debug`, `request-retry`, `proxy-url`, etc. |
-| `/v0/management/usage` | GET | — | Stats nested under `.usage` |
+| `/v0/management/usage-queue?count=N` | GET | — | v7: returns a **bare JSON array** of recent requests (not wrapped); `/v0/management/usage` was removed in v7 |
 | `/v0/management/latest-version` | GET | — | Returns `{"latest-version": "vX.Y.Z"}` |
-| `/` | GET | — | Health endpoint, no auth |
+| `/healthz` | GET | — | Liveness endpoint, no auth; returns `{"status":"ok"}` |
 
 ## OPENCODE_CONFIG AND OPENCODE_AUTH_JSON SHAPES
 
@@ -77,6 +77,7 @@ Anthropic-only repos use the single-provider subset of these shapes (unchanged f
 - **Never re-run `provision-droplet.ts` against an existing droplet** without `--force` — it overwrites the management key.
 - **Never use `Authorization: Bearer` for management endpoints** — use `x-management-key`.
 - **Never assume management API body shapes** — empirically verified, not guessed (incident: 2026-04-07).
+- **v7 IP-bans the caller after 5 consecutive bad management-key attempts (~30 min).** Management flows probe `/v0/management/config` once before issuing parallel calls so a wrong key costs a single failed attempt, never an escalating burst.
 - **Never commit `MANAGEMENT_PASSWORD`** — it lives in the droplet's `.env` and the local `CLIPROXY_MANAGEMENT_KEY` secret.
 - **Never use `curl` in healthchecks** — only `wget` is in the Alpine base.
 

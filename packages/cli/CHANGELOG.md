@@ -1,5 +1,13 @@
 # @marcusrbrown/infra
 
+## 0.9.2
+### Patch Changes
+
+
+- ⚠️ Update dependency `fro-bot/agent` from `0.44.2` to `0.46.1` ([#337](https://github.com/marcusrbrown/infra/pull/337))
+  
+  ⚠️ **Breaking Changes**: This update includes breaking changes that may require code modifications.
+
 ## 0.9.1
 ### Patch Changes
 

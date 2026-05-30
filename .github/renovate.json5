@@ -50,6 +50,9 @@
       matchDatasources: ['github-releases'],
       matchPackageNames: ['fro-bot/agent'],
       groupName: null,
+      // Hold at v0.44.x until v0.46.x deploy-side prerequisites land (GitHub App secret
+      // materialization in deploy.ts + droplet GitHub App credentials). See issue #341.
+      allowedVersions: '<0.45.0',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in each apps/*/upstream.json so new

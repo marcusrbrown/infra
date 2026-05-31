@@ -38,6 +38,8 @@ on:
         required: false
       AWS_SESSION_TOKEN:
         required: false
+      DISCORD_PRIVILEGED_INTENTS:
+        required: false
 
 jobs:
   detect-changes:
@@ -132,3 +134,4 @@ jobs:
           S3_REGION: ${{ secrets.S3_REGION }}
           S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
           OBJECT_STORE_HOSTS: ${{ secrets.OBJECT_STORE_HOSTS }}
+          DISCORD_PRIVILEGED_INTENTS: ${{ secrets.DISCORD_PRIVILEGED_INTENTS }}

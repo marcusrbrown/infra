@@ -91,6 +91,7 @@ After provisioning: commit the updated `.github/known_hosts`.
 | `GH_APP_PRIVATE_KEY` | ✓ | GitHub App private key PEM (materializes to `github-app-private-key`) |
 | `S3_ENDPOINT` | — | Custom endpoint URL (R2, MinIO, etc.) |
 | `OBJECT_STORE_HOSTS` | — | Comma-separated hostnames the mitmproxy egress filter allows through to S3 |
+| `DISCORD_PRIVILEGED_INTENTS` | — | Opt-in privileged intents (e.g. `MessageContent`); materializes to `discord-privileged-intents`, empty = baseline intents |
 
 ### GitHub App (`/fro-bot add-project`)
 

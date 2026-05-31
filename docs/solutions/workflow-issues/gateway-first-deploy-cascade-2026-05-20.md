@@ -6,6 +6,7 @@ root_cause: incomplete_setup
 resolution_type: code_fix
 severity: critical
 date: 2026-05-20
+last_refreshed: 2026-05-31
 tags: [gateway, docker-compose, digitalocean, deploy, ssh, ufw, controlmaster, secrets, ndjson]
 module: apps/gateway
 related_issues: []
@@ -155,7 +156,7 @@ Each fix is structural at the layer it addresses: append `\n` when materializing
 
 ### Wave-specific guardrails
 
-- **Wave 1 / contract drift**: pin upstream by SemVer tag (not `latest`), audit the upstream compose contract before each major bump, treat compose `environment` / `volumes` / `secrets` as a versioned API.
+- **Wave 1 / contract drift**: pin upstream by SemVer tag (not `latest`), audit the upstream compose contract before each major bump, treat compose `environment` / `volumes` / `secrets` as a versioned API. Note: auditing the contract is necessary but **not sufficient** for `build:`-from-source compose services — the deploy must also force a rebuild (`docker compose up --build`), or a moved pin updates source on disk while the running container keeps a stale image. See [gateway-deploy-stale-image-2026-05-31.md](./gateway-deploy-stale-image-2026-05-31.md).
 - **Wave 2 / secret corruption**: never use `gh secret set --body "$(cat <<'EOF' ... EOF)"`. Pipe via stdin (`bun -e 'process.stdout.write(...)' | gh secret set --env <env> <name>`) or use `gh secret set --env <env> <name> < file`. Audit all secrets via single sweep when one looks corrupt, not one at a time.
 - **Wave 3 / PEM newline**: test the actual file contents written to disk in CI key tests, not just the mode bits. Specifically cover both branches (trailing newline missing → appended; existing → not doubled).
 - **Wave 4 / SSH rate limit**: keep deploys connection-pooled by default (ControlMaster=auto + ControlPersist). Watch UFW counters during first deploys of new apps. Don't blame "transient network" without demanding evidence from counters or logs.
@@ -170,6 +171,7 @@ Each fix is structural at the layer it addresses: append `\n` when materializing
 
 ## Related Issues
 
+- [gateway-deploy-stale-image-2026-05-31.md](./gateway-deploy-stale-image-2026-05-31.md) — same app and deploy path; the missing `docker compose up --build` that let a moved pin run a stale image (and masked a broken upstream image)
 - [cliproxy-first-deploy-cascade-2026-04-06.md](./cliproxy-first-deploy-cascade-2026-04-06.md) — same shape of cascade for the cliproxy app, 4 waves
 - [bun-deploy-user-permissions-ci-2026-04-02.md](./bun-deploy-user-permissions-ci-2026-04-02.md) — earlier deploy-cascade precedent (3 waves of permission failures during keeweb deploy bootstrap)
 - PRs: [#273](https://github.com/marcusrbrown/infra/pull/273), [#276](https://github.com/marcusrbrown/infra/pull/276), [#277](https://github.com/marcusrbrown/infra/pull/277), [#278](https://github.com/marcusrbrown/infra/pull/278)

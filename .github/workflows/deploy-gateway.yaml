@@ -28,11 +28,17 @@ on:
         required: true
       GATEWAY_HOST:
         required: true
+      GH_APP_ID:
+        required: true
+      GH_APP_PRIVATE_KEY:
+        required: true
       S3_ENDPOINT:
         required: false
       OBJECT_STORE_HOSTS:
         required: false
       AWS_SESSION_TOKEN:
+        required: false
+      DISCORD_PRIVILEGED_INTENTS:
         required: false
 
 jobs:
@@ -88,6 +94,8 @@ jobs:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           S3_REGION: ${{ secrets.S3_REGION }}
           GATEWAY_HOST: ${{ secrets.GATEWAY_HOST }}
+          GH_APP_ID: ${{ secrets.GH_APP_ID }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
         run: |
           missing=()
           [[ -n "${GATEWAY_SSH_KEY}" ]] || missing+=("GATEWAY_SSH_KEY")
@@ -99,6 +107,8 @@ jobs:
           [[ -n "${S3_BUCKET}" ]] || missing+=("S3_BUCKET")
           [[ -n "${S3_REGION}" ]] || missing+=("S3_REGION")
           [[ -n "${GATEWAY_HOST}" ]] || missing+=("GATEWAY_HOST")
+          [[ -n "${GH_APP_ID}" ]] || missing+=("GH_APP_ID")
+          [[ -n "${GH_APP_PRIVATE_KEY}" ]] || missing+=("GH_APP_PRIVATE_KEY")
           if (( ${#missing[@]} > 0 )); then
             echo "Missing required secret(s): ${missing[*]}"
             exit 1
@@ -112,6 +122,8 @@ jobs:
         env:
           GATEWAY_SSH_KEY: ${{ secrets.GATEWAY_SSH_KEY }}
           GATEWAY_HOST: ${{ secrets.GATEWAY_HOST }}
+          GH_APP_ID: ${{ secrets.GH_APP_ID }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
           DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
@@ -122,3 +134,4 @@ jobs:
           S3_REGION: ${{ secrets.S3_REGION }}
           S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
           OBJECT_STORE_HOSTS: ${{ secrets.OBJECT_STORE_HOSTS }}
+          DISCORD_PRIVILEGED_INTENTS: ${{ secrets.DISCORD_PRIVILEGED_INTENTS }}

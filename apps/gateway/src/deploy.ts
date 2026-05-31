@@ -95,6 +95,8 @@ const REQUIRED_ENV_VARS = [
   'S3_BUCKET',
   'S3_REGION',
   'GATEWAY_HOST',
+  'GH_APP_ID',
+  'GH_APP_PRIVATE_KEY',
 ] as const
 
 // ─── Exported helpers ─────────────────────────────────────────────────────────
@@ -133,6 +135,8 @@ export interface ValidatedDeployEnv {
   S3_REGION: string
   AWS_ACCESS_KEY_ID: string
   AWS_SECRET_ACCESS_KEY: string
+  GH_APP_ID: string
+  GH_APP_PRIVATE_KEY: string
 }
 
 export function narrowValidatedEnv(env: Record<string, string>): ValidatedDeployEnv {
@@ -145,6 +149,8 @@ export function narrowValidatedEnv(env: Record<string, string>): ValidatedDeploy
     S3_REGION: env.S3_REGION as string,
     AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID as string,
     AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY as string,
+    GH_APP_ID: env.GH_APP_ID as string,
+    GH_APP_PRIVATE_KEY: env.GH_APP_PRIVATE_KEY as string,
   }
 }
 
@@ -274,11 +280,14 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
     {name: 'aws-secret-access-key', envKey: 'AWS_SECRET_ACCESS_KEY'},
     {name: 's3-bucket', envKey: 'S3_BUCKET'},
     {name: 's3-region', envKey: 'S3_REGION'},
+    {name: 'github-app-id', envKey: 'GH_APP_ID'},
+    {name: 'github-app-private-key', envKey: 'GH_APP_PRIVATE_KEY'},
   ]
 
   const optional: {name: string; envKey: string}[] = [
     {name: 's3-endpoint', envKey: 'S3_ENDPOINT'},
     {name: 'aws-session-token', envKey: 'AWS_SESSION_TOKEN'},
+    {name: 'discord-privileged-intents', envKey: 'DISCORD_PRIVILEGED_INTENTS'},
   ]
 
   const secrets: SecretFile[] = []

@@ -50,11 +50,13 @@
       matchDatasources: ['github-releases'],
       matchPackageNames: ['fro-bot/agent'],
       groupName: null,
-      // Hold at v0.44.2 until v0.46.x deploy-side prerequisites land (GitHub App secret
-      // materialization in deploy.ts + droplet GitHub App credentials). v0.44.3 already adds
-      // the discord-privileged-intents bind-mount (create_host_path: false) that deploy.ts does
-      // not materialize, so the ceiling must exclude it too. See issue #341.
-      allowedVersions: '<0.44.3',
+      // Hold below v0.47.0. v0.46.x is adopted (deploy.ts materializes the github-app-id,
+      // github-app-private-key, and discord-privileged-intents secret files). v0.47.0 adds an
+      // announce-webhook + presence feature whose loadConfig unconditionally requires two new
+      // secrets (GATEWAY_WEBHOOK_SECRET, GATEWAY_PRESENCE_CHANNEL_ID) plus an HTTP ingress port —
+      // a separate feature-adoption decision (HTTP surface contradicts the no-public-HTTP posture).
+      // See issue #341.
+      allowedVersions: '<0.47.0',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in each apps/*/upstream.json so new

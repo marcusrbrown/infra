@@ -11,6 +11,7 @@ tags: [gateway, docker-compose, digitalocean, deploy, ssh, ufw, controlmaster, s
 module: apps/gateway
 related_issues: []
 related_docs:
+  - docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md
   - docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md
   - docs/solutions/workflow-issues/bun-deploy-user-permissions-ci-2026-04-02.md
 ---

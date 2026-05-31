@@ -667,7 +667,9 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     console.warn(`  3. Materialize ${buildSecretFileList(env).length} secret files under ${SECRETS_DIR}`)
     console.warn(`  4. Write .env to ${ENV_PATH}`)
     console.warn(`  5. Run init-certs.sh (idempotent)`)
-    console.warn(`  6. docker compose up -d --wait --wait-timeout 120${forceRecreate ? ' --force-recreate' : ''}`)
+    console.warn(
+      `  6. docker compose up -d --build --wait --wait-timeout 120${forceRecreate ? ' --force-recreate' : ''}`,
+    )
     console.warn(
       `  7. Poll Discord slash command registration (app=${env.DISCORD_APPLICATION_ID} guild=${env.DISCORD_GUILD_ID})`,
     )
@@ -808,6 +810,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       DEPLOY_DIR,
       'up',
       '-d',
+      '--build',
       '--wait',
       '--wait-timeout',
       '120',

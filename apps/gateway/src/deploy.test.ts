@@ -602,6 +602,7 @@ describe('main', () => {
     const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
     expect(composeCall).toBeDefined()
     expect(composeCall?.join(' ')).not.toContain('--force-recreate')
+    expect(composeCall?.join(' ')).toContain('--build')
   })
 
   test('edge case (secrets changed): checksum differs → --force-recreate added', async () => {
@@ -621,6 +622,45 @@ describe('main', () => {
     const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
     expect(composeCall).toBeDefined()
     expect(composeCall?.join(' ')).toContain('--force-recreate')
+    expect(composeCall?.join(' ')).toContain('--build')
+  })
+
+  test('rebuilds the image from pinned source on every deploy regardless of --force-recreate', async () => {
+    const {main, buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const env = makeEnv()
+    const expectedChecksum = computeSecretsChecksum(buildSecretFileList(env))
+
+    // Secrets unchanged path — no --force-recreate
+    const {spawnFn: spawnFnA, calls: callsA} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes('cat')) {
+        return makeSpawnResult({stdout: expectedChecksum})
+      }
+      return undefined
+    })
+    const mockFetchA = makeDiscordFetch([{name: 'ping'}])
+    await main({env, args: [], fetch: mockFetchA, sleep: async () => {}, spawn: spawnFnA})
+
+    const composeCallA = callsA.find(cmd => cmd.some(s => s.includes('docker compose')))
+    expect(composeCallA).toBeDefined()
+    expect(composeCallA?.join(' ')).toContain('--build')
+    expect(composeCallA?.join(' ')).not.toContain('--force-recreate')
+
+    // Secrets changed path — --force-recreate present alongside --build
+    const {spawnFn: spawnFnB, calls: callsB} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes('cat')) {
+        return makeSpawnResult({stdout: 'old-checksum-that-differs'})
+      }
+      return undefined
+    })
+    const mockFetchB = makeDiscordFetch([{name: 'ping'}])
+    await main({env: makeEnv(), args: [], fetch: mockFetchB, sleep: async () => {}, spawn: spawnFnB})
+
+    const composeCallB = callsB.find(cmd => cmd.some(s => s.includes('docker compose')))
+    expect(composeCallB).toBeDefined()
+    expect(composeCallB?.join(' ')).toContain('--build')
+    expect(composeCallB?.join(' ')).toContain('--force-recreate')
   })
 
   test('readRemoteChecksum: SSH exits 0 with checksum → returns checksum string', async () => {

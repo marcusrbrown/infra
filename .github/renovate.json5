@@ -50,6 +50,13 @@
       matchDatasources: ['github-releases'],
       matchPackageNames: ['fro-bot/agent'],
       groupName: null,
+      // Each fro-bot/agent bump rebuilds and redeploys the executable gateway daemon, so it must
+      // not inherit the fro-bot/** minor+patch automerge from the shared preset. Require explicit
+      // operator approval (dashboard checkbox to create the PR, manual merge) so every daemon bump
+      // gets a source-contract verification pass before landing — the v0.46.1 crash-loop and
+      // v0.47.0 required-secret additions are why this gate exists.
+      automerge: false,
+      dependencyDashboardApproval: true,
       // Ceiling at <0.47.0. v0.46.2 fixed the v0.46.1 crash-loop (ERR_MODULE_NOT_FOUND for
       // '@fro-bot/runtime') by inlining the runtime into the gateway bundle; verified live.
       // v0.47.0 adds an announce-webhook HTTP ingress plus two unconditional required secrets

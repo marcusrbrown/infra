@@ -50,13 +50,14 @@
       matchDatasources: ['github-releases'],
       matchPackageNames: ['fro-bot/agent'],
       groupName: null,
-      // Hold below v0.47.0. v0.46.x is adopted (deploy.ts materializes the github-app-id,
-      // github-app-private-key, and discord-privileged-intents secret files). v0.47.0 adds an
-      // announce-webhook + presence feature whose loadConfig unconditionally requires two new
-      // secrets (GATEWAY_WEBHOOK_SECRET, GATEWAY_PRESENCE_CHANNEL_ID) plus an HTTP ingress port —
-      // a separate feature-adoption decision (HTTP surface contradicts the no-public-HTTP posture).
-      // See issue #341.
-      allowedVersions: '<0.47.0',
+      // Hold at v0.44.2 — the only version empirically confirmed to run on this droplet.
+      // v0.46.1's runtime image is broken: the gateway crash-loops with
+      // ERR_MODULE_NOT_FOUND for '@fro-bot/runtime/src/index.ts' (the compiled gateway dist
+      // resolves the runtime workspace package to its src path, which the runtime image does
+      // not copy). Intermediate tags (v0.44.3, v0.45.0, v0.46.0) are unverified. Lift this
+      // ceiling only after upstream ships a fixed image AND a fresh rebuild is verified to boot.
+      // Tracked upstream; see issue #341.
+      allowedVersions: '<0.44.3',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in each apps/*/upstream.json so new

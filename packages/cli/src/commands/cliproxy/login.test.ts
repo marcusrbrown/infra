@@ -239,6 +239,107 @@ describe('cliproxy login', () => {
     })
   })
 
+  describe('host forwarding into ssh argv', () => {
+    it('forwards resolved host from CLIPROXY_DOMAIN env var into ssh argv', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn, calls} = makeSpawnOk(0)
+      setValidEnv()
+      process.env.CLIPROXY_DOMAIN = 'env-host.example.com'
+
+      await cliproxyLoginAction('claude', {}, spawnFn)
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]!.cmd).toContain('root@env-host.example.com')
+    })
+
+    it('forwards resolved host from --host option into ssh argv', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn, calls} = makeSpawnOk(0)
+      setValidEnv()
+      delete process.env.CLIPROXY_DOMAIN
+
+      await cliproxyLoginAction('claude', {host: 'flag-host.example.com'}, spawnFn)
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]!.cmd).toContain('root@flag-host.example.com')
+    })
+  })
+
+  describe('non-zero exit propagation', () => {
+    it('throws with exit code in message when remote ssh exits non-zero', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn, calls} = makeSpawnOk(17)
+      setValidEnv()
+
+      await expect(cliproxyLoginAction('claude', {}, spawnFn)).rejects.toThrow(
+        'Remote login command failed with exit code 17',
+      )
+      expect(calls).toHaveLength(1)
+    })
+  })
+
+  describe('ssh spawn contract', () => {
+    it('happy path — claude: spawn argv and options match ssh boundary contract', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn, calls} = makeSpawnOk(0)
+      setValidEnv()
+      process.env.SSH_AUTH_SOCK = '/tmp/contract-test.sock'
+      const capturedPath = process.env.PATH!
+      const capturedHome = process.env.HOME!
+
+      await cliproxyLoginAction('claude', {}, spawnFn)
+
+      expect(calls).toHaveLength(1)
+      const {cmd, opts} = calls[0]!
+      const spawnOpts = opts as Parameters<SpawnFn>[1]
+
+      // SSH flags
+      expect(cmd).toContain('-tt')
+      expect(cmd).toContain('BatchMode=yes')
+      expect(cmd).toContain('ConnectTimeout=10')
+
+      // stdio inheritance
+      expect(spawnOpts.stdin).toBe('inherit')
+      expect(spawnOpts.stdout).toBe('inherit')
+      expect(spawnOpts.stderr).toBe('inherit')
+
+      // forwarded env vars
+      expect(spawnOpts.env.PATH).toBe(capturedPath)
+      expect(spawnOpts.env.HOME).toBe(capturedHome)
+      expect(spawnOpts.env.SSH_AUTH_SOCK).toBe('/tmp/contract-test.sock')
+    })
+
+    it('happy path — codex: spawn argv and options match ssh boundary contract', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn, calls} = makeSpawnOk(0)
+      setValidEnv()
+      process.env.SSH_AUTH_SOCK = '/tmp/contract-test.sock'
+      const capturedPath = process.env.PATH!
+      const capturedHome = process.env.HOME!
+
+      await cliproxyLoginAction('codex', {}, spawnFn)
+
+      expect(calls).toHaveLength(1)
+      const {cmd, opts} = calls[0]!
+      const spawnOpts = opts as Parameters<SpawnFn>[1]
+
+      // SSH flags
+      expect(cmd).toContain('-tt')
+      expect(cmd).toContain('BatchMode=yes')
+      expect(cmd).toContain('ConnectTimeout=10')
+
+      // stdio inheritance
+      expect(spawnOpts.stdin).toBe('inherit')
+      expect(spawnOpts.stdout).toBe('inherit')
+      expect(spawnOpts.stderr).toBe('inherit')
+
+      // forwarded env vars
+      expect(spawnOpts.env.PATH).toBe(capturedPath)
+      expect(spawnOpts.env.HOME).toBe(capturedHome)
+      expect(spawnOpts.env.SSH_AUTH_SOCK).toBe('/tmp/contract-test.sock')
+    })
+  })
+
   describe('anti-phishing notice', () => {
     let logLines: string[]
     let originalLog: typeof console.log

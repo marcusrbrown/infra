@@ -50,14 +50,12 @@
       matchDatasources: ['github-releases'],
       matchPackageNames: ['fro-bot/agent'],
       groupName: null,
-      // Hold at v0.44.2 — the only version empirically confirmed to run on this droplet.
-      // v0.46.1's runtime image is broken: the gateway crash-loops with
-      // ERR_MODULE_NOT_FOUND for '@fro-bot/runtime/src/index.ts' (the compiled gateway dist
-      // resolves the runtime workspace package to its src path, which the runtime image does
-      // not copy). Intermediate tags (v0.44.3, v0.45.0, v0.46.0) are unverified. Lift this
-      // ceiling only after upstream ships a fixed image AND a fresh rebuild is verified to boot.
-      // Tracked upstream; see issue #341.
-      allowedVersions: '<0.44.3',
+      // Ceiling at <0.47.0. v0.46.2 fixed the v0.46.1 crash-loop (ERR_MODULE_NOT_FOUND for
+      // '@fro-bot/runtime') by inlining the runtime into the gateway bundle; verified live.
+      // v0.47.0 adds an announce-webhook HTTP ingress plus two unconditional required secrets
+      // (GATEWAY_WEBHOOK_SECRET, GATEWAY_PRESENCE_CHANNEL_ID) that we do not yet materialize and
+      // that conflict with the no-public-HTTP posture — adopting it is separate, deliberate work.
+      allowedVersions: '<0.47.0',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in each apps/*/upstream.json so new

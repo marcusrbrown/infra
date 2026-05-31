@@ -219,6 +219,56 @@ describe('gateway deploy', () => {
 
       expect(env.AWS_SESSION_TOKEN).toBe('sts-temporary-token-value')
     })
+
+    it('forwards GH_APP_ID and GH_APP_PRIVATE_KEY when present in process.env', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+      process.env.GH_APP_ID = '999888'
+      process.env.GH_APP_PRIVATE_KEY = '-----BEGIN RSA PRIVATE KEY-----\nfakekey\n-----END RSA PRIVATE KEY-----\n'
+
+      try {
+        const env = getGatewayDeployEnv()
+        expect(env.GH_APP_ID).toBe('999888')
+        expect(env.GH_APP_PRIVATE_KEY).toBe('-----BEGIN RSA PRIVATE KEY-----\nfakekey\n-----END RSA PRIVATE KEY-----\n')
+      } finally {
+        delete process.env.GH_APP_ID
+        delete process.env.GH_APP_PRIVATE_KEY
+      }
+    })
+
+    it('forwards DISCORD_PRIVILEGED_INTENTS when present in process.env', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+      process.env.DISCORD_PRIVILEGED_INTENTS = 'GUILD_MEMBERS'
+
+      try {
+        const env = getGatewayDeployEnv()
+        expect(env.DISCORD_PRIVILEGED_INTENTS).toBe('GUILD_MEMBERS')
+      } finally {
+        delete process.env.DISCORD_PRIVILEGED_INTENTS
+      }
+    })
+
+    it('DISCORD_PRIVILEGED_INTENTS unset → forwarded as empty string', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+      delete process.env.DISCORD_PRIVILEGED_INTENTS
+
+      const env = getGatewayDeployEnv()
+      expect(env.DISCORD_PRIVILEGED_INTENTS).toBe('')
+    })
   })
 
   describe('validateGatewayRemotePreconditions', () => {

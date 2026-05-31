@@ -51,6 +51,8 @@ function makeEnv(overrides: Record<string, string> = {}): Record<string, string>
     S3_BUCKET: 'my-bucket',
     S3_REGION: 'us-east-1',
     GATEWAY_HOST: 'gateway.fro.bot',
+    GH_APP_ID: 'app-id-12345',
+    GH_APP_PRIVATE_KEY: '-----BEGIN RSA PRIVATE KEY-----\nfakekey\n-----END RSA PRIVATE KEY-----\n',
     PATH: '/usr/bin:/bin',
     HOME: '/root',
     ...overrides,
@@ -221,10 +223,10 @@ describe('computeObjectStoreHosts', () => {
 // ─── buildSecretFileList ──────────────────────────────────────────────────────
 
 describe('buildSecretFileList', () => {
-  test('returns exactly 9 secret entries', async () => {
+  test('returns exactly 12 secret entries', async () => {
     const {buildSecretFileList} = await import('./deploy')
     const secrets = buildSecretFileList(makeEnv())
-    expect(secrets).toHaveLength(9)
+    expect(secrets).toHaveLength(12)
   })
 
   test('uses kebab-case file names matching upstream compose contract', async () => {
@@ -240,6 +242,9 @@ describe('buildSecretFileList', () => {
     expect(names).toContain('s3-region')
     expect(names).toContain('s3-endpoint')
     expect(names).toContain('aws-session-token')
+    expect(names).toContain('github-app-id')
+    expect(names).toContain('github-app-private-key')
+    expect(names).toContain('discord-privileged-intents')
   })
 
   test('does not use snake_case file names', async () => {
@@ -1872,5 +1877,79 @@ describe('SSH ControlMaster multiplexing', () => {
     if (capturedControlPath) {
       expect(existsSync(capturedControlPath)).toBe(false)
     }
+  })
+})
+
+// ─── github app secret materialization ───────────────────────────────────────
+
+describe('github app secret materialization', () => {
+  const SAMPLE_PEM =
+    '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234\nabcdefghijklmnop\n-----END RSA PRIVATE KEY-----\n'
+
+  test('github-app-id included as required secret mapped to GH_APP_ID', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv({GH_APP_ID: '123456', GH_APP_PRIVATE_KEY: SAMPLE_PEM}))
+    const entry = secrets.find(s => s.name === 'github-app-id')
+    expect(entry).toBeDefined()
+    expect(entry?.content).toBe('123456')
+    expect(entry?.required).toBe(true)
+  })
+
+  test('github-app-private-key included as required secret mapped to GH_APP_PRIVATE_KEY', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv({GH_APP_ID: '123456', GH_APP_PRIVATE_KEY: SAMPLE_PEM}))
+    const entry = secrets.find(s => s.name === 'github-app-private-key')
+    expect(entry).toBeDefined()
+    expect(entry?.content).toBe(SAMPLE_PEM)
+    expect(entry?.required).toBe(true)
+  })
+
+  test('discord-privileged-intents included as optional secret mapped to DISCORD_PRIVILEGED_INTENTS', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(
+      makeEnv({
+        GH_APP_ID: '123456',
+        GH_APP_PRIVATE_KEY: SAMPLE_PEM,
+        DISCORD_PRIVILEGED_INTENTS: 'GUILD_MEMBERS,GUILD_PRESENCES',
+      }),
+    )
+    const entry = secrets.find(s => s.name === 'discord-privileged-intents')
+    expect(entry).toBeDefined()
+    expect(entry?.content).toBe('GUILD_MEMBERS,GUILD_PRESENCES')
+    expect(entry?.required).toBe(false)
+  })
+
+  test('discord-privileged-intents unset → empty content, required false', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv({GH_APP_ID: '123456', GH_APP_PRIVATE_KEY: SAMPLE_PEM})
+    delete (env as Record<string, string>).DISCORD_PRIVILEGED_INTENTS
+    const secrets = buildSecretFileList(env)
+    const entry = secrets.find(s => s.name === 'discord-privileged-intents')
+    expect(entry).toBeDefined()
+    expect(entry?.content).toBe('')
+    expect(entry?.required).toBe(false)
+  })
+
+  test('multiline PEM content preserved verbatim in github-app-private-key', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv({GH_APP_ID: '123456', GH_APP_PRIVATE_KEY: SAMPLE_PEM}))
+    const entry = secrets.find(s => s.name === 'github-app-private-key')
+    expect(entry?.content).toBe(SAMPLE_PEM)
+  })
+
+  test('GH_APP_ID missing → validateRequiredEnv reports missing var', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    const env = makeEnv({GH_APP_PRIVATE_KEY: SAMPLE_PEM})
+    delete (env as Record<string, string>).GH_APP_ID
+    const missing = validateRequiredEnv(env)
+    expect(missing).toContain('GH_APP_ID')
+  })
+
+  test('GH_APP_PRIVATE_KEY missing → validateRequiredEnv reports missing var', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    const env = makeEnv({GH_APP_ID: '123456'})
+    delete (env as Record<string, string>).GH_APP_PRIVATE_KEY
+    const missing = validateRequiredEnv(env)
+    expect(missing).toContain('GH_APP_PRIVATE_KEY')
   })
 })

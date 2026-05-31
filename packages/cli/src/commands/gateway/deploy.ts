@@ -47,6 +47,9 @@ export function getGatewayDeployEnv(): Record<string, string> {
     S3_REGION: process.env.S3_REGION ?? '',
     S3_ENDPOINT: process.env.S3_ENDPOINT ?? '',
     OBJECT_STORE_HOSTS: process.env.OBJECT_STORE_HOSTS ?? '',
+    GH_APP_ID: process.env.GH_APP_ID ?? '',
+    GH_APP_PRIVATE_KEY: process.env.GH_APP_PRIVATE_KEY ?? '',
+    DISCORD_PRIVILEGED_INTENTS: process.env.DISCORD_PRIVILEGED_INTENTS ?? '',
   }
 }
 

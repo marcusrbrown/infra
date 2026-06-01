@@ -230,14 +230,36 @@ describe('cliproxy setup helpers', () => {
       expect(Object.keys(dualResult)).toEqual(['kind', 'stepsWithGaps'])
     })
 
-    it('REQUIRED_OPENCODE_INPUTS covers exactly auth-json, opencode-config, omo-providers, model (no enable-omo)', () => {
-      // Infer the required inputs from fixture-based testing: a workflow with exactly
-      // these four inputs and no others (besides github-token and prompt) passes with zero gaps.
-      const result = analyzeFroBotWorkflow(WORKFLOW_WITH_OPENAI_MODEL)
+    it('REQUIRED_OPENCODE_INPUTS covers exactly auth-json, opencode-config, model (no omo-providers, no enable-omo)', () => {
+      // A workflow that wires auth-json, opencode-config, model (but NOT omo-providers) must
+      // pass with zero gaps — omo-providers is vestigial and must not be required.
+      const workflowWithoutOmo = `      - uses: fro-bot/agent@abc123
+        with:
+          github-token: \${{ secrets.FRO_BOT_PAT }}
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          model: \${{ vars.FRO_BOT_MODEL }}
+          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
+          prompt: \${{ env.PROMPT }}
+`
+      const result = analyzeFroBotWorkflow(workflowWithoutOmo)
 
       expect(result.kind).toBe('analyzed')
       if (result.kind !== 'analyzed') throw new Error('unreachable')
-      // Zero gaps confirms the four inputs in the fixture are sufficient — enable-omo is NOT required.
+      // Zero gaps confirms omo-providers is NOT required.
+      expect(result.stepsWithGaps).toEqual([])
+    })
+
+    it('a workflow missing only omo-providers (but with auth-json, opencode-config, model) is not flagged', () => {
+      const workflowWithoutOmo = `      - uses: fro-bot/agent@abc123
+        with:
+          auth-json: \${{ secrets.OPENCODE_AUTH_JSON }}
+          opencode-config: \${{ secrets.OPENCODE_CONFIG }}
+          model: \${{ vars.FRO_BOT_MODEL }}
+`
+      const result = analyzeFroBotWorkflow(workflowWithoutOmo)
+
+      expect(result.kind).toBe('analyzed')
+      if (result.kind !== 'analyzed') throw new Error('unreachable')
       expect(result.stepsWithGaps).toEqual([])
     })
   })

@@ -337,7 +337,6 @@ Manual deploys are available either per-app (`workflow_dispatch` on each dedicat
 | `DIGITALOCEAN_ACCESS_TOKEN` | DigitalOcean API token (used by `apps/cliproxy` provision scripts)  |
 | `FRO_BOT_PAT`               | PAT for the `fro-bot` user (agent identity for `@fro-bot` mentions) |
 | `NPM_TOKEN`                 | npm publish token for `@marcusrbrown/infra` package                 |
-| `OMO_PROVIDERS`             | Comma-separated oMo provider list (e.g. `claude-max20`)             |
 | `OPENCODE_AUTH_JSON`        | LLM provider credentials JSON injected into Fro Bot runs            |
 | `OPENCODE_CONFIG`           | OpenCode provider config JSON (e.g. Anthropic `baseURL` override)   |
 

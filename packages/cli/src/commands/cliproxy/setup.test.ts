@@ -2038,7 +2038,7 @@ describe('post-write readback verification', () => {
 
   it('happy path: readback returns all written names → no new warning emitted', async () => {
     // Pre-write list is empty; post-write readback returns all written names
-    // The opencode harness writes: OPENCODE_AUTH_JSON, OPENCODE_CONFIG, OMO_PROVIDERS (secrets)
+    // The opencode harness writes: OPENCODE_AUTH_JSON, OPENCODE_CONFIG (secrets)
     // and FRO_BOT_MODEL (variable)
     let callCount = 0
     const {deps} = makeDeps(async (_repo, kind) => {
@@ -2048,7 +2048,7 @@ describe('post-write readback verification', () => {
         return []
       }
       // Post-write readback: return all written names
-      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG']
       return ['FRO_BOT_MODEL']
     })
 
@@ -2068,7 +2068,7 @@ describe('post-write readback verification', () => {
       callCount++
       if (callCount <= 2) return []
       // Post-write: secret readback missing OPENCODE_AUTH_JSON
-      if (kind === 'secret') return ['OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      if (kind === 'secret') return ['OPENCODE_CONFIG']
       return ['FRO_BOT_MODEL']
     })
 
@@ -2088,7 +2088,7 @@ describe('post-write readback verification', () => {
     const {deps} = makeDeps(async (_repo, kind) => {
       callCount++
       if (callCount <= 2) return []
-      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG']
       // Variable readback missing FRO_BOT_MODEL
       return []
     })
@@ -2102,12 +2102,12 @@ describe('post-write readback verification', () => {
   })
 
   it('partial visibility: readback shows some but not all written names → warning lists exactly the absent names', async () => {
-    // Post-write: OPENCODE_CONFIG and OMO_PROVIDERS present, OPENCODE_AUTH_JSON absent
+    // Post-write: OPENCODE_CONFIG present, OPENCODE_AUTH_JSON absent
     let callCount = 0
     const {deps} = makeDeps(async (_repo, kind) => {
       callCount++
       if (callCount <= 2) return []
-      if (kind === 'secret') return ['OPENCODE_CONFIG', 'OMO_PROVIDERS'] // OPENCODE_AUTH_JSON absent
+      if (kind === 'secret') return ['OPENCODE_CONFIG'] // OPENCODE_AUTH_JSON absent
       return ['FRO_BOT_MODEL']
     })
 
@@ -2117,9 +2117,8 @@ describe('post-write readback verification', () => {
     expect(mismatchWarnings.length).toBeGreaterThan(0)
     // Must name OPENCODE_AUTH_JSON (absent)
     expect(mismatchWarnings.some(m => m.includes('OPENCODE_AUTH_JSON'))).toBe(true)
-    // Must NOT name OPENCODE_CONFIG or OMO_PROVIDERS (they ARE present)
+    // Must NOT name OPENCODE_CONFIG (it IS present)
     expect(mismatchWarnings.some(m => m.includes('OPENCODE_CONFIG'))).toBe(false)
-    expect(mismatchWarnings.some(m => m.includes('OMO_PROVIDERS'))).toBe(false)
   })
 
   it('cannot verify: listExistingGhNames throws on post-write call → softer warning, command does NOT throw, rollback NOT fired', async () => {
@@ -2268,7 +2267,7 @@ describe('post-write readback verification', () => {
         return []
       }
       // Post-write readback: all names present
-      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG']
       return ['FRO_BOT_MODEL']
     })
 
@@ -2338,7 +2337,7 @@ describe('non-interactive overwrite warning concurrency caveat', () => {
   it('--force overwrite with a collision present → warning carries the last-write-wins concurrency caveat', async () => {
     // OPENCODE_AUTH_JSON already exists → collision on the opencode secret set → overwrite warning fires.
     const deps = makeDeps(async (_repo, kind) => {
-      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG', 'OMO_PROVIDERS']
+      if (kind === 'secret') return ['OPENCODE_AUTH_JSON', 'OPENCODE_CONFIG']
       return ['FRO_BOT_MODEL']
     })
 

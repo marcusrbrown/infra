@@ -123,7 +123,6 @@ describe('getHarnessTemplate', () => {
     expect(template.secrets.map((entry: SecretAssignment) => entry.name)).toEqual([
       'OPENCODE_AUTH_JSON',
       'OPENCODE_CONFIG',
-      'OMO_PROVIDERS',
     ])
     expect(template.variables.map((entry: VariableAssignment) => entry.name)).toEqual(['FRO_BOT_MODEL'])
   })
@@ -135,11 +134,11 @@ describe('getHarnessTemplate', () => {
     expect(modelEntry?.value).toMatch(/^anthropic\//)
   })
 
-  it('uses the expected OMO_PROVIDERS default value', () => {
+  it('does not include an OMO_PROVIDERS secret', () => {
     const template = getHarnessTemplate('opencode', {keyValue: 'sk-test'})
-    const providersEntry = template.secrets.find((entry: SecretAssignment) => entry.name === 'OMO_PROVIDERS')
+    const secretNames = template.secrets.map((entry: SecretAssignment) => entry.name)
 
-    expect(providersEntry?.value).toBe('claude-max20')
+    expect(secretNames).not.toContain('OMO_PROVIDERS')
   })
 
   it('writes an OPENCODE_CONFIG baseURL with the /v1 suffix', () => {
@@ -183,11 +182,11 @@ describe('getHarnessTemplate provider-aware', () => {
       expect(configEntry?.value).toBe(ANTHROPIC_ONLY_CONFIG)
     })
 
-    it('no providers/model args → OMO_PROVIDERS is claude-max20', () => {
+    it('no providers/model args → OMO_PROVIDERS is not emitted', () => {
       const template = getHarnessTemplate('opencode', {keyValue: 'test-key'})
-      const entry = template.secrets.find((e: SecretAssignment) => e.name === 'OMO_PROVIDERS')
+      const secretNames = template.secrets.map((e: SecretAssignment) => e.name)
 
-      expect(entry?.value).toBe('claude-max20')
+      expect(secretNames).not.toContain('OMO_PROVIDERS')
     })
 
     it('no providers/model args → FRO_BOT_MODEL is anthropic/claude-sonnet-4-6', () => {
@@ -234,15 +233,15 @@ describe('getHarnessTemplate provider-aware', () => {
       expect(configEntry?.value).toBe('{"provider":{"openai":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}')
     })
 
-    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → OMO_PROVIDERS is openai", () => {
+    it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → OMO_PROVIDERS is not emitted", () => {
       const template = getHarnessTemplate('opencode', {
         keyValue: 'sk-openai-key',
         providers: ['openai'],
         model: 'openai/gpt-5.4-mini',
       })
-      const entry = template.secrets.find((e: SecretAssignment) => e.name === 'OMO_PROVIDERS')
+      const secretNames = template.secrets.map((e: SecretAssignment) => e.name)
 
-      expect(entry?.value).toBe('openai')
+      expect(secretNames).not.toContain('OMO_PROVIDERS')
     })
 
     it("providers: ['openai'], model: 'openai/gpt-5.4-mini' → FRO_BOT_MODEL is openai/gpt-5.4-mini", () => {
@@ -294,15 +293,15 @@ describe('getHarnessTemplate provider-aware', () => {
       )
     })
 
-    it("providers: ['anthropic', 'openai'] → OMO_PROVIDERS is claude-max20,openai", () => {
+    it("providers: ['anthropic', 'openai'] → OMO_PROVIDERS is not emitted", () => {
       const template = getHarnessTemplate('opencode', {
         keyValue: 'sk-dual',
         providers: ['anthropic', 'openai'],
         model: 'openai/gpt-5.4-mini',
       })
-      const entry = template.secrets.find((e: SecretAssignment) => e.name === 'OMO_PROVIDERS')
+      const secretNames = template.secrets.map((e: SecretAssignment) => e.name)
 
-      expect(entry?.value).toBe('claude-max20,openai')
+      expect(secretNames).not.toContain('OMO_PROVIDERS')
     })
 
     it("providers: ['anthropic', 'openai'] → FRO_BOT_MODEL is the supplied model", () => {

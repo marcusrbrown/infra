@@ -23,7 +23,7 @@ export type FroBotWorkflowCheck =
 // For proxy-routed providers configured via OPENCODE_CONFIG.provider.<name>.options.baseURL,
 // the fro-bot/agent action honors auth.json directly (regardless of oMo state).
 // Source: fro-bot/agent@v0.44.3+ action.yaml lines 99-104; verified by librarian 2026-05-25.
-const REQUIRED_OPENCODE_INPUTS = ['auth-json', 'opencode-config', 'omo-providers', 'model'] as const
+const REQUIRED_OPENCODE_INPUTS = ['auth-json', 'opencode-config', 'model'] as const
 type RequiredOpencodeInput = (typeof REQUIRED_OPENCODE_INPUTS)[number]
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -129,7 +129,6 @@ export function formatWorkflowSnippet(missingInputs: readonly string[]): string 
   const inputMap = {
     'auth-json': 'auth-json: ${{ secrets.OPENCODE_AUTH_JSON }}',
     'opencode-config': 'opencode-config: ${{ secrets.OPENCODE_CONFIG }}',
-    'omo-providers': 'omo-providers: ${{ secrets.OMO_PROVIDERS }}',
     model: 'model: ${{ vars.FRO_BOT_MODEL }}',
   } satisfies Record<RequiredOpencodeInput, string>
   /* eslint-enable no-template-curly-in-string */

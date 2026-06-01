@@ -350,7 +350,7 @@ export async function buildNonInteractivePlan(
   // Check BEFORE verifyModelsAvailable to avoid a network call when the gate will reject anyway.
   if (requiresDestructiveProviderChangeConfirmation(providers) && !options.force) {
     throw new Error(
-      `Refusing destructive provider change on ${options.repo ?? ''} without --force. Selected providers ${providers.join(', ')} would overwrite existing GitHub secret values (OPENCODE_AUTH_JSON, OPENCODE_CONFIG, OMO_PROVIDERS, FRO_BOT_MODEL). Note: --force authorizes overwriting these GitHub secret values; it does NOT rotate the underlying CLIProxyAPI proxy bearer token (which is preserved byte-for-byte when --key is supplied).`,
+      `Refusing destructive provider change on ${options.repo ?? ''} without --force. Selected providers ${providers.join(', ')} would overwrite existing GitHub secret values (OPENCODE_AUTH_JSON, OPENCODE_CONFIG, FRO_BOT_MODEL). Note: --force authorizes overwriting these GitHub secret values; it does NOT rotate the underlying CLIProxyAPI proxy bearer token (which is preserved byte-for-byte when --key is supplied).`,
     )
   }
 

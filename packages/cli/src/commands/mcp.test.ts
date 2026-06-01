@@ -73,6 +73,14 @@ function buildTestCli(): ReturnType<typeof goke> {
   return cli
 }
 
+/** Extract all text block content from a CallToolResult, joined by newline. */
+function allText(result: CallToolResult): string {
+  return result.content
+    .filter((block): block is {type: 'text'; text: string} => block.type === 'text')
+    .map(block => block.text)
+    .join('\n')
+}
+
 // ─── Suite ────────────────────────────────────────────────────────────────────
 
 describe('mcp integration (Tier-1, in-process)', () => {
@@ -125,24 +133,46 @@ describe('mcp integration (Tier-1, in-process)', () => {
 
   // ── Mode B contract: gateway_backup ───────────────────────────────────────
   //
-  // gateway_backup tries to SSH to a real droplet, which is unreachable in CI.
-  // We assert the contract: the tool returns a non-empty CallToolResult.
-  // In CI the result will be an error CallToolResult (isError: true) because
-  // SSH fails — that's fine; the contract is that the MCP layer wraps the
-  // error and returns content rather than throwing.
+  // gateway_backup reads GATEWAY_HOST before attempting any SSH call.
+  // When GATEWAY_HOST is unset the action exits synchronously with a
+  // well-known error message — no network contact is made.
+  // The MCP layer must wrap that failure as an error CallToolResult
+  // (isError: true) rather than throwing, and the content must contain
+  // the exact error message from gatewayBackupAction so we catch contract
+  // regressions if the message ever changes.
 
-  test('gateway_backup returns a non-empty CallToolResult (Mode B contract)', async () => {
-    const rawResult = await client.callTool(
-      {
-        name: 'gateway_backup',
-        arguments: {},
-      },
-      CallToolResultSchema,
-    )
-    // Parse through the schema to get a properly typed result.
-    // The tool must return at least one content block (even on SSH failure).
-    const result: CallToolResult = CallToolResultSchema.parse(rawResult)
-    expect(result.content.length).toBeGreaterThan(0)
+  test('gateway_backup wraps missing-GATEWAY_HOST as an error CallToolResult with the known message', async () => {
+    const originalHost = process.env.GATEWAY_HOST
+
+    try {
+      // Delete GATEWAY_HOST to trigger the fast synchronous error path inside
+      // gatewayBackupAction — no SSH or network call is made.
+      delete process.env.GATEWAY_HOST
+
+      const rawResult = await client.callTool(
+        {
+          name: 'gateway_backup',
+          arguments: {},
+        },
+        CallToolResultSchema,
+      )
+
+      const result: CallToolResult = CallToolResultSchema.parse(rawResult)
+
+      // The MCP layer must surface the error as a content block, not a thrown exception.
+      expect(result.isError).toBe(true)
+      expect(result.content.length).toBeGreaterThan(0)
+
+      // The content must carry the exact contract-bearing error string from
+      // gatewayBackupAction. This assertion fails if the error message changes.
+      expect(allText(result)).toContain('Gateway host not set. Export GATEWAY_HOST before running backup.')
+    } finally {
+      if (originalHost === undefined) {
+        delete process.env.GATEWAY_HOST
+      } else {
+        process.env.GATEWAY_HOST = originalHost
+      }
+    }
   })
 
   // ── Mode C contract: cliproxy_keys_list ───────────────────────────────────
@@ -177,13 +207,10 @@ describe('mcp integration (Tier-1, in-process)', () => {
       // Mode C contract: at least 2 content blocks (stdout text + structured return)
       expect(result.content.length).toBeGreaterThanOrEqual(2)
 
-      const allText = result.content
-        .filter((block): block is {type: 'text'; text: string} => block.type === 'text')
-        .map(block => block.text)
-        .join('\n')
+      const text = allText(result)
 
       // One block must contain the formatted stdout (key names printed by the action)
-      expect(allText).toContain('fro-bot-test1')
+      expect(text).toContain('fro-bot-test1')
 
       // One block must contain the stringified return value (JSON array of key names)
       const hasStructuredReturn = result.content.some(block => {
@@ -196,6 +223,179 @@ describe('mcp integration (Tier-1, in-process)', () => {
         }
       })
       expect(hasStructuredReturn).toBe(true)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (originalKey === undefined) {
+        delete process.env.CLIPROXY_MANAGEMENT_KEY
+      } else {
+        process.env.CLIPROXY_MANAGEMENT_KEY = originalKey
+      }
+    }
+  })
+
+  // ── Positional-arg routing: cliproxy_keys_add ─────────────────────────────
+  //
+  // The MCP inputSchema for cliproxy_keys_add has a single required property
+  // `key` (derived from the command's positional `<key>` argument). This test
+  // proves that goke routes the MCP argument value through to the action's
+  // positional parameter (apiKeyToAdd) by asserting the key name appears in
+  // the action's output text.
+  //
+  // Verified inputSchema (empirical): { properties: { key: { type: "string",
+  //   description: "Management API key…" }, url: { type: "string" } },
+  //   required: ["key"] }
+
+  test('cliproxy_keys_add routes the positional key argument through MCP', async () => {
+    const originalFetch = globalThis.fetch
+    const originalKey = process.env.CLIPROXY_MANAGEMENT_KEY
+
+    try {
+      process.env.CLIPROXY_MANAGEMENT_KEY = 'test-management-key'
+
+      globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+        const method = typeof _init?.method === 'string' ? _init.method.toUpperCase() : 'GET'
+        if (method === 'GET') {
+          // Return empty current key list so the new key is not already present
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: {'content-type': 'application/json'},
+          })
+        }
+
+        // PUT response — the action ignores the body and logs the new count
+        return new Response(JSON.stringify(['tier1-test-key']), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      }) as typeof fetch
+
+      const rawResult = await client.callTool(
+        {
+          name: 'cliproxy_keys_add',
+          // `key` is the positional <key> arg (the API key to add).
+          // Verified from listTools() inputSchema — required property.
+          arguments: {key: 'tier1-test-key'},
+        },
+        CallToolResultSchema,
+      )
+
+      const result: CallToolResult = CallToolResultSchema.parse(rawResult)
+
+      expect(result.isError).not.toBe(true)
+      // The action logs `Added key "tier1-test-key"` — presence proves the
+      // positional arg was correctly routed from the MCP call.
+      expect(allText(result)).toContain('tier1-test-key')
+    } finally {
+      globalThis.fetch = originalFetch
+      if (originalKey === undefined) {
+        delete process.env.CLIPROXY_MANAGEMENT_KEY
+      } else {
+        process.env.CLIPROXY_MANAGEMENT_KEY = originalKey
+      }
+    }
+  })
+
+  // ── Positional-arg routing: cliproxy_keys_remove ──────────────────────────
+  //
+  // The MCP inputSchema for cliproxy_keys_remove has a required property `key`
+  // (derived from the positional `<key>` argument). The action issues a DELETE
+  // request with `?value=<apiKeyToRemove>` and logs the response. The fetch mock
+  // echoes back the query-parameter value so we can assert it was routed correctly.
+  //
+  // Verified inputSchema (empirical): { properties: { key: { type: "string" },
+  //   url: { type: "string" } }, required: ["key"] }
+
+  test('cliproxy_keys_remove routes the positional key argument through MCP', async () => {
+    const originalFetch = globalThis.fetch
+    const originalKey = process.env.CLIPROXY_MANAGEMENT_KEY
+
+    try {
+      process.env.CLIPROXY_MANAGEMENT_KEY = 'test-management-key'
+
+      globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+        // The action appends ?value=<apiKeyToRemove> — echo it back in the
+        // response body so the assertion can verify positional routing.
+        const urlStr = typeof _url === 'string' ? _url : _url instanceof URL ? _url.href : (_url as Request).url
+        const url = new URL(urlStr)
+        const removedKey = url.searchParams.get('value') ?? 'unknown'
+        return new Response(JSON.stringify({removed: removedKey}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      }) as typeof fetch
+
+      const rawResult = await client.callTool(
+        {
+          name: 'cliproxy_keys_remove',
+          // `key` is the positional <key> arg (the API key to remove).
+          // Verified from listTools() inputSchema — required property.
+          arguments: {key: 'tier1-test-remove-key'},
+        },
+        CallToolResultSchema,
+      )
+
+      const result: CallToolResult = CallToolResultSchema.parse(rawResult)
+
+      expect(result.isError).not.toBe(true)
+      // The response includes the echoed ?value= param — proves the positional
+      // arg was routed to the DELETE URL query parameter.
+      expect(allText(result)).toContain('tier1-test-remove-key')
+    } finally {
+      globalThis.fetch = originalFetch
+      if (originalKey === undefined) {
+        delete process.env.CLIPROXY_MANAGEMENT_KEY
+      } else {
+        process.env.CLIPROXY_MANAGEMENT_KEY = originalKey
+      }
+    }
+  })
+
+  // ── Positional-arg routing: cliproxy_config_set ───────────────────────────
+  //
+  // The MCP inputSchema for cliproxy_config_set has two required properties:
+  // `field` and `value` (both positional). The action PUT-s `{value: <parsed>}`
+  // to the field-specific endpoint and logs the response JSON. Returning the
+  // value in the mock response lets us assert both positionals were routed.
+  //
+  // Verified inputSchema (empirical): { properties: { field: { type: "string",
+  //   description: "Positional argument field" }, value: { type: "string",
+  //   description: "Positional argument value" }, url: …, key: … },
+  //   required: ["field","value"] }
+
+  test('cliproxy_config_set routes both positional arguments (field and value) through MCP', async () => {
+    const originalFetch = globalThis.fetch
+    const originalKey = process.env.CLIPROXY_MANAGEMENT_KEY
+
+    try {
+      process.env.CLIPROXY_MANAGEMENT_KEY = 'test-management-key'
+
+      globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+        // Echo back the parsed body so we can assert the value was routed.
+        // The action sends {value: <parsedValue>}. We return it as-is.
+        const body = _init?.body
+        const parsed: unknown = body ? JSON.parse(String(body)) : {}
+        return new Response(JSON.stringify(parsed), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      }) as typeof fetch
+
+      const rawResult = await client.callTool(
+        {
+          name: 'cliproxy_config_set',
+          // `field` and `value` are the positional args from `<field> <value>`.
+          // `proxy-url` is a string-type mutable field — no parsing needed.
+          arguments: {field: 'proxy-url', value: 'tier1-test-url'},
+        },
+        CallToolResultSchema,
+      )
+
+      const result: CallToolResult = CallToolResultSchema.parse(rawResult)
+
+      expect(result.isError).not.toBe(true)
+      // The response echoes back {value: "tier1-test-url"} — presence of the
+      // value proves positional routing worked end-to-end.
+      expect(allText(result)).toContain('tier1-test-url')
     } finally {
       globalThis.fetch = originalFetch
       if (originalKey === undefined) {

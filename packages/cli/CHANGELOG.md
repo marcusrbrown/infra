@@ -1,5 +1,20 @@
 # @marcusrbrown/infra
 
+## 0.9.5
+### Patch Changes
+
+
+- `cliproxy setup --harness opencode` no longer writes the `OMO_PROVIDERS` secret. Proxy routing is driven entirely by the `OPENCODE_CONFIG` provider `baseURL`, so `OMO_PROVIDERS` was vestigial; the workflow analyzer also no longer flags repos that omit `omo-providers` from their Fro Bot workflow. ([#359](https://github.com/marcusrbrown/infra/pull/359))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.33` to `7.1.34` ([#357](https://github.com/marcusrbrown/infra/pull/357))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.34` to `7.1.36` ([#358](https://github.com/marcusrbrown/infra/pull/358))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.32` to `7.1.33` ([#353](https://github.com/marcusrbrown/infra/pull/353))
+
 ## 0.9.4
 ### Patch Changes
 

@@ -1,5 +1,14 @@
 # @marcusrbrown/infra
 
+## 0.9.7
+### Patch Changes
+
+
+- `cliproxy login codex` now surfaces a clear error when the remote CLIProxyAPI binary predates `--codex-device-login` support (requires v6.10.9+), pointing to a new provider-version-skew runbook instead of a cryptic SSH exit code. ([#369](https://github.com/marcusrbrown/infra/pull/369))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.37` to `7.1.38` ([#367](https://github.com/marcusrbrown/infra/pull/367))
+
 ## 0.9.6
 ### Patch Changes
 

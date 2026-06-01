@@ -37,7 +37,7 @@ describe('formatDryRunPreview', () => {
     expect(preview).toContain('Planned secrets:')
     expect(preview).toContain('OPENCODE_AUTH_JSON')
     expect(preview).toContain('OPENCODE_CONFIG')
-    expect(preview).toContain('OMO_PROVIDERS')
+    expect(preview).not.toContain('OMO_PROVIDERS')
   })
 
   it('renders planned variables', () => {

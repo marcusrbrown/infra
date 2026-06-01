@@ -25,13 +25,6 @@ export interface HarnessTemplate {
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
 
-// OMO_PROVIDERS token map — template/harness concern, not a provider concern.
-// Keyed by ProviderId but lives here because it drives harness template construction.
-const OMO_TOKEN: Record<ProviderId, string> = {
-  anthropic: 'claude-max20',
-  openai: 'openai',
-}
-
 export function stripTrailingSlash(value: string): string {
   return value.endsWith('/') ? value.slice(0, -1) : value
 }
@@ -78,8 +71,6 @@ export function getHarnessTemplate(
       providerConfig[p] = {options: {baseURL: `${baseUrl}/v1`}}
     }
 
-    const omoProviders = providers.map(p => OMO_TOKEN[p]).join(',')
-
     return {
       secrets: [
         {
@@ -89,10 +80,6 @@ export function getHarnessTemplate(
         {
           name: 'OPENCODE_CONFIG',
           value: JSON.stringify({provider: providerConfig}),
-        },
-        {
-          name: 'OMO_PROVIDERS',
-          value: omoProviders,
         },
       ],
       variables: [

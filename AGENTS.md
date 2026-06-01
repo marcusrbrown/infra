@@ -130,7 +130,7 @@ bun run deploy:umami                            # Local umami deploy (loads root
 - `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are scoped to `cliproxy` environment.
 - `GATEWAY_SSH_KEY`, `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, and `GATEWAY_HOST` are scoped to `gateway` environment. Optional: `S3_ENDPOINT`, `OBJECT_STORE_HOSTS`.
 - `UMAMI_SSH_KEY`, `UMAMI_DOMAIN`, `UMAMI_APP_SECRET`, `UMAMI_DB_PASSWORD`, and `UMAMI_ADMIN_PASSWORD` are scoped to `umami` environment. `UMAMI_DB_PASSWORD` is volume-coupled — rotate only via the `ALTER USER` runbook in `apps/umami/AGENTS.md`.
-- `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `OMO_PROVIDERS`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
+- `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.
 - `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets.
 - Deploy target: `box.heatvision.co` (Mail-In-A-Box server). Site path: `/home/user-data/www/kw.igg.ms/`.

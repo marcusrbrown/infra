@@ -97,6 +97,14 @@ export async function cliproxyLoginAction(
 
   const exitCode = await child.exited
   if (exitCode !== 0) {
+    if (provider === 'codex') {
+      throw new Error(
+        `Remote login command failed with exit code ${exitCode}. ` +
+          `The most likely cause is that the droplet's CLIProxyAPI binary predates --codex-device-login support (requires v6.10.9+). ` +
+          `See docs/runbooks/cliproxy-provider-version-skew.md for diagnosis and remediation steps.`,
+      )
+    }
+
     throw new Error(`Remote login command failed with exit code ${exitCode}`)
   }
 

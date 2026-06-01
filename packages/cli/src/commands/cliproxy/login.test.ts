@@ -276,6 +276,32 @@ describe('cliproxy login', () => {
       )
       expect(calls).toHaveLength(1)
     })
+
+    it('codex non-zero exit: error message includes exit code and v6.10.9 version requirement', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk(1)
+      setValidEnv()
+
+      const error = await cliproxyLoginAction('codex', {}, spawnFn).catch((error_: unknown) => error_)
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toMatch(/exit code 1/)
+      expect(message).toMatch(/v6\.10\.9/)
+      expect(message).toMatch(/cliproxy-provider-version-skew\.md/)
+    })
+
+    it('codex non-zero exit: error message does not bleed into claude non-zero exit', async () => {
+      const {cliproxyLoginAction} = await import('./login')
+      const {spawnFn} = makeSpawnOk(2)
+      setValidEnv()
+
+      const error = await cliproxyLoginAction('claude', {}, spawnFn).catch((error_: unknown) => error_)
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toMatch(/Remote login command failed with exit code 2/)
+      expect(message).not.toMatch(/v6\.10\.9/)
+      expect(message).not.toMatch(/cliproxy-provider-version-skew/)
+    })
   })
 
   describe('ssh spawn contract', () => {

@@ -40,6 +40,15 @@
       sourceUrl: 'https://github.com/postgres/postgres',
       changelogUrl: 'https://www.postgresql.org/docs/release/',
       groupName: null,
+      // A Postgres major bump cannot be applied by recreating the container — PG18 refuses to
+      // start against a PG15 data directory, and the password is baked into the named volume.
+      // Hold at the current major (<16) and require explicit dashboard approval so a major can
+      // never auto-PR/auto-merge/auto-deploy ahead of the migration runbook
+      // (docs/plans/2026-06-01-001-feat-umami-postgres-major-upgrade-plan.md). Lift the ceiling
+      // to <19 only as part of the executed cutover. Minor/patch PG15 updates still flow.
+      allowedVersions: '<16',
+      automerge: false,
+      dependencyDashboardApproval: true,
     },
     {
       // The github-releases datasource auto-derives source URL + release notes from depName

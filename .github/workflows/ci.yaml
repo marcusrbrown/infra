@@ -39,14 +39,7 @@ jobs:
         run: bun run lint
 
       - name: Check formatting
-        run: |
-          bun run fix
-          if ! git diff --exit-code; then
-            echo "❌ Code formatting issues found. Run 'bun run fix' to fix them."
-            exit 1
-          else
-            echo "✅ Code formatting is correct."
-          fi
+        run: bunx prettier --check .
 
   type-check:
     name: Type Check

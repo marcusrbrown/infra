@@ -419,12 +419,38 @@ export function validateObjectStoreHosts(value: string): void {
 }
 
 /**
+ * Normalizes a PEM private key that may be stored single-line with literal `\n`
+ * escape sequences (the convenient form for a .env file) into a real multi-line
+ * PEM, and ensures a trailing newline.
+ *
+ * Safe for both sources: a valid PEM body is base64 + header/footer dashes and
+ * never contains a literal backslash-n, so the unescape is a no-op for a value
+ * that already has real newlines (e.g. a GitHub Environment secret). The trailing
+ * newline also repairs GitHub Actions stripping trailing whitespace from secrets.
+ */
+export function normalizePemPrivateKey(value: string): string {
+  if (!value) return value
+  let normalized = value
+  if (normalized.includes(String.raw`\n`)) {
+    normalized = normalized.replaceAll(String.raw`\r\n`, '\n').replaceAll(String.raw`\n`, '\n')
+  }
+  if (!normalized.endsWith('\n')) {
+    normalized = `${normalized}\n`
+  }
+  return normalized
+}
+
+/**
  * Builds the list of secret files to materialize on the droplet.
  * Required secrets get the actual value; optional secrets that are
  * unset get '' (empty placeholder).
+ *
+ * `github-app-private-key` is run through normalizePemPrivateKey so the PEM can
+ * be supplied either as a real multi-line value (CI / GitHub Environment) or as
+ * a single-line `\n`-escaped value (convenient in a local .env).
  */
 export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
-  const required: {name: string; envKey: string}[] = [
+  const required: {name: string; envKey: string; transform?: (value: string) => string}[] = [
     {name: 'discord-token', envKey: 'DISCORD_TOKEN'},
     {name: 'discord-application-id', envKey: 'DISCORD_APPLICATION_ID'},
     {name: 'discord-guild-id', envKey: 'DISCORD_GUILD_ID'},
@@ -433,12 +459,12 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
     {name: 's3-bucket', envKey: 'S3_BUCKET'},
     {name: 's3-region', envKey: 'S3_REGION'},
     {name: 'github-app-id', envKey: 'GH_APP_ID'},
-    {name: 'github-app-private-key', envKey: 'GH_APP_PRIVATE_KEY'},
+    {name: 'github-app-private-key', envKey: 'GH_APP_PRIVATE_KEY', transform: normalizePemPrivateKey},
     {name: 'workspace-opencode-token', envKey: 'WORKSPACE_OPENCODE_TOKEN'},
     {name: 'workspace-opencode-auth', envKey: 'WORKSPACE_OPENCODE_AUTH'},
   ]
 
-  const optional: {name: string; envKey: string}[] = [
+  const optional: {name: string; envKey: string; transform?: (value: string) => string}[] = [
     {name: 's3-endpoint', envKey: 'S3_ENDPOINT'},
     {name: 'aws-session-token', envKey: 'AWS_SESSION_TOKEN'},
     {name: 'discord-privileged-intents', envKey: 'DISCORD_PRIVILEGED_INTENTS'},
@@ -451,12 +477,14 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
 
   const secrets: SecretFile[] = []
 
-  for (const {name, envKey} of required) {
-    secrets.push({name, content: env[envKey] ?? '', required: true})
+  for (const {name, envKey, transform} of required) {
+    const raw = env[envKey] ?? ''
+    secrets.push({name, content: transform ? transform(raw) : raw, required: true})
   }
 
-  for (const {name, envKey} of optional) {
-    secrets.push({name, content: env[envKey] ?? '', required: false})
+  for (const {name, envKey, transform} of optional) {
+    const raw = env[envKey] ?? ''
+    secrets.push({name, content: transform ? transform(raw) : raw, required: false})
   }
 
   return secrets

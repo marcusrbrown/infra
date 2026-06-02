@@ -14,3 +14,7 @@ dist/
 *.log
 bun.lockb
 .context/systematic/
+
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps

@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-06-02T01:42:36.000Z",
+  "dependencies": [
+    {
+      "name": "opencode",
+      "resolvedVersion": "1.15.13",
+      "repoUrl": "https://github.com/anomalyco/opencode.git",
+      "ref": "v1.15.13",
+      "path": ".slim/clonedeps/repos/anomalyco__opencode",
+      "packagePath": "packages/opencode",
+      "reason": "Inspect MCP tool registration + permission enforcement to correctly gate sensitive infra MCP tools (tools:false and permission:deny both failed empirically)"
+    }
+  ]
+}

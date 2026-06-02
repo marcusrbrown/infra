@@ -39,6 +39,15 @@ env:
     monorepo that deploys KeeWeb to box.heatvision.co via SSH/rsync.
     Read AGENTS.md for full project conventions before reviewing.
 
+    Review the diff directly. Do NOT invoke `ce:review` or any other `ce:*`
+    skill (ce:work, ce:plan, ce:brainstorm, ce:compound, etc.). Those are
+    heavy multi-agent workflows meant for authoring changes, not reviewing
+    them — `ce:review` in particular is run by the author before pushing, so
+    repeating it here is redundant and makes the review take far too long.
+    Read the changed files yourself and form your own assessment with the
+    standard tools (read, grep, git diff). A focused single-pass review is
+    the goal.
+
     Focus your review on:
     - Correctness and edge cases
     - Security implications (secret exposure, SSH config, deploy safety)

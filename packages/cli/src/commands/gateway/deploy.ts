@@ -50,6 +50,12 @@ export function getGatewayDeployEnv(): Record<string, string> {
     GH_APP_ID: process.env.GH_APP_ID ?? '',
     GH_APP_PRIVATE_KEY: process.env.GH_APP_PRIVATE_KEY ?? '',
     DISCORD_PRIVILEGED_INTENTS: process.env.DISCORD_PRIVILEGED_INTENTS ?? '',
+    WORKSPACE_OPENCODE_TOKEN: process.env.WORKSPACE_OPENCODE_TOKEN ?? '',
+    WORKSPACE_OPENCODE_AUTH: process.env.WORKSPACE_OPENCODE_AUTH ?? '',
+    WORKSPACE_OPENCODE_URL: process.env.WORKSPACE_OPENCODE_URL ?? '',
+    WORKSPACE_OPENCODE_MODEL: process.env.WORKSPACE_OPENCODE_MODEL ?? '',
+    WORKSPACE_OPENCODE_CONFIG: process.env.WORKSPACE_OPENCODE_CONFIG ?? '',
+    GATEWAY_TRIGGER_ROLE_ID: process.env.GATEWAY_TRIGGER_ROLE_ID ?? '',
   }
 }
 

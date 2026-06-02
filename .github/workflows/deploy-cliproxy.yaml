@@ -4,9 +4,6 @@ permissions:
   contents: read
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
   workflow_call:
     secrets:
@@ -17,36 +14,12 @@ on:
       CLIPROXY_DOMAIN:
         required: true
 
+concurrency:
+  group: deploy-cliproxy-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  detect-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      cliproxy: ${{ steps.filter.outputs.cliproxy }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 0
-
-      - name: Detect changed paths
-        id: filter
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
-        with:
-          predicate-quantifier: every
-          filters: |
-            cliproxy:
-              - 'apps/cliproxy/**'
-              - '!apps/cliproxy/**/*.md'
-              - '!apps/cliproxy/**/*.test.ts'
-              - '!apps/cliproxy/**/__fixtures__/**'
-              - '!apps/cliproxy/**/__snapshots__/**'
-
   deploy-cliproxy:
-    needs: detect-changes
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call' ||
-      needs.detect-changes.outputs.cliproxy == 'true'
     runs-on: ubuntu-latest
     environment: cliproxy
     steps:

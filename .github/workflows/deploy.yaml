@@ -4,11 +4,65 @@ permissions:
   contents: read
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-aggregate-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      keeweb: ${{ steps.filter.outputs.keeweb }}
+      cliproxy: ${{ steps.filter.outputs.cliproxy }}
+      gateway: ${{ steps.filter.outputs.gateway }}
+      umami: ${{ steps.filter.outputs.umami }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          predicate-quantifier: every
+          filters: |
+            keeweb:
+              - 'apps/keeweb/**'
+              - '!apps/keeweb/**/*.md'
+              - '!apps/keeweb/**/*.test.ts'
+              - '!apps/keeweb/**/__fixtures__/**'
+              - '!apps/keeweb/**/__snapshots__/**'
+            cliproxy:
+              - 'apps/cliproxy/**'
+              - '!apps/cliproxy/**/*.md'
+              - '!apps/cliproxy/**/*.test.ts'
+              - '!apps/cliproxy/**/__fixtures__/**'
+              - '!apps/cliproxy/**/__snapshots__/**'
+            gateway:
+              - 'apps/gateway/**'
+              - '!apps/gateway/**/*.md'
+              - '!apps/gateway/**/*.test.ts'
+              - '!apps/gateway/**/__fixtures__/**'
+              - '!apps/gateway/**/__snapshots__/**'
+            umami:
+              - 'apps/umami/**'
+              - '!apps/umami/**/*.md'
+              - '!apps/umami/**/*.test.ts'
+              - '!apps/umami/**/__fixtures__/**'
+              - '!apps/umami/**/__snapshots__/**'
+
   # Keep deploys independent by design: one app failing should not block the other.
   deploy-keeweb:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.keeweb == 'true'
     uses: ./.github/workflows/deploy-keeweb.yaml
     with:
       deploy_nginx: true
@@ -17,8 +71,48 @@ jobs:
       DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
 
   deploy-cliproxy:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.cliproxy == 'true'
     uses: ./.github/workflows/deploy-cliproxy.yaml
     secrets:
       CLIPROXY_SSH_KEY: ${{ secrets.CLIPROXY_SSH_KEY }}
       CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
       CLIPROXY_DOMAIN: ${{ secrets.CLIPROXY_DOMAIN }}
+
+  deploy-gateway:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.gateway == 'true'
+    uses: ./.github/workflows/deploy-gateway.yaml
+    secrets:
+      GATEWAY_SSH_KEY: ${{ secrets.GATEWAY_SSH_KEY }}
+      DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+      DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
+      DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      S3_REGION: ${{ secrets.S3_REGION }}
+      GATEWAY_HOST: ${{ secrets.GATEWAY_HOST }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+      OBJECT_STORE_HOSTS: ${{ secrets.OBJECT_STORE_HOSTS }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      DISCORD_PRIVILEGED_INTENTS: ${{ secrets.DISCORD_PRIVILEGED_INTENTS }}
+
+  deploy-umami:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.umami == 'true'
+    uses: ./.github/workflows/deploy-umami.yaml
+    secrets:
+      UMAMI_SSH_KEY: ${{ secrets.UMAMI_SSH_KEY }}
+      UMAMI_DOMAIN: ${{ secrets.UMAMI_DOMAIN }}
+      UMAMI_APP_SECRET: ${{ secrets.UMAMI_APP_SECRET }}
+      UMAMI_DB_PASSWORD: ${{ secrets.UMAMI_DB_PASSWORD }}
+      UMAMI_ADMIN_PASSWORD: ${{ secrets.UMAMI_ADMIN_PASSWORD }}

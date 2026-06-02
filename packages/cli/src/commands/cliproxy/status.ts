@@ -385,7 +385,16 @@ export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCt
   try {
     const verbose = options.verbose === true
     const baseUrl = stripTrailingSlash(options.url ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
-    const managementKey = options.key ?? process.env.CLIPROXY_MANAGEMENT_KEY
+
+    // Trusted URL: the canonical configured/default host, trailing-slash-normalized.
+    // Ambient env keys must ONLY follow to this trusted destination to prevent
+    // secret exfiltration when an agent passes an attacker-controlled --url.
+    const trustedUrl = stripTrailingSlash(process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
+    const urlIsExplicitlyOverridden = options.url !== undefined && baseUrl !== trustedUrl
+
+    // An explicit --key is always honored (operator knows what they're doing).
+    // An ambient env key is only forwarded when the resolved baseUrl is trusted.
+    const managementKey = options.key ?? (urlIsExplicitlyOverridden ? undefined : process.env.CLIPROXY_MANAGEMENT_KEY)
 
     ctx.console.log('CLIProxyAPI status')
     ctx.console.log('')

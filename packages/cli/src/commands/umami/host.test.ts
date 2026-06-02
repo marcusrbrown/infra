@@ -48,7 +48,7 @@ describe('validateUmamiHost', () => {
     expect(() => validateUmamiHost('')).toThrow('Invalid UMAMI_DOMAIN')
   })
 
-  it('truncates the invalid value in the error message to ~30 chars', () => {
+  it('omits the rejected value entirely from the error message', () => {
     const longMalicious = `-oProxyCommand=${'A'.repeat(100)}`
     let message = ''
     try {
@@ -56,7 +56,24 @@ describe('validateUmamiHost', () => {
     } catch (error) {
       message = error instanceof Error ? error.message : String(error)
     }
+    // The value is never echoed (it may be a misdirected secret) — only the constraint is shown.
     expect(message).toContain('Invalid UMAMI_DOMAIN')
-    expect(message.length).toBeLessThan(longMalicious.length + 50)
+    expect(message).not.toContain('ProxyCommand')
+    expect(message).not.toContain('AAAA')
+  })
+
+  // ── Secret value redaction ───────────────────────────────────────────────────
+
+  it('does not echo the rejected value in the error message', () => {
+    const secretValue = 'AWS_SECRET_KEY=AKIA1234567890EXAMPLE'
+    let message = ''
+    try {
+      validateUmamiHost(secretValue)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message).toContain('Invalid UMAMI_DOMAIN')
+    expect(message).not.toContain('AKIA1234567890EXAMPLE')
+    expect(message).not.toContain('AWS_SECRET_KEY')
   })
 })

@@ -385,3 +385,68 @@ describe('status command', () => {
     expect(captured.exit).toBeNull()
   })
 })
+
+// ─── SSH error redaction — host value must not leak in returned error strings ──
+
+describe('getUmamiComposeStatus — SSH error redaction', () => {
+  it('does not include the resolved host value in the error when SSH fails', async () => {
+    const {getUmamiComposeStatus} = await import('./status')
+    const secretLookingHost = 'TOPSECRETHOSTNAME'
+
+    const mockSpawn = (_cmd: string[], _opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'}) => {
+      const encoder = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(encoder.encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(encoder.encode(`ssh: Could not resolve hostname ${secretLookingHost}: Name or service not known`))
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(255),
+      }
+    }
+
+    const result = await getUmamiComposeStatus(secretLookingHost, mockSpawn)
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toBeDefined()
+    expect(result.error).not.toContain(secretLookingHost)
+  })
+
+  it('does not leak the host even when OpenSSH lowercases it in stderr', async () => {
+    const {getUmamiComposeStatus} = await import('./status')
+    const secretHost = 'AKIAIOSFODNN7EXAMPLE'
+
+    const mockSpawn = (_cmd: string[], _opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'}) => {
+      const encoder = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(
+              encoder.encode(`ssh: Could not resolve hostname ${secretHost.toLowerCase()}: Name or service not known`),
+            )
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(255),
+      }
+    }
+
+    const result = await getUmamiComposeStatus(secretHost, mockSpawn)
+
+    expect(result.ok).toBe(false)
+    expect(result.error).not.toContain(secretHost)
+    expect(result.error).not.toContain(secretHost.toLowerCase())
+  })
+})

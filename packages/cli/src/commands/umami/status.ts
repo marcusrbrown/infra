@@ -1,9 +1,9 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
-
 import {z} from 'zod'
 
+import {redactHost} from '../../lib/redact'
 import {validateUmamiHost} from './host'
 
 declare const process: {
@@ -124,7 +124,7 @@ export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defau
     return {
       ok: false,
       services: [],
-      error: `SSH command failed (exit ${exitCode}): ${stderrText.trim() || 'unknown error'}`,
+      error: `SSH command failed (exit ${exitCode}): ${redactHost(stderrText.trim(), host) || 'unknown error'}`,
     }
   }
 
@@ -133,7 +133,11 @@ export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defau
   try {
     entries = parseComposePsOutput(stdoutText)
   } catch {
-    return {ok: false, services: [], error: `Failed to parse docker compose ps output: ${stdoutText.slice(0, 200)}`}
+    return {
+      ok: false,
+      services: [],
+      error: `Failed to parse docker compose ps output: ${redactHost(stdoutText.slice(0, 200), host)}`,
+    }
   }
 
   const services = parseComposePs(entries)

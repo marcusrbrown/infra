@@ -717,3 +717,125 @@ describe('management auth probe (ban-awareness)', () => {
     expect(managementFetchUrls.length).toBe(1)
   })
 })
+
+// ─── Ambient management key trusted-URL binding ───────────────────────────────
+
+describe('cliproxyStatusAction — ambient key does not follow agent-supplied URLs', () => {
+  let originalEnv: Record<string, string | undefined>
+
+  beforeEach(() => {
+    originalEnv = {
+      CLIPROXY_URL: process.env.CLIPROXY_URL,
+      CLIPROXY_MANAGEMENT_KEY: process.env.CLIPROXY_MANAGEMENT_KEY,
+    }
+    process.env.CLIPROXY_MANAGEMENT_KEY = 'secret-ambient-key'
+    delete process.env.CLIPROXY_URL
+  })
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(originalEnv)) {
+      if (v === undefined) {
+        delete process.env[k]
+      } else {
+        process.env[k] = v
+      }
+    }
+    globalThis.fetch = originalFetch
+  })
+
+  it('does NOT send the ambient management key to a non-trusted --url override', async () => {
+    const capturedRequestsByHost: Record<string, string[]> = {}
+
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      const {hostname} = new URL(url)
+      const hdrs = init?.headers
+      const key = hdrs instanceof Headers ? hdrs.get('x-management-key') : null
+
+      if (!capturedRequestsByHost[hostname]) capturedRequestsByHost[hostname] = []
+      if (key) capturedRequestsByHost[hostname].push(key)
+
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.includes('/v0/management/'))
+        return new Response('[]', {status: 200, headers: {'content-type': 'application/json'}})
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx} = createCapturedCtx()
+    try {
+      await cliproxyStatusAction({url: 'https://evil.example.com'}, ctx)
+    } catch {
+      // exit(1) expected or not — either way, we just care about key leakage
+    }
+
+    // The ambient secret key must NOT appear in any request to the evil host
+    expect(capturedRequestsByHost['evil.example.com'] ?? []).not.toContain('secret-ambient-key')
+  })
+
+  it('still uses the ambient key when --url matches the default trusted URL', async () => {
+    const capturedManagementKeys: string[] = []
+
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      const hdrs = init?.headers
+      const key = hdrs instanceof Headers ? hdrs.get('x-management-key') : null
+      if (url.includes('/v0/management/') && key) capturedManagementKeys.push(key)
+
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.includes('/v0/management/config'))
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
+      if (url.includes('/v0/management/usage-queue'))
+        return new Response('[]', {status: 200, headers: {'content-type': 'application/json'}})
+      if (url.includes('/v0/management/latest-version'))
+        return new Response(JSON.stringify({'latest-version': 'v1.0.0'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx} = createCapturedCtx()
+    // Default URL is https://cliproxy.fro.bot — pass it explicitly
+    await cliproxyStatusAction({url: 'https://cliproxy.fro.bot'}, ctx)
+
+    expect(capturedManagementKeys).toContain('secret-ambient-key')
+  })
+
+  it('uses an explicit --key even when --url is a non-trusted host', async () => {
+    const capturedManagementKeys: string[] = []
+
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      const hdrs = init?.headers
+      const key = hdrs instanceof Headers ? hdrs.get('x-management-key') : null
+      if (url.includes('/v0/management/') && key) capturedManagementKeys.push(key)
+
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.includes('/v0/management/config'))
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
+      if (url.includes('/v0/management/usage-queue'))
+        return new Response('[]', {status: 200, headers: {'content-type': 'application/json'}})
+      if (url.includes('/v0/management/latest-version'))
+        return new Response(JSON.stringify({'latest-version': 'v1.0.0'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx} = createCapturedCtx()
+    await cliproxyStatusAction({url: 'https://other-cliproxy.example.com', key: 'explicit-key'}, ctx)
+
+    expect(capturedManagementKeys).toContain('explicit-key')
+  })
+
+  it('falls through to the no-key warning path when URL is untrusted and no --key given', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      return new Response('[]', {status: 200})
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction({url: 'https://other-cliproxy.example.com'}, ctx)
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output).toMatch(/CLIPROXY_MANAGEMENT_KEY|no key|skipping/i)
+  })
+})

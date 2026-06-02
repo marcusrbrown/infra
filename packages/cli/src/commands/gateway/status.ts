@@ -1,11 +1,10 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
-
 import {z} from 'zod'
 
+import {redactHost} from '../../lib/redact'
 // ─── Minimal ctx interface (subset of GokeExecutionContext used by this action) ─
-
 import {validateGatewayHost} from './host'
 
 declare const process: {
@@ -128,10 +127,11 @@ export async function getGatewayComposeStatus(
   ])
 
   if (exitCode !== 0) {
+    const redacted = redactHost(stderrText.trim(), host) || 'unknown error'
     return {
       ok: false,
       services: [],
-      error: `SSH command failed (exit ${exitCode}): ${stderrText.trim() || 'unknown error'}`,
+      error: `SSH command failed (exit ${exitCode}): ${redacted}`,
     }
   }
 
@@ -140,7 +140,11 @@ export async function getGatewayComposeStatus(
   try {
     entries = parseComposePsOutput(stdoutText)
   } catch {
-    return {ok: false, services: [], error: `Failed to parse docker compose ps output: ${stdoutText.slice(0, 200)}`}
+    return {
+      ok: false,
+      services: [],
+      error: `Failed to parse docker compose ps output: ${redactHost(stdoutText.slice(0, 200), host)}`,
+    }
   }
 
   const services = parseComposePs(entries)

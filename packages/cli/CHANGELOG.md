@@ -1,5 +1,14 @@
 # @marcusrbrown/infra
 
+## 0.9.8
+### Patch Changes
+
+
+- Stop exposing mutating and secret-disclosing commands through the MCP server. `gateway backup`, `cliproxy keys list`, `cliproxy keys add`, `cliproxy keys remove`, `cliproxy config get`, and `cliproxy config set` are no longer registered as MCP tools — they remain available via the direct CLI. This keeps key and secret operations out of reach of autonomous agents while the read-only status tools stay exposed. ([#374](https://github.com/marcusrbrown/infra/pull/374))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.38` to `7.1.39` ([#370](https://github.com/marcusrbrown/infra/pull/370))
+
 ## 0.9.7
 ### Patch Changes
 

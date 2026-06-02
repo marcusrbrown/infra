@@ -82,10 +82,12 @@ The MCP server (`mcp.ts`) exposes a curated subset of commands as MCP tools via 
 
 Use the shared `ActionCtx` type from `src/lib/action-ctx.ts` — a structural subtype of `GokeExecutionContext` that captures exactly the surface actions consume. `createCapturedCtx()`, `expectCapturedToInclude()`, and `MockProcessExit` remain in `src/__test__/mcp-ctx-fixture.ts` for test use only. Action bodies are exported as named functions (e.g., `gatewayStatusAction`, `cliproxyKeysListAction`) and the `.action(...)` callback delegates to them, so Tier-2 tests invoke actions directly with `createCapturedCtx()`.
 
-**Mode C (structured-return commands).** Two commands return structured data alongside ctx-printed text so MCP consumers get both formatted output AND parseable JSON in the `CallToolResult`:
+**Current MCP surface = the 5 read-only status tools (all Mode A).** The 6 mutating/secret-disclosing commands (`gateway backup`, `cliproxy keys list`/`add`/`remove`, `cliproxy config get`/`set`) are **source-gated out of `MCP_ALLOWLIST`** — never registered as MCP tools, available via direct CLI only. The Mode B/C and mutation-verification guidance below documents the capture *contract* and remains the bar for any future capturable command; the specific commands it cites are now CLI-only, not MCP-exposed.
 
-- `cliproxy keys list` returns the parsed API-key array
-- `cliproxy config get` returns the parsed config object (the `--output` path still returns the object even when also writing to disk)
+**Mode C (structured-return commands).** The structured-return contract: a command returns structured data alongside ctx-printed text so MCP consumers get both formatted output AND parseable JSON in the `CallToolResult`. Two commands were designed for it before being source-gated to CLI-only:
+
+- `cliproxy keys list` returns the parsed API-key array (now CLI-only)
+- `cliproxy config get` returns the parsed config object (now CLI-only; the `--output` path still returns the object even when also writing to disk)
 
 Return values are plain data (arrays, objects) — never `{content: [...]}` shapes. `@goke/mcp` stringifies them and emits one text block per data plus one per captured stream. Extending Mode C is governed solely by the consolidated eligibility rule below (data-shape **and** exit-path constrained — transport source does not matter): mutations and complex orchestrations stay Mode A (text only). When in doubt, leave it Mode A; opening Mode C creates a contract MCP consumers may come to depend on.
 

@@ -10,20 +10,21 @@
       "enabled": true,
     },
   },
-  // Gated infra tools (disabled for agents). Two categories:
-  //   1. Mutating — key/config writes + CA backup; no agent approval gate exists yet.
-  //   2. Secret-disclosing reads — cliproxy_keys_list prints live bearer tokens and
-  //      cliproxy_config_get dumps the management config (incl. the management key).
-  //      Read-only does not mean secret-safe, so these stay human-CLI-only too.
-  // Tool ids are prefixed with the MCP server name above (infra_). Keep this list in
-  // sync with mutating/secret-bearing entries in MCP_ALLOWLIST (packages/cli/src/commands/mcp.ts);
-  // a conventions test enforces the mutating-tool half of that invariant.
-  "tools": {
-    "infra_cliproxy_keys_add": false,
-    "infra_cliproxy_keys_remove": false,
-    "infra_cliproxy_config_set": false,
-    "infra_gateway_backup": false,
-    "infra_cliproxy_keys_list": false,
-    "infra_cliproxy_config_get": false,
+  // Defense-in-depth permission backstop for sensitive infra tools.
+  // Primary gate: these 6 commands are NOT in MCP_ALLOWLIST (packages/cli/src/commands/mcp.ts)
+  // and are therefore never registered as MCP tools — the MCP server simply does not expose them.
+  // Secondary gate (this block): even if MCP_ALLOWLIST were mistakenly re-expanded in the future,
+  // opencode's native tool permission check denies these tool calls centrally before execution.
+  // Both layers are enforced by the conventions test in packages/cli/src/conventions.test.ts.
+  // Tool ids use opencode's `<server>_<tool>` form (sanitized, underscore-joined),
+  // here `infra_<command-with-underscores>` — NOT the `mcp_Infra_*` alias the local
+  // Anthropic-auth plugin surfaces to the agent. Do NOT remove this block.
+  "permission": {
+    "infra_cliproxy_keys_add": "deny",
+    "infra_cliproxy_keys_remove": "deny",
+    "infra_cliproxy_config_set": "deny",
+    "infra_gateway_backup": "deny",
+    "infra_cliproxy_keys_list": "deny",
+    "infra_cliproxy_config_get": "deny",
   },
 }

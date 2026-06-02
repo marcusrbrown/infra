@@ -39,13 +39,11 @@ on:
         required: false
       WORKSPACE_OPENCODE_TOKEN:
         required: true
-      WORKSPACE_OPENCODE_AUTH:
+      OPENCODE_AUTH_JSON:
         required: true
       WORKSPACE_OPENCODE_URL:
         required: false
-      WORKSPACE_OPENCODE_MODEL:
-        required: true
-      WORKSPACE_OPENCODE_CONFIG:
+      OPENCODE_CONFIG:
         required: true
       GATEWAY_TRIGGER_ROLE_ID:
         required: true
@@ -82,9 +80,9 @@ jobs:
           GH_APP_ID: ${{ secrets.GH_APP_ID }}
           GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           WORKSPACE_OPENCODE_TOKEN: ${{ secrets.WORKSPACE_OPENCODE_TOKEN }}
-          WORKSPACE_OPENCODE_AUTH: ${{ secrets.WORKSPACE_OPENCODE_AUTH }}
-          WORKSPACE_OPENCODE_MODEL: ${{ secrets.WORKSPACE_OPENCODE_MODEL }}
-          WORKSPACE_OPENCODE_CONFIG: ${{ secrets.WORKSPACE_OPENCODE_CONFIG }}
+          WORKSPACE_OPENCODE_AUTH: ${{ secrets.OPENCODE_AUTH_JSON }}
+          WORKSPACE_OPENCODE_MODEL: ${{ vars.FRO_BOT_MODEL }}
+          WORKSPACE_OPENCODE_CONFIG: ${{ secrets.OPENCODE_CONFIG }}
           GATEWAY_TRIGGER_ROLE_ID: ${{ secrets.GATEWAY_TRIGGER_ROLE_ID }}
         run: |
           missing=()
@@ -131,8 +129,8 @@ jobs:
           OBJECT_STORE_HOSTS: ${{ secrets.OBJECT_STORE_HOSTS }}
           DISCORD_PRIVILEGED_INTENTS: ${{ secrets.DISCORD_PRIVILEGED_INTENTS }}
           WORKSPACE_OPENCODE_TOKEN: ${{ secrets.WORKSPACE_OPENCODE_TOKEN }}
-          WORKSPACE_OPENCODE_AUTH: ${{ secrets.WORKSPACE_OPENCODE_AUTH }}
+          WORKSPACE_OPENCODE_AUTH: ${{ secrets.OPENCODE_AUTH_JSON }}
           WORKSPACE_OPENCODE_URL: ${{ secrets.WORKSPACE_OPENCODE_URL }}
-          WORKSPACE_OPENCODE_MODEL: ${{ secrets.WORKSPACE_OPENCODE_MODEL }}
-          WORKSPACE_OPENCODE_CONFIG: ${{ secrets.WORKSPACE_OPENCODE_CONFIG }}
+          WORKSPACE_OPENCODE_MODEL: ${{ vars.FRO_BOT_MODEL }}
+          WORKSPACE_OPENCODE_CONFIG: ${{ secrets.OPENCODE_CONFIG }}
           GATEWAY_TRIGGER_ROLE_ID: ${{ secrets.GATEWAY_TRIGGER_ROLE_ID }}

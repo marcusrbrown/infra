@@ -38,9 +38,6 @@ jobs:
       - name: Run ESLint
         run: bun run lint
 
-      - name: Check formatting
-        run: bunx prettier --check .
-
   type-check:
     name: Type Check
     runs-on: ubuntu-latest

@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       keeweb: ${{ steps.filter.outputs.keeweb }}
+      keeweb_nginx: ${{ steps.filter.outputs.keeweb_nginx }}
       cliproxy: ${{ steps.filter.outputs.cliproxy }}
       gateway: ${{ steps.filter.outputs.gateway }}
       umami: ${{ steps.filter.outputs.umami }}
@@ -38,6 +39,8 @@ jobs:
               - '!apps/keeweb/**/*.test.ts'
               - '!apps/keeweb/**/__fixtures__/**'
               - '!apps/keeweb/**/__snapshots__/**'
+            keeweb_nginx:
+              - 'apps/keeweb/config/kw.igg.ms.conf'
             cliproxy:
               - 'apps/cliproxy/**'
               - '!apps/cliproxy/**/*.md'
@@ -65,7 +68,7 @@ jobs:
       needs.detect-changes.outputs.keeweb == 'true'
     uses: ./.github/workflows/deploy-keeweb.yaml
     with:
-      deploy_nginx: true
+      deploy_nginx: ${{ github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.keeweb_nginx == 'true' }}
     secrets:
       DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
       DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}

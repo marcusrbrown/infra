@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    // Secrets (CLIPROXY_MANAGEMENT_KEY, CLIPROXY_DOMAIN, GATEWAY_HOST, UMAMI_DOMAIN)
+    // are NOT set here. The MCP subprocess inherits them: Bun auto-loads repo-root
+    // .env locally; CI/harness inherits the parent process env. No values in this file.
+    "infra": {
+      "type": "local",
+      "command": ["bunx", "@marcusrbrown/infra", "mcp"],
+      "enabled": true,
+    },
+  },
+  // Defense-in-depth permission backstop for sensitive infra tools.
+  // Primary gate: these 6 commands are NOT in MCP_ALLOWLIST (packages/cli/src/commands/mcp.ts)
+  // and are therefore never registered as MCP tools — the MCP server simply does not expose them.
+  // Secondary gate (this block): even if MCP_ALLOWLIST were mistakenly re-expanded in the future,
+  // opencode's native tool permission check denies these tool calls centrally before execution.
+  // Both layers are enforced by the conventions test in packages/cli/src/conventions.test.ts.
+  // Tool ids use opencode's `<server>_<tool>` form (sanitized, underscore-joined),
+  // here `infra_<command-with-underscores>` — NOT the `mcp_Infra_*` alias the local
+  // Anthropic-auth plugin surfaces to the agent. Do NOT remove this block.
+  "permission": {
+    "infra_cliproxy_keys_add": "deny",
+    "infra_cliproxy_keys_remove": "deny",
+    "infra_cliproxy_config_set": "deny",
+    "infra_gateway_backup": "deny",
+    "infra_cliproxy_keys_list": "deny",
+    "infra_cliproxy_config_get": "deny",
+  },
+}

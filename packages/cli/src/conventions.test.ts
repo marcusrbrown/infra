@@ -1,10 +1,43 @@
 import {relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 import {parse as parseYaml} from 'yaml'
+import {MCP_ALLOWLIST} from './commands/mcp'
 
 const REPO_ROOT = resolve(import.meta.dir, '../../..')
 const INTERNAL_ORGS = new Set(['marcusrbrown'])
 const ALLOWED_SHELL_SCRIPTS = new Set(['apps/keeweb/deploy.sh'])
+
+// ---------------------------------------------------------------------------
+// MCP drift-guard: sensitive tool set (two-layer security model)
+// ---------------------------------------------------------------------------
+//
+// These 6 commands are source-gated: they are NOT in MCP_ALLOWLIST and are
+// therefore never registered as MCP tools. They remain CLI-only.
+//
+// WHY each is source-gated (primary layer — MCP_ALLOWLIST exclusion):
+//   cliproxy keys add    — mutating: creates live bearer tokens on the proxy
+//   cliproxy keys remove — mutating: revokes live bearer tokens
+//   cliproxy config set  — mutating: overwrites CLIProxyAPI runtime config
+//   gateway backup       — secret-bearing: writes CA private key material to a tarball
+//   cliproxy keys list   — secret-disclosing: prints live bearer tokens in plaintext
+//   cliproxy config get  — secret-disclosing: dumps management config incl. management key
+//
+// Defense-in-depth (secondary layer — opencode.jsonc `permission: deny`):
+// Even if MCP_ALLOWLIST were mistakenly re-expanded, opencode's native tool
+// permission check provides a backstop that denies these tool calls centrally
+// before execution. Both layers must stay in sync; the test below enforces it.
+//
+// A conventions test below asserts every entry (a) is NOT in MCP_ALLOWLIST
+// (source-gated out) and (b) is still denied in opencode.jsonc under the
+// prefixed tool id (defense-in-depth backstop).
+const SENSITIVE_MCP_COMMANDS: readonly string[] = [
+  'cliproxy keys add',
+  'cliproxy keys remove',
+  'cliproxy config set',
+  'gateway backup',
+  'cliproxy keys list',
+  'cliproxy config get',
+]
 
 // Accepted version-comment forms on SHA-pinned `uses:` lines:
 //   # v6.0.2                        (semver tag)
@@ -241,6 +274,53 @@ describe('repo conventions', () => {
     const files = listShellScriptFiles()
     const offenders = files.map(f => relative(REPO_ROOT, f)).filter(f => !ALLOWED_SHELL_SCRIPTS.has(f))
     expect(offenders).toEqual([])
+  })
+
+  it('gates every sensitive infra MCP tool in opencode.jsonc', async () => {
+    // Parse opencode.jsonc tolerantly: it uses JSONC syntax (// line comments,
+    // trailing commas). Strategy:
+    //   1. Strip full-line comments — lines whose first non-whitespace is `//`.
+    //      This avoids breaking the `https://` in the $schema string value.
+    //   2. Strip trailing commas before `}` or `]`.
+    //   3. JSON.parse the result.
+    const jsoncText = await Bun.file(resolve(REPO_ROOT, 'opencode.jsonc')).text()
+    const stripped = jsoncText
+      .split('\n')
+      .map(line => (/^\s*\/\//.test(line) ? '' : line))
+      .join('\n')
+      .replaceAll(/,(\s*[}\]])/g, '$1')
+    const opencode = JSON.parse(stripped) as {permission?: Record<string, unknown>}
+
+    // Parse sanity: permission block must be present (catches a broken parse).
+    // opencode permission-checks MCP tool calls via the `permission` map (tool ids
+    // `<server>_<tool>`); we assert the canonical `permission: "deny"` form here.
+    const permission = opencode.permission ?? {}
+    expect(Object.keys(permission).length).toBeGreaterThan(0)
+
+    const violations: string[] = []
+    for (const cmd of SENSITIVE_MCP_COMMANDS) {
+      // (a) Primary gate: the command must NOT be in MCP_ALLOWLIST (source-gated out).
+      //     If someone re-adds it to the allowlist, this catches the regression immediately.
+      if (MCP_ALLOWLIST.has(cmd)) {
+        violations.push(
+          `'${cmd}' is in SENSITIVE_MCP_COMMANDS AND in MCP_ALLOWLIST — source-gate regression: remove it from MCP_ALLOWLIST`,
+        )
+      }
+      // (b) Defense-in-depth backstop: the tool must still be denied in opencode.jsonc.
+      //     This catches the case where MCP_ALLOWLIST is mistakenly re-expanded.
+      //     The infra MCP server converts command names to tool names with underscores,
+      //     and OpenCode prefixes with the server name, giving "infra_<underscored>".
+      const toolId = `infra_${cmd.replaceAll(' ', '_')}`
+      if (permission[toolId] !== 'deny') {
+        violations.push(
+          `${toolId}: not denied in opencode.jsonc permission (found: ${JSON.stringify(permission[toolId])}) — defense-in-depth backstop missing`,
+        )
+      }
+    }
+    expect(
+      violations,
+      `Sensitive infra MCP tools must be source-gated (not in MCP_ALLOWLIST) and denied in opencode.jsonc:\n${violations.join('\n')}`,
+    ).toEqual([])
   })
 })
 

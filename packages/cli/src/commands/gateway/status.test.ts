@@ -481,3 +481,70 @@ describe('gatewayStatusAction — ctx capture (Tier-2)', () => {
     expect(captured.exit?.code).toBe(1)
   })
 })
+
+// ─── SSH error redaction — host value must not leak in returned error strings ──
+
+describe('getGatewayComposeStatus — SSH error redaction', () => {
+  it('does not include the resolved host value in the error when SSH fails', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+    const secretLookingHost = 'TOPSECRETHOSTNAME'
+
+    const mockSpawn = (_cmd: string[], _opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'}) => {
+      const encoder = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(encoder.encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(encoder.encode(`ssh: Could not resolve hostname ${secretLookingHost}: Name or service not known`))
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(255),
+      }
+    }
+
+    const result = await getGatewayComposeStatus(secretLookingHost, mockSpawn)
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toBeDefined()
+    expect(result.error).not.toContain(secretLookingHost)
+  })
+
+  it('does not leak the host even when OpenSSH lowercases it in stderr', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+    // A misdirected secret-shaped value passes the hostname regex and becomes the host;
+    // OpenSSH lowercases it in the "Could not resolve hostname" stderr line.
+    const secretHost = 'AKIAIOSFODNN7EXAMPLE'
+
+    const mockSpawn = (_cmd: string[], _opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'}) => {
+      const encoder = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(
+              encoder.encode(`ssh: Could not resolve hostname ${secretHost.toLowerCase()}: Name or service not known`),
+            )
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(255),
+      }
+    }
+
+    const result = await getGatewayComposeStatus(secretHost, mockSpawn)
+
+    expect(result.ok).toBe(false)
+    expect(result.error).not.toContain(secretHost)
+    expect(result.error).not.toContain(secretHost.toLowerCase())
+  })
+})

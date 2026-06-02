@@ -13,7 +13,8 @@ const VALID_HOST_RE = /^[a-z\d][a-z\d.\-]*$/i
  * Rejects: empty strings, values starting with `-`, and anything containing
  * characters outside `[A-Za-z0-9.-]`.
  *
- * @throws {Error} with a sanitized excerpt of the invalid value.
+ * @throws {Error} when empty or not a valid hostname. The rejected value is
+ *   never included in the message (it may be a misdirected secret).
  * @returns The validated host string (unchanged).
  */
 export function validateGatewayHost(host: string): string {
@@ -22,9 +23,10 @@ export function validateGatewayHost(host: string): string {
   }
 
   if (!VALID_HOST_RE.test(host)) {
-    // Truncate to 30 chars and strip non-printable bytes before echoing back
-    const excerpt = host.slice(0, 30).replaceAll(/[^\u0020-\u007E]/g, '?')
-    throw new Error(`Invalid GATEWAY_HOST: "${excerpt}" — must match ${String.raw`[A-Za-z0-9][A-Za-z0-9.\-]*`}`)
+    // Do NOT echo the value — it may be a secret that was redirected via --key
+    throw new Error(
+      `Invalid GATEWAY_HOST: value is not a valid hostname (must match ${String.raw`[A-Za-z0-9][A-Za-z0-9.\-]*`})`,
+    )
   }
 
   return host

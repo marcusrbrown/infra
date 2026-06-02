@@ -2606,3 +2606,88 @@ describe('main() — validation aborts before any SSH mutation', () => {
 })
 
 // Note: getGatewayDeployEnv CLI parity tests live in packages/cli/src/commands/gateway/deploy.test.ts
+
+// ─── normalizePemPrivateKey ───────────────────────────────────────────────────
+
+describe('normalizePemPrivateKey', () => {
+  test(String.raw`single-line value with literal \n sequences → converted to real newlines`, async () => {
+    const {normalizePemPrivateKey} = await import('./deploy')
+    const singleLine = String.raw`-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\nAB==\n-----END RSA PRIVATE KEY-----`
+    const result = normalizePemPrivateKey(singleLine)
+    // Must contain real newlines
+    expect(result.includes('\n')).toBe(true)
+    // Must NOT contain literal backslash-n
+    expect(result.includes(String.raw`\n`)).toBe(false)
+    // Exact expected multi-line output (trailing newline ensured)
+    const expected = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\nAB==\n-----END RSA PRIVATE KEY-----\n'
+    expect(result).toBe(expected)
+  })
+
+  test('value already containing real newlines → returned unchanged except trailing newline ensured', async () => {
+    const {normalizePemPrivateKey} = await import('./deploy')
+    const multiLine = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\nAB==\n-----END RSA PRIVATE KEY-----\n'
+    const result = normalizePemPrivateKey(multiLine)
+    // Body is unchanged — no literal \n present, no double-newline added
+    expect(result).toBe(multiLine)
+    expect(result.includes(String.raw`\n`)).toBe(false)
+  })
+
+  test('value without trailing newline → gets exactly one trailing newline', async () => {
+    const {normalizePemPrivateKey} = await import('./deploy')
+    const noTrailing = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\nAB==\n-----END RSA PRIVATE KEY-----'
+    const result = normalizePemPrivateKey(noTrailing)
+    expect(result.endsWith('\n')).toBe(true)
+    expect(result.endsWith('\n\n')).toBe(false)
+    expect(result).toBe(`${noTrailing}\n`)
+  })
+
+  test(String.raw`value with literal \r\n sequences → normalized to real \n`, async () => {
+    const {normalizePemPrivateKey} = await import('./deploy')
+    const crlfEscaped = String.raw`-----BEGIN RSA PRIVATE KEY-----\r\nMIIEow...\r\nAB==\r\n-----END RSA PRIVATE KEY-----`
+    const result = normalizePemPrivateKey(crlfEscaped)
+    // Must not contain literal \r\n or \n
+    expect(result.includes(String.raw`\r\n`)).toBe(false)
+    expect(result.includes(String.raw`\n`)).toBe(false)
+    // Must contain real newlines only
+    expect(result.includes('\n')).toBe(true)
+    expect(result.includes('\r')).toBe(false)
+    const expected = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\nAB==\n-----END RSA PRIVATE KEY-----\n'
+    expect(result).toBe(expected)
+  })
+
+  test('empty string → returns empty string (no trailing newline added)', async () => {
+    const {normalizePemPrivateKey} = await import('./deploy')
+    expect(normalizePemPrivateKey('')).toBe('')
+  })
+})
+
+// ─── buildSecretFileList — normalizePemPrivateKey wiring ─────────────────────
+
+describe('buildSecretFileList — normalizePemPrivateKey wiring', () => {
+  test(String.raw`github-app-private-key: single-line \n-escaped env value → content has real newlines`, async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const singleLineKey = String.raw`-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\nAB==\n-----END RSA PRIVATE KEY-----`
+    const secrets = buildSecretFileList(makeEnv({GH_APP_PRIVATE_KEY: singleLineKey}))
+    const entry = secrets.find(s => s.name === 'github-app-private-key')
+    expect(entry).toBeDefined()
+    // Transform must have been applied: real newlines present
+    expect(entry!.content.includes('\n')).toBe(true)
+    // No literal backslash-n remaining
+    expect(entry!.content.includes(String.raw`\n`)).toBe(false)
+    // Exact expected output
+    const expected = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\nAB==\n-----END RSA PRIVATE KEY-----\n'
+    expect(entry!.content).toBe(expected)
+  })
+
+  test('discord-token: NOT transformed — value passed through verbatim', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    // A value with literal \n that would be transformed if normalizePemPrivateKey were applied
+    const rawToken = String.raw`tok\nwith\nliteral\nescapes`
+    const secrets = buildSecretFileList(makeEnv({DISCORD_TOKEN: rawToken}))
+    const entry = secrets.find(s => s.name === 'discord-token')
+    expect(entry).toBeDefined()
+    // discord-token has no transform — content must be verbatim
+    expect(entry!.content).toBe(rawToken)
+    expect(entry!.content.includes(String.raw`\n`)).toBe(true)
+  })
+})

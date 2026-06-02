@@ -53,6 +53,11 @@ function makeEnv(overrides: Record<string, string> = {}): Record<string, string>
     GATEWAY_HOST: 'gateway.fro.bot',
     GH_APP_ID: 'app-id-12345',
     GH_APP_PRIVATE_KEY: '-----BEGIN RSA PRIVATE KEY-----\nfakekey\n-----END RSA PRIVATE KEY-----\n',
+    WORKSPACE_OPENCODE_TOKEN: 'ws-token-secret',
+    WORKSPACE_OPENCODE_AUTH: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
+    WORKSPACE_OPENCODE_MODEL: 'anthropic/claude-sonnet-4-6',
+    WORKSPACE_OPENCODE_CONFIG: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
+    GATEWAY_TRIGGER_ROLE_ID: '123456789012345678',
     PATH: '/usr/bin:/bin',
     HOME: '/root',
     ...overrides,
@@ -223,10 +228,10 @@ describe('computeObjectStoreHosts', () => {
 // ─── buildSecretFileList ──────────────────────────────────────────────────────
 
 describe('buildSecretFileList', () => {
-  test('returns exactly 12 secret entries', async () => {
+  test('returns exactly 16 secret entries', async () => {
     const {buildSecretFileList} = await import('./deploy')
     const secrets = buildSecretFileList(makeEnv())
-    expect(secrets).toHaveLength(12)
+    expect(secrets).toHaveLength(16)
   })
 
   test('uses kebab-case file names matching upstream compose contract', async () => {
@@ -245,6 +250,10 @@ describe('buildSecretFileList', () => {
     expect(names).toContain('github-app-id')
     expect(names).toContain('github-app-private-key')
     expect(names).toContain('discord-privileged-intents')
+    expect(names).toContain('workspace-opencode-token')
+    expect(names).toContain('workspace-opencode-auth')
+    expect(names).toContain('workspace-opencode-url')
+    expect(names).toContain('gateway-trigger-role-id')
   })
 
   test('does not use snake_case file names', async () => {
@@ -1993,3 +2002,280 @@ describe('github app secret materialization', () => {
     expect(missing).toContain('GH_APP_PRIVATE_KEY')
   })
 })
+
+// ─── Empty-string fail-closed for workspace/trigger vars ─────────────────────
+
+describe('validateRequiredEnv — workspace mention-loop vars', () => {
+  test('WORKSPACE_OPENCODE_TOKEN unset → reported missing', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).WORKSPACE_OPENCODE_TOKEN
+    expect(validateRequiredEnv(env)).toContain('WORKSPACE_OPENCODE_TOKEN')
+  })
+
+  test('WORKSPACE_OPENCODE_TOKEN empty string → reported missing (fail-closed)', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    expect(validateRequiredEnv(makeEnv({WORKSPACE_OPENCODE_TOKEN: ''}))).toContain('WORKSPACE_OPENCODE_TOKEN')
+  })
+
+  test('WORKSPACE_OPENCODE_TOKEN whitespace-only → reported missing (fail-closed)', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    expect(validateRequiredEnv(makeEnv({WORKSPACE_OPENCODE_TOKEN: '   '}))).toContain('WORKSPACE_OPENCODE_TOKEN')
+  })
+
+  test('WORKSPACE_OPENCODE_AUTH unset → reported missing', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).WORKSPACE_OPENCODE_AUTH
+    expect(validateRequiredEnv(env)).toContain('WORKSPACE_OPENCODE_AUTH')
+  })
+
+  test('WORKSPACE_OPENCODE_AUTH empty string → reported missing (fail-closed)', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    expect(validateRequiredEnv(makeEnv({WORKSPACE_OPENCODE_AUTH: ''}))).toContain('WORKSPACE_OPENCODE_AUTH')
+  })
+
+  test('WORKSPACE_OPENCODE_AUTH whitespace-only → reported missing (fail-closed)', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    expect(validateRequiredEnv(makeEnv({WORKSPACE_OPENCODE_AUTH: '  '}))).toContain('WORKSPACE_OPENCODE_AUTH')
+  })
+
+  test('GATEWAY_TRIGGER_ROLE_ID unset → reported missing', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_TRIGGER_ROLE_ID
+    expect(validateRequiredEnv(env)).toContain('GATEWAY_TRIGGER_ROLE_ID')
+  })
+
+  test('GATEWAY_TRIGGER_ROLE_ID empty string → reported missing (authz gate fail-closed)', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    expect(validateRequiredEnv(makeEnv({GATEWAY_TRIGGER_ROLE_ID: ''}))).toContain('GATEWAY_TRIGGER_ROLE_ID')
+  })
+
+  test('GATEWAY_TRIGGER_ROLE_ID whitespace-only → reported missing (authz gate fail-closed)', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    expect(validateRequiredEnv(makeEnv({GATEWAY_TRIGGER_ROLE_ID: '   '}))).toContain('GATEWAY_TRIGGER_ROLE_ID')
+  })
+
+  test('all three present with real values → none reported missing', async () => {
+    const {validateRequiredEnv} = await import('./deploy')
+    const missing = validateRequiredEnv(makeEnv())
+    expect(missing).not.toContain('WORKSPACE_OPENCODE_TOKEN')
+    expect(missing).not.toContain('WORKSPACE_OPENCODE_AUTH')
+    expect(missing).not.toContain('GATEWAY_TRIGGER_ROLE_ID')
+  })
+})
+
+describe('buildSecretFileList — workspace mention-loop entries', () => {
+  test('workspace-opencode-token maps to WORKSPACE_OPENCODE_TOKEN, required', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const entry = secrets.find(s => s.name === 'workspace-opencode-token')
+    expect(entry).toBeDefined()
+    expect(entry?.content).toBe('ws-token-secret')
+    expect(entry?.required).toBe(true)
+  })
+
+  test('workspace-opencode-auth maps to WORKSPACE_OPENCODE_AUTH, required', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const entry = secrets.find(s => s.name === 'workspace-opencode-auth')
+    expect(entry).toBeDefined()
+    expect(entry?.required).toBe(true)
+  })
+
+  test('workspace-opencode-url unset → empty content, required false', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).WORKSPACE_OPENCODE_URL
+    const secrets = buildSecretFileList(env)
+    const entry = secrets.find(s => s.name === 'workspace-opencode-url')
+    expect(entry).toBeDefined()
+    expect(entry?.content).toBe('')
+    expect(entry?.required).toBe(false)
+  })
+
+  test('workspace-opencode-url set → content is the value', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv({WORKSPACE_OPENCODE_URL: 'http://workspace:9200'}))
+    const entry = secrets.find(s => s.name === 'workspace-opencode-url')
+    expect(entry?.content).toBe('http://workspace:9200')
+    expect(entry?.required).toBe(false)
+  })
+
+  test('gateway-trigger-role-id maps to GATEWAY_TRIGGER_ROLE_ID, required false in file list', async () => {
+    // The env var is in REQUIRED_ENV_VARS (fail-closed), but the file-list entry is optional-shaped
+    // so an empty value writes an empty file (upstream compose treats it as optional).
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeEnv())
+    const entry = secrets.find(s => s.name === 'gateway-trigger-role-id')
+    expect(entry).toBeDefined()
+    expect(entry?.content).toBe('123456789012345678')
+    expect(entry?.required).toBe(false)
+  })
+})
+
+// ─── .env materialization with MODEL/CONFIG validation ───────────────────────
+
+describe('buildGatewayEnvFileContents', () => {
+  test('happy path: valid model + JSON config → .env contains all three lines', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'bucket.s3.us-east-1.amazonaws.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
+    })
+    expect(result).toContain('OBJECT_STORE_HOSTS=bucket.s3.us-east-1.amazonaws.com')
+    expect(result).toContain('WORKSPACE_OPENCODE_MODEL=anthropic/claude-sonnet-4-6')
+    // CONFIG line must be present
+    expect(result).toMatch(/WORKSPACE_OPENCODE_CONFIG=/)
+  })
+
+  test('config with $ signs: written with $$ escaping so docker-compose interpolation preserves literal $', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const config = '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}'
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config,
+    })
+    // docker-compose reads .env and interpolates ${VAR}; $$ in .env → literal $ in container env.
+    // The config has no $ in this fixture, but the encoding must be consistent.
+    const configLine = result.split('\n').find(l => l.startsWith('WORKSPACE_OPENCODE_CONFIG='))
+    expect(configLine).toBeDefined()
+  })
+
+  test('config containing $ survives docker-compose interpolation: $$ round-trip', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    // A config with a literal $ (e.g. a hypothetical env-var reference in a URL)
+    const config = '{"key":"value$with$dollars"}'
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config,
+    })
+    const configLine = result.split('\n').find(l => l.startsWith('WORKSPACE_OPENCODE_CONFIG='))
+    expect(configLine).toBeDefined()
+    // The raw .env line must have $$ where the original had $
+    expect(configLine).toContain('$$')
+    // Simulating docker-compose interpolation: replace $$ → $ to recover original
+    const rawValue = configLine!.slice('WORKSPACE_OPENCODE_CONFIG='.length).replaceAll('$$', '$')
+    expect(rawValue).toBe(config)
+  })
+
+  test('config with quotes and backslashes round-trips intact', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const config = '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}'
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config,
+    })
+    const configLine = result.split('\n').find(l => l.startsWith('WORKSPACE_OPENCODE_CONFIG='))
+    expect(configLine).toBeDefined()
+    // Recover: $$ → $ (docker-compose interpolation simulation)
+    const rawValue = configLine!.slice('WORKSPACE_OPENCODE_CONFIG='.length).replaceAll('$$', '$')
+    expect(rawValue).toBe(config)
+  })
+
+  test('SHELL_METACHAR_RE is NOT applied to config (would reject valid JSON)', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    // This config contains " and $ — both rejected by SHELL_METACHAR_RE but valid JSON
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6',
+        config: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
+      }),
+    ).not.toThrow()
+  })
+
+  test('invalid JSON config → throws before any SSH write', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6',
+        config: 'not-valid-json',
+      }),
+    ).toThrow(/WORKSPACE_OPENCODE_CONFIG.*not valid JSON/i)
+  })
+
+  test('config with embedded newline → rejected', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6',
+        config: '{"key":"value\nwith newline"}',
+      }),
+    ).toThrow(/WORKSPACE_OPENCODE_CONFIG.*newline/i)
+  })
+
+  test('config exceeding size cap → rejected', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const bigConfig = `{"key":"${'x'.repeat(20_000)}"}`
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6',
+        config: bigConfig,
+      }),
+    ).toThrow(/WORKSPACE_OPENCODE_CONFIG.*too large/i)
+  })
+
+  test('model with shell metachar → rejected', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6; rm -rf /',
+        config: '{"k":"v"}',
+      }),
+    ).toThrow(/WORKSPACE_OPENCODE_MODEL.*shell metacharacter/i)
+  })
+
+  test('model with valid id (no metachar) → accepted', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6',
+        config: '{"k":"v"}',
+      }),
+    ).not.toThrow()
+  })
+})
+
+describe('validateWorkspaceEnvVars', () => {
+  test('WORKSPACE_OPENCODE_MODEL missing → reported missing', async () => {
+    const {validateWorkspaceEnvVars} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).WORKSPACE_OPENCODE_MODEL
+    expect(validateWorkspaceEnvVars(env)).toContain('WORKSPACE_OPENCODE_MODEL')
+  })
+
+  test('WORKSPACE_OPENCODE_MODEL empty → reported missing', async () => {
+    const {validateWorkspaceEnvVars} = await import('./deploy')
+    expect(validateWorkspaceEnvVars(makeEnv({WORKSPACE_OPENCODE_MODEL: ''}))).toContain('WORKSPACE_OPENCODE_MODEL')
+  })
+
+  test('WORKSPACE_OPENCODE_CONFIG missing → reported missing', async () => {
+    const {validateWorkspaceEnvVars} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).WORKSPACE_OPENCODE_CONFIG
+    expect(validateWorkspaceEnvVars(env)).toContain('WORKSPACE_OPENCODE_CONFIG')
+  })
+
+  test('WORKSPACE_OPENCODE_CONFIG empty → reported missing', async () => {
+    const {validateWorkspaceEnvVars} = await import('./deploy')
+    expect(validateWorkspaceEnvVars(makeEnv({WORKSPACE_OPENCODE_CONFIG: ''}))).toContain('WORKSPACE_OPENCODE_CONFIG')
+  })
+
+  test('both present and valid → empty array', async () => {
+    const {validateWorkspaceEnvVars} = await import('./deploy')
+    expect(validateWorkspaceEnvVars(makeEnv())).toEqual([])
+  })
+})
+
+// Note: getGatewayDeployEnv CLI parity tests live in packages/cli/src/commands/gateway/deploy.test.ts

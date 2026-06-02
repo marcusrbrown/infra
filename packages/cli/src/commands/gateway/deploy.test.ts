@@ -13,6 +13,7 @@ const envKeys = [
   'DISCORD_GUILD_ID',
   'DISCORD_TOKEN',
   'GATEWAY_HOST',
+  'GATEWAY_TRIGGER_ROLE_ID',
   'HOME',
   'OBJECT_STORE_HOSTS',
   'PATH',
@@ -20,6 +21,11 @@ const envKeys = [
   'S3_ENDPOINT',
   'S3_REGION',
   'SSH_AUTH_SOCK',
+  'WORKSPACE_OPENCODE_AUTH',
+  'WORKSPACE_OPENCODE_CONFIG',
+  'WORKSPACE_OPENCODE_MODEL',
+  'WORKSPACE_OPENCODE_TOKEN',
+  'WORKSPACE_OPENCODE_URL',
 ] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
@@ -268,6 +274,92 @@ describe('gateway deploy', () => {
 
       const env = getGatewayDeployEnv()
       expect(env.DISCORD_PRIVILEGED_INTENTS).toBe('')
+    })
+
+    // ── workspace mention-loop var parity ─────────────────────────────────────
+
+    it('forwards WORKSPACE_OPENCODE_TOKEN when set', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+        WORKSPACE_OPENCODE_TOKEN: 'ws-tok-123',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.WORKSPACE_OPENCODE_TOKEN).toBe('ws-tok-123')
+    })
+
+    it('forwards WORKSPACE_OPENCODE_AUTH when set', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+        WORKSPACE_OPENCODE_AUTH: '{"provider":{}}',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.WORKSPACE_OPENCODE_AUTH).toBe('{"provider":{}}')
+    })
+
+    it('forwards WORKSPACE_OPENCODE_URL when set', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+        WORKSPACE_OPENCODE_URL: 'http://workspace:9200',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.WORKSPACE_OPENCODE_URL).toBe('http://workspace:9200')
+    })
+
+    it('WORKSPACE_OPENCODE_URL unset → forwarded as empty string (optional)', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+        WORKSPACE_OPENCODE_URL: undefined,
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.WORKSPACE_OPENCODE_URL).toBe('')
+    })
+
+    it('forwards WORKSPACE_OPENCODE_MODEL when set', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+        WORKSPACE_OPENCODE_MODEL: 'anthropic/claude-sonnet-4-6',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.WORKSPACE_OPENCODE_MODEL).toBe('anthropic/claude-sonnet-4-6')
+    })
+
+    it('forwards WORKSPACE_OPENCODE_CONFIG when set', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+        WORKSPACE_OPENCODE_CONFIG: '{"provider":{}}',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.WORKSPACE_OPENCODE_CONFIG).toBe('{"provider":{}}')
+    })
+
+    it('forwards GATEWAY_TRIGGER_ROLE_ID when set', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+        GATEWAY_TRIGGER_ROLE_ID: '987654321098765432',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.GATEWAY_TRIGGER_ROLE_ID).toBe('987654321098765432')
     })
   })
 

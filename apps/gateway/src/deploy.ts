@@ -97,25 +97,32 @@ const REQUIRED_ENV_VARS = [
   'GATEWAY_HOST',
   'GH_APP_ID',
   'GH_APP_PRIVATE_KEY',
+  'WORKSPACE_OPENCODE_TOKEN',
+  'WORKSPACE_OPENCODE_AUTH',
+  'GATEWAY_TRIGGER_ROLE_ID',
 ] as const
 
 // ─── Exported helpers ─────────────────────────────────────────────────────────
 
 /**
- * Validates required environment variables are present.
+ * Validates required environment variables are present and non-empty.
  * Returns the list of missing variable names.
  * GATEWAY_SSH_KEY is required only when CI=true.
+ *
+ * Empty and whitespace-only values are treated as missing — this is the
+ * fail-closed gate for security-sensitive vars like GATEWAY_TRIGGER_ROLE_ID
+ * (an empty value would open the mention loop to all guild members).
  */
 export function validateRequiredEnv(env: Record<string, string>): string[] {
   const missing: string[] = []
 
   for (const key of REQUIRED_ENV_VARS) {
-    if (!env[key]) {
+    if (!env[key]?.trim()) {
       missing.push(key)
     }
   }
 
-  if (env.CI === 'true' && !env.GATEWAY_SSH_KEY) {
+  if (env.CI === 'true' && !env.GATEWAY_SSH_KEY?.trim()) {
     missing.push('GATEWAY_SSH_KEY')
   }
 
@@ -187,6 +194,84 @@ export function resolveUpstreamPin(jsonPath?: string): UpstreamPin {
 
   const {repo, ref} = parsed as {repo: string; ref: string}
   return {repo, ref}
+}
+
+// ─── Shell metacharacter deny-list (for simple string values) ────────────────
+// These characters are dangerous when interpolated into remote shell context.
+// NOT applied to WORKSPACE_OPENCODE_CONFIG — valid JSON requires " $ \ which
+// this regex rejects. CONFIG is validated via JSON.parse instead.
+const SHELL_METACHAR_RE = /[\n\r`$|;&'"\\]/
+
+/**
+ * Validates WORKSPACE_OPENCODE_MODEL and WORKSPACE_OPENCODE_CONFIG are present
+ * and well-formed. Returns the list of missing/invalid variable names.
+ */
+export function validateWorkspaceEnvVars(env: Record<string, string>): string[] {
+  const missing: string[] = []
+  if (!env.WORKSPACE_OPENCODE_MODEL?.trim()) {
+    missing.push('WORKSPACE_OPENCODE_MODEL')
+  }
+  if (!env.WORKSPACE_OPENCODE_CONFIG?.trim()) {
+    missing.push('WORKSPACE_OPENCODE_CONFIG')
+  }
+  return missing
+}
+
+/**
+ * Builds the contents of the remote .env file for the gateway deploy.
+ *
+ * WORKSPACE_OPENCODE_CONFIG encoding:
+ *   The workspace compose.yaml reads this via ${WORKSPACE_OPENCODE_CONFIG:-}
+ *   (docker-compose variable interpolation from .env). To prevent compose from
+ *   expanding $ sequences inside the JSON value, every $ is doubled to $$.
+ *   docker-compose converts $$ → $ when passing the value to the container,
+ *   so the container receives the original JSON intact.
+ *
+ *   SHELL_METACHAR_RE is NOT applied to CONFIG — it rejects " $ \ which valid
+ *   JSON requires. Instead: JSON.parse structural check + no embedded newlines
+ *   + size cap.
+ *
+ *   WORKSPACE_OPENCODE_MODEL is a simple id (e.g. anthropic/claude-sonnet-4-6)
+ *   with no quotes or $, so SHELL_METACHAR_RE is appropriate for it.
+ */
+export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; model: string; config: string}): string {
+  const {objectStoreHosts, model, config} = opts
+
+  // Validate model: simple id, no shell metacharacters
+  const modelMatch = SHELL_METACHAR_RE.exec(model)
+  if (modelMatch) {
+    const char = JSON.stringify(modelMatch[0])
+    throw new Error(
+      `WORKSPACE_OPENCODE_MODEL contains a shell metacharacter (${char}) that is not allowed. Remove the character before deploying.`,
+    )
+  }
+
+  // Validate config: must be valid JSON, single-line, within size cap
+  if (config.includes('\n') || config.includes('\r')) {
+    throw new Error(
+      'WORKSPACE_OPENCODE_CONFIG must not contain embedded newlines — it must be a single-line JSON value.',
+    )
+  }
+  if (config.length > 16_384) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG is too large (${config.length} bytes; max 16384). Reduce the config size before deploying.`,
+    )
+  }
+  try {
+    JSON.parse(config)
+  } catch {
+    throw new Error(
+      'WORKSPACE_OPENCODE_CONFIG is not valid JSON. Provide a valid JSON object (e.g. {"provider":{...}}).',
+    )
+  }
+
+  // Escape $ → $$ so docker-compose interpolation does not expand $VAR sequences.
+  // docker-compose converts $$ → $ when passing the value to the container.
+  // Note: String.replaceAll('$', '$$') does NOT work — '$$' in a string replacement
+  // is a special pattern meaning "insert a literal $", so it's a no-op. Use split/join.
+  const escapedConfig = config.split('$').join('$$')
+
+  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\n`
 }
 
 /**
@@ -282,12 +367,19 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
     {name: 's3-region', envKey: 'S3_REGION'},
     {name: 'github-app-id', envKey: 'GH_APP_ID'},
     {name: 'github-app-private-key', envKey: 'GH_APP_PRIVATE_KEY'},
+    {name: 'workspace-opencode-token', envKey: 'WORKSPACE_OPENCODE_TOKEN'},
+    {name: 'workspace-opencode-auth', envKey: 'WORKSPACE_OPENCODE_AUTH'},
   ]
 
   const optional: {name: string; envKey: string}[] = [
     {name: 's3-endpoint', envKey: 'S3_ENDPOINT'},
     {name: 'aws-session-token', envKey: 'AWS_SESSION_TOKEN'},
     {name: 'discord-privileged-intents', envKey: 'DISCORD_PRIVILEGED_INTENTS'},
+    {name: 'workspace-opencode-url', envKey: 'WORKSPACE_OPENCODE_URL'},
+    // gateway-trigger-role-id: env var is in REQUIRED_ENV_VARS (fail-closed authz gate),
+    // but the file-list entry is optional-shaped so an empty value writes an empty file
+    // (upstream compose treats it as optional; we enforce non-empty via REQUIRED_ENV_VARS).
+    {name: 'gateway-trigger-role-id', envKey: 'GATEWAY_TRIGGER_ROLE_ID'},
   ]
 
   const secrets: SecretFile[] = []
@@ -660,6 +752,18 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   const objectStoreHosts = computeObjectStoreHosts(env)
   validateObjectStoreHosts(objectStoreHosts)
 
+  // Phase 3b: Validate workspace .env vars (MODEL/CONFIG) before any SSH.
+  // buildGatewayEnvFileContents throws with a descriptive message on invalid input.
+  const missingWorkspace = validateWorkspaceEnvVars(env)
+  if (missingWorkspace.length > 0) {
+    throw new Error(`Missing required environment variables: ${missingWorkspace.join(', ')}`)
+  }
+  buildGatewayEnvFileContents({
+    objectStoreHosts,
+    model: env.WORKSPACE_OPENCODE_MODEL ?? '',
+    config: env.WORKSPACE_OPENCODE_CONFIG ?? '',
+  })
+
   if (isDryRun) {
     console.warn('\u001B[1;33m[dry-run]\u001B[0m Planned actions:')
     console.warn(`  1. Ensure droplet workspace at ${REMOTE_DIR} (clone ${repo}@${ref} or fetch+reset)`)
@@ -782,11 +886,16 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     const checksumChanged = priorChecksum !== currentChecksum
 
     // Phase 6: Materialize .env via stdin pipe (OBJECT_STORE_HOSTS already validated above)
+    const envFileContents = buildGatewayEnvFileContents({
+      objectStoreHosts,
+      model: env.WORKSPACE_OPENCODE_MODEL ?? '',
+      config: env.WORKSPACE_OPENCODE_CONFIG ?? '',
+    })
     await writeRemoteFile(
       'Writing .env',
       host,
       ENV_PATH,
-      `OBJECT_STORE_HOSTS=${objectStoreHosts}\n`,
+      envFileContents,
       deployEnv,
       spawnFn,
       secrets,

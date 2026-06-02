@@ -79,6 +79,7 @@ const SECRETS_DIR = `${DEPLOY_DIR}/secrets`
 const CHECKSUM_PATH = `${REMOTE_DIR}/.secrets-checksum`
 const ENV_PATH = `${DEPLOY_DIR}/.env`
 const DEFAULT_REMOTE_USER = 'root'
+const CLIPROXY_EGRESS_HOST = 'cliproxy.fro.bot'
 
 /**
  * RFC1123 label: lowercase letters, digits, hyphens; 1-63 chars; no leading/trailing hyphen.
@@ -97,25 +98,32 @@ const REQUIRED_ENV_VARS = [
   'GATEWAY_HOST',
   'GH_APP_ID',
   'GH_APP_PRIVATE_KEY',
+  'WORKSPACE_OPENCODE_TOKEN',
+  'WORKSPACE_OPENCODE_AUTH',
+  'GATEWAY_TRIGGER_ROLE_ID',
 ] as const
 
 // ─── Exported helpers ─────────────────────────────────────────────────────────
 
 /**
- * Validates required environment variables are present.
+ * Validates required environment variables are present and non-empty.
  * Returns the list of missing variable names.
  * GATEWAY_SSH_KEY is required only when CI=true.
+ *
+ * Empty and whitespace-only values are treated as missing — this is the
+ * fail-closed gate for security-sensitive vars like GATEWAY_TRIGGER_ROLE_ID
+ * (an empty value would open the mention loop to all guild members).
  */
 export function validateRequiredEnv(env: Record<string, string>): string[] {
   const missing: string[] = []
 
   for (const key of REQUIRED_ENV_VARS) {
-    if (!env[key]) {
+    if (!env[key]?.trim()) {
       missing.push(key)
     }
   }
 
-  if (env.CI === 'true' && !env.GATEWAY_SSH_KEY) {
+  if (env.CI === 'true' && !env.GATEWAY_SSH_KEY?.trim()) {
     missing.push('GATEWAY_SSH_KEY')
   }
 
@@ -187,6 +195,150 @@ export function resolveUpstreamPin(jsonPath?: string): UpstreamPin {
 
   const {repo, ref} = parsed as {repo: string; ref: string}
   return {repo, ref}
+}
+
+/**
+ * Allow-list regex for WORKSPACE_OPENCODE_MODEL.
+ * Accepts: letters, digits, dots, hyphens, underscores, and exactly one slash.
+ * Rejects: whitespace, #, =, and any other character outside the safe set.
+ */
+const MODEL_ALLOWLIST_RE = /^[\w.-]+\/[\w.-]+$/
+
+/**
+ * Returns the list of missing WORKSPACE_OPENCODE_MODEL / WORKSPACE_OPENCODE_CONFIG
+ * variable names. The name reflects what it returns — a list of missing vars.
+ */
+export function getMissingWorkspaceEnvVars(env: Record<string, string>): string[] {
+  const missing: string[] = []
+  if (!env.WORKSPACE_OPENCODE_MODEL?.trim()) {
+    missing.push('WORKSPACE_OPENCODE_MODEL')
+  }
+  if (!env.WORKSPACE_OPENCODE_CONFIG?.trim()) {
+    missing.push('WORKSPACE_OPENCODE_CONFIG')
+  }
+  return missing
+}
+
+/**
+ * Builds the contents of the remote .env file for the gateway deploy.
+ *
+ * WORKSPACE_OPENCODE_CONFIG encoding:
+ *   The workspace compose.yaml reads this via ${WORKSPACE_OPENCODE_CONFIG:-}
+ *   (docker-compose variable interpolation from .env). To prevent compose from
+ *   expanding $ sequences inside the JSON value, every $ is doubled to $$.
+ *   docker-compose converts $$ → $ when passing the value to the container,
+ *   so the container receives the original JSON intact.
+ *
+ *   A shell metacharacter deny-list is NOT applied to CONFIG — valid JSON
+ *   requires " $ \ which such a list would reject. Instead: JSON.parse
+ *   structural check + no embedded newlines + size cap.
+ *
+ *   WORKSPACE_OPENCODE_MODEL is validated via MODEL_ALLOWLIST_RE — a positive
+ *   allow-list that accepts only letters, digits, dots, hyphens, underscores,
+ *   and exactly one slash (e.g. anthropic/claude-sonnet-4-6).
+ */
+export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; model: string; config: string}): string {
+  const {objectStoreHosts, model, config} = opts
+
+  // Validate model: positive allow-list — exactly one /, non-empty provider + model segments,
+  // characters limited to letters, digits, dots, hyphens, underscores.
+  // Rejects whitespace, #, =, and any char outside the safe set.
+  if (!MODEL_ALLOWLIST_RE.test(model)) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_MODEL "${model}" is not a valid provider/model identifier. ` +
+        'Use the format "provider/model" with characters limited to letters, digits, dots, hyphens, and underscores ' +
+        '(e.g. "anthropic/claude-sonnet-4-6" or "openai/gpt-5.5-fast"). ' +
+        'Whitespace, #, =, and other special characters are not allowed.',
+    )
+  }
+
+  // Validate config: must be valid JSON, single-line, within size cap
+  if (config.includes('\n') || config.includes('\r')) {
+    throw new Error(
+      'WORKSPACE_OPENCODE_CONFIG must not contain embedded newlines — it must be a single-line JSON value.',
+    )
+  }
+  if (config.length > 16_384) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG is too large (${config.length} bytes; max 16384). Reduce the config size before deploying.`,
+    )
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(config)
+  } catch {
+    throw new Error(
+      'WORKSPACE_OPENCODE_CONFIG is not valid JSON. Provide a valid JSON object (e.g. {"provider":{...}}).',
+    )
+  }
+
+  // Reject non-plain-object values (null, arrays, primitives)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      'WORKSPACE_OPENCODE_CONFIG must be a JSON object (e.g. {"provider":{...}}), not a primitive, null, or array.',
+    )
+  }
+
+  // Derive provider prefix from WORKSPACE_OPENCODE_MODEL (substring before the first /).
+  // MODEL_ALLOWLIST_RE already guarantees exactly one '/' and non-empty segments,
+  // so the split always produces a non-empty string at index 0.
+  // Require config.provider[providerPrefix].options.baseURL to route through the cliproxy
+  // egress proxy: a valid https URL whose host is exactly CLIPROXY_EGRESS_HOST and whose
+  // path ends in /v1. This is the egress-routing security guard — a bare /v1 suffix check
+  // is insufficient (https://api.openai.com/v1 would bypass the proxy).
+  const providerPrefix = model.split('/')[0] ?? ''
+  const configObj = parsed as Record<string, unknown>
+  const providerEntry = (configObj.provider as Record<string, unknown> | undefined)?.[providerPrefix]
+  const options = (providerEntry as Record<string, unknown> | undefined)?.options
+  const baseURL = (options as Record<string, unknown> | undefined)?.baseURL
+
+  if (typeof baseURL !== 'string' || !baseURL) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG must include config.provider["${providerPrefix}"].options.baseURL ` +
+        `as a non-empty string (e.g. "https://${CLIPROXY_EGRESS_HOST}/v1"). ` +
+        'Without this, the workspace would bypass the cliproxy egress proxy and make direct upstream API calls.',
+    )
+  }
+
+  let parsedURL: URL
+  try {
+    parsedURL = new URL(baseURL)
+  } catch {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG provider["${providerPrefix}"].options.baseURL is not a valid URL: ${JSON.stringify(baseURL)}. ` +
+        `Expected "https://${CLIPROXY_EGRESS_HOST}/v1".`,
+    )
+  }
+
+  if (parsedURL.protocol !== 'https:') {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG provider["${providerPrefix}"].options.baseURL must use https (got ${JSON.stringify(parsedURL.protocol.replace(':', ''))}). ` +
+        `Expected "https://${CLIPROXY_EGRESS_HOST}/v1".`,
+    )
+  }
+
+  if (parsedURL.hostname !== CLIPROXY_EGRESS_HOST) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG provider["${providerPrefix}"].options.baseURL must route through cliproxy.fro.bot ` +
+        `(got ${JSON.stringify(parsedURL.hostname)}). Expected "https://${CLIPROXY_EGRESS_HOST}/v1".`,
+    )
+  }
+
+  if (!baseURL.endsWith('/v1')) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG provider["${providerPrefix}"].options.baseURL must end in "/v1" ` +
+        `(got ${JSON.stringify(baseURL)}). Expected "https://${CLIPROXY_EGRESS_HOST}/v1".`,
+    )
+  }
+
+  // Escape $ → $$ so docker-compose interpolation does not expand $VAR sequences.
+  // docker-compose converts $$ → $ when passing the value to the container.
+  // Note: String.replaceAll('$', '$$') does NOT work — '$$' in a string replacement
+  // is a special pattern meaning "insert a literal $", so it's a no-op. Use split/join.
+  const escapedConfig = config.split('$').join('$$')
+
+  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\n`
 }
 
 /**
@@ -282,12 +434,19 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
     {name: 's3-region', envKey: 'S3_REGION'},
     {name: 'github-app-id', envKey: 'GH_APP_ID'},
     {name: 'github-app-private-key', envKey: 'GH_APP_PRIVATE_KEY'},
+    {name: 'workspace-opencode-token', envKey: 'WORKSPACE_OPENCODE_TOKEN'},
+    {name: 'workspace-opencode-auth', envKey: 'WORKSPACE_OPENCODE_AUTH'},
   ]
 
   const optional: {name: string; envKey: string}[] = [
     {name: 's3-endpoint', envKey: 'S3_ENDPOINT'},
     {name: 'aws-session-token', envKey: 'AWS_SESSION_TOKEN'},
     {name: 'discord-privileged-intents', envKey: 'DISCORD_PRIVILEGED_INTENTS'},
+    {name: 'workspace-opencode-url', envKey: 'WORKSPACE_OPENCODE_URL'},
+    // gateway-trigger-role-id: env var is in REQUIRED_ENV_VARS (fail-closed authz gate),
+    // but the file-list entry is optional-shaped so an empty value writes an empty file
+    // (upstream compose treats it as optional; we enforce non-empty via REQUIRED_ENV_VARS).
+    {name: 'gateway-trigger-role-id', envKey: 'GATEWAY_TRIGGER_ROLE_ID'},
   ]
 
   const secrets: SecretFile[] = []
@@ -660,6 +819,18 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   const objectStoreHosts = computeObjectStoreHosts(env)
   validateObjectStoreHosts(objectStoreHosts)
 
+  // Phase 3b: Validate workspace .env vars (MODEL/CONFIG) before any SSH.
+  // buildGatewayEnvFileContents throws with a descriptive message on invalid input.
+  const missingWorkspace = getMissingWorkspaceEnvVars(env)
+  if (missingWorkspace.length > 0) {
+    throw new Error(`Missing required environment variables: ${missingWorkspace.join(', ')}`)
+  }
+  buildGatewayEnvFileContents({
+    objectStoreHosts,
+    model: env.WORKSPACE_OPENCODE_MODEL ?? '',
+    config: env.WORKSPACE_OPENCODE_CONFIG ?? '',
+  })
+
   if (isDryRun) {
     console.warn('\u001B[1;33m[dry-run]\u001B[0m Planned actions:')
     console.warn(`  1. Ensure droplet workspace at ${REMOTE_DIR} (clone ${repo}@${ref} or fetch+reset)`)
@@ -782,11 +953,16 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     const checksumChanged = priorChecksum !== currentChecksum
 
     // Phase 6: Materialize .env via stdin pipe (OBJECT_STORE_HOSTS already validated above)
+    const envFileContents = buildGatewayEnvFileContents({
+      objectStoreHosts,
+      model: env.WORKSPACE_OPENCODE_MODEL ?? '',
+      config: env.WORKSPACE_OPENCODE_CONFIG ?? '',
+    })
     await writeRemoteFile(
       'Writing .env',
       host,
       ENV_PATH,
-      `OBJECT_STORE_HOSTS=${objectStoreHosts}\n`,
+      envFileContents,
       deployEnv,
       spawnFn,
       secrets,

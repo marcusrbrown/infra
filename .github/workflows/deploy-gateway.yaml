@@ -37,6 +37,18 @@ on:
         required: false
       DISCORD_PRIVILEGED_INTENTS:
         required: false
+      WORKSPACE_OPENCODE_TOKEN:
+        required: true
+      WORKSPACE_OPENCODE_AUTH:
+        required: true
+      WORKSPACE_OPENCODE_URL:
+        required: false
+      WORKSPACE_OPENCODE_MODEL:
+        required: true
+      WORKSPACE_OPENCODE_CONFIG:
+        required: true
+      GATEWAY_TRIGGER_ROLE_ID:
+        required: true
 
 concurrency:
   group: deploy-gateway-${{ github.ref_name }}
@@ -69,6 +81,11 @@ jobs:
           GATEWAY_HOST: ${{ secrets.GATEWAY_HOST }}
           GH_APP_ID: ${{ secrets.GH_APP_ID }}
           GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          WORKSPACE_OPENCODE_TOKEN: ${{ secrets.WORKSPACE_OPENCODE_TOKEN }}
+          WORKSPACE_OPENCODE_AUTH: ${{ secrets.WORKSPACE_OPENCODE_AUTH }}
+          WORKSPACE_OPENCODE_MODEL: ${{ secrets.WORKSPACE_OPENCODE_MODEL }}
+          WORKSPACE_OPENCODE_CONFIG: ${{ secrets.WORKSPACE_OPENCODE_CONFIG }}
+          GATEWAY_TRIGGER_ROLE_ID: ${{ secrets.GATEWAY_TRIGGER_ROLE_ID }}
         run: |
           missing=()
           [[ -n "${GATEWAY_SSH_KEY}" ]] || missing+=("GATEWAY_SSH_KEY")
@@ -82,6 +99,11 @@ jobs:
           [[ -n "${GATEWAY_HOST}" ]] || missing+=("GATEWAY_HOST")
           [[ -n "${GH_APP_ID}" ]] || missing+=("GH_APP_ID")
           [[ -n "${GH_APP_PRIVATE_KEY}" ]] || missing+=("GH_APP_PRIVATE_KEY")
+          [[ -n "${WORKSPACE_OPENCODE_TOKEN}" ]] || missing+=("WORKSPACE_OPENCODE_TOKEN")
+          [[ -n "${WORKSPACE_OPENCODE_AUTH}" ]] || missing+=("WORKSPACE_OPENCODE_AUTH")
+          [[ -n "${WORKSPACE_OPENCODE_MODEL}" ]] || missing+=("WORKSPACE_OPENCODE_MODEL")
+          [[ -n "${WORKSPACE_OPENCODE_CONFIG}" ]] || missing+=("WORKSPACE_OPENCODE_CONFIG")
+          [[ -n "${GATEWAY_TRIGGER_ROLE_ID}" ]] || missing+=("GATEWAY_TRIGGER_ROLE_ID")
           if (( ${#missing[@]} > 0 )); then
             echo "Missing required secret(s): ${missing[*]}"
             exit 1
@@ -108,3 +130,9 @@ jobs:
           S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
           OBJECT_STORE_HOSTS: ${{ secrets.OBJECT_STORE_HOSTS }}
           DISCORD_PRIVILEGED_INTENTS: ${{ secrets.DISCORD_PRIVILEGED_INTENTS }}
+          WORKSPACE_OPENCODE_TOKEN: ${{ secrets.WORKSPACE_OPENCODE_TOKEN }}
+          WORKSPACE_OPENCODE_AUTH: ${{ secrets.WORKSPACE_OPENCODE_AUTH }}
+          WORKSPACE_OPENCODE_URL: ${{ secrets.WORKSPACE_OPENCODE_URL }}
+          WORKSPACE_OPENCODE_MODEL: ${{ secrets.WORKSPACE_OPENCODE_MODEL }}
+          WORKSPACE_OPENCODE_CONFIG: ${{ secrets.WORKSPACE_OPENCODE_CONFIG }}
+          GATEWAY_TRIGGER_ROLE_ID: ${{ secrets.GATEWAY_TRIGGER_ROLE_ID }}

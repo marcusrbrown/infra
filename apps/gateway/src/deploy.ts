@@ -196,17 +196,18 @@ export function resolveUpstreamPin(jsonPath?: string): UpstreamPin {
   return {repo, ref}
 }
 
-// ─── Shell metacharacter deny-list (for simple string values) ────────────────
-// These characters are dangerous when interpolated into remote shell context.
-// NOT applied to WORKSPACE_OPENCODE_CONFIG — valid JSON requires " $ \ which
-// this regex rejects. CONFIG is validated via JSON.parse instead.
-const SHELL_METACHAR_RE = /[\n\r`$|;&'"\\]/
+/**
+ * Allow-list regex for WORKSPACE_OPENCODE_MODEL.
+ * Accepts: letters, digits, dots, hyphens, underscores, and exactly one slash.
+ * Rejects: whitespace, #, =, and any other character outside the safe set.
+ */
+const MODEL_ALLOWLIST_RE = /^[\w.-]+\/[\w.-]+$/
 
 /**
- * Validates WORKSPACE_OPENCODE_MODEL and WORKSPACE_OPENCODE_CONFIG are present
- * and well-formed. Returns the list of missing/invalid variable names.
+ * Returns the list of missing WORKSPACE_OPENCODE_MODEL / WORKSPACE_OPENCODE_CONFIG
+ * variable names. The name reflects what it returns — a list of missing vars.
  */
-export function validateWorkspaceEnvVars(env: Record<string, string>): string[] {
+export function getMissingWorkspaceEnvVars(env: Record<string, string>): string[] {
   const missing: string[] = []
   if (!env.WORKSPACE_OPENCODE_MODEL?.trim()) {
     missing.push('WORKSPACE_OPENCODE_MODEL')
@@ -227,22 +228,26 @@ export function validateWorkspaceEnvVars(env: Record<string, string>): string[] 
  *   docker-compose converts $$ → $ when passing the value to the container,
  *   so the container receives the original JSON intact.
  *
- *   SHELL_METACHAR_RE is NOT applied to CONFIG — it rejects " $ \ which valid
- *   JSON requires. Instead: JSON.parse structural check + no embedded newlines
- *   + size cap.
+ *   A shell metacharacter deny-list is NOT applied to CONFIG — valid JSON
+ *   requires " $ \ which such a list would reject. Instead: JSON.parse
+ *   structural check + no embedded newlines + size cap.
  *
- *   WORKSPACE_OPENCODE_MODEL is a simple id (e.g. anthropic/claude-sonnet-4-6)
- *   with no quotes or $, so SHELL_METACHAR_RE is appropriate for it.
+ *   WORKSPACE_OPENCODE_MODEL is validated via MODEL_ALLOWLIST_RE — a positive
+ *   allow-list that accepts only letters, digits, dots, hyphens, underscores,
+ *   and exactly one slash (e.g. anthropic/claude-sonnet-4-6).
  */
 export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; model: string; config: string}): string {
   const {objectStoreHosts, model, config} = opts
 
-  // Validate model: simple id, no shell metacharacters
-  const modelMatch = SHELL_METACHAR_RE.exec(model)
-  if (modelMatch) {
-    const char = JSON.stringify(modelMatch[0])
+  // Validate model: positive allow-list — exactly one /, non-empty provider + model segments,
+  // characters limited to letters, digits, dots, hyphens, underscores.
+  // Rejects whitespace, #, =, and any char outside the safe set.
+  if (!MODEL_ALLOWLIST_RE.test(model)) {
     throw new Error(
-      `WORKSPACE_OPENCODE_MODEL contains a shell metacharacter (${char}) that is not allowed. Remove the character before deploying.`,
+      `WORKSPACE_OPENCODE_MODEL "${model}" is not a valid provider/model identifier. ` +
+        'Use the format "provider/model" with characters limited to letters, digits, dots, hyphens, and underscores ' +
+        '(e.g. "anthropic/claude-sonnet-4-6" or "openai/gpt-5.5-fast"). ' +
+        'Whitespace, #, =, and other special characters are not allowed.',
     )
   }
 
@@ -257,11 +262,40 @@ export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; mod
       `WORKSPACE_OPENCODE_CONFIG is too large (${config.length} bytes; max 16384). Reduce the config size before deploying.`,
     )
   }
+
+  let parsed: unknown
   try {
-    JSON.parse(config)
+    parsed = JSON.parse(config)
   } catch {
     throw new Error(
       'WORKSPACE_OPENCODE_CONFIG is not valid JSON. Provide a valid JSON object (e.g. {"provider":{...}}).',
+    )
+  }
+
+  // Reject non-plain-object values (null, arrays, primitives)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      'WORKSPACE_OPENCODE_CONFIG must be a JSON object (e.g. {"provider":{...}}), not a primitive, null, or array.',
+    )
+  }
+
+  // Derive provider prefix from WORKSPACE_OPENCODE_MODEL (substring before the first /).
+  // MODEL_ALLOWLIST_RE already guarantees exactly one '/' and non-empty segments,
+  // so the split always produces a non-empty string at index 0.
+  // Require config.provider[providerPrefix].options.baseURL to be a non-empty string
+  // ending in /v1. This is the egress-routing security guard — without it the workspace
+  // would bypass the cliproxy egress proxy and make direct upstream API calls.
+  const providerPrefix = model.split('/')[0] ?? ''
+  const configObj = parsed as Record<string, unknown>
+  const providerEntry = (configObj.provider as Record<string, unknown> | undefined)?.[providerPrefix]
+  const options = (providerEntry as Record<string, unknown> | undefined)?.options
+  const baseURL = (options as Record<string, unknown> | undefined)?.baseURL
+
+  if (typeof baseURL !== 'string' || !baseURL || !baseURL.endsWith('/v1')) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG must include config.provider["${providerPrefix}"].options.baseURL ` +
+        'as a non-empty string ending in "/v1" (e.g. "https://cliproxy.fro.bot/v1"). ' +
+        'Without this, the workspace would bypass the cliproxy egress proxy and make direct upstream API calls.',
     )
   }
 
@@ -754,7 +788,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
 
   // Phase 3b: Validate workspace .env vars (MODEL/CONFIG) before any SSH.
   // buildGatewayEnvFileContents throws with a descriptive message on invalid input.
-  const missingWorkspace = validateWorkspaceEnvVars(env)
+  const missingWorkspace = getMissingWorkspaceEnvVars(env)
   if (missingWorkspace.length > 0) {
     throw new Error(`Missing required environment variables: ${missingWorkspace.join(', ')}`)
   }

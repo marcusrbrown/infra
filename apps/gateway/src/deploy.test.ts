@@ -2449,6 +2449,39 @@ describe('buildGatewayEnvFileContents — CONFIG semantic validation', () => {
     ).toThrow(/WORKSPACE_OPENCODE_CONFIG/)
   })
 
+  test('CONFIG with a direct-upstream /v1 baseURL → rejected (must route through cliproxy)', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'openai/gpt-5.5-fast',
+        config: '{"provider":{"openai":{"options":{"baseURL":"https://api.openai.com/v1"}}}}',
+      }),
+    ).toThrow(/cliproxy\.fro\.bot/)
+  })
+
+  test('CONFIG with a hostname-spoofing baseURL → rejected (exact host match)', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6',
+        config: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot.evil.example/v1"}}}}',
+      }),
+    ).toThrow(/cliproxy\.fro\.bot/)
+  })
+
+  test('CONFIG with a non-https cliproxy baseURL → rejected', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6',
+        config: '{"provider":{"anthropic":{"options":{"baseURL":"http://cliproxy.fro.bot/v1"}}}}',
+      }),
+    ).toThrow(/WORKSPACE_OPENCODE_CONFIG/)
+  })
+
   test('CONFIG with valid baseURL ending in /v1 → accepted', async () => {
     const {buildGatewayEnvFileContents} = await import('./deploy')
     expect(() =>

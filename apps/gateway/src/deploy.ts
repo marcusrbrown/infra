@@ -79,6 +79,7 @@ const SECRETS_DIR = `${DEPLOY_DIR}/secrets`
 const CHECKSUM_PATH = `${REMOTE_DIR}/.secrets-checksum`
 const ENV_PATH = `${DEPLOY_DIR}/.env`
 const DEFAULT_REMOTE_USER = 'root'
+const CLIPROXY_EGRESS_HOST = 'cliproxy.fro.bot'
 
 /**
  * RFC1123 label: lowercase letters, digits, hyphens; 1-63 chars; no leading/trailing hyphen.
@@ -282,20 +283,52 @@ export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; mod
   // Derive provider prefix from WORKSPACE_OPENCODE_MODEL (substring before the first /).
   // MODEL_ALLOWLIST_RE already guarantees exactly one '/' and non-empty segments,
   // so the split always produces a non-empty string at index 0.
-  // Require config.provider[providerPrefix].options.baseURL to be a non-empty string
-  // ending in /v1. This is the egress-routing security guard — without it the workspace
-  // would bypass the cliproxy egress proxy and make direct upstream API calls.
+  // Require config.provider[providerPrefix].options.baseURL to route through the cliproxy
+  // egress proxy: a valid https URL whose host is exactly CLIPROXY_EGRESS_HOST and whose
+  // path ends in /v1. This is the egress-routing security guard — a bare /v1 suffix check
+  // is insufficient (https://api.openai.com/v1 would bypass the proxy).
   const providerPrefix = model.split('/')[0] ?? ''
   const configObj = parsed as Record<string, unknown>
   const providerEntry = (configObj.provider as Record<string, unknown> | undefined)?.[providerPrefix]
   const options = (providerEntry as Record<string, unknown> | undefined)?.options
   const baseURL = (options as Record<string, unknown> | undefined)?.baseURL
 
-  if (typeof baseURL !== 'string' || !baseURL || !baseURL.endsWith('/v1')) {
+  if (typeof baseURL !== 'string' || !baseURL) {
     throw new Error(
       `WORKSPACE_OPENCODE_CONFIG must include config.provider["${providerPrefix}"].options.baseURL ` +
-        'as a non-empty string ending in "/v1" (e.g. "https://cliproxy.fro.bot/v1"). ' +
+        `as a non-empty string (e.g. "https://${CLIPROXY_EGRESS_HOST}/v1"). ` +
         'Without this, the workspace would bypass the cliproxy egress proxy and make direct upstream API calls.',
+    )
+  }
+
+  let parsedURL: URL
+  try {
+    parsedURL = new URL(baseURL)
+  } catch {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG provider["${providerPrefix}"].options.baseURL is not a valid URL: ${JSON.stringify(baseURL)}. ` +
+        `Expected "https://${CLIPROXY_EGRESS_HOST}/v1".`,
+    )
+  }
+
+  if (parsedURL.protocol !== 'https:') {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG provider["${providerPrefix}"].options.baseURL must use https (got ${JSON.stringify(parsedURL.protocol.replace(':', ''))}). ` +
+        `Expected "https://${CLIPROXY_EGRESS_HOST}/v1".`,
+    )
+  }
+
+  if (parsedURL.hostname !== CLIPROXY_EGRESS_HOST) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG provider["${providerPrefix}"].options.baseURL must route through cliproxy.fro.bot ` +
+        `(got ${JSON.stringify(parsedURL.hostname)}). Expected "https://${CLIPROXY_EGRESS_HOST}/v1".`,
+    )
+  }
+
+  if (!baseURL.endsWith('/v1')) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG provider["${providerPrefix}"].options.baseURL must end in "/v1" ` +
+        `(got ${JSON.stringify(baseURL)}). Expected "https://${CLIPROXY_EGRESS_HOST}/v1".`,
     )
   }
 

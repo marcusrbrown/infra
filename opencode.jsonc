@@ -1,0 +1,29 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    // Secrets (CLIPROXY_MANAGEMENT_KEY, CLIPROXY_DOMAIN, GATEWAY_HOST, UMAMI_DOMAIN)
+    // are NOT set here. The MCP subprocess inherits them: Bun auto-loads repo-root
+    // .env locally; CI/harness inherits the parent process env. No values in this file.
+    "infra": {
+      "type": "local",
+      "command": ["bunx", "@marcusrbrown/infra", "mcp"],
+      "enabled": true,
+    },
+  },
+  // Gated infra tools (disabled for agents). Two categories:
+  //   1. Mutating — key/config writes + CA backup; no agent approval gate exists yet.
+  //   2. Secret-disclosing reads — cliproxy_keys_list prints live bearer tokens and
+  //      cliproxy_config_get dumps the management config (incl. the management key).
+  //      Read-only does not mean secret-safe, so these stay human-CLI-only too.
+  // Tool ids are prefixed with the MCP server name above (infra_). Keep this list in
+  // sync with mutating/secret-bearing entries in MCP_ALLOWLIST (packages/cli/src/commands/mcp.ts);
+  // a conventions test enforces the mutating-tool half of that invariant.
+  "tools": {
+    "infra_cliproxy_keys_add": false,
+    "infra_cliproxy_keys_remove": false,
+    "infra_cliproxy_config_set": false,
+    "infra_gateway_backup": false,
+    "infra_cliproxy_keys_list": false,
+    "infra_cliproxy_config_get": false,
+  },
+}

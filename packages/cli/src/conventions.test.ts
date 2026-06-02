@@ -1,10 +1,38 @@
 import {relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 import {parse as parseYaml} from 'yaml'
+import {MCP_ALLOWLIST} from './commands/mcp'
 
 const REPO_ROOT = resolve(import.meta.dir, '../../..')
 const INTERNAL_ORGS = new Set(['marcusrbrown'])
 const ALLOWED_SHELL_SCRIPTS = new Set(['apps/keeweb/deploy.sh'])
+
+// ---------------------------------------------------------------------------
+// MCP drift-guard: sensitive tool set
+// ---------------------------------------------------------------------------
+//
+// The subset of MCP_ALLOWLIST command names that are mutating or secret-
+// disclosing. These MUST remain gated false in opencode.jsonc so that coding
+// agents (OpenCode / Fro-Bot) cannot invoke them without human approval.
+//
+// WHY each is here:
+//   cliproxy keys add    — mutating: creates live bearer tokens on the proxy
+//   cliproxy keys remove — mutating: revokes live bearer tokens
+//   cliproxy config set  — mutating: overwrites CLIProxyAPI runtime config
+//   gateway backup       — secret-bearing: writes CA private key material to a tarball
+//   cliproxy keys list   — secret-disclosing: prints live bearer tokens in plaintext
+//   cliproxy config get  — secret-disclosing: dumps management config incl. management key
+//
+// A conventions test below asserts every entry (a) remains in MCP_ALLOWLIST
+// and (b) is gated false in opencode.jsonc under the prefixed tool id.
+const SENSITIVE_MCP_COMMANDS: readonly string[] = [
+  'cliproxy keys add',
+  'cliproxy keys remove',
+  'cliproxy config set',
+  'gateway backup',
+  'cliproxy keys list',
+  'cliproxy config get',
+]
 
 // Accepted version-comment forms on SHA-pinned `uses:` lines:
 //   # v6.0.2                        (semver tag)
@@ -241,6 +269,48 @@ describe('repo conventions', () => {
     const files = listShellScriptFiles()
     const offenders = files.map(f => relative(REPO_ROOT, f)).filter(f => !ALLOWED_SHELL_SCRIPTS.has(f))
     expect(offenders).toEqual([])
+  })
+
+  it('gates every sensitive infra MCP tool in opencode.jsonc', async () => {
+    // Parse opencode.jsonc tolerantly: it uses JSONC syntax (// line comments,
+    // trailing commas). Strategy:
+    //   1. Strip full-line comments — lines whose first non-whitespace is `//`.
+    //      This avoids breaking the `https://` in the $schema string value.
+    //   2. Strip trailing commas before `}` or `]`.
+    //   3. JSON.parse the result.
+    const jsoncText = await Bun.file(resolve(REPO_ROOT, 'opencode.jsonc')).text()
+    const stripped = jsoncText
+      .split('\n')
+      .map(line => (/^\s*\/\//.test(line) ? '' : line))
+      .join('\n')
+      .replaceAll(/,(\s*[}\]])/g, '$1')
+    const opencode = JSON.parse(stripped) as {tools?: Record<string, unknown>}
+
+    // Parse sanity: tools block must be present (catches a broken parse)
+    const tools = opencode.tools ?? {}
+    expect(Object.keys(tools).length).toBeGreaterThan(0)
+
+    const violations: string[] = []
+    for (const cmd of SENSITIVE_MCP_COMMANDS) {
+      // (a) Sanity: the command must still be in MCP_ALLOWLIST. If someone removes it
+      //     from the allowlist, the gate becomes orphaned and this set needs updating.
+      if (!MCP_ALLOWLIST.has(cmd)) {
+        violations.push(
+          `'${cmd}' is in SENSITIVE_MCP_COMMANDS but not in MCP_ALLOWLIST — remove from SENSITIVE_MCP_COMMANDS or re-add to allowlist`,
+        )
+        continue
+      }
+      // (b) The infra MCP server converts command names to tool names with underscores,
+      //     and OpenCode prefixes with the server name, giving "infra_<underscored>".
+      const toolId = `infra_${cmd.replaceAll(' ', '_')}`
+      if (tools[toolId] !== false) {
+        violations.push(`${toolId}: not gated false in opencode.jsonc tools (found: ${JSON.stringify(tools[toolId])})`)
+      }
+    }
+    expect(
+      violations,
+      `Sensitive infra MCP tools must be gated false in opencode.jsonc:\n${violations.join('\n')}`,
+    ).toEqual([])
   })
 })
 

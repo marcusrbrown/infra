@@ -24,7 +24,7 @@
     "pre-commit": "bun run lint-staged"
   },
   "lint-staged": {
-    "*.{ts,js,json,md,yaml,yml,conf}": [
+    "*.{ts,js,json,jsonc,md,yaml,yml,conf}": [
       "eslint --fix"
     ]
   },

@@ -1797,19 +1797,12 @@ describe('SSH ControlMaster multiplexing', () => {
     }
   })
 
-  test('CI mode: every ssh argv includes ControlPath under the key tmpdir', async () => {
+  test('CI mode: every ssh argv includes ControlPath under /tmp/gw-cm-* (not the key tmpdir)', async () => {
+    // After the macOS ControlPath-length fix, the control socket lives under a short
+    // /tmp-rooted dir (gw-cm-*) separate from the key tmpdir (gateway-deploy-key-*).
     const {main} = await import('./deploy')
-    let capturedKeyDir: string | undefined
 
-    const {spawnFn, calls} = makeSpawnMock(cmd => {
-      // Capture the tmpdir from the -i path on the first ssh call
-      const iIdx = cmd.indexOf('-i')
-      if (iIdx !== -1 && capturedKeyDir === undefined) {
-        const keyPath = cmd[iIdx + 1]
-        if (keyPath) capturedKeyDir = keyPath.replace(/\/id$/, '')
-      }
-      return undefined
-    })
+    const {spawnFn, calls} = makeSpawnMock()
 
     await main({
       env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
@@ -1819,17 +1812,14 @@ describe('SSH ControlMaster multiplexing', () => {
       spawn: spawnFn,
     })
 
-    expect(capturedKeyDir).toBeDefined()
-
     const sshCalls = calls.filter(cmd => cmd[0] === 'ssh')
     expect(sshCalls.length).toBeGreaterThan(0)
 
     for (const cmd of sshCalls) {
       const controlPathArg = cmd.find(arg => arg.startsWith('ControlPath='))
       expect(controlPathArg).toBeDefined()
-      if (capturedKeyDir) {
-        expect(controlPathArg).toContain(capturedKeyDir)
-      }
+      // Control socket must be under /tmp/gw-cm-*, not under the key tmpdir
+      expect(controlPathArg).toMatch(/^ControlPath=\/tmp\/gw-cm-/)
     }
   })
 
@@ -1892,6 +1882,67 @@ describe('SSH ControlMaster multiplexing', () => {
     for (const cmd of sshCalls) {
       const controlPathArg = cmd.find(arg => arg.startsWith('ControlPath='))
       expect(controlPathArg).toBeDefined()
+    }
+  })
+
+  test('macOS long TMPDIR: ControlPath is rooted at /tmp, not the long TMPDIR, and stays under 104 bytes', async () => {
+    // Regression test for macOS sun_path limit (104 bytes).
+    // On macOS, os.tmpdir() returns a long path like /var/folders/td/f1mm.../T/
+    // which causes the ControlPath unix-domain socket to exceed 104 bytes → ssh exits 255.
+    // The fix: root the control socket under /tmp (short) regardless of os.tmpdir().
+    //
+    // Strategy: create a real long-named dir under the actual tmpdir so mkdtempSync
+    // succeeds (simulating macOS where the long path exists), then assert the captured
+    // ControlPath is rooted at /tmp/ and stays under 104 bytes.
+    const {main} = await import('./deploy')
+    const {mkdtempSync: realMkdtemp, rmSync: realRmSync} = await import('node:fs')
+    const {tmpdir: realTmpdir} = await import('node:os')
+    const {join: realJoin} = await import('node:path')
+
+    // Create a real long-named parent dir under the actual tmpdir to simulate macOS.
+    // The name is long enough that a socket path rooted here would exceed 104 bytes.
+    const longParent = realMkdtemp(realJoin(realTmpdir(), 'gateway-deploy-macos-sim-long-path-xxxxxxxx-'))
+    const originalTmpdir = process.env.TMPDIR
+    process.env.TMPDIR = longParent
+
+    const capturedControlPaths: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const controlPathArg = cmd.find(arg => arg.startsWith('ControlPath='))
+      if (controlPathArg) {
+        capturedControlPaths.push(controlPathArg.slice('ControlPath='.length))
+      }
+      return undefined
+    })
+
+    try {
+      await main({
+        env: makeEnv({CI: 'true', GATEWAY_SSH_KEY: 'fake-key'}),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      })
+    } finally {
+      if (originalTmpdir === undefined) {
+        delete process.env.TMPDIR
+      } else {
+        process.env.TMPDIR = originalTmpdir
+      }
+      realRmSync(longParent, {recursive: true, force: true})
+    }
+
+    expect(capturedControlPaths.length).toBeGreaterThan(0)
+
+    for (const controlPath of capturedControlPaths) {
+      // (a) Must be rooted at /tmp/, NOT under the long TMPDIR
+      expect(controlPath.startsWith('/tmp/')).toBe(true)
+      expect(controlPath.startsWith(longParent)).toBe(false)
+
+      // (b) Worst-case resolved length must stay under 104 bytes.
+      // Replace %C with a 40-char placeholder (SHA1 hex hash length) to simulate expansion.
+      const worstCase = controlPath.replace('%C', 'a'.repeat(40))
+      expect(worstCase.length).toBeLessThan(104)
     }
   })
 

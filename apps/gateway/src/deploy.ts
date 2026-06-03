@@ -338,7 +338,7 @@ export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; mod
   // is a special pattern meaning "insert a literal $", so it's a no-op. Use split/join.
   const escapedConfig = config.split('$').join('$$')
 
-  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\n`
+  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\nWORKSPACE_EGRESS_HOSTS=${CLIPROXY_EGRESS_HOST}\n`
 }
 
 /**

@@ -80,6 +80,8 @@ const CHECKSUM_PATH = `${REMOTE_DIR}/.secrets-checksum`
 const ENV_PATH = `${DEPLOY_DIR}/.env`
 const DEFAULT_REMOTE_USER = 'root'
 const CLIPROXY_EGRESS_HOST = 'cliproxy.fro.bot'
+// OpenCode fetches its model catalog from models.dev at startup; the sandboxed workspace reaches it through the mitmproxy egress allowlist.
+const OPENCODE_CATALOG_HOST = 'models.dev'
 
 /**
  * RFC1123 label: lowercase letters, digits, hyphens; 1-63 chars; no leading/trailing hyphen.
@@ -338,7 +340,7 @@ export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; mod
   // is a special pattern meaning "insert a literal $", so it's a no-op. Use split/join.
   const escapedConfig = config.split('$').join('$$')
 
-  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\nWORKSPACE_EGRESS_HOSTS=${CLIPROXY_EGRESS_HOST}\n`
+  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\nWORKSPACE_EGRESS_HOSTS=${CLIPROXY_EGRESS_HOST},${OPENCODE_CATALOG_HOST}\n`
 }
 
 /**

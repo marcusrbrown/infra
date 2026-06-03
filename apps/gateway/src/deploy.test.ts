@@ -2307,7 +2307,7 @@ describe('buildGatewayEnvFileContents', () => {
     ).not.toThrow()
   })
 
-  test('emits WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot line (v0.52.1+ mitmproxy allowlist requirement)', async () => {
+  test('emits WORKSPACE_EGRESS_HOSTS with cliproxy and models.dev so the workspace can reach both the proxy and the OpenCode model catalog', async () => {
     const {buildGatewayEnvFileContents} = await import('./deploy')
     const result = buildGatewayEnvFileContents({
       objectStoreHosts: 'bucket.s3.us-east-1.amazonaws.com',
@@ -2315,7 +2315,8 @@ describe('buildGatewayEnvFileContents', () => {
       config: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
     })
     // Must contain exactly this line so mitmproxy allows the workspace to reach cliproxy
-    expect(result.split('\n')).toContain('WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot')
+    // and the OpenCode model catalog (models.dev) — without models.dev OpenCode cannot start
+    expect(result.split('\n')).toContain('WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev')
   })
 })
 

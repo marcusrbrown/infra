@@ -30,6 +30,7 @@
       allowedVersions: '<=2.11.3',
       automerge: false,
       dependencyDashboardApproval: true,
+    },
     {
       description: ['Add changelog context for Umami Docker image updates'],
       matchDatasources: ['docker'],

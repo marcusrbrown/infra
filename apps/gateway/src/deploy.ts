@@ -882,13 +882,22 @@ export async function main(opts: MainOpts = {}): Promise<void> {
 
   // CI mode: write GATEWAY_SSH_KEY to a tmp file with mode 0o600.
   // Local mode: keyPath stays undefined; SSH_AUTH_SOCK is forwarded via deployEnv.
-  // A tmpdir is always created (CI or local) to hold the ControlMaster socket.
   let keyPath: string | undefined
   let keyTmpDir: string | undefined
+  // ControlMaster socket lives under a SHORT /tmp-rooted dir to stay well under the
+  // 104-byte sun_path limit for unix-domain sockets. On macOS, os.tmpdir() returns a
+  // long path like /var/folders/td/f1mm.../T/ which causes ControlPath to exceed 104
+  // bytes → ssh fails with "ControlPath too long". The private key file stays in the
+  // secure os.tmpdir()-rooted dir (user-owned mode-700); only the socket moves to /tmp.
+  let controlTmpDir: string | undefined
 
   try {
-    // Always create a tmpdir — used for ControlPath socket in both CI and local mode.
+    // Key dir: secure, user-owned, under os.tmpdir() (may be long on macOS — that's fine
+    // for a regular file path; the 104-byte limit only applies to unix-domain sockets).
     keyTmpDir = mkdtempSync(join(tmpdir(), 'gateway-deploy-key-'))
+
+    // Control socket dir: always under /tmp so the socket path stays short.
+    controlTmpDir = mkdtempSync(join('/tmp', 'gw-cm-'))
 
     if (env.CI === 'true' && env.GATEWAY_SSH_KEY) {
       try {
@@ -906,8 +915,9 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       }
     }
 
-    // ControlPath socket lives inside keyTmpDir; %C expands to a hash of the connection tuple.
-    const controlPath = join(keyTmpDir, 'cm-%C')
+    // ControlPath socket lives inside controlTmpDir (short /tmp-rooted path).
+    // %C expands to a hash of the connection tuple.
+    const controlPath = join(controlTmpDir, 'cm-%C')
 
     // Phase 4: Ensure droplet workspace
     await runCommand(
@@ -1068,9 +1078,12 @@ export async function main(opts: MainOpts = {}): Promise<void> {
 
     console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
   } finally {
-    // Clean up the tmp key directory regardless of success or failure
+    // Clean up both tmp directories regardless of success or failure.
     if (keyTmpDir) {
       rmSync(keyTmpDir, {recursive: true, force: true})
+    }
+    if (controlTmpDir) {
+      rmSync(controlTmpDir, {recursive: true, force: true})
     }
   }
 }

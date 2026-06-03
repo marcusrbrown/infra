@@ -2306,6 +2306,17 @@ describe('buildGatewayEnvFileContents', () => {
       }),
     ).not.toThrow()
   })
+
+  test('emits WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot line (v0.52.1+ mitmproxy allowlist requirement)', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'bucket.s3.us-east-1.amazonaws.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
+    })
+    // Must contain exactly this line so mitmproxy allows the workspace to reach cliproxy
+    expect(result.split('\n')).toContain('WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot')
+  })
 })
 
 describe('getMissingWorkspaceEnvVars', () => {

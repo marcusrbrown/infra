@@ -1,5 +1,14 @@
 # @marcusrbrown/infra
 
+## 0.9.11
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.43` to `7.1.44` ([#399](https://github.com/marcusrbrown/infra/pull/399))
+
+
+- 🐳 Roll back Docker image `caddy` from `2.11.4-alpine` to `2.11.3-alpine` ([#398](https://github.com/marcusrbrown/infra/pull/398))
+
 ## 0.9.10
 ### Patch Changes
 

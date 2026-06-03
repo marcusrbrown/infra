@@ -4,9 +4,6 @@ permissions:
   contents: read
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
   workflow_call:
     secrets:
@@ -21,36 +18,12 @@ on:
       UMAMI_ADMIN_PASSWORD:
         required: true
 
+concurrency:
+  group: deploy-umami-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  detect-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      umami: ${{ steps.filter.outputs.umami }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 0
-
-      - name: Detect changed paths
-        id: filter
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
-        with:
-          predicate-quantifier: every
-          filters: |
-            umami:
-              - 'apps/umami/**'
-              - '!apps/umami/**/*.md'
-              - '!apps/umami/**/*.test.ts'
-              - '!apps/umami/**/__fixtures__/**'
-              - '!apps/umami/**/__snapshots__/**'
-
   deploy-umami:
-    needs: detect-changes
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call' ||
-      needs.detect-changes.outputs.umami == 'true'
     runs-on: ubuntu-latest
     environment: umami
     steps:

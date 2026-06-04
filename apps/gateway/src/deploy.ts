@@ -273,7 +273,7 @@ export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; mod
     throw new Error(
       `WORKSPACE_OPENCODE_MODEL "${model}" is not a valid provider/model identifier. ` +
         'Use the format "provider/model" with characters limited to letters, digits, dots, hyphens, and underscores ' +
-        '(e.g. "anthropic/claude-sonnet-4-6" or "openai/gpt-5.5-fast"). ' +
+        '(e.g. "anthropic/claude-sonnet-4-6" or "openai/gpt-5.5"). ' +
         'Whitespace, #, =, and other special characters are not allowed.',
     )
   }

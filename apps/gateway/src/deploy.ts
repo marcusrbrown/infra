@@ -535,6 +535,81 @@ export function computeSecretsChecksum(secrets: SecretFile[]): string {
   return hasher.digest('hex')
 }
 
+// Pinned Caddy image digest — same as apps/cliproxy/docker-compose.yaml and apps/umami/docker-compose.yaml.
+// Renovate tracks the digest in those files; keep in sync when Renovate bumps them.
+const CADDY_IMAGE = 'caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794'
+
+/**
+ * Builds the compose.override.yaml content that adds a path-scoped Caddy reverse proxy
+ * publishing :80/:443 on gateway-net, plus the daemon's announce secret wiring.
+ *
+ * This file is materialized on the droplet only when announceEnabled. When disabled,
+ * git clean -xfd removes any prior copy automatically.
+ *
+ * Docker Compose merges the gateway service's `volumes:` list by mount-target key —
+ * new targets APPEND, same-target REPLACES. The two announce bind mounts added here
+ * use new targets (/run/secrets/gateway_webhook_secret and
+ * /run/secrets/gateway_presence_channel_id), so upstream's other secret mounts are
+ * preserved unchanged.
+ */
+export function buildComposeOverride(): string {
+  return `services:
+  gateway:
+    environment:
+      GATEWAY_WEBHOOK_SECRET_FILE: /run/secrets/gateway_webhook_secret
+      GATEWAY_PRESENCE_CHANNEL_ID_FILE: /run/secrets/gateway_presence_channel_id
+    volumes:
+      - type: bind
+        source: ./secrets/gateway-webhook-secret
+        target: /run/secrets/gateway_webhook_secret
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./secrets/gateway-presence-channel-id
+        target: /run/secrets/gateway_presence_channel_id
+        read_only: true
+        bind:
+          create_host_path: false
+  caddy:
+    image: ${CADDY_IMAGE}
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    networks:
+      - gateway-net
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - gateway
+volumes:
+  caddy_data:
+  caddy_config:
+`
+}
+
+/**
+ * Builds the Caddyfile content for the announce ingress.
+ *
+ * Uses a named matcher (@announce) scoped to /v1/announce so the catch-all
+ * respond 404 is a bare directive (not inside a handle block). This is ACME-safe:
+ * Caddy uses TLS-ALPN-01 on :443 by default, which never touches HTTP paths, so
+ * the 404 directive only affects request routing and cannot shadow ACME challenges.
+ *
+ * @param host - The gateway hostname (GATEWAY_HOST env var, e.g. gateway.fro.bot)
+ */
+export function buildCaddyfile(host: string): string {
+  return `${host} {
+  @announce path /v1/announce
+  reverse_proxy @announce gateway:3000
+  respond 404
+}
+`
+}
+
 /**
  * Parses deploy CLI arguments into explicit booleans and rejects unknown flags.
  * Keeping this as a pure helper makes agent/CI invocations predictable instead
@@ -1032,8 +1107,47 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       )
     }
 
-    // Compute current checksum and read prior checksum to detect rotation
-    const currentChecksum = computeSecretsChecksum(secrets)
+    // Phase 5b: Materialize compose.override.yaml + Caddyfile when announce is enabled.
+    // These are working-tree files; git clean -xfd (phase 4) already removed any prior copy,
+    // so they are only present when announceEnabled. writeRemoteFile overwrites idempotently.
+    const announceEnabled = announceState === 'enabled'
+    const overrideContent = announceEnabled ? buildComposeOverride() : ''
+    const caddyfileContent = announceEnabled ? buildCaddyfile(validated.GATEWAY_HOST) : ''
+
+    if (announceEnabled) {
+      await writeRemoteFile(
+        'Writing compose.override.yaml',
+        host,
+        `${DEPLOY_DIR}/compose.override.yaml`,
+        overrideContent,
+        deployEnv,
+        spawnFn,
+        secrets,
+        keyPath,
+        controlPath,
+      )
+      await writeRemoteFile(
+        'Writing Caddyfile',
+        host,
+        `${DEPLOY_DIR}/Caddyfile`,
+        caddyfileContent,
+        deployEnv,
+        spawnFn,
+        secrets,
+        keyPath,
+        controlPath,
+      )
+    }
+
+    // Compute current checksum and read prior checksum to detect rotation.
+    // Fold override + Caddyfile bytes into the checksum so toggling announce on/off
+    // forces --force-recreate (Caddy is created/destroyed on the toggling deploy).
+    const checksumInput: SecretFile[] = [...secrets]
+    if (announceEnabled) {
+      checksumInput.push({name: 'compose.override.yaml', content: overrideContent, required: false})
+      checksumInput.push({name: 'Caddyfile', content: caddyfileContent, required: false})
+    }
+    const currentChecksum = computeSecretsChecksum(checksumInput)
     const priorChecksum = await readRemoteChecksum(host, deployEnv, spawnFn, keyPath, controlPath)
     const checksumChanged = priorChecksum !== currentChecksum
 
@@ -1064,6 +1178,9 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     )
 
     // Phase 8: docker compose up
+    // --remove-orphans: required to retire the Caddy container when announce is toggled off.
+    // When disabled, the override is absent (git clean removed it), so Caddy is no longer a
+    // declared service. Without --remove-orphans, the container lingers on :443.
     const composeArgs = [
       'docker',
       'compose',
@@ -1075,6 +1192,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       '--wait',
       '--wait-timeout',
       '120',
+      '--remove-orphans',
     ]
     if (forceRecreate || checksumChanged) {
       composeArgs.push('--force-recreate')

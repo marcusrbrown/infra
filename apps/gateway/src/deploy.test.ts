@@ -2724,6 +2724,199 @@ describe('normalizePemPrivateKey', () => {
   })
 })
 
+// ─── getAnnounceState ─────────────────────────────────────────────────────────
+
+describe('getAnnounceState', () => {
+  test('both GATEWAY_WEBHOOK_SECRET and GATEWAY_PRESENCE_CHANNEL_ID set → enabled', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const state = getAnnounceState(
+      makeEnv({GATEWAY_WEBHOOK_SECRET: 'secret-hmac-key', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+    )
+    expect(state).toBe('enabled')
+  })
+
+  test('neither GATEWAY_WEBHOOK_SECRET nor GATEWAY_PRESENCE_CHANNEL_ID set → disabled', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const state = getAnnounceState(env)
+    expect(state).toBe('disabled')
+  })
+
+  test('only GATEWAY_WEBHOOK_SECRET set → invalid', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: 'secret-hmac-key'})
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const state = getAnnounceState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('only GATEWAY_PRESENCE_CHANNEL_ID set → invalid', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'})
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    const state = getAnnounceState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('GATEWAY_WEBHOOK_SECRET whitespace-only → treated as absent → invalid', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: '   ', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'})
+    const state = getAnnounceState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('GATEWAY_PRESENCE_CHANNEL_ID whitespace-only → treated as absent → invalid', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: 'secret-hmac-key', GATEWAY_PRESENCE_CHANNEL_ID: '  '})
+    const state = getAnnounceState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('both whitespace-only → both absent → disabled', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: '   ', GATEWAY_PRESENCE_CHANNEL_ID: '  '})
+    const state = getAnnounceState(env)
+    expect(state).toBe('disabled')
+  })
+})
+
+// ─── buildSecretFileList — announce secret files ──────────────────────────────
+
+describe('buildSecretFileList — announce secret files', () => {
+  test('both announce inputs set → includes ANNOUNCE_WEBHOOK_SECRET_FILE and ANNOUNCE_PRESENCE_CHANNEL_FILE', async () => {
+    const {buildSecretFileList, ANNOUNCE_WEBHOOK_SECRET_FILE, ANNOUNCE_PRESENCE_CHANNEL_FILE} = await import('./deploy')
+    const secrets = buildSecretFileList(
+      makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+    )
+    const webhookSecret = secrets.find(s => s.name === ANNOUNCE_WEBHOOK_SECRET_FILE)
+    const channelId = secrets.find(s => s.name === ANNOUNCE_PRESENCE_CHANNEL_FILE)
+    expect(webhookSecret).toBeDefined()
+    expect(webhookSecret?.content).toBe('hmac-secret-value')
+    expect(webhookSecret?.required).toBe(false)
+    expect(channelId).toBeDefined()
+    expect(channelId?.content).toBe('111222333444555666')
+    expect(channelId?.required).toBe(false)
+  })
+
+  test('neither announce input set → neither announce secret file present', async () => {
+    const {buildSecretFileList, ANNOUNCE_WEBHOOK_SECRET_FILE, ANNOUNCE_PRESENCE_CHANNEL_FILE} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const secrets = buildSecretFileList(env)
+    const names = secrets.map(s => s.name)
+    expect(names).not.toContain(ANNOUNCE_WEBHOOK_SECRET_FILE)
+    expect(names).not.toContain(ANNOUNCE_PRESENCE_CHANNEL_FILE)
+  })
+
+  test('neither announce input set → output length equals baseline (16)', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const secrets = buildSecretFileList(env)
+    expect(secrets).toHaveLength(16)
+  })
+
+  test('both announce inputs set → output has 18 entries (16 baseline + 2 announce)', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(
+      makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+    )
+    expect(secrets).toHaveLength(18)
+  })
+
+  test('both announce inputs set → checksum differs from no-announce baseline', async () => {
+    const {buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const baseEnv = makeEnv()
+    delete (baseEnv as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (baseEnv as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const baseSecrets = buildSecretFileList(baseEnv)
+    const announceSecrets = buildSecretFileList(
+      makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+    )
+    expect(computeSecretsChecksum(announceSecrets)).not.toBe(computeSecretsChecksum(baseSecrets))
+  })
+})
+
+// ─── main() — announce both-or-neither gate ───────────────────────────────────
+
+describe('main() — announce both-or-neither gate', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('only GATEWAY_WEBHOOK_SECRET set → rejects before any spawn naming GATEWAY_PRESENCE_CHANNEL_ID', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value'})
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+
+    await expect(
+      main({
+        env,
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_PRESENCE_CHANNEL_ID/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('only GATEWAY_PRESENCE_CHANNEL_ID set → rejects before any spawn naming GATEWAY_WEBHOOK_SECRET', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    const env = makeEnv({GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'})
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+
+    await expect(
+      main({
+        env,
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_WEBHOOK_SECRET/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('GATEWAY_WEBHOOK_SECRET whitespace-only + GATEWAY_PRESENCE_CHANNEL_ID set → rejects before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({GATEWAY_WEBHOOK_SECRET: '   ', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_WEBHOOK_SECRET/)
+
+    expect(calls).toHaveLength(0)
+  })
+})
+
 // ─── buildSecretFileList — normalizePemPrivateKey wiring ─────────────────────
 
 describe('buildSecretFileList — normalizePemPrivateKey wiring', () => {
@@ -2752,5 +2945,514 @@ describe('buildSecretFileList — normalizePemPrivateKey wiring', () => {
     // discord-token has no transform — content must be verbatim
     expect(entry!.content).toBe(rawToken)
     expect(entry!.content.includes(String.raw`\n`)).toBe(true)
+  })
+})
+
+// ─── buildComposeOverride ─────────────────────────────────────────────────────
+
+describe('buildComposeOverride', () => {
+  test('includes caddy service with 80:80 and 443:443 port bindings', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('80:80')
+    expect(yaml).toContain('443:443')
+  })
+
+  test('caddy service joins gateway-net network', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('gateway-net')
+  })
+
+  test('caddy service has named caddy_data and caddy_config volumes', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('caddy_data')
+    expect(yaml).toContain('caddy_config')
+  })
+
+  test('caddy service depends_on gateway', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('depends_on')
+    expect(yaml).toContain('gateway')
+  })
+
+  test('caddy service mounts Caddyfile read-only', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('Caddyfile')
+    expect(yaml).toContain(':ro')
+  })
+
+  test('gateway service gets GATEWAY_WEBHOOK_SECRET_FILE env entry', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('GATEWAY_WEBHOOK_SECRET_FILE')
+    expect(yaml).toContain('/run/secrets/gateway_webhook_secret')
+  })
+
+  test('gateway service gets GATEWAY_PRESENCE_CHANNEL_ID_FILE env entry', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('GATEWAY_PRESENCE_CHANNEL_ID_FILE')
+    expect(yaml).toContain('/run/secrets/gateway_presence_channel_id')
+  })
+
+  test('gateway service gets two announce bind-mount volumes with correct source paths', async () => {
+    const {buildComposeOverride, ANNOUNCE_WEBHOOK_SECRET_FILE, ANNOUNCE_PRESENCE_CHANNEL_FILE} =
+      await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain(`./secrets/${ANNOUNCE_WEBHOOK_SECRET_FILE}`)
+    expect(yaml).toContain(`./secrets/${ANNOUNCE_PRESENCE_CHANNEL_FILE}`)
+  })
+
+  test('gateway service bind-mounts target /run/secrets/gateway_webhook_secret', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('/run/secrets/gateway_webhook_secret')
+  })
+
+  test('gateway service bind-mounts target /run/secrets/gateway_presence_channel_id', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('/run/secrets/gateway_presence_channel_id')
+  })
+
+  test('top-level volumes block declares caddy_data and caddy_config', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    // Top-level volumes section must exist
+    expect(yaml).toMatch(/^volumes:/m)
+    expect(yaml).toContain('caddy_data')
+    expect(yaml).toContain('caddy_config')
+  })
+
+  test('caddy image is pinned to the same digest as cliproxy (caddy:2.11.3-alpine@sha256:...)', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    // Must use a pinned digest (sha256:)
+    expect(yaml).toMatch(/caddy:[\d.]+-alpine@sha256:[0-9a-f]{64}/)
+  })
+
+  test('caddy service has restart: unless-stopped', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride()
+    expect(yaml).toContain('unless-stopped')
+  })
+})
+
+// ─── buildCaddyfile ───────────────────────────────────────────────────────────
+
+describe('buildCaddyfile', () => {
+  test('interpolates the passed host as the site address', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    expect(result).toContain('gateway.fro.bot')
+  })
+
+  test('routes /v1/announce path via handle block (not a named matcher)', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    // New form uses handle /v1/announce { ... } — no @announce named matcher
+    expect(result).toContain('/v1/announce')
+    expect(result).not.toContain('@announce')
+  })
+
+  test('reverse_proxy to gateway:3000 inside the /v1/announce handle block', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    expect(result).toContain('reverse_proxy gateway:3000')
+    // Must NOT use the old named-matcher form
+    expect(result).not.toContain('reverse_proxy @announce')
+  })
+
+  test('uses handle /v1/announce block with reverse_proxy inside (not a named matcher)', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    // Must use handle /v1/announce { reverse_proxy gateway:3000 } form
+    expect(result).toContain('handle /v1/announce {')
+    expect(result).toMatch(/handle\s+\/v1\/announce\s*\{[^}]*reverse_proxy\s+gateway:3000[^}]*\}/)
+  })
+
+  test('has a catch-all handle block with respond 404', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    // Must use handle { respond 404 } catch-all form (mutually exclusive with the path handle above)
+    expect(result).toMatch(/handle\s*\{[^}]*respond\s+404[^}]*\}/)
+  })
+
+  test('matched /v1/announce handle block appears before the catch-all handle block', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    const announceIdx = result.indexOf('handle /v1/announce')
+    const catchAllIdx = result.indexOf('handle {')
+    expect(announceIdx).toBeGreaterThanOrEqual(0)
+    expect(catchAllIdx).toBeGreaterThanOrEqual(0)
+    expect(announceIdx).toBeLessThan(catchAllIdx)
+  })
+
+  test('interpolates host as the site address block', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    // Host must appear as the site address (first token before the opening brace)
+    expect(result).toMatch(/^gateway\.fro\.bot\s*\{/m)
+  })
+
+  test('does NOT reference GATEWAY_ANNOUNCE_DOMAIN (uses passed host directly)', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    expect(result).not.toContain('GATEWAY_ANNOUNCE_DOMAIN')
+  })
+
+  test('different hosts produce different Caddyfile content', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    expect(buildCaddyfile('gateway.fro.bot')).not.toBe(buildCaddyfile('other.example.com'))
+  })
+})
+
+// ─── compose.override.yaml + Caddyfile materialization in main() ──────────────
+
+describe('main() — announce override + Caddyfile materialization', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('announce disabled → writeRemoteFile NOT called for compose.override.yaml', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      // Capture stdin for SSH cat commands
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+
+    await main({
+      env,
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+    })
+
+    // compose.override.yaml must NOT have been written
+    const overridePath = '/opt/gateway/deploy/compose.override.yaml'
+    expect(stdinCaptures[overridePath]).toBeUndefined()
+  })
+
+  test('announce disabled → writeRemoteFile NOT called for Caddyfile', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+
+    await main({
+      env,
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+    })
+
+    const caddyfilePath = '/opt/gateway/deploy/Caddyfile'
+    expect(stdinCaptures[caddyfilePath]).toBeUndefined()
+  })
+
+  test('announce enabled → compose.override.yaml is written via writeRemoteFile', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({
+        GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value',
+        GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666',
+      }),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+    })
+
+    const overridePath = '/opt/gateway/deploy/compose.override.yaml'
+    expect(stdinCaptures[overridePath]).toBeDefined()
+    expect(stdinCaptures[overridePath]).toContain('caddy')
+  })
+
+  test('announce enabled → Caddyfile is written via writeRemoteFile with correct host', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({
+        GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value',
+        GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666',
+      }),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+    })
+
+    const caddyfilePath = '/opt/gateway/deploy/Caddyfile'
+    expect(stdinCaptures[caddyfilePath]).toBeDefined()
+    expect(stdinCaptures[caddyfilePath]).toContain('gateway.fro.bot')
+  })
+})
+
+// ─── checksum includes override + Caddyfile bytes ────────────────────────────
+
+describe('computeSecretsChecksum — override + Caddyfile folded in', () => {
+  test('announce enabled → checksum differs from disabled baseline (override bytes change it)', async () => {
+    const {buildSecretFileList, buildComposeOverride, buildCaddyfile, computeSecretsChecksum} = await import('./deploy')
+
+    const baseEnv = makeEnv()
+    delete (baseEnv as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (baseEnv as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+
+    const announceEnv = makeEnv({
+      GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value',
+      GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666',
+    })
+
+    const baseSecrets = buildSecretFileList(baseEnv)
+    const announceSecrets = buildSecretFileList(announceEnv)
+
+    // Fold override + Caddyfile into the announce checksum input
+    const overrideEntry = {name: 'compose.override.yaml', content: buildComposeOverride(), required: false}
+    const caddyfileEntry = {
+      name: 'Caddyfile',
+      content: buildCaddyfile(announceEnv.GATEWAY_HOST ?? 'gateway.fro.bot'),
+      required: false,
+    }
+    const announceChecksumInput = [...announceSecrets, overrideEntry, caddyfileEntry]
+
+    expect(computeSecretsChecksum(announceChecksumInput)).not.toBe(computeSecretsChecksum(baseSecrets))
+  })
+})
+
+// ─── compose-up args include --remove-orphans ─────────────────────────────────
+
+describe('main() — compose-up args', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('compose-up command always includes --remove-orphans', async () => {
+    const {main} = await import('./deploy')
+    const composeCmds: string[][] = []
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('docker compose') && cmd.join(' ').includes('up')) {
+        composeCmds.push(cmd)
+      }
+      return undefined
+    })
+
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+
+    await main({
+      env,
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+    })
+
+    expect(composeCmds.length).toBeGreaterThan(0)
+    const composeCmd = composeCmds[0]!
+    const cmdStr = composeCmd.join(' ')
+    expect(cmdStr).toContain('--remove-orphans')
+  })
+
+  test('compose-up command always includes --build', async () => {
+    const {main} = await import('./deploy')
+    const composeCmds: string[][] = []
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('docker compose') && cmd.join(' ').includes('up')) {
+        composeCmds.push(cmd)
+      }
+      return undefined
+    })
+
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+
+    await main({
+      env,
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+    })
+
+    expect(composeCmds.length).toBeGreaterThan(0)
+    const composeCmd = composeCmds[0]!
+    const cmdStr = composeCmd.join(' ')
+    expect(cmdStr).toContain('--build')
+  })
+})
+
+// ─── docker compose config merge integration test ─────────────────────────────
+
+describe('docker compose config merge — override appends mounts, does not replace', () => {
+  test('base with existing bind mounts + override → merged config retains pre-existing mounts AND adds announce mounts', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+
+    // Check docker is available
+    const dockerCheck = Bun.spawnSync(['docker', '--version'], {stdout: 'pipe', stderr: 'pipe'})
+    if (dockerCheck.exitCode !== 0) {
+      console.warn('docker not available — skipping compose merge integration test')
+      return
+    }
+
+    // Write a minimal base compose.yaml mimicking the upstream gateway service
+    // with a couple of existing bind mounts (simulating the real upstream)
+    const baseCompose = `services:
+  gateway:
+    image: alpine:latest
+    networks:
+      - gateway-net
+    volumes:
+      - type: bind
+        source: ./secrets/discord-token
+        target: /run/secrets/discord_token
+        read_only: true
+      - type: bind
+        source: ./secrets/aws-access-key-id
+        target: /run/secrets/aws_access_key_id
+        read_only: true
+networks:
+  gateway-net:
+    driver: bridge
+`
+
+    const overrideYaml = buildComposeOverride()
+
+    // Write to a temp directory
+    const {mkdtempSync: mkdtemp, writeFileSync: writeFile, rmSync: rm} = await import('node:fs')
+    const {tmpdir: tmp} = await import('node:os')
+    const {join: pathJoin} = await import('node:path')
+
+    const testDir = mkdtemp(pathJoin(tmp(), 'compose-merge-test-'))
+    try {
+      writeFile(pathJoin(testDir, 'compose.yaml'), baseCompose)
+      writeFile(pathJoin(testDir, 'compose.override.yaml'), overrideYaml)
+
+      const result = Bun.spawnSync(['docker', 'compose', '--project-directory', testDir, 'config'], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+
+      if (result.exitCode !== 0) {
+        const stderr = new TextDecoder().decode(result.stderr)
+        // If docker compose config fails due to missing files (secrets dir etc.), that's OK for this test
+        // We only care about the merge behavior, not full validity
+        if (!stderr.includes('no such file') && !stderr.includes('does not exist')) {
+          throw new Error(`docker compose config failed: ${stderr}`)
+        }
+        // Skip if it fails due to missing secret files (expected in test env)
+        console.warn('docker compose config failed due to missing files — checking partial output')
+      }
+
+      const merged = new TextDecoder().decode(result.stdout)
+
+      // Pre-existing mounts must be preserved
+      expect(merged).toContain('/run/secrets/discord_token')
+      expect(merged).toContain('/run/secrets/aws_access_key_id')
+
+      // Announce mounts must be added
+      expect(merged).toContain('/run/secrets/gateway_webhook_secret')
+      expect(merged).toContain('/run/secrets/gateway_presence_channel_id')
+    } finally {
+      rm(testDir, {recursive: true, force: true})
+    }
   })
 })

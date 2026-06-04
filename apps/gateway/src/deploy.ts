@@ -73,6 +73,11 @@ export interface DeployArgs {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const REMOTE_DIR = '/opt/gateway'
+
+// Announce secret file names (kebab-case, matching upstream compose contract).
+// Referenced from both buildSecretFileList (content) and buildComposeOverride (bind-mount source).
+export const ANNOUNCE_WEBHOOK_SECRET_FILE = 'gateway-webhook-secret'
+export const ANNOUNCE_PRESENCE_CHANNEL_FILE = 'gateway-presence-channel-id'
 const DEPLOY_DIR = `${REMOTE_DIR}/deploy`
 const SECRETS_DIR = `${DEPLOY_DIR}/secrets`
 // Checksum lives OUTSIDE deploy/ so git clean -xfd doesn't destroy it
@@ -205,6 +210,25 @@ export function resolveUpstreamPin(jsonPath?: string): UpstreamPin {
  * Rejects: whitespace, #, =, and any other character outside the safe set.
  */
 const MODEL_ALLOWLIST_RE = /^[\w.-]+\/[\w.-]+$/
+
+/**
+ * Returns the announce state based on the presence of both announce inputs.
+ *
+ * - 'enabled':  both GATEWAY_WEBHOOK_SECRET and GATEWAY_PRESENCE_CHANNEL_ID are
+ *               present and non-empty (whitespace-only = absent).
+ * - 'disabled': both are absent (unset or whitespace-only).
+ * - 'invalid':  exactly one is present — the both-or-neither gate is violated.
+ *
+ * Mirrors the empty/whitespace-only = absent semantics used by validateRequiredEnv.
+ */
+export function getAnnounceState(env: Record<string, string>): 'enabled' | 'disabled' | 'invalid' {
+  const hasWebhookSecret = Boolean(env.GATEWAY_WEBHOOK_SECRET?.trim())
+  const hasChannelId = Boolean(env.GATEWAY_PRESENCE_CHANNEL_ID?.trim())
+
+  if (hasWebhookSecret && hasChannelId) return 'enabled'
+  if (!hasWebhookSecret && !hasChannelId) return 'disabled'
+  return 'invalid'
+}
 
 /**
  * Returns the list of missing WORKSPACE_OPENCODE_MODEL / WORKSPACE_OPENCODE_CONFIG
@@ -489,6 +513,18 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
     secrets.push({name, content: transform ? transform(raw) : raw, required: false})
   }
 
+  // Announce secret files: only materialized when BOTH inputs are present and non-empty.
+  // When disabled (both absent), push neither. When invalid (exactly one set), main()
+  // throws before reaching here, so this branch is never reached in that case.
+  if (getAnnounceState(env) === 'enabled') {
+    secrets.push({name: ANNOUNCE_WEBHOOK_SECRET_FILE, content: env.GATEWAY_WEBHOOK_SECRET ?? '', required: false})
+    secrets.push({
+      name: ANNOUNCE_PRESENCE_CHANNEL_FILE,
+      content: env.GATEWAY_PRESENCE_CHANNEL_ID ?? '',
+      required: false,
+    })
+  }
+
   return secrets
 }
 
@@ -502,6 +538,87 @@ export function computeSecretsChecksum(secrets: SecretFile[]): string {
     hasher.update(`${secret.name}:${secret.content}\n`)
   }
   return hasher.digest('hex')
+}
+
+// Pinned Caddy image digest — same as apps/cliproxy/docker-compose.yaml and apps/umami/docker-compose.yaml.
+// Renovate tracks the digest in those files; keep in sync when Renovate bumps them.
+const CADDY_IMAGE = 'caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794'
+
+/**
+ * Builds the compose.override.yaml content that adds a path-scoped Caddy reverse proxy
+ * publishing :80/:443 on gateway-net, plus the daemon's announce secret wiring.
+ *
+ * This file is materialized on the droplet only when announceEnabled. When disabled,
+ * git clean -xfd removes any prior copy automatically.
+ *
+ * Docker Compose merges the gateway service's `volumes:` list by mount-target key —
+ * new targets APPEND, same-target REPLACES. The two announce bind mounts added here
+ * use new targets (/run/secrets/gateway_webhook_secret and
+ * /run/secrets/gateway_presence_channel_id), so upstream's other secret mounts are
+ * preserved unchanged.
+ */
+export function buildComposeOverride(): string {
+  return `services:
+  gateway:
+    environment:
+      GATEWAY_WEBHOOK_SECRET_FILE: /run/secrets/gateway_webhook_secret
+      GATEWAY_PRESENCE_CHANNEL_ID_FILE: /run/secrets/gateway_presence_channel_id
+    volumes:
+      - type: bind
+        source: ./secrets/${ANNOUNCE_WEBHOOK_SECRET_FILE}
+        target: /run/secrets/gateway_webhook_secret
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./secrets/${ANNOUNCE_PRESENCE_CHANNEL_FILE}
+        target: /run/secrets/gateway_presence_channel_id
+        read_only: true
+        bind:
+          create_host_path: false
+  caddy:
+    image: ${CADDY_IMAGE}
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    networks:
+      - gateway-net
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - gateway
+volumes:
+  caddy_data:
+  caddy_config:
+`
+}
+
+/**
+ * Builds the Caddyfile content for the announce ingress.
+ *
+ * Uses mutually-exclusive `handle` blocks so Caddy's directive-ordering cannot
+ * reorder the catch-all respond 404 ahead of the reverse_proxy. The path-specific
+ * handle is evaluated first (higher specificity), the catch-all second.
+ *
+ * ACME-safe: Caddy serves HTTP-01 challenges on :80 via an auto-injected route
+ * ahead of user routes, and TLS-ALPN-01 on :443 never touches HTTP paths. The
+ * catch-all 404 is inside the :443 host block and does not shadow ACME challenges.
+ *
+ * @param host - The gateway hostname (GATEWAY_HOST env var, e.g. gateway.fro.bot)
+ */
+export function buildCaddyfile(host: string): string {
+  return `${host} {
+  handle /v1/announce {
+    reverse_proxy gateway:3000
+  }
+  handle {
+    respond 404
+  }
+}
+`
 }
 
 /**
@@ -861,15 +978,33 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     config: env.WORKSPACE_OPENCODE_CONFIG ?? '',
   })
 
+  // Phase 3c: Validate announce both-or-neither gate before any SSH.
+  // Exactly one of the announce inputs being set is an invalid configuration —
+  // fail fast with a clear message naming the missing input.
+  const announceState = getAnnounceState(env)
+  if (announceState === 'invalid') {
+    const missingAnnounce = env.GATEWAY_WEBHOOK_SECRET?.trim()
+      ? 'GATEWAY_PRESENCE_CHANNEL_ID'
+      : 'GATEWAY_WEBHOOK_SECRET'
+    throw new Error(
+      `Announce inputs must be set together (both-or-neither). Missing: ${missingAnnounce}. ` +
+        'Set both GATEWAY_WEBHOOK_SECRET and GATEWAY_PRESENCE_CHANNEL_ID, or leave both unset.',
+    )
+  }
+
   if (isDryRun) {
+    const announceEnabled = announceState === 'enabled'
     console.warn('\u001B[1;33m[dry-run]\u001B[0m Planned actions:')
     console.warn(`  1. Ensure droplet workspace at ${REMOTE_DIR} (clone ${repo}@${ref} or fetch+reset)`)
     console.warn(`  2. Compute OBJECT_STORE_HOSTS: ${objectStoreHosts}`)
     console.warn(`  3. Materialize ${buildSecretFileList(env).length} secret files under ${SECRETS_DIR}`)
+    if (announceEnabled) {
+      console.warn(`  3b. Announce enabled — materialize compose.override.yaml + Caddyfile under ${DEPLOY_DIR}`)
+    }
     console.warn(`  4. Write .env to ${ENV_PATH}`)
     console.warn(`  5. Run init-certs.sh (idempotent)`)
     console.warn(
-      `  6. docker compose up -d --build --wait --wait-timeout 120${forceRecreate ? ' --force-recreate' : ''}`,
+      `  6. docker compose up -d --build --wait --wait-timeout 120 --remove-orphans${forceRecreate ? ' --force-recreate' : ''}`,
     )
     console.warn(
       `  7. Poll Discord slash command registration (app=${env.DISCORD_APPLICATION_ID} guild=${env.DISCORD_GUILD_ID})`,
@@ -987,8 +1122,47 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       )
     }
 
-    // Compute current checksum and read prior checksum to detect rotation
-    const currentChecksum = computeSecretsChecksum(secrets)
+    // Phase 5b: Materialize compose.override.yaml + Caddyfile when announce is enabled.
+    // These are working-tree files; git clean -xfd (phase 4) already removed any prior copy,
+    // so they are only present when announceEnabled. writeRemoteFile overwrites idempotently.
+    const announceEnabled = announceState === 'enabled'
+    const overrideContent = announceEnabled ? buildComposeOverride() : ''
+    const caddyfileContent = announceEnabled ? buildCaddyfile(validated.GATEWAY_HOST) : ''
+
+    if (announceEnabled) {
+      await writeRemoteFile(
+        'Writing compose.override.yaml',
+        host,
+        `${DEPLOY_DIR}/compose.override.yaml`,
+        overrideContent,
+        deployEnv,
+        spawnFn,
+        secrets,
+        keyPath,
+        controlPath,
+      )
+      await writeRemoteFile(
+        'Writing Caddyfile',
+        host,
+        `${DEPLOY_DIR}/Caddyfile`,
+        caddyfileContent,
+        deployEnv,
+        spawnFn,
+        secrets,
+        keyPath,
+        controlPath,
+      )
+    }
+
+    // Compute current checksum and read prior checksum to detect rotation.
+    // Fold override + Caddyfile bytes into the checksum so toggling announce on/off
+    // forces --force-recreate (Caddy is created/destroyed on the toggling deploy).
+    const checksumInput: SecretFile[] = [...secrets]
+    if (announceEnabled) {
+      checksumInput.push({name: 'compose.override.yaml', content: overrideContent, required: false})
+      checksumInput.push({name: 'Caddyfile', content: caddyfileContent, required: false})
+    }
+    const currentChecksum = computeSecretsChecksum(checksumInput)
     const priorChecksum = await readRemoteChecksum(host, deployEnv, spawnFn, keyPath, controlPath)
     const checksumChanged = priorChecksum !== currentChecksum
 
@@ -1019,6 +1193,9 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     )
 
     // Phase 8: docker compose up
+    // --remove-orphans: required to retire the Caddy container when announce is toggled off.
+    // When disabled, the override is absent (git clean removed it), so Caddy is no longer a
+    // declared service. Without --remove-orphans, the container lingers on :443.
     const composeArgs = [
       'docker',
       'compose',
@@ -1030,6 +1207,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       '--wait',
       '--wait-timeout',
       '120',
+      '--remove-orphans',
     ]
     if (forceRecreate || checksumChanged) {
       composeArgs.push('--force-recreate')

@@ -67,6 +67,8 @@ export interface MainOpts {
   probeAttempts?: number
   /** Interval between probe attempts in ms when announce is enabled (default: 3_000). */
   probeIntervalMs?: number
+  /** Per-attempt timeout in ms for the HTTPS ingress probe (default: 5_000). */
+  probePerAttemptTimeoutMs?: number
 }
 
 export interface DeployArgs {
@@ -949,6 +951,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   const intervalMs = opts.intervalMs ?? 3000
   const probeAttempts = opts.probeAttempts ?? 5
   const probeIntervalMs = opts.probeIntervalMs ?? 3_000
+  const probePerAttemptTimeoutMs = opts.probePerAttemptTimeoutMs ?? 5_000
 
   const {dryRun: isDryRun, forceRecreate} = parseDeployArgs(args)
 
@@ -1248,14 +1251,24 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     // Phase 9b: Post-deploy HTTPS ingress probe — warning-only, only when announce is enabled.
     // The endpoint is HMAC-gated: an unsigned POST returns HTTP 400, which proves TLS terminated
     // and Caddy routed correctly. Any 2xx or 4xx is treated as healthy. Connection/TLS errors
-    // mean the cert is still issuing (ACME can take 30-60s+); we warn and let the deploy succeed.
+    // (including per-attempt AbortController timeout) mean the cert is still issuing
+    // (ACME can take 30-60s+); we warn and let the deploy succeed.
+    // Each attempt is bounded by probePerAttemptTimeoutMs via AbortController (mirrors pollRegistration).
     if (announceEnabled) {
       const probeUrl = `https://${host}/v1/announce`
       console.warn(`\u001B[1;34m==>\u001B[0m Probing HTTPS ingress: ${probeUrl}`)
       let probeOk = false
       for (let attempt = 1; attempt <= probeAttempts; attempt++) {
+        const ac = new AbortController()
+        const timer = setTimeout(() => ac.abort(), probePerAttemptTimeoutMs)
         try {
-          const response = await fetchFn(probeUrl)
+          const response = await fetchFn(probeUrl, {
+            method: 'POST',
+            body: '{}',
+            headers: {'Content-Type': 'application/json'},
+            signal: ac.signal,
+          })
+          clearTimeout(timer)
           const status = response.status
           // Any HTTP response (2xx or 4xx) proves TLS terminated + Caddy routed → healthy.
           // 400 is the expected response for an unsigned POST to the HMAC-gated endpoint.
@@ -1264,7 +1277,8 @@ export async function main(opts: MainOpts = {}): Promise<void> {
             break
           }
         } catch {
-          // Connection/TLS error — cert may still be issuing; retry
+          clearTimeout(timer)
+          // Connection/TLS error or AbortError from per-attempt timeout — cert may still be issuing; retry
         }
         if (attempt < probeAttempts) {
           await sleepFn(probeIntervalMs)

@@ -3575,6 +3575,68 @@ describe('main() — post-deploy HTTPS ingress probe', () => {
     )
     expect(warnAboutCert).toHaveLength(0)
   })
+
+  test('announce enabled + never-resolving fetch → bounded by probePerAttemptTimeoutMs, warning logged, deploy succeeds', async () => {
+    // A fetch that never resolves on its own must be bounded by the per-attempt AbortController:
+    // it fires after probePerAttemptTimeoutMs, the attempt is treated as a connection error, and
+    // the probe ends warning-only so the deploy still succeeds.
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+      origWarn(...args)
+    }
+
+    // fetchFn that never resolves on its own — only rejects when its signal aborts.
+    const mockFetch = mock(async (url: string, init?: RequestInit) => {
+      if (url.includes('/v1/announce')) {
+        // Hang until the AbortController fires
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal
+          if (signal) {
+            if (signal.aborted) {
+              reject(new DOMException('The operation was aborted.', 'AbortError'))
+              return
+            }
+            signal.addEventListener('abort', () => {
+              reject(new DOMException('The operation was aborted.', 'AbortError'))
+            })
+          }
+          // No signal → hangs forever (should not happen with the fix)
+        })
+      }
+      // Discord registration
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    let threw = false
+    try {
+      await main({
+        env: makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+        args: [],
+        fetch: mockFetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+        probeAttempts: 2,
+        probeIntervalMs: 0,
+        probePerAttemptTimeoutMs: 10,
+      })
+    } catch {
+      threw = true
+    } finally {
+      console.warn = origWarn
+    }
+
+    // Deploy must NOT throw — warning-only
+    expect(threw).toBe(false)
+    // A warning about cert issuing must be logged (all attempts timed out)
+    const warnAboutCert = warnMessages.filter(
+      m => m.includes('still be issuing') || m.includes('probe did not succeed'),
+    )
+    expect(warnAboutCert.length).toBeGreaterThan(0)
+  })
 })
 
 // ─── Item 2: checksum-delta isolation test ────────────────────────────────────

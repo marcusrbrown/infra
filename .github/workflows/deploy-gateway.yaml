@@ -49,6 +49,10 @@ on:
         required: true
       GATEWAY_TRIGGER_ROLE_ID:
         required: true
+      GATEWAY_WEBHOOK_SECRET:
+        required: false
+      GATEWAY_PRESENCE_CHANNEL_ID:
+        required: false
 
 concurrency:
   group: deploy-gateway-${{ github.ref_name }}
@@ -136,3 +140,5 @@ jobs:
           WORKSPACE_OPENCODE_MODEL: ${{ secrets.WORKSPACE_OPENCODE_MODEL }}
           WORKSPACE_OPENCODE_CONFIG: ${{ secrets.WORKSPACE_OPENCODE_CONFIG }}
           GATEWAY_TRIGGER_ROLE_ID: ${{ secrets.GATEWAY_TRIGGER_ROLE_ID }}
+          GATEWAY_WEBHOOK_SECRET: ${{ secrets.GATEWAY_WEBHOOK_SECRET }}
+          GATEWAY_PRESENCE_CHANNEL_ID: ${{ secrets.GATEWAY_PRESENCE_CHANNEL_ID }}

@@ -2785,13 +2785,13 @@ describe('getAnnounceState', () => {
 // ─── buildSecretFileList — announce secret files ──────────────────────────────
 
 describe('buildSecretFileList — announce secret files', () => {
-  test('both announce inputs set → includes gateway-webhook-secret and gateway-presence-channel-id', async () => {
-    const {buildSecretFileList} = await import('./deploy')
+  test('both announce inputs set → includes ANNOUNCE_WEBHOOK_SECRET_FILE and ANNOUNCE_PRESENCE_CHANNEL_FILE', async () => {
+    const {buildSecretFileList, ANNOUNCE_WEBHOOK_SECRET_FILE, ANNOUNCE_PRESENCE_CHANNEL_FILE} = await import('./deploy')
     const secrets = buildSecretFileList(
       makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
     )
-    const webhookSecret = secrets.find(s => s.name === 'gateway-webhook-secret')
-    const channelId = secrets.find(s => s.name === 'gateway-presence-channel-id')
+    const webhookSecret = secrets.find(s => s.name === ANNOUNCE_WEBHOOK_SECRET_FILE)
+    const channelId = secrets.find(s => s.name === ANNOUNCE_PRESENCE_CHANNEL_FILE)
     expect(webhookSecret).toBeDefined()
     expect(webhookSecret?.content).toBe('hmac-secret-value')
     expect(webhookSecret?.required).toBe(false)
@@ -2801,14 +2801,14 @@ describe('buildSecretFileList — announce secret files', () => {
   })
 
   test('neither announce input set → neither announce secret file present', async () => {
-    const {buildSecretFileList} = await import('./deploy')
+    const {buildSecretFileList, ANNOUNCE_WEBHOOK_SECRET_FILE, ANNOUNCE_PRESENCE_CHANNEL_FILE} = await import('./deploy')
     const env = makeEnv()
     delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
     delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
     const secrets = buildSecretFileList(env)
     const names = secrets.map(s => s.name)
-    expect(names).not.toContain('gateway-webhook-secret')
-    expect(names).not.toContain('gateway-presence-channel-id')
+    expect(names).not.toContain(ANNOUNCE_WEBHOOK_SECRET_FILE)
+    expect(names).not.toContain(ANNOUNCE_PRESENCE_CHANNEL_FILE)
   })
 
   test('neither announce input set → output length equals baseline (16)', async () => {
@@ -3000,10 +3000,11 @@ describe('buildComposeOverride', () => {
   })
 
   test('gateway service gets two announce bind-mount volumes with correct source paths', async () => {
-    const {buildComposeOverride} = await import('./deploy')
+    const {buildComposeOverride, ANNOUNCE_WEBHOOK_SECRET_FILE, ANNOUNCE_PRESENCE_CHANNEL_FILE} =
+      await import('./deploy')
     const yaml = buildComposeOverride()
-    expect(yaml).toContain('./secrets/gateway-webhook-secret')
-    expect(yaml).toContain('./secrets/gateway-presence-channel-id')
+    expect(yaml).toContain(`./secrets/${ANNOUNCE_WEBHOOK_SECRET_FILE}`)
+    expect(yaml).toContain(`./secrets/${ANNOUNCE_PRESENCE_CHANNEL_FILE}`)
   })
 
   test('gateway service bind-mounts target /run/secrets/gateway_webhook_secret', async () => {
@@ -3050,25 +3051,52 @@ describe('buildCaddyfile', () => {
     expect(result).toContain('gateway.fro.bot')
   })
 
-  test('uses @announce named matcher scoped to /v1/announce path', async () => {
+  test('routes /v1/announce path via handle block (not a named matcher)', async () => {
     const {buildCaddyfile} = await import('./deploy')
     const result = buildCaddyfile('gateway.fro.bot')
-    expect(result).toContain('@announce')
+    // New form uses handle /v1/announce { ... } — no @announce named matcher
     expect(result).toContain('/v1/announce')
+    expect(result).not.toContain('@announce')
   })
 
-  test('reverse_proxy @announce to gateway:3000', async () => {
+  test('reverse_proxy to gateway:3000 inside the /v1/announce handle block', async () => {
     const {buildCaddyfile} = await import('./deploy')
     const result = buildCaddyfile('gateway.fro.bot')
-    expect(result).toContain('reverse_proxy @announce gateway:3000')
+    expect(result).toContain('reverse_proxy gateway:3000')
+    // Must NOT use the old named-matcher form
+    expect(result).not.toContain('reverse_proxy @announce')
   })
 
-  test('has a default respond 404 (not inside a handle block — ACME-safe)', async () => {
+  test('uses handle /v1/announce block with reverse_proxy inside (not a named matcher)', async () => {
     const {buildCaddyfile} = await import('./deploy')
     const result = buildCaddyfile('gateway.fro.bot')
-    expect(result).toContain('respond 404')
-    // Must NOT use handle { respond 404 } pattern (ACME footgun)
-    expect(result).not.toMatch(/handle\s*\{[^}]*respond\s+404[^}]*\}/)
+    // Must use handle /v1/announce { reverse_proxy gateway:3000 } form
+    expect(result).toContain('handle /v1/announce {')
+    expect(result).toMatch(/handle\s+\/v1\/announce\s*\{[^}]*reverse_proxy\s+gateway:3000[^}]*\}/)
+  })
+
+  test('has a catch-all handle block with respond 404', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    // Must use handle { respond 404 } catch-all form (mutually exclusive with the path handle above)
+    expect(result).toMatch(/handle\s*\{[^}]*respond\s+404[^}]*\}/)
+  })
+
+  test('matched /v1/announce handle block appears before the catch-all handle block', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    const announceIdx = result.indexOf('handle /v1/announce')
+    const catchAllIdx = result.indexOf('handle {')
+    expect(announceIdx).toBeGreaterThanOrEqual(0)
+    expect(catchAllIdx).toBeGreaterThanOrEqual(0)
+    expect(announceIdx).toBeLessThan(catchAllIdx)
+  })
+
+  test('interpolates host as the site address block', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    // Host must appear as the site address (first token before the opening brace)
+    expect(result).toMatch(/^gateway\.fro\.bot\s*\{/m)
   })
 
   test('does NOT reference GATEWAY_ANNOUNCE_DOMAIN (uses passed host directly)', async () => {

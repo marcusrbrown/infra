@@ -73,6 +73,11 @@ export interface DeployArgs {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const REMOTE_DIR = '/opt/gateway'
+
+// Announce secret file names (kebab-case, matching upstream compose contract).
+// Referenced from both buildSecretFileList (content) and buildComposeOverride (bind-mount source).
+export const ANNOUNCE_WEBHOOK_SECRET_FILE = 'gateway-webhook-secret'
+export const ANNOUNCE_PRESENCE_CHANNEL_FILE = 'gateway-presence-channel-id'
 const DEPLOY_DIR = `${REMOTE_DIR}/deploy`
 const SECRETS_DIR = `${DEPLOY_DIR}/secrets`
 // Checksum lives OUTSIDE deploy/ so git clean -xfd doesn't destroy it
@@ -512,9 +517,9 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
   // When disabled (both absent), push neither. When invalid (exactly one set), main()
   // throws before reaching here, so this branch is never reached in that case.
   if (getAnnounceState(env) === 'enabled') {
-    secrets.push({name: 'gateway-webhook-secret', content: env.GATEWAY_WEBHOOK_SECRET ?? '', required: false})
+    secrets.push({name: ANNOUNCE_WEBHOOK_SECRET_FILE, content: env.GATEWAY_WEBHOOK_SECRET ?? '', required: false})
     secrets.push({
-      name: 'gateway-presence-channel-id',
+      name: ANNOUNCE_PRESENCE_CHANNEL_FILE,
       content: env.GATEWAY_PRESENCE_CHANNEL_ID ?? '',
       required: false,
     })
@@ -560,13 +565,13 @@ export function buildComposeOverride(): string {
       GATEWAY_PRESENCE_CHANNEL_ID_FILE: /run/secrets/gateway_presence_channel_id
     volumes:
       - type: bind
-        source: ./secrets/gateway-webhook-secret
+        source: ./secrets/${ANNOUNCE_WEBHOOK_SECRET_FILE}
         target: /run/secrets/gateway_webhook_secret
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ./secrets/gateway-presence-channel-id
+        source: ./secrets/${ANNOUNCE_PRESENCE_CHANNEL_FILE}
         target: /run/secrets/gateway_presence_channel_id
         read_only: true
         bind:
@@ -594,18 +599,24 @@ volumes:
 /**
  * Builds the Caddyfile content for the announce ingress.
  *
- * Uses a named matcher (@announce) scoped to /v1/announce so the catch-all
- * respond 404 is a bare directive (not inside a handle block). This is ACME-safe:
- * Caddy uses TLS-ALPN-01 on :443 by default, which never touches HTTP paths, so
- * the 404 directive only affects request routing and cannot shadow ACME challenges.
+ * Uses mutually-exclusive `handle` blocks so Caddy's directive-ordering cannot
+ * reorder the catch-all respond 404 ahead of the reverse_proxy. The path-specific
+ * handle is evaluated first (higher specificity), the catch-all second.
+ *
+ * ACME-safe: Caddy serves HTTP-01 challenges on :80 via an auto-injected route
+ * ahead of user routes, and TLS-ALPN-01 on :443 never touches HTTP paths. The
+ * catch-all 404 is inside the :443 host block and does not shadow ACME challenges.
  *
  * @param host - The gateway hostname (GATEWAY_HOST env var, e.g. gateway.fro.bot)
  */
 export function buildCaddyfile(host: string): string {
   return `${host} {
-  @announce path /v1/announce
-  reverse_proxy @announce gateway:3000
-  respond 404
+  handle /v1/announce {
+    reverse_proxy gateway:3000
+  }
+  handle {
+    respond 404
+  }
 }
 `
 }
@@ -982,14 +993,18 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   }
 
   if (isDryRun) {
+    const announceEnabled = announceState === 'enabled'
     console.warn('\u001B[1;33m[dry-run]\u001B[0m Planned actions:')
     console.warn(`  1. Ensure droplet workspace at ${REMOTE_DIR} (clone ${repo}@${ref} or fetch+reset)`)
     console.warn(`  2. Compute OBJECT_STORE_HOSTS: ${objectStoreHosts}`)
     console.warn(`  3. Materialize ${buildSecretFileList(env).length} secret files under ${SECRETS_DIR}`)
+    if (announceEnabled) {
+      console.warn(`  3b. Announce enabled — materialize compose.override.yaml + Caddyfile under ${DEPLOY_DIR}`)
+    }
     console.warn(`  4. Write .env to ${ENV_PATH}`)
     console.warn(`  5. Run init-certs.sh (idempotent)`)
     console.warn(
-      `  6. docker compose up -d --build --wait --wait-timeout 120${forceRecreate ? ' --force-recreate' : ''}`,
+      `  6. docker compose up -d --build --wait --wait-timeout 120 --remove-orphans${forceRecreate ? ' --force-recreate' : ''}`,
     )
     console.warn(
       `  7. Poll Discord slash command registration (app=${env.DISCORD_APPLICATION_ID} guild=${env.DISCORD_GUILD_ID})`,

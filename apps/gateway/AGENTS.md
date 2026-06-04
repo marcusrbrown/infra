@@ -91,7 +91,7 @@ After provisioning: commit the updated `.github/known_hosts`.
 | `GH_APP_PRIVATE_KEY` | ✓ | GitHub App private key PEM (materializes to `github-app-private-key`) |
 | `WORKSPACE_OPENCODE_TOKEN` | ✓ | Internal shared bearer between the gateway and the workspace `:9200` OpenCode proxy (random value; fail-closed if empty) |
 | `WORKSPACE_OPENCODE_AUTH` | ✓ | OpenCode provider `auth.json` for the workspace — a **dedicated scoped cliproxy key**, not the repo's `OPENCODE_AUTH_JSON` (separate revocation + blast radius) |
-| `WORKSPACE_OPENCODE_MODEL` | ✓ | OpenCode model id for the mention loop (e.g. `openai/gpt-5.5-fast`); an OpenCode harness string, not a `/v1/models` catalog id. Written to `.env` |
+| `WORKSPACE_OPENCODE_MODEL` | ✓ | OpenCode model id for the mention loop (e.g. `openai/gpt-5.5`). MUST be a real cliproxy `/v1/models` catalog id — an unlisted id (e.g. `gpt-5.5-fast`) 502s and OpenCode retries silently, yielding an empty run. Written to `.env` |
 | `WORKSPACE_OPENCODE_CONFIG` | ✓ | OpenCode provider/baseURL config JSON routing through `cliproxy.fro.bot/v1`; JSON-validated, `$`-escaped, written to `.env` |
 | `GATEWAY_TRIGGER_ROLE_ID` | ✓ | Discord role ID allowed to trigger the `@fro-bot` mention loop — required (fail-closed); empty would open LLM execution to every guild member |
 | `S3_ENDPOINT` | — | Custom endpoint URL (R2, MinIO, etc.) |

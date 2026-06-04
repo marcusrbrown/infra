@@ -128,7 +128,7 @@ bun run deploy:umami                            # Local umami deploy (loads root
 
 - `DROPBOX_APP_SECRET` and `DEPLOY_SSH_KEY` are GitHub Actions secrets scoped to `keeweb` environment.
 - `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are scoped to `cliproxy` environment.
-- `GATEWAY_SSH_KEY`, `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, and `GATEWAY_HOST` are scoped to `gateway` environment. Optional: `S3_ENDPOINT`, `OBJECT_STORE_HOSTS`.
+- `GATEWAY_SSH_KEY`, `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, and `GATEWAY_HOST` are scoped to `gateway` environment. Optional: `S3_ENDPOINT`, `OBJECT_STORE_HOSTS`. Opt-in announce/presence webhook (both-or-neither): `GATEWAY_WEBHOOK_SECRET` (HMAC key, sensitive) and `GATEWAY_PRESENCE_CHANNEL_ID` (Discord channel ID) — set both to enable `POST /v1/announce` + Caddy ingress; leave both unset to keep the gateway outbound-only.
 - `UMAMI_SSH_KEY`, `UMAMI_DOMAIN`, `UMAMI_APP_SECRET`, `UMAMI_DB_PASSWORD`, and `UMAMI_ADMIN_PASSWORD` are scoped to `umami` environment. `UMAMI_DB_PASSWORD` is volume-coupled — rotate only via the `ALTER USER` runbook in `apps/umami/AGENTS.md`.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.

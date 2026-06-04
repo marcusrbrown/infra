@@ -1,6 +1,6 @@
 # Gateway Deploy Package
 
-The gateway is the Fro Bot Discord client and workspace runner — a 3-service Docker Compose stack (gateway daemon, workspace executor, mitmproxy egress filter) deployed on a dedicated DigitalOcean droplet at `gateway.fro.bot`. The upstream source is `fro-bot/agent`, pinned to `v0.52.1` in `apps/gateway/upstream.json`. v0.52.1 adds `WORKSPACE_EGRESS_HOSTS` consumed by `deploy/mitmproxy/allowlist.py` (comma-separated exact hosts the sandboxed workspace may reach through the mitmproxy egress proxy; fail-closed if empty). The deploy emits `WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev` so the workspace OpenCode can reach the cliproxy endpoint and fetch its model catalog from `models.dev` at startup. v0.51.0 shipped the real workspace executor (a Hono service exposing `/healthz` + `/clone` on `:9100` and an OpenCode bearer proxy on `:9200`, all on the internal `sandbox-net` with no host ports), enabling both `/fro-bot add-project` repo cloning and the `@fro-bot` mention loop (Discord-message-triggered OpenCode execution routed through `cliproxy.fro.bot`). v0.51.0 also fixed the v0.50.0 undeployable defect (fro-bot/agent#738): `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` are now `readOptionalSecret` (opt-in) and commented-out in the upstream compose — both remain **unset** in this deployment (presence/announce webhook off). The Renovate ceiling is `<0.53.0` (allow v0.52.x patch/hotfix; v0.53.0+ needs a deliberate source-contract pass). The deploy materializes GitHub App credentials (`github-app-id`, `github-app-private-key`) so `/fro-bot add-project` can clone target repos via the App token, plus the workspace OpenCode credentials and a required Discord trigger-role authz gate for the mention loop. There is no public HTTP surface; the gateway connects outbound to Discord, S3, and (via the mitmproxy egress allowlist) the cliproxy endpoint only. Management happens via SSH and the `bunx @marcusrbrown/infra gateway *` CLI commands.
+The gateway is the Fro Bot Discord client and workspace runner — a 3-service Docker Compose stack (gateway daemon, workspace executor, mitmproxy egress filter) deployed on a dedicated DigitalOcean droplet at `gateway.fro.bot`. The upstream source is `fro-bot/agent`, pinned to `v0.52.1` in `apps/gateway/upstream.json`. v0.52.1 adds `WORKSPACE_EGRESS_HOSTS` consumed by `deploy/mitmproxy/allowlist.py` (comma-separated exact hosts the sandboxed workspace may reach through the mitmproxy egress proxy; fail-closed if empty). The deploy emits `WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev` so the workspace OpenCode can reach the cliproxy endpoint and fetch its model catalog from `models.dev` at startup. v0.51.0 shipped the real workspace executor (a Hono service exposing `/healthz` + `/clone` on `:9100` and an OpenCode bearer proxy on `:9200`, all on the internal `sandbox-net` with no host ports), enabling both `/fro-bot add-project` repo cloning and the `@fro-bot` mention loop (Discord-message-triggered OpenCode execution routed through `cliproxy.fro.bot`). v0.51.0 also fixed the v0.50.0 undeployable defect (fro-bot/agent#738): `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` are now `readOptionalSecret` (opt-in) in the upstream daemon — set both to enable the announce/presence webhook (see [Announce/presence webhook](#announcepresence-webhook) below), or leave both unset to keep the gateway outbound-only. The Renovate ceiling is `<0.53.0` (allow v0.52.x patch/hotfix; v0.53.0+ needs a deliberate source-contract pass). The deploy materializes GitHub App credentials (`github-app-id`, `github-app-private-key`) so `/fro-bot add-project` can clone target repos via the App token, plus the workspace OpenCode credentials and a required Discord trigger-role authz gate for the mention loop. When the announce inputs are unset, there is no public HTTP surface; the gateway connects outbound to Discord, S3, and (via the mitmproxy egress allowlist) the cliproxy endpoint only. Management happens via SSH and the `bunx @marcusrbrown/infra gateway *` CLI commands.
 
 The deploy script materializes secrets as files on the droplet (never via argv), bootstraps the mitmproxy CA on first run, brings up the Compose stack, and gates completion on Discord command registration. A secrets checksum written only after a fully successful deploy prevents silent stale-credentials states across retries.
 
@@ -98,6 +98,10 @@ After provisioning: commit the updated `.github/known_hosts`.
 | `WORKSPACE_OPENCODE_URL` | — | Override the workspace OpenCode proxy URL (default `http://workspace:9200`) |
 | `OBJECT_STORE_HOSTS` | — | Comma-separated hostnames the mitmproxy egress filter allows through to S3 |
 | `DISCORD_PRIVILEGED_INTENTS` | — | Opt-in privileged intents (e.g. `MessageContent`); materializes to `discord-privileged-intents`, empty = baseline intents |
+| `GATEWAY_WEBHOOK_SECRET` | opt-in† | HMAC signing key for the announce webhook — strong random value; materialized via SSH stdin, never argv. Set together with `GATEWAY_PRESENCE_CHANNEL_ID` to enable the announce endpoint; leave both unset to keep the gateway outbound-only. Setting exactly one fails the deploy before any SSH. |
+| `GATEWAY_PRESENCE_CHANNEL_ID` | opt-in† | Discord channel ID where the daemon posts presence embeds as the Fro Bot user. Set together with `GATEWAY_WEBHOOK_SECRET`. |
+
+†Both-or-neither: set both to enable the announce/presence webhook; set neither to disable. Setting exactly one is an error — the deploy fails fast with a message naming the missing input, before any SSH connection is made.
 
 ### GitHub App (`/fro-bot add-project`)
 
@@ -105,7 +109,7 @@ The gateway authenticates to GitHub as a public App (owned by the `fro-bot` acco
 
 ### Mention loop (`@fro-bot` → OpenCode)
 
-v0.51.0's workspace executor runs OpenCode against `cliproxy.fro.bot` when an authorized user `@`-mentions the bot. Trust model: the workspace runs on `sandbox-net` (`internal: true` — no direct external egress; all outbound forced through the mitmproxy allowlist), so a prompt-injection payload in a Discord message or cloned repo cannot reach an arbitrary destination. `GATEWAY_TRIGGER_ROLE_ID` bounds **who** can trigger a run (and thus spend); it is enforced non-empty at deploy time (`REQUIRED_ENV_VARS` in `deploy.ts`) even though the upstream daemon treats it as `readOptionalSecret` — this repo's deploy is stricter (fail-closed). `WORKSPACE_OPENCODE_AUTH` is a dedicated scoped cliproxy key so it can be revoked independently of CI's `OPENCODE_AUTH_JSON`. `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` are opt-in upstream and left **unset** here — the presence/announce webhook is off. **Honest limit:** an *authorized* role-holder is still an untrusted-content source — containment bounds blast radius, it does not prevent a determined authorized user from misusing the agent within the allowed surface. Verify post-deploy with a real authorized mention (Discord command registration alone does not prove the workspace works); if broken, revert `upstream.json` to the last known-good ref and redeploy.
+v0.51.0's workspace executor runs OpenCode against `cliproxy.fro.bot` when an authorized user `@`-mentions the bot. Trust model: the workspace runs on `sandbox-net` (`internal: true` — no direct external egress; all outbound forced through the mitmproxy allowlist), so a prompt-injection payload in a Discord message or cloned repo cannot reach an arbitrary destination. `GATEWAY_TRIGGER_ROLE_ID` bounds **who** can trigger a run (and thus spend); it is enforced non-empty at deploy time (`REQUIRED_ENV_VARS` in `deploy.ts`) even though the upstream daemon treats it as `readOptionalSecret` — this repo's deploy is stricter (fail-closed). `WORKSPACE_OPENCODE_AUTH` is a dedicated scoped cliproxy key so it can be revoked independently of CI's `OPENCODE_AUTH_JSON`. `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` are opt-in — set both in the `gateway` GitHub Environment to enable the announce/presence webhook (see [Announce/presence webhook](#announcepresence-webhook) below). **Honest limit:** an *authorized* role-holder is still an untrusted-content source — containment bounds blast radius, it does not prevent a determined authorized user from misusing the agent within the allowed surface. Verify post-deploy with a real authorized mention (Discord command registration alone does not prove the workspace works); if broken, revert `upstream.json` to the last known-good ref and redeploy.
 
 The deploy emits `WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev`. Both hosts are required: `cliproxy.fro.bot` is the LLM proxy the workspace routes all model traffic through; `models.dev` is the model catalog OpenCode fetches at startup to populate its provider list. Without `models.dev` in the allowlist, OpenCode cannot start and the `@`-mention loop fails entirely — the workspace container exits before accepting any request. The `/fro-bot add-project` clone path is unaffected (it does not invoke OpenCode).
 
@@ -117,6 +121,52 @@ After deploying a new daemon version, run these checks in order — each gate mu
 2. `bunx @marcusrbrown/infra gateway logs workspace --tail 100` — confirm the workspace container started without errors (look for the Hono server listening on `:9100` and `:9200`).
 3. **`/fro-bot add-project` clone smoke** — run the slash command against a repo the GitHub App is installed on; confirm the clone completes without error. This exercises the GitHub App credentials and the workspace `/clone` endpoint end-to-end.
 4. **Authorized `@fro-bot` mention round-trip** — send a mention from an account holding `GATEWAY_TRIGGER_ROLE_ID`; confirm a response arrives. This is the only proof the workspace OpenCode execution path is live. Discord command registration (step 7 of the deploy flow) does **not** prove the workspace works — it only proves the daemon registered slash commands.
+
+## ANNOUNCE/PRESENCE WEBHOOK
+
+The daemon's `POST /v1/announce` endpoint is opt-in. When enabled, it accepts HMAC-signed requests and posts a Discord embed as the Fro Bot user to the configured presence channel. The intended caller is the `fro-bot/.github` control plane (separate work, not in this repo).
+
+### Enabling
+
+Set both `GATEWAY_WEBHOOK_SECRET` (a strong random HMAC key) and `GATEWAY_PRESENCE_CHANNEL_ID` (the target Discord channel ID) in the `gateway` GitHub Environment, then trigger a deploy. The deploy materializes both as secret files on the droplet and writes a `compose.override.yaml` that:
+
+- Adds a Caddy reverse proxy service publishing `:80`/`:443` on `gateway-net`, terminating TLS for `gateway.fro.bot` via Let's Encrypt auto-cert.
+- Path-scopes Caddy to `/v1/announce` only — all other paths return 404. This is the gateway's **only** public route: `https://gateway.fro.bot/v1/announce`.
+- Wires the daemon's announce `*_FILE` env entries and secret mounts via the override's `gateway` service block.
+
+The override is a working-tree file re-materialized on every deploy when the inputs are present. The override contents are included in the secrets checksum, so toggling announce on or off forces `--force-recreate` on the next deploy.
+
+### Security posture
+
+- **Auth:** the daemon verifies the HMAC signature, enforces a replay cache, and applies a rate limiter. Caddy adds TLS termination.
+- **No IP allowlist:** GitHub Actions egress ranges are too dynamic to pin reliably. HMAC + TLS is the full auth boundary.
+- **Secret materialization:** `GATEWAY_WEBHOOK_SECRET` is written to the droplet via SSH stdin only — never via argv.
+- **Path isolation:** Caddy uses a named `@announce` matcher (`path /v1/announce`) with a default `respond 404`. The catch-all does not shadow ACME challenge paths (Caddy uses TLS-ALPN-01 on `:443` by default, which does not touch HTTP path routing).
+
+### Rollback / disabling
+
+Remove both `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` from the `gateway` GitHub Environment and redeploy. The deploy's `git clean -xfd` removes the `compose.override.yaml` (a working-tree file); `--remove-orphans` retires the now-undeclared Caddy container; the checksum flip (override bytes gone) triggers `--force-recreate`. After the deploy, verify with `docker compose config` on the droplet — the Caddy service must not appear.
+
+### Caddy volume guardrail
+
+Caddy stores TLS certs in a named Docker volume (`caddy_data`). Docker volumes are independent of the git working tree — `git clean -xfd` and normal deploys never touch them. The real cert-loss risk is an explicit `docker compose down -v` or `docker volume prune` on the gateway project, which would wipe the certs and force Let's Encrypt re-issuance (rate-limit risk). **Never run `docker compose down -v` or `docker volume prune` on the gateway stack.** See the ANTI-PATTERNS section.
+
+### Rotation
+
+If `GATEWAY_WEBHOOK_SECRET` leaks, the blast radius is Fro-Bot-user impersonation into the presence channel. Rotate by setting a new value in the `gateway` GitHub Environment and redeploying. Coordinate with the `fro-bot/.github` caller, which holds the matching secret on its side. The deploy re-materializes the secret file via SSH stdin; the checksum flip force-recreates the daemon container.
+
+### Post-enable verification
+
+After the first enabling deploy:
+
+1. `bunx @marcusrbrown/infra gateway status` — confirm the `caddy` service appears healthy alongside `gateway`, `workspace`, `mitmproxy`.
+2. Send a correctly HMAC-signed test POST to `https://gateway.fro.bot/v1/announce` — confirm a Discord embed appears in the presence channel.
+3. Send an unsigned or replayed POST — confirm a 401/403 response.
+4. Send a request to any other path (e.g. `https://gateway.fro.bot/`) — confirm a 404 response.
+
+### Implementation pointers
+
+`buildSecretFileList`, `getAnnounceState`, `buildComposeOverride`, `buildCaddyfile` in `apps/gateway/src/deploy.ts`.
 
 ## CA RESTORE PROCEDURE
 
@@ -166,6 +216,7 @@ For the full operator-facing rotation and emergency revocation procedure (includ
 - **Never validate `WORKSPACE_OPENCODE_CONFIG` with the shell-metachar guard** — it is JSON (`"`, `$`, `\` are required) and `SHELL_METACHAR_RE` would reject every valid config. Validate it with `JSON.parse` + newline/size checks; `SHELL_METACHAR_RE` is only for simple values like `WORKSPACE_OPENCODE_MODEL`.
 - **Never bind-mount config files outside `/opt/gateway/deploy/secrets/`** — `init-certs.sh` and `docker-compose.yaml` are upstream's; this repo materializes secrets only.
 - **Never run `pollRegistration` with an unbounded per-attempt timeout** — each fetch is wrapped in an `AbortController` with `perAttemptTimeoutMs` (defaults to `max(6000, intervalMs * 2)`).
+- **Never run `docker compose down -v` or `docker volume prune` on the gateway stack** — this wipes named Docker volumes including `caddy_data` (TLS certs) and `mitmproxy-certs` (CA key). Normal deploys and `git clean -xfd` do NOT touch Docker volumes. Losing `caddy_data` forces Let's Encrypt re-issuance (rate-limit risk); losing `mitmproxy-certs` breaks workspace egress trust (requires CA restore).
 
 ## DECOMMISSIONING
 

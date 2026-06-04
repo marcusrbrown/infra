@@ -207,6 +207,25 @@ export function resolveUpstreamPin(jsonPath?: string): UpstreamPin {
 const MODEL_ALLOWLIST_RE = /^[\w.-]+\/[\w.-]+$/
 
 /**
+ * Returns the announce state based on the presence of both announce inputs.
+ *
+ * - 'enabled':  both GATEWAY_WEBHOOK_SECRET and GATEWAY_PRESENCE_CHANNEL_ID are
+ *               present and non-empty (whitespace-only = absent).
+ * - 'disabled': both are absent (unset or whitespace-only).
+ * - 'invalid':  exactly one is present — the both-or-neither gate is violated.
+ *
+ * Mirrors the empty/whitespace-only = absent semantics used by validateRequiredEnv.
+ */
+export function getAnnounceState(env: Record<string, string>): 'enabled' | 'disabled' | 'invalid' {
+  const hasWebhookSecret = Boolean(env.GATEWAY_WEBHOOK_SECRET?.trim())
+  const hasChannelId = Boolean(env.GATEWAY_PRESENCE_CHANNEL_ID?.trim())
+
+  if (hasWebhookSecret && hasChannelId) return 'enabled'
+  if (!hasWebhookSecret && !hasChannelId) return 'disabled'
+  return 'invalid'
+}
+
+/**
  * Returns the list of missing WORKSPACE_OPENCODE_MODEL / WORKSPACE_OPENCODE_CONFIG
  * variable names. The name reflects what it returns — a list of missing vars.
  */
@@ -487,6 +506,18 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
   for (const {name, envKey, transform} of optional) {
     const raw = env[envKey] ?? ''
     secrets.push({name, content: transform ? transform(raw) : raw, required: false})
+  }
+
+  // Announce secret files: only materialized when BOTH inputs are present and non-empty.
+  // When disabled (both absent), push neither. When invalid (exactly one set), main()
+  // throws before reaching here, so this branch is never reached in that case.
+  if (getAnnounceState(env) === 'enabled') {
+    secrets.push({name: 'gateway-webhook-secret', content: env.GATEWAY_WEBHOOK_SECRET ?? '', required: false})
+    secrets.push({
+      name: 'gateway-presence-channel-id',
+      content: env.GATEWAY_PRESENCE_CHANNEL_ID ?? '',
+      required: false,
+    })
   }
 
   return secrets
@@ -860,6 +891,20 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     model: env.WORKSPACE_OPENCODE_MODEL ?? '',
     config: env.WORKSPACE_OPENCODE_CONFIG ?? '',
   })
+
+  // Phase 3c: Validate announce both-or-neither gate before any SSH.
+  // Exactly one of the announce inputs being set is an invalid configuration —
+  // fail fast with a clear message naming the missing input.
+  const announceState = getAnnounceState(env)
+  if (announceState === 'invalid') {
+    const missingAnnounce = env.GATEWAY_WEBHOOK_SECRET?.trim()
+      ? 'GATEWAY_PRESENCE_CHANNEL_ID'
+      : 'GATEWAY_WEBHOOK_SECRET'
+    throw new Error(
+      `Announce inputs must be set together (both-or-neither). Missing: ${missingAnnounce}. ` +
+        'Set both GATEWAY_WEBHOOK_SECRET and GATEWAY_PRESENCE_CHANNEL_ID, or leave both unset.',
+    )
+  }
 
   if (isDryRun) {
     console.warn('\u001B[1;33m[dry-run]\u001B[0m Planned actions:')

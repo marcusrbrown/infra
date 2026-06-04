@@ -2724,6 +2724,199 @@ describe('normalizePemPrivateKey', () => {
   })
 })
 
+// ─── getAnnounceState ─────────────────────────────────────────────────────────
+
+describe('getAnnounceState', () => {
+  test('both GATEWAY_WEBHOOK_SECRET and GATEWAY_PRESENCE_CHANNEL_ID set → enabled', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const state = getAnnounceState(
+      makeEnv({GATEWAY_WEBHOOK_SECRET: 'secret-hmac-key', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+    )
+    expect(state).toBe('enabled')
+  })
+
+  test('neither GATEWAY_WEBHOOK_SECRET nor GATEWAY_PRESENCE_CHANNEL_ID set → disabled', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const state = getAnnounceState(env)
+    expect(state).toBe('disabled')
+  })
+
+  test('only GATEWAY_WEBHOOK_SECRET set → invalid', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: 'secret-hmac-key'})
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const state = getAnnounceState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('only GATEWAY_PRESENCE_CHANNEL_ID set → invalid', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'})
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    const state = getAnnounceState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('GATEWAY_WEBHOOK_SECRET whitespace-only → treated as absent → invalid', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: '   ', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'})
+    const state = getAnnounceState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('GATEWAY_PRESENCE_CHANNEL_ID whitespace-only → treated as absent → invalid', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: 'secret-hmac-key', GATEWAY_PRESENCE_CHANNEL_ID: '  '})
+    const state = getAnnounceState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('both whitespace-only → both absent → disabled', async () => {
+    const {getAnnounceState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: '   ', GATEWAY_PRESENCE_CHANNEL_ID: '  '})
+    const state = getAnnounceState(env)
+    expect(state).toBe('disabled')
+  })
+})
+
+// ─── buildSecretFileList — announce secret files ──────────────────────────────
+
+describe('buildSecretFileList — announce secret files', () => {
+  test('both announce inputs set → includes gateway-webhook-secret and gateway-presence-channel-id', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(
+      makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+    )
+    const webhookSecret = secrets.find(s => s.name === 'gateway-webhook-secret')
+    const channelId = secrets.find(s => s.name === 'gateway-presence-channel-id')
+    expect(webhookSecret).toBeDefined()
+    expect(webhookSecret?.content).toBe('hmac-secret-value')
+    expect(webhookSecret?.required).toBe(false)
+    expect(channelId).toBeDefined()
+    expect(channelId?.content).toBe('111222333444555666')
+    expect(channelId?.required).toBe(false)
+  })
+
+  test('neither announce input set → neither announce secret file present', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const secrets = buildSecretFileList(env)
+    const names = secrets.map(s => s.name)
+    expect(names).not.toContain('gateway-webhook-secret')
+    expect(names).not.toContain('gateway-presence-channel-id')
+  })
+
+  test('neither announce input set → output length equals baseline (16)', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const secrets = buildSecretFileList(env)
+    expect(secrets).toHaveLength(16)
+  })
+
+  test('both announce inputs set → output has 18 entries (16 baseline + 2 announce)', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(
+      makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+    )
+    expect(secrets).toHaveLength(18)
+  })
+
+  test('both announce inputs set → checksum differs from no-announce baseline', async () => {
+    const {buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const baseEnv = makeEnv()
+    delete (baseEnv as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (baseEnv as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    const baseSecrets = buildSecretFileList(baseEnv)
+    const announceSecrets = buildSecretFileList(
+      makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+    )
+    expect(computeSecretsChecksum(announceSecrets)).not.toBe(computeSecretsChecksum(baseSecrets))
+  })
+})
+
+// ─── main() — announce both-or-neither gate ───────────────────────────────────
+
+describe('main() — announce both-or-neither gate', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('only GATEWAY_WEBHOOK_SECRET set → rejects before any spawn naming GATEWAY_PRESENCE_CHANNEL_ID', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    const env = makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value'})
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+
+    await expect(
+      main({
+        env,
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_PRESENCE_CHANNEL_ID/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('only GATEWAY_PRESENCE_CHANNEL_ID set → rejects before any spawn naming GATEWAY_WEBHOOK_SECRET', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    const env = makeEnv({GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'})
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+
+    await expect(
+      main({
+        env,
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_WEBHOOK_SECRET/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('GATEWAY_WEBHOOK_SECRET whitespace-only + GATEWAY_PRESENCE_CHANNEL_ID set → rejects before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({GATEWAY_WEBHOOK_SECRET: '   ', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_WEBHOOK_SECRET/)
+
+    expect(calls).toHaveLength(0)
+  })
+})
+
 // ─── buildSecretFileList — normalizePemPrivateKey wiring ─────────────────────
 
 describe('buildSecretFileList — normalizePemPrivateKey wiring', () => {

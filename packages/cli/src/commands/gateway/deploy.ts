@@ -56,6 +56,8 @@ export function getGatewayDeployEnv(): Record<string, string> {
     WORKSPACE_OPENCODE_MODEL: process.env.WORKSPACE_OPENCODE_MODEL ?? '',
     WORKSPACE_OPENCODE_CONFIG: process.env.WORKSPACE_OPENCODE_CONFIG ?? '',
     GATEWAY_TRIGGER_ROLE_ID: process.env.GATEWAY_TRIGGER_ROLE_ID ?? '',
+    GATEWAY_WEBHOOK_SECRET: process.env.GATEWAY_WEBHOOK_SECRET ?? '',
+    GATEWAY_PRESENCE_CHANNEL_ID: process.env.GATEWAY_PRESENCE_CHANNEL_ID ?? '',
   }
 }
 

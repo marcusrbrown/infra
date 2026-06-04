@@ -13,7 +13,9 @@ const envKeys = [
   'DISCORD_GUILD_ID',
   'DISCORD_TOKEN',
   'GATEWAY_HOST',
+  'GATEWAY_PRESENCE_CHANNEL_ID',
   'GATEWAY_TRIGGER_ROLE_ID',
+  'GATEWAY_WEBHOOK_SECRET',
   'HOME',
   'OBJECT_STORE_HOSTS',
   'PATH',
@@ -360,6 +362,56 @@ describe('gateway deploy', () => {
       })
       const env = getGatewayDeployEnv()
       expect(env.GATEWAY_TRIGGER_ROLE_ID).toBe('987654321098765432')
+    })
+
+    // ── announce opt-in vars parity ───────────────────────────────────────────
+
+    it('forwards GATEWAY_WEBHOOK_SECRET when set', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.GATEWAY_WEBHOOK_SECRET).toBe('hmac-secret-value')
+    })
+
+    it('GATEWAY_WEBHOOK_SECRET unset → forwarded as empty string', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        GATEWAY_WEBHOOK_SECRET: undefined,
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.GATEWAY_WEBHOOK_SECRET).toBe('')
+    })
+
+    it('forwards GATEWAY_PRESENCE_CHANNEL_ID when set', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.GATEWAY_PRESENCE_CHANNEL_ID).toBe('111222333444555666')
+    })
+
+    it('GATEWAY_PRESENCE_CHANNEL_ID unset → forwarded as empty string', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        GATEWAY_PRESENCE_CHANNEL_ID: undefined,
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+      const env = getGatewayDeployEnv()
+      expect(env.GATEWAY_PRESENCE_CHANNEL_ID).toBe('')
     })
   })
 

@@ -63,6 +63,10 @@ export interface MainOpts {
   spawn?: SpawnFn
   maxAttempts?: number
   intervalMs?: number
+  /** Number of HTTPS ingress probe attempts when announce is enabled (default: 5). */
+  probeAttempts?: number
+  /** Interval between probe attempts in ms when announce is enabled (default: 3_000). */
+  probeIntervalMs?: number
 }
 
 export interface DeployArgs {
@@ -943,6 +947,8 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   const spawnFn = opts.spawn ?? defaultSpawn
   const maxAttempts = opts.maxAttempts ?? 10
   const intervalMs = opts.intervalMs ?? 3000
+  const probeAttempts = opts.probeAttempts ?? 5
+  const probeIntervalMs = opts.probeIntervalMs ?? 3_000
 
   const {dryRun: isDryRun, forceRecreate} = parseDeployArgs(args)
 
@@ -1238,6 +1244,41 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       maxAttempts,
       intervalMs,
     })
+
+    // Phase 9b: Post-deploy HTTPS ingress probe — warning-only, only when announce is enabled.
+    // The endpoint is HMAC-gated: an unsigned POST returns HTTP 400, which proves TLS terminated
+    // and Caddy routed correctly. Any 2xx or 4xx is treated as healthy. Connection/TLS errors
+    // mean the cert is still issuing (ACME can take 30-60s+); we warn and let the deploy succeed.
+    if (announceEnabled) {
+      const probeUrl = `https://${host}/v1/announce`
+      console.warn(`\u001B[1;34m==>\u001B[0m Probing HTTPS ingress: ${probeUrl}`)
+      let probeOk = false
+      for (let attempt = 1; attempt <= probeAttempts; attempt++) {
+        try {
+          const response = await fetchFn(probeUrl)
+          const status = response.status
+          // Any HTTP response (2xx or 4xx) proves TLS terminated + Caddy routed → healthy.
+          // 400 is the expected response for an unsigned POST to the HMAC-gated endpoint.
+          if (status >= 200 && status < 500) {
+            probeOk = true
+            break
+          }
+        } catch {
+          // Connection/TLS error — cert may still be issuing; retry
+        }
+        if (attempt < probeAttempts) {
+          await sleepFn(probeIntervalMs)
+        }
+      }
+      if (probeOk) {
+        console.warn(`\u001B[1;32m✓\u001B[0m HTTPS ingress probe succeeded: ${probeUrl}`)
+      } else {
+        console.warn(
+          `\u001B[1;33m[warn]\u001B[0m HTTPS ingress probe did not succeed — cert may still be issuing. ` +
+            `Verify with: curl -sI ${probeUrl}`,
+        )
+      }
+    }
 
     // Phase 10: Persist checksum AFTER compose + registration succeed
     // If either phase 8 or 9 threw, we never reach here — prior checksum stays in place

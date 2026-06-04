@@ -3380,6 +3380,233 @@ describe('main() — compose-up args', () => {
   })
 })
 
+// ─── Item 1: post-deploy HTTPS ingress probe (announce enabled) ───────────────
+
+describe('main() — post-deploy HTTPS ingress probe', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('announce disabled → probe fetch never called', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const fetchCalls: string[] = []
+
+    const mockFetch = mock(async (url: string) => {
+      fetchCalls.push(url)
+      // Discord registration response
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+
+    await main({env, args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    // No probe URL should have been called
+    const probeCalls = fetchCalls.filter(u => u.includes('/v1/announce'))
+    expect(probeCalls).toHaveLength(0)
+  })
+
+  test('announce enabled + HTTP 400 → healthy (no warning logged, deploy succeeds)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+      origWarn(...args)
+    }
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes('/v1/announce')) {
+        // 400 = HMAC-gated endpoint, TLS terminated + Caddy routed → healthy
+        return new Response('Bad Request', {status: 400})
+      }
+      // Discord registration
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    try {
+      await main({
+        env: makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+        args: [],
+        fetch: mockFetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+        probeAttempts: 3,
+        probeIntervalMs: 0,
+      })
+    } finally {
+      console.warn = origWarn
+    }
+
+    // Deploy must succeed (no throw)
+    // No warning about cert issuing should appear (400 = healthy)
+    // Filter specifically for the probe failure warning (not "init-certs.sh" which also contains "cert")
+    const warnAboutCert = warnMessages.filter(
+      m => m.includes('still be issuing') || m.includes('probe did not succeed'),
+    )
+    expect(warnAboutCert).toHaveLength(0)
+  })
+
+  test('announce enabled + connection error on all attempts → warning logged, deploy still succeeds', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+      origWarn(...args)
+    }
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes('/v1/announce')) {
+        throw new TypeError('fetch failed: connection refused')
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    let threw = false
+    try {
+      await main({
+        env: makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+        args: [],
+        fetch: mockFetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+        probeAttempts: 3,
+        probeIntervalMs: 0,
+      })
+    } catch {
+      threw = true
+    } finally {
+      console.warn = origWarn
+    }
+
+    // Deploy must NOT throw — warning-only
+    expect(threw).toBe(false)
+    // A warning about cert issuing must be logged (the probe failure warning)
+    const warnAboutCert = warnMessages.filter(
+      m => m.includes('still be issuing') || m.includes('probe did not succeed'),
+    )
+    expect(warnAboutCert.length).toBeGreaterThan(0)
+  })
+
+  test('announce enabled + probe runs against https://<GATEWAY_HOST>/v1/announce', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const probedUrls: string[] = []
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes('/v1/announce')) {
+        probedUrls.push(url)
+        return new Response('Bad Request', {status: 400})
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    await main({
+      env: makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+      args: [],
+      fetch: mockFetch,
+      sleep: async () => {},
+      spawn: spawnFn,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+    })
+
+    expect(probedUrls).toHaveLength(1)
+    expect(probedUrls[0]).toBe('https://gateway.fro.bot/v1/announce')
+  })
+
+  test('announce enabled + 2xx response → healthy (deploy succeeds, no warning)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+      origWarn(...args)
+    }
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes('/v1/announce')) {
+        return new Response('OK', {status: 200})
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    try {
+      await main({
+        env: makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+        args: [],
+        fetch: mockFetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+      })
+    } finally {
+      console.warn = origWarn
+    }
+
+    // Filter specifically for the probe failure warning (not "init-certs.sh" which also contains "cert")
+    const warnAboutCert = warnMessages.filter(
+      m => m.includes('still be issuing') || m.includes('probe did not succeed'),
+    )
+    expect(warnAboutCert).toHaveLength(0)
+  })
+})
+
+// ─── Item 2: checksum-delta isolation test ────────────────────────────────────
+
+describe('computeSecretsChecksum — override+Caddyfile contribution isolates from secret-only checksum', () => {
+  test('same announce secrets: checksum WITH override+Caddyfile bytes differs from checksum of JUST secret files', async () => {
+    const {buildSecretFileList, buildComposeOverride, buildCaddyfile, computeSecretsChecksum} = await import('./deploy')
+
+    const announceEnv = makeEnv({
+      GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value',
+      GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666',
+    })
+
+    // Checksum of just the secret files (same announce secrets present)
+    const secretsOnly = buildSecretFileList(announceEnv)
+    const checksumSecretsOnly = computeSecretsChecksum(secretsOnly)
+
+    // Checksum with override + Caddyfile bytes folded in (same secrets, same env)
+    const overrideContent = buildComposeOverride()
+    const caddyfileContent = buildCaddyfile(announceEnv.GATEWAY_HOST ?? 'gateway.fro.bot')
+    const checksumInput = [
+      ...secretsOnly,
+      {name: 'compose.override.yaml', content: overrideContent, required: false},
+      {name: 'Caddyfile', content: caddyfileContent, required: false},
+    ]
+    const checksumWithOverride = computeSecretsChecksum(checksumInput)
+
+    // The override/Caddyfile contribution alone must flip the checksum
+    expect(checksumWithOverride).not.toBe(checksumSecretsOnly)
+  })
+})
+
 // ─── docker compose config merge integration test ─────────────────────────────
 
 describe('docker compose config merge — override appends mounts, does not replace', () => {
@@ -3387,9 +3614,15 @@ describe('docker compose config merge — override appends mounts, does not repl
     const {buildComposeOverride} = await import('./deploy')
 
     // Check docker is available
-    const dockerCheck = Bun.spawnSync(['docker', '--version'], {stdout: 'pipe', stderr: 'pipe'})
-    if (dockerCheck.exitCode !== 0) {
-      console.warn('docker not available — skipping compose merge integration test')
+    const dockerAvailable = Boolean(Bun.which('docker'))
+    if (!dockerAvailable) {
+      if (process.env.CI) {
+        throw new Error(
+          'docker is not available in CI — the compose merge proof must not silently vanish. ' +
+            'Ensure docker is installed in the CI environment.',
+        )
+      }
+      console.warn('docker not available (non-CI) — skipping compose merge integration test')
       return
     }
 

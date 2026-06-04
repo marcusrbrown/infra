@@ -72,14 +72,16 @@
       // the workspace-agent secret additions are why this gate exists.
       automerge: false,
       dependencyDashboardApproval: true,
-      // Ceiling at <0.53.0. v0.52.1 is the adopted daemon version: it adds WORKSPACE_EGRESS_HOSTS
-      // consumed by deploy/mitmproxy/allowlist.py (comma-separated hosts the sandboxed workspace
-      // may reach through the mitmproxy egress proxy; fail-closed if empty). The deploy emits
-      // WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot so the workspace OpenCode can reach the cliproxy
-      // endpoint. Allow v0.52.x patch/hotfix PRs; v0.53.0+ is unverified and may change the
-      // compose/secret contract, so it needs a deliberate source-contract pass before the ceiling
-      // moves again.
-      allowedVersions: '<0.53.0',
+      // Ceiling at <0.54.0. v0.53.1 is the adopted daemon version: it fixes the workspace-agent
+      // OpenCode supervisor cold-boot timeout (per-probe AbortController timeout, retry-until-deadline
+      // loop, 60s default readyTimeoutMs configurable via WORKSPACE_OPENCODE_READY_TIMEOUT_MS, /readyz
+      // endpoint) — this was the mention-loop blocker (fro-bot/agent#749). v0.52.1 added
+      // WORKSPACE_EGRESS_HOSTS consumed by deploy/mitmproxy/allowlist.py (comma-separated hosts the
+      // sandboxed workspace may reach through the mitmproxy egress proxy; fail-closed if empty); still
+      // consumed. The deploy emits WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev. Allow v0.53.x
+      // patch/hotfix PRs; v0.54.0+ is unverified and needs a deliberate source-contract pass before
+      // the ceiling moves again.
+      allowedVersions: '<0.54.0',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in each apps/*/upstream.json so new

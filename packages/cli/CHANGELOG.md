@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.9.13
+### Patch Changes
+
+
+- Use the repo-pinned SSH known_hosts file for infra status SSH checks so local and MCP status commands do not depend on user-level SSH known_hosts entries. ([#428](https://github.com/marcusrbrown/infra/pull/428))
+
 ## 0.9.12
 ### Patch Changes
 

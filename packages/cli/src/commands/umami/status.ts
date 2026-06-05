@@ -3,6 +3,7 @@ import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
 import {z} from 'zod'
 
+import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {validateUmamiHost} from './host'
 
@@ -102,6 +103,7 @@ export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defau
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
+    ...buildKnownHostsArgs(),
     `root@${host}`,
     `docker compose --project-directory ${COMPOSE_PROJECT_DIR} ps --format json`,
   ]

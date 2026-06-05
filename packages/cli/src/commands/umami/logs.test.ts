@@ -152,3 +152,40 @@ describe('logs command', () => {
     expect(spawnCalled).toBe(false)
   })
 })
+
+// ─── SSH command includes repo-pinned UserKnownHostsFile ─────────────────────
+
+describe('streamUmamiLogs — SSH command includes UserKnownHostsFile', () => {
+  it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to ssh', async () => {
+    delete process.env.CI
+
+    let capturedCmd: string[] = []
+    const spawnCapture: LogsSpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      return {exited: Promise.resolve(0)}
+    }
+
+    await streamUmamiLogs({host: 'metrics.fro.bot', service: 'umami', tail: 100, allowCi: false}, spawnCapture)
+
+    const knownHostsIdx = capturedCmd.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
+    expect(knownHostsIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[knownHostsIdx - 1]).toBe('-o')
+    expect(capturedCmd[knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
+  })
+
+  it('does not weaken StrictHostKeyChecking when UserKnownHostsFile is added', async () => {
+    delete process.env.CI
+
+    let capturedCmd: string[] = []
+    const spawnCapture: LogsSpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      return {exited: Promise.resolve(0)}
+    }
+
+    await streamUmamiLogs({host: 'metrics.fro.bot', service: 'umami', tail: 100, allowCi: false}, spawnCapture)
+
+    const strictIdx = capturedCmd.findIndex(arg => arg.startsWith('StrictHostKeyChecking='))
+    expect(strictIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[strictIdx]).toBe('StrictHostKeyChecking=yes')
+  })
+})

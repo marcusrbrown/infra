@@ -265,6 +265,79 @@ describe('backupGatewayCa — atomic write (COR2)', () => {
   })
 })
 
+// ─── SSH command includes repo-pinned UserKnownHostsFile ─────────────────────
+
+describe('backupGatewayCa — SSH command includes UserKnownHostsFile', () => {
+  let tmpOutput: string
+
+  beforeEach(() => {
+    tmpOutput = `/tmp/test-backup-known-hosts-${Date.now()}.tar`
+  })
+
+  afterEach(async () => {
+    try {
+      ;(await Bun.file(tmpOutput).exists()) && Bun.spawnSync(['rm', '-f', tmpOutput])
+    } catch {
+      // ignore
+    }
+  })
+
+  it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to ssh', async () => {
+    let capturedCmd: string[] = []
+    const spawnCapture: BackupSpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3]))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(controller) {
+            controller.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await backupGatewayCa({host: 'gateway.example.com', output: tmpOutput, includeCa: true}, spawnCapture)
+
+    const knownHostsIdx = capturedCmd.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
+    expect(knownHostsIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[knownHostsIdx - 1]).toBe('-o')
+    expect(capturedCmd[knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
+  })
+
+  it('does not weaken StrictHostKeyChecking when UserKnownHostsFile is added', async () => {
+    let capturedCmd: string[] = []
+    const spawnCapture: BackupSpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3]))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(controller) {
+            controller.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await backupGatewayCa({host: 'gateway.example.com', output: tmpOutput, includeCa: true}, spawnCapture)
+
+    const strictIdx = capturedCmd.findIndex(arg => arg.startsWith('StrictHostKeyChecking='))
+    expect(strictIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[strictIdx]).toBe('StrictHostKeyChecking=yes')
+  })
+})
+
 // ─── SEC1: Tmp file born with mode 0600 (no chmod race) ──────────────────────
 
 describe('backupGatewayCa — SEC1: tmp file created with mode 0600 atomically', () => {

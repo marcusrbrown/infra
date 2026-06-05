@@ -139,6 +139,71 @@ function makeSpawnError(message: string): SpawnFn {
   }
 }
 
+// ─── SSH command includes repo-pinned UserKnownHostsFile ─────────────────────
+
+describe('getGatewayComposeStatus — SSH command includes UserKnownHostsFile', () => {
+  it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to ssh when the file exists', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+    let capturedCmd: string[] = []
+
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const encoder = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(JSON.stringify([{Name: 'gateway', State: 'running', Health: 'healthy'}])))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getGatewayComposeStatus('gateway.fro.bot', capturingSpawn)
+
+    const knownHostsIdx = capturedCmd.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
+    expect(knownHostsIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[knownHostsIdx - 1]).toBe('-o')
+    expect(capturedCmd[knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
+  })
+
+  it('does not weaken StrictHostKeyChecking when UserKnownHostsFile is added', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+    let capturedCmd: string[] = []
+
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const encoder = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(JSON.stringify([{Name: 'gateway', State: 'running', Health: 'healthy'}])))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getGatewayComposeStatus('gateway.fro.bot', capturingSpawn)
+
+    const strictIdx = capturedCmd.findIndex(arg => arg.startsWith('StrictHostKeyChecking='))
+    expect(strictIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[strictIdx]).toBe('StrictHostKeyChecking=yes')
+  })
+})
+
 describe('getGatewayComposeStatus — host validation (SEC1)', () => {
   it('rejects a leading-hyphen host and does not invoke ssh', async () => {
     const {getGatewayComposeStatus} = await import('./status')

@@ -5,6 +5,7 @@ import type {ActionCtx} from '../../lib/action-ctx'
 import {closeSync, constants as fsConstants, openSync, renameSync, unlinkSync, writeSync} from 'node:fs'
 
 import {z} from 'zod'
+import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {validateGatewayHost} from './host'
 
 declare const process: {
@@ -69,6 +70,7 @@ export async function backupGatewayCa(
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
+    ...buildKnownHostsArgs(),
     `root@${opts.host}`,
     `docker run --rm -v ${MITMPROXY_CERTS_VOLUME}:/src:ro alpine tar -cf - -C /src ${CA_CERT_FILE} ${CA_KEY_FILE}`,
   ]

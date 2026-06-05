@@ -133,6 +133,70 @@ function makeSpawn(stdout: string, stderr = '', exitCode = 0): SpawnFn {
   }
 }
 
+// ─── SSH command includes repo-pinned UserKnownHostsFile ─────────────────────
+
+describe('getUmamiComposeStatus — SSH command includes UserKnownHostsFile', () => {
+  it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to ssh when the file exists', async () => {
+    let capturedCmd: string[] = []
+
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const enc = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(JSON.stringify([{Name: 'umami', State: 'running', Health: 'healthy'}])))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getUmamiComposeStatus('metrics.fro.bot', capturingSpawn)
+
+    // Find the UserKnownHostsFile option in the ssh command
+    const knownHostsIdx = capturedCmd.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
+    expect(knownHostsIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[knownHostsIdx - 1]).toBe('-o')
+    expect(capturedCmd[knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
+  })
+
+  it('does not weaken StrictHostKeyChecking when UserKnownHostsFile is added', async () => {
+    let capturedCmd: string[] = []
+
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const enc = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(JSON.stringify([{Name: 'umami', State: 'running', Health: 'healthy'}])))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getUmamiComposeStatus('metrics.fro.bot', capturingSpawn)
+
+    const strictIdx = capturedCmd.findIndex(arg => arg.startsWith('StrictHostKeyChecking='))
+    expect(strictIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[strictIdx]).toBe('StrictHostKeyChecking=yes')
+  })
+})
+
 describe('getUmamiComposeStatus', () => {
   it('returns service rows from NDJSON output', async () => {
     const ndjson = [

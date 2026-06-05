@@ -4,6 +4,11 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, mock, test} from 'bun:test'
 
+// ─── Test digest fixtures ─────────────────────────────────────────────────────
+
+const GATEWAY_DIGEST = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+const WORKSPACE_DIGEST = 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function makeStream(content: string): ReadableStream<Uint8Array> {
@@ -58,6 +63,8 @@ function makeEnv(overrides: Record<string, string> = {}): Record<string, string>
     WORKSPACE_OPENCODE_MODEL: 'anthropic/claude-sonnet-4-6',
     WORKSPACE_OPENCODE_CONFIG: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
     GATEWAY_TRIGGER_ROLE_ID: '123456789012345678',
+    GATEWAY_IMAGE_DIGEST: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    WORKSPACE_IMAGE_DIGEST: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     PATH: '/usr/bin:/bin',
     HOME: '/root',
     ...overrides,
@@ -73,13 +80,28 @@ function writeUpstreamJson(content: object): string {
   return path
 }
 
-/** Build a spawn mock that records calls and returns success by default. */
+/**
+ * Build a spawn mock that records calls and returns success by default.
+ * docker inspect commands return a JSON array containing the expected digest
+ * so assertRunningImageDigest passes in tests that don't override the handler.
+ */
 function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {spawnFn: SpawnFn; calls: string[][]} {
   const calls: string[][] = []
   const spawnFn: SpawnFn = (cmd, _opts) => {
     calls.push(cmd)
     const custom = handler?.(cmd)
-    return custom ?? makeSpawnResult()
+    if (custom !== undefined) return custom
+    // Return valid RepoDigests JSON for docker inspect so assertRunningImageDigest passes
+    const cmdStr = cmd.join(' ')
+    if (cmdStr.includes('docker inspect') && cmdStr.includes('RepoDigests')) {
+      // Return both digests so either gateway or workspace check passes
+      const digests = [
+        `ghcr.io/marcusrbrown/infra-gateway@${GATEWAY_DIGEST}`,
+        `ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`,
+      ]
+      return makeSpawnResult({stdout: JSON.stringify(digests)})
+    }
+    return makeSpawnResult()
   }
   return {spawnFn, calls}
 }
@@ -593,9 +615,19 @@ describe('main', () => {
   })
 
   test('edge case (secrets unchanged): checksum matches → no --force-recreate', async () => {
-    const {main, buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const {main, buildSecretFileList, computeSecretsChecksum, buildComposeOverride} = await import('./deploy')
     const env = makeEnv()
-    const expectedChecksum = computeSecretsChecksum(buildSecretFileList(env))
+    const secrets = buildSecretFileList(env)
+    // Override is always included in checksum now
+    const overrideContent = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+    })
+    const expectedChecksum = computeSecretsChecksum([
+      ...secrets,
+      {name: 'compose.override.yaml', content: overrideContent, required: false},
+    ])
 
     const {spawnFn, calls} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
@@ -608,10 +640,10 @@ describe('main', () => {
 
     await main({env, args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
 
-    const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
-    expect(composeCall).toBeDefined()
-    expect(composeCall?.join(' ')).not.toContain('--force-recreate')
-    expect(composeCall?.join(' ')).toContain('--build')
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall).toBeDefined()
+    expect(upCall?.join(' ')).not.toContain('--force-recreate')
+    expect(upCall?.join(' ')).not.toContain('--build')
   })
 
   test('edge case (secrets changed): checksum differs → --force-recreate added', async () => {
@@ -628,16 +660,25 @@ describe('main', () => {
 
     await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
 
-    const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
-    expect(composeCall).toBeDefined()
-    expect(composeCall?.join(' ')).toContain('--force-recreate')
-    expect(composeCall?.join(' ')).toContain('--build')
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall).toBeDefined()
+    expect(upCall?.join(' ')).toContain('--force-recreate')
+    expect(upCall?.join(' ')).not.toContain('--build')
   })
 
-  test('rebuilds the image from pinned source on every deploy regardless of --force-recreate', async () => {
-    const {main, buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+  test('pulls prebuilt GHCR image on every deploy regardless of --force-recreate', async () => {
+    const {main, buildSecretFileList, computeSecretsChecksum, buildComposeOverride} = await import('./deploy')
     const env = makeEnv()
-    const expectedChecksum = computeSecretsChecksum(buildSecretFileList(env))
+    const secrets = buildSecretFileList(env)
+    const overrideContent = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+    })
+    const expectedChecksum = computeSecretsChecksum([
+      ...secrets,
+      {name: 'compose.override.yaml', content: overrideContent, required: false},
+    ])
 
     // Secrets unchanged path — no --force-recreate
     const {spawnFn: spawnFnA, calls: callsA} = makeSpawnMock(cmd => {
@@ -650,12 +691,12 @@ describe('main', () => {
     const mockFetchA = makeDiscordFetch([{name: 'ping'}])
     await main({env, args: [], fetch: mockFetchA, sleep: async () => {}, spawn: spawnFnA})
 
-    const composeCallA = callsA.find(cmd => cmd.some(s => s.includes('docker compose')))
-    expect(composeCallA).toBeDefined()
-    expect(composeCallA?.join(' ')).toContain('--build')
-    expect(composeCallA?.join(' ')).not.toContain('--force-recreate')
+    const upCallA = callsA.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCallA).toBeDefined()
+    expect(upCallA?.join(' ')).toContain('--no-build')
+    expect(upCallA?.join(' ')).not.toContain('--force-recreate')
 
-    // Secrets changed path — --force-recreate present alongside --build
+    // Secrets changed path — --force-recreate present alongside --no-build
     const {spawnFn: spawnFnB, calls: callsB} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
       if (cmdStr.includes('.secrets-checksum') && cmdStr.includes('cat')) {
@@ -666,16 +707,25 @@ describe('main', () => {
     const mockFetchB = makeDiscordFetch([{name: 'ping'}])
     await main({env: makeEnv(), args: [], fetch: mockFetchB, sleep: async () => {}, spawn: spawnFnB})
 
-    const composeCallB = callsB.find(cmd => cmd.some(s => s.includes('docker compose')))
-    expect(composeCallB).toBeDefined()
-    expect(composeCallB?.join(' ')).toContain('--build')
-    expect(composeCallB?.join(' ')).toContain('--force-recreate')
+    const upCallB = callsB.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCallB).toBeDefined()
+    expect(upCallB?.join(' ')).toContain('--no-build')
+    expect(upCallB?.join(' ')).toContain('--force-recreate')
   })
 
   test('readRemoteChecksum: SSH exits 0 with checksum → returns checksum string', async () => {
-    const {main, buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const {main, buildSecretFileList, computeSecretsChecksum, buildComposeOverride} = await import('./deploy')
     const env = makeEnv()
-    const expectedChecksum = computeSecretsChecksum(buildSecretFileList(env))
+    const secrets = buildSecretFileList(env)
+    const overrideContent = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+    })
+    const expectedChecksum = computeSecretsChecksum([
+      ...secrets,
+      {name: 'compose.override.yaml', content: overrideContent, required: false},
+    ])
 
     const mockFetch = makeDiscordFetch([{name: 'ping'}])
 
@@ -688,8 +738,8 @@ describe('main', () => {
       return undefined
     })
     await main({env, args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
-    const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
-    expect(composeCall?.join(' ')).not.toContain('--force-recreate')
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall?.join(' ')).not.toContain('--force-recreate')
   })
 
   test('readRemoteChecksum: SSH exits 0 with empty stdout (first deploy) → returns empty string, no force-recreate suppressed', async () => {
@@ -707,9 +757,9 @@ describe('main', () => {
 
     await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
 
-    // Empty prior checksum != current checksum → --force-recreate
-    const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))
-    expect(composeCall?.join(' ')).toContain('--force-recreate')
+    // Empty prior checksum != current checksum → --force-recreate on the up command
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall?.join(' ')).toContain('--force-recreate')
   })
 
   test('readRemoteChecksum: SSH exits non-zero → throws with exit code and stderr', async () => {
@@ -2950,51 +3000,57 @@ describe('buildSecretFileList — normalizePemPrivateKey wiring', () => {
 
 // ─── buildComposeOverride ─────────────────────────────────────────────────────
 
+const OVERRIDE_OPTS_ANNOUNCE = {
+  gatewayDigest: GATEWAY_DIGEST,
+  workspaceDigest: WORKSPACE_DIGEST,
+  announceEnabled: true,
+}
+
 describe('buildComposeOverride', () => {
   test('includes caddy service with 80:80 and 443:443 port bindings', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('80:80')
     expect(yaml).toContain('443:443')
   })
 
   test('caddy service joins gateway-net network', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('gateway-net')
   })
 
   test('caddy service has named caddy_data and caddy_config volumes', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('caddy_data')
     expect(yaml).toContain('caddy_config')
   })
 
   test('caddy service depends_on gateway', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('depends_on')
     expect(yaml).toContain('gateway')
   })
 
   test('caddy service mounts Caddyfile read-only', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('Caddyfile')
     expect(yaml).toContain(':ro')
   })
 
   test('gateway service gets GATEWAY_WEBHOOK_SECRET_FILE env entry', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('GATEWAY_WEBHOOK_SECRET_FILE')
     expect(yaml).toContain('/run/secrets/gateway_webhook_secret')
   })
 
   test('gateway service gets GATEWAY_PRESENCE_CHANNEL_ID_FILE env entry', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('GATEWAY_PRESENCE_CHANNEL_ID_FILE')
     expect(yaml).toContain('/run/secrets/gateway_presence_channel_id')
   })
@@ -3002,26 +3058,26 @@ describe('buildComposeOverride', () => {
   test('gateway service gets two announce bind-mount volumes with correct source paths', async () => {
     const {buildComposeOverride, ANNOUNCE_WEBHOOK_SECRET_FILE, ANNOUNCE_PRESENCE_CHANNEL_FILE} =
       await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain(`./secrets/${ANNOUNCE_WEBHOOK_SECRET_FILE}`)
     expect(yaml).toContain(`./secrets/${ANNOUNCE_PRESENCE_CHANNEL_FILE}`)
   })
 
   test('gateway service bind-mounts target /run/secrets/gateway_webhook_secret', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('/run/secrets/gateway_webhook_secret')
   })
 
   test('gateway service bind-mounts target /run/secrets/gateway_presence_channel_id', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('/run/secrets/gateway_presence_channel_id')
   })
 
   test('top-level volumes block declares caddy_data and caddy_config', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     // Top-level volumes section must exist
     expect(yaml).toMatch(/^volumes:/m)
     expect(yaml).toContain('caddy_data')
@@ -3030,14 +3086,14 @@ describe('buildComposeOverride', () => {
 
   test('caddy image is pinned to the same digest as cliproxy (caddy:2.11.3-alpine@sha256:...)', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     // Must use a pinned digest (sha256:)
     expect(yaml).toMatch(/caddy:[\d.]+-alpine@sha256:[0-9a-f]{64}/)
   })
 
   test('caddy service has restart: unless-stopped', async () => {
     const {buildComposeOverride} = await import('./deploy')
-    const yaml = buildComposeOverride()
+    const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     expect(yaml).toContain('unless-stopped')
   })
 })
@@ -3135,7 +3191,7 @@ describe('main() — announce override + Caddyfile materialization', () => {
     }
   })
 
-  test('announce disabled → writeRemoteFile NOT called for compose.override.yaml', async () => {
+  test('announce disabled → compose.override.yaml IS written (carries image pins)', async () => {
     const {main} = await import('./deploy')
     const stdinCaptures: Record<string, string> = {}
     const {spawnFn} = makeSpawnMock(cmd => {
@@ -3165,9 +3221,13 @@ describe('main() — announce override + Caddyfile materialization', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
     })
 
-    // compose.override.yaml must NOT have been written
+    // compose.override.yaml MUST be written (carries image digest pins)
     const overridePath = '/opt/gateway/deploy/compose.override.yaml'
-    expect(stdinCaptures[overridePath]).toBeUndefined()
+    expect(stdinCaptures[overridePath]).toBeDefined()
+    expect(stdinCaptures[overridePath]).toContain('ghcr.io/marcusrbrown/infra-gateway@')
+    expect(stdinCaptures[overridePath]).toContain('ghcr.io/marcusrbrown/infra-workspace@')
+    // Caddy/announce wiring must NOT be present when announce is disabled
+    expect(stdinCaptures[overridePath]).not.toContain('GATEWAY_WEBHOOK_SECRET_FILE')
   })
 
   test('announce disabled → writeRemoteFile NOT called for Caddyfile', async () => {
@@ -3289,7 +3349,15 @@ describe('computeSecretsChecksum — override + Caddyfile folded in', () => {
     const announceSecrets = buildSecretFileList(announceEnv)
 
     // Fold override + Caddyfile into the announce checksum input
-    const overrideEntry = {name: 'compose.override.yaml', content: buildComposeOverride(), required: false}
+    const overrideEntry = {
+      name: 'compose.override.yaml',
+      content: buildComposeOverride({
+        gatewayDigest: GATEWAY_DIGEST,
+        workspaceDigest: WORKSPACE_DIGEST,
+        announceEnabled: true,
+      }),
+      required: false,
+    }
     const caddyfileEntry = {
       name: 'Caddyfile',
       content: buildCaddyfile(announceEnv.GATEWAY_HOST ?? 'gateway.fro.bot'),
@@ -3352,7 +3420,7 @@ describe('main() — compose-up args', () => {
     expect(cmdStr).toContain('--remove-orphans')
   })
 
-  test('compose-up command always includes --build', async () => {
+  test('compose-up command always includes --no-build (pulls prebuilt image, never builds on droplet)', async () => {
     const {main} = await import('./deploy')
     const composeCmds: string[][] = []
     const {spawnFn} = makeSpawnMock(cmd => {
@@ -3376,7 +3444,8 @@ describe('main() — compose-up args', () => {
     expect(composeCmds.length).toBeGreaterThan(0)
     const composeCmd = composeCmds[0]!
     const cmdStr = composeCmd.join(' ')
-    expect(cmdStr).toContain('--build')
+    expect(cmdStr).toContain('--no-build')
+    expect(cmdStr).not.toContain('--build')
   })
 })
 
@@ -3655,7 +3724,11 @@ describe('computeSecretsChecksum — override+Caddyfile contribution isolates fr
     const checksumSecretsOnly = computeSecretsChecksum(secretsOnly)
 
     // Checksum with override + Caddyfile bytes folded in (same secrets, same env)
-    const overrideContent = buildComposeOverride()
+    const overrideContent = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: true,
+    })
     const caddyfileContent = buildCaddyfile(announceEnv.GATEWAY_HOST ?? 'gateway.fro.bot')
     const checksumInput = [
       ...secretsOnly,
@@ -3709,7 +3782,7 @@ networks:
     driver: bridge
 `
 
-    const overrideYaml = buildComposeOverride()
+    const overrideYaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
 
     // Write to a temp directory
     const {mkdtempSync: mkdtemp, writeFileSync: writeFile, rmSync: rm} = await import('node:fs')
@@ -3749,5 +3822,302 @@ networks:
     } finally {
       rm(testDir, {recursive: true, force: true})
     }
+  })
+})
+
+// ─── Off-droplet image build: override, pull-then-up, digest verification ─────
+
+describe('buildComposeOverride — image pins always materialized', () => {
+  test('announce-disabled: override contains image pins for gateway and workspace', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const result = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+    })
+    expect(result).toContain(`ghcr.io/marcusrbrown/infra-gateway@${GATEWAY_DIGEST}`)
+    expect(result).toContain(`ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`)
+  })
+
+  test('announce-disabled: override does NOT contain Caddy service or announce wiring', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const result = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+    })
+    expect(result).not.toContain('caddy:')
+    expect(result).not.toContain('GATEWAY_WEBHOOK_SECRET_FILE')
+    expect(result).not.toContain('GATEWAY_PRESENCE_CHANNEL_ID_FILE')
+  })
+
+  test('announce-enabled: override contains BOTH image pins AND Caddy/announce wiring', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const result = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: true,
+    })
+    // Image pins present
+    expect(result).toContain(`ghcr.io/marcusrbrown/infra-gateway@${GATEWAY_DIGEST}`)
+    expect(result).toContain(`ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`)
+    // Caddy/announce wiring present
+    expect(result).toContain('caddy:')
+    expect(result).toContain('GATEWAY_WEBHOOK_SECRET_FILE')
+    expect(result).toContain('GATEWAY_PRESENCE_CHANNEL_ID_FILE')
+  })
+
+  test('image pins use exact @sha256: digest format, not a tag', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const result = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+    })
+    // Must use @sha256: digest notation
+    expect(result).toMatch(/ghcr\.io\/marcusrbrown\/infra-gateway@sha256:[0-9a-f]{64}/)
+    expect(result).toMatch(/ghcr\.io\/marcusrbrown\/infra-workspace@sha256:[0-9a-f]{64}/)
+  })
+
+  test('announce-enabled: announce volumes use new mount targets (volume-merge semantics preserved)', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const result = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: true,
+    })
+    expect(result).toContain('/run/secrets/gateway_webhook_secret')
+    expect(result).toContain('/run/secrets/gateway_presence_channel_id')
+  })
+})
+
+describe('main() — compose command sequence: pull-then-up-without-build', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('compose command sequence includes a pull step before up', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    const composeCalls = calls.filter(cmd => cmd.some(s => s.includes('docker compose')))
+    const pullCall = composeCalls.find(cmd => cmd.some(s => s.includes(' pull') || s.endsWith('pull')))
+    const upCall = composeCalls.find(cmd => cmd.some(s => s.includes(' up ')))
+
+    expect(pullCall).toBeDefined()
+    expect(upCall).toBeDefined()
+
+    // pull must come before up
+    const pullIdx = pullCall ? calls.indexOf(pullCall) : -1
+    const upIdx = upCall ? calls.indexOf(upCall) : -1
+    expect(pullIdx).toBeLessThan(upIdx)
+  })
+
+  test('compose up command does NOT contain --build', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall).toBeDefined()
+    expect(upCall?.join(' ')).not.toContain('--build')
+  })
+
+  test('compose up command contains --no-build', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall).toBeDefined()
+    expect(upCall?.join(' ')).toContain('--no-build')
+  })
+
+  test('compose up command retains --wait, --wait-timeout 120, --remove-orphans', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall).toBeDefined()
+    const upStr = upCall?.join(' ') ?? ''
+    expect(upStr).toContain('--wait')
+    expect(upStr).toContain('--wait-timeout')
+    expect(upStr).toContain('120')
+    expect(upStr).toContain('--remove-orphans')
+  })
+
+  test('--force-recreate absent when checksum unchanged and forceRecreate not set', async () => {
+    const {main, buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const env = makeEnv()
+    // Compute what the checksum will be with the override always included
+    const secrets = buildSecretFileList(env)
+    const {buildComposeOverride} = await import('./deploy')
+    const overrideContent = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+    })
+    const checksumInput = [...secrets, {name: 'compose.override.yaml', content: overrideContent, required: false}]
+    const expectedChecksum = computeSecretsChecksum(checksumInput)
+
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes('cat')) {
+        return makeSpawnResult({stdout: expectedChecksum})
+      }
+      return undefined
+    })
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env, args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall?.join(' ')).not.toContain('--force-recreate')
+  })
+
+  test('--force-recreate present when checksum changed', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('.secrets-checksum') && cmdStr.includes('cat')) {
+        return makeSpawnResult({stdout: 'old-checksum-that-differs'})
+      }
+      return undefined
+    })
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall?.join(' ')).toContain('--force-recreate')
+  })
+
+  test('--force-recreate present when --force-recreate arg passed', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env: makeEnv(), args: ['--force-recreate'], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall?.join(' ')).toContain('--force-recreate')
+  })
+
+  test('missing GATEWAY_IMAGE_DIGEST → throws before any SSH, no build fallback', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_IMAGE_DIGEST
+
+    await expect(main({env, args: [], spawn: spawnFn})).rejects.toThrow(/GATEWAY_IMAGE_DIGEST/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('missing WORKSPACE_IMAGE_DIGEST → throws before any SSH, no build fallback', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const env = makeEnv()
+    delete (env as Record<string, string>).WORKSPACE_IMAGE_DIGEST
+
+    await expect(main({env, args: [], spawn: spawnFn})).rejects.toThrow(/WORKSPACE_IMAGE_DIGEST/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('override is always written (announce-disabled path) and contains image pins', async () => {
+    const {main} = await import('./deploy')
+    const overrideWrites: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('compose.override.yaml')) {
+        const result = makeSpawnResult({captureStdin: true})
+        if (result.stdin) {
+          const origWrite = result.stdin.write.bind(result.stdin)
+          result.stdin.write = (data: Uint8Array) => {
+            overrideWrites.push(new TextDecoder().decode(data))
+            origWrite(data)
+          }
+        }
+        return result
+      }
+      return undefined
+    })
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn})
+
+    expect(overrideWrites.length).toBeGreaterThan(0)
+    const overrideContent = overrideWrites.join('')
+    expect(overrideContent).toContain(`ghcr.io/marcusrbrown/infra-gateway@${GATEWAY_DIGEST}`)
+    expect(overrideContent).toContain(`ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`)
+  })
+})
+
+describe('assertRunningImageDigest — pure digest verification helper', () => {
+  test('passes when actual RepoDigests contains the expected digest', async () => {
+    const {assertRunningImageDigest} = await import('./deploy')
+    const repoDigests = [
+      `ghcr.io/marcusrbrown/infra-gateway@${GATEWAY_DIGEST}`,
+      'ghcr.io/marcusrbrown/infra-gateway:v0.44.0',
+    ]
+    expect(() => assertRunningImageDigest(repoDigests, GATEWAY_DIGEST, 'gateway')).not.toThrow()
+  })
+
+  test('throws when actual RepoDigests does not contain the expected digest', async () => {
+    const {assertRunningImageDigest} = await import('./deploy')
+    const wrongDigest = 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    const repoDigests = [`ghcr.io/marcusrbrown/infra-gateway@${wrongDigest}`]
+    expect(() => assertRunningImageDigest(repoDigests, GATEWAY_DIGEST, 'gateway')).toThrow(/gateway/)
+  })
+
+  test('throws when RepoDigests is empty', async () => {
+    const {assertRunningImageDigest} = await import('./deploy')
+    expect(() => assertRunningImageDigest([], GATEWAY_DIGEST, 'gateway')).toThrow(/gateway/)
+  })
+
+  test('error message includes the expected digest for actionability', async () => {
+    const {assertRunningImageDigest} = await import('./deploy')
+    const wrongDigest = 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    const repoDigests = [`ghcr.io/marcusrbrown/infra-gateway@${wrongDigest}`]
+    let errorMessage = ''
+    try {
+      assertRunningImageDigest(repoDigests, GATEWAY_DIGEST, 'gateway')
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+    expect(errorMessage).toContain(GATEWAY_DIGEST)
+  })
+
+  test('passes for workspace service with correct digest', async () => {
+    const {assertRunningImageDigest} = await import('./deploy')
+    const repoDigests = [`ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`]
+    expect(() => assertRunningImageDigest(repoDigests, WORKSPACE_DIGEST, 'workspace')).not.toThrow()
   })
 })

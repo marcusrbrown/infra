@@ -550,22 +550,45 @@ export function computeSecretsChecksum(secrets: SecretFile[]): string {
 // Renovate tracks the digest in those files; keep in sync when Renovate bumps them.
 const CADDY_IMAGE = 'caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794'
 
+export interface ComposeOverrideOpts {
+  /** Digest of the gateway image pushed to GHCR (e.g. "sha256:abc..."). */
+  gatewayDigest: string
+  /** Digest of the workspace image pushed to GHCR (e.g. "sha256:def..."). */
+  workspaceDigest: string
+  /** When true, adds the Caddy reverse proxy and announce secret wiring. */
+  announceEnabled: boolean
+}
+
+const GATEWAY_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-gateway'
+const WORKSPACE_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-workspace'
+
 /**
- * Builds the compose.override.yaml content that adds a path-scoped Caddy reverse proxy
- * publishing :80/:443 on gateway-net, plus the daemon's announce secret wiring.
+ * Builds the compose.override.yaml content.
  *
- * This file is materialized on the droplet only when announceEnabled. When disabled,
- * git clean -xfd removes any prior copy automatically.
+ * Always emits `image:` digest pins for the `gateway` and `workspace` services so
+ * the droplet pulls the prebuilt GHCR artifacts and never builds from source.
+ * Docker Compose deep-merges the override; the upstream `build:` stanzas remain
+ * present but are inert without `--build`.
+ *
+ * When announceEnabled, also adds a path-scoped Caddy reverse proxy publishing
+ * :80/:443 on gateway-net, plus the daemon's announce secret wiring.
  *
  * Docker Compose merges the gateway service's `volumes:` list by mount-target key —
  * new targets APPEND, same-target REPLACES. The two announce bind mounts added here
  * use new targets (/run/secrets/gateway_webhook_secret and
  * /run/secrets/gateway_presence_channel_id), so upstream's other secret mounts are
  * preserved unchanged.
+ *
+ * When announceEnabled is false, git clean -xfd removes any prior Caddyfile
+ * automatically. The override file itself is always written (image pins are required
+ * on every deploy). --remove-orphans retires the Caddy container when announce is
+ * toggled off.
  */
-export function buildComposeOverride(): string {
-  return `services:
-  gateway:
+export function buildComposeOverride(opts: ComposeOverrideOpts): string {
+  const {gatewayDigest, workspaceDigest, announceEnabled} = opts
+
+  const announceSection = announceEnabled
+    ? `
     environment:
       GATEWAY_WEBHOOK_SECRET_FILE: /run/secrets/gateway_webhook_secret
       GATEWAY_PRESENCE_CHANNEL_ID_FILE: /run/secrets/gateway_presence_channel_id
@@ -581,8 +604,11 @@ export function buildComposeOverride(): string {
         target: /run/secrets/gateway_presence_channel_id
         read_only: true
         bind:
-          create_host_path: false
-  caddy:
+          create_host_path: false`
+    : ''
+
+  const caddySection = announceEnabled
+    ? `  caddy:
     image: ${CADDY_IMAGE}
     restart: unless-stopped
     ports:
@@ -596,10 +622,22 @@ export function buildComposeOverride(): string {
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:
       - gateway
-volumes:
+`
+    : ''
+
+  const volumesSection = announceEnabled
+    ? `volumes:
   caddy_data:
   caddy_config:
 `
+    : ''
+
+  return `services:
+  gateway:
+    image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${announceSection}
+  workspace:
+    image: ${WORKSPACE_IMAGE_NAME}@${workspaceDigest}
+${caddySection}${volumesSection}`
 }
 
 /**
@@ -661,6 +699,35 @@ export function redactSecretsFromError(error: unknown, secrets: SecretFile[]): E
     }
   }
   return new Error(sanitized)
+}
+
+/**
+ * Asserts that the running container's RepoDigests include the expected digest.
+ *
+ * Pure helper — no SSH, no side effects. Throws with an actionable message when
+ * the running image does not match the CI-pushed digest. Used after `docker compose up`
+ * to confirm the droplet is running the prebuilt GHCR artifact, not a stale or
+ * locally-built image.
+ *
+ * @param actualRepoDigests - Array of RepoDigest strings from `docker inspect --format '{{json .RepoDigests}}'`
+ * @param expectedDigest - The sha256 digest that must appear in at least one entry (e.g. "sha256:abc...")
+ * @param serviceName - Human-readable service name for error messages (e.g. "gateway", "workspace")
+ */
+export function assertRunningImageDigest(
+  actualRepoDigests: string[],
+  expectedDigest: string,
+  serviceName: string,
+): void {
+  const matched = actualRepoDigests.some(d => d.includes(expectedDigest))
+  if (!matched) {
+    throw new Error(
+      `Running ${serviceName} image digest does not match the expected CI-pushed digest.\n` +
+        `  Expected: ${expectedDigest}\n` +
+        `  Actual RepoDigests: ${actualRepoDigests.length > 0 ? actualRepoDigests.join(', ') : '(empty)'}\n` +
+        `The droplet may be running a stale or locally-built image. ` +
+        `Re-run the deploy to pull the correct GHCR artifact.`,
+    )
+  }
 }
 
 /**
@@ -987,7 +1054,45 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     config: env.WORKSPACE_OPENCODE_CONFIG ?? '',
   })
 
-  // Phase 3c: Validate announce both-or-neither gate before any SSH.
+  // Phase 3c: Validate image digests before any SSH.
+  // GATEWAY_IMAGE_DIGEST and WORKSPACE_IMAGE_DIGEST are required on every deploy —
+  // they are supplied by the CI build-images job and used to pin the pulled images.
+  // Failing fast here prevents a silent fall-through to on-droplet building.
+  // Both digests are validated against /^sha256:[0-9a-f]{64}$/ to guard the
+  // compose override `image:@<digest>` and the Phase 9c verification.
+  const DIGEST_RE = /^sha256:[0-9a-f]{64}$/
+  const gatewayDigest = env.GATEWAY_IMAGE_DIGEST?.trim()
+  const workspaceDigest = env.WORKSPACE_IMAGE_DIGEST?.trim()
+  if (!gatewayDigest) {
+    throw new Error(
+      'GATEWAY_IMAGE_DIGEST is required but not set. ' +
+        'This value is supplied by the CI build-images job. ' +
+        'For a local deploy, build and push the image to GHCR first, then set GATEWAY_IMAGE_DIGEST.',
+    )
+  }
+  if (!DIGEST_RE.test(gatewayDigest)) {
+    throw new Error(
+      `GATEWAY_IMAGE_DIGEST has an invalid format: "${gatewayDigest}". ` +
+        'Expected sha256:<64 hex chars> (e.g. sha256:abc...def). ' +
+        'This value is supplied by the CI build-images job outputs.digest.',
+    )
+  }
+  if (!workspaceDigest) {
+    throw new Error(
+      'WORKSPACE_IMAGE_DIGEST is required but not set. ' +
+        'This value is supplied by the CI build-images job. ' +
+        'For a local deploy, build and push the image to GHCR first, then set WORKSPACE_IMAGE_DIGEST.',
+    )
+  }
+  if (!DIGEST_RE.test(workspaceDigest)) {
+    throw new Error(
+      `WORKSPACE_IMAGE_DIGEST has an invalid format: "${workspaceDigest}". ` +
+        'Expected sha256:<64 hex chars> (e.g. sha256:abc...def). ' +
+        'This value is supplied by the CI build-images job outputs.digest.',
+    )
+  }
+
+  // Phase 3d: Validate announce both-or-neither gate before any SSH.
   // Exactly one of the announce inputs being set is an invalid configuration —
   // fail fast with a clear message naming the missing input.
   const announceState = getAnnounceState(env)
@@ -1007,17 +1112,22 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     console.warn(`  1. Ensure droplet workspace at ${REMOTE_DIR} (clone ${repo}@${ref} or fetch+reset)`)
     console.warn(`  2. Compute OBJECT_STORE_HOSTS: ${objectStoreHosts}`)
     console.warn(`  3. Materialize ${buildSecretFileList(env).length} secret files under ${SECRETS_DIR}`)
+    console.warn(
+      `  3b. Write compose.override.yaml with image pins (gateway@${gatewayDigest}, workspace@${workspaceDigest})${announceEnabled ? ' + Caddy/announce wiring' : ''}`,
+    )
     if (announceEnabled) {
-      console.warn(`  3b. Announce enabled — materialize compose.override.yaml + Caddyfile under ${DEPLOY_DIR}`)
+      console.warn(`  3c. Announce enabled — materialize Caddyfile under ${DEPLOY_DIR}`)
     }
     console.warn(`  4. Write .env to ${ENV_PATH}`)
     console.warn(`  5. Run init-certs.sh (idempotent)`)
+    console.warn(`  6. docker compose pull (pull prebuilt GHCR images)`)
     console.warn(
-      `  6. docker compose up -d --build --wait --wait-timeout 120 --remove-orphans${forceRecreate ? ' --force-recreate' : ''}`,
+      `  7. docker compose up -d --no-build --wait --wait-timeout 120 --remove-orphans${forceRecreate ? ' --force-recreate' : ''}`,
     )
     console.warn(
-      `  7. Poll Discord slash command registration (app=${env.DISCORD_APPLICATION_ID} guild=${env.DISCORD_GUILD_ID})`,
+      `  8. Poll Discord slash command registration (app=${env.DISCORD_APPLICATION_ID} guild=${env.DISCORD_GUILD_ID})`,
     )
+    console.warn(`  9. Verify running image digests match CI-pushed digests`)
     console.warn('\u001B[1;33m[dry-run]\u001B[0m No remote side effects performed.')
     return
   }
@@ -1131,25 +1241,31 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       )
     }
 
-    // Phase 5b: Materialize compose.override.yaml + Caddyfile when announce is enabled.
-    // These are working-tree files; git clean -xfd (phase 4) already removed any prior copy,
-    // so they are only present when announceEnabled. writeRemoteFile overwrites idempotently.
+    // Phase 5b: Materialize compose.override.yaml (always) + Caddyfile (announce-only).
+    // The override is written on EVERY deploy because it carries the image digest pins
+    // for gateway and workspace — without it, compose would use build: semantics.
+    // git clean -xfd (phase 4) removed any prior copy; writeRemoteFile overwrites idempotently.
     const announceEnabled = announceState === 'enabled'
-    const overrideContent = announceEnabled ? buildComposeOverride() : ''
+    const overrideContent = buildComposeOverride({
+      gatewayDigest,
+      workspaceDigest,
+      announceEnabled,
+    })
     const caddyfileContent = announceEnabled ? buildCaddyfile(validated.GATEWAY_HOST) : ''
 
+    await writeRemoteFile(
+      'Writing compose.override.yaml',
+      host,
+      `${DEPLOY_DIR}/compose.override.yaml`,
+      overrideContent,
+      deployEnv,
+      spawnFn,
+      secrets,
+      keyPath,
+      controlPath,
+    )
+
     if (announceEnabled) {
-      await writeRemoteFile(
-        'Writing compose.override.yaml',
-        host,
-        `${DEPLOY_DIR}/compose.override.yaml`,
-        overrideContent,
-        deployEnv,
-        spawnFn,
-        secrets,
-        keyPath,
-        controlPath,
-      )
       await writeRemoteFile(
         'Writing Caddyfile',
         host,
@@ -1164,11 +1280,14 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     }
 
     // Compute current checksum and read prior checksum to detect rotation.
-    // Fold override + Caddyfile bytes into the checksum so toggling announce on/off
-    // forces --force-recreate (Caddy is created/destroyed on the toggling deploy).
-    const checksumInput: SecretFile[] = [...secrets]
+    // The override is always included (image pins change when digests change, which
+    // should force recreate). Caddyfile is included only when announce is enabled,
+    // so toggling announce on/off forces --force-recreate (Caddy is created/destroyed).
+    const checksumInput: SecretFile[] = [
+      ...secrets,
+      {name: 'compose.override.yaml', content: overrideContent, required: false},
+    ]
     if (announceEnabled) {
-      checksumInput.push({name: 'compose.override.yaml', content: overrideContent, required: false})
       checksumInput.push({name: 'Caddyfile', content: caddyfileContent, required: false})
     }
     const currentChecksum = computeSecretsChecksum(checksumInput)
@@ -1201,10 +1320,22 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 8: docker compose up
+    // Phase 8: Pull prebuilt GHCR images, then bring up the stack without building.
+    // The compose.override.yaml written in phase 5b pins gateway and workspace to the
+    // CI-pushed digests. docker compose pull fetches those exact images; docker compose up
+    // with --no-build uses the pulled images and never triggers an on-droplet build.
+    // A missing/unpullable image errors here (does not fall back to building).
+    //
     // --remove-orphans: required to retire the Caddy container when announce is toggled off.
-    // When disabled, the override is absent (git clean removed it), so Caddy is no longer a
-    // declared service. Without --remove-orphans, the container lingers on :443.
+    // When announce is disabled, Caddy is not declared in the override, so without
+    // --remove-orphans the container lingers on :443.
+    await runCommand(
+      'Pulling prebuilt images from GHCR',
+      sshCommand(host, `docker compose --project-directory ${DEPLOY_DIR} pull`, keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+
     const composeArgs = [
       'docker',
       'compose',
@@ -1212,7 +1343,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       DEPLOY_DIR,
       'up',
       '-d',
-      '--build',
+      '--no-build',
       '--wait',
       '--wait-timeout',
       '120',
@@ -1294,8 +1425,56 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       }
     }
 
-    // Phase 10: Persist checksum AFTER compose + registration succeed
-    // If either phase 8 or 9 threw, we never reach here — prior checksum stays in place
+    // Phase 9c: Verify running image digests match the CI-pushed GHCR digests.
+    // This confirms the droplet is running the prebuilt artifact, not a stale or
+    // locally-built image. Throws if the digest does not match — deploy fails loudly.
+    //
+    // Two-step inspect: containers have no .RepoDigests field — inspecting a container
+    // directly returns a template error and empty stdout. Instead:
+    //   1. Resolve the container's image SHA via `docker inspect --format '{{.Image}}' <container>`
+    //   2. Inspect the IMAGE's RepoDigests via `docker inspect --format '{{json .RepoDigests}}' <imageSHA>`
+    for (const [service, expectedDigest] of [
+      ['gateway', gatewayDigest],
+      ['workspace', workspaceDigest],
+    ] as const) {
+      // Step 1: resolve container → image SHA
+      const {stdout: imageSha} = await runCommand(
+        `Resolving running image SHA: ${service}`,
+        sshCommand(
+          host,
+          `docker inspect --format '{{.Image}}' $(docker compose --project-directory ${DEPLOY_DIR} ps -q ${service})`,
+          keyPath,
+          controlPath,
+        ),
+        deployEnv,
+        spawnFn,
+      )
+      // Step 2: inspect the IMAGE's RepoDigests
+      const {stdout: repoDigestsJson} = await runCommand(
+        `Verifying running image digest: ${service}`,
+        sshCommand(host, `docker inspect --format '{{json .RepoDigests}}' ${imageSha.trim()}`, keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+      // Narrow the parsed JSON: must be string[] — anything else is treated as empty
+      // so assertRunningImageDigest throws its actionable mismatch error (not a TypeError).
+      let repoDigests: string[]
+      try {
+        const parsed: unknown = JSON.parse(repoDigestsJson.trim())
+        if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
+          repoDigests = parsed
+        } else {
+          repoDigests = []
+        }
+      } catch {
+        repoDigests = []
+      }
+      assertRunningImageDigest(repoDigests, expectedDigest, service)
+      console.warn(`\u001B[1;32m✓\u001B[0m ${service} image digest verified`)
+    }
+
+    // Phase 10: Persist checksum AFTER compose + registration + digest verification succeed
+    // If any of phase 8, 9, or 9c threw, we never reach here — prior checksum stays in place
     // so the next deploy correctly detects secrets as changed and forces recreate.
     await writeRemoteFile(
       'Persisting secrets checksum',

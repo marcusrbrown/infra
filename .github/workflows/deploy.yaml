@@ -89,6 +89,9 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       needs.detect-changes.outputs.gateway == 'true'
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/deploy-gateway.yaml
     secrets:
       GATEWAY_SSH_KEY: ${{ secrets.GATEWAY_SSH_KEY }}

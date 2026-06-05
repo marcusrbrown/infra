@@ -15,14 +15,38 @@ The deploy script materializes secrets as files on the droplet (never via argv),
 
 ## DEPLOY FLOW
 
+The deploy runs in two stages: a CI `build-images` job builds and pushes the `gateway` and `workspace` Docker images to GHCR, then the `deploy-gateway` job SSHes to the droplet to pull those images and bring up the stack. The droplet never builds images — it only pulls prebuilt artifacts.
+
+### CI: build-images job
+
+Runs on `ubuntu-latest` with `packages: write` permission (job-scoped only; the deploy job is package-read-only). Steps:
+
+1. Reads the pinned `ref` from `apps/gateway/upstream.json`.
+2. Checks out `fro-bot/agent` at that ref.
+3. Logs in to `ghcr.io` with `GITHUB_TOKEN`.
+4. Builds `deploy/gateway.Dockerfile` (context: upstream root) and pushes to `ghcr.io/marcusrbrown/infra-gateway:<ref>`. Captures the pushed digest from `build-push-action` outputs.
+5. Builds `deploy/workspace.Dockerfile` (context: upstream root) and pushes to `ghcr.io/marcusrbrown/infra-workspace:<ref>`. Captures the pushed digest.
+6. Exposes both digests as job outputs (`gateway_digest`, `workspace_digest`).
+
+The `deploy-gateway` job declares `needs: build-images`. A build or push failure blocks the deploy entirely — the old stack stays live.
+
+### Droplet: deploy-gateway job
+
 1. **Validate host** — `validateGatewayHost` rejects `-`-prefixed values and characters outside the allowed alphabet. SSH treats `-`-prefixed hostnames as flags (including `-oProxyCommand=`); this check is mandatory before any SSH invocation.
-2. **Checksum computation** — SHA-256 of all secret values is computed locally. The result is compared against `/opt/gateway/.secrets-checksum` on the droplet. If the checksums differ, `--force-recreate` is added to `docker compose up` so containers pick up the new secret files. If they match, containers are still restarted by `docker compose up -d --wait` but without `--force-recreate` (faster). In both cases the deploy continues — there is no early exit. The checksum file lives outside the deploy clone so `git clean -xfd` on subsequent deploys doesn't wipe it.
-3. **Source materialization** — SSH to the droplet; clone or fetch `fro-bot/agent` at the pinned ref from `upstream.json`, then `git reset --hard && git clean -xfd` to the pinned SHA.
+2. **Checksum computation** — SHA-256 of all secret values (including the `compose.override.yaml` content) is computed locally. The result is compared against `/opt/gateway/.secrets-checksum` on the droplet. If the checksums differ, `--force-recreate` is added to `docker compose up` so containers pick up the new secret files. If they match, containers are still restarted by `docker compose up -d --wait` but without `--force-recreate` (faster). In both cases the deploy continues — there is no early exit. The checksum file lives outside the deploy clone so `git clean -xfd` on subsequent deploys doesn't wipe it.
+3. **Source materialization** — SSH to the droplet; clone or fetch `fro-bot/agent` at the pinned ref from `upstream.json`, then `git reset --hard && git clean -xfd` to the pinned SHA. The upstream checkout is still needed for `compose.yaml`, `init-certs.sh`, and the Dockerfiles compose references — but the droplet does not build from them.
 4. **Secret files** — 11 required files written atomically under `/opt/gateway/deploy/secrets/` (`discord-token`, `discord-application-id`, `discord-guild-id`, `aws-access-key-id`, `aws-secret-access-key`, `s3-bucket`, `s3-region`, `github-app-id`, `github-app-private-key`, `workspace-opencode-token`, `workspace-opencode-auth`) plus optional-shaped files (`s3-endpoint`, `aws-session-token`, `discord-privileged-intents`, `workspace-opencode-url`, and `gateway-trigger-role-id` — written as 0-byte placeholders when unset, though `GATEWAY_TRIGGER_ROLE_ID` is enforced non-empty via `REQUIRED_ENV_VARS`, so the mention-loop authz gate fails closed rather than opening to all guild members). The `/opt/gateway/deploy/.env` carries `OBJECT_STORE_HOSTS` (computed from `S3_BUCKET`/`S3_REGION`/`S3_ENDPOINT`), `WORKSPACE_OPENCODE_MODEL`, `WORKSPACE_OPENCODE_CONFIG` — the latter is JSON-validated (via `JSON.parse`, not the shell-metachar guard) and `$`→`$$`-escaped so docker-compose `${VAR}` interpolation passes the JSON through intact — and `WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev` (v0.52.1+ requirement; consumed by `deploy/mitmproxy/allowlist.py` to allow the sandboxed workspace to reach the cliproxy OpenCode proxy and the OpenCode model catalog through mitmproxy; fail-closed if unset). Secret bytes enter via SSH stdin only — never via argv. Filenames on disk are kebab-case; the compose contract maps each to `/run/secrets/<snake_case>` and exposes via `${NAME}_FILE` env vars. The GitHub App credentials come from the `GH_APP_ID` / `GH_APP_PRIVATE_KEY` environment secrets (GitHub reserves the `GITHUB_` prefix for secret names) and materialize to the upstream-fixed `github-app-id` / `github-app-private-key` files. See `docs/runbooks/discord-token-lifecycle.md` for the full mapping table.
-5. **CA bootstrap** — `init-certs.sh` runs on the droplet (idempotent; skips if the CA already exists in the `mitmproxy-certs` named volume).
-6. **Compose up** — `docker compose up -d --wait --wait-timeout 120`. mitmproxy starts first, then the gateway daemon.
-7. **Registration poll** — `GET /applications/{app_id}/guilds/{guild_id}/commands` on the Discord API. Polls Discord registration with ~90s default budget (10 attempts × (3s interval + 6s per-attempt timeout); defaults from `apps/gateway/src/deploy.ts:344-368`). 429 honors `Retry-After` and doesn't count against the attempt budget (each 429 retry adds up to 60s; pathological all-429 ceiling ~11 min). 401/403/404 abort immediately with token-sanitized errors. 5xx retries.
-8. **Checksum write** — `/opt/gateway/.secrets-checksum` is written only after compose + registration both succeed. If either fails mid-rotation, the old checksum persists and the next deploy force-recreates again.
+5. **Compose override** — `compose.override.yaml` is written on every deploy. It pins `gateway.image` to `ghcr.io/marcusrbrown/infra-gateway@<digest>` and `workspace.image` to `ghcr.io/marcusrbrown/infra-workspace@<digest>` using the exact digests from the `build-images` job. Docker Compose deep-merges the override; the upstream `build:` stanzas remain present but are inert without `--build`. When announce is enabled, the override also adds the Caddy service and announce secret wiring (see [Announce/presence webhook](#announcepresence-webhook)).
+6. **CA bootstrap** — `init-certs.sh` runs on the droplet (idempotent; skips if the CA already exists in the `mitmproxy-certs` named volume).
+7. **Pull images** — `docker compose --project-directory /opt/gateway/deploy pull` fetches the pinned GHCR images by digest. A missing or unpullable image errors here and does not fall back to an on-droplet build.
+8. **Compose up** — `docker compose --project-directory /opt/gateway/deploy up -d --no-build --wait --wait-timeout 120 --remove-orphans` (plus `--force-recreate` when the checksum changed or `--force-recreate` was passed). `mitmproxy` starts first, then the gateway daemon. `--no-build` is explicit — the droplet never builds images.
+9. **Registration poll** — `GET /applications/{app_id}/guilds/{guild_id}/commands` on the Discord API. Polls Discord registration with ~90s default budget (10 attempts × (3s interval + 6s per-attempt timeout); defaults from `apps/gateway/src/deploy.ts:344-368`). 429 honors `Retry-After` and doesn't count against the attempt budget (each 429 retry adds up to 60s; pathological all-429 ceiling ~11 min). 401/403/404 abort immediately with token-sanitized errors. 5xx retries.
+10. **Running image digest verification** — for each of `gateway` and `workspace`, the deploy reads the running container's `RepoDigests` and asserts they match the CI-pushed digest. This confirms the droplet is running the GHCR artifact, not a stale or locally-built image. Throws if the digest does not match — deploy fails loudly. Manual verification:
+    ```bash
+    docker inspect --format '{{json .RepoDigests}}' "$(docker inspect --format '{{.Image}}' "$(docker compose --project-directory /opt/gateway/deploy ps -q gateway)")"
+    docker inspect --format '{{json .RepoDigests}}' "$(docker inspect --format '{{.Image}}' "$(docker compose --project-directory /opt/gateway/deploy ps -q workspace)")"
+    ```
+11. **Checksum write** — `/opt/gateway/.secrets-checksum` is written only after compose + registration + digest verification all succeed. If any step fails mid-rotation, the old checksum persists and the next deploy force-recreates again.
 
 ## DAY-2 OPERATIONS
 
@@ -100,8 +124,67 @@ After provisioning: commit the updated `.github/known_hosts`.
 | `DISCORD_PRIVILEGED_INTENTS` | — | Opt-in privileged intents (e.g. `MessageContent`); materializes to `discord-privileged-intents`, empty = baseline intents |
 | `GATEWAY_WEBHOOK_SECRET` | opt-in† | HMAC signing key for the announce webhook — strong random value; materialized via SSH stdin, never argv. Set together with `GATEWAY_PRESENCE_CHANNEL_ID` to enable the announce endpoint; leave both unset to keep the gateway outbound-only. Setting exactly one fails the deploy before any SSH. |
 | `GATEWAY_PRESENCE_CHANNEL_ID` | opt-in† | Discord channel ID where the daemon posts presence embeds as the Fro Bot user. Set together with `GATEWAY_WEBHOOK_SECRET`. |
+| `GATEWAY_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-gateway` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.gateway_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually (see [Break-glass runbook](#break-glass-runbook)). |
+| `WORKSPACE_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-workspace` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.workspace_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually. |
 
 †Both-or-neither: set both to enable the announce/presence webhook; set neither to disable. Setting exactly one is an error — the deploy fails fast with a message naming the missing input, before any SSH connection is made.
+
+## GHCR IMAGES
+
+The `gateway` and `workspace` images are published to:
+
+- `ghcr.io/marcusrbrown/infra-gateway` — built from `fro-bot/agent` `deploy/gateway.Dockerfile`
+- `ghcr.io/marcusrbrown/infra-workspace` — built from `fro-bot/agent` `deploy/workspace.Dockerfile`
+
+Both packages are **public**. The upstream Dockerfiles were audited before first publish: all secrets are runtime bind-mounts into `/run/secrets/...` — no `ARG`/`ENV`/`COPY` of secret material is baked into the image layers. The source (`fro-bot/agent`) is itself public. Public visibility means the droplet pulls with no authentication required.
+
+Tags (`:<ref>`) are pushed for human readability. The deploy pins and verifies by **digest** (`@sha256:<digest>`), not by tag — GHCR tags are mutable, so tag-based verification would be circular. Digest pull is immutable and makes the running-image check a true identity assertion.
+
+The `build-images` CI job holds `packages: write` permission (job-scoped only). The `deploy-gateway` job is package-read-only.
+
+## BREAK-GLASS RUNBOOK
+
+The deploy depends on CI and GHCR availability. If CI or GHCR is unavailable during an incident and the droplet needs a redeploy:
+
+1. **Build and push from a workstation** (which has ample RAM — this is the off-droplet build done by hand):
+   ```bash
+   # Check out fro-bot/agent at the pinned ref
+   REF=$(jq -r .ref apps/gateway/upstream.json)
+   git clone --depth 1 --branch "$REF" https://github.com/fro-bot/agent.git /tmp/fro-bot-agent
+
+   # Log in to GHCR
+   echo "$GITHUB_TOKEN" | docker login ghcr.io -u <your-github-username> --password-stdin
+
+   # Build and push gateway image; capture the digest
+   GATEWAY_DIGEST=$(docker buildx build \
+     --platform linux/amd64 \
+     --file /tmp/fro-bot-agent/deploy/gateway.Dockerfile \
+     --push \
+     --iidfile /tmp/gateway-iid.txt \
+     --metadata-file /tmp/gateway-meta.json \
+     /tmp/fro-bot-agent \
+     && jq -r '."containerimage.digest"' /tmp/gateway-meta.json)
+
+   # Build and push workspace image; capture the digest
+   WORKSPACE_DIGEST=$(docker buildx build \
+     --platform linux/amd64 \
+     --file /tmp/fro-bot-agent/deploy/workspace.Dockerfile \
+     --push \
+     --metadata-file /tmp/workspace-meta.json \
+     /tmp/fro-bot-agent \
+     && jq -r '."containerimage.digest"' /tmp/workspace-meta.json)
+   ```
+
+2. **Run the local deploy** with the digests you just captured:
+   ```bash
+   GATEWAY_IMAGE_DIGEST="$GATEWAY_DIGEST" \
+   WORKSPACE_IMAGE_DIGEST="$WORKSPACE_DIGEST" \
+   bunx @marcusrbrown/infra gateway deploy --local
+   ```
+
+**Never run `docker compose up --build` on the droplet.** The `compose.override.yaml` image pins make GHCR the source of truth regardless, but building on the 1vCPU/2GB droplet exhausts RAM and thrashes swap — this is the failure mode the off-droplet build flow exists to prevent. The on-droplet build fallback is intentionally removed; the workstation build above is the correct emergency path.
+
+The deploy depends on CI + GHCR availability + pull working. This is a deliberate trade: the on-droplet build is the hazard being removed, so keeping it as a fallback would keep the hazard.
 
 ### GitHub App (`/fro-bot add-project`)
 
@@ -141,11 +224,11 @@ The override is a working-tree file re-materialized on every deploy when the inp
 - **Auth:** the daemon verifies the HMAC signature, enforces a replay cache, and applies a rate limiter. Caddy adds TLS termination.
 - **No IP allowlist:** GitHub Actions egress ranges are too dynamic to pin reliably. HMAC + TLS is the full auth boundary.
 - **Secret materialization:** `GATEWAY_WEBHOOK_SECRET` is written to the droplet via SSH stdin only — never via argv.
-- **Path isolation:** Caddy uses a named `@announce` matcher (`path /v1/announce`) with a default `respond 404`. The catch-all does not shadow ACME challenge paths (Caddy uses TLS-ALPN-01 on `:443` by default, which does not touch HTTP path routing).
+- **Path isolation:** Caddy uses a `handle /v1/announce { ... }` block with a catch-all `handle { respond 404 }`. The catch-all does not shadow ACME challenge paths (Caddy uses TLS-ALPN-01 on `:443` by default, which does not touch HTTP path routing).
 
 ### Rollback / disabling
 
-Remove both `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` from the `gateway` GitHub Environment and redeploy. The deploy's `git clean -xfd` removes the `compose.override.yaml` (a working-tree file); `--remove-orphans` retires the now-undeclared Caddy container; the checksum flip (override bytes gone) triggers `--force-recreate`. After the deploy, verify with `docker compose config` on the droplet — the Caddy service must not appear.
+Remove both `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` from the `gateway` GitHub Environment and redeploy. The `compose.override.yaml` is always rewritten on deploy — when announce is disabled, the override carries only the image digest pins (no Caddy/announce sections). `git clean -xfd` removes the `Caddyfile` (a working-tree file written only when announce is enabled); `--remove-orphans` retires the now-undeclared Caddy container; the checksum flip (override bytes changed, Caddyfile gone) triggers `--force-recreate`. After the deploy, verify with `docker compose config` on the droplet — the Caddy service must not appear.
 
 ### Caddy volume guardrail
 
@@ -213,6 +296,7 @@ For the full operator-facing rotation and emergency revocation procedure (includ
 - **Never pass secret bytes via argv** — `writeRemoteFile` pipes bytes through SSH stdin only. `--body <value>` patterns are banned.
 - **Never skip `validateGatewayHost`** — it rejects `-`-prefixed values and characters outside the allowed alphabet. SSH treats `-`-prefixed hostnames as flags (including `-oProxyCommand=`).
 - **Never restart the gateway in-place to rotate the CA** — workspaces lose trust in the egress proxy. Restore from backup instead.
+- **Never run `docker compose up --build` on the droplet** — building the `gateway` or `workspace` images on the 1vCPU/2GB droplet exhausts RAM and thrashes swap while the live stack is running. The deploy uses `docker compose pull` + `up -d --no-build`; the `compose.override.yaml` image pins make GHCR the source of truth. For emergency rebuilds, build from a workstation and push to GHCR (see [Break-glass runbook](#break-glass-runbook)).
 - **Never validate `WORKSPACE_OPENCODE_CONFIG` with the shell-metachar guard** — it is JSON (`"`, `$`, `\` are required) and `SHELL_METACHAR_RE` would reject every valid config. Validate it with `JSON.parse` + newline/size checks; `SHELL_METACHAR_RE` is only for simple values like `WORKSPACE_OPENCODE_MODEL`.
 - **Never bind-mount config files outside `/opt/gateway/deploy/secrets/`** — `init-certs.sh` and `docker-compose.yaml` are upstream's; this repo materializes secrets only.
 - **Never run `pollRegistration` with an unbounded per-attempt timeout** — each fetch is wrapped in an `AbortController` with `perAttemptTimeoutMs` (defaults to `max(6000, intervalMs * 2)`).

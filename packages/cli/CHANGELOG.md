@@ -1,5 +1,15 @@
 # @marcusrbrown/infra
 
+## 0.9.14
+### Patch Changes
+
+
+- Fix `keeweb status` content hash check emitting a degraded warning when running from a packaged install (bunx, npm global, unpacked tarball). ([#430](https://github.com/marcusrbrown/infra/pull/430))
+  
+  `checkContentHash` detects the install layout by checking for a source-only marker file (`apps/keeweb/src/build.ts`) that is never shipped in the CLI package. When the marker is absent (packaged/unpacked install), the check returns `level: 'info'` with the message: `Content hash not available: local KeeWeb dist is only present in a source checkout`. This avoids exposing raw temp or node_modules paths and does not count toward the warning total in the status summary.
+  
+  In a source checkout, missing dist shows an actionable build hint at `level: 'warning'`; matching or mismatched hashes return `ok` or `warning` respectively.
+
 ## 0.9.13
 ### Patch Changes
 

@@ -220,3 +220,44 @@ describe('tail forwarding', () => {
     expect(capturedCmd.join(' ')).toContain('--tail=25')
   })
 })
+
+// ─── SSH command includes repo-pinned UserKnownHostsFile ─────────────────────
+
+describe('streamGatewayLogs — SSH command includes UserKnownHostsFile', () => {
+  it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to ssh', async () => {
+    delete process.env.CI
+
+    const {streamGatewayLogs} = await import('./logs')
+
+    let capturedCmd: string[] = []
+    const spawnCapture: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      return {exited: Promise.resolve(0)}
+    }
+
+    await streamGatewayLogs({host: 'gateway.example.com', service: 'gateway', tail: 100, allowCi: false}, spawnCapture)
+
+    const knownHostsIdx = capturedCmd.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
+    expect(knownHostsIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[knownHostsIdx - 1]).toBe('-o')
+    expect(capturedCmd[knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
+  })
+
+  it('does not weaken StrictHostKeyChecking when UserKnownHostsFile is added', async () => {
+    delete process.env.CI
+
+    const {streamGatewayLogs} = await import('./logs')
+
+    let capturedCmd: string[] = []
+    const spawnCapture: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      return {exited: Promise.resolve(0)}
+    }
+
+    await streamGatewayLogs({host: 'gateway.example.com', service: 'gateway', tail: 100, allowCi: false}, spawnCapture)
+
+    const strictIdx = capturedCmd.findIndex(arg => arg.startsWith('StrictHostKeyChecking='))
+    expect(strictIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[strictIdx]).toBe('StrictHostKeyChecking=yes')
+  })
+})

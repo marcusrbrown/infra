@@ -2,6 +2,7 @@ import type {goke} from 'goke'
 
 import {z} from 'zod'
 
+import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {validateGatewayHost} from './host'
 
 declare const process: {
@@ -88,6 +89,7 @@ export async function streamGatewayLogs(
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
+    ...buildKnownHostsArgs(),
     `root@${opts.host}`,
     `docker compose --project-directory ${COMPOSE_PROJECT_DIR} logs --no-color --tail=${opts.tail} ${opts.service}`,
   ]

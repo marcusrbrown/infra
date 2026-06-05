@@ -403,6 +403,162 @@ describe('restoreGatewayCa — SEC2: unguessable remote tmp path via mktemp', ()
   })
 })
 
+// ─── SSH and SCP commands include repo-pinned UserKnownHostsFile ─────────────
+
+describe('restoreGatewayCa — SSH and SCP commands include UserKnownHostsFile', () => {
+  it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to every ssh invocation', async () => {
+    const tarDir = `/tmp/test-kh-ssh-tar-dir-${Date.now()}`
+    const realTar = `/tmp/test-kh-ssh-tar-${Date.now()}.tar`
+    const certContent = 'CERT'
+    const keyContent = 'KEY'
+    Bun.spawnSync(['mkdir', '-p', tarDir])
+    await Bun.write(`${tarDir}/mitmproxy-ca-cert.pem`, certContent)
+    await Bun.write(`${tarDir}/mitmproxy-ca.pem`, keyContent)
+    Bun.spawnSync(['tar', '-cf', realTar, '-C', tarDir, 'mitmproxy-ca-cert.pem', 'mitmproxy-ca.pem'])
+
+    const capturedCmds: string[][] = []
+    const spawnCapture: RestoreSpawnFn = (cmd, _opts) => {
+      capturedCmds.push([...cmd])
+      const cmdStr = cmd.join(' ')
+      const isTarTf = cmd[0] === 'tar' && cmd.includes('-tf')
+      const isMktemp = cmdStr.includes('mktemp')
+      const encoder = new TextEncoder()
+      let stdout = ''
+      if (isTarTf) stdout = 'mitmproxy-ca-cert.pem\nmitmproxy-ca.pem\n'
+      else if (isMktemp) stdout = '/tmp/gateway-ca-restore-kh-test.tar\n'
+      else stdout = certContent
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(stdout))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(controller) {
+            controller.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await restoreGatewayCa({host: 'gateway.example.com', input: realTar, includeCa: true}, spawnCapture)
+
+    // Every ssh invocation must include UserKnownHostsFile
+    const sshCmds = capturedCmds.filter(c => c[0] === 'ssh')
+    expect(sshCmds.length).toBeGreaterThan(0)
+    for (const sshCmd of sshCmds) {
+      const knownHostsIdx = sshCmd.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
+      expect(knownHostsIdx).toBeGreaterThan(-1)
+      expect(sshCmd[knownHostsIdx - 1]).toBe('-o')
+      expect(sshCmd[knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
+    }
+
+    Bun.spawnSync(['rm', '-rf', tarDir, realTar])
+  })
+
+  it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to the scp invocation', async () => {
+    const tarDir = `/tmp/test-kh-scp-tar-dir-${Date.now()}`
+    const realTar = `/tmp/test-kh-scp-tar-${Date.now()}.tar`
+    const certContent = 'CERT'
+    const keyContent = 'KEY'
+    Bun.spawnSync(['mkdir', '-p', tarDir])
+    await Bun.write(`${tarDir}/mitmproxy-ca-cert.pem`, certContent)
+    await Bun.write(`${tarDir}/mitmproxy-ca.pem`, keyContent)
+    Bun.spawnSync(['tar', '-cf', realTar, '-C', tarDir, 'mitmproxy-ca-cert.pem', 'mitmproxy-ca.pem'])
+
+    const capturedCmds: string[][] = []
+    const spawnCapture: RestoreSpawnFn = (cmd, _opts) => {
+      capturedCmds.push([...cmd])
+      const cmdStr = cmd.join(' ')
+      const isTarTf = cmd[0] === 'tar' && cmd.includes('-tf')
+      const isMktemp = cmdStr.includes('mktemp')
+      const encoder = new TextEncoder()
+      let stdout = ''
+      if (isTarTf) stdout = 'mitmproxy-ca-cert.pem\nmitmproxy-ca.pem\n'
+      else if (isMktemp) stdout = '/tmp/gateway-ca-restore-kh-scp-test.tar\n'
+      else stdout = certContent
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(stdout))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(controller) {
+            controller.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await restoreGatewayCa({host: 'gateway.example.com', input: realTar, includeCa: true}, spawnCapture)
+
+    const scpCmd = capturedCmds.find(c => c[0] === 'scp')
+    expect(scpCmd).toBeDefined()
+    const knownHostsIdx = scpCmd!.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
+    expect(knownHostsIdx).toBeGreaterThan(-1)
+    expect(scpCmd![knownHostsIdx - 1]).toBe('-o')
+    expect(scpCmd![knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
+
+    Bun.spawnSync(['rm', '-rf', tarDir, realTar])
+  })
+
+  it('does not weaken StrictHostKeyChecking in ssh or scp commands', async () => {
+    const tarDir = `/tmp/test-kh-strict-tar-dir-${Date.now()}`
+    const realTar = `/tmp/test-kh-strict-tar-${Date.now()}.tar`
+    const certContent = 'CERT'
+    const keyContent = 'KEY'
+    Bun.spawnSync(['mkdir', '-p', tarDir])
+    await Bun.write(`${tarDir}/mitmproxy-ca-cert.pem`, certContent)
+    await Bun.write(`${tarDir}/mitmproxy-ca.pem`, keyContent)
+    Bun.spawnSync(['tar', '-cf', realTar, '-C', tarDir, 'mitmproxy-ca-cert.pem', 'mitmproxy-ca.pem'])
+
+    const capturedCmds: string[][] = []
+    const spawnCapture: RestoreSpawnFn = (cmd, _opts) => {
+      capturedCmds.push([...cmd])
+      const cmdStr = cmd.join(' ')
+      const isTarTf = cmd[0] === 'tar' && cmd.includes('-tf')
+      const isMktemp = cmdStr.includes('mktemp')
+      const encoder = new TextEncoder()
+      let stdout = ''
+      if (isTarTf) stdout = 'mitmproxy-ca-cert.pem\nmitmproxy-ca.pem\n'
+      else if (isMktemp) stdout = '/tmp/gateway-ca-restore-kh-strict-test.tar\n'
+      else stdout = certContent
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(stdout))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(controller) {
+            controller.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await restoreGatewayCa({host: 'gateway.example.com', input: realTar, includeCa: true}, spawnCapture)
+
+    // All ssh and scp commands must have StrictHostKeyChecking=yes
+    const sshAndScpCmds = capturedCmds.filter(c => c[0] === 'ssh' || c[0] === 'scp')
+    expect(sshAndScpCmds.length).toBeGreaterThan(0)
+    for (const cmd of sshAndScpCmds) {
+      const strictIdx = cmd.findIndex(arg => arg.startsWith('StrictHostKeyChecking='))
+      expect(strictIdx).toBeGreaterThan(-1)
+      expect(cmd[strictIdx]).toBe('StrictHostKeyChecking=yes')
+    }
+
+    Bun.spawnSync(['rm', '-rf', tarDir, realTar])
+  })
+})
+
 // ─── COR1: validateBackupArchive ─────────────────────────────────────────────
 
 describe('validateBackupArchive — COR1', () => {

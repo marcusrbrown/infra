@@ -2,6 +2,7 @@ import type {goke} from 'goke'
 
 import {z} from 'zod'
 
+import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {validateGatewayHost} from './host'
 
 declare const process: {
@@ -38,7 +39,16 @@ export type RestoreResult = {ok: true; confirmed: true} | {ok: false; error: str
 
 /** Returns the argv array for an SSH command to the given host. */
 function sshCommand(host: string, remote: string): string[] {
-  return ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', `root@${host}`, remote]
+  return [
+    'ssh',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'StrictHostKeyChecking=yes',
+    ...buildKnownHostsArgs(),
+    `root@${host}`,
+    remote,
+  ]
 }
 
 async function spawnText(
@@ -143,6 +153,7 @@ export async function restoreGatewayCa(
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
+    ...buildKnownHostsArgs(),
     opts.input,
     `root@${opts.host}:${tmpRemote}`,
   ]

@@ -3,6 +3,7 @@ import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
 import {z} from 'zod'
 
+import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 // ─── Minimal ctx interface (subset of GokeExecutionContext used by this action) ─
 import {validateGatewayHost} from './host'
@@ -108,6 +109,7 @@ export async function getGatewayComposeStatus(
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
+    ...buildKnownHostsArgs(),
     `root@${host}`,
     `docker compose --project-directory ${COMPOSE_PROJECT_DIR} ps --format json`,
   ]

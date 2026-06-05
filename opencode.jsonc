@@ -6,7 +6,7 @@
     // .env locally; CI/harness inherits the parent process env. No values in this file.
     "infra": {
       "type": "local",
-      "command": ["bunx", "@marcusrbrown/infra", "mcp"],
+      "command": ["bun", "run", "packages/cli/src/cli.ts", "mcp"],
       "enabled": true,
     },
   },

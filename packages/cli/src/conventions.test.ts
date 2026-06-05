@@ -276,6 +276,30 @@ describe('repo conventions', () => {
     expect(offenders).toEqual([])
   })
 
+  it('opencode.jsonc mcp.infra.command uses local repo source (not bunx published package)', async () => {
+    const jsoncText = await Bun.file(resolve(REPO_ROOT, 'opencode.jsonc')).text()
+    const stripped = jsoncText
+      .split('\n')
+      .map(line => (/^\s*\/\//.test(line) ? '' : line))
+      .join('\n')
+      .replaceAll(/,(\s*[}\]])/g, '$1')
+    const opencode = JSON.parse(stripped) as {mcp?: {infra?: {command?: unknown}}}
+
+    const infraCommand = opencode.mcp?.infra?.command
+    expect(Array.isArray(infraCommand), 'mcp.infra.command must be an array').toBe(true)
+
+    const cmd = infraCommand as string[]
+    expect(
+      cmd,
+      'mcp.infra.command must be ["bun", "run", "packages/cli/src/cli.ts", "mcp"] — use local source, not bunx',
+    ).toEqual(['bun', 'run', 'packages/cli/src/cli.ts', 'mcp'])
+
+    // Explicit regression guard: bunx @marcusrbrown/infra resolves stale published
+    // package cache and exits before the MCP handshake, causing connection closed.
+    expect(cmd.join(' ')).not.toContain('bunx')
+    expect(cmd.join(' ')).not.toContain('@marcusrbrown/infra')
+  })
+
   it('gates every sensitive infra MCP tool in opencode.jsonc', async () => {
     // Parse opencode.jsonc tolerantly: it uses JSONC syntax (// line comments,
     // trailing commas). Strategy:

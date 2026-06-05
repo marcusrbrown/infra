@@ -61,7 +61,7 @@ The deploy's job is to make the running daemon match the pinned source. With a `
 
 ## Prevention
 
-- **For any `build:`-from-source Compose service, the deploy must `docker compose up --build`.** Without it, source changes (including pin bumps) never reach the running container. Mechanically enforced by a test asserting `--build` is present in the compose command on every path:
+- **For an ON-HOST `build:`-from-source Compose deploy, the deploy must `docker compose up --build`.** Without it, source changes (including pin bumps) never reach the running container. (Scope: this applies when the host builds the image. The gateway deploy later moved the build off the droplet — CI builds and pushes to GHCR, the droplet pulls a digest-pinned image and runs `up -d --no-build`. Under that model the droplet must NOT use `--build`; freshness comes from the pinned digest, not a host rebuild. See `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`.) When the host does build, enforce `--build` with a test asserting it is present in the compose command on every path:
 
   ```ts
   const composeCall = calls.find(cmd => cmd.some(s => s.includes('docker compose')))

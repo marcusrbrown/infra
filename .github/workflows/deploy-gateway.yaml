@@ -59,7 +59,56 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      gateway_digest: ${{ steps.build-gateway.outputs.digest }}
+      workspace_digest: ${{ steps.build-workspace.outputs.digest }}
+    steps:
+      - name: Checkout infra
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Read upstream ref
+        id: upstream
+        run: echo "ref=$(jq -r .ref apps/gateway/upstream.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout fro-bot/agent
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: fro-bot/agent
+          ref: ${{ steps.upstream.outputs.ref }}
+          path: upstream-agent
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push gateway image
+        id: build-gateway
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: upstream-agent
+          file: upstream-agent/deploy/gateway.Dockerfile
+          push: true
+          tags: ghcr.io/marcusrbrown/infra-gateway:${{ steps.upstream.outputs.ref }}
+
+      - name: Build and push workspace image
+        id: build-workspace
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: upstream-agent
+          file: upstream-agent/deploy/workspace.Dockerfile
+          push: true
+          tags: ghcr.io/marcusrbrown/infra-workspace:${{ steps.upstream.outputs.ref }}
+
   deploy-gateway:
+    needs: build-images
     runs-on: ubuntu-latest
     environment: gateway
     steps:
@@ -142,3 +191,5 @@ jobs:
           GATEWAY_TRIGGER_ROLE_ID: ${{ secrets.GATEWAY_TRIGGER_ROLE_ID }}
           GATEWAY_WEBHOOK_SECRET: ${{ secrets.GATEWAY_WEBHOOK_SECRET }}
           GATEWAY_PRESENCE_CHANNEL_ID: ${{ secrets.GATEWAY_PRESENCE_CHANNEL_ID }}
+          GATEWAY_IMAGE_DIGEST: ${{ needs.build-images.outputs.gateway_digest }}
+          WORKSPACE_IMAGE_DIGEST: ${{ needs.build-images.outputs.workspace_digest }}

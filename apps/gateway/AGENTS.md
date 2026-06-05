@@ -184,7 +184,7 @@ The deploy depends on CI and GHCR availability. If CI or GHCR is unavailable dur
 
 **Never run `docker compose up --build` on the droplet.** The `compose.override.yaml` image pins make GHCR the source of truth regardless, but building on the 1vCPU/2GB droplet exhausts RAM and thrashes swap — this is the failure mode the off-droplet build flow exists to prevent. The on-droplet build fallback is intentionally removed; the workstation build above is the correct emergency path.
 
-The deploy now depends on CI + GHCR availability + pull working. This is a deliberate trade: the on-droplet build is the hazard being removed, so keeping it as a fallback would keep the hazard.
+The deploy depends on CI + GHCR availability + pull working. This is a deliberate trade: the on-droplet build is the hazard being removed, so keeping it as a fallback would keep the hazard.
 
 ### GitHub App (`/fro-bot add-project`)
 
@@ -224,11 +224,11 @@ The override is a working-tree file re-materialized on every deploy when the inp
 - **Auth:** the daemon verifies the HMAC signature, enforces a replay cache, and applies a rate limiter. Caddy adds TLS termination.
 - **No IP allowlist:** GitHub Actions egress ranges are too dynamic to pin reliably. HMAC + TLS is the full auth boundary.
 - **Secret materialization:** `GATEWAY_WEBHOOK_SECRET` is written to the droplet via SSH stdin only — never via argv.
-- **Path isolation:** Caddy uses a named `@announce` matcher (`path /v1/announce`) with a default `respond 404`. The catch-all does not shadow ACME challenge paths (Caddy uses TLS-ALPN-01 on `:443` by default, which does not touch HTTP path routing).
+- **Path isolation:** Caddy uses a `handle /v1/announce { ... }` block with a catch-all `handle { respond 404 }`. The catch-all does not shadow ACME challenge paths (Caddy uses TLS-ALPN-01 on `:443` by default, which does not touch HTTP path routing).
 
 ### Rollback / disabling
 
-Remove both `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` from the `gateway` GitHub Environment and redeploy. The deploy's `git clean -xfd` removes the `compose.override.yaml` (a working-tree file); `--remove-orphans` retires the now-undeclared Caddy container; the checksum flip (override bytes gone) triggers `--force-recreate`. After the deploy, verify with `docker compose config` on the droplet — the Caddy service must not appear.
+Remove both `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` from the `gateway` GitHub Environment and redeploy. The `compose.override.yaml` is always rewritten on deploy — when announce is disabled, the override carries only the image digest pins (no Caddy/announce sections). `git clean -xfd` removes the `Caddyfile` (a working-tree file written only when announce is enabled); `--remove-orphans` retires the now-undeclared Caddy container; the checksum flip (override bytes changed, Caddyfile gone) triggers `--force-recreate`. After the deploy, verify with `docker compose config` on the droplet — the Caddy service must not appear.
 
 ### Caddy volume guardrail
 

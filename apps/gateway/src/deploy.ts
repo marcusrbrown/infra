@@ -1058,6 +1058,9 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   // GATEWAY_IMAGE_DIGEST and WORKSPACE_IMAGE_DIGEST are required on every deploy —
   // they are supplied by the CI build-images job and used to pin the pulled images.
   // Failing fast here prevents a silent fall-through to on-droplet building.
+  // Both digests are validated against /^sha256:[0-9a-f]{64}$/ to guard the
+  // compose override `image:@<digest>` and the Phase 9c verification.
+  const DIGEST_RE = /^sha256:[0-9a-f]{64}$/
   const gatewayDigest = env.GATEWAY_IMAGE_DIGEST?.trim()
   const workspaceDigest = env.WORKSPACE_IMAGE_DIGEST?.trim()
   if (!gatewayDigest) {
@@ -1067,11 +1070,25 @@ export async function main(opts: MainOpts = {}): Promise<void> {
         'For a local deploy, build and push the image to GHCR first, then set GATEWAY_IMAGE_DIGEST.',
     )
   }
+  if (!DIGEST_RE.test(gatewayDigest)) {
+    throw new Error(
+      `GATEWAY_IMAGE_DIGEST has an invalid format: "${gatewayDigest}". ` +
+        'Expected sha256:<64 hex chars> (e.g. sha256:abc...def). ' +
+        'This value is supplied by the CI build-images job outputs.digest.',
+    )
+  }
   if (!workspaceDigest) {
     throw new Error(
       'WORKSPACE_IMAGE_DIGEST is required but not set. ' +
         'This value is supplied by the CI build-images job. ' +
         'For a local deploy, build and push the image to GHCR first, then set WORKSPACE_IMAGE_DIGEST.',
+    )
+  }
+  if (!DIGEST_RE.test(workspaceDigest)) {
+    throw new Error(
+      `WORKSPACE_IMAGE_DIGEST has an invalid format: "${workspaceDigest}". ` +
+        'Expected sha256:<64 hex chars> (e.g. sha256:abc...def). ' +
+        'This value is supplied by the CI build-images job outputs.digest.',
     )
   }
 
@@ -1411,24 +1428,44 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     // Phase 9c: Verify running image digests match the CI-pushed GHCR digests.
     // This confirms the droplet is running the prebuilt artifact, not a stale or
     // locally-built image. Throws if the digest does not match — deploy fails loudly.
+    //
+    // Two-step inspect: containers have no .RepoDigests field — inspecting a container
+    // directly returns a template error and empty stdout. Instead:
+    //   1. Resolve the container's image SHA via `docker inspect --format '{{.Image}}' <container>`
+    //   2. Inspect the IMAGE's RepoDigests via `docker inspect --format '{{json .RepoDigests}}' <imageSHA>`
     for (const [service, expectedDigest] of [
       ['gateway', gatewayDigest],
       ['workspace', workspaceDigest],
     ] as const) {
-      const {stdout: repoDigestsJson} = await runCommand(
-        `Verifying running image digest: ${service}`,
+      // Step 1: resolve container → image SHA
+      const {stdout: imageSha} = await runCommand(
+        `Resolving running image SHA: ${service}`,
         sshCommand(
           host,
-          `docker inspect --format '{{json .RepoDigests}}' $(docker compose --project-directory ${DEPLOY_DIR} ps -q ${service})`,
+          `docker inspect --format '{{.Image}}' $(docker compose --project-directory ${DEPLOY_DIR} ps -q ${service})`,
           keyPath,
           controlPath,
         ),
         deployEnv,
         spawnFn,
       )
+      // Step 2: inspect the IMAGE's RepoDigests
+      const {stdout: repoDigestsJson} = await runCommand(
+        `Verifying running image digest: ${service}`,
+        sshCommand(host, `docker inspect --format '{{json .RepoDigests}}' ${imageSha.trim()}`, keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+      // Narrow the parsed JSON: must be string[] — anything else is treated as empty
+      // so assertRunningImageDigest throws its actionable mismatch error (not a TypeError).
       let repoDigests: string[]
       try {
-        repoDigests = JSON.parse(repoDigestsJson.trim()) as string[]
+        const parsed: unknown = JSON.parse(repoDigestsJson.trim())
+        if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
+          repoDigests = parsed
+        } else {
+          repoDigests = []
+        }
       } catch {
         repoDigests = []
       }

@@ -82,8 +82,12 @@ function writeUpstreamJson(content: object): string {
 
 /**
  * Build a spawn mock that records calls and returns success by default.
- * docker inspect commands return a JSON array containing the expected digest
- * so assertRunningImageDigest passes in tests that don't override the handler.
+ * docker inspect commands return appropriate values so assertRunningImageDigest
+ * passes in tests that don't override the handler.
+ *
+ * Two-step image inspect (P1 fix):
+ *   1. `docker inspect --format '{{.Image}}' <container>` → returns a fake image SHA
+ *   2. `docker inspect --format '{{json .RepoDigests}}' <imageSHA>` → returns valid RepoDigests JSON
  */
 function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {spawnFn: SpawnFn; calls: string[][]} {
   const calls: string[][] = []
@@ -91,10 +95,13 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
     calls.push(cmd)
     const custom = handler?.(cmd)
     if (custom !== undefined) return custom
-    // Return valid RepoDigests JSON for docker inspect so assertRunningImageDigest passes
     const cmdStr = cmd.join(' ')
+    // Step 1: resolve container → image SHA
+    if (cmdStr.includes('docker inspect') && cmdStr.includes('{{.Image}}')) {
+      return makeSpawnResult({stdout: 'sha256:mockimagesha0000000000000000000000000000000000000000000000000000'})
+    }
+    // Step 2: inspect image RepoDigests — return both digests so either service check passes
     if (cmdStr.includes('docker inspect') && cmdStr.includes('RepoDigests')) {
-      // Return both digests so either gateway or workspace check passes
       const digests = [
         `ghcr.io/marcusrbrown/infra-gateway@${GATEWAY_DIGEST}`,
         `ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`,
@@ -4119,5 +4126,416 @@ describe('assertRunningImageDigest — pure digest verification helper', () => {
     const {assertRunningImageDigest} = await import('./deploy')
     const repoDigests = [`ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`]
     expect(() => assertRunningImageDigest(repoDigests, WORKSPACE_DIGEST, 'workspace')).not.toThrow()
+  })
+})
+
+// ─── P1: image-inspect command targets IMAGE, not container ──────────────────
+
+describe('Phase 9c — running image digest verification (P1)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('inspect command resolves container image ID first, then inspects image RepoDigests', async () => {
+    // P1: the old code ran `docker inspect --format '{{json .RepoDigests}}' <container-id>`
+    // which errors on containers (no .RepoDigests field). The fix must:
+    //   1. Run `docker inspect --format '{{.Image}}' <container-id>` to get the image SHA
+    //   2. Run `docker inspect --format '{{json .RepoDigests}}' <image-sha>` on the IMAGE
+    const {main} = await import('./deploy')
+    const inspectCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker inspect')) {
+        inspectCalls.push(cmdStr)
+        // First inspect: resolve container → image ID
+        if (cmdStr.includes('{{.Image}}')) {
+          return makeSpawnResult({stdout: 'sha256:deadbeef1234'})
+        }
+        // Second inspect: image RepoDigests
+        if (cmdStr.includes('RepoDigests') && cmdStr.includes('sha256:deadbeef1234')) {
+          const digests = [
+            `ghcr.io/marcusrbrown/infra-gateway@${GATEWAY_DIGEST}`,
+            `ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`,
+          ]
+          return makeSpawnResult({stdout: JSON.stringify(digests)})
+        }
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Must have at least one inspect call that resolves the container's image ID
+    const imageResolutionCall = inspectCalls.find(c => c.includes('{{.Image}}'))
+    expect(imageResolutionCall).toBeDefined()
+
+    // Must have at least one inspect call that inspects RepoDigests on the image SHA
+    const repoDigestsCall = inspectCalls.find(c => c.includes('RepoDigests') && c.includes('sha256:deadbeef1234'))
+    expect(repoDigestsCall).toBeDefined()
+  })
+
+  test('RepoDigests inspect uses the image SHA returned by the {{.Image}} step, not a subshell', async () => {
+    // The old broken form embedded `$(docker compose ps -q svc)` directly in the RepoDigests inspect.
+    // The fix: Step 1 resolves the image SHA via `{{.Image}}`; Step 2 passes that SHA to RepoDigests.
+    // This test verifies Step 2's command contains the image SHA from Step 1's stdout.
+    const {main} = await import('./deploy')
+    const inspectCalls: string[] = []
+    const IMAGE_SHA = 'sha256:verifiableimagesha00000000000000000000000000000000000000000000'
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker inspect')) {
+        inspectCalls.push(cmdStr)
+        if (cmdStr.includes('{{.Image}}')) {
+          // Return a known image SHA
+          return makeSpawnResult({stdout: IMAGE_SHA})
+        }
+        if (cmdStr.includes('RepoDigests')) {
+          const digests = [
+            `ghcr.io/marcusrbrown/infra-gateway@${GATEWAY_DIGEST}`,
+            `ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`,
+          ]
+          return makeSpawnResult({stdout: JSON.stringify(digests)})
+        }
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // The RepoDigests inspect must contain the image SHA from Step 1
+    const repoDigestsCalls = inspectCalls.filter(c => c.includes('RepoDigests'))
+    expect(repoDigestsCalls.length).toBeGreaterThan(0)
+    for (const call of repoDigestsCalls) {
+      expect(call).toContain(IMAGE_SHA)
+    }
+  })
+
+  test('deploy fails when image RepoDigests do not contain the expected digest', async () => {
+    // Regression guard: assertRunningImageDigest must still throw when digest mismatches
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('{{.Image}}')) {
+        return makeSpawnResult({stdout: 'sha256:imagesha999'})
+      }
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('RepoDigests')) {
+        // Return a WRONG digest
+        return makeSpawnResult({
+          stdout: JSON.stringify([`ghcr.io/marcusrbrown/infra-gateway@sha256:${'f'.repeat(64)}`]),
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/digest does not match/)
+  })
+})
+
+// ─── P2: digest format validation ────────────────────────────────────────────
+
+describe('Phase 3c — digest format validation (P2)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('malformed GATEWAY_IMAGE_DIGEST (partial hex) → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({GATEWAY_IMAGE_DIGEST: 'sha256:abc123'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_IMAGE_DIGEST/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('malformed GATEWAY_IMAGE_DIGEST (tag-only, no sha256:) → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({GATEWAY_IMAGE_DIGEST: 'v1.2.3'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_IMAGE_DIGEST/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('malformed GATEWAY_IMAGE_DIGEST (sha256: prefix but wrong length) → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({GATEWAY_IMAGE_DIGEST: `sha256:${'a'.repeat(63)}`}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_IMAGE_DIGEST/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('malformed GATEWAY_IMAGE_DIGEST (shell metacharacters) → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({GATEWAY_IMAGE_DIGEST: `sha256:$(evil)${'a'.repeat(55)}`}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_IMAGE_DIGEST/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('malformed WORKSPACE_IMAGE_DIGEST (partial hex) → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({WORKSPACE_IMAGE_DIGEST: 'sha256:abc123'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/WORKSPACE_IMAGE_DIGEST/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('malformed WORKSPACE_IMAGE_DIGEST (tag-only) → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({WORKSPACE_IMAGE_DIGEST: 'latest'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/WORKSPACE_IMAGE_DIGEST/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('valid sha256 digests (64 hex chars) → passes validation, proceeds to SSH', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    // Valid digests — should NOT throw from validation; will reach SSH phase
+    await main({
+      env: makeEnv({
+        GATEWAY_IMAGE_DIGEST: `sha256:${'a'.repeat(64)}`,
+        WORKSPACE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
+      }),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Reached SSH phase (calls > 0)
+    expect(calls.length).toBeGreaterThan(0)
+  })
+})
+
+// ─── P2: JSON narrowing for docker inspect output ────────────────────────────
+
+describe('Phase 9c — JSON narrowing for docker inspect RepoDigests output', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('docker inspect returning null → treated as empty → assertRunningImageDigest throws mismatch (not TypeError)', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('{{.Image}}')) {
+        return makeSpawnResult({stdout: 'sha256:imagesha999'})
+      }
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('RepoDigests')) {
+        return makeSpawnResult({stdout: 'null'})
+      }
+      return undefined
+    })
+
+    let caughtError: Error | undefined
+    try {
+      await main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      })
+    } catch (error) {
+      caughtError = error instanceof Error ? error : new Error(String(error))
+    }
+
+    expect(caughtError).toBeDefined()
+    // Must be the actionable mismatch error, not a TypeError from unsafe cast
+    expect(caughtError?.message).toMatch(/digest does not match/)
+    expect(caughtError?.message).not.toMatch(/TypeError/)
+    expect(caughtError?.message).not.toMatch(/Cannot read/)
+  })
+
+  test('docker inspect returning a plain string → treated as empty → assertRunningImageDigest throws mismatch', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('{{.Image}}')) {
+        return makeSpawnResult({stdout: 'sha256:imagesha999'})
+      }
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('RepoDigests')) {
+        return makeSpawnResult({stdout: '"just-a-string"'})
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/digest does not match/)
+  })
+
+  test('docker inspect returning an object {} → treated as empty → assertRunningImageDigest throws mismatch', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('{{.Image}}')) {
+        return makeSpawnResult({stdout: 'sha256:imagesha999'})
+      }
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('RepoDigests')) {
+        return makeSpawnResult({stdout: '{}'})
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/digest does not match/)
+  })
+
+  test('docker inspect returning array of non-strings [123] → treated as empty → assertRunningImageDigest throws mismatch', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('{{.Image}}')) {
+        return makeSpawnResult({stdout: 'sha256:imagesha999'})
+      }
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('RepoDigests')) {
+        return makeSpawnResult({stdout: '[123, 456]'})
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/digest does not match/)
   })
 })

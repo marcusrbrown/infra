@@ -18,3 +18,10 @@ bun.lockb
 # BEGIN oh-my-opencode-slim clonedeps
 .slim/clonedeps/repos/
 # END oh-my-opencode-slim clonedeps
+
+# Opencode
+!.opencode/
+.opencode/*
+!.opencode/commands/
+!.opencode/themes/
+!.opencode/tui.json

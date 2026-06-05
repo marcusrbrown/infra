@@ -43,8 +43,8 @@ The `deploy-gateway` job declares `needs: build-images`. A build or push failure
 9. **Registration poll** — `GET /applications/{app_id}/guilds/{guild_id}/commands` on the Discord API. Polls Discord registration with ~90s default budget (10 attempts × (3s interval + 6s per-attempt timeout); defaults from `apps/gateway/src/deploy.ts:344-368`). 429 honors `Retry-After` and doesn't count against the attempt budget (each 429 retry adds up to 60s; pathological all-429 ceiling ~11 min). 401/403/404 abort immediately with token-sanitized errors. 5xx retries.
 10. **Running image digest verification** — for each of `gateway` and `workspace`, the deploy reads the running container's `RepoDigests` and asserts they match the CI-pushed digest. This confirms the droplet is running the GHCR artifact, not a stale or locally-built image. Throws if the digest does not match — deploy fails loudly. Manual verification:
     ```bash
-    docker inspect --format '{{json .RepoDigests}}' $(docker compose --project-directory /opt/gateway/deploy ps -q gateway)
-    docker inspect --format '{{json .RepoDigests}}' $(docker compose --project-directory /opt/gateway/deploy ps -q workspace)
+    docker inspect --format '{{json .RepoDigests}}' "$(docker inspect --format '{{.Image}}' "$(docker compose --project-directory /opt/gateway/deploy ps -q gateway)")"
+    docker inspect --format '{{json .RepoDigests}}' "$(docker inspect --format '{{.Image}}' "$(docker compose --project-directory /opt/gateway/deploy ps -q workspace)")"
     ```
 11. **Checksum write** — `/opt/gateway/.secrets-checksum` is written only after compose + registration + digest verification all succeed. If any step fails mid-rotation, the old checksum persists and the next deploy force-recreates again.
 

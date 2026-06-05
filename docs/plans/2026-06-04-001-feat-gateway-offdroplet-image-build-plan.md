@@ -1,7 +1,7 @@
 ---
 title: 'feat: Off-droplet gateway image build (CI → GHCR → droplet pull)'
 type: feat
-status: active
+status: completed
 date: 2026-06-04
 origin: docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md
 ---
@@ -94,7 +94,7 @@ and a fresh upstream ref (cold build cache) makes it worse. See origin:
 
 ## Implementation Units
 
-- [ ] **Unit 1: CI build-and-push job (GHCR)**
+- [x] **Unit 1: CI build-and-push job (GHCR)**
 
 **Goal:** Build `gateway` + `workspace` images from the pinned upstream ref in CI and push to GHCR, before any droplet deploy.
 
@@ -122,7 +122,7 @@ and a fresh upstream ref (cold build cache) makes it worse. See origin:
 **Verification:**
 - A gateway deploy dispatch builds both images and pushes `:<ref>` tags to GHCR; the `deploy` job only starts after `build-images` succeeds.
 
-- [ ] **Unit 2: Droplet deploy pulls instead of builds**
+- [x] **Unit 2: Droplet deploy pulls instead of builds**
 
 **Goal:** Change `deploy.ts` so the droplet pulls the GHCR images and recreates, never building.
 
@@ -157,7 +157,7 @@ and a fresh upstream ref (cold build cache) makes it worse. See origin:
 **Verification:**
 - A deploy pulls both images, recreates, all services healthy, and the running gateway/workspace images are the GHCR `:<ref>` artifacts (verified by image ref, not git source).
 
-- [ ] **Unit 3: Docs + AGENTS.md for the new flow**
+- [x] **Unit 3: Docs + AGENTS.md for the new flow**
 
 **Goal:** Document the build→push→pull deploy flow, GHCR packages, local/emergency deploy path, and running-image verification.
 

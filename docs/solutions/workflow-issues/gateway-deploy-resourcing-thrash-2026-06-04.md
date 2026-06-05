@@ -109,7 +109,7 @@ verify the running image's build timestamp + code signature, never the git check
 
 - **The next `fro-bot/agent` CI bump WILL re-thrash** — same `--build`-with-old-stack-running path. Fix before the next daemon bump, via one of:
   - **Resize the droplet to ≥4 GB** — simplest; the build gets headroom alongside the running stack. Standing cost increase.
-  - **Build off-droplet (GHCR) and pull** — no recurring cost; the droplet only pulls a prebuilt image. Larger change (CI build/push + registry auth).
+  - **Build off-droplet (GHCR) and pull** — no recurring cost; the droplet only pulls a prebuilt image. Larger change (CI build/push + registry auth). **This is the implemented path** — see the playbook `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`. The droplet now pulls digest-pinned GHCR images and never builds.
   - **Stop the old stack before building in `deploy.ts`** — no cost; accepts a planned downtime window per deploy (no safe-failure fallback during the build).
 - **Always run a manual recovery rebuild detached** (`setsid`/`nohup` to a logfile) so an SSH drop or local fork-pressure can't abort it half-done.
 - **Never SSH-hammer a thrashing droplet** — it can't run `docker ps`, and UFW rate-limits new connections. Use external probes (public endpoint, GitHub run API, `doctl`) which add zero droplet load.

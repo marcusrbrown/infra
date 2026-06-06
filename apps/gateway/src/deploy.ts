@@ -251,6 +251,54 @@ export function getMissingWorkspaceEnvVars(env: Record<string, string>): string[
   return missing
 }
 
+/** Maximum allowed value for WORKSPACE_OPENCODE_READY_TIMEOUT_MS (10 minutes in ms). */
+export const READY_TIMEOUT_MAX_MS = 600_000
+
+/**
+ * Validates WORKSPACE_OPENCODE_READY_TIMEOUT_MS.
+ *
+ * - Absent or exact empty string → returns undefined (upstream default of 60000 applies).
+ * - Whitespace-only string → throws (malformed, not absent).
+ * - Valid positive integer string in [1, 600000] → returns the parsed number.
+ * - Non-numeric, zero, negative, float, above max, NaN, Infinity, or unsafe integer → throws.
+ *
+ * Mirrors upstream behavior: empty/absent uses default; non-numeric/zero/negative fails startup.
+ */
+export function validateReadyTimeout(value: string | undefined): number | undefined {
+  if (value === undefined || value === '') return undefined
+
+  const trimmed = value.trim()
+
+  // Whitespace-only is malformed (not absent)
+  if (trimmed === '') {
+    throw new Error(
+      `WORKSPACE_OPENCODE_READY_TIMEOUT_MS "${value}" is invalid (whitespace-only). ` +
+        `Must be a positive integer in milliseconds between 1 and ${READY_TIMEOUT_MAX_MS} (e.g. "60000"), ` +
+        'or absent/empty to use the upstream default of 60000ms.',
+    )
+  }
+
+  const parsed = Number(trimmed)
+
+  if (
+    !Number.isFinite(parsed) ||
+    !Number.isInteger(parsed) ||
+    !Number.isSafeInteger(parsed) ||
+    parsed <= 0 ||
+    parsed > READY_TIMEOUT_MAX_MS ||
+    String(parsed) !== trimmed
+  ) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_READY_TIMEOUT_MS "${value}" is invalid. ` +
+        `Must be a positive integer in milliseconds between 1 and ${READY_TIMEOUT_MAX_MS} (e.g. "60000"). ` +
+        'Absent or empty uses the upstream default of 60000ms. ' +
+        'Zero, negative, non-integer, NaN, Infinity, unsafe integers, and values above the maximum are rejected.',
+    )
+  }
+
+  return parsed
+}
+
 /**
  * Builds the contents of the remote .env file for the gateway deploy.
  *
@@ -268,9 +316,20 @@ export function getMissingWorkspaceEnvVars(env: Record<string, string>): string[
  *   WORKSPACE_OPENCODE_MODEL is validated via MODEL_ALLOWLIST_RE — a positive
  *   allow-list that accepts only letters, digits, dots, hyphens, underscores,
  *   and exactly one slash (e.g. anthropic/claude-sonnet-4-6).
+ *
+ * WORKSPACE_OPENCODE_READY_TIMEOUT_MS (v0.53.1+):
+ *   Optional. When set, emitted as-is so the workspace supervisor uses the
+ *   operator-specified timeout instead of the upstream default (60000ms).
+ *   Validated by validateReadyTimeout before reaching here; also validated
+ *   directly here to guard against callers that bypass validateReadyTimeout.
  */
-export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; model: string; config: string}): string {
-  const {objectStoreHosts, model, config} = opts
+export function buildGatewayEnvFileContents(opts: {
+  objectStoreHosts: string
+  model: string
+  config: string
+  readyTimeoutMs?: number
+}): string {
+  const {objectStoreHosts, model, config, readyTimeoutMs} = opts
 
   // Validate model: positive allow-list — exactly one /, non-empty provider + model segments,
   // characters limited to letters, digits, dots, hyphens, underscores.
@@ -370,7 +429,26 @@ export function buildGatewayEnvFileContents(opts: {objectStoreHosts: string; mod
   // is a special pattern meaning "insert a literal $", so it's a no-op. Use split/join.
   const escapedConfig = config.split('$').join('$$')
 
-  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\nWORKSPACE_EGRESS_HOSTS=${CLIPROXY_EGRESS_HOST},${OPENCODE_CATALOG_HOST}\n`
+  // Validate readyTimeoutMs if provided — must be a safe positive integer within bounds.
+  // validateReadyTimeout handles string input; here we guard the numeric form directly.
+  if (
+    readyTimeoutMs !== undefined &&
+    (!Number.isFinite(readyTimeoutMs) ||
+      !Number.isInteger(readyTimeoutMs) ||
+      !Number.isSafeInteger(readyTimeoutMs) ||
+      readyTimeoutMs <= 0 ||
+      readyTimeoutMs > READY_TIMEOUT_MAX_MS)
+  ) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_READY_TIMEOUT_MS ${readyTimeoutMs} is invalid. ` +
+        `Must be a positive integer in milliseconds between 1 and ${READY_TIMEOUT_MAX_MS}. ` +
+        'Zero, negative, non-integer, NaN, Infinity, unsafe integers, and values above the maximum are rejected.',
+    )
+  }
+
+  const readyTimeoutLine = readyTimeoutMs === undefined ? '' : `\nWORKSPACE_OPENCODE_READY_TIMEOUT_MS=${readyTimeoutMs}`
+
+  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\nWORKSPACE_EGRESS_HOSTS=${CLIPROXY_EGRESS_HOST},${OPENCODE_CATALOG_HOST}${readyTimeoutLine}\n`
 }
 
 /**
@@ -557,6 +635,14 @@ export interface ComposeOverrideOpts {
   workspaceDigest: string
   /** When true, adds the Caddy reverse proxy and announce secret wiring. */
   announceEnabled: boolean
+  /**
+   * When set, the validated ready timeout value (ms). Unused by the override itself —
+   * the override always emits the Docker Compose interpolation expression
+   * `${WORKSPACE_OPENCODE_READY_TIMEOUT_MS:-}` so the workspace container receives
+   * the value from the .env file written by buildGatewayEnvFileContents.
+   * Present in opts for documentation/traceability; the override expression is always emitted.
+   */
+  readyTimeoutMs?: number
 }
 
 const GATEWAY_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-gateway'
@@ -625,18 +711,28 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
 `
     : ''
 
+  // workspace-repos is always declared — it persists cloned repo checkouts across
+  // container recreation and daemon upgrades. `docker compose down -v` destroys it.
+  // Announce-enabled stacks also declare caddy_data and caddy_config.
   const volumesSection = announceEnabled
     ? `volumes:
   caddy_data:
   caddy_config:
+  workspace-repos:
 `
-    : ''
+    : `volumes:
+  workspace-repos:
+`
 
   return `services:
   gateway:
     image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${announceSection}
   workspace:
     image: ${WORKSPACE_IMAGE_NAME}@${workspaceDigest}
+    environment:
+      WORKSPACE_OPENCODE_READY_TIMEOUT_MS: \${WORKSPACE_OPENCODE_READY_TIMEOUT_MS:-}
+    volumes:
+      - workspace-repos:/workspace/repos
 ${caddySection}${volumesSection}`
 }
 
@@ -1042,16 +1138,19 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   const objectStoreHosts = computeObjectStoreHosts(env)
   validateObjectStoreHosts(objectStoreHosts)
 
-  // Phase 3b: Validate workspace .env vars (MODEL/CONFIG) before any SSH.
+  // Phase 3b: Validate workspace .env vars (MODEL/CONFIG/READY_TIMEOUT) before any SSH.
   // buildGatewayEnvFileContents throws with a descriptive message on invalid input.
   const missingWorkspace = getMissingWorkspaceEnvVars(env)
   if (missingWorkspace.length > 0) {
     throw new Error(`Missing required environment variables: ${missingWorkspace.join(', ')}`)
   }
+  // validateReadyTimeout throws on non-numeric/zero/negative values; absent/empty → undefined.
+  const readyTimeoutMs = validateReadyTimeout(env.WORKSPACE_OPENCODE_READY_TIMEOUT_MS)
   buildGatewayEnvFileContents({
     objectStoreHosts,
     model: env.WORKSPACE_OPENCODE_MODEL ?? '',
     config: env.WORKSPACE_OPENCODE_CONFIG ?? '',
+    readyTimeoutMs,
   })
 
   // Phase 3c: Validate image digests before any SSH.
@@ -1299,6 +1398,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       objectStoreHosts,
       model: env.WORKSPACE_OPENCODE_MODEL ?? '',
       config: env.WORKSPACE_OPENCODE_CONFIG ?? '',
+      readyTimeoutMs,
     })
     await writeRemoteFile(
       'Writing .env',

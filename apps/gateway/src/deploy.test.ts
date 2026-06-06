@@ -4539,3 +4539,181 @@ describe('Phase 9c — JSON narrowing for docker inspect RepoDigests output', ()
     ).rejects.toThrow(/digest does not match/)
   })
 })
+
+describe('validateReadyTimeout — WORKSPACE_OPENCODE_READY_TIMEOUT_MS', () => {
+  test('absent/empty → returns undefined (use upstream default of 60000)', async () => {
+    const {validateReadyTimeout} = await import('./deploy')
+    expect(validateReadyTimeout(undefined)).toBeUndefined()
+    expect(validateReadyTimeout('')).toBeUndefined()
+  })
+
+  test('whitespace-only string → throws (malformed, not absent)', async () => {
+    const {validateReadyTimeout} = await import('./deploy')
+    expect(() => validateReadyTimeout('   ')).toThrow(/WORKSPACE_OPENCODE_READY_TIMEOUT_MS/)
+    expect(() => validateReadyTimeout('\t')).toThrow(/WORKSPACE_OPENCODE_READY_TIMEOUT_MS/)
+    expect(() => validateReadyTimeout(' \n ')).toThrow(/WORKSPACE_OPENCODE_READY_TIMEOUT_MS/)
+  })
+
+  test('valid positive integer string → returns the parsed number', async () => {
+    const {validateReadyTimeout} = await import('./deploy')
+    expect(validateReadyTimeout('60000')).toBe(60000)
+    expect(validateReadyTimeout('120000')).toBe(120000)
+    expect(validateReadyTimeout('30000')).toBe(30000)
+  })
+
+  test('non-numeric string → throws with descriptive message', async () => {
+    const {validateReadyTimeout} = await import('./deploy')
+    expect(() => validateReadyTimeout('not-a-number')).toThrow(/WORKSPACE_OPENCODE_READY_TIMEOUT_MS/)
+  })
+
+  test('zero → throws (must be positive)', async () => {
+    const {validateReadyTimeout} = await import('./deploy')
+    expect(() => validateReadyTimeout('0')).toThrow(/WORKSPACE_OPENCODE_READY_TIMEOUT_MS/)
+  })
+
+  test('negative integer → throws (must be positive)', async () => {
+    const {validateReadyTimeout} = await import('./deploy')
+    expect(() => validateReadyTimeout('-1000')).toThrow(/WORKSPACE_OPENCODE_READY_TIMEOUT_MS/)
+  })
+
+  test('float string → throws (must be integer)', async () => {
+    const {validateReadyTimeout} = await import('./deploy')
+    expect(() => validateReadyTimeout('60000.5')).toThrow(/WORKSPACE_OPENCODE_READY_TIMEOUT_MS/)
+  })
+})
+
+describe('buildGatewayEnvFileContents — WORKSPACE_OPENCODE_READY_TIMEOUT_MS', () => {
+  const VALID_OPTS = {
+    objectStoreHosts: 'bucket.s3.us-east-1.amazonaws.com',
+    model: 'anthropic/claude-sonnet-4-6',
+    config: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
+  }
+
+  test('readyTimeoutMs absent → .env does NOT contain WORKSPACE_OPENCODE_READY_TIMEOUT_MS line', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents(VALID_OPTS)
+    expect(result).not.toContain('WORKSPACE_OPENCODE_READY_TIMEOUT_MS')
+  })
+
+  test('readyTimeoutMs set → .env contains WORKSPACE_OPENCODE_READY_TIMEOUT_MS=<value>', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({...VALID_OPTS, readyTimeoutMs: 90000})
+    expect(result).toContain('WORKSPACE_OPENCODE_READY_TIMEOUT_MS=90000')
+  })
+
+  test('readyTimeoutMs=60000 (upstream default) → emitted explicitly when provided', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({...VALID_OPTS, readyTimeoutMs: 60000})
+    expect(result).toContain('WORKSPACE_OPENCODE_READY_TIMEOUT_MS=60000')
+  })
+})
+
+describe('main() — WORKSPACE_OPENCODE_READY_TIMEOUT_MS validation', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.55.2'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('WORKSPACE_OPENCODE_READY_TIMEOUT_MS absent → deploy proceeds normally', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const env = makeEnv()
+    delete (env as Record<string, string>).WORKSPACE_OPENCODE_READY_TIMEOUT_MS
+
+    await main({env, args: [], fetch: makeDiscordFetch([{name: 'ping'}]), sleep: async () => {}, spawn: spawnFn})
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  test('WORKSPACE_OPENCODE_READY_TIMEOUT_MS=120000 → deploy proceeds normally', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({WORKSPACE_OPENCODE_READY_TIMEOUT_MS: '120000'}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  test('WORKSPACE_OPENCODE_READY_TIMEOUT_MS=0 → throws before any SSH', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({WORKSPACE_OPENCODE_READY_TIMEOUT_MS: '0'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/WORKSPACE_OPENCODE_READY_TIMEOUT_MS/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('WORKSPACE_OPENCODE_READY_TIMEOUT_MS=not-a-number → throws before any SSH', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({WORKSPACE_OPENCODE_READY_TIMEOUT_MS: 'not-a-number'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/WORKSPACE_OPENCODE_READY_TIMEOUT_MS/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('WORKSPACE_OPENCODE_READY_TIMEOUT_MS=120000 → .env written with WORKSPACE_OPENCODE_READY_TIMEOUT_MS line', async () => {
+    const {main} = await import('./deploy')
+    const envWrites: Record<string, string> = {}
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('cat >') && cmdStr.includes('.env')) {
+        const result = makeSpawnResult({captureStdin: true})
+        result.stdin = {
+          write(data: Uint8Array) {
+            const path = cmdStr.match(/cat > '([^']+)'/)?.[1] ?? '.env'
+            envWrites[path] = (envWrites[path] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({WORKSPACE_OPENCODE_READY_TIMEOUT_MS: '120000'}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const envPath = '/opt/gateway/deploy/.env'
+    expect(envWrites[envPath]).toBeDefined()
+    expect(envWrites[envPath]).toContain('WORKSPACE_OPENCODE_READY_TIMEOUT_MS=120000')
+  })
+})

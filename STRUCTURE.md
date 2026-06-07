@@ -1,0 +1,114 @@
+# Structure
+
+Where things live and where to put new code. For system shape, data flow, and invariants, see [`ARCHITECTURE.md`](ARCHITECTURE.md). For per-app operational detail, see each `apps/<name>/AGENTS.md` and `packages/cli/AGENTS.md`.
+
+## Directory Layout
+
+```text
+├── apps/                       Deployable units (one self-contained deploy each)
+│   ├── keeweb/                 KeeWeb static-site deploy (SSH/rsync to Mail-in-a-Box)
+│   ├── cliproxy/               CLIProxyAPI Claude proxy (DigitalOcean + Docker Compose)
+│   ├── gateway/                Fro Bot Discord gateway (DigitalOcean + Docker Compose)
+│   └── umami/                  Umami analytics (DigitalOcean + Docker Compose)
+├── packages/                   Reusable libraries (never import from apps/)
+│   ├── cli/                    @marcusrbrown/infra goke CLI + MCP bridge
+│   └── shared/                 Cross-app SSH/SCP/DigitalOcean provisioning helpers
+├── docs/                       Brainstorms → plans → solutions (compound learning)
+├── .agents/skills/             Agent skill context packets (load before working in a domain)
+├── .github/                    Workflows, pinned host keys, Renovate, Copilot, repo settings
+└── .opencode/commands/         OpenCode slash commands (e.g. generate-readme)
+```
+
+## Directory Purposes
+
+### `apps/`
+
+One subdirectory per deployable. Each app owns its Compose/build config, a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a droplet provisioning script (`server/provision-droplet.ts`, except keeweb), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`.
+
+### `packages/`
+
+Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge). `packages/shared` is the provisioning helper library consumed by every app's provision script. `packages/` never imports from `apps/`.
+
+### `.github/`
+
+CI/CD and automation: `workflows/*.yaml` (deploy router + per-app deploys, CI, release, Fro Bot, Renovate, Scorecard, settings sync), `known_hosts` (pinned SSH host keys), `renovate.json5`, `settings.yml`, `copilot-instructions.md`.
+
+### `docs/`
+
+Compound-learning chain: `brainstorms/` (requirements), `plans/` (implementation plans), `solutions/` (documented fixes/best-practices with YAML frontmatter). Plan-taxonomy lives here and only here — never in shipped source or public docs.
+
+### `.agents/skills/`
+
+Per-domain agent context packets (`<name>/SKILL.md`). Load the relevant skill before working in that domain.
+
+### `.opencode/commands/`
+
+OpenCode slash commands (Markdown). `generate-readme.md` owns `README.md` generation; this is distinct from the `generating-project-docs` skill that owns `ARCHITECTURE.md`/`STRUCTURE.md`.
+
+## Key File Locations
+
+**Entry Points**
+
+| File                        | Role                                                     |
+| --------------------------- | -------------------------------------------------------- |
+| `packages/cli/src/cli.ts`   | goke CLI entry; registers all command groups             |
+| `apps/<name>/src/deploy.ts` | App deploy script (`main`/`deploy`)                      |
+| `apps/keeweb/src/build.ts`  | KeeWeb build (download + SHA-256 verify + config inject) |
+| `apps/keeweb/deploy.sh`     | Only Bash script in the repo (SSH/rsync deploy)          |
+
+**Per-App Deploy / Provision**
+
+| File                                      | Role                                                              |
+| ----------------------------------------- | ----------------------------------------------------------------- |
+| `apps/<name>/server/provision-droplet.ts` | DigitalOcean droplet provisioning (cliproxy, gateway, umami)      |
+| `apps/<name>/src/host.ts`                 | Deploy-side host validator (rejects `-`-prefixed / invalid hosts) |
+| `apps/gateway/upstream.json`              | Pinned `fro-bot/agent` daemon ref                                 |
+
+**CLI Commands**
+
+| File                                          | Role                                           |
+| --------------------------------------------- | ---------------------------------------------- |
+| `packages/cli/src/commands/<app>/<action>.ts` | Per-app subcommand (status, deploy, …)         |
+| `packages/cli/src/commands/<app>/index.ts`    | Command-group barrel (`register<App>Commands`) |
+| `packages/cli/src/commands/status.ts`         | Unified cross-app status dashboard             |
+| `packages/cli/src/commands/mcp.ts`            | MCP stdio bridge + `MCP_ALLOWLIST`             |
+| `packages/cli/src/lib/action-ctx.ts`          | `ActionCtx` — MCP-capturable action context    |
+| `packages/shared/server/droplet-helpers.ts`   | Shared SSH/SCP/DigitalOcean helpers            |
+
+**Config**
+
+| File                     | Role                                                                  |
+| ------------------------ | --------------------------------------------------------------------- |
+| `package.json`           | Workspaces, root `provision:*` / `deploy:*` / `test` / `lint` scripts |
+| `eslint.config.ts`       | ESLint via `@bfra.me/eslint-config`                                   |
+| `tsconfig.json`          | TypeScript via `@bfra.me/tsconfig`                                    |
+| `.github/renovate.json5` | Renovate config (incl. `apps/*/upstream.json` custom manager)         |
+
+**Tests / CI**
+
+| File                                   | Role                                                       |
+| -------------------------------------- | ---------------------------------------------------------- |
+| `**/*.test.ts`                         | Colocated tests (mock at boundaries: `fetch`, `Bun.spawn`) |
+| `packages/cli/src/conventions.test.ts` | Executable convention enforcement                          |
+| `.github/workflows/deploy.yaml`        | Deploy router (paths-filter → per-app deploy)              |
+| `.github/workflows/deploy-<app>.yaml`  | Gated per-app deploy                                       |
+
+## Naming Conventions
+
+- **Scripts**: TypeScript run via `bun run`. Only `apps/keeweb/deploy.sh` is Bash.
+- **Tests**: colocated `*.test.ts` beside source. Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Use `NO_COLOR=1` for deterministic subprocess snapshots.
+- **CLI command modules**: `packages/cli/src/commands/<app>/<action>.ts` (e.g. `status.ts`, `deploy.ts`) + a barrel `index.ts` exporting `register<App>Commands`.
+- **Host validators**: `host.ts` (deploy-side under `apps/<name>/src/`, CLI-side under `packages/cli/src/commands/<app>/`).
+- **Workflows**: `.yaml` extension (not `.yml`); deploy workflows `deploy-<app>.yaml`.
+- **Bun script guards**: scripts exporting functions for tests gate top-level execution with `if (import.meta.main)`.
+
+## Where to Add New Code
+
+Mechanical layout; for the integration rationale see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+- **New app** → `apps/<name>/` mirroring `apps/cliproxy/`: Compose config, `src/deploy.ts`, `server/provision-droplet.ts`, `src/host.ts`, `AGENTS.md`. Add to `package.json` `workspaces` + `provision:<name>`/`deploy:<name>` scripts; run `bun install` to refresh `bun.lock`.
+- **New CLI command** → `packages/cli/src/commands/<app>/<action>.ts` + colocated test; export it from the group's `index.ts` barrel.
+- **New shared helper** → `packages/shared/server/droplet-helpers.ts` + colocated test.
+- **New test** → colocate `*.test.ts` beside the source; fixtures/snapshots in `__fixtures__/`/`__snapshots__/`.
+- **New workflow** → `.github/workflows/<name>.yaml`, SHA-pinned actions with `# vX.Y.Z`; for a deploy, copy a `deploy-<app>.yaml` and wire it into `deploy.yaml`'s paths-filter.
+- **New docs page** → `docs/<brainstorms|plans|solutions>/`; solutions carry YAML frontmatter.

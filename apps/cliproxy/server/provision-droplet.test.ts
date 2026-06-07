@@ -1,4 +1,6 @@
-import {existsSync} from 'node:fs'
+import {existsSync, statSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
@@ -6,6 +8,7 @@ import {
   performProvisioning,
   resolveProvisionIdentity,
   validateCliproxyDomain,
+  writeManagementKeyFile,
   writeRemoteEnvFile,
 } from './provision-droplet'
 
@@ -309,6 +312,63 @@ describe('provision-droplet', () => {
       await expect(writeRemoteEnvFile('1.2.3.4')).rejects.toThrow(/255/)
 
       spawnSpy.mockRestore()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // writeManagementKeyFile — writes key to 0600 file, never to stdout
+  // ---------------------------------------------------------------------------
+
+  describe('writeManagementKeyFile', () => {
+    let testDir: string
+    let keyFilePath: string
+
+    beforeEach(() => {
+      testDir = join(tmpdir(), `infra-test-${Date.now()}`)
+      keyFilePath = join(testDir, '.cliproxy-management-key')
+    })
+
+    afterEach(async () => {
+      // Clean up test file
+      try {
+        const {rmSync} = await import('node:fs')
+        rmSync(testDir, {recursive: true, force: true})
+      } catch {
+        // best-effort
+      }
+    })
+
+    it('writes the management key to the expected file path', async () => {
+      const key = 'test-management-key-value-abc123'
+      const result = await writeManagementKeyFile(testDir, key)
+
+      expect(existsSync(result)).toBe(true)
+      const contents = await Bun.file(result).text()
+      expect(contents).toBe(key)
+    })
+
+    it('creates the file with mode 0600 (owner read/write only)', async () => {
+      const key = 'test-management-key-value-abc123'
+      const result = await writeManagementKeyFile(testDir, key)
+
+      const stat = statSync(result)
+      // 0o600 = 384 decimal; mask with 0o777 to get permission bits only
+      expect(stat.mode & 0o777).toBe(0o600)
+    })
+
+    it('returns the path to the written file', async () => {
+      const key = 'test-management-key-value-abc123'
+      const result = await writeManagementKeyFile(testDir, key)
+
+      expect(result).toBe(keyFilePath)
+    })
+
+    it('does NOT include the raw key value in the returned path string', async () => {
+      const key = 'super-secret-management-key-xyz789'
+      const result = await writeManagementKeyFile(testDir, key)
+
+      // The returned path must not contain the key value
+      expect(result).not.toContain(key)
     })
   })
 })

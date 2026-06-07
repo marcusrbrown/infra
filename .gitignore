@@ -5,6 +5,7 @@ dist/
 .env
 .env.*
 !.env.example
+.cliproxy-management-key
 .DS_Store
 *.swp
 *.swo

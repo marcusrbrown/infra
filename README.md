@@ -358,46 +358,7 @@ Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, and `gateway.fro.bot` are
 
 ## Repository Structure
 
-```text
-├── apps/
-│   ├── keeweb/                  KeeWeb deploy package
-│   │   ├── src/build.ts         Build script (download + SHA-256 verify + config injection)
-│   │   ├── config/              Config templates (nginx, app config)
-│   │   ├── server/              Deploy user provisioning script
-│   │   └── deploy.sh            SSH/rsync deploy script
-│   └── cliproxy/                CLIProxyAPI deployment package
-│       ├── config/              docker-compose.yaml, Caddyfile, config.yaml template
-│       ├── server/              Droplet provisioning script
-│       └── src/deploy.ts        Deploy script
-│   └── gateway/                 Fro Bot gateway deployment package
-│       ├── server/              Droplet provisioning script
-│       ├── src/deploy.ts        Deploy script (secrets materialization, compose up, registration poll)
-│       └── upstream.json        Pinned fro-bot/agent ref
-├── packages/cli/                @marcusrbrown/infra CLI
-│   └── src/
-│       ├── cli.ts               Entry point (goke framework)
-│       ├── cli.test.ts          CLI snapshot + discovery tests
-│       └── commands/            Command modules (subdirectory per app)
-│           ├── keeweb/          status, deploy, open + barrel
-│           ├── cliproxy/        status, deploy, config, keys, login, open, setup + barrel
-│           ├── gateway/         status, deploy, logs, backup, restore + barrel
-│           ├── status.ts        Unified cross-app status dashboard
-│           └── mcp.ts           MCP bridge (stdio server)
-├── .agents/
-│   └── skills/                  Agent skill context packets (goke)
-├── .github/
-│   ├── copilot-instructions.md  Copilot coding agent instructions
-│   ├── known_hosts              Pinned SSH host keys
-│   ├── renovate.json5           Renovate configuration
-│   ├── settings.yml             Repository settings definition
-│   └── workflows/               CI/CD and automation workflows
-├── docs/
-│   ├── brainstorms/             Requirements and brainstorms
-│   ├── plans/                   Implementation plans
-│   └── solutions/               Compound learning docs
-└── .opencode/
-    └── commands/                OpenCode slash commands
-```
+For the directory layout and where to put new code, see [`STRUCTURE.md`](STRUCTURE.md). For system shape, data flow, and invariants, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Testing
 

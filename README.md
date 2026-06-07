@@ -59,7 +59,8 @@ bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 | **Deploy KeeWeb** | Push to `main`, `workflow_dispatch` | Build and deploy KeeWeb (path-filtered) |
 | **Deploy CLIProxy** | Push to `main`, `workflow_dispatch` | Deploy CLIProxyAPI (path-filtered) |
 | **Deploy Gateway** | Push to `main`, `workflow_dispatch` | Deploy gateway stack (path-filtered) |
-| **Deploy** | `workflow_dispatch` | Manual umbrella dispatch that triggers all three deploy workflows |
+| **Deploy Umami** | Push to `main`, `workflow_dispatch` | Deploy Umami analytics stack (path-filtered) |
+| **Deploy** | Push to `main`, `workflow_dispatch` | Router that path-filters changes and dispatches the per-app deploy workflows |
 | **Release** | Push to `main` | Version and publish `@marcusrbrown/infra` via Changesets |
 | **Renovate** | Schedule, issue/PR edits, post-deploy | Automated dependency updates |
 | **Renovate Changesets** | Renovate PRs | Auto-create changeset files for dependency updates |
@@ -70,11 +71,12 @@ bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 
 ### Deploy Pipeline
 
-`Deploy KeeWeb`, `Deploy CLIProxy`, and `Deploy Gateway` use `dorny/paths-filter` to deploy only when app files change (docs, tests, fixtures, and snapshots are excluded from the filter). Each deploy runs in its own GitHub Environment and requires approval.
+The `Deploy` router uses `dorny/paths-filter` (`predicate-quantifier: every`) to deploy only when an app's files change (docs, tests, fixtures, and snapshots are excluded from the filter). Each per-app deploy runs in its own GitHub Environment and requires approval.
 
 - **Deploy KeeWeb** runs in the `keeweb` environment.
 - **Deploy CLIProxy** runs in the `cliproxy` environment.
 - **Deploy Gateway** runs in the `gateway` environment.
+- **Deploy Umami** runs in the `umami` environment.
 
 Manual deploys are available either per-app (`workflow_dispatch` on each dedicated workflow) or together via the umbrella `Deploy` workflow.
 
@@ -121,6 +123,18 @@ Manual deploys are available either per-app (`workflow_dispatch` on each dedicat
 | `GATEWAY_PRESENCE_CHANNEL_ID` |  | Discord channel ID for presence embeds (set with `GATEWAY_WEBHOOK_SECRET`) |
 
 See [`apps/gateway/README.md`](apps/gateway/README.md) for the complete contract including CI-injected image digests and OpenCode supervisor tuning.
+
+**`umami` environment:**
+
+| Secret                 | Required | Description                                                                   |
+| ---------------------- | -------- | ----------------------------------------------------------------------------- |
+| `UMAMI_SSH_KEY`        | ✓        | Ed25519 private key for the `metrics.fro.bot` droplet                         |
+| `UMAMI_DOMAIN`         | ✓        | FQDN of the Umami instance                                                    |
+| `UMAMI_APP_SECRET`     | ✓        | Umami app secret (session/JWT signing)                                        |
+| `UMAMI_DB_PASSWORD`    | ✓        | Postgres password (volume-coupled — rotate only via the `ALTER USER` runbook) |
+| `UMAMI_ADMIN_PASSWORD` | ✓        | Admin password set during deploy rotation                                     |
+
+See [`apps/umami/README.md`](apps/umami/README.md) and [`apps/umami/AGENTS.md`](apps/umami/AGENTS.md) for the DB-password rotation runbook.
 
 **Repository secrets:**
 

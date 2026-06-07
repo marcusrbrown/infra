@@ -23,9 +23,7 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     permissions:
-      contents: write
       id-token: write
-      pull-requests: write
     steps:
       - id: get-app-token
         name: Get Workflow Access Token

@@ -97,31 +97,42 @@ Manual deploys are available either per-app (`workflow_dispatch` on each dedicat
 
 **`gateway` environment:**
 
-| Secret                   | Required | Description                                                       |
-| ------------------------ | -------- | ----------------------------------------------------------------- |
-| `GATEWAY_SSH_KEY`        | ✓        | Ed25519 private key for the `gateway.fro.bot` droplet             |
-| `DISCORD_TOKEN`          | ✓        | Discord bot token                                                 |
-| `DISCORD_APPLICATION_ID` | ✓        | Discord application ID                                            |
-| `DISCORD_GUILD_ID`       | ✓        | Discord guild (server) ID                                         |
-| `AWS_ACCESS_KEY_ID`      | ✓        | S3/R2 access key                                                  |
-| `AWS_SECRET_ACCESS_KEY`  | ✓        | S3/R2 secret key                                                  |
-| `S3_BUCKET`              | ✓        | Bucket name                                                       |
-| `S3_REGION`              | ✓        | Bucket region                                                     |
-| `GATEWAY_HOST`           | ✓        | FQDN or IP of the droplet                                         |
-| `S3_ENDPOINT`            |          | Custom endpoint URL (R2, MinIO, etc.)                             |
-| `OBJECT_STORE_HOSTS`     |          | Comma-separated hostnames allowed through mitmproxy egress filter |
+| Secret | Required | Description |
+| --- | --- | --- |
+| `GATEWAY_SSH_KEY` | ✓ | Ed25519 private key for the `gateway.fro.bot` droplet |
+| `DISCORD_TOKEN` | ✓ | Discord bot token |
+| `DISCORD_APPLICATION_ID` | ✓ | Discord application ID |
+| `DISCORD_GUILD_ID` | ✓ | Discord guild (server) ID |
+| `AWS_ACCESS_KEY_ID` | ✓ | S3/R2 access key |
+| `AWS_SECRET_ACCESS_KEY` | ✓ | S3/R2 secret key |
+| `S3_BUCKET` | ✓ | Bucket name |
+| `S3_REGION` | ✓ | Bucket region |
+| `GATEWAY_HOST` | ✓ | FQDN of the droplet |
+| `GH_APP_ID` | ✓ | GitHub App ID for `/fro-bot add-project` repo access |
+| `GH_APP_PRIVATE_KEY` | ✓ | GitHub App private key PEM |
+| `WORKSPACE_OPENCODE_TOKEN` | ✓ | Internal bearer token between gateway and workspace OpenCode proxy |
+| `WORKSPACE_OPENCODE_AUTH` | ✓ | OpenCode provider `auth.json` for the workspace |
+| `WORKSPACE_OPENCODE_MODEL` | ✓ | OpenCode model ID for the mention loop |
+| `WORKSPACE_OPENCODE_CONFIG` | ✓ | OpenCode provider/baseURL config JSON |
+| `GATEWAY_TRIGGER_ROLE_ID` | ✓ | Discord role ID allowed to trigger the `@fro-bot` mention loop |
+| `S3_ENDPOINT` |  | Custom endpoint URL (R2, MinIO, etc.) |
+| `OBJECT_STORE_HOSTS` |  | Comma-separated hostnames allowed through mitmproxy egress filter |
+| `GATEWAY_WEBHOOK_SECRET` |  | HMAC key for the announce webhook (set with `GATEWAY_PRESENCE_CHANNEL_ID`) |
+| `GATEWAY_PRESENCE_CHANNEL_ID` |  | Discord channel ID for presence embeds (set with `GATEWAY_WEBHOOK_SECRET`) |
+
+See [`apps/gateway/README.md`](apps/gateway/README.md) for the complete contract including CI-injected image digests and OpenCode supervisor tuning.
 
 **Repository secrets:**
 
-| Secret                      | Description                                                         |
-| --------------------------- | ------------------------------------------------------------------- |
-| `APPLICATION_ID`            | GitHub App ID for Renovate and repo settings sync                   |
-| `APPLICATION_PRIVATE_KEY`   | GitHub App private key                                              |
-| `DIGITALOCEAN_ACCESS_TOKEN` | DigitalOcean API token (used by `apps/cliproxy` provision scripts)  |
-| `FRO_BOT_PAT`               | PAT for the `fro-bot` user (agent identity for `@fro-bot` mentions) |
-| `NPM_TOKEN`                 | npm publish token for `@marcusrbrown/infra` package                 |
-| `OPENCODE_AUTH_JSON`        | LLM provider credentials JSON injected into Fro Bot runs            |
-| `OPENCODE_CONFIG`           | OpenCode provider config JSON (e.g. Anthropic `baseURL` override)   |
+| Secret                      | Description                                                                |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `APPLICATION_ID`            | GitHub App ID for Renovate and repo settings sync                          |
+| `APPLICATION_PRIVATE_KEY`   | GitHub App private key                                                     |
+| `DIGITALOCEAN_ACCESS_TOKEN` | DigitalOcean API token (used by cliproxy, gateway, and umami provisioning) |
+| `FRO_BOT_PAT`               | PAT for the `fro-bot` user (agent identity for `@fro-bot` mentions)        |
+| `NPM_TOKEN`                 | npm publish token for `@marcusrbrown/infra` package                        |
+| `OPENCODE_AUTH_JSON`        | LLM provider credentials JSON injected into Fro Bot runs                   |
+| `OPENCODE_CONFIG`           | OpenCode provider config JSON (e.g. Anthropic `baseURL` override)          |
 
 **Repository variables:**
 

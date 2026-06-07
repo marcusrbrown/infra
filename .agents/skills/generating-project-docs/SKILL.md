@@ -1,7 +1,7 @@
 ---
 name: generating-project-docs
-description: Use when creating, refreshing, or updating this repo's agent-facing system docs — ARCHITECTURE.md and STRUCTURE.md, or scoped section updates within them
-argument-hint: "[architecture|structure|all|section-name]"
+description: Use when creating, refreshing, or updating this repo's system docs — ARCHITECTURE.md, STRUCTURE.md, or per-package READMEs under apps/ and packages/ (not the root README)
+argument-hint: "[architecture|structure|readme <package>|all|section-name]"
 ---
 
 # Generating Project Documentation
@@ -14,20 +14,27 @@ This is a Bun-workspace monorepo of personal infrastructure deploys (apps under 
 
 If you cannot point at a file or command that justifies a sentence, do not write it.
 
-**Scope:** This skill owns `ARCHITECTURE.md` and `STRUCTURE.md` (root-level, agent-facing system docs). It does NOT own `README.md` — the `/generate-readme` OpenCode command (`.opencode/commands/generate-readme.md`) owns that. When this skill creates ARCHITECTURE.md / STRUCTURE.md, the deep structural content moves OUT of the README into them, and the README links to them.
+**Scope:** This skill owns three doc kinds:
+- `ARCHITECTURE.md` and `STRUCTURE.md` (root-level, agent-facing system docs)
+- Per-package READMEs: `apps/<name>/README.md` and `packages/<name>/README.md`
+
+It does NOT own the **root** `README.md` — the `/generate-readme` OpenCode command (`.opencode/commands/generate-readme.md`) owns that. The ownership split is deliberate: the root README is the project front door (lean overview + links); each package README is the package's own front door (its build/deploy/command detail, owned closest to the code). When this skill creates per-package READMEs, the deep per-app/per-command detail moves OUT of the root README into them, and the root README keeps a lean summary + link per package.
+
+**Authoring conventions:** per-package READMEs follow the same conventions as the root README — match `.opencode/commands/generate-readme.md`'s formatting rules (badges/code-block/table rules, no secret values, derive from live workspace metadata). `packages/cli/README.md` is the npm-published package readme; keep that role when regenerating it.
 
 ## When to Use
 
 - Creating `ARCHITECTURE.md` or `STRUCTURE.md` for the first time (neither exists yet)
-- Refreshing them after a new app, package, CLI command, or deploy contract lands
-- Fixing documentation drift (app/package counts, directory layout, CLI surface, codemap paths)
-- Updating a scoped section (e.g. only the `## Codemap` block or the "Where to Add New Code" checklist)
+- Creating or refreshing a per-package README (`apps/<name>/README.md`, `packages/<name>/README.md`)
+- Refreshing any of these after a new app, package, CLI command, or deploy contract lands
+- Fixing documentation drift (app/package counts, directory layout, CLI surface, codemap paths, command lists)
+- Updating a scoped section within any of these docs
 
 ## When NOT to Use
 
-- Updating `README.md` — use the `/generate-readme` command instead
+- Updating the **root** `README.md` — use the `/generate-readme` command instead
 - Writing planning docs (`docs/brainstorms/`, `docs/plans/`, `docs/solutions/`) — those follow their own templates
-- Writing per-app operational docs (`apps/*/AGENTS.md`, `packages/*/AGENTS.md`) — those are nearest-context runbooks with their own shape; ARCHITECTURE/STRUCTURE link TO them, they are not regenerated here
+- Writing per-app operational docs (`apps/*/AGENTS.md`, `packages/*/AGENTS.md`) — those are nearest-context runbooks with their own shape; this skill's docs link TO them, they are not regenerated here
 
 ## Arguments
 
@@ -37,7 +44,8 @@ $ARGUMENTS
 
 - **Empty or `architecture`** — Create/update `ARCHITECTURE.md` (default)
 - **`structure`** — Create/update `STRUCTURE.md`
-- **`all`** — Both docs
+- **`readme <package>`** — Create/update the README for `apps/<package>/` or `packages/<package>/`
+- **`all`** — ARCHITECTURE.md + STRUCTURE.md (not per-package READMEs; name those explicitly)
 - **`<section-name>`** — Update only that named section within the target doc (e.g. `codemap`, `invariants`, `where-to-add`)
 
 For scoped updates: read the current document, locate the section by heading, replace only that section's content. Preserve surrounding structure exactly.
@@ -78,7 +86,7 @@ These docs are read by coding agents that need to make a correct change fast. Op
 
 ## Document Division of Labor
 
-Keep the two docs disjoint so they don't drift into each other.
+Keep the docs disjoint so they don't drift into each other.
 
 | `ARCHITECTURE.md` (why / how it fits) | `STRUCTURE.md` (where things live) |
 |---------------------------------------|------------------------------------|
@@ -88,6 +96,16 @@ Keep the two docs disjoint so they don't drift into each other.
 | Invariants CI/review enforce | Key file locations (entry points, config, tests) |
 | Cross-cutting concerns (secrets, deploy gating, host-key pinning, paths-filter) | "Where to Add New Code" checklist |
 | "Where to add a new app / command" patterns (the *why*/integration) | Build-artifact + fixture/snapshot locations |
+
+README layering (also disjoint):
+
+| Root `README.md` (owned by `/generate-readme`) | Per-package `README.md` (owned here) |
+|-----------------------------------------------|--------------------------------------|
+| Project front door: overview, prerequisites, quick start | Package front door: this package's build/deploy/commands |
+| Lean per-app/per-package summary + a link to each package README | Full per-app deploy/provision/config detail; full CLI command list (cli) |
+| Cross-repo concerns: CI/CD overview, links to ARCHITECTURE/STRUCTURE | Links to that package's `AGENTS.md` for runbooks |
+
+Deep per-app and per-command detail lives in the package README, not the root README. The root README links down; package READMEs do not duplicate the root.
 
 ## Section Order
 
@@ -115,6 +133,25 @@ Audience: an agent that needs to know where to put a change.
 4. `## Key File Locations` — categorized tables: Entry Points, Per-App Deploy/Provision, CLI Commands, Config, Tests, CI/Deploy
 5. `## Naming Conventions` — files, colocated `*.test.ts`, `__fixtures__/`/`__snapshots__/`, command modules (`<action>.ts` under `commands/<app>/` + barrel `index.ts`), host validators (`host.ts` per app)
 6. `## Where to Add New Code` — mechanical checklist (new app, new command, new shared helper, new test, new workflow, new docs page), deferring the *why* to ARCHITECTURE.md
+
+### Per-package `README.md`
+
+Audience: a developer/operator landing on one package. Seed from the package's `AGENTS.md` (operational truth) and the matching section currently in the root README; keep it the package's own front door.
+
+**App README** (`apps/<name>/README.md`):
+1. `# <App Name>` — H1 + one-line purpose and deploy target (the public domain)
+2. Short overview paragraph — what it deploys and the stack (Docker Compose / build, DigitalOcean / Mail-in-a-Box)
+3. `## Build` / `## Deploy` — the exact commands (`bun run --cwd apps/<name> …`, root `deploy:<name>` wrapper, `deploy.sh` for keeweb); note remote vs `--local`
+4. `## Provisioning` — `provision:<name>` wrapper (where applicable) and one-time setup
+5. `## Configuration` — required env/secrets by NAME only (never values), the GitHub Environment, pinned upstream ref for gateway
+6. `## Operations` — link to `apps/<name>/AGENTS.md` for runbooks/rotation/restore; do not duplicate the runbook
+7. `## CLI` — the `bunx @marcusrbrown/infra <name> …` commands for this app
+
+**Package README** (`packages/<name>/README.md`):
+- `packages/cli/README.md` is the **npm-published** readme: H1 `@marcusrbrown/infra`, install (`bun add -g` / `bunx`), then the FULL current command surface grouped by app (status/deploy/… for keeweb, cliproxy, gateway, umami) + unified `status` + the MCP bridge. Derive the command list from `packages/cli/src/cli.ts` registrations and `commands/<app>/`.
+- `packages/shared/README.md`: H1 + one-line purpose (cross-app SSH/SCP/DigitalOcean provisioning helpers), a short consumer note (imported by each `apps/*/server/provision-droplet.ts`), and the exported helper surface from `packages/shared/server/droplet-helpers.ts`. Mark it a private workspace library (not published).
+
+Match `.opencode/commands/generate-readme.md` formatting rules for all of the above.
 
 ## Style Rules (Non-Negotiable)
 

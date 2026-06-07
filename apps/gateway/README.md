@@ -1,5 +1,7 @@
 # Gateway
 
+[![Deploy Gateway](https://github.com/marcusrbrown/infra/actions/workflows/deploy-gateway.yaml/badge.svg)](https://github.com/marcusrbrown/infra/actions/workflows/deploy-gateway.yaml)
+
 Fro Bot Discord client and workspace runner at [gateway.fro.bot](https://gateway.fro.bot).
 
 Three-service Docker Compose stack (gateway daemon, workspace executor, mitmproxy egress filter) on a dedicated DigitalOcean droplet. The upstream source is `fro-bot/agent`, pinned to the ref in [`apps/gateway/upstream.json`](upstream.json) (currently `v0.55.3`). The deploy builds Docker images in CI and pushes them to GHCR; the droplet only pulls prebuilt artifacts — it never builds images. Secrets are materialized as files on the droplet via SSH stdin, never via argv.

@@ -1,5 +1,7 @@
 # CLIProxyAPI
 
+[![Deploy CLIProxy](https://github.com/marcusrbrown/infra/actions/workflows/deploy-cliproxy.yaml/badge.svg)](https://github.com/marcusrbrown/infra/actions/workflows/deploy-cliproxy.yaml)
+
 OAuth-authenticated Claude proxy at [cliproxy.fro.bot](https://cliproxy.fro.bot).
 
 Docker Compose stack (Caddy + `cli-proxy-api`) on a DigitalOcean droplet. CLI clients authenticate with bearer API keys; the proxy forwards requests to Claude using stored OAuth tokens. Caddy handles HTTPS termination with automatic Let's Encrypt certificates. OAuth tokens persist in the `cliproxy_auth` named volume across container recreates.

@@ -1,5 +1,7 @@
 # KeeWeb
 
+[![Deploy KeeWeb](https://github.com/marcusrbrown/infra/actions/workflows/deploy-keeweb.yaml/badge.svg)](https://github.com/marcusrbrown/infra/actions/workflows/deploy-keeweb.yaml)
+
 Self-hosted KeeWeb v1.18.7 password manager at [kw.igg.ms](https://kw.igg.ms).
 
 Download-based build: `src/build.ts` fetches the upstream release archive from GitHub Releases, verifies its SHA-256, and produces a deploy-ready `dist/`. The Dropbox app secret is injected into `dist/config.json` at build time. The only Bash script in the repo is `apps/keeweb/deploy.sh`; all other scripts are TypeScript run via `bun run`.

@@ -2,7 +2,13 @@
 
 Personal infrastructure management — deploy automation, operational CLI, and tooling.
 
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/marcusrbrown/infra/badge?style=flat-square)](https://scorecard.dev/viewer/?uri=github.com/marcusrbrown/infra)
+<p align="center">
+  <a href="https://www.npmjs.com/package/@marcusrbrown/infra"><img src="https://img.shields.io/npm/v/@marcusrbrown/infra?style=flat-square" alt="npm version"></a>
+  <a href="https://github.com/marcusrbrown/infra/actions/workflows/ci.yaml"><img src="https://github.com/marcusrbrown/infra/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/marcusrbrown/infra/actions/workflows/codeql.yaml"><img src="https://github.com/marcusrbrown/infra/actions/workflows/codeql.yaml/badge.svg" alt="CodeQL"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/marcusrbrown/infra"><img src="https://api.scorecard.dev/projects/github.com/marcusrbrown/infra/badge?style=flat-square" alt="OpenSSF Scorecard"></a>
+  <a href="https://github.com/marcusrbrown/infra/blob/main/LICENSE"><img src="https://img.shields.io/github/license/marcusrbrown/infra?style=flat-square" alt="License"></a>
+</p>
 
 ## Overview
 

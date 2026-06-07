@@ -4,6 +4,9 @@ name: Renovate Changesets
 on:
   pull_request_target:
 
+permissions:
+  contents: read
+
 jobs:
   renovate-changesets:
     name: Create Renovate Changeset

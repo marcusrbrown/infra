@@ -9,6 +9,9 @@ on:
     - cron: '02 18 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   update-repo-settings:
     name: Update Repo Settings

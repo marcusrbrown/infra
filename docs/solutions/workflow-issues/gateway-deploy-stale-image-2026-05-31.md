@@ -6,7 +6,8 @@ root_cause: missing_workflow_step
 resolution_type: code_fix
 severity: critical
 date: 2026-05-31
-tags: [gateway, docker-compose, build, stale-image, deploy, fro-bot, upstream, git-clean, secrets]
+last_updated: 2026-06-07
+tags: [gateway, docker-compose, build, stale-image, deploy, fro-bot, upstream, git-clean, secrets, version-surface, daemon-pin]
 module: apps/gateway
 related_issues: []
 related_docs:
@@ -71,6 +72,15 @@ The deploy's job is to make the running daemon match the pinned source. With a `
 - **Verify freshness, not just health, after a version bump.** A green deploy with a passing health/registration gate can still be running old code. Confirm the running image's build time and the live behavior the new version is supposed to add (here: query the Discord guild-commands API for the new command), not just that the container is healthy.
 - **Never `git clean -xfd` the droplet deploy directory during manual recovery.** It deletes the untracked `secrets/` files. Some secret values are GitHub-Environment-only and not in the local `.env`, so the correct restore path is a full pipeline (or local-with-materializer) deploy, not hand-editing. (auto memory [claude])
 - **A pinned upstream ref does not guarantee a runnable image.** Probe a freshly-built image's boot before trusting a cutover, per the upstream-upgrade playbook. Hold the Renovate ceiling at the last version verified to boot.
+- **`fro-bot/agent` has two independent version surfaces — don't confuse them.** The CI PR-reviewer Action is pinned in `.github/workflows/fro-bot.yaml` (`uses: fro-bot/agent@<SHA> # vX.Y.Z`, bumped by Renovate's grouped Action updates); the deployed Discord daemon is pinned in `apps/gateway/upstream.json` (`{repo, ref}`, bumped by a standalone custom-manager Renovate PR, ceiling `<0.56.0`). They legitimately sit on different versions. A daemon behavior fix (Discord mentions, workspace, registration) ships **only** via an `upstream.json` bump + gated redeploy — bumping the Action SHA changes how PRs get reviewed, not the live daemon. Before assuming "fro-bot/agent is on vX," check which surface you mean.
+- **Monitor-to-ship loop for upstream daemon fixes.** When an upstream daemon issue is filed, set a smart note watching for its close. On close: confirm the fix lives in daemon code (`packages/gateway/src/...`), not just CI/Action code → that means an `upstream.json` bump. Then apply the verify-at-tag rule (diff `packages/gateway/src/config.ts` required secrets vs `deploy/compose.yaml` wiring at the new tag) before bumping, and after deploy grep the new behavior string inside the running container to prove freshness, e.g.:
+
+  ```bash
+  CID=$(docker compose --project-directory /opt/gateway/deploy ps -q gateway)
+  docker exec "$CID" grep -rl "<new-behavior-string>" /app/packages/gateway/dist/main.mjs
+  ```
+
+  Example: upstream #801 (mention timeout messaging) shipped in daemon v0.55.3 (`packages/gateway/src/execute/run.ts`, branched on `hasVisibleOutput()`); delivered via `upstream.json` v0.55.2 → v0.55.3 (PR #444), live-verified by finding `time limit after posting updates above` in the running container's `main.mjs`.
 
 ## Related Issues
 

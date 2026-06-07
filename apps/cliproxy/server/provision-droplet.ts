@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
 import {randomBytes} from 'node:crypto'
-import {resolve} from 'node:path'
+import {chmodSync, mkdirSync, writeFileSync} from 'node:fs'
+import {join, resolve} from 'node:path'
 
 import {
   dropletExists,
@@ -221,6 +222,24 @@ export async function performProvisioning(
 }
 
 // ---------------------------------------------------------------------------
+// Management key file helper (exported for testability)
+// ---------------------------------------------------------------------------
+
+/**
+ * Writes the management key to `<repoRoot>/.cliproxy-management-key` with mode 0600.
+ * Returns the absolute path to the written file.
+ *
+ * The key value is NEVER printed to stdout — only the file path is surfaced to the operator.
+ */
+export async function writeManagementKeyFile(repoRoot: string, key: string): Promise<string> {
+  mkdirSync(repoRoot, {recursive: true})
+  const filePath = join(repoRoot, '.cliproxy-management-key')
+  writeFileSync(filePath, key, {mode: 0o600})
+  chmodSync(filePath, 0o600)
+  return filePath
+}
+
+// ---------------------------------------------------------------------------
 // Main orchestrator
 // ---------------------------------------------------------------------------
 
@@ -241,11 +260,14 @@ async function provision(): Promise<void> {
 
   const managementPassword = await performProvisioning(dropletIp, process.env.CLIPROXY_SSH_KEY)
 
+  const repoRoot = resolve(import.meta.dir, '../../..')
+  const keyFilePath = await writeManagementKeyFile(repoRoot, managementPassword)
+
   console.log('\n\u001B[1;32m✓\u001B[0m CLIProxy droplet provisioned\n')
   console.log(`Droplet IP: ${dropletIp}`)
-  console.log(`Management key: ${managementPassword}`)
+  console.log(`Management key written to: ${keyFilePath} (mode 0600)`)
   console.log(
-    '\n⚠️  Save this key — it cannot be recovered. Set it as CLIPROXY_MANAGEMENT_KEY in GitHub secrets and local .env',
+    '\n⚠️  Save this key now — it cannot be recovered. Copy it into CLIPROXY_MANAGEMENT_KEY (GitHub secret + local .env), then delete the file.',
   )
   console.log('\nCommit the updated .github/known_hosts before triggering a CI deploy.')
 }

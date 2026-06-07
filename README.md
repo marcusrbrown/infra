@@ -31,240 +31,23 @@ bun test --recursive
 
 ## Apps
 
-### KeeWeb (`apps/keeweb`)
+Each app is a self-contained deploy unit. See its README for build, deploy, provisioning, and configuration detail; see its `AGENTS.md` for operational runbooks.
 
-Self-hosted [KeeWeb](https://keeweb.info) v1.18.7 password manager at [kw.igg.ms](https://kw.igg.ms). Static site built from the upstream release archive with Dropbox client-credential injection.
-
-**Build** — downloads the KeeWeb release, verifies SHA-256, produces a deploy-ready `dist/`:
-
-```bash
-bun run --cwd apps/keeweb build
-```
-
-To inject the Dropbox app secret during build:
-
-```bash
-DROPBOX_APP_SECRET=<value> bun run --cwd apps/keeweb build
-```
-
-**Deploy** — pushes `dist/` to the server via SSH/rsync:
-
-```bash
-bash apps/keeweb/deploy.sh           # content only
-bash apps/keeweb/deploy.sh --nginx   # content + nginx config
-```
-
-### CLIProxyAPI (`apps/cliproxy`)
-
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) Docker Compose stack fronted by Caddy at [cliproxy.fro.bot](https://cliproxy.fro.bot). Authenticates to Claude once via the Claude Code OAuth flow, then issues per-repo API keys so Fro Bot agents across multiple repositories can use Claude models through a single subscription.
-
-**Provision** — creates the DigitalOcean droplet and bootstraps Docker + firewall (one-time, `--force` required to rerun against an existing droplet):
-
-```bash
-bun run --cwd apps/cliproxy provision
-```
-
-**Deploy** — uploads compose files and restarts the stack (idempotent, preserves runtime `config.yaml` unless `--force-config` is set):
-
-```bash
-bun run --cwd apps/cliproxy deploy
-```
-
-### Gateway (`apps/gateway`)
-
-Fro Bot Discord client and workspace runner at [gateway.fro.bot](https://gateway.fro.bot). A 3-service Docker Compose stack (gateway daemon, workspace executor, mitmproxy egress filter) on a dedicated DigitalOcean droplet. Pinned to `fro-bot/agent v0.44.0` via `apps/gateway/upstream.json`. No public HTTP surface — the gateway connects outbound to Discord and S3 only.
-
-**Prerequisites** — before provisioning:
-
-- `DIGITALOCEAN_ACCESS_TOKEN` in `.env`; `doctl auth init` run locally
-- Discord application created at <https://discord.com/developers/applications> with bot scope; token + application ID + guild ID captured
-- S3 or R2 bucket created; access key, secret key, bucket name, and region captured
-
-**Provision** — creates the DigitalOcean droplet and bootstraps Docker + firewall (one-time, `--force` required to rerun against an existing droplet):
-
-```bash
-bun run --cwd apps/gateway provision
-```
-
-After provisioning, commit the updated `.github/known_hosts` (the script appends the new droplet's host keys). See [`apps/gateway/AGENTS.md`](apps/gateway/AGENTS.md) for the full provisioning checklist.
-
-**Deploy** — materializes secrets on the droplet, brings up the Compose stack, and gates on Discord command registration:
-
-```bash
-bun run --cwd apps/gateway deploy
-```
+- **[KeeWeb](apps/keeweb/README.md)** (`apps/keeweb`) — self-hosted [KeeWeb](https://keeweb.info) password manager at [kw.igg.ms](https://kw.igg.ms); static site deployed over SSH/rsync to a Mail-in-a-Box server.
+- **[CLIProxyAPI](apps/cliproxy/README.md)** (`apps/cliproxy`) — [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) Claude proxy at [cliproxy.fro.bot](https://cliproxy.fro.bot); Docker Compose + Caddy on DigitalOcean, issuing per-repo API keys backed by one Claude subscription.
+- **[Gateway](apps/gateway/README.md)** (`apps/gateway`) — Fro Bot Discord client and workspace runner at [gateway.fro.bot](https://gateway.fro.bot); a 3-service Docker Compose stack on DigitalOcean, pinned to `fro-bot/agent` via `apps/gateway/upstream.json`.
+- **[Umami](apps/umami/README.md)** (`apps/umami`) — self-hosted [Umami](https://umami.is) privacy-respecting analytics at [metrics.fro.bot](https://metrics.fro.bot); Docker Compose (Umami + Postgres + Caddy) on DigitalOcean.
 
 ## CLI
 
-The [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI exposes operational commands for KeeWeb, CLIProxyAPI, and Gateway plus an MCP bridge.
+The [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI (`packages/cli`) is the unified operator surface — one command group per app, a unified `status` dashboard, and an MCP bridge. See [`packages/cli/README.md`](packages/cli/README.md) for the full command reference.
 
 ```bash
 bunx @marcusrbrown/infra --help
+bunx @marcusrbrown/infra status          # all deployments, human-readable
+bunx @marcusrbrown/infra status --json   # machine-readable
+bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 ```
-
-Or install globally:
-
-```bash
-bun add -g @marcusrbrown/infra
-infra --help
-```
-
-### Unified status
-
-**`infra status`** — parallel health checks for all active deployments:
-
-```bash
-bunx @marcusrbrown/infra status          # human-readable table
-bunx @marcusrbrown/infra status --json   # machine-readable JSON
-```
-
-### KeeWeb commands
-
-**`infra keeweb status`** — operational health check (HTTP reachability, last successful deploy timestamp via GitHub Actions API, SHA-256 content hash comparison vs local `dist/`).
-
-```bash
-bunx @marcusrbrown/infra keeweb status
-```
-
-**`infra keeweb deploy`** — trigger a deployment:
-
-```bash
-bunx @marcusrbrown/infra keeweb deploy                  # trigger GitHub Actions workflow (default)
-bunx @marcusrbrown/infra keeweb deploy --dry-run        # validate preconditions without triggering
-bunx @marcusrbrown/infra keeweb deploy --local          # deploy directly via SSH (content only)
-bunx @marcusrbrown/infra keeweb deploy --local --nginx  # include nginx config deploy
-```
-
-Local deploy requires `ssh-agent` running with the deploy key loaded (`SSH_AUTH_SOCK`).
-
-**`infra keeweb open`** — open KeeWeb in the default browser (fire-and-forget, won't block the terminal):
-
-```bash
-bunx @marcusrbrown/infra keeweb open
-```
-
-### CLIProxyAPI commands
-
-**`infra cliproxy status`** — HTTP reachability, version, usage statistics.
-
-```bash
-bunx @marcusrbrown/infra cliproxy status
-```
-
-**`infra cliproxy deploy`** — trigger a deployment (remote by default, `--local` for direct SSH):
-
-```bash
-bunx @marcusrbrown/infra cliproxy deploy                       # trigger GitHub Actions workflow
-bunx @marcusrbrown/infra cliproxy deploy --dry-run             # validate without triggering
-bunx @marcusrbrown/infra cliproxy deploy --local               # deploy directly via SSH
-bunx @marcusrbrown/infra cliproxy deploy --local --force-config  # overwrite server config.yaml
-```
-
-**`infra cliproxy config`** — read or update runtime configuration via the management API:
-
-```bash
-bunx @marcusrbrown/infra cliproxy config get
-bunx @marcusrbrown/infra cliproxy config get --output /tmp/cliproxy.yaml  # write to file (chmod 600)
-bunx @marcusrbrown/infra cliproxy config set debug true
-bunx @marcusrbrown/infra cliproxy config set request-retry 3
-bunx @marcusrbrown/infra cliproxy config set proxy-url https://proxy.example.com
-```
-
-**`infra cliproxy keys`** — manage proxy API keys (opaque bearer tokens distributed to Fro Bot repos):
-
-```bash
-bunx @marcusrbrown/infra cliproxy keys list
-bunx @marcusrbrown/infra cliproxy keys add "fro-bot-<repo>"
-bunx @marcusrbrown/infra cliproxy keys remove "fro-bot-<repo>"
-```
-
-**`infra cliproxy login`** — OAuth authentication with a Claude subscription (runs over SSH with TTY):
-
-```bash
-bunx @marcusrbrown/infra cliproxy login claude
-```
-
-**`infra cliproxy open`** — launch the CLIProxyAPI built-in terminal dashboard via SSH (requires TTY):
-
-```bash
-bunx @marcusrbrown/infra cliproxy open
-```
-
-**`infra cliproxy setup`** — interactive onboarding wizard for connecting a new repo to CLIProxyAPI:
-
-```bash
-bunx @marcusrbrown/infra cliproxy setup                                    # interactive wizard
-bunx @marcusrbrown/infra cliproxy setup --key sk-... --repo owner/repo --harness opencode  # non-interactive
-```
-
-Generates an API key, sets `OPENCODE_AUTH_JSON` and `OPENCODE_CONFIG` secrets on the target repo, and verifies the connection.
-
-#### Selecting providers
-
-`cliproxy setup --harness opencode` wires one or both of `anthropic` and `openai`. Both providers authenticate with the same proxy bearer key; the selection determines which entries land in `OPENCODE_CONFIG` and `OPENCODE_AUTH_JSON`.
-
-```sh
-bunx @marcusrbrown/infra cliproxy setup --harness opencode \
-  --providers anthropic,openai \
-  --model openai/gpt-5.4-mini \
-  --force
-```
-
-Flags:
-
-- `--providers` — comma-separated list (`anthropic`, `openai`). Default: `anthropic`. Interactive mode shows a multiselect with `anthropic` pre-checked.
-- `--model` — model identifier for `FRO_BOT_MODEL`. Required when multiple providers are selected in non-interactive mode.
-- `--force` — confirm overwriting existing GitHub secrets in non-interactive mode. Interactive mode shows a confirm prompt instead.
-- `--dry-run` — print the planned secrets without probing the proxy or writing anything.
-- `--verify-smoke` — trigger a `fro-bot.yaml` smoke run after setup with a 5-minute bounded poll. Non-blocking.
-
-OpenAI routing requires a Codex Pro OAuth token loaded on the proxy (`cliproxy login codex`).
-
-### Gateway commands
-
-**`infra gateway status`** — SSH to the droplet, run `docker compose ps`, show service states, ages, and healthchecks.
-
-```bash
-bunx @marcusrbrown/infra gateway status
-```
-
-**`infra gateway deploy`** — trigger a deployment (remote by default, `--local` for direct SSH):
-
-```bash
-bunx @marcusrbrown/infra gateway deploy             # trigger GitHub Actions workflow
-bunx @marcusrbrown/infra gateway deploy --dry-run   # validate without triggering
-bunx @marcusrbrown/infra gateway deploy --local     # deploy directly via SSH (requires SSH_AUTH_SOCK)
-```
-
-**`infra gateway logs`** — stream `docker compose logs` from the droplet:
-
-```bash
-bunx @marcusrbrown/infra gateway logs gateway        # gateway daemon logs
-bunx @marcusrbrown/infra gateway logs mitmproxy      # egress filter logs
-bunx @marcusrbrown/infra gateway logs gateway --tail 100
-```
-
-**`infra gateway backup`** — pull the mitmproxy CA cert + key as a tarball (mode 0600):
-
-```bash
-bunx @marcusrbrown/infra gateway backup --include-ca --output ./gateway-ca.tar
-```
-
-**`infra gateway restore`** — validate and restore a CA tarball to the droplet:
-
-```bash
-bunx @marcusrbrown/infra gateway restore --include-ca --input ./gateway-ca.tar
-```
-
-### MCP bridge
-
-**`infra mcp`** — start a stdio MCP server exposing all CLI commands as tools:
-
-```bash
-bunx @marcusrbrown/infra mcp
-```
-
-Lets coding agents (Fro Bot, Copilot) call commands programmatically via the [Model Context Protocol](https://modelcontextprotocol.io).
 
 ## CI/CD
 
@@ -276,7 +59,8 @@ Lets coding agents (Fro Bot, Copilot) call commands programmatically via the [Mo
 | **Deploy KeeWeb** | Push to `main`, `workflow_dispatch` | Build and deploy KeeWeb (path-filtered) |
 | **Deploy CLIProxy** | Push to `main`, `workflow_dispatch` | Deploy CLIProxyAPI (path-filtered) |
 | **Deploy Gateway** | Push to `main`, `workflow_dispatch` | Deploy gateway stack (path-filtered) |
-| **Deploy** | `workflow_dispatch` | Manual umbrella dispatch that triggers all three deploy workflows |
+| **Deploy Umami** | Push to `main`, `workflow_dispatch` | Deploy Umami analytics stack (path-filtered) |
+| **Deploy** | Push to `main`, `workflow_dispatch` | Router that path-filters changes and dispatches the per-app deploy workflows |
 | **Release** | Push to `main` | Version and publish `@marcusrbrown/infra` via Changesets |
 | **Renovate** | Schedule, issue/PR edits, post-deploy | Automated dependency updates |
 | **Renovate Changesets** | Renovate PRs | Auto-create changeset files for dependency updates |
@@ -287,11 +71,12 @@ Lets coding agents (Fro Bot, Copilot) call commands programmatically via the [Mo
 
 ### Deploy Pipeline
 
-`Deploy KeeWeb`, `Deploy CLIProxy`, and `Deploy Gateway` use `dorny/paths-filter` to deploy only when app files change (docs, tests, fixtures, and snapshots are excluded from the filter). Each deploy runs in its own GitHub Environment and requires approval.
+The `Deploy` router uses `dorny/paths-filter` (`predicate-quantifier: every`) to deploy only when an app's files change (docs, tests, fixtures, and snapshots are excluded from the filter). Each per-app deploy runs in its own GitHub Environment and requires approval.
 
 - **Deploy KeeWeb** runs in the `keeweb` environment.
 - **Deploy CLIProxy** runs in the `cliproxy` environment.
 - **Deploy Gateway** runs in the `gateway` environment.
+- **Deploy Umami** runs in the `umami` environment.
 
 Manual deploys are available either per-app (`workflow_dispatch` on each dedicated workflow) or together via the umbrella `Deploy` workflow.
 
@@ -314,31 +99,54 @@ Manual deploys are available either per-app (`workflow_dispatch` on each dedicat
 
 **`gateway` environment:**
 
-| Secret                   | Required | Description                                                       |
-| ------------------------ | -------- | ----------------------------------------------------------------- |
-| `GATEWAY_SSH_KEY`        | ✓        | Ed25519 private key for the `gateway.fro.bot` droplet             |
-| `DISCORD_TOKEN`          | ✓        | Discord bot token                                                 |
-| `DISCORD_APPLICATION_ID` | ✓        | Discord application ID                                            |
-| `DISCORD_GUILD_ID`       | ✓        | Discord guild (server) ID                                         |
-| `AWS_ACCESS_KEY_ID`      | ✓        | S3/R2 access key                                                  |
-| `AWS_SECRET_ACCESS_KEY`  | ✓        | S3/R2 secret key                                                  |
-| `S3_BUCKET`              | ✓        | Bucket name                                                       |
-| `S3_REGION`              | ✓        | Bucket region                                                     |
-| `GATEWAY_HOST`           | ✓        | FQDN or IP of the droplet                                         |
-| `S3_ENDPOINT`            |          | Custom endpoint URL (R2, MinIO, etc.)                             |
-| `OBJECT_STORE_HOSTS`     |          | Comma-separated hostnames allowed through mitmproxy egress filter |
+| Secret | Required | Description |
+| --- | --- | --- |
+| `GATEWAY_SSH_KEY` | ✓ | Ed25519 private key for the `gateway.fro.bot` droplet |
+| `DISCORD_TOKEN` | ✓ | Discord bot token |
+| `DISCORD_APPLICATION_ID` | ✓ | Discord application ID |
+| `DISCORD_GUILD_ID` | ✓ | Discord guild (server) ID |
+| `AWS_ACCESS_KEY_ID` | ✓ | S3/R2 access key |
+| `AWS_SECRET_ACCESS_KEY` | ✓ | S3/R2 secret key |
+| `S3_BUCKET` | ✓ | Bucket name |
+| `S3_REGION` | ✓ | Bucket region |
+| `GATEWAY_HOST` | ✓ | FQDN of the droplet |
+| `GH_APP_ID` | ✓ | GitHub App ID for `/fro-bot add-project` repo access |
+| `GH_APP_PRIVATE_KEY` | ✓ | GitHub App private key PEM |
+| `WORKSPACE_OPENCODE_TOKEN` | ✓ | Internal bearer token between gateway and workspace OpenCode proxy |
+| `WORKSPACE_OPENCODE_AUTH` | ✓ | OpenCode provider `auth.json` for the workspace |
+| `WORKSPACE_OPENCODE_MODEL` | ✓ | OpenCode model ID for the mention loop |
+| `WORKSPACE_OPENCODE_CONFIG` | ✓ | OpenCode provider/baseURL config JSON |
+| `GATEWAY_TRIGGER_ROLE_ID` | ✓ | Discord role ID allowed to trigger the `@fro-bot` mention loop |
+| `S3_ENDPOINT` |  | Custom endpoint URL (R2, MinIO, etc.) |
+| `OBJECT_STORE_HOSTS` |  | Comma-separated hostnames allowed through mitmproxy egress filter |
+| `GATEWAY_WEBHOOK_SECRET` |  | HMAC key for the announce webhook (set with `GATEWAY_PRESENCE_CHANNEL_ID`) |
+| `GATEWAY_PRESENCE_CHANNEL_ID` |  | Discord channel ID for presence embeds (set with `GATEWAY_WEBHOOK_SECRET`) |
+
+See [`apps/gateway/README.md`](apps/gateway/README.md) for the complete contract including CI-injected image digests and OpenCode supervisor tuning.
+
+**`umami` environment:**
+
+| Secret                 | Required | Description                                                                   |
+| ---------------------- | -------- | ----------------------------------------------------------------------------- |
+| `UMAMI_SSH_KEY`        | ✓        | Ed25519 private key for the `metrics.fro.bot` droplet                         |
+| `UMAMI_DOMAIN`         | ✓        | FQDN of the Umami instance                                                    |
+| `UMAMI_APP_SECRET`     | ✓        | Umami app secret (session/JWT signing)                                        |
+| `UMAMI_DB_PASSWORD`    | ✓        | Postgres password (volume-coupled — rotate only via the `ALTER USER` runbook) |
+| `UMAMI_ADMIN_PASSWORD` | ✓        | Admin password set during deploy rotation                                     |
+
+See [`apps/umami/README.md`](apps/umami/README.md) and [`apps/umami/AGENTS.md`](apps/umami/AGENTS.md) for the DB-password rotation runbook.
 
 **Repository secrets:**
 
-| Secret                      | Description                                                         |
-| --------------------------- | ------------------------------------------------------------------- |
-| `APPLICATION_ID`            | GitHub App ID for Renovate and repo settings sync                   |
-| `APPLICATION_PRIVATE_KEY`   | GitHub App private key                                              |
-| `DIGITALOCEAN_ACCESS_TOKEN` | DigitalOcean API token (used by `apps/cliproxy` provision scripts)  |
-| `FRO_BOT_PAT`               | PAT for the `fro-bot` user (agent identity for `@fro-bot` mentions) |
-| `NPM_TOKEN`                 | npm publish token for `@marcusrbrown/infra` package                 |
-| `OPENCODE_AUTH_JSON`        | LLM provider credentials JSON injected into Fro Bot runs            |
-| `OPENCODE_CONFIG`           | OpenCode provider config JSON (e.g. Anthropic `baseURL` override)   |
+| Secret                      | Description                                                                |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `APPLICATION_ID`            | GitHub App ID for Renovate and repo settings sync                          |
+| `APPLICATION_PRIVATE_KEY`   | GitHub App private key                                                     |
+| `DIGITALOCEAN_ACCESS_TOKEN` | DigitalOcean API token (used by cliproxy, gateway, and umami provisioning) |
+| `FRO_BOT_PAT`               | PAT for the `fro-bot` user (agent identity for `@fro-bot` mentions)        |
+| `NPM_TOKEN`                 | npm publish token for `@marcusrbrown/infra` package                        |
+| `OPENCODE_AUTH_JSON`        | LLM provider credentials JSON injected into Fro Bot runs                   |
+| `OPENCODE_CONFIG`           | OpenCode provider config JSON (e.g. Anthropic `baseURL` override)          |
 
 **Repository variables:**
 

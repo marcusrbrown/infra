@@ -151,6 +151,13 @@ Audience: a developer/operator landing on one package. Seed from the package's `
 - `packages/cli/README.md` is the **npm-published** readme: H1 `@marcusrbrown/infra`, install (`bun add -g` / `bunx`), then the FULL current command surface grouped by app (status/deploy/… for keeweb, cliproxy, gateway, umami) + unified `status` + the MCP bridge. Derive the command list from `packages/cli/src/cli.ts` registrations and `commands/<app>/`.
 - `packages/shared/README.md`: H1 + one-line purpose (cross-app SSH/SCP/DigitalOcean provisioning helpers), a short consumer note (imported by each `apps/*/server/provision-droplet.ts`), and the exported helper surface from `packages/shared/server/droplet-helpers.ts`. Mark it a private workspace library (not published).
 
+**Badges (per-package):** badge eligibility is constrained by reality — only `@marcusrbrown/infra` (`packages/cli`) is published; every app and `packages/shared` is `private: true`, so npm/version badges are invalid for them.
+- **`apps/<name>/README.md`**: one GitHub-native deploy-status badge for that app's deploy workflow, directly under the H1:
+  `[![Deploy <App>](https://github.com/marcusrbrown/infra/actions/workflows/deploy-<name>.yaml/badge.svg)](https://github.com/marcusrbrown/infra/actions/workflows/deploy-<name>.yaml)` — renders the last completed deploy's conclusion (correct even though the workflow is environment-gated).
+- **`packages/cli/README.md`**: npm version + npm downloads (it is the npm package page): `https://img.shields.io/npm/v/@marcusrbrown/infra?style=flat-square` and `https://img.shields.io/npm/dm/@marcusrbrown/infra?style=flat-square`.
+- **`packages/shared/README.md`**: no badges — it is an internal library and badges would be noise.
+- Never place an npm badge on a private package. Verify any new badge endpoint resolves (`curl -sI`) before adding it.
+
 Match `.opencode/commands/generate-readme.md` formatting rules for all of the above.
 
 ## Style Rules (Non-Negotiable)

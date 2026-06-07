@@ -1,5 +1,7 @@
 # @marcusrbrown/infra
 
+[![npm version](https://img.shields.io/npm/v/@marcusrbrown/infra?style=flat-square)](https://www.npmjs.com/package/@marcusrbrown/infra) [![npm downloads](https://img.shields.io/npm/dm/@marcusrbrown/infra?style=flat-square)](https://www.npmjs.com/package/@marcusrbrown/infra)
+
 Infrastructure management CLI — deploy automation, health checks, and MCP bridge.
 
 > **Requires [Bun](https://bun.sh)** — this package ships TypeScript source with a `#!/usr/bin/env bun` shebang.

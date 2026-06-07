@@ -1,5 +1,7 @@
 # Umami
 
+[![Deploy Umami](https://github.com/marcusrbrown/infra/actions/workflows/deploy-umami.yaml/badge.svg)](https://github.com/marcusrbrown/infra/actions/workflows/deploy-umami.yaml)
+
 Privacy-respecting, self-hosted web analytics at [metrics.fro.bot](https://metrics.fro.bot).
 
 Three-service Docker Compose stack (umami + postgres + caddy) on a dedicated DigitalOcean droplet. Caddy handles automatic HTTPS. Postgres is reachable only on the internal compose network — port 5432 is never published to the host. Images are digest-pinned and tracked by Renovate. `DISABLE_TELEMETRY=1` and `PRIVATE_MODE=1` are set in the compose layer; Umami is cookie-free and respects Do-Not-Track by default.

@@ -1,5 +1,20 @@
 # @marcusrbrown/infra
 
+## 0.9.16
+### Patch Changes
+
+
+- Update Fro Bot gateway daemon to v0.57.0 (adds daily_digest presence event). ([#466](https://github.com/marcusrbrown/infra/pull/466))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.54` to `7.1.55` ([#462](https://github.com/marcusrbrown/infra/pull/462))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.55` to `7.1.56` ([#464](https://github.com/marcusrbrown/infra/pull/464))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.50` to `7.1.54` ([#460](https://github.com/marcusrbrown/infra/pull/460))
+
 ## 0.9.15
 ### Patch Changes
 

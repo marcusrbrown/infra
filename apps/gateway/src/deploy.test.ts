@@ -3404,7 +3404,15 @@ describe('main() — compose-up args', () => {
     const {main} = await import('./deploy')
     const composeCmds: string[][] = []
     const {spawnFn} = makeSpawnMock(cmd => {
-      if (cmd.join(' ').includes('docker compose') && cmd.join(' ').includes('up')) {
+      // Match the remote command string (last argv element) to avoid false positives from
+      // the random ControlPath socket path (e.g. /tmp/gw-cm-<random>/cm-%C) which may
+      // contain the substring "up". The remote command for compose-up looks like:
+      //   docker compose --project-directory <dir> up -d --no-build ...
+      // whereas compose-pull looks like:
+      //   docker compose --project-directory <dir> pull
+      // Checking the last element for ' up ' (with spaces) reliably distinguishes them.
+      const remoteCmd = cmd.at(-1) ?? ''
+      if (remoteCmd.includes('docker compose') && remoteCmd.includes(' up ')) {
         composeCmds.push(cmd)
       }
       return undefined
@@ -3431,7 +3439,15 @@ describe('main() — compose-up args', () => {
     const {main} = await import('./deploy')
     const composeCmds: string[][] = []
     const {spawnFn} = makeSpawnMock(cmd => {
-      if (cmd.join(' ').includes('docker compose') && cmd.join(' ').includes('up')) {
+      // Match the remote command string (last argv element) to avoid false positives from
+      // the random ControlPath socket path (e.g. /tmp/gw-cm-<random>/cm-%C) which may
+      // contain the substring "up". The remote command for compose-up looks like:
+      //   docker compose --project-directory <dir> up -d --no-build ...
+      // whereas compose-pull looks like:
+      //   docker compose --project-directory <dir> pull
+      // Checking the last element for ' up ' (with spaces) reliably distinguishes them.
+      const remoteCmd = cmd.at(-1) ?? ''
+      if (remoteCmd.includes('docker compose') && remoteCmd.includes(' up ')) {
         composeCmds.push(cmd)
       }
       return undefined

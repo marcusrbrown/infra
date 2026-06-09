@@ -7,7 +7,7 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 | Task | Location | Notes |
 | --- | --- | --- |
 | Config templates | `config/config.yaml`, `config/Caddyfile` | Server template — runtime keys live on the droplet |
-| Docker stack | `docker-compose.yaml` | Caddy + cli-proxy-api, restart: unless-stopped, healthcheck on `/healthz` |
+| Docker stack | `docker-compose.yaml` | Caddy + cli-proxy-api, restart: unless-stopped, healthcheck on caddy probing `/healthz` |
 | Provision droplet | `server/provision-droplet.ts` | One-time. Refuses re-run on existing droplet without `--force` |
 | Deploy updates | `src/deploy.ts` | Preserves `config.yaml`, preflight management key check |
 | CLI commands | `packages/cli/src/commands/cliproxy/` | See packages/cli/AGENTS.md for command pattern |
@@ -24,7 +24,8 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 ## DOCKER STACK
 
 - **Caddy**: HTTPS termination, auto Let's Encrypt. `restart: unless-stopped`.
-- **cli-proxy-api**: `eceasy/cli-proxy-api` (pinned digest, Renovate-managed). Alpine 3.22 base. `restart: unless-stopped`. Healthcheck: `wget --spider -q http://localhost:8317/healthz` (purpose-built liveness endpoint, available since v6.9.31; `wget` is in the base, `curl` is not).
+- **cli-proxy-api**: `eceasy/cli-proxy-api` v7.1.56 (pinned digest, Renovate-managed). Debian bookworm base (v7.1.54+, no wget/curl). `restart: unless-stopped`. No container healthcheck — the upstream Debian image ships no probe tools; Caddy probes the backend instead (see below).
+- **Healthcheck**: lives on the `caddy` service, not `cli-proxy-api`. Caddy (alpine, has wget) runs `wget --spider -q http://cli-proxy-api:8317/healthz` across the compose network. `docker compose up -d --wait` gates on Caddy-healthy, which transitively proves the proxy is serving.
 - **Volumes**: `caddy_data`, `caddy_config`, `cliproxy_auth` (OAuth tokens persist here across container recreates).
 - **Env file**: `MANAGEMENT_PASSWORD` injected from host `.env` into the container.
 
@@ -79,7 +80,7 @@ Anthropic-only repos use the single-provider subset of these shapes (unchanged f
 - **Never assume management API body shapes** — empirically verified, not guessed (incident: 2026-04-07).
 - **v7 IP-bans the caller after 5 consecutive bad management-key attempts (~30 min).** Management flows probe `/v0/management/config` once before issuing parallel calls so a wrong key costs a single failed attempt, never an escalating burst.
 - **Never commit `MANAGEMENT_PASSWORD`** — it lives in the droplet's `.env` and the local `CLIPROXY_MANAGEMENT_KEY` secret.
-- **Never use `curl` in healthchecks** — only `wget` is in the Alpine base.
+- **Never use `curl` in healthchecks** — only `wget` is in the Alpine base (Caddy image). The cli-proxy-api image (Debian bookworm, v7.1.54+) has no probe tools; healthcheck belongs on the caddy service.
 
 ## NOTES
 

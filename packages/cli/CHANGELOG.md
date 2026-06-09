@@ -1,5 +1,17 @@
 # @marcusrbrown/infra
 
+## 0.9.18
+### Patch Changes
+
+
+- Update Fro Bot gateway daemon to v0.59.1 (live-status mention UX, opt-in persona support) ([#476](https://github.com/marcusrbrown/infra/pull/476))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.50` to `7.1.56` ([#468](https://github.com/marcusrbrown/infra/pull/468))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.58` to `7.1.60` ([#478](https://github.com/marcusrbrown/infra/pull/478))
+
 ## 0.9.17
 ### Patch Changes
 

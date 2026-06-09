@@ -12,21 +12,24 @@ services:
       - caddy_data:/data
       - caddy_config:/config
       - ./config/Caddyfile:/etc/caddy/Caddyfile
+    depends_on:
+      cli-proxy-api:
+        condition: service_started
+    healthcheck:
+      test: [CMD, wget, --spider, -q, 'http://cli-proxy-api:8317/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   cli-proxy-api:
-    image: eceasy/cli-proxy-api:v7.1.50@sha256:889746f2dc85c73171fa0d401e55b51f0cc25d28d8f834a09b3fbe34806d75e6
+    image: eceasy/cli-proxy-api:v7.1.56@sha256:0e7daf455117edf85d1219fde337e7121a6480f704e868fb936b5e2828e466fd
     restart: unless-stopped
     env_file:
       - path: .env
         required: false
     environment:
       MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD:-}
-    healthcheck:
-      test: [CMD, wget, --spider, -q, 'http://localhost:8317/healthz']
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
     volumes:
       - cliproxy_auth:/root/.cli-proxy-api
       - ./config/config.yaml:/CLIProxyAPI/config.yaml

@@ -215,9 +215,9 @@ async function deploy(): Promise<void> {
 
   await runCommand(
     'Updating Docker Compose stack',
-    // --wait blocks until cli-proxy-api reports healthy per its Docker healthcheck
-    // (start_period: 10s, retries: 3). --wait-timeout caps the block at 90s.
-    // The healthCheck() below is the app-level verification layer on top.
+    // --wait blocks until caddy reports healthy; caddy's healthcheck probes
+    // http://cli-proxy-api:8317/healthz, so a healthy caddy transitively proves
+    // the proxy is serving. --wait-timeout caps the block at 90s.
     sshCommand(host, `cd ${REMOTE_DIR} && docker compose pull && docker compose up -d --wait --wait-timeout 90`),
     env,
   )

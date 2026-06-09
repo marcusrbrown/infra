@@ -258,6 +258,8 @@ After the first enabling deploy:
 3. Send an unsigned or replayed POST — confirm a 401/403 response.
 4. Send a request to any other path (e.g. `https://gateway.fro.bot/`) — confirm a 404 response.
 
+For verifying a real control-plane go-live end-to-end (live log monitoring, success-field criteria, and distinguishing the real signed event from test probes), see [`docs/runbooks/gateway-announce-event-verification.md`](../../docs/runbooks/gateway-announce-event-verification.md).
+
 ### Implementation pointers
 
 `buildSecretFileList`, `getAnnounceState`, `buildComposeOverride`, `buildCaddyfile` in `apps/gateway/src/deploy.ts`.

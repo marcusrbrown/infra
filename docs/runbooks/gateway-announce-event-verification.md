@@ -21,7 +21,7 @@ Confirm the gateway is ready and the ingress is live:
 ```sh
 # services healthy + daemon version
 ssh root@gateway.fro.bot 'cd /opt/gateway/deploy && docker compose ps --format "{{.Name}} {{.Status}}"'
-ssh root@gateway.fro.bot 'cat /opt/gateway/.upstream-ref'   # expect the event-supporting version
+ssh root@gateway.fro.bot 'git -C /opt/gateway describe --tags'   # expect the event-supporting ref (e.g. v0.57.0)
 
 # unsigned probe MUST be rejected (proves the HMAC gate is active)
 curl -s -o /dev/null -w "%{http_code}\n" -X POST https://gateway.fro.bot/v1/announce -d '{}'

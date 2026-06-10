@@ -14,7 +14,7 @@ declare const process: {
 }
 
 export interface StatusSummary {
-  app: 'keeweb' | 'cliproxy' | 'gateway' | 'umami'
+  app: 'keeweb' | 'cliproxy' | 'gateway' | 'umami' | 'vpn'
   http: string
   lastDeploy: string
   version: string
@@ -66,6 +66,7 @@ function toJsonPayload(rows: StatusSummary[]): Record<AppName, StatusSummary> {
     cliproxy: rows.find(row => row.app === 'cliproxy') ?? errorSummary('cliproxy', 'missing result'),
     gateway: rows.find(row => row.app === 'gateway') ?? errorSummary('gateway', 'missing result'),
     umami: rows.find(row => row.app === 'umami') ?? errorSummary('umami', 'missing result'),
+    vpn: rows.find(row => row.app === 'vpn') ?? errorSummary('vpn', 'missing result'),
   }
 }
 

@@ -263,7 +263,7 @@ describe('removePeer', () => {
     const {peers: updated} = removePeer(peers, 'laptop')
 
     expect(updated).toHaveLength(1)
-    expect(updated[0]!.name).toBe('phone')
+    expect(updated[0]?.name).toBe('phone')
   })
 
   it('throws a clear error when removing a non-existent peer', () => {
@@ -318,6 +318,6 @@ describe('parsePeersJson', () => {
       peers: [{name: 'laptop', publicKey: 'pk==', tunnelIp: '10.8.0.2'}],
     })
     expect(result.peers).toHaveLength(1)
-    expect(result.peers[0]!.name).toBe('laptop')
+    expect(result.peers[0]?.name).toBe('laptop')
   })
 })

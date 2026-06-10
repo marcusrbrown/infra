@@ -61,21 +61,11 @@ jobs:
               - '!apps/umami/**/__fixtures__/**'
               - '!apps/umami/**/__snapshots__/**'
             vpn:
-              - 'apps/vpn/**'
-              - '!apps/vpn/**/*.md'
-              - '!apps/vpn/**/*.test.ts'
-              - '!apps/vpn/**/__fixtures__/**'
-              - '!apps/vpn/**/__snapshots__/**'
-              - 'packages/cli/src/commands/vpn/**'
-              - '!packages/cli/src/commands/vpn/**/*.md'
-              - '!packages/cli/src/commands/vpn/**/*.test.ts'
-              - '!packages/cli/src/commands/vpn/**/__fixtures__/**'
-              - '!packages/cli/src/commands/vpn/**/__snapshots__/**'
-              - 'packages/shared/vpn/**'
-              - '!packages/shared/vpn/**/*.md'
-              - '!packages/shared/vpn/**/*.test.ts'
-              - '!packages/shared/vpn/**/__fixtures__/**'
-              - '!packages/shared/vpn/**/__snapshots__/**'
+              - '{apps/vpn,packages/cli/src/commands/vpn,packages/shared/vpn}/**'
+              - '!**/*.md'
+              - '!**/*.test.ts'
+              - '!**/__fixtures__/**'
+              - '!**/__snapshots__/**'
 
   # Keep deploys independent by design: one app failing should not block the other.
   deploy-keeweb:

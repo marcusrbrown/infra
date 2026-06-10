@@ -1,0 +1,17 @@
+# wg0.conf server-config template (no secrets).
+#
+# The live /etc/wireguard/wg0.conf is rendered SERVER-SIDE on every deploy from
+# apps/vpn/config/peers.json plus the box's persisted /etc/wireguard/server.key.
+# The server PRIVATE key never leaves the box; deploy reads back only server.pub.
+#
+# [Interface]
+# Address = 10.8.0.1/24
+# ListenPort = 51820
+# PrivateKey = <contents of /etc/wireguard/server.key, injected server-side>
+# PostUp   = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o <wan> -j MASQUERADE
+# PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o <wan> -j MASQUERADE
+#
+# # One [Peer] block per entry in peers.json:
+# [Peer]
+# PublicKey = <peer publicKey>
+# AllowedIPs = 10.8.0.N/32

@@ -7,7 +7,7 @@ The VPN box is a single-user WireGuard egress box on AWS Lightsail (`eu-west-1`,
 | Task | Location | Notes |
 | --- | --- | --- |
 | Deploy script | `apps/vpn/src/deploy.ts` | Server-key preservation, wg0.conf render, health gate |
-| Provision script | `apps/vpn/server/provision-droplet.ts` | Lightsail SDK; one-time. Refuses re-run without `--force` |
+| Provision script | `apps/vpn/server/provision.ts` | Lightsail SDK; one-time. Refuses re-run without `--force` |
 | Peer model | `apps/vpn/src/peers.ts` (shared: `packages/shared/vpn/peers.ts`) | peers.json read/write, next-IP allocation, config rendering |
 | CLI commands | `packages/cli/src/commands/vpn/` | status, deploy, logs, client add\|list\|remove |
 | Peer config | `apps/vpn/config/peers.json` | Public keys + tunnel IPs only — no private material |
@@ -41,7 +41,7 @@ The server private key is generated once on the box and persisted at `/etc/wireg
 **Prerequisites:**
 
 - Dedicated least-privilege Lightsail IAM user created (see [IAM note](#iam-note) below); `VPN_AWS_ACCESS_KEY_ID` + `VPN_AWS_SECRET_ACCESS_KEY` in the repo-root `.env`. These are distinct from the gateway's `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (S3-scoped, lacks Lightsail permissions).
-- `fro-bot-vpn` Ed25519 keypair generated; public key available; `VPN_SSH_KEY` (private key) in `.env`
+- `wg-egress` Ed25519 keypair generated; public key available; `VPN_SSH_KEY` (private key) in `.env`
 - `vpn` GitHub Environment created with required reviewer + main-only branch policy (pre-create before merge — auto-create is ungated)
 
 **Run:**
@@ -55,11 +55,11 @@ bun run provision:vpn
 The script will:
 
 1. Validate `VPN_AWS_ACCESS_KEY_ID` and `VPN_AWS_SECRET_ACCESS_KEY` are present
-2. Reject if the `fro-bot-vpn` instance already exists (aborts; `--force` to override)
-3. Import the `fro-bot-vpn` Ed25519 public key into Lightsail (idempotent — skips if already present)
+2. Reject if the `wg-egress` instance already exists (aborts; `--force` to override)
+3. Import the `wg-egress` Ed25519 public key into Lightsail (idempotent — skips if already present)
 4. Resolve the current Ubuntu LTS blueprint ID and smallest IPv4 bundle ID live via `GetBlueprintsCommand`/`GetBundlesCommand` (never hardcoded)
 5. Create the instance in `eu-west-1a`, poll until `state.name === 'running'`
-6. Allocate + attach the `fro-bot-vpn-ip` static IP
+6. Allocate + attach the `wg-egress-ip` static IP
 7. Set the exact firewall ruleset: SSH 22 (tcp) + UDP 51820 — closes Lightsail's default 80/443 (`PutInstancePublicPortsCommand` replaces the whole set; SSH 22 is always included to prevent lockout)
 8. Wait for SSH (`waitForSsh` shared helper)
 9. Install WireGuard: `sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard`
@@ -90,7 +90,7 @@ Ed25519 key import: `ImportKeyPairCommand` is called with the Ed25519 public key
 
 | Secret | Required | Description |
 | --- | --- | --- |
-| `VPN_SSH_KEY` | ✓ | Ed25519 private key for the VPN box (`fro-bot-vpn` keypair) |
+| `VPN_SSH_KEY` | ✓ | Ed25519 private key for the VPN box (`wg-egress` keypair) |
 | `VPN_HOST` | ✓ | Static IP of the Lightsail instance (printed by provisioning) |
 
 Both secrets are scoped to the `vpn` GitHub Environment. AWS provisioning credentials (`VPN_AWS_ACCESS_KEY_ID`, `VPN_AWS_SECRET_ACCESS_KEY`, and optional `VPN_AWS_REGION`) are operator-local only — they are NOT in the `vpn` Environment and are never used by the deploy or status paths.
@@ -155,7 +155,7 @@ The box is an egress relay for a single user. WireGuard logs no traffic by defau
 ## DECOMMISSIONING
 
 1. `vpn client remove <name>` for each peer (or skip if decommissioning entirely).
-2. Delete the `fro-bot-vpn` instance and `fro-bot-vpn-ip` static IP in the AWS Lightsail console.
+2. Delete the `wg-egress` instance and `wg-egress-ip` static IP in the AWS Lightsail console.
 3. Remove the VPN IP entry from `.github/known_hosts`.
 4. Delete the `vpn` GitHub Environment.
 5. Terminate the old `us-west-2` OpenVPN EC2 instance (manual AWS console step — see `docs/runbooks/vpn-egress-box.md`).

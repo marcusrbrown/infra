@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "deploy": "bun run src/deploy.ts",
-    "provision": "bun run server/provision-droplet.ts",
+    "provision": "bun run server/provision.ts",
     "test": "bun test"
   },
   "dependencies": {

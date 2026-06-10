@@ -16,13 +16,13 @@ Before running provisioning:
 
 1. **Create a dedicated least-privilege Lightsail IAM user** in the AWS console. Attach a policy granting only the Lightsail actions needed for provisioning (instance create/get, static IP allocate/attach/get, firewall set, key pair import, blueprint/bundle list). This user is separate from the gateway's S3 keys. Lightsail IAM is action-scoped — many actions require `Resource: *`; scope by action, not ARN.
 
-2. **Generate the `fro-bot-vpn` Ed25519 keypair** locally:
+2. **Generate the `wg-egress` Ed25519 keypair** locally:
 
    ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/fro-bot-vpn -C fro-bot-vpn -N ''
+   ssh-keygen -t ed25519 -f ~/.ssh/wg-egress -C wg-egress -N ''
    ```
 
-   The public key (`~/.ssh/fro-bot-vpn.pub`) is imported into Lightsail by the provisioner. The private key is `VPN_SSH_KEY`.
+   The public key (`~/.ssh/wg-egress.pub`) is imported into Lightsail by the provisioner. The private key is `VPN_SSH_KEY`.
 
 3. **Create the `vpn` GitHub Environment** in the repo settings with:
    - Required reviewer set
@@ -36,7 +36,7 @@ Before running provisioning:
    VPN_AWS_ACCESS_KEY_ID=<provisioning-iam-access-key>
    VPN_AWS_SECRET_ACCESS_KEY=<provisioning-iam-secret-key>
    # VPN_AWS_REGION=eu-west-1  # optional; defaults to eu-west-1
-   VPN_SSH_KEY=<contents of ~/.ssh/fro-bot-vpn>
+   VPN_SSH_KEY=<contents of ~/.ssh/wg-egress>
    ```
 
    `VPN_AWS_*` credentials are provisioning-only and distinct from the gateway's `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (S3-scoped). They are not seeded into the `vpn` GitHub Environment.
@@ -54,10 +54,10 @@ bun run provision:vpn
 ```
 
 The script:
-- Imports the `fro-bot-vpn` Ed25519 public key into Lightsail
+- Imports the `wg-egress` Ed25519 public key into Lightsail
 - Resolves the current Ubuntu LTS blueprint and smallest IPv4 bundle live
 - Creates the instance in `eu-west-1a`
-- Allocates + attaches the `fro-bot-vpn-ip` static IP
+- Allocates + attaches the `wg-egress-ip` static IP
 - Sets the exact firewall: SSH 22 (tcp) + UDP 51820 (udp) — closes Lightsail's default 80/443
 - Waits for SSH
 - Installs WireGuard (`apt-get install -y wireguard`)
@@ -74,7 +74,7 @@ VPN_HOST=<printed-static-ip>
 
 # In the vpn GitHub Environment (via gh CLI or the GitHub UI):
 printf '%s' '<printed-static-ip>' | gh secret set --env vpn VPN_HOST
-printf '%s' "$(cat ~/.ssh/fro-bot-vpn)" | gh secret set --env vpn VPN_SSH_KEY
+printf '%s' "$(cat ~/.ssh/wg-egress)" | gh secret set --env vpn VPN_SSH_KEY
 ```
 
 ### Step 3: Commit `.github/known_hosts`
@@ -184,7 +184,7 @@ Distribute the new client configs to each peer device. The old configs are perma
 
 ### Rotate `VPN_SSH_KEY`
 
-1. Generate a new `fro-bot-vpn` Ed25519 keypair.
+1. Generate a new `wg-egress` Ed25519 keypair.
 2. Add the new public key to the box's `~/.ssh/authorized_keys` (while the old key still works).
 3. Update `VPN_SSH_KEY` in the `vpn` GitHub Environment.
 4. Trigger a deploy to verify the new key works.

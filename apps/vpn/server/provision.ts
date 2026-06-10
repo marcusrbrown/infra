@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * Lightsail provisioner for the fro-bot-vpn WireGuard egress box.
+ * Lightsail provisioner for the wg-egress WireGuard egress box.
  *
  * Idempotent: aborts if the instance already exists unless --force is passed.
  * Partial-state repair: if the instance exists but static IP or firewall is
@@ -44,9 +44,9 @@ import {
 // Constants
 // ---------------------------------------------------------------------------
 
-const INSTANCE_NAME = 'fro-bot-vpn'
-const KEY_PAIR_NAME = 'fro-bot-vpn-key'
-const STATIC_IP_NAME = 'fro-bot-vpn-ip'
+const INSTANCE_NAME = 'wg-egress'
+const KEY_PAIR_NAME = 'wg-egress-key'
+const STATIC_IP_NAME = 'wg-egress-ip'
 const AVAILABILITY_ZONE = 'eu-west-1a'
 const REMOTE_USER = 'ubuntu'
 
@@ -316,7 +316,7 @@ export async function pinIpHostKey(
   pinFn: PinHostKeysFn = pinHostKeys,
 ): Promise<void> {
   await pinFn(ip, ip, knownHostsPath, {
-    marker: `# fro-bot-vpn static IP (${ip})`,
+    marker: `# wg-egress static IP (${ip})`,
   })
 }
 
@@ -513,7 +513,7 @@ async function main(): Promise<void> {
   const publicKey = process.env.VPN_PUBLIC_KEY
   if (!publicKey) {
     console.error('\u001B[1;31mError:\u001B[0m VPN_PUBLIC_KEY environment variable is required')
-    console.error('Set it to the contents of your fro-bot-vpn Ed25519 public key.')
+    console.error('Set it to the contents of your wg-egress Ed25519 public key.')
     process.exit(1)
   }
 

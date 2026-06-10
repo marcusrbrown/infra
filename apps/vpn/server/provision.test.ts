@@ -15,7 +15,7 @@ import {
   validateRequiredEnv,
   type LightsailSendFn,
   type ProvisionDeps,
-} from './provision-droplet'
+} from './provision'
 
 // ---------------------------------------------------------------------------
 // Env helpers
@@ -153,10 +153,10 @@ const FAKE_BUNDLES = [
 
 const FAKE_STATIC_IP = {
   staticIp: {
-    name: 'fro-bot-vpn-ip',
+    name: 'wg-egress-ip',
     ipAddress: '1.2.3.4',
     isAttached: true,
-    attachedTo: 'fro-bot-vpn',
+    attachedTo: 'wg-egress',
   },
 }
 
@@ -164,7 +164,7 @@ const FAKE_STATIC_IP = {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('provision-droplet', () => {
+describe('provision', () => {
   beforeEach(() => {
     saveEnv()
   })
@@ -328,9 +328,9 @@ describe('provision-droplet', () => {
   describe('instanceExists', () => {
     it('returns true when the named instance is in the list', async () => {
       const {send} = makeFakeSend({
-        GetInstancesCommand: {instances: [{name: 'fro-bot-vpn', state: {name: 'running'}}]},
+        GetInstancesCommand: {instances: [{name: 'wg-egress', state: {name: 'running'}}]},
       })
-      const result = await instanceExists('fro-bot-vpn', send)
+      const result = await instanceExists('wg-egress', send)
       expect(result).toBe(true)
     })
 
@@ -338,7 +338,7 @@ describe('provision-droplet', () => {
       const {send} = makeFakeSend({
         GetInstancesCommand: {instances: [{name: 'other-instance', state: {name: 'running'}}]},
       })
-      const result = await instanceExists('fro-bot-vpn', send)
+      const result = await instanceExists('wg-egress', send)
       expect(result).toBe(false)
     })
 
@@ -346,7 +346,7 @@ describe('provision-droplet', () => {
       const {send} = makeFakeSend({
         GetInstancesCommand: {instances: []},
       })
-      const result = await instanceExists('fro-bot-vpn', send)
+      const result = await instanceExists('wg-egress', send)
       expect(result).toBe(false)
     })
   })
@@ -361,10 +361,10 @@ describe('provision-droplet', () => {
         ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
       })
       const publicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@example.com'
-      await importKeyPairIdempotent('fro-bot-vpn', publicKey, send)
+      await importKeyPairIdempotent('wg-egress', publicKey, send)
       expect(calls).toHaveLength(1)
       expect(calls[0]?.commandName).toBe('ImportKeyPairCommand')
-      expect(calls[0]?.input.keyPairName).toBe('fro-bot-vpn')
+      expect(calls[0]?.input.keyPairName).toBe('wg-egress')
       // Lightsail expects the raw OpenSSH public key text — btoa() double-encodes and is wrong
       expect(calls[0]?.input.publicKeyBase64).toBe(publicKey.trim())
       // Explicitly assert it is NOT the btoa-encoded form
@@ -376,7 +376,7 @@ describe('provision-droplet', () => {
         ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
       })
       const publicKeyWithWhitespace = '  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@example.com  \n'
-      await importKeyPairIdempotent('fro-bot-vpn', publicKeyWithWhitespace, send)
+      await importKeyPairIdempotent('wg-egress', publicKeyWithWhitespace, send)
       expect(calls[0]?.input.publicKeyBase64).toBe(publicKeyWithWhitespace.trim())
     })
 
@@ -390,9 +390,7 @@ describe('provision-droplet', () => {
         throw alreadyExistsError
       }) as unknown as LightsailSendFn
       // Should not throw
-      await expect(
-        importKeyPairIdempotent('fro-bot-vpn', 'ssh-ed25519 AAAA test', throwingSend),
-      ).resolves.toBeUndefined()
+      await expect(importKeyPairIdempotent('wg-egress', 'ssh-ed25519 AAAA test', throwingSend)).resolves.toBeUndefined()
     })
 
     it('re-throws errors that are not "already exists"', async () => {
@@ -400,7 +398,7 @@ describe('provision-droplet', () => {
       const throwingSend = (async () => {
         throw otherError
       }) as unknown as LightsailSendFn
-      await expect(importKeyPairIdempotent('fro-bot-vpn', 'ssh-ed25519 AAAA test', throwingSend)).rejects.toThrow(
+      await expect(importKeyPairIdempotent('wg-egress', 'ssh-ed25519 AAAA test', throwingSend)).rejects.toThrow(
         'Access denied',
       )
     })
@@ -413,9 +411,9 @@ describe('provision-droplet', () => {
   describe('pollUntilRunning', () => {
     it('returns immediately when instance is already running', async () => {
       const {send, calls} = makeFakeSend({
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
       })
-      await pollUntilRunning('fro-bot-vpn', send, {intervalMs: 0})
+      await pollUntilRunning('wg-egress', send, {intervalMs: 0})
       expect(calls).toHaveLength(1)
     })
 
@@ -426,19 +424,19 @@ describe('provision-droplet', () => {
         if (name === 'GetInstanceCommand') {
           callCount++
           const state = callCount < 3 ? 'pending' : 'running'
-          return {instance: {name: 'fro-bot-vpn', state: {name: state}}}
+          return {instance: {name: 'wg-egress', state: {name: state}}}
         }
         throw new Error(`Unexpected: ${name}`)
       }) as unknown as LightsailSendFn
-      await pollUntilRunning('fro-bot-vpn', pollSend, {intervalMs: 0})
+      await pollUntilRunning('wg-egress', pollSend, {intervalMs: 0})
       expect(callCount).toBe(3)
     })
 
     it('throws when max attempts exceeded without reaching running state', async () => {
       const {send} = makeFakeSend({
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'pending'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'pending'}}},
       })
-      await expect(pollUntilRunning('fro-bot-vpn', send, {intervalMs: 0, maxAttempts: 2})).rejects.toThrow(/Timed out/)
+      await expect(pollUntilRunning('wg-egress', send, {intervalMs: 0, maxAttempts: 2})).rejects.toThrow(/Timed out/)
     })
   })
 
@@ -532,7 +530,7 @@ describe('provision-droplet', () => {
           GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
           GetBundlesCommand: {bundles: FAKE_BUNDLES},
           CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
-          GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+          GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
           AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
           AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
           PutInstancePublicPortsCommand: {operation: {status: 'Succeeded'}},
@@ -595,7 +593,7 @@ describe('provision-droplet', () => {
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
         CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
         AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         GetStaticIpCommand: FAKE_STATIC_IP,
@@ -630,7 +628,7 @@ describe('provision-droplet', () => {
 
     it('aborts without creating when instance already exists and no --force', async () => {
       const {send, calls} = makeFakeSend({
-        GetInstancesCommand: {instances: [{name: 'fro-bot-vpn', state: {name: 'running'}}]},
+        GetInstancesCommand: {instances: [{name: 'wg-egress', state: {name: 'running'}}]},
       })
 
       const deps: ProvisionDeps = {
@@ -657,11 +655,11 @@ describe('provision-droplet', () => {
       // --force allows proceeding with repair; it does NOT re-create the instance.
       // Static IP already exists in this scenario — GetStaticIpCommand returns it, so AllocateStaticIpCommand is skipped.
       const {send, calls} = makeFakeSend({
-        GetInstancesCommand: {instances: [{name: 'fro-bot-vpn', state: {name: 'running'}}]},
+        GetInstancesCommand: {instances: [{name: 'wg-egress', state: {name: 'running'}}]},
         ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
         // Static IP already exists — GetStaticIpCommand returns it (idempotent: no AllocateStaticIpCommand)
         GetStaticIpCommand: FAKE_STATIC_IP,
         AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
@@ -697,11 +695,11 @@ describe('provision-droplet', () => {
       // Static IP already exists — GetStaticIpCommand returns it without throwing.
       // AllocateStaticIpCommand must NOT be called; AttachStaticIpCommand is safe to call.
       const {send, calls} = makeFakeSend({
-        GetInstancesCommand: {instances: [{name: 'fro-bot-vpn', state: {name: 'running'}}]},
+        GetInstancesCommand: {instances: [{name: 'wg-egress', state: {name: 'running'}}]},
         ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
         // GetStaticIpCommand returns the existing IP — no allocation needed
         GetStaticIpCommand: FAKE_STATIC_IP,
         AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
@@ -749,11 +747,11 @@ describe('provision-droplet', () => {
           return FAKE_STATIC_IP
         }
         const fakeResponses: Partial<Record<CommandName, unknown>> = {
-          GetInstancesCommand: {instances: [{name: 'fro-bot-vpn', state: {name: 'running'}, isStaticIp: false}]},
+          GetInstancesCommand: {instances: [{name: 'wg-egress', state: {name: 'running'}, isStaticIp: false}]},
           ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
           GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
           GetBundlesCommand: {bundles: FAKE_BUNDLES},
-          GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+          GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
           AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
           AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
           PutInstancePublicPortsCommand: {operation: {status: 'Succeeded'}},
@@ -803,7 +801,7 @@ describe('provision-droplet', () => {
           GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
           GetBundlesCommand: {bundles: FAKE_BUNDLES},
           CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
-          GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+          GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
           AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
           AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
           GetStaticIpCommand: FAKE_STATIC_IP,
@@ -837,7 +835,7 @@ describe('provision-droplet', () => {
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
         CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
         AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         GetStaticIpCommand: FAKE_STATIC_IP,
@@ -877,7 +875,7 @@ describe('provision-droplet', () => {
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
         CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
         AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         GetStaticIpCommand: FAKE_STATIC_IP,
@@ -964,7 +962,7 @@ describe('provision-droplet', () => {
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
         CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
         AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         GetStaticIpCommand: FAKE_STATIC_IP,
@@ -1000,7 +998,7 @@ describe('provision-droplet', () => {
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
         CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
         AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         GetStaticIpCommand: FAKE_STATIC_IP,
@@ -1033,7 +1031,7 @@ describe('provision-droplet', () => {
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
         CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
         AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         GetStaticIpCommand: FAKE_STATIC_IP,
@@ -1059,8 +1057,8 @@ describe('provision-droplet', () => {
       expect(createCall?.input.availabilityZone).toBe('eu-west-1a')
       expect(createCall?.input.blueprintId).toBe('ubuntu_24_04')
       expect(createCall?.input.bundleId).toBe('nano_3_0')
-      expect(createCall?.input.keyPairName).toBe('fro-bot-vpn-key')
-      expect(createCall?.input.instanceNames).toEqual(['fro-bot-vpn'])
+      expect(createCall?.input.keyPairName).toBe('wg-egress-key')
+      expect(createCall?.input.instanceNames).toEqual(['wg-egress'])
     })
   })
 })

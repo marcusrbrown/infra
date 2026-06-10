@@ -29,7 +29,7 @@ One-time: creates the Lightsail instance, allocates a static IP, sets the exact 
 **Prerequisites:**
 
 - Dedicated least-privilege Lightsail IAM user created; `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` in the repo-root `.env`
-- `fro-bot-vpn` Ed25519 keypair generated; `VPN_SSH_KEY` (private key) in `.env`
+- `wg-egress` Ed25519 keypair generated; `VPN_SSH_KEY` (private key) in `.env`
 - `vpn` GitHub Environment created with required reviewer + main-only branch policy
 
 Use the root wrapper (loads the repo-root `.env`):
@@ -48,7 +48,7 @@ GitHub Environment: **`vpn`**
 
 | Secret        | Required | Description                                                   |
 | ------------- | -------- | ------------------------------------------------------------- |
-| `VPN_SSH_KEY` | ✓        | Ed25519 private key for the VPN box (`fro-bot-vpn` keypair)   |
+| `VPN_SSH_KEY` | ✓        | Ed25519 private key for the VPN box (`wg-egress` keypair)     |
 | `VPN_HOST`    | ✓        | Static IP of the Lightsail instance (printed by provisioning) |
 
 AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status.

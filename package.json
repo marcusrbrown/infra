@@ -18,7 +18,7 @@
     "provision:cliproxy": "bun run apps/cliproxy/server/provision-droplet.ts",
     "provision:gateway": "bun run apps/gateway/server/provision-droplet.ts",
     "provision:umami": "bun run apps/umami/server/provision-droplet.ts",
-    "provision:vpn": "bun run apps/vpn/server/provision-droplet.ts",
+    "provision:vpn": "bun run apps/vpn/server/provision.ts",
     "test": "bun test --recursive",
     "version-changesets": "changeset version"
   },

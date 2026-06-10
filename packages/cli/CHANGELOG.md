@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.10.1
+### Patch Changes
+
+
+- Fix a failed install caused by an unresolvable `@marcusrbrown/infra-shared@workspace:*` dependency. The VPN peer model now ships with the package, so `bun add`/`npm install @marcusrbrown/infra` resolves cleanly. ([#485](https://github.com/marcusrbrown/infra/pull/485))
+
 ## 0.10.0
 ### Minor Changes
 

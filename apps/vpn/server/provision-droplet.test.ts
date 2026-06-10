@@ -356,7 +356,7 @@ describe('provision-droplet', () => {
   // -------------------------------------------------------------------------
 
   describe('importKeyPairIdempotent', () => {
-    it('calls ImportKeyPairCommand with the correct key pair name and base64 public key', async () => {
+    it('sends the raw trimmed OpenSSH public key text — NOT btoa-encoded', async () => {
       const {send, calls} = makeFakeSend({
         ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
       })
@@ -365,9 +365,19 @@ describe('provision-droplet', () => {
       expect(calls).toHaveLength(1)
       expect(calls[0]?.commandName).toBe('ImportKeyPairCommand')
       expect(calls[0]?.input.keyPairName).toBe('fro-bot-vpn')
-      // publicKeyBase64 should be the base64-encoded public key
-      const decoded = atob(calls[0]?.input.publicKeyBase64 as string)
-      expect(decoded).toBe(publicKey)
+      // Lightsail expects the raw OpenSSH public key text — btoa() double-encodes and is wrong
+      expect(calls[0]?.input.publicKeyBase64).toBe(publicKey.trim())
+      // Explicitly assert it is NOT the btoa-encoded form
+      expect(calls[0]?.input.publicKeyBase64).not.toBe(btoa(publicKey))
+    })
+
+    it('trims leading/trailing whitespace from the public key before sending', async () => {
+      const {send, calls} = makeFakeSend({
+        ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
+      })
+      const publicKeyWithWhitespace = '  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@example.com  \n'
+      await importKeyPairIdempotent('fro-bot-vpn', publicKeyWithWhitespace, send)
+      expect(calls[0]?.input.publicKeyBase64).toBe(publicKeyWithWhitespace.trim())
     })
 
     it('swallows "already exists" error and continues (idempotent)', async () => {

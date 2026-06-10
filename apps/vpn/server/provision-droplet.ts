@@ -7,10 +7,12 @@
  * Partial-state repair: if the instance exists but static IP or firewall is
  * missing, repairs them without re-creating the instance (requires --force).
  *
- * Ed25519 note: ImportKeyPairCommand is called with the Ed25519 public key
- * encoded as base64. Lightsail historically documented RSA keys, but Ed25519
- * import is attempted here. If Lightsail rejects Ed25519 at runtime, fall back
- * to an RSA key for this box only and record the outcome in apps/vpn/AGENTS.md.
+ * Ed25519 note: ImportKeyPairCommand is called with the raw OpenSSH public key
+ * text (NOT btoa-encoded — see importKeyPairIdempotent for details). Lightsail
+ * accepts Ed25519 keys passed as raw OpenSSH text; this has been empirically
+ * confirmed against live AWS Lightsail eu-west-1. If Lightsail rejects Ed25519
+ * at runtime for some other reason, fall back to an RSA key for this box only
+ * and record the outcome in apps/vpn/AGENTS.md.
  * No RSA fallback is implemented here — that is a runtime concern, not a
  * compile-time one.
  */
@@ -218,18 +220,20 @@ export async function instanceExists(name: string, send: LightsailSendFn): Promi
  * Imports the SSH public key into Lightsail as a named key pair.
  * Idempotent: swallows "already exists" errors so re-runs don't fail.
  *
- * The public key is base64-encoded before sending (Lightsail API requirement).
- * Ed25519 keys are attempted; if Lightsail rejects them at runtime, an RSA
- * fallback may be needed (see module-level comment).
+ * Despite the SDK parameter being named `publicKeyBase64`, Lightsail expects
+ * the raw OpenSSH public key text (e.g. "ssh-ed25519 AAAA... comment") passed
+ * as-is. The "Base64" in the name refers to the key body already being base64
+ * inside the OpenSSH format — calling btoa() on top of it double-encodes and
+ * causes InvalidInputException: The format of this public key is not valid.
+ * Ed25519 keys are accepted by Lightsail when passed as raw OpenSSH text.
  */
 export async function importKeyPairIdempotent(
   keyPairName: string,
   publicKey: string,
   send: LightsailSendFn,
 ): Promise<void> {
-  const publicKeyBase64 = btoa(publicKey)
   try {
-    await send(new ImportKeyPairCommand({keyPairName, publicKeyBase64}))
+    await send(new ImportKeyPairCommand({keyPairName, publicKeyBase64: publicKey.trim()}))
   } catch (error: unknown) {
     // Swallow "already exists" errors — idempotent re-import is fine
     const msg = error instanceof Error ? error.message : String(error)

@@ -12,13 +12,15 @@ Personal infrastructure management — deploy automation, operational CLI, and t
 
 ## Overview
 
-Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
+Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, a WireGuard VPN egress box on AWS Lightsail, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
 
 | Package | Description |
 | --- | --- |
 | `apps/keeweb` | KeeWeb v1.18.7 static site deploy automation (`kw.igg.ms`) |
 | `apps/cliproxy` | CLIProxyAPI Docker Compose stack behind Caddy (`cliproxy.fro.bot`) |
 | `apps/gateway` | Fro Bot gateway Docker Compose stack (`gateway.fro.bot`) |
+| `apps/umami` | Self-hosted Umami analytics Docker Compose stack (`metrics.fro.bot`) |
+| `apps/vpn` | WireGuard egress box on AWS Lightsail `eu-west-1` — native `wg-quick@wg0`, no Docker |
 | `packages/cli` | [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI — health checks, deploy triggers, onboarding wizard, MCP bridge |
 
 ## Prerequisites
@@ -43,6 +45,7 @@ Each app is a self-contained deploy unit. See its README for build, deploy, prov
 - **[CLIProxyAPI](apps/cliproxy/README.md)** (`apps/cliproxy`) — [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) Claude proxy at [cliproxy.fro.bot](https://cliproxy.fro.bot); Docker Compose + Caddy on DigitalOcean, issuing per-repo API keys backed by one Claude subscription.
 - **[Gateway](apps/gateway/README.md)** (`apps/gateway`) — Fro Bot Discord client and workspace runner at [gateway.fro.bot](https://gateway.fro.bot); a 3-service Docker Compose stack on DigitalOcean, pinned to `fro-bot/agent` via `apps/gateway/upstream.json`.
 - **[Umami](apps/umami/README.md)** (`apps/umami`) — self-hosted [Umami](https://umami.is) privacy-respecting analytics at [metrics.fro.bot](https://metrics.fro.bot); Docker Compose (Umami + Postgres + Caddy) on DigitalOcean.
+- **[VPN](apps/vpn/README.md)** (`apps/vpn`) — WireGuard egress box on AWS Lightsail (`eu-west-1`, Ireland); native `wg-quick@wg0` + systemd, no Docker; provisioned via `@aws-sdk/client-lightsail`, deployed over SSH.
 
 ## CLI
 
@@ -66,6 +69,7 @@ bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 | **Deploy CLIProxy** | Push to `main`, `workflow_dispatch` | Deploy CLIProxyAPI (path-filtered) |
 | **Deploy Gateway** | Push to `main`, `workflow_dispatch` | Deploy gateway stack (path-filtered) |
 | **Deploy Umami** | Push to `main`, `workflow_dispatch` | Deploy Umami analytics stack (path-filtered) |
+| **Deploy VPN** | Push to `main`, `workflow_dispatch` | Deploy WireGuard VPN box (path-filtered) |
 | **Deploy** | Push to `main`, `workflow_dispatch` | Router that path-filters changes and dispatches the per-app deploy workflows |
 | **Release** | Push to `main` | Version and publish `@marcusrbrown/infra` via Changesets |
 | **Renovate** | Schedule, issue/PR edits, post-deploy | Automated dependency updates |
@@ -83,6 +87,7 @@ The `Deploy` router uses `dorny/paths-filter` (`predicate-quantifier: every`) to
 - **Deploy CLIProxy** runs in the `cliproxy` environment.
 - **Deploy Gateway** runs in the `gateway` environment.
 - **Deploy Umami** runs in the `umami` environment.
+- **Deploy VPN** runs in the `vpn` environment.
 
 Manual deploys are available either per-app (`workflow_dispatch` on each dedicated workflow) or together via the umbrella `Deploy` workflow.
 
@@ -142,6 +147,15 @@ See [`apps/gateway/README.md`](apps/gateway/README.md) for the complete contract
 
 See [`apps/umami/README.md`](apps/umami/README.md) and [`apps/umami/AGENTS.md`](apps/umami/AGENTS.md) for the DB-password rotation runbook.
 
+**`vpn` environment:**
+
+| Secret        | Required | Description                                                   |
+| ------------- | -------- | ------------------------------------------------------------- |
+| `VPN_SSH_KEY` | ✓        | Ed25519 private key for the VPN box (`fro-bot-vpn` keypair)   |
+| `VPN_HOST`    | ✓        | Static IP of the Lightsail instance (printed by provisioning) |
+
+AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status. See [`apps/vpn/README.md`](apps/vpn/README.md) and [`apps/vpn/AGENTS.md`](apps/vpn/AGENTS.md).
+
 **Repository secrets:**
 
 | Secret                      | Description                                                                |
@@ -168,7 +182,7 @@ The KeeWeb deploy target uses a dedicated `deploy-kw` user with scoped sudo for 
 bun run apps/keeweb/server/setup-deploy-user.ts
 ```
 
-Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, and `gateway.fro.bot` are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`.
+Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, `gateway.fro.bot`, and the VPN static IP are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`.
 
 ## Repository Structure
 

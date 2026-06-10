@@ -6,7 +6,7 @@
 
 ## OVERVIEW
 
-Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, Fro Bot gateway deployment, Umami analytics, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), and `metrics.fro.bot` (Umami analytics on DigitalOcean).
+Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, Fro Bot gateway deployment, Umami analytics, WireGuard VPN egress box, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), `metrics.fro.bot` (Umami analytics on DigitalOcean), and a static IP on AWS Lightsail `eu-west-1` (WireGuard VPN).
 
 ## STRUCTURE
 
@@ -15,6 +15,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── apps/cliproxy/      CLIProxyAPI deploy package (see apps/cliproxy/AGENTS.md)
 ├── apps/gateway/       Fro Bot gateway deploy package (see apps/gateway/AGENTS.md)
 ├── apps/umami/         Umami analytics deploy package (see apps/umami/AGENTS.md)
+├── apps/vpn/           WireGuard VPN egress box (see apps/vpn/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── packages/shared/    Shared provisioning helpers (see packages/shared/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
@@ -44,6 +45,11 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Check umami health | `bunx @marcusrbrown/infra umami status` | SSH, docker compose ps, service states |
 | Trigger umami deploy | `bunx @marcusrbrown/infra umami deploy` | Remote (default) or `--local` |
 | Umami operator docs | `apps/umami/AGENTS.md` | Deploy flow, admin rotation, DB-password runbook, privacy baseline |
+| Check VPN health | `bunx @marcusrbrown/infra vpn status` | SSH, wg show wg0, interface state + server pubkey + peer count |
+| Trigger VPN deploy | `bunx @marcusrbrown/infra vpn deploy` | Remote (default) or `--local`. `--force-server-key` rotates server key (invalidates all client configs). |
+| Manage VPN peers | `bunx @marcusrbrown/infra vpn client add\|list\|remove` | CLI-only (mutating/sensitive) |
+| VPN operator docs | `apps/vpn/AGENTS.md` | Deploy flow, provisioning, server-key invariants, anti-patterns |
+| VPN runbook | `docs/runbooks/vpn-egress-box.md` | Bootstrap ordering, reprovision recovery, client onboarding, old-EC2 teardown |
 | Unified status | `bunx @marcusrbrown/infra status` | All deployments, `--json` for machine output |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
@@ -116,12 +122,20 @@ bunx @marcusrbrown/infra gateway restore --include-ca --input FILE  # Restore CA
 bunx @marcusrbrown/infra umami status             # SSH, docker compose ps, service states
 bunx @marcusrbrown/infra umami deploy             # Trigger umami deploy (GitHub Actions)
 bunx @marcusrbrown/infra umami logs               # Stream umami service logs (--tail N)
+bunx @marcusrbrown/infra vpn status               # SSH, wg show wg0, interface state + server pubkey + peer count
+bunx @marcusrbrown/infra vpn deploy               # Trigger VPN deploy (GitHub Actions)
+bunx @marcusrbrown/infra vpn logs                 # Stream journalctl -u wg-quick@wg0 (--tail N)
+bunx @marcusrbrown/infra vpn client add <name>    # Generate keypair, assign tunnel IP, write client .conf, redeploy
+bunx @marcusrbrown/infra vpn client list          # List peers (name, tunnel IP, public key)
+bunx @marcusrbrown/infra vpn client remove <name> # Remove peer, trigger redeploy
 bunx @marcusrbrown/infra status                   # Unified status (all deployments)
 bunx @marcusrbrown/infra status --json            # Machine-readable status
 bunx @marcusrbrown/infra mcp                      # Start MCP server
 bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on server
 bun run provision:umami                         # Provision umami droplet (loads root .env; also :cliproxy, :gateway)
 bun run deploy:umami                            # Local umami deploy (loads root .env; also :cliproxy, :gateway)
+bun run provision:vpn                           # Provision VPN Lightsail instance (loads root .env; prints static IP)
+bun run deploy:vpn                              # Local VPN deploy (loads root .env)
 ```
 
 ## NOTES
@@ -130,6 +144,7 @@ bun run deploy:umami                            # Local umami deploy (loads root
 - `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are scoped to `cliproxy` environment.
 - `GATEWAY_SSH_KEY`, `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, and `GATEWAY_HOST` are scoped to `gateway` environment. Optional: `S3_ENDPOINT`, `OBJECT_STORE_HOSTS`. Opt-in announce/presence webhook (both-or-neither): `GATEWAY_WEBHOOK_SECRET` (HMAC key, sensitive) and `GATEWAY_PRESENCE_CHANNEL_ID` (Discord channel ID) — set both to enable `POST /v1/announce` + Caddy ingress; leave both unset to keep the gateway outbound-only.
 - `UMAMI_SSH_KEY`, `UMAMI_DOMAIN`, `UMAMI_APP_SECRET`, `UMAMI_DB_PASSWORD`, and `UMAMI_ADMIN_PASSWORD` are scoped to `umami` environment. `UMAMI_DB_PASSWORD` is volume-coupled — rotate only via the `ALTER USER` runbook in `apps/umami/AGENTS.md`.
+- `VPN_SSH_KEY` and `VPN_HOST` are scoped to `vpn` environment. AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.
 - `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets.

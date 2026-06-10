@@ -124,12 +124,21 @@ const FAKE_BLUEPRINTS = [
 ]
 
 const FAKE_BUNDLES = [
-  {bundleId: 'nano_3_0', price: 3.5, isActive: true, supportedPlatforms: ['LINUX_UNIX'], cpuCount: 2, ramSizeInGb: 0.5},
+  {
+    bundleId: 'nano_3_0',
+    price: 3.5,
+    isActive: true,
+    supportedPlatforms: ['LINUX_UNIX'],
+    publicIpv4AddressCount: 1,
+    cpuCount: 2,
+    ramSizeInGb: 0.5,
+  },
   {
     bundleId: 'micro_3_0',
     price: 5,
     isActive: true,
     supportedPlatforms: ['LINUX_UNIX'],
+    publicIpv4AddressCount: 1,
     cpuCount: 2,
     ramSizeInGb: 1,
   },
@@ -138,6 +147,7 @@ const FAKE_BUNDLES = [
     price: 10,
     isActive: true,
     supportedPlatforms: ['LINUX_UNIX'],
+    publicIpv4AddressCount: 1,
     cpuCount: 2,
     ramSizeInGb: 2,
   },
@@ -146,6 +156,7 @@ const FAKE_BUNDLES = [
     price: 8,
     isActive: true,
     supportedPlatforms: ['WINDOWS'],
+    publicIpv4AddressCount: 1,
     cpuCount: 2,
     ramSizeInGb: 0.5,
   },
@@ -283,9 +294,59 @@ describe('provision', () => {
   // -------------------------------------------------------------------------
 
   describe('findSmallestIpv4Bundle', () => {
-    it('picks the cheapest active LINUX_UNIX bundle', () => {
+    it('picks the cheapest active LINUX_UNIX bundle with a public IPv4 address', () => {
       const id = findSmallestIpv4Bundle(FAKE_BUNDLES)
       expect(id).toBe('nano_3_0')
+    })
+
+    it('skips IPv6-only bundles and picks the cheapest IPv4 bundle instead', () => {
+      // nano_ipv6_3_0 is cheaper ($3.5) but IPv6-only — must be skipped.
+      // nano_3_0 ($5) has publicIpv4AddressCount=1 and must be selected.
+      const bundles = [
+        {
+          bundleId: 'nano_ipv6_3_0',
+          price: 3.5,
+          isActive: true,
+          supportedPlatforms: ['LINUX_UNIX'],
+          publicIpv4AddressCount: 0,
+        },
+        {
+          bundleId: 'nano_3_0',
+          price: 5,
+          isActive: true,
+          supportedPlatforms: ['LINUX_UNIX'],
+          publicIpv4AddressCount: 1,
+        },
+        {
+          bundleId: 'micro_3_0',
+          price: 7,
+          isActive: true,
+          supportedPlatforms: ['LINUX_UNIX'],
+          publicIpv4AddressCount: 1,
+        },
+      ]
+      const id = findSmallestIpv4Bundle(bundles)
+      expect(id).toBe('nano_3_0')
+    })
+
+    it('throws when all LINUX_UNIX bundles are IPv6-only (no public IPv4 address)', () => {
+      const ipv6Only = [
+        {
+          bundleId: 'nano_ipv6_3_0',
+          price: 3.5,
+          isActive: true,
+          supportedPlatforms: ['LINUX_UNIX'],
+          publicIpv4AddressCount: 0,
+        },
+        {
+          bundleId: 'micro_ipv6_3_0',
+          price: 5,
+          isActive: true,
+          supportedPlatforms: ['LINUX_UNIX'],
+          publicIpv4AddressCount: 0,
+        },
+      ]
+      expect(() => findSmallestIpv4Bundle(ipv6Only)).toThrow(/No active LINUX_UNIX bundle with a public IPv4 address/)
     })
 
     it('ignores Windows-only bundles', () => {
@@ -295,8 +356,7 @@ describe('provision', () => {
           price: 8,
           isActive: true,
           supportedPlatforms: ['WINDOWS'],
-          cpuCount: 2,
-          ramSizeInGb: 0.5,
+          publicIpv4AddressCount: 1,
         },
       ]
       expect(() => findSmallestIpv4Bundle(windowsOnly)).toThrow(/No active LINUX_UNIX bundle/)
@@ -309,8 +369,7 @@ describe('provision', () => {
           price: 3.5,
           isActive: false,
           supportedPlatforms: ['LINUX_UNIX'],
-          cpuCount: 2,
-          ramSizeInGb: 0.5,
+          publicIpv4AddressCount: 1,
         },
       ]
       expect(() => findSmallestIpv4Bundle(inactive)).toThrow(/No active LINUX_UNIX bundle/)

@@ -174,8 +174,10 @@ export function findUbuntuBlueprint(
 }
 
 /**
- * Picks the cheapest active LINUX_UNIX bundle from the list.
- * Filters by isActive=true, supportedPlatforms includes LINUX_UNIX.
+ * Picks the cheapest active LINUX_UNIX bundle that supports a public IPv4 address.
+ * Filters by isActive=true, supportedPlatforms includes LINUX_UNIX, and publicIpv4AddressCount >= 1.
+ * IPv6-only bundles (publicIpv4AddressCount=0) are excluded because Lightsail does not support
+ * AttachStaticIp on IPv6-only instances.
  * Sorts by price ascending.
  * Throws an actionable error if no matching bundle is found.
  */
@@ -185,14 +187,21 @@ export function findSmallestIpv4Bundle(
     price?: number
     isActive?: boolean
     supportedPlatforms?: string[]
+    publicIpv4AddressCount?: number
   }[],
 ): string {
   const candidates = bundles.filter(
-    b => b.isActive === true && b.bundleId && b.supportedPlatforms?.includes('LINUX_UNIX'),
+    b =>
+      b.isActive === true &&
+      b.bundleId &&
+      b.supportedPlatforms?.includes('LINUX_UNIX') &&
+      (b.publicIpv4AddressCount ?? 0) >= 1,
   )
 
   if (candidates.length === 0) {
-    throw new Error('No active LINUX_UNIX bundle found. Run GetBundlesCommand to see available bundles.')
+    throw new Error(
+      'No active LINUX_UNIX bundle with a public IPv4 address found. Run GetBundlesCommand to see available bundles.',
+    )
   }
 
   // Sort by price ascending — cheapest first
@@ -200,7 +209,7 @@ export function findSmallestIpv4Bundle(
 
   const chosen = candidates[0]
   if (!chosen?.bundleId) {
-    throw new Error('No active LINUX_UNIX bundle found.')
+    throw new Error('No active LINUX_UNIX bundle with a public IPv4 address found.')
   }
 
   return chosen.bundleId
@@ -388,7 +397,13 @@ export async function performProvisioning(deps: ProvisionDeps): Promise<void> {
   const blueprintId = findUbuntuBlueprint(blueprintsResponse.blueprints ?? [])
 
   const bundlesResponse = (await send(new GetBundlesCommand({}))) as {
-    bundles?: {bundleId?: string; price?: number; isActive?: boolean; supportedPlatforms?: string[]}[]
+    bundles?: {
+      bundleId?: string
+      price?: number
+      isActive?: boolean
+      supportedPlatforms?: string[]
+      publicIpv4AddressCount?: number
+    }[]
   }
   const bundleId = findSmallestIpv4Bundle(bundlesResponse.bundles ?? [])
 

@@ -1,0 +1,53 @@
+name: Deploy VPN
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      VPN_SSH_KEY:
+        required: true
+      VPN_HOST:
+        required: true
+
+concurrency:
+  group: deploy-vpn-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-vpn:
+    runs-on: ubuntu-latest
+    environment: vpn
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Validate required secrets
+        env:
+          VPN_SSH_KEY: ${{ secrets.VPN_SSH_KEY }}
+          VPN_HOST: ${{ secrets.VPN_HOST }}
+        run: |
+          missing=()
+          [[ -n "${VPN_SSH_KEY}" ]] || missing+=("VPN_SSH_KEY")
+          [[ -n "${VPN_HOST}" ]] || missing+=("VPN_HOST")
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required secret(s): ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Configure SSH known_hosts
+        run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
+
+      - name: Deploy vpn
+        run: bun run --cwd apps/vpn deploy
+        env:
+          VPN_SSH_KEY: ${{ secrets.VPN_SSH_KEY }}
+          VPN_HOST: ${{ secrets.VPN_HOST }}

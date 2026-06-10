@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-lightsail": "3.1065.0",
-    "@marcusrbrown/infra-shared": "workspace:*"
+    "@marcusrbrown/infra-shared": "workspace:*",
+    "zod": "^4.3.6"
   }
 }

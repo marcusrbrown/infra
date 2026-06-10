@@ -4,7 +4,7 @@ import {chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 
-import {readPeers, renderServerConfig, type Peer} from '@marcusrbrown/infra-shared/vpn/peers'
+import {readPeers, renderServerConfig, type Peer} from '@marcusrbrown/infra/vpn/peers'
 import {validateVpnHost} from './host'
 
 // ─── Types ────────────────────────────────────────────────────────────────────

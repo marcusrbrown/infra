@@ -3,15 +3,8 @@ import type {goke} from 'goke'
 import {mkdir, writeFile} from 'node:fs/promises'
 import {resolve} from 'node:path'
 
-import {
-  addPeer,
-  readPeers,
-  removePeer,
-  renderClientConfig,
-  writePeers,
-  type Peer,
-} from '@marcusrbrown/infra-shared/vpn/peers'
 import {z} from 'zod'
+import {addPeer, readPeers, removePeer, renderClientConfig, writePeers, type Peer} from './peers'
 
 declare const process: {
   env: Record<string, string | undefined>

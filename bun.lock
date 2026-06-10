@@ -51,20 +51,20 @@
       "version": "0.0.0",
       "dependencies": {
         "@aws-sdk/client-lightsail": "3.1065.0",
+        "@marcusrbrown/infra": "workspace:*",
         "@marcusrbrown/infra-shared": "workspace:*",
         "zod": "^4.3.6",
       },
     },
     "packages/cli": {
       "name": "@marcusrbrown/infra",
-      "version": "0.9.18",
+      "version": "0.10.0",
       "bin": {
         "infra": "src/cli.ts",
       },
       "dependencies": {
         "@clack/prompts": "^1.2.0",
         "@goke/mcp": "^0.0.10",
-        "@marcusrbrown/infra-shared": "workspace:*",
         "goke": "^6.3.2",
         "string-dedent": "^3.0.2",
         "zod": "^4.3.6",

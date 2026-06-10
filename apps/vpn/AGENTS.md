@@ -40,7 +40,7 @@ The server private key is generated once on the box and persisted at `/etc/wireg
 
 **Prerequisites:**
 
-- Dedicated least-privilege Lightsail IAM user created (see [IAM note](#iam-note) below); `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` in the repo-root `.env`
+- Dedicated least-privilege Lightsail IAM user created (see [IAM note](#iam-note) below); `VPN_AWS_ACCESS_KEY_ID` + `VPN_AWS_SECRET_ACCESS_KEY` in the repo-root `.env`. These are distinct from the gateway's `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (S3-scoped, lacks Lightsail permissions).
 - `fro-bot-vpn` Ed25519 keypair generated; public key available; `VPN_SSH_KEY` (private key) in `.env`
 - `vpn` GitHub Environment created with required reviewer + main-only branch policy (pre-create before merge — auto-create is ungated)
 
@@ -54,7 +54,7 @@ bun run provision:vpn
 
 The script will:
 
-1. Validate AWS credentials are present (env credential chain)
+1. Validate `VPN_AWS_ACCESS_KEY_ID` and `VPN_AWS_SECRET_ACCESS_KEY` are present
 2. Reject if the `fro-bot-vpn` instance already exists (aborts; `--force` to override)
 3. Import the `fro-bot-vpn` Ed25519 public key into Lightsail (idempotent — skips if already present)
 4. Resolve the current Ubuntu LTS blueprint ID and smallest IPv4 bundle ID live via `GetBlueprintsCommand`/`GetBundlesCommand` (never hardcoded)
@@ -72,13 +72,13 @@ After provisioning: commit the updated `.github/known_hosts` before the first CI
 
 The `VPN_HOST` cycle: the static IP is unknown until provisioning runs. Sequence:
 
-1. Seed `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `VPN_SSH_KEY` into `.env`
+1. Seed `VPN_AWS_ACCESS_KEY_ID`, `VPN_AWS_SECRET_ACCESS_KEY`, `VPN_SSH_KEY` into `.env`
 2. `bun run provision:vpn` — allocates the static IP and prints it
 3. Seed the printed IP as `VPN_HOST` into `.env` + the `vpn` GitHub Environment
 4. Commit the updated `.github/known_hosts`
 5. First deploy: `bunx @marcusrbrown/infra vpn deploy`
 
-AWS credentials are used only during provisioning. They are not required for deploy or status — those reach the box over SSH only.
+`VPN_AWS_*` credentials are used only during provisioning. They are not required for deploy or status — those reach the box over SSH only. Optionally set `VPN_AWS_REGION` to override the default `eu-west-1` (note: the availability zone is hardcoded to `eu-west-1a` — only `eu-west-1` is supported).
 
 ### IAM note
 
@@ -93,7 +93,7 @@ Ed25519 key import: `ImportKeyPairCommand` is called with the Ed25519 public key
 | `VPN_SSH_KEY` | ✓ | Ed25519 private key for the VPN box (`fro-bot-vpn` keypair) |
 | `VPN_HOST` | ✓ | Static IP of the Lightsail instance (printed by provisioning) |
 
-Both secrets are scoped to the `vpn` GitHub Environment. AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — they are NOT in the `vpn` Environment and are never used by the deploy or status paths.
+Both secrets are scoped to the `vpn` GitHub Environment. AWS provisioning credentials (`VPN_AWS_ACCESS_KEY_ID`, `VPN_AWS_SECRET_ACCESS_KEY`, and optional `VPN_AWS_REGION`) are operator-local only — they are NOT in the `vpn` Environment and are never used by the deploy or status paths.
 
 ## CLI COMMANDS
 

@@ -21,7 +21,7 @@ import {
 // Env helpers
 // ---------------------------------------------------------------------------
 
-const managedEnvKeys = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'VPN_SSH_KEY'] as const
+const managedEnvKeys = ['VPN_AWS_ACCESS_KEY_ID', 'VPN_AWS_SECRET_ACCESS_KEY', 'VPN_AWS_REGION', 'VPN_SSH_KEY'] as const
 type ManagedEnvKey = (typeof managedEnvKeys)[number]
 
 let savedEnv: Partial<Record<ManagedEnvKey, string | undefined>>
@@ -178,32 +178,42 @@ describe('provision-droplet', () => {
   // -------------------------------------------------------------------------
 
   describe('validateRequiredEnv', () => {
-    it('returns empty array when all required vars are present', () => {
+    it('returns empty array when all required VPN_AWS_* vars are present', () => {
       const missing = validateRequiredEnv({
-        AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
-        AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        VPN_AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
+        VPN_AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
       })
       expect(missing).toEqual([])
     })
 
-    it('returns AWS_ACCESS_KEY_ID when it is missing', () => {
+    it('returns VPN_AWS_ACCESS_KEY_ID when it is missing', () => {
       const missing = validateRequiredEnv({
-        AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        VPN_AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
       })
-      expect(missing).toContain('AWS_ACCESS_KEY_ID')
+      expect(missing).toContain('VPN_AWS_ACCESS_KEY_ID')
     })
 
-    it('returns AWS_SECRET_ACCESS_KEY when it is missing', () => {
+    it('returns VPN_AWS_SECRET_ACCESS_KEY when it is missing', () => {
+      const missing = validateRequiredEnv({
+        VPN_AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
+      })
+      expect(missing).toContain('VPN_AWS_SECRET_ACCESS_KEY')
+    })
+
+    it('returns both VPN_AWS_* vars when both are missing', () => {
+      const missing = validateRequiredEnv({})
+      expect(missing).toContain('VPN_AWS_ACCESS_KEY_ID')
+      expect(missing).toContain('VPN_AWS_SECRET_ACCESS_KEY')
+    })
+
+    it('does not require standard AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY', () => {
+      // Standard AWS env vars must NOT satisfy the VPN provisioner — they belong to the gateway S3 credential
       const missing = validateRequiredEnv({
         AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
+        AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
       })
-      expect(missing).toContain('AWS_SECRET_ACCESS_KEY')
-    })
-
-    it('returns both vars when both are missing', () => {
-      const missing = validateRequiredEnv({})
-      expect(missing).toContain('AWS_ACCESS_KEY_ID')
-      expect(missing).toContain('AWS_SECRET_ACCESS_KEY')
+      expect(missing).toContain('VPN_AWS_ACCESS_KEY_ID')
+      expect(missing).toContain('VPN_AWS_SECRET_ACCESS_KEY')
     })
   })
 

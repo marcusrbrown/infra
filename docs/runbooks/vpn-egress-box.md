@@ -33,12 +33,13 @@ Before running provisioning:
 4. **Seed the repo-root `.env`** with:
 
    ```bash
-   AWS_ACCESS_KEY_ID=<provisioning-iam-access-key>
-   AWS_SECRET_ACCESS_KEY=<provisioning-iam-secret-key>
+   VPN_AWS_ACCESS_KEY_ID=<provisioning-iam-access-key>
+   VPN_AWS_SECRET_ACCESS_KEY=<provisioning-iam-secret-key>
+   # VPN_AWS_REGION=eu-west-1  # optional; defaults to eu-west-1
    VPN_SSH_KEY=<contents of ~/.ssh/fro-bot-vpn>
    ```
 
-   AWS credentials are provisioning-only. They are not seeded into the `vpn` GitHub Environment.
+   `VPN_AWS_*` credentials are provisioning-only and distinct from the gateway's `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (S3-scoped). They are not seeded into the `vpn` GitHub Environment.
 
 ---
 

@@ -99,11 +99,16 @@ export interface ProvisionDeps {
 // ---------------------------------------------------------------------------
 
 /**
- * Validates that all required AWS environment variables are present.
+ * Validates that all required VPN AWS environment variables are present.
  * Returns the list of missing variable names (empty = all present).
+ *
+ * Uses VPN_AWS_ACCESS_KEY_ID and VPN_AWS_SECRET_ACCESS_KEY — distinct from the
+ * gateway's standard AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (S3-scoped, lacks
+ * Lightsail permissions). Set up a dedicated least-privilege Lightsail IAM user
+ * and place its credentials in VPN_AWS_ACCESS_KEY_ID / VPN_AWS_SECRET_ACCESS_KEY.
  */
 export function validateRequiredEnv(env: Partial<Record<string, string>>): string[] {
-  const required = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']
+  const required = ['VPN_AWS_ACCESS_KEY_ID', 'VPN_AWS_SECRET_ACCESS_KEY']
   return required.filter(key => !env[key])
 }
 
@@ -494,7 +499,10 @@ async function main(): Promise<void> {
   const missing = validateRequiredEnv(process.env as Record<string, string>)
   if (missing.length > 0) {
     console.error(`\u001B[1;31mError:\u001B[0m Missing required environment variables: ${missing.join(', ')}`)
-    console.error('Set them before running this script.')
+    console.error(
+      'Set VPN_AWS_ACCESS_KEY_ID and VPN_AWS_SECRET_ACCESS_KEY to the credentials of a dedicated Lightsail IAM user.',
+    )
+    console.error('See apps/vpn/AGENTS.md § IAM note for the required action set.')
     process.exit(1)
   }
 
@@ -505,7 +513,25 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  const client = new LightsailClient({region: 'eu-west-1'})
+  // VPN_AWS_REGION defaults to eu-west-1 (the initial scope is Ireland only).
+  // The availability zone is hardcoded to eu-west-1a; if you set a different
+  // VPN_AWS_REGION the AZ will not match — eu-west-1 is the only supported region.
+  const region = process.env.VPN_AWS_REGION ?? 'eu-west-1'
+
+  // Credentials are passed explicitly so the SDK never falls back to the ambient
+  // standard AWS env vars (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY), which belong
+  // to the gateway's S3 credential and lack Lightsail permissions.
+  const accessKeyId = process.env.VPN_AWS_ACCESS_KEY_ID
+  const secretAccessKey = process.env.VPN_AWS_SECRET_ACCESS_KEY
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error(
+      'VPN_AWS_ACCESS_KEY_ID and VPN_AWS_SECRET_ACCESS_KEY are required to construct the Lightsail client.',
+    )
+  }
+  const client = new LightsailClient({
+    region,
+    credentials: {accessKeyId, secretAccessKey},
+  })
   const send: LightsailSendFn = command => client.send(command)
 
   const knownHostsPath = resolve(join(import.meta.dir, '..', '..', '..', '.github', 'known_hosts'))

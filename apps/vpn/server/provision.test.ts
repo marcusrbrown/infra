@@ -7,6 +7,7 @@ import {
   findUbuntuBlueprint,
   importKeyPairIdempotent,
   instanceExists,
+  isAlreadyExistsError,
   parseProvisionArgs,
   performProvisioning,
   pinIpHostKey,
@@ -411,6 +412,42 @@ describe('provision', () => {
   })
 
   // -------------------------------------------------------------------------
+  // isAlreadyExistsError
+  // -------------------------------------------------------------------------
+
+  describe('isAlreadyExistsError', () => {
+    it('returns true for the REAL Lightsail NameExists message "Some names are already in use: wg-egress-key"', () => {
+      // REGRESSION: this is the exact message Lightsail emits for a pre-existing key pair.
+      // The old inlined logic checked for 'already exists' or 'duplicate' — neither matches.
+      const err = new Error('Some names are already in use: wg-egress-key')
+      expect(isAlreadyExistsError(err)).toBe(true)
+    })
+
+    it('returns true for an error message containing "already exists"', () => {
+      expect(isAlreadyExistsError(new Error('Key pair already exists'))).toBe(true)
+    })
+
+    it('returns true for an error message containing "duplicate"', () => {
+      expect(isAlreadyExistsError(new Error('Duplicate resource name'))).toBe(true)
+    })
+
+    it('returns true when error name/code is NameExists', () => {
+      const err = Object.assign(new Error('InvalidInputException'), {name: 'NameExists'})
+      expect(isAlreadyExistsError(err)).toBe(true)
+    })
+
+    it('returns false for an unrelated error', () => {
+      expect(isAlreadyExistsError(new Error('Access denied'))).toBe(false)
+    })
+
+    it('returns false for a non-Error value', () => {
+      expect(isAlreadyExistsError('some string')).toBe(false)
+      expect(isAlreadyExistsError(null)).toBe(false)
+      expect(isAlreadyExistsError(42)).toBe(false)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // importKeyPairIdempotent
   // -------------------------------------------------------------------------
 
@@ -460,6 +497,20 @@ describe('provision', () => {
       await expect(importKeyPairIdempotent('wg-egress', 'ssh-ed25519 AAAA test', throwingSend)).rejects.toThrow(
         'Access denied',
       )
+    })
+
+    it('REGRESSION: swallows the REAL Lightsail NameExists message "Some names are already in use: wg-egress-key"', async () => {
+      // Lightsail's actual error for a pre-existing key pair — neither 'already exists' nor 'duplicate' matches.
+      const lightsailError = Object.assign(new Error('Some names are already in use: wg-egress-key'), {
+        name: 'InvalidInputException',
+      })
+      const throwingSend = (async () => {
+        throw lightsailError
+      }) as unknown as LightsailSendFn
+      // Must resolve (not throw) — this is the idempotency regression
+      await expect(
+        importKeyPairIdempotent('wg-egress-key', 'ssh-ed25519 AAAA test', throwingSend),
+      ).resolves.toBeUndefined()
     })
   })
 
@@ -838,6 +889,62 @@ describe('provision', () => {
       // Should NOT re-create the instance
       expect(commandNames).not.toContain('CreateInstancesCommand')
       // Static IP was missing → AllocateStaticIpCommand must be called
+      expect(commandNames).toContain('AllocateStaticIpCommand')
+      expect(commandNames).toContain('AttachStaticIpCommand')
+    })
+
+    it('REGRESSION: AllocateStaticIp "already in use" (NameExists) is swallowed and provisioning continues', async () => {
+      // Race/eventual-consistency: AllocateStaticIpCommand can throw NameExists even after GetStaticIp
+      // returns not-found. The allocate call must swallow NameExists and continue to retrieve the IP.
+      const calls: FakeCall[] = []
+      let getStaticIpCallCount = 0
+      const customSend = (async (command: {constructor: {name: string}; input: Record<string, unknown>}) => {
+        const name = command.constructor.name as CommandName
+        calls.push({commandName: name, input: command.input})
+        if (name === 'GetStaticIpCommand') {
+          getStaticIpCallCount++
+          if (getStaticIpCallCount === 1) {
+            // First call: existence check — IP does not exist yet
+            throw new Error('Static IP not found')
+          }
+          // Second call: after allocation — return the IP
+          return FAKE_STATIC_IP
+        }
+        if (name === 'AllocateStaticIpCommand') {
+          // Simulate NameExists race: allocation throws "already in use"
+          throw Object.assign(new Error('Some names are already in use: wg-egress-ip'), {
+            name: 'InvalidInputException',
+          })
+        }
+        const fakeResponses: Partial<Record<CommandName, unknown>> = {
+          GetInstancesCommand: {instances: []},
+          ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
+          GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
+          GetBundlesCommand: {bundles: FAKE_BUNDLES},
+          CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
+          GetInstanceCommand: {instance: {name: 'wg-egress', state: {name: 'running'}}},
+          AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
+          PutInstancePublicPortsCommand: {operation: {status: 'Succeeded'}},
+        }
+        if (name in fakeResponses) return fakeResponses[name]
+        throw new Error(`Unexpected command: ${name}`)
+      }) as unknown as LightsailSendFn
+
+      const deps: ProvisionDeps = {
+        send: customSend,
+        publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@example.com',
+        privateKey: FAKE_PRIVATE_KEY,
+        knownHostsPath: '/fake/.github/known_hosts',
+        pollIntervalMs: 0,
+        waitForSsh: async () => {},
+        runSsh: async () => {},
+        pinHostKeys: async () => {},
+        printIp: () => {},
+      }
+
+      // Must resolve — NameExists on AllocateStaticIp is swallowed, GetStaticIp retrieves the IP
+      await expect(performProvisioning(deps)).resolves.toBeUndefined()
+      const commandNames = calls.map(c => c.commandName)
       expect(commandNames).toContain('AllocateStaticIpCommand')
       expect(commandNames).toContain('AttachStaticIpCommand')
     })

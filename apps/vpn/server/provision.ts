@@ -226,8 +226,42 @@ export async function instanceExists(name: string, send: LightsailSendFn): Promi
 }
 
 /**
+ * Returns true if the error represents a "resource already exists" condition.
+ *
+ * Matches (case-insensitive):
+ *   - 'already in use'  — Lightsail NameExists: "Some names are already in use: <name>"
+ *   - 'already exists'  — generic / older Lightsail phrasing
+ *   - 'duplicate'       — generic duplicate-resource phrasing
+ *   - 'nameexists'      — error code that may appear in the message or error name
+ *
+ * Also checks the error's `.name` property for 'NameExists' and an optional
+ * `.code` property (AWS SDK errors sometimes expose one) for 'NameExists'.
+ * No `as any` — narrowed with `instanceof Error` and `'code' in error`.
+ */
+export function isAlreadyExistsError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const msg = error.message.toLowerCase()
+  if (
+    msg.includes('already in use') ||
+    msg.includes('already exists') ||
+    msg.includes('duplicate') ||
+    msg.includes('nameexists')
+  ) {
+    return true
+  }
+  // Check error name (e.g. AWS SDK sets error.name = 'NameExists')
+  if (error.name.toLowerCase() === 'nameexists') return true
+  // Check optional .code property (some AWS SDK errors expose it)
+  if ('code' in error && error.code === 'NameExists') return true
+  return false
+}
+
+/**
  * Imports the SSH public key into Lightsail as a named key pair.
- * Idempotent: swallows "already exists" errors so re-runs don't fail.
+ * Idempotent: swallows "already exists" / "already in use" (NameExists) errors
+ * so re-runs don't fail. Lightsail's actual error for a pre-existing key pair is:
+ *   InvalidInputException: Some names are already in use: <keyPairName>
+ * (error code NameExists) — matched by isAlreadyExistsError().
  *
  * Despite the SDK parameter being named `publicKeyBase64`, Lightsail expects
  * the raw OpenSSH public key text (e.g. "ssh-ed25519 AAAA... comment") passed
@@ -244,9 +278,8 @@ export async function importKeyPairIdempotent(
   try {
     await send(new ImportKeyPairCommand({keyPairName, publicKeyBase64: publicKey.trim()}))
   } catch (error: unknown) {
-    // Swallow "already exists" errors — idempotent re-import is fine
-    const msg = error instanceof Error ? error.message : String(error)
-    if (msg.toLowerCase().includes('already exists') || msg.toLowerCase().includes('duplicate')) {
+    // Swallow "already exists" / NameExists errors — idempotent re-import is fine
+    if (isAlreadyExistsError(error)) {
       console.log(`\u001B[1;34m==>\u001B[0m Key pair "${keyPairName}" already exists — skipping import`)
       return
     }
@@ -452,7 +485,15 @@ export async function performProvisioning(deps: ProvisionDeps): Promise<void> {
       throw error
     }
     console.log(`\u001B[1;34m==>\u001B[0m Allocating static IP "${STATIC_IP_NAME}"`)
-    await send(new AllocateStaticIpCommand({staticIpName: STATIC_IP_NAME}))
+    try {
+      await send(new AllocateStaticIpCommand({staticIpName: STATIC_IP_NAME}))
+    } catch (error_: unknown) {
+      // Swallow NameExists / "already in use" — race or eventual-consistency: the IP
+      // already exists even though GetStaticIp returned not-found moments ago.
+      // The subsequent GetStaticIpCommand below will retrieve the address.
+      if (!isAlreadyExistsError(error_)) throw error_
+      console.log(`\u001B[1;34m==>\u001B[0m Static IP "${STATIC_IP_NAME}" already exists (race) — skipping allocation`)
+    }
   }
 
   // AttachStaticIpCommand is safe to call when already attached (idempotent)

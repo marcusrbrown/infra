@@ -35,15 +35,23 @@ import {registerKeewebCommands} from './keeweb'
 import {MCP_ALLOWLIST, registerMcp} from './mcp'
 import {registerStatus} from './status'
 import {registerUmamiCommands} from './umami'
+import {registerVpnCommands} from './vpn'
 
 // ─── Tool name constants ──────────────────────────────────────────────────────
 
 /**
  * The MCP tool surface, pinned as an INDEPENDENT literal (deliberately NOT
  * derived from MCP_ALLOWLIST) so allowlist drift surfaces as a test failure —
- * per the Tier-1 test bar in packages/cli/AGENTS.md. Five read-only status tools.
+ * per the Tier-1 test bar in packages/cli/AGENTS.md. Six read-only status tools.
  */
-const EXPECTED_TOOLS = ['cliproxy_status', 'gateway_status', 'keeweb_status', 'status', 'umami_status'].sort()
+const EXPECTED_TOOLS = [
+  'cliproxy_status',
+  'gateway_status',
+  'keeweb_status',
+  'status',
+  'umami_status',
+  'vpn_status',
+].sort()
 
 /**
  * CLI-only commands that must NOT appear in the MCP tool list: the
@@ -70,6 +78,12 @@ const CLI_ONLY_TOOLS = [
   'cliproxy_keys_remove',
   'cliproxy_config_get',
   'cliproxy_config_set',
+  // VPN: mutating / sensitive / log-streaming — CLI-only
+  'vpn_deploy',
+  'vpn_logs',
+  'vpn_client_add',
+  'vpn_client_list',
+  'vpn_client_remove',
 ].sort()
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -81,6 +95,7 @@ function buildTestCli(): ReturnType<typeof goke> {
   registerCliproxyCommands(cli)
   registerGatewayCommands(cli)
   registerUmamiCommands(cli)
+  registerVpnCommands(cli)
   registerStatus(cli)
   registerMcp(cli)
   return cli

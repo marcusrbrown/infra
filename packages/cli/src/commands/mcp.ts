@@ -24,6 +24,11 @@ import {createMcpAction} from '@goke/mcp'
  * - `cliproxy keys remove` — mutating: revokes live bearer tokens on the proxy; CLI-only
  * - `cliproxy config get`  — secret-disclosing: dumps management config incl. management key; CLI-only
  * - `cliproxy config set`  — mutating: overwrites CLIProxyAPI runtime config; CLI-only
+ * - `vpn deploy`           — mutating: deploys WireGuard config to live VPN box; CLI-only
+ * - `vpn logs`             — sensitive: streams journalctl logs that may reveal peer IPs/traffic; CLI-only
+ * - `vpn client add`       — mutating: generates keypair + appends peer + triggers redeploy; CLI-only
+ * - `vpn client list`      — sensitive: lists peer public keys and tunnel IPs; CLI-only
+ * - `vpn client remove`    — mutating: removes peer + triggers redeploy; CLI-only
  *
  * A defense-in-depth backstop also denies these in opencode.jsonc `permission`
  * so that even if MCP_ALLOWLIST were mistakenly re-expanded, opencode's native
@@ -35,6 +40,7 @@ export const MCP_ALLOWLIST: ReadonlySet<string> = new Set([
   'cliproxy status',
   'keeweb status',
   'umami status',
+  'vpn status',
   'status',
 ])
 

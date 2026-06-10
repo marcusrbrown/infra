@@ -8,6 +8,7 @@ import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getGatewayStatusSummary} from './gateway'
 import {getKeewebStatusSummary} from './keeweb/status'
 import {getUmamiStatusSummary} from './umami'
+import {getVpnStatusSummary} from './vpn'
 
 declare const process: {
   env: Record<string, string | undefined>
@@ -29,6 +30,7 @@ interface StatusDependencies {
   getCliproxyStatusSummary: (baseUrl: string, key: string, verbose: boolean) => Promise<StatusSummary>
   getGatewayStatusSummary: (host: string) => Promise<StatusSummary>
   getUmamiStatusSummary: (host: string) => Promise<StatusSummary>
+  getVpnStatusSummary: (host: string) => Promise<StatusSummary>
 }
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
@@ -83,6 +85,7 @@ export async function unifiedStatusAction(
     getCliproxyStatusSummary,
     getGatewayStatusSummary,
     getUmamiStatusSummary,
+    getVpnStatusSummary,
   },
 ): Promise<void> {
   const verbose = options.verbose === true
@@ -90,15 +93,17 @@ export async function unifiedStatusAction(
   const cliproxyKey = process.env.CLIPROXY_MANAGEMENT_KEY ?? ''
   const gatewayHost = process.env.GATEWAY_HOST ?? ''
   const umamiHost = process.env.UMAMI_DOMAIN ?? ''
+  const vpnHost = process.env.VPN_HOST ?? ''
 
   const results = await Promise.allSettled([
     dependencies.getKeewebStatusSummary(verbose),
     dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey, verbose),
     dependencies.getGatewayStatusSummary(gatewayHost),
     dependencies.getUmamiStatusSummary(umamiHost),
+    dependencies.getVpnStatusSummary(vpnHost),
   ])
 
-  const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway', 'umami']
+  const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn']
   const rows: StatusSummary[] = results.map((result, index) => {
     const app = appNames[index] ?? 'keeweb'
     if (result.status === 'fulfilled') {
@@ -128,6 +133,7 @@ export function registerStatus(
     getCliproxyStatusSummary,
     getGatewayStatusSummary,
     getUmamiStatusSummary,
+    getVpnStatusSummary,
   },
 ): void {
   cli

@@ -40,12 +40,22 @@ const healthyUmami: StatusSummary = {
   usageStats: '—',
 }
 
+const healthyVpn: StatusSummary = {
+  app: 'vpn',
+  http: 'OK: wg0 up, pubkey:TESTKEY== 1 peer(s)',
+  lastDeploy: '—',
+  version: '—',
+  contentHash: '—',
+  usageStats: '—',
+}
+
 function makeDeps(overrides?: Partial<Parameters<typeof registerStatus>[1]>): Parameters<typeof registerStatus>[1] {
   return {
     getKeewebStatusSummary: async () => healthyKeeweb,
     getCliproxyStatusSummary: async () => healthyCliproxy,
     getGatewayStatusSummary: async () => healthyGateway,
     getUmamiStatusSummary: async () => healthyUmami,
+    getVpnStatusSummary: async () => healthyVpn,
     ...overrides,
   }
 }
@@ -63,6 +73,40 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     expect(expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 | — | 12 req / 0 fail |')).toBe(true)
     expect(expectCapturedToInclude(captured, '| gateway | OK: gateway:running/healthy | — | — | — | — |')).toBe(true)
     expect(expectCapturedToInclude(captured, '| umami | OK: umami:running/healthy | — | — | — | — |')).toBe(true)
+    expect(expectCapturedToInclude(captured, '| vpn | OK: wg0 up, pubkey:TESTKEY== 1 peer(s) | — | — | — | — |')).toBe(
+      true,
+    )
+  })
+
+  it('includes a vpn row sourced from getVpnStatusSummary()', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await unifiedStatusAction({}, ctx, makeDeps())
+
+    // The vpn row must appear in the table output
+    expect(expectCapturedToInclude(captured, '| vpn |')).toBe(true)
+  })
+
+  it('shows an error row for vpn when getVpnStatusSummary rejects', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await unifiedStatusAction(
+      {},
+      ctx,
+      makeDeps({
+        getVpnStatusSummary: async () => {
+          throw new Error('VPN_HOST not set')
+        },
+      }),
+    )
+
+    expect(
+      expectCapturedToInclude(
+        captured,
+        '| vpn | ❌ VPN_HOST not set | ❌ VPN_HOST not set | ❌ VPN_HOST not set | ❌ VPN_HOST not set | ❌ VPN_HOST not set |',
+      ),
+    ).toBe(true)
+    expect(captured.stderr.join('')).toContain('vpn status check failed: VPN_HOST not set')
   })
 
   it('shows an error row when umami is unreachable and keeps the other results', async () => {
@@ -127,12 +171,14 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
       cliproxy: {version: string}
       gateway: {http: string}
       umami: {http: string}
+      vpn: {http: string}
     }
 
     expect(parsed.keeweb.http).toBe('OK')
     expect(parsed.cliproxy.version).toBe('v1.2.3')
     expect(parsed.gateway.http).toBe('OK: gateway:running/healthy')
     expect(parsed.umami.http).toBe('OK: umami:running/healthy')
+    expect(parsed.vpn.http).toBe('OK: wg0 up, pubkey:TESTKEY== 1 peer(s)')
   })
 
   it('does not write to global console (output is captured via ctx)', async () => {

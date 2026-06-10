@@ -8,13 +8,14 @@ import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getGatewayStatusSummary} from './gateway'
 import {getKeewebStatusSummary} from './keeweb/status'
 import {getUmamiStatusSummary} from './umami'
+import {getVpnStatusSummary} from './vpn'
 
 declare const process: {
   env: Record<string, string | undefined>
 }
 
 export interface StatusSummary {
-  app: 'keeweb' | 'cliproxy' | 'gateway' | 'umami'
+  app: 'keeweb' | 'cliproxy' | 'gateway' | 'umami' | 'vpn'
   http: string
   lastDeploy: string
   version: string
@@ -29,6 +30,7 @@ interface StatusDependencies {
   getCliproxyStatusSummary: (baseUrl: string, key: string, verbose: boolean) => Promise<StatusSummary>
   getGatewayStatusSummary: (host: string) => Promise<StatusSummary>
   getUmamiStatusSummary: (host: string) => Promise<StatusSummary>
+  getVpnStatusSummary: (host: string) => Promise<StatusSummary>
 }
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
@@ -66,6 +68,7 @@ function toJsonPayload(rows: StatusSummary[]): Record<AppName, StatusSummary> {
     cliproxy: rows.find(row => row.app === 'cliproxy') ?? errorSummary('cliproxy', 'missing result'),
     gateway: rows.find(row => row.app === 'gateway') ?? errorSummary('gateway', 'missing result'),
     umami: rows.find(row => row.app === 'umami') ?? errorSummary('umami', 'missing result'),
+    vpn: rows.find(row => row.app === 'vpn') ?? errorSummary('vpn', 'missing result'),
   }
 }
 
@@ -82,6 +85,7 @@ export async function unifiedStatusAction(
     getCliproxyStatusSummary,
     getGatewayStatusSummary,
     getUmamiStatusSummary,
+    getVpnStatusSummary,
   },
 ): Promise<void> {
   const verbose = options.verbose === true
@@ -89,15 +93,17 @@ export async function unifiedStatusAction(
   const cliproxyKey = process.env.CLIPROXY_MANAGEMENT_KEY ?? ''
   const gatewayHost = process.env.GATEWAY_HOST ?? ''
   const umamiHost = process.env.UMAMI_DOMAIN ?? ''
+  const vpnHost = process.env.VPN_HOST ?? ''
 
   const results = await Promise.allSettled([
     dependencies.getKeewebStatusSummary(verbose),
     dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey, verbose),
     dependencies.getGatewayStatusSummary(gatewayHost),
     dependencies.getUmamiStatusSummary(umamiHost),
+    dependencies.getVpnStatusSummary(vpnHost),
   ])
 
-  const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway', 'umami']
+  const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn']
   const rows: StatusSummary[] = results.map((result, index) => {
     const app = appNames[index] ?? 'keeweb'
     if (result.status === 'fulfilled') {
@@ -127,13 +133,16 @@ export function registerStatus(
     getCliproxyStatusSummary,
     getGatewayStatusSummary,
     getUmamiStatusSummary,
+    getVpnStatusSummary,
   },
 ): void {
   cli
     .command('status', 'Show status of all deployments')
     .option(
       '--json',
-      z.boolean().describe('Output machine-readable JSON with keeweb, cliproxy, gateway, and umami summary objects.'),
+      z
+        .boolean()
+        .describe('Output machine-readable JSON with keeweb, cliproxy, gateway, umami, and vpn summary objects.'),
     )
     .option(
       '--verbose',

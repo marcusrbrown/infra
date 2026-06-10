@@ -21,6 +21,7 @@ jobs:
       cliproxy: ${{ steps.filter.outputs.cliproxy }}
       gateway: ${{ steps.filter.outputs.gateway }}
       umami: ${{ steps.filter.outputs.umami }}
+      vpn: ${{ steps.filter.outputs.vpn }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -59,6 +60,22 @@ jobs:
               - '!apps/umami/**/*.test.ts'
               - '!apps/umami/**/__fixtures__/**'
               - '!apps/umami/**/__snapshots__/**'
+            vpn:
+              - 'apps/vpn/**'
+              - '!apps/vpn/**/*.md'
+              - '!apps/vpn/**/*.test.ts'
+              - '!apps/vpn/**/__fixtures__/**'
+              - '!apps/vpn/**/__snapshots__/**'
+              - 'packages/cli/src/commands/vpn/**'
+              - '!packages/cli/src/commands/vpn/**/*.md'
+              - '!packages/cli/src/commands/vpn/**/*.test.ts'
+              - '!packages/cli/src/commands/vpn/**/__fixtures__/**'
+              - '!packages/cli/src/commands/vpn/**/__snapshots__/**'
+              - 'packages/shared/vpn/**'
+              - '!packages/shared/vpn/**/*.md'
+              - '!packages/shared/vpn/**/*.test.ts'
+              - '!packages/shared/vpn/**/__fixtures__/**'
+              - '!packages/shared/vpn/**/__snapshots__/**'
 
   # Keep deploys independent by design: one app failing should not block the other.
   deploy-keeweb:
@@ -129,3 +146,13 @@ jobs:
       UMAMI_APP_SECRET: ${{ secrets.UMAMI_APP_SECRET }}
       UMAMI_DB_PASSWORD: ${{ secrets.UMAMI_DB_PASSWORD }}
       UMAMI_ADMIN_PASSWORD: ${{ secrets.UMAMI_ADMIN_PASSWORD }}
+
+  deploy-vpn:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.vpn == 'true'
+    uses: ./.github/workflows/deploy-vpn.yaml
+    secrets:
+      VPN_SSH_KEY: ${{ secrets.VPN_SSH_KEY }}
+      VPN_HOST: ${{ secrets.VPN_HOST }}

@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./server/droplet-helpers": "./server/droplet-helpers.ts"
+    "./server/droplet-helpers": "./server/droplet-helpers.ts",
+    "./vpn/peers": "./vpn/peers.ts"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
   }
 }

@@ -11,7 +11,7 @@ const ALLOWED_SHELL_SCRIPTS = new Set(['apps/keeweb/deploy.sh'])
 // MCP drift-guard: sensitive tool set (two-layer security model)
 // ---------------------------------------------------------------------------
 //
-// These 6 commands are source-gated: they are NOT in MCP_ALLOWLIST and are
+// These commands are source-gated: they are NOT in MCP_ALLOWLIST and are
 // therefore never registered as MCP tools. They remain CLI-only.
 //
 // WHY each is source-gated (primary layer — MCP_ALLOWLIST exclusion):
@@ -21,6 +21,11 @@ const ALLOWED_SHELL_SCRIPTS = new Set(['apps/keeweb/deploy.sh'])
 //   gateway backup       — secret-bearing: writes CA private key material to a tarball
 //   cliproxy keys list   — secret-disclosing: prints live bearer tokens in plaintext
 //   cliproxy config get  — secret-disclosing: dumps management config incl. management key
+//   vpn deploy           — mutating: deploys WireGuard config to live VPN box
+//   vpn logs             — sensitive: streams journalctl logs that may reveal peer IPs/traffic
+//   vpn client add       — mutating: generates keypair + appends peer + triggers redeploy
+//   vpn client list      — sensitive: lists peer public keys and tunnel IPs
+//   vpn client remove    — mutating: removes peer + triggers redeploy
 //
 // Defense-in-depth (secondary layer — opencode.jsonc `permission: deny`):
 // Even if MCP_ALLOWLIST were mistakenly re-expanded, opencode's native tool
@@ -37,6 +42,12 @@ const SENSITIVE_MCP_COMMANDS: readonly string[] = [
   'gateway backup',
   'cliproxy keys list',
   'cliproxy config get',
+  // VPN: mutating / sensitive / log-streaming — CLI-only
+  'vpn deploy',
+  'vpn logs',
+  'vpn client add',
+  'vpn client list',
+  'vpn client remove',
 ]
 
 // Accepted version-comment forms on SHA-pinned `uses:` lines:

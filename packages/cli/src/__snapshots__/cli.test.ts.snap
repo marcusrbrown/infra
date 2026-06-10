@@ -143,9 +143,42 @@ Commands:
     --key [key]                        Environment variable name holding the SSH host. Falls back to UMAMI_DOMAIN when omitted.
 
 
+  vpn status                           Show operational health of the VPN box via SSH and wg show.
+
+    --key [key]                        Environment variable name holding the SSH host. Falls back to VPN_HOST when omitted.
+
+
+  vpn deploy                           Deploy the VPN. Default mode triggers the GitHub Deploy VPN workflow, while --local runs apps/vpn deploy directly with Bun.
+
+    --local                            Run local deployment with Bun using apps/vpn instead of triggering GitHub Actions. (default: false)
+    --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
+    --force-server-key                 Force regeneration of the server WireGuard keypair. WARNING: invalidates all existing client configs. (default: false)
+
+
+  vpn logs                             Stream WireGuard VPN logs via SSH and journalctl.
+
+    --tail [n]                         Number of log lines to tail. (default: 100)
+    --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive VPN data. (default: false)
+    --key [key]                        Environment variable name holding the SSH host. Falls back to VPN_HOST when omitted.
+
+
+  vpn client add <name>                Add a new VPN client peer. Generates a keypair, assigns a tunnel IP, and writes the client .conf to apps/vpn/clients/.
+
+    --split-tunnel [cidrs]             Comma-separated CIDRs for split-tunnel routing. Defaults to 0.0.0.0/0 (full tunnel).
+    --dns [dns]                        DNS server for the client config.
+    --server-pubkey [key]              Server public key. Falls back to VPN_SERVER_PUBKEY env var.
+    --endpoint [host]                  VPN server endpoint (IP or hostname). Falls back to VPN_HOST env var.
+
+
+  vpn client list                      List all VPN client peers from peers.json.
+
+
+  vpn client remove <name>             Remove a VPN client peer from peers.json. Run \`infra vpn deploy\` to revoke access.
+
+
   status                               Show status of all deployments
 
-    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, and umami summary objects.
+    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, umami, and vpn summary objects.
     --verbose                          Include verbose per-app health check details when building the summary rows.
 
 

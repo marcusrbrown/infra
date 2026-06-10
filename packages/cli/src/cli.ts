@@ -8,6 +8,7 @@ import {registerKeewebCommands} from './commands/keeweb'
 import {registerMcp} from './commands/mcp'
 import {registerStatus} from './commands/status'
 import {registerUmamiCommands} from './commands/umami'
+import {registerVpnCommands} from './commands/vpn'
 
 declare const process: {
   argv: string[]
@@ -22,6 +23,7 @@ registerKeewebCommands(cli)
 registerCliproxyCommands(cli)
 registerGatewayCommands(cli)
 registerUmamiCommands(cli)
+registerVpnCommands(cli)
 registerStatus(cli)
 registerMcp(cli)
 

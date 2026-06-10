@@ -26,5 +26,13 @@
     "infra_gateway_backup": "deny",
     "infra_cliproxy_keys_list": "deny",
     "infra_cliproxy_config_get": "deny",
+    // VPN: mutating / sensitive / log-streaming — CLI-only (defense-in-depth backstop)
+    // Primary gate: these commands are NOT in MCP_ALLOWLIST (packages/cli/src/commands/mcp.ts).
+    // vpn logs may reveal peer IPs/traffic; vpn deploy/client* are mutating.
+    "infra_vpn_deploy": "deny",
+    "infra_vpn_logs": "deny",
+    "infra_vpn_client_add": "deny",
+    "infra_vpn_client_list": "deny",
+    "infra_vpn_client_remove": "deny",
   },
 }

@@ -45,7 +45,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const INSTANCE_NAME = 'fro-bot-vpn'
-const KEY_PAIR_NAME = 'fro-bot-vpn'
+const KEY_PAIR_NAME = 'fro-bot-vpn-key'
 const STATIC_IP_NAME = 'fro-bot-vpn-ip'
 const AVAILABILITY_ZONE = 'eu-west-1a'
 const REMOTE_USER = 'ubuntu'

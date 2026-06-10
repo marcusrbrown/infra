@@ -1059,7 +1059,7 @@ describe('provision-droplet', () => {
       expect(createCall?.input.availabilityZone).toBe('eu-west-1a')
       expect(createCall?.input.blueprintId).toBe('ubuntu_24_04')
       expect(createCall?.input.bundleId).toBe('nano_3_0')
-      expect(createCall?.input.keyPairName).toBe('fro-bot-vpn')
+      expect(createCall?.input.keyPairName).toBe('fro-bot-vpn-key')
       expect(createCall?.input.instanceNames).toEqual(['fro-bot-vpn'])
     })
   })

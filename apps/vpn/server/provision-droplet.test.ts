@@ -490,22 +490,40 @@ describe('provision-droplet', () => {
 
   describe('performProvisioning', () => {
     it('happy path: runs full provisioning sequence in order', async () => {
-      const {send, calls} = makeFakeSend({
-        GetInstancesCommand: {instances: []},
-        ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
-        GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
-        GetBundlesCommand: {bundles: FAKE_BUNDLES},
-        CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
-        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
-        AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
-        AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
-        GetStaticIpCommand: FAKE_STATIC_IP,
-        PutInstancePublicPortsCommand: {operation: {status: 'Succeeded'}},
-      })
+      // Fresh instance: GetStaticIpCommand throws "not found" on first call (existence check),
+      // then AllocateStaticIpCommand allocates, then GetStaticIpCommand returns the IP.
+      const calls: FakeCall[] = []
+      let getStaticIpCallCount = 0
+      const customSend = (async (command: {constructor: {name: string}; input: Record<string, unknown>}) => {
+        const name = command.constructor.name as CommandName
+        calls.push({commandName: name, input: command.input})
+        if (name === 'GetStaticIpCommand') {
+          getStaticIpCallCount++
+          if (getStaticIpCallCount === 1) {
+            // First call: existence check — IP does not exist yet
+            throw new Error('Static IP not found')
+          }
+          // Second call: after allocation — return the IP
+          return FAKE_STATIC_IP
+        }
+        const fakeResponses: Partial<Record<CommandName, unknown>> = {
+          GetInstancesCommand: {instances: []},
+          ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
+          GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
+          GetBundlesCommand: {bundles: FAKE_BUNDLES},
+          CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
+          GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+          AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
+          AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
+          PutInstancePublicPortsCommand: {operation: {status: 'Succeeded'}},
+        }
+        if (name in fakeResponses) return fakeResponses[name]
+        throw new Error(`Unexpected command: ${name}`)
+      }) as unknown as LightsailSendFn
 
       const callOrder: string[] = []
       const deps: ProvisionDeps = {
-        send,
+        send: customSend,
         publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@example.com',
         privateKey: FAKE_PRIVATE_KEY,
         knownHostsPath: '/fake/.github/known_hosts',
@@ -526,7 +544,7 @@ describe('provision-droplet', () => {
 
       await performProvisioning(deps)
 
-      // Verify command sequence
+      // Verify command sequence — new order includes GetStaticIpCommand (existence check) before AllocateStaticIpCommand
       const commandNames = calls.map(c => c.commandName)
       expect(commandNames[0]).toBe('GetInstancesCommand')
       expect(commandNames[1]).toBe('ImportKeyPairCommand')
@@ -534,10 +552,11 @@ describe('provision-droplet', () => {
       expect(commandNames[3]).toBe('GetBundlesCommand')
       expect(commandNames[4]).toBe('CreateInstancesCommand')
       expect(commandNames[5]).toBe('GetInstanceCommand') // poll
-      expect(commandNames[6]).toBe('AllocateStaticIpCommand')
-      expect(commandNames[7]).toBe('AttachStaticIpCommand')
-      expect(commandNames[8]).toBe('GetStaticIpCommand')
-      expect(commandNames[9]).toBe('PutInstancePublicPortsCommand')
+      expect(commandNames[6]).toBe('GetStaticIpCommand') // existence check (throws not-found)
+      expect(commandNames[7]).toBe('AllocateStaticIpCommand') // allocate fresh
+      expect(commandNames[8]).toBe('AttachStaticIpCommand')
+      expect(commandNames[9]).toBe('GetStaticIpCommand') // get IP after allocation
+      expect(commandNames[10]).toBe('PutInstancePublicPortsCommand')
 
       // WireGuard install runs before pinHostKeys
       const wgIdx = callOrder.findIndex(c => c.includes('wireguard'))
@@ -616,15 +635,16 @@ describe('provision-droplet', () => {
     it('proceeds with repair when instance already exists with --force (skips re-create, repairs static IP + firewall)', async () => {
       // Plan: "Existing instance → abort unless --force; if instance exists but static IP/firewall missing → repair."
       // --force allows proceeding with repair; it does NOT re-create the instance.
+      // Static IP already exists in this scenario — GetStaticIpCommand returns it, so AllocateStaticIpCommand is skipped.
       const {send, calls} = makeFakeSend({
         GetInstancesCommand: {instances: [{name: 'fro-bot-vpn', state: {name: 'running'}}]},
         ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
         GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
-        AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
-        AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
+        // Static IP already exists — GetStaticIpCommand returns it (idempotent: no AllocateStaticIpCommand)
         GetStaticIpCommand: FAKE_STATIC_IP,
+        AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         PutInstancePublicPortsCommand: {operation: {status: 'Succeeded'}},
       })
 
@@ -646,28 +666,84 @@ describe('provision-droplet', () => {
       const commandNames = calls.map(c => c.commandName)
       // Instance already exists → skip re-create (repair path)
       expect(commandNames).not.toContain('CreateInstancesCommand')
-      // But should still repair static IP and firewall
-      expect(commandNames).toContain('AllocateStaticIpCommand')
+      // Static IP already exists → AllocateStaticIpCommand is NOT called (idempotent)
+      expect(commandNames).not.toContain('AllocateStaticIpCommand')
+      // Attach and firewall are still applied
       expect(commandNames).toContain('AttachStaticIpCommand')
       expect(commandNames).toContain('PutInstancePublicPortsCommand')
     })
 
-    it('repairs missing static IP without re-creating the instance', async () => {
-      // Instance exists but no static IP attached
+    it('--force repair: skips AllocateStaticIpCommand when static IP already exists (idempotent)', async () => {
+      // Static IP already exists — GetStaticIpCommand returns it without throwing.
+      // AllocateStaticIpCommand must NOT be called; AttachStaticIpCommand is safe to call.
       const {send, calls} = makeFakeSend({
-        GetInstancesCommand: {instances: [{name: 'fro-bot-vpn', state: {name: 'running'}, isStaticIp: false}]},
+        GetInstancesCommand: {instances: [{name: 'fro-bot-vpn', state: {name: 'running'}}]},
         ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
         GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
         GetBundlesCommand: {bundles: FAKE_BUNDLES},
         GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
-        AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
-        AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
+        // GetStaticIpCommand returns the existing IP — no allocation needed
         GetStaticIpCommand: FAKE_STATIC_IP,
+        AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
         PutInstancePublicPortsCommand: {operation: {status: 'Succeeded'}},
       })
 
       const deps: ProvisionDeps = {
         send,
+        publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@example.com',
+        privateKey: FAKE_PRIVATE_KEY,
+        knownHostsPath: '/fake/.github/known_hosts',
+        pollIntervalMs: 0,
+        force: true,
+        waitForSsh: async () => {},
+        runSsh: async () => {},
+        pinHostKeys: async () => {},
+        printIp: () => {},
+      }
+
+      await performProvisioning(deps)
+
+      const commandNames = calls.map(c => c.commandName)
+      // Static IP already exists → must NOT allocate again
+      expect(commandNames).not.toContain('AllocateStaticIpCommand')
+      // Attach is idempotent — still called
+      expect(commandNames).toContain('AttachStaticIpCommand')
+      // Provisioning must have succeeded (printIp would have been called)
+    })
+
+    it('repairs missing static IP without re-creating the instance', async () => {
+      // Instance exists but static IP is missing — GetStaticIpCommand throws not-found on first call,
+      // so AllocateStaticIpCommand is called, then GetStaticIpCommand returns the IP after allocation.
+      const calls: FakeCall[] = []
+      let getStaticIpCallCount = 0
+      const customSend = (async (command: {constructor: {name: string}; input: Record<string, unknown>}) => {
+        const name = command.constructor.name as CommandName
+        calls.push({commandName: name, input: command.input})
+        if (name === 'GetStaticIpCommand') {
+          getStaticIpCallCount++
+          if (getStaticIpCallCount === 1) {
+            // First call: existence check — IP does not exist
+            throw new Error('Static IP not found')
+          }
+          // Second call: after allocation
+          return FAKE_STATIC_IP
+        }
+        const fakeResponses: Partial<Record<CommandName, unknown>> = {
+          GetInstancesCommand: {instances: [{name: 'fro-bot-vpn', state: {name: 'running'}, isStaticIp: false}]},
+          ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
+          GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
+          GetBundlesCommand: {bundles: FAKE_BUNDLES},
+          GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+          AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
+          AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
+          PutInstancePublicPortsCommand: {operation: {status: 'Succeeded'}},
+        }
+        if (name in fakeResponses) return fakeResponses[name]
+        throw new Error(`Unexpected command: ${name}`)
+      }) as unknown as LightsailSendFn
+
+      const deps: ProvisionDeps = {
+        send: customSend,
         publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@example.com',
         privateKey: FAKE_PRIVATE_KEY,
         knownHostsPath: '/fake/.github/known_hosts',
@@ -684,7 +760,7 @@ describe('provision-droplet', () => {
       const commandNames = calls.map(c => c.commandName)
       // Should NOT re-create the instance
       expect(commandNames).not.toContain('CreateInstancesCommand')
-      // Should allocate and attach static IP
+      // Static IP was missing → AllocateStaticIpCommand must be called
       expect(commandNames).toContain('AllocateStaticIpCommand')
       expect(commandNames).toContain('AttachStaticIpCommand')
     })

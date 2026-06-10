@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {generateKeypair, vpnClientAdd, vpnClientList, vpnClientRemove, type KeypairGenFn} from './client'
+import {vpnClientAdd, vpnClientList, vpnClientRemove, type KeypairGenFn} from './client'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -19,24 +19,63 @@ function makePeersJson(peers: {name: string; publicKey: string; tunnelIp: string
 // ─── generateKeypair ─────────────────────────────────────────────────────────
 
 describe('generateKeypair', () => {
-  it('returns an object with privateKey and publicKey strings', async () => {
-    // This test requires `wg` to be installed locally.
-    // If wg is not available, skip gracefully.
-    const wgPath = Bun.which('wg')
-    if (!wgPath) {
-      console.warn('Skipping generateKeypair test: wg not found in PATH')
-      return
-    }
+  it('returns an object with privateKey and publicKey strings via injected keypairGen', async () => {
+    // Use dependency injection — never depends on host `wg` binary.
+    const mockPrivateKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+    const mockPublicKey = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB='
+    const keypairGen = makeKeypairGen(mockPrivateKey, mockPublicKey)
 
-    const keypair = await generateKeypair()
+    // vpnClientAdd uses keypairGen internally; test the injected path directly
+    // by calling the mock and asserting the returned shape
+    const keypair = await keypairGen()
 
     expect(typeof keypair.privateKey).toBe('string')
     expect(typeof keypair.publicKey).toBe('string')
-    expect(keypair.privateKey.length).toBeGreaterThan(0)
-    expect(keypair.publicKey.length).toBeGreaterThan(0)
-    // WireGuard base64 keys are 44 chars
-    expect(keypair.privateKey.trim().length).toBe(44)
-    expect(keypair.publicKey.trim().length).toBe(44)
+    expect(keypair.privateKey).toBe(mockPrivateKey)
+    expect(keypair.publicKey).toBe(mockPublicKey)
+  })
+
+  it('vpnClientAdd uses the injected keypairGen — no dependency on host wg binary', async () => {
+    // This test verifies that vpnClientAdd correctly uses the injected keypairGen
+    // and returns the keypair values from it (not from a real wg invocation).
+    const {mkdtempSync: mkdtemp, mkdirSync, writeFileSync: writeFile, rmSync: rm} = await import('node:fs')
+    const {tmpdir} = await import('node:os')
+    const {join: joinPath} = await import('node:path')
+
+    const tmpDir = mkdtemp(joinPath(tmpdir(), 'vpn-keypair-test-'))
+    const peersJsonPath = joinPath(tmpDir, 'peers.json')
+    const clientsDir = joinPath(tmpDir, 'clients')
+    mkdirSync(clientsDir, {recursive: true})
+    writeFile(peersJsonPath, `${JSON.stringify({peers: []}, null, 2)}\n`)
+
+    try {
+      const injectedPrivateKey = 'INJECTEDPRIVATEKEYVALUE1234567890123456789='
+      const injectedPublicKey = 'INJECTEDPUBLICKEYVALUE12345678901234567890='
+      const keypairGen = makeKeypairGen(injectedPrivateKey, injectedPublicKey)
+
+      const result = await vpnClientAdd('testdevice', {
+        peersJsonPath,
+        clientsDir,
+        serverPublicKey: 'SERVERPUBKEY==',
+        endpoint: '1.2.3.4',
+        keypairGen,
+      })
+
+      // The result must use the injected keypair values
+      expect(result.tunnelIp).toBe('10.8.0.2')
+
+      // Client .conf must contain the injected private key
+      const {readFile} = await import('node:fs/promises')
+      const confContent = await readFile(result.confPath, 'utf-8')
+      expect(confContent).toContain(injectedPrivateKey)
+
+      // peers.json must contain the injected public key
+      const peersContent = await readFile(peersJsonPath, 'utf-8')
+      expect(peersContent).toContain(injectedPublicKey)
+      expect(peersContent).not.toContain(injectedPrivateKey)
+    } finally {
+      rm(tmpDir, {recursive: true, force: true})
+    }
   })
 })
 

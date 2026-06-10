@@ -59,10 +59,14 @@ function extractOctet(tunnelIp: string): number | null {
   return Number.isFinite(octet) && octet >= FIRST_CLIENT_OCTET ? octet : null
 }
 
+// Last valid client octet: .254 (.1 is server, .255 is broadcast)
+const LAST_CLIENT_OCTET = 254
+
 /**
  * Compute the next available tunnel IP.
  * Sequential 10.8.0.N/32 starting at .2 (.1 is reserved for the server).
  * Reuses freed slots — returns the lowest free N >= 2.
+ * Throws when all 253 client slots (.2–.254) are exhausted.
  */
 export function nextTunnelIp(peers: Peer[]): string {
   const allocated = new Set<number>()
@@ -76,6 +80,10 @@ export function nextTunnelIp(peers: Peer[]): string {
   let n = FIRST_CLIENT_OCTET
   while (allocated.has(n) || n === SERVER_OCTET) {
     n++
+  }
+
+  if (n > LAST_CLIENT_OCTET) {
+    throw new Error(`Tunnel subnet 10.8.0.0/24 exhausted (max 253 peers).`)
   }
 
   return `${TUNNEL_SUBNET_PREFIX}${n}`

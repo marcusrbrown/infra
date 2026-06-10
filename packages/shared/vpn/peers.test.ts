@@ -174,6 +174,41 @@ describe('renderClientConfig', () => {
 
     expect(first).toBe(second)
   })
+
+  it('includes DNS line when dns option is provided', () => {
+    const config = renderClientConfig({
+      clientPrivateKey: CLIENT_PRIVATE_KEY,
+      serverPublicKey: SERVER_PUBLIC_KEY,
+      endpoint: ENDPOINT,
+      tunnelIp: TUNNEL_IP,
+      dns: '1.1.1.1',
+    })
+
+    expect(config).toContain('DNS = 1.1.1.1')
+  })
+
+  it('omits DNS line when dns option is not provided', () => {
+    const config = renderClientConfig({
+      clientPrivateKey: CLIENT_PRIVATE_KEY,
+      serverPublicKey: SERVER_PUBLIC_KEY,
+      endpoint: ENDPOINT,
+      tunnelIp: TUNNEL_IP,
+    })
+
+    expect(config).not.toContain('DNS')
+  })
+
+  it('omits DNS line when dns option is explicitly undefined', () => {
+    const config = renderClientConfig({
+      clientPrivateKey: CLIENT_PRIVATE_KEY,
+      serverPublicKey: SERVER_PUBLIC_KEY,
+      endpoint: ENDPOINT,
+      tunnelIp: TUNNEL_IP,
+      dns: undefined,
+    })
+
+    expect(config).not.toContain('DNS')
+  })
 })
 
 // ── nextTunnelIp ──────────────────────────────────────────────────────────────
@@ -214,6 +249,15 @@ describe('nextTunnelIp', () => {
     ]
     const {peers: afterRemove} = removePeer(peers, 'laptop')
     expect(nextTunnelIp(afterRemove)).toBe('10.8.0.2')
+  })
+
+  it('throws an exhaustion error when all 253 client slots are allocated (.2 through .254)', () => {
+    // Fill all valid client octets: .2 through .254 (253 peers)
+    const peers: Peer[] = []
+    for (let i = 2; i <= 254; i++) {
+      peers.push({name: `peer${i}`, publicKey: `pk${i}==`, tunnelIp: `10.8.0.${i}`})
+    }
+    expect(() => nextTunnelIp(peers)).toThrow(/exhausted|max 253 peers/)
   })
 })
 

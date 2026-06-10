@@ -434,6 +434,12 @@ describe('deploy', () => {
     // Assert: the awk command writes to wg0.conf
     const awkCmd = awkCall?.cmd.join(' ') ?? ''
     expect(awkCmd).toMatch(/wg0\.conf/)
+
+    // Fix 3: atomic write — awk must write to a temp file then mv into place
+    expect(awkCmd).toMatch(/wg0\.conf\.new/)
+    expect(awkCmd).toMatch(/mv\s/)
+    // Fix 3: server key non-empty guard must precede the awk substitution
+    expect(awkCmd).toMatch(/test -s/)
   })
 
   it('SECURITY: placeholder __SERVER_PRIVATE_KEY__ appears in shipped config; box-side awk substitutes from server.key', async () => {
@@ -462,7 +468,8 @@ describe('deploy', () => {
     // The awk substitution command must:
     // (a) reference /etc/wireguard/server.key via getline (box-local read)
     // (b) substitute the placeholder
-    // (c) write to /etc/wireguard/wg0.conf
+    // (c) write atomically to /etc/wireguard/wg0.conf via temp+mv
+    // (d) guard against empty server.key with test -s
     const awkCall = calls.find(c => {
       const cmd = c.cmd.join(' ')
       return cmd.includes('awk') && cmd.includes('server.key') && cmd.includes('__SERVER_PRIVATE_KEY__')
@@ -472,11 +479,87 @@ describe('deploy', () => {
     expect(awkCmd).toMatch(/getline key/)
     expect(awkCmd).toMatch(/server\.key/)
     expect(awkCmd).toMatch(/wg0\.conf/)
+    // Fix 3: atomic write — must use temp file + mv
+    expect(awkCmd).toMatch(/wg0\.conf\.new/)
+    expect(awkCmd).toMatch(/mv\s/)
+    // Fix 3: server key non-empty guard
+    expect(awkCmd).toMatch(/test -s/)
 
     // The real private key must NOT appear in any argv or stdin
     const FAKE_REAL_KEY = 'REAL_PRIVATE_KEY_THAT_MUST_NOT_APPEAR'
     const keyInArgv = calls.some(c => c.cmd.some(arg => arg.includes(FAKE_REAL_KEY)))
     expect(keyInArgv).toBe(false)
+  })
+
+  // ─── peers.json read failure behavior ────────────────────────────────────
+
+  it('aborts deploy when peers.json exists but contains corrupt/malformed JSON', async () => {
+    const calls: SpawnCall[] = []
+    const mockSpawn = makeMockSpawn(calls, [])
+
+    // Write a corrupt peers.json to a temp file
+    const {mkdtempSync: mkdtemp, writeFileSync: writeFile, rmSync: rm} = await import('node:fs')
+    const {tmpdir} = await import('node:os')
+    const {join: joinPath} = await import('node:path')
+    const tmpDir = mkdtemp(joinPath(tmpdir(), 'vpn-deploy-peers-test-'))
+    const corruptPeersPath = joinPath(tmpDir, 'peers.json')
+    try {
+      writeFile(corruptPeersPath, 'this is not valid json {{{')
+
+      await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: corruptPeersPath})).rejects.toThrow()
+
+      // No SSH calls must have been made — deploy must abort before SSH
+      expect(calls).toHaveLength(0)
+    } finally {
+      rm(tmpDir, {recursive: true, force: true})
+    }
+  })
+
+  it('proceeds with 0 peers when peers.json does not exist (no peers yet)', async () => {
+    const calls: SpawnCall[] = []
+    const results = [
+      {stdout: '', exitCode: 0}, // ensure server key
+      {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
+      {stdout: '', exitCode: 0}, // awk substitution
+      {stdout: '', exitCode: 0}, // write wg-forwarding.conf
+      {stdout: '', exitCode: 0}, // sysctl --system
+      {stdout: '', exitCode: 0}, // systemctl enable --now
+      {stdout: '', exitCode: 0}, // systemctl restart
+      {stdout: 'interface: wg0\n  public key: FAKEPUBKEY==\n  peers: 0\n', exitCode: 0}, // wg show
+    ]
+    const mockSpawn = makeMockSpawn(calls, results)
+
+    // Point to a path that does not exist
+    const nonExistentPath = '/tmp/vpn-deploy-test-nonexistent-peers-XXXXXX.json'
+
+    // Should NOT throw — missing file is valid (no peers yet)
+    await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: nonExistentPath})).resolves.toBeUndefined()
+
+    // SSH calls must have proceeded (deploy ran)
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  it('aborts deploy when peers.json exists but contains valid JSON with wrong schema', async () => {
+    const calls: SpawnCall[] = []
+    const mockSpawn = makeMockSpawn(calls, [])
+
+    const {mkdtempSync: mkdtemp, writeFileSync: writeFile, rmSync: rm} = await import('node:fs')
+    const {tmpdir} = await import('node:os')
+    const {join: joinPath} = await import('node:path')
+    const tmpDir = mkdtemp(joinPath(tmpdir(), 'vpn-deploy-peers-test-'))
+    const badSchemaPeersPath = joinPath(tmpDir, 'peers.json')
+    try {
+      // Valid JSON but wrong schema — missing required fields
+      writeFile(badSchemaPeersPath, JSON.stringify({wrong: 'schema', notPeers: true}))
+
+      await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: badSchemaPeersPath})).rejects.toThrow()
+
+      // No SSH calls — deploy must abort
+      expect(calls).toHaveLength(0)
+    } finally {
+      rm(tmpDir, {recursive: true, force: true})
+    }
   })
 
   it('CI mode: materializes VPN_SSH_KEY to a temp file before SSH calls', async () => {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import {chmodSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 
@@ -362,11 +362,18 @@ async function renderWgConfServerSide(
   // awk is safe for base64 keys (which contain `/` and `+`) because gsub() does not use
   // regex delimiters for the replacement string. The key is read via getline from the
   // box's local filesystem — it never appears in argv or crosses SSH.
+  //
+  // Atomic write: awk writes to a temp file, then mv replaces wg0.conf atomically.
+  // mv is atomic on the same filesystem — prevents a partial write if SSH drops mid-command.
+  // Guard: test -s verifies server.key is non-empty before substitution (fail closed).
+  const newConfPath = `${WG_CONFIG_PATH}.new`
   const substituteCmd =
+    `test -s '${SERVER_KEY_PATH}' && ` +
     `awk 'BEGIN{getline key < "${SERVER_KEY_PATH}"} ` +
     `{gsub("${PLACEHOLDER}", key); print}' ` +
-    `'${tmpConfPath}' > '${WG_CONFIG_PATH}' ` +
-    `&& chmod 600 '${WG_CONFIG_PATH}' ` +
+    `'${tmpConfPath}' > '${newConfPath}' ` +
+    `&& chmod 600 '${newConfPath}' ` +
+    `&& mv '${newConfPath}' '${WG_CONFIG_PATH}' ` +
     `&& rm -f '${tmpConfPath}'`
 
   await runCommand(
@@ -467,13 +474,17 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const host = validated.VPN_HOST
 
   // Read and validate peers.json — used for wg0.conf rendering and health gate peer count.
+  // Missing file is the ONLY acceptable empty case (no peers yet).
+  // Corrupt/malformed JSON or schema errors → re-throw (abort the deploy).
   let peers: Peer[]
   let peerCount: number
-  try {
+  if (existsSync(peersJsonPath)) {
+    // File exists: parse and validate — any error is fatal (corrupt data must not deploy 0 peers)
     const peersFile = await readPeers(peersJsonPath)
     peers = peersFile.peers
     peerCount = peers.length
-  } catch {
+  } else {
+    // File absent: valid initial state — no peers yet
     peers = []
     peerCount = 0
   }

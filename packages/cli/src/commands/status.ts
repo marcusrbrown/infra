@@ -140,7 +140,9 @@ export function registerStatus(
     .command('status', 'Show status of all deployments')
     .option(
       '--json',
-      z.boolean().describe('Output machine-readable JSON with keeweb, cliproxy, gateway, and umami summary objects.'),
+      z
+        .boolean()
+        .describe('Output machine-readable JSON with keeweb, cliproxy, gateway, umami, and vpn summary objects.'),
     )
     .option(
       '--verbose',

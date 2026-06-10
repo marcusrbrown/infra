@@ -178,7 +178,7 @@ Commands:
 
   status                               Show status of all deployments
 
-    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, and umami summary objects.
+    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, umami, and vpn summary objects.
     --verbose                          Include verbose per-app health check details when building the summary rows.
 
 

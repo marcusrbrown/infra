@@ -403,18 +403,45 @@ export async function performProvisioning(deps: ProvisionDeps): Promise<void> {
   console.log(`\u001B[1;34m==>\u001B[0m Waiting for instance to reach running state`)
   await pollUntilRunning(INSTANCE_NAME, send, {intervalMs: pollIntervalMs})
 
-  // Step 6: Allocate + attach static IP
-  console.log(`\u001B[1;34m==>\u001B[0m Allocating static IP "${STATIC_IP_NAME}"`)
-  await send(new AllocateStaticIpCommand({staticIpName: STATIC_IP_NAME}))
+  // Step 6: Allocate + attach static IP (idempotent — mirrors importKeyPairIdempotent pattern)
+  // Check if the static IP already exists before allocating — Lightsail rejects duplicate names.
+  let staticIp: string | undefined
+  try {
+    console.log(`\u001B[1;34m==>\u001B[0m Checking if static IP "${STATIC_IP_NAME}" already exists`)
+    const existingIpResponse = (await send(new GetStaticIpCommand({staticIpName: STATIC_IP_NAME}))) as {
+      staticIp?: {ipAddress?: string}
+    }
+    staticIp = existingIpResponse.staticIp?.ipAddress
+    if (staticIp) {
+      console.log(
+        `\u001B[1;34m==>\u001B[0m Static IP "${STATIC_IP_NAME}" already exists (${staticIp}) — skipping allocation`,
+      )
+    }
+  } catch (error: unknown) {
+    // Static IP does not exist — allocate fresh
+    const msg = error instanceof Error ? error.message : String(error)
+    const isNotFound =
+      msg.toLowerCase().includes('not found') ||
+      msg.toLowerCase().includes('does not exist') ||
+      msg.toLowerCase().includes('no static ip')
+    if (!isNotFound) {
+      throw error
+    }
+    console.log(`\u001B[1;34m==>\u001B[0m Allocating static IP "${STATIC_IP_NAME}"`)
+    await send(new AllocateStaticIpCommand({staticIpName: STATIC_IP_NAME}))
+  }
 
+  // AttachStaticIpCommand is safe to call when already attached (idempotent)
   console.log(`\u001B[1;34m==>\u001B[0m Attaching static IP to instance`)
   await send(new AttachStaticIpCommand({staticIpName: STATIC_IP_NAME, instanceName: INSTANCE_NAME}))
 
-  // Step 7: Get the allocated IP address
-  const staticIpResponse = (await send(new GetStaticIpCommand({staticIpName: STATIC_IP_NAME}))) as {
-    staticIp?: {ipAddress?: string}
+  // Step 7: Get the IP address (may already be set from the existence check above)
+  if (!staticIp) {
+    const staticIpResponse = (await send(new GetStaticIpCommand({staticIpName: STATIC_IP_NAME}))) as {
+      staticIp?: {ipAddress?: string}
+    }
+    staticIp = staticIpResponse.staticIp?.ipAddress
   }
-  const staticIp = staticIpResponse.staticIp?.ipAddress
   if (!staticIp) {
     throw new Error('Failed to retrieve static IP address after allocation')
   }

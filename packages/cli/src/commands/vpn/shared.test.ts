@@ -195,6 +195,67 @@ describe('getVpnStatusSummary', () => {
     expect(summary.app).toBe('vpn')
   })
 
+  it('SSH user contract: connects as ubuntu@host, not root@host', async () => {
+    const wgOutput = 'interface: wg0\n  public key: key==\n  private key: (hidden)\n  listening port: 51820\n'
+    let capturedCmd: string[] = []
+
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const encoder = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(wgOutput))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getVpnStatusSummary('1.2.3.4', capturingSpawn)
+
+    const destination = capturedCmd.find(arg => arg.includes('@'))
+    expect(destination).toBeDefined()
+    expect(destination).toMatch(/^ubuntu@/)
+    expect(destination).not.toMatch(/^root@/)
+  })
+
+  it('privilege contract: wg show wg0 is prefixed with sudo', async () => {
+    const wgOutput = 'interface: wg0\n  public key: key==\n  private key: (hidden)\n  listening port: 51820\n'
+    let capturedCmd: string[] = []
+
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const encoder = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(wgOutput))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getVpnStatusSummary('1.2.3.4', capturingSpawn)
+
+    // The last element of the SSH command is the remote command to run
+    const remoteCmd = capturedCmd.at(-1)
+    expect(remoteCmd).toMatch(/^sudo wg show wg0/)
+  })
+
   it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to ssh', async () => {
     const wgOutput = 'interface: wg0\n  public key: key==\n  private key: (hidden)\n  listening port: 51820\n'
     let capturedCmd: string[] = []

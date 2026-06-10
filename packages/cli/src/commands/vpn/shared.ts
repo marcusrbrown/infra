@@ -86,8 +86,8 @@ export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn
     '-o',
     'StrictHostKeyChecking=yes',
     ...buildKnownHostsArgs(),
-    `root@${host}`,
-    'wg show wg0',
+    `ubuntu@${host}`,
+    'sudo wg show wg0',
   ]
 
   const env: Record<string, string> = {

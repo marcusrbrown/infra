@@ -141,6 +141,43 @@ describe('CI guard', () => {
   })
 })
 
+// ─── SSH user + privilege contract ───────────────────────────────────────────
+
+describe('streamVpnLogs — SSH user + privilege contract', () => {
+  it('SSH user contract: connects as ubuntu@host, not root@host', async () => {
+    delete process.env.CI
+
+    let capturedCmd: string[] = []
+    const spawnCapture: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      return {exited: Promise.resolve(0)}
+    }
+
+    await streamVpnLogs({host: 'vpn.example.com', tail: 100, allowCi: false}, spawnCapture)
+
+    const destination = capturedCmd.find(arg => arg.includes('@'))
+    expect(destination).toBeDefined()
+    expect(destination).toMatch(/^ubuntu@/)
+    expect(destination).not.toMatch(/^root@/)
+  })
+
+  it('privilege contract: journalctl is prefixed with sudo', async () => {
+    delete process.env.CI
+
+    let capturedCmd: string[] = []
+    const spawnCapture: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      return {exited: Promise.resolve(0)}
+    }
+
+    await streamVpnLogs({host: 'vpn.example.com', tail: 100, allowCi: false}, spawnCapture)
+
+    // The last element of the SSH command is the remote command to run
+    const remoteCmd = capturedCmd.at(-1)
+    expect(remoteCmd).toMatch(/^sudo journalctl/)
+  })
+})
+
 // ─── --tail forwarding ───────────────────────────────────────────────────────
 
 describe('tail forwarding', () => {

@@ -62,7 +62,7 @@ The script will:
 6. Allocate + attach the `fro-bot-vpn-ip` static IP
 7. Set the exact firewall ruleset: SSH 22 (tcp) + UDP 51820 — closes Lightsail's default 80/443 (`PutInstancePublicPortsCommand` replaces the whole set; SSH 22 is always included to prevent lockout)
 8. Wait for SSH (`waitForSsh` shared helper)
-9. Install WireGuard: `apt-get update && apt-get install -y wireguard`
+9. Install WireGuard: `sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard`
 10. Pin the IP host key into `.github/known_hosts` (IP-only in v1; fail closed if pinning fails)
 11. **Print the allocated static IP** — operator seeds this as `VPN_HOST` into `.env` + the `vpn` GitHub Environment before the first deploy
 

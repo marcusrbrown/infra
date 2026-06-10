@@ -810,6 +810,46 @@ describe('provision-droplet', () => {
       expect(importCalled).toBe(true)
     })
 
+    it('WireGuard install command uses sudo apt-get and DEBIAN_FRONTEND=noninteractive', async () => {
+      const {send} = makeFakeSend({
+        GetInstancesCommand: {instances: []},
+        ImportKeyPairCommand: {operation: {status: 'Succeeded'}},
+        GetBlueprintsCommand: {blueprints: FAKE_BLUEPRINTS},
+        GetBundlesCommand: {bundles: FAKE_BUNDLES},
+        CreateInstancesCommand: {operations: [{status: 'Succeeded'}]},
+        GetInstanceCommand: {instance: {name: 'fro-bot-vpn', state: {name: 'running'}}},
+        AllocateStaticIpCommand: {operations: [{status: 'Succeeded'}]},
+        AttachStaticIpCommand: {operations: [{status: 'Succeeded'}]},
+        GetStaticIpCommand: FAKE_STATIC_IP,
+        PutInstancePublicPortsCommand: {operation: {status: 'Succeeded'}},
+      })
+
+      const sshCalls: string[] = []
+      const deps: ProvisionDeps = {
+        send,
+        publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@example.com',
+        privateKey: FAKE_PRIVATE_KEY,
+        knownHostsPath: '/fake/.github/known_hosts',
+        pollIntervalMs: 0,
+        waitForSsh: async () => {},
+        runSsh: async (cmd: string) => {
+          sshCalls.push(cmd)
+        },
+        pinHostKeys: async () => {},
+        printIp: () => {},
+      }
+
+      await performProvisioning(deps)
+
+      expect(sshCalls.length).toBeGreaterThan(0)
+      const installCmd = sshCalls.find(c => c.includes('wireguard'))
+      expect(installCmd).toBeDefined()
+      // Must use sudo for privileged apt-get
+      expect(installCmd).toMatch(/sudo apt-get/)
+      // Must be non-interactive to avoid hanging in CI
+      expect(installCmd).toMatch(/DEBIAN_FRONTEND=noninteractive/)
+    })
+
     it('WireGuard install step runs before any wg/key generation', async () => {
       const {send} = makeFakeSend({
         GetInstancesCommand: {instances: []},

@@ -464,7 +464,11 @@ export async function performProvisioning(deps: ProvisionDeps): Promise<void> {
 
     // Step 10: Install WireGuard (must run before any wg use)
     console.log(`\u001B[1;34m==>\u001B[0m Installing WireGuard`)
-    await resolvedRunSsh('apt-get update && apt-get install -y wireguard', staticIp, identityFile)
+    await resolvedRunSsh(
+      'sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard',
+      staticIp,
+      identityFile,
+    )
 
     // Step 11: Pin IP host key (fail closed — error propagates)
     console.log(`\u001B[1;34m==>\u001B[0m Pinning host key for ${staticIp}`)

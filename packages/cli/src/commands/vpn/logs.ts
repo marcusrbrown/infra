@@ -76,8 +76,8 @@ export async function streamVpnLogs(
     '-o',
     'StrictHostKeyChecking=yes',
     ...buildKnownHostsArgs(),
-    `root@${opts.host}`,
-    `journalctl -u wg-quick@wg0 --no-pager -n ${opts.tail}`,
+    `ubuntu@${opts.host}`,
+    `sudo journalctl -u wg-quick@wg0 --no-pager -n ${opts.tail}`,
   ]
 
   const env: Record<string, string> = {

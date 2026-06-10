@@ -53,7 +53,7 @@ export interface DeployOpts {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_REMOTE_USER = 'root'
+const DEFAULT_REMOTE_USER = 'ubuntu'
 const WG_CONFIG_PATH = '/etc/wireguard/wg0.conf'
 const SERVER_KEY_PATH = '/etc/wireguard/server.key'
 const SERVER_PUB_PATH = '/etc/wireguard/server.pub'
@@ -132,7 +132,7 @@ function sshCommand(host: string, command: string, keyPath?: string, controlPath
 function buildDeployEnv(env: Record<string, string>): DeployEnv {
   return {
     PATH: env.PATH ?? '/usr/bin:/bin',
-    HOME: env.HOME ?? '/root',
+    HOME: env.HOME ?? '/home/ubuntu',
     VPN_HOST: env.VPN_HOST ?? '',
     ...(env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: env.SSH_AUTH_SOCK} : {}),
   }
@@ -188,8 +188,9 @@ async function writeRemoteFile(
   console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
 
   // umask 077 ensures the file is created with 600 permissions.
+  // sudo tee writes with root privileges; output is discarded (> /dev/null).
   // Content arrives via stdin — never in the shell command string.
-  const proc = spawnFn(sshCommand(host, `umask 077; cat > '${remotePath}'`, keyPath, controlPath), {
+  const proc = spawnFn(sshCommand(host, `umask 077; sudo tee '${remotePath}' > /dev/null`, keyPath, controlPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -233,7 +234,7 @@ async function readRemoteServerPub(
 ): Promise<string> {
   const {stdout} = await runCommand(
     'Reading server public key (server.pub)',
-    sshCommand(host, `cat '${SERVER_PUB_PATH}'`, keyPath, controlPath),
+    sshCommand(host, `sudo cat '${SERVER_PUB_PATH}'`, keyPath, controlPath),
     deployEnv,
     spawnFn,
   )
@@ -261,8 +262,8 @@ async function ensureServerKey(
   controlPath?: string,
 ): Promise<void> {
   const cmd =
-    `umask 077; test -f '${SERVER_KEY_PATH}' || ` +
-    `(wg genkey | tee '${SERVER_KEY_PATH}' | wg pubkey > '${SERVER_PUB_PATH}')`
+    `sudo sh -c 'umask 077; test -f ${SERVER_KEY_PATH} || ` +
+    `(wg genkey | tee ${SERVER_KEY_PATH} | wg pubkey > ${SERVER_PUB_PATH})'`
 
   await runCommand(
     'Ensuring server keypair (atomic, preserved)',
@@ -292,7 +293,7 @@ async function forceRegenerateServerKey(
 
   // No `test -f` guard — unconditionally regenerate.
   // The private key is written to the box only; never transmitted locally.
-  const cmd = `umask 077; wg genkey | tee '${SERVER_KEY_PATH}' | wg pubkey > '${SERVER_PUB_PATH}'`
+  const cmd = `sudo sh -c 'umask 077; wg genkey | tee ${SERVER_KEY_PATH} | wg pubkey > ${SERVER_PUB_PATH}'`
 
   await runCommand('Force-regenerating server keypair', sshCommand(host, cmd, keyPath, controlPath), deployEnv, spawnFn)
 }
@@ -367,14 +368,16 @@ async function renderWgConfServerSide(
   // mv is atomic on the same filesystem — prevents a partial write if SSH drops mid-command.
   // Guard: test -s verifies server.key is non-empty before substitution (fail closed).
   const newConfPath = `${WG_CONFIG_PATH}.new`
+  // Wrap the entire substitution pipeline under sudo sh -c so awk can read
+  // the root-owned server.key and mv into /etc/wireguard (root-owned dir).
   const substituteCmd =
-    `test -s '${SERVER_KEY_PATH}' && ` +
-    `awk 'BEGIN{getline key < "${SERVER_KEY_PATH}"} ` +
-    `{gsub("${PLACEHOLDER}", key); print}' ` +
-    `'${tmpConfPath}' > '${newConfPath}' ` +
-    `&& chmod 600 '${newConfPath}' ` +
-    `&& mv '${newConfPath}' '${WG_CONFIG_PATH}' ` +
-    `&& rm -f '${tmpConfPath}'`
+    `sudo sh -c 'test -s ${SERVER_KEY_PATH} && ` +
+    `awk '"'"'BEGIN{getline key < "${SERVER_KEY_PATH}"} ` +
+    `{gsub("${PLACEHOLDER}", key); print}'"'"' ` +
+    `${tmpConfPath} > ${newConfPath} ` +
+    `&& chmod 600 ${newConfPath} ` +
+    `&& mv ${newConfPath} ${WG_CONFIG_PATH} ` +
+    `&& rm -f ${tmpConfPath}'`
 
   await runCommand(
     'Substituting server key placeholder in wg0.conf (server-side, key never leaves box)',
@@ -404,7 +407,7 @@ async function healthGate(
   keyPath?: string,
   controlPath?: string,
 ): Promise<void> {
-  const proc = spawnFn(sshCommand(host, 'wg show wg0', keyPath, controlPath), {
+  const proc = spawnFn(sshCommand(host, 'sudo wg show wg0', keyPath, controlPath), {
     env: deployEnv,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -544,7 +547,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     // Phase 7: Apply sysctl settings
     await runCommand(
       'Applying sysctl settings (ip_forward)',
-      sshCommand(host, 'sysctl --system', keyPath, controlPath),
+      sshCommand(host, 'sudo sysctl --system', keyPath, controlPath),
       deployEnv,
       spawnFn,
     )
@@ -552,7 +555,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     // Phase 8: Enable and start wg-quick@wg0
     await runCommand(
       'Enabling wg-quick@wg0',
-      sshCommand(host, 'systemctl enable --now wg-quick@wg0', keyPath, controlPath),
+      sshCommand(host, 'sudo systemctl enable --now wg-quick@wg0', keyPath, controlPath),
       deployEnv,
       spawnFn,
     )
@@ -560,7 +563,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     // Phase 9: Restart to pick up new config
     await runCommand(
       'Restarting wg-quick@wg0 (pick up new config)',
-      sshCommand(host, 'systemctl restart wg-quick@wg0', keyPath, controlPath),
+      sshCommand(host, 'sudo systemctl restart wg-quick@wg0', keyPath, controlPath),
       deployEnv,
       spawnFn,
     )

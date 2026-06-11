@@ -1,3 +1,9 @@
 {
-  "peers": []
+  "peers": [
+    {
+      "name": "poly",
+      "publicKey": "Sg1owQaGZFaqUK7Zd84pwbI3PgXp3zEbFWRIikZFzS0=",
+      "tunnelIp": "10.8.0.2"
+    }
+  ]
 }

@@ -118,9 +118,17 @@ bunx @marcusrbrown/infra vpn client add <name>
 This:
 1. Generates a client keypair locally
 2. Assigns the next available tunnel IP (`10.8.0.N/32`, sequential from `.2`)
-3. Appends the client public key + tunnel IP to `apps/vpn/config/peers.json`
-4. Writes the client `.conf` (with client private key) to `apps/vpn/clients/<name>.conf`
-5. Triggers a redeploy to activate the new peer
+3. Appends the client public key + tunnel IP to the local `apps/vpn/config/peers.json` (gitignored)
+4. Syncs the updated roster to the `VPN_PEERS` GitHub Environment secret via `gh secret set VPN_PEERS --env vpn`
+5. Writes the client `.conf` (with client private key) to `apps/vpn/clients/<name>.conf`
+
+If the `gh` sync fails (missing binary, auth, or network), the command still succeeds and prints a warning with the exact remediation command:
+
+```bash
+gh secret set VPN_PEERS --env vpn --repo marcusrbrown/infra < apps/vpn/config/peers.json
+```
+
+**Stale-secret hazard:** if the sync fails and CI runs a deploy before the secret is re-synced, the stale roster in `VPN_PEERS` is applied to the box. The wipe guard (see below) blocks an empty-roster deploy, but a stale non-empty roster deploys silently. Re-sync with the command above.
 
 The client `.conf` path is printed. Distribute it to the peer device securely (never via unencrypted channels). The `apps/vpn/clients/` directory is gitignored — client private keys never enter the repo.
 
@@ -136,7 +144,33 @@ To remove a peer:
 bunx @marcusrbrown/infra vpn client remove <name>
 ```
 
-The peer is removed from `peers.json` and revoked on the next deploy. The client config on the peer device becomes invalid after the next deploy completes.
+The peer is removed from the local `peers.json` and the `VPN_PEERS` secret is synced. Run `vpn deploy` explicitly to revoke the peer on the box. The client config on the peer device becomes invalid after the next deploy completes.
+
+---
+
+## Wipe Guard
+
+The deploy includes a wipe guard that prevents silently disconnecting all clients when the incoming peer roster is empty. If `VPN_PEERS` is unset or empty in CI and the live box has peers, the deploy aborts with:
+
+```
+Wipe guard: the incoming roster is empty (0 peers) but the live box has N peer(s).
+Deploying an empty roster would disconnect all clients.
+To fix: re-sync the roster secret with:
+  gh secret set VPN_PEERS --env vpn --repo marcusrbrown/infra < apps/vpn/config/peers.json
+To intentionally remove all peers, set VPN_ALLOW_EMPTY_ROSTER=1.
+```
+
+**What it protects against:** an empty or missing `VPN_PEERS` secret in CI would deploy a 0-peer config to a box with live peers, silently disconnecting every client. The health gate would pass (expected 0 == actual 0), making the failure invisible.
+
+**When to override:** set `VPN_ALLOW_EMPTY_ROSTER=1` in the deploy environment only when intentionally removing all peers. First-boot bootstrap (live=0, incoming=0) proceeds normally without the override.
+
+**Remediation for a blocked deploy:**
+
+```bash
+# Re-sync the local roster to the VPN_PEERS secret:
+gh secret set VPN_PEERS --env vpn --repo marcusrbrown/infra < apps/vpn/config/peers.json
+# Then re-trigger the deploy.
+```
 
 ---
 

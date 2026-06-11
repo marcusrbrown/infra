@@ -11,6 +11,9 @@ dist/
 apps/vpn/clients/*
 !apps/vpn/clients/.gitkeep
 
+# VPN peer roster — local working state only; roster is stored in VPN_PEERS GitHub secret
+apps/vpn/config/peers.json
+
 .DS_Store
 *.swp
 *.swo

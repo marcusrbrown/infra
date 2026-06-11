@@ -149,10 +149,11 @@ See [`apps/umami/README.md`](apps/umami/README.md) and [`apps/umami/AGENTS.md`](
 
 **`vpn` environment:**
 
-| Secret        | Required | Description                                                   |
-| ------------- | -------- | ------------------------------------------------------------- |
-| `VPN_SSH_KEY` | ✓        | Ed25519 private key for the VPN box (`wg-egress` keypair)     |
-| `VPN_HOST`    | ✓        | Static IP of the Lightsail instance (printed by provisioning) |
+| Secret        | Required | Description                                                                      |
+| ------------- | -------- | -------------------------------------------------------------------------------- |
+| `VPN_SSH_KEY` | ✓        | Ed25519 private key for the VPN box (`wg-egress` keypair)                        |
+| `VPN_HOST`    | ✓        | Static IP of the Lightsail instance (printed by provisioning)                    |
+| `VPN_PEERS`   | —        | Peer roster JSON. Auto-synced by `vpn client add/remove`. Empty roster is valid. |
 
 AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status. See [`apps/vpn/README.md`](apps/vpn/README.md) and [`apps/vpn/AGENTS.md`](apps/vpn/AGENTS.md).
 

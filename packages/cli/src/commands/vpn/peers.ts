@@ -10,9 +10,39 @@ const peerSchema = z.object({
   tunnelIp: z.string(),
 })
 
-const peersFileSchema = z.object({
-  peers: z.array(peerSchema),
-})
+const peersFileSchema = z
+  .object({
+    peers: z.array(peerSchema),
+  })
+  .superRefine((data, ctx) => {
+    // Reject duplicate tunnelIp values — duplicated tunnel IPs break WireGuard routing silently
+    const seenIps = new Set<string>()
+    for (const peer of data.peers) {
+      if (seenIps.has(peer.tunnelIp)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate tunnel IP "${peer.tunnelIp}" — each peer must have a unique tunnel IP.`,
+          path: ['peers'],
+        })
+        return
+      }
+      seenIps.add(peer.tunnelIp)
+    }
+
+    // Reject duplicate name values
+    const seenNames = new Set<string>()
+    for (const peer of data.peers) {
+      if (seenNames.has(peer.name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate name "${peer.name}" — each peer must have a unique name.`,
+          path: ['peers'],
+        })
+        return
+      }
+      seenNames.add(peer.name)
+    }
+  })
 
 export type Peer = z.infer<typeof peerSchema>
 export type PeersFile = z.infer<typeof peersFileSchema>
@@ -35,9 +65,29 @@ export async function readPeers(filePath: string): Promise<PeersFile> {
   return parsePeersJson(raw)
 }
 
+/**
+ * Read peers from filePath, returning {peers: []} when the file is absent (ENOENT).
+ *
+ * ENOENT is the only error that is silently treated as an empty roster — this
+ * supports fresh checkouts where peers.json is gitignored and does not exist yet.
+ *
+ * All other errors (corrupt JSON, schema violations, permission errors) still throw
+ * so that a corrupt file is never silently treated as an empty roster.
+ */
+export async function readPeersOrEmpty(filePath: string): Promise<PeersFile> {
+  try {
+    return await readPeers(filePath)
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return {peers: []}
+    }
+    throw error
+  }
+}
+
 export async function writePeers(filePath: string, peersFile: PeersFile): Promise<void> {
   const content = `${JSON.stringify(peersFile, null, 2)}\n`
-  await writeFile(filePath, content, 'utf-8')
+  await writeFile(filePath, content, {mode: 0o600})
 }
 
 // ── IP allocation ─────────────────────────────────────────────────────────────

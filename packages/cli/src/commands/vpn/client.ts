@@ -4,7 +4,7 @@ import {mkdir, writeFile} from 'node:fs/promises'
 import {resolve} from 'node:path'
 
 import {z} from 'zod'
-import {addPeer, readPeers, removePeer, renderClientConfig, writePeers, type Peer} from './peers'
+import {addPeer, readPeersOrEmpty, removePeer, renderClientConfig, writePeers, type Peer} from './peers'
 
 declare const process: {
   env: Record<string, string | undefined>
@@ -20,14 +20,34 @@ export interface Keypair {
 
 export type KeypairGenFn = () => Promise<Keypair>
 
+/** Minimal subset of Bun.Subprocess used for gh secret sync. */
+export interface SyncSpawnResult {
+  stdout: ReadableStream<Uint8Array>
+  stderr: ReadableStream<Uint8Array>
+  stdin?: {write: (data: Uint8Array) => void; end: () => void}
+  exited: Promise<number>
+}
+
+export interface SyncSpawnOpts {
+  stdout: 'pipe'
+  stderr: 'pipe'
+  stdin: 'pipe'
+}
+
+/** Injectable spawn function for gh secret sync — defaults to Bun.spawn. */
+export type SpawnFn = (cmd: string[], opts: SyncSpawnOpts) => SyncSpawnResult
+
 export interface VpnClientAddOpts {
   peersJsonPath: string
   clientsDir: string
   serverPublicKey: string
   endpoint: string
   keypairGen?: KeypairGenFn
+  spawnFn?: SpawnFn
   allowedIps?: string
   dns?: string
+  /** Timeout in ms for gh secret sync. Defaults to 15000. Injectable for tests. */
+  syncTimeoutMs?: number
 }
 
 export interface VpnClientAddResult {
@@ -92,6 +112,112 @@ export async function generateKeypair(): Promise<Keypair> {
   }
 }
 
+// ─── gh secret sync ───────────────────────────────────────────────────────────
+
+const GH_SYNC_REPO = 'marcusrbrown/infra'
+const GH_SYNC_ENV = 'vpn'
+const GH_SYNC_SECRET = 'VPN_PEERS'
+
+/**
+ * The exact remediation command — mirrors the real spawn command exactly.
+ * Includes --repo so the operator can run it from any directory.
+ */
+const GH_SYNC_REMEDIATION = `gh secret set ${GH_SYNC_SECRET} --env ${GH_SYNC_ENV} --repo ${GH_SYNC_REPO} < apps/vpn/config/peers.json`
+
+function defaultSpawnFn(cmd: string[], opts: SyncSpawnOpts): SyncSpawnResult {
+  return Bun.spawn(cmd, opts)
+}
+
+/**
+ * Sync the updated peer roster to the VPN_PEERS GitHub Environment secret.
+ *
+ * Pipes the JSON via stdin to `gh secret set VPN_PEERS --env vpn --repo marcusrbrown/infra`.
+ * The roster bytes NEVER appear in argv — stdin only.
+ *
+ * On failure: prints a warning with the exact remediation command. Does NOT throw.
+ * The local peers.json write has already succeeded; the secret being stale is recoverable.
+ *
+ * Hardening:
+ * - Wraps the entire spawn + stdin write + exited await in try/catch.
+ *   If spawnFn throws synchronously (e.g. ENOENT for missing gh), prints warning and returns.
+ * - Races proc.exited against timeoutMs (default 15s). On timeout, kills the proc and warns.
+ * - Drains stdout to avoid pipe-buffer deadlock.
+ */
+async function syncPeersSecret(peersJson: string, spawnFn: SpawnFn, timeoutMs = 15_000): Promise<void> {
+  const cmd = ['gh', 'secret', 'set', GH_SYNC_SECRET, '--env', GH_SYNC_ENV, '--repo', GH_SYNC_REPO]
+
+  let proc: SyncSpawnResult
+  try {
+    proc = spawnFn(cmd, {stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'})
+  } catch {
+    console.warn(
+      `[warn] VPN_PEERS secret sync failed: could not spawn gh. ` +
+        `The local peers.json was updated but the VPN_PEERS secret is stale. ` +
+        `Remediation: ${GH_SYNC_REMEDIATION}`,
+    )
+    return
+  }
+
+  if (!proc.stdin) {
+    console.warn(
+      `[warn] VPN_PEERS secret sync skipped: spawn did not provide stdin pipe. ` +
+        `Remediation: ${GH_SYNC_REMEDIATION}`,
+    )
+    return
+  }
+
+  try {
+    proc.stdin.write(new TextEncoder().encode(peersJson))
+    proc.stdin.end()
+
+    // Race proc.exited against timeout to avoid hanging indefinitely.
+    // Drain stdout concurrently to avoid pipe-buffer deadlock.
+    let timedOut = false
+    const timeoutHandle = {kill: () => {}}
+
+    const timeoutPromise = new Promise<number>(resolveTimeout => {
+      const id = setTimeout(() => {
+        timedOut = true
+        resolveTimeout(-1)
+      }, timeoutMs)
+      timeoutHandle.kill = () => clearTimeout(id)
+    })
+
+    const [exitCode] = await Promise.all([
+      Promise.race([proc.exited, timeoutPromise]),
+      // Drain stdout to prevent pipe-buffer deadlock
+      new Response(proc.stdout).text().catch(() => ''),
+    ])
+
+    timeoutHandle.kill()
+
+    if (timedOut) {
+      console.warn(
+        `[warn] VPN_PEERS secret sync timed out after ${timeoutMs}ms. ` +
+          `The local peers.json was updated but the VPN_PEERS secret is stale. ` +
+          `Remediation: ${GH_SYNC_REMEDIATION}`,
+      )
+      return
+    }
+
+    const stderr = await new Response(proc.stderr).text().catch(() => '')
+
+    if (exitCode !== 0) {
+      console.warn(
+        `[warn] VPN_PEERS secret sync failed (gh exited ${exitCode}${stderr.trim() ? `: ${stderr.trim()}` : ''}). ` +
+          `The local peers.json was updated but the VPN_PEERS secret is stale. ` +
+          `Remediation: ${GH_SYNC_REMEDIATION}`,
+      )
+    }
+  } catch {
+    console.warn(
+      `[warn] VPN_PEERS secret sync failed unexpectedly. ` +
+        `The local peers.json was updated but the VPN_PEERS secret is stale. ` +
+        `Remediation: ${GH_SYNC_REMEDIATION}`,
+    )
+  }
+}
+
 // ─── Write-guard ──────────────────────────────────────────────────────────────
 
 /**
@@ -124,15 +250,22 @@ function assertPathUnderClientsDir(confPath: string, clientsDir: string): void {
  * 2. Assigns the next available tunnel IP via addPeer.
  * 3. Appends the PUBLIC key + tunnel IP to peers.json.
  * 4. Writes the client .conf (with PRIVATE key) to clients/<name>.conf.
+ * 5. Best-effort syncs the updated roster to the VPN_PEERS GitHub secret.
  *
  * Security invariants:
  * - The client PRIVATE key is written ONLY to the gitignored clients/ directory.
  * - peers.json contains ONLY the public key — never the private key.
  * - The output path is validated before writing (runtime guard, not gitignore-only).
+ *
+ * Ordering: local peers.json write → client .conf write → THEN best-effort sync.
+ * The .conf holds the user's ONLY copy of the private key; it must be written
+ * before the best-effort sync so a sync failure never loses the private key.
  */
 export async function vpnClientAdd(name: string, opts: VpnClientAddOpts): Promise<VpnClientAddResult> {
   const {peersJsonPath, clientsDir, serverPublicKey, endpoint, allowedIps, dns} = opts
   const keypairGen = opts.keypairGen ?? generateKeypair
+  const spawnFn = opts.spawnFn ?? defaultSpawnFn
+  const syncTimeoutMs = opts.syncTimeoutMs ?? 15_000
 
   // Validate the output path before doing any work
   const confPath = resolve(clientsDir, `${name}.conf`)
@@ -141,8 +274,8 @@ export async function vpnClientAdd(name: string, opts: VpnClientAddOpts): Promis
   // Generate keypair
   const keypair = await keypairGen()
 
-  // Read current peers
-  const peersFile = await readPeers(peersJsonPath)
+  // Read current peers — returns {peers: []} on fresh checkout (ENOENT)
+  const peersFile = await readPeersOrEmpty(peersJsonPath)
 
   // Add peer (throws if duplicate name)
   const {peers: updatedPeers, tunnelIp} = addPeer(peersFile.peers, {
@@ -151,7 +284,8 @@ export async function vpnClientAdd(name: string, opts: VpnClientAddOpts): Promis
   })
 
   // Write updated peers.json (PUBLIC key only — never private key)
-  await writePeers(peersJsonPath, {peers: updatedPeers})
+  const updatedPeersFile = {peers: updatedPeers}
+  await writePeers(peersJsonPath, updatedPeersFile)
 
   // Render client .conf (contains PRIVATE key)
   const confContent = renderClientConfig({
@@ -167,17 +301,28 @@ export async function vpnClientAdd(name: string, opts: VpnClientAddOpts): Promis
   await mkdir(clientsDir, {recursive: true})
 
   // Write client .conf to the gitignored clients/ directory
+  // MUST happen BEFORE gh sync — this is the user's ONLY copy of the private key.
   await writeFile(confPath, confContent, {mode: 0o600})
+
+  // Sync updated roster to VPN_PEERS GitHub secret (best-effort — failure is a warning, not fatal)
+  const peersJson = `${JSON.stringify(updatedPeersFile, null, 2)}\n`
+  await syncPeersSecret(peersJson, spawnFn, syncTimeoutMs)
 
   return {tunnelIp, confPath}
 }
 
 /**
  * List all VPN client peers from peers.json.
+ * Returns an empty array when peers.json does not exist (fresh checkout).
  */
 export async function vpnClientList(peersJsonPath: string): Promise<Peer[]> {
-  const peersFile = await readPeers(peersJsonPath)
+  const peersFile = await readPeersOrEmpty(peersJsonPath)
   return peersFile.peers
+}
+
+export interface VpnClientRemoveOpts {
+  spawnFn?: SpawnFn
+  syncTimeoutMs?: number
 }
 
 /**
@@ -186,11 +331,27 @@ export async function vpnClientList(peersJsonPath: string): Promise<Peer[]> {
  * Note: The client .conf file in clients/ is NOT deleted — the operator
  * should delete it manually. The peer is removed from peers.json so the
  * next deploy will revoke access.
+ *
+ * After a successful local write, syncs the updated roster to the VPN_PEERS
+ * GitHub Environment secret (best-effort — failure is a warning, not fatal).
  */
-export async function vpnClientRemove(name: string, peersJsonPath: string): Promise<void> {
-  const peersFile = await readPeers(peersJsonPath)
+export async function vpnClientRemove(
+  name: string,
+  peersJsonPath: string,
+  opts: VpnClientRemoveOpts = {},
+): Promise<void> {
+  const spawnFn = opts.spawnFn ?? defaultSpawnFn
+  const syncTimeoutMs = opts.syncTimeoutMs ?? 15_000
+
+  // Read current peers — returns {peers: []} on fresh checkout (ENOENT)
+  const peersFile = await readPeersOrEmpty(peersJsonPath)
   const {peers: updatedPeers} = removePeer(peersFile.peers, name)
-  await writePeers(peersJsonPath, {peers: updatedPeers})
+  const updatedPeersFile = {peers: updatedPeers}
+  await writePeers(peersJsonPath, updatedPeersFile)
+
+  // Sync updated roster to VPN_PEERS GitHub secret (best-effort — failure is a warning, not fatal)
+  const peersJson = `${JSON.stringify(updatedPeersFile, null, 2)}\n`
+  await syncPeersSecret(peersJson, spawnFn, syncTimeoutMs)
 }
 
 // ─── Default paths ────────────────────────────────────────────────────────────
@@ -211,7 +372,7 @@ export function registerVpnClient(cli: ReturnType<typeof goke>): void {
   cli
     .command(
       'vpn client add <name>',
-      'Add a new VPN client peer. Generates a keypair, assigns a tunnel IP, and writes the client .conf to apps/vpn/clients/.',
+      'Add a new VPN client peer. Generates a keypair, assigns a tunnel IP, writes the client .conf to apps/vpn/clients/, and syncs the roster to the VPN_PEERS GitHub secret (best-effort).',
     )
     .option(
       '--split-tunnel [cidrs]',
@@ -289,7 +450,7 @@ export function registerVpnClient(cli: ReturnType<typeof goke>): void {
   cli
     .command(
       'vpn client remove <name>',
-      'Remove a VPN client peer from peers.json. Run `infra vpn deploy` to revoke access.',
+      'Remove a VPN client peer from peers.json and sync the roster to the VPN_PEERS GitHub secret (best-effort). Run `infra vpn deploy` to revoke access.',
     )
     .example('# Remove a client named "laptop"')
     .example('infra vpn client remove laptop')

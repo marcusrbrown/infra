@@ -1,10 +1,10 @@
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
-import {readFile} from 'node:fs/promises'
+import {readFile, stat} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {vpnClientAdd, vpnClientList, vpnClientRemove, type KeypairGenFn} from './client'
+import {vpnClientAdd, vpnClientList, vpnClientRemove, type KeypairGenFn, type SpawnFn} from './client'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -14,6 +14,33 @@ function makeKeypairGen(privateKey: string, publicKey: string): KeypairGenFn {
 
 function makePeersJson(peers: {name: string; publicKey: string; tunnelIp: string}[]): string {
   return `${JSON.stringify({peers}, null, 2)}\n`
+}
+
+/**
+ * Inert spawn stub — never touches real processes.
+ * Returns a mock proc: stdin {write, end}, exited resolves 0, empty stdout/stderr.
+ * Inject this into every call that doesn't explicitly test sync behavior.
+ */
+function makeNoopSpawnFn(): SpawnFn {
+  return (_cmd, _opts) => ({
+    stdout: new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(''))
+        c.close()
+      },
+    }),
+    stderr: new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(''))
+        c.close()
+      },
+    }),
+    stdin: {
+      write: (_data: Uint8Array) => {},
+      end: () => {},
+    },
+    exited: Promise.resolve(0),
+  })
 }
 
 // ─── generateKeypair ─────────────────────────────────────────────────────────
@@ -59,6 +86,7 @@ describe('generateKeypair', () => {
         serverPublicKey: 'SERVERPUBKEY==',
         endpoint: '1.2.3.4',
         keypairGen,
+        spawnFn: makeNoopSpawnFn(),
       })
 
       // The result must use the injected keypair values
@@ -109,6 +137,7 @@ describe('vpnClientAdd', () => {
       serverPublicKey: 'SERVERPUBKEY==',
       endpoint: '1.2.3.4',
       keypairGen,
+      spawnFn: makeNoopSpawnFn(),
     })
 
     // Check result
@@ -142,6 +171,7 @@ describe('vpnClientAdd', () => {
       serverPublicKey: 'SERVERPUBKEY==',
       endpoint: '1.2.3.4',
       keypairGen: keypairGen1,
+      spawnFn: makeNoopSpawnFn(),
     })
 
     const result2 = await vpnClientAdd('phone', {
@@ -150,6 +180,7 @@ describe('vpnClientAdd', () => {
       serverPublicKey: 'SERVERPUBKEY==',
       endpoint: '1.2.3.4',
       keypairGen: keypairGen2,
+      spawnFn: makeNoopSpawnFn(),
     })
 
     expect(result2.tunnelIp).toBe('10.8.0.3')
@@ -165,6 +196,7 @@ describe('vpnClientAdd', () => {
       endpoint: '1.2.3.4',
       keypairGen,
       allowedIps: '10.0.0.0/8,192.168.0.0/16',
+      spawnFn: makeNoopSpawnFn(),
     })
 
     const confContent = await readFile(result.confPath, 'utf-8')
@@ -180,6 +212,7 @@ describe('vpnClientAdd', () => {
       serverPublicKey: 'SERVERPUBKEY==',
       endpoint: '1.2.3.4',
       keypairGen,
+      spawnFn: makeNoopSpawnFn(),
     })
 
     await expect(
@@ -189,6 +222,7 @@ describe('vpnClientAdd', () => {
         serverPublicKey: 'SERVERPUBKEY==',
         endpoint: '1.2.3.4',
         keypairGen,
+        spawnFn: makeNoopSpawnFn(),
       }),
     ).rejects.toThrow('already exists')
   })
@@ -204,6 +238,7 @@ describe('vpnClientAdd', () => {
         serverPublicKey: 'SERVERPUBKEY==',
         endpoint: '1.2.3.4',
         keypairGen,
+        spawnFn: makeNoopSpawnFn(),
       }),
     ).rejects.toThrow()
   })
@@ -217,6 +252,7 @@ describe('vpnClientAdd', () => {
       serverPublicKey: 'SERVERPUBKEY==',
       endpoint: '1.2.3.4',
       keypairGen,
+      spawnFn: makeNoopSpawnFn(),
     })
 
     // peers.json must NOT contain the private key
@@ -227,6 +263,76 @@ describe('vpnClientAdd', () => {
     // client .conf must contain the private key
     const confContent = await readFile(result.confPath, 'utf-8')
     expect(confContent).toContain('SECRETPRIVATEKEY==')
+  })
+
+  // Fix #2: ENOENT bootstrap on fresh checkout
+  it('succeeds on fresh checkout (no peers.json) — creates first peer', async () => {
+    // Do NOT write peers.json — simulate fresh checkout
+    const freshDir = mkdtempSync(join(tmpdir(), 'vpn-fresh-test-'))
+    const freshPeersJsonPath = join(freshDir, 'peers.json')
+    const freshClientsDir = join(freshDir, 'clients')
+    mkdirSync(freshClientsDir, {recursive: true})
+
+    try {
+      const keypairGen = makeKeypairGen('PRIV==', 'PUB==')
+      const result = await vpnClientAdd('firstpeer', {
+        peersJsonPath: freshPeersJsonPath,
+        clientsDir: freshClientsDir,
+        serverPublicKey: 'SERVERPUBKEY==',
+        endpoint: '1.2.3.4',
+        keypairGen,
+        spawnFn: makeNoopSpawnFn(),
+      })
+
+      expect(result.tunnelIp).toBe('10.8.0.2')
+
+      // peers.json must now exist with the new peer
+      const peersContent = await readFile(freshPeersJsonPath, 'utf-8')
+      const peersData = JSON.parse(peersContent) as {peers: {name: string}[]}
+      expect(peersData.peers).toHaveLength(1)
+      expect(peersData.peers[0]?.name).toBe('firstpeer')
+
+      // client .conf must exist with private key
+      const confContent = await readFile(result.confPath, 'utf-8')
+      expect(confContent).toContain('PRIV==')
+    } finally {
+      rmSync(freshDir, {recursive: true, force: true})
+    }
+  })
+
+  // Fix #4: write client .conf BEFORE gh sync
+  it('client .conf exists even when spawnFn throws (conf written before sync)', async () => {
+    const keypairGen = makeKeypairGen('PRIV==', 'PUB==')
+    const throwingSpawnFn: SpawnFn = () => {
+      throw new Error('gh not found')
+    }
+
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+
+    try {
+      const result = await vpnClientAdd('laptop', {
+        peersJsonPath,
+        clientsDir,
+        serverPublicKey: 'SERVERPUBKEY==',
+        endpoint: '1.2.3.4',
+        keypairGen,
+        spawnFn: throwingSpawnFn,
+      })
+
+      // .conf must exist with the private key
+      const confContent = await readFile(result.confPath, 'utf-8')
+      expect(confContent).toContain('PRIV==')
+
+      // A warning must have been printed (not a throw)
+      const allWarnings = warnMessages.join('\n')
+      expect(allWarnings).toMatch(/VPN_PEERS|stale|warning/i)
+    } finally {
+      console.warn = originalWarn
+    }
   })
 })
 
@@ -270,6 +376,13 @@ describe('vpnClientList', () => {
     expect(peers[0]?.tunnelIp).toBe('10.8.0.2')
     expect(peers[1]?.name).toBe('phone')
   })
+
+  // Fix #2: list on fresh checkout (no peers.json) returns empty
+  it('returns empty array when peers.json does not exist (fresh checkout)', async () => {
+    // Do NOT write peers.json
+    const peers = await vpnClientList(peersJsonPath)
+    expect(peers).toHaveLength(0)
+  })
 })
 
 // ─── vpnClientRemove ──────────────────────────────────────────────────────────
@@ -296,7 +409,7 @@ describe('vpnClientRemove', () => {
       ]),
     )
 
-    await vpnClientRemove('laptop', peersJsonPath)
+    await vpnClientRemove('laptop', peersJsonPath, {spawnFn: makeNoopSpawnFn()})
 
     const peersContent = await readFile(peersJsonPath, 'utf-8')
     const peersData = JSON.parse(peersContent) as {peers: {name: string}[]}
@@ -307,7 +420,9 @@ describe('vpnClientRemove', () => {
   it('throws when removing a non-existent peer', async () => {
     writeFileSync(peersJsonPath, makePeersJson([]))
 
-    await expect(vpnClientRemove('nonexistent', peersJsonPath)).rejects.toThrow('not found')
+    await expect(vpnClientRemove('nonexistent', peersJsonPath, {spawnFn: makeNoopSpawnFn()})).rejects.toThrow(
+      'not found',
+    )
   })
 
   it('after remove, list reflects the removal', async () => {
@@ -319,11 +434,427 @@ describe('vpnClientRemove', () => {
       ]),
     )
 
-    await vpnClientRemove('laptop', peersJsonPath)
+    await vpnClientRemove('laptop', peersJsonPath, {spawnFn: makeNoopSpawnFn()})
     const peers = await vpnClientList(peersJsonPath)
 
     expect(peers).toHaveLength(1)
     expect(peers[0]?.name).toBe('phone')
+  })
+
+  // Fix #2: remove of nonexistent peer on fresh checkout gives not-found error, not ENOENT
+  it('throws not-found (not ENOENT) when removing from a nonexistent peers.json', async () => {
+    // Do NOT write peers.json — simulate fresh checkout
+    await expect(vpnClientRemove('nonexistent', peersJsonPath, {spawnFn: makeNoopSpawnFn()})).rejects.toThrow(
+      'not found',
+    )
+  })
+})
+
+// ─── gh secret sync after vpnClientAdd ───────────────────────────────────────
+
+describe('vpnClientAdd: gh secret sync', () => {
+  let tmpDir: string
+  let peersJsonPath: string
+  let clientsDir: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'vpn-client-sync-test-'))
+    peersJsonPath = join(tmpDir, 'peers.json')
+    clientsDir = join(tmpDir, 'clients')
+    mkdirSync(clientsDir, {recursive: true})
+    writeFileSync(peersJsonPath, makePeersJson([]))
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, {recursive: true, force: true})
+  })
+
+  it('spawns gh secret set with roster on STDIN after successful add', async () => {
+    const keypairGen = makeKeypairGen('PRIV==', 'NEWPUBKEY==')
+    const spawnCalls: {cmd: string[]; stdin: string}[] = []
+
+    const mockSpawnFn: SpawnFn = (cmd, _opts) => {
+      let stdinContent = ''
+      const stdinPipe = {
+        write: (data: Uint8Array) => {
+          stdinContent += new TextDecoder().decode(data)
+        },
+        end: () => {
+          spawnCalls.push({cmd, stdin: stdinContent})
+        },
+      }
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stdin: stdinPipe,
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await vpnClientAdd('newpeer', {
+      peersJsonPath,
+      clientsDir,
+      serverPublicKey: 'SERVERPUBKEY==',
+      endpoint: '1.2.3.4',
+      keypairGen,
+      spawnFn: mockSpawnFn,
+    })
+
+    // Must have spawned gh secret set
+    const ghCall = spawnCalls.find(c => c.cmd.includes('gh') && c.cmd.includes('secret') && c.cmd.includes('set'))
+    expect(ghCall).toBeDefined()
+
+    // The new peer's public key must appear in STDIN, not in argv
+    expect(ghCall?.stdin).toContain('NEWPUBKEY==')
+    const argvContainsPubkey = ghCall?.cmd.some(arg => arg.includes('NEWPUBKEY=='))
+    expect(argvContainsPubkey).toBe(false)
+
+    // Must pass --env vpn and --repo marcusrbrown/infra
+    expect(ghCall?.cmd).toContain('--env')
+    expect(ghCall?.cmd).toContain('vpn')
+    expect(ghCall?.cmd).toContain('--repo')
+    expect(ghCall?.cmd).toContain('marcusrbrown/infra')
+  })
+
+  it('gh failure → command still succeeds, warning printed with remediation', async () => {
+    const keypairGen = makeKeypairGen('PRIV==', 'NEWPUBKEY==')
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+
+    const mockSpawnFn: SpawnFn = (_cmd, _opts) => {
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('auth error'))
+            c.close()
+          },
+        }),
+        stdin: {
+          write: (_data: Uint8Array) => {},
+          end: () => {},
+        },
+        exited: Promise.resolve(1), // gh fails
+      }
+    }
+
+    try {
+      // Must NOT throw even though gh fails
+      const result = await vpnClientAdd('newpeer', {
+        peersJsonPath,
+        clientsDir,
+        serverPublicKey: 'SERVERPUBKEY==',
+        endpoint: '1.2.3.4',
+        keypairGen,
+        spawnFn: mockSpawnFn,
+      })
+
+      // The add itself must succeed
+      expect(result.tunnelIp).toBe('10.8.0.2')
+
+      // A warning must have been printed with remediation
+      const allWarnings = warnMessages.join('\n')
+      expect(allWarnings).toMatch(/VPN_PEERS|stale|warning/i)
+      expect(allWarnings).toMatch(/gh secret set/)
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+
+  // Fix #3: spawnFn throws synchronously → command still succeeds + warning printed
+  it('spawnFn throws synchronously → command still succeeds, warning printed with remediation', async () => {
+    const keypairGen = makeKeypairGen('PRIV==', 'PUB==')
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+
+    const throwingSpawnFn: SpawnFn = () => {
+      throw new Error('ENOENT: gh not found')
+    }
+
+    try {
+      const result = await vpnClientAdd('newpeer', {
+        peersJsonPath,
+        clientsDir,
+        serverPublicKey: 'SERVERPUBKEY==',
+        endpoint: '1.2.3.4',
+        keypairGen,
+        spawnFn: throwingSpawnFn,
+      })
+
+      // Command must succeed
+      expect(result.tunnelIp).toBe('10.8.0.2')
+
+      // Warning must be printed with remediation
+      const allWarnings = warnMessages.join('\n')
+      expect(allWarnings).toMatch(/VPN_PEERS|stale|warning/i)
+      expect(allWarnings).toMatch(/gh secret set/)
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+
+  // Fix #3: timeout — spawnFn whose exited never resolves → warning after timeout
+  it('spawnFn whose exited never resolves → warning after timeout (injectable timeoutMs)', async () => {
+    const keypairGen = makeKeypairGen('PRIV==', 'PUB==')
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+
+    const hangingSpawnFn: SpawnFn = (_cmd, _opts) => ({
+      stdout: new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(''))
+          c.close()
+        },
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(''))
+          c.close()
+        },
+      }),
+      stdin: {
+        write: (_data: Uint8Array) => {},
+        end: () => {},
+      },
+      // Never resolves
+      exited: new Promise<number>(() => {}),
+    })
+
+    try {
+      // Use a very short timeout (50ms) so the test doesn't hang
+      const result = await vpnClientAdd('newpeer', {
+        peersJsonPath,
+        clientsDir,
+        serverPublicKey: 'SERVERPUBKEY==',
+        endpoint: '1.2.3.4',
+        keypairGen,
+        spawnFn: hangingSpawnFn,
+        syncTimeoutMs: 50,
+      })
+
+      // Command must succeed
+      expect(result.tunnelIp).toBe('10.8.0.2')
+
+      // Warning must be printed
+      const allWarnings = warnMessages.join('\n')
+      expect(allWarnings).toMatch(/VPN_PEERS|stale|warning|timeout/i)
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+
+  // Fix #5: remediation message must include --repo marcusrbrown/infra
+  it('remediation message includes --repo marcusrbrown/infra', async () => {
+    const keypairGen = makeKeypairGen('PRIV==', 'PUB==')
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+
+    const failingSpawnFn: SpawnFn = (_cmd, _opts) => ({
+      stdout: new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(''))
+          c.close()
+        },
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('error'))
+          c.close()
+        },
+      }),
+      stdin: {write: (_data: Uint8Array) => {}, end: () => {}},
+      exited: Promise.resolve(1),
+    })
+
+    try {
+      await vpnClientAdd('newpeer', {
+        peersJsonPath,
+        clientsDir,
+        serverPublicKey: 'SERVERPUBKEY==',
+        endpoint: '1.2.3.4',
+        keypairGen,
+        spawnFn: failingSpawnFn,
+      })
+
+      const allWarnings = warnMessages.join('\n')
+      expect(allWarnings).toContain('--repo marcusrbrown/infra')
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+})
+
+// ─── gh secret sync after vpnClientRemove ────────────────────────────────────
+
+describe('vpnClientRemove: gh secret sync', () => {
+  let tmpDir: string
+  let peersJsonPath: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'vpn-client-remove-sync-test-'))
+    peersJsonPath = join(tmpDir, 'peers.json')
+    writeFileSync(
+      peersJsonPath,
+      makePeersJson([
+        {name: 'laptop', publicKey: 'PUB1==', tunnelIp: '10.8.0.2'},
+        {name: 'phone', publicKey: 'PUB2==', tunnelIp: '10.8.0.3'},
+      ]),
+    )
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, {recursive: true, force: true})
+  })
+
+  it('spawns gh secret set with updated roster on STDIN after successful remove', async () => {
+    const spawnCalls: {cmd: string[]; stdin: string}[] = []
+
+    const mockSpawnFn: SpawnFn = (cmd, _opts) => {
+      let stdinContent = ''
+      const stdinPipe = {
+        write: (data: Uint8Array) => {
+          stdinContent += new TextDecoder().decode(data)
+        },
+        end: () => {
+          spawnCalls.push({cmd, stdin: stdinContent})
+        },
+      }
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stdin: stdinPipe,
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await vpnClientRemove('laptop', peersJsonPath, {spawnFn: mockSpawnFn})
+
+    // Must have spawned gh secret set
+    const ghCall = spawnCalls.find(c => c.cmd.includes('gh') && c.cmd.includes('secret') && c.cmd.includes('set'))
+    expect(ghCall).toBeDefined()
+
+    // Removed peer must NOT appear in STDIN
+    expect(ghCall?.stdin).not.toContain('PUB1==')
+    // Remaining peer must appear in STDIN
+    expect(ghCall?.stdin).toContain('PUB2==')
+
+    // Roster bytes must not appear in argv
+    const argvContainsRoster = ghCall?.cmd.some(arg => arg.includes('PUB1==') || arg.includes('PUB2=='))
+    expect(argvContainsRoster).toBe(false)
+  })
+
+  it('gh failure on remove → command still succeeds, warning printed', async () => {
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+
+    const mockSpawnFn: SpawnFn = (_cmd, _opts) => {
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('network error'))
+            c.close()
+          },
+        }),
+        stdin: {
+          write: (_data: Uint8Array) => {},
+          end: () => {},
+        },
+        exited: Promise.resolve(1), // gh fails
+      }
+    }
+
+    try {
+      // Must NOT throw even though gh fails
+      await vpnClientRemove('laptop', peersJsonPath, {spawnFn: mockSpawnFn})
+
+      // A warning must have been printed with remediation
+      const allWarnings = warnMessages.join('\n')
+      expect(allWarnings).toMatch(/VPN_PEERS|stale|warning/i)
+      expect(allWarnings).toMatch(/gh secret set/)
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+
+  // Fix #5: remediation message must include --repo marcusrbrown/infra
+  it('remediation message on remove failure includes --repo marcusrbrown/infra', async () => {
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+
+    const failingSpawnFn: SpawnFn = (_cmd, _opts) => ({
+      stdout: new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(''))
+          c.close()
+        },
+      }),
+      stderr: new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('error'))
+          c.close()
+        },
+      }),
+      stdin: {write: (_data: Uint8Array) => {}, end: () => {}},
+      exited: Promise.resolve(1),
+    })
+
+    try {
+      await vpnClientRemove('laptop', peersJsonPath, {spawnFn: failingSpawnFn})
+
+      const allWarnings = warnMessages.join('\n')
+      expect(allWarnings).toContain('--repo marcusrbrown/infra')
+    } finally {
+      console.warn = originalWarn
+    }
   })
 })
 
@@ -355,6 +886,7 @@ describe('write-guard: client .conf path safety', () => {
       serverPublicKey: 'SERVERPUBKEY==',
       endpoint: '1.2.3.4',
       keypairGen,
+      spawnFn: makeNoopSpawnFn(),
     })
 
     // The resolved path must be under clientsDir
@@ -373,7 +905,45 @@ describe('write-guard: client .conf path safety', () => {
         serverPublicKey: 'SERVERPUBKEY==',
         endpoint: '1.2.3.4',
         keypairGen,
+        spawnFn: makeNoopSpawnFn(),
       }),
     ).rejects.toThrow()
+  })
+})
+
+// ─── client .conf file permissions ───────────────────────────────────────────
+
+describe('vpnClientAdd: client .conf file permissions', () => {
+  let tmpDir: string
+  let peersJsonPath: string
+  let clientsDir: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'vpn-client-perm-test-'))
+    peersJsonPath = join(tmpDir, 'peers.json')
+    clientsDir = join(tmpDir, 'clients')
+    mkdirSync(clientsDir, {recursive: true})
+    writeFileSync(peersJsonPath, makePeersJson([]))
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, {recursive: true, force: true})
+  })
+
+  it('writes client .conf with mode 0o600 (owner read/write only)', async () => {
+    const keypairGen = makeKeypairGen('PRIV==', 'PUB==')
+
+    const result = await vpnClientAdd('laptop', {
+      peersJsonPath,
+      clientsDir,
+      serverPublicKey: 'SERVERPUBKEY==',
+      endpoint: '1.2.3.4',
+      keypairGen,
+      spawnFn: makeNoopSpawnFn(),
+    })
+
+    const fileStat = await stat(result.confPath)
+    const permBits = fileStat.mode & 0o777
+    expect(permBits).toBe(0o600)
   })
 })

@@ -162,7 +162,7 @@ Commands:
     --key [key]                        Environment variable name holding the SSH host. Falls back to VPN_HOST when omitted.
 
 
-  vpn client add <name>                Add a new VPN client peer. Generates a keypair, assigns a tunnel IP, and writes the client .conf to apps/vpn/clients/.
+  vpn client add <name>                Add a new VPN client peer. Generates a keypair, assigns a tunnel IP, writes the client .conf to apps/vpn/clients/, and syncs the roster to the VPN_PEERS GitHub secret (best-effort).
 
     --split-tunnel [cidrs]             Comma-separated CIDRs for split-tunnel routing. Defaults to 0.0.0.0/0 (full tunnel).
     --dns [dns]                        DNS server for the client config.
@@ -173,7 +173,7 @@ Commands:
   vpn client list                      List all VPN client peers from peers.json.
 
 
-  vpn client remove <name>             Remove a VPN client peer from peers.json. Run \`infra vpn deploy\` to revoke access.
+  vpn client remove <name>             Remove a VPN client peer from peers.json and sync the roster to the VPN_PEERS GitHub secret (best-effort). Run \`infra vpn deploy\` to revoke access.
 
 
   status                               Show status of all deployments

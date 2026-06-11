@@ -1,14 +1,19 @@
 /// <reference types="bun" />
 
+import {mkdtempSync, rmSync, statSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 
 import {
   addPeer,
   nextTunnelIp,
   parsePeersJson,
+  readPeersOrEmpty,
   removePeer,
   renderClientConfig,
   renderServerConfig,
+  writePeers,
   type Peer,
   type PeersFile,
 } from './peers'
@@ -363,5 +368,111 @@ describe('parsePeersJson', () => {
     })
     expect(result.peers).toHaveLength(1)
     expect(result.peers[0]?.name).toBe('laptop')
+  })
+
+  // Fix #7: duplicate tunnelIp / duplicate name validation
+  it('rejects a roster with duplicate tunnelIp values', () => {
+    expect(() =>
+      parsePeersJson({
+        peers: [
+          {name: 'laptop', publicKey: 'pk1==', tunnelIp: '10.8.0.2'},
+          {name: 'phone', publicKey: 'pk2==', tunnelIp: '10.8.0.2'},
+        ],
+      }),
+    ).toThrow(/duplicate.*tunnel|tunnel.*duplicate/i)
+  })
+
+  it('rejects a roster with duplicate name values', () => {
+    expect(() =>
+      parsePeersJson({
+        peers: [
+          {name: 'laptop', publicKey: 'pk1==', tunnelIp: '10.8.0.2'},
+          {name: 'laptop', publicKey: 'pk2==', tunnelIp: '10.8.0.3'},
+        ],
+      }),
+    ).toThrow(/duplicate.*name|name.*duplicate/i)
+  })
+
+  it('accepts a valid roster with unique names and tunnel IPs', () => {
+    const result: PeersFile = parsePeersJson({
+      peers: [
+        {name: 'laptop', publicKey: 'pk1==', tunnelIp: '10.8.0.2'},
+        {name: 'phone', publicKey: 'pk2==', tunnelIp: '10.8.0.3'},
+      ],
+    })
+    expect(result.peers).toHaveLength(2)
+  })
+})
+
+// ── readPeersOrEmpty ──────────────────────────────────────────────────────────
+
+describe('readPeersOrEmpty', () => {
+  it('returns {peers: []} when the file does not exist (ENOENT)', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'vpn-peers-test-'))
+    try {
+      const nonExistentPath = join(tmpDir, 'peers.json')
+      const result = await readPeersOrEmpty(nonExistentPath)
+      expect(result).toEqual({peers: []})
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+
+  it('returns parsed file when the file exists and is valid', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'vpn-peers-test-'))
+    try {
+      const filePath = join(tmpDir, 'peers.json')
+      writeFileSync(
+        filePath,
+        JSON.stringify({peers: [{name: 'laptop', publicKey: 'pk==', tunnelIp: '10.8.0.2'}]}, null, 2),
+      )
+      const result = await readPeersOrEmpty(filePath)
+      expect(result.peers).toHaveLength(1)
+      expect(result.peers[0]?.name).toBe('laptop')
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+
+  it('throws on corrupt JSON (not ENOENT — corrupt file must NOT silently become empty roster)', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'vpn-peers-test-'))
+    try {
+      const filePath = join(tmpDir, 'peers.json')
+      writeFileSync(filePath, 'not valid json {{{')
+      await expect(readPeersOrEmpty(filePath)).rejects.toThrow()
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+
+  it('throws on schema-invalid JSON (not ENOENT — schema errors must not silently become empty roster)', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'vpn-peers-test-'))
+    try {
+      const filePath = join(tmpDir, 'peers.json')
+      writeFileSync(filePath, JSON.stringify({peers: [{name: 'laptop'}]}))
+      await expect(readPeersOrEmpty(filePath)).rejects.toThrow()
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+})
+
+// ── writePeers: restrictive permissions ──────────────────────────────────────
+
+describe('writePeers: file permissions', () => {
+  it('writes peers.json with mode 0o600 (owner read/write only)', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'vpn-peers-perm-test-'))
+    try {
+      const filePath = join(tmpDir, 'peers.json')
+      await writePeers(filePath, {peers: []})
+
+      const stat = statSync(filePath)
+      // On macOS/Linux: check that mode is 0o600 (owner rw, no group/other)
+      // stat.mode includes file type bits; mask with 0o777 for permission bits
+      const permBits = stat.mode & 0o777
+      expect(permBits).toBe(0o600)
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
   })
 })

@@ -1,5 +1,9 @@
 import type {DeployOpts, SpawnFn, SpawnResult} from './deploy'
 
+import {mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
+
 import {describe, expect, it} from 'bun:test'
 import {deploy, validateEnv} from './deploy'
 
@@ -74,6 +78,22 @@ const CI_ENV: Record<string, string> = {
   VPN_SSH_KEY: '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n',
 }
 
+// ─── Temp peers.json fixture helpers ─────────────────────────────────────────
+
+/**
+ * Creates a temp dir with a peers.json containing 0 peers.
+ * Returns { dir, peersJsonPath } — caller must rmSync(dir) in finally.
+ */
+function makeTempPeersDir(peers: {name: string; publicKey: string; tunnelIp: string}[] = []): {
+  dir: string
+  peersJsonPath: string
+} {
+  const dir = mkdtempSync(join(tmpdir(), 'vpn-deploy-test-'))
+  const peersJsonPath = join(dir, 'peers.json')
+  writeFileSync(peersJsonPath, JSON.stringify({peers}))
+  return {dir, peersJsonPath}
+}
+
 // ─── validateEnv tests ────────────────────────────────────────────────────────
 
 describe('validateEnv', () => {
@@ -124,17 +144,19 @@ describe('deploy', () => {
   it('runs all phases in order: server key, wg0.conf, sysctl, enable, restart, health gate', async () => {
     const calls: SpawnCall[] = []
 
-    // New call sequence (9 calls total):
-    // 0: ensure server key (ssh)
-    // 1: read server.pub (ssh)
-    // 2: ship placeholder wg0.conf to temp path (ssh stdin — writeRemoteFile)
-    // 3: awk substitution command (ssh — runCommand)
-    // 4: write wg-forwarding.conf (ssh stdin)
-    // 5: sysctl --system (ssh)
-    // 6: systemctl enable --now wg-quick@wg0 (ssh)
-    // 7: systemctl restart wg-quick@wg0 (ssh)
-    // 8: wg show wg0 (ssh)
+    // New call sequence (10 calls total, 0-peer roster triggers wipe guard):
+    // 0: wipe guard: wg show wg0 dump (0 live peers → proceed)
+    // 1: ensure server key (ssh)
+    // 2: read server.pub (ssh)
+    // 3: ship placeholder wg0.conf to temp path (ssh stdin — writeRemoteFile)
+    // 4: awk substitution command (ssh — runCommand)
+    // 5: write wg-forwarding.conf (ssh stdin)
+    // 6: sysctl --system (ssh)
+    // 7: systemctl enable --now wg-quick@wg0 (ssh)
+    // 8: systemctl restart wg-quick@wg0 (ssh)
+    // 9: wg show wg0 (ssh)
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (1 line = server only = 0 peers)
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -148,52 +170,58 @@ describe('deploy', () => {
 
     const mockSpawn = makeMockSpawn(calls, results)
 
-    const opts: DeployOpts = {
-      env: BASE_ENV,
-      spawn: mockSpawn,
-      peersJsonPath: 'apps/vpn/config/peers.json',
+    // Use a temp peers.json with 0 peers — isolated from the real working file
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      const opts: DeployOpts = {
+        env: BASE_ENV,
+        spawn: mockSpawn,
+        peersJsonPath,
+      }
+
+      await deploy(opts)
+
+      // Verify ordering: server key → read pub → placeholder config → awk sub → forwarding conf → sysctl → enable → restart → health
+      const labels = calls.map(c => c.cmd.join(' '))
+
+      // Phase 1: ensure server key (atomic, preserved) — the command contains `test -f` guard
+      const serverKeyIdx = labels.findIndex(l => l.includes('test -f') && l.includes('server.key'))
+      expect(serverKeyIdx).toBeGreaterThanOrEqual(0)
+
+      // Phase 2: read server.pub (only pub, not private key) — `cat server.pub`
+      const readPubIdx = labels.findIndex(l => l.includes('cat') && l.includes('server.pub'))
+      expect(readPubIdx).toBeGreaterThan(serverKeyIdx)
+
+      // Phase 3a: placeholder wg0.conf shipped via stdin (writeRemoteFile to .tmp path)
+      const placeholderIdx = calls.findIndex(c => c.stdin !== undefined && c.stdin.includes('__SERVER_PRIVATE_KEY__'))
+      expect(placeholderIdx).toBeGreaterThan(readPubIdx)
+
+      // Phase 3b: awk substitution command (server-side, references server.key)
+      const awkIdx = labels.findIndex(l => l.includes('awk') && l.includes('server.key'))
+      expect(awkIdx).toBeGreaterThan(placeholderIdx)
+
+      // Phase 4: wg-forwarding.conf written via stdin
+      const forwardingIdx = calls.findIndex(c => c.stdin !== undefined && c.stdin.includes('net.ipv4.ip_forward'))
+      expect(forwardingIdx).toBeGreaterThan(awkIdx)
+
+      // Phase 5: sysctl --system
+      const sysctlIdx = labels.findIndex(l => l.includes('sysctl') && l.includes('--system'))
+      expect(sysctlIdx).toBeGreaterThan(forwardingIdx)
+
+      // Phase 6: systemctl enable --now wg-quick@wg0
+      const enableIdx = labels.findIndex(l => l.includes('enable') && l.includes('wg-quick@wg0'))
+      expect(enableIdx).toBeGreaterThan(sysctlIdx)
+
+      // Phase 7: systemctl restart wg-quick@wg0
+      const restartIdx = labels.findIndex(l => l.includes('restart') && l.includes('wg-quick@wg0'))
+      expect(restartIdx).toBeGreaterThan(enableIdx)
+
+      // Phase 8: health gate — wg show wg0 (not the wipe guard dump which uses `wg show wg0 dump`)
+      const healthIdx = labels.findIndex(l => l.includes('wg show wg0') && !l.includes('wg show wg0 dump'))
+      expect(healthIdx).toBeGreaterThan(restartIdx)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
     }
-
-    await deploy(opts)
-
-    // Verify ordering: server key → read pub → placeholder config → awk sub → forwarding conf → sysctl → enable → restart → health
-    const labels = calls.map(c => c.cmd.join(' '))
-
-    // Phase 1: ensure server key (atomic, preserved) — the command contains `test -f` guard
-    const serverKeyIdx = labels.findIndex(l => l.includes('test -f') && l.includes('server.key'))
-    expect(serverKeyIdx).toBeGreaterThanOrEqual(0)
-
-    // Phase 2: read server.pub (only pub, not private key) — `cat server.pub`
-    const readPubIdx = labels.findIndex(l => l.includes('cat') && l.includes('server.pub'))
-    expect(readPubIdx).toBeGreaterThan(serverKeyIdx)
-
-    // Phase 3a: placeholder wg0.conf shipped via stdin (writeRemoteFile to .tmp path)
-    const placeholderIdx = calls.findIndex(c => c.stdin !== undefined && c.stdin.includes('__SERVER_PRIVATE_KEY__'))
-    expect(placeholderIdx).toBeGreaterThan(readPubIdx)
-
-    // Phase 3b: awk substitution command (server-side, references server.key)
-    const awkIdx = labels.findIndex(l => l.includes('awk') && l.includes('server.key'))
-    expect(awkIdx).toBeGreaterThan(placeholderIdx)
-
-    // Phase 4: wg-forwarding.conf written via stdin
-    const forwardingIdx = calls.findIndex(c => c.stdin !== undefined && c.stdin.includes('net.ipv4.ip_forward'))
-    expect(forwardingIdx).toBeGreaterThan(awkIdx)
-
-    // Phase 5: sysctl --system
-    const sysctlIdx = labels.findIndex(l => l.includes('sysctl') && l.includes('--system'))
-    expect(sysctlIdx).toBeGreaterThan(forwardingIdx)
-
-    // Phase 6: systemctl enable --now wg-quick@wg0
-    const enableIdx = labels.findIndex(l => l.includes('enable') && l.includes('wg-quick@wg0'))
-    expect(enableIdx).toBeGreaterThan(sysctlIdx)
-
-    // Phase 7: systemctl restart wg-quick@wg0
-    const restartIdx = labels.findIndex(l => l.includes('restart') && l.includes('wg-quick@wg0'))
-    expect(restartIdx).toBeGreaterThan(enableIdx)
-
-    // Phase 8: health gate — wg show wg0
-    const healthIdx = labels.findIndex(l => l.includes('wg show wg0'))
-    expect(healthIdx).toBeGreaterThan(restartIdx)
   })
 
   it('server key already present — no wg genkey in the command', async () => {
@@ -203,6 +231,7 @@ describe('deploy', () => {
     // The command uses `test -f ... || (wg genkey ...)` — if file exists, genkey never runs
     // We verify the COMMAND SENT does not contain `wg genkey` as a standalone call
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0}, // ensure server key (file exists, no-op)
       {stdout: 'EXISTINGPUBKEY==\n', exitCode: 0}, // read server.pub
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -215,18 +244,24 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    // The server key command uses `test -f ... || (wg genkey ...)` — it's a single SSH call
-    // that conditionally generates. We assert there is NO separate `wg genkey` SSH call.
-    // The only wg-related calls should be the atomic ensure command and wg show
-    const standaloneGenkey = calls.filter(c => c.cmd.join(' ').match(/^\s*wg\s+genkey\s*$/))
-    expect(standaloneGenkey).toHaveLength(0)
+      // The server key command uses `test -f ... || (wg genkey ...)` — it's a single SSH call
+      // that conditionally generates. We assert there is NO separate `wg genkey` SSH call.
+      // The only wg-related calls should be the atomic ensure command and wg show
+      const standaloneGenkey = calls.filter(c => c.cmd.join(' ').match(/^\s*wg\s+genkey\s*$/))
+      expect(standaloneGenkey).toHaveLength(0)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('--force-server-key regenerates the server key', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0}, // force-regenerate server key
       {stdout: 'NEWPUBKEY==\n', exitCode: 0}, // read server.pub
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -239,21 +274,26 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({
-      env: BASE_ENV,
-      spawn: mockSpawn,
-      forceServerKey: true,
-      peersJsonPath: 'apps/vpn/config/peers.json',
-    })
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({
+        env: BASE_ENV,
+        spawn: mockSpawn,
+        forceServerKey: true,
+        peersJsonPath,
+      })
 
-    // When --force-server-key, the server key command must unconditionally regenerate
-    // (no `test -f` guard — it always runs wg genkey)
-    const serverKeyCall = calls.find(c => c.cmd.join(' ').includes('server.key'))
-    expect(serverKeyCall).toBeDefined()
-    // Force path: command must NOT have `test -f` guard
-    const serverKeyCmd = serverKeyCall?.cmd.join(' ') ?? ''
-    expect(serverKeyCmd).not.toMatch(/test -f/)
-    expect(serverKeyCmd).toMatch(/wg genkey/)
+      // When --force-server-key, the server key command must unconditionally regenerate
+      // (no `test -f` guard — it always runs wg genkey)
+      const serverKeyCall = calls.find(c => c.cmd.join(' ').includes('server.key'))
+      expect(serverKeyCall).toBeDefined()
+      // Force path: command must NOT have `test -f` guard
+      const serverKeyCmd = serverKeyCall?.cmd.join(' ') ?? ''
+      expect(serverKeyCmd).not.toMatch(/test -f/)
+      expect(serverKeyCmd).toMatch(/wg genkey/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('throws before any SSH call when VPN_HOST is missing', async () => {
@@ -263,24 +303,32 @@ describe('deploy', () => {
     const env = {...BASE_ENV}
     delete env.VPN_HOST
 
-    await expect(deploy({env, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})).rejects.toThrow(
-      /VPN_HOST/,
-    )
-    expect(calls).toHaveLength(0)
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await expect(deploy({env, spawn: mockSpawn, peersJsonPath})).rejects.toThrow(/VPN_HOST/)
+      expect(calls).toHaveLength(0)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('throws before any SSH call when VPN_HOST is a ProxyCommand injection', async () => {
     const calls: SpawnCall[] = []
     const mockSpawn = makeMockSpawn(calls, [])
 
-    await expect(
-      deploy({
-        env: {...BASE_ENV, VPN_HOST: '-oProxyCommand=evil'},
-        spawn: mockSpawn,
-        peersJsonPath: 'apps/vpn/config/peers.json',
-      }),
-    ).rejects.toThrow(/Invalid VPN_HOST/)
-    expect(calls).toHaveLength(0)
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await expect(
+        deploy({
+          env: {...BASE_ENV, VPN_HOST: '-oProxyCommand=evil'},
+          spawn: mockSpawn,
+          peersJsonPath,
+        }),
+      ).rejects.toThrow(/Invalid VPN_HOST/)
+      expect(calls).toHaveLength(0)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('throws before any SSH call when SSH context is missing', async () => {
@@ -288,15 +336,19 @@ describe('deploy', () => {
     const mockSpawn = makeMockSpawn(calls, [])
 
     const env = {PATH: '/usr/bin:/bin', HOME: '/root', VPN_HOST: '1.2.3.4'}
-    await expect(deploy({env, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})).rejects.toThrow(
-      /SSH context/,
-    )
-    expect(calls).toHaveLength(0)
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await expect(deploy({env, spawn: mockSpawn, peersJsonPath})).rejects.toThrow(/SSH context/)
+      expect(calls).toHaveLength(0)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('health gate fails when wg show returns non-zero exit', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'PUBKEY==\n', exitCode: 0}, // read server.pub
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -309,15 +361,21 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await expect(
-      deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'}),
-    ).rejects.toThrow(/health gate|wg show|interface/)
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})).rejects.toThrow(
+        /health gate|wg show|interface/,
+      )
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('health gate fails when wg show shows wrong peer count', async () => {
     const calls: SpawnCall[] = []
     // peers.json has 0 peers but wg show reports 2 — mismatch
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -334,9 +392,12 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await expect(
-      deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'}),
-    ).rejects.toThrow(/peer count|health gate/)
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})).rejects.toThrow(/peer count|health gate/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   // ─── Security invariant: private key never leaves the box ─────────────────
@@ -344,6 +405,7 @@ describe('deploy', () => {
   it('SECURITY: server private key is never read to the local process — only server.pub crosses SSH', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -356,26 +418,32 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    // Assert: no SSH command reads server.key (only server.pub is read back)
-    const readsPrivateKey = calls.some(c => {
-      const cmd = c.cmd.join(' ')
-      // Reading server.key would look like `cat /etc/wireguard/server.key`
-      // The only allowed reference to server.key is in the atomic ensure command
-      // (which writes it, not reads it to stdout for local consumption)
-      return cmd.includes('cat') && cmd.includes('server.key') && !cmd.includes('server.pub')
-    })
-    expect(readsPrivateKey).toBe(false)
+      // Assert: no SSH command reads server.key (only server.pub is read back)
+      const readsPrivateKey = calls.some(c => {
+        const cmd = c.cmd.join(' ')
+        // Reading server.key would look like `cat /etc/wireguard/server.key`
+        // The only allowed reference to server.key is in the atomic ensure command
+        // (which writes it, not reads it to stdout for local consumption)
+        return cmd.includes('cat') && cmd.includes('server.key') && !cmd.includes('server.pub')
+      })
+      expect(readsPrivateKey).toBe(false)
 
-    // Assert: the command that reads back the public key reads server.pub, not server.key
-    const readsPub = calls.some(c => c.cmd.join(' ').includes('server.pub'))
-    expect(readsPub).toBe(true)
+      // Assert: the command that reads back the public key reads server.pub, not server.key
+      const readsPub = calls.some(c => c.cmd.join(' ').includes('server.pub'))
+      expect(readsPub).toBe(true)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('SECURITY: peers/config bytes go through SSH stdin, never appear in argv', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -388,22 +456,30 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    // The wg0.conf placeholder config is shipped via stdin.
-    // Assert: no argv contains WireGuard config content ([Interface], [Peer])
-    // Note: PrivateKey line is NOT in the shipped config (it has the placeholder instead)
-    const argvContainsConfig = calls.some(c => c.cmd.some(arg => arg.includes('[Interface]') || arg.includes('[Peer]')))
-    expect(argvContainsConfig).toBe(false)
+      // The wg0.conf placeholder config is shipped via stdin.
+      // Assert: no argv contains WireGuard config content ([Interface], [Peer])
+      // Note: PrivateKey line is NOT in the shipped config (it has the placeholder instead)
+      const argvContainsConfig = calls.some(c =>
+        c.cmd.some(arg => arg.includes('[Interface]') || arg.includes('[Peer]')),
+      )
+      expect(argvContainsConfig).toBe(false)
 
-    // Assert: the placeholder config is shipped via stdin (has a stdin property with [Interface])
-    const wgConfCall = calls.find(c => c.stdin !== undefined && c.stdin.includes('[Interface]'))
-    expect(wgConfCall).toBeDefined()
+      // Assert: the placeholder config is shipped via stdin (has a stdin property with [Interface])
+      const wgConfCall = calls.find(c => c.stdin !== undefined && c.stdin.includes('[Interface]'))
+      expect(wgConfCall).toBeDefined()
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('SECURITY: server-side render — wg0.conf is assembled on the box using its local server.key', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -416,35 +492,41 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    // The render mechanism:
-    // 1. Locally renders config with __SERVER_PRIVATE_KEY__ placeholder
-    // 2. Ships placeholder config via stdin to a temp file on the box
-    // 3. Box-side awk reads /etc/wireguard/server.key and substitutes the placeholder
-    //
-    // Assert: the stdin payload for the wg0.conf step contains the placeholder (not the real key)
-    const placeholderCall = calls.find(c => c.stdin !== undefined && c.stdin.includes('__SERVER_PRIVATE_KEY__'))
-    expect(placeholderCall).toBeDefined()
+      // The render mechanism:
+      // 1. Locally renders config with __SERVER_PRIVATE_KEY__ placeholder
+      // 2. Ships placeholder config via stdin to a temp file on the box
+      // 3. Box-side awk reads /etc/wireguard/server.key and substitutes the placeholder
+      //
+      // Assert: the stdin payload for the wg0.conf step contains the placeholder (not the real key)
+      const placeholderCall = calls.find(c => c.stdin !== undefined && c.stdin.includes('__SERVER_PRIVATE_KEY__'))
+      expect(placeholderCall).toBeDefined()
 
-    // Assert: the awk substitution command references server.key (box-local, never transmitted)
-    const awkCall = calls.find(c => c.cmd.join(' ').includes('awk') && c.cmd.join(' ').includes('server.key'))
-    expect(awkCall).toBeDefined()
+      // Assert: the awk substitution command references server.key (box-local, never transmitted)
+      const awkCall = calls.find(c => c.cmd.join(' ').includes('awk') && c.cmd.join(' ').includes('server.key'))
+      expect(awkCall).toBeDefined()
 
-    // Assert: the awk command writes to wg0.conf
-    const awkCmd = awkCall?.cmd.join(' ') ?? ''
-    expect(awkCmd).toMatch(/wg0\.conf/)
+      // Assert: the awk command writes to wg0.conf
+      const awkCmd = awkCall?.cmd.join(' ') ?? ''
+      expect(awkCmd).toMatch(/wg0\.conf/)
 
-    // Fix 3: atomic write — awk must write to a temp file then mv into place
-    expect(awkCmd).toMatch(/wg0\.conf\.new/)
-    expect(awkCmd).toMatch(/mv\s/)
-    // Fix 3: server key non-empty guard must precede the awk substitution
-    expect(awkCmd).toMatch(/test -s/)
+      // Fix 3: atomic write — awk must write to a temp file then mv into place
+      expect(awkCmd).toMatch(/wg0\.conf\.new/)
+      expect(awkCmd).toMatch(/mv\s/)
+      // Fix 3: server key non-empty guard must precede the awk substitution
+      expect(awkCmd).toMatch(/test -s/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('SECURITY: placeholder __SERVER_PRIVATE_KEY__ appears in shipped config; box-side awk substitutes from server.key', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -457,38 +539,43 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    // The shipped config must contain the placeholder on the PrivateKey line
-    const placeholderCall = calls.find(c => c.stdin !== undefined && c.stdin.includes('__SERVER_PRIVATE_KEY__'))
-    expect(placeholderCall).toBeDefined()
-    const shippedConfig = placeholderCall?.stdin ?? ''
-    expect(shippedConfig).toMatch(/PrivateKey = __SERVER_PRIVATE_KEY__/)
+      // The shipped config must contain the placeholder on the PrivateKey line
+      const placeholderCall = calls.find(c => c.stdin !== undefined && c.stdin.includes('__SERVER_PRIVATE_KEY__'))
+      expect(placeholderCall).toBeDefined()
+      const shippedConfig = placeholderCall?.stdin ?? ''
+      expect(shippedConfig).toMatch(/PrivateKey = __SERVER_PRIVATE_KEY__/)
 
-    // The awk substitution command must:
-    // (a) reference /etc/wireguard/server.key via getline (box-local read)
-    // (b) substitute the placeholder
-    // (c) write atomically to /etc/wireguard/wg0.conf via temp+mv
-    // (d) guard against empty server.key with test -s
-    const awkCall = calls.find(c => {
-      const cmd = c.cmd.join(' ')
-      return cmd.includes('awk') && cmd.includes('server.key') && cmd.includes('__SERVER_PRIVATE_KEY__')
-    })
-    expect(awkCall).toBeDefined()
-    const awkCmd = awkCall?.cmd.join(' ') ?? ''
-    expect(awkCmd).toMatch(/getline key/)
-    expect(awkCmd).toMatch(/server\.key/)
-    expect(awkCmd).toMatch(/wg0\.conf/)
-    // Fix 3: atomic write — must use temp file + mv
-    expect(awkCmd).toMatch(/wg0\.conf\.new/)
-    expect(awkCmd).toMatch(/mv\s/)
-    // Fix 3: server key non-empty guard
-    expect(awkCmd).toMatch(/test -s/)
+      // The awk substitution command must:
+      // (a) reference /etc/wireguard/server.key via getline (box-local read)
+      // (b) substitute the placeholder
+      // (c) write atomically to /etc/wireguard/wg0.conf via temp+mv
+      // (d) guard against empty server.key with test -s
+      const awkCall = calls.find(c => {
+        const cmd = c.cmd.join(' ')
+        return cmd.includes('awk') && cmd.includes('server.key') && cmd.includes('__SERVER_PRIVATE_KEY__')
+      })
+      expect(awkCall).toBeDefined()
+      const awkCmd = awkCall?.cmd.join(' ') ?? ''
+      expect(awkCmd).toMatch(/getline key/)
+      expect(awkCmd).toMatch(/server\.key/)
+      expect(awkCmd).toMatch(/wg0\.conf/)
+      // Fix 3: atomic write — must use temp file + mv
+      expect(awkCmd).toMatch(/wg0\.conf\.new/)
+      expect(awkCmd).toMatch(/mv\s/)
+      // Fix 3: server key non-empty guard
+      expect(awkCmd).toMatch(/test -s/)
 
-    // The real private key must NOT appear in any argv or stdin
-    const FAKE_REAL_KEY = 'REAL_PRIVATE_KEY_THAT_MUST_NOT_APPEAR'
-    const keyInArgv = calls.some(c => c.cmd.some(arg => arg.includes(FAKE_REAL_KEY)))
-    expect(keyInArgv).toBe(false)
+      // The real private key must NOT appear in any argv or stdin
+      const FAKE_REAL_KEY = 'REAL_PRIVATE_KEY_THAT_MUST_NOT_APPEAR'
+      const keyInArgv = calls.some(c => c.cmd.some(arg => arg.includes(FAKE_REAL_KEY)))
+      expect(keyInArgv).toBe(false)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   // ─── peers.json read failure behavior ────────────────────────────────────
@@ -498,26 +585,24 @@ describe('deploy', () => {
     const mockSpawn = makeMockSpawn(calls, [])
 
     // Write a corrupt peers.json to a temp file
-    const {mkdtempSync: mkdtemp, writeFileSync: writeFile, rmSync: rm} = await import('node:fs')
-    const {tmpdir} = await import('node:os')
-    const {join: joinPath} = await import('node:path')
-    const tmpDir = mkdtemp(joinPath(tmpdir(), 'vpn-deploy-peers-test-'))
-    const corruptPeersPath = joinPath(tmpDir, 'peers.json')
+    const tmpDir = mkdtempSync(join(tmpdir(), 'vpn-deploy-peers-test-'))
+    const corruptPeersPath = join(tmpDir, 'peers.json')
     try {
-      writeFile(corruptPeersPath, 'this is not valid json {{{')
+      writeFileSync(corruptPeersPath, 'this is not valid json {{{')
 
       await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: corruptPeersPath})).rejects.toThrow()
 
       // No SSH calls must have been made — deploy must abort before SSH
       expect(calls).toHaveLength(0)
     } finally {
-      rm(tmpDir, {recursive: true, force: true})
+      rmSync(tmpDir, {recursive: true, force: true})
     }
   })
 
   it('proceeds with 0 peers when peers.json does not exist (no peers yet)', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -544,21 +629,18 @@ describe('deploy', () => {
     const calls: SpawnCall[] = []
     const mockSpawn = makeMockSpawn(calls, [])
 
-    const {mkdtempSync: mkdtemp, writeFileSync: writeFile, rmSync: rm} = await import('node:fs')
-    const {tmpdir} = await import('node:os')
-    const {join: joinPath} = await import('node:path')
-    const tmpDir = mkdtemp(joinPath(tmpdir(), 'vpn-deploy-peers-test-'))
-    const badSchemaPeersPath = joinPath(tmpDir, 'peers.json')
+    const tmpDir = mkdtempSync(join(tmpdir(), 'vpn-deploy-peers-test-'))
+    const badSchemaPeersPath = join(tmpDir, 'peers.json')
     try {
       // Valid JSON but wrong schema — missing required fields
-      writeFile(badSchemaPeersPath, JSON.stringify({wrong: 'schema', notPeers: true}))
+      writeFileSync(badSchemaPeersPath, JSON.stringify({wrong: 'schema', notPeers: true}))
 
       await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: badSchemaPeersPath})).rejects.toThrow()
 
       // No SSH calls — deploy must abort
       expect(calls).toHaveLength(0)
     } finally {
-      rm(tmpDir, {recursive: true, force: true})
+      rmSync(tmpDir, {recursive: true, force: true})
     }
   })
 
@@ -567,6 +649,7 @@ describe('deploy', () => {
   it('SSH user contract: all SSH connections use ubuntu@host, never root@host', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -579,24 +662,30 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    const sshCalls = calls.filter(c => c.cmd[0] === 'ssh')
-    expect(sshCalls.length).toBeGreaterThan(0)
+      const sshCalls = calls.filter(c => c.cmd[0] === 'ssh')
+      expect(sshCalls.length).toBeGreaterThan(0)
 
-    for (const call of sshCalls) {
-      // The destination is the arg matching user@host (not a ControlPath option value)
-      // ControlPath contains %r@%h:%p — filter those out by requiring no % or :
-      const destination = call.cmd.find(arg => /^[a-z]+@[^%:]+$/.test(arg))
-      expect(destination).toBeDefined()
-      expect(destination).toMatch(/^ubuntu@/)
-      expect(destination).not.toMatch(/^root@/)
+      for (const call of sshCalls) {
+        // The destination is the arg matching user@host (not a ControlPath option value)
+        // ControlPath contains %r@%h:%p — filter those out by requiring no % or :
+        const destination = call.cmd.find(arg => /^[a-z]+@[^%:]+$/.test(arg))
+        expect(destination).toBeDefined()
+        expect(destination).toMatch(/^ubuntu@/)
+        expect(destination).not.toMatch(/^root@/)
+      }
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
     }
   })
 
   it('privilege contract: wg show wg0 is prefixed with sudo', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -609,17 +698,23 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    const wgShowCall = calls.find(c => c.cmd.join(' ').includes('wg show wg0'))
-    expect(wgShowCall).toBeDefined()
-    const wgShowCmd = wgShowCall?.cmd.join(' ') ?? ''
-    expect(wgShowCmd).toMatch(/sudo wg show wg0/)
+      const wgShowCall = calls.find(c => c.cmd.join(' ').includes('wg show wg0'))
+      expect(wgShowCall).toBeDefined()
+      const wgShowCmd = wgShowCall?.cmd.join(' ') ?? ''
+      expect(wgShowCmd).toMatch(/sudo wg show wg0/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('privilege contract: systemctl enable uses sudo', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -632,17 +727,23 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    const enableCall = calls.find(c => c.cmd.join(' ').includes('enable') && c.cmd.join(' ').includes('wg-quick@wg0'))
-    expect(enableCall).toBeDefined()
-    const enableCmd = enableCall?.cmd.join(' ') ?? ''
-    expect(enableCmd).toMatch(/sudo systemctl enable/)
+      const enableCall = calls.find(c => c.cmd.join(' ').includes('enable') && c.cmd.join(' ').includes('wg-quick@wg0'))
+      expect(enableCall).toBeDefined()
+      const enableCmd = enableCall?.cmd.join(' ') ?? ''
+      expect(enableCmd).toMatch(/sudo systemctl enable/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('privilege contract: systemctl restart uses sudo', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -655,17 +756,25 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    const restartCall = calls.find(c => c.cmd.join(' ').includes('restart') && c.cmd.join(' ').includes('wg-quick@wg0'))
-    expect(restartCall).toBeDefined()
-    const restartCmd = restartCall?.cmd.join(' ') ?? ''
-    expect(restartCmd).toMatch(/sudo systemctl restart/)
+      const restartCall = calls.find(
+        c => c.cmd.join(' ').includes('restart') && c.cmd.join(' ').includes('wg-quick@wg0'),
+      )
+      expect(restartCall).toBeDefined()
+      const restartCmd = restartCall?.cmd.join(' ') ?? ''
+      expect(restartCmd).toMatch(/sudo systemctl restart/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('privilege contract: sysctl --system uses sudo', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -678,17 +787,23 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    const sysctlCall = calls.find(c => c.cmd.join(' ').includes('sysctl') && c.cmd.join(' ').includes('--system'))
-    expect(sysctlCall).toBeDefined()
-    const sysctlCmd = sysctlCall?.cmd.join(' ') ?? ''
-    expect(sysctlCmd).toMatch(/sudo sysctl --system/)
+      const sysctlCall = calls.find(c => c.cmd.join(' ').includes('sysctl') && c.cmd.join(' ').includes('--system'))
+      expect(sysctlCall).toBeDefined()
+      const sysctlCmd = sysctlCall?.cmd.join(' ') ?? ''
+      expect(sysctlCmd).toMatch(/sudo sysctl --system/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('privilege contract: writeRemoteFile uses sudo tee for privileged paths', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -701,24 +816,30 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    // The placeholder wg0.conf write (stdin) must use sudo tee
-    const wgConfWrite = calls.find(c => c.stdin !== undefined && c.stdin.includes('__SERVER_PRIVATE_KEY__'))
-    expect(wgConfWrite).toBeDefined()
-    const wgConfCmd = wgConfWrite?.cmd.join(' ') ?? ''
-    expect(wgConfCmd).toMatch(/sudo tee/)
+      // The placeholder wg0.conf write (stdin) must use sudo tee
+      const wgConfWrite = calls.find(c => c.stdin !== undefined && c.stdin.includes('__SERVER_PRIVATE_KEY__'))
+      expect(wgConfWrite).toBeDefined()
+      const wgConfCmd = wgConfWrite?.cmd.join(' ') ?? ''
+      expect(wgConfCmd).toMatch(/sudo tee/)
 
-    // The sysctl forwarding conf write (stdin) must use sudo tee
-    const sysctlWrite = calls.find(c => c.stdin !== undefined && c.stdin.includes('net.ipv4.ip_forward'))
-    expect(sysctlWrite).toBeDefined()
-    const sysctlWriteCmd = sysctlWrite?.cmd.join(' ') ?? ''
-    expect(sysctlWriteCmd).toMatch(/sudo tee/)
+      // The sysctl forwarding conf write (stdin) must use sudo tee
+      const sysctlWrite = calls.find(c => c.stdin !== undefined && c.stdin.includes('net.ipv4.ip_forward'))
+      expect(sysctlWrite).toBeDefined()
+      const sysctlWriteCmd = sysctlWrite?.cmd.join(' ') ?? ''
+      expect(sysctlWriteCmd).toMatch(/sudo tee/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('privilege contract: server key generation uses sudo sh -c for privileged writes', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -731,18 +852,26 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    // The server key ensure command must use sudo (writes to /etc/wireguard/)
-    const serverKeyCall = calls.find(c => c.cmd.join(' ').includes('server.key') && c.cmd.join(' ').includes('test -f'))
-    expect(serverKeyCall).toBeDefined()
-    const serverKeyCmd = serverKeyCall?.cmd.join(' ') ?? ''
-    expect(serverKeyCmd).toMatch(/sudo/)
+      // The server key ensure command must use sudo (writes to /etc/wireguard/)
+      const serverKeyCall = calls.find(
+        c => c.cmd.join(' ').includes('server.key') && c.cmd.join(' ').includes('test -f'),
+      )
+      expect(serverKeyCall).toBeDefined()
+      const serverKeyCmd = serverKeyCall?.cmd.join(' ') ?? ''
+      expect(serverKeyCmd).toMatch(/sudo/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('privilege contract: read server.pub uses sudo cat', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -755,17 +884,23 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    const readPubCall = calls.find(c => c.cmd.join(' ').includes('cat') && c.cmd.join(' ').includes('server.pub'))
-    expect(readPubCall).toBeDefined()
-    const readPubCmd = readPubCall?.cmd.join(' ') ?? ''
-    expect(readPubCmd).toMatch(/sudo cat/)
+      const readPubCall = calls.find(c => c.cmd.join(' ').includes('cat') && c.cmd.join(' ').includes('server.pub'))
+      expect(readPubCall).toBeDefined()
+      const readPubCmd = readPubCall?.cmd.join(' ') ?? ''
+      expect(readPubCmd).toMatch(/sudo cat/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('privilege contract: awk substitution uses sudo sh -c for privileged writes', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -778,12 +913,17 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
 
-    const awkCall = calls.find(c => c.cmd.join(' ').includes('awk') && c.cmd.join(' ').includes('server.key'))
-    expect(awkCall).toBeDefined()
-    const awkCmd = awkCall?.cmd.join(' ') ?? ''
-    expect(awkCmd).toMatch(/sudo/)
+      const awkCall = calls.find(c => c.cmd.join(' ').includes('awk') && c.cmd.join(' ').includes('server.key'))
+      expect(awkCall).toBeDefined()
+      const awkCmd = awkCall?.cmd.join(' ') ?? ''
+      expect(awkCmd).toMatch(/sudo/)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('HOME env defaults to /home/ubuntu, not /root', async () => {
@@ -792,6 +932,7 @@ describe('deploy', () => {
     const calls: SpawnCall[] = []
     const capturedEnvs: Record<string, string>[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -836,15 +977,20 @@ describe('deploy', () => {
 
     // Use BASE_ENV which has HOME=/root — the deploy should still work
     // but the DEFAULT fallback (when HOME is absent) must be /home/ubuntu
-    await deploy({env: BASE_ENV, spawn: capturingSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: capturingSpawn, peersJsonPath})
 
-    // All SSH calls must use ubuntu@ destinations
-    const sshCalls = calls.filter(c => c.cmd[0] === 'ssh')
-    expect(sshCalls.length).toBeGreaterThan(0)
-    for (const call of sshCalls) {
-      // Filter out ControlPath args (contain % or :) to find the real destination
-      const destination = call.cmd.find(arg => /^[a-z]+@[^%:]+$/.test(arg))
-      expect(destination).toMatch(/^ubuntu@/)
+      // All SSH calls must use ubuntu@ destinations
+      const sshCalls = calls.filter(c => c.cmd[0] === 'ssh')
+      expect(sshCalls.length).toBeGreaterThan(0)
+      for (const call of sshCalls) {
+        // Filter out ControlPath args (contain % or :) to find the real destination
+        const destination = call.cmd.find(arg => /^[a-z]+@[^%:]+$/.test(arg))
+        expect(destination).toMatch(/^ubuntu@/)
+      }
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
     }
   })
 
@@ -889,13 +1035,10 @@ describe('deploy', () => {
 
     // Write a valid peers.json to a temp file — if the env var is set but invalid,
     // the deploy must NOT fall back to the file
-    const {mkdtempSync: mkdtemp, writeFileSync: writeFile, rmSync: rm} = await import('node:fs')
-    const {tmpdir} = await import('node:os')
-    const {join: joinPath} = await import('node:path')
-    const tmpDir = mkdtemp(joinPath(tmpdir(), 'vpn-deploy-peers-env-test-'))
-    const validPeersPath = joinPath(tmpDir, 'peers.json')
+    const tmpDir = mkdtempSync(join(tmpdir(), 'vpn-deploy-peers-env-test-'))
+    const validPeersPath = join(tmpDir, 'peers.json')
     try {
-      writeFile(
+      writeFileSync(
         validPeersPath,
         JSON.stringify({peers: [{name: 'filepeer', publicKey: 'FILEPUBKEY==', tunnelIp: '10.8.0.2'}]}),
       )
@@ -911,13 +1054,14 @@ describe('deploy', () => {
       // No SSH calls — deploy must abort before SSH
       expect(calls).toHaveLength(0)
     } finally {
-      rm(tmpDir, {recursive: true, force: true})
+      rmSync(tmpDir, {recursive: true, force: true})
     }
   })
 
   it('CI mode: materializes VPN_SSH_KEY to a temp file before SSH calls', async () => {
     const calls: SpawnCall[] = []
     const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
@@ -930,14 +1074,152 @@ describe('deploy', () => {
     ]
 
     const mockSpawn = makeMockSpawn(calls, results)
-    await deploy({env: CI_ENV, spawn: mockSpawn, peersJsonPath: 'apps/vpn/config/peers.json'})
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: CI_ENV, spawn: mockSpawn, peersJsonPath})
 
-    // In CI mode, SSH commands must use -i <keypath> + IdentitiesOnly=yes
-    const sshCalls = calls.filter(c => c.cmd[0] === 'ssh')
-    expect(sshCalls.length).toBeGreaterThan(0)
-    for (const call of sshCalls) {
-      expect(call.cmd).toContain('-i')
-      expect(call.cmd).toContain('IdentitiesOnly=yes')
+      // In CI mode, SSH commands must use -i <keypath> + IdentitiesOnly=yes
+      const sshCalls = calls.filter(c => c.cmd[0] === 'ssh')
+      expect(sshCalls.length).toBeGreaterThan(0)
+      for (const call of sshCalls) {
+        expect(call.cmd).toContain('-i')
+        expect(call.cmd).toContain('IdentitiesOnly=yes')
+      }
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  // ─── Wipe guard (Fix 2) ───────────────────────────────────────────────────
+
+  it('wipe guard: aborts when incoming roster is 0 peers but live box has peers', async () => {
+    const calls: SpawnCall[] = []
+    // The wipe guard queries live peer count before applying config.
+    // wg show wg0 dump: first line is server, subsequent lines are peers.
+    // With 1 live peer, dump has 2 lines (server + 1 peer).
+    const results = [
+      // wipe guard query: wg show wg0 dump
+      {stdout: 'server-line\npeer-line\n', exitCode: 0},
+    ]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    // Empty roster (0 peers) — no peers.json
+    const nonExistentPath = '/tmp/vpn-deploy-test-wipe-guard-nonexistent.json'
+
+    await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: nonExistentPath})).rejects.toThrow(
+      /empty roster|VPN_ALLOW_EMPTY_ROSTER|wipe guard/i,
+    )
+
+    // Must abort before writing any config
+    const configWrites = calls.filter(c => c.stdin !== undefined && c.stdin.includes('[Interface]'))
+    expect(configWrites).toHaveLength(0)
+  })
+
+  it('wipe guard: VPN_ALLOW_EMPTY_ROSTER=1 bypasses the guard and proceeds with 0 peers', async () => {
+    const calls: SpawnCall[] = []
+    const results = [
+      {stdout: '', exitCode: 0}, // ensure server key
+      {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
+      {stdout: '', exitCode: 0}, // awk substitution
+      {stdout: '', exitCode: 0}, // write wg-forwarding.conf
+      {stdout: '', exitCode: 0}, // sysctl --system
+      {stdout: '', exitCode: 0}, // systemctl enable --now
+      {stdout: '', exitCode: 0}, // systemctl restart
+      {stdout: 'interface: wg0\n  public key: FAKEPUBKEY==\n  peers: 0\n', exitCode: 0}, // wg show
+    ]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    const nonExistentPath = '/tmp/vpn-deploy-test-wipe-guard-override-nonexistent.json'
+
+    // With VPN_ALLOW_EMPTY_ROSTER=1, deploy must proceed even with 0 peers
+    await expect(
+      deploy({
+        env: {...BASE_ENV, VPN_ALLOW_EMPTY_ROSTER: '1'},
+        spawn: mockSpawn,
+        peersJsonPath: nonExistentPath,
+      }),
+    ).resolves.toBeUndefined()
+
+    // Deploy must have proceeded (SSH calls made)
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  it('wipe guard: first-boot (live=0, incoming=0) proceeds normally without override', async () => {
+    const calls: SpawnCall[] = []
+    const results = [
+      // wipe guard query: wg show wg0 dump — only server line (0 peers)
+      {stdout: 'server-line\n', exitCode: 0},
+      {stdout: '', exitCode: 0}, // ensure server key
+      {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
+      {stdout: '', exitCode: 0}, // awk substitution
+      {stdout: '', exitCode: 0}, // write wg-forwarding.conf
+      {stdout: '', exitCode: 0}, // sysctl --system
+      {stdout: '', exitCode: 0}, // systemctl enable --now
+      {stdout: '', exitCode: 0}, // systemctl restart
+      {stdout: 'interface: wg0\n  public key: FAKEPUBKEY==\n  peers: 0\n', exitCode: 0}, // wg show
+    ]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    const nonExistentPath = '/tmp/vpn-deploy-test-wipe-guard-firstboot-nonexistent.json'
+
+    // First boot: live=0, incoming=0 — must proceed without override
+    await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: nonExistentPath})).resolves.toBeUndefined()
+
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  it('wipe guard: incoming > 0 peers — guard not triggered, no pre-check SSH call', async () => {
+    const calls: SpawnCall[] = []
+    const results = [
+      {stdout: '', exitCode: 0}, // ensure server key
+      {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
+      {stdout: '', exitCode: 0}, // awk substitution
+      {stdout: '', exitCode: 0}, // write wg-forwarding.conf
+      {stdout: '', exitCode: 0}, // sysctl --system
+      {stdout: '', exitCode: 0}, // systemctl enable --now
+      {stdout: '', exitCode: 0}, // systemctl restart
+      {stdout: 'interface: wg0\n  public key: FAKEPUBKEY==\npeer: PEER1\n', exitCode: 0}, // wg show (1 peer)
+    ]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    // 1 peer in roster — guard must not trigger
+    const {dir, peersJsonPath} = makeTempPeersDir([{name: 'peer1', publicKey: 'PEER1PUBKEY==', tunnelIp: '10.8.0.2'}])
+    try {
+      await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})).resolves.toBeUndefined()
+
+      // No wg show dump call before the main deploy sequence
+      // (the wipe guard dump call only happens when incoming=0)
+      const dumpCalls = calls.filter(c => c.cmd.join(' ').includes('wg show wg0 dump'))
+      expect(dumpCalls).toHaveLength(0)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  // ─── VPN_PEERS ZodError wrap (Fix 3) ─────────────────────────────────────
+
+  it('VPN_PEERS set + valid JSON but wrong schema → fails with clear error, no file fallback', async () => {
+    const calls: SpawnCall[] = []
+    const mockSpawn = makeMockSpawn(calls, [])
+
+    // Write a valid peers.json to a temp file — must NOT be used as fallback
+    const {dir, peersJsonPath} = makeTempPeersDir([{name: 'filepeer', publicKey: 'FILEPUBKEY==', tunnelIp: '10.8.0.2'}])
+    try {
+      await expect(
+        deploy({
+          env: {...BASE_ENV, VPN_PEERS: '{"foo":"bar"}'},
+          spawn: mockSpawn,
+          peersJsonPath,
+        }),
+      ).rejects.toThrow()
+
+      // No SSH calls — deploy must abort before SSH
+      expect(calls).toHaveLength(0)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
     }
   })
 })

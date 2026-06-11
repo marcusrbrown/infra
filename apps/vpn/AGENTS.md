@@ -23,7 +23,7 @@ Deploy is SSH-only. No Docker, no Compose. The box runs native `wg-quick@wg0` un
 2. **Materialize SSH key** (CI only) — `VPN_SSH_KEY` is written to a `0600` temp file via `materializeIdentityFile`; cleaned up after.
 3. **Ensure server key** — `ssh "umask 077; test -f /etc/wireguard/server.key || (wg genkey | tee /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub)"`. Atomic; preserved on redeploy unless `--force-server-key`. The server PRIVATE key never leaves the box.
 4. **Read back server.pub** — only the public key is read back for status/diagnosis. The private key is never transmitted.
-    5. **Render wg0.conf server-side** — the peer roster (from `VPN_PEERS` env var in CI, or local `peers.json` for local deploys) is used to render the config; the box assembles `/etc/wireguard/wg0.conf` referencing its local `/etc/wireguard/server.key`. Config bytes go through SSH stdin, never argv.
+5. **Render wg0.conf server-side** — the peer roster (from `VPN_PEERS` env var in CI, or local `peers.json` for local deploys) is used to render the config; the box assembles `/etc/wireguard/wg0.conf` referencing its local `/etc/wireguard/server.key`. Config bytes go through SSH stdin, never argv.
 6. **Write ip_forward snippet** — `wg-forwarding.conf` is written to `/etc/sysctl.d/`; `sysctl --system` applies it.
 7. **Control wg-quick@wg0** — `systemctl enable --now wg-quick@wg0` then `systemctl restart wg-quick@wg0` to pick up the new config.
 8. **Health gate** — `wg show wg0` confirms the interface is up and the expected peer count is present. Freshness, not just liveness.
@@ -103,9 +103,9 @@ All three secrets are scoped to the `vpn` GitHub Environment. AWS provisioning c
 | `bunx @marcusrbrown/infra vpn status` | SSH to box, run `wg show wg0`, show interface state + server public key + peer count |
 | `bunx @marcusrbrown/infra vpn deploy` | Trigger the deploy workflow via `gh workflow run` (remote, default). `--local` runs the deploy script directly (requires `SSH_AUTH_SOCK`). `--force-server-key` rotates the server key (invalidates all client configs). |
 | `bunx @marcusrbrown/infra vpn logs [--tail N]` | Stream `journalctl -u wg-quick@wg0` from the box. Logs may reveal peer IPs; operator-only via SSH boundary. |
-| `bunx @marcusrbrown/infra vpn client add <name>` | Generate a client keypair locally, assign the next tunnel IP, append the public key to `peers.json`, sync the roster to the `VPN_PEERS` secret, write the client `.conf` to `apps/vpn/clients/`. |
+| `bunx @marcusrbrown/infra vpn client add <name>` | Generate a client keypair locally, assign the next tunnel IP, append the public key to `peers.json`, sync the roster to the `VPN_PEERS` secret, write the client `.conf` to `apps/vpn/clients/`. Run `vpn deploy` explicitly to apply the change. |
 | `bunx @marcusrbrown/infra vpn client list` | List peers from the local `peers.json` (name, tunnel IP, public key). |
-| `bunx @marcusrbrown/infra vpn client remove <name>` | Remove a peer from `peers.json`, sync the roster to the `VPN_PEERS` secret, and trigger redeploy (peer is revoked on next deploy). |
+| `bunx @marcusrbrown/infra vpn client remove <name>` | Remove a peer from `peers.json` and sync the roster to the `VPN_PEERS` secret. Run `vpn deploy` explicitly to revoke the peer on the box. |
 
 `vpn status` is MCP-exposed (read-only). All other vpn commands are CLI-only (mutating or sensitive).
 
@@ -113,9 +113,17 @@ All three secrets are scoped to the `vpn` GitHub Environment. AWS provisioning c
 
 The peer roster is stored in the `VPN_PEERS` GitHub Environment secret and in a local gitignored file `apps/vpn/config/peers.json`. The schema: `{"peers":[{"name":...,"publicKey":...,"tunnelIp":...}]}` (Zod-validated). Public keys and tunnel IPs only — never private material.
 
-`vpn client add` and `vpn client remove` write the updated roster to the local `peers.json` and then sync it to the `VPN_PEERS` secret via `gh secret set VPN_PEERS --env vpn < apps/vpn/config/peers.json`. If the `gh` sync fails (missing binary, auth, network), the command still succeeds and prints a warning with the exact remediation command. `vpn client list` reads the local file.
+`vpn client add` and `vpn client remove` write the updated roster to the local `peers.json` and then sync it to the `VPN_PEERS` secret via `gh secret set VPN_PEERS --env vpn --repo marcusrbrown/infra < apps/vpn/config/peers.json`. If the `gh` sync fails (missing binary, auth, network), the command still succeeds and prints a warning with the exact remediation command. The operator runs `vpn deploy` explicitly to apply the change to the box. `vpn client list` reads the local file.
 
-In CI, the deploy reads the roster from `VPN_PEERS`. Locally (no env var set), it falls back to the local `peers.json`. A malformed `VPN_PEERS` value fails the deploy immediately — no file fallback when the env var is set.
+**Stale-secret hazard:** if the `gh` sync fails and CI runs a deploy before the secret is re-synced, the stale roster in `VPN_PEERS` is applied to the box. The wipe guard blocks an empty-roster deploy (see below), but a stale non-empty roster deploys silently. Re-sync with:
+
+```bash
+gh secret set VPN_PEERS --env vpn --repo marcusrbrown/infra < apps/vpn/config/peers.json
+```
+
+In CI, the deploy reads the roster from `VPN_PEERS`. Locally (no env var set), it falls back to the local `peers.json`. A malformed `VPN_PEERS` value (invalid JSON or wrong schema) fails the deploy immediately — no file fallback when the env var is set.
+
+**Wipe guard:** when the incoming roster has 0 peers, the deploy queries the live box peer count (`wg show wg0 dump`) before applying config. If the live box has peers and the incoming roster is empty, the deploy aborts with a clear error — this prevents silently disconnecting all clients when `VPN_PEERS` is unset or empty in CI. Set `VPN_ALLOW_EMPTY_ROSTER=1` to intentionally remove all peers. First-boot (live=0, incoming=0) proceeds normally without the override.
 
 Tunnel IPs are sequential `10.8.0.N/32` starting at `.2` (`.1` is reserved for the server). `client remove` frees the slot; `client add` reuses freed slots.
 
@@ -126,7 +134,7 @@ Client `.conf` files (containing the client private key) are written only to `ap
 - **Monitoring** — `vpn status` for live interface state; `vpn logs` to stream journalctl output.
 - **Roll back a bad deploy** — the deploy is idempotent and preserves the server key. Fix the underlying issue and retry.
 - **Add a peer** — `vpn client add <name>`. The client `.conf` is written to `apps/vpn/clients/<name>.conf`.
-- **Remove a peer** — `vpn client remove <name>`. The peer is revoked on the next deploy.
+- **Remove a peer** — `vpn client remove <name>`. Updates the local roster and syncs the `VPN_PEERS` secret. Run `vpn deploy` explicitly to revoke the peer on the box.
 - **Rotate the server key** — `vpn deploy --force-server-key`. All existing client configs become invalid; reissue every client config after rotation.
 - **Reprovision (fresh disk)** — see [Reprovision recovery](#reprovision-recovery) below.
 

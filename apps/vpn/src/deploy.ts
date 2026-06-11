@@ -49,6 +49,8 @@ export interface DeployOpts {
   peersJsonPath?: string
   /** When true, regenerate the server key even if it already exists. */
   forceServerKey?: boolean
+  /** When true, skip the wipe guard (allow deploying 0 peers even if live box has peers). */
+  allowEmptyRoster?: boolean
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -490,14 +492,17 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     let raw: unknown
     try {
       raw = JSON.parse(vpnPeersEnv)
-    } catch {
+      const peersFile = parsePeersJson(raw)
+      peers = peersFile.peers
+      peerCount = peers.length
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
       throw new Error(
-        'VPN_PEERS is set but contains invalid JSON. Fix the secret value or unset VPN_PEERS to use the local peers.json file.',
+        `VPN_PEERS is set but contains invalid or malformed data: ${detail}\n` +
+          'Fix the secret value in the vpn GitHub Environment. ' +
+          'Note: unsetting VPN_PEERS in CI deploys an empty roster (now blocked by the wipe guard unless VPN_ALLOW_EMPTY_ROSTER=1 is set).',
       )
     }
-    const peersFile = parsePeersJson(raw)
-    peers = peersFile.peers
-    peerCount = peers.length
   } else if (existsSync(peersJsonPath)) {
     // File exists: parse and validate — any error is fatal (corrupt data must not deploy 0 peers)
     const peersFile = await readPeers(peersJsonPath)
@@ -510,6 +515,9 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   }
 
   const deployEnv = buildDeployEnv(env)
+
+  // Wipe guard flag — evaluated before SSH (no key needed for the flag check itself)
+  const allowEmptyRoster = opts.allowEmptyRoster === true || env.VPN_ALLOW_EMPTY_ROSTER === '1'
 
   // Phase 2: Materialize SSH key (CI mode only)
   let keyPath: string | undefined
@@ -531,6 +539,41 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 
     // ControlPath socket lives inside tmpDir
     const controlPath = join(tmpDir, 'cm-%r@%h:%p')
+
+    // Wipe guard: if the incoming roster has 0 peers, query the live box peer count before
+    // applying config. If the live box has peers and we're about to deploy 0, abort — this
+    // would silently disconnect every client and the health gate would pass (expected 0 == actual 0).
+    //
+    // Override: VPN_ALLOW_EMPTY_ROSTER=1 (or opts.allowEmptyRoster) skips the guard.
+    // First-boot bootstrap (live=0, incoming=0) proceeds normally.
+    if (peerCount === 0 && !allowEmptyRoster) {
+      // Query live peer count via `wg show wg0 dump` — first line is the server, peers follow.
+      const dumpResult = spawnFn(sshCommand(host, 'sudo wg show wg0 dump', keyPath, controlPath), {
+        env: deployEnv,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      const dumpStdout = await new Response(dumpResult.stdout).text()
+      await new Response(dumpResult.stderr).text() // drain stderr
+      await dumpResult.exited
+
+      // Count peer lines: all lines after the first (server) line
+      const dumpLines = dumpStdout
+        .trim()
+        .split('\n')
+        .filter(l => l.trim() !== '')
+      const livePeerCount = dumpLines.length > 1 ? dumpLines.length - 1 : 0
+
+      if (livePeerCount > 0) {
+        throw new Error(
+          `Wipe guard: the incoming roster is empty (0 peers) but the live box has ${livePeerCount} peer(s). ` +
+            'Deploying an empty roster would disconnect all clients. ' +
+            'To fix: re-sync the roster secret with:\n' +
+            '  gh secret set VPN_PEERS --env vpn --repo marcusrbrown/infra < apps/vpn/config/peers.json\n' +
+            'To intentionally remove all peers, set VPN_ALLOW_EMPTY_ROSTER=1.',
+        )
+      }
+    }
 
     // Phase 3: Ensure server keypair (atomic, preserved)
     if (forceServerKey) {

@@ -848,6 +848,73 @@ describe('deploy', () => {
     }
   })
 
+  // ─── VPN_PEERS env var behavior ──────────────────────────────────────────
+
+  it('VPN_PEERS env set + valid → peers come from env, file is not read', async () => {
+    const calls: SpawnCall[] = []
+    const results = [
+      {stdout: '', exitCode: 0}, // ensure server key
+      {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
+      {stdout: '', exitCode: 0}, // awk substitution
+      {stdout: '', exitCode: 0}, // write wg-forwarding.conf
+      {stdout: '', exitCode: 0}, // sysctl --system
+      {stdout: '', exitCode: 0}, // systemctl enable --now
+      {stdout: '', exitCode: 0}, // systemctl restart
+      // wg show reports 1 peer — must match the 1 peer in VPN_PEERS
+      {stdout: 'interface: wg0\n  public key: FAKEPUBKEY==\npeer: ENVPEER\n', exitCode: 0},
+    ]
+    const mockSpawn = makeMockSpawn(calls, results)
+
+    const envPeers = JSON.stringify({
+      peers: [{name: 'envpeer', publicKey: 'ENVPEERPUBKEY==', tunnelIp: '10.8.0.2'}],
+    })
+
+    // Point peersJsonPath to a non-existent file — if the env var is used, it won't be read
+    await deploy({
+      env: {...BASE_ENV, VPN_PEERS: envPeers},
+      spawn: mockSpawn,
+      peersJsonPath: '/tmp/vpn-deploy-test-NONEXISTENT-peers.json',
+    })
+
+    // The wg0.conf shipped via stdin must contain the env peer's public key
+    const wgConfCall = calls.find(c => c.stdin !== undefined && c.stdin.includes('[Interface]'))
+    expect(wgConfCall).toBeDefined()
+    expect(wgConfCall?.stdin).toContain('ENVPEERPUBKEY==')
+  })
+
+  it('VPN_PEERS set + malformed → deploy fails with clear error, no file fallback', async () => {
+    const calls: SpawnCall[] = []
+    const mockSpawn = makeMockSpawn(calls, [])
+
+    // Write a valid peers.json to a temp file — if the env var is set but invalid,
+    // the deploy must NOT fall back to the file
+    const {mkdtempSync: mkdtemp, writeFileSync: writeFile, rmSync: rm} = await import('node:fs')
+    const {tmpdir} = await import('node:os')
+    const {join: joinPath} = await import('node:path')
+    const tmpDir = mkdtemp(joinPath(tmpdir(), 'vpn-deploy-peers-env-test-'))
+    const validPeersPath = joinPath(tmpDir, 'peers.json')
+    try {
+      writeFile(
+        validPeersPath,
+        JSON.stringify({peers: [{name: 'filepeer', publicKey: 'FILEPUBKEY==', tunnelIp: '10.8.0.2'}]}),
+      )
+
+      await expect(
+        deploy({
+          env: {...BASE_ENV, VPN_PEERS: 'this is not valid json {{{'},
+          spawn: mockSpawn,
+          peersJsonPath: validPeersPath,
+        }),
+      ).rejects.toThrow()
+
+      // No SSH calls — deploy must abort before SSH
+      expect(calls).toHaveLength(0)
+    } finally {
+      rm(tmpDir, {recursive: true, force: true})
+    }
+  })
+
   it('CI mode: materializes VPN_SSH_KEY to a temp file before SSH calls', async () => {
     const calls: SpawnCall[] = []
     const results = [

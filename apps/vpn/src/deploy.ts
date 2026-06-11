@@ -4,7 +4,7 @@ import {chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 
-import {readPeers, renderServerConfig, type Peer} from '@marcusrbrown/infra/vpn/peers'
+import {parsePeersJson, readPeers, renderServerConfig, type Peer} from '@marcusrbrown/infra/vpn/peers'
 import {validateVpnHost} from './host'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -476,12 +476,29 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const validated = validateEnv(env)
   const host = validated.VPN_HOST
 
-  // Read and validate peers.json — used for wg0.conf rendering and health gate peer count.
-  // Missing file is the ONLY acceptable empty case (no peers yet).
-  // Corrupt/malformed JSON or schema errors → re-throw (abort the deploy).
+  // Read and validate peers — used for wg0.conf rendering and health gate peer count.
+  //
+  // Source precedence:
+  //   1. VPN_PEERS env var (set in CI via GitHub Environment secret) — if set and non-empty,
+  //      parse the roster from it. A malformed value is fatal (fail closed — no file fallback).
+  //   2. Local peers.json file (local deploys, file absent = valid empty-roster state).
   let peers: Peer[]
   let peerCount: number
-  if (existsSync(peersJsonPath)) {
+  const vpnPeersEnv = env.VPN_PEERS
+  if (vpnPeersEnv !== undefined && vpnPeersEnv !== '') {
+    // Env var is set: parse and validate — any error is fatal (fail closed, no file fallback)
+    let raw: unknown
+    try {
+      raw = JSON.parse(vpnPeersEnv)
+    } catch {
+      throw new Error(
+        'VPN_PEERS is set but contains invalid JSON. Fix the secret value or unset VPN_PEERS to use the local peers.json file.',
+      )
+    }
+    const peersFile = parsePeersJson(raw)
+    peers = peersFile.peers
+    peerCount = peers.length
+  } else if (existsSync(peersJsonPath)) {
     // File exists: parse and validate — any error is fatal (corrupt data must not deploy 0 peers)
     const peersFile = await readPeers(peersJsonPath)
     peers = peersFile.peers

@@ -327,6 +327,248 @@ describe('vpnClientRemove', () => {
   })
 })
 
+// ─── gh secret sync after vpnClientAdd ───────────────────────────────────────
+
+describe('vpnClientAdd: gh secret sync', () => {
+  let tmpDir: string
+  let peersJsonPath: string
+  let clientsDir: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'vpn-client-sync-test-'))
+    peersJsonPath = join(tmpDir, 'peers.json')
+    clientsDir = join(tmpDir, 'clients')
+    mkdirSync(clientsDir, {recursive: true})
+    writeFileSync(peersJsonPath, makePeersJson([]))
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, {recursive: true, force: true})
+  })
+
+  it('spawns gh secret set with roster on STDIN after successful add', async () => {
+    const keypairGen = makeKeypairGen('PRIV==', 'NEWPUBKEY==')
+    const spawnCalls: {cmd: string[]; stdin: string}[] = []
+
+    const mockSpawnFn: import('./client').SpawnFn = (cmd, _opts) => {
+      let stdinContent = ''
+      const stdinPipe = {
+        write: (data: Uint8Array) => {
+          stdinContent += new TextDecoder().decode(data)
+        },
+        end: () => {
+          spawnCalls.push({cmd, stdin: stdinContent})
+        },
+      }
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stdin: stdinPipe,
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await vpnClientAdd('newpeer', {
+      peersJsonPath,
+      clientsDir,
+      serverPublicKey: 'SERVERPUBKEY==',
+      endpoint: '1.2.3.4',
+      keypairGen,
+      spawnFn: mockSpawnFn,
+    })
+
+    // Must have spawned gh secret set
+    const ghCall = spawnCalls.find(c => c.cmd.includes('gh') && c.cmd.includes('secret') && c.cmd.includes('set'))
+    expect(ghCall).toBeDefined()
+
+    // The new peer's public key must appear in STDIN, not in argv
+    expect(ghCall?.stdin).toContain('NEWPUBKEY==')
+    const argvContainsPubkey = ghCall?.cmd.some(arg => arg.includes('NEWPUBKEY=='))
+    expect(argvContainsPubkey).toBe(false)
+
+    // Must pass --env vpn and --repo marcusrbrown/infra
+    expect(ghCall?.cmd).toContain('--env')
+    expect(ghCall?.cmd).toContain('vpn')
+    expect(ghCall?.cmd).toContain('--repo')
+    expect(ghCall?.cmd).toContain('marcusrbrown/infra')
+  })
+
+  it('gh failure → command still succeeds, warning printed with remediation', async () => {
+    const keypairGen = makeKeypairGen('PRIV==', 'NEWPUBKEY==')
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+
+    const mockSpawnFn: import('./client').SpawnFn = (_cmd, _opts) => {
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('auth error'))
+            c.close()
+          },
+        }),
+        stdin: {
+          write: (_data: Uint8Array) => {},
+          end: () => {},
+        },
+        exited: Promise.resolve(1), // gh fails
+      }
+    }
+
+    try {
+      // Must NOT throw even though gh fails
+      const result = await vpnClientAdd('newpeer', {
+        peersJsonPath,
+        clientsDir,
+        serverPublicKey: 'SERVERPUBKEY==',
+        endpoint: '1.2.3.4',
+        keypairGen,
+        spawnFn: mockSpawnFn,
+      })
+
+      // The add itself must succeed
+      expect(result.tunnelIp).toBe('10.8.0.2')
+
+      // A warning must have been printed with remediation
+      const allWarnings = warnMessages.join('\n')
+      expect(allWarnings).toMatch(/VPN_PEERS|stale|warning/i)
+      expect(allWarnings).toMatch(/gh secret set/)
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+})
+
+// ─── gh secret sync after vpnClientRemove ────────────────────────────────────
+
+describe('vpnClientRemove: gh secret sync', () => {
+  let tmpDir: string
+  let peersJsonPath: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'vpn-client-remove-sync-test-'))
+    peersJsonPath = join(tmpDir, 'peers.json')
+    writeFileSync(
+      peersJsonPath,
+      makePeersJson([
+        {name: 'laptop', publicKey: 'PUB1==', tunnelIp: '10.8.0.2'},
+        {name: 'phone', publicKey: 'PUB2==', tunnelIp: '10.8.0.3'},
+      ]),
+    )
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, {recursive: true, force: true})
+  })
+
+  it('spawns gh secret set with updated roster on STDIN after successful remove', async () => {
+    const spawnCalls: {cmd: string[]; stdin: string}[] = []
+
+    const mockSpawnFn: import('./client').SpawnFn = (cmd, _opts) => {
+      let stdinContent = ''
+      const stdinPipe = {
+        write: (data: Uint8Array) => {
+          stdinContent += new TextDecoder().decode(data)
+        },
+        end: () => {
+          spawnCalls.push({cmd, stdin: stdinContent})
+        },
+      }
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stdin: stdinPipe,
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await vpnClientRemove('laptop', peersJsonPath, {spawnFn: mockSpawnFn})
+
+    // Must have spawned gh secret set
+    const ghCall = spawnCalls.find(c => c.cmd.includes('gh') && c.cmd.includes('secret') && c.cmd.includes('set'))
+    expect(ghCall).toBeDefined()
+
+    // Removed peer must NOT appear in STDIN
+    expect(ghCall?.stdin).not.toContain('PUB1==')
+    // Remaining peer must appear in STDIN
+    expect(ghCall?.stdin).toContain('PUB2==')
+
+    // Roster bytes must not appear in argv
+    const argvContainsRoster = ghCall?.cmd.some(arg => arg.includes('PUB1==') || arg.includes('PUB2=='))
+    expect(argvContainsRoster).toBe(false)
+  })
+
+  it('gh failure on remove → command still succeeds, warning printed', async () => {
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+
+    const mockSpawnFn: import('./client').SpawnFn = (_cmd, _opts) => {
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(''))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('network error'))
+            c.close()
+          },
+        }),
+        stdin: {
+          write: (_data: Uint8Array) => {},
+          end: () => {},
+        },
+        exited: Promise.resolve(1), // gh fails
+      }
+    }
+
+    try {
+      // Must NOT throw even though gh fails
+      await vpnClientRemove('laptop', peersJsonPath, {spawnFn: mockSpawnFn})
+
+      // A warning must have been printed with remediation
+      const allWarnings = warnMessages.join('\n')
+      expect(allWarnings).toMatch(/VPN_PEERS|stale|warning/i)
+      expect(allWarnings).toMatch(/gh secret set/)
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+})
+
 // ─── Write-guard: client .conf must stay in clients/ ─────────────────────────
 
 describe('write-guard: client .conf path safety', () => {

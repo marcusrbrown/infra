@@ -11,6 +11,8 @@ on:
         required: true
       VPN_HOST:
         required: true
+      VPN_PEERS:
+        required: false
 
 concurrency:
   group: deploy-vpn-${{ github.ref_name }}
@@ -51,3 +53,4 @@ jobs:
         env:
           VPN_SSH_KEY: ${{ secrets.VPN_SSH_KEY }}
           VPN_HOST: ${{ secrets.VPN_HOST }}
+          VPN_PEERS: ${{ secrets.VPN_PEERS }}

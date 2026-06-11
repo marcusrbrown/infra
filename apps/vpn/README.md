@@ -4,7 +4,7 @@
 
 WireGuard egress box on AWS Lightsail (`eu-west-1`, Ireland). The first AWS-backed deployable in this repo.
 
-Native `wg-quick@wg0` + systemd (no Docker). Provisioned via `@aws-sdk/client-lightsail`; deployed over SSH. The static IP is the durable client-facing endpoint. Peer configs are tracked in `apps/vpn/config/peers.json` (public keys only); client `.conf` files are written to the gitignored `apps/vpn/clients/` directory.
+Native `wg-quick@wg0` + systemd (no Docker). Provisioned via `@aws-sdk/client-lightsail`; deployed over SSH. The static IP is the durable client-facing endpoint. The peer roster is stored in the `VPN_PEERS` GitHub Environment secret and a local gitignored file `apps/vpn/config/peers.json`. Client `.conf` files are written to the gitignored `apps/vpn/clients/` directory.
 
 ## Deploy
 
@@ -46,10 +46,11 @@ GitHub Environment: **`vpn`**
 
 ### Required secrets
 
-| Secret        | Required | Description                                                   |
-| ------------- | -------- | ------------------------------------------------------------- |
-| `VPN_SSH_KEY` | ✓        | Ed25519 private key for the VPN box (`wg-egress` keypair)     |
-| `VPN_HOST`    | ✓        | Static IP of the Lightsail instance (printed by provisioning) |
+| Secret        | Required | Description                                                                      |
+| ------------- | -------- | -------------------------------------------------------------------------------- |
+| `VPN_SSH_KEY` | ✓        | Ed25519 private key for the VPN box (`wg-egress` keypair)                        |
+| `VPN_HOST`    | ✓        | Static IP of the Lightsail instance (printed by provisioning)                    |
+| `VPN_PEERS`   | —        | Peer roster JSON. Auto-synced by `vpn client add/remove`. Empty roster is valid. |
 
 AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status.
 

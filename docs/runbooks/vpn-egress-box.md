@@ -118,9 +118,15 @@ bunx @marcusrbrown/infra vpn client add <name>
 This:
 1. Generates a client keypair locally
 2. Assigns the next available tunnel IP (`10.8.0.N/32`, sequential from `.2`)
-3. Appends the client public key + tunnel IP to `apps/vpn/config/peers.json`
-4. Writes the client `.conf` (with client private key) to `apps/vpn/clients/<name>.conf`
-5. Triggers a redeploy to activate the new peer
+3. Appends the client public key + tunnel IP to the local `apps/vpn/config/peers.json` (gitignored)
+4. Syncs the updated roster to the `VPN_PEERS` GitHub Environment secret via `gh secret set VPN_PEERS --env vpn`
+5. Writes the client `.conf` (with client private key) to `apps/vpn/clients/<name>.conf`
+
+If the `gh` sync fails (missing binary, auth, or network), the command still succeeds and prints a warning with the exact remediation command:
+
+```bash
+gh secret set VPN_PEERS --env vpn < apps/vpn/config/peers.json
+```
 
 The client `.conf` path is printed. Distribute it to the peer device securely (never via unencrypted channels). The `apps/vpn/clients/` directory is gitignored — client private keys never enter the repo.
 
@@ -136,7 +142,7 @@ To remove a peer:
 bunx @marcusrbrown/infra vpn client remove <name>
 ```
 
-The peer is removed from `peers.json` and revoked on the next deploy. The client config on the peer device becomes invalid after the next deploy completes.
+The peer is removed from the local `peers.json`, the `VPN_PEERS` secret is synced, and the peer is revoked on the next deploy. The client config on the peer device becomes invalid after the next deploy completes.
 
 ---
 

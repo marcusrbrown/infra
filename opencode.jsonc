@@ -9,6 +9,29 @@
       "command": ["bun", "run", "packages/cli/src/cli.ts", "mcp"],
       "enabled": true,
     },
+    "discord": {
+      "type": "local",
+      // opencode's {env:VAR} interpolation reads opencode's own process env, which
+      // does NOT carry repo-root .env (Bun only auto-loads .env for the `infra`
+      // bun-run server, not this docker server). Docker's --env-file also rejects
+      // .env because the multi-line VPN_SSH_KEY PEM has whitespace it can't parse.
+      // So source .env in a shell wrapper (shell handles the PEM fine) and forward
+      // ONLY the two Discord vars into the container via -e. No secrets in this file.
+      "command": [
+        "sh",
+        "-c",
+        "set -a; . ./.env; set +a; exec docker run --rm -i -e DISCORD_TOKEN -e DISCORD_GUILD_ID saseq/discord-mcp:1.0.0",
+      ],
+      // Disabled by default — requires Docker + .env-local DISCORD_TOKEN/DISCORD_GUILD_ID.
+      // Flip to true to enable, then restart opencode (config is not hot-reloaded).
+      "enabled": false,
+      // The saseq/discord-mcp image is a Spring Boot (JVM) server whose cold
+      // start — JVM boot + Discord gateway connect — measures ~30s before it
+      // answers the MCP initialize handshake. opencode applies this value as
+      // the connect timeout (mcp.timeout ?? 30000); 30000 races the boot and
+      // yields "Connection closed" (-32000). 60000 gives comfortable headroom.
+      "timeout": 60000,
+    },
   },
   // Defense-in-depth permission backstop for sensitive infra tools.
   // Primary gate: these 6 commands are NOT in MCP_ALLOWLIST (packages/cli/src/commands/mcp.ts)
@@ -34,5 +57,31 @@
     "infra_vpn_client_add": "deny",
     "infra_vpn_client_list": "deny",
     "infra_vpn_client_remove": "deny",
+    // Discord MCP (saseq/discord-mcp) exposes 65 guild tools. opencode resolves
+    // the LAST matching permission rule, so the wildcard baseline comes first and
+    // the explicit denies below it win for destructive tools. Tool ids use the
+    // `<server>_<tool>` form — here `discord_<tool>`.
+    // Baseline: every Discord tool prompts; nothing auto-runs.
+    "discord_*": "ask",
+    // Deny: irreversible member actions, content/structure deletion, voice yanks.
+    "discord_ban_member": "deny",
+    "discord_unban_member": "deny",
+    "discord_kick_member": "deny",
+    "discord_timeout_member": "deny",
+    "discord_remove_timeout": "deny",
+    "discord_disconnect_member": "deny",
+    "discord_move_member": "deny",
+    "discord_modify_voice_state": "deny",
+    "discord_delete_channel": "deny",
+    "discord_delete_category": "deny",
+    "discord_delete_message": "deny",
+    "discord_delete_private_message": "deny",
+    "discord_delete_role": "deny",
+    "discord_remove_role": "deny",
+    "discord_delete_webhook": "deny",
+    "discord_delete_emoji": "deny",
+    "discord_delete_invite": "deny",
+    "discord_delete_guild_scheduled_event": "deny",
+    "discord_delete_channel_permission_overwrite": "deny",
   },
 }

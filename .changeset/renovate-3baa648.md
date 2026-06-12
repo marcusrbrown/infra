@@ -1,0 +1,5 @@
+---
+'@marcusrbrown/infra': patch
+---
+
+🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.70` to `7.1.71`

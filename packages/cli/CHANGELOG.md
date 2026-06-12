@@ -1,5 +1,29 @@
 # @marcusrbrown/infra
 
+## 0.10.2
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.63` to `7.1.64` ([#491](https://github.com/marcusrbrown/infra/pull/491))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.66` to `7.1.68` ([#496](https://github.com/marcusrbrown/infra/pull/496))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.64` to `7.1.66` ([#493](https://github.com/marcusrbrown/infra/pull/493))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.61` to `7.1.62` ([#488](https://github.com/marcusrbrown/infra/pull/488))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.62` to `7.1.63` ([#490](https://github.com/marcusrbrown/infra/pull/490))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.68` to `7.1.70` ([#501](https://github.com/marcusrbrown/infra/pull/501))
+
+
+- `vpn client add` and `vpn client remove` now sync the peer roster to the `VPN_PEERS` GitHub Environment secret after each successful local write. The roster is piped via stdin to `gh secret set VPN_PEERS --env vpn --repo marcusrbrown/infra` — roster bytes never appear in argv. If the `gh` sync fails, the command still succeeds and prints a warning with the exact remediation command. The deploy reads the roster from `VPN_PEERS` in CI and falls back to the local `apps/vpn/config/peers.json` for local deploys. ([#495](https://github.com/marcusrbrown/infra/pull/495))
+
 ## 0.10.1
 ### Patch Changes
 

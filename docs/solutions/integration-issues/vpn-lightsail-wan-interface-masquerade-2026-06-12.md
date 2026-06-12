@@ -31,15 +31,15 @@ tags:
 
 ## Problem
 
-The WireGuard egress box (AWS Lightsail eu-west-1, `wg-egress` at `52.208.116.13`) deployed cleanly and a split-tunnel client peer registered with a fresh handshake, but every request routed through the tunnel timed out. The box could reach the destination directly; only forwarded client traffic blackholed.
+The WireGuard egress box (AWS Lightsail eu-west-1, `wg-egress`) deployed cleanly and a split-tunnel client peer registered with a fresh handshake, but every request routed through the tunnel timed out. The box could reach the destination directly; only forwarded client traffic blackholed.
 
 ## Symptoms
 
-- `curl https://clob.polymarket.com/time` through the tunnel timed out with `exit 28`
+- `curl https://<target-host>` through the tunnel timed out with `exit 28`
 - Lopsided WireGuard transfer: ~6 KB sent into the tunnel, ~376 B returned
 - `ping 10.8.0.1` (server's own tunnel IP) had 100% packet loss
 - `tcpdump -i wg0` on the box showed client SYNs **arriving** and retransmitting, with no SYN-ACK and no ICMP replies
-- `curl https://clob.polymarket.com/time` **from the box itself** returned HTTP 200 in ~60ms — box egress was healthy
+- `curl https://<target-host>` **from the box itself** returned HTTP 200 in ~60ms — box egress was healthy
 
 ## What Didn't Work
 
@@ -70,7 +70,7 @@ PostUp = ...; iptables -t nat -A POSTROUTING -o ens5 -j MASQUERADE
 PostDown = ...; iptables -t nat -D POSTROUTING -o ens5 -j MASQUERADE
 ```
 
-Verified live: `clob.polymarket.com` and `gamma-api.polymarket.com` return HTTP 200 through the tunnel, while non-listed hosts keep the client's real IP (split-tunnel intact). The rule is baked into the deployed `wg0.conf`, so it survives reboots and `wg-quick` cycles.
+Verified live: the split-tunnel target hosts return HTTP 200 through the tunnel, while non-listed hosts keep the client's real IP (split-tunnel intact). The rule is baked into the deployed `wg0.conf`, so it survives reboots and `wg-quick` cycles.
 
 ## Why This Works
 

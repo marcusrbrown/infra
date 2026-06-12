@@ -301,6 +301,42 @@ async function forceRegenerateServerKey(
 }
 
 /**
+ * Detects the WAN interface on the remote box by parsing `ip route show default`.
+ * Extracts the token after `dev` from the default route line.
+ *
+ * Fails closed with a clear error if detection returns empty — never silently
+ * falls back to a hardcoded interface name.
+ */
+async function detectWanInterface(
+  host: string,
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  keyPath?: string,
+  controlPath?: string,
+): Promise<string> {
+  const {stdout} = await runCommand(
+    'Detecting WAN interface (ip route show default)',
+    sshCommand(host, 'ip route show default', keyPath, controlPath),
+    deployEnv,
+    spawnFn,
+  )
+
+  // Parse the token after `dev` from the default route output.
+  // Example: "default via 172.26.0.1 dev ens5 proto dhcp src 172.26.14.2 metric 100"
+  const match = stdout.match(/\bdev\s+(\S+)/)
+  const iface = match?.[1]?.trim() ?? ''
+
+  if (!iface) {
+    throw new Error(
+      'Failed to detect WAN interface: `ip route show default` returned no default route with a `dev` field. ' +
+        'Cannot determine the correct interface for NAT MASQUERADE.',
+    )
+  }
+
+  return iface
+}
+
+/**
  * Renders wg0.conf SERVER-SIDE via SSH stdin.
  *
  * Security mechanism (the private key never leaves the box):
@@ -586,10 +622,14 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     const serverPubKey = await readRemoteServerPub(host, deployEnv, spawnFn, keyPath, controlPath)
     console.warn(`\u001B[1;32m✓\u001B[0m Server public key: ${serverPubKey}`)
 
-    // Phase 5: Render wg0.conf server-side
+    // Phase 5: Detect WAN interface on the box, then render wg0.conf server-side.
+    // Detection runs `ip route show default` over SSH and parses the `dev <iface>` token.
+    // Fails closed with a clear error if the default route has no `dev` field.
+    const wanInterface = await detectWanInterface(host, deployEnv, spawnFn, keyPath, controlPath)
+
     // renderServerConfig is called locally with a placeholder key — the real key stays on the box.
     // The placeholder config is shipped via stdin; box-side awk substitutes the real key.
-    await renderWgConfServerSide(host, peers, 'eth0', deployEnv, spawnFn, keyPath, controlPath)
+    await renderWgConfServerSide(host, peers, wanInterface, deployEnv, spawnFn, keyPath, controlPath)
 
     // Phase 6: Write ip_forward sysctl config via stdin
     const forwardingConf = 'net.ipv4.ip_forward = 1\n'

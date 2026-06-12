@@ -144,21 +144,23 @@ describe('deploy', () => {
   it('runs all phases in order: server key, wg0.conf, sysctl, enable, restart, health gate', async () => {
     const calls: SpawnCall[] = []
 
-    // New call sequence (10 calls total, 0-peer roster triggers wipe guard):
+    // New call sequence (11 calls total, 0-peer roster triggers wipe guard):
     // 0: wipe guard: wg show wg0 dump (0 live peers → proceed)
     // 1: ensure server key (ssh)
     // 2: read server.pub (ssh)
-    // 3: ship placeholder wg0.conf to temp path (ssh stdin — writeRemoteFile)
-    // 4: awk substitution command (ssh — runCommand)
-    // 5: write wg-forwarding.conf (ssh stdin)
-    // 6: sysctl --system (ssh)
-    // 7: systemctl enable --now wg-quick@wg0 (ssh)
-    // 8: systemctl restart wg-quick@wg0 (ssh)
-    // 9: wg show wg0 (ssh)
+    // 3: ip route show default (WAN interface detection)
+    // 4: ship placeholder wg0.conf to temp path (ssh stdin — writeRemoteFile)
+    // 5: awk substitution command (ssh — runCommand)
+    // 6: write wg-forwarding.conf (ssh stdin)
+    // 7: sysctl --system (ssh)
+    // 8: systemctl enable --now wg-quick@wg0 (ssh)
+    // 9: systemctl restart wg-quick@wg0 (ssh)
+    // 10: wg show wg0 (ssh)
     const results = [
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (1 line = server only = 0 peers)
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution (server-side)
       {stdout: '', exitCode: 0}, // write wg-forwarding.conf (stdin)
@@ -234,6 +236,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0}, // ensure server key (file exists, no-op)
       {stdout: 'EXISTINGPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0}, // write wg-forwarding.conf
@@ -264,6 +267,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0}, // force-regenerate server key
       {stdout: 'NEWPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0}, // write wg-forwarding.conf
@@ -351,6 +355,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'PUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0}, // write wg-forwarding.conf
@@ -378,6 +383,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0},
@@ -408,6 +414,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0},
@@ -446,6 +453,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0},
@@ -482,6 +490,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0},
@@ -529,6 +538,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0},
@@ -605,6 +615,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0}, // write wg-forwarding.conf
@@ -652,6 +663,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -688,6 +700,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -717,6 +730,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -746,6 +760,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -777,6 +792,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -806,6 +822,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -842,6 +859,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -874,6 +892,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -903,6 +922,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -935,6 +955,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
       {stdout: '', exitCode: 0},
@@ -1001,6 +1022,7 @@ describe('deploy', () => {
     const results = [
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0}, // write wg-forwarding.conf
@@ -1064,6 +1086,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump (0 live peers → proceed)
       {stdout: '', exitCode: 0},
       {stdout: 'PUBKEY==\n', exitCode: 0},
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0},
@@ -1120,6 +1143,7 @@ describe('deploy', () => {
     const results = [
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0}, // write wg-forwarding.conf
@@ -1152,6 +1176,7 @@ describe('deploy', () => {
       {stdout: 'server-line\n', exitCode: 0},
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0}, // write wg-forwarding.conf
@@ -1175,6 +1200,7 @@ describe('deploy', () => {
     const results = [
       {stdout: '', exitCode: 0}, // ensure server key
       {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n', exitCode: 0}, // ip route show default
       {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
       {stdout: '', exitCode: 0}, // awk substitution
       {stdout: '', exitCode: 0}, // write wg-forwarding.conf
@@ -1194,6 +1220,76 @@ describe('deploy', () => {
       // (the wipe guard dump call only happens when incoming=0)
       const dumpCalls = calls.filter(c => c.cmd.join(' ').includes('wg show wg0 dump'))
       expect(dumpCalls).toHaveLength(0)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  // ─── WAN interface detection ──────────────────────────────────────────────
+
+  it('detects WAN interface from ip route show default output and uses it in wg0.conf', async () => {
+    const calls: SpawnCall[] = []
+
+    // New call sequence (11 calls total, 0-peer roster triggers wipe guard):
+    // 0: wipe guard: wg show wg0 dump (0 live peers → proceed)
+    // 1: ensure server key
+    // 2: read server.pub
+    // 3: ip route show default (WAN interface detection → ens5)
+    // 4: ship placeholder wg0.conf to temp path (stdin)
+    // 5: awk substitution
+    // 6: write wg-forwarding.conf (stdin)
+    // 7: sysctl --system
+    // 8: systemctl enable --now
+    // 9: systemctl restart
+    // 10: wg show wg0
+    const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump
+      {stdout: '', exitCode: 0}, // ensure server key
+      {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp src 172.26.14.2 metric 100\n', exitCode: 0}, // ip route
+      {stdout: '', exitCode: 0}, // ship placeholder wg0.conf (stdin)
+      {stdout: '', exitCode: 0}, // awk substitution
+      {stdout: '', exitCode: 0}, // write wg-forwarding.conf
+      {stdout: '', exitCode: 0}, // sysctl --system
+      {stdout: '', exitCode: 0}, // systemctl enable --now
+      {stdout: '', exitCode: 0}, // systemctl restart
+      {stdout: 'interface: wg0\n  public key: FAKEPUBKEY==\n  peers: 0\n', exitCode: 0}, // wg show
+    ]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})
+
+      // The ip route show default command must have been called
+      const routeCall = calls.find(c => c.cmd.join(' ').includes('ip route show default'))
+      expect(routeCall).toBeDefined()
+
+      // The shipped wg0.conf must use ens5 (detected), NOT eth0 (hardcoded)
+      const wgConfCall = calls.find(c => c.stdin !== undefined && c.stdin.includes('[Interface]'))
+      expect(wgConfCall).toBeDefined()
+      expect(wgConfCall?.stdin).toContain('ens5')
+      expect(wgConfCall?.stdin).not.toContain('eth0')
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  it('throws a clear error when ip route show default returns empty output', async () => {
+    const calls: SpawnCall[] = []
+    const results = [
+      {stdout: 'server-line\n', exitCode: 0}, // wipe guard dump
+      {stdout: '', exitCode: 0}, // ensure server key
+      {stdout: 'FAKEPUBKEY==\n', exitCode: 0}, // read server.pub
+      {stdout: '', exitCode: 0}, // ip route show default — empty output (detection fails)
+    ]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    const {dir, peersJsonPath} = makeTempPeersDir([])
+    try {
+      await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath})).rejects.toThrow(
+        /WAN interface|ip route|default route/i,
+      )
     } finally {
       rmSync(dir, {recursive: true, force: true})
     }

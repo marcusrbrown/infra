@@ -146,3 +146,4 @@ jobs:
     secrets:
       VPN_SSH_KEY: ${{ secrets.VPN_SSH_KEY }}
       VPN_HOST: ${{ secrets.VPN_HOST }}
+      VPN_PEERS: ${{ secrets.VPN_PEERS }}

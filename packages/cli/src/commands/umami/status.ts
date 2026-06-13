@@ -5,6 +5,7 @@ import {z} from 'zod'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
+import {buildIdentityArgs} from '../../lib/ssh-identity'
 import {validateUmamiHost} from './host'
 
 declare const process: {
@@ -97,13 +98,17 @@ function defaultSpawn(
 export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defaultSpawn): Promise<UmamiStatusResult> {
   validateUmamiHost(host)
 
+  const knownHostsArgs = buildKnownHostsArgs()
+  const {args: identityArgs, cleanup} = buildIdentityArgs(process.env.UMAMI_SSH_KEY)
+
   const sshCmd = [
     'ssh',
     '-o',
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
-    ...buildKnownHostsArgs(),
+    ...knownHostsArgs,
+    ...identityArgs,
     `root@${host}`,
     `docker compose --project-directory ${COMPOSE_PROJECT_DIR} ps --format json`,
   ]
@@ -114,13 +119,20 @@ export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defau
     ...(process.env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK} : {}),
   }
 
-  const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+  let stdoutText: string
+  let stderrText: string
+  let exitCode: number
 
-  const [stdoutText, stderrText, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
+  try {
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    ;[stdoutText, stderrText, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+  } finally {
+    cleanup()
+  }
 
   if (exitCode !== 0) {
     return {

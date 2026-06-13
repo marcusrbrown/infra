@@ -1,4 +1,4 @@
-import {describe, expect, it} from 'bun:test'
+import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {getVpnStatusSummary, parseWgShowOutput, type WgShowResult} from './shared'
 
@@ -330,5 +330,125 @@ describe('WgShowResult type', () => {
     expect(result.interfaceUp).toBe(true)
     expect(result.serverPublicKey).toBe('key==')
     expect(result.peerCount).toBe(2)
+  })
+})
+
+// ─── SSH identity injection (VPN_SSH_KEY) ─────────────────────────────────────
+
+describe('getVpnWgStatus — SSH identity injection', () => {
+  let originalEnv: Record<string, string | undefined>
+
+  beforeEach(() => {
+    originalEnv = {VPN_SSH_KEY: process.env.VPN_SSH_KEY}
+  })
+
+  afterEach(() => {
+    if (originalEnv.VPN_SSH_KEY === undefined) {
+      delete process.env.VPN_SSH_KEY
+    } else {
+      process.env.VPN_SSH_KEY = originalEnv.VPN_SSH_KEY
+    }
+  })
+
+  it('includes -i <path> and IdentitiesOnly=yes in ssh argv when VPN_SSH_KEY is set', async () => {
+    const {getVpnWgStatus} = await import('./shared')
+    process.env.VPN_SSH_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n'
+
+    const wgOutput = 'interface: wg0\n  public key: key==\n  private key: (hidden)\n  listening port: 51820\n'
+    let capturedCmd: string[] = []
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const enc = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(wgOutput))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getVpnWgStatus('1.2.3.4', capturingSpawn)
+
+    const iIdx = capturedCmd.indexOf('-i')
+    expect(iIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[iIdx + 1]).toBeTruthy()
+
+    const identitiesOnlyIdx = capturedCmd.indexOf('IdentitiesOnly=yes')
+    expect(identitiesOnlyIdx).toBeGreaterThan(-1)
+  })
+
+  it('does not include -i or IdentitiesOnly=yes when VPN_SSH_KEY is absent', async () => {
+    const {getVpnWgStatus} = await import('./shared')
+    delete process.env.VPN_SSH_KEY
+
+    const wgOutput = 'interface: wg0\n  public key: key==\n  private key: (hidden)\n  listening port: 51820\n'
+    let capturedCmd: string[] = []
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const enc = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(wgOutput))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getVpnWgStatus('1.2.3.4', capturingSpawn)
+
+    expect(capturedCmd.indexOf('-i')).toBe(-1)
+    expect(capturedCmd.indexOf('IdentitiesOnly=yes')).toBe(-1)
+  })
+
+  it('cleans up the temp key file after the SSH command completes', async () => {
+    const {getVpnWgStatus} = await import('./shared')
+    const {statSync} = await import('node:fs')
+    process.env.VPN_SSH_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n'
+
+    const wgOutput = 'interface: wg0\n  public key: key==\n  private key: (hidden)\n  listening port: 51820\n'
+    let capturedKeyPath: string | undefined
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1) capturedKeyPath = cmd[iIdx + 1]
+      const enc = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(wgOutput))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getVpnWgStatus('1.2.3.4', capturingSpawn)
+
+    expect(capturedKeyPath).toBeTruthy()
+    const keyPath = capturedKeyPath
+    if (keyPath) {
+      expect(() => statSync(keyPath)).toThrow()
+    }
   })
 })

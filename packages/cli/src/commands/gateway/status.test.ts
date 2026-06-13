@@ -613,3 +613,143 @@ describe('getGatewayComposeStatus — SSH error redaction', () => {
     expect(result.error).not.toContain(secretHost.toLowerCase())
   })
 })
+
+// ─── SSH identity injection (GATEWAY_SSH_KEY) ─────────────────────────────────
+
+describe('getGatewayComposeStatus — SSH identity injection', () => {
+  let originalEnv: Record<string, string | undefined>
+
+  beforeEach(() => {
+    originalEnv = {GATEWAY_SSH_KEY: process.env.GATEWAY_SSH_KEY}
+  })
+
+  afterEach(() => {
+    if (originalEnv.GATEWAY_SSH_KEY === undefined) {
+      delete process.env.GATEWAY_SSH_KEY
+    } else {
+      process.env.GATEWAY_SSH_KEY = originalEnv.GATEWAY_SSH_KEY
+    }
+  })
+
+  it('includes -i <path> and IdentitiesOnly=yes in ssh argv when GATEWAY_SSH_KEY is set', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+    process.env.GATEWAY_SSH_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n'
+
+    let capturedCmd: string[] = []
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const enc = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(JSON.stringify([{Name: 'gateway', State: 'running', Health: 'healthy'}])))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getGatewayComposeStatus('gateway.example.com', capturingSpawn)
+
+    const iIdx = capturedCmd.indexOf('-i')
+    expect(iIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[iIdx + 1]).toBeTruthy() // path to temp key file
+
+    const identitiesOnlyIdx = capturedCmd.indexOf('IdentitiesOnly=yes')
+    expect(identitiesOnlyIdx).toBeGreaterThan(-1)
+
+    const destination = capturedCmd.find(arg => arg.includes('@'))
+    expect(destination).toBe('root@gateway.example.com')
+  })
+
+  it('does not include -i or IdentitiesOnly=yes when GATEWAY_SSH_KEY is absent', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+    delete process.env.GATEWAY_SSH_KEY
+
+    let capturedCmd: string[] = []
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const enc = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(JSON.stringify([{Name: 'gateway', State: 'running', Health: 'healthy'}])))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getGatewayComposeStatus('gateway.example.com', capturingSpawn)
+
+    expect(capturedCmd.indexOf('-i')).toBe(-1)
+    expect(capturedCmd.indexOf('IdentitiesOnly=yes')).toBe(-1)
+  })
+
+  it('cleans up the temp key file after the SSH command completes', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+    const {statSync} = await import('node:fs')
+    process.env.GATEWAY_SSH_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n'
+
+    let capturedKeyPath: string | undefined
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1) capturedKeyPath = cmd[iIdx + 1]
+      const enc = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(JSON.stringify([{Name: 'gateway', State: 'running', Health: 'healthy'}])))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getGatewayComposeStatus('gateway.example.com', capturingSpawn)
+
+    expect(capturedKeyPath).toBeTruthy()
+    const keyPath = capturedKeyPath
+    if (keyPath) {
+      expect(() => statSync(keyPath)).toThrow()
+    }
+  })
+
+  it('cleans up the temp key dir even when spawn throws synchronously', async () => {
+    const {getGatewayComposeStatus} = await import('./status')
+    const {statSync} = await import('node:fs')
+    process.env.GATEWAY_SSH_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n'
+
+    let capturedKeyPath: string | undefined
+    const throwingSpawn: SpawnFn = (cmd, _opts) => {
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1) capturedKeyPath = cmd[iIdx + 1]
+      throw new Error('spawn failed')
+    }
+
+    await expect(getGatewayComposeStatus('gateway.example.com', throwingSpawn)).rejects.toThrow('spawn failed')
+
+    expect(capturedKeyPath).toBeTruthy()
+    if (capturedKeyPath) {
+      expect(() => statSync(capturedKeyPath as string)).toThrow()
+    }
+  })
+})

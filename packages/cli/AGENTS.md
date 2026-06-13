@@ -136,6 +136,10 @@ GitHub's secrets API is write-only, so the CLI cannot verify `--key` matches the
 - **Transient-empty gate bypass.** A `gh secret list` that returns empty on a successful (zero-exit) call — scope-limited token, replication lag — looks identical to a genuinely fresh repo and silently disables both gates. After writing, setup re-lists secret and variable names and warns if a just-written name is not visible (the token's list view is unreliable, so the pre-write gates may have been bypassed). This readback catches token-scope blindness; it cannot detect whether a *different* value was overwritten, since the written name is present on readback either way.
 - **`/v1/models` validation: `owned_by` is optional.** When verifying provider/model availability, setup accepts entries with or without `owned_by`. When absent or blank, the provider is inferred from the model id prefix (`anthropic/…`, `openai/…`) or known bare-id patterns (e.g. `claude-*`, `gpt-*`). Entries that cannot be mapped to a known provider are skipped harmlessly.
 
+## SSH IDENTITY
+
+The `gateway status`, `umami status`, and `vpn status` commands materialize the app's SSH key (`GATEWAY_SSH_KEY`, `UMAMI_SSH_KEY`, `VPN_SSH_KEY`) to a 0600 temp file and pass `-i <path> -o IdentitiesOnly=yes` to SSH for deterministic auth. When the env var is unset or empty, the args are omitted and SSH falls back to the agent.
+
 ## ANTI-PATTERNS
 
 - Never use `bundledDependencies` — Bun's `.bun/` symlinks create `../../` paths that npm rejects with E415.

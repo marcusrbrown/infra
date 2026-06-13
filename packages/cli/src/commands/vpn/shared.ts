@@ -2,6 +2,7 @@ import type {StatusSummary} from '../status'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
+import {buildIdentityArgs} from '../../lib/ssh-identity'
 import {validateVpnHost} from './host'
 
 declare const process: {
@@ -79,13 +80,17 @@ export interface VpnStatusResult {
 export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn): Promise<VpnStatusResult> {
   validateVpnHost(host)
 
+  const knownHostsArgs = buildKnownHostsArgs()
+  const {args: identityArgs, cleanup} = buildIdentityArgs(process.env.VPN_SSH_KEY)
+
   const sshCmd = [
     'ssh',
     '-o',
     'BatchMode=yes',
     '-o',
     'StrictHostKeyChecking=yes',
-    ...buildKnownHostsArgs(),
+    ...knownHostsArgs,
+    ...identityArgs,
     `ubuntu@${host}`,
     'sudo wg show wg0',
   ]
@@ -96,13 +101,20 @@ export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn
     ...(process.env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK} : {}),
   }
 
-  const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+  let stdoutText: string
+  let stderrText: string
+  let exitCode: number
 
-  const [stdoutText, stderrText, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
+  try {
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    ;[stdoutText, stderrText, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+  } finally {
+    cleanup()
+  }
 
   if (exitCode !== 0) {
     const redacted = redactHost(stderrText.trim(), host) || 'unknown error'

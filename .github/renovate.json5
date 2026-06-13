@@ -72,9 +72,9 @@
       // the workspace-agent secret additions are why this gate exists.
       automerge: false,
       dependencyDashboardApproval: true,
-      // Allow v0.59.x patch/hotfix PRs; v0.60.0+ needs a deliberate source-contract pass
+      // Allow v0.62.x patch/hotfix PRs; v0.63.0+ needs a deliberate source-contract pass
       // (verify no new boot-required secrets) before the ceiling moves.
-      allowedVersions: '<0.60.0',
+      allowedVersions: '<0.63.0',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in each apps/*/upstream.json so new

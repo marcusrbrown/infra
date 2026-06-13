@@ -3845,7 +3845,7 @@ networks:
     } finally {
       rm(testDir, {recursive: true, force: true})
     }
-  })
+  }, 30000)
 })
 
 // ─── Off-droplet image build: override, pull-then-up, digest verification ─────

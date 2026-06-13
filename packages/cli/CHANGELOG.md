@@ -1,5 +1,17 @@
 # @marcusrbrown/infra
 
+## 0.10.3
+### Patch Changes
+
+
+- Update the Fro Bot gateway daemon to fro-bot/agent v0.62.0. ([#510](https://github.com/marcusrbrown/infra/pull/510))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.71` to `7.1.73` ([#505](https://github.com/marcusrbrown/infra/pull/505))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.70` to `7.1.71` ([#502](https://github.com/marcusrbrown/infra/pull/502))
+
 ## 0.10.2
 ### Patch Changes
 

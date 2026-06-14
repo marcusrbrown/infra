@@ -17,7 +17,7 @@ Where things live and where to put new code. For system shape, data flow, and in
 ├── docs/                       Brainstorms → plans → solutions (compound learning)
 ├── .agents/skills/             Agent skill context packets (load before working in a domain)
 ├── .github/                    Workflows, pinned host keys, Renovate, Copilot, repo settings
-└── .opencode/commands/         OpenCode slash commands (e.g. generate-readme)
+└── .opencode/commands/         OpenCode slash commands
 ```
 
 ## Directory Purposes
@@ -44,7 +44,7 @@ Per-domain agent context packets (`<name>/SKILL.md`). Load the relevant skill be
 
 ### `.opencode/commands/`
 
-OpenCode slash commands (Markdown). `generate-readme.md` owns `README.md` generation; this is distinct from the `generating-project-docs` skill that owns `ARCHITECTURE.md`/`STRUCTURE.md`.
+OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agents/skills/generating-project-docs/SKILL.md`) owns all generated docs — `ARCHITECTURE.md`, `STRUCTURE.md`, the root `README.md`, and per-package READMEs. Slash commands here are for other OpenCode workflows.
 
 ## Key File Locations
 

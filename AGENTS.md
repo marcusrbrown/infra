@@ -22,7 +22,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── .changeset/         Changesets config for versioning
 ├── .agents/skills/     Agent skills (goke, etc.) — load before working with that domain
 ├── .github/            Workflows, pinned host keys, Renovate, Copilot instructions
-└── .opencode/          OpenCode slash commands (generate-readme)
+└── .opencode/          OpenCode slash commands
 ```
 
 ## WHERE TO LOOK

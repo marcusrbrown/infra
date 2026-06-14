@@ -172,6 +172,67 @@ export async function deployCompose(host: string, identityFile?: string): Promis
   await run('Starting Docker Compose stack', ssh(host, `cd ${REMOTE_DIR} && docker compose up -d`, REMOTE_USER, opts))
 }
 
+/**
+ * Seeds `remote-management.secret-key` in the already-uploaded config.yaml to
+ * `managementPassword`. Only replaces when the current value is empty (idempotent
+ * on reruns where the key was already set).
+ *
+ * SECURITY: the password travels via SSH stdin only — it NEVER appears in argv
+ * of any process (local or remote). The remote command is `python3 -c '<script>'
+ * <config_path>`: the script body is in argv (not secret), the config path is in
+ * argv (not secret), and the password is read from stdin inside the python
+ * interpreter — never passed to any external command. Python's str.replace is
+ * literal (no regex), so special characters in the password are safe.
+ *
+ * The password is hex-only (randomBytes.toString('hex')), but the implementation
+ * is safe for any value that does not contain a newline (the readline delimiter).
+ */
+export async function seedRemoteSecretKey(
+  host: string,
+  managementPassword: string,
+  identityFile?: string,
+): Promise<void> {
+  const configPath = `${REMOTE_DIR}/config/config.yaml`
+  const opts = identityFile ? {identityFile} : undefined
+
+  // python3 -c: script body is in argv (not secret); config path is argv (not
+  // secret); password is read from stdin inside the interpreter — never an argv
+  // of any process. str.replace is literal (no regex), so no special-char risk.
+  // Exits 0 on success (including the no-op when already set); raises on I/O
+  // errors so the caller's `if (exitCode !== 0) throw` catches real failures.
+  //
+  // The script uses chr(39) for single-quote and chr(10) for newline so the
+  // entire script body can be safely wrapped in single quotes by the remote shell
+  // (no single-quote escaping needed, no shell injection surface).
+  const pythonScript =
+    'import sys; ' +
+    'pw = sys.stdin.readline().rstrip(chr(10)); ' +
+    'path = sys.argv[1]; ' +
+    'f=open(path); content=f.read(); f.close(); ' +
+    'needle="secret-key: "+chr(39)+chr(39); ' +
+    'content=content.replace(needle, "secret-key: "+chr(39)+pw+chr(39), 1) if needle in content else content; ' +
+    'f=open(path,"w"); f.write(content); f.close()'
+
+  const remoteCmd = `python3 -c '${pythonScript}' ${configPath}`
+
+  const proc = Bun.spawn(ssh(host, remoteCmd, REMOTE_USER, opts), {
+    stdin: 'pipe',
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+
+  // Trailing newline so python's readline() gets a terminated line.
+  proc.stdin.write(`${managementPassword}\n`)
+  proc.stdin.end()
+
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    throw new Error(`Seeding remote secret-key failed (exit ${exitCode})`)
+  }
+
+  console.log('\u001B[1;34m==>\u001B[0m Seeded remote-management.secret-key in config.yaml')
+}
+
 // ---------------------------------------------------------------------------
 // Full provisioning orchestration seam (exported for testability)
 // ---------------------------------------------------------------------------
@@ -181,6 +242,7 @@ export interface PerformProvisioningDeps {
   pinHostKeys?: typeof pinHostKeys
   copyComposeFiles?: typeof copyComposeFiles
   writeRemoteEnvFile?: typeof writeRemoteEnvFile
+  seedRemoteSecretKey?: typeof seedRemoteSecretKey
   deployCompose?: typeof deployCompose
 }
 
@@ -201,6 +263,7 @@ export async function performProvisioning(
   const resolvedPinHostKeys = deps.pinHostKeys ?? pinHostKeys
   const resolvedCopyComposeFiles = deps.copyComposeFiles ?? copyComposeFiles
   const resolvedWriteRemoteEnvFile = deps.writeRemoteEnvFile ?? writeRemoteEnvFile
+  const resolvedSeedRemoteSecretKey = deps.seedRemoteSecretKey ?? seedRemoteSecretKey
   const resolvedDeployCompose = deps.deployCompose ?? deployCompose
 
   const {identityFile, cleanup} = resolveProvisionIdentity(privateKey)
@@ -214,6 +277,7 @@ export async function performProvisioning(
     await validateDns(dropletIp)
     await resolvedCopyComposeFiles(dropletIp, identityFile)
     const managementPassword = await resolvedWriteRemoteEnvFile(dropletIp, identityFile)
+    await resolvedSeedRemoteSecretKey(dropletIp, managementPassword, identityFile)
     await resolvedDeployCompose(dropletIp, identityFile)
     return managementPassword
   } finally {

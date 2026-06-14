@@ -7,6 +7,7 @@ import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 import {
   performProvisioning,
   resolveProvisionIdentity,
+  seedRemoteSecretKey,
   validateCliproxyDomain,
   writeManagementKeyFile,
   writeRemoteEnvFile,
@@ -153,6 +154,7 @@ describe('provision-droplet', () => {
       const capturedWaitForSsh: {host: string; user: string; identityFile?: string}[] = []
       const capturedCopyComposeFiles: {host: string; identityFile?: string}[] = []
       const capturedWriteRemoteEnvFile: {host: string; identityFile?: string}[] = []
+      const capturedSeedRemoteSecretKey: {host: string; identityFile?: string}[] = []
       const capturedDeployCompose: {host: string; identityFile?: string}[] = []
 
       const fakeWaitForSsh = async (host: string, user: string, opts?: {identityFile?: string}) => {
@@ -165,6 +167,9 @@ describe('provision-droplet', () => {
         capturedWriteRemoteEnvFile.push({host, identityFile})
         return 'fake-mgmt-password'
       }
+      const fakeSeedRemoteSecretKey = async (host: string, _password: string, identityFile?: string) => {
+        capturedSeedRemoteSecretKey.push({host, identityFile})
+      }
       const fakeDeployCompose = async (host: string, identityFile?: string) => {
         capturedDeployCompose.push({host, identityFile})
       }
@@ -174,6 +179,7 @@ describe('provision-droplet', () => {
         pinHostKeys: async () => {},
         copyComposeFiles: fakeCopyComposeFiles,
         writeRemoteEnvFile: fakeWriteRemoteEnvFile,
+        seedRemoteSecretKey: fakeSeedRemoteSecretKey,
         deployCompose: fakeDeployCompose,
       })
 
@@ -185,6 +191,7 @@ describe('provision-droplet', () => {
       // All helpers must receive the same identity file path
       expect(capturedCopyComposeFiles[0]?.identityFile).toBe(wsfPath)
       expect(capturedWriteRemoteEnvFile[0]?.identityFile).toBe(wsfPath)
+      expect(capturedSeedRemoteSecretKey[0]?.identityFile).toBe(wsfPath)
       expect(capturedDeployCompose[0]?.identityFile).toBe(wsfPath)
     })
 
@@ -205,6 +212,9 @@ describe('provision-droplet', () => {
         recordIdentity(identityFile)
         return 'fake-mgmt-password'
       }
+      const fakeSeedRemoteSecretKey = async (_host: string, _password: string, identityFile?: string) => {
+        recordIdentity(identityFile)
+      }
       const fakeDeployCompose = async (_host: string, identityFile?: string) => {
         recordIdentity(identityFile)
       }
@@ -214,6 +224,7 @@ describe('provision-droplet', () => {
         pinHostKeys: async () => {},
         copyComposeFiles: fakeCopyComposeFiles,
         writeRemoteEnvFile: fakeWriteRemoteEnvFile,
+        seedRemoteSecretKey: fakeSeedRemoteSecretKey,
         deployCompose: fakeDeployCompose,
       })
 
@@ -233,6 +244,7 @@ describe('provision-droplet', () => {
       const fakeCopyComposeFiles = async (_host: string, _identityFile?: string) => {}
       const fakeWriteRemoteEnvFile = async (_host: string, _identityFile?: string): Promise<string> =>
         'fake-mgmt-password'
+      const fakeSeedRemoteSecretKey = async (_host: string, _password: string, _identityFile?: string) => {}
       const fakeDeployCompose = async (_host: string, _identityFile?: string) => {}
 
       await expect(
@@ -241,6 +253,7 @@ describe('provision-droplet', () => {
           pinHostKeys: async () => {},
           copyComposeFiles: fakeCopyComposeFiles,
           writeRemoteEnvFile: fakeWriteRemoteEnvFile,
+          seedRemoteSecretKey: fakeSeedRemoteSecretKey,
           deployCompose: fakeDeployCompose,
         }),
       ).rejects.toThrow('provisioning step failed')
@@ -259,6 +272,7 @@ describe('provision-droplet', () => {
       const fakeCopyComposeFiles = async (_host: string, _identityFile?: string) => {}
       const fakeWriteRemoteEnvFile = async (_host: string, _identityFile?: string): Promise<string> =>
         'fake-mgmt-password'
+      const fakeSeedRemoteSecretKey = async (_host: string, _password: string, _identityFile?: string) => {}
       const fakeDeployCompose = async (_host: string, _identityFile?: string) => {}
 
       await performProvisioning('1.2.3.4', undefined, {
@@ -266,6 +280,7 @@ describe('provision-droplet', () => {
         pinHostKeys: async () => {},
         copyComposeFiles: fakeCopyComposeFiles,
         writeRemoteEnvFile: fakeWriteRemoteEnvFile,
+        seedRemoteSecretKey: fakeSeedRemoteSecretKey,
         deployCompose: fakeDeployCompose,
       })
 
@@ -284,6 +299,7 @@ describe('provision-droplet', () => {
       const fakeCopyComposeFiles = async (_host: string, _identityFile?: string) => {}
       const fakeWriteRemoteEnvFile = async (_host: string, _identityFile?: string): Promise<string> =>
         'fake-mgmt-password'
+      const fakeSeedRemoteSecretKey = async (_host: string, _password: string, _identityFile?: string) => {}
       const fakeDeployCompose = async (_host: string, _identityFile?: string) => {}
 
       await performProvisioning('1.2.3.4', undefined, {
@@ -291,10 +307,208 @@ describe('provision-droplet', () => {
         pinHostKeys: fakePinHostKeys,
         copyComposeFiles: fakeCopyComposeFiles,
         writeRemoteEnvFile: fakeWriteRemoteEnvFile,
+        seedRemoteSecretKey: fakeSeedRemoteSecretKey,
         deployCompose: fakeDeployCompose,
       })
 
       expect(callOrder.indexOf('waitForSsh')).toBeLessThan(callOrder.indexOf('pinHostKeys'))
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // seedRemoteSecretKey — pipes password via stdin, never in argv
+  // ---------------------------------------------------------------------------
+
+  describe('seedRemoteSecretKey', () => {
+    it('pipes the management password through stdin, never in the command argv', async () => {
+      const password = 'deadbeef1234567890abcdef'
+      let capturedStdinWrite: string | undefined
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
+        stdin: {
+          write: (chunk: string) => {
+            capturedStdinWrite = (capturedStdinWrite ?? '') + chunk
+          },
+          end: () => {},
+        },
+        exited: Promise.resolve(0),
+      } as unknown as ReturnType<typeof Bun.spawn>)
+
+      // Capture argv via the spy's call args after the call
+      await seedRemoteSecretKey('1.2.3.4', password)
+      const capturedArgv = spawnSpy.mock.calls[0]?.[0] as string[]
+
+      spawnSpy.mockRestore()
+
+      // Password must appear in stdin, never in argv
+      expect(capturedStdinWrite).toContain(password)
+      expect(capturedArgv?.join(' ')).not.toContain(password)
+      // Password must end with a newline so python's readline() gets a terminated line
+      expect(capturedStdinWrite?.endsWith('\n')).toBe(true)
+    })
+
+    it('uses python3 -c to run the replacement in-process (secret never in any external argv)', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
+        stdin: {write: () => {}, end: () => {}},
+        exited: Promise.resolve(0),
+      } as unknown as ReturnType<typeof Bun.spawn>)
+
+      await seedRemoteSecretKey('1.2.3.4', 'abc123')
+      const capturedArgv = spawnSpy.mock.calls[0]?.[0] as string[]
+      const remoteCmd = capturedArgv?.at(-1) ?? ''
+      spawnSpy.mockRestore()
+
+      // Must use python3 -c (script body in argv, secret read from stdin)
+      expect(remoteCmd).toContain('python3 -c')
+      // Must NOT use sed or awk (those would receive the secret as argv)
+      expect(remoteCmd).not.toContain('sed ')
+      expect(remoteCmd).not.toContain('awk ')
+      // Must NOT use shell `read` to capture the password into a shell variable
+      // that then gets interpolated into an external command
+      expect(remoteCmd).not.toMatch(/read\s+-r\s+PW/)
+    })
+
+    it('remote command does not interpolate the password into any external-command argument', async () => {
+      const password = 'deadbeef1234567890abcdef'
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
+        stdin: {write: () => {}, end: () => {}},
+        exited: Promise.resolve(0),
+      } as unknown as ReturnType<typeof Bun.spawn>)
+
+      await seedRemoteSecretKey('1.2.3.4', password)
+      const capturedArgv = spawnSpy.mock.calls[0]?.[0] as string[]
+      spawnSpy.mockRestore()
+
+      // The entire SSH argv (joined) must not contain the password value
+      const argvStr = capturedArgv?.join(' ') ?? ''
+      expect(argvStr).not.toContain(password)
+      // The remote command must reference the config path (not secret)
+      expect(argvStr).toContain('/opt/cliproxy/config/config.yaml')
+    })
+
+    it('targets the remote config.yaml path in the SSH command', async () => {
+      const password = 'deadbeef1234567890abcdef'
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
+        stdin: {write: () => {}, end: () => {}},
+        exited: Promise.resolve(0),
+      } as unknown as ReturnType<typeof Bun.spawn>)
+
+      await seedRemoteSecretKey('1.2.3.4', password)
+
+      const capturedArgv = spawnSpy.mock.calls[0]?.[0] as string[]
+      spawnSpy.mockRestore()
+
+      // The remote command must reference the config.yaml path
+      const argvStr = capturedArgv?.join(' ') ?? ''
+      expect(argvStr).toContain('/opt/cliproxy/config/config.yaml')
+    })
+
+    it('rejects with an error when the SSH command fails', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
+        stdin: {write: () => {}, end: () => {}},
+        exited: Promise.resolve(1),
+      } as unknown as ReturnType<typeof Bun.spawn>)
+
+      await expect(seedRemoteSecretKey('1.2.3.4', 'some-password')).rejects.toThrow(/exit/)
+
+      spawnSpy.mockRestore()
+    })
+
+    it('passes the identity file to the SSH command when provided', async () => {
+      const password = 'deadbeef1234567890abcdef'
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
+        stdin: {write: () => {}, end: () => {}},
+        exited: Promise.resolve(0),
+      } as unknown as ReturnType<typeof Bun.spawn>)
+
+      await seedRemoteSecretKey('1.2.3.4', password, '/tmp/fake-key')
+
+      const capturedArgv = spawnSpy.mock.calls[0]?.[0] as string[]
+      spawnSpy.mockRestore()
+
+      expect(capturedArgv?.join(' ')).toContain('/tmp/fake-key')
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // performProvisioning — seedRemoteSecretKey ordering
+  // ---------------------------------------------------------------------------
+
+  describe('SSH provisioning orchestration — seedRemoteSecretKey ordering', () => {
+    it('calls seedRemoteSecretKey after copyComposeFiles and writeRemoteEnvFile, before deployCompose', async () => {
+      const callOrder: string[] = []
+
+      await performProvisioning('1.2.3.4', undefined, {
+        waitForSsh: async () => {
+          callOrder.push('waitForSsh')
+        },
+        pinHostKeys: async () => {
+          callOrder.push('pinHostKeys')
+        },
+        copyComposeFiles: async () => {
+          callOrder.push('copyComposeFiles')
+        },
+        writeRemoteEnvFile: async () => {
+          callOrder.push('writeRemoteEnvFile')
+          return 'fake-pw'
+        },
+        seedRemoteSecretKey: async () => {
+          callOrder.push('seedRemoteSecretKey')
+        },
+        deployCompose: async () => {
+          callOrder.push('deployCompose')
+        },
+      })
+
+      const seedIdx = callOrder.indexOf('seedRemoteSecretKey')
+      const uploadIdx = callOrder.indexOf('copyComposeFiles')
+      const envIdx = callOrder.indexOf('writeRemoteEnvFile')
+      const composeIdx = callOrder.indexOf('deployCompose')
+
+      expect(seedIdx).toBeGreaterThan(uploadIdx)
+      expect(seedIdx).toBeGreaterThan(envIdx)
+      expect(seedIdx).toBeLessThan(composeIdx)
+    })
+
+    it('passes the management password from writeRemoteEnvFile to seedRemoteSecretKey', async () => {
+      let capturedPassword: string | undefined
+      let capturedHost: string | undefined
+
+      await performProvisioning('5.6.7.8', undefined, {
+        waitForSsh: async () => {},
+        pinHostKeys: async () => {},
+        copyComposeFiles: async () => {},
+        writeRemoteEnvFile: async () => 'the-generated-password',
+        seedRemoteSecretKey: async (host: string, password: string) => {
+          capturedHost = host
+          capturedPassword = password
+        },
+        deployCompose: async () => {},
+      })
+
+      expect(capturedPassword).toBe('the-generated-password')
+      expect(capturedHost).toBe('5.6.7.8')
+    })
+
+    it('threads identity file through seedRemoteSecretKey when key is set', async () => {
+      let capturedIdentityFile: string | undefined
+
+      await performProvisioning('1.2.3.4', FAKE_PRIVATE_KEY, {
+        waitForSsh: async (_host, _user, opts) => {
+          capturedIdentityFile = opts?.identityFile
+        },
+        pinHostKeys: async () => {},
+        copyComposeFiles: async () => {},
+        writeRemoteEnvFile: async () => 'fake-pw',
+        seedRemoteSecretKey: async (_host, _password, identityFile) => {
+          // identityFile must match what waitForSsh received
+          expect(identityFile).toBe(capturedIdentityFile)
+        },
+        deployCompose: async () => {},
+      })
     })
   })
 

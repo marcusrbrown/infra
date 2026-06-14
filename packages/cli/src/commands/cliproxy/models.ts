@@ -1,3 +1,4 @@
+import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 
 import {z} from 'zod'
@@ -137,4 +138,26 @@ export async function cliproxyModelsAction(options: ModelsOptions, ctx: ActionCt
     ctx.console.error(message)
     ctx.process.exit(1)
   }
+}
+
+export function registerCliproxyModels(cli: ReturnType<typeof goke>): void {
+  cli
+    .command('cliproxy models [provider]', 'List the models CLIProxyAPI serves.')
+    .option(
+      '--url [url]',
+      z.string().describe('Base URL for CLIProxyAPI. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.'),
+    )
+    .option('--key [key]', z.string().describe('API key (bearer). Falls back to CLIPROXY_API_KEY when omitted.'))
+    .option('--verbose', 'Show owned_by and created date for each model.')
+    .example('# List all models served by CLIProxyAPI')
+    .example('infra cliproxy models')
+    .example('# Filter to Anthropic models only')
+    .example('infra cliproxy models anthropic')
+    .example('# Show verbose output with owned_by and created date')
+    .example('infra cliproxy models --verbose')
+    .example('# Filter to OpenAI models with verbose output')
+    .example('infra cliproxy models openai --verbose')
+    .action((provider, options, ctx) =>
+      cliproxyModelsAction({...options, provider: provider as string | undefined}, ctx),
+    )
 }

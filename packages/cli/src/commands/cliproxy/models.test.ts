@@ -1,7 +1,8 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
+import {goke} from 'goke'
 
 import {createCapturedCtx, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
-import {cliproxyModelsAction} from './models'
+import {cliproxyModelsAction, registerCliproxyModels} from './models'
 
 const originalFetch = globalThis.fetch
 
@@ -325,5 +326,31 @@ describe('cliproxyModelsAction — ambient key not forwarded to untrusted URL', 
       const allOutput = [...captured.stdout, ...captured.stderr].join('\n')
       expect(allOutput).not.toContain('ambient-secret-key')
     }
+  })
+})
+
+describe('registerCliproxyModels — help output and command discovery', () => {
+  it('shows [provider] positional, --url, --key, and --verbose in help text', () => {
+    const cli = goke('infra')
+    registerCliproxyModels(cli)
+    cli.help()
+
+    const helpText = cli.helpText()
+
+    expect(helpText).toContain('cliproxy models')
+    expect(helpText).toContain('[provider]')
+    expect(helpText).toContain('--url [url]')
+    expect(helpText).toContain('--key [key]')
+    expect(helpText).toContain('--verbose')
+  })
+
+  it('command is discoverable in the registered cliproxy group', () => {
+    const cli = goke('infra')
+    registerCliproxyModels(cli)
+    cli.help()
+
+    const helpText = cli.helpText()
+
+    expect(helpText).toContain('List the models CLIProxyAPI serves.')
   })
 })

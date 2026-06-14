@@ -45,6 +45,7 @@ Manage the CLIProxyAPI proxy on `cliproxy.fro.bot`.
 | Subcommand        | Description                                                              |
 | ----------------- | ------------------------------------------------------------------------ |
 | `cliproxy status` | HTTP reachability, usage stats, version                                  |
+| `cliproxy models` | List models served at /v1/models; optional `[provider]` filter           |
 | `cliproxy deploy` | Trigger deployment (GitHub Actions by default; `--local` for direct SSH) |
 | `cliproxy config` | Get or set proxy configuration via the management API                    |
 | `cliproxy keys`   | List, add, or remove API keys via the management API                     |
@@ -54,6 +55,8 @@ Manage the CLIProxyAPI proxy on `cliproxy.fro.bot`.
 
 ```bash
 bunx @marcusrbrown/infra cliproxy status
+bunx @marcusrbrown/infra cliproxy models
+bunx @marcusrbrown/infra cliproxy models anthropic
 bunx @marcusrbrown/infra cliproxy deploy
 bunx @marcusrbrown/infra cliproxy config get
 bunx @marcusrbrown/infra cliproxy config set

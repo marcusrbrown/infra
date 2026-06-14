@@ -28,6 +28,7 @@ src/commands/
 ├── cliproxy/
 │   ├── index.ts      → registerCliproxyCommands(cli)
 │   ├── status.ts     → registerCliproxyStatus(cli)
+│   ├── models.ts     → registerCliproxyModels(cli)
 │   ├── deploy.ts     → registerCliproxyDeploy(cli)
 │   ├── config.ts     → registerCliproxyConfig(cli)
 │   ├── keys.ts       → registerCliproxyKeys(cli)
@@ -82,7 +83,7 @@ The MCP server (`mcp.ts`) exposes a curated subset of commands as MCP tools via 
 
 Use the shared `ActionCtx` type from `src/lib/action-ctx.ts` — a structural subtype of `GokeExecutionContext` that captures exactly the surface actions consume. `createCapturedCtx()`, `expectCapturedToInclude()`, and `MockProcessExit` remain in `src/__test__/mcp-ctx-fixture.ts` for test use only. Action bodies are exported as named functions (e.g., `gatewayStatusAction`, `cliproxyKeysListAction`) and the `.action(...)` callback delegates to them, so Tier-2 tests invoke actions directly with `createCapturedCtx()`.
 
-**Current MCP surface = the 5 read-only status tools (all Mode A).** The 6 mutating/secret-disclosing commands (`gateway backup`, `cliproxy keys list`/`add`/`remove`, `cliproxy config get`/`set`) are **source-gated out of `MCP_ALLOWLIST`** — never registered as MCP tools, available via direct CLI only. The Mode B/C and mutation-verification guidance below documents the capture *contract* and remains the bar for any future capturable command; the specific commands it cites are now CLI-only, not MCP-exposed.
+**Current MCP surface = 6 read-only tools (all Mode A): the 5 status tools plus `cliproxy models`.** The 6 mutating/secret-disclosing commands (`gateway backup`, `cliproxy keys list`/`add`/`remove`, `cliproxy config get`/`set`) are **source-gated out of `MCP_ALLOWLIST`** — never registered as MCP tools, available via direct CLI only. The Mode B/C and mutation-verification guidance below documents the capture *contract* and remains the bar for any future capturable command; the specific commands it cites are now CLI-only, not MCP-exposed.
 
 **Mode C (structured-return commands).** The structured-return contract: a command returns structured data alongside ctx-printed text so MCP consumers get both formatted output AND parseable JSON in the `CallToolResult`. Two commands were designed for it before being source-gated to CLI-only:
 

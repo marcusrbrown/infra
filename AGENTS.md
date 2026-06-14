@@ -35,6 +35,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Trigger deploy | `bunx @marcusrbrown/infra keeweb deploy` | Remote (default) or `--local` |
 | Open KeeWeb | `bunx @marcusrbrown/infra keeweb open` | Opens in browser, fire-and-forget |
 | Check proxy health | `bunx @marcusrbrown/infra cliproxy status` | HTTP, usage stats, version |
+| List proxy models | `bunx @marcusrbrown/infra cliproxy models [provider]` | Models at /v1/models; filter to `anthropic` or `openai` |
 | Manage proxy | `bunx @marcusrbrown/infra cliproxy config|keys|login` | Management API |
 | Trigger proxy deploy | `bunx @marcusrbrown/infra cliproxy deploy` | Remote (default) or `--local` |
 | Open proxy TUI | `bunx @marcusrbrown/infra cliproxy open` | SSH + interactive TUI |
@@ -111,6 +112,8 @@ bunx @marcusrbrown/infra keeweb status          # Check deploy health
 bunx @marcusrbrown/infra keeweb deploy          # Trigger deploy (GitHub Actions)
 bunx @marcusrbrown/infra keeweb open              # Open KeeWeb in browser
 bunx @marcusrbrown/infra cliproxy status          # Check proxy health
+bunx @marcusrbrown/infra cliproxy models          # List models at /v1/models
+bunx @marcusrbrown/infra cliproxy models anthropic  # Filter to Anthropic models
 bunx @marcusrbrown/infra cliproxy deploy          # Trigger proxy deploy (GitHub Actions)
 bunx @marcusrbrown/infra cliproxy open            # Open proxy TUI via SSH
 bunx @marcusrbrown/infra cliproxy setup           # Onboard repo to CLIProxyAPI

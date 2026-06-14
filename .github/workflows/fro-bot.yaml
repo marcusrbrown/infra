@@ -579,3 +579,8 @@ jobs:
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
           prompt: ${{ env.PROMPT }}
           timeout: 0
+          # The daily schedule reuses one per-cron session that grows unbounded and
+          # eventually no-ops. Skipping the session cache on the schedule run starts a
+          # fresh session so each autohealing pass executes and posts its report.
+          # Other triggers keep cache continuity for their issue/PR threads.
+          skip-cache: ${{ github.event_name == 'schedule' }}

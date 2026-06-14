@@ -323,12 +323,10 @@ describe('provision-droplet', () => {
     it('pipes the management password through stdin, never in the command argv', async () => {
       const password = 'deadbeef1234567890abcdef'
       let capturedStdinWrite: string | undefined
-      let capturedArgv: string[] | undefined
 
       const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
         stdin: {
           write: (chunk: string) => {
-            capturedArgv ??= []
             capturedStdinWrite = (capturedStdinWrite ?? '') + chunk
           },
           end: () => {},
@@ -338,30 +336,55 @@ describe('provision-droplet', () => {
 
       // Capture argv via the spy's call args after the call
       await seedRemoteSecretKey('1.2.3.4', password)
-      capturedArgv = spawnSpy.mock.calls[0]?.[0] as string[]
+      const capturedArgv = spawnSpy.mock.calls[0]?.[0] as string[]
 
       spawnSpy.mockRestore()
 
       // Password must appear in stdin, never in argv
       expect(capturedStdinWrite).toContain(password)
       expect(capturedArgv?.join(' ')).not.toContain(password)
-      // Trailing newline so the remote `read -r` returns 0 and the seed runs
-      // (without it, read exits non-zero at EOF and the sed silently no-ops).
+      // Password must end with a newline so python's readline() gets a terminated line
       expect(capturedStdinWrite?.endsWith('\n')).toBe(true)
     })
 
-    it('uses an if/grep guard (not || true) so a real sed failure surfaces', async () => {
+    it('uses python3 -c to run the replacement in-process (secret never in any external argv)', async () => {
       const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
         stdin: {write: () => {}, end: () => {}},
         exited: Promise.resolve(0),
       } as unknown as ReturnType<typeof Bun.spawn>)
 
       await seedRemoteSecretKey('1.2.3.4', 'abc123')
-      const remoteCmd = (spawnSpy.mock.calls[0]?.[0] as string[]).at(-1) ?? ''
+      const capturedArgv = spawnSpy.mock.calls[0]?.[0] as string[]
+      const remoteCmd = capturedArgv?.at(-1) ?? ''
       spawnSpy.mockRestore()
 
-      expect(remoteCmd).toContain('if grep -q')
-      expect(remoteCmd).not.toContain('|| true')
+      // Must use python3 -c (script body in argv, secret read from stdin)
+      expect(remoteCmd).toContain('python3 -c')
+      // Must NOT use sed or awk (those would receive the secret as argv)
+      expect(remoteCmd).not.toContain('sed ')
+      expect(remoteCmd).not.toContain('awk ')
+      // Must NOT use shell `read` to capture the password into a shell variable
+      // that then gets interpolated into an external command
+      expect(remoteCmd).not.toMatch(/read\s+-r\s+PW/)
+    })
+
+    it('remote command does not interpolate the password into any external-command argument', async () => {
+      const password = 'deadbeef1234567890abcdef'
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
+        stdin: {write: () => {}, end: () => {}},
+        exited: Promise.resolve(0),
+      } as unknown as ReturnType<typeof Bun.spawn>)
+
+      await seedRemoteSecretKey('1.2.3.4', password)
+      const capturedArgv = spawnSpy.mock.calls[0]?.[0] as string[]
+      spawnSpy.mockRestore()
+
+      // The entire SSH argv (joined) must not contain the password value
+      const argvStr = capturedArgv?.join(' ') ?? ''
+      expect(argvStr).not.toContain(password)
+      // The remote command must reference the config path (not secret)
+      expect(argvStr).toContain('/opt/cliproxy/config/config.yaml')
     })
 
     it('targets the remote config.yaml path in the SSH command', async () => {

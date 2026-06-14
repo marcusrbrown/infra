@@ -177,13 +177,15 @@ export async function deployCompose(host: string, identityFile?: string): Promis
  * `managementPassword`. Only replaces when the current value is empty (idempotent
  * on reruns where the key was already set).
  *
- * SECURITY: the password travels via SSH stdin only — it never appears in argv.
- * A remote shell reads the password from stdin into a variable, then uses sed
- * with that variable to rewrite the config. The password value is never in any
- * argv array — only the variable reference `$PW` appears in the command string.
+ * SECURITY: the password travels via SSH stdin only — it NEVER appears in argv
+ * of any process (local or remote). The remote command is `python3 -c '<script>'
+ * <config_path>`: the script body is in argv (not secret), the config path is in
+ * argv (not secret), and the password is read from stdin inside the python
+ * interpreter — never passed to any external command. Python's str.replace is
+ * literal (no regex), so special characters in the password are safe.
  *
- * The password is hex-only (randomBytes.toString('hex')), so it contains no
- * characters that could break the sed expression delimiter or the YAML value.
+ * The password is hex-only (randomBytes.toString('hex')), but the implementation
+ * is safe for any value that does not contain a newline (the readline delimiter).
  */
 export async function seedRemoteSecretKey(
   host: string,
@@ -193,15 +195,25 @@ export async function seedRemoteSecretKey(
   const configPath = `${REMOTE_DIR}/config/config.yaml`
   const opts = identityFile ? {identityFile} : undefined
 
-  // Shell reads the password from stdin into $PW (never in argv), then replaces
-  // `secret-key: ''` only when it is currently empty. The grep guard makes reruns
-  // a no-op; an `if` block (not `&&  || true`) lets a genuine sed failure surface
-  // as a non-zero exit instead of being masked. sed delimiter is | (password is
-  // hex, no | chars).
-  const remoteCmd =
-    `IFS= read -r PW; ` +
-    `if grep -q "secret-key: ''" ${configPath}; then ` +
-    `sed -i "s|secret-key: ''|secret-key: '$PW'|" ${configPath}; fi`
+  // python3 -c: script body is in argv (not secret); config path is argv (not
+  // secret); password is read from stdin inside the interpreter — never an argv
+  // of any process. str.replace is literal (no regex), so no special-char risk.
+  // Exits 0 on success (including the no-op when already set); raises on I/O
+  // errors so the caller's `if (exitCode !== 0) throw` catches real failures.
+  //
+  // The script uses chr(39) for single-quote and chr(10) for newline so the
+  // entire script body can be safely wrapped in single quotes by the remote shell
+  // (no single-quote escaping needed, no shell injection surface).
+  const pythonScript =
+    'import sys; ' +
+    'pw = sys.stdin.readline().rstrip(chr(10)); ' +
+    'path = sys.argv[1]; ' +
+    'f=open(path); content=f.read(); f.close(); ' +
+    'needle="secret-key: "+chr(39)+chr(39); ' +
+    'content=content.replace(needle, "secret-key: "+chr(39)+pw+chr(39), 1) if needle in content else content; ' +
+    'f=open(path,"w"); f.write(content); f.close()'
+
+  const remoteCmd = `python3 -c '${pythonScript}' ${configPath}`
 
   const proc = Bun.spawn(ssh(host, remoteCmd, REMOTE_USER, opts), {
     stdin: 'pipe',
@@ -209,8 +221,7 @@ export async function seedRemoteSecretKey(
     stderr: 'inherit',
   })
 
-  // Trailing newline so `read -r` sees a terminated line and returns 0 — without
-  // it, read exits non-zero at EOF and the seed silently no-ops.
+  // Trailing newline so python's readline() gets a terminated line.
   proc.stdin.write(`${managementPassword}\n`)
   proc.stdin.end()
 

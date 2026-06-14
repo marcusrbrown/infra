@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.11.2
+### Patch Changes
+
+
+- Update the gateway daemon (`fro-bot/agent`) to v0.63.0. ([#526](https://github.com/marcusrbrown/infra/pull/526))
+
 ## 0.11.1
 ### Patch Changes
 

@@ -522,7 +522,6 @@ jobs:
           !endsWith(github.event.pull_request.user.login || '', '[bot]') &&
           (github.event.pull_request.user.login || '') != 'fro-bot'
         ) ||
-        github.event_name == 'schedule' ||
         github.event_name == 'workflow_dispatch' ||
         (
           (github.event_name == 'issue_comment' ||
@@ -579,3 +578,19 @@ jobs:
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
           prompt: ${{ env.PROMPT }}
           timeout: 0
+
+  # The daily schedule self-dispatches so each autohealing run executes on workflow_dispatch,
+  # which the upstream harness keys to a fresh per-run session. A direct schedule trigger
+  # reuses one stable per-cron session that grows unbounded and eventually no-ops.
+  dispatch-daily:
+    name: Dispatch daily autohealing run
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch fresh daily autohealing run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run fro-bot.yaml --ref main

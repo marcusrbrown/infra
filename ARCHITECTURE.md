@@ -23,8 +23,8 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 | App deploy scripts | `apps/<name>/src/deploy.ts` (`main`/`deploy`) — except keeweb |
 | KeeWeb build + deploy | `apps/keeweb/src/build.ts`, `apps/keeweb/deploy.sh` |
 | Droplet provisioning | `apps/<name>/server/provision-droplet.ts` (cliproxy, gateway, umami) |
-| VPN provisioning (Lightsail) | `apps/vpn/server/provision-droplet.ts` — `@aws-sdk/client-lightsail`; resolves blueprint/bundle live, set-exact firewall, imports Ed25519 key, installs WireGuard, pins IP host key |
-| VPN peer model | `packages/shared/vpn/peers.ts` (`readPeers`, `writePeers`, `renderServerConfig`, `Peer`) |
+| VPN provisioning (Lightsail) | `apps/vpn/server/provision.ts` — `@aws-sdk/client-lightsail`; resolves blueprint/bundle live, set-exact firewall, imports Ed25519 key, installs WireGuard, pins IP host key |
+| VPN peer model | `packages/cli/src/commands/vpn/peers.ts` (`readPeers`, `writePeers`, `parsePeersJson`, `renderServerConfig`, `Peer`), exported as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn/src/deploy.ts` |
 | Shared SSH/SCP/DO helpers | `packages/shared/server/droplet-helpers.ts` (`ssh`, `scp`, `waitForSsh`, `getSshFingerprint`, `pinHostKeys`, `materializeIdentityFile`) |
 | Gateway upstream daemon pin | `apps/gateway/upstream.json` |
 | Per-app host validators | `apps/<name>/src/host.ts` and `packages/cli/src/commands/<app>/host.ts` |
@@ -76,7 +76,7 @@ Enforceable rules. Many are gated by `packages/cli/src/conventions.test.ts`, ESL
 
 Integration-level patterns; for the mechanical file layout see [`STRUCTURE.md`](STRUCTURE.md).
 
-- **New deployable app** → create `apps/<name>/` mirroring the closest existing app (`apps/cliproxy/` for a Docker-Compose droplet app, `apps/vpn/` for a native-systemd AWS Lightsail app): Compose config or deploy script, `src/deploy.ts`, `server/provision-droplet.ts` (using `packages/shared/server/droplet-helpers.ts` for SSH helpers, or `@aws-sdk/client-lightsail` for Lightsail), `src/host.ts`. Add it to `package.json` `workspaces`, add `provision:<name>` / `deploy:<name>` root scripts, add a CLI command group under `packages/cli/src/commands/<name>/`, add a gated `deploy-<name>.yaml` workflow wired into `deploy.yaml`'s paths-filter, create the `<name>` GitHub Environment, and add `apps/<name>/AGENTS.md`.
+- **New deployable app** → create `apps/<name>/` mirroring the closest existing app (`apps/cliproxy/` for a Docker-Compose droplet app, `apps/vpn/` for a native-systemd AWS Lightsail app): Compose config or deploy script, `src/deploy.ts`, `server/provision.ts` (using `packages/shared/server/droplet-helpers.ts` for SSH helpers, or `@aws-sdk/client-lightsail` for Lightsail), `src/host.ts`. New provisioners use `provision.ts`; the existing DigitalOcean apps keep their `provision-droplet.ts` filenames. Add it to `package.json` `workspaces`, add `provision:<name>` / `deploy:<name>` root scripts, add a CLI command group under `packages/cli/src/commands/<name>/`, add a gated `deploy-<name>.yaml` workflow wired into `deploy.yaml`'s paths-filter, create the `<name>` GitHub Environment, and add `apps/<name>/AGENTS.md`.
 - **New CLI command group** → add `register<Name>Commands` and a `commands/<name>/` directory with per-action files and a barrel `index.ts`; register it in `packages/cli/src/cli.ts`. Expose a command over MCP only by adding it to `MCP_ALLOWLIST`, and only if it is read-only.
-- **New shared provisioning helper** → add it to `packages/shared/server/droplet-helpers.ts` with a colocated test; consume it from each `provision-droplet.ts`.
+- **New shared provisioning helper** → add it to `packages/shared/server/droplet-helpers.ts` with a colocated test; consume it from each app's provisioning script (`provision-droplet.ts` for cliproxy/gateway/umami, `provision.ts` for vpn).
 - **New deploy workflow** → copy an existing `deploy-<app>.yaml`, keep the per-app Environment gate and `paths-filter` negations, and wire it into `deploy.yaml`.

@@ -38,6 +38,7 @@ import {createMcpAction} from '@goke/mcp'
 export const MCP_ALLOWLIST: ReadonlySet<string> = new Set([
   'gateway status',
   'cliproxy status',
+  'cliproxy models',
   'keeweb status',
   'umami status',
   'vpn status',

@@ -76,6 +76,13 @@ Commands:
     --host [host]                      CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
 
 
+  cliproxy models [provider]           List the models CLIProxyAPI serves.
+
+    --url [url]                        Base URL for CLIProxyAPI. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
+    --key [key]                        API key (bearer). Falls back to CLIPROXY_API_KEY when omitted.
+    --verbose                          Show owned_by and created date for each model.
+
+
   cliproxy open                        Launch CLIProxyAPI TUI dashboard via SSH.
 
     --host [host]                      SSH host for CLIProxyAPI server. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.

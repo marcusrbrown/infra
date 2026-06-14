@@ -44,7 +44,7 @@ operator (CLI) or agent (MCP)
   → result captured via ctx (MCP) or printed (terminal)
 ```
 
-**MCP bridge:** `registerMcp` exposes only the `MCP_ALLOWLIST` set — `gateway status`, `cliproxy status`, `keeweb status`, `umami status`, `vpn status`, and unified `status`. All mutating commands (keys, config, deploy, backup, logs, client management) are source-gated out of MCP. Allowlisted actions thread `ctx` (`packages/cli/src/lib/action-ctx.ts`) so captured output reaches the agent; global `console`/`process.stdout` bypass capture and must not be used in MCP-exposed bodies.
+**MCP bridge:** `registerMcp` exposes only the `MCP_ALLOWLIST` set — `gateway status`, `cliproxy status`, `cliproxy models`, `keeweb status`, `umami status`, `vpn status`, and unified `status`. All mutating commands (keys, config, deploy, backup, logs, client management) are source-gated out of MCP. Allowlisted actions thread `ctx` (`packages/cli/src/lib/action-ctx.ts`) so captured output reaches the agent; global `console`/`process.stdout` bypass capture and must not be used in MCP-exposed bodies.
 
 **Deploy pipeline:** a push to `main` triggers `.github/workflows/deploy.yaml`, which runs `dorny/paths-filter` (`predicate-quantifier: every`) and routes to the matching `deploy-<app>.yaml`. Each app deploy waits at its per-app GitHub Environment approval gate before touching the droplet.
 

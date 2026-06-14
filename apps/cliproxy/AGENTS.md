@@ -24,7 +24,7 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 ## DOCKER STACK
 
 - **Caddy**: HTTPS termination, auto Let's Encrypt. `restart: unless-stopped`.
-- **cli-proxy-api**: `eceasy/cli-proxy-api` v7.1.56 (pinned digest, Renovate-managed). Debian bookworm base (v7.1.54+, no wget/curl). `restart: unless-stopped`. No container healthcheck — the upstream Debian image ships no probe tools; Caddy probes the backend instead (see below).
+- **cli-proxy-api**: `eceasy/cli-proxy-api` v7.2.2 (pinned digest, Renovate-managed). Debian bookworm base (v7.1.54+, no wget/curl). `restart: unless-stopped`. No container healthcheck — the upstream Debian image ships no probe tools; Caddy probes the backend instead (see below).
 - **Healthcheck**: lives on the `caddy` service, not `cli-proxy-api`. Caddy (alpine, has wget) runs `wget --spider -q http://cli-proxy-api:8317/healthz` across the compose network. `docker compose up -d --wait` gates on Caddy-healthy, which transitively proves the proxy is serving.
 - **Volumes**: `caddy_data`, `caddy_config`, `cliproxy_auth` (OAuth tokens persist here across container recreates).
 - **Env file**: `MANAGEMENT_PASSWORD` injected from host `.env` into the container.

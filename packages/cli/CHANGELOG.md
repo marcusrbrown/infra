@@ -1,5 +1,20 @@
 # @marcusrbrown/infra
 
+## 0.11.3
+### Patch Changes
+
+
+- 📦 Update npm dependency `all` ([#534](https://github.com/marcusrbrown/infra/pull/534))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.75` to `7.1.76` ([#529](https://github.com/marcusrbrown/infra/pull/529))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.1.76` to `7.2.1` ([#532](https://github.com/marcusrbrown/infra/pull/532))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.1` to `7.2.2` ([#533](https://github.com/marcusrbrown/infra/pull/533))
+
 ## 0.11.2
 ### Patch Changes
 

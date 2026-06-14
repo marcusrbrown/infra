@@ -1,7 +1,7 @@
 ---
 name: generating-project-docs
-description: Use when creating, refreshing, or updating this repo's system docs — ARCHITECTURE.md, STRUCTURE.md, or per-package READMEs under apps/ and packages/ (not the root README)
-argument-hint: "[architecture|structure|readme <package>|all|section-name]"
+description: Use when creating, refreshing, or updating this repo's generated documentation — ARCHITECTURE.md, STRUCTURE.md, the root README.md, or per-package READMEs under apps/ and packages/. Use after a new app, package, CLI command/subcommand, deploy contract, or workflow lands, or when fixing documentation drift.
+argument-hint: "[architecture|structure|readme|readme <package>|root-readme|all|section-name]"
 ---
 
 # Generating Project Documentation
@@ -14,25 +14,26 @@ This is a Bun-workspace monorepo of personal infrastructure deploys (apps under 
 
 If you cannot point at a file or command that justifies a sentence, do not write it.
 
-**Scope:** This skill owns three doc kinds:
+**Scope:** This skill owns FOUR doc kinds:
 - `ARCHITECTURE.md` and `STRUCTURE.md` (root-level, agent-facing system docs)
+- The **root** `README.md` (project front door: overview, prerequisites, quick start, per-package summaries, CI/CD, links to ARCHITECTURE/STRUCTURE)
 - Per-package READMEs: `apps/<name>/README.md` and `packages/<name>/README.md`
 
-It does NOT own the **root** `README.md` — the `/generate-readme` OpenCode command (`.opencode/commands/generate-readme.md`) owns that. The ownership split is deliberate: the root README is the project front door (lean overview + links); each package README is the package's own front door (its build/deploy/command detail, owned closest to the code). When this skill creates per-package READMEs, the deep per-app/per-command detail moves OUT of the root README into them, and the root README keeps a lean summary + link per package.
+This skill is the sole owner of all four doc kinds.
 
-**Authoring conventions:** per-package READMEs follow the same conventions as the root README — match `.opencode/commands/generate-readme.md`'s formatting rules (badges/code-block/table rules, no secret values, derive from live workspace metadata). `packages/cli/README.md` is the npm-published package readme; keep that role when regenerating it.
+**Authoring conventions:** per-package READMEs and the root README follow the same formatting rules (badges/code-block/table rules, no secret values, derive from live workspace metadata). `packages/cli/README.md` is the npm-published package readme; keep that role when regenerating it.
 
 ## When to Use
 
 - Creating `ARCHITECTURE.md` or `STRUCTURE.md` for the first time (neither exists yet)
+- Creating or refreshing the root `README.md`
 - Creating or refreshing a per-package README (`apps/<name>/README.md`, `packages/<name>/README.md`)
-- Refreshing any of these after a new app, package, CLI command, or deploy contract lands
+- Refreshing any of these after a new app, package, CLI command/subcommand, or deploy contract lands
 - Fixing documentation drift (app/package counts, directory layout, CLI surface, codemap paths, command lists)
 - Updating a scoped section within any of these docs
 
 ## When NOT to Use
 
-- Updating the **root** `README.md` — use the `/generate-readme` command instead
 - Writing planning docs (`docs/brainstorms/`, `docs/plans/`, `docs/solutions/`) — those follow their own templates
 - Writing per-app operational docs (`apps/*/AGENTS.md`, `packages/*/AGENTS.md`) — those are nearest-context runbooks with their own shape; this skill's docs link TO them, they are not regenerated here
 
@@ -44,8 +45,9 @@ $ARGUMENTS
 
 - **Empty or `architecture`** — Create/update `ARCHITECTURE.md` (default)
 - **`structure`** — Create/update `STRUCTURE.md`
+- **`root-readme`** (or **`readme`** with no package) — Create/update the root `README.md`
 - **`readme <package>`** — Create/update the README for `apps/<package>/` or `packages/<package>/`
-- **`all`** — ARCHITECTURE.md + STRUCTURE.md (not per-package READMEs; name those explicitly)
+- **`all`** — ALL covered docs: `ARCHITECTURE.md`, `STRUCTURE.md`, the root `README.md`, AND every per-package README under `apps/*` and `packages/*`. For each, refresh it if stale or has pending changes; skip only if already current. `all` must never silently omit a doc kind.
 - **`<section-name>`** — Update only that named section within the target doc (e.g. `codemap`, `invariants`, `where-to-add`)
 
 For scoped updates: read the current document, locate the section by heading, replace only that section's content. Preserve surrounding structure exactly.
@@ -99,8 +101,8 @@ Keep the docs disjoint so they don't drift into each other.
 
 README layering (also disjoint):
 
-| Root `README.md` (owned by `/generate-readme`) | Per-package `README.md` (owned here) |
-|-----------------------------------------------|--------------------------------------|
+| Root `README.md` (owned here) | Per-package `README.md` (owned here) |
+|-------------------------------|--------------------------------------|
 | Project front door: overview, prerequisites, quick start | Package front door: this package's build/deploy/commands |
 | Lean per-app/per-package summary + a link to each package README | Full per-app deploy/provision/config detail; full CLI command list (cli) |
 | Cross-repo concerns: CI/CD overview, links to ARCHITECTURE/STRUCTURE | Links to that package's `AGENTS.md` for runbooks |
@@ -134,6 +136,54 @@ Audience: an agent that needs to know where to put a change.
 5. `## Naming Conventions` — files, colocated `*.test.ts`, `__fixtures__/`/`__snapshots__/`, command modules (`<action>.ts` under `commands/<app>/` + barrel `index.ts`), host validators (`host.ts` per app)
 6. `## Where to Add New Code` — mechanical checklist (new app, new command, new shared helper, new test, new workflow, new docs page), deferring the *why* to ARCHITECTURE.md
 
+### Root `README.md`
+
+Audience: a developer or operator landing on the repo for the first time.
+
+**Section order** (first creation; preserve evolved structure on refresh):
+
+1. Header (title + description + badges)
+2. Overview
+3. Prerequisites
+4. Quick Start
+5. Apps (one subsection per app)
+6. CLI
+7. CI/CD (workflows, secrets, environments)
+8. Repository Structure
+9. Development (lint, typecheck, hooks)
+10. License
+
+**Badge block** — the root README header carries a single centered badge row, in this order:
+
+```html
+<p align="center">
+  <a href="https://www.npmjs.com/package/@marcusrbrown/infra"><img src="https://img.shields.io/npm/v/@marcusrbrown/infra?style=flat-square" alt="npm version"></a>
+  <a href="https://github.com/marcusrbrown/infra/actions/workflows/ci.yaml"><img src="https://github.com/marcusrbrown/infra/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/marcusrbrown/infra/actions/workflows/codeql.yaml"><img src="https://github.com/marcusrbrown/infra/actions/workflows/codeql.yaml/badge.svg" alt="CodeQL"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/marcusrbrown/infra"><img src="https://api.scorecard.dev/projects/github.com/marcusrbrown/infra/badge?style=flat-square" alt="OpenSSF Scorecard"></a>
+  <a href="https://github.com/marcusrbrown/infra/blob/main/LICENSE"><img src="https://img.shields.io/github/license/marcusrbrown/infra?style=flat-square" alt="License"></a>
+</p>
+```
+
+Use `style=flat-square` for shields.io badges; GitHub-native workflow badges (`actions/workflows/<file>/badge.svg`) carry no style param. Never add a badge whose endpoint does not resolve — verify with `curl -sI` before introducing a new one.
+
+**Content mapping** (section → live data source):
+
+| README Section       | Data Source                                             |
+| -------------------- | ------------------------------------------------------- |
+| Header + Badges      | Centered badge row (npm, CI, CodeQL, Scorecard, License) + repo metadata |
+| Overview             | `package.json` description + workspace-packages         |
+| Prerequisites        | Bun version requirement                                 |
+| Quick Start          | Install + build commands                                |
+| Apps                 | `apps/*/package.json` with build/deploy commands        |
+| CLI                  | `packages/cli/package.json` with usage                  |
+| CI/CD                | `ls .github/workflows/*.yaml`, environment protection, secrets table |
+| Repository Structure | `find . -not -path '*/node_modules/*' …` tree           |
+| Development          | Lint, typecheck, format commands from `package.json`    |
+| License              | `package.json` license field                            |
+
+**Root README layering note:** the root README is the lean front door — overview, per-package summary + link to each package README, cross-repo CI/CD, and links to ARCHITECTURE/STRUCTURE. Deep per-app and per-command detail lives in the package READMEs, which the root links down to. The root README does not duplicate package-level detail.
+
 ### Per-package `README.md`
 
 Audience: a developer/operator landing on one package. Seed from the package's `AGENTS.md` (operational truth) and the matching section currently in the root README; keep it the package's own front door.
@@ -151,14 +201,16 @@ Audience: a developer/operator landing on one package. Seed from the package's `
 - `packages/cli/README.md` is the **npm-published** readme: H1 `@marcusrbrown/infra`, install (`bun add -g` / `bunx`), then the FULL current command surface grouped by app (status/deploy/… for keeweb, cliproxy, gateway, umami) + unified `status` + the MCP bridge. Derive the command list from `packages/cli/src/cli.ts` registrations and `commands/<app>/`.
 - `packages/shared/README.md`: H1 + one-line purpose (cross-app SSH/SCP/DigitalOcean provisioning helpers), a short consumer note (imported by each `apps/*/server/provision-droplet.ts`), and the exported helper surface from `packages/shared/server/droplet-helpers.ts`. Mark it a private workspace library (not published).
 
-**Badges (per-package):** badge eligibility is constrained by reality — only `@marcusrbrown/infra` (`packages/cli`) is published; every app and `packages/shared` is `private: true`, so npm/version badges are invalid for them.
+**Badges:**
+
+Badge eligibility is constrained by reality — only `@marcusrbrown/infra` (`packages/cli`) is published; every app and `packages/shared` is `private: true`, so npm/version badges are invalid for them.
+
+- **Root `README.md`**: centered badge row per the block above (npm version, CI, CodeQL, OpenSSF Scorecard, License).
 - **`apps/<name>/README.md`**: one GitHub-native deploy-status badge for that app's deploy workflow, directly under the H1:
   `[![Deploy <App>](https://github.com/marcusrbrown/infra/actions/workflows/deploy-<name>.yaml/badge.svg)](https://github.com/marcusrbrown/infra/actions/workflows/deploy-<name>.yaml)` — renders the last completed deploy's conclusion (correct even though the workflow is environment-gated).
 - **`packages/cli/README.md`**: npm version + npm downloads (it is the npm package page): `https://img.shields.io/npm/v/@marcusrbrown/infra?style=flat-square` and `https://img.shields.io/npm/dm/@marcusrbrown/infra?style=flat-square`.
 - **`packages/shared/README.md`**: no badges — it is an internal library and badges would be noise.
 - Never place an npm badge on a private package. Verify any new badge endpoint resolves (`curl -sI`) before adding it.
-
-Match `.opencode/commands/generate-readme.md` formatting rules for all of the above.
 
 ## Style Rules (Non-Negotiable)
 
@@ -174,9 +226,22 @@ Match `.opencode/commands/generate-readme.md` formatting rules for all of the ab
 ## Generation Flow
 
 1. **Inventory** — run every command in "Pre-Generation Inventory". Count; don't estimate.
-2. **Diff against current doc** — for each section, identify what changed (new app/package, new command group, renamed paths, count drift). First creation: extract the deep structural content from `README.md`'s `## Repository Structure` and the deploy/CI sections, reshaped per the section order above, then leave a lean pointer in the README (coordinate with `/generate-readme`).
+2. **Diff against current doc** — for each section, identify what changed (new app/package, new command group, renamed paths, count drift). First creation: extract the deep structural content from `README.md`'s `## Repository Structure` and the deploy/CI sections, reshaped per the section order above.
 3. **Write minimal diff** — update only what changed; keep voice and untouched sections exact.
 4. **Verify** — run the quality checks below; re-read end-to-end before saving.
+
+### `all` execution
+
+When invoked with `all`:
+
+1. **Inventory** — run the full Pre-Generation Inventory once (shared across all docs).
+2. **For each of the four doc kinds**, in order:
+   - `ARCHITECTURE.md` — check staleness; update if stale or has pending changes; skip if current.
+   - `STRUCTURE.md` — same.
+   - Root `README.md` — same.
+   - Per-package READMEs — iterate over `ls -d apps/*/ packages/*/` (every app + every package, not a hardcoded list); for each, check staleness and update if needed.
+3. **Never silently omit a doc kind.** If a doc does not exist yet, create it. If it is current, note it as skipped with a reason.
+4. **After all updates**, run the post-`all` quality check (see Quality Checks below).
 
 ## Quality Checks
 
@@ -196,6 +261,11 @@ Match `.opencode/commands/generate-readme.md` formatting rules for all of the ab
 - [ ] All code blocks language-tagged; all paths in backticks
 - [ ] Taxonomy/process-leakage grep returns nothing (see Style rule 3)
 
+**Post-`all` check:**
+- [ ] New CLI subcommands appear in both root `README.md` and `packages/cli/README.md`
+- [ ] App/package counts in root README match live `ls -d apps/*/ packages/*/`
+- [ ] No covered doc is stale: every doc kind was either updated or confirmed current
+
 ## Common Mistakes
 
 | Mistake | Fix |
@@ -203,7 +273,7 @@ Match `.opencode/commands/generate-readme.md` formatting rules for all of the ab
 | Carrying counts/paths from the README or a previous draft | Re-derive from `ls`/`find`/`grep` |
 | Line numbers in the codemap | Reference the symbol/path; agents symbol-search |
 | Duplicating deploy procedures from `apps/*/AGENTS.md` | Cross-link to the AGENTS.md; don't copy |
-| Regenerating the README here | README is owned by `/generate-readme`; this skill owns ARCHITECTURE/STRUCTURE |
+| Skipping the root README or per-package READMEs when running `all` | `all` means ALL four doc kinds; never omit one silently |
 | Overlapping ARCHITECTURE and STRUCTURE content | Apply the division-of-labor table; shape/why vs where/layout |
 | Including `.slim/clonedeps/` in trees or counts | Exclude vendored dependency source from all inventory |
 | Marketing language or "previously X" framing | Delete it; state the present-tense fact |
@@ -222,5 +292,5 @@ git log --oneline -15                                  # recent change context
 
 # Verify (run after writing)
 grep -nE "\bUnit [0-9]+|\bR[0-9]+\b|ce:[a-z]" ARCHITECTURE.md STRUCTURE.md   # must be empty
-git diff ARCHITECTURE.md STRUCTURE.md                  # review own diff
+git diff ARCHITECTURE.md STRUCTURE.md README.md        # review own diff
 ```

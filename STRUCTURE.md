@@ -12,23 +12,23 @@ Where things live and where to put new code. For system shape, data flow, and in
 │   ├── umami/                  Umami analytics (DigitalOcean + Docker Compose)
 │   └── vpn/                    WireGuard egress box (AWS Lightsail eu-west-1, native wg-quick@wg0)
 ├── packages/                   Reusable libraries (never import from apps/)
-│   ├── cli/                    @marcusrbrown/infra goke CLI + MCP bridge
-│   └── shared/                 Cross-app SSH/SCP/provisioning helpers + VPN peer model
+│   ├── cli/                    @marcusrbrown/infra goke CLI + MCP bridge + VPN peer model
+│   └── shared/                 Cross-app SSH/SCP/provisioning helpers
 ├── docs/                       Brainstorms → plans → solutions (compound learning)
 ├── .agents/skills/             Agent skill context packets (load before working in a domain)
 ├── .github/                    Workflows, pinned host keys, Renovate, Copilot, repo settings
-└── .opencode/commands/         OpenCode slash commands (e.g. generate-readme)
+└── .opencode/commands/         OpenCode slash commands
 ```
 
 ## Directory Purposes
 
 ### `apps/`
 
-One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (`server/provision-droplet.ts`, except keeweb — DigitalOcean for Docker apps, `@aws-sdk/client-lightsail` for VPN), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`.
+One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (except keeweb — `server/provision-droplet.ts` for the DigitalOcean Docker apps, `server/provision.ts` for the `@aws-sdk/client-lightsail` VPN box), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`, and the VPN peer model is published from `packages/cli`.
 
 ### `packages/`
 
-Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge). `packages/shared` is the provisioning helper library consumed by every app's provision script; it also holds the VPN peer model (`packages/shared/vpn/peers.ts`). `packages/` never imports from `apps/`.
+Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge) and also owns the VPN peer model (`packages/cli/src/commands/vpn/peers.ts`, published as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn`). `packages/shared` is the provisioning helper library consumed by every app's provision script. `packages/` never imports from `apps/`; the published `@marcusrbrown/infra` (cli) stays self-contained and must not depend on the private `packages/shared`.
 
 ### `.github/`
 
@@ -44,7 +44,7 @@ Per-domain agent context packets (`<name>/SKILL.md`). Load the relevant skill be
 
 ### `.opencode/commands/`
 
-OpenCode slash commands (Markdown). `generate-readme.md` owns `README.md` generation; this is distinct from the `generating-project-docs` skill that owns `ARCHITECTURE.md`/`STRUCTURE.md`.
+OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agents/skills/generating-project-docs/SKILL.md`) owns all generated docs — `ARCHITECTURE.md`, `STRUCTURE.md`, the root `README.md`, and per-package READMEs. Slash commands here are for other OpenCode workflows.
 
 ## Key File Locations
 
@@ -61,10 +61,11 @@ OpenCode slash commands (Markdown). `generate-readme.md` owns `README.md` genera
 
 | File | Role |
 | --- | --- |
-| `apps/<name>/server/provision-droplet.ts` | DigitalOcean droplet provisioning (cliproxy, gateway, umami); Lightsail provisioning (vpn) |
+| `apps/<name>/server/provision-droplet.ts` | DigitalOcean droplet provisioning (cliproxy, gateway, umami) |
+| `apps/vpn/server/provision.ts` | Lightsail provisioning (`@aws-sdk/client-lightsail`) |
 | `apps/<name>/src/host.ts` | Deploy-side host validator (rejects `-`-prefixed / invalid hosts) |
 | `apps/gateway/upstream.json` | Pinned `fro-bot/agent` daemon ref |
-| `packages/shared/vpn/peers.ts` | VPN peer model: `readPeers`, `writePeers`, `renderServerConfig`, `Peer` |
+| `packages/cli/src/commands/vpn/peers.ts` | VPN peer model: `readPeers`, `writePeers`, `parsePeersJson`, `renderServerConfig`, `Peer` (exported as `@marcusrbrown/infra/vpn/peers`) |
 
 **CLI Commands**
 
@@ -108,7 +109,7 @@ OpenCode slash commands (Markdown). `generate-readme.md` owns `README.md` genera
 
 Mechanical layout; for the integration rationale see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-- **New app** → `apps/<name>/` mirroring `apps/cliproxy/` (Docker Compose on DigitalOcean) or `apps/vpn/` (native systemd on AWS Lightsail): Compose config or deploy script, `src/deploy.ts`, `server/provision-droplet.ts`, `src/host.ts`, `AGENTS.md`. Add to `package.json` `workspaces` + `provision:<name>`/`deploy:<name>` scripts; run `bun install` to refresh `bun.lock`.
+- **New app** → `apps/<name>/` mirroring `apps/cliproxy/` (Docker Compose on DigitalOcean) or `apps/vpn/` (native systemd on AWS Lightsail): Compose config or deploy script, `src/deploy.ts`, `server/provision.ts` (new apps use `provision.ts`; existing DigitalOcean apps keep `provision-droplet.ts`), `src/host.ts`, `AGENTS.md`. Add to `package.json` `workspaces` + `provision:<name>`/`deploy:<name>` scripts; run `bun install` to refresh `bun.lock`.
 - **New CLI command** → `packages/cli/src/commands/<app>/<action>.ts` + colocated test; export it from the group's `index.ts` barrel.
 - **New shared helper** → `packages/shared/server/droplet-helpers.ts` + colocated test.
 - **New test** → colocate `*.test.ts` beside the source; fixtures/snapshots in `__fixtures__/`/`__snapshots__/`.

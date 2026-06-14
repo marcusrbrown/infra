@@ -172,6 +172,56 @@ export async function deployCompose(host: string, identityFile?: string): Promis
   await run('Starting Docker Compose stack', ssh(host, `cd ${REMOTE_DIR} && docker compose up -d`, REMOTE_USER, opts))
 }
 
+/**
+ * Seeds `remote-management.secret-key` in the already-uploaded config.yaml to
+ * `managementPassword`. Only replaces when the current value is empty (idempotent
+ * on reruns where the key was already set).
+ *
+ * SECURITY: the password travels via SSH stdin only — it never appears in argv.
+ * A remote shell reads the password from stdin into a variable, then uses sed
+ * with that variable to rewrite the config. The password value is never in any
+ * argv array — only the variable reference `$PW` appears in the command string.
+ *
+ * The password is hex-only (randomBytes.toString('hex')), so it contains no
+ * characters that could break the sed expression delimiter or the YAML value.
+ */
+export async function seedRemoteSecretKey(
+  host: string,
+  managementPassword: string,
+  identityFile?: string,
+): Promise<void> {
+  const configPath = `${REMOTE_DIR}/config/config.yaml`
+  const opts = identityFile ? {identityFile} : undefined
+
+  // Shell reads the password from stdin into $PW (never in argv), then replaces
+  // `secret-key: ''` only when it is currently empty. The grep guard makes reruns
+  // a no-op; an `if` block (not `&&  || true`) lets a genuine sed failure surface
+  // as a non-zero exit instead of being masked. sed delimiter is | (password is
+  // hex, no | chars).
+  const remoteCmd =
+    `IFS= read -r PW; ` +
+    `if grep -q "secret-key: ''" ${configPath}; then ` +
+    `sed -i "s|secret-key: ''|secret-key: '$PW'|" ${configPath}; fi`
+
+  const proc = Bun.spawn(ssh(host, remoteCmd, REMOTE_USER, opts), {
+    stdin: 'pipe',
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+
+  // Trailing newline so `read -r` sees a terminated line and returns 0 — without
+  // it, read exits non-zero at EOF and the seed silently no-ops.
+  proc.stdin.write(`${managementPassword}\n`)
+  proc.stdin.end()
+
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    throw new Error(`Seeding remote secret-key failed (exit ${exitCode})`)
+  }
+
+  console.log('\u001B[1;34m==>\u001B[0m Seeded remote-management.secret-key in config.yaml')
+}
+
 // ---------------------------------------------------------------------------
 // Full provisioning orchestration seam (exported for testability)
 // ---------------------------------------------------------------------------
@@ -181,6 +231,7 @@ export interface PerformProvisioningDeps {
   pinHostKeys?: typeof pinHostKeys
   copyComposeFiles?: typeof copyComposeFiles
   writeRemoteEnvFile?: typeof writeRemoteEnvFile
+  seedRemoteSecretKey?: typeof seedRemoteSecretKey
   deployCompose?: typeof deployCompose
 }
 
@@ -201,6 +252,7 @@ export async function performProvisioning(
   const resolvedPinHostKeys = deps.pinHostKeys ?? pinHostKeys
   const resolvedCopyComposeFiles = deps.copyComposeFiles ?? copyComposeFiles
   const resolvedWriteRemoteEnvFile = deps.writeRemoteEnvFile ?? writeRemoteEnvFile
+  const resolvedSeedRemoteSecretKey = deps.seedRemoteSecretKey ?? seedRemoteSecretKey
   const resolvedDeployCompose = deps.deployCompose ?? deployCompose
 
   const {identityFile, cleanup} = resolveProvisionIdentity(privateKey)
@@ -214,6 +266,7 @@ export async function performProvisioning(
     await validateDns(dropletIp)
     await resolvedCopyComposeFiles(dropletIp, identityFile)
     const managementPassword = await resolvedWriteRemoteEnvFile(dropletIp, identityFile)
+    await resolvedSeedRemoteSecretKey(dropletIp, managementPassword, identityFile)
     await resolvedDeployCompose(dropletIp, identityFile)
     return managementPassword
   } finally {

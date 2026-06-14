@@ -174,7 +174,7 @@ describe('cliproxyModelsAction — empty results', () => {
     await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', provider: 'anthropic'}, ctx)
 
     const output = captured.stdout.join('\n')
-    expect(output).toContain('No models')
+    expect(output).toContain('for provider anthropic')
     expect(captured.exit).toBeNull()
   })
 })

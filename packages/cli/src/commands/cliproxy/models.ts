@@ -21,6 +21,7 @@ const modelEntrySchema = z
   .object({
     id: z.string(),
     owned_by: z.string().optional(),
+    created: z.number().optional(),
   })
   .passthrough()
 
@@ -47,20 +48,95 @@ function isValidProvider(value: string): value is ValidProvider {
 }
 
 /**
+ * Derives the provider string for a model entry.
+ * Prefers owned_by when present and non-empty; falls back to PROVIDER_ID_PATTERNS
+ * matching against the bare id; falls back to 'unknown'.
+ * Display/validation-only — never an auth or trust signal.
+ */
+function deriveProvider(entry: ModelEntry): string {
+  if (entry.owned_by !== undefined && entry.owned_by.trim() !== '') {
+    return entry.owned_by
+  }
+  // Strip any existing provider/ prefix before pattern matching
+  const bareId = stripProviderPrefix(entry.id)
+  for (const [provider, pattern] of Object.entries(PROVIDER_ID_PATTERNS)) {
+    if (pattern.test(bareId)) return provider
+  }
+  return 'unknown'
+}
+
+/**
+ * Strips an existing `provider/` prefix from a raw id, if present.
+ * Defensive: handles entries that already have a prefix so we don't double-prefix.
+ */
+function stripProviderPrefix(id: string): string {
+  const slashIdx = id.indexOf('/')
+  if (slashIdx === -1) return id
+  // Only strip if the prefix looks like a known provider or 'unknown'
+  const prefix = id.slice(0, slashIdx)
+  if (prefix === 'unknown' || isValidProvider(prefix)) {
+    return id.slice(slashIdx + 1)
+  }
+  return id
+}
+
+/**
  * Decides whether a /v1/models entry belongs to a provider.
  * Prefers owned_by when present; falls back to id prefix / known bare-id
  * patterns when absent. Display/validation-only — never an auth or trust signal.
  */
 function entryMatchesProvider(entry: ModelEntry, provider: string): boolean {
-  if (entry.owned_by !== undefined && entry.owned_by.trim() !== '') {
-    return entry.owned_by === provider
+  return deriveProvider(entry) === provider
+}
+
+/**
+ * Sort entries: grouped by provider (ascending), within each group by created asc.
+ * Entries with missing/non-number created sort last within their group.
+ */
+function sortEntries(entries: ModelEntry[]): ModelEntry[] {
+  // Annotate with derived provider for stable grouping
+  const annotated = entries.map(e => ({entry: e, provider: deriveProvider(e)}))
+
+  // Sort: provider asc, then created asc (missing created → Infinity → sorts last)
+  annotated.sort((a, b) => {
+    const providerCmp = a.provider.localeCompare(b.provider)
+    if (providerCmp !== 0) return providerCmp
+    const aCreated = typeof a.entry.created === 'number' ? a.entry.created : Infinity
+    const bCreated = typeof b.entry.created === 'number' ? b.entry.created : Infinity
+    return aCreated - bCreated
+  })
+
+  return annotated.map(a => a.entry)
+}
+
+/**
+ * Formats a model entry for plain output: `provider/raw_id`.
+ */
+function formatPlainLine(entry: ModelEntry): string {
+  const provider = deriveProvider(entry)
+  const rawId = stripProviderPrefix(entry.id)
+  return `${provider}/${rawId}`
+}
+
+interface VerboseEntry {
+  id: string
+  provider: string
+  raw_id: string
+  created: string | null
+}
+
+/**
+ * Formats a model entry for verbose JSON output.
+ */
+function formatVerboseEntry(entry: ModelEntry): VerboseEntry {
+  const provider = deriveProvider(entry)
+  const rawId = stripProviderPrefix(entry.id)
+  return {
+    id: `${provider}/${rawId}`,
+    provider,
+    raw_id: rawId,
+    created: typeof entry.created === 'number' ? new Date(entry.created * 1000).toISOString() : null,
   }
-  const id = entry.id ?? ''
-  if (id.startsWith(`${provider}/`)) {
-    return true
-  }
-  const pattern = PROVIDER_ID_PATTERNS[provider]
-  return pattern === undefined ? false : pattern.test(id)
 }
 
 export interface ModelsOptions {
@@ -110,6 +186,17 @@ export async function cliproxyModelsAction(options: ModelsOptions, ctx: ActionCt
       entries = entries.filter(e => entryMatchesProvider(e, options.provider as string))
     }
 
+    // Sort: provider-grouped (asc), date-asc within each group
+    entries = sortEntries(entries)
+
+    if (options.verbose) {
+      // --verbose: emit a single JSON array (pretty-printed) of the fields we have.
+      // Always valid JSON — empty/zero-match → [].
+      const verboseEntries = entries.map(formatVerboseEntry)
+      ctx.console.log(JSON.stringify(verboseEntries, null, 2))
+      return
+    }
+
     if (entries.length === 0) {
       ctx.console.log(
         options.provider === undefined ? 'No models.' : `No models found for provider ${options.provider}.`,
@@ -117,21 +204,8 @@ export async function cliproxyModelsAction(options: ModelsOptions, ctx: ActionCt
       return
     }
 
-    if (options.verbose) {
-      // Aligned columns: id, owned_by (or '-' if absent), created as ISO date
-      const idWidth = Math.max(...entries.map(e => e.id.length), 2)
-      const ownerWidth = Math.max(...entries.map(e => (e.owned_by ?? '-').length), 8)
-
-      for (const entry of entries) {
-        const id = entry.id.padEnd(idWidth)
-        const owner = (entry.owned_by ?? '-').padEnd(ownerWidth)
-        const date = typeof entry.created === 'number' ? new Date(entry.created * 1000).toISOString().slice(0, 10) : '-'
-        ctx.console.log(`${id}  ${owner}  ${date}`)
-      }
-    } else {
-      for (const entry of entries) {
-        ctx.console.log(entry.id)
-      }
+    for (const entry of entries) {
+      ctx.console.log(formatPlainLine(entry))
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

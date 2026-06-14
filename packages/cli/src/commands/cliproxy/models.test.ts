@@ -21,6 +21,11 @@ function createFetchImplementation(handler: FetchReplacement): typeof fetch {
   )
 }
 
+// Fixture: mixed providers with known created timestamps for ordering assertions.
+// anthropic group: claude-3-5-sonnet (created=1700000000) < claude-opus-4 (created=1710000000)
+// openai group: gpt-4o (created=1705000000) < gpt-4o-mini (created=1706000000)
+// Provider groups sorted ascending: anthropic < openai
+// Expected plain order: anthropic/claude-3-5-sonnet-20241022, anthropic/claude-opus-4, openai/gpt-4o, openai/gpt-4o-mini
 const MIXED_MODELS_RESPONSE = {
   object: 'list',
   data: [
@@ -48,6 +53,24 @@ const NO_OWNED_BY_RESPONSE = {
   ],
 }
 
+// Model with no owned_by and no matching pattern → unknown provider
+const UNKNOWN_PROVIDER_RESPONSE = {
+  object: 'list',
+  data: [
+    {id: 'claude-3-5-sonnet-20241022', object: 'model', owned_by: 'anthropic', created: 1_700_000_000},
+    {id: 'some-mystery-model-v1', object: 'model', created: 1_715_000_000},
+  ],
+}
+
+// Fixture with deliberately reversed order to test date-asc sorting within a group
+const REVERSED_ORDER_RESPONSE = {
+  object: 'list',
+  data: [
+    {id: 'claude-opus-4', object: 'model', owned_by: 'anthropic', created: 1_710_000_000},
+    {id: 'claude-3-5-sonnet-20241022', object: 'model', owned_by: 'anthropic', created: 1_700_000_000},
+  ],
+}
+
 describe('cliproxyModelsAction — plain output', () => {
   beforeEach(() => {
     globalThis.fetch = createFetchImplementation(async () => {
@@ -59,7 +82,7 @@ describe('cliproxyModelsAction — plain output', () => {
     globalThis.fetch = originalFetch
   })
 
-  it('lists all model ids one per line when no provider filter', async () => {
+  it('emits provider/id format (not bare id) for each model', async () => {
     globalThis.fetch = createFetchImplementation(
       async () =>
         new Response(JSON.stringify(MIXED_MODELS_RESPONSE), {
@@ -72,13 +95,54 @@ describe('cliproxyModelsAction — plain output', () => {
     await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key'}, ctx)
 
     const output = captured.stdout.join('\n')
-    expect(output).toContain('claude-3-5-sonnet-20241022')
-    expect(output).toContain('claude-opus-4')
-    expect(output).toContain('gpt-4o')
-    expect(output).toContain('gpt-4o-mini')
+    expect(output).toContain('anthropic/claude-3-5-sonnet-20241022')
+    expect(output).toContain('anthropic/claude-opus-4')
+    expect(output).toContain('openai/gpt-4o')
+    expect(output).toContain('openai/gpt-4o-mini')
+    // Must NOT emit bare ids without prefix
+    expect(output).not.toMatch(/^claude-/m)
+    expect(output).not.toMatch(/^gpt-/m)
   })
 
-  it('filters to openai models only when provider=openai', async () => {
+  it('groups by provider (anthropic before openai) and sorts date-asc within each group', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(MIXED_MODELS_RESPONSE), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key'}, ctx)
+
+    const lines = captured.stdout.join('\n').split('\n').filter(Boolean)
+    expect(lines).toEqual([
+      'anthropic/claude-3-5-sonnet-20241022',
+      'anthropic/claude-opus-4',
+      'openai/gpt-4o',
+      'openai/gpt-4o-mini',
+    ])
+  })
+
+  it('sorts date-asc within a provider group even when API returns them in reverse order', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(REVERSED_ORDER_RESPONSE), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key'}, ctx)
+
+    const lines = captured.stdout.join('\n').split('\n').filter(Boolean)
+    // claude-3-5-sonnet (created=1700000000) must come before claude-opus-4 (created=1710000000)
+    expect(lines).toEqual(['anthropic/claude-3-5-sonnet-20241022', 'anthropic/claude-opus-4'])
+  })
+
+  it('filters to openai models only when provider=openai, still emits provider/id', async () => {
     globalThis.fetch = createFetchImplementation(
       async () =>
         new Response(JSON.stringify(MIXED_MODELS_RESPONSE), {
@@ -91,12 +155,12 @@ describe('cliproxyModelsAction — plain output', () => {
     await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', provider: 'openai'}, ctx)
 
     const output = captured.stdout.join('\n')
-    expect(output).toContain('gpt-4o')
-    expect(output).toContain('gpt-4o-mini')
+    expect(output).toContain('openai/gpt-4o')
+    expect(output).toContain('openai/gpt-4o-mini')
     expect(output).not.toContain('claude')
   })
 
-  it('matches provider via id prefix when owned_by is absent', async () => {
+  it('infers anthropic provider via id pattern when owned_by is absent', async () => {
     globalThis.fetch = createFetchImplementation(
       async () =>
         new Response(JSON.stringify(NO_OWNED_BY_RESPONSE), {
@@ -109,8 +173,65 @@ describe('cliproxyModelsAction — plain output', () => {
     await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', provider: 'anthropic'}, ctx)
 
     const output = captured.stdout.join('\n')
-    expect(output).toContain('claude-3-5-sonnet-20241022')
+    expect(output).toContain('anthropic/claude-3-5-sonnet-20241022')
     expect(output).not.toContain('gpt-4o')
+  })
+
+  it('infers openai provider via id pattern when owned_by is absent', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(NO_OWNED_BY_RESPONSE), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', provider: 'openai'}, ctx)
+
+    const output = captured.stdout.join('\n')
+    expect(output).toContain('openai/gpt-4o')
+    expect(output).not.toContain('claude')
+  })
+
+  it('prefixes unknown/<id> for entries with no owned_by and no matching pattern, sorted last', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(UNKNOWN_PROVIDER_RESPONSE), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key'}, ctx)
+
+    const lines = captured.stdout.join('\n').split('\n').filter(Boolean)
+    // anthropic group first, unknown group last
+    expect(lines[0]).toBe('anthropic/claude-3-5-sonnet-20241022')
+    expect(lines.at(-1)).toBe('unknown/some-mystery-model-v1')
+  })
+
+  it('does not double-prefix an id that already has a provider/ prefix', async () => {
+    const alreadyPrefixedResponse = {
+      object: 'list',
+      data: [{id: 'anthropic/claude-opus-4', object: 'model', owned_by: 'anthropic', created: 1_710_000_000}],
+    }
+
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(alreadyPrefixedResponse), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key'}, ctx)
+
+    const output = captured.stdout.join('\n')
+    expect(output).toContain('anthropic/claude-opus-4')
+    expect(output).not.toContain('anthropic/anthropic/')
   })
 })
 
@@ -119,7 +240,7 @@ describe('cliproxyModelsAction — verbose output', () => {
     globalThis.fetch = originalFetch
   })
 
-  it('shows owned_by and formatted date in verbose mode', async () => {
+  it('emits a single valid JSON array parseable by JSON.parse', async () => {
     globalThis.fetch = createFetchImplementation(
       async () =>
         new Response(JSON.stringify(OPENAI_ONLY_RESPONSE), {
@@ -131,11 +252,126 @@ describe('cliproxyModelsAction — verbose output', () => {
     const {ctx, captured} = createCapturedCtx()
     await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', verbose: true}, ctx)
 
-    const output = captured.stdout.join('\n')
-    expect(output).toContain('gpt-4o')
-    expect(output).toContain('openai')
-    // created=1705000000 → 2024-01-11 or similar ISO date prefix
-    expect(output).toMatch(/\d{4}-\d{2}-\d{2}/)
+    const raw = captured.stdout.join('')
+    const parsed = JSON.parse(raw)
+    expect(Array.isArray(parsed)).toBe(true)
+  })
+
+  it('verbose entries have {id, provider, raw_id, created} shape with prefixed id', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(OPENAI_ONLY_RESPONSE), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', verbose: true}, ctx)
+
+    const parsed: {id: string; provider: string; raw_id: string; created: string | null}[] = JSON.parse(
+      captured.stdout.join(''),
+    )
+    expect(parsed.length).toBe(2)
+
+    // parsed.length === 2 asserted above; non-null access is safe
+    const first = parsed[0]!
+    expect(first).toHaveProperty('id')
+    expect(first).toHaveProperty('provider')
+    expect(first).toHaveProperty('raw_id')
+    expect(first).toHaveProperty('created')
+    // id must be prefixed
+    expect(first.id).toBe('openai/gpt-4o')
+    expect(first.provider).toBe('openai')
+    expect(first.raw_id).toBe('gpt-4o')
+    // created is ISO 8601 string
+    expect(typeof first.created).toBe('string')
+    expect(first.created).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  })
+
+  it('verbose output is date-asc sorted and provider-grouped (anthropic before openai)', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(MIXED_MODELS_RESPONSE), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', verbose: true}, ctx)
+
+    const parsed: {id: string; provider: string; raw_id: string; created: string | null}[] = JSON.parse(
+      captured.stdout.join(''),
+    )
+    expect(parsed.map(e => e.id)).toEqual([
+      'anthropic/claude-3-5-sonnet-20241022',
+      'anthropic/claude-opus-4',
+      'openai/gpt-4o',
+      'openai/gpt-4o-mini',
+    ])
+  })
+
+  it('verbose with empty data emits [] (not a text message)', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify({object: 'list', data: []}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', verbose: true}, ctx)
+
+    const raw = captured.stdout.join('')
+    const parsed = JSON.parse(raw)
+    expect(parsed).toEqual([])
+  })
+
+  it('verbose with zero-match provider filter emits [] (not a text message)', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(OPENAI_ONLY_RESPONSE), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction(
+      {url: 'https://cliproxy.example.com', key: 'test-api-key', verbose: true, provider: 'anthropic'},
+      ctx,
+    )
+
+    const raw = captured.stdout.join('')
+    const parsed = JSON.parse(raw)
+    expect(parsed).toEqual([])
+  })
+
+  it('verbose: created is null when entry has no created timestamp', async () => {
+    const noCreatedResponse = {
+      object: 'list',
+      data: [{id: 'gpt-4o', object: 'model', owned_by: 'openai'}],
+    }
+
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(noCreatedResponse), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', verbose: true}, ctx)
+
+    const parsed: {id: string; provider: string; raw_id: string; created: string | null}[] = JSON.parse(
+      captured.stdout.join(''),
+    )
+    expect(parsed.length).toBe(1)
+    // parsed.length === 1 asserted above; non-null access is safe
+    expect(parsed[0]!.created).toBeNull()
   })
 })
 
@@ -144,7 +380,7 @@ describe('cliproxyModelsAction — empty results', () => {
     globalThis.fetch = originalFetch
   })
 
-  it('prints "No models." when data array is empty', async () => {
+  it('prints "No models." when data array is empty (non-verbose)', async () => {
     globalThis.fetch = createFetchImplementation(
       async () =>
         new Response(JSON.stringify({object: 'list', data: []}), {
@@ -161,7 +397,7 @@ describe('cliproxyModelsAction — empty results', () => {
     expect(captured.exit).toBeNull()
   })
 
-  it('prints provider-specific "No models" message when filter yields zero matches', async () => {
+  it('prints provider-specific "No models" message when filter yields zero matches (non-verbose)', async () => {
     globalThis.fetch = createFetchImplementation(
       async () =>
         new Response(JSON.stringify(OPENAI_ONLY_RESPONSE), {

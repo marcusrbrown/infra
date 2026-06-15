@@ -1,5 +1,32 @@
 # @marcusrbrown/infra
 
+## 0.12.1
+### Patch Changes
+
+
+- Dashboard SSH-backed `status` and `logs` commands now fail fast when SSH cannot establish a connection to an unreachable or stale-DNS host. `status` preserves the SSH error detail in its output. ([#566](https://github.com/marcusrbrown/infra/pull/566))
+
+
+- Update the gateway daemon to fro-bot/agent v0.64.3. ([#562](https://github.com/marcusrbrown/infra/pull/562))
+
+
+- 📦 Update npm dependency `all` ([#564](https://github.com/marcusrbrown/infra/pull/564))
+
+
+- 🐳 Update Docker image `ghcr.io/marcusrbrown/infra-dashboard` ([#569](https://github.com/marcusrbrown/infra/pull/569))
+
+
+- 🐳 Update Docker image `ghcr.io/marcusrbrown/infra-dashboard` ([#563](https://github.com/marcusrbrown/infra/pull/563))
+
+
+- 🐳 Update Docker image `ghcr.io/marcusrbrown/infra-dashboard` ([#560](https://github.com/marcusrbrown/infra/pull/560))
+
+
+- 🐳 Update Docker image `docker-compose` ([#554](https://github.com/marcusrbrown/infra/pull/554))
+
+
+- 🐳 Update Docker image `ghcr.io/marcusrbrown/infra-dashboard` ([#568](https://github.com/marcusrbrown/infra/pull/568))
+
 ## 0.12.0
 ### Minor Changes
 

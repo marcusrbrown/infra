@@ -17,7 +17,7 @@ services:
         condition: service_healthy
 
   dashboard:
-    image: ghcr.io/marcusrbrown/infra-dashboard:ecfb88fddbb0516c8320d3d1fed66724433bfb1d@sha256:ed56657cb29a22ab1fe9828cd6a09c163ee6da2f083ff08d0f6f6290063076c8
+    image: ghcr.io/marcusrbrown/infra-dashboard:ecfb88fddbb0516c8320d3d1fed66724433bfb1d@sha256:f22a5b1baf85cd822a8ca559dbfd1ca259a2f0962dc68fb460a717637f1cf069
     restart: unless-stopped
     env_file:
       - path: .env

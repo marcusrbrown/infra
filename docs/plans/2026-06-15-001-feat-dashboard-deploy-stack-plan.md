@@ -210,7 +210,8 @@ services:
     security_opt: [no-new-privileges:true]
     user: '<non-root-uid>:<gid>'
     volumes:
-      - /run/secrets/github-app.pem:/run/secrets/github-app.pem:ro
+      # host path (uploaded by deploy.ts, 0600) : container path : read-only
+      - /opt/dashboard/config/github-app.pem:/run/secrets/github-app.pem:ro
     healthcheck:
       test: [CMD-SHELL, 'curl -f http://localhost:3000/healthz || exit 1']
       interval: 10s

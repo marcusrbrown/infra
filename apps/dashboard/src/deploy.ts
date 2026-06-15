@@ -89,11 +89,7 @@ export interface ValidatedEnv {
 export function validateSecretValue(value: string, name: string): void {
   const match = SHELL_METACHAR_RE.exec(value)
   if (match) {
-    const char = JSON.stringify(match[0])
-    throw new Error(
-      `${name} contains a shell metacharacter (${char}) that is not allowed in secret values. ` +
-        'Remove the character before deploying.',
-    )
+    throw new Error(`${name} contains a disallowed shell metacharacter. Remove shell metacharacters before deploying.`)
   }
 }
 
@@ -635,7 +631,12 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     //   2. Inspect the IMAGE's RepoDigests via `docker inspect --format '{{json .RepoDigests}}' <imageSHA>`
     const {stdout: imageSha} = await runCommand(
       'Resolving running image SHA: dashboard',
-      sshCommand(host, `docker inspect --format '{{.Image}}' $(docker compose ps -q dashboard)`, keyPath, controlPath),
+      sshCommand(
+        host,
+        `cd ${REMOTE_DIR} && docker inspect --format '{{.Image}}' $(docker compose ps -q dashboard)`,
+        keyPath,
+        controlPath,
+      ),
       deployEnv,
       spawnFn,
     )

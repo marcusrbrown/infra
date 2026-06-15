@@ -3,6 +3,7 @@ import type {goke} from 'goke'
 import {z} from 'zod'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
+import {buildIdentityArgs} from '../../lib/ssh-identity'
 import {validateDashboardHost} from './host'
 
 declare const process: {
@@ -88,6 +89,8 @@ export async function streamDashboardLogs(
 
   validateDashboardHost(opts.host)
 
+  const {args: identityArgs, cleanup} = buildIdentityArgs(process.env.DASHBOARD_SSH_KEY)
+
   const sshCmd = [
     'ssh',
     '-o',
@@ -95,6 +98,7 @@ export async function streamDashboardLogs(
     '-o',
     'StrictHostKeyChecking=yes',
     ...buildKnownHostsArgs(),
+    ...identityArgs,
     `root@${opts.host}`,
     `docker compose --project-directory ${COMPOSE_PROJECT_DIR} logs --no-color --tail=${opts.tail} ${opts.service}`,
   ]
@@ -105,8 +109,13 @@ export async function streamDashboardLogs(
     ...(process.env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK} : {}),
   }
 
-  const child = spawn(sshCmd, {env, stdout: 'inherit', stderr: 'inherit'})
-  const exitCode = await child.exited
+  let exitCode: number
+  try {
+    const child = spawn(sshCmd, {env, stdout: 'inherit', stderr: 'inherit'})
+    exitCode = await child.exited
+  } finally {
+    cleanup()
+  }
 
   return {refused: false, exitCode}
 }

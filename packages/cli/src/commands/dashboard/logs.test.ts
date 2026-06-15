@@ -2,6 +2,17 @@ import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {streamDashboardLogs, type LogsSpawnFn, type StreamLogsOpts} from './logs'
 
+// ─── Capturing spawn helper ───────────────────────────────────────────────────
+
+function makeCapturingLogsSpawn(exitCode = 0): {spawn: LogsSpawnFn; capturedCmd: () => string[]} {
+  let captured: string[] = []
+  const spawn: LogsSpawnFn = (cmd, _opts) => {
+    captured = [...cmd]
+    return {exited: Promise.resolve(exitCode)}
+  }
+  return {spawn, capturedCmd: () => captured}
+}
+
 // NOTE: dashboard logs is intentionally CLI-only and NOT in the MCP allowlist.
 // Logs may contain sensitive data (DB passwords, app secrets, user data).
 
@@ -196,5 +207,87 @@ describe('streamDashboardLogs — SSH command includes UserKnownHostsFile', () =
     const strictIdx = capturedCmd.findIndex(arg => arg.startsWith('StrictHostKeyChecking='))
     expect(strictIdx).toBeGreaterThan(-1)
     expect(capturedCmd[strictIdx]).toBe('StrictHostKeyChecking=yes')
+  })
+})
+
+// ─── SSH identity injection (DASHBOARD_SSH_KEY) ───────────────────────────────
+
+describe('streamDashboardLogs — SSH identity injection', () => {
+  let originalEnv: Record<string, string | undefined>
+
+  beforeEach(() => {
+    originalEnv = {
+      CI: process.env.CI,
+      DASHBOARD_SSH_KEY: process.env.DASHBOARD_SSH_KEY,
+    }
+    delete process.env.CI
+  })
+
+  afterEach(() => {
+    if (originalEnv.CI === undefined) {
+      delete process.env.CI
+    } else {
+      process.env.CI = originalEnv.CI
+    }
+
+    if (originalEnv.DASHBOARD_SSH_KEY === undefined) {
+      delete process.env.DASHBOARD_SSH_KEY
+    } else {
+      process.env.DASHBOARD_SSH_KEY = originalEnv.DASHBOARD_SSH_KEY
+    }
+  })
+
+  it('includes -i <path> and IdentitiesOnly=yes in ssh argv when DASHBOARD_SSH_KEY is set', async () => {
+    process.env.DASHBOARD_SSH_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n'
+
+    const {spawn, capturedCmd} = makeCapturingLogsSpawn(0)
+
+    await streamDashboardLogs({host: 'dashboard.fro.bot', service: 'dashboard', tail: 100, allowCi: false}, spawn)
+
+    const cmd = capturedCmd()
+    const iIdx = cmd.indexOf('-i')
+    expect(iIdx).toBeGreaterThan(-1)
+    expect(cmd[iIdx + 1]).toBeTruthy()
+
+    const identitiesOnlyIdx = cmd.indexOf('IdentitiesOnly=yes')
+    expect(identitiesOnlyIdx).toBeGreaterThan(-1)
+
+    const destination = cmd.find(arg => arg.includes('@'))
+    expect(destination).toBe('root@dashboard.fro.bot')
+  })
+
+  it('does not include -i or IdentitiesOnly=yes when DASHBOARD_SSH_KEY is absent', async () => {
+    delete process.env.DASHBOARD_SSH_KEY
+
+    const {spawn, capturedCmd} = makeCapturingLogsSpawn(0)
+
+    await streamDashboardLogs({host: 'dashboard.fro.bot', service: 'dashboard', tail: 100, allowCi: false}, spawn)
+
+    const cmd = capturedCmd()
+    expect(cmd.indexOf('-i')).toBe(-1)
+    expect(cmd.indexOf('IdentitiesOnly=yes')).toBe(-1)
+  })
+
+  it('cleans up the temp key file after the SSH command completes', async () => {
+    const {statSync} = await import('node:fs')
+    process.env.DASHBOARD_SSH_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n'
+
+    let capturedKeyPath: string | undefined
+    const capturingSpawn: LogsSpawnFn = (cmd, _opts) => {
+      const iIdx = cmd.indexOf('-i')
+      if (iIdx !== -1) capturedKeyPath = cmd[iIdx + 1]
+      return {exited: Promise.resolve(0)}
+    }
+
+    await streamDashboardLogs(
+      {host: 'dashboard.fro.bot', service: 'dashboard', tail: 100, allowCi: false},
+      capturingSpawn,
+    )
+
+    expect(capturedKeyPath).toBeTruthy()
+    const keyPath = capturedKeyPath
+    if (keyPath) {
+      expect(() => statSync(keyPath)).toThrow()
+    }
   })
 })

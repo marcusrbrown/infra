@@ -260,6 +260,19 @@ describe('secret boundary validation', () => {
   it('rejects a value containing a semicolon', () => {
     expect(() => validateSecretValue('bad;value', 'TEST')).toThrow()
   })
+
+  it('error message contains the var name but NOT the offending character', () => {
+    try {
+      validateSecretValue('bad`value', 'MY_SECRET')
+      expect(true).toBe(false) // should not reach here
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      expect(msg).toContain('MY_SECRET')
+      expect(msg).toContain('shell metacharacter')
+      // Must NOT echo the secret-derived byte
+      expect(msg).not.toContain('`')
+    }
+  })
 })
 
 // ─── .env file contents ───────────────────────────────────────────────────────
@@ -827,6 +840,43 @@ describe('GitHub App key chown for node user', () => {
     expect(chmodIdx).toBeGreaterThan(-1)
     expect(chownIdx).toBeGreaterThan(-1)
     expect(chmodIdx).toBeLessThan(chownIdx)
+  })
+})
+
+// ─── digest-verify cwd ────────────────────────────────────────────────────────
+
+describe('digest-verify SSH command scoped to REMOTE_DIR', () => {
+  it('docker compose ps -q dashboard in digest-verify step is prefixed with cd /opt/dashboard', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // Find the call that resolves the running image SHA (docker inspect + docker compose ps -q)
+    const digestVerifyCall = calls.find(c => {
+      const s = c.cmd.join(' ')
+      return s.includes('docker inspect') && s.includes('docker compose ps -q dashboard')
+    })
+
+    expect(digestVerifyCall).toBeDefined()
+    const cmdStr = digestVerifyCall?.cmd.join(' ') ?? ''
+
+    // The command must be scoped to /opt/dashboard before docker compose ps
+    expect(cmdStr).toContain('cd /opt/dashboard')
+
+    // cd /opt/dashboard must appear BEFORE docker compose ps -q dashboard
+    const cdIdx = cmdStr.indexOf('cd /opt/dashboard')
+    const psIdx = cmdStr.indexOf('docker compose ps -q dashboard')
+    expect(cdIdx).toBeGreaterThan(-1)
+    expect(psIdx).toBeGreaterThan(-1)
+    expect(cdIdx).toBeLessThan(psIdx)
   })
 })
 

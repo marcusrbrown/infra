@@ -81,11 +81,7 @@ export interface DeployOpts {
 export function validateSecretValue(value: string, name: string): void {
   const match = SHELL_METACHAR_RE.exec(value)
   if (match) {
-    const char = JSON.stringify(match[0])
-    throw new Error(
-      `${name} contains a shell metacharacter (${char}) that is not allowed in secret values. ` +
-        'Remove the character before deploying.',
-    )
+    throw new Error(`${name} contains a disallowed shell metacharacter. Remove shell metacharacters before deploying.`)
   }
 }
 

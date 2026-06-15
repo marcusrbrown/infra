@@ -1,5 +1,17 @@
 # @marcusrbrown/infra
 
+## 0.12.0
+### Minor Changes
+
+
+- Add the `dashboard` command group: `infra dashboard status`, `infra dashboard deploy`, and `infra dashboard logs` for operating the Fro Bot monitoring dashboard at `dashboard.fro.bot`. `dashboard status` is exposed over the MCP bridge; `deploy` and `logs` remain CLI-only. The unified `infra status` dashboard now includes a dashboard row. ([#552](https://github.com/marcusrbrown/infra/pull/552))
+
+
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.5` to `7.2.6` ([#555](https://github.com/marcusrbrown/infra/pull/555))
+
 ## 0.11.4
 ### Patch Changes
 

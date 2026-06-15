@@ -133,6 +133,40 @@ function makeSpawn(stdout: string, stderr = '', exitCode = 0): SpawnFn {
   }
 }
 
+// ─── SSH command includes ConnectTimeout ─────────────────────────────────────
+
+describe('getDashboardComposeStatus — SSH command includes ConnectTimeout', () => {
+  it('passes -o ConnectTimeout=10 to ssh', async () => {
+    let capturedCmd: string[] = []
+
+    const capturingSpawn: SpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      const enc = new TextEncoder()
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(JSON.stringify([{Name: 'dashboard', State: 'running', Health: 'healthy'}])))
+            c.close()
+          },
+        }),
+        stderr: new ReadableStream({
+          start(c) {
+            c.close()
+          },
+        }),
+        exited: Promise.resolve(0),
+      }
+    }
+
+    await getDashboardComposeStatus('dashboard.fro.bot', capturingSpawn)
+
+    const connectTimeoutIdx = capturedCmd.findIndex(arg => arg.startsWith('ConnectTimeout='))
+    expect(connectTimeoutIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[connectTimeoutIdx - 1]).toBe('-o')
+    expect(capturedCmd[connectTimeoutIdx]).toBe('ConnectTimeout=10')
+  })
+})
+
 // ─── SSH command includes repo-pinned UserKnownHostsFile ─────────────────────
 
 describe('getDashboardComposeStatus — SSH command includes UserKnownHostsFile', () => {
@@ -359,6 +393,28 @@ describe('status command', () => {
 
     expect(threw).toBe(false)
     expect(captured.stderr.join('')).toContain('Error')
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  it('prints the SSH error message (not a generic no-services message) when SSH fails', async () => {
+    process.env.DASHBOARD_DOMAIN = 'dashboard.fro.bot'
+
+    const {ctx, captured} = createCapturedCtx()
+
+    try {
+      await dashboardStatusAction(
+        {},
+        ctx,
+        makeSpawn('', 'ssh: connect to host dashboard.fro.bot port 22: Connection timed out', 255),
+      )
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+    }
+
+    const stderrText = captured.stderr.join('')
+    // Must surface the SSH failure detail, not the generic no-services fallback
+    expect(stderrText).toContain('SSH command failed')
+    expect(stderrText).not.toContain('No services reported by docker compose ps')
     expect(captured.exit?.code).toBe(1)
   })
 

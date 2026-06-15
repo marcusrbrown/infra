@@ -18,9 +18,11 @@ is materialized as a file on the droplet (never as an env var), and the dashboar
 hardened (`read_only`, `cap_drop: [ALL]`, no-new-privileges, non-root user).
 
 This plan covers the infra-repo side of the dashboard deployment. The fro-bot/dashboard app
-itself (Hono server, GitHub App integration, OAuth, monitoring UI) is built and published in the
-`fro-bot/dashboard` repo; this plan consumes a published Docker image and owns the hosting
-contract only.
+itself (Hono server, GitHub App integration, OAuth, monitoring UI) publishes no Docker image;
+infra builds the image off-droplet to GHCR (`ghcr.io/marcusrbrown/infra-dashboard`) in CI,
+pinning the fro-bot/dashboard source ref, and the droplet pulls the digest-pinned GHCR artifact.
+This mirrors the gateway build-to-GHCR pattern (not umami's published-image pull). This plan
+owns the hosting contract only.
 
 ## Problem Frame
 
@@ -35,7 +37,7 @@ hardening requirements. (See origin: docs/brainstorms/2026-06-15-dashboard-deplo
 - R1–R5: Compose stack (two services: `dashboard` + `caddy`; hardening; file-mounted App key;
   Caddyfile; compose validation test).
 - R6–R11: Deploy script (env + host validation; `.env` via SSH stdin; App key via SSH stdin as
-  file; deploy ordering app-then-caddy; `/healthz` probe; ControlMaster).
+  file; deploy ordering app-then-caddy; `/api/healthz` probe; ControlMaster).
 - R12: Host validation (`validateDashboardHost`, `VALID_HOST_RE`).
 - R13: Provisioning script (doctl, host-key pinning, `# dashboard droplet (...)` marker).
 - R14: GitHub Environment `dashboard` + secret names.
@@ -46,14 +48,15 @@ hardening requirements. (See origin: docs/brainstorms/2026-06-15-dashboard-deplo
 
 ## Scope Boundaries
 
-- Not building the fro-bot/dashboard app — consumes a published Docker image only.
+- Not building the fro-bot/dashboard app in-container on the droplet — the image is built
+  off-droplet to GHCR in CI and pulled by digest.
 - No database (dashboard is stateless).
-- No multi-tenancy, no image build in CI, no automated secret rotation, no write-path.
+- No multi-tenancy, no automated secret rotation, no write-path.
 
 ### Deferred to Separate Tasks
 
-- Renovate tracking for the dashboard image (add after the first deploy confirms the image
-  registry path and tag convention).
+- Renovate tracking for `apps/dashboard/upstream.json` (the fro-bot/dashboard source ref) — add
+  after the first deploy confirms the workflow is stable (mirrors gateway Renovate tracking).
 - Any future `dashboard backup` or data-export tooling (N/A for a stateless app).
 
 ## Context & Research
@@ -80,6 +83,11 @@ hardening requirements. (See origin: docs/brainstorms/2026-06-15-dashboard-deplo
 - **`apps/umami/server/provision-droplet.ts`** — `doctl droplet create`, SSH wait, host-key
   pinning. Mirror with `# dashboard droplet (...)` marker.
 - **`.github/workflows/deploy-umami.yaml`** — gated workflow shape to mirror.
+- **`.github/workflows/deploy-gateway.yaml`** — `build-images` job pattern to mirror: `packages:
+  write`, checkout upstream app repo at pinned ref, `docker/build-push-action` to GHCR, expose
+  `outputs.gateway_digest`; deploy job `needs: build-images` and passes `GATEWAY_IMAGE_DIGEST`.
+- **`apps/gateway/upstream.json`** — pinned fro-bot/gateway source ref; mirror as
+  `apps/dashboard/upstream.json` for fro-bot/dashboard.
 - **`.github/workflows/deploy.yaml`** — router: `detect-changes` + per-app job pattern.
 - **`packages/cli/src/commands/umami/`** — CLI command group to mirror for `dashboard/`.
 - **`packages/cli/src/commands/mcp.ts`** — `MCP_ALLOWLIST` + `ctx`-threading.
@@ -102,10 +110,21 @@ hardening requirements. (See origin: docs/brainstorms/2026-06-15-dashboard-deplo
 
 ## Key Technical Decisions
 
+- **Image build to GHCR (not published-image pull):** The fro-bot/dashboard repo publishes no
+  Docker image (only a Dockerfile exists; no publish workflow). Infra builds the image off-droplet
+  to `ghcr.io/marcusrbrown/infra-dashboard@sha256:<digest>` in a `build-images` CI job, pinning
+  the fro-bot/dashboard source ref in `apps/dashboard/upstream.json`. The deploy job
+  `needs: build-images` and passes `DASHBOARD_IMAGE_DIGEST`; `deploy.ts` runs `docker compose
+  pull` then `up -d --no-build --wait dashboard`, then verifies the running container's
+  `RepoDigests` include the expected digest (fails closed on mismatch). This mirrors the gateway
+  pattern exactly.
 - **File-mounted App key (not env var):** The GitHub App private key is the security-critical
   delta from umami. It must never appear in `docker inspect` output, process listings, or crash
   dumps. The deploy uploads it to `/opt/dashboard/config/github-app.pem` (0600) via SSH stdin
-  and the compose bind-mounts it read-only into the container. This is a deliberate, documented
+  and the compose bind-mounts it read-only into the container at `/run/secrets/github-app.pem`.
+  The app reads the key via `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem` (file
+  path env var); an env-string fallback `DASHBOARD_GITHUB_APP_KEY` also exists in the app but
+  the file-mount approach is the chosen security posture. This is a deliberate, documented
   departure from umami's env-var-only secret handling.
 - **Container hardening (`read_only`, `cap_drop: [ALL]`, no-new-privileges, non-root):** The
   presence of a long-lived private key in the container justifies hardening beyond the umami
@@ -114,9 +133,9 @@ hardening requirements. (See origin: docs/brainstorms/2026-06-15-dashboard-deplo
 - **Deploy ordering (app-then-caddy):** Mirror umami — bring up `dashboard` first (health gate),
   then `caddy` (public exposure). This prevents a public TLS endpoint from existing before the
   app is healthy.
-- **`/healthz` probe (not `/api/heartbeat`):** The dashboard's health endpoint is `/healthz`.
-  The umami-specific `/api/heartbeat` must not be used here. This is a named constant in
-  `deploy.ts`.
+- **`/api/healthz` probe (not `/api/heartbeat`, not `/healthz`):** The dashboard's health
+  endpoint is `/api/healthz`. The umami-specific `/api/heartbeat` must not be used here, and the
+  root `/healthz` path does not exist. This is a named constant in `deploy.ts`.
 - **DigitalOcean droplet (not AWS):** The dashboard is stateless and low-traffic; the existing
   DO provisioning pattern (`doctl`, `droplet-helpers.ts`) is the right fit. No new cloud
   provider.
@@ -137,12 +156,12 @@ hardening requirements. (See origin: docs/brainstorms/2026-06-15-dashboard-deplo
 
 ### Deferred to Implementation
 
-- OQ4. Health probe retry budget — exact retry count + timeout for `/healthz` on first deploy
-  (ACME lag). Mirror umami's bounded-retry + WARNING-on-lag pattern; exact numbers decided during
-  `deploy.ts` implementation.
-- OQ5. Image registry path — where is the fro-bot/dashboard image published (GHCR vs Docker
-  Hub)? Confirm with the fro-bot/dashboard repo before writing the compose file. The compose
-  image field is a placeholder until confirmed.
+- OQ4. Health probe retry budget — exact retry count + timeout for `/api/healthz` on first
+  deploy (ACME lag). Mirror umami's bounded-retry + WARNING-on-lag pattern; exact numbers decided
+  during `deploy.ts` implementation.
+- OQ5. Image registry path — **RESOLVED:** the fro-bot/dashboard repo publishes no Docker image.
+  Infra builds to GHCR as `ghcr.io/marcusrbrown/infra-dashboard` (gateway pattern). The compose
+  `image:` field uses `ghcr.io/marcusrbrown/infra-dashboard:<ref>@sha256:<digest>`.
 
 ## Output Structure
 
@@ -151,6 +170,7 @@ apps/dashboard/
 ├── package.json
 ├── AGENTS.md
 ├── README.md
+├── upstream.json          # pinned fro-bot/dashboard git ref (mirror apps/gateway/upstream.json)
 ├── config/
 │   └── Caddyfile
 ├── docker-compose.yaml
@@ -174,7 +194,7 @@ packages/cli/src/commands/dashboard/
 └── logs.test.ts
 
 .github/workflows/
-├── deploy-dashboard.yaml   # new gated workflow
+├── deploy-dashboard.yaml   # new gated workflow (includes build-images job)
 └── deploy.yaml             # modified: add dashboard filter + job
 ```
 
@@ -199,12 +219,13 @@ services:
     depends_on: [dashboard]
 
   dashboard:
-    image: <registry>/fro-bot/dashboard:<version>@sha256:<digest>
+    image: ghcr.io/marcusrbrown/infra-dashboard:<ref>@sha256:<digest>
     restart: unless-stopped
     env_file: [{path: .env, required: false}]
     # Security hardening — deliberate delta from apps/umami:
     # The GitHub App private key is file-mounted (not env); these flags
     # minimize blast radius if the app process is compromised.
+    # DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem set in .env
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -213,7 +234,7 @@ services:
       # host path (uploaded by deploy.ts, 0600) : container path : read-only
       - /opt/dashboard/config/github-app.pem:/run/secrets/github-app.pem:ro
     healthcheck:
-      test: [CMD-SHELL, 'curl -f http://localhost:3000/healthz || exit 1']
+      test: [CMD-SHELL, 'curl -f http://localhost:3000/api/healthz || exit 1']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -228,21 +249,24 @@ volumes:
 
 ```text
 deploy.ts
-  validateEnv (DASHBOARD_DOMAIN, DASHBOARD_SSH_KEY in CI, App secrets)
+  validateEnv (DASHBOARD_DOMAIN, DASHBOARD_SSH_KEY in CI, DASHBOARD_IMAGE_DIGEST, App secrets)
   validateDashboardHost(host)                    # before any SSH argv
   materializeIdentityFile(DASHBOARD_SSH_KEY)     # CI: temp file, 0600
   DNS preflight: resolve DASHBOARD_DOMAIN
   ControlMaster SSH setup (shared socket)
   ssh: mkdir -p /opt/dashboard/config
   materialize /opt/dashboard/.env via SSH stdin  # never argv
+    # .env includes DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem
   upload docker-compose.yaml + config/Caddyfile
   upload DASHBOARD_GITHUB_APP_KEY to /opt/dashboard/config/github-app.pem (0600) via SSH stdin
     # SECURITY: never written to a temp file on the CI runner
     # never passed as argv, never logged
-  docker compose pull
-  docker compose up -d --wait dashboard          # app health gate first
-  docker compose up -d --wait caddy             # public exposure only after app is healthy
-  probe https://$DASHBOARD_DOMAIN/healthz        # bounded retry; ACME-lag tolerant
+  docker compose pull                            # pulls ghcr.io/marcusrbrown/infra-dashboard@sha256:<digest>
+  docker compose up -d --no-build --wait dashboard   # app health gate first
+  verify RepoDigests: docker inspect --format '{{json .RepoDigests}}' dashboard
+    # fails closed if expected digest not present
+  docker compose up -d --no-build --wait caddy  # public exposure only after app is healthy
+  probe https://$DASHBOARD_DOMAIN/api/healthz    # bounded retry; ACME-lag tolerant
 ```
 
 **Provisioning flow:**
@@ -262,8 +286,8 @@ provision-droplet.ts
 - [ ] **Unit 1: apps/dashboard Compose stack + Caddy + hardening + compose test**
 
 **Goal:** Create the `apps/dashboard` workspace with `docker-compose.yaml`, `config/Caddyfile`,
-`docker-compose.test.ts`, and `package.json`. Establish the container hardening delta from umami
-as a documented, tested baseline.
+`docker-compose.test.ts`, `upstream.json`, and `package.json`. Establish the container hardening
+delta from umami as a documented, tested baseline.
 
 **Requirements:** R1, R2, R3, R4, R5, R21, R22
 
@@ -271,6 +295,7 @@ as a documented, tested baseline.
 
 **Files:**
 - Create: `apps/dashboard/package.json`
+- Create: `apps/dashboard/upstream.json` (pin fro-bot/dashboard git ref; mirror `apps/gateway/upstream.json`)
 - Create: `apps/dashboard/docker-compose.yaml`
 - Create: `apps/dashboard/config/Caddyfile`
 - Create: `apps/dashboard/docker-compose.test.ts`
@@ -279,17 +304,22 @@ as a documented, tested baseline.
 **Approach:**
 - Mirror `apps/umami/package.json` name pattern: `@marcusrbrown/infra-dashboard`, private,
   scripts `deploy`/`provision`/`test`.
-- `docker-compose.yaml`: two services (`dashboard` + `caddy`). The `dashboard` service adds
-  `read_only: true`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, non-root
-  `user`, and a bind mount for the App key file. Comment the hardening block as a deliberate
-  delta from `apps/umami`. Caddy service mirrors umami exactly.
+- `upstream.json`: pin the fro-bot/dashboard git ref (SHA + tag). Mirror `apps/gateway/upstream.json`
+  structure. Renovate will track this file to open PRs when fro-bot/dashboard cuts new releases.
+- `docker-compose.yaml`: two services (`dashboard` + `caddy`). The `dashboard` service uses
+  `image: ghcr.io/marcusrbrown/infra-dashboard:<ref>@sha256:<digest>` (built by the CI
+  `build-images` job, pulled by digest). Adds `read_only: true`, `cap_drop: [ALL]`,
+  `security_opt: [no-new-privileges:true]`, non-root `user`, and a bind mount for the App key
+  file. Comment the hardening block as a deliberate delta from `apps/umami`. Caddy service
+  mirrors umami exactly.
 - `config/Caddyfile`: `{$DASHBOARD_DOMAIN} { reverse_proxy dashboard:3000 }`.
 - `docker-compose.test.ts`: assert pinned Caddy image digest (mirror umami test) + assert
-  `read_only: true` and `cap_drop` present in the compose text (security-critical fields).
+  `read_only: true` and `cap_drop` present in the compose text (security-critical fields) +
+  assert `image:` references `ghcr.io/marcusrbrown/infra-dashboard`.
 - Run `bun install` to update `bun.lock` (CI `--frozen-lockfile` requires it).
 
 **Patterns to follow:** `apps/umami/docker-compose.yaml`, `apps/umami/config/Caddyfile`,
-`apps/umami/docker-compose.test.ts`, `apps/umami/package.json`.
+`apps/umami/docker-compose.test.ts`, `apps/umami/package.json`, `apps/gateway/upstream.json`.
 
 **Security note:** The `read_only`/`cap_drop`/`no-new-privileges`/non-root block is the
 security-critical delta from umami. It must be present in the compose file and asserted in the
@@ -300,17 +330,19 @@ test before any other unit proceeds.
 - Compose test asserts `read_only: true` is present in the compose text.
 - Compose test asserts `cap_drop` contains `ALL`.
 - Compose test asserts the App key bind mount path is present.
+- Compose test asserts `image:` references `ghcr.io/marcusrbrown/infra-dashboard`.
 
 **Verification:** `bun test` green in `apps/dashboard/`; `bun install` clean; `apps/dashboard`
 resolves as a workspace member.
 
 ---
 
-- [ ] **Unit 2: src/deploy.ts + src/host.ts + tests (SSH secret materialization, App key file, deploy ordering, /healthz probe)**
+- [ ] **Unit 2: src/deploy.ts + src/host.ts + tests (SSH secret materialization, App key file, deploy ordering, /api/healthz probe)**
 
 **Goal:** `deploy.ts` — validate env + host, materialize `.env` via SSH stdin, upload compose +
-Caddyfile, upload the GitHub App private key as a file (0600) via SSH stdin, bring up app then
-Caddy, probe `/healthz`. `host.ts` — `validateDashboardHost` with SSH argv injection defense.
+Caddyfile, upload the GitHub App private key as a file (0600) via SSH stdin, pull the
+digest-pinned GHCR image, bring up app then Caddy, verify RepoDigests, probe `/api/healthz`.
+`host.ts` — `validateDashboardHost` with SSH argv injection defense.
 
 **Requirements:** R6, R7, R8, R9, R10, R11, R12
 
@@ -326,47 +358,59 @@ Caddy, probe `/healthz`. `host.ts` — `validateDashboardHost` with SSH argv inj
 - `host.ts`: `VALID_HOST_RE = /^[a-z\d][a-z\d.\-]*$/i`, `validateDashboardHost(host: string):
   string`. Mirror `apps/umami/src/host.ts` exactly (rename function + error message prefix).
 - `deploy.ts`:
-  - `validateEnv`: require `DASHBOARD_DOMAIN`, `DASHBOARD_GITHUB_APP_ID`,
+  - `validateEnv`: require `DASHBOARD_DOMAIN`, `DASHBOARD_IMAGE_DIGEST`, `DASHBOARD_GITHUB_APP_ID`,
     `DASHBOARD_GITHUB_APP_KEY`, `DASHBOARD_OAUTH_CLIENT_ID`, `DASHBOARD_OAUTH_CLIENT_SECRET`,
-    `DASHBOARD_OPERATOR_LOGIN`, `DASHBOARD_COOKIE_KEY`, SSH context.
+    `DASHBOARD_OPERATOR_LOGIN`, `DASHBOARD_COOKIE_KEY`, SSH context. Missing
+    `DASHBOARD_IMAGE_DIGEST` → fail closed before any SSH call.
   - `validateDashboardHost(host)` before any SSH argv.
   - `materializeIdentityFile(DASHBOARD_SSH_KEY)` in CI (shared helper).
   - DNS preflight: resolve `DASHBOARD_DOMAIN`.
   - ControlMaster SSH setup.
   - `ssh: mkdir -p /opt/dashboard/config`.
-  - Materialize `/opt/dashboard/.env` via SSH stdin (boundary-validate secret values).
+  - Materialize `/opt/dashboard/.env` via SSH stdin (boundary-validate secret values). The `.env`
+    includes `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem` so the app reads the
+    key via file path (not the env-string fallback).
   - Upload `docker-compose.yaml` + `config/Caddyfile`.
   - **Upload App key:** pipe `DASHBOARD_GITHUB_APP_KEY` via SSH stdin to
     `/opt/dashboard/config/github-app.pem`; set `chmod 0600`. Never write to a temp file on the
     runner, never pass as argv, never log. This is the security-critical step.
-  - `docker compose pull`.
-  - `docker compose up -d --wait dashboard` (app health gate).
-  - `docker compose up -d --wait caddy` (public exposure after app is healthy).
-  - Probe `https://$DASHBOARD_DOMAIN/healthz` — bounded retry; emit WARNING on ACME lag (first
-    deploy); still succeeds if containers are healthy (idempotent re-run once cert lands).
+  - `docker compose pull` (pulls `ghcr.io/marcusrbrown/infra-dashboard@sha256:<digest>`).
+  - `docker compose up -d --no-build --wait dashboard` (app health gate; `--no-build` enforces
+    digest-pinned image).
+  - **Verify RepoDigests:** `docker inspect --format '{{json .RepoDigests}}' dashboard` — fail
+    closed if the expected digest is not present in the output.
+  - `docker compose up -d --no-build --wait caddy` (public exposure after app is healthy).
+  - Probe `https://$DASHBOARD_DOMAIN/api/healthz` — bounded retry; emit WARNING on ACME lag
+    (first deploy); still succeeds if containers are healthy (idempotent re-run once cert lands).
 - Injectable `SpawnFn` for testability (gateway/umami pattern).
 
 **Patterns to follow:** `apps/umami/src/deploy.ts` (SSH-stdin materialization, ControlMaster,
-DNS preflight, deploy ordering, bounded HTTPS probe), `apps/umami/src/host.ts` (host validator).
+DNS preflight, deploy ordering, bounded HTTPS probe), `apps/umami/src/host.ts` (host validator),
+`apps/gateway/src/deploy.ts` (DASHBOARD_IMAGE_DIGEST requirement, `--no-build`, RepoDigests
+verification).
 
 **Security note:** The App key upload step (R8) is the security-critical delta. Tests must assert
 the key bytes go via SSH stdin, never appear in spawn argv, and are never written to a local temp
-file. The health probe endpoint is `/healthz` (not `/api/heartbeat`).
+file. The health probe endpoint is `/api/healthz` (not `/healthz`, not `/api/heartbeat`).
 
 **Test scenarios:**
 - `host.ts`: valid hostname/FQDN/IP passes; empty string throws; `-`-prefixed value throws;
   value with shell metacharacters throws.
-- `deploy.ts` happy path: validates env + host, materializes `.env` via stdin, uploads compose +
-  Caddyfile, uploads App key via stdin (not argv), brings up `dashboard` then `caddy` in order,
-  probes `/healthz`.
+- `deploy.ts` happy path: validates env + host, materializes `.env` via stdin (including
+  `DASHBOARD_GITHUB_APP_KEY_FILE`), uploads compose + Caddyfile, uploads App key via stdin (not
+  argv), pulls image, brings up `dashboard` then `caddy` in order, verifies RepoDigests, probes
+  `/api/healthz`.
 - `deploy.ts` edge: missing `DASHBOARD_DOMAIN` → throws before any SSH call.
+- `deploy.ts` edge: missing `DASHBOARD_IMAGE_DIGEST` → fails closed before any SSH call.
 - `deploy.ts` edge: `validateDashboardHost` rejects `-oProxyCommand=...` style host → throws
   before SSH argv built.
 - `deploy.ts` security: App key bytes appear in SSH stdin, not in spawn argv (assert spawn args
   contain no PEM content).
-- `deploy.ts` edge: `/healthz` returns non-200 after retries → deploy fails with clear error.
+- `deploy.ts` edge: RepoDigests mismatch → deploy fails closed with clear error.
+- `deploy.ts` edge: `/api/healthz` returns non-200 after retries → deploy fails with clear error.
 
-**Verification:** `bun test` green; App key never in argv; health probe endpoint is `/healthz`.
+**Verification:** `bun test` green; App key never in argv; health probe endpoint is `/api/healthz`;
+RepoDigests verification present.
 
 ---
 
@@ -406,7 +450,8 @@ keys into `.github/known_hosts` with marker `# dashboard droplet (...)`. Idempot
 
 - [ ] **Unit 4: deploy-dashboard.yaml + umbrella deploy.yaml routing**
 
-**Goal:** `deploy-dashboard.yaml` gated workflow + wire into `deploy.yaml` router with
+**Goal:** `deploy-dashboard.yaml` gated workflow with a `build-images` job (builds fro-bot/dashboard
+to GHCR) + a `deploy` job that consumes the digest — wired into `deploy.yaml` router with
 `dorny/paths-filter` and `predicate-quantifier: every`.
 
 **Requirements:** R15, R16
@@ -418,11 +463,24 @@ keys into `.github/known_hosts` with marker `# dashboard droplet (...)`. Idempot
 - Modify: `.github/workflows/deploy.yaml`
 
 **Approach:**
-- `deploy-dashboard.yaml`: mirror `deploy-umami.yaml` exactly. Triggers: `workflow_dispatch` +
-  `workflow_call`. Secrets: all R14 secrets declared `required: true`. `environment: dashboard`.
-  Steps: checkout (SHA-pinned), setup-bun (SHA-pinned), `bun install --frozen-lockfile
-  --ignore-scripts`, validate secrets (bash array check), configure known_hosts from
-  `.github/known_hosts`, `bun run --cwd apps/dashboard deploy` with all secrets in env.
+- `deploy-dashboard.yaml`:
+  - **`build-images` job** (mirror `deploy-gateway.yaml` `build-images` job):
+    - `permissions: { contents: read, packages: write }` — `packages: write` required to push to
+      GHCR.
+    - Checkout fro-bot/dashboard at the ref pinned in `apps/dashboard/upstream.json`.
+    - `docker/login-action` to GHCR (SHA-pinned with `# vX.Y.Z` comment).
+    - `docker/build-push-action` to `ghcr.io/marcusrbrown/infra-dashboard:<ref>` (SHA-pinned
+      with `# vX.Y.Z` comment).
+    - Expose `outputs.dashboard_digest: ${{ steps.build-dashboard.outputs.digest }}`.
+  - **`deploy` job** (mirror `deploy-umami.yaml` shape):
+    - `needs: build-images`.
+    - Triggers: `workflow_dispatch` + `workflow_call`.
+    - Secrets: all R14 secrets declared `required: true`.
+    - `environment: dashboard`.
+    - Steps: checkout (SHA-pinned), setup-bun (SHA-pinned), `bun install --frozen-lockfile
+      --ignore-scripts`, validate secrets (bash array check), configure known_hosts from
+      `.github/known_hosts`, `bun run --cwd apps/dashboard deploy` with all secrets in env,
+      including `DASHBOARD_IMAGE_DIGEST: ${{ needs.build-images.outputs.dashboard_digest }}`.
 - `deploy.yaml` changes:
   - Add `dashboard: ${{ steps.filter.outputs.dashboard }}` to `detect-changes` outputs.
   - Add `dashboard` filter in `dorny/paths-filter`: `apps/dashboard/**` with negations for
@@ -430,21 +488,28 @@ keys into `.github/known_hosts` with marker `# dashboard droplet (...)`. Idempot
   - Add `deploy-dashboard` job: `needs: detect-changes`, `if: github.event_name ==
     'workflow_dispatch' || needs.detect-changes.outputs.dashboard == 'true'`, `uses:
     ./.github/workflows/deploy-dashboard.yaml`, `secrets:` all R14 secrets.
+  - The caller job in `deploy.yaml` must also carry `permissions: { packages: write }` (gateway
+    precedent — the umbrella router needs this permission to pass through to the reusable
+    workflow's `build-images` job).
 - All action `uses:` references must be SHA-pinned with a version comment (conventions gate).
 - `.yaml` extension (not `.yml`).
 - No `ssh-keyscan` in CI (host keys come from committed `.github/known_hosts`).
 - No `secrets: inherit`.
 
-**Patterns to follow:** `.github/workflows/deploy-umami.yaml`, `.github/workflows/deploy.yaml`
-(existing router structure).
+**Patterns to follow:** `.github/workflows/deploy-gateway.yaml` (`build-images` job, digest
+output, `packages: write`), `.github/workflows/deploy-umami.yaml` (deploy job shape),
+`.github/workflows/deploy.yaml` (existing router structure).
 
 **Test scenarios:**
 - Convention gate: `deploy-dashboard.yaml` passes `packages/cli/src/conventions.test.ts` (SHA-
   pinned with version comment, `.yaml`, no `ssh-keyscan`, no `secrets: inherit`).
 - `deploy.yaml` router: `dashboard` filter matches `apps/dashboard/**` changes; negations exclude
   docs/tests.
+- `build-images` job outputs `dashboard_digest`; `deploy` job receives it as
+  `DASHBOARD_IMAGE_DIGEST`.
 
-**Verification:** YAML parses; conventions test green; router has a `dashboard` branch.
+**Verification:** YAML parses; conventions test green; router has a `dashboard` branch;
+`build-images` job present with `packages: write`.
 
 ---
 
@@ -507,9 +572,9 @@ CLI-only; `infra dashboard --help` renders.
 - [ ] **Unit 6: apps/dashboard/README.md + AGENTS.md runbook**
 
 **Goal:** `apps/dashboard/README.md` (deploy badge, stack summary, commands, configuration table)
-and `apps/dashboard/AGENTS.md` (full operator runbook: deploy flow, file-mounted App key
-security, container hardening rationale, provisioning, secret rotation, upgrade flow,
-anti-patterns).
+and `apps/dashboard/AGENTS.md` (full operator runbook: deploy flow, GHCR build + ref pinning,
+file-mounted App key security, container hardening rationale, provisioning, secret rotation,
+upgrade flow, anti-patterns).
 
 **Requirements:** R24, R25
 
@@ -526,28 +591,37 @@ anti-patterns).
   Configuration table (GitHub Environment `dashboard`, all R14 secrets with descriptions).
   Operations pointer to AGENTS.md. CLI commands table.
 - `AGENTS.md`: mirror `apps/umami/AGENTS.md` structure. Key sections:
-  - **Stack** — service table (dashboard image, caddy image, roles).
+  - **Stack** — service table (dashboard image `ghcr.io/marcusrbrown/infra-dashboard`, caddy
+    image, roles).
+  - **GHCR build + ref pinning** — explain that infra builds fro-bot/dashboard's Dockerfile to
+    GHCR in the `build-images` CI job; `apps/dashboard/upstream.json` pins the fro-bot/dashboard
+    git ref; Renovate tracks this file to open PRs when fro-bot/dashboard cuts new releases
+    (mirrors gateway pattern). Document how to update the pinned ref manually.
   - **Deploy flow** — numbered steps matching `deploy.ts` implementation; call out the App key
     file upload step explicitly (step N: "Uploads the GitHub App private key to
     `/opt/dashboard/config/github-app.pem` (0600) via SSH stdin — never as an env var, never
-    logged").
+    logged"); call out the RepoDigests verification step; note the health probe is `/api/healthz`.
   - **Container hardening** — explain `read_only`/`cap_drop`/`no-new-privileges`/non-root as a
     deliberate delta from `apps/umami`; document the file-mount path for the App key; explain
-    why env vars are insufficient for long-lived key material.
+    why env vars are insufficient for long-lived key material; note that `DASHBOARD_GITHUB_APP_KEY_FILE`
+    points the app to the mounted file.
   - **Secret rotation** — how to rotate each secret; note that `DASHBOARD_GITHUB_APP_KEY`
     rotation requires re-uploading the key file (redeploy) and revoking the old key in the
     GitHub App settings.
-  - **Upgrade flow** — Renovate opens PRs for the dashboard image; merge → Deploy Dashboard
-    workflow ships the new digest.
+  - **Upgrade flow** — Renovate opens PRs for `apps/dashboard/upstream.json` (the
+    fro-bot/dashboard source ref); merge → `build-images` job rebuilds the image to GHCR →
+    Deploy Dashboard workflow ships the new digest.
   - **Provisioning** — one-time `bun run provision:dashboard`; commit `.github/known_hosts`
     before first CI deploy.
   - **Anti-patterns** — never put the App private key in an env var; never `docker compose down
-    -v` (destroys Caddy TLS data); never put secret values in SSH argv.
+    -v` (destroys Caddy TLS data); never put secret values in SSH argv; never use `--build` in
+    the deploy (image must be the pre-built GHCR digest, not rebuilt on the droplet).
 
-**Patterns to follow:** `apps/umami/README.md`, `apps/umami/AGENTS.md`.
+**Patterns to follow:** `apps/umami/README.md`, `apps/umami/AGENTS.md`, `apps/gateway/AGENTS.md`
+(GHCR build + upstream.json ref pinning pattern).
 
 **Verification:** Docs accurate to shipped behavior; no secret values in docs; anti-patterns
-section explicitly calls out the file-mounted-key requirement.
+section explicitly calls out the file-mounted-key requirement and the GHCR-only image source.
 
 ---
 
@@ -557,7 +631,7 @@ section explicitly calls out the file-mounted-key requirement.
   router; new entry in unified `status`; new `MCP_ALLOWLIST` member. No existing app code paths
   change.
 - **Error propagation:** provisioning fails closed on host-key pinning; deploy fails closed on
-  missing env/host, on App key upload failure, and on `/healthz` probe failure.
+  missing env/host, on App key upload failure, and on `/api/healthz` probe failure.
 - **State lifecycle risks:** Caddy TLS data lives in the `caddy_data` volume — never run `docker
   compose down -v`. No DB volume; no fingerprint guard needed.
 - **API surface parity:** `dashboard status` follows the same Mode A + `ctx`-threading +
@@ -571,8 +645,8 @@ section explicitly calls out the file-mounted-key requirement.
 
 | Risk | Mitigation |
 |------|------------|
-| fro-bot/dashboard image registry path unknown | Confirm with fro-bot/dashboard repo before writing compose; use a placeholder until confirmed (OQ5) |
-| `read_only: true` breaks the Hono app (needs writable paths) | Verify with the fro-bot/dashboard team; add `tmpfs` mounts for any required writable paths (e.g. `/tmp`) if needed |
+| No upstream image — infra builds to GHCR (gateway pattern) | `build-images` job in `deploy-dashboard.yaml`; `apps/dashboard/upstream.json` pins the fro-bot/dashboard ref; RepoDigests verification fails closed on digest mismatch |
+| `read_only: true` breaks the Hono app (needs writable paths) | Verify during impl; add `tmpfs` mounts for any required writable paths (e.g. `/tmp`) if needed — the app may need a writable `/tmp` even under `read_only: true` |
 | GitHub Environment `dashboard` auto-creates ungated on first workflow reference | Pre-create with reviewer + branch policy before merge (umami lesson) |
 | First deploy cascade (ACME cert lag, SSH key trailing-`\n`) | Reuse battle-tested `droplet-helpers.ts`; budget the cascade; `materializeIdentityFile` already handles trailing-newline |
 | App key accidentally logged or written to runner disk | Deploy test asserts key bytes never in spawn argv; no temp file write; CI log masking via GitHub secret redaction |
@@ -587,20 +661,27 @@ section explicitly calls out the file-mounted-key requirement.
 - **Bootstrap ordering:** (1) seed secrets into `.env` + `dashboard` Environment; (2) `bun run
   provision:dashboard` — creates droplet, pins host keys; (3) commit `.github/known_hosts`; (4)
   first deploy via `bun run --cwd apps/dashboard deploy` or the workflow.
-- **First deploy cascade expected** — budget attempts; verify with `/healthz` probe (not just
+- **First deploy cascade expected** — budget attempts; verify with `/api/healthz` probe (not just
   `docker compose ps`).
 - **App key file on the droplet** — `/opt/dashboard/config/github-app.pem` (0600, owned by root
   or the deploy user). The compose bind-mounts it read-only into the container at
-  `/run/secrets/github-app.pem`. Never copy this file off the droplet; rotate by redeploying
-  with a new `DASHBOARD_GITHUB_APP_KEY` secret.
+  `/run/secrets/github-app.pem`. The app reads it via `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem`
+  (set in `.env`). Never copy this file off the droplet; rotate by redeploying with a new
+  `DASHBOARD_GITHUB_APP_KEY` secret.
 
 ## Sources & References
 
 - **Origin document:** [docs/brainstorms/2026-06-15-dashboard-deploy-stack-requirements.md](docs/brainstorms/2026-06-15-dashboard-deploy-stack-requirements.md)
 - **Related app plan (fro-bot/.github):** `docs/plans/2026-06-15-001-feat-monitoring-dashboard-phase-1-plan.md` (Units 7–8 cover the infra deploy contract from the app's perspective; this plan is the infra-repo-owned counterpart)
-- Related code: `apps/umami/` (all files — primary pattern), `packages/cli/src/commands/umami/`,
+- Related code: `apps/umami/` (all files — primary pattern), `apps/gateway/` (build-to-GHCR
+  pattern, `upstream.json` ref pinning, `src/deploy.ts` RepoDigests verification),
+  `packages/cli/src/commands/umami/`,
   `packages/cli/src/commands/mcp.ts`, `packages/cli/src/commands/status.ts`,
   `packages/cli/src/conventions.test.ts`, `packages/shared/server/droplet-helpers.ts`
+- Related workflows: `.github/workflows/deploy-gateway.yaml` (`build-images` job, `packages:
+  write`, digest output pattern)
 - Related learnings: `docs/solutions/workflow-issues/umami-first-deploy-cascade-2026-05-29.md`,
   `gateway-first-deploy-cascade-2026-05-20.md`, `cliproxy-first-deploy-cascade-2026-04-06.md`,
-  `bun-deploy-user-permissions-ci-2026-04-02.md`
+  `bun-deploy-user-permissions-ci-2026-04-02.md`,
+  `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` (the `--build`/rebuild
+  lesson — why `--no-build` + digest pinning is the correct pattern)

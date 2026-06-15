@@ -12,7 +12,7 @@ Personal infrastructure management — deploy automation, operational CLI, and t
 
 ## Overview
 
-Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, a WireGuard VPN egress box on AWS Lightsail, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
+Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, a Fro Bot monitoring dashboard, a WireGuard VPN egress box on AWS Lightsail, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
 
 | Package | Description |
 | --- | --- |
@@ -20,6 +20,7 @@ Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy
 | `apps/cliproxy` | CLIProxyAPI Docker Compose stack behind Caddy (`cliproxy.fro.bot`) |
 | `apps/gateway` | Fro Bot gateway Docker Compose stack (`gateway.fro.bot`) |
 | `apps/umami` | Self-hosted Umami analytics Docker Compose stack (`metrics.fro.bot`) |
+| `apps/dashboard` | Fro Bot monitoring dashboard Docker Compose stack (`dashboard.fro.bot`) |
 | `apps/vpn` | WireGuard egress box on AWS Lightsail `eu-west-1` — native `wg-quick@wg0`, no Docker |
 | `packages/cli` | [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI — health checks, deploy triggers, onboarding wizard, MCP bridge |
 
@@ -45,6 +46,7 @@ Each app is a self-contained deploy unit. See its README for build, deploy, prov
 - **[CLIProxyAPI](apps/cliproxy/README.md)** (`apps/cliproxy`) — [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) Claude proxy at [cliproxy.fro.bot](https://cliproxy.fro.bot); Docker Compose + Caddy on DigitalOcean, issuing per-repo API keys backed by one Claude subscription.
 - **[Gateway](apps/gateway/README.md)** (`apps/gateway`) — Fro Bot Discord client and workspace runner at [gateway.fro.bot](https://gateway.fro.bot); a 3-service Docker Compose stack on DigitalOcean, pinned to `fro-bot/agent` via `apps/gateway/upstream.json`.
 - **[Umami](apps/umami/README.md)** (`apps/umami`) — self-hosted [Umami](https://umami.is) privacy-respecting analytics at [metrics.fro.bot](https://metrics.fro.bot); Docker Compose (Umami + Postgres + Caddy) on DigitalOcean.
+- **[Dashboard](apps/dashboard/README.md)** (`apps/dashboard`) — Fro Bot monitoring dashboard at [dashboard.fro.bot](https://dashboard.fro.bot); Docker Compose (dashboard + Caddy) on DigitalOcean; image built from `fro-bot/dashboard` (pinned in `apps/dashboard/upstream.json`) and pushed to GHCR by CI before deploy. See [`apps/dashboard/AGENTS.md`](apps/dashboard/AGENTS.md) for the operator runbook.
 - **[VPN](apps/vpn/README.md)** (`apps/vpn`) — WireGuard egress box on AWS Lightsail (`eu-west-1`, Ireland); native `wg-quick@wg0` + systemd, no Docker; provisioned via `@aws-sdk/client-lightsail`, deployed over SSH.
 
 ## CLI
@@ -69,6 +71,7 @@ bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 | **Deploy CLIProxy** | Push to `main`, `workflow_dispatch` | Deploy CLIProxyAPI (path-filtered) |
 | **Deploy Gateway** | Push to `main`, `workflow_dispatch` | Deploy gateway stack (path-filtered) |
 | **Deploy Umami** | Push to `main`, `workflow_dispatch` | Deploy Umami analytics stack (path-filtered) |
+| **Deploy Dashboard** | Push to `main`, `workflow_dispatch` | Build dashboard image to GHCR and deploy (path-filtered) |
 | **Deploy VPN** | Push to `main`, `workflow_dispatch` | Deploy WireGuard VPN box (path-filtered) |
 | **Deploy** | Push to `main`, `workflow_dispatch` | Router that path-filters changes and dispatches the per-app deploy workflows |
 | **Release** | Push to `main` | Version and publish `@marcusrbrown/infra` via Changesets |
@@ -87,6 +90,7 @@ The `Deploy` router uses `dorny/paths-filter` (`predicate-quantifier: every`) to
 - **Deploy CLIProxy** runs in the `cliproxy` environment.
 - **Deploy Gateway** runs in the `gateway` environment.
 - **Deploy Umami** runs in the `umami` environment.
+- **Deploy Dashboard** runs in the `dashboard` environment.
 - **Deploy VPN** runs in the `vpn` environment.
 
 Manual deploys are available either per-app (`workflow_dispatch` on each dedicated workflow) or together via the umbrella `Deploy` workflow.
@@ -147,6 +151,21 @@ See [`apps/gateway/README.md`](apps/gateway/README.md) for the complete contract
 
 See [`apps/umami/README.md`](apps/umami/README.md) and [`apps/umami/AGENTS.md`](apps/umami/AGENTS.md) for the DB-password rotation runbook.
 
+**`dashboard` environment:**
+
+| Secret | Required | Description |
+| --- | --- | --- |
+| `DASHBOARD_SSH_KEY` | ✓ | Ed25519 private key for the `dashboard.fro.bot` droplet |
+| `DASHBOARD_DOMAIN` | ✓ | FQDN of the dashboard instance |
+| `DASHBOARD_GITHUB_APP_ID` | ✓ | GitHub App ID for dashboard repo access |
+| `DASHBOARD_GITHUB_APP_KEY` | ✓ | GitHub App private key PEM (uploaded via SSH stdin; bind-mounted into container at `/run/secrets/github-app.pem`) |
+| `DASHBOARD_OAUTH_CLIENT_ID` | ✓ | OAuth client ID for dashboard authentication |
+| `DASHBOARD_OAUTH_CLIENT_SECRET` | ✓ | OAuth client secret for dashboard authentication |
+| `DASHBOARD_OPERATOR_LOGIN` | ✓ | GitHub login of the operator allowed to access the dashboard |
+| `DASHBOARD_COOKIE_KEY` | ✓ | Cookie signing key |
+
+See [`apps/dashboard/AGENTS.md`](apps/dashboard/AGENTS.md) for the operator runbook.
+
 **`vpn` environment:**
 
 | Secret        | Required | Description                                                                      |
@@ -183,7 +202,7 @@ The KeeWeb deploy target uses a dedicated `deploy-kw` user with scoped sudo for 
 bun run apps/keeweb/server/setup-deploy-user.ts
 ```
 
-Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, `gateway.fro.bot`, and the VPN static IP are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`.
+Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, `gateway.fro.bot`, `dashboard.fro.bot`, and the VPN static IP are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`.
 
 ## Repository Structure
 

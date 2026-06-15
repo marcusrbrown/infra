@@ -3,6 +3,7 @@
 import {goke} from 'goke'
 import pkg from '../package.json' with {type: 'json'}
 import {registerCliproxyCommands} from './commands/cliproxy'
+import {registerDashboardCommands} from './commands/dashboard'
 import {registerGatewayCommands} from './commands/gateway'
 import {registerKeewebCommands} from './commands/keeweb'
 import {registerMcp} from './commands/mcp'
@@ -23,6 +24,7 @@ registerKeewebCommands(cli)
 registerCliproxyCommands(cli)
 registerGatewayCommands(cli)
 registerUmamiCommands(cli)
+registerDashboardCommands(cli)
 registerVpnCommands(cli)
 registerStatus(cli)
 registerMcp(cli)

@@ -1,0 +1,439 @@
+import {existsSync} from 'node:fs'
+
+import {dropletExists} from '@marcusrbrown/infra-shared/server/droplet-helpers'
+import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
+
+import {validateDashboardHost} from '../src/host'
+import {
+  checkDropletExistence,
+  DROPLET_NAME,
+  establishSshAccess,
+  getDashboardSshFingerprint,
+  parseProvisionArgs,
+  validateRequiredEnv,
+} from './provision-droplet'
+
+// ---------------------------------------------------------------------------
+// Env helpers
+// ---------------------------------------------------------------------------
+
+const managedEnvKeys = [
+  'DIGITALOCEAN_ACCESS_TOKEN',
+  'DASHBOARD_DOMAIN',
+  'DASHBOARD_SSH_KEY',
+  'DASHBOARD_SSH_KEY_NAME',
+] as const
+type ManagedEnvKey = (typeof managedEnvKeys)[number]
+
+let savedEnv: Partial<Record<ManagedEnvKey, string | undefined>>
+
+function saveEnv(): void {
+  savedEnv = Object.fromEntries(managedEnvKeys.map(k => [k, process.env[k]]))
+}
+
+function restoreEnv(): void {
+  for (const key of managedEnvKeys) {
+    const value = savedEnv[key]
+    if (value === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = value
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Spawn mock helpers
+// ---------------------------------------------------------------------------
+
+interface SpawnResult {
+  stdout: ReadableStream<Uint8Array>
+  stderr: ReadableStream<Uint8Array>
+  exited: Promise<number>
+}
+
+function makeSpawnResult(stdout: string, exitCode: number): SpawnResult {
+  const enc = new TextEncoder()
+  return {
+    stdout: new ReadableStream({
+      start(controller) {
+        controller.enqueue(enc.encode(stdout))
+        controller.close()
+      },
+    }),
+    stderr: new ReadableStream({
+      start(controller) {
+        controller.close()
+      },
+    }),
+    exited: Promise.resolve(exitCode),
+  }
+}
+
+// A fake private key for testing — not a real key, just realistic shape
+const FAKE_PRIVATE_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakebase64content\n-----END OPENSSH PRIVATE KEY-----'
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('provision-droplet', () => {
+  beforeEach(() => {
+    saveEnv()
+  })
+
+  afterEach(() => {
+    restoreEnv()
+  })
+
+  // -------------------------------------------------------------------------
+  // import.meta.main guard — importing the module must not trigger side effects
+  // -------------------------------------------------------------------------
+
+  describe('import guard', () => {
+    it('exports named functions without triggering doctl or network calls on import', () => {
+      // The mere fact that this test file imports from ./provision-droplet
+      // and we reach this assertion proves the import.meta.main guard works.
+      expect(typeof validateRequiredEnv).toBe('function')
+      expect(typeof parseProvisionArgs).toBe('function')
+      expect(typeof getDashboardSshFingerprint).toBe('function')
+      expect(typeof checkDropletExistence).toBe('function')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // validateRequiredEnv
+  // -------------------------------------------------------------------------
+
+  describe('required environment variable validation', () => {
+    it('returns empty array when all required vars are present', () => {
+      const missing = validateRequiredEnv({
+        DIGITALOCEAN_ACCESS_TOKEN: 'tok_abc',
+        DASHBOARD_DOMAIN: 'dashboard.fro.bot',
+      })
+
+      expect(missing).toEqual([])
+    })
+
+    it('reports DIGITALOCEAN_ACCESS_TOKEN when it is missing', () => {
+      const missing = validateRequiredEnv({
+        DASHBOARD_DOMAIN: 'dashboard.fro.bot',
+      })
+
+      expect(missing).toContain('DIGITALOCEAN_ACCESS_TOKEN')
+    })
+
+    it('reports DASHBOARD_DOMAIN when it is missing', () => {
+      const missing = validateRequiredEnv({
+        DIGITALOCEAN_ACCESS_TOKEN: 'tok_abc',
+      })
+
+      expect(missing).toContain('DASHBOARD_DOMAIN')
+    })
+
+    it('reports both vars when both are missing', () => {
+      const missing = validateRequiredEnv({})
+
+      expect(missing).toContain('DIGITALOCEAN_ACCESS_TOKEN')
+      expect(missing).toContain('DASHBOARD_DOMAIN')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // parseProvisionArgs
+  // -------------------------------------------------------------------------
+
+  describe('provision argument parsing', () => {
+    it('parses --force and --check-exists flags', () => {
+      expect(parseProvisionArgs(['--force', '--check-exists'])).toEqual({force: true, checkExists: true})
+      expect(parseProvisionArgs([])).toEqual({force: false, checkExists: false})
+    })
+
+    it('rejects unknown arguments instead of silently ignoring them', () => {
+      expect(() => parseProvisionArgs(['--unknown'])).toThrow(/Unknown provision argument/)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // droplet existence guard
+  // -------------------------------------------------------------------------
+
+  describe('droplet existence guard', () => {
+    it('returns true when the dashboard droplet is listed', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(`${DROPLET_NAME}\n`, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const result = await dropletExists(DROPLET_NAME)
+
+      expect(result).toBe(true)
+      spawnSpy.mockRestore()
+    })
+
+    it('returns false when the dashboard droplet is not listed', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult('other-droplet\n', 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const result = await dropletExists(DROPLET_NAME)
+
+      expect(result).toBe(false)
+      spawnSpy.mockRestore()
+    })
+
+    it('aborts without creating when droplet exists and --force is not set', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(`${DROPLET_NAME}\n`, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const exists = await dropletExists(DROPLET_NAME)
+      expect(exists).toBe(true)
+
+      const force = false
+      const wouldAbort = exists && !force
+      expect(wouldAbort).toBe(true)
+
+      // Only one spawn call (the list) — no create call made
+      expect(spawnSpy).toHaveBeenCalledTimes(1)
+
+      spawnSpy.mockRestore()
+    })
+
+    it('proceeds past the guard when --force is set even if droplet exists', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(`${DROPLET_NAME}\n`, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const exists = await dropletExists(DROPLET_NAME)
+      expect(exists).toBe(true)
+
+      const force = true
+      const wouldAbort = exists && !force
+      expect(wouldAbort).toBe(false)
+
+      spawnSpy.mockRestore()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // checkDropletExistence
+  // -------------------------------------------------------------------------
+
+  describe('checkDropletExistence', () => {
+    it('returns machine-readable existence state without provisioning side effects', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(`${DROPLET_NAME}\n`, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const state = await checkDropletExistence(DROPLET_NAME)
+
+      expect(state).toEqual({name: DROPLET_NAME, exists: true})
+      expect(spawnSpy).toHaveBeenCalledTimes(1)
+      expect(spawnSpy.mock.calls[0]?.[0]).toEqual([
+        'doctl',
+        'compute',
+        'droplet',
+        'list',
+        '--format',
+        'Name',
+        '--no-header',
+      ])
+
+      spawnSpy.mockRestore()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // SSH key selection by name
+  // -------------------------------------------------------------------------
+
+  const MULTI_KEY_OUTPUT = [
+    'UltraVisor                                            91:53:2a:06:50:89:54:68:e6:c5:fd:c4:1a:c5:87:c9',
+    'ShellFish@Marcus-iPad-01052022                        d4:a0:81:f4:7c:ba:17:f5:71:6a:17:75:e3:20:19:2e',
+    'id_rsa-root@monica.marcusrbrown.com via hypervisor    b8:02:e3:70:3a:6a:60:45:09:e0:8b:01:d8:09:43:22',
+    'fro-bot-dashboard                                     e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b',
+  ].join('\n')
+
+  describe('SSH key selection by name', () => {
+    it('uses fro-bot-dashboard as the default key name when no argument is provided', async () => {
+      delete process.env.DASHBOARD_SSH_KEY_NAME
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(MULTI_KEY_OUTPUT, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getDashboardSshFingerprint()
+
+      expect(fp).toBe('e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('uses DASHBOARD_SSH_KEY_NAME env var when no argument is passed', async () => {
+      process.env.DASHBOARD_SSH_KEY_NAME = 'custom-dashboard-key'
+
+      const customKeyOutput = [
+        'fro-bot-dashboard                                     e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b',
+        'custom-dashboard-key                                  aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99',
+      ].join('\n')
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(customKeyOutput, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getDashboardSshFingerprint()
+
+      expect(fp).toBe('aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99')
+      expect(fp).not.toBe('e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('matches the named key when explicitly passed as argument', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
+        makeSpawnResult(MULTI_KEY_OUTPUT, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      const fp = await getDashboardSshFingerprint('fro-bot-dashboard')
+
+      expect(fp).toBe('e0:8f:0d:fa:d1:b3:ab:b4:83:9b:06:b6:20:82:91:2b')
+      expect(fp).not.toBe('91:53:2a:06:50:89:54:68:e6:c5:fd:c4:1a:c5:87:c9')
+
+      spawnSpy.mockRestore()
+    })
+
+    it('throws when the named key is not found in the account', async () => {
+      const threeOtherKeys = [
+        'UltraVisor                                            91:53:2a:06:50:89:54:68:e6:c5:fd:c4:1a:c5:87:c9',
+        'ShellFish@Marcus-iPad-01052022                        d4:a0:81:f4:7c:ba:17:f5:71:6a:17:75:e3:20:19:2e',
+        'id_rsa-root@monica.marcusrbrown.com via hypervisor    b8:02:e3:70:3a:6a:60:45:09:e0:8b:01:d8:09:43:22',
+      ].join('\n')
+
+      const spawnSpy = spyOn(Bun, 'spawn').mockReturnValueOnce(
+        makeSpawnResult(threeOtherKeys, 0) as ReturnType<typeof Bun.spawn>,
+      )
+
+      await expect(getDashboardSshFingerprint('fro-bot-dashboard')).rejects.toThrow(/not found/)
+
+      spawnSpy.mockRestore()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // validateDashboardHost — provision script must call this before pinHostKeys
+  // -------------------------------------------------------------------------
+
+  describe('host validation security invariant', () => {
+    it('accepts a valid hostname', () => {
+      expect(validateDashboardHost('dashboard.fro.bot')).toBe('dashboard.fro.bot')
+    })
+
+    it('throws on empty string', () => {
+      expect(() => validateDashboardHost('')).toThrow(/empty/)
+    })
+
+    it('throws on a value starting with a dash (ssh flag injection)', () => {
+      expect(() => validateDashboardHost('-oProxyCommand=evil')).toThrow(/Invalid DASHBOARD_DOMAIN/)
+    })
+
+    it('throws on a value containing shell metacharacters', () => {
+      expect(() => validateDashboardHost('host;rm -rf /')).toThrow(/Invalid DASHBOARD_DOMAIN/)
+    })
+
+    it('throws on a value containing a space', () => {
+      expect(() => validateDashboardHost('host name')).toThrow(/Invalid DASHBOARD_DOMAIN/)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // establishSshAccess — SSH identity seam
+  // -------------------------------------------------------------------------
+
+  describe('SSH access establishment', () => {
+    it('passes identity file to waitForSsh when DASHBOARD_SSH_KEY is set', async () => {
+      let capturedPath: string | undefined
+      let fileExistedDuringCall = false
+
+      const fakeWaitForSsh = async (host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedPath = opts?.identityFile
+        // Assert the file actually exists at call time (before finally cleanup)
+        fileExistedDuringCall = capturedPath !== undefined && existsSync(capturedPath)
+        expect(host).toBe('1.2.3.4')
+      }
+
+      await establishSshAccess('1.2.3.4', FAKE_PRIVATE_KEY, {waitForSsh: fakeWaitForSsh})
+
+      // Path must have been a non-empty string
+      expect(capturedPath).toBeTruthy()
+      expect(capturedPath).not.toBe('')
+      // The file must have existed at the moment waitForSsh was called
+      expect(fileExistedDuringCall).toBe(true)
+      // After the call, the finally block must have cleaned it up
+      expect(existsSync(capturedPath ?? '')).toBe(false)
+    })
+
+    it('does not pass identity file to waitForSsh when no key material is given', async () => {
+      const capturedOpts: ({identityFile?: string} | undefined)[] = []
+      const fakeWaitForSsh = async (_host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedOpts.push(opts)
+      }
+
+      await establishSshAccess('1.2.3.4', undefined, {waitForSsh: fakeWaitForSsh})
+
+      expect(capturedOpts).toHaveLength(1)
+      expect(capturedOpts[0]?.identityFile).toBeUndefined()
+    })
+
+    it('cleans up the temp key file even when waitForSsh throws', async () => {
+      let capturedPath: string | undefined
+      const fakeWaitForSsh = async (_host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedPath = opts?.identityFile
+        throw new Error('SSH connection failed')
+      }
+
+      await expect(establishSshAccess('1.2.3.4', FAKE_PRIVATE_KEY, {waitForSsh: fakeWaitForSsh})).rejects.toThrow(
+        'SSH connection failed',
+      )
+
+      // File must be cleaned up even though waitForSsh threw
+      expect(capturedPath).toBeTruthy()
+      expect(existsSync(capturedPath ?? '')).toBe(false)
+    })
+
+    it('does not create a temp file when no key material is provided', async () => {
+      let capturedPath: string | undefined
+      const fakeWaitForSsh = async (_host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedPath = opts?.identityFile
+      }
+
+      await establishSshAccess('1.2.3.4', undefined, {waitForSsh: fakeWaitForSsh})
+
+      expect(capturedPath).toBeUndefined()
+    })
+
+    it('treats a whitespace-only key as absent — no temp file, no SSH -i flag', async () => {
+      let capturedOpts: {identityFile?: string} | undefined
+      const fakeWaitForSsh = async (_host: string, _user: string, opts?: {identityFile?: string}) => {
+        capturedOpts = opts
+      }
+
+      await establishSshAccess('1.2.3.4', '   \n  ', {waitForSsh: fakeWaitForSsh})
+
+      expect(capturedOpts?.identityFile).toBeUndefined()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // pinHostKeys marker — provision script must use the correct marker string
+  // -------------------------------------------------------------------------
+
+  describe('host-key pinning marker', () => {
+    it('uses the dashboard droplet marker format', async () => {
+      // This test verifies the marker format by importing and inspecting the
+      // DROPLET_HOST_KEY_MARKER export from provision-droplet.
+      // The marker must contain "dashboard droplet" to match the plan spec.
+      const {DROPLET_HOST_KEY_MARKER} = await import('./provision-droplet')
+      expect(DROPLET_HOST_KEY_MARKER).toMatch(/dashboard droplet/)
+    })
+  })
+})

@@ -224,6 +224,19 @@ describe('secret boundary validation', () => {
   it('rejects a value containing a backslash', () => {
     expect(() => validateSecretValue(String.raw`bad\value`, 'TEST')).toThrow()
   })
+
+  it('error message contains the var name but NOT the offending character', () => {
+    try {
+      validateSecretValue('bad`value', 'MY_SECRET')
+      expect(true).toBe(false) // should not reach here
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      expect(msg).toContain('MY_SECRET')
+      expect(msg).toContain('shell metacharacter')
+      // Must NOT echo the secret-derived byte
+      expect(msg).not.toContain('`')
+    }
+  })
 })
 
 // ─── host validation guard ────────────────────────────────────────────────────

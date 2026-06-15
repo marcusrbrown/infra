@@ -1,0 +1,123 @@
+name: Deploy Dashboard
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      DASHBOARD_SSH_KEY:
+        required: true
+      DASHBOARD_DOMAIN:
+        required: true
+      DASHBOARD_GITHUB_APP_ID:
+        required: true
+      DASHBOARD_GITHUB_APP_KEY:
+        required: true
+      DASHBOARD_OAUTH_CLIENT_ID:
+        required: true
+      DASHBOARD_OAUTH_CLIENT_SECRET:
+        required: true
+      DASHBOARD_OPERATOR_LOGIN:
+        required: true
+      DASHBOARD_COOKIE_KEY:
+        required: true
+
+concurrency:
+  group: deploy-dashboard-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      dashboard_digest: ${{ steps.build-dashboard.outputs.digest }}
+    steps:
+      - name: Checkout infra
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Read upstream ref
+        id: upstream
+        run: echo "ref=$(jq -r .ref apps/dashboard/upstream.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout fro-bot/dashboard
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: fro-bot/dashboard
+          ref: ${{ steps.upstream.outputs.ref }}
+          path: upstream-dashboard
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push dashboard image
+        id: build-dashboard
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: upstream-dashboard
+          file: upstream-dashboard/Dockerfile
+          push: true
+          tags: ghcr.io/marcusrbrown/infra-dashboard:${{ steps.upstream.outputs.ref }}
+
+  deploy-dashboard:
+    needs: build-images
+    runs-on: ubuntu-latest
+    environment: dashboard
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Validate required secrets
+        env:
+          DASHBOARD_SSH_KEY: ${{ secrets.DASHBOARD_SSH_KEY }}
+          DASHBOARD_DOMAIN: ${{ secrets.DASHBOARD_DOMAIN }}
+          DASHBOARD_GITHUB_APP_ID: ${{ secrets.DASHBOARD_GITHUB_APP_ID }}
+          DASHBOARD_GITHUB_APP_KEY: ${{ secrets.DASHBOARD_GITHUB_APP_KEY }}
+          DASHBOARD_OAUTH_CLIENT_ID: ${{ secrets.DASHBOARD_OAUTH_CLIENT_ID }}
+          DASHBOARD_OAUTH_CLIENT_SECRET: ${{ secrets.DASHBOARD_OAUTH_CLIENT_SECRET }}
+          DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
+          DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}
+        run: |
+          missing=()
+          [[ -n "${DASHBOARD_SSH_KEY}" ]] || missing+=("DASHBOARD_SSH_KEY")
+          [[ -n "${DASHBOARD_DOMAIN}" ]] || missing+=("DASHBOARD_DOMAIN")
+          [[ -n "${DASHBOARD_GITHUB_APP_ID}" ]] || missing+=("DASHBOARD_GITHUB_APP_ID")
+          [[ -n "${DASHBOARD_GITHUB_APP_KEY}" ]] || missing+=("DASHBOARD_GITHUB_APP_KEY")
+          [[ -n "${DASHBOARD_OAUTH_CLIENT_ID}" ]] || missing+=("DASHBOARD_OAUTH_CLIENT_ID")
+          [[ -n "${DASHBOARD_OAUTH_CLIENT_SECRET}" ]] || missing+=("DASHBOARD_OAUTH_CLIENT_SECRET")
+          [[ -n "${DASHBOARD_OPERATOR_LOGIN}" ]] || missing+=("DASHBOARD_OPERATOR_LOGIN")
+          [[ -n "${DASHBOARD_COOKIE_KEY}" ]] || missing+=("DASHBOARD_COOKIE_KEY")
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required secret(s): ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Configure SSH known_hosts
+        run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          DASHBOARD_SSH_KEY: ${{ secrets.DASHBOARD_SSH_KEY }}
+          DASHBOARD_DOMAIN: ${{ secrets.DASHBOARD_DOMAIN }}
+          DASHBOARD_GITHUB_APP_ID: ${{ secrets.DASHBOARD_GITHUB_APP_ID }}
+          DASHBOARD_GITHUB_APP_KEY: ${{ secrets.DASHBOARD_GITHUB_APP_KEY }}
+          DASHBOARD_OAUTH_CLIENT_ID: ${{ secrets.DASHBOARD_OAUTH_CLIENT_ID }}
+          DASHBOARD_OAUTH_CLIENT_SECRET: ${{ secrets.DASHBOARD_OAUTH_CLIENT_SECRET }}
+          DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
+          DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}
+          DASHBOARD_IMAGE_DIGEST: ${{ needs.build-images.outputs.dashboard_digest }}
+        run: bun run --cwd apps/dashboard deploy

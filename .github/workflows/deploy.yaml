@@ -22,6 +22,7 @@ jobs:
       gateway: ${{ steps.filter.outputs.gateway }}
       umami: ${{ steps.filter.outputs.umami }}
       vpn: ${{ steps.filter.outputs.vpn }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -66,6 +67,12 @@ jobs:
               - '!**/*.test.ts'
               - '!**/__fixtures__/**'
               - '!**/__snapshots__/**'
+            dashboard:
+              - 'apps/dashboard/**'
+              - '!apps/dashboard/**/*.md'
+              - '!apps/dashboard/**/*.test.ts'
+              - '!apps/dashboard/**/__fixtures__/**'
+              - '!apps/dashboard/**/__snapshots__/**'
 
   # Keep deploys independent by design: one app failing should not block the other.
   deploy-keeweb:
@@ -147,3 +154,22 @@ jobs:
       VPN_SSH_KEY: ${{ secrets.VPN_SSH_KEY }}
       VPN_HOST: ${{ secrets.VPN_HOST }}
       VPN_PEERS: ${{ secrets.VPN_PEERS }}
+
+  deploy-dashboard:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.dashboard == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/deploy-dashboard.yaml
+    secrets:
+      DASHBOARD_SSH_KEY: ${{ secrets.DASHBOARD_SSH_KEY }}
+      DASHBOARD_DOMAIN: ${{ secrets.DASHBOARD_DOMAIN }}
+      DASHBOARD_GITHUB_APP_ID: ${{ secrets.DASHBOARD_GITHUB_APP_ID }}
+      DASHBOARD_GITHUB_APP_KEY: ${{ secrets.DASHBOARD_GITHUB_APP_KEY }}
+      DASHBOARD_OAUTH_CLIENT_ID: ${{ secrets.DASHBOARD_OAUTH_CLIENT_ID }}
+      DASHBOARD_OAUTH_CLIENT_SECRET: ${{ secrets.DASHBOARD_OAUTH_CLIENT_SECRET }}
+      DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
+      DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}

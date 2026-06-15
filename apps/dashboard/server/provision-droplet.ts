@@ -15,7 +15,7 @@ import {
 
 import {validateDashboardHost} from '../src/host'
 
-const DROPLET_NAME = 'fro-bot-dashboard'
+export const DROPLET_NAME = 'dashboard'
 const DROPLET_IMAGE = 'docker-20-04'
 const DROPLET_SIZE = 's-1vcpu-1gb'
 const DROPLET_REGION = 'nyc1'

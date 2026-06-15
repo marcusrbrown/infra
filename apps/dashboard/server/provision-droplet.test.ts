@@ -6,6 +6,7 @@ import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 import {validateDashboardHost} from '../src/host'
 import {
   checkDropletExistence,
+  DROPLET_NAME,
   establishSshAccess,
   getDashboardSshFingerprint,
   parseProvisionArgs,
@@ -158,23 +159,23 @@ describe('provision-droplet', () => {
   // -------------------------------------------------------------------------
 
   describe('droplet existence guard', () => {
-    it('returns true when the fro-bot-dashboard droplet is listed', async () => {
+    it('returns true when the dashboard droplet is listed', async () => {
       const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
-        makeSpawnResult('fro-bot-dashboard\n', 0) as ReturnType<typeof Bun.spawn>,
+        makeSpawnResult(`${DROPLET_NAME}\n`, 0) as ReturnType<typeof Bun.spawn>,
       )
 
-      const result = await dropletExists('fro-bot-dashboard')
+      const result = await dropletExists(DROPLET_NAME)
 
       expect(result).toBe(true)
       spawnSpy.mockRestore()
     })
 
-    it('returns false when the fro-bot-dashboard droplet is not listed', async () => {
+    it('returns false when the dashboard droplet is not listed', async () => {
       const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
         makeSpawnResult('other-droplet\n', 0) as ReturnType<typeof Bun.spawn>,
       )
 
-      const result = await dropletExists('fro-bot-dashboard')
+      const result = await dropletExists(DROPLET_NAME)
 
       expect(result).toBe(false)
       spawnSpy.mockRestore()
@@ -182,10 +183,10 @@ describe('provision-droplet', () => {
 
     it('aborts without creating when droplet exists and --force is not set', async () => {
       const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
-        makeSpawnResult('fro-bot-dashboard\n', 0) as ReturnType<typeof Bun.spawn>,
+        makeSpawnResult(`${DROPLET_NAME}\n`, 0) as ReturnType<typeof Bun.spawn>,
       )
 
-      const exists = await dropletExists('fro-bot-dashboard')
+      const exists = await dropletExists(DROPLET_NAME)
       expect(exists).toBe(true)
 
       const force = false
@@ -200,10 +201,10 @@ describe('provision-droplet', () => {
 
     it('proceeds past the guard when --force is set even if droplet exists', async () => {
       const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
-        makeSpawnResult('fro-bot-dashboard\n', 0) as ReturnType<typeof Bun.spawn>,
+        makeSpawnResult(`${DROPLET_NAME}\n`, 0) as ReturnType<typeof Bun.spawn>,
       )
 
-      const exists = await dropletExists('fro-bot-dashboard')
+      const exists = await dropletExists(DROPLET_NAME)
       expect(exists).toBe(true)
 
       const force = true
@@ -221,12 +222,12 @@ describe('provision-droplet', () => {
   describe('checkDropletExistence', () => {
     it('returns machine-readable existence state without provisioning side effects', async () => {
       const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue(
-        makeSpawnResult('fro-bot-dashboard\n', 0) as ReturnType<typeof Bun.spawn>,
+        makeSpawnResult(`${DROPLET_NAME}\n`, 0) as ReturnType<typeof Bun.spawn>,
       )
 
-      const state = await checkDropletExistence('fro-bot-dashboard')
+      const state = await checkDropletExistence(DROPLET_NAME)
 
-      expect(state).toEqual({name: 'fro-bot-dashboard', exists: true})
+      expect(state).toEqual({name: DROPLET_NAME, exists: true})
       expect(spawnSpy).toHaveBeenCalledTimes(1)
       expect(spawnSpy.mock.calls[0]?.[0]).toEqual([
         'doctl',

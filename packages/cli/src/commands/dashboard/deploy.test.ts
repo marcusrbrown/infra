@@ -5,7 +5,20 @@ import {getDashboardDeployEnv, validateDashboardRemotePreconditions} from './dep
 
 const repoRoot = resolve(import.meta.dir, '../../../../..')
 
-const envKeys = ['HOME', 'PATH', 'SSH_AUTH_SOCK', 'DASHBOARD_DOMAIN', 'DASHBOARD_SSH_KEY'] as const
+const envKeys = [
+  'HOME',
+  'PATH',
+  'SSH_AUTH_SOCK',
+  'DASHBOARD_DOMAIN',
+  'DASHBOARD_SSH_KEY',
+  'DASHBOARD_IMAGE_DIGEST',
+  'DASHBOARD_GITHUB_APP_ID',
+  'DASHBOARD_GITHUB_APP_KEY',
+  'DASHBOARD_OAUTH_CLIENT_ID',
+  'DASHBOARD_OAUTH_CLIENT_SECRET',
+  'DASHBOARD_OPERATOR_LOGIN',
+  'DASHBOARD_COOKIE_KEY',
+] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
 
@@ -112,6 +125,35 @@ describe('getDashboardDeployEnv', () => {
 
     expect(env.DASHBOARD_SSH_KEY).toBe('ssh-ed25519 AAAA...')
     expect('SSH_AUTH_SOCK' in env).toBe(false)
+    expect(env.DASHBOARD_SSH_KEY).toBe('ssh-ed25519 AAAA...')
+    expect('SSH_AUTH_SOCK' in env).toBe(false)
+  })
+
+  it('forwards all DASHBOARD_* vars from process.env (not a selective subset)', () => {
+    setManagedEnv({
+      PATH: '/usr/bin:/bin',
+      HOME: '/home/user',
+      SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
+      DASHBOARD_DOMAIN: 'dashboard.fro.bot',
+      DASHBOARD_IMAGE_DIGEST: `sha256:${'a'.repeat(64)}`,
+      DASHBOARD_GITHUB_APP_ID: '123456',
+      DASHBOARD_GITHUB_APP_KEY: '-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----',
+      DASHBOARD_OAUTH_CLIENT_ID: 'Iv1.abc123',
+      DASHBOARD_OAUTH_CLIENT_SECRET: 'oauthsecret',
+      DASHBOARD_OPERATOR_LOGIN: 'marcusrbrown',
+      DASHBOARD_COOKIE_KEY: 'cookiekey',
+    })
+
+    const env = getDashboardDeployEnv()
+
+    // All DASHBOARD_* vars must be present in the returned env
+    expect(env.DASHBOARD_DOMAIN).toBe('dashboard.fro.bot')
+    expect(env.DASHBOARD_IMAGE_DIGEST).toBe(`sha256:${'a'.repeat(64)}`)
+    expect(env.DASHBOARD_GITHUB_APP_ID).toBe('123456')
+    expect(env.DASHBOARD_OAUTH_CLIENT_ID).toBe('Iv1.abc123')
+    expect(env.DASHBOARD_OAUTH_CLIENT_SECRET).toBe('oauthsecret')
+    expect(env.DASHBOARD_OPERATOR_LOGIN).toBe('marcusrbrown')
+    expect(env.DASHBOARD_COOKIE_KEY).toBe('cookiekey')
   })
 })
 

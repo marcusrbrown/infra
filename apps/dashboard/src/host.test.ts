@@ -48,7 +48,7 @@ describe('validateDashboardHost', () => {
     expect(() => validateDashboardHost('')).toThrow('Invalid DASHBOARD_DOMAIN')
   })
 
-  it('truncates the invalid value in the error message to ~30 chars', () => {
+  it('does NOT echo the invalid value in the error message (may be a misdirected secret)', () => {
     const longMalicious = `-oProxyCommand=${'A'.repeat(100)}`
     let message = ''
     try {
@@ -57,6 +57,8 @@ describe('validateDashboardHost', () => {
       message = error instanceof Error ? error.message : String(error)
     }
     expect(message).toContain('Invalid DASHBOARD_DOMAIN')
-    expect(message.length).toBeLessThan(longMalicious.length + 50)
+    // The invalid value must NOT appear in the error message
+    expect(message).not.toContain('-oProxyCommand')
+    expect(message).not.toContain('AAAA')
   })
 })

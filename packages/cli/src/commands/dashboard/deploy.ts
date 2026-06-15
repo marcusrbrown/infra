@@ -35,13 +35,17 @@ export function getDashboardDeployEnv(): Record<string, string> {
     )
   }
 
-  return {
-    PATH: path,
-    HOME: home,
-    ...(sshAuthSock ? {SSH_AUTH_SOCK: sshAuthSock} : {}),
-    DASHBOARD_DOMAIN: process.env.DASHBOARD_DOMAIN ?? '',
-    ...(sshKey ? {DASHBOARD_SSH_KEY: sshKey} : {}),
+  // Spread all of process.env so DASHBOARD_* vars (IMAGE_DIGEST, GITHUB_APP_ID, etc.)
+  // are forwarded to the spawned deploy.ts process. validateEnv in deploy.ts requires
+  // all DASHBOARD_* vars to be present — a selective subset would cause it to fail.
+  // Filter out undefined values (Record<string, string> does not allow undefined).
+  const fullEnv: Record<string, string> = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined) {
+      fullEnv[k] = v
+    }
   }
+  return fullEnv
 }
 
 export function validateDashboardRemotePreconditions(): void {

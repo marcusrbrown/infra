@@ -166,6 +166,17 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
     )
   }
 
+  // Validate digest format: must be sha256:<64 hex chars>
+  // Mirrors apps/gateway/src/deploy.ts DIGEST_RE validation.
+  const DIGEST_RE = /^sha256:[0-9a-f]{64}$/
+  if (!DIGEST_RE.test(imageDigest)) {
+    throw new Error(
+      `DASHBOARD_IMAGE_DIGEST has an invalid format: "${imageDigest}". ` +
+        'Expected sha256:<64 hex chars> (e.g. sha256:abc...def). ' +
+        'This value is supplied by the CI build-images job.',
+    )
+  }
+
   // Validate host before any SSH argv construction
   validateDashboardHost(domain)
 
@@ -191,6 +202,11 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
  *
  * NOTE: The GitHub App private key is NOT included here. It is uploaded as a
  * separate file (0600) via SSH stdin. The .env references the file path only.
+ *
+ * NOTE: Image pinning is NOT done here. The digest-pinned image reference is
+ * written to docker-compose.override.yaml via buildComposeOverride, which Docker
+ * Compose auto-merges when running from REMOTE_DIR. This ensures the actual
+ * container uses the digest-pinned image, not the mutable tag in docker-compose.yaml.
  */
 export function buildEnvFileContents(opts: {
   domain: string
@@ -199,10 +215,8 @@ export function buildEnvFileContents(opts: {
   oauthClientSecret: string
   operatorLogin: string
   cookieKey: string
-  imageDigest: string
 }): string {
-  const {domain, githubAppId, oauthClientId, oauthClientSecret, operatorLogin, cookieKey, imageDigest} = opts
-  const imageRef = `${DASHBOARD_IMAGE_NAME}@${imageDigest}`
+  const {domain, githubAppId, oauthClientId, oauthClientSecret, operatorLogin, cookieKey} = opts
   return (
     `DASHBOARD_DOMAIN=${domain}\n` +
     `DASHBOARD_GITHUB_APP_ID=${githubAppId}\n` +
@@ -210,9 +224,25 @@ export function buildEnvFileContents(opts: {
     `DASHBOARD_OAUTH_CLIENT_ID=${oauthClientId}\n` +
     `DASHBOARD_OAUTH_CLIENT_SECRET=${oauthClientSecret}\n` +
     `DASHBOARD_OPERATOR_LOGIN=${operatorLogin}\n` +
-    `DASHBOARD_COOKIE_KEY=${cookieKey}\n` +
-    `DASHBOARD_IMAGE_REF=${imageRef}\n`
+    `DASHBOARD_COOKIE_KEY=${cookieKey}\n`
   )
+}
+
+/**
+ * Builds the docker-compose.override.yaml content that pins the dashboard image
+ * to the CI-pushed digest.
+ *
+ * Docker Compose auto-merges docker-compose.override.yaml when running from the
+ * project directory (REMOTE_DIR). This override replaces the mutable tag in
+ * docker-compose.yaml with the immutable digest reference, ensuring the droplet
+ * always runs the exact image verified by CI.
+ *
+ * @param opts - Options object
+ * @param opts.imageDigest - The sha256 digest (e.g. "sha256:abc...")
+ */
+export function buildComposeOverride(opts: {imageDigest: string}): string {
+  const {imageDigest} = opts
+  return `services:\n  dashboard:\n    image: ${DASHBOARD_IMAGE_NAME}@${imageDigest}\n`
 }
 
 /**
@@ -402,17 +432,19 @@ async function defaultResolve(host: string): Promise<void> {
  * 1. Validate env (throws before any SSH on failure) — fails closed on missing DASHBOARD_IMAGE_DIGEST
  * 2. Validate host (SSH argv injection defense)
  * 3. DNS preflight
- * 4. ControlMaster SSH multiplexing setup
+ * 4. ControlMaster SSH multiplexing setup (dual-tmpdir: key under os.tmpdir(), socket under /tmp)
  * 5. Remote prep: mkdir -p /opt/dashboard/config
  * 6. Materialize /opt/dashboard/.env via SSH stdin (includes DASHBOARD_GITHUB_APP_KEY_FILE path)
- * 7. scp docker-compose.yaml + config/Caddyfile
- * 8. Upload GitHub App private key via SSH stdin to /opt/dashboard/config/github-app.pem (0600)
+ * 7. Write docker-compose.override.yaml via SSH stdin (pins image to digest)
+ * 8. scp docker-compose.yaml + config/Caddyfile
+ * 9. Upload GitHub App private key via SSH stdin to /opt/dashboard/config/github-app.pem (0600)
  *    SECURITY: PEM bytes flow through stdin ONLY — never in argv, never in a local temp file
- * 9. docker compose pull (pulls digest-pinned GHCR image)
- * 10. docker compose up -d --no-build --wait dashboard (app health gate first)
- * 11. Verify RepoDigests: assert running image includes DASHBOARD_IMAGE_DIGEST (fail closed)
- * 12. docker compose up -d --no-build --wait caddy (public exposure after app healthy)
- * 13. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
+ * 10. chown 1000:1000 github-app.pem so the container's node user (UID 1000) can read it
+ * 11. docker compose pull (pulls digest-pinned GHCR image via override)
+ * 12. docker compose up -d --no-build --wait dashboard (app health gate first)
+ * 13. Verify RepoDigests: assert running image includes DASHBOARD_IMAGE_DIGEST (fail closed)
+ * 14. docker compose up -d --no-build --wait caddy (public exposure after app healthy)
+ * 15. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
  */
 export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
@@ -449,22 +481,33 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   // CI mode: write DASHBOARD_SSH_KEY to a tmp file with mode 0o600.
   // Local mode: keyPath stays undefined; SSH_AUTH_SOCK is forwarded via deployEnv.
   let keyPath: string | undefined
-  let tmpDir: string | undefined
+  let keyTmpDir: string | undefined
+  // ControlMaster socket lives under a SHORT /tmp-rooted dir to stay well under the
+  // 104-byte sun_path limit for unix-domain sockets. On macOS, os.tmpdir() returns a
+  // long path like /var/folders/td/f1mm.../T/ which causes ControlPath to exceed 104
+  // bytes → ssh fails with "ControlPath too long". The private key file stays in the
+  // secure os.tmpdir()-rooted dir (user-owned mode-700); only the socket moves to /tmp.
+  let controlTmpDir: string | undefined
 
   try {
-    // Always create a tmpdir — used for ControlPath socket in both CI and local mode.
-    tmpDir = mkdtempSync(join(tmpdir(), 'dashboard-deploy-'))
+    // Key dir: secure, user-owned, under os.tmpdir() (may be long on macOS — that's fine
+    // for a regular file path; the 104-byte limit only applies to unix-domain sockets).
+    keyTmpDir = mkdtempSync(join(tmpdir(), 'dashboard-deploy-key-'))
+
+    // Control socket dir: always under /tmp so the socket path stays short.
+    controlTmpDir = mkdtempSync(join('/tmp', 'dash-cm-'))
 
     if (env.DASHBOARD_SSH_KEY) {
-      keyPath = join(tmpDir, 'id')
+      keyPath = join(keyTmpDir, 'id')
       const keyContent = env.DASHBOARD_SSH_KEY.endsWith('\n') ? env.DASHBOARD_SSH_KEY : `${env.DASHBOARD_SSH_KEY}\n`
       writeFileSync(keyPath, keyContent, {mode: 0o600})
       // Defensive chmod in case umask narrowed the initial mode
       chmodSync(keyPath, 0o600)
     }
 
-    // ControlPath socket lives inside tmpDir
-    const controlPath = join(tmpDir, 'cm-%r@%h:%p')
+    // ControlPath socket lives inside controlTmpDir (short /tmp-rooted path).
+    // %C expands to a hash of the connection tuple.
+    const controlPath = join(controlTmpDir, 'cm-%C')
 
     // Phase 3: Remote prep
     await runCommand(
@@ -475,7 +518,8 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     )
 
     // Phase 4: Materialize /opt/dashboard/.env via SSH stdin
-    // The .env includes DASHBOARD_GITHUB_APP_KEY_FILE (file path) — NOT the PEM content
+    // The .env includes DASHBOARD_GITHUB_APP_KEY_FILE (file path) — NOT the PEM content.
+    // Image pinning is handled by the compose override (Phase 4b), not the .env.
     const envContents = buildEnvFileContents({
       domain: host,
       githubAppId: validated.DASHBOARD_GITHUB_APP_ID,
@@ -483,13 +527,28 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       oauthClientSecret: validated.DASHBOARD_OAUTH_CLIENT_SECRET,
       operatorLogin: validated.DASHBOARD_OPERATOR_LOGIN,
       cookieKey: validated.DASHBOARD_COOKIE_KEY,
-      imageDigest,
     })
     await writeRemoteFile(
       `Writing ${REMOTE_ENV_PATH}`,
       host,
       REMOTE_ENV_PATH,
       envContents,
+      deployEnv,
+      spawnFn,
+      keyPath,
+      controlPath,
+    )
+
+    // Phase 4b: Write docker-compose.override.yaml (digest pin)
+    // Docker Compose auto-merges docker-compose.override.yaml when running from REMOTE_DIR.
+    // This override replaces the mutable tag in docker-compose.yaml with the immutable
+    // digest reference, ensuring the droplet always runs the exact CI-pushed image.
+    const overrideContent = buildComposeOverride({imageDigest})
+    await writeRemoteFile(
+      `Writing ${REMOTE_DIR}/docker-compose.override.yaml`,
+      host,
+      `${REMOTE_DIR}/docker-compose.override.yaml`,
+      overrideContent,
       deployEnv,
       spawnFn,
       keyPath,
@@ -541,7 +600,19 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 7: docker compose pull (pulls digest-pinned GHCR image)
+    // chown 1000:1000 so the container's node user (UID 1000) can read the key.
+    // docker-compose.yaml runs the dashboard container as `user: node` (UID 1000).
+    // The bind mount maps host UID 1000 → container UID 1000, so chown on the host
+    // makes the file readable by the node process inside the container.
+    // Combined with 0600, only UID 1000 (node) can read the key — least-privilege.
+    await runCommand(
+      `Setting ownership on ${REMOTE_APP_KEY_PATH} (node user UID 1000)`,
+      sshCommand(host, `chown 1000:1000 '${REMOTE_APP_KEY_PATH}'`, keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    // Phase 7: docker compose pull (pulls digest-pinned GHCR image via override)
     await runCommand(
       'Pulling Docker images',
       sshCommand(host, `cd ${REMOTE_DIR} && docker compose pull`, keyPath, controlPath),
@@ -630,9 +701,12 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 
     console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
   } finally {
-    // Clean up the tmp dir regardless of success or failure
-    if (tmpDir) {
-      rmSync(tmpDir, {recursive: true, force: true})
+    // Clean up both tmp directories regardless of success or failure.
+    if (keyTmpDir) {
+      rmSync(keyTmpDir, {recursive: true, force: true})
+    }
+    if (controlTmpDir) {
+      rmSync(controlTmpDir, {recursive: true, force: true})
     }
   }
 }

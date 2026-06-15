@@ -66,7 +66,7 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | `apps/vpn/server/provision.ts` | Lightsail provisioning (`@aws-sdk/client-lightsail`) |
 | `apps/<name>/src/host.ts` | Deploy-side host validator (rejects `-`-prefixed / invalid hosts) |
 | `apps/gateway/upstream.json` | Pinned `fro-bot/agent` daemon ref |
-| `apps/dashboard/upstream.json` | Pinned `fro-bot/dashboard` source ref (infra builds image to `ghcr.io/marcusrbrown/infra-dashboard`) |
+| `apps/dashboard/docker-compose.yaml` | Digest-pinned `ghcr.io/fro-bot/dashboard` image (tag@sha256 in the `image:` line; Renovate tracks bumps) |
 | `packages/cli/src/commands/vpn/peers.ts` | VPN peer model: `readPeers`, `writePeers`, `parsePeersJson`, `renderServerConfig`, `Peer` (exported as `@marcusrbrown/infra/vpn/peers`) |
 
 **CLI Commands**

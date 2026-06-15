@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import {chmodSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -15,7 +15,6 @@ const REMOTE_CONFIG_DIR = `${REMOTE_DIR}/config`
 const REMOTE_CADDYFILE_PATH = `${REMOTE_CONFIG_DIR}/Caddyfile`
 const REMOTE_APP_KEY_PATH = `${REMOTE_CONFIG_DIR}/github-app.pem`
 const HEALTH_PATH = '/api/healthz'
-const DASHBOARD_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-dashboard'
 const DEFAULT_REMOTE_USER = 'root'
 
 // ─── Shell metacharacter deny-list ────────────────────────────────────────────
@@ -73,12 +72,50 @@ export interface ValidatedEnv {
   DASHBOARD_OAUTH_CLIENT_SECRET: string
   DASHBOARD_OPERATOR_LOGIN: string
   DASHBOARD_COOKIE_KEY: string
-  DASHBOARD_IMAGE_DIGEST: string
   SSH_AUTH_SOCK?: string
   DASHBOARD_SSH_KEY?: string
 }
 
 // ─── Exported helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Parses the sha256 digest from a docker-compose image line.
+ *
+ * Matches the `@sha256:<64 hex chars>` portion of an image reference such as:
+ *   `image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:d3dd...`
+ *
+ * Returns the full `sha256:<hex>` string, or null if no digest is present.
+ * No YAML parser dependency — simple regex on the image line.
+ */
+export function parseComposeImageDigest(line: string): string | null {
+  const match = /@(sha256:[0-9a-f]{64})/.exec(line)
+  return match?.[1] ?? null
+}
+
+/**
+ * Reads the dashboard image digest from the committed docker-compose.yaml.
+ *
+ * Scans for the `dashboard:` service's `image:` line and extracts the
+ * `@sha256:<hex>` digest. Throws if the compose file cannot be read or
+ * the dashboard image line has no pinned digest.
+ */
+function readComposeDigest(): string {
+  const composePath = join(import.meta.dir, '..', 'docker-compose.yaml')
+  const content = readFileSync(composePath, 'utf8')
+
+  // Find the dashboard service image line — look for fro-bot/dashboard with a digest
+  for (const line of content.split('\n')) {
+    if (line.includes('fro-bot/dashboard')) {
+      const digest = parseComposeImageDigest(line)
+      if (digest) return digest
+    }
+  }
+
+  throw new Error(
+    'Could not find a pinned sha256 digest for the dashboard image in apps/dashboard/docker-compose.yaml. ' +
+      'Ensure the image line contains @sha256:<64 hex chars>.',
+  )
+}
 
 /**
  * Validates that a secret value contains no shell metacharacters that would be
@@ -96,7 +133,7 @@ export function validateSecretValue(value: string, name: string): void {
 /**
  * Validates all required environment variables are present and well-formed.
  * Calls validateDashboardHost on DASHBOARD_DOMAIN before any SSH argv is constructed.
- * Fails closed if DASHBOARD_IMAGE_DIGEST is missing.
+ * Digest is sourced from the committed docker-compose.yaml, not from env.
  *
  * @throws {Error} with a specific message naming the missing/invalid variable.
  * @returns A typed ValidatedEnv with all required fields guaranteed non-empty.
@@ -152,27 +189,6 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
     throw new Error('DASHBOARD_COOKIE_KEY is required for deploy')
   }
 
-  // Fail closed: DASHBOARD_IMAGE_DIGEST is required — no fallback to on-droplet build
-  const imageDigest = env.DASHBOARD_IMAGE_DIGEST
-  if (!imageDigest) {
-    throw new Error(
-      'DASHBOARD_IMAGE_DIGEST is required but not set. ' +
-        'This value is supplied by the CI build-images job. ' +
-        'For a local deploy, build and push the image to GHCR first, then set DASHBOARD_IMAGE_DIGEST.',
-    )
-  }
-
-  // Validate digest format: must be sha256:<64 hex chars>
-  // Mirrors apps/gateway/src/deploy.ts DIGEST_RE validation.
-  const DIGEST_RE = /^sha256:[0-9a-f]{64}$/
-  if (!DIGEST_RE.test(imageDigest)) {
-    throw new Error(
-      `DASHBOARD_IMAGE_DIGEST has an invalid format: "${imageDigest}". ` +
-        'Expected sha256:<64 hex chars> (e.g. sha256:abc...def). ' +
-        'This value is supplied by the CI build-images job.',
-    )
-  }
-
   // Validate host before any SSH argv construction
   validateDashboardHost(domain)
 
@@ -186,7 +202,6 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
     DASHBOARD_OAUTH_CLIENT_SECRET: oauthClientSecret,
     DASHBOARD_OPERATOR_LOGIN: operatorLogin,
     DASHBOARD_COOKIE_KEY: cookieKey,
-    DASHBOARD_IMAGE_DIGEST: imageDigest,
     ...(env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: env.SSH_AUTH_SOCK} : {}),
     ...(env.DASHBOARD_SSH_KEY ? {DASHBOARD_SSH_KEY: env.DASHBOARD_SSH_KEY} : {}),
   }
@@ -199,10 +214,8 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
  * NOTE: The GitHub App private key is NOT included here. It is uploaded as a
  * separate file (0600) via SSH stdin. The .env references the file path only.
  *
- * NOTE: Image pinning is NOT done here. The digest-pinned image reference is
- * written to docker-compose.override.yaml via buildComposeOverride, which Docker
- * Compose auto-merges when running from REMOTE_DIR. This ensures the actual
- * container uses the digest-pinned image, not the mutable tag in docker-compose.yaml.
+ * NOTE: Image pinning is done via the committed docker-compose.yaml digest pin,
+ * not via an override file or env var.
  */
 export function buildEnvFileContents(opts: {
   domain: string
@@ -226,27 +239,10 @@ export function buildEnvFileContents(opts: {
 }
 
 /**
- * Builds the docker-compose.override.yaml content that pins the dashboard image
- * to the CI-pushed digest.
- *
- * Docker Compose auto-merges docker-compose.override.yaml when running from the
- * project directory (REMOTE_DIR). This override replaces the mutable tag in
- * docker-compose.yaml with the immutable digest reference, ensuring the droplet
- * always runs the exact image verified by CI.
- *
- * @param opts - Options object
- * @param opts.imageDigest - The sha256 digest (e.g. "sha256:abc...")
- */
-export function buildComposeOverride(opts: {imageDigest: string}): string {
-  const {imageDigest} = opts
-  return `services:\n  dashboard:\n    image: ${DASHBOARD_IMAGE_NAME}@${imageDigest}\n`
-}
-
-/**
  * Asserts that the running container's RepoDigests include the expected digest.
  *
  * Pure helper — no SSH, no side effects. Throws with an actionable message when
- * the running image does not match the CI-pushed digest.
+ * the running image does not match the digest pinned in docker-compose.yaml.
  *
  * @param actualRepoDigests - Array of RepoDigest strings from `docker inspect --format '{{json .RepoDigests}}'`
  * @param expectedDigest - The sha256 digest that must appear in at least one entry (e.g. "sha256:abc...")
@@ -260,7 +256,7 @@ export function assertRunningImageDigest(
   const matched = actualRepoDigests.some(d => d.includes(expectedDigest))
   if (!matched) {
     throw new Error(
-      `Running ${serviceName} image digest does not match the expected CI-pushed digest.\n` +
+      `Running ${serviceName} image digest does not match the expected digest from docker-compose.yaml.\n` +
         `  Expected: ${expectedDigest}\n` +
         `  Actual RepoDigests: ${actualRepoDigests.length > 0 ? actualRepoDigests.join(', ') : '(empty)'}\n` +
         `The droplet may be running a stale or locally-built image. ` +
@@ -426,22 +422,24 @@ async function defaultResolve(host: string): Promise<void> {
  * Deploys the Dashboard stack to the remote droplet.
  *
  * Order of operations:
- * 1. Validate env (throws before any SSH on failure) — fails closed on missing DASHBOARD_IMAGE_DIGEST
+ * 1. Validate env (throws before any SSH on failure)
  * 2. Validate host (SSH argv injection defense)
- * 3. DNS preflight
- * 4. ControlMaster SSH multiplexing setup (dual-tmpdir: key under os.tmpdir(), socket under /tmp)
- * 5. Remote prep: mkdir -p /opt/dashboard/config
- * 6. Materialize /opt/dashboard/.env via SSH stdin (includes DASHBOARD_GITHUB_APP_KEY_FILE path)
- * 7. Write docker-compose.override.yaml via SSH stdin (pins image to digest)
+ * 3. Read expected digest from committed docker-compose.yaml (fail closed if not pinned)
+ * 4. DNS preflight
+ * 5. ControlMaster SSH multiplexing setup (dual-tmpdir: key under os.tmpdir(), socket under /tmp)
+ * 6. Remote prep: mkdir -p /opt/dashboard/config
+ * 7. Materialize /opt/dashboard/.env via SSH stdin (includes DASHBOARD_GITHUB_APP_KEY_FILE path)
  * 8. scp docker-compose.yaml + config/Caddyfile
  * 9. Upload GitHub App private key via SSH stdin to /opt/dashboard/config/github-app.pem (0600)
  *    SECURITY: PEM bytes flow through stdin ONLY — never in argv, never in a local temp file
  * 10. chown 1000:1000 github-app.pem so the container's node user (UID 1000) can read it
- * 11. docker compose pull (pulls digest-pinned GHCR image via override)
- * 12. docker compose up -d --no-build --wait dashboard (app health gate first)
- * 13. Verify RepoDigests: assert running image includes DASHBOARD_IMAGE_DIGEST (fail closed)
- * 14. docker compose up -d --no-build --wait caddy (public exposure after app healthy)
- * 15. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
+ * 11. rm -f /opt/dashboard/docker-compose.override.yaml (idempotent legacy cleanup — old deploys
+ *     wrote this file; Docker Compose auto-merges it if present, which would override the image pin)
+ * 12. docker compose pull (pulls digest-pinned GHCR image from docker-compose.yaml)
+ * 13. docker compose up -d --no-build --wait dashboard (app health gate first)
+ * 14. Verify RepoDigests: assert running image includes digest from docker-compose.yaml (fail closed)
+ * 15. docker compose up -d --no-build --wait caddy (public exposure after app healthy)
+ * 16. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
  */
 export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
@@ -453,11 +451,12 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const probeIntervalMs = opts.probeIntervalMs ?? 5_000
 
   // Phase 1: Validate env — throws before any SSH on failure
-  // DASHBOARD_IMAGE_DIGEST missing → throws here (fail closed)
   const validated = validateEnv(env)
 
   const host = validated.DASHBOARD_DOMAIN
-  const imageDigest = validated.DASHBOARD_IMAGE_DIGEST
+
+  // Phase 2: Read expected digest from committed docker-compose.yaml (fail closed)
+  const imageDigest = readComposeDigest()
 
   // Boundary-validate secret values before any SSH
   validateSecretValue(validated.DASHBOARD_OAUTH_CLIENT_SECRET, 'DASHBOARD_OAUTH_CLIENT_SECRET')
@@ -465,7 +464,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   // NOTE: DASHBOARD_GITHUB_APP_KEY is a PEM — it contains newlines which would fail
   // validateSecretValue. That's intentional: the PEM goes via stdin only, never shell-interpolated.
 
-  // Phase 2: DNS preflight
+  // Phase 3: DNS preflight
   try {
     await resolveFn(host)
   } catch (error) {
@@ -506,7 +505,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     // %C expands to a hash of the connection tuple.
     const controlPath = join(controlTmpDir, 'cm-%C')
 
-    // Phase 3: Remote prep
+    // Phase 4: Remote prep
     await runCommand(
       'Creating remote directories',
       sshCommand(host, `mkdir -p ${REMOTE_CONFIG_DIR}`, keyPath, controlPath),
@@ -514,9 +513,9 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 4: Materialize /opt/dashboard/.env via SSH stdin
+    // Phase 5: Materialize /opt/dashboard/.env via SSH stdin
     // The .env includes DASHBOARD_GITHUB_APP_KEY_FILE (file path) — NOT the PEM content.
-    // Image pinning is handled by the compose override (Phase 4b), not the .env.
+    // Image pinning is handled by the digest in docker-compose.yaml, not the .env.
     const envContents = buildEnvFileContents({
       domain: host,
       githubAppId: validated.DASHBOARD_GITHUB_APP_ID,
@@ -536,23 +535,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       controlPath,
     )
 
-    // Phase 4b: Write docker-compose.override.yaml (digest pin)
-    // Docker Compose auto-merges docker-compose.override.yaml when running from REMOTE_DIR.
-    // This override replaces the mutable tag in docker-compose.yaml with the immutable
-    // digest reference, ensuring the droplet always runs the exact CI-pushed image.
-    const overrideContent = buildComposeOverride({imageDigest})
-    await writeRemoteFile(
-      `Writing ${REMOTE_DIR}/docker-compose.override.yaml`,
-      host,
-      `${REMOTE_DIR}/docker-compose.override.yaml`,
-      overrideContent,
-      deployEnv,
-      spawnFn,
-      keyPath,
-      controlPath,
-    )
-
-    // Phase 5: scp docker-compose.yaml and Caddyfile
+    // Phase 6: scp docker-compose.yaml and Caddyfile
     const localCompose = join(import.meta.dir, '..', 'docker-compose.yaml')
     const localCaddyfile = join(import.meta.dir, '..', 'config', 'Caddyfile')
 
@@ -570,7 +553,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 6: Upload GitHub App private key via SSH stdin (SECURITY-CRITICAL)
+    // Phase 7: Upload GitHub App private key via SSH stdin (SECURITY-CRITICAL)
     // The PEM bytes flow through stdin ONLY — never in argv, never in a local temp file.
     // umask 077 ensures the file is created with 0600 permissions.
     // We also explicitly chmod 0600 after write for defense-in-depth.
@@ -609,7 +592,20 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 7: docker compose pull (pulls digest-pinned GHCR image via override)
+    // Phase 7.5: Remove stale legacy override file (idempotent).
+    // Old deploys wrote /opt/dashboard/docker-compose.override.yaml which Docker Compose
+    // auto-merges if present. The image pin now lives in the committed docker-compose.yaml,
+    // so the override must be removed before `docker compose pull` to prevent any stale
+    // image reference in the override from winning and causing confusing digest verification
+    // failures.
+    await runCommand(
+      'Removing stale docker-compose.override.yaml (legacy cleanup)',
+      sshCommand(host, `rm -f ${REMOTE_DIR}/docker-compose.override.yaml`, keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    // Phase 8: docker compose pull (pulls digest-pinned GHCR image from docker-compose.yaml)
     await runCommand(
       'Pulling Docker images',
       sshCommand(host, `cd ${REMOTE_DIR} && docker compose pull`, keyPath, controlPath),
@@ -617,7 +613,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 8: Start dashboard only (Caddy NOT started — no public exposure yet).
+    // Phase 9: Start dashboard only (Caddy NOT started — no public exposure yet).
     // --no-build enforces digest-pinned image; never builds from source on the droplet.
     await runCommand(
       'Starting dashboard (internal only)',
@@ -626,7 +622,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 9: Verify RepoDigests — fail closed if running image doesn't match expected digest.
+    // Phase 10: Verify RepoDigests — fail closed if running image doesn't match expected digest.
     // Two-step inspect: containers have no .RepoDigests field — inspect the image instead.
     //   1. Resolve the container's image SHA via `docker inspect --format '{{.Image}}' <container>`
     //   2. Inspect the IMAGE's RepoDigests via `docker inspect --format '{{json .RepoDigests}}' <imageSHA>`
@@ -664,7 +660,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     assertRunningImageDigest(repoDigests, imageDigest, 'dashboard')
     console.warn('\u001B[1;32m✓\u001B[0m dashboard image digest verified')
 
-    // Phase 10: Start Caddy — now safe to expose publicly (app is healthy + digest verified).
+    // Phase 11: Start Caddy — now safe to expose publicly (app is healthy + digest verified).
     await runCommand(
       'Starting Caddy (public exposure)',
       sshCommand(host, `cd ${REMOTE_DIR} && docker compose up -d --no-build --wait caddy`, keyPath, controlPath),
@@ -672,7 +668,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
-    // Phase 11: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
+    // Phase 12: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
     let probeOk = false
     for (let attempt = 1; attempt <= probeAttempts; attempt++) {
       try {

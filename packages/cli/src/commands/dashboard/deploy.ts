@@ -35,9 +35,9 @@ export function getDashboardDeployEnv(): Record<string, string> {
     )
   }
 
-  // Spread all of process.env so DASHBOARD_* vars (IMAGE_DIGEST, GITHUB_APP_ID, etc.)
+  // Spread all of process.env so DASHBOARD_* vars (GITHUB_APP_ID, OAUTH_CLIENT_ID, etc.)
   // are forwarded to the spawned deploy.ts process. validateEnv in deploy.ts requires
-  // all DASHBOARD_* vars to be present — a selective subset would cause it to fail.
+  // all DASHBOARD_* credential vars to be present — a selective subset would cause it to fail.
   // Filter out undefined values (Record<string, string> does not allow undefined).
   const fullEnv: Record<string, string> = {}
   for (const [k, v] of Object.entries(process.env)) {

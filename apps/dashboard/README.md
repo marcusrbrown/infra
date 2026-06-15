@@ -4,11 +4,11 @@
 
 Fro Bot operator dashboard at [dashboard.fro.bot](https://dashboard.fro.bot).
 
-Two-service Docker Compose stack (dashboard + caddy) on a dedicated DigitalOcean droplet. The dashboard image is built off-droplet from the pinned [fro-bot/dashboard](https://github.com/fro-bot/dashboard) ref in `apps/dashboard/upstream.json` and pushed to `ghcr.io/marcusrbrown/infra-dashboard` by the CI `build-images` job. The deploy pulls the prebuilt digest — no on-droplet build. Caddy handles automatic HTTPS. The GitHub App private key is file-mounted into the container (never an env var).
+Two-service Docker Compose stack (dashboard + caddy) on a dedicated DigitalOcean droplet. The dashboard image is the upstream released image from `ghcr.io/fro-bot/dashboard`, pinned by tag and digest in `apps/dashboard/docker-compose.yaml`. The deploy pulls the digest-pinned image — no on-droplet build. Caddy handles automatic HTTPS. The GitHub App private key is file-mounted into the container (never an env var).
 
 ## Deploy
 
-Validates env and host, runs a DNS preflight, materializes `/opt/dashboard/.env` via SSH stdin (never argv), uploads `docker-compose.yaml` and `Caddyfile`, uploads the GitHub App private key to `/opt/dashboard/config/github-app.pem` (0600) via SSH stdin, pulls the digest-pinned GHCR image, brings up `dashboard` (health-gated), verifies the running image's RepoDigests against the expected CI digest, then brings up `caddy`. A public HTTPS probe to `/api/healthz` confirms end-to-end reachability.
+Validates env and host, runs a DNS preflight, materializes `/opt/dashboard/.env` via SSH stdin (never argv), uploads `docker-compose.yaml` and `Caddyfile`, uploads the GitHub App private key to `/opt/dashboard/config/github-app.pem` (0600) via SSH stdin, pulls the digest-pinned image from `ghcr.io/fro-bot/dashboard`, brings up `dashboard` (health-gated), verifies the running image's RepoDigests against the compose-pinned digest, then brings up `caddy`. A public HTTPS probe to `/api/healthz` confirms end-to-end reachability.
 
 ```bash
 bun run --cwd apps/dashboard deploy
@@ -54,11 +54,13 @@ Repository secret: `DIGITALOCEAN_ACCESS_TOKEN` (used by the provision script).
 
 Full deploy flow, secret rotation runbooks, upgrade flow, container hardening details, and anti-patterns: [`apps/dashboard/AGENTS.md`](AGENTS.md).
 
+For rollback procedures (reverting to a prior image digest): [`docs/runbooks/dashboard-released-image-rollback.md`](../../docs/runbooks/dashboard-released-image-rollback.md).
+
 Key operational notes:
 
 - Never put the GitHub App private key in an env var — it is file-mounted at `/run/secrets/github-app.pem` and the app reads it via `DASHBOARD_GITHUB_APP_KEY_FILE`.
 - Never run `docker compose down -v` — destroys the `caddy_data` volume (Caddy TLS certificates).
-- Never add `--build` to the deploy — the deploy pulls the prebuilt GHCR digest; on-droplet builds are not supported.
+- Never add `--build` to the deploy — the deploy pulls the digest-pinned image from `ghcr.io/fro-bot/dashboard`; on-droplet builds are not supported.
 - Never pass secret bytes via SSH argv — the deploy pipes them through stdin only.
 
 ## CLI

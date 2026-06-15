@@ -295,6 +295,8 @@ describe('.env file contents', () => {
     expect(contents).toContain('DASHBOARD_COOKIE_KEY=cookiekey\n')
     // App key must be a FILE path, not the PEM content
     expect(contents).toContain('DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem\n')
+    // OAuth redirect URI must be derived from domain, not hardcoded to localhost
+    expect(contents).toContain('DASHBOARD_OAUTH_REDIRECT_URI=https://dashboard.fro.bot/auth/callback\n')
     // Image ref must NOT be in .env — it's in docker-compose.override.yaml
     expect(contents).not.toContain('DASHBOARD_IMAGE_REF')
   })

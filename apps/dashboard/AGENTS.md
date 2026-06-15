@@ -29,7 +29,8 @@ Caddy depends on the `dashboard` service being healthy before starting.
 4. Remote prep: `mkdir -p /opt/dashboard/config` on the droplet.
 5. Materializes `/opt/dashboard/.env` over SSH **stdin** (never argv). The `.env` includes
    `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem` (the file path only — the PEM content
-   is never written to `.env`).
+   is never written to `.env`) and `DASHBOARD_OAUTH_REDIRECT_URI=https://$DASHBOARD_DOMAIN/auth/callback`
+   (derived from `DASHBOARD_DOMAIN`; no separate secret required).
 6. Uploads `docker-compose.yaml` and `config/Caddyfile` via `scp`.
 7. **Uploads the GitHub App private key** to `/opt/dashboard/config/github-app.pem` (0600) via SSH
    stdin — never as an env var, never logged. PEM bytes flow through stdin only; `umask 077` plus an

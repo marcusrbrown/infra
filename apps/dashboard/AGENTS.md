@@ -148,7 +148,7 @@ Valid services for `dashboard logs`: `dashboard`, `caddy`.
 
 One-time: `bun run provision:dashboard` (root wrapper — loads the repo-root `.env`; `--cwd
 apps/dashboard` would miss it) creates the `s-1vcpu-1gb` droplet (image `docker-20-04`, region
-`nyc1`, name `fro-bot-dashboard`), selects the SSH key by name (`DASHBOARD_SSH_KEY_NAME`, default
+`nyc1`, name `dashboard`), selects the SSH key by name (`DASHBOARD_SSH_KEY_NAME`, default
 `fro-bot-dashboard`), waits for SSH, and pins both the domain and droplet-IP host keys into
 `.github/known_hosts` (commit the result before the first CI deploy).
 

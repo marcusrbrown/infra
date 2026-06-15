@@ -109,6 +109,8 @@ export async function getDashboardComposeStatus(
     '-o',
     'BatchMode=yes',
     '-o',
+    'ConnectTimeout=10',
+    '-o',
     'StrictHostKeyChecking=yes',
     ...knownHostsArgs,
     ...identityArgs,
@@ -250,7 +252,8 @@ export async function dashboardStatusAction(
   }
 
   if (result.services.length === 0) {
-    ctx.console.error(`Error: No services reported by docker compose ps`)
+    const msg = result.error ?? 'No services reported by docker compose ps'
+    ctx.console.error(`Error: ${msg}`)
     ctx.process.exit(1)
     return
   }

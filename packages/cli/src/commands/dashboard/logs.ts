@@ -96,6 +96,8 @@ export async function streamDashboardLogs(
     '-o',
     'BatchMode=yes',
     '-o',
+    'ConnectTimeout=10',
+    '-o',
     'StrictHostKeyChecking=yes',
     ...buildKnownHostsArgs(),
     ...identityArgs,

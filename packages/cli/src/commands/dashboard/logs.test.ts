@@ -167,6 +167,30 @@ describe('logs command', () => {
   })
 })
 
+// ─── SSH command includes ConnectTimeout ─────────────────────────────────────
+
+describe('streamDashboardLogs — SSH command includes ConnectTimeout', () => {
+  it('passes -o ConnectTimeout=10 to ssh', async () => {
+    delete process.env.CI
+
+    let capturedCmd: string[] = []
+    const spawnCapture: LogsSpawnFn = (cmd, _opts) => {
+      capturedCmd = cmd
+      return {exited: Promise.resolve(0)}
+    }
+
+    await streamDashboardLogs(
+      {host: 'dashboard.fro.bot', service: 'dashboard', tail: 100, allowCi: false},
+      spawnCapture,
+    )
+
+    const connectTimeoutIdx = capturedCmd.findIndex(arg => arg.startsWith('ConnectTimeout='))
+    expect(connectTimeoutIdx).toBeGreaterThan(-1)
+    expect(capturedCmd[connectTimeoutIdx - 1]).toBe('-o')
+    expect(capturedCmd[connectTimeoutIdx]).toBe('ConnectTimeout=10')
+  })
+})
+
 // ─── SSH command includes repo-pinned UserKnownHostsFile ─────────────────────
 
 describe('streamDashboardLogs — SSH command includes UserKnownHostsFile', () => {

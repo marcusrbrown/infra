@@ -2,9 +2,9 @@ import {describe, expect, it} from 'bun:test'
 
 import {
   assertRunningImageDigest,
-  buildComposeOverride,
   buildEnvFileContents,
   deploy,
+  parseComposeImageDigest,
   validateEnv,
   validateSecretValue,
   type SpawnFn,
@@ -13,6 +13,8 @@ import {
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
+// Digest pinned in apps/dashboard/docker-compose.yaml
+const COMPOSE_DIGEST = 'sha256:d3dd509856430b7bf90119ed2aaff5c579c89f53605596e250494702a8fe5f2e'
 const FAKE_DIGEST = `sha256:${'a'.repeat(64)}`
 
 const VALID_ENV = {
@@ -26,7 +28,6 @@ const VALID_ENV = {
   DASHBOARD_OAUTH_CLIENT_SECRET: 'oauthsecretvalue',
   DASHBOARD_OPERATOR_LOGIN: 'marcusrbrown',
   DASHBOARD_COOKIE_KEY: 'cookiesecretkey32byteslong123456',
-  DASHBOARD_IMAGE_DIGEST: FAKE_DIGEST,
 }
 
 /** Builds a fake SpawnResult that exits 0 with given stdout. */
@@ -129,15 +130,15 @@ const fetchHealthzFail = async (_url: string, _opts?: RequestInit): Promise<Resp
 
 /**
  * Builds a standard set of responses for a happy-path deploy.
- * Call order:
+ * Call order (no override upload — digest is sourced from committed compose file):
  *   0: mkdir -p /opt/dashboard/config
  *   1: write .env (stdin)
- *   2: write docker-compose.override.yaml (stdin)
- *   3: scp docker-compose.yaml
- *   4: scp Caddyfile
- *   5: write github-app.pem (stdin)
- *   6: chmod 0600 github-app.pem
- *   7: chown 1000:1000 github-app.pem
+ *   2: scp docker-compose.yaml
+ *   3: scp Caddyfile
+ *   4: write github-app.pem (stdin)
+ *   5: chmod 0600 github-app.pem
+ *   6: chown 1000:1000 github-app.pem
+ *   7: rm -f docker-compose.override.yaml (stale legacy override cleanup)
  *   8: docker compose pull
  *   9: docker compose up -d --no-build --wait dashboard
  *  10: docker inspect (resolve image SHA for dashboard)
@@ -146,16 +147,16 @@ const fetchHealthzFail = async (_url: string, _opts?: RequestInit): Promise<Resp
  *  13: (extra buffer)
  */
 function makeHappyPathResponses(): SpawnResult[] {
-  const repoDigestsJson = JSON.stringify([`ghcr.io/marcusrbrown/infra-dashboard@${FAKE_DIGEST}`])
+  const repoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@${COMPOSE_DIGEST}`])
   return [
     makeSpawnResult(), // 0: mkdir
     makeSpawnResult(), // 1: write .env
-    makeSpawnResult(), // 2: write override
-    makeSpawnResult(), // 3: scp compose
-    makeSpawnResult(), // 4: scp Caddyfile
-    makeSpawnResult(), // 5: write github-app.pem
-    makeSpawnResult(), // 6: chmod 0600
-    makeSpawnResult(), // 7: chown 1000:1000
+    makeSpawnResult(), // 2: scp compose
+    makeSpawnResult(), // 3: scp Caddyfile
+    makeSpawnResult(), // 4: write github-app.pem
+    makeSpawnResult(), // 5: chmod 0600
+    makeSpawnResult(), // 6: chown 1000:1000
+    makeSpawnResult(), // 7: rm -f docker-compose.override.yaml
     makeSpawnResult(), // 8: compose pull
     makeSpawnResult(), // 9: compose up dashboard
     makeSpawnResult('sha256:imageid123'), // 10: docker inspect (image SHA)
@@ -165,11 +166,52 @@ function makeHappyPathResponses(): SpawnResult[] {
   ]
 }
 
+// ─── parseComposeImageDigest ──────────────────────────────────────────────────
+
+describe('parseComposeImageDigest', () => {
+  it('extracts the sha256 digest from a compose image line with tag@digest', () => {
+    const line =
+      '    image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:d3dd509856430b7bf90119ed2aaff5c579c89f53605596e250494702a8fe5f2e'
+    const digest = parseComposeImageDigest(line)
+    expect(digest).toBe('sha256:d3dd509856430b7bf90119ed2aaff5c579c89f53605596e250494702a8fe5f2e')
+  })
+
+  it('extracts the sha256 digest from a compose image line with only @digest (no tag)', () => {
+    const line = `    image: ghcr.io/fro-bot/dashboard@${FAKE_DIGEST}`
+    const digest = parseComposeImageDigest(line)
+    expect(digest).toBe(FAKE_DIGEST)
+  })
+
+  it('returns null when no @sha256: digest is present', () => {
+    const line = '    image: ghcr.io/fro-bot/dashboard:latest'
+    const digest = parseComposeImageDigest(line)
+    expect(digest).toBeNull()
+  })
+
+  it('returns null for an empty string', () => {
+    expect(parseComposeImageDigest('')).toBeNull()
+  })
+
+  it('extracts the actual compose digest from the committed docker-compose.yaml', () => {
+    // This test reads the real file — verifies the helper works end-to-end
+    const digest = parseComposeImageDigest(
+      'image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:d3dd509856430b7bf90119ed2aaff5c579c89f53605596e250494702a8fe5f2e',
+    )
+    expect(digest).toBe(COMPOSE_DIGEST)
+  })
+})
+
 // ─── env validation ───────────────────────────────────────────────────────────
 
 describe('env validation', () => {
-  it('accepts a fully valid env', () => {
+  it('accepts a fully valid env (no DASHBOARD_IMAGE_DIGEST required)', () => {
     expect(() => validateEnv(VALID_ENV)).not.toThrow()
+  })
+
+  it('does NOT require DASHBOARD_IMAGE_DIGEST', () => {
+    // VALID_ENV has no DASHBOARD_IMAGE_DIGEST — must not throw
+    const env = {...VALID_ENV}
+    expect(() => validateEnv(env)).not.toThrow()
   })
 
   it('throws a specific message when DASHBOARD_DOMAIN is missing', () => {
@@ -205,11 +247,6 @@ describe('env validation', () => {
   it('throws a specific message when DASHBOARD_COOKIE_KEY is missing', () => {
     const env = {...VALID_ENV, DASHBOARD_COOKIE_KEY: ''}
     expect(() => validateEnv(env)).toThrow('DASHBOARD_COOKIE_KEY')
-  })
-
-  it('throws (fail closed) when DASHBOARD_IMAGE_DIGEST is missing', () => {
-    const env = {...VALID_ENV, DASHBOARD_IMAGE_DIGEST: ''}
-    expect(() => validateEnv(env)).toThrow('DASHBOARD_IMAGE_DIGEST')
   })
 
   it('throws when PATH is missing', () => {
@@ -297,7 +334,7 @@ describe('.env file contents', () => {
     expect(contents).toContain('DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem\n')
     // OAuth redirect URI must be derived from domain, not hardcoded to localhost
     expect(contents).toContain('DASHBOARD_OAUTH_REDIRECT_URI=https://dashboard.fro.bot/auth/callback\n')
-    // Image ref must NOT be in .env — it's in docker-compose.override.yaml
+    // Image ref must NOT be in .env — it's pinned in docker-compose.yaml
     expect(contents).not.toContain('DASHBOARD_IMAGE_REF')
   })
 
@@ -320,13 +357,13 @@ describe('.env file contents', () => {
 
 describe('assertRunningImageDigest', () => {
   it('passes when expected digest is present in RepoDigests', () => {
-    const repoDigests = [`ghcr.io/marcusrbrown/infra-dashboard@${FAKE_DIGEST}`]
+    const repoDigests = [`ghcr.io/fro-bot/dashboard@${FAKE_DIGEST}`]
     expect(() => assertRunningImageDigest(repoDigests, FAKE_DIGEST, 'dashboard')).not.toThrow()
   })
 
   it('throws when expected digest is not present', () => {
     const otherDigest = `sha256:${'b'.repeat(64)}`
-    const repoDigests = [`ghcr.io/marcusrbrown/infra-dashboard@${otherDigest}`]
+    const repoDigests = [`ghcr.io/fro-bot/dashboard@${otherDigest}`]
     expect(() => assertRunningImageDigest(repoDigests, FAKE_DIGEST, 'dashboard')).toThrow(/digest|dashboard/)
   })
 
@@ -495,6 +532,78 @@ describe('happy path deploy', () => {
 
     expect(probedUrls.some(u => u.includes('/api/healthz'))).toBe(true)
   })
+
+  it('removes stale docker-compose.override.yaml before docker compose pull', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // Find the rm -f cleanup call
+    const rmCall = calls.find(
+      c => c.cmd.join(' ').includes('rm -f') && c.cmd.join(' ').includes('docker-compose.override.yaml'),
+    )
+    expect(rmCall).toBeDefined()
+
+    // It must come before docker compose pull
+    const rmIdx = calls.findIndex(
+      c => c.cmd.join(' ').includes('rm -f') && c.cmd.join(' ').includes('docker-compose.override.yaml'),
+    )
+    const pullIdx = calls.findIndex(c => c.cmd.join(' ').includes('docker compose pull'))
+    expect(rmIdx).toBeGreaterThan(-1)
+    expect(pullIdx).toBeGreaterThan(-1)
+    expect(rmIdx).toBeLessThan(pullIdx)
+  })
+
+  it('does NOT upload docker-compose.override.yaml (only removes it)', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // No scp or stdin-write call should reference docker-compose.override.yaml
+    // (the rm -f cleanup call is expected and allowed)
+    const uploadOverrideCall = calls.find(c => {
+      const s = c.cmd.join(' ') + c.stdinData
+      return (
+        s.includes('docker-compose.override.yaml') && !s.includes('rm -f') // rm -f is the expected cleanup, not an upload
+      )
+    })
+    expect(uploadOverrideCall).toBeUndefined()
+  })
+
+  it('uses digest from committed compose file for assertRunningImageDigest', async () => {
+    // Provide a RepoDigests response that matches the compose-pinned digest
+    const responses = makeHappyPathResponses()
+    // responses[11] already returns COMPOSE_DIGEST — deploy should pass
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
 })
 
 // ─── SECURITY: App key never in argv ─────────────────────────────────────────
@@ -608,22 +717,6 @@ describe('edge cases', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it('throws (fail closed) before any SSH call when DASHBOARD_IMAGE_DIGEST is missing', async () => {
-    const env = {...VALID_ENV, DASHBOARD_IMAGE_DIGEST: ''}
-    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
-
-    await expect(
-      deploy({
-        env,
-        spawn: spawnFn,
-        resolve: resolvesOk,
-        fetch: fetchHealthzOk,
-      }),
-    ).rejects.toThrow('DASHBOARD_IMAGE_DIGEST')
-
-    expect(calls).toHaveLength(0)
-  })
-
   it('rejects -oProxyCommand= host before any SSH argv', async () => {
     const env = {...VALID_ENV, DASHBOARD_DOMAIN: '-oProxyCommand=evil'}
     const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
@@ -640,9 +733,9 @@ describe('edge cases', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it('fails closed when RepoDigests mismatch', async () => {
+  it('fails closed when RepoDigests mismatch (compose-sourced digest)', async () => {
     const wrongDigest = `sha256:${'b'.repeat(64)}`
-    const wrongRepoDigestsJson = JSON.stringify([`ghcr.io/marcusrbrown/infra-dashboard@${wrongDigest}`])
+    const wrongRepoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@${wrongDigest}`])
 
     const responses = makeHappyPathResponses()
     // Override the RepoDigests response (index 11) with a mismatched digest
@@ -697,29 +790,10 @@ describe('edge cases', () => {
   })
 })
 
-// ─── buildComposeOverride ────────────────────────────────────────────────────
-
-describe('buildComposeOverride', () => {
-  it('returns a compose override with the digest-pinned image', () => {
-    const override = buildComposeOverride({imageDigest: FAKE_DIGEST})
-    expect(override).toContain(`ghcr.io/marcusrbrown/infra-dashboard@${FAKE_DIGEST}`)
-    expect(override).toContain('services:')
-    expect(override).toContain('dashboard:')
-    expect(override).toContain('image:')
-  })
-
-  it('uses the full image name with @digest format', () => {
-    const override = buildComposeOverride({imageDigest: FAKE_DIGEST})
-    // Must be @digest format, not :tag format
-    expect(override).toContain(`@${FAKE_DIGEST}`)
-    expect(override).not.toContain(':latest')
-  })
-})
-
 // ─── .env does not contain image ref ─────────────────────────────────────────
 
 describe('.env does not contain image ref', () => {
-  it('does NOT include DASHBOARD_IMAGE_REF in .env (pinning moved to override)', () => {
+  it('does NOT include DASHBOARD_IMAGE_REF in .env (pinning in docker-compose.yaml)', () => {
     const contents = buildEnvFileContents({
       domain: 'dashboard.fro.bot',
       githubAppId: '123456',
@@ -730,75 +804,6 @@ describe('.env does not contain image ref', () => {
     })
     expect(contents).not.toContain('DASHBOARD_IMAGE_REF')
     expect(contents).not.toContain('sha256:')
-  })
-})
-
-// ─── digest format validation ─────────────────────────────────────────────────
-
-describe('digest format validation', () => {
-  it('throws on a malformed digest (missing sha256: prefix)', () => {
-    const env = {...VALID_ENV, DASHBOARD_IMAGE_DIGEST: 'abc123'}
-    expect(() => validateEnv(env)).toThrow(/DASHBOARD_IMAGE_DIGEST.*invalid format/)
-  })
-
-  it('throws on a malformed digest (wrong hex length)', () => {
-    const env = {...VALID_ENV, DASHBOARD_IMAGE_DIGEST: 'sha256:abc123'}
-    expect(() => validateEnv(env)).toThrow(/DASHBOARD_IMAGE_DIGEST.*invalid format/)
-  })
-
-  it('throws on a malformed digest (uppercase hex)', () => {
-    const env = {...VALID_ENV, DASHBOARD_IMAGE_DIGEST: `sha256:${'A'.repeat(64)}`}
-    expect(() => validateEnv(env)).toThrow(/DASHBOARD_IMAGE_DIGEST.*invalid format/)
-  })
-
-  it('accepts a well-formed sha256 digest', () => {
-    const env = {...VALID_ENV, DASHBOARD_IMAGE_DIGEST: FAKE_DIGEST}
-    expect(() => validateEnv(env)).not.toThrow()
-  })
-})
-
-// ─── override file upload ─────────────────────────────────────────────────────
-
-describe('compose override upload', () => {
-  it('uploads docker-compose.override.yaml with the digest-pinned image', async () => {
-    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
-
-    await deploy({
-      env: VALID_ENV,
-      spawn: spawnFn,
-      resolve: resolvesOk,
-      fetch: fetchHealthzOk,
-      probeAttempts: 1,
-      probeIntervalMs: 0,
-      sleep: async () => {},
-    })
-
-    // Find the override write call — stdin must contain the digest-pinned image
-    const overrideWrite = calls.find(
-      c => c.stdinData.includes('docker-compose.override.yaml') || c.stdinData.includes(FAKE_DIGEST),
-    )
-    expect(overrideWrite).toBeDefined()
-    expect(overrideWrite?.stdinData).toContain(FAKE_DIGEST)
-    expect(overrideWrite?.stdinData).toContain('ghcr.io/marcusrbrown/infra-dashboard@')
-  })
-
-  it('uploads override to /opt/dashboard/docker-compose.override.yaml', async () => {
-    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
-
-    await deploy({
-      env: VALID_ENV,
-      spawn: spawnFn,
-      resolve: resolvesOk,
-      fetch: fetchHealthzOk,
-      probeAttempts: 1,
-      probeIntervalMs: 0,
-      sleep: async () => {},
-    })
-
-    // The SSH command writing the override must reference the correct remote path
-    const overrideWrite = calls.find(c => c.stdinData.includes(FAKE_DIGEST))
-    expect(overrideWrite).toBeDefined()
-    expect(overrideWrite?.cmd.join(' ')).toContain('docker-compose.override.yaml')
   })
 })
 

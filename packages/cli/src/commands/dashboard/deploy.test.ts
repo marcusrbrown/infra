@@ -11,7 +11,6 @@ const envKeys = [
   'SSH_AUTH_SOCK',
   'DASHBOARD_DOMAIN',
   'DASHBOARD_SSH_KEY',
-  'DASHBOARD_IMAGE_DIGEST',
   'DASHBOARD_GITHUB_APP_ID',
   'DASHBOARD_GITHUB_APP_KEY',
   'DASHBOARD_OAUTH_CLIENT_ID',
@@ -135,7 +134,6 @@ describe('getDashboardDeployEnv', () => {
       HOME: '/home/user',
       SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
       DASHBOARD_DOMAIN: 'dashboard.fro.bot',
-      DASHBOARD_IMAGE_DIGEST: `sha256:${'a'.repeat(64)}`,
       DASHBOARD_GITHUB_APP_ID: '123456',
       DASHBOARD_GITHUB_APP_KEY: '-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----',
       DASHBOARD_OAUTH_CLIENT_ID: 'Iv1.abc123',
@@ -148,7 +146,6 @@ describe('getDashboardDeployEnv', () => {
 
     // All DASHBOARD_* vars must be present in the returned env
     expect(env.DASHBOARD_DOMAIN).toBe('dashboard.fro.bot')
-    expect(env.DASHBOARD_IMAGE_DIGEST).toBe(`sha256:${'a'.repeat(64)}`)
     expect(env.DASHBOARD_GITHUB_APP_ID).toBe('123456')
     expect(env.DASHBOARD_OAUTH_CLIENT_ID).toBe('Iv1.abc123')
     expect(env.DASHBOARD_OAUTH_CLIENT_SECRET).toBe('oauthsecret')

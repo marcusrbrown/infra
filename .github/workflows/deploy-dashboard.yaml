@@ -29,46 +29,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-images:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      dashboard_digest: ${{ steps.build-dashboard.outputs.digest }}
-    steps:
-      - name: Checkout infra
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Read upstream ref
-        id: upstream
-        run: echo "ref=$(jq -r .ref apps/dashboard/upstream.json)" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout fro-bot/dashboard
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          repository: fro-bot/dashboard
-          ref: ${{ steps.upstream.outputs.ref }}
-          path: upstream-dashboard
-
-      - name: Log in to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Build and push dashboard image
-        id: build-dashboard
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
-        with:
-          context: upstream-dashboard
-          file: upstream-dashboard/Dockerfile
-          push: true
-          tags: ghcr.io/marcusrbrown/infra-dashboard:${{ steps.upstream.outputs.ref }}
-
   deploy-dashboard:
-    needs: build-images
     runs-on: ubuntu-latest
     environment: dashboard
     steps:
@@ -119,5 +80,4 @@ jobs:
           DASHBOARD_OAUTH_CLIENT_SECRET: ${{ secrets.DASHBOARD_OAUTH_CLIENT_SECRET }}
           DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
           DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}
-          DASHBOARD_IMAGE_DIGEST: ${{ needs.build-images.outputs.dashboard_digest }}
         run: bun run --cwd apps/dashboard deploy

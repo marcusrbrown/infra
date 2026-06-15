@@ -162,7 +162,6 @@ jobs:
       needs.detect-changes.outputs.dashboard == 'true'
     permissions:
       contents: read
-      packages: write
     uses: ./.github/workflows/deploy-dashboard.yaml
     secrets:
       DASHBOARD_SSH_KEY: ${{ secrets.DASHBOARD_SSH_KEY }}

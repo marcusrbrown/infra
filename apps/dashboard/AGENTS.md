@@ -2,18 +2,19 @@
 
 Fro Bot operator dashboard for `dashboard.fro.bot`. A two-service Docker Compose stack (dashboard +
 caddy) on a dedicated DigitalOcean droplet, fronted by Caddy for automatic HTTPS. The dashboard image
-is built off-droplet from the pinned [fro-bot/dashboard](https://github.com/fro-bot/dashboard) ref
-and pushed to GHCR; the deploy pulls the prebuilt digest — no on-droplet build.
+is the upstream released image from `ghcr.io/fro-bot/dashboard`, pinned by digest in
+`apps/dashboard/docker-compose.yaml`. The deploy pulls the digest-pinned image — no on-droplet build.
 
 ## Stack
 
 | Service     | Image                                                    | Role                                                    |
 | ----------- | -------------------------------------------------------- | ------------------------------------------------------- |
-| `dashboard` | `ghcr.io/marcusrbrown/infra-dashboard:<ref>` (from GHCR) | Hono app on `:3000`; GitHub App + OAuth; healthcheck at `/api/healthz` |
+| `dashboard` | `ghcr.io/fro-bot/dashboard:<tag>@sha256:<digest>` (digest-pinned in compose) | Hono app on `:3000`; GitHub App + OAuth; healthcheck at `/api/healthz` |
 | `caddy`     | `caddy:2.11.3-alpine` (digest-pinned)                    | Auto-TLS reverse proxy `:443 → dashboard:3000`          |
 
-The dashboard image tag is the fro-bot/dashboard commit SHA pinned in `apps/dashboard/upstream.json`.
-Caddy depends on the `dashboard` service being healthy before starting.
+The dashboard image tag and digest are pinned directly in `apps/dashboard/docker-compose.yaml`.
+Renovate tracks the `ghcr.io/fro-bot/dashboard` image and opens PRs to bump the pin when a new
+release is published. Caddy depends on the `dashboard` service being healthy before starting.
 
 ## Deploy flow
 
@@ -21,9 +22,7 @@ Caddy depends on the `dashboard` service being healthy before starting.
 
 1. Validates env (`DASHBOARD_DOMAIN`, `DASHBOARD_GITHUB_APP_ID`, `DASHBOARD_GITHUB_APP_KEY`,
    `DASHBOARD_OAUTH_CLIENT_ID`, `DASHBOARD_OAUTH_CLIENT_SECRET`, `DASHBOARD_OPERATOR_LOGIN`,
-   `DASHBOARD_COOKIE_KEY`, `DASHBOARD_IMAGE_DIGEST`, plus SSH context) and the host string before any
-   SSH argv is built. Fails closed if `DASHBOARD_IMAGE_DIGEST` is missing — no fallback to on-droplet
-   build.
+   `DASHBOARD_COOKIE_KEY`, plus SSH context) and the host string before any SSH argv is built.
 2. DNS preflight — resolves `DASHBOARD_DOMAIN` and fails fast if it does not resolve.
 3. ControlMaster SSH multiplexing setup — a shared socket is created; subsequent steps reuse it.
 4. Remote prep: `mkdir -p /opt/dashboard/config` on the droplet.
@@ -35,13 +34,13 @@ Caddy depends on the `dashboard` service being healthy before starting.
 7. **Uploads the GitHub App private key** to `/opt/dashboard/config/github-app.pem` (0600) via SSH
    stdin — never as an env var, never logged. PEM bytes flow through stdin only; `umask 077` plus an
    explicit `chmod 0600` ensure the file is readable only by root.
-8. `docker compose pull` — pulls the digest-pinned GHCR image.
+8. `docker compose pull` — pulls the digest-pinned image from `ghcr.io/fro-bot/dashboard`.
 9. `docker compose up -d --no-build --wait dashboard` — starts the app only; Caddy is **NOT** started
-   yet. `--no-build` enforces the prebuilt GHCR digest; `--wait` uses the container healthcheck
+   yet. `--no-build` enforces the prebuilt digest; `--wait` uses the container healthcheck
    (`/api/healthz` on `:3000`) as the authoritative success signal.
 10. **RepoDigests verification** — resolves the running container's image SHA, then inspects the
-    image's `RepoDigests` and asserts that `DASHBOARD_IMAGE_DIGEST` appears in at least one entry.
-    Fails closed with an actionable message if the running image does not match the CI-pushed digest.
+    image's `RepoDigests` and asserts that the compose-pinned digest appears in at least one entry.
+    Fails closed with an actionable message if the running image does not match the pinned digest.
 11. `docker compose up -d --no-build --wait caddy` — publicly exposes the service **only after** the
     app is healthy and the digest is verified.
 12. **Bounded public HTTPS probe** — retries `https://$DASHBOARD_DOMAIN/api/healthz` up to 10 times
@@ -51,23 +50,15 @@ Caddy depends on the `dashboard` service being healthy before starting.
 In CI the SSH key is materialized from `DASHBOARD_SSH_KEY` to a temp file with a trailing newline
 (GitHub strips trailing whitespace from secrets) and `chmod 600`; locally it uses the ssh-agent.
 
-## Image build (GHCR)
+## Image source
 
-The `build-images` CI job in the **Deploy Dashboard** workflow:
+The dashboard image is the upstream released image from `ghcr.io/fro-bot/dashboard`, pinned by tag
+and digest in `apps/dashboard/docker-compose.yaml`. Renovate tracks this image and opens PRs to bump
+the pin when a new release is published. Merging a Renovate PR triggers the Deploy Dashboard workflow,
+which pulls the new digest and ships it to the droplet automatically.
 
-1. Reads the pinned commit SHA from `apps/dashboard/upstream.json` (field `ref`).
-2. Checks out `fro-bot/dashboard` at that ref.
-3. Builds `fro-bot/dashboard`'s `Dockerfile` and pushes the image to
-   `ghcr.io/marcusrbrown/infra-dashboard:<ref>` with `docker/build-push-action`.
-4. Outputs the pushed image digest (`sha256:…`) as `dashboard_digest`.
-
-The `deploy-dashboard` job receives `DASHBOARD_IMAGE_DIGEST` from that output and passes it to
-`bun run --cwd apps/dashboard deploy`. The deploy pulls the digest-pinned image with
-`docker compose pull` and verifies RepoDigests after `up`.
-
-**Renovate** tracks `apps/dashboard/upstream.json` (the `ref` field pointing to the fro-bot/dashboard
-source ref). When Renovate opens a PR bumping the ref, merging it triggers the Deploy Dashboard
-workflow, which builds and ships the new digest automatically.
+The former `ghcr.io/marcusrbrown/infra-dashboard` image (built by this repo's CI) is retired. It can
+be deleted manually from the GitHub Container Registry once no references remain.
 
 ## Container hardening
 
@@ -129,9 +120,10 @@ path, never via an env-string fallback.
 
 ## Upgrade flow
 
-Renovate opens PRs for `apps/dashboard/upstream.json` when a new commit is available on the
-fro-bot/dashboard default branch. Merge the PR → the Deploy Dashboard workflow builds the new image
-from the bumped ref, pushes it to GHCR, and ships the new digest to the droplet automatically.
+Renovate opens PRs when a new `ghcr.io/fro-bot/dashboard` release is published. Merge the PR → the
+Deploy Dashboard workflow pulls the new digest-pinned image and ships it to the droplet automatically.
+
+For rollback procedures, see [`docs/runbooks/dashboard-released-image-rollback.md`](../../docs/runbooks/dashboard-released-image-rollback.md).
 
 ## CLI
 
@@ -165,8 +157,9 @@ When unset, it falls back to ssh-agent.
   path.
 - **Never `docker compose down -v`** — destroys the `caddy_data` volume (Caddy TLS certificates and
   ACME state). Use `docker compose down` (no `-v`) to stop services without losing TLS data.
-- **Never add `--build` to the dashboard deploy** — the deploy pulls the prebuilt GHCR digest;
-  on-droplet builds are not supported and `--no-build` is enforced in the deploy script.
+- **Never add `--build` to the dashboard deploy** — the deploy pulls the digest-pinned image from
+  `ghcr.io/fro-bot/dashboard`; on-droplet builds are not supported and `--no-build` is enforced in
+  the deploy script.
 - **Never put secret values in SSH argv** — the deploy pipes them via stdin (`writeRemoteFile`).
   Shell metacharacters in secret values are rejected before any SSH connection is opened.
 - **Never skip `validateDashboardHost`** — it rejects `-`-prefixed values and characters outside the

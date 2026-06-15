@@ -40,6 +40,20 @@
       groupName: null,
     },
     {
+      // ghcr.io/fro-bot/dashboard is the upstream-published, smoke-tested image consumed by
+      // apps/dashboard via docker-compose.yaml (tag@digest pin). The implicit docker-compose
+      // manager tracks digest bumps; this rule adds PR context and requires operator approval
+      // before a bump PR is created — matching the cliproxy/umami gating pattern.
+      description: ['Add changelog context for fro-bot/dashboard Docker image updates'],
+      matchDatasources: ['docker'],
+      matchPackageNames: ['ghcr.io/fro-bot/dashboard'],
+      sourceUrl: 'https://github.com/fro-bot/dashboard',
+      changelogUrl: 'https://github.com/fro-bot/dashboard/releases',
+      groupName: null,
+      automerge: false,
+      dependencyDashboardApproval: true,
+    },
+    {
       description: ['Add changelog context for Postgres Docker image updates'],
       matchDatasources: ['docker'],
       matchPackageNames: ['postgres'],
@@ -77,11 +91,10 @@
       allowedVersions: '<0.65.0',
     },
   ],
-  // Track the upstream daemon source pin (`ref`) in each apps/*/upstream.json so new
+  // Track the upstream daemon source pin (`ref`) in apps/gateway/upstream.json so new
   // releases of the named `repo` surface as PRs. This is independent of the fro-bot/agent
   // GitHub Action SHA-pin in .github/workflows/ (a separate consumer Renovate already tracks).
-  // depName is captured dynamically from the `repo` field, so any future apps/*/upstream.json
-  // is tracked with no additional config.
+  // depName is captured dynamically from the `repo` field.
   customManagers: [
     {
       customType: 'regex',

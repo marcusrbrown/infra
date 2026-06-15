@@ -4,6 +4,8 @@ import {goke} from 'goke'
 import {createCapturedCtx, expectCapturedToInclude} from '../__test__/mcp-ctx-fixture'
 import {registerStatus, unifiedStatusAction} from './status'
 
+// NOTE: dashboard is included in the unified status table alongside the other apps.
+
 const healthyKeeweb: StatusSummary = {
   app: 'keeweb',
   http: 'OK',
@@ -49,12 +51,22 @@ const healthyVpn: StatusSummary = {
   usageStats: '—',
 }
 
+const healthyDashboard: StatusSummary = {
+  app: 'dashboard',
+  http: 'OK: dashboard:running/healthy',
+  lastDeploy: '—',
+  version: '—',
+  contentHash: '—',
+  usageStats: '—',
+}
+
 function makeDeps(overrides?: Partial<Parameters<typeof registerStatus>[1]>): Parameters<typeof registerStatus>[1] {
   return {
     getKeewebStatusSummary: async () => healthyKeeweb,
     getCliproxyStatusSummary: async () => healthyCliproxy,
     getGatewayStatusSummary: async () => healthyGateway,
     getUmamiStatusSummary: async () => healthyUmami,
+    getDashboardStatusSummary: async () => healthyDashboard,
     getVpnStatusSummary: async () => healthyVpn,
     ...overrides,
   }
@@ -73,6 +85,9 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     expect(expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 | — | 12 req / 0 fail |')).toBe(true)
     expect(expectCapturedToInclude(captured, '| gateway | OK: gateway:running/healthy | — | — | — | — |')).toBe(true)
     expect(expectCapturedToInclude(captured, '| umami | OK: umami:running/healthy | — | — | — | — |')).toBe(true)
+    expect(expectCapturedToInclude(captured, '| dashboard | OK: dashboard:running/healthy | — | — | — | — |')).toBe(
+      true,
+    )
     expect(expectCapturedToInclude(captured, '| vpn | OK: wg0 up, pubkey:TESTKEY== 1 peer(s) | — | — | — | — |')).toBe(
       true,
     )
@@ -171,6 +186,7 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
       cliproxy: {version: string}
       gateway: {http: string}
       umami: {http: string}
+      dashboard: {http: string}
       vpn: {http: string}
     }
 
@@ -178,6 +194,7 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     expect(parsed.cliproxy.version).toBe('v1.2.3')
     expect(parsed.gateway.http).toBe('OK: gateway:running/healthy')
     expect(parsed.umami.http).toBe('OK: umami:running/healthy')
+    expect(parsed.dashboard.http).toBe('OK: dashboard:running/healthy')
     expect(parsed.vpn.http).toBe('OK: wg0 up, pubkey:TESTKEY== 1 peer(s)')
   })
 

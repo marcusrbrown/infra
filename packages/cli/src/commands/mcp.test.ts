@@ -30,6 +30,7 @@ import {afterAll, afterEach, beforeAll, beforeEach, describe, expect, test} from
 import {goke} from 'goke'
 
 import {registerCliproxyCommands} from './cliproxy'
+import {registerDashboardCommands} from './dashboard'
 import {registerGatewayCommands} from './gateway'
 import {registerKeewebCommands} from './keeweb'
 import {MCP_ALLOWLIST, registerMcp} from './mcp'
@@ -47,6 +48,7 @@ import {registerVpnCommands} from './vpn'
 const EXPECTED_TOOLS = [
   'cliproxy_models',
   'cliproxy_status',
+  'dashboard_status',
   'gateway_status',
   'keeweb_status',
   'status',
@@ -65,6 +67,8 @@ const CLI_ONLY_TOOLS = [
   'cliproxy_login',
   'cliproxy_open',
   'cliproxy_setup',
+  'dashboard_deploy',
+  'dashboard_logs',
   'gateway_deploy',
   'gateway_logs',
   'gateway_restore',
@@ -96,6 +100,7 @@ function buildTestCli(): ReturnType<typeof goke> {
   registerCliproxyCommands(cli)
   registerGatewayCommands(cli)
   registerUmamiCommands(cli)
+  registerDashboardCommands(cli)
   registerVpnCommands(cli)
   registerStatus(cli)
   registerMcp(cli)

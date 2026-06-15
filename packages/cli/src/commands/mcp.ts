@@ -16,6 +16,8 @@ import {createMcpAction} from '@goke/mcp'
  * - `keeweb open`      — host-machine side effect (spawns local browser, requires user intent)
  * - `umami deploy`     — intentionally CLI-only: mutates live deployment and requires environment approval
  * - `umami logs`       — intentionally CLI-only: streams logs that may emit sensitive data (DB passwords, app secrets)
+ * - `dashboard deploy` — intentionally CLI-only: mutates live deployment and requires environment approval
+ * - `dashboard logs`   — intentionally CLI-only: streams logs that may emit sensitive data (DB passwords, app secrets)
  *
  * Source-gated sensitive commands (security — CLI-only, never MCP-exposed):
  * - `gateway backup`       — secret-bearing: writes CA private key material to a tarball; CLI-only
@@ -41,6 +43,7 @@ export const MCP_ALLOWLIST: ReadonlySet<string> = new Set([
   'cliproxy models',
   'keeweb status',
   'umami status',
+  'dashboard status',
   'vpn status',
   'status',
 ])

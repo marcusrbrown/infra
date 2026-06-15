@@ -150,6 +150,24 @@ Commands:
     --key [key]                        Environment variable name holding the SSH host. Falls back to UMAMI_DOMAIN when omitted.
 
 
+  dashboard status                     Show operational health of the dashboard deployment via docker compose ps.
+
+    --key [key]                        Environment variable name holding the SSH host. Falls back to DASHBOARD_DOMAIN when omitted.
+
+
+  dashboard deploy                     Deploy the dashboard. Default mode triggers the GitHub Deploy Dashboard workflow, while --local runs apps/dashboard deploy directly with Bun.
+
+    --local                            Run local deployment with Bun using apps/dashboard instead of triggering GitHub Actions. (default: false)
+    --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
+
+
+  dashboard logs [service]             Stream logs from a dashboard service via SSH and docker compose.
+
+    --tail [n]                         Number of log lines to tail from each service. (default: 100)
+    --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive credentials. (default: false)
+    --key [key]                        Environment variable name holding the SSH host. Falls back to DASHBOARD_DOMAIN when omitted.
+
+
   vpn status                           Show operational health of the VPN box via SSH and wg show.
 
     --key [key]                        Environment variable name holding the SSH host. Falls back to VPN_HOST when omitted.
@@ -185,7 +203,7 @@ Commands:
 
   status                               Show status of all deployments
 
-    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, umami, and vpn summary objects.
+    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, and vpn summary objects.
     --verbose                          Include verbose per-app health check details when building the summary rows.
 
 

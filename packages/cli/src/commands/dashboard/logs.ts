@@ -15,7 +15,7 @@ const COMPOSE_PROJECT_DIR = '/opt/dashboard'
 const SENSITIVE_WARNING =
   'Warning: Logs may contain database passwords, app secrets, or user data. Treat output as sensitive; do not capture in shared logs or chat.'
 
-export const VALID_SERVICES = ['dashboard', 'db', 'caddy'] as const
+export const VALID_SERVICES = ['dashboard', 'caddy'] as const
 
 export type ValidService = (typeof VALID_SERVICES)[number]
 

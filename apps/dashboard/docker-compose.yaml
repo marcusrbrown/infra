@@ -1,0 +1,53 @@
+services:
+  caddy:
+    image: caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./config/Caddyfile:/etc/caddy/Caddyfile
+    depends_on:
+      dashboard:
+        condition: service_healthy
+
+  dashboard:
+    image: ghcr.io/marcusrbrown/infra-dashboard:250493945add33e30cf25ec890d7d1b37d31d00e
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    # Security hardening — deliberate delta from apps/umami:
+    # The GitHub App private key is file-mounted (not an env var); these flags
+    # minimize blast radius if the Hono app process is compromised.
+    # DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem is set in .env
+    # so the app reads the key via file path, never via an env-string fallback.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: node
+    tmpfs:
+      - /tmp
+    volumes:
+      # Host path (uploaded by deploy.ts, 0600) : container path : read-only
+      - /opt/dashboard/config/github-app.pem:/run/secrets/github-app.pem:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'node -e "fetch(''http://localhost:3000/api/healthz'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"'
+
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  caddy_data:
+  caddy_config:

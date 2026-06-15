@@ -30,6 +30,12 @@
         "@marcusrbrown/infra-shared": "workspace:*",
       },
     },
+    "apps/dashboard": {
+      "name": "@marcusrbrown/infra-dashboard",
+      "dependencies": {
+        "@marcusrbrown/infra-shared": "workspace:*",
+      },
+    },
     "apps/gateway": {
       "name": "@marcusrbrown/infra-gateway",
       "version": "0.0.0",
@@ -57,7 +63,7 @@
     },
     "packages/cli": {
       "name": "@marcusrbrown/infra",
-      "version": "0.11.2",
+      "version": "0.11.3",
       "bin": {
         "infra": "src/cli.ts",
       },
@@ -229,6 +235,8 @@
     "@marcusrbrown/infra": ["@marcusrbrown/infra@workspace:packages/cli"],
 
     "@marcusrbrown/infra-cliproxy": ["@marcusrbrown/infra-cliproxy@workspace:apps/cliproxy"],
+
+    "@marcusrbrown/infra-dashboard": ["@marcusrbrown/infra-dashboard@workspace:apps/dashboard"],
 
     "@marcusrbrown/infra-gateway": ["@marcusrbrown/infra-gateway@workspace:apps/gateway"],
 

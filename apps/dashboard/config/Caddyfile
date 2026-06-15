@@ -1,0 +1,4 @@
+# Caddy automatically provisions and renews HTTPS certificates via Let's Encrypt.
+{$DASHBOARD_DOMAIN} {
+  reverse_proxy dashboard:3000
+}

@@ -219,6 +219,7 @@ export function buildEnvFileContents(opts: {
     `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem\n` +
     `DASHBOARD_OAUTH_CLIENT_ID=${oauthClientId}\n` +
     `DASHBOARD_OAUTH_CLIENT_SECRET=${oauthClientSecret}\n` +
+    `DASHBOARD_OAUTH_REDIRECT_URI=https://${domain}/auth/callback\n` +
     `DASHBOARD_OPERATOR_LOGIN=${operatorLogin}\n` +
     `DASHBOARD_COOKIE_KEY=${cookieKey}\n`
   )

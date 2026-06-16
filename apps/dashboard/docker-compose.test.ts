@@ -9,10 +9,10 @@ describe('dashboard docker compose', () => {
     )
   })
 
-  it('references the released ghcr.io/fro-bot/dashboard image', () => {
-    expect(compose).toContain(
-      'image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:d3dd509856430b7bf90119ed2aaff5c579c89f53605596e250494702a8fe5f2e',
-    )
+  it('references a pinned ghcr.io/fro-bot/dashboard image with a sha256 digest', () => {
+    // Validates format: ghcr.io/fro-bot/dashboard:<tag>@sha256:<64 hex chars>
+    // Does not pin a specific historical tag/digest — Renovate bumps update the compose file.
+    expect(compose).toMatch(/image: ghcr\.io\/fro-bot\/dashboard:[^@]+@sha256:[0-9a-f]{64}/)
   })
 
   it('has read_only: true on the dashboard service (security hardening)', () => {

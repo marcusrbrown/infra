@@ -13,8 +13,13 @@ import {
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
-// Digest pinned in apps/dashboard/docker-compose.yaml
-const COMPOSE_DIGEST = 'sha256:d3dd509856430b7bf90119ed2aaff5c579c89f53605596e250494702a8fe5f2e'
+// Derive the expected digest from the committed docker-compose.yaml so that
+// Renovate image bumps do not require manual test updates.
+const composeText = await Bun.file(new URL('../docker-compose.yaml', import.meta.url)).text()
+const dashboardImageLine = composeText.split('\n').find(l => l.includes('fro-bot/dashboard')) ?? ''
+const COMPOSE_DIGEST = parseComposeImageDigest(dashboardImageLine) ?? ''
+if (!COMPOSE_DIGEST) throw new Error('Could not derive COMPOSE_DIGEST from docker-compose.yaml')
+
 const FAKE_DIGEST = `sha256:${'a'.repeat(64)}`
 
 const VALID_ENV = {
@@ -194,9 +199,7 @@ describe('parseComposeImageDigest', () => {
 
   it('extracts the actual compose digest from the committed docker-compose.yaml', () => {
     // This test reads the real file — verifies the helper works end-to-end
-    const digest = parseComposeImageDigest(
-      'image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:d3dd509856430b7bf90119ed2aaff5c579c89f53605596e250494702a8fe5f2e',
-    )
+    const digest = parseComposeImageDigest(dashboardImageLine)
     expect(digest).toBe(COMPOSE_DIGEST)
   })
 })

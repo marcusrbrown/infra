@@ -644,3 +644,147 @@ describe('dorny/paths-filter quantifier guard', () => {
     expect(violations).toEqual([])
   })
 })
+
+// ─── deploy.yaml: aggregate router passes operator secrets to deploy-gateway ──
+
+describe('deploy.yaml: aggregate router forwards operator secrets to deploy-gateway job', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  it('deploy-gateway job secrets block passes GATEWAY_OPERATOR_BIND_HOST', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'deploy-gateway'?: {
+          secrets?: Record<string, string>
+        }
+      }
+    }
+    const secrets = parsed?.jobs?.['deploy-gateway']?.secrets ?? {}
+    expect(secrets).toHaveProperty('GATEWAY_OPERATOR_BIND_HOST')
+    expect(secrets.GATEWAY_OPERATOR_BIND_HOST).toContain('GATEWAY_OPERATOR_BIND_HOST')
+  })
+
+  it('deploy-gateway job secrets block passes GATEWAY_OPERATOR_BIND_PORT', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'deploy-gateway'?: {
+          secrets?: Record<string, string>
+        }
+      }
+    }
+    const secrets = parsed?.jobs?.['deploy-gateway']?.secrets ?? {}
+    expect(secrets).toHaveProperty('GATEWAY_OPERATOR_BIND_PORT')
+    expect(secrets.GATEWAY_OPERATOR_BIND_PORT).toContain('GATEWAY_OPERATOR_BIND_PORT')
+  })
+
+  it('deploy-gateway job secrets block passes GATEWAY_OPERATOR_PUBLIC_ORIGIN', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'deploy-gateway'?: {
+          secrets?: Record<string, string>
+        }
+      }
+    }
+    const secrets = parsed?.jobs?.['deploy-gateway']?.secrets ?? {}
+    expect(secrets).toHaveProperty('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+    expect(secrets.GATEWAY_OPERATOR_PUBLIC_ORIGIN).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+  })
+})
+
+// ─── deploy-gateway.yaml: optional operator secret declarations ───────────────
+
+describe('deploy-gateway.yaml: optional operator secret declarations (issue 1)', () => {
+  const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
+
+  it('workflow_call.secrets declares GATEWAY_OPERATOR_BIND_HOST as optional', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}}
+    const secrets = parsed?.on?.workflow_call?.secrets ?? {}
+    expect(secrets).toHaveProperty('GATEWAY_OPERATOR_BIND_HOST')
+    expect(secrets.GATEWAY_OPERATOR_BIND_HOST?.required).toBe(false)
+  })
+
+  it('workflow_call.secrets declares GATEWAY_OPERATOR_BIND_PORT as optional', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}}
+    const secrets = parsed?.on?.workflow_call?.secrets ?? {}
+    expect(secrets).toHaveProperty('GATEWAY_OPERATOR_BIND_PORT')
+    expect(secrets.GATEWAY_OPERATOR_BIND_PORT?.required).toBe(false)
+  })
+
+  it('workflow_call.secrets declares GATEWAY_OPERATOR_PUBLIC_ORIGIN as optional', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}}
+    const secrets = parsed?.on?.workflow_call?.secrets ?? {}
+    expect(secrets).toHaveProperty('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+    expect(secrets.GATEWAY_OPERATOR_PUBLIC_ORIGIN?.required).toBe(false)
+  })
+
+  it('Deploy gateway step env forwards GATEWAY_OPERATOR_BIND_HOST', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'deploy-gateway'?: {
+          steps?: {name?: string; env?: Record<string, string>}[]
+        }
+      }
+    }
+    const steps = parsed?.jobs?.['deploy-gateway']?.steps ?? []
+    const deployStep = steps.find(s => s.name === 'Deploy gateway')
+    expect(deployStep).toBeDefined()
+    expect(deployStep?.env).toHaveProperty('GATEWAY_OPERATOR_BIND_HOST')
+    expect(deployStep?.env?.GATEWAY_OPERATOR_BIND_HOST).toContain('GATEWAY_OPERATOR_BIND_HOST')
+  })
+
+  it('Deploy gateway step env forwards GATEWAY_OPERATOR_BIND_PORT', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'deploy-gateway'?: {
+          steps?: {name?: string; env?: Record<string, string>}[]
+        }
+      }
+    }
+    const steps = parsed?.jobs?.['deploy-gateway']?.steps ?? []
+    const deployStep = steps.find(s => s.name === 'Deploy gateway')
+    expect(deployStep).toBeDefined()
+    expect(deployStep?.env).toHaveProperty('GATEWAY_OPERATOR_BIND_PORT')
+    expect(deployStep?.env?.GATEWAY_OPERATOR_BIND_PORT).toContain('GATEWAY_OPERATOR_BIND_PORT')
+  })
+
+  it('Deploy gateway step env forwards GATEWAY_OPERATOR_PUBLIC_ORIGIN', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'deploy-gateway'?: {
+          steps?: {name?: string; env?: Record<string, string>}[]
+        }
+      }
+    }
+    const steps = parsed?.jobs?.['deploy-gateway']?.steps ?? []
+    const deployStep = steps.find(s => s.name === 'Deploy gateway')
+    expect(deployStep).toBeDefined()
+    expect(deployStep?.env).toHaveProperty('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+    expect(deployStep?.env?.GATEWAY_OPERATOR_PUBLIC_ORIGIN).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+  })
+
+  it('operator vars are NOT in the required-secret validation step env', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'deploy-gateway'?: {
+          steps?: {name?: string; env?: Record<string, string>; run?: string}[]
+        }
+      }
+    }
+    const steps = parsed?.jobs?.['deploy-gateway']?.steps ?? []
+    const validateStep = steps.find(s => s.name === 'Validate required secrets')
+    expect(validateStep).toBeDefined()
+    // Operator vars must NOT be in the validation step env (deploy script enforces all-or-none)
+    expect(validateStep?.env ?? {}).not.toHaveProperty('GATEWAY_OPERATOR_BIND_HOST')
+    expect(validateStep?.env ?? {}).not.toHaveProperty('GATEWAY_OPERATOR_BIND_PORT')
+    expect(validateStep?.env ?? {}).not.toHaveProperty('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+  })
+})

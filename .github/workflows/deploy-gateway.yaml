@@ -53,6 +53,12 @@ on:
         required: false
       GATEWAY_PRESENCE_CHANNEL_ID:
         required: false
+      GATEWAY_OPERATOR_BIND_HOST:
+        required: false
+      GATEWAY_OPERATOR_BIND_PORT:
+        required: false
+      GATEWAY_OPERATOR_PUBLIC_ORIGIN:
+        required: false
 
 concurrency:
   group: deploy-gateway-${{ github.ref_name }}
@@ -191,5 +197,8 @@ jobs:
           GATEWAY_TRIGGER_ROLE_ID: ${{ secrets.GATEWAY_TRIGGER_ROLE_ID }}
           GATEWAY_WEBHOOK_SECRET: ${{ secrets.GATEWAY_WEBHOOK_SECRET }}
           GATEWAY_PRESENCE_CHANNEL_ID: ${{ secrets.GATEWAY_PRESENCE_CHANNEL_ID }}
+          GATEWAY_OPERATOR_BIND_HOST: ${{ secrets.GATEWAY_OPERATOR_BIND_HOST }}
+          GATEWAY_OPERATOR_BIND_PORT: ${{ secrets.GATEWAY_OPERATOR_BIND_PORT }}
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: ${{ secrets.GATEWAY_OPERATOR_PUBLIC_ORIGIN }}
           GATEWAY_IMAGE_DIGEST: ${{ needs.build-images.outputs.gateway_digest }}
           WORKSPACE_IMAGE_DIGEST: ${{ needs.build-images.outputs.workspace_digest }}

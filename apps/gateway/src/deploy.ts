@@ -218,6 +218,201 @@ export function resolveUpstreamPin(jsonPath?: string): UpstreamPin {
 const MODEL_ALLOWLIST_RE = /^[\w.-]+\/[\w.-]+$/
 
 /**
+ * Returns the operator listener state based on the presence of all three operator inputs.
+ *
+ * - 'enabled':  all three vars (GATEWAY_OPERATOR_BIND_HOST, GATEWAY_OPERATOR_BIND_PORT,
+ *               GATEWAY_OPERATOR_PUBLIC_ORIGIN) are present and non-empty.
+ * - 'disabled': all three are absent (unset or whitespace-only).
+ * - 'invalid':  one or two are present — the all-or-none gate is violated.
+ *
+ * Mirrors the empty/whitespace-only = absent semantics used by validateRequiredEnv.
+ */
+export function getOperatorState(env: Record<string, string>): 'enabled' | 'disabled' | 'invalid' {
+  const hasBindHost = Boolean(env.GATEWAY_OPERATOR_BIND_HOST?.trim())
+  const hasBindPort = Boolean(env.GATEWAY_OPERATOR_BIND_PORT?.trim())
+  const hasPublicOrigin = Boolean(env.GATEWAY_OPERATOR_PUBLIC_ORIGIN?.trim())
+
+  const count = [hasBindHost, hasBindPort, hasPublicOrigin].filter(Boolean).length
+
+  if (count === 3) return 'enabled'
+  if (count === 0) return 'disabled'
+  return 'invalid'
+}
+
+/**
+ * Validates the operator listener configuration values.
+ * Throws with a descriptive message when any value is unsafe or invalid.
+ *
+ * Rejection rules (mirrors upstream deploy/validate-stack.sh):
+ *   - bindHost: rejects 0.0.0.0 (all-interface), 127.x (loopback), 10.x (sandbox-net), IPv6
+ *   - bindPort: must be a positive integer in [1, 65535]
+ *   - publicOrigin: must be a valid HTTPS URL that is a true origin (no path, query, hash, or credentials)
+ *     and whose hostname must equal gatewayHost (single-host deploy topology constraint).
+ */
+export function validateOperatorConfig(opts: {
+  bindHost: string
+  bindPort: string
+  publicOrigin: string
+  /** The expected gateway hostname (GATEWAY_HOST). When provided, publicOrigin hostname must match. */
+  gatewayHost?: string
+}): void {
+  const {bindHost, bindPort, publicOrigin, gatewayHost} = opts
+
+  // Validate bind host
+  if (!bindHost) {
+    throw new Error('GATEWAY_OPERATOR_BIND_HOST is required when operator listener is enabled.')
+  }
+
+  // Reject IP:port format (contains colon but is not IPv6 — e.g. 172.20.0.2:9300)
+  // Check this before the IPv6 check to give a more accurate error message.
+  if (bindHost.includes(':')) {
+    // Distinguish IPv6 (multiple colons or starts with ::) from IP:port (single colon, starts with digit)
+    const colonCount = (bindHost.match(/:/g) ?? []).length
+    if (colonCount === 1 && /^\d/.test(bindHost)) {
+      throw new Error(
+        `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" contains a colon — this looks like an IP:port format. ` +
+          'Provide only the IPv4 address without a port (e.g. 172.20.0.2). ' +
+          'The port is configured separately via GATEWAY_OPERATOR_BIND_PORT.',
+      )
+    }
+    throw new Error(
+      `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is an IPv6 address. ` +
+        'Only IPv4 gateway-net addresses are supported (e.g. 172.20.0.2).',
+    )
+  }
+
+  // Reject all-interface bind
+  if (bindHost === '0.0.0.0') {
+    throw new Error(
+      `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is an all-interface bind (0.0.0.0). ` +
+        'Use a specific gateway-net IPv4 address (e.g. 172.20.0.2).',
+    )
+  }
+
+  // Reject loopback (127.x.x.x)
+  if (bindHost.startsWith('127.')) {
+    throw new Error(
+      `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is a loopback address. ` +
+        'The operator listener must bind to a gateway-net address, not loopback.',
+    )
+  }
+
+  // Reject sandbox-net (10.x.x.x)
+  if (bindHost.startsWith('10.')) {
+    throw new Error(
+      `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is in the sandbox-net range (10.0.0.0/8). ` +
+        'The operator listener must bind to a gateway-net address, not sandbox-net.',
+    )
+  }
+
+  // Validate bind host is inside gateway-net (172.20.0.0/16).
+  // The gateway-net subnet is 172.20.0.0/16 — only 172.20.x.x addresses are valid.
+  // This rejects addresses outside the gateway-net range (e.g. 172.21.x.x, 192.168.x.x).
+  if (!bindHost.startsWith('172.20.')) {
+    throw new Error(
+      `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is not in the gateway-net subnet (172.20.0.0/16). ` +
+        'The operator listener must bind to a gateway-net IPv4 address in the 172.20.x.x range ' +
+        '(e.g. 172.20.0.2).',
+    )
+  }
+
+  // Validate port
+  if (!bindPort) {
+    throw new Error('GATEWAY_OPERATOR_BIND_PORT is required when operator listener is enabled.')
+  }
+
+  const parsedPort = Number(bindPort)
+  if (
+    !Number.isFinite(parsedPort) ||
+    !Number.isInteger(parsedPort) ||
+    parsedPort < 1 ||
+    parsedPort > 65535 ||
+    String(parsedPort) !== bindPort.trim()
+  ) {
+    throw new Error(
+      `GATEWAY_OPERATOR_BIND_PORT "${bindPort}" is invalid. ` +
+        'Must be a positive integer in [1, 65535] (e.g. "9300").',
+    )
+  }
+
+  // Validate public origin
+  if (!publicOrigin) {
+    throw new Error('GATEWAY_OPERATOR_PUBLIC_ORIGIN is required when operator listener is enabled.')
+  }
+
+  let parsedOrigin: URL
+  try {
+    parsedOrigin = new URL(publicOrigin)
+  } catch {
+    throw new Error(
+      `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" is not a valid URL. ` +
+        'Must be a valid HTTPS origin (e.g. "https://gateway.fro.bot").',
+    )
+  }
+
+  if (parsedOrigin.protocol !== 'https:') {
+    throw new Error(
+      `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" must use https (got "${parsedOrigin.protocol.replace(':', '')}"). ` +
+        'The operator listener public origin must be an HTTPS URL.',
+    )
+  }
+
+  // Reject credentials (username/password) in the origin
+  if (parsedOrigin.username || parsedOrigin.password) {
+    throw new Error(
+      `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" must not contain credentials (username/password). ` +
+        'Must be a bare HTTPS origin (e.g. "https://gateway.fro.bot").',
+    )
+  }
+
+  // Reject non-root pathname (must be exactly "/" — the URL constructor normalizes bare host to "/")
+  if (parsedOrigin.pathname !== '/') {
+    throw new Error(
+      `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" must not contain a path. ` +
+        'Must be a bare HTTPS origin with no path, query, or fragment (e.g. "https://gateway.fro.bot").',
+    )
+  }
+
+  // Reject query string
+  if (parsedOrigin.search) {
+    throw new Error(
+      `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" must not contain a query string. ` +
+        'Must be a bare HTTPS origin (e.g. "https://gateway.fro.bot").',
+    )
+  }
+
+  // Reject hash/fragment
+  if (parsedOrigin.hash) {
+    throw new Error(
+      `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" must not contain a hash/fragment. ` +
+        'Must be a bare HTTPS origin (e.g. "https://gateway.fro.bot").',
+    )
+  }
+
+  // Reject explicit non-default HTTPS ports (anything other than 443 or the default).
+  // The URL parser normalizes :443 away for https: (parsedOrigin.port === '' for both
+  // https://host and https://host:443). Any non-empty port is a non-default port.
+  // Current Caddy topology only supports the default HTTPS port (443).
+  if (parsedOrigin.port !== '') {
+    throw new Error(
+      `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" specifies a non-default port (:${parsedOrigin.port}). ` +
+        'Only the default HTTPS port (443) is supported by the current Caddy topology. ' +
+        'Use a bare HTTPS origin without an explicit port (e.g. "https://gateway.fro.bot").',
+    )
+  }
+
+  // Require hostname to match GATEWAY_HOST (single-host deploy topology constraint).
+  // This avoids multi-site Caddy complexity — the Caddyfile is built for GATEWAY_HOST only.
+  if (gatewayHost && parsedOrigin.hostname !== gatewayHost) {
+    throw new Error(
+      `GATEWAY_OPERATOR_PUBLIC_ORIGIN hostname "${parsedOrigin.hostname}" does not match GATEWAY_HOST "${gatewayHost}". ` +
+        'The operator public origin must use the same hostname as the gateway (single-host topology). ' +
+        `Expected: "https://${gatewayHost}"`,
+    )
+  }
+}
+
+/**
  * Returns the announce state based on the presence of both announce inputs.
  *
  * - 'enabled':  both GATEWAY_WEBHOOK_SECRET and GATEWAY_PRESENCE_CHANNEL_ID are
@@ -643,6 +838,17 @@ export interface ComposeOverrideOpts {
    * Present in opts for documentation/traceability; the override expression is always emitted.
    */
   readyTimeoutMs?: number
+  /**
+   * When true, adds the operator listener env entries and static gateway-net IP to the
+   * gateway service. Requires operatorBindHost, operatorBindPort, and operatorPublicOrigin.
+   */
+  operatorEnabled?: boolean
+  /** The gateway-net IPv4 address for the operator listener bind host. */
+  operatorBindHost?: string
+  /** The operator listener port. */
+  operatorBindPort?: string
+  /** The HTTPS origin for the operator public surface (e.g. "https://operator.example.com"). */
+  operatorPublicOrigin?: string
 }
 
 const GATEWAY_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-gateway'
@@ -671,14 +877,41 @@ const WORKSPACE_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-workspace'
  * toggled off.
  */
 export function buildComposeOverride(opts: ComposeOverrideOpts): string {
-  const {gatewayDigest, workspaceDigest, announceEnabled} = opts
+  const {
+    gatewayDigest,
+    workspaceDigest,
+    announceEnabled,
+    operatorEnabled,
+    operatorBindHost,
+    operatorBindPort,
+    operatorPublicOrigin,
+  } = opts
 
-  const announceSection = announceEnabled
+  // Caddy is needed when either announce or operator is enabled.
+  const caddyEnabled = announceEnabled || Boolean(operatorEnabled)
+
+  // Build the gateway service environment section (announce + operator)
+  const announceEnvLines = announceEnabled
+    ? `      GATEWAY_WEBHOOK_SECRET_FILE: /run/secrets/gateway_webhook_secret
+      GATEWAY_PRESENCE_CHANNEL_ID_FILE: /run/secrets/gateway_presence_channel_id`
+    : ''
+
+  const operatorEnvLines =
+    operatorEnabled && operatorBindHost && operatorBindPort && operatorPublicOrigin
+      ? `      GATEWAY_OPERATOR_BIND_HOST: ${operatorBindHost}
+      GATEWAY_OPERATOR_BIND_PORT: ${operatorBindPort}
+      GATEWAY_OPERATOR_PUBLIC_ORIGIN: ${operatorPublicOrigin}`
+      : ''
+
+  const envLines = [announceEnvLines, operatorEnvLines].filter(Boolean).join('\n')
+  const environmentSection = envLines
     ? `
     environment:
-      GATEWAY_WEBHOOK_SECRET_FILE: /run/secrets/gateway_webhook_secret
-      GATEWAY_PRESENCE_CHANNEL_ID_FILE: /run/secrets/gateway_presence_channel_id
-    volumes:
+${envLines}`
+    : ''
+
+  const announceVolumes = announceEnabled
+    ? `
       - type: bind
         source: ./secrets/${ANNOUNCE_WEBHOOK_SECRET_FILE}
         target: /run/secrets/gateway_webhook_secret
@@ -693,7 +926,23 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
           create_host_path: false`
     : ''
 
-  const caddySection = announceEnabled
+  const volumesSection2 = announceVolumes
+    ? `
+    volumes:${announceVolumes}`
+    : ''
+
+  // Static gateway-net IP for deterministic operator listener bind address.
+  // When operator is enabled, the gateway service gets a static ipv4_address on gateway-net
+  // so GATEWAY_OPERATOR_BIND_HOST is always a known, stable address.
+  const gatewayNetworksSection =
+    operatorEnabled && operatorBindHost
+      ? `
+    networks:
+      gateway-net:
+        ipv4_address: ${operatorBindHost}`
+      : ''
+
+  const caddySection = caddyEnabled
     ? `  caddy:
     image: ${CADDY_IMAGE}
     restart: unless-stopped
@@ -713,8 +962,8 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
 
   // workspace-repos is always declared — it persists cloned repo checkouts across
   // container recreation and daemon upgrades. `docker compose down -v` destroys it.
-  // Announce-enabled stacks also declare caddy_data and caddy_config.
-  const volumesSection = announceEnabled
+  // Caddy-enabled stacks (announce or operator) also declare caddy_data and caddy_config.
+  const volumesSection = caddyEnabled
     ? `volumes:
   caddy_data:
   caddy_config:
@@ -724,37 +973,94 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
   workspace-repos:
 `
 
+  // When operator is enabled, declare a top-level networks section with explicit IPAM
+  // so the static ipv4_address assignment has a deterministic subnet contract.
+  // The /16 subnet covers the 172.20.x.x range used by the upstream gateway-net.
+  const networksSection = operatorEnabled
+    ? `networks:
+  gateway-net:
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+`
+    : ''
+
   return `services:
   gateway:
-    image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${announceSection}
+    image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${environmentSection}${volumesSection2}${gatewayNetworksSection}
   workspace:
     image: ${WORKSPACE_IMAGE_NAME}@${workspaceDigest}
     environment:
       WORKSPACE_OPENCODE_READY_TIMEOUT_MS: \${WORKSPACE_OPENCODE_READY_TIMEOUT_MS:-}
     volumes:
       - workspace-repos:/workspace/repos
-${caddySection}${volumesSection}`
+${caddySection}${volumesSection}${networksSection}`
 }
 
 /**
- * Builds the Caddyfile content for the announce ingress.
+ * Options for the Caddyfile route generation.
+ */
+export interface CaddyfileOperatorOpts {
+  /**
+   * When true, adds the /v1/announce route.
+   * When false (or omitted), the /v1/announce route is NOT emitted.
+   * For backward compatibility, when the entire opts object is omitted,
+   * the legacy behavior (announce route present) is preserved.
+   */
+  announceEnabled?: boolean
+  /** When true, adds the /operator/* route. */
+  operatorEnabled: boolean
+  /** The operator listener target (e.g. "172.20.0.2:9300"). */
+  operatorTarget?: string
+}
+
+/**
+ * Builds the Caddyfile content for the announce ingress and/or operator routing.
  *
  * Uses mutually-exclusive `handle` blocks so Caddy's directive-ordering cannot
  * reorder the catch-all respond 404 ahead of the reverse_proxy. The path-specific
- * handle is evaluated first (higher specificity), the catch-all second.
+ * handles are evaluated first (higher specificity), the catch-all last.
  *
  * ACME-safe: Caddy serves HTTP-01 challenges on :80 via an auto-injected route
  * ahead of user routes, and TLS-ALPN-01 on :443 never touches HTTP paths. The
  * catch-all 404 is inside the :443 host block and does not shadow ACME challenges.
  *
+ * Route generation:
+ *   - announce-only (announceEnabled=true, operatorEnabled=false): /v1/announce + catch-all
+ *   - operator-only (announceEnabled=false, operatorEnabled=true): /operator/* + flush_interval -1 + catch-all
+ *   - both: /v1/announce + /operator/* + catch-all
+ *   - neither: not called by main() (no Caddy when both disabled)
+ *
+ * When opts is omitted entirely (legacy call), the /v1/announce route is emitted
+ * for backward compatibility.
+ *
  * @param host - The gateway hostname (GATEWAY_HOST env var, e.g. gateway.fro.bot)
+ * @param opts - Optional routing config; when omitted, legacy announce-only behavior applies
  */
-export function buildCaddyfile(host: string): string {
-  return `${host} {
-  handle /v1/announce {
+export function buildCaddyfile(host: string, opts?: CaddyfileOperatorOpts): string {
+  // When opts is omitted entirely, preserve legacy behavior (announce route present).
+  const announceEnabled = opts === undefined ? true : Boolean(opts.announceEnabled)
+  const operatorEnabled = Boolean(opts?.operatorEnabled)
+
+  const announceBlock = announceEnabled
+    ? `  handle /v1/announce {
     reverse_proxy gateway:3000
   }
-  handle {
+`
+    : ''
+
+  const operatorBlock =
+    operatorEnabled && opts?.operatorTarget
+      ? `  handle /operator/* {
+    reverse_proxy ${opts.operatorTarget} {
+      flush_interval -1
+    }
+  }
+`
+      : ''
+
+  return `${host} {
+${announceBlock}${operatorBlock}  handle {
     respond 404
   }
 }
@@ -1205,18 +1511,53 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     )
   }
 
+  // Phase 3e: Validate operator listener config before any SSH.
+  // All three vars must be present together (all-or-none gate).
+  // When enabled, validate the bind host/port/origin values for unsafe topology.
+  const operatorState = getOperatorState(env)
+  if (operatorState === 'invalid') {
+    const hasBindHost = Boolean(env.GATEWAY_OPERATOR_BIND_HOST?.trim())
+    const hasBindPort = Boolean(env.GATEWAY_OPERATOR_BIND_PORT?.trim())
+    const hasPublicOrigin = Boolean(env.GATEWAY_OPERATOR_PUBLIC_ORIGIN?.trim())
+    const missing = [
+      !hasBindHost && 'GATEWAY_OPERATOR_BIND_HOST',
+      !hasBindPort && 'GATEWAY_OPERATOR_BIND_PORT',
+      !hasPublicOrigin && 'GATEWAY_OPERATOR_PUBLIC_ORIGIN',
+    ]
+      .filter(Boolean)
+      .join(', ')
+    throw new Error(
+      `Operator listener inputs must be set together (all-or-none). Missing: ${missing}. ` +
+        'Set all three of GATEWAY_OPERATOR_BIND_HOST, GATEWAY_OPERATOR_BIND_PORT, and GATEWAY_OPERATOR_PUBLIC_ORIGIN, or leave all unset.',
+    )
+  }
+  if (operatorState === 'enabled') {
+    validateOperatorConfig({
+      bindHost: env.GATEWAY_OPERATOR_BIND_HOST ?? '',
+      bindPort: env.GATEWAY_OPERATOR_BIND_PORT ?? '',
+      publicOrigin: env.GATEWAY_OPERATOR_PUBLIC_ORIGIN ?? '',
+      gatewayHost: env.GATEWAY_HOST,
+    })
+  }
+
   if (isDryRun) {
     const announceEnabled = announceState === 'enabled'
+    const operatorEnabledDry = operatorState === 'enabled'
+    const caddyEnabledDry = announceEnabled || operatorEnabledDry
+    const caddyWiringDesc = [announceEnabled ? 'announce' : '', operatorEnabledDry ? 'operator' : '']
+      .filter(Boolean)
+      .join('+')
     console.warn('\u001B[1;33m[dry-run]\u001B[0m Planned actions:')
     console.warn(`  1. Ensure droplet workspace at ${REMOTE_DIR} (clone ${repo}@${ref} or fetch+reset)`)
     console.warn(`  2. Compute OBJECT_STORE_HOSTS: ${objectStoreHosts}`)
     console.warn(`  3. Materialize ${buildSecretFileList(env).length} secret files under ${SECRETS_DIR}`)
     console.warn(
-      `  3b. Write compose.override.yaml with image pins (gateway@${gatewayDigest}, workspace@${workspaceDigest})${announceEnabled ? ' + Caddy/announce wiring' : ''}`,
+      `  3b. Write compose.override.yaml with image pins (gateway@${gatewayDigest}, workspace@${workspaceDigest})${caddyEnabledDry ? ` + Caddy/${caddyWiringDesc} wiring` : ''}`,
     )
-    if (announceEnabled) {
-      console.warn(`  3c. Announce enabled — materialize Caddyfile under ${DEPLOY_DIR}`)
+    if (caddyEnabledDry) {
+      console.warn(`  3c. Caddy enabled (${caddyWiringDesc}) — materialize Caddyfile under ${DEPLOY_DIR}`)
     }
+    console.warn(`  3d. Run upstream stack validation: cd ${REMOTE_DIR} && bash deploy/validate-stack.sh`)
     console.warn(`  4. Write .env to ${ENV_PATH}`)
     console.warn(`  5. Run init-certs.sh (idempotent)`)
     console.warn(`  6. docker compose pull (pull prebuilt GHCR images)`)
@@ -1340,17 +1681,35 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       )
     }
 
-    // Phase 5b: Materialize compose.override.yaml (always) + Caddyfile (announce-only).
+    // Phase 5b: Materialize compose.override.yaml (always) + Caddyfile (when Caddy is enabled).
     // The override is written on EVERY deploy because it carries the image digest pins
     // for gateway and workspace — without it, compose would use build: semantics.
     // git clean -xfd (phase 4) removed any prior copy; writeRemoteFile overwrites idempotently.
+    // Caddy is enabled when announce OR operator is enabled (caddyEnabled = announceEnabled || operatorEnabled).
     const announceEnabled = announceState === 'enabled'
+    const operatorEnabled = operatorState === 'enabled'
+    const caddyEnabled = announceEnabled || operatorEnabled
+    const operatorBindHost = operatorEnabled ? (env.GATEWAY_OPERATOR_BIND_HOST ?? '') : undefined
+    const operatorBindPort = operatorEnabled ? (env.GATEWAY_OPERATOR_BIND_PORT ?? '') : undefined
+    const operatorPublicOrigin = operatorEnabled ? (env.GATEWAY_OPERATOR_PUBLIC_ORIGIN ?? '') : undefined
     const overrideContent = buildComposeOverride({
       gatewayDigest,
       workspaceDigest,
       announceEnabled,
+      operatorEnabled,
+      operatorBindHost,
+      operatorBindPort,
+      operatorPublicOrigin,
     })
-    const caddyfileContent = announceEnabled ? buildCaddyfile(validated.GATEWAY_HOST) : ''
+    const operatorTarget =
+      operatorEnabled && operatorBindHost && operatorBindPort ? `${operatorBindHost}:${operatorBindPort}` : undefined
+    const caddyfileContent = caddyEnabled
+      ? buildCaddyfile(validated.GATEWAY_HOST, {
+          announceEnabled,
+          operatorEnabled,
+          operatorTarget,
+        })
+      : ''
 
     await writeRemoteFile(
       'Writing compose.override.yaml',
@@ -1364,7 +1723,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       controlPath,
     )
 
-    if (announceEnabled) {
+    if (caddyEnabled) {
       await writeRemoteFile(
         'Writing Caddyfile',
         host,
@@ -1378,15 +1737,89 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       )
     }
 
+    // Phase 5c: Run upstream stack validation.
+    // deploy/validate-stack.sh performs static network-topology and persistence invariant
+    // checks on the upstream base compose stack. It runs AFTER compose.override.yaml (and
+    // Caddyfile when Caddy is enabled) are materialized so the validator sees the final
+    // merged stack — including the image pins and network wiring written in Phase 5b.
+    //
+    // The script lives in the upstream repo at deploy/validate-stack.sh and is run from
+    // REMOTE_DIR (the repo root) so the relative path deploy/validate-stack.sh resolves
+    // correctly. Running from DEPLOY_DIR would require deploy/deploy/validate-stack.sh.
+    //
+    // Fail-closed: a non-zero exit aborts the deploy before docker compose pull/up and
+    // before checksum persistence. This ensures unsafe topology is never deployed.
+    await runCommand(
+      'Running upstream stack validation (deploy/validate-stack.sh)',
+      sshCommand(host, `cd ${REMOTE_DIR} && bash deploy/validate-stack.sh`, keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    // Phase 5d: Infra-owned rendered-config validation gate (operator deploys only).
+    // When the operator listener is enabled, run `docker compose config --format json` on the
+    // remote to get the fully-merged compose config and validate the operator topology invariants:
+    //   - gateway has static ipv4_address on gateway-net equal to GATEWAY_OPERATOR_BIND_HOST
+    //   - gateway keeps sandbox-net
+    //   - workspace is sandbox-net only (not gateway-net/egress-net)
+    //   - caddy is gateway-net only
+    //   - caddy publishes only 80/443 host ports
+    //   - gateway publishes no host ports for the operator listener
+    //   - top-level gateway-net IPAM includes the expected subnet (172.20.0.0/16)
+    //
+    // This gate runs AFTER upstream validate-stack.sh (which validates the base stack) and
+    // BEFORE docker compose pull/up and checksum persistence. Non-zero exit aborts the deploy.
+    // Non-operator deploys skip this gate entirely — no needless complexity.
+    //
+    // Shell safety: uses a single-quoted heredoc (<<'SCRIPT'...SCRIPT) so the outer shell
+    // does NOT expand $CONFIG or $(...) before the inner bash runs. The expected bind host
+    // is interpolated at script-build time (before SSH), not inside the heredoc.
+    // Tooling: uses Python (always available on Ubuntu/Debian) to parse JSON — avoids
+    // bun, node, and jq which are not guaranteed on the droplet.
+    if (operatorEnabled && operatorBindHost) {
+      // operatorBindHost is validated before reaching here (validateOperatorConfig).
+      // It is a safe 172.20.x.x IPv4 address — safe to embed in the heredoc body.
+      const expectedBindHost = operatorBindHost
+      const validateScript = `bash <<'SCRIPT'
+set -euo pipefail
+CONFIG=$(docker compose --project-directory ${DEPLOY_DIR} config --format json)
+if [ $? -ne 0 ] || [ -z "$CONFIG" ]; then
+  echo "FAIL: docker compose config failed or returned empty output"
+  exit 1
+fi
+GW_IP=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); n=c.get('services',{}).get('gateway',{}).get('networks',{}).get('gateway-net',{}); print(n.get('ipv4_address',''))")
+if [ "$GW_IP" != "${expectedBindHost}" ]; then echo "FAIL: gateway gateway-net ipv4_address is '$GW_IP', expected '${expectedBindHost}'"; exit 1; fi
+GW_SUBNET=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); cfg=c.get('networks',{}).get('gateway-net',{}).get('ipam',{}).get('config',[]); print(cfg[0].get('subnet','') if cfg else '')")
+if [ "$GW_SUBNET" != "172.20.0.0/16" ]; then echo "FAIL: gateway-net IPAM subnet is '$GW_SUBNET', expected '172.20.0.0/16'"; exit 1; fi
+GW_PORTS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); p=c.get('services',{}).get('gateway',{}).get('ports',[]); print(len(p))")
+if [ "$GW_PORTS" != "0" ] && [ -n "$GW_PORTS" ]; then echo "FAIL: gateway publishes host ports (operator listener must not have host ports): $GW_PORTS port(s)"; exit 1; fi
+GW_SANDBOX=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); nets=list(c.get('services',{}).get('gateway',{}).get('networks',{}).keys()); print('yes' if 'sandbox-net' in nets else 'no')")
+if [ "$GW_SANDBOX" != "yes" ]; then echo "FAIL: gateway is missing sandbox-net (required for workspace communication)"; exit 1; fi
+WS_NETS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); nets=list(c.get('services',{}).get('workspace',{}).get('networks',{}).keys()); print(','.join(nets))")
+if echo "$WS_NETS" | grep -qE 'gateway-net|egress-net'; then echo "FAIL: workspace must be sandbox-net only, but has: $WS_NETS"; exit 1; fi
+CADDY_NETS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); nets=list(c.get('services',{}).get('caddy',{}).get('networks',{}).keys()); print(','.join(nets))")
+if [ "$CADDY_NETS" != "gateway-net" ]; then echo "FAIL: caddy must be gateway-net only, but has: $CADDY_NETS"; exit 1; fi
+CADDY_PORTS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); ports=c.get('services',{}).get('caddy',{}).get('ports',[]); published=[str(p.get('published','')) for p in ports if isinstance(p,dict)]; print(','.join(published))")
+if [ "$CADDY_PORTS" != "80,443" ] && [ "$CADDY_PORTS" != "443,80" ]; then echo "FAIL: caddy must publish only ports 80 and 443, but has: $CADDY_PORTS"; exit 1; fi
+echo "OK: infra rendered-config validation passed"
+SCRIPT`
+      await runCommand(
+        'Running infra rendered-config validation (operator topology invariants)',
+        sshCommand(host, validateScript, keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+    }
+
     // Compute current checksum and read prior checksum to detect rotation.
     // The override is always included (image pins change when digests change, which
-    // should force recreate). Caddyfile is included only when announce is enabled,
-    // so toggling announce on/off forces --force-recreate (Caddy is created/destroyed).
+    // should force recreate). Caddyfile is included whenever Caddy is enabled
+    // (announce OR operator), so toggling either on/off forces --force-recreate.
     const checksumInput: SecretFile[] = [
       ...secrets,
       {name: 'compose.override.yaml', content: overrideContent, required: false},
     ]
-    if (announceEnabled) {
+    if (caddyEnabled) {
       checksumInput.push({name: 'Caddyfile', content: caddyfileContent, required: false})
     }
     const currentChecksum = computeSecretsChecksum(checksumInput)
@@ -1521,6 +1954,45 @@ export async function main(opts: MainOpts = {}): Promise<void> {
         console.warn(
           `\u001B[1;33m[warn]\u001B[0m HTTPS ingress probe did not succeed — cert may still be issuing. ` +
             `Verify with: curl -sI ${probeUrl}`,
+        )
+      }
+    }
+
+    // Phase 9b2: Post-deploy operator health probe — warning-only, only when operator is enabled.
+    // Probes GET /operator/health through the public Caddy route (via GATEWAY_OPERATOR_PUBLIC_ORIGIN).
+    // Requires HTTP 200 — the /operator/health route contract is a health check that returns 200 on success.
+    // 3xx/4xx/5xx are not treated as success (unlike the announce probe which accepts any 2xx/4xx).
+    // Connection/TLS errors are treated as transient (cert may still be issuing); we warn and continue.
+    if (operatorEnabled && operatorPublicOrigin) {
+      const operatorHealthUrl = new URL('/operator/health', operatorPublicOrigin).toString()
+      console.warn(`\u001B[1;34m==>\u001B[0m Probing operator health endpoint`)
+      let operatorProbeOk = false
+      for (let attempt = 1; attempt <= probeAttempts; attempt++) {
+        const ac = new AbortController()
+        const timer = setTimeout(() => ac.abort(), probePerAttemptTimeoutMs)
+        try {
+          const response = await fetchFn(operatorHealthUrl, {signal: ac.signal})
+          clearTimeout(timer)
+          const status = response.status
+          // Require exactly HTTP 200 — the health route contract says 200 = healthy.
+          // 3xx/4xx/5xx are routing failures or service errors, not success.
+          if (status === 200) {
+            operatorProbeOk = true
+            break
+          }
+        } catch {
+          clearTimeout(timer)
+        }
+        if (attempt < probeAttempts) {
+          await sleepFn(probeIntervalMs)
+        }
+      }
+      if (operatorProbeOk) {
+        console.warn(`\u001B[1;32m✓\u001B[0m Operator health probe succeeded: ${operatorHealthUrl}`)
+      } else {
+        console.warn(
+          `\u001B[1;33m[warn]\u001B[0m Operator health probe did not succeed — service may still be starting. ` +
+            `Verify with: curl -sI ${operatorHealthUrl}`,
         )
       }
     }

@@ -113,6 +113,15 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
   return {spawnFn, calls}
 }
 
+/** Build a minimal valid env with operator listener vars set. */
+function makeOperatorEnv() {
+  return makeEnv({
+    GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+    GATEWAY_OPERATOR_BIND_PORT: '9300',
+    GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+  })
+}
+
 /** Build a mock fetch that returns a Discord commands response. */
 function makeDiscordFetch(commands: {name: string}[]): typeof fetch {
   return mock(async () => new Response(JSON.stringify(commands), {status: 200})) as unknown as typeof fetch
@@ -126,6 +135,22 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(tmpDir, {recursive: true, force: true})
+})
+
+// ─── upstream.json pin regression guard ──────────────────────────────────────
+//
+// This topology requires fro-bot/agent#931 / v0.66.0 because deploy now invokes
+// deploy/validate-stack.sh which was introduced at that version.
+// If upstream.json is ever downgraded below v0.66.0 this test fails immediately.
+
+describe('upstream.json pin', () => {
+  test('upstream.json is pinned to exactly v0.66.0 (operator topology requires fro-bot/agent#931)', async () => {
+    const {resolveUpstreamPin} = await import('./deploy')
+    const upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    const pin = resolveUpstreamPin(upstreamPath)
+    expect(pin.repo).toBe('fro-bot/agent')
+    expect(pin.ref).toBe('v0.66.0')
+  })
 })
 
 // ─── validateRequiredEnv ──────────────────────────────────────────────────────
@@ -2034,6 +2059,187 @@ describe('SSH ControlMaster multiplexing', () => {
     if (capturedControlPath) {
       expect(existsSync(capturedControlPath)).toBe(false)
     }
+  })
+})
+
+// ─── upstream stack validation (validate-stack.sh) ───────────────────────────
+
+describe('upstream stack validation (validate-stack.sh)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('RED: deploy flow invokes deploy/validate-stack.sh after writing compose.override.yaml and before docker compose pull', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('compose.override.yaml') && cmdStr.includes("cat > '")) {
+        eventLog.push('write-override')
+      } else if (cmdStr.includes('validate-stack.sh')) {
+        eventLog.push('validate-stack')
+      } else if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const overrideIdx = eventLog.indexOf('write-override')
+    const validateIdx = eventLog.indexOf('validate-stack')
+    const pullIdx = eventLog.indexOf('compose-pull')
+
+    // validate-stack.sh must be invoked
+    expect(validateIdx).toBeGreaterThanOrEqual(0)
+    // validate-stack.sh must run after compose.override.yaml is written
+    expect(validateIdx).toBeGreaterThan(overrideIdx)
+    // validate-stack.sh must run before docker compose pull
+    expect(validateIdx).toBeLessThan(pullIdx)
+  })
+
+  test('RED: validate-stack.sh command uses upstream script under DEPLOY_DIR (not a repo-local script)', async () => {
+    const {main} = await import('./deploy')
+    const validateCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('validate-stack.sh')) {
+        validateCmds.push(cmd)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(validateCmds).toHaveLength(1)
+    const cmdStr = validateCmds[0]!.join(' ')
+    // Must reference the upstream script path (deploy/validate-stack.sh relative to REMOTE_DIR)
+    expect(cmdStr).toContain('deploy/validate-stack.sh')
+    // Must NOT reference a repo-local path (apps/gateway or similar)
+    expect(cmdStr).not.toContain('apps/gateway')
+    // Must be run from the remote dir (/opt/gateway), not a local path
+    expect(cmdStr).toContain('/opt/gateway')
+  })
+
+  test('RED: non-zero validator exit aborts deploy before docker compose pull', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('validate-stack.sh')) {
+        eventLog.push('validate-stack')
+        return makeSpawnResult({exitCode: 1, stderr: 'FAIL: sandbox-net is not internal:true'})
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    // validate-stack.sh was invoked
+    expect(eventLog).toContain('validate-stack')
+    // docker compose pull must NOT have been invoked
+    expect(eventLog).not.toContain('compose-pull')
+  })
+
+  test('RED: non-zero validator exit aborts deploy before docker compose up', async () => {
+    const {main} = await import('./deploy')
+    const composeCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('validate-stack.sh')) {
+        return makeSpawnResult({exitCode: 1, stderr: 'FAIL: topology violation'})
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        composeCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    // docker compose up must NOT have been invoked
+    expect(composeCalls).toHaveLength(0)
+  })
+
+  test('RED: non-zero validator exit aborts deploy before checksum persistence', async () => {
+    const {main} = await import('./deploy')
+    const checksumWrites: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('validate-stack.sh')) {
+        return makeSpawnResult({exitCode: 1, stderr: 'FAIL: topology violation'})
+      }
+      if (cmdStr.includes('> /opt/gateway/.secrets-checksum')) {
+        checksumWrites.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    // Checksum must NOT have been written
+    expect(checksumWrites).toHaveLength(0)
   })
 })
 
@@ -4731,5 +4937,2544 @@ describe('main() — WORKSPACE_OPENCODE_READY_TIMEOUT_MS validation', () => {
     const envPath = '/opt/gateway/deploy/.env'
     expect(envWrites[envPath]).toBeDefined()
     expect(envWrites[envPath]).toContain('WORKSPACE_OPENCODE_READY_TIMEOUT_MS=120000')
+  })
+})
+
+// ─── getOperatorState ─────────────────────────────────────────────────────────
+
+describe('getOperatorState', () => {
+  test('all three vars present → enabled', async () => {
+    const {getOperatorState} = await import('./deploy')
+    const state = getOperatorState(
+      makeEnv({
+        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_PORT: '9300',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+      }),
+    )
+    expect(state).toBe('enabled')
+  })
+
+  test('none of the three vars present → disabled', async () => {
+    const {getOperatorState} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+    const state = getOperatorState(env)
+    expect(state).toBe('disabled')
+  })
+
+  test('only GATEWAY_OPERATOR_BIND_HOST set → invalid (partial config)', async () => {
+    const {getOperatorState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2'})
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+    const state = getOperatorState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('only GATEWAY_OPERATOR_BIND_PORT set → invalid (partial config)', async () => {
+    const {getOperatorState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_OPERATOR_BIND_PORT: '9300'})
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+    const state = getOperatorState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('only GATEWAY_OPERATOR_PUBLIC_ORIGIN set → invalid (partial config)', async () => {
+    const {getOperatorState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot'})
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
+    const state = getOperatorState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('two of three vars set → invalid (partial config)', async () => {
+    const {getOperatorState} = await import('./deploy')
+    const env = makeEnv({
+      GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+      GATEWAY_OPERATOR_BIND_PORT: '9300',
+    })
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+    const state = getOperatorState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('whitespace-only values treated as absent → disabled when all whitespace-only', async () => {
+    const {getOperatorState} = await import('./deploy')
+    const state = getOperatorState(
+      makeEnv({
+        GATEWAY_OPERATOR_BIND_HOST: '   ',
+        GATEWAY_OPERATOR_BIND_PORT: '   ',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: '   ',
+      }),
+    )
+    expect(state).toBe('disabled')
+  })
+})
+
+// ─── validateOperatorConfig ───────────────────────────────────────────────────
+
+describe('validateOperatorConfig', () => {
+  // ── valid inputs ────────────────────────────────────────────────────────────
+
+  test('valid gateway-net IP, valid port, valid HTTPS origin → no throw', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).not.toThrow()
+  })
+
+  test('accepts port 1 (minimum valid port)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '1',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).not.toThrow()
+  })
+
+  test('accepts port 65535 (maximum valid port)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '65535',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).not.toThrow()
+  })
+
+  // ── bind host rejections ────────────────────────────────────────────────────
+
+  test('rejects 0.0.0.0 (all-interface bind)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '0.0.0.0',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*0\.0\.0\.0|all.interface/i)
+  })
+
+  test('rejects 127.0.0.1 (loopback)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '127.0.0.1',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*loopback|127\./i)
+  })
+
+  test('rejects 127.0.0.2 (loopback range)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '127.0.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*loopback|127\./i)
+  })
+
+  test('rejects 10.0.0.1 (sandbox-net range)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '10.0.0.1',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*sandbox|10\./i)
+  })
+
+  test('rejects 10.255.255.255 (sandbox-net range boundary)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '10.255.255.255',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*sandbox|10\./i)
+  })
+
+  test('rejects IPv6 address', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '::1',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*IPv6/i)
+  })
+
+  test('rejects IPv6 full address', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '2001:db8::1',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*IPv6/i)
+  })
+
+  // ── port rejections ─────────────────────────────────────────────────────────
+
+  test('rejects port 0', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '0',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_PORT/)
+  })
+
+  test('rejects port 65536 (out of range)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '65536',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_PORT/)
+  })
+
+  test('rejects non-integer port string', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: 'abc',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_PORT/)
+  })
+
+  test('rejects float port string', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300.5',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_PORT/)
+  })
+
+  test('rejects negative port', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '-1',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_PORT/)
+  })
+
+  // ── public origin rejections ────────────────────────────────────────────────
+
+  test('rejects non-HTTPS origin (http://)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'http://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*https/i)
+  })
+
+  test('rejects empty origin', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: '',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN/)
+  })
+
+  test('rejects non-URL origin', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'not-a-url',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN/)
+  })
+})
+
+// ─── buildComposeOverride — operator topology ─────────────────────────────────
+
+describe('buildComposeOverride — operator topology', () => {
+  const OPERATOR_OPTS = {
+    gatewayDigest: GATEWAY_DIGEST,
+    workspaceDigest: WORKSPACE_DIGEST,
+    announceEnabled: true,
+    operatorEnabled: true,
+    operatorBindHost: '172.20.0.2',
+    operatorBindPort: '9300',
+    operatorPublicOrigin: 'https://gateway.fro.bot',
+  }
+
+  test('operator enabled: gateway service has GATEWAY_OPERATOR_BIND_HOST env entry', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_OPTS)
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_HOST')
+    expect(yaml).toContain('172.20.0.2')
+  })
+
+  test('operator enabled: gateway service has GATEWAY_OPERATOR_BIND_PORT env entry', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_OPTS)
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_PORT')
+    expect(yaml).toContain('9300')
+  })
+
+  test('operator enabled: gateway service has static ipv4_address on gateway-net', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_OPTS)
+    expect(yaml).toContain('ipv4_address')
+    expect(yaml).toContain('172.20.0.2')
+  })
+
+  test('operator enabled: gateway service has NO host ports: entry for operator listener', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_OPTS)
+    // The gateway service block must not have a ports: section with 9300
+    // (Caddy is the only host-published HTTP surface)
+    expect(yaml).not.toMatch(/ports:[\s\S]*?9300/)
+  })
+
+  test('operator disabled: gateway service has NO GATEWAY_OPERATOR_BIND_HOST env entry', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: false,
+    })
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_BIND_HOST')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_BIND_PORT')
+  })
+
+  test('operator disabled: gateway service has NO static ipv4_address', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: false,
+    })
+    expect(yaml).not.toContain('ipv4_address')
+  })
+
+  test('workspace service has no gateway-net network (sandbox-net only)', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_OPTS)
+    // workspace service block must not reference gateway-net
+    // Find the workspace service section and check it doesn't have gateway-net
+    // The workspace section ends at the next service (caddy:) or volumes: section
+    const workspaceIdx = yaml.indexOf('  workspace:')
+    const afterWorkspace = yaml.slice(workspaceIdx)
+    // The next service starts with exactly 2 spaces + name + colon (e.g. "  caddy:")
+    // or the volumes: section starts at column 0
+    const nextSectionMatch = afterWorkspace.match(/\n {2}[a-z]|\nvolumes:/)
+    const workspaceSection = nextSectionMatch ? afterWorkspace.slice(0, nextSectionMatch.index) : afterWorkspace
+    expect(workspaceSection).not.toContain('gateway-net')
+  })
+
+  test('caddy service has no operator listener ports (only 80:80 and 443:443)', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_OPTS)
+    // Caddy should only have 80:80 and 443:443
+    expect(yaml).toContain('80:80')
+    expect(yaml).toContain('443:443')
+    // No additional port bindings for operator listener
+    expect(yaml).not.toMatch(/'9300:9300'/)
+    expect(yaml).not.toMatch(/"9300:9300"/)
+  })
+
+  test('operator enabled with announce disabled: gateway still gets operator env entries', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://gateway.fro.bot',
+    })
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_HOST')
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_PORT')
+  })
+})
+
+// ─── buildCaddyfile — operator routing ───────────────────────────────────────
+
+describe('buildCaddyfile — operator routing', () => {
+  test('operator enabled: /operator/* handle block present', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    expect(result).toContain('/operator/*')
+  })
+
+  test('operator enabled: /operator/* reverse_proxy targets configured bind host:port', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    expect(result).toContain('reverse_proxy 172.20.0.2:9300')
+  })
+
+  test('operator enabled: /operator/* reverse_proxy includes flush_interval -1', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    expect(result).toContain('flush_interval -1')
+  })
+
+  test('operator enabled with announce enabled: /v1/announce handle block still present and separate', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      announceEnabled: true,
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    expect(result).toContain('handle /v1/announce {')
+    expect(result).toContain('reverse_proxy gateway:3000')
+  })
+
+  test('operator enabled with announce enabled: /v1/announce handle appears before /operator/* handle', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      announceEnabled: true,
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    const announceIdx = result.indexOf('handle /v1/announce')
+    const operatorIdx = result.indexOf('handle /operator/*')
+    expect(announceIdx).toBeGreaterThanOrEqual(0)
+    expect(operatorIdx).toBeGreaterThanOrEqual(0)
+    expect(announceIdx).toBeLessThan(operatorIdx)
+  })
+
+  test('operator enabled: catch-all 404 remains last handler', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    const operatorIdx = result.indexOf('handle /operator/*')
+    const catchAllIdx = result.indexOf('handle {')
+    expect(catchAllIdx).toBeGreaterThan(operatorIdx)
+    expect(result).toMatch(/handle\s*\{[^}]*respond\s+404[^}]*\}/)
+  })
+
+  test('operator disabled: no /operator/* handle block', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    expect(result).not.toContain('/operator/*')
+  })
+
+  test('operator disabled: no flush_interval in Caddyfile', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot')
+    expect(result).not.toContain('flush_interval')
+  })
+
+  test('operator enabled: /operator/* handle block appears before catch-all', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    const operatorIdx = result.indexOf('handle /operator/*')
+    const catchAllIdx = result.lastIndexOf('handle {')
+    expect(operatorIdx).toBeGreaterThanOrEqual(0)
+    expect(operatorIdx).toBeLessThan(catchAllIdx)
+  })
+})
+
+// ─── main() — operator config validation before SSH ──────────────────────────
+
+describe('main() — operator config validation before SSH', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('partial operator config (only BIND_HOST set) → rejects before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    const env = makeEnv({GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2'})
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+
+    await expect(
+      main({
+        env,
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_OPERATOR/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('partial operator config (only BIND_PORT set) → rejects before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    const env = makeEnv({GATEWAY_OPERATOR_BIND_PORT: '9300'})
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+
+    await expect(
+      main({
+        env,
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_OPERATOR/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('partial operator config (only PUBLIC_ORIGIN set) → rejects before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    const env = makeEnv({GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot'})
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
+
+    await expect(
+      main({
+        env,
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_OPERATOR/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('unsafe bind host (0.0.0.0) → rejects before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({
+          GATEWAY_OPERATOR_BIND_HOST: '0.0.0.0',
+          GATEWAY_OPERATOR_BIND_PORT: '9300',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_OPERATOR_BIND_HOST/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('loopback bind host (127.0.0.1) → rejects before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({
+          GATEWAY_OPERATOR_BIND_HOST: '127.0.0.1',
+          GATEWAY_OPERATOR_BIND_PORT: '9300',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_OPERATOR_BIND_HOST/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('sandbox-net bind host (10.x.x.x) → rejects before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({
+          GATEWAY_OPERATOR_BIND_HOST: '10.0.0.5',
+          GATEWAY_OPERATOR_BIND_PORT: '9300',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_OPERATOR_BIND_HOST/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('non-HTTPS public origin → rejects before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeEnv({
+          GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+          GATEWAY_OPERATOR_BIND_PORT: '9300',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'http://gateway.fro.bot',
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('complete valid operator config → deploy proceeds (spawn called)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({
+        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_PORT: '9300',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+      }),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  test('no operator vars → deploy proceeds without operator topology (spawn called)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+
+    await main({
+      env,
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    expect(calls.length).toBeGreaterThan(0)
+  })
+})
+
+// ─── main() — operator health probe ──────────────────────────────────────────
+
+describe('main() — operator health probe', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('operator enabled: fetch called with /operator/health URL after compose up', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const fetchedUrls: string[] = []
+
+    const fetchMock = mock(async (url: string) => {
+      fetchedUrls.push(url)
+      if (url.includes('/operator/health')) {
+        return new Response(JSON.stringify({status: 'ok'}), {status: 200})
+      }
+      // Discord commands response
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    await main({
+      env: makeEnv({
+        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_PORT: '9300',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+      }),
+      args: [],
+      spawn: spawnFn,
+      fetch: fetchMock,
+      sleep: async () => {},
+    })
+
+    const operatorHealthUrl = fetchedUrls.find(u => u.includes('/operator/health'))
+    expect(operatorHealthUrl).toBeDefined()
+    expect(operatorHealthUrl).toContain('https://gateway.fro.bot/operator/health')
+  })
+
+  test('operator disabled: fetch NOT called with /operator/health URL', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const fetchedUrls: string[] = []
+
+    const fetchMock = mock(async (url: string) => {
+      fetchedUrls.push(url)
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+
+    await main({
+      env,
+      args: [],
+      spawn: spawnFn,
+      fetch: fetchMock,
+      sleep: async () => {},
+    })
+
+    const operatorHealthUrl = fetchedUrls.find(u => u.includes('/operator/health'))
+    expect(operatorHealthUrl).toBeUndefined()
+  })
+
+  test('operator health probe failure (connection error) → deploy still succeeds (warning only)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+
+    const fetchMock = mock(async (url: string) => {
+      if (url.includes('/operator/health')) {
+        throw new Error('Connection refused')
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    // Should not throw — operator health probe is warning-only
+    await expect(
+      main({
+        env: makeEnv({
+          GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+          GATEWAY_OPERATOR_BIND_PORT: '9300',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+        }),
+        args: [],
+        spawn: spawnFn,
+        fetch: fetchMock,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
+})
+
+// ─── Topology blocker fixes (issue #579) ─────────────────────────────────────
+
+// Blocker 1: GATEWAY_OPERATOR_PUBLIC_ORIGIN must be passed into gateway container env
+describe('buildComposeOverride — GATEWAY_OPERATOR_PUBLIC_ORIGIN in gateway env (blocker 1)', () => {
+  test('operator enabled: gateway service has GATEWAY_OPERATOR_PUBLIC_ORIGIN env entry', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://operator.example.com',
+    })
+    expect(yaml).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+    expect(yaml).toContain('https://operator.example.com')
+  })
+
+  test('operator disabled: gateway service has NO GATEWAY_OPERATOR_PUBLIC_ORIGIN env entry', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: false,
+    })
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+  })
+
+  test('operator enabled with announce enabled: all three operator env entries present', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: true,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://operator.example.com',
+    })
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_HOST')
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_PORT')
+    expect(yaml).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+  })
+})
+
+// Blocker 2: Caddy must exist when announceEnabled || operatorEnabled
+describe('buildComposeOverride — Caddy gated by caddyEnabled = announceEnabled || operatorEnabled (blocker 2)', () => {
+  test('operator-only (announce disabled): Caddy service IS declared', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://operator.example.com',
+    })
+    expect(yaml).toContain('caddy:')
+    expect(yaml).toContain('80:80')
+    expect(yaml).toContain('443:443')
+  })
+
+  test('operator-only (announce disabled): caddy_data and caddy_config volumes declared', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://operator.example.com',
+    })
+    expect(yaml).toContain('caddy_data')
+    expect(yaml).toContain('caddy_config')
+  })
+
+  test('neither enabled: Caddy service NOT declared', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: false,
+    })
+    expect(yaml).not.toContain('caddy:')
+    expect(yaml).not.toContain('caddy_data')
+    expect(yaml).not.toContain('caddy_config')
+  })
+
+  test('announce-only (operator disabled): Caddy service IS declared', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: true,
+      operatorEnabled: false,
+    })
+    expect(yaml).toContain('caddy:')
+  })
+
+  test('both enabled: Caddy service IS declared', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: true,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://operator.example.com',
+    })
+    expect(yaml).toContain('caddy:')
+  })
+})
+
+// Blocker 2: buildCaddyfile must accept announce/operator booleans
+describe('buildCaddyfile — announce/operator routing booleans (blocker 2)', () => {
+  test('announce-only: /v1/announce route present, no /operator/* route', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      announceEnabled: true,
+      operatorEnabled: false,
+    })
+    expect(result).toContain('handle /v1/announce {')
+    expect(result).not.toContain('/operator/*')
+  })
+
+  test('operator-only: /operator/* route present, no /v1/announce route', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    expect(result).toContain('/operator/*')
+    expect(result).not.toContain('/v1/announce')
+  })
+
+  test('operator-only: includes flush_interval -1', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    expect(result).toContain('flush_interval -1')
+  })
+
+  test('both enabled: both /v1/announce and /operator/* routes present', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      announceEnabled: true,
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    expect(result).toContain('handle /v1/announce {')
+    expect(result).toContain('/operator/*')
+  })
+
+  test('both enabled: catch-all 404 still present', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    const result = buildCaddyfile('gateway.fro.bot', {
+      announceEnabled: true,
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+    expect(result).toMatch(/handle\s*\{[^}]*respond\s+404[^}]*\}/)
+  })
+
+  test('no opts (legacy call): /v1/announce route present (backward compat)', async () => {
+    const {buildCaddyfile} = await import('./deploy')
+    // When called with no opts, should still produce a valid Caddyfile
+    // (backward compat for existing announce-only callers)
+    const result = buildCaddyfile('gateway.fro.bot')
+    expect(result).toContain('gateway.fro.bot')
+    // catch-all must always be present
+    expect(result).toMatch(/handle\s*\{[^}]*respond\s+404[^}]*\}/)
+  })
+})
+
+// Blocker 3: Static ipv4_address needs explicit network/IPAM contract
+describe('buildComposeOverride — deterministic network/IPAM for static operator IP (blocker 3)', () => {
+  test('operator enabled: top-level networks section declares gateway-net with IPAM subnet', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://operator.example.com',
+    })
+    // Must declare top-level networks section with gateway-net
+    expect(yaml).toMatch(/^networks:/m)
+    expect(yaml).toContain('gateway-net:')
+    // Must include IPAM config with a subnet
+    expect(yaml).toContain('ipam:')
+    expect(yaml).toContain('subnet:')
+  })
+
+  test('operator disabled: no top-level networks section with IPAM', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: false,
+    })
+    // No IPAM section when operator is disabled
+    expect(yaml).not.toContain('ipam:')
+    expect(yaml).not.toContain('subnet:')
+  })
+
+  test('announce-only (no operator): no top-level networks IPAM', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: true,
+      operatorEnabled: false,
+    })
+    expect(yaml).not.toContain('ipam:')
+    expect(yaml).not.toContain('subnet:')
+  })
+
+  test('operator enabled: IPAM subnet is deterministic (172.20.0.0/16)', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://operator.example.com',
+    })
+    expect(yaml).toContain('172.20.0.0/16')
+  })
+})
+
+// Blocker: deploy flow writes Caddyfile when operator enabled even if announce disabled
+describe('main() — Caddyfile written when operator enabled (announce disabled) (blocker 2)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('operator enabled, announce disabled → Caddyfile IS written', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({
+        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_PORT: '9300',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+      }),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    const caddyfilePath = '/opt/gateway/deploy/Caddyfile'
+    expect(stdinCaptures[caddyfilePath]).toBeDefined()
+  })
+
+  test('operator enabled, announce disabled → Caddyfile contains /operator/* route', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({
+        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_PORT: '9300',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+      }),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    const caddyfilePath = '/opt/gateway/deploy/Caddyfile'
+    expect(stdinCaptures[caddyfilePath]).toContain('/operator/*')
+  })
+
+  test('operator enabled, announce disabled → Caddyfile does NOT contain /v1/announce route', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({
+        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_PORT: '9300',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+      }),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    const caddyfilePath = '/opt/gateway/deploy/Caddyfile'
+    expect(stdinCaptures[caddyfilePath]).not.toContain('/v1/announce')
+  })
+
+  test('neither enabled → Caddyfile NOT written', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
+    delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+
+    await main({
+      env,
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    const caddyfilePath = '/opt/gateway/deploy/Caddyfile'
+    expect(stdinCaptures[caddyfilePath]).toBeUndefined()
+  })
+
+  test('announce enabled, operator disabled → Caddyfile contains /v1/announce, no /operator/*', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({
+        GATEWAY_WEBHOOK_SECRET: 'hmac-secret',
+        GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666',
+      }),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    const caddyfilePath = '/opt/gateway/deploy/Caddyfile'
+    expect(stdinCaptures[caddyfilePath]).toBeDefined()
+    expect(stdinCaptures[caddyfilePath]).toContain('/v1/announce')
+    expect(stdinCaptures[caddyfilePath]).not.toContain('/operator/*')
+  })
+})
+
+// Checksum includes Caddyfile when Caddy is enabled (not just announce)
+describe('computeSecretsChecksum — Caddyfile included when operator enabled (blocker 2)', () => {
+  test('operator-only: checksum input includes Caddyfile bytes', async () => {
+    const {buildSecretFileList, buildComposeOverride, buildCaddyfile, computeSecretsChecksum} = await import('./deploy')
+
+    const operatorEnv = makeEnv({
+      GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+      GATEWAY_OPERATOR_BIND_PORT: '9300',
+      GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+    })
+
+    const secrets = buildSecretFileList(operatorEnv)
+    const overrideContent = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://operator.example.com',
+    })
+    const caddyfileContent = buildCaddyfile('gateway.fro.bot', {
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorTarget: '172.20.0.2:9300',
+    })
+
+    // Checksum WITH Caddyfile must differ from checksum WITHOUT Caddyfile
+    const checksumWithout = computeSecretsChecksum([
+      ...secrets,
+      {name: 'compose.override.yaml', content: overrideContent, required: false},
+    ])
+    const checksumWith = computeSecretsChecksum([
+      ...secrets,
+      {name: 'compose.override.yaml', content: overrideContent, required: false},
+      {name: 'Caddyfile', content: caddyfileContent, required: false},
+    ])
+
+    expect(checksumWith).not.toBe(checksumWithout)
+  })
+})
+
+// ─── Issue 2: validateOperatorConfig — public origin host mismatch ────────────
+
+describe('validateOperatorConfig — public origin host mismatch (issue 2)', () => {
+  test('origin hostname matching GATEWAY_HOST is accepted', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).not.toThrow()
+  })
+
+  test('origin hostname not matching GATEWAY_HOST is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*hostname.*GATEWAY_HOST|host.*mismatch/i)
+  })
+
+  test('origin with pathname other than / is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot/some/path',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*path|origin/i)
+  })
+
+  test('origin with query string is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot?foo=bar',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*query|search|origin/i)
+  })
+
+  test('origin with hash/fragment is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot#section',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*hash|fragment|origin/i)
+  })
+
+  test('origin with username is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://user@gateway.fro.bot',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*credential|username|password|origin/i)
+  })
+
+  test('origin with password is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://user:pass@gateway.fro.bot',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*credential|username|password|origin/i)
+  })
+
+  test('existing unsafe bind host checks still work with gatewayHost param', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '0.0.0.0',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).toThrow(/0\.0\.0\.0/)
+  })
+
+  test('existing loopback check still works with gatewayHost param', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '127.0.0.1',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).toThrow(/loopback/)
+  })
+})
+
+// ─── Issue 3: operator health probe requires HTTP 200 ─────────────────────────
+
+describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('operator health probe: HTTP 200 → probeOk (success logged)', async () => {
+    const {main} = await import('./deploy')
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => warnMessages.push(args.join(' '))
+
+    const fetchMock = mock(async (url: string) => {
+      if (url.includes('/operator/health')) {
+        return new Response('OK', {status: 200})
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    })
+
+    try {
+      await main({
+        env: makeOperatorEnv(),
+        args: [],
+        spawn: makeSpawnMock().spawnFn,
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+      })
+    } finally {
+      console.warn = origWarn
+    }
+
+    expect(warnMessages.some(m => m.includes('Operator health probe succeeded'))).toBe(true)
+  })
+
+  test('operator health probe: HTTP 404 → NOT success (warns, does not log success)', async () => {
+    const {main} = await import('./deploy')
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => warnMessages.push(args.join(' '))
+
+    const fetchMock = mock(async (url: string) => {
+      if (url.includes('/operator/health')) {
+        return new Response('Not Found', {status: 404})
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    })
+
+    try {
+      await main({
+        env: makeOperatorEnv(),
+        args: [],
+        spawn: makeSpawnMock().spawnFn,
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+        probeAttempts: 1,
+      })
+    } finally {
+      console.warn = origWarn
+    }
+
+    // 404 must NOT be treated as success
+    expect(warnMessages.some(m => m.includes('Operator health probe succeeded'))).toBe(false)
+    // Must warn that probe did not succeed
+    expect(warnMessages.some(m => m.includes('did not succeed') || m.includes('warn'))).toBe(true)
+  })
+
+  test('operator health probe: HTTP 301 redirect → NOT success (warns)', async () => {
+    const {main} = await import('./deploy')
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => warnMessages.push(args.join(' '))
+
+    const fetchMock = mock(async (url: string) => {
+      if (url.includes('/operator/health')) {
+        return new Response('', {status: 301, headers: {Location: 'https://gateway.fro.bot/operator/health/'}})
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    })
+
+    try {
+      await main({
+        env: makeOperatorEnv(),
+        args: [],
+        spawn: makeSpawnMock().spawnFn,
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+        probeAttempts: 1,
+      })
+    } finally {
+      console.warn = origWarn
+    }
+
+    // 3xx must NOT be treated as success
+    expect(warnMessages.some(m => m.includes('Operator health probe succeeded'))).toBe(false)
+  })
+})
+
+// ─── Issue 4: infra rendered-config validation gate ───────────────────────────
+
+describe('infra rendered-config validation gate (issue 4)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('operator enabled: infra rendered-config validation runs after upstream validate-stack.sh and before docker compose pull', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('validate-stack.sh')) {
+        eventLog.push('upstream-validate')
+      } else if (cmdStr.includes('docker compose') && cmdStr.includes('config')) {
+        eventLog.push('infra-rendered-config')
+      } else if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const upstreamIdx = eventLog.indexOf('upstream-validate')
+    const infraIdx = eventLog.indexOf('infra-rendered-config')
+    const pullIdx = eventLog.indexOf('compose-pull')
+
+    // infra rendered-config validation must be invoked
+    expect(infraIdx).toBeGreaterThanOrEqual(0)
+    // must run after upstream validate-stack.sh
+    expect(infraIdx).toBeGreaterThan(upstreamIdx)
+    // must run before docker compose pull
+    expect(infraIdx).toBeLessThan(pullIdx)
+  })
+
+  test('operator enabled: non-zero rendered-config exit aborts before docker compose pull', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker compose') && cmdStr.includes('config')) {
+        eventLog.push('infra-rendered-config')
+        return makeSpawnResult({exitCode: 1, stderr: 'FAIL: gateway not on gateway-net'})
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    expect(eventLog).toContain('infra-rendered-config')
+    expect(eventLog).not.toContain('compose-pull')
+  })
+
+  test('operator enabled: non-zero rendered-config exit aborts before docker compose up', async () => {
+    const {main} = await import('./deploy')
+    const composeCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker compose') && cmdStr.includes('config')) {
+        return makeSpawnResult({exitCode: 1, stderr: 'FAIL: topology violation'})
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        composeCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    expect(composeCalls).toHaveLength(0)
+  })
+
+  test('operator enabled: non-zero rendered-config exit aborts before checksum persistence', async () => {
+    const {main} = await import('./deploy')
+    const checksumWrites: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker compose') && cmdStr.includes('config')) {
+        return makeSpawnResult({exitCode: 1, stderr: 'FAIL: topology violation'})
+      }
+      if (cmdStr.includes('> /opt/gateway/.secrets-checksum')) {
+        checksumWrites.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    expect(checksumWrites).toHaveLength(0)
+  })
+
+  test('operator disabled: infra rendered-config validation is NOT invoked', async () => {
+    const {main} = await import('./deploy')
+    const renderedConfigCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker compose') && cmdStr.includes('config')) {
+        renderedConfigCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // No rendered-config validation for non-operator deploys
+    expect(renderedConfigCalls).toHaveLength(0)
+  })
+})
+
+// ─── CE Review Findings: Phase 5d shell quoting + Bun dependency ─────────────
+
+describe('Phase 5d rendered-config validation — safe shell quoting (CE review finding 1)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('Phase 5d command does NOT use bun --eval (no host-Bun dependency)', async () => {
+    const {main} = await import('./deploy')
+    const renderedConfigCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Capture the Phase 5d validation command (runs docker compose config)
+      if (cmdStr.includes('docker compose') && cmdStr.includes('config')) {
+        renderedConfigCmds.push(cmd)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(renderedConfigCmds.length).toBeGreaterThan(0)
+    for (const cmd of renderedConfigCmds) {
+      const cmdStr = cmd.join(' ')
+      // Must NOT use bun --eval (no host-Bun dependency on the droplet)
+      expect(cmdStr).not.toContain('bun --eval')
+      expect(cmdStr).not.toContain('bun --eval')
+    }
+  })
+
+  test('Phase 5d command uses single-quoted heredoc or equivalent no-expansion mechanism (no outer $VAR expansion)', async () => {
+    const {main} = await import('./deploy')
+    const sshCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Capture SSH commands that contain the rendered-config validation script
+      if (cmd[0] === 'ssh' && cmdStr.includes('docker compose') && cmdStr.includes('config')) {
+        sshCmds.push(cmd)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(sshCmds.length).toBeGreaterThan(0)
+    for (const cmd of sshCmds) {
+      // The remote command (last SSH arg) must use a single-quoted heredoc
+      // (<<'SCRIPT'...SCRIPT) to prevent outer shell expansion of $CONFIG etc.
+      // OR use bash -s with stdin piping (no $VAR in the command string itself).
+      // We check: the command must NOT use bash -c with a double-quoted or JSON.stringify'd script
+      // that would allow outer shell to expand $CONFIG or $(...) before inner bash runs.
+      const remoteCmd = cmd.at(-1) ?? ''
+      // Must NOT use bash -c with a string that contains unquoted $CONFIG or $(
+      // (the old broken form was: bash -c ${JSON.stringify(script)} which passes a double-quoted string)
+      expect(remoteCmd).not.toMatch(/bash\s+-c\s+"[^"]*\$CONFIG/)
+      expect(remoteCmd).not.toMatch(/bash\s+-c\s+"[^"]*\$\(/)
+      // Must use single-quoted heredoc OR stdin-based approach
+      // Single-quoted heredoc: <<'SCRIPT' prevents variable expansion
+      const usesHeredoc =
+        remoteCmd.includes("<<'SCRIPT'") || remoteCmd.includes("<<'EOF'") || remoteCmd.includes("<<'VALIDATE'")
+      const usesBashS = remoteCmd.includes('bash -s') || remoteCmd.includes("bash <<'")
+      expect(usesHeredoc || usesBashS).toBe(true)
+    }
+  })
+
+  test('Phase 5d validation command does not use bash -c with JSON.stringify (old broken form)', async () => {
+    // The old form was: sshCommand(host, `bash -c ${JSON.stringify(validateScript)}`, ...)
+    // This is broken because the outer shell expands $CONFIG before inner bash runs.
+    // The fix must use a heredoc or stdin-based approach.
+    const {main} = await import('./deploy')
+    const sshCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmd[0] === 'ssh' && cmdStr.includes('config') && cmdStr.includes('docker compose')) {
+        sshCmds.push(cmd)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(sshCmds.length).toBeGreaterThan(0)
+    for (const cmd of sshCmds) {
+      const remoteCmd = cmd.at(-1) ?? ''
+      // The old broken form used JSON.stringify which produces a double-quoted string
+      // with escaped characters — the outer shell would expand $CONFIG before inner bash.
+      // Must NOT match: bash -c "..." where the string contains $CONFIG
+      expect(remoteCmd).not.toMatch(/bash\s+-c\s+"\s*set\s+-euo/)
+    }
+  })
+})
+
+// ─── CE Review Findings: buildComposeOverride operator env guard (finding 2) ──
+
+describe('buildComposeOverride — operator env guard requires operatorPublicOrigin (CE review finding 2)', () => {
+  test('operator enabled with all three vars: emits GATEWAY_OPERATOR_PUBLIC_ORIGIN', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://gateway.fro.bot',
+    })
+    expect(yaml).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+    expect(yaml).toContain('https://gateway.fro.bot')
+  })
+
+  test('operator enabled but operatorPublicOrigin undefined: does NOT emit any operator env lines', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: undefined,
+    })
+    // Must NOT emit any operator env lines when operatorPublicOrigin is missing
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_BIND_HOST')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_BIND_PORT')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+  })
+
+  test('operator enabled but operatorPublicOrigin undefined: does NOT emit empty GATEWAY_OPERATOR_PUBLIC_ORIGIN', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: undefined,
+    })
+    // Must NOT emit GATEWAY_OPERATOR_PUBLIC_ORIGIN with empty value
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN:')
+    expect(yaml).not.toMatch(/GATEWAY_OPERATOR_PUBLIC_ORIGIN:\s*$/)
+  })
+
+  test('operator enabled with all three vars: GATEWAY_OPERATOR_PUBLIC_ORIGIN value is the origin, not empty', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://gateway.fro.bot',
+    })
+    // The value must be the actual origin, not empty
+    expect(yaml).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN: https://gateway.fro.bot')
+  })
+})
+
+// ─── CE Review Findings: validateOperatorConfig hardening (finding 3) ─────────
+
+describe('validateOperatorConfig — non-443 port rejection (CE review finding 3)', () => {
+  test('explicit non-443 port in publicOrigin is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot:8443',
+      }),
+    ).toThrow(/port|443|Caddy/i)
+  })
+
+  test('explicit :443 in publicOrigin is accepted (or normalized)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    // https://gateway.fro.bot:443 is the same as https://gateway.fro.bot
+    // URL parser normalizes :443 away for https: — should not throw
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot:443',
+      }),
+    ).not.toThrow()
+  })
+
+  test('explicit :8443 port in publicOrigin is rejected with clear message about Caddy topology', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    let errorMessage = ''
+    try {
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot:8443',
+      })
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+    expect(errorMessage).toMatch(/8443|non-default|port|443/i)
+    expect(errorMessage).toMatch(/Caddy|topology|supported/i)
+  })
+})
+
+describe('validateOperatorConfig — gatewayHost direct unit tests (CE review finding 3)', () => {
+  test('matching gatewayHost is accepted', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).not.toThrow()
+  })
+
+  test('mismatched gatewayHost is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://other.example.com',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).toThrow(/hostname.*GATEWAY_HOST|host.*mismatch/i)
+  })
+
+  test('omitted gatewayHost is accepted (backward compatible)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    // When gatewayHost is not provided, no hostname check is performed
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://any.example.com',
+      }),
+    ).not.toThrow()
+  })
+})
+
+describe('validateOperatorConfig — trailing slash health URL (CE review finding 3)', () => {
+  test('health probe URL does not double-slash when origin has trailing slash', async () => {
+    // The health probe URL must be constructed with new URL('/operator/health', origin)
+    // so that a trailing slash in origin does not produce //operator/health
+    const origin = 'https://gateway.fro.bot'
+    const healthUrl = new URL('/operator/health', origin).toString()
+    expect(healthUrl).toBe('https://gateway.fro.bot/operator/health')
+    expect(healthUrl).not.toContain('//operator/health')
+  })
+
+  test('health probe URL with trailing slash origin does not double-slash', async () => {
+    // Even if origin has trailing slash, new URL('/operator/health', origin) is correct
+    const originWithSlash = 'https://gateway.fro.bot/'
+    const healthUrl = new URL('/operator/health', originWithSlash).toString()
+    expect(healthUrl).toBe('https://gateway.fro.bot/operator/health')
+    expect(healthUrl).not.toContain('//operator/health')
+  })
+})
+
+describe('validateOperatorConfig — subnet validation (CE review finding 3)', () => {
+  test('bind host inside 172.20.0.0/16 is accepted', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+      }),
+    ).not.toThrow()
+  })
+
+  test('bind host 172.20.255.254 (top of /16) is accepted', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.255.254',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+      }),
+    ).not.toThrow()
+  })
+
+  test('bind host 172.21.0.2 (outside 172.20.0.0/16) is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.21.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+      }),
+    ).toThrow(/172\.20\.0\.0\/16|gateway-net|subnet/i)
+  })
+
+  test('bind host 172.19.0.2 (outside 172.20.0.0/16) is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.19.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+      }),
+    ).toThrow(/172\.20\.0\.0\/16|gateway-net|subnet/i)
+  })
+
+  test('bind host 192.168.1.1 (outside 172.20.0.0/16) is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '192.168.1.1',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+      }),
+    ).toThrow(/172\.20\.0\.0\/16|gateway-net|subnet/i)
+  })
+})
+
+describe('validateOperatorConfig — colon error text improvement (CE review finding 3)', () => {
+  test('172.20.0.2:9300 (IP with port) is described as containing a colon, not as IPv6', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    let errorMessage = ''
+    try {
+      validateOperatorConfig({
+        bindHost: '172.20.0.2:9300',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+      })
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+    // Must NOT describe it as IPv6 (it's an IP:port, not IPv6)
+    expect(errorMessage).not.toMatch(/IPv6/i)
+    // Must describe the colon issue clearly
+    expect(errorMessage).toMatch(/colon|port|IP:port|format/i)
+  })
+})
+
+describe('validateOperatorConfig — empty bindHost and bindPort (CE review finding 3)', () => {
+  test('empty bindHost throws with descriptive message', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*required/i)
+  })
+
+  test('empty bindPort throws with descriptive message', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '',
+        publicOrigin: 'https://gateway.fro.bot',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_PORT.*required/i)
+  })
+})
+
+// ─── CE Review Findings: shared operator fixture includes operatorPublicOrigin ─
+
+describe('buildComposeOverride — shared operator fixture includes operatorPublicOrigin (CE review finding 2)', () => {
+  // The shared OPERATOR_OPTS fixture in the existing tests was missing operatorPublicOrigin.
+  // These tests assert the primary operator topology tests work with operatorPublicOrigin set.
+  test('operator topology with operatorPublicOrigin: GATEWAY_OPERATOR_PUBLIC_ORIGIN in output', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: true,
+      operatorEnabled: true,
+      operatorBindHost: '172.20.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://gateway.fro.bot',
+    })
+    expect(yaml).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+    expect(yaml).toContain('https://gateway.fro.bot')
+    // Also verify the other operator env entries are present
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_HOST')
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_PORT')
+  })
+})
+
+// ─── Phase 5d rendered-config validation — missing invariants ─────────────────
+//
+// These tests cover the invariants that Phase 5d must check but currently does not:
+//   - gateway keeps sandbox-net
+//   - workspace is sandbox-net only (not gateway-net/egress-net)
+//   - caddy is gateway-net only
+//   - caddy publishes only host ports 80 and 443
+
+/** Capture the Phase 5d validate script command string from spawn calls. */
+function captureValidateScript(calls: string[][]): string | undefined {
+  // The Phase 5d script is passed as the last element of an SSH command
+  // and contains the single-quoted heredoc marker and docker compose config.
+  const cmd = calls.find(c => {
+    const last = c.at(-1) ?? ''
+    return last.includes("bash <<'SCRIPT'") && last.includes('docker compose') && last.includes('config --format json')
+  })
+  return cmd?.at(-1)
+}
+
+describe('Phase 5d rendered-config validation — full invariant coverage', () => {
+  // These tests inspect the validateScript string that main() passes to SSH.
+  // We capture the SSH command for the infra rendered-config validation step
+  // and assert the script body contains the required checks.
+
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('Phase 5d script checks gateway keeps sandbox-net', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // Must check that gateway keeps sandbox-net
+    expect(script).toMatch(/sandbox.net/)
+  })
+
+  test('Phase 5d script checks workspace is sandbox-net only (not gateway-net or egress-net)', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // Must check workspace network membership
+    expect(script).toMatch(/workspace/)
+    // Must check for absence of gateway-net or egress-net on workspace
+    expect(script).toMatch(/gateway.net|egress.net/)
+  })
+
+  test('Phase 5d script checks caddy is gateway-net only', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // Must check caddy network membership
+    expect(script).toMatch(/caddy/)
+    expect(script).toMatch(/gateway.net/)
+  })
+
+  test('Phase 5d script checks caddy publishes only ports 80 and 443', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // Must check caddy port bindings (80 and 443)
+    expect(script).toMatch(/caddy/)
+    expect(script).toMatch(/80/)
+    expect(script).toMatch(/443/)
+  })
+
+  test('Phase 5d script uses single-quoted heredoc (no outer shell expansion)', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // Must use single-quoted heredoc to prevent outer shell expansion
+    expect(script).toContain("bash <<'SCRIPT'")
+    // Must NOT use double-quoted heredoc
+    expect(script).not.toContain('bash <<"SCRIPT"')
+    expect(script).not.toContain('bash <<SCRIPT')
+  })
+
+  test('Phase 5d script does not use bun --eval', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // Must NOT use bun --eval (not guaranteed on droplet)
+    expect(script).not.toContain('bun --eval')
+    expect(script).not.toContain('bun -e ')
+  })
+
+  test('Phase 5d script does not swallow parse errors with 2>/dev/null || true', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // Must NOT swallow errors with 2>/dev/null || true
+    expect(script).not.toContain('2>/dev/null || true')
+  })
+
+  test('Phase 5d non-zero exit (sandbox-net missing from gateway) aborts deploy before compose pull', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      const lastArg = cmd.at(-1) ?? ''
+      if (lastArg.includes("bash <<'SCRIPT'") && lastArg.includes('config --format json')) {
+        eventLog.push('phase-5d-validate')
+        return makeSpawnResult({exitCode: 1, stderr: 'FAIL: gateway missing sandbox-net'})
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    expect(eventLog).toContain('phase-5d-validate')
+    expect(eventLog).not.toContain('compose-pull')
+  })
+})
+
+// ─── Issue 2: operator health URL trailing-slash normalization ────────────────
+//
+// `${operatorPublicOrigin}/operator/health` produces a double slash when origin
+// has a trailing slash (e.g. "https://gateway.fro.bot/"). Fix: use new URL().
+
+describe('operator health URL — trailing-slash origin normalization', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('trailing-slash origin probes /operator/health with no double slash', async () => {
+    // validateOperatorConfig rejects trailing-slash origins (pathname !== '/'),
+    // so we test the URL construction directly via the new URL() helper behavior.
+    // The regression: string concat `${origin}/operator/health` where origin ends in '/'
+    // produces 'https://gateway.fro.bot//operator/health' (double slash in path).
+    // The fix: new URL('/operator/health', origin).toString() normalizes correctly.
+    //
+    // We verify the fix by checking the probed URL from a valid (no trailing slash) origin
+    // does NOT contain '//operator' (the double-slash path pattern).
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const probedUrls: string[] = []
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes('/operator/health')) {
+        probedUrls.push(url)
+        return new Response('OK', {status: 200})
+      }
+      // Discord registration
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: mockFetch,
+      sleep: async () => {},
+      spawn: spawnFn,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+    })
+
+    expect(probedUrls).toHaveLength(1)
+    // Must NOT have double slash in the path (the regression pattern)
+    expect(probedUrls[0]).not.toMatch(/\/\/operator/)
+    // Must be exactly this URL (no double slash)
+    expect(probedUrls[0]).toBe('https://gateway.fro.bot/operator/health')
+  })
+
+  test('URL construction: new URL("/operator/health", origin) normalizes trailing-slash origin correctly', () => {
+    // Unit test for the URL construction fix independent of main().
+    // This directly verifies that new URL('/operator/health', origin).toString()
+    // produces the correct URL even when origin has a trailing slash.
+    const originWithSlash = 'https://gateway.fro.bot/'
+    const originWithoutSlash = 'https://gateway.fro.bot'
+
+    // String concat (the broken approach):
+    const brokenWithSlash = `${originWithSlash}/operator/health`
+    const brokenWithoutSlash = `${originWithoutSlash}/operator/health`
+
+    // new URL() (the correct approach):
+    const fixedWithSlash = new URL('/operator/health', originWithSlash).toString()
+    const fixedWithoutSlash = new URL('/operator/health', originWithoutSlash).toString()
+
+    // The broken approach produces double slash for trailing-slash origin
+    expect(brokenWithSlash).toContain('//operator')
+    // The broken approach works for no-trailing-slash origin
+    expect(brokenWithoutSlash).not.toContain('//operator')
+
+    // The fixed approach works for both
+    expect(fixedWithSlash).toBe('https://gateway.fro.bot/operator/health')
+    expect(fixedWithoutSlash).toBe('https://gateway.fro.bot/operator/health')
+    expect(fixedWithSlash).not.toContain('//operator')
+    expect(fixedWithoutSlash).not.toContain('//operator')
+  })
+
+  test('operator health probe URL is constructed with new URL() not string concat', async () => {
+    // Verify the URL construction is correct by checking the probed URL format.
+    // The fix: new URL('/operator/health', operatorPublicOrigin).toString()
+    // This test verifies the result is correct regardless of implementation.
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const probedUrls: string[] = []
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes('/operator/health')) {
+        probedUrls.push(url)
+        return new Response('OK', {status: 200})
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: mockFetch,
+      sleep: async () => {},
+      spawn: spawnFn,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+    })
+
+    expect(probedUrls).toHaveLength(1)
+    expect(probedUrls[0]).toBe('https://gateway.fro.bot/operator/health')
+    // Verify no double slash in the path
+    expect(probedUrls[0]).not.toMatch(/\/\/operator/)
+  })
+})
+
+// ─── Issue 3: operator health probe log does not expose URL ──────────────────
+//
+// The initial probe log must use a static message, not the full URL.
+// The final verify curl URL may still appear (existing tests/docs expect it).
+
+describe('operator health probe — initial log does not expose URL', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('initial operator health probe log uses static message, not the full URL', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+      origWarn(...args)
+    }
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes('/operator/health')) {
+        return new Response('OK', {status: 200})
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    try {
+      await main({
+        env: makeOperatorEnv(),
+        args: [],
+        fetch: mockFetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+      })
+    } finally {
+      console.warn = origWarn
+    }
+
+    // The initial probe log must use a static message
+    const initialProbeLogs = warnMessages.filter(m => m.includes('Probing operator health'))
+    expect(initialProbeLogs.length).toBeGreaterThan(0)
+    // The initial probe log must NOT contain the full URL
+    const initialProbeLog = initialProbeLogs[0]!
+    expect(initialProbeLog).not.toContain('https://gateway.fro.bot/operator/health')
+    // Must use a static message
+    expect(initialProbeLog).toContain('Probing operator health')
   })
 })

@@ -1,6 +1,6 @@
 # Gateway Deploy Package
 
-The gateway is the Fro Bot Discord client and workspace runner — a 3-service Docker Compose stack (gateway daemon, workspace executor, mitmproxy egress filter) deployed on a dedicated DigitalOcean droplet at `gateway.fro.bot`. The upstream source is `fro-bot/agent`, pinned to `v0.64.3` in `apps/gateway/upstream.json`. v0.64.3 bumps the harness OpenCode build with no required-secret or topology change vs v0.63.0. v0.60.0 introduced a serial per-channel run queue (one active run per Discord channel at a time) and the `/fro-bot force-release-lock` slash command for operator-driven lock release. v0.59.0 added a live-status message + typing indicator for mention runs (`GATEWAY_STATUS_MODE`, defaults to `live-status`, no infra wiring needed). v0.57.0 added the `daily_digest` presence/announce event, reusing the existing `/v1/announce` HMAC webhook ingress (`GATEWAY_WEBHOOK_SECRET` + `GATEWAY_PRESENCE_CHANNEL_ID` already configured). `WORKSPACE_EGRESS_HOSTS` is consumed by `deploy/mitmproxy/allowlist.py` (comma-separated exact hosts the sandboxed workspace may reach through the mitmproxy egress proxy; fail-closed if empty). The deploy emits `WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev` so the workspace OpenCode can reach the cliproxy endpoint and fetch its model catalog from `models.dev` at startup. The workspace executor exposes `/healthz` + `/clone` on `:9100` and an OpenCode bearer proxy on `:9200`, all on the internal `sandbox-net` with no host ports, enabling both `/fro-bot add-project` repo cloning and the `@fro-bot` mention loop. `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` are `readOptionalSecret` (opt-in) in the upstream daemon — set both to enable the announce/presence webhook (see [Announce/presence webhook](#announcepresence-webhook) below), or leave both unset to keep the gateway outbound-only. The deploy materializes GitHub App credentials (`github-app-id`, `github-app-private-key`) from `GH_APP_ID` / `GH_APP_PRIVATE_KEY` environment secrets.
+The gateway is the Fro Bot Discord client and workspace runner — a 3-service Docker Compose stack (gateway daemon, workspace executor, mitmproxy egress filter) deployed on a dedicated DigitalOcean droplet at `gateway.fro.bot`. The upstream source is `fro-bot/agent`, pinned to `v0.66.0` in `apps/gateway/upstream.json`. v0.66.0 adds the operator listener topology contract (`fro-bot/agent#931`): `GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`, and `GATEWAY_OPERATOR_PUBLIC_ORIGIN` enable the operator listener when all three are set. The current operator route surface is `GET /operator/health`. v0.64.3 bumped the harness OpenCode build with no required-secret or topology change vs v0.63.0. v0.60.0 introduced a serial per-channel run queue (one active run per Discord channel at a time) and the `/fro-bot force-release-lock` slash command for operator-driven lock release. v0.59.0 added a live-status message + typing indicator for mention runs (`GATEWAY_STATUS_MODE`, defaults to `live-status`, no infra wiring needed). v0.57.0 added the `daily_digest` presence/announce event, reusing the existing `/v1/announce` HMAC webhook ingress (`GATEWAY_WEBHOOK_SECRET` + `GATEWAY_PRESENCE_CHANNEL_ID` already configured). `WORKSPACE_EGRESS_HOSTS` is consumed by `deploy/mitmproxy/allowlist.py` (comma-separated exact hosts the sandboxed workspace may reach through the mitmproxy egress proxy; fail-closed if empty). The deploy emits `WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev` so the workspace OpenCode can reach the cliproxy endpoint and fetch its model catalog from `models.dev` at startup. The workspace executor exposes `/healthz` + `/clone` on `:9100` and an OpenCode bearer proxy on `:9200`, all on the internal `sandbox-net` with no host ports, enabling both `/fro-bot add-project` repo cloning and the `@fro-bot` mention loop. `GATEWAY_WEBHOOK_SECRET` and `GATEWAY_PRESENCE_CHANNEL_ID` are `readOptionalSecret` (opt-in) in the upstream daemon — set both to enable the announce/presence webhook (see [Announce/presence webhook](#announcepresence-webhook) below), or leave both unset to keep the gateway outbound-only. The deploy materializes GitHub App credentials (`github-app-id`, `github-app-private-key`) from `GH_APP_ID` / `GH_APP_PRIVATE_KEY` environment secrets.
 
 The deploy script materializes secrets as files on the droplet (never via argv), bootstraps the mitmproxy CA on first run, brings up the Compose stack, and gates completion on Discord command registration. A secrets checksum written only after a fully successful deploy prevents silent stale-credentials states across retries.
 
@@ -125,10 +125,15 @@ After provisioning: commit the updated `.github/known_hosts`.
 | `DISCORD_PRIVILEGED_INTENTS` | — | Opt-in privileged intents (e.g. `MessageContent`); materializes to `discord-privileged-intents`, empty = baseline intents |
 | `GATEWAY_WEBHOOK_SECRET` | opt-in† | HMAC signing key for the announce webhook — strong random value; materialized via SSH stdin, never argv. Set together with `GATEWAY_PRESENCE_CHANNEL_ID` to enable the announce endpoint; leave both unset to keep the gateway outbound-only. Setting exactly one fails the deploy before any SSH. |
 | `GATEWAY_PRESENCE_CHANNEL_ID` | opt-in† | Discord channel ID where the daemon posts presence embeds as the Fro Bot user. Set together with `GATEWAY_WEBHOOK_SECRET`. |
+| `GATEWAY_OPERATOR_BIND_HOST` | opt-in‡ | Gateway-net IPv4 address for the operator listener bind (e.g. `172.20.0.2`). Rejects `0.0.0.0`, loopback, sandbox-net, and IPv6. |
+| `GATEWAY_OPERATOR_BIND_PORT` | opt-in‡ | Port for the operator listener (e.g. `9300`). Must be a positive integer in [1, 65535]. |
+| `GATEWAY_OPERATOR_PUBLIC_ORIGIN` | opt-in‡ | HTTPS origin for the operator public surface (e.g. `https://operator.example.com`). Must be HTTPS. |
 | `GATEWAY_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-gateway` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.gateway_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually (see [Break-glass runbook](#break-glass-runbook)). |
 | `WORKSPACE_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-workspace` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.workspace_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually. |
 
 †Both-or-neither: set both to enable the announce/presence webhook; set neither to disable. Setting exactly one is an error — the deploy fails fast with a message naming the missing input, before any SSH connection is made.
+
+‡All-or-none: set all three to enable the operator listener; set none to disable. Setting one or two is an error — the deploy fails fast before any SSH. See [Operator Listener](#operator-listener) for bind host/port/origin constraints.
 
 ## GHCR IMAGES
 
@@ -225,7 +230,7 @@ The daemon's `POST /v1/announce` endpoint is opt-in. When enabled, it accepts HM
 Set both `GATEWAY_WEBHOOK_SECRET` (a strong random HMAC key) and `GATEWAY_PRESENCE_CHANNEL_ID` (the target Discord channel ID) in the `gateway` GitHub Environment, then trigger a deploy. The deploy materializes both as secret files on the droplet and writes a `compose.override.yaml` that:
 
 - Adds a Caddy reverse proxy service publishing `:80`/`:443` on `gateway-net`, terminating TLS for `gateway.fro.bot` via Let's Encrypt auto-cert.
-- Path-scopes Caddy to `/v1/announce` only — all other paths return 404. This is the gateway's **only** public route: `https://gateway.fro.bot/v1/announce`.
+- Path-scopes Caddy to `/v1/announce` and (when operator is enabled) `/operator/*` — all other paths return 404.
 - Wires the daemon's announce `*_FILE` env entries and secret mounts via the override's `gateway` service block.
 
 The override is a working-tree file re-materialized on every deploy when the inputs are present. The override contents are included in the secrets checksum, so toggling announce on or off forces `--force-recreate` on the next deploy.
@@ -263,6 +268,45 @@ For verifying a real control-plane go-live end-to-end (live log monitoring, succ
 ### Implementation pointers
 
 `buildSecretFileList`, `getAnnounceState`, `buildComposeOverride`, `buildCaddyfile` in `apps/gateway/src/deploy.ts`.
+
+## OPERATOR LISTENER
+
+The gateway operator listener is opt-in. When enabled, it exposes `GET /operator/health` (and future privileged operator routes) on a `gateway-net`-only address. Caddy routes `/operator/*` traffic from the public HTTPS edge to the listener over `gateway-net` — the listener has no host-published port.
+
+### Enabling
+
+Set all three vars in the `gateway` GitHub Environment and trigger a deploy:
+
+| Variable | Description |
+| --- | --- |
+| `GATEWAY_OPERATOR_BIND_HOST` | Gateway-net IPv4 address for the listener bind (e.g. `172.20.0.2`). Must be a static gateway-net address — not `0.0.0.0`, loopback (`127.*`), sandbox-net (`10.*`), or IPv6. |
+| `GATEWAY_OPERATOR_BIND_PORT` | Port for the operator listener (e.g. `9300`). Must be a positive integer in [1, 65535]. |
+| `GATEWAY_OPERATOR_PUBLIC_ORIGIN` | HTTPS origin for the operator public surface (e.g. `https://operator.example.com`). Must be HTTPS. |
+
+All three must be set together (all-or-none). Setting one or two fails the deploy before any SSH. Leaving all three unset disables the operator listener.
+
+The deploy:
+- Validates all three values before any SSH (rejects unsafe bind hosts, invalid ports, non-HTTPS origins).
+- Writes `GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`, and `GATEWAY_OPERATOR_PUBLIC_ORIGIN` into the gateway service environment in `compose.override.yaml`.
+- Sets a static `ipv4_address` on `gateway-net` for the gateway service so the bind address is deterministic.
+- Adds a `/operator/*` Caddy route with `flush_interval -1` (no response buffering, ready for future SSE).
+- Probes `GET <GATEWAY_OPERATOR_PUBLIC_ORIGIN>/operator/health` after compose up (warning-only; connection errors do not fail the deploy).
+
+### Security posture
+
+- The operator listener has no host `ports:` entry — it is only reachable via Caddy over `gateway-net`.
+- The workspace (`sandbox-net`) has no path to the operator listener.
+- `/v1/announce` and `/operator/*` are separate Caddy `handle` blocks with distinct trust boundaries.
+- Auth/session/CSRF wiring for privileged operator routes is deferred to `infra#580`, pending upstream auth/session work in `fro-bot/agent`.
+
+### Post-enable verification
+
+After the first enabling deploy:
+
+1. `bunx @marcusrbrown/infra gateway status` — confirm `caddy` and `gateway` services appear healthy.
+2. `curl -sI <GATEWAY_OPERATOR_PUBLIC_ORIGIN>/operator/health` — confirm a 200 response.
+3. Confirm no host port for the operator listener: `docker compose --project-directory /opt/gateway/deploy ps` — the `gateway` service must not show a `9300->9300` port mapping.
+4. Confirm workspace is not on `gateway-net`: `docker network inspect gateway-net` — the `workspace` container must not appear.
 
 ## CA RESTORE PROCEDURE
 

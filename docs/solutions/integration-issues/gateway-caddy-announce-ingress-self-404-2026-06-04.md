@@ -141,3 +141,4 @@ the first public deploy.
 - `docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md` — sibling lesson: required runtime inputs must be wired through every layer, not just the preflight/local path.
 - `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md` — the first public deploy is an end-to-end contract test; verify the whole path, not assumptions.
 - `docs/solutions/integration-issues/gateway-mention-loop-supervisor-timeout-2026-06-03.md` — sibling meta-lesson: verify against ground-truth behavior, not inferred behavior.
+- `./docker-network-stale-subnet-cleanup-2026-06-18.md` — sibling integration issue on the same gateway stack: stale Docker network IPAM state blocks compose up after an explicit-subnet topology change.

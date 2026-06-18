@@ -1,5 +1,47 @@
 # @marcusrbrown/infra
 
+## 0.12.2
+### Patch Changes
+
+
+- Gateway deploy now forwards operator auth/config environment values (`GATEWAY_OPERATOR_GITHUB_CLIENT_ID`, `GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET`, `GATEWAY_OPERATOR_CSRF_SECRET`, `GATEWAY_OPERATOR_ALLOWLIST`) required for the Gateway operator web surface. ([#598](https://github.com/marcusrbrown/infra/pull/598))
+
+
+- Forward optional gateway operator listener settings into local gateway deploys. ([#586](https://github.com/marcusrbrown/infra/pull/586))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.18` to `7.2.19` ([#599](https://github.com/marcusrbrown/infra/pull/599))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.12` to `7.2.15` ([#583](https://github.com/marcusrbrown/infra/pull/583))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.7` to `7.2.9` ([#576](https://github.com/marcusrbrown/infra/pull/576))
+
+
+- 🐳 Update Docker image `ghcr.io/fro-bot/dashboard` from `2026.06.15` to `2026.06.16` ([#574](https://github.com/marcusrbrown/infra/pull/574))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.6` to `7.2.7` ([#572](https://github.com/marcusrbrown/infra/pull/572))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.11` to `7.2.12` ([#578](https://github.com/marcusrbrown/infra/pull/578))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.9` to `7.2.11` ([#577](https://github.com/marcusrbrown/infra/pull/577))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.15` to `7.2.16` ([#585](https://github.com/marcusrbrown/infra/pull/585))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.17` to `7.2.18` ([#597](https://github.com/marcusrbrown/infra/pull/597))
+
+
+- 📦 Update GitHub Actions workflow dependencies: `@aws-sdk/client-lightsail`, `fro-bot/agent` ([#600](https://github.com/marcusrbrown/infra/pull/600))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.16` to `7.2.17` ([#596](https://github.com/marcusrbrown/infra/pull/596))
+
 ## 0.12.1
 ### Patch Changes
 

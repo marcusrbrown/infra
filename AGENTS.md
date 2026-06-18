@@ -14,6 +14,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── apps/keeweb/        KeeWeb deploy package (see apps/keeweb/AGENTS.md)
 ├── apps/cliproxy/      CLIProxyAPI deploy package (see apps/cliproxy/AGENTS.md)
 ├── apps/gateway/       Fro Bot gateway deploy package (see apps/gateway/AGENTS.md)
+├── apps/dashboard/     Fro Bot operator dashboard deploy package (see apps/dashboard/AGENTS.md)
 ├── apps/umami/         Umami analytics deploy package (see apps/umami/AGENTS.md)
 ├── apps/vpn/           WireGuard VPN egress box (see apps/vpn/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
@@ -43,6 +44,9 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Check gateway health | `bunx @marcusrbrown/infra gateway status` | SSH, docker compose ps, service states |
 | Trigger gateway deploy | `bunx @marcusrbrown/infra gateway deploy` | Remote (default) or `--local` |
 | Gateway operator docs | `apps/gateway/AGENTS.md` | Deploy flow, provisioning, CA restore, anti-patterns |
+| Check dashboard health | `bunx @marcusrbrown/infra dashboard status` | SSH, docker compose ps, service states |
+| Trigger dashboard deploy | `bunx @marcusrbrown/infra dashboard deploy` | Remote (default) or `--local` |
+| Dashboard operator docs | `apps/dashboard/AGENTS.md` | Deploy flow, provisioning, image digest verification, anti-patterns |
 | Check umami health | `bunx @marcusrbrown/infra umami status` | SSH, docker compose ps, service states |
 | Trigger umami deploy | `bunx @marcusrbrown/infra umami deploy` | Remote (default) or `--local` |
 | Umami operator docs | `apps/umami/AGENTS.md` | Deploy flow, admin rotation, DB-password runbook, privacy baseline |
@@ -122,6 +126,9 @@ bunx @marcusrbrown/infra gateway deploy           # Trigger gateway deploy (GitH
 bunx @marcusrbrown/infra gateway logs gateway     # Stream gateway service logs (--tail N)
 bunx @marcusrbrown/infra gateway backup --include-ca  # Pull mitmproxy CA cert + key as tarball
 bunx @marcusrbrown/infra gateway restore --include-ca --input FILE  # Restore CA from tarball
+bunx @marcusrbrown/infra dashboard status         # SSH, docker compose ps, service states
+bunx @marcusrbrown/infra dashboard deploy         # Trigger dashboard deploy (GitHub Actions)
+bunx @marcusrbrown/infra dashboard logs dashboard # Stream dashboard service logs (--tail N)
 bunx @marcusrbrown/infra umami status             # SSH, docker compose ps, service states
 bunx @marcusrbrown/infra umami deploy             # Trigger umami deploy (GitHub Actions)
 bunx @marcusrbrown/infra umami logs               # Stream umami service logs (--tail N)
@@ -146,6 +153,7 @@ bun run deploy:vpn                              # Local VPN deploy (loads root .
 - `DROPBOX_APP_SECRET` and `DEPLOY_SSH_KEY` are GitHub Actions secrets scoped to `keeweb` environment.
 - `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, and `CLIPROXY_DOMAIN` are scoped to `cliproxy` environment.
 - `GATEWAY_SSH_KEY`, `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_GUILD_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`, and `GATEWAY_HOST` are scoped to `gateway` environment. Optional: `S3_ENDPOINT`, `OBJECT_STORE_HOSTS`. Opt-in announce/presence webhook (both-or-neither): `GATEWAY_WEBHOOK_SECRET` (HMAC key, sensitive) and `GATEWAY_PRESENCE_CHANNEL_ID` (Discord channel ID) — set both to enable `POST /v1/announce` + Caddy ingress; leave both unset to keep the gateway outbound-only. Opt-in operator listener (all-or-none): `GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`, `GATEWAY_OPERATOR_PUBLIC_ORIGIN` — set all three to enable the operator listener and route `/operator/*` through Caddy; leave all unset to disable. The ratified browser-visible operator origin is `https://dashboard.fro.bot`; set `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot` when enabling for production. The gateway Caddy `/operator/*` route is topology scaffolding — `gateway.fro.bot/operator/*` is not the production browser origin. See `apps/gateway/AGENTS.md` for constraints and `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md` for the decision record.
+- `DASHBOARD_SSH_KEY`, `DASHBOARD_DOMAIN`, `DASHBOARD_GITHUB_APP_ID`, `DASHBOARD_GITHUB_APP_KEY`, `DASHBOARD_OAUTH_CLIENT_ID`, `DASHBOARD_OAUTH_CLIENT_SECRET`, `DASHBOARD_OPERATOR_LOGIN`, and `DASHBOARD_COOKIE_KEY` are scoped to `dashboard` environment. Deploy reads the GitHub App private key from a file mount (`DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem`), never an env-string fallback. The dashboard Caddy `/operator/*` same-origin route is planned but not active; do not enable it until the private dashboard→gateway path and auth/session prerequisites in `apps/dashboard/AGENTS.md` are met.
 - `UMAMI_SSH_KEY`, `UMAMI_DOMAIN`, `UMAMI_APP_SECRET`, `UMAMI_DB_PASSWORD`, and `UMAMI_ADMIN_PASSWORD` are scoped to `umami` environment. `UMAMI_DB_PASSWORD` is volume-coupled — rotate only via the `ALTER USER` runbook in `apps/umami/AGENTS.md`.
 - `VPN_SSH_KEY`, `VPN_HOST`, and `VPN_PEERS` are scoped to `vpn` environment. `VPN_PEERS` holds the peer roster JSON and is auto-synced by `vpn client add/remove`. AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.

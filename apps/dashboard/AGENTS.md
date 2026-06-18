@@ -149,6 +149,30 @@ SSH auth during provisioning: when `DASHBOARD_SSH_KEY` is set, the script materi
 temp key file and pins it with `-i` + `IdentitiesOnly=yes` (no ssh-agent needed; cleaned up after).
 When unset, it falls back to ssh-agent.
 
+## Operator same-origin target
+
+The ratified browser-visible operator API origin is `https://dashboard.fro.bot/operator/*`. The
+dashboard Caddy instance owns the `/operator/*` route and proxies it to the gateway operator
+listener over a private dashboard→gateway path. This makes the operator API same-origin with the
+dashboard UI.
+
+**Current state:** The dashboard Caddy `/operator/*` route is not yet deployed. No routing is
+active. Do not add a `/operator/*` block to `apps/dashboard/config/Caddyfile` until all
+prerequisites are met.
+
+**Prerequisites before enabling:**
+
+1. A private network path from the dashboard droplet to the gateway operator listener must exist
+   (e.g. DigitalOcean VPC or private network peering). The gateway operator listener must not be
+   reachable from the public internet directly.
+2. Upstream auth/session/CSRF readiness — `fro-bot/agent` must ship the auth/session/CSRF contract
+   for privileged operator routes (`marcusrbrown/infra#580`).
+3. The dashboard Caddy `/operator/*` reverse proxy block must include `flush_interval -1` to disable
+   response buffering so future SSE streams are not silently buffered.
+
+See `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md` for the full decision
+record and implementation slices.
+
 ## Anti-patterns
 
 - **Never put the GitHub App private key in an env var** — use the file mount
@@ -164,3 +188,7 @@ When unset, it falls back to ssh-agent.
   Shell metacharacters in secret values are rejected before any SSH connection is opened.
 - **Never skip `validateDashboardHost`** — it rejects `-`-prefixed values and characters outside the
   allowed alphabet. SSH treats `-`-prefixed hostnames as flags (including `-oProxyCommand=`).
+- **Never wire `apps/dashboard/config/Caddyfile` to proxy `/operator/*` to `gateway.fro.bot`** —
+  that would route browser operator calls to the public gateway edge, not through a private path.
+  The dashboard→gateway path must be private (not public internet). See the operator same-origin
+  target section above.

@@ -118,7 +118,7 @@ function makeOperatorEnv() {
   return makeEnv({
     GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
     GATEWAY_OPERATOR_BIND_PORT: '9300',
-    GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+    GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
   })
 }
 
@@ -5491,7 +5491,7 @@ describe('main() — operator config validation before SSH', () => {
     const {main} = await import('./deploy')
     const {spawnFn, calls} = makeSpawnMock()
 
-    const env = makeEnv({GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot'})
+    const env = makeEnv({GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot'})
     delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
     delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
 
@@ -5515,7 +5515,7 @@ describe('main() — operator config validation before SSH', () => {
         env: makeEnv({
           GATEWAY_OPERATOR_BIND_HOST: '0.0.0.0',
           GATEWAY_OPERATOR_BIND_PORT: '9300',
-          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
         }),
         args: [],
         spawn: spawnFn,
@@ -5534,7 +5534,7 @@ describe('main() — operator config validation before SSH', () => {
         env: makeEnv({
           GATEWAY_OPERATOR_BIND_HOST: '127.0.0.1',
           GATEWAY_OPERATOR_BIND_PORT: '9300',
-          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
         }),
         args: [],
         spawn: spawnFn,
@@ -5553,7 +5553,7 @@ describe('main() — operator config validation before SSH', () => {
         env: makeEnv({
           GATEWAY_OPERATOR_BIND_HOST: '10.0.0.5',
           GATEWAY_OPERATOR_BIND_PORT: '9300',
-          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
         }),
         args: [],
         spawn: spawnFn,
@@ -5572,7 +5572,7 @@ describe('main() — operator config validation before SSH', () => {
         env: makeEnv({
           GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
           GATEWAY_OPERATOR_BIND_PORT: '9300',
-          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'http://gateway.fro.bot',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'http://dashboard.fro.bot',
         }),
         args: [],
         spawn: spawnFn,
@@ -5590,7 +5590,7 @@ describe('main() — operator config validation before SSH', () => {
       env: makeEnv({
         GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
         GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
       }),
       args: [],
       spawn: spawnFn,
@@ -5663,7 +5663,7 @@ describe('main() — operator health probe', () => {
       env: makeEnv({
         GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
         GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
       }),
       args: [],
       spawn: spawnFn,
@@ -5673,7 +5673,7 @@ describe('main() — operator health probe', () => {
 
     const operatorHealthUrl = fetchedUrls.find(u => u.includes('/operator/health'))
     expect(operatorHealthUrl).toBeDefined()
-    expect(operatorHealthUrl).toContain('https://gateway.fro.bot/operator/health')
+    expect(operatorHealthUrl).toContain('https://dashboard.fro.bot/operator/health')
   })
 
   test('operator disabled: fetch NOT called with /operator/health URL', async () => {
@@ -5720,7 +5720,7 @@ describe('main() — operator health probe', () => {
         env: makeEnv({
           GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
           GATEWAY_OPERATOR_BIND_PORT: '9300',
-          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
         }),
         args: [],
         spawn: spawnFn,
@@ -6182,7 +6182,7 @@ describe('computeSecretsChecksum — Caddyfile included when operator enabled (b
     const operatorEnv = makeEnv({
       GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
       GATEWAY_OPERATOR_BIND_PORT: '9300',
-      GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+      GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
     })
 
     const secrets = buildSecretFileList(operatorEnv)
@@ -6216,11 +6216,28 @@ describe('computeSecretsChecksum — Caddyfile included when operator enabled (b
   })
 })
 
-// ─── Issue 2: validateOperatorConfig — public origin host mismatch ────────────
+// ─── Issue 2: validateOperatorConfig — dashboard-origin convention ────────────
+// The ratified browser-visible operator origin is https://dashboard.fro.bot.
+// This is enforced by convention and documentation, not by the validator.
+// The validator accepts any valid HTTPS origin.
 
-describe('validateOperatorConfig — public origin host mismatch (issue 2)', () => {
-  test('origin hostname matching GATEWAY_HOST is accepted', async () => {
+describe('validateOperatorConfig — dashboard-origin convention (issue 2)', () => {
+  test('https://dashboard.fro.bot with gatewayHost is accepted (ratified browser-visible origin)', async () => {
     const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://dashboard.fro.bot',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).not.toThrow()
+  })
+
+  test('https://gateway.fro.bot is accepted — validator does not enforce origin convention', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    // The validator accepts any valid HTTPS origin. The dashboard.fro.bot convention is
+    // enforced by documentation and operator practice, not by the deploy validator.
     expect(() =>
       validateOperatorConfig({
         bindHost: '172.20.0.2',
@@ -6231,7 +6248,7 @@ describe('validateOperatorConfig — public origin host mismatch (issue 2)', () 
     ).not.toThrow()
   })
 
-  test('origin hostname not matching GATEWAY_HOST is rejected', async () => {
+  test('arbitrary cross-host origin is accepted — validator accepts any valid HTTPS origin', async () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
@@ -6240,7 +6257,7 @@ describe('validateOperatorConfig — public origin host mismatch (issue 2)', () 
         publicOrigin: 'https://operator.example.com',
         gatewayHost: 'gateway.fro.bot',
       }),
-    ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*hostname.*GATEWAY_HOST|host.*mismatch/i)
+    ).not.toThrow()
   })
 
   test('origin with pathname other than / is rejected', async () => {
@@ -6249,7 +6266,7 @@ describe('validateOperatorConfig — public origin host mismatch (issue 2)', () 
       validateOperatorConfig({
         bindHost: '172.20.0.2',
         bindPort: '9300',
-        publicOrigin: 'https://gateway.fro.bot/some/path',
+        publicOrigin: 'https://dashboard.fro.bot/some/path',
         gatewayHost: 'gateway.fro.bot',
       }),
     ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*path|origin/i)
@@ -6261,7 +6278,7 @@ describe('validateOperatorConfig — public origin host mismatch (issue 2)', () 
       validateOperatorConfig({
         bindHost: '172.20.0.2',
         bindPort: '9300',
-        publicOrigin: 'https://gateway.fro.bot?foo=bar',
+        publicOrigin: 'https://dashboard.fro.bot?foo=bar',
         gatewayHost: 'gateway.fro.bot',
       }),
     ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*query|search|origin/i)
@@ -6273,7 +6290,7 @@ describe('validateOperatorConfig — public origin host mismatch (issue 2)', () 
       validateOperatorConfig({
         bindHost: '172.20.0.2',
         bindPort: '9300',
-        publicOrigin: 'https://gateway.fro.bot#section',
+        publicOrigin: 'https://dashboard.fro.bot#section',
         gatewayHost: 'gateway.fro.bot',
       }),
     ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*hash|fragment|origin/i)
@@ -6285,7 +6302,7 @@ describe('validateOperatorConfig — public origin host mismatch (issue 2)', () 
       validateOperatorConfig({
         bindHost: '172.20.0.2',
         bindPort: '9300',
-        publicOrigin: 'https://user@gateway.fro.bot',
+        publicOrigin: 'https://user@dashboard.fro.bot',
         gatewayHost: 'gateway.fro.bot',
       }),
     ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*credential|username|password|origin/i)
@@ -6297,7 +6314,7 @@ describe('validateOperatorConfig — public origin host mismatch (issue 2)', () 
       validateOperatorConfig({
         bindHost: '172.20.0.2',
         bindPort: '9300',
-        publicOrigin: 'https://user:pass@gateway.fro.bot',
+        publicOrigin: 'https://user:pass@dashboard.fro.bot',
         gatewayHost: 'gateway.fro.bot',
       }),
     ).toThrow(/GATEWAY_OPERATOR_PUBLIC_ORIGIN.*credential|username|password|origin/i)
@@ -6309,7 +6326,7 @@ describe('validateOperatorConfig — public origin host mismatch (issue 2)', () 
       validateOperatorConfig({
         bindHost: '0.0.0.0',
         bindPort: '9300',
-        publicOrigin: 'https://gateway.fro.bot',
+        publicOrigin: 'https://dashboard.fro.bot',
         gatewayHost: 'gateway.fro.bot',
       }),
     ).toThrow(/0\.0\.0\.0/)
@@ -6321,7 +6338,7 @@ describe('validateOperatorConfig — public origin host mismatch (issue 2)', () 
       validateOperatorConfig({
         bindHost: '127.0.0.1',
         bindPort: '9300',
-        publicOrigin: 'https://gateway.fro.bot',
+        publicOrigin: 'https://dashboard.fro.bot',
         gatewayHost: 'gateway.fro.bot',
       }),
     ).toThrow(/loopback/)
@@ -6804,10 +6821,10 @@ describe('buildComposeOverride — operator env guard requires operatorPublicOri
       operatorEnabled: true,
       operatorBindHost: '172.20.0.2',
       operatorBindPort: '9300',
-      operatorPublicOrigin: 'https://gateway.fro.bot',
+      operatorPublicOrigin: 'https://dashboard.fro.bot',
     })
     // The value must be the actual origin, not empty
-    expect(yaml).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN: https://gateway.fro.bot')
+    expect(yaml).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN: https://dashboard.fro.bot')
   })
 })
 
@@ -6855,9 +6872,23 @@ describe('validateOperatorConfig — non-443 port rejection (CE review finding 3
   })
 })
 
-describe('validateOperatorConfig — gatewayHost direct unit tests (CE review finding 3)', () => {
-  test('matching gatewayHost is accepted', async () => {
+describe('validateOperatorConfig — gatewayHost param (CE review finding 3)', () => {
+  test('dashboard.fro.bot with gatewayHost is accepted (ratified browser-visible origin)', async () => {
     const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://dashboard.fro.bot',
+        gatewayHost: 'gateway.fro.bot',
+      }),
+    ).not.toThrow()
+  })
+
+  test('gateway.fro.bot as publicOrigin with gatewayHost is accepted — no hostname constraint enforced', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    // The validator accepts any valid HTTPS origin. The dashboard.fro.bot convention is
+    // enforced by documentation and operator practice, not by the deploy validator.
     expect(() =>
       validateOperatorConfig({
         bindHost: '172.20.0.2',
@@ -6868,7 +6899,7 @@ describe('validateOperatorConfig — gatewayHost direct unit tests (CE review fi
     ).not.toThrow()
   })
 
-  test('mismatched gatewayHost is rejected', async () => {
+  test('arbitrary cross-host origin with gatewayHost is accepted — validator accepts any valid HTTPS origin', async () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
@@ -6877,12 +6908,11 @@ describe('validateOperatorConfig — gatewayHost direct unit tests (CE review fi
         publicOrigin: 'https://other.example.com',
         gatewayHost: 'gateway.fro.bot',
       }),
-    ).toThrow(/hostname.*GATEWAY_HOST|host.*mismatch/i)
+    ).not.toThrow()
   })
 
-  test('omitted gatewayHost is accepted (backward compatible)', async () => {
+  test('omitted gatewayHost is accepted (no hostname check)', async () => {
     const {validateOperatorConfig} = await import('./deploy')
-    // When gatewayHost is not provided, no hostname check is performed
     expect(() =>
       validateOperatorConfig({
         bindHost: '172.20.0.2',
@@ -6897,17 +6927,17 @@ describe('validateOperatorConfig — trailing slash health URL (CE review findin
   test('health probe URL does not double-slash when origin has trailing slash', async () => {
     // The health probe URL must be constructed with new URL('/operator/health', origin)
     // so that a trailing slash in origin does not produce //operator/health
-    const origin = 'https://gateway.fro.bot'
+    const origin = 'https://dashboard.fro.bot'
     const healthUrl = new URL('/operator/health', origin).toString()
-    expect(healthUrl).toBe('https://gateway.fro.bot/operator/health')
+    expect(healthUrl).toBe('https://dashboard.fro.bot/operator/health')
     expect(healthUrl).not.toContain('//operator/health')
   })
 
   test('health probe URL with trailing slash origin does not double-slash', async () => {
     // Even if origin has trailing slash, new URL('/operator/health', origin) is correct
-    const originWithSlash = 'https://gateway.fro.bot/'
+    const originWithSlash = 'https://dashboard.fro.bot/'
     const healthUrl = new URL('/operator/health', originWithSlash).toString()
-    expect(healthUrl).toBe('https://gateway.fro.bot/operator/health')
+    expect(healthUrl).toBe('https://dashboard.fro.bot/operator/health')
     expect(healthUrl).not.toContain('//operator/health')
   })
 })
@@ -7027,10 +7057,10 @@ describe('buildComposeOverride — shared operator fixture includes operatorPubl
       operatorEnabled: true,
       operatorBindHost: '172.20.0.2',
       operatorBindPort: '9300',
-      operatorPublicOrigin: 'https://gateway.fro.bot',
+      operatorPublicOrigin: 'https://dashboard.fro.bot',
     })
     expect(yaml).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
-    expect(yaml).toContain('https://gateway.fro.bot')
+    expect(yaml).toContain('https://dashboard.fro.bot')
     // Also verify the other operator env entries are present
     expect(yaml).toContain('GATEWAY_OPERATOR_BIND_HOST')
     expect(yaml).toContain('GATEWAY_OPERATOR_BIND_PORT')
@@ -7347,15 +7377,15 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     // Must NOT have double slash in the path (the regression pattern)
     expect(probedUrls[0]).not.toMatch(/\/\/operator/)
     // Must be exactly this URL (no double slash)
-    expect(probedUrls[0]).toBe('https://gateway.fro.bot/operator/health')
+    expect(probedUrls[0]).toBe('https://dashboard.fro.bot/operator/health')
   })
 
   test('URL construction: new URL("/operator/health", origin) normalizes trailing-slash origin correctly', () => {
     // Unit test for the URL construction fix independent of main().
     // This directly verifies that new URL('/operator/health', origin).toString()
     // produces the correct URL even when origin has a trailing slash.
-    const originWithSlash = 'https://gateway.fro.bot/'
-    const originWithoutSlash = 'https://gateway.fro.bot'
+    const originWithSlash = 'https://dashboard.fro.bot/'
+    const originWithoutSlash = 'https://dashboard.fro.bot'
 
     // String concat (the broken approach):
     const brokenWithSlash = `${originWithSlash}/operator/health`
@@ -7371,8 +7401,8 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     expect(brokenWithoutSlash).not.toContain('//operator')
 
     // The fixed approach works for both
-    expect(fixedWithSlash).toBe('https://gateway.fro.bot/operator/health')
-    expect(fixedWithoutSlash).toBe('https://gateway.fro.bot/operator/health')
+    expect(fixedWithSlash).toBe('https://dashboard.fro.bot/operator/health')
+    expect(fixedWithoutSlash).toBe('https://dashboard.fro.bot/operator/health')
     expect(fixedWithSlash).not.toContain('//operator')
     expect(fixedWithoutSlash).not.toContain('//operator')
   })
@@ -7404,7 +7434,7 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     })
 
     expect(probedUrls).toHaveLength(1)
-    expect(probedUrls[0]).toBe('https://gateway.fro.bot/operator/health')
+    expect(probedUrls[0]).toBe('https://dashboard.fro.bot/operator/health')
     // Verify no double slash in the path
     expect(probedUrls[0]).not.toMatch(/\/\/operator/)
   })
@@ -7473,7 +7503,7 @@ describe('operator health probe — initial log does not expose URL', () => {
     expect(initialProbeLogs.length).toBeGreaterThan(0)
     // The initial probe log must NOT contain the full URL
     const initialProbeLog = initialProbeLogs[0]!
-    expect(initialProbeLog).not.toContain('https://gateway.fro.bot/operator/health')
+    expect(initialProbeLog).not.toContain('https://dashboard.fro.bot/operator/health')
     // Must use a static message
     expect(initialProbeLog).toContain('Probing operator health')
   })

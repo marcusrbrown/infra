@@ -1,7 +1,7 @@
 ---
 title: "feat: Gateway operator listener reverse-proxy topology"
 type: feat
-status: active
+status: completed
 date: 2026-06-17
 ---
 
@@ -11,11 +11,13 @@ date: 2026-06-17
 
 Prepare the infra deploy topology that exposes the Gateway operator listener through the public Caddy edge while keeping the listener private to `gateway-net`. The upstream listener contract is now defined by `fro-bot/agent#931` and released in `fro-bot/agent v0.66.0`: `GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`, and `GATEWAY_OPERATOR_PUBLIC_ORIGIN` enable the listener only when all three are present, and the current route surface is `GET /operator/health`.
 
-This plan is readiness/design for `marcusrbrown/infra#579`. It does not wire operator auth/session secrets (`infra#580`) or decide the dashboard hosting origin (`infra#581`).
+This plan is readiness/design for `marcusrbrown/infra#579`. It does not wire operator auth/session secrets (`infra#580`). The production browser-visible origin was resolved by `infra#581` as `https://dashboard.fro.bot`; `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot` is the production value. The `/operator/*` path is the routed path within that origin, not part of the origin itself.
+
+`marcusrbrown/infra#579` delivered the Caddy topology scaffolding and the current `GET /operator/health` route. It does not enable dashboard live-client behavior, operator auth/session wiring, repo selector, launch approvals, or any privileged operator routes. No privileged `/operator/*` route should be treated as production-ready before `infra#580` auth/session/CSRF/allowlist wiring lands (or an equivalent upstream auth gate is present).
 
 ## Problem Frame
 
-The gateway has one public ingress today: Caddy terminates TLS for `gateway.fro.bot` and path-scopes the HMAC announce webhook to `/v1/announce`. The operator control surface needs a browser-facing public origin that reaches the upstream operator listener without publishing that listener to the host and without making it reachable from the workspace `sandbox-net`.
+The gateway has one public ingress today: Caddy terminates TLS for `gateway.fro.bot` and path-scopes the HMAC announce webhook to `/v1/announce`. The current operator surface (`GET /operator/health`) and future privileged routes need a browser-facing public origin that reaches the upstream operator listener without publishing that listener to the host and without making it reachable from the workspace `sandbox-net`.
 
 `fro-bot/agent#929` shipped only the shared web-surface spine. `fro-bot/agent#931` later shipped the Unit 2 listener/topology contract, so the exact config names are no longer speculative. Privileged operator behavior remains gated by later agent units.
 
@@ -34,12 +36,11 @@ The gateway has one public ingress today: Caddy terminates TLS for `gateway.fro.
 - No guessed future agent config. The only operator env names in scope are the Unit 2 names from `fro-bot/agent#931`: `GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`, and `GATEWAY_OPERATOR_PUBLIC_ORIGIN`. The original “blocked on Unit 2 config names” state is resolved; auth/session/route config remains blocked on later agent units.
 - No operator OAuth/session/CSRF/allowlist secret wiring; that stays in `infra#580` after agent Unit 3 lands.
 - No live run observation, launch, approvals, or repo-selector implementation; those wait for later Gateway Phase B units.
-- No broad public gateway API. `/v1/announce` and `/operator/*` remain distinct route families with distinct trust boundaries.
+- No broad public gateway API. `/v1/announce` and `/operator/*` remain distinct route families with distinct trust boundaries. The current public operator route is `GET /operator/health` only; `/operator/*` routing exists as topology/SSE-ready scaffolding for later routes. No privileged operator routes are currently available.
 - No host `ports:` entry for the operator listener.
 
 ### Deferred to Separate Tasks
 
-- Same-origin dashboard/operator hosting decision: `marcusrbrown/infra#581`.
 - Operator auth/config secret wiring: `marcusrbrown/infra#580`, blocked on agent Unit 3.
 - Dashboard live operator client and UI work: `fro-bot/dashboard#25` and `fro-bot/dashboard#26`, blocked on later agent units for live calls.
 
@@ -60,7 +61,7 @@ The gateway has one public ingress today: Caddy terminates TLS for `gateway.fro.
 ### Upstream Contract
 
 - `fro-bot/agent#931` merged at `198905b57545902d82fe0668fc7daa3cf3d339d4` and defines the operator listener contract.
-- `fro-bot/agent v0.66.0` contains `fro-bot/agent#931`; current infra gateway pin `v0.64.3` does not.
+- `fro-bot/agent v0.66.0` contains `fro-bot/agent#931`; the infra gateway pin was advanced to `v0.66.0` as part of this work.
 - `deploy/compose.yaml` comments the three opt-in env vars under the gateway service:
   - `GATEWAY_OPERATOR_BIND_HOST`
   - `GATEWAY_OPERATOR_BIND_PORT`
@@ -92,8 +93,8 @@ The gateway has one public ingress today: Caddy terminates TLS for `gateway.fro.
 ### Deferred to Implementation
 
 - **Exact upstream pin or release tag:** resolved after planning started — `fro-bot/agent v0.66.0` contains `fro-bot/agent#931` and is the first checked release suitable for the topology implementation path.
-- **Final public operator origin value:** coordinate with `infra#581`; the topology supports the chosen HTTPS origin, but this plan does not decide the dashboard hosting path.
-- **Operator bind IP strategy:** implementation must choose and test either a deterministic `gateway-net` static IP in the override or a safe derivation mechanism. Do not use an implicit Docker bridge address.
+- **Final public operator origin value:** resolved by `infra#581` as `https://dashboard.fro.bot`; `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot` is the production value. The origin is `https://dashboard.fro.bot`; `/operator/*` is the routed path, not part of the origin string.
+- **Operator bind IP strategy:** resolved. The live `fro-bot_gateway-net` subnet is `172.21.0.0/16`; the gateway service binds to `172.21.0.2` (deterministic static IP in the compose override). Workspace remains on `sandbox-net` only.
 - **Coarse unauthenticated auth failure probe:** blocked until upstream exposes an authenticated route in a later agent unit.
 
 ## High-Level Technical Design
@@ -102,9 +103,9 @@ The gateway has one public ingress today: Caddy terminates TLS for `gateway.fro.
 
 ```mermaid
 flowchart LR
-  Browser[Operator browser] -->|HTTPS /operator/*| Caddy[Caddy on host :443]
+  Browser[Operator browser] -->|HTTPS /operator/health now; broader /operator/* later| Caddy[Caddy on host :443]
   ControlPlane[Control plane] -->|HTTPS POST /v1/announce + HMAC| Caddy
-  Caddy -->|/operator/* over gateway-net| Operator[Gateway operator listener]
+  Caddy -->|/operator/health now; /operator/* scaffolded for later| Operator[Gateway operator listener]
   Caddy -->|/v1/announce over gateway-net| Announce[Gateway announce endpoint]
   Workspace[Workspace executor] -. sandbox-net only .- Mitmproxy[mitmproxy]
   Workspace -. no route .- Operator
@@ -114,7 +115,7 @@ The Caddy edge is the only host-published HTTP surface. `gateway` stays dual-hom
 
 ## Implementation Units
 
-- [ ] **Unit 1: Advance and pin the upstream listener contract**
+- [x] **Unit 1: Advance and pin the upstream listener contract**
 
 **Goal:** Move `apps/gateway/upstream.json` to `fro-bot/agent v0.66.0`, then verify infra sees the Unit 2 compose and validation contract.
 
@@ -141,7 +142,7 @@ The Caddy edge is the only host-published HTTP surface. `gateway` stays dual-hom
 
 **Verification:** Upstream pin points at `v0.66.0`; local tests can exercise the new infra wiring without guessed names.
 
-- [ ] **Unit 2: Generate operator topology in compose override**
+- [x] **Unit 2: Generate operator topology in compose override**
 
 **Goal:** Extend the generated gateway `compose.override.yaml` so the operator listener is enabled only with complete config, bound to `gateway-net`, and never host-published.
 
@@ -177,7 +178,7 @@ The Caddy edge is the only host-published HTTP surface. `gateway` stays dual-hom
 
 **Verification:** Generated compose topology is fail-closed, deterministic, and private to `gateway-net`; focused gateway deploy tests pass.
 
-- [ ] **Unit 3: Extend Caddy routing for operator paths and SSE**
+- [x] **Unit 3: Extend Caddy routing for operator paths and SSE**
 
 **Goal:** Route `/operator/*` through Caddy to the operator listener while preserving `/v1/announce` as a separate HMAC path and disabling buffering for future streams.
 
@@ -208,7 +209,7 @@ The Caddy edge is the only host-published HTTP surface. `gateway` stays dual-hom
 
 **Verification:** Caddyfile tests prove route separation and no-buffering; generated config keeps announce and operator trust boundaries distinct.
 
-- [ ] **Unit 4: Add validation and post-deploy probes**
+- [x] **Unit 4: Add validation and post-deploy probes**
 
 **Goal:** Ensure deploy validation rejects unsafe topology and deployment verification proves the operator listener is reachable only through the intended public proxy path.
 
@@ -239,7 +240,7 @@ The Caddy edge is the only host-published HTTP surface. `gateway` stays dual-hom
 
 **Verification:** Deploy fails closed on invalid topology and records health evidence for the public operator path.
 
-- [ ] **Unit 5: Operator documentation and tracking updates**
+- [x] **Unit 5: Operator documentation and tracking updates**
 
 **Goal:** Document the operator topology, blocked follow-up work, and rollout probes without conflating it with announce ingress or future auth work.
 
@@ -271,7 +272,7 @@ The Caddy edge is the only host-published HTTP surface. `gateway` stays dual-hom
 - **State lifecycle risks:** Caddy config changes are generated in the override/Caddyfile path already included in checksum-driven recreate behavior. A failed deploy should leave the previous checksum intact for retry.
 - **API surface parity:** CLI remote deploy must pass through any new operator env vars for local mode only when they are part of the environment contract; MCP remains read-only.
 - **Integration coverage:** Unit tests prove generated topology; post-deploy probes prove public health through Caddy and absence of host-published listener ports.
-- **Unchanged invariants:** `/v1/announce` remains HMAC-authenticated and path-scoped; workspace remains sandbox-contained; no mutating operator route exists until later upstream units ship it.
+- **Unchanged invariants:** `/v1/announce` remains HMAC-authenticated and path-scoped; workspace remains sandbox-contained; no mutating operator route exists until later upstream units ship it. No privileged `/operator/*` route is production-ready until `infra#580` auth/session/CSRF/allowlist wiring lands.
 
 ## Risks & Dependencies
 
@@ -285,9 +286,21 @@ The Caddy edge is the only host-published HTTP surface. `gateway` stays dual-hom
 
 ## Documentation / Operational Notes
 
-- Update `apps/gateway/AGENTS.md` before deploying operator topology so operators know which surfaces are public and which routes remain unavailable.
-- Add post-deploy verification for `docker compose config`, `docker compose ps`, public `/operator/health`, and a negative check that the operator listener has no host-published port.
-- Keep `fro-bot/.github#3512` updated with `@fro-bot` when this repo moves from readiness to implementation and when implementation completes.
+- `apps/gateway/AGENTS.md` documents which surfaces are public and which routes remain unavailable.
+- Post-deploy verification covers `docker compose config`, `docker compose ps`, public `/operator/health`, and a negative check that the operator listener has no host-published port.
+- `fro-bot/.github#3512` was updated with `@fro-bot` when this repo moved from readiness to implementation and when implementation completed.
+
+## Completion & Verification
+
+Implementation shipped across PRs #586, #589, and #592 against `marcusrbrown/infra#579`. Deploy run [27740787921](https://github.com/marcusrbrown/infra/actions/runs/27740787921) succeeded. Live deploy verification is recorded here even though live launch/approval/repo-selector functionality remains out of scope for this plan. Live evidence confirmed:
+
+- `fro-bot_gateway-net` subnet: `172.21.0.0/16`; gateway binds to `172.21.0.2`.
+- Services `gateway`, `mitmproxy`, `workspace`, and `caddy` running/healthy; no host ports on the operator listener.
+- Operator env keys (`GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`, `GATEWAY_OPERATOR_PUBLIC_ORIGIN`) present in the deployed environment.
+- Deploy log confirmed: image pull → stale-network cleanup → active endpoint release → stale network removal → operator health probe → image digest verification.
+- `workspace` remains on `sandbox-net` only; Caddy on `gateway-net` only.
+
+Deferred work remains open: operator auth/session secret wiring (`infra#580`, blocked on agent Unit 3) and dashboard live operator client (`fro-bot/dashboard#25`, `fro-bot/dashboard#26`). The current public operator surface is `GET /operator/health` only; `/operator/*` routing is topology/SSE-ready scaffolding. No privileged operator routes are production-ready until `infra#580` lands.
 
 ## Sources & References
 

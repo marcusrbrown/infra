@@ -276,7 +276,7 @@ The gateway operator listener is opt-in. When enabled, it exposes `GET /operator
 
 **Browser-visible operator origin:** The ratified target for the browser-visible operator API is `https://dashboard.fro.bot/operator/*`. `GATEWAY_OPERATOR_PUBLIC_ORIGIN` must be set to `https://dashboard.fro.bot` when the operator listener is enabled for production use. The gateway-side Caddy `/operator/*` route is topology scaffolding — it proves the gateway listener and Caddy wiring work, but `gateway.fro.bot/operator/*` is not the production browser origin and must not be used as such. See `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md` for the full decision record.
 
-**Current state:** Operator live routing is disabled. No operator env vars are set in the `gateway` GitHub Environment. The dashboard Caddy `/operator/*` route is not yet deployed. The private dashboard→gateway path and upstream auth/session/CSRF work (`infra#580`) must land before the operator API is live for browser clients.
+**Current state:** The operator listener is **enabled in production**. `GATEWAY_OPERATOR_BIND_HOST=172.21.0.2`, `GATEWAY_OPERATOR_BIND_PORT=9300`, and `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot` are set in the `gateway` GitHub Environment. Deploy run [27740787921](https://github.com/marcusrbrown/infra/actions/runs/27740787921) succeeded; the `/operator/health` probe ran through the public Caddy route. The current public operator surface is `GET /operator/health` only. The dashboard Caddy `/operator/*` route is not yet deployed. No privileged operator route is production-ready until `infra#580` auth/session/CSRF/allowlist (or an equivalent upstream auth gate) lands; the dashboard live client remains separate.
 
 ### Enabling
 

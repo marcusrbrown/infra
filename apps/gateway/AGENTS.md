@@ -273,6 +273,10 @@ For verifying a real control-plane go-live end-to-end (live log monitoring, succ
 
 The gateway operator listener is opt-in. When enabled, it exposes `GET /operator/health` (and future privileged operator routes) on a `gateway-net`-only address. Caddy routes `/operator/*` traffic from the public HTTPS edge to the listener over `gateway-net` — the listener has no host-published port.
 
+**Browser-visible operator origin:** The ratified target for the browser-visible operator API is `https://dashboard.fro.bot/operator/*`. `GATEWAY_OPERATOR_PUBLIC_ORIGIN` must be set to `https://dashboard.fro.bot` when the operator listener is enabled for production use. The gateway-side Caddy `/operator/*` route is topology scaffolding — it proves the gateway listener and Caddy wiring work, but `gateway.fro.bot/operator/*` is not the production browser origin and must not be used as such. See `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md` for the full decision record.
+
+**Current state:** Operator live routing is disabled. No operator env vars are set in the `gateway` GitHub Environment. The dashboard Caddy `/operator/*` route is not yet deployed. The private dashboard→gateway path and upstream auth/session/CSRF work (`infra#580`) must land before the operator API is live for browser clients.
+
 ### Enabling
 
 Set all three vars in the `gateway` GitHub Environment and trigger a deploy:
@@ -281,7 +285,7 @@ Set all three vars in the `gateway` GitHub Environment and trigger a deploy:
 | --- | --- |
 | `GATEWAY_OPERATOR_BIND_HOST` | Gateway-net IPv4 address for the listener bind (e.g. `172.20.0.2`). Must be a static gateway-net address — not `0.0.0.0`, loopback (`127.*`), sandbox-net (`10.*`), or IPv6. |
 | `GATEWAY_OPERATOR_BIND_PORT` | Port for the operator listener (e.g. `9300`). Must be a positive integer in [1, 65535]. |
-| `GATEWAY_OPERATOR_PUBLIC_ORIGIN` | HTTPS origin for the operator public surface (e.g. `https://operator.example.com`). Must be HTTPS. |
+| `GATEWAY_OPERATOR_PUBLIC_ORIGIN` | HTTPS origin for the browser-visible operator API. The ratified target is `https://dashboard.fro.bot`. Must be HTTPS. |
 
 All three must be set together (all-or-none). Setting one or two fails the deploy before any SSH. Leaving all three unset disables the operator listener.
 
@@ -298,6 +302,7 @@ The deploy:
 - The workspace (`sandbox-net`) has no path to the operator listener.
 - `/v1/announce` and `/operator/*` are separate Caddy `handle` blocks with distinct trust boundaries.
 - Auth/session/CSRF wiring for privileged operator routes is deferred to `infra#580`, pending upstream auth/session work in `fro-bot/agent`.
+- The gateway Caddy `/operator/*` route is topology scaffolding. The production browser operator path is `https://dashboard.fro.bot/operator/*` via the dashboard Caddy proxy — not `gateway.fro.bot/operator/*` directly.
 
 ### Post-enable verification
 

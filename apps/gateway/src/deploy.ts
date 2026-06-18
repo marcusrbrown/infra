@@ -101,6 +101,16 @@ export const GATEWAY_NET_EXPECTED_SUBNET = '172.21.0.0/16'
  */
 export const GATEWAY_NET_FULL_NAME = `${COMPOSE_PROJECT_NAME}_gateway-net`
 
+/**
+ * Static container names for the gateway and caddy services in this compose project.
+ * Docker Compose names containers as `<project>-<service>-<replica>` (default replica = 1).
+ * These are used for direct `docker rm -f` endpoint release because `docker compose rm`
+ * requires the service to be present in the current compose config — caddy may be absent
+ * when announce/operator is disabled, leaving orphan caddy containers from a prior deploy.
+ */
+export const GATEWAY_CONTAINER_NAME = `${COMPOSE_PROJECT_NAME}-gateway-1`
+export const CADDY_CONTAINER_NAME = `${COMPOSE_PROJECT_NAME}-caddy-1`
+
 // Announce secret file names (kebab-case, matching upstream compose contract).
 // Referenced from both buildSecretFileList (content) and buildComposeOverride (bind-mount source).
 export const ANNOUNCE_WEBHOOK_SECRET_FILE = 'gateway-webhook-secret'
@@ -1454,7 +1464,24 @@ async function readRemoteChecksum(
  * Behavior:
  *   - Network missing (inspect exits non-zero) → OK, skip removal
  *   - Network exists with correct subnet (172.21.0.0/16) → OK, skip removal
- *   - Network exists with any other subnet → remove it; throw on failure (fail-closed)
+ *   - Network exists with any other subnet → attempt removal:
+ *       a. First `docker network rm` attempt.
+ *       b. If it fails with "active endpoints" (gateway/caddy still attached):
+ *          remove the gateway and caddy containers via `docker rm -f fro-bot-gateway-1`
+ *          and `docker rm -f fro-bot-caddy-1` (direct container removal by known static
+ *          names), then retry `docker network rm`.
+ *          NOTE: `docker compose rm` is NOT used here because caddy may be absent from
+ *          the current compose config (when announce/operator is disabled), causing
+ *          `docker compose rm ... caddy` to fail with "no such service". Direct `docker rm -f`
+ *          tolerates orphan caddy containers from prior announce/operator deploys.
+ *          NOTE: `docker compose stop` alone is NOT sufficient — stopped containers
+ *          can still keep active endpoints. Docker network endpoints are tied to
+ *          container lifetime/network attachment, not run state. Only removing the
+ *          containers releases their network endpoints.
+ *       c. If container removal or second rm fails → throw (fail-closed, deploy aborts
+ *          before up). The error message explicitly states that gateway/caddy
+ *          containers were removed so the operator knows the service state and can
+ *          rerun the deploy (which will recreate them via `docker compose up -d`).
  *
  * Shell safety: the network name (GATEWAY_NET_FULL_NAME) is a static constant
  * containing only alphanumeric characters, underscores, and hyphens — safe to
@@ -1507,7 +1534,7 @@ export async function removeStaleGatewayNet(
 
   // Step 3: Remove the stale network.
   console.warn(
-    `\u001B[1;33m[warn]\u001B[0m ${GATEWAY_NET_FULL_NAME} has stale subnet (${existingSubnet || 'unknown'}), expected ${GATEWAY_NET_EXPECTED_SUBNET} — removing before compose pull/up`,
+    `\u001B[1;33m[warn]\u001B[0m ${GATEWAY_NET_FULL_NAME} has stale subnet (${existingSubnet || 'unknown'}), expected ${GATEWAY_NET_EXPECTED_SUBNET} — removing after compose pull / before compose up`,
   )
 
   const rmProc = spawnFn(sshCommand(host, `docker network rm ${GATEWAY_NET_FULL_NAME}`, keyPath, controlPath), {
@@ -1518,14 +1545,77 @@ export async function removeStaleGatewayNet(
   const rmStderr = await new Response(rmProc.stderr).text()
   const rmExitCode = await rmProc.exited
 
-  if (rmExitCode !== 0) {
+  if (rmExitCode === 0) {
+    console.warn(`\u001B[1;32m✓\u001B[0m Removed stale ${GATEWAY_NET_FULL_NAME} network`)
+    return
+  }
+
+  // Step 3b: First rm failed. If the error is "active endpoints", stop the services
+  // that own those endpoints (gateway and caddy in this topology), then retry rm.
+  // Any other failure is treated as fatal (fail-closed).
+  if (!rmStderr.includes('active endpoints')) {
     throw new Error(
       `Failed to remove stale ${GATEWAY_NET_FULL_NAME} network (exit ${rmExitCode}): ${rmStderr.trim()}. ` +
         `Stop any containers using this network and retry the deploy.`,
     )
   }
 
-  console.warn(`\u001B[1;32m✓\u001B[0m Removed stale ${GATEWAY_NET_FULL_NAME} network`)
+  console.warn(
+    `\u001B[1;33m[warn]\u001B[0m ${GATEWAY_NET_FULL_NAME} has active endpoints — removing gateway and caddy containers to release endpoints before retry`,
+  )
+
+  // Remove only the containers that can own endpoints on gateway-net.
+  // We use `docker rm -f <container-name>` on the known static container names rather than
+  // `docker compose rm -f -s gateway caddy` because:
+  //   1. `docker compose rm` requires the service to be present in the current compose config.
+  //      When caddy is disabled (no announce/operator), the freshly written override omits
+  //      the caddy service, so `docker compose rm ... caddy` would fail with "no such service".
+  //   2. `docker rm -f` on a non-existent container exits non-zero but we treat that as OK
+  //      (the container is already gone — endpoint already released).
+  //   3. This approach is scoped to exactly the two containers that can own gateway-net
+  //      endpoints: fro-bot-gateway-1 and fro-bot-caddy-1.
+  // `docker compose stop` alone is NOT sufficient: stopped containers can still keep active
+  // endpoints — Docker network endpoints are tied to container lifetime/network attachment,
+  // not run state. Only removing the containers releases their network endpoints.
+  // The subsequent `docker compose up -d` (later in the deploy) recreates gateway+caddy.
+  for (const containerName of [GATEWAY_CONTAINER_NAME, CADDY_CONTAINER_NAME]) {
+    const rmProc = spawnFn(sshCommand(host, `docker rm -f ${containerName}`, keyPath, controlPath), {
+      env: deployEnv,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const rmContainerStderr = await new Response(rmProc.stderr).text()
+    const rmContainerExitCode = await rmProc.exited
+    if (rmContainerExitCode !== 0 && !rmContainerStderr.includes('No such container')) {
+      // Non-zero exit is OK if the container simply doesn't exist (already removed / never created).
+      // Any other error (permission denied, daemon unreachable, etc.) is fatal — fail closed.
+      throw new Error(
+        `Failed to remove container ${containerName} to release ${GATEWAY_NET_FULL_NAME} endpoints (exit ${rmContainerExitCode}): ${rmContainerStderr.trim()}. ` +
+          `Stop any containers using this network and retry the deploy.`,
+      )
+    }
+  }
+
+  // Step 3c: Retry network removal after containers are removed.
+  const rmRetryProc = spawnFn(sshCommand(host, `docker network rm ${GATEWAY_NET_FULL_NAME}`, keyPath, controlPath), {
+    env: deployEnv,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const rmRetryStderr = await new Response(rmRetryProc.stderr).text()
+  const rmRetryExitCode = await rmRetryProc.exited
+
+  if (rmRetryExitCode !== 0) {
+    throw new Error(
+      `Failed to remove stale ${GATEWAY_NET_FULL_NAME} network after removing gateway/caddy containers (exit ${rmRetryExitCode}): ${rmRetryStderr.trim()}. ` +
+        `The gateway and caddy containers have been removed. ` +
+        `Rerun the deploy to recreate them, or run: docker compose --project-directory ${DEPLOY_DIR} up -d gateway caddy`,
+    )
+  }
+
+  console.warn(
+    `\u001B[1;32m✓\u001B[0m Removed stale ${GATEWAY_NET_FULL_NAME} network (after removing gateway/caddy containers)`,
+  )
 }
 
 // ─── main orchestrator ────────────────────────────────────────────────────────
@@ -1680,7 +1770,10 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     console.warn(`  3d. Run upstream stack validation: cd ${REMOTE_DIR} && bash deploy/validate-stack.sh`)
     console.warn(`  4. Write .env to ${ENV_PATH}`)
     console.warn(`  5. Run init-certs.sh (idempotent)`)
-    console.warn(`  6. docker compose pull (pull prebuilt GHCR images)`)
+    console.warn(`  6. docker compose pull (pull prebuilt GHCR images — before any container disruption)`)
+    console.warn(
+      `  6b. Remove stale ${GATEWAY_NET_FULL_NAME} network if subnet differs from ${GATEWAY_NET_EXPECTED_SUBNET} (after pull, before up)`,
+    )
     console.warn(
       `  7. docker compose up -d --no-build --wait --wait-timeout 120 --remove-orphans${forceRecreate ? ' --force-recreate' : ''}`,
     )
@@ -1931,23 +2024,6 @@ SCRIPT`
       )
     }
 
-    // Phase 5e: Remove stale gateway-net network (all deploys).
-    // The live `fro-bot_gateway-net` Docker network may have a stale subnet from a previous
-    // operator deploy (e.g. 172.20.0.0/16 — the known conflicted subnet from the failed operator
-    // deploy). If the existing network differs from the expected 172.21.0.0/16 subnet, Docker will
-    // refuse to create the new network with "Pool overlaps with other one on this address space".
-    // We inspect the existing network and remove it if stale — before docker compose pull/up so
-    // the compose up can recreate it with the correct subnet.
-    //
-    // Behavior:
-    //   - Network missing → OK, skip removal
-    //   - Network exists with correct subnet (172.21.0.0/16) → OK, skip removal
-    //   - Network exists with any other subnet → remove it; throw on failure (fail-closed)
-    //
-    // This phase runs AFTER rendered-config validation (Phase 5d, operator-only) and BEFORE
-    // checksum read and pull/up. Non-operator deploys skip Phase 5d but still run Phase 5e.
-    await removeStaleGatewayNet(host, deployEnv, spawnFn, keyPath, controlPath)
-
     // Compute current checksum and read prior checksum to detect rotation.
     // The override is always included (image pins change when digests change, which
     // should force recreate). Caddyfile is included whenever Caddy is enabled
@@ -2005,6 +2081,26 @@ SCRIPT`
       deployEnv,
       spawnFn,
     )
+
+    // Phase 8b: Remove stale gateway-net network (all deploys).
+    // Runs AFTER docker compose pull so images are already cached before any container disruption.
+    // If the image pull fails, gateway/caddy containers are never removed — no avoidable downtime.
+    //
+    // The live `fro-bot_gateway-net` Docker network may have a stale subnet from a previous
+    // operator deploy (e.g. 172.20.0.0/16 — the known conflicted subnet from the failed operator
+    // deploy). If the existing network differs from the expected 172.21.0.0/16 subnet, Docker will
+    // refuse to create the new network with "Pool overlaps with other one on this address space".
+    // We inspect the existing network and remove it if stale — after pull and before compose up so
+    // the compose up can recreate it with the correct subnet.
+    //
+    // Behavior:
+    //   - Network missing → OK, skip removal
+    //   - Network exists with correct subnet (172.21.0.0/16) → OK, skip removal
+    //   - Network exists with any other subnet → remove it; throw on failure (fail-closed)
+    //
+    // This phase runs AFTER docker compose pull (Phase 8) and BEFORE docker compose up.
+    // Non-operator deploys skip Phase 5d but still run this phase.
+    await removeStaleGatewayNet(host, deployEnv, spawnFn, keyPath, controlPath)
 
     const composeArgs = [
       'docker',

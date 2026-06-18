@@ -11,8 +11,8 @@ date: 2026-06-18
 
 The gateway operator listener topology landed in `marcusrbrown/infra#579`. This plan ratifies which
 public origin owns the browser-visible operator API, documents the rejected alternatives, records the
-current production state, and specifies the implementation slices required before the operator API is
-live for browser clients.
+current production state, and specifies the implementation slices required before the privileged/dashboard
+operator API is live for browser clients.
 
 **Ratified contract:** The browser-visible operator API origin is `https://dashboard.fro.bot`. The
 dashboard Caddy instance owns the `/operator/*` route and proxies it to the gateway operator listener
@@ -47,7 +47,7 @@ session.
 | -- | ----------- |
 | R1 | The browser-visible operator API origin must be same-origin with the dashboard UI (`dashboard.fro.bot`). |
 | R2 | Cross-origin credentialed browser calls from `dashboard.fro.bot` to `gateway.fro.bot` must not be required. |
-| R3 | The gateway operator listener must not be reachable from the public internet directly; the dashboard Caddy proxy is the only intended browser ingress. |
+| R3 | Privileged operator routes and dashboard browser operator calls must not be reachable from the public internet directly without the private dashboard→gateway path and auth/session prerequisites in place; the dashboard Caddy proxy is the only intended browser ingress for privileged/dashboard operator calls. The public Caddy health/topology route (`GET /operator/health`) is intentionally reachable. |
 | R4 | The gateway Caddy `/operator/*` route is topology scaffolding only — it must not be treated as the production browser origin. |
 | R5 | `GATEWAY_OPERATOR_PUBLIC_ORIGIN` must be set to `https://dashboard.fro.bot` when the operator listener is enabled for production. |
 | R6 | The dashboard Caddy `/operator/*` route must include `flush_interval -1` to avoid silently buffering future SSE streams. |
@@ -61,8 +61,8 @@ session.
 
 - Ratify `https://dashboard.fro.bot` as the browser-visible operator API origin.
 - Document rejected alternatives and the reasoning.
-- Record current production state (operator routing disabled).
-- Specify the implementation slices required before the operator API is live.
+- Record current production state (gateway operator listener enabled; `GET /operator/health` live; dashboard same-origin `/operator/*` route not yet deployed).
+- Specify the implementation slices required before the privileged/dashboard operator API is live.
 - Update AGENTS.md files to reference this plan.
 
 ### Deferred to Separate Tasks
@@ -156,7 +156,7 @@ deploy code, Caddyfiles, routing changes, or tests are introduced here.
 
   **Goal:** Author this ratification plan document, establishing `https://dashboard.fro.bot` as the
   browser-visible operator API origin, documenting rejected alternatives, recording current production
-  state, and specifying the implementation slices required before the operator API is live.
+  state, and specifying the implementation slices required before the privileged/dashboard operator API is live.
 
   **Requirements:**
   - R1 — same-origin contract ratified in writing.
@@ -189,7 +189,7 @@ deploy code, Caddyfiles, routing changes, or tests are introduced here.
   - All seven requirements (R1–R7) appear in the Requirements Trace table.
   - Rejected alternatives (`gateway.fro.bot`, cross-origin credentialed calls, third origin) each have
     a dedicated Key Technical Decisions subsection.
-  - Current production state (operator disabled) is documented in Documentation / Operational Notes.
+  - Current production state (gateway operator listener enabled; `GET /operator/health` live; dashboard Caddy `/operator/*` route not yet deployed) is documented in Documentation / Operational Notes.
 
 ---
 
@@ -260,12 +260,13 @@ deploy code, Caddyfiles, routing changes, or tests are introduced here.
 - [ ] **Unit 4: Update dashboard operator docs**
 
   **Goal:** Update `apps/dashboard/AGENTS.md` to document the operator same-origin contract, the
-  current disabled state, the prerequisites that must land before the dashboard Caddy `/operator/*`
-  route is deployed, and a reference to this plan.
+  current state (gateway operator listener enabled; dashboard Caddy `/operator/*` route not yet
+  deployed), the prerequisites that must land before the dashboard Caddy `/operator/*` route is
+  deployed, and a reference to this plan.
 
   **Requirements:**
   - R1 — same-origin contract (`dashboard.fro.bot`) documented.
-  - R3 — gateway listener must not be publicly reachable; dashboard Caddy is the only browser ingress.
+  - R3 — privileged/dashboard operator calls must not be publicly reachable without private path and auth/session prerequisites; dashboard Caddy is the only browser ingress for privileged/dashboard operator calls.
   - R6 — `flush_interval -1` documented as a prerequisite for the dashboard Caddy route.
   - R7 — dashboard proxy gated on auth/session/CSRF contract (`infra#580`).
 
@@ -290,7 +291,7 @@ deploy code, Caddyfiles, routing changes, or tests are introduced here.
 
   **Verification:**
   - `apps/dashboard/AGENTS.md` contains a reference to `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`.
-  - The section documents the current disabled state and the three prerequisites.
+  - The section documents the current state (gateway operator listener enabled; dashboard Caddy `/operator/*` route not yet deployed) and the three prerequisites.
   - No plan-taxonomy strings (`R[0-9]+`, `Unit [0-9]+`, `(v[0-9]+)`) appear in `apps/dashboard/AGENTS.md`.
 
 ---
@@ -323,19 +324,25 @@ deploy code, Caddyfiles, routing changes, or tests are introduced here.
 
 ### Current production state
 
-Operator live routing is **disabled**. No `GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`,
-or `GATEWAY_OPERATOR_PUBLIC_ORIGIN` values are set in the `gateway` GitHub Environment. No dashboard
-Caddy `/operator/*` route is deployed. The gateway-side Caddy `/operator/*` route is topology
-scaffolding only — it is not the production browser origin.
+The gateway operator listener is **enabled in production**. `GATEWAY_OPERATOR_BIND_HOST=172.21.0.2`,
+`GATEWAY_OPERATOR_BIND_PORT=9300`, and `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot`
+are set in the `gateway` GitHub Environment. Deploy run
+[27740787921](https://github.com/marcusrbrown/infra/actions/runs/27740787921) succeeded; the
+`/operator/health` probe ran through the public Caddy route. The current public operator surface is
+`GET /operator/health` only. No dashboard Caddy `/operator/*` route is deployed. The gateway-side
+Caddy `/operator/*` route is topology scaffolding only — it is not the production browser origin.
 
-### Required implementation slices before operator API is live
+### Required implementation slices before privileged/dashboard operator API is live
 
-The following work must land before the operator API is live for browser clients:
+The following work must land before the privileged/dashboard operator API is live for browser clients:
 
 1. **Private dashboard→gateway path and trust boundary.** A private network path from the dashboard
    droplet to the gateway operator listener must be established (e.g. a DigitalOcean VPC or private
-   network peering). The gateway operator listener must not be reachable from the public internet
-   directly; the dashboard Caddy proxy is the only intended ingress for browser operator calls.
+   network peering). Privileged operator routes and dashboard browser operator calls must not be
+   reachable from the public internet without the private path and auth/session prerequisites in place;
+   the dashboard Caddy proxy is the only intended ingress for privileged/dashboard browser operator
+   calls. (The public Caddy health/topology route `GET /operator/health` is intentionally reachable
+   now and is not blocked by this prerequisite.)
 
 2. **Upstream auth/session/CSRF readiness.** `fro-bot/agent` must ship the auth/session/CSRF contract
    for privileged operator routes (tracked in `marcusrbrown/infra#580`). The dashboard `/operator/*`

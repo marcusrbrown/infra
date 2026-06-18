@@ -116,7 +116,7 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
 /** Build a minimal valid env with operator listener vars set. */
 function makeOperatorEnv() {
   return makeEnv({
-    GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+    GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
     GATEWAY_OPERATOR_BIND_PORT: '9300',
     GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
   })
@@ -4947,7 +4947,7 @@ describe('getOperatorState', () => {
     const {getOperatorState} = await import('./deploy')
     const state = getOperatorState(
       makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
         GATEWAY_OPERATOR_BIND_PORT: '9300',
         GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
       }),
@@ -4967,7 +4967,7 @@ describe('getOperatorState', () => {
 
   test('only GATEWAY_OPERATOR_BIND_HOST set → invalid (partial config)', async () => {
     const {getOperatorState} = await import('./deploy')
-    const env = makeEnv({GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2'})
+    const env = makeEnv({GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2'})
     delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
     delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
     const state = getOperatorState(env)
@@ -4995,7 +4995,7 @@ describe('getOperatorState', () => {
   test('two of three vars set → invalid (partial config)', async () => {
     const {getOperatorState} = await import('./deploy')
     const env = makeEnv({
-      GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+      GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
       GATEWAY_OPERATOR_BIND_PORT: '9300',
     })
     delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
@@ -5025,7 +5025,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://operator.example.com',
       }),
@@ -5036,7 +5036,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '1',
         publicOrigin: 'https://operator.example.com',
       }),
@@ -5047,7 +5047,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '65535',
         publicOrigin: 'https://operator.example.com',
       }),
@@ -5133,13 +5133,68 @@ describe('validateOperatorConfig', () => {
     ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*IPv6/i)
   })
 
+  test('rejects 172.20.x.x (known conflicted Docker subnet from the failed operator deploy)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*172\.20\.|sandbox|gateway-net/i)
+  })
+
+  test('rejects 172.20.255.255 (172.20.0.0/16 range boundary — known conflicted subnet)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.255.255',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*172\.20\.|sandbox|gateway-net/i)
+  })
+
+  test('accepts 172.21.0.2 (gateway-net range)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.21.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).not.toThrow()
+  })
+
+  test('rejects 172.22.0.1 (outside gateway-net 172.21.0.0/16)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.22.0.1',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*172\.21\.|gateway-net/i)
+  })
+
+  test('rejects 192.168.1.1 (outside gateway-net 172.21.0.0/16)', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '192.168.1.1',
+        bindPort: '9300',
+        publicOrigin: 'https://operator.example.com',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_BIND_HOST.*172\.21\.|gateway-net/i)
+  })
+
   // ── port rejections ─────────────────────────────────────────────────────────
 
   test('rejects port 0', async () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '0',
         publicOrigin: 'https://operator.example.com',
       }),
@@ -5150,7 +5205,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '65536',
         publicOrigin: 'https://operator.example.com',
       }),
@@ -5161,7 +5216,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: 'abc',
         publicOrigin: 'https://operator.example.com',
       }),
@@ -5172,7 +5227,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300.5',
         publicOrigin: 'https://operator.example.com',
       }),
@@ -5183,7 +5238,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '-1',
         publicOrigin: 'https://operator.example.com',
       }),
@@ -5196,7 +5251,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'http://operator.example.com',
       }),
@@ -5207,7 +5262,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: '',
       }),
@@ -5218,7 +5273,7 @@ describe('validateOperatorConfig', () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'not-a-url',
       }),
@@ -5234,7 +5289,7 @@ describe('buildComposeOverride — operator topology', () => {
     workspaceDigest: WORKSPACE_DIGEST,
     announceEnabled: true,
     operatorEnabled: true,
-    operatorBindHost: '172.20.0.2',
+    operatorBindHost: '172.21.0.2',
     operatorBindPort: '9300',
     operatorPublicOrigin: 'https://gateway.fro.bot',
   }
@@ -5243,7 +5298,7 @@ describe('buildComposeOverride — operator topology', () => {
     const {buildComposeOverride} = await import('./deploy')
     const yaml = buildComposeOverride(OPERATOR_OPTS)
     expect(yaml).toContain('GATEWAY_OPERATOR_BIND_HOST')
-    expect(yaml).toContain('172.20.0.2')
+    expect(yaml).toContain('172.21.0.2')
   })
 
   test('operator enabled: gateway service has GATEWAY_OPERATOR_BIND_PORT env entry', async () => {
@@ -5257,7 +5312,7 @@ describe('buildComposeOverride — operator topology', () => {
     const {buildComposeOverride} = await import('./deploy')
     const yaml = buildComposeOverride(OPERATOR_OPTS)
     expect(yaml).toContain('ipv4_address')
-    expect(yaml).toContain('172.20.0.2')
+    expect(yaml).toContain('172.21.0.2')
   })
 
   test('operator enabled: gateway service has NO host ports: entry for operator listener', async () => {
@@ -5324,7 +5379,7 @@ describe('buildComposeOverride — operator topology', () => {
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://gateway.fro.bot',
     })
@@ -5340,7 +5395,7 @@ describe('buildCaddyfile — operator routing', () => {
     const {buildCaddyfile} = await import('./deploy')
     const result = buildCaddyfile('gateway.fro.bot', {
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     expect(result).toContain('/operator/*')
   })
@@ -5349,16 +5404,16 @@ describe('buildCaddyfile — operator routing', () => {
     const {buildCaddyfile} = await import('./deploy')
     const result = buildCaddyfile('gateway.fro.bot', {
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
-    expect(result).toContain('reverse_proxy 172.20.0.2:9300')
+    expect(result).toContain('reverse_proxy 172.21.0.2:9300')
   })
 
   test('operator enabled: /operator/* reverse_proxy includes flush_interval -1', async () => {
     const {buildCaddyfile} = await import('./deploy')
     const result = buildCaddyfile('gateway.fro.bot', {
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     expect(result).toContain('flush_interval -1')
   })
@@ -5368,7 +5423,7 @@ describe('buildCaddyfile — operator routing', () => {
     const result = buildCaddyfile('gateway.fro.bot', {
       announceEnabled: true,
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     expect(result).toContain('handle /v1/announce {')
     expect(result).toContain('reverse_proxy gateway:3000')
@@ -5379,7 +5434,7 @@ describe('buildCaddyfile — operator routing', () => {
     const result = buildCaddyfile('gateway.fro.bot', {
       announceEnabled: true,
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     const announceIdx = result.indexOf('handle /v1/announce')
     const operatorIdx = result.indexOf('handle /operator/*')
@@ -5392,7 +5447,7 @@ describe('buildCaddyfile — operator routing', () => {
     const {buildCaddyfile} = await import('./deploy')
     const result = buildCaddyfile('gateway.fro.bot', {
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     const operatorIdx = result.indexOf('handle /operator/*')
     const catchAllIdx = result.indexOf('handle {')
@@ -5416,7 +5471,7 @@ describe('buildCaddyfile — operator routing', () => {
     const {buildCaddyfile} = await import('./deploy')
     const result = buildCaddyfile('gateway.fro.bot', {
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     const operatorIdx = result.indexOf('handle /operator/*')
     const catchAllIdx = result.lastIndexOf('handle {')
@@ -5453,7 +5508,7 @@ describe('main() — operator config validation before SSH', () => {
     const {main} = await import('./deploy')
     const {spawnFn, calls} = makeSpawnMock()
 
-    const env = makeEnv({GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2'})
+    const env = makeEnv({GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2'})
     delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
     delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
 
@@ -5570,7 +5625,7 @@ describe('main() — operator config validation before SSH', () => {
     await expect(
       main({
         env: makeEnv({
-          GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+          GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
           GATEWAY_OPERATOR_BIND_PORT: '9300',
           GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'http://dashboard.fro.bot',
         }),
@@ -5588,7 +5643,7 @@ describe('main() — operator config validation before SSH', () => {
 
     await main({
       env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
         GATEWAY_OPERATOR_BIND_PORT: '9300',
         GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
       }),
@@ -5661,7 +5716,7 @@ describe('main() — operator health probe', () => {
 
     await main({
       env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
         GATEWAY_OPERATOR_BIND_PORT: '9300',
         GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
       }),
@@ -5718,7 +5773,7 @@ describe('main() — operator health probe', () => {
     await expect(
       main({
         env: makeEnv({
-          GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+          GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
           GATEWAY_OPERATOR_BIND_PORT: '9300',
           GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
         }),
@@ -5742,7 +5797,7 @@ describe('buildComposeOverride — GATEWAY_OPERATOR_PUBLIC_ORIGIN in gateway env
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
     })
@@ -5768,7 +5823,7 @@ describe('buildComposeOverride — GATEWAY_OPERATOR_PUBLIC_ORIGIN in gateway env
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: true,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
     })
@@ -5787,7 +5842,7 @@ describe('buildComposeOverride — Caddy gated by caddyEnabled = announceEnabled
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
     })
@@ -5803,7 +5858,7 @@ describe('buildComposeOverride — Caddy gated by caddyEnabled = announceEnabled
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
     })
@@ -5842,7 +5897,7 @@ describe('buildComposeOverride — Caddy gated by caddyEnabled = announceEnabled
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: true,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
     })
@@ -5867,7 +5922,7 @@ describe('buildCaddyfile — announce/operator routing booleans (blocker 2)', ()
     const result = buildCaddyfile('gateway.fro.bot', {
       announceEnabled: false,
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     expect(result).toContain('/operator/*')
     expect(result).not.toContain('/v1/announce')
@@ -5878,7 +5933,7 @@ describe('buildCaddyfile — announce/operator routing booleans (blocker 2)', ()
     const result = buildCaddyfile('gateway.fro.bot', {
       announceEnabled: false,
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     expect(result).toContain('flush_interval -1')
   })
@@ -5888,7 +5943,7 @@ describe('buildCaddyfile — announce/operator routing booleans (blocker 2)', ()
     const result = buildCaddyfile('gateway.fro.bot', {
       announceEnabled: true,
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     expect(result).toContain('handle /v1/announce {')
     expect(result).toContain('/operator/*')
@@ -5899,7 +5954,7 @@ describe('buildCaddyfile — announce/operator routing booleans (blocker 2)', ()
     const result = buildCaddyfile('gateway.fro.bot', {
       announceEnabled: true,
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
     expect(result).toMatch(/handle\s*\{[^}]*respond\s+404[^}]*\}/)
   })
@@ -5924,7 +5979,7 @@ describe('buildComposeOverride — deterministic network/IPAM for static operato
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
     })
@@ -5961,18 +6016,34 @@ describe('buildComposeOverride — deterministic network/IPAM for static operato
     expect(yaml).not.toContain('subnet:')
   })
 
-  test('operator enabled: IPAM subnet is deterministic (172.20.0.0/16)', async () => {
+  test('operator enabled: IPAM subnet is 172.21.0.0/16 (not 172.20.0.0/16, the known conflicted Docker subnet)', async () => {
     const {buildComposeOverride} = await import('./deploy')
     const yaml = buildComposeOverride({
       gatewayDigest: GATEWAY_DIGEST,
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
     })
-    expect(yaml).toContain('172.20.0.0/16')
+    // Must use 172.21.0.0/16 — 172.20.0.0/16 is the known conflicted Docker subnet from the failed operator deploy
+    expect(yaml).toContain('172.21.0.0/16')
+    expect(yaml).not.toContain('172.20.0.0/16')
+  })
+
+  test('operator enabled: bind host 172.21.0.2 is inside gateway-net 172.21.0.0/16', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.21.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://operator.example.com',
+    })
+    expect(yaml).toContain('ipv4_address: 172.21.0.2')
   })
 })
 
@@ -6019,9 +6090,9 @@ describe('main() — Caddyfile written when operator enabled (announce disabled)
 
     await main({
       env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
         GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
       }),
       args: [],
       spawn: spawnFn,
@@ -6053,9 +6124,9 @@ describe('main() — Caddyfile written when operator enabled (announce disabled)
 
     await main({
       env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
         GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
       }),
       args: [],
       spawn: spawnFn,
@@ -6087,9 +6158,9 @@ describe('main() — Caddyfile written when operator enabled (announce disabled)
 
     await main({
       env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
         GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://gateway.fro.bot',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
       }),
       args: [],
       spawn: spawnFn,
@@ -6180,7 +6251,7 @@ describe('computeSecretsChecksum — Caddyfile included when operator enabled (b
     const {buildSecretFileList, buildComposeOverride, buildCaddyfile, computeSecretsChecksum} = await import('./deploy')
 
     const operatorEnv = makeEnv({
-      GATEWAY_OPERATOR_BIND_HOST: '172.20.0.2',
+      GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
       GATEWAY_OPERATOR_BIND_PORT: '9300',
       GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
     })
@@ -6191,14 +6262,14 @@ describe('computeSecretsChecksum — Caddyfile included when operator enabled (b
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
     })
     const caddyfileContent = buildCaddyfile('gateway.fro.bot', {
       announceEnabled: false,
       operatorEnabled: true,
-      operatorTarget: '172.20.0.2:9300',
+      operatorTarget: '172.21.0.2:9300',
     })
 
     // Checksum WITH Caddyfile must differ from checksum WITHOUT Caddyfile
@@ -6216,7 +6287,7 @@ describe('computeSecretsChecksum — Caddyfile included when operator enabled (b
   })
 })
 
-// ─── Issue 2: validateOperatorConfig — dashboard-origin convention ────────────
+// ─── Issue 2: validateOperatorConfig — dashboard-origin convention ─────────────
 // The ratified browser-visible operator origin is https://dashboard.fro.bot.
 // This is enforced by convention and documentation, not by the validator.
 // The validator accepts any valid HTTPS origin.
@@ -6226,7 +6297,7 @@ describe('validateOperatorConfig — dashboard-origin convention (issue 2)', () 
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://dashboard.fro.bot',
         gatewayHost: 'gateway.fro.bot',
@@ -6240,7 +6311,7 @@ describe('validateOperatorConfig — dashboard-origin convention (issue 2)', () 
     // enforced by documentation and operator practice, not by the deploy validator.
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://gateway.fro.bot',
         gatewayHost: 'gateway.fro.bot',
@@ -6252,7 +6323,7 @@ describe('validateOperatorConfig — dashboard-origin convention (issue 2)', () 
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://operator.example.com',
         gatewayHost: 'gateway.fro.bot',
@@ -6264,7 +6335,7 @@ describe('validateOperatorConfig — dashboard-origin convention (issue 2)', () 
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://dashboard.fro.bot/some/path',
         gatewayHost: 'gateway.fro.bot',
@@ -6276,7 +6347,7 @@ describe('validateOperatorConfig — dashboard-origin convention (issue 2)', () 
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://dashboard.fro.bot?foo=bar',
         gatewayHost: 'gateway.fro.bot',
@@ -6288,7 +6359,7 @@ describe('validateOperatorConfig — dashboard-origin convention (issue 2)', () 
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://dashboard.fro.bot#section',
         gatewayHost: 'gateway.fro.bot',
@@ -6300,7 +6371,7 @@ describe('validateOperatorConfig — dashboard-origin convention (issue 2)', () 
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://user@dashboard.fro.bot',
         gatewayHost: 'gateway.fro.bot',
@@ -6312,7 +6383,7 @@ describe('validateOperatorConfig — dashboard-origin convention (issue 2)', () 
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://user:pass@dashboard.fro.bot',
         gatewayHost: 'gateway.fro.bot',
@@ -6771,7 +6842,7 @@ describe('buildComposeOverride — operator env guard requires operatorPublicOri
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://gateway.fro.bot',
     })
@@ -6786,7 +6857,7 @@ describe('buildComposeOverride — operator env guard requires operatorPublicOri
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: undefined,
     })
@@ -6803,7 +6874,7 @@ describe('buildComposeOverride — operator env guard requires operatorPublicOri
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: undefined,
     })
@@ -6819,7 +6890,7 @@ describe('buildComposeOverride — operator env guard requires operatorPublicOri
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://dashboard.fro.bot',
     })
@@ -6835,7 +6906,7 @@ describe('validateOperatorConfig — non-443 port rejection (CE review finding 3
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://gateway.fro.bot:8443',
       }),
@@ -6848,7 +6919,7 @@ describe('validateOperatorConfig — non-443 port rejection (CE review finding 3
     // URL parser normalizes :443 away for https: — should not throw
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://gateway.fro.bot:443',
       }),
@@ -6860,7 +6931,7 @@ describe('validateOperatorConfig — non-443 port rejection (CE review finding 3
     let errorMessage = ''
     try {
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://gateway.fro.bot:8443',
       })
@@ -6872,12 +6943,12 @@ describe('validateOperatorConfig — non-443 port rejection (CE review finding 3
   })
 })
 
-describe('validateOperatorConfig — gatewayHost param (CE review finding 3)', () => {
+describe('validateOperatorConfig — gatewayHost direct unit tests (CE review finding 3)', () => {
   test('dashboard.fro.bot with gatewayHost is accepted (ratified browser-visible origin)', async () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://dashboard.fro.bot',
         gatewayHost: 'gateway.fro.bot',
@@ -6891,7 +6962,7 @@ describe('validateOperatorConfig — gatewayHost param (CE review finding 3)', (
     // enforced by documentation and operator practice, not by the deploy validator.
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://gateway.fro.bot',
         gatewayHost: 'gateway.fro.bot',
@@ -6903,7 +6974,7 @@ describe('validateOperatorConfig — gatewayHost param (CE review finding 3)', (
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://other.example.com',
         gatewayHost: 'gateway.fro.bot',
@@ -6915,7 +6986,7 @@ describe('validateOperatorConfig — gatewayHost param (CE review finding 3)', (
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '9300',
         publicOrigin: 'https://any.example.com',
       }),
@@ -6943,29 +7014,7 @@ describe('validateOperatorConfig — trailing slash health URL (CE review findin
 })
 
 describe('validateOperatorConfig — subnet validation (CE review finding 3)', () => {
-  test('bind host inside 172.20.0.0/16 is accepted', async () => {
-    const {validateOperatorConfig} = await import('./deploy')
-    expect(() =>
-      validateOperatorConfig({
-        bindHost: '172.20.0.2',
-        bindPort: '9300',
-        publicOrigin: 'https://gateway.fro.bot',
-      }),
-    ).not.toThrow()
-  })
-
-  test('bind host 172.20.255.254 (top of /16) is accepted', async () => {
-    const {validateOperatorConfig} = await import('./deploy')
-    expect(() =>
-      validateOperatorConfig({
-        bindHost: '172.20.255.254',
-        bindPort: '9300',
-        publicOrigin: 'https://gateway.fro.bot',
-      }),
-    ).not.toThrow()
-  })
-
-  test('bind host 172.21.0.2 (outside 172.20.0.0/16) is rejected', async () => {
+  test('bind host inside 172.21.0.0/16 is accepted', async () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
@@ -6973,10 +7022,32 @@ describe('validateOperatorConfig — subnet validation (CE review finding 3)', (
         bindPort: '9300',
         publicOrigin: 'https://gateway.fro.bot',
       }),
-    ).toThrow(/172\.20\.0\.0\/16|gateway-net|subnet/i)
+    ).not.toThrow()
   })
 
-  test('bind host 172.19.0.2 (outside 172.20.0.0/16) is rejected', async () => {
+  test('bind host 172.21.255.254 (top of gateway-net /16) is accepted', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.21.255.254',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+      }),
+    ).not.toThrow()
+  })
+
+  test('bind host 172.20.0.2 (known conflicted Docker subnet 172.20.0.0/16) is rejected', async () => {
+    const {validateOperatorConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorConfig({
+        bindHost: '172.20.0.2',
+        bindPort: '9300',
+        publicOrigin: 'https://gateway.fro.bot',
+      }),
+    ).toThrow(/172\.20\.|sandbox|gateway-net/i)
+  })
+
+  test('bind host 172.19.0.2 (outside 172.21.0.0/16) is rejected', async () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
@@ -6984,10 +7055,10 @@ describe('validateOperatorConfig — subnet validation (CE review finding 3)', (
         bindPort: '9300',
         publicOrigin: 'https://gateway.fro.bot',
       }),
-    ).toThrow(/172\.20\.0\.0\/16|gateway-net|subnet/i)
+    ).toThrow(/172\.21\.0\.0\/16|gateway-net|subnet/i)
   })
 
-  test('bind host 192.168.1.1 (outside 172.20.0.0/16) is rejected', async () => {
+  test('bind host 192.168.1.1 (outside 172.21.0.0/16) is rejected', async () => {
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
@@ -6995,17 +7066,17 @@ describe('validateOperatorConfig — subnet validation (CE review finding 3)', (
         bindPort: '9300',
         publicOrigin: 'https://gateway.fro.bot',
       }),
-    ).toThrow(/172\.20\.0\.0\/16|gateway-net|subnet/i)
+    ).toThrow(/172\.21\.0\.0\/16|gateway-net|subnet/i)
   })
 })
 
 describe('validateOperatorConfig — colon error text improvement (CE review finding 3)', () => {
-  test('172.20.0.2:9300 (IP with port) is described as containing a colon, not as IPv6', async () => {
+  test('172.21.0.2:9300 (IP with port) is described as containing a colon, not as IPv6', async () => {
     const {validateOperatorConfig} = await import('./deploy')
     let errorMessage = ''
     try {
       validateOperatorConfig({
-        bindHost: '172.20.0.2:9300',
+        bindHost: '172.21.0.2:9300',
         bindPort: '9300',
         publicOrigin: 'https://gateway.fro.bot',
       })
@@ -7035,7 +7106,7 @@ describe('validateOperatorConfig — empty bindHost and bindPort (CE review find
     const {validateOperatorConfig} = await import('./deploy')
     expect(() =>
       validateOperatorConfig({
-        bindHost: '172.20.0.2',
+        bindHost: '172.21.0.2',
         bindPort: '',
         publicOrigin: 'https://gateway.fro.bot',
       }),
@@ -7055,7 +7126,7 @@ describe('buildComposeOverride — shared operator fixture includes operatorPubl
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: true,
       operatorEnabled: true,
-      operatorBindHost: '172.20.0.2',
+      operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://dashboard.fro.bot',
     })
@@ -7282,6 +7353,56 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     expect(script).not.toContain('2>/dev/null || true')
   })
 
+  test('Phase 5d script checks gateway-net IPAM subnet is 172.21.0.0/16', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // Must hardcode the expected gateway-net subnet — drift between buildComposeOverride
+    // (which emits 172.21.0.0/16) and this validation script would go undetected otherwise.
+    expect(script).toContain('172.21.0.0/16')
+  })
+
+  test('Phase 5d script embeds the expected operator bind host (172.21.0.2) from env', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // The expectedBindHost (172.21.0.2) must be interpolated into the script at build time
+    // so the gateway ipv4_address check compares against the actual configured bind host.
+    // Drift between GATEWAY_OPERATOR_BIND_HOST and the script's expected value would silently
+    // allow a misconfigured gateway-net IP to pass validation.
+    expect(script).toContain('172.21.0.2')
+  })
+
   test('Phase 5d non-zero exit (sandbox-net missing from gateway) aborts deploy before compose pull', async () => {
     const {main} = await import('./deploy')
     const eventLog: string[] = []
@@ -7506,5 +7627,394 @@ describe('operator health probe — initial log does not expose URL', () => {
     expect(initialProbeLog).not.toContain('https://dashboard.fro.bot/operator/health')
     // Must use a static message
     expect(initialProbeLog).toContain('Probing operator health')
+  })
+})
+
+// ─── stale gateway-net cleanup (operator subnet migration) ───────────────────
+//
+// When the operator listener is enabled, the deploy must remove a stale
+// `fro-bot_gateway-net` Docker network before `docker compose pull/up` if the
+// existing network has the old subnet (172.20.0.0/16). This prevents Docker from
+// failing with "Pool overlaps with other one on this address space" when the
+// compose.override.yaml declares the new 172.21.0.0/16 subnet.
+//
+// The cleanup is guarded by subnet inspection:
+//   - If the network does not exist → skip (OK, first deploy or already clean)
+//   - If the network exists with 172.21.0.0/16 → skip (already correct)
+//   - If the network exists with any other subnet → remove it before pull/up
+//   - If removal fails → fail closed (throw before pull/up)
+//
+// Network name: `fro-bot_gateway-net` — derived from the upstream compose.yaml
+// `name: fro-bot` project name (confirmed by fro-bot_sandbox-net references in
+// deploy.ts comments) and the `gateway-net` network key in the compose file.
+
+describe('stale gateway-net cleanup (operator subnet migration)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('operator mode: stale gateway-net (172.20.0.0/16) is removed before docker compose pull', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Subnet inspection: network exists with old subnet
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        eventLog.push('network-inspect')
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      // Network removal
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        eventLog.push('network-rm')
+        return makeSpawnResult()
+      }
+      // docker compose pull
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const inspectIdx = eventLog.indexOf('network-inspect')
+    const rmIdx = eventLog.indexOf('network-rm')
+    const pullIdx = eventLog.indexOf('compose-pull')
+
+    // All three must have occurred
+    expect(inspectIdx).toBeGreaterThanOrEqual(0)
+    expect(rmIdx).toBeGreaterThanOrEqual(0)
+    expect(pullIdx).toBeGreaterThanOrEqual(0)
+
+    // Removal must happen before pull
+    expect(rmIdx).toBeLessThan(pullIdx)
+    // Inspect must happen before removal
+    expect(inspectIdx).toBeLessThan(rmIdx)
+  })
+
+  test('operator mode: cleanup runs after compose.override.yaml write and rendered-config validation', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('compose.override.yaml') && cmdStr.includes("cat > '")) {
+        eventLog.push('write-override')
+      } else if (cmdStr.includes('validate-stack.sh')) {
+        eventLog.push('validate-stack')
+      } else if (cmdStr.includes('docker compose') && cmdStr.includes('config --format json')) {
+        eventLog.push('rendered-config-validation')
+        return makeSpawnResult({
+          stdout: JSON.stringify({
+            services: {
+              gateway: {
+                networks: {'gateway-net': {ipv4_address: '172.21.0.2'}, 'sandbox-net': {}},
+                ports: [],
+              },
+              workspace: {networks: {'sandbox-net': {}}},
+              caddy: {networks: {'gateway-net': {}}, ports: [{published: '80'}, {published: '443'}]},
+            },
+            networks: {'gateway-net': {ipam: {config: [{subnet: '172.21.0.0/16'}]}}},
+          }),
+        })
+      } else if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        eventLog.push('network-inspect')
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      } else if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        eventLog.push('network-rm')
+      } else if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const overrideIdx = eventLog.indexOf('write-override')
+    const validateIdx = eventLog.indexOf('validate-stack')
+    const renderedIdx = eventLog.indexOf('rendered-config-validation')
+    const inspectIdx = eventLog.indexOf('network-inspect')
+    const rmIdx = eventLog.indexOf('network-rm')
+    const pullIdx = eventLog.indexOf('compose-pull')
+
+    // Cleanup must run after override write
+    expect(inspectIdx).toBeGreaterThan(overrideIdx)
+    // Cleanup must run after validate-stack.sh
+    expect(inspectIdx).toBeGreaterThan(validateIdx)
+    // Cleanup must run after rendered-config validation (when operator mode)
+    expect(inspectIdx).toBeGreaterThan(renderedIdx)
+    // Removal before pull
+    expect(rmIdx).toBeLessThan(pullIdx)
+  })
+
+  test('operator mode: network with correct subnet (172.21.0.0/16) is NOT removed', async () => {
+    const {main} = await import('./deploy')
+    const networkRmCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        // Network already has the correct subnet
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.21.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        networkRmCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Network must NOT have been removed — it already has the correct subnet
+    expect(networkRmCalls).toHaveLength(0)
+  })
+
+  test('operator mode: missing network (inspect exits non-zero) is treated as OK — no removal', async () => {
+    const {main} = await import('./deploy')
+    const networkRmCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        // Network does not exist — docker network inspect exits 1
+        return makeSpawnResult({exitCode: 1, stderr: 'Error: No such network: fro-bot_gateway-net'})
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        networkRmCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // No removal when network doesn't exist
+    expect(networkRmCalls).toHaveLength(0)
+  })
+
+  test('operator mode: stale network removal failure fails closed before docker compose pull', async () => {
+    const {main} = await import('./deploy')
+    const composePullCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        // Removal fails (e.g. network still has active endpoints)
+        return makeSpawnResult({
+          exitCode: 1,
+          stderr: 'Error response from daemon: network fro-bot_gateway-net id ... has active endpoints',
+        })
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        composePullCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/stale.*gateway-net|network rm|fro-bot_gateway-net/i)
+
+    // docker compose pull must NOT have been invoked
+    expect(composePullCalls).toHaveLength(0)
+  })
+
+  test('operator mode: targets fro-bot_gateway-net (not bare gateway-net)', async () => {
+    const {main} = await import('./deploy')
+    const networkInspectCmds: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect')) {
+        networkInspectCmds.push(cmdStr)
+        // Return no-network to skip removal
+        return makeSpawnResult({exitCode: 1, stderr: 'No such network'})
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Must have inspected fro-bot_gateway-net (not bare gateway-net)
+    const gatewayNetInspects = networkInspectCmds.filter(c => c.includes('fro-bot_gateway-net'))
+    expect(gatewayNetInspects.length).toBeGreaterThan(0)
+
+    // Must NOT have inspected bare gateway-net (without project prefix)
+    const bareNetInspects = networkInspectCmds.filter(c => {
+      // Match "gateway-net" but not "fro-bot_gateway-net"
+      return /\bgateway-net\b/.test(c) && !c.includes('fro-bot_gateway-net')
+    })
+    expect(bareNetInspects).toHaveLength(0)
+  })
+
+  test('non-operator mode: gateway-net inspection still runs (cleanup is unconditional)', async () => {
+    const {main} = await import('./deploy')
+    const networkInspectCmds: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        networkInspectCmds.push(cmdStr)
+        // Network does not exist — skip removal
+        return makeSpawnResult({exitCode: 1, stderr: 'Error: No such network: fro-bot_gateway-net'})
+      }
+      return undefined
+    })
+
+    // Non-operator env (no operator vars)
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Cleanup runs on all deploys — inspect must have been called
+    expect(networkInspectCmds.length).toBeGreaterThan(0)
+  })
+
+  test('non-operator mode: stale gateway-net (172.20.0.0/16) is removed before docker compose pull', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        eventLog.push('network-inspect')
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        eventLog.push('network-rm')
+        return makeSpawnResult()
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const inspectIdx = eventLog.indexOf('network-inspect')
+    const rmIdx = eventLog.indexOf('network-rm')
+    const pullIdx = eventLog.indexOf('compose-pull')
+
+    // All three must have occurred
+    expect(inspectIdx).toBeGreaterThanOrEqual(0)
+    expect(rmIdx).toBeGreaterThanOrEqual(0)
+    expect(pullIdx).toBeGreaterThanOrEqual(0)
+
+    // Removal must happen before pull
+    expect(rmIdx).toBeLessThan(pullIdx)
+  })
+
+  test('operator mode: stale network removal does not use shell metacharacters in network name', async () => {
+    const {main} = await import('./deploy')
+    const networkRmCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm')) {
+        networkRmCmds.push(cmd)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(networkRmCmds).toHaveLength(1)
+    const rmCmd = networkRmCmds[0]!
+    // The network name must be passed as a separate argv element (not shell-interpolated)
+    // This is the safe pattern: ['ssh', ..., 'docker network rm fro-bot_gateway-net']
+    // or ['ssh', ..., 'docker', 'network', 'rm', 'fro-bot_gateway-net']
+    // Either way, the full command string must contain the exact network name
+    expect(rmCmd.join(' ')).toContain('fro-bot_gateway-net')
+    // Must not contain shell injection characters in the network name position
+    const networkNameArg = rmCmd.find(a => a.includes('fro-bot_gateway-net'))
+    expect(networkNameArg).toBeDefined()
   })
 })

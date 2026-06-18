@@ -136,3 +136,4 @@ Standing guidance:
 - `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md` — probe-first upstream-upgrade discipline.
 - Upstream: `fro-bot/agent#741` (egress topology, closed/shipped in v0.52.1), `fro-bot/agent#749` (supervisor robustness, open).
 - Infra: `#373` (gateway daemon hold, closed), `#341` (v0.46.1 GitHub App + add-project adoption, closed).
+- `./docker-network-stale-subnet-cleanup-2026-06-18.md` — sibling integration issue on the same gateway stack: stale Docker network IPAM state blocks compose up after an explicit-subnet topology change.

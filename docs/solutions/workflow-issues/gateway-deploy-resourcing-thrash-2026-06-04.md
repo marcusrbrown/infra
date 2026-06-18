@@ -119,3 +119,4 @@ verify the running image's build timestamp + code signature, never the git check
 - `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` — the `--build` flag was *added* to fix stale-image reuse; this doc covers the resourcing cost of that build running on an undersized droplet.
 - `docs/solutions/integration-issues/gateway-mention-loop-model-config-2026-06-04.md` — the v0.54.1 being deployed here is the `#766` mention-loop fix; this outage was the cutover, not the code.
 - `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md` — earlier gateway deploy-pipeline cascade (different failure class).
+- `../integration-issues/docker-network-stale-subnet-cleanup-2026-06-18.md` — same deploy path; stale Docker network IPAM state blocks compose up after an explicit-subnet topology change, requiring a pull-before-cleanup migration step.

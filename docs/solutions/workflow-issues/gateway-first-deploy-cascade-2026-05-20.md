@@ -177,3 +177,4 @@ Each fix is structural at the layer it addresses: append `\n` when materializing
 - [bun-deploy-user-permissions-ci-2026-04-02.md](./bun-deploy-user-permissions-ci-2026-04-02.md) — earlier deploy-cascade precedent (3 waves of permission failures during keeweb deploy bootstrap)
 - PRs: [#273](https://github.com/marcusrbrown/infra/pull/273), [#276](https://github.com/marcusrbrown/infra/pull/276), [#277](https://github.com/marcusrbrown/infra/pull/277), [#278](https://github.com/marcusrbrown/infra/pull/278)
 - Release: [`@marcusrbrown/infra@0.4.11`](https://www.npmjs.com/package/@marcusrbrown/infra/v/0.4.11) ships the Wave 5 fix
+- [../integration-issues/docker-network-stale-subnet-cleanup-2026-06-18.md](../integration-issues/docker-network-stale-subnet-cleanup-2026-06-18.md) — same deploy path; stale Docker network IPAM state blocks compose up after an explicit-subnet topology change, requiring a pull-before-cleanup migration step.

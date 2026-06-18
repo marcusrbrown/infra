@@ -113,15 +113,6 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
   return {spawnFn, calls}
 }
 
-/** Build a minimal valid env with operator listener vars set. */
-function makeOperatorEnv() {
-  return makeEnv({
-    GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
-    GATEWAY_OPERATOR_BIND_PORT: '9300',
-    GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
-  })
-}
-
 /** Build a mock fetch that returns a Discord commands response. */
 function makeDiscordFetch(commands: {name: string}[]): typeof fetch {
   return mock(async () => new Response(JSON.stringify(commands), {status: 200})) as unknown as typeof fetch
@@ -139,17 +130,51 @@ afterEach(() => {
 
 // ─── upstream.json pin regression guard ──────────────────────────────────────
 //
-// This topology requires fro-bot/agent#931 / v0.66.0 because deploy now invokes
-// deploy/validate-stack.sh which was introduced at that version.
-// If upstream.json is ever downgraded below v0.66.0 this test fails immediately.
+// This guard enforces the minimum upstream ref required for the operator auth/config
+// contract. fro-bot/agent v0.69.0 (PR #944 + PR #939) ships the operator browser auth
+// gate (GitHub OAuth, CSRF, allowlist) and session foundation. The four auth/config env
+// vars (GATEWAY_OPERATOR_GITHUB_CLIENT_ID, GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET,
+// GATEWAY_OPERATOR_CSRF_SECRET, GATEWAY_OPERATOR_ALLOWLIST) are only present in
+// packages/gateway/src/config.ts at v0.69.0 or later.
+//
+// If upstream.json is ever downgraded below v0.69.0 this test fails immediately.
+
+/**
+ * Parse a semver tag string like "v0.69.0" into [major, minor, patch].
+ * Returns null if the string does not match the expected format.
+ */
+function parseSemver(ref: string): [number, number, number] | null {
+  const m = /^v(\d+)\.(\d+)\.(\d+)$/.exec(ref)
+  if (!m) return null
+  return [Number.parseInt(m[1] ?? '', 10), Number.parseInt(m[2] ?? '', 10), Number.parseInt(m[3] ?? '', 10)]
+}
+
+/**
+ * Returns true if `ref` is semver-greater-than-or-equal to `min`.
+ * Both must be "vMAJOR.MINOR.PATCH" strings.
+ */
+function semverGte(ref: string, min: string): boolean {
+  const a = parseSemver(ref)
+  const b = parseSemver(min)
+  if (!a || !b) return false
+  if (a[0] !== b[0]) return a[0] > b[0]
+  if (a[1] !== b[1]) return a[1] > b[1]
+  return a[2] >= b[2]
+}
 
 describe('upstream.json pin', () => {
-  test('upstream.json is pinned to exactly v0.66.0 (operator topology requires fro-bot/agent#931)', async () => {
+  test('upstream.json ref is v0.69.0 or later (operator auth/config contract requires fro-bot/agent v0.69.0)', async () => {
     const {resolveUpstreamPin} = await import('./deploy')
     const upstreamPath = join(import.meta.dir, '..', 'upstream.json')
     const pin = resolveUpstreamPin(upstreamPath)
     expect(pin.repo).toBe('fro-bot/agent')
-    expect(pin.ref).toBe('v0.66.0')
+    expect(
+      semverGte(pin.ref, 'v0.69.0'),
+      `upstream.json ref "${pin.ref}" is below v0.69.0. The operator auth/config contract ` +
+        `(GATEWAY_OPERATOR_GITHUB_CLIENT_ID, GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET, ` +
+        `GATEWAY_OPERATOR_CSRF_SECRET, GATEWAY_OPERATOR_ALLOWLIST) requires fro-bot/agent v0.69.0 ` +
+        `(PR #944 + PR #939). Bump upstream.json ref to v0.69.0 or later.`,
+    ).toBe(true)
   })
 })
 
@@ -5642,11 +5667,7 @@ describe('main() — operator config validation before SSH', () => {
     const {spawnFn, calls} = makeSpawnMock()
 
     await main({
-      env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
-        GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
-      }),
+      env: makeOperatorAuthEnv(),
       args: [],
       spawn: spawnFn,
       fetch: makeDiscordFetch([{name: 'ping'}]),
@@ -5700,7 +5721,11 @@ describe('main() — operator health probe', () => {
     }
   })
 
-  test('operator enabled: fetch called with /operator/health URL after compose up', async () => {
+  test('operator enabled: fetch called with /operator/health URL using GATEWAY_HOST (not dashboard origin)', async () => {
+    // The operator health probe must use the gateway-side Caddy route (https://<GATEWAY_HOST>/operator/health),
+    // NOT the dashboard origin (GATEWAY_OPERATOR_PUBLIC_ORIGIN). The dashboard→gateway private path is not
+    // yet active; the gateway Caddy /operator/* route is the correct liveness origin for this topology stage.
+    // See docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md and AGENTS.md.
     const {main} = await import('./deploy')
     const {spawnFn} = makeSpawnMock()
     const fetchedUrls: string[] = []
@@ -5715,11 +5740,7 @@ describe('main() — operator health probe', () => {
     }) as unknown as typeof fetch
 
     await main({
-      env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
-        GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
-      }),
+      env: makeOperatorAuthEnv(),
       args: [],
       spawn: spawnFn,
       fetch: fetchMock,
@@ -5728,7 +5749,9 @@ describe('main() — operator health probe', () => {
 
     const operatorHealthUrl = fetchedUrls.find(u => u.includes('/operator/health'))
     expect(operatorHealthUrl).toBeDefined()
-    expect(operatorHealthUrl).toContain('https://dashboard.fro.bot/operator/health')
+    // Must probe gateway host (gateway.fro.bot), NOT the dashboard origin (dashboard.fro.bot)
+    expect(operatorHealthUrl).toContain('https://gateway.fro.bot/operator/health')
+    expect(operatorHealthUrl).not.toContain('dashboard.fro.bot')
   })
 
   test('operator disabled: fetch NOT called with /operator/health URL', async () => {
@@ -5772,11 +5795,7 @@ describe('main() — operator health probe', () => {
     // Should not throw — operator health probe is warning-only
     await expect(
       main({
-        env: makeEnv({
-          GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
-          GATEWAY_OPERATOR_BIND_PORT: '9300',
-          GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
-        }),
+        env: makeOperatorAuthEnv(),
         args: [],
         spawn: spawnFn,
         fetch: fetchMock,
@@ -6089,11 +6108,7 @@ describe('main() — Caddyfile written when operator enabled (announce disabled)
     })
 
     await main({
-      env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
-        GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
-      }),
+      env: makeOperatorAuthEnv(),
       args: [],
       spawn: spawnFn,
       fetch: makeDiscordFetch([{name: 'ping'}]),
@@ -6123,11 +6138,7 @@ describe('main() — Caddyfile written when operator enabled (announce disabled)
     })
 
     await main({
-      env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
-        GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
-      }),
+      env: makeOperatorAuthEnv(),
       args: [],
       spawn: spawnFn,
       fetch: makeDiscordFetch([{name: 'ping'}]),
@@ -6157,11 +6168,7 @@ describe('main() — Caddyfile written when operator enabled (announce disabled)
     })
 
     await main({
-      env: makeEnv({
-        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
-        GATEWAY_OPERATOR_BIND_PORT: '9300',
-        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
-      }),
+      env: makeOperatorAuthEnv(),
       args: [],
       spawn: spawnFn,
       fetch: makeDiscordFetch([{name: 'ping'}]),
@@ -6455,7 +6462,7 @@ describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
 
     try {
       await main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         spawn: makeSpawnMock().spawnFn,
         fetch: fetchMock as unknown as typeof fetch,
@@ -6483,7 +6490,7 @@ describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
 
     try {
       await main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         spawn: makeSpawnMock().spawnFn,
         fetch: fetchMock as unknown as typeof fetch,
@@ -6515,7 +6522,7 @@ describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
 
     try {
       await main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         spawn: makeSpawnMock().spawnFn,
         fetch: fetchMock as unknown as typeof fetch,
@@ -6572,7 +6579,7 @@ describe('infra rendered-config validation gate (issue 4)', () => {
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -6609,7 +6616,7 @@ describe('infra rendered-config validation gate (issue 4)', () => {
 
     await expect(
       main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -6638,7 +6645,7 @@ describe('infra rendered-config validation gate (issue 4)', () => {
 
     await expect(
       main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -6666,7 +6673,7 @@ describe('infra rendered-config validation gate (issue 4)', () => {
 
     await expect(
       main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -6740,7 +6747,7 @@ describe('Phase 5d rendered-config validation — safe shell quoting (CE review 
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -6770,7 +6777,7 @@ describe('Phase 5d rendered-config validation — safe shell quoting (CE review 
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -6814,7 +6821,7 @@ describe('Phase 5d rendered-config validation — safe shell quoting (CE review 
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7193,7 +7200,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7216,7 +7223,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7241,7 +7248,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7265,7 +7272,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7290,7 +7297,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7316,7 +7323,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7340,7 +7347,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7363,7 +7370,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7387,7 +7394,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7422,7 +7429,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await expect(
       main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -7485,7 +7492,7 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     }) as unknown as typeof fetch
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: mockFetch,
       sleep: async () => {},
@@ -7497,41 +7504,27 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     expect(probedUrls).toHaveLength(1)
     // Must NOT have double slash in the path (the regression pattern)
     expect(probedUrls[0]).not.toMatch(/\/\/operator/)
-    // Must be exactly this URL (no double slash)
-    expect(probedUrls[0]).toBe('https://dashboard.fro.bot/operator/health')
+    // Must probe gateway host (gateway.fro.bot), NOT the dashboard origin (dashboard.fro.bot)
+    expect(probedUrls[0]).toBe('https://gateway.fro.bot/operator/health')
+    expect(probedUrls[0]).not.toContain('dashboard.fro.bot')
   })
 
-  test('URL construction: new URL("/operator/health", origin) normalizes trailing-slash origin correctly', () => {
-    // Unit test for the URL construction fix independent of main().
-    // This directly verifies that new URL('/operator/health', origin).toString()
-    // produces the correct URL even when origin has a trailing slash.
-    const originWithSlash = 'https://dashboard.fro.bot/'
-    const originWithoutSlash = 'https://dashboard.fro.bot'
+  test('URL construction: template literal with GATEWAY_HOST produces correct operator health URL', () => {
+    // Unit test for the URL construction approach used in the operator health probe.
+    // The probe uses a template literal: `https://${host}/operator/health` where host = GATEWAY_HOST.
+    // This is simpler than new URL() since GATEWAY_HOST is already validated as a
+    // safe RFC1123 hostname (no trailing slash, no path component).
+    const host = 'gateway.fro.bot'
+    const probeUrl = `https://${host}/operator/health`
 
-    // String concat (the broken approach):
-    const brokenWithSlash = `${originWithSlash}/operator/health`
-    const brokenWithoutSlash = `${originWithoutSlash}/operator/health`
-
-    // new URL() (the correct approach):
-    const fixedWithSlash = new URL('/operator/health', originWithSlash).toString()
-    const fixedWithoutSlash = new URL('/operator/health', originWithoutSlash).toString()
-
-    // The broken approach produces double slash for trailing-slash origin
-    expect(brokenWithSlash).toContain('//operator')
-    // The broken approach works for no-trailing-slash origin
-    expect(brokenWithoutSlash).not.toContain('//operator')
-
-    // The fixed approach works for both
-    expect(fixedWithSlash).toBe('https://dashboard.fro.bot/operator/health')
-    expect(fixedWithoutSlash).toBe('https://dashboard.fro.bot/operator/health')
-    expect(fixedWithSlash).not.toContain('//operator')
-    expect(fixedWithoutSlash).not.toContain('//operator')
+    expect(probeUrl).toBe('https://gateway.fro.bot/operator/health')
+    expect(probeUrl).not.toContain('//operator')
   })
 
-  test('operator health probe URL is constructed with new URL() not string concat', async () => {
-    // Verify the URL construction is correct by checking the probed URL format.
-    // The fix: new URL('/operator/health', operatorPublicOrigin).toString()
-    // This test verifies the result is correct regardless of implementation.
+  test('operator health probe URL uses GATEWAY_HOST, not GATEWAY_OPERATOR_PUBLIC_ORIGIN', async () => {
+    // The probe must use the gateway-side Caddy route (https://<GATEWAY_HOST>/operator/health),
+    // NOT the dashboard origin (GATEWAY_OPERATOR_PUBLIC_ORIGIN). The dashboard→gateway private
+    // path is not yet active; the gateway Caddy /operator/* route is the correct liveness origin.
     const {main} = await import('./deploy')
     const {spawnFn} = makeSpawnMock()
     const probedUrls: string[] = []
@@ -7545,7 +7538,7 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     }) as unknown as typeof fetch
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: mockFetch,
       sleep: async () => {},
@@ -7555,7 +7548,9 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     })
 
     expect(probedUrls).toHaveLength(1)
-    expect(probedUrls[0]).toBe('https://dashboard.fro.bot/operator/health')
+    // Must probe gateway host (gateway.fro.bot), NOT the dashboard origin (dashboard.fro.bot)
+    expect(probedUrls[0]).toBe('https://gateway.fro.bot/operator/health')
+    expect(probedUrls[0]).not.toContain('dashboard.fro.bot')
     // Verify no double slash in the path
     expect(probedUrls[0]).not.toMatch(/\/\/operator/)
   })
@@ -7607,7 +7602,7 @@ describe('operator health probe — initial log does not expose URL', () => {
 
     try {
       await main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         fetch: mockFetch,
         sleep: async () => {},
@@ -7700,7 +7695,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7767,7 +7762,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7813,7 +7808,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7841,7 +7836,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7886,7 +7881,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
 
     await expect(
       main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -7936,7 +7931,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
 
     await expect(
       main({
-        env: makeOperatorEnv(),
+        env: makeOperatorAuthEnv(),
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -7967,7 +7962,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -8081,7 +8076,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     })
 
     await main({
-      env: makeOperatorEnv(),
+      env: makeOperatorAuthEnv(),
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -8889,5 +8884,855 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     expect(staleWarning).not.toMatch(/before compose pull\/up/i)
     // Must say something like "after compose pull" or "before compose up"
     expect(staleWarning).toMatch(/after.*pull|before.*up/i)
+  })
+})
+
+// ─── getOperatorAuthState ─────────────────────────────────────────────────────
+
+describe('getOperatorAuthState', () => {
+  test('all four auth/config vars present → enabled', async () => {
+    const {getOperatorAuthState} = await import('./deploy')
+    const state = getOperatorAuthState(
+      makeEnv({
+        GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123',
+        GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-abc123',
+        GATEWAY_OPERATOR_CSRF_SECRET: 'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY',
+        GATEWAY_OPERATOR_ALLOWLIST: '12345678',
+      }),
+    )
+    expect(state).toBe('enabled')
+  })
+
+  test('all four absent → disabled', async () => {
+    const {getOperatorAuthState} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_GITHUB_CLIENT_ID
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_CSRF_SECRET
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_ALLOWLIST
+    const state = getOperatorAuthState(env)
+    expect(state).toBe('disabled')
+  })
+
+  test('all four whitespace-only → treated as absent → disabled', async () => {
+    const {getOperatorAuthState} = await import('./deploy')
+    const state = getOperatorAuthState(
+      makeEnv({
+        GATEWAY_OPERATOR_GITHUB_CLIENT_ID: '   ',
+        GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: '   ',
+        GATEWAY_OPERATOR_CSRF_SECRET: '   ',
+        GATEWAY_OPERATOR_ALLOWLIST: '   ',
+      }),
+    )
+    expect(state).toBe('disabled')
+  })
+
+  test('only one var present → invalid', async () => {
+    const {getOperatorAuthState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123'})
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_CSRF_SECRET
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_ALLOWLIST
+    const state = getOperatorAuthState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('two vars present → invalid', async () => {
+    const {getOperatorAuthState} = await import('./deploy')
+    const env = makeEnv({
+      GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123',
+      GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-abc123',
+    })
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_CSRF_SECRET
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_ALLOWLIST
+    const state = getOperatorAuthState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('three vars present → invalid', async () => {
+    const {getOperatorAuthState} = await import('./deploy')
+    const env = makeEnv({
+      GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123',
+      GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-abc123',
+      GATEWAY_OPERATOR_CSRF_SECRET: 'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY',
+    })
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_ALLOWLIST
+    const state = getOperatorAuthState(env)
+    expect(state).toBe('invalid')
+  })
+})
+
+// ─── validateOperatorAuthConfig ───────────────────────────────────────────────
+
+// Valid CSRF secret: 43 base64url chars (no padding), decodes to 32 bytes.
+// Generated from: Buffer.from('a'.repeat(32)).toString('base64url')
+const VALID_CSRF_SECRET = 'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'
+
+describe('validateOperatorAuthConfig', () => {
+  // ── happy path ──────────────────────────────────────────────────────────────
+
+  test('valid inputs → no throw', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '12345678\n87654321',
+      }),
+    ).not.toThrow()
+  })
+
+  test('single numeric ID in allowlist → no throw', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '12345678',
+      }),
+    ).not.toThrow()
+  })
+
+  // ── client ID errors ────────────────────────────────────────────────────────
+
+  test('empty githubClientId → throws', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: '',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '12345678',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_GITHUB_CLIENT_ID/)
+  })
+
+  // ── client secret errors ────────────────────────────────────────────────────
+
+  test('empty githubClientSecret → throws', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: '',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '12345678',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET/)
+  })
+
+  // ── CSRF secret errors ──────────────────────────────────────────────────────
+
+  test('CSRF secret with padding = → throws', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: 'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=',
+        allowlist: '12345678',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_CSRF_SECRET/)
+  })
+
+  test('CSRF secret with whitespace → throws', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: 'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE ',
+        allowlist: '12345678',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_CSRF_SECRET/)
+  })
+
+  test('CSRF secret with newline → throws', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: 'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE\n',
+        allowlist: '12345678',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_CSRF_SECRET/)
+  })
+
+  test('CSRF secret decoding to fewer than 32 bytes → throws', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    // 'YWJj' decodes to 'abc' (3 bytes)
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: 'YWJj',
+        allowlist: '12345678',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_CSRF_SECRET/)
+  })
+
+  test('empty CSRF secret → throws', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: '',
+        allowlist: '12345678',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_CSRF_SECRET/)
+  })
+
+  // ── allowlist errors ────────────────────────────────────────────────────────
+
+  test('empty allowlist → throws', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_ALLOWLIST/)
+  })
+
+  test('non-numeric line in allowlist → throws with line number', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '12345678\nnot-a-number',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_ALLOWLIST/)
+  })
+
+  // ── upstream-aligned allowlist semantics (fro-bot/agent v0.69.0) ────────────
+  // Upstream ignores blank/whitespace-only lines and supports full-line # comments.
+  // Infra pre-deploy validation must match upstream parser semantics.
+
+  test('blank lines in allowlist are ignored (upstream semantics) → no throw', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '12345678\n\n87654321',
+      }),
+    ).not.toThrow()
+  })
+
+  test('whitespace-only lines in allowlist are ignored → no throw', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '12345678\n   \n87654321',
+      }),
+    ).not.toThrow()
+  })
+
+  test('full-line # comment in allowlist is ignored → no throw', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '# authorized operators\n12345678\n87654321',
+      }),
+    ).not.toThrow()
+  })
+
+  test('# comment with leading whitespace in allowlist is ignored → no throw', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '12345678\n  # trailing comment\n87654321',
+      }),
+    ).not.toThrow()
+  })
+
+  test('allowlist with only blank lines and comments → throws (empty effective allowlist)', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '# just a comment\n\n  ',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_ALLOWLIST/)
+  })
+
+  test('allowlist with only comments → throws (empty effective allowlist)', async () => {
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '# comment one\n# comment two',
+      }),
+    ).toThrow(/GATEWAY_OPERATOR_ALLOWLIST/)
+  })
+
+  test('inline comment on allowlist line (e.g. "12345678 # comment") is rejected as non-numeric', async () => {
+    // Upstream parser semantics: only FULL-LINE comments (trimmed line starts with #) are ignored.
+    // An inline comment like "12345678 # comment" is NOT a full-line comment — the trimmed value
+    // is "12345678 # comment" which fails /^\d+$/ and must be rejected.
+    const {validateOperatorAuthConfig} = await import('./deploy')
+    expect(() =>
+      validateOperatorAuthConfig({
+        githubClientId: 'Iv1.abc123',
+        githubClientSecret: 'secret-abc123',
+        csrfSecret: VALID_CSRF_SECRET,
+        allowlist: '12345678 # comment',
+      }),
+    ).toThrow(/not a numeric GitHub user ID/)
+  })
+})
+
+// ─── Unit 3: buildSecretFileList — operator auth/config secret files ──────────
+
+// Valid operator auth env vars for Unit 3 tests.
+const VALID_OPERATOR_AUTH_ENV = {
+  GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123',
+  GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-abc123',
+  GATEWAY_OPERATOR_CSRF_SECRET: VALID_CSRF_SECRET,
+  GATEWAY_OPERATOR_ALLOWLIST: '12345678\n87654321',
+}
+
+/** Build env with operator listener trio + auth/config vars. */
+function makeOperatorAuthEnv(overrides: Record<string, string> = {}): Record<string, string> {
+  return makeEnv({
+    GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
+    GATEWAY_OPERATOR_BIND_PORT: '9300',
+    GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
+    ...VALID_OPERATOR_AUTH_ENV,
+    ...overrides,
+  })
+}
+
+describe('buildSecretFileList — operator auth/config secret files', () => {
+  test('operator listener enabled + all four auth vars present → four operator auth secret files appended', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeOperatorAuthEnv())
+    const names = secrets.map(s => s.name)
+    expect(names).toContain('gateway-operator-github-client-id')
+    expect(names).toContain('gateway-operator-github-client-secret')
+    expect(names).toContain('gateway-operator-csrf-secret')
+    expect(names).toContain('gateway-operator-allowlist')
+  })
+
+  test('operator listener enabled + all four auth vars present → secret contents match env values', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeOperatorAuthEnv())
+    const clientId = secrets.find(s => s.name === 'gateway-operator-github-client-id')
+    const clientSecret = secrets.find(s => s.name === 'gateway-operator-github-client-secret')
+    const csrfSecret = secrets.find(s => s.name === 'gateway-operator-csrf-secret')
+    const allowlist = secrets.find(s => s.name === 'gateway-operator-allowlist')
+    expect(clientId?.content).toBe('Iv1.abc123')
+    expect(clientSecret?.content).toBe('secret-abc123')
+    expect(csrfSecret?.content).toBe(VALID_CSRF_SECRET)
+    expect(allowlist?.content).toBe('12345678\n87654321')
+  })
+
+  test('operator listener enabled + all four auth vars present → all four entries have required: false', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makeOperatorAuthEnv())
+    for (const name of [
+      'gateway-operator-github-client-id',
+      'gateway-operator-github-client-secret',
+      'gateway-operator-csrf-secret',
+      'gateway-operator-allowlist',
+    ]) {
+      const entry = secrets.find(s => s.name === name)
+      expect(entry?.required, `${name} should have required: false`).toBe(false)
+    }
+  })
+
+  test('operator listener disabled → no operator auth secret files emitted even if auth vars are set', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    // Auth vars present but listener trio absent
+    const env = makeEnv({...VALID_OPERATOR_AUTH_ENV})
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_HOST
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_BIND_PORT
+    delete (env as Record<string, string>).GATEWAY_OPERATOR_PUBLIC_ORIGIN
+    const secrets = buildSecretFileList(env)
+    const names = secrets.map(s => s.name)
+    expect(names).not.toContain('gateway-operator-github-client-id')
+    expect(names).not.toContain('gateway-operator-github-client-secret')
+    expect(names).not.toContain('gateway-operator-csrf-secret')
+    expect(names).not.toContain('gateway-operator-allowlist')
+  })
+
+  test('operator listener enabled + auth vars absent → no operator auth secret files emitted', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    // Listener trio present but auth vars absent
+    const env = makeEnv({
+      GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
+      GATEWAY_OPERATOR_BIND_PORT: '9300',
+      GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
+    })
+    const secrets = buildSecretFileList(env)
+    const names = secrets.map(s => s.name)
+    expect(names).not.toContain('gateway-operator-github-client-id')
+    expect(names).not.toContain('gateway-operator-github-client-secret')
+    expect(names).not.toContain('gateway-operator-csrf-secret')
+    expect(names).not.toContain('gateway-operator-allowlist')
+  })
+
+  test('operator listener enabled + auth enabled → output length is baseline + 4', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const baseSecrets = buildSecretFileList(makeEnv())
+    const authSecrets = buildSecretFileList(makeOperatorAuthEnv())
+    expect(authSecrets).toHaveLength(baseSecrets.length + 4)
+  })
+
+  test('allowlist multiline text preserved verbatim in secret content', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const multilineAllowlist = '# authorized operators\n12345678\n87654321\n'
+    const secrets = buildSecretFileList(makeOperatorAuthEnv({GATEWAY_OPERATOR_ALLOWLIST: multilineAllowlist}))
+    const entry = secrets.find(s => s.name === 'gateway-operator-allowlist')
+    expect(entry?.content).toBe(multilineAllowlist)
+  })
+})
+
+// ─── Unit 3: checksum sensitivity to operator auth/config values ──────────────
+
+describe('computeSecretsChecksum — operator auth/config rotation sensitivity', () => {
+  test('checksum changes when GATEWAY_OPERATOR_GITHUB_CLIENT_ID changes', async () => {
+    const {buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const a = buildSecretFileList(makeOperatorAuthEnv({GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.aaa'}))
+    const b = buildSecretFileList(makeOperatorAuthEnv({GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.bbb'}))
+    expect(computeSecretsChecksum(a)).not.toBe(computeSecretsChecksum(b))
+  })
+
+  test('checksum changes when GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET changes', async () => {
+    const {buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const a = buildSecretFileList(makeOperatorAuthEnv({GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-aaa'}))
+    const b = buildSecretFileList(makeOperatorAuthEnv({GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-bbb'}))
+    expect(computeSecretsChecksum(a)).not.toBe(computeSecretsChecksum(b))
+  })
+
+  test('checksum changes when GATEWAY_OPERATOR_CSRF_SECRET changes', async () => {
+    const {buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    // Two different valid CSRF secrets (both ≥32 decoded bytes)
+    const csrfA = 'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE' // 'a'.repeat(32) base64url
+    const csrfB = 'YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI' // 'b'.repeat(32) base64url
+    const a = buildSecretFileList(makeOperatorAuthEnv({GATEWAY_OPERATOR_CSRF_SECRET: csrfA}))
+    const b = buildSecretFileList(makeOperatorAuthEnv({GATEWAY_OPERATOR_CSRF_SECRET: csrfB}))
+    expect(computeSecretsChecksum(a)).not.toBe(computeSecretsChecksum(b))
+  })
+
+  test('checksum changes when GATEWAY_OPERATOR_ALLOWLIST changes', async () => {
+    const {buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const a = buildSecretFileList(makeOperatorAuthEnv({GATEWAY_OPERATOR_ALLOWLIST: '12345678'}))
+    const b = buildSecretFileList(makeOperatorAuthEnv({GATEWAY_OPERATOR_ALLOWLIST: '87654321'}))
+    expect(computeSecretsChecksum(a)).not.toBe(computeSecretsChecksum(b))
+  })
+
+  test('checksum with operator auth differs from baseline without operator auth', async () => {
+    const {buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const base = buildSecretFileList(makeEnv())
+    const withAuth = buildSecretFileList(makeOperatorAuthEnv())
+    expect(computeSecretsChecksum(withAuth)).not.toBe(computeSecretsChecksum(base))
+  })
+})
+
+// ─── Unit 3: main() fail-fast for partial operator auth config ────────────────
+
+describe('main() — operator auth/config fail-fast gate (Unit 3)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('operator listener enabled + only one auth var set → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const env = makeEnv({
+      GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
+      GATEWAY_OPERATOR_BIND_PORT: '9300',
+      GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
+      GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123',
+    })
+    // Only one of four auth vars set → invalid state
+
+    await expect(main({env, args: [], spawn: spawnFn})).rejects.toThrow(/GATEWAY_OPERATOR/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('operator listener enabled + three of four auth vars set → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const env = makeEnv({
+      GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
+      GATEWAY_OPERATOR_BIND_PORT: '9300',
+      GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
+      GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123',
+      GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-abc123',
+      GATEWAY_OPERATOR_CSRF_SECRET: VALID_CSRF_SECRET,
+      // GATEWAY_OPERATOR_ALLOWLIST absent
+    })
+
+    await expect(main({env, args: [], spawn: spawnFn})).rejects.toThrow(/GATEWAY_OPERATOR/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('operator listener enabled + all four auth vars valid → deploy proceeds (spawn called)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeOperatorAuthEnv(),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  test('operator listener enabled + all four auth vars absent → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    // Listener trio present, all four auth vars absent — invalid per v0.69.0 contract
+    const env = makeEnv({
+      GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
+      GATEWAY_OPERATOR_BIND_PORT: '9300',
+      GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
+    })
+
+    await expect(main({env, args: [], spawn: spawnFn})).rejects.toThrow(
+      /GATEWAY_OPERATOR_GITHUB_CLIENT_ID.*GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET.*GATEWAY_OPERATOR_CSRF_SECRET.*GATEWAY_OPERATOR_ALLOWLIST/,
+    )
+    expect(calls).toHaveLength(0)
+  })
+
+  test('operator listener disabled + auth vars absent → deploy proceeds (no auth gate triggered)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    const env = makeEnv()
+    // No operator vars at all
+
+    await main({
+      env,
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  test('operator listener enabled + invalid CSRF secret → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({GATEWAY_OPERATOR_CSRF_SECRET: 'tooshort'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_OPERATOR_CSRF_SECRET/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('operator listener enabled + invalid allowlist (non-numeric line) → throws before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({GATEWAY_OPERATOR_ALLOWLIST: 'not-a-number'}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_OPERATOR_ALLOWLIST/)
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ─── Unit 4: buildComposeOverride — operator auth _FILE env vars, bind mounts, tuning vars ──
+
+describe('buildComposeOverride — operator auth _FILE env vars and bind mounts (Unit 4)', () => {
+  // ── Required≡wired invariant (R9): single combined assertion ─────────────────
+  // This is the infra-side guard against the class of failure documented in
+  // docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md.
+  // Do NOT split this invariant across separate test cases.
+  test('required≡wired invariant: operatorAuthEnabled=true with all file names and all tuning vars → override contains listener trio + four _FILE env vars + four bind mounts + three tuning vars, no bare secret values', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.21.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://dashboard.fro.bot',
+      operatorAuthEnabled: true,
+      operatorGithubClientIdFile: 'gateway-operator-github-client-id',
+      operatorGithubClientSecretFile: 'gateway-operator-github-client-secret',
+      operatorCsrfSecretFile: 'gateway-operator-csrf-secret',
+      operatorAllowlistFile: 'gateway-operator-allowlist',
+      operatorOauthAllowedReturnPaths: '/operator,/operator/dashboard',
+      operatorOauthStateTtlMs: '300000',
+      operatorOauthMaxOutstandingAttempts: '10',
+    })
+
+    // Listener trio env vars
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_HOST: 172.21.0.2')
+    expect(yaml).toContain('GATEWAY_OPERATOR_BIND_PORT: 9300')
+    expect(yaml).toContain('GATEWAY_OPERATOR_PUBLIC_ORIGIN: https://dashboard.fro.bot')
+
+    // Four _FILE env vars (container paths use snake_case per upstream compose convention)
+    expect(yaml).toContain('GATEWAY_OPERATOR_GITHUB_CLIENT_ID_FILE: /run/secrets/gateway_operator_github_client_id')
+    expect(yaml).toContain(
+      'GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET_FILE: /run/secrets/gateway_operator_github_client_secret',
+    )
+    expect(yaml).toContain('GATEWAY_OPERATOR_CSRF_SECRET_FILE: /run/secrets/gateway_operator_csrf_secret')
+    expect(yaml).toContain('GATEWAY_OPERATOR_ALLOWLIST_FILE: /run/secrets/gateway_operator_allowlist')
+
+    // Four bind mounts (host paths use kebab-case secret file names)
+    expect(yaml).toContain('./secrets/gateway-operator-github-client-id')
+    expect(yaml).toContain('/run/secrets/gateway_operator_github_client_id')
+    expect(yaml).toContain('./secrets/gateway-operator-github-client-secret')
+    expect(yaml).toContain('/run/secrets/gateway_operator_github_client_secret')
+    expect(yaml).toContain('./secrets/gateway-operator-csrf-secret')
+    expect(yaml).toContain('/run/secrets/gateway_operator_csrf_secret')
+    expect(yaml).toContain('./secrets/gateway-operator-allowlist')
+    expect(yaml).toContain('/run/secrets/gateway_operator_allowlist')
+
+    // Three optional tuning vars as plain env entries
+    expect(yaml).toContain('GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS: /operator,/operator/dashboard')
+    expect(yaml).toContain('GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS: 300000')
+    expect(yaml).toContain('GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS: 10')
+
+    // No bare secret values — only _FILE pointers
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_GITHUB_CLIENT_ID:')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET:')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_CSRF_SECRET:')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_ALLOWLIST:')
+  })
+
+  test('operatorAuthEnabled=false → no auth _FILE env vars or bind mounts in override', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.21.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://dashboard.fro.bot',
+      operatorAuthEnabled: false,
+    })
+
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_GITHUB_CLIENT_ID_FILE')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET_FILE')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_CSRF_SECRET_FILE')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_ALLOWLIST_FILE')
+    expect(yaml).not.toContain('gateway_operator_github_client_id')
+    expect(yaml).not.toContain('gateway_operator_github_client_secret')
+    expect(yaml).not.toContain('gateway_operator_csrf_secret')
+    expect(yaml).not.toContain('gateway_operator_allowlist')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS')
+  })
+
+  test('operatorAuthEnabled=true with optional tuning vars absent → tuning vars not emitted', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.21.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://dashboard.fro.bot',
+      operatorAuthEnabled: true,
+      operatorGithubClientIdFile: 'gateway-operator-github-client-id',
+      operatorGithubClientSecretFile: 'gateway-operator-github-client-secret',
+      operatorCsrfSecretFile: 'gateway-operator-csrf-secret',
+      operatorAllowlistFile: 'gateway-operator-allowlist',
+      // No tuning vars
+    })
+
+    // _FILE env vars and mounts must still be present
+    expect(yaml).toContain('GATEWAY_OPERATOR_GITHUB_CLIENT_ID_FILE')
+    expect(yaml).toContain('GATEWAY_OPERATOR_CSRF_SECRET_FILE')
+
+    // Tuning vars must NOT be emitted
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS')
+  })
+
+  test('operatorAuthEnabled=true with missing file names → throws naming the missing options', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    // operatorAuthEnabled=true but no file names provided — must throw, not silently skip
+    expect(() =>
+      buildComposeOverride({
+        gatewayDigest: GATEWAY_DIGEST,
+        workspaceDigest: WORKSPACE_DIGEST,
+        announceEnabled: false,
+        operatorEnabled: true,
+        operatorBindHost: '172.21.0.2',
+        operatorBindPort: '9300',
+        operatorPublicOrigin: 'https://dashboard.fro.bot',
+        operatorAuthEnabled: true,
+        // No file names provided
+      }),
+    ).toThrow(/operatorGithubClientIdFile/)
+  })
+
+  test('operatorAuthEnabled=true with one missing file name → throws naming that option', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    // Three of four provided — the missing one must appear in the error
+    expect(() =>
+      buildComposeOverride({
+        gatewayDigest: GATEWAY_DIGEST,
+        workspaceDigest: WORKSPACE_DIGEST,
+        announceEnabled: false,
+        operatorEnabled: true,
+        operatorBindHost: '172.21.0.2',
+        operatorBindPort: '9300',
+        operatorPublicOrigin: 'https://dashboard.fro.bot',
+        operatorAuthEnabled: true,
+        operatorGithubClientIdFile: 'gateway-operator-github-client-id',
+        operatorGithubClientSecretFile: 'gateway-operator-github-client-secret',
+        operatorCsrfSecretFile: 'gateway-operator-csrf-secret',
+        // operatorAllowlistFile missing
+      }),
+    ).toThrow(/operatorAllowlistFile/)
+  })
+
+  test('operatorAuthEnabled=true with whitespace-only file name → throws naming that option', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    expect(() =>
+      buildComposeOverride({
+        gatewayDigest: GATEWAY_DIGEST,
+        workspaceDigest: WORKSPACE_DIGEST,
+        announceEnabled: false,
+        operatorEnabled: true,
+        operatorBindHost: '172.21.0.2',
+        operatorBindPort: '9300',
+        operatorPublicOrigin: 'https://dashboard.fro.bot',
+        operatorAuthEnabled: true,
+        operatorGithubClientIdFile: 'gateway-operator-github-client-id',
+        operatorGithubClientSecretFile: '   ', // whitespace-only
+        operatorCsrfSecretFile: 'gateway-operator-csrf-secret',
+        operatorAllowlistFile: 'gateway-operator-allowlist',
+      }),
+    ).toThrow(/operatorGithubClientSecretFile/)
+  })
+
+  test('bind mounts use read_only: true and create_host_path: false', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.21.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://dashboard.fro.bot',
+      operatorAuthEnabled: true,
+      operatorGithubClientIdFile: 'gateway-operator-github-client-id',
+      operatorGithubClientSecretFile: 'gateway-operator-github-client-secret',
+      operatorCsrfSecretFile: 'gateway-operator-csrf-secret',
+      operatorAllowlistFile: 'gateway-operator-allowlist',
+    })
+
+    // The operator auth section must use read_only: true and create_host_path: false
+    // (same style as announce volumes)
+    const authSection = yaml.slice(yaml.indexOf('gateway_operator_github_client_id'))
+    expect(yaml).toContain('read_only: true')
+    expect(yaml).toContain('create_host_path: false')
+    // Verify the pattern appears in the operator auth section specifically
+    expect(authSection).toContain('read_only: true')
+  })
+})
+
+// ─── Unit 4: main() dry-run with operator auth → prints callback preflight ────
+
+describe('main() — dry-run with operator auth enabled → callback URL preflight (Unit 4)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('dry-run with operator auth enabled → console output contains expected OAuth callback URL from GATEWAY_OPERATOR_PUBLIC_ORIGIN', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+      origWarn(...args)
+    }
+
+    try {
+      await main({
+        env: makeOperatorAuthEnv(),
+        args: ['--dry-run'],
+        spawn: spawnFn,
+      })
+    } finally {
+      console.warn = origWarn
+    }
+
+    const allOutput = warnMessages.join('\n')
+    // Must print the expected OAuth callback URL for manual cross-check against GitHub OAuth App settings
+    expect(allOutput).toContain('https://dashboard.fro.bot/operator/auth/github/callback')
   })
 })

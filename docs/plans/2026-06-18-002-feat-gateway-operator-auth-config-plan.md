@@ -599,7 +599,7 @@ If operator auth/config wiring needs to be disabled after deployment:
 4. The deploy detects `getOperatorState` returns `'disabled'` (listener trio absent), skips all
    operator auth/config wiring, and runs `docker compose up --remove-orphans`.
 5. The gateway restarts with the operator listener disabled. All active operator sessions are
-   invalidated (v1 in-memory — no data rollback needed).
+   invalidated (in-memory — no data rollback needed).
 6. Verify: `bunx @marcusrbrown/infra gateway status` shows all services healthy.
 
 **Note:** Listener trio present + auth/config secrets absent is not a valid state — `main()` will
@@ -613,36 +613,34 @@ entirely; the gateway continues to serve all other routes normally.
 
 After the first deploy with operator auth/config wiring:
 
-1. **Gateway-side health probe:** Verify the operator listener is up using the currently deployed
-   gateway Caddy route:
-   ```
-   GET https://gateway.fro.bot/operator/health
-   ```
-   This route is already live from `infra#579`; confirm it returns 200 after the auth-wired
-   restart. Alternatively, probe the listener directly from the droplet:
+1. **Gateway-side health probe:** Verify the operator listener is up using the droplet-local direct
+   probe (run on the droplet or via SSH):
    ```bash
    curl -sf http://172.21.0.2:9300/operator/health
    ```
-   (The `172.21.0.2:9300` address is the gateway-net-internal operator listener; use this if the
-   public gateway Caddy route is intentionally not exposed for this probe.)
+   This should return `200 {"ok":true}`.
 
-    **⚠ Liveness probe warning:** Do **not** use `https://dashboard.fro.bot/operator/health` or
-    any `https://dashboard.fro.bot/operator/*` URL as a liveness probe at this stage. The
-    dashboard Caddy `/operator/*` reverse proxy and private dashboard→gateway path are out of scope
-    for this plan and remain deferred to
-    `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`. Use
-    `https://gateway.fro.bot/operator/health` (public gateway Caddy route) or
-    `http://172.21.0.2:9300/operator/health` (droplet-local gateway-net probe) for gateway-side
-    liveness verification. The OAuth callback URL registration uses the dashboard origin
-    (`https://dashboard.fro.bot/operator/auth/github/callback`) — this is a GitHub OAuth App
-    setting, not a live HTTP probe target. Do not use dashboard-origin URLs as liveness probes
-    until the private path task lands.
+   **⚠ Liveness probe warning:** Do **not** use `https://dashboard.fro.bot/operator/health` or
+   any `https://dashboard.fro.bot/operator/*` URL as a liveness probe. The dashboard Caddy
+   `/operator/*` reverse proxy and private dashboard→gateway path are deferred to
+   `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`. Do **not** use
+   `https://gateway.fro.bot/operator/health` as a liveness probe either — through Caddy, the
+   v0.69.0 operator endpoint validates forwarded headers and requires `X-Forwarded-Host` to equal
+   the `PUBLIC_ORIGIN` host (`dashboard.fro.bot`); because Caddy forwards `Host: gateway.fro.bot`,
+   the forwarded-host mismatches and the endpoint returns `400 {"error":"bad request"}` by design.
+   There is no trusted-proxy config knob in v0.69.0. The only valid gateway-side liveness probe is
+   the droplet-local direct probe: `curl -sf http://172.21.0.2:9300/operator/health` →
+   `200 {"ok":true}`. The OAuth callback URL registration uses the dashboard origin
+   (`https://dashboard.fro.bot/operator/auth/github/callback`) — this is a GitHub OAuth App
+   setting, not a live HTTP probe target.
 
-2. **Auth gate coarse check:** `GET https://gateway.fro.bot/operator/` (or any non-health
-   operator path via the gateway Caddy route) should return a non-5xx, non-404 response — likely
-   a redirect to the GitHub OAuth flow or a structured auth-required response. The exact response
-   shape depends on upstream routing; the goal is to confirm the auth gate is active and not
-   crashing the gateway.
+2. **Auth gate coarse check:** `GET https://gateway.fro.bot/operator/` (or any non-health operator
+   path via the gateway Caddy route) returns `400 {"error":"bad request"}` by design — the
+   forwarded-header guard rejects it because the forwarded host (`gateway.fro.bot`) does not match
+   the `PUBLIC_ORIGIN` host (`dashboard.fro.bot`). The auth-gate / OAuth-redirect coarse check is
+   only meaningful through the real same-origin path (`https://dashboard.fro.bot/operator/*`, once
+   the dashboard same-origin plan lands) or via the direct listener with appropriate forwarded
+   headers. Via `gateway.fro.bot/operator/` the 400 is expected and correct.
 
 3. **Callback URL preflight:** Before triggering the OAuth flow, verify the expected callback URL
    string. The deploy dry-run output (or validation helper) prints:

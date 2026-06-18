@@ -100,16 +100,13 @@ Leave these unset to use upstream defaults (`/operator`, `600000`, `5`).
    bunx @marcusrbrown/infra gateway deploy
    ```
 2. **Approve the environment gate** in GitHub Actions.
-3. **Verify gateway-side liveness** using the gateway Caddy route:
-   ```bash
-   curl -sf https://gateway.fro.bot/operator/health
-   ```
-   Or probe the listener directly from the droplet:
+3. **Verify gateway-side liveness** using the droplet-local direct probe (run on the droplet or via SSH):
    ```bash
    curl -sf http://172.21.0.2:9300/operator/health
    ```
+   This should return `200 {"ok":true}`.
 
-   **⚠ Liveness probe warning:** Do **not** use `https://dashboard.fro.bot/operator/health` or any `https://dashboard.fro.bot/operator/*` URL as a liveness probe. The dashboard Caddy `/operator/*` reverse proxy and private dashboard→gateway path are deferred to `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`. Use `https://gateway.fro.bot/operator/health` (public gateway Caddy route) or `http://172.21.0.2:9300/operator/health` (droplet-local gateway-net probe) for gateway-side liveness verification. The OAuth callback URL registration uses the dashboard origin — this is a GitHub OAuth App setting, not a live HTTP probe target.
+   **⚠ Liveness probe warning:** Do **not** use `https://dashboard.fro.bot/operator/health` or any `https://dashboard.fro.bot/operator/*` URL as a liveness probe. The dashboard Caddy `/operator/*` reverse proxy and private dashboard→gateway path are deferred to `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`. Do **not** use `https://gateway.fro.bot/operator/health` as a liveness probe either — through Caddy, the v0.69.0 operator endpoint validates forwarded headers and requires `X-Forwarded-Host` to equal the `PUBLIC_ORIGIN` host (`dashboard.fro.bot`); because Caddy forwards `Host: gateway.fro.bot`, the forwarded-host mismatches and the endpoint returns `400 {"error":"bad request"}` by design. There is no trusted-proxy config knob in v0.69.0. The only valid gateway-side liveness probe is the droplet-local direct probe: `curl -sf http://172.21.0.2:9300/operator/health` → `200 {"ok":true}`. The OAuth callback URL registration uses the dashboard origin — this is a GitHub OAuth App setting, not a live HTTP probe target.
 
 4. **Callback URL preflight:** The deploy dry-run output prints the expected callback URL:
    ```
@@ -117,7 +114,7 @@ Leave these unset to use upstream defaults (`/operator`, `600000`, `5`).
    ```
    Cross-check this string against the **Authorization callback URL** field in the GitHub OAuth App settings (GitHub Developer Portal → OAuth Apps → your app). This portal check is manual and must be completed before enablement. Infra cannot read or validate the OAuth App callback registration via API — no public GitHub API surface exposes this field.
 
-5. **Auth gate coarse check:** `GET https://gateway.fro.bot/operator/` should return a non-5xx, non-404 response — likely a redirect to the GitHub OAuth flow or a structured auth-required response.
+5. **Auth gate coarse check:** `GET https://gateway.fro.bot/operator/` returns `400 {"error":"bad request"}` by design — the forwarded-header guard rejects it because the forwarded host (`gateway.fro.bot`) does not match the `PUBLIC_ORIGIN` host (`dashboard.fro.bot`). The auth-gate / OAuth-redirect coarse check is only meaningful through the real same-origin path (`https://dashboard.fro.bot/operator/*`, once the dashboard same-origin plan lands) or via the direct listener with appropriate forwarded headers. Via `gateway.fro.bot/operator/` the 400 is expected and correct.
 
 6. **Allowlist enforcement check:** Attempt to complete the OAuth flow with a GitHub account that is NOT in the allowlist. Confirm the response is a coarse auth-failure (non-5xx, no route or allowlist detail leaked).
 
@@ -139,7 +136,7 @@ Leave these unset to use upstream defaults (`/operator`, `600000`, `5`).
    ```
 4. Trigger a deploy: `bunx @marcusrbrown/infra gateway deploy`.
 5. Approve the environment gate.
-6. Verify: `curl -sf https://gateway.fro.bot/operator/health` returns 200.
+6. Verify: `curl -sf http://172.21.0.2:9300/operator/health` (run on the droplet or via SSH) returns `200 {"ok":true}`.
 7. Delete the old client secret in the GitHub OAuth App settings.
 
 Sessions are in-memory — the restart triggered by the checksum change invalidates all active operator sessions. Operators must re-authenticate after the deploy.
@@ -153,7 +150,7 @@ Sessions are in-memory — the restart triggered by the checksum change invalida
    ```
 3. Trigger a deploy: `bunx @marcusrbrown/infra gateway deploy`.
 4. Approve the environment gate.
-5. Verify: `curl -sf https://gateway.fro.bot/operator/health` returns 200.
+5. Verify: `curl -sf http://172.21.0.2:9300/operator/health` (run on the droplet or via SSH) returns `200 {"ok":true}`.
 
 ### Updating the allowlist
 

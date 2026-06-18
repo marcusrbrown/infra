@@ -7670,7 +7670,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     }
   })
 
-  test('operator mode: stale gateway-net (172.20.0.0/16) is removed before docker compose pull', async () => {
+  test('operator mode: stale gateway-net (172.20.0.0/16) is removed after docker compose pull and before docker compose up', async () => {
     const {main} = await import('./deploy')
     const eventLog: string[] = []
 
@@ -7692,6 +7692,10 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
       if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
         eventLog.push('compose-pull')
       }
+      // docker compose up
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        eventLog.push('compose-up')
+      }
       return undefined
     })
 
@@ -7706,19 +7710,23 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     const inspectIdx = eventLog.indexOf('network-inspect')
     const rmIdx = eventLog.indexOf('network-rm')
     const pullIdx = eventLog.indexOf('compose-pull')
+    const upIdx = eventLog.indexOf('compose-up')
 
-    // All three must have occurred
+    // All four must have occurred
     expect(inspectIdx).toBeGreaterThanOrEqual(0)
     expect(rmIdx).toBeGreaterThanOrEqual(0)
     expect(pullIdx).toBeGreaterThanOrEqual(0)
+    expect(upIdx).toBeGreaterThanOrEqual(0)
 
-    // Removal must happen before pull
-    expect(rmIdx).toBeLessThan(pullIdx)
+    // Pull must happen before removal (images cached before container disruption)
+    expect(pullIdx).toBeLessThan(rmIdx)
     // Inspect must happen before removal
     expect(inspectIdx).toBeLessThan(rmIdx)
+    // Removal must happen before up
+    expect(rmIdx).toBeLessThan(upIdx)
   })
 
-  test('operator mode: cleanup runs after compose.override.yaml write and rendered-config validation', async () => {
+  test('operator mode: cleanup runs after compose.override.yaml write, rendered-config validation, and docker compose pull', async () => {
     const {main} = await import('./deploy')
     const eventLog: string[] = []
 
@@ -7743,6 +7751,8 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
             networks: {'gateway-net': {ipam: {config: [{subnet: '172.21.0.0/16'}]}}},
           }),
         })
+      } else if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
       } else if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
         eventLog.push('network-inspect')
         return makeSpawnResult({
@@ -7750,8 +7760,8 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
         })
       } else if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
         eventLog.push('network-rm')
-      } else if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
-        eventLog.push('compose-pull')
+      } else if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        eventLog.push('compose-up')
       }
       return undefined
     })
@@ -7767,9 +7777,10 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     const overrideIdx = eventLog.indexOf('write-override')
     const validateIdx = eventLog.indexOf('validate-stack')
     const renderedIdx = eventLog.indexOf('rendered-config-validation')
+    const pullIdx = eventLog.indexOf('compose-pull')
     const inspectIdx = eventLog.indexOf('network-inspect')
     const rmIdx = eventLog.indexOf('network-rm')
-    const pullIdx = eventLog.indexOf('compose-pull')
+    const upIdx = eventLog.indexOf('compose-up')
 
     // Cleanup must run after override write
     expect(inspectIdx).toBeGreaterThan(overrideIdx)
@@ -7777,8 +7788,10 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     expect(inspectIdx).toBeGreaterThan(validateIdx)
     // Cleanup must run after rendered-config validation (when operator mode)
     expect(inspectIdx).toBeGreaterThan(renderedIdx)
-    // Removal before pull
-    expect(rmIdx).toBeLessThan(pullIdx)
+    // Cleanup must run after docker compose pull (pull-before-disruption invariant)
+    expect(inspectIdx).toBeGreaterThan(pullIdx)
+    // Removal must happen before up
+    expect(rmIdx).toBeLessThan(upIdx)
   })
 
   test('operator mode: network with correct subnet (172.21.0.0/16) is NOT removed', async () => {
@@ -7839,9 +7852,11 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     expect(networkRmCalls).toHaveLength(0)
   })
 
-  test('operator mode: stale network removal failure fails closed before docker compose pull', async () => {
+  test('operator mode: stale network removal failure fails closed before docker compose up (pull already ran)', async () => {
     const {main} = await import('./deploy')
     const composePullCalls: string[] = []
+    const composeUpCalls: string[] = []
+    const composeStopCalls: string[] = []
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
@@ -7851,14 +7866,20 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
         })
       }
       if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
-        // Removal fails (e.g. network still has active endpoints)
+        // Non-active-endpoint failure — must fail closed immediately without retry
         return makeSpawnResult({
           exitCode: 1,
-          stderr: 'Error response from daemon: network fro-bot_gateway-net id ... has active endpoints',
+          stderr: 'Error response from daemon: permission denied',
         })
       }
       if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
         composePullCalls.push(cmdStr)
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        composeUpCalls.push(cmdStr)
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' stop')) {
+        composeStopCalls.push(cmdStr)
       }
       return undefined
     })
@@ -7871,10 +7892,64 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
         sleep: async () => {},
         spawn: spawnFn,
       }),
-    ).rejects.toThrow(/stale.*gateway-net|network rm|fro-bot_gateway-net/i)
+    ).rejects.toThrow(/Failed to remove stale.*fro-bot_gateway-net.*permission denied/i)
 
-    // docker compose pull must NOT have been invoked
-    expect(composePullCalls).toHaveLength(0)
+    // Must NOT have called docker compose stop (no active-endpoint retry path)
+    expect(composeStopCalls).toHaveLength(0)
+    // docker compose pull MUST have been invoked (pull happens before cleanup)
+    expect(composePullCalls.length).toBeGreaterThan(0)
+    // docker compose up must NOT have been invoked (cleanup failed before up)
+    expect(composeUpCalls).toHaveLength(0)
+  })
+
+  test('operator mode: non-active-endpoint network rm failure fails closed without stopping services (pull already ran)', async () => {
+    const {main} = await import('./deploy')
+    const composePullCalls: string[] = []
+    const composeUpCalls: string[] = []
+    const composeStopCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        // Non-active-endpoint failure — must fail closed immediately
+        return makeSpawnResult({
+          exitCode: 1,
+          stderr: 'Error response from daemon: permission denied',
+        })
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        composePullCalls.push(cmdStr)
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        composeUpCalls.push(cmdStr)
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' stop')) {
+        composeStopCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/Failed to remove stale.*fro-bot_gateway-net.*permission denied/i)
+
+    // Must NOT have called docker compose stop (no active-endpoint retry)
+    expect(composeStopCalls).toHaveLength(0)
+    // docker compose pull MUST have been invoked (pull happens before cleanup)
+    expect(composePullCalls.length).toBeGreaterThan(0)
+    // docker compose up must NOT have been invoked (cleanup failed before up)
+    expect(composeUpCalls).toHaveLength(0)
   })
 
   test('operator mode: targets fro-bot_gateway-net (not bare gateway-net)', async () => {
@@ -7938,7 +8013,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     expect(networkInspectCmds.length).toBeGreaterThan(0)
   })
 
-  test('non-operator mode: stale gateway-net (172.20.0.0/16) is removed before docker compose pull', async () => {
+  test('non-operator mode: stale gateway-net (172.20.0.0/16) is removed after docker compose pull and before docker compose up', async () => {
     const {main} = await import('./deploy')
     const eventLog: string[] = []
 
@@ -7957,6 +8032,9 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
       if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
         eventLog.push('compose-pull')
       }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        eventLog.push('compose-up')
+      }
       return undefined
     })
 
@@ -7971,14 +8049,18 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     const inspectIdx = eventLog.indexOf('network-inspect')
     const rmIdx = eventLog.indexOf('network-rm')
     const pullIdx = eventLog.indexOf('compose-pull')
+    const upIdx = eventLog.indexOf('compose-up')
 
-    // All three must have occurred
+    // All four must have occurred
     expect(inspectIdx).toBeGreaterThanOrEqual(0)
     expect(rmIdx).toBeGreaterThanOrEqual(0)
     expect(pullIdx).toBeGreaterThanOrEqual(0)
+    expect(upIdx).toBeGreaterThanOrEqual(0)
 
-    // Removal must happen before pull
-    expect(rmIdx).toBeLessThan(pullIdx)
+    // Pull must happen before removal (images cached before container disruption)
+    expect(pullIdx).toBeLessThan(rmIdx)
+    // Removal must happen before compose up
+    expect(rmIdx).toBeLessThan(upIdx)
   })
 
   test('operator mode: stale network removal does not use shell metacharacters in network name', async () => {
@@ -8016,5 +8098,796 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     // Must not contain shell injection characters in the network name position
     const networkNameArg = rmCmd.find(a => a.includes('fro-bot_gateway-net'))
     expect(networkNameArg).toBeDefined()
+  })
+
+  // ── active-endpoint recovery (run 27737556059 regression) ──────────────────
+  //
+  // When `docker network rm fro-bot_gateway-net` fails because gateway/caddy
+  // containers are still attached (active endpoints), removeStaleGatewayNet must:
+  //   1. REMOVE (not just stop) the services that own gateway-net endpoints (gateway + caddy)
+  //      using `docker compose rm -f -s gateway caddy` or equivalent endpoint-release command.
+  //      Stopped containers can still keep active endpoints — stop alone is not sufficient.
+  //   2. Retry `docker network rm fro-bot_gateway-net`
+  //   3. Continue to docker compose pull/up on success
+  //
+  // Fail-closed invariants:
+  //   - If endpoint release fails → deploy fails before pull/up
+  //   - If second rm fails → deploy fails before pull/up with error mentioning containers removed
+  //   - No endpoint release when network is missing or already has correct subnet
+  //   - Non-active-endpoint first rm failure fails closed before endpoint release
+  //   - Endpoint release is scoped to gateway+caddy only (never workspace/mitmproxy)
+
+  // RED: endpoint release must use `rm` (remove containers), not just `stop`
+  // Stopped containers can still keep active endpoints — Docker network endpoints are tied
+  // to container lifetime/network attachment, not run state.
+  test('RED: active-endpoint recovery uses docker compose rm (not just stop) to release endpoints', async () => {
+    const {removeStaleGatewayNet} = await import('./deploy')
+    const rmCmds: string[] = []
+    const stopCmds: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.19.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        // First rm fails with active endpoints
+        if (!rmCmds.some(c => c.includes('network rm'))) {
+          rmCmds.push(cmdStr)
+          return makeSpawnResult({
+            exitCode: 1,
+            stderr: 'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints',
+          })
+        }
+        rmCmds.push(cmdStr)
+        return makeSpawnResult()
+      }
+      // Track stop-only commands (should NOT be used for endpoint release)
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' stop ') && !cmdStr.includes(' rm ')) {
+        stopCmds.push(cmdStr)
+      }
+      return undefined
+    })
+
+    const deployEnv = {PATH: '/usr/bin:/bin', HOME: '/root', GATEWAY_HOST: 'gateway.fro.bot'}
+    await removeStaleGatewayNet('gateway.fro.bot', deployEnv, spawnFn)
+
+    // The endpoint release command must NOT be a bare `stop` — it must be `rm` (or `rm -f -s`)
+    // to actually remove the containers and release their network endpoints.
+    // A bare `stop` leaves containers attached to the network.
+    expect(stopCmds).toHaveLength(0)
+  })
+
+  // Endpoint release command must be scoped to gateway+caddy only
+  test('endpoint release command targets only gateway and caddy containers (fro-bot-gateway-1, fro-bot-caddy-1), not workspace or mitmproxy', async () => {
+    const {removeStaleGatewayNet} = await import('./deploy')
+    const dockerRmCmds: string[] = []
+    let networkRmCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.19.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        networkRmCount++
+        if (networkRmCount === 1) {
+          return makeSpawnResult({
+            exitCode: 1,
+            stderr: 'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints',
+          })
+        }
+        return makeSpawnResult()
+      }
+      // Capture direct docker rm -f calls (the endpoint release mechanism)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        dockerRmCmds.push(cmdStr)
+      }
+      return undefined
+    })
+
+    const deployEnv = {PATH: '/usr/bin:/bin', HOME: '/root', GATEWAY_HOST: 'gateway.fro.bot'}
+    await removeStaleGatewayNet('gateway.fro.bot', deployEnv, spawnFn)
+
+    // Must have issued exactly 2 docker rm -f calls (one per container)
+    expect(dockerRmCmds).toHaveLength(2)
+    // Must target fro-bot-gateway-1 and fro-bot-caddy-1 (the known static container names)
+    expect(dockerRmCmds.some(c => c.includes('fro-bot-gateway-1'))).toBe(true)
+    expect(dockerRmCmds.some(c => c.includes('fro-bot-caddy-1'))).toBe(true)
+    // Must NOT target workspace or mitmproxy
+    expect(dockerRmCmds.every(c => !c.includes('workspace'))).toBe(true)
+    expect(dockerRmCmds.every(c => !c.includes('mitmproxy'))).toBe(true)
+  })
+
+  // RED: retry failure after endpoint release must mention containers were removed/stopped
+  test('RED: retry rm failure after endpoint release error mentions containers were removed and operator should rerun', async () => {
+    const {removeStaleGatewayNet} = await import('./deploy')
+    let rmCallCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.19.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        rmCallCount++
+        // Both rm attempts fail
+        return makeSpawnResult({
+          exitCode: 1,
+          stderr:
+            rmCallCount === 1
+              ? 'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints'
+              : 'Error response from daemon: network fro-bot_gateway-net id abc still has active endpoints',
+        })
+      }
+      // Endpoint release succeeds
+      return undefined
+    })
+
+    const deployEnv = {PATH: '/usr/bin:/bin', HOME: '/root', GATEWAY_HOST: 'gateway.fro.bot'}
+    let caughtError: Error | undefined
+    try {
+      await removeStaleGatewayNet('gateway.fro.bot', deployEnv, spawnFn)
+    } catch (error) {
+      caughtError = error instanceof Error ? error : new Error(String(error))
+    }
+
+    expect(caughtError).toBeDefined()
+    // Error must mention that containers were removed/stopped so operator knows state
+    const msg = caughtError!.message.toLowerCase()
+    expect(msg).toMatch(/removed|stopped/)
+    // Error must guide operator to rerun deploy or bring services back up
+    expect(msg).toMatch(/rerun|redeploy|docker compose up|up -d/)
+  })
+
+  // RED: non-active-endpoint first rm failure must fail closed before endpoint release
+  test('RED: non-active-endpoint first rm failure fails closed without triggering endpoint release', async () => {
+    const {removeStaleGatewayNet} = await import('./deploy')
+    const endpointReleaseCmds: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.19.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        // Fails with a non-active-endpoint error (e.g. permission denied)
+        return makeSpawnResult({
+          exitCode: 1,
+          stderr: 'Error response from daemon: permission denied while trying to remove network',
+        })
+      }
+      if (cmdStr.includes('docker compose') && (cmdStr.includes(' rm ') || cmdStr.includes(' stop '))) {
+        endpointReleaseCmds.push(cmdStr)
+      }
+      return undefined
+    })
+
+    const deployEnv = {PATH: '/usr/bin:/bin', HOME: '/root', GATEWAY_HOST: 'gateway.fro.bot'}
+    await expect(removeStaleGatewayNet('gateway.fro.bot', deployEnv, spawnFn)).rejects.toThrow()
+
+    // No endpoint release should have been attempted for non-active-endpoint errors
+    expect(endpointReleaseCmds).toHaveLength(0)
+  })
+
+  test('active endpoints: removes gateway+caddy containers (docker rm -f) then retries rm, deploy continues to up (pull already ran)', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+    let rmCallCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.19.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        rmCallCount++
+        if (rmCallCount === 1) {
+          // First rm fails: active endpoints
+          return makeSpawnResult({
+            exitCode: 1,
+            stderr:
+              'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints (name:"fro-bot-gateway-1" ..., name:"fro-bot-caddy-1" ...)',
+          })
+        }
+        // Second rm succeeds
+        eventLog.push('network-rm-retry')
+        return makeSpawnResult()
+      }
+      // Direct docker rm -f (the new endpoint release mechanism)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        eventLog.push('container-rm')
+        return makeSpawnResult()
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        eventLog.push('compose-up')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Pull must have happened first (before any container disruption)
+    expect(eventLog).toContain('compose-pull')
+    // Container removal must have happened (at least once — two docker rm -f calls)
+    expect(eventLog).toContain('container-rm')
+    // Second rm must have happened
+    expect(eventLog).toContain('network-rm-retry')
+    // Up must have happened (deploy continued)
+    expect(eventLog).toContain('compose-up')
+    // Pull must happen before container removal (images cached before disruption)
+    expect(eventLog.indexOf('compose-pull')).toBeLessThan(eventLog.indexOf('container-rm'))
+    // Container removal must happen before second rm
+    expect(eventLog.lastIndexOf('container-rm')).toBeLessThan(eventLog.indexOf('network-rm-retry'))
+    // Second rm must happen before up
+    expect(eventLog.indexOf('network-rm-retry')).toBeLessThan(eventLog.indexOf('compose-up'))
+  })
+
+  test('active endpoints: container removal failure fails closed before docker compose up (pull already ran)', async () => {
+    const {main} = await import('./deploy')
+    const composePullCalls: string[] = []
+    const composeUpCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.19.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        // First rm always fails with active endpoints
+        return makeSpawnResult({
+          exitCode: 1,
+          stderr: 'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints',
+        })
+      }
+      // Direct docker rm -f fails (container removal fails — not "No such container")
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        return makeSpawnResult({exitCode: 1, stderr: 'Error response from daemon: failed to remove container'})
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        composePullCalls.push(cmdStr)
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        composeUpCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    // docker compose pull MUST have been invoked (pull happens before cleanup)
+    expect(composePullCalls.length).toBeGreaterThan(0)
+    // docker compose up must NOT have been invoked (cleanup failed before up)
+    expect(composeUpCalls).toHaveLength(0)
+  })
+
+  test('active endpoints: second rm failure after container removal fails closed before docker compose up (pull already ran)', async () => {
+    const {main} = await import('./deploy')
+    const composePullCalls: string[] = []
+    const composeUpCalls: string[] = []
+    let rmCallCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.19.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        rmCallCount++
+        // Both rm attempts fail
+        return makeSpawnResult({
+          exitCode: 1,
+          stderr:
+            rmCallCount === 1
+              ? 'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints'
+              : 'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints (still)',
+        })
+      }
+      // Direct docker rm -f succeeds (container removal succeeds)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        return makeSpawnResult()
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        composePullCalls.push(cmdStr)
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        composeUpCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow()
+
+    // docker compose pull MUST have been invoked (pull happens before cleanup)
+    expect(composePullCalls.length).toBeGreaterThan(0)
+    // docker compose up must NOT have been invoked (cleanup failed before up)
+    expect(composeUpCalls).toHaveLength(0)
+  })
+
+  test('active endpoints: no container removal when network is missing (inspect exits non-zero)', async () => {
+    const {main} = await import('./deploy')
+    const containerRmCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        // Network does not exist
+        return makeSpawnResult({exitCode: 1, stderr: 'Error: No such network: fro-bot_gateway-net'})
+      }
+      // Track direct docker rm -f calls (should not be used when network is missing)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        containerRmCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // No container removal when network doesn't exist
+    expect(containerRmCalls).toHaveLength(0)
+  })
+
+  test('active endpoints: no container removal when network already has correct subnet', async () => {
+    const {main} = await import('./deploy')
+    const containerRmCalls: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        // Network already has correct subnet
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.21.0.0/16'}]}}]),
+        })
+      }
+      // Track direct docker rm -f calls (should not be used when subnet is correct)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        containerRmCalls.push(cmdStr)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // No container removal when subnet is already correct
+    expect(containerRmCalls).toHaveLength(0)
+  })
+
+  // ── pull-before-disruption ordering (safety migration) ────────────────────
+  //
+  // removeStaleGatewayNet must run AFTER docker compose pull and BEFORE docker compose up.
+  // This prevents avoidable downtime: if the image pull fails after gateway/caddy containers
+  // have already been removed, the service is left in a degraded state with no way to recover
+  // without a manual re-deploy. By pulling first, we ensure images are available before
+  // any container disruption occurs.
+
+  test('RED: stale network cleanup runs AFTER docker compose pull and BEFORE docker compose up', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        eventLog.push('network-inspect')
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        eventLog.push('network-rm')
+        return makeSpawnResult()
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        eventLog.push('compose-up')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const pullIdx = eventLog.indexOf('compose-pull')
+    const rmIdx = eventLog.indexOf('network-rm')
+    const upIdx = eventLog.indexOf('compose-up')
+
+    // All three must have occurred
+    expect(pullIdx).toBeGreaterThanOrEqual(0)
+    expect(rmIdx).toBeGreaterThanOrEqual(0)
+    expect(upIdx).toBeGreaterThanOrEqual(0)
+
+    // pull must happen BEFORE network cleanup
+    expect(pullIdx).toBeLessThan(rmIdx)
+    // network cleanup must happen BEFORE compose up
+    expect(rmIdx).toBeLessThan(upIdx)
+  })
+
+  test('stale network cleanup (active-endpoint path) runs AFTER docker compose pull and BEFORE docker compose up', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+    let rmCallCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        rmCallCount++
+        if (rmCallCount === 1) {
+          return makeSpawnResult({
+            exitCode: 1,
+            stderr: 'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints',
+          })
+        }
+        eventLog.push('network-rm-retry')
+        return makeSpawnResult()
+      }
+      // Direct docker rm -f (the new endpoint release mechanism)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        eventLog.push('container-rm')
+        return makeSpawnResult()
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        eventLog.push('compose-up')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const pullIdx = eventLog.indexOf('compose-pull')
+    const containerRmIdx = eventLog.indexOf('container-rm')
+    const networkRmIdx = eventLog.indexOf('network-rm-retry')
+    const upIdx = eventLog.indexOf('compose-up')
+
+    // All must have occurred
+    expect(pullIdx).toBeGreaterThanOrEqual(0)
+    expect(containerRmIdx).toBeGreaterThanOrEqual(0)
+    expect(networkRmIdx).toBeGreaterThanOrEqual(0)
+    expect(upIdx).toBeGreaterThanOrEqual(0)
+
+    // pull must happen BEFORE any container disruption
+    expect(pullIdx).toBeLessThan(containerRmIdx)
+    // container rm must happen before network rm retry
+    expect(eventLog.lastIndexOf('container-rm')).toBeLessThan(networkRmIdx)
+    // network rm must happen before compose up
+    expect(networkRmIdx).toBeLessThan(upIdx)
+  })
+
+  test('active endpoints: rm retry count is exactly 2 (first fails with active endpoints, second succeeds)', async () => {
+    const {main} = await import('./deploy')
+    let rmCallCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.19.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        rmCallCount++
+        if (rmCallCount === 1) {
+          return makeSpawnResult({
+            exitCode: 1,
+            stderr: 'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints',
+          })
+        }
+        return makeSpawnResult()
+      }
+      // Direct docker rm -f succeeds (container removal succeeds)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        return makeSpawnResult()
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Exactly 2 rm attempts: first fails, second succeeds
+    expect(rmCallCount).toBe(2)
+  })
+
+  // ── caddy-disabled orphan recovery ────────────────────────────────────────
+  //
+  // When caddy is disabled (no announce/operator), the freshly written compose
+  // override omits the caddy service. `docker compose rm ... caddy` would fail
+  // because caddy is not a known service in the current config. The endpoint
+  // release must instead use `docker rm -f` on the known static container names
+  // (`fro-bot-gateway-1`, `fro-bot-caddy-1`) so it tolerates orphan caddy
+  // containers left over from a prior announce/operator deploy.
+
+  test('caddy-disabled: active endpoints from orphan caddy are released via docker rm -f (not docker compose rm)', async () => {
+    // RED: current implementation uses `docker compose rm -f -s gateway caddy`
+    // which fails when caddy is absent from the current compose config.
+    // The fix must use `docker rm -f fro-bot-gateway-1` / `docker rm -f fro-bot-caddy-1`
+    // (or equivalent direct container removal) instead.
+    const {removeStaleGatewayNet} = await import('./deploy')
+    const composeRmCmds: string[] = []
+    const dockerRmCmds: string[] = []
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        if (!eventLog.includes('network-rm-first')) {
+          eventLog.push('network-rm-first')
+          // First rm fails: active endpoints from gateway + orphan caddy
+          return makeSpawnResult({
+            exitCode: 1,
+            stderr:
+              'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints (name:"fro-bot-gateway-1" ..., name:"fro-bot-caddy-1" ...)',
+          })
+        }
+        eventLog.push('network-rm-retry')
+        return makeSpawnResult()
+      }
+      // Track docker compose rm (should NOT be used — caddy absent from current config)
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' rm ')) {
+        composeRmCmds.push(cmdStr)
+        // Simulate failure: caddy is not a known service in current compose config
+        if (cmdStr.includes('caddy')) {
+          return makeSpawnResult({
+            exitCode: 1,
+            stderr: 'no such service: caddy',
+          })
+        }
+      }
+      // Track direct docker rm -f calls (the correct approach)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        dockerRmCmds.push(cmdStr)
+        eventLog.push('docker-rm-f')
+        // Simulate: gateway container exists and is removed; caddy container is orphan (also removed)
+        return makeSpawnResult()
+      }
+      return undefined
+    })
+
+    const deployEnv = {PATH: '/usr/bin:/bin', HOME: '/root', GATEWAY_HOST: 'gateway.fro.bot'}
+    await removeStaleGatewayNet('gateway.fro.bot', deployEnv, spawnFn)
+
+    // Must have retried network rm after endpoint release
+    expect(eventLog).toContain('network-rm-retry')
+    // Must have used direct docker rm -f (not docker compose rm which fails without caddy in config)
+    expect(dockerRmCmds.length).toBeGreaterThan(0)
+    // Must have targeted fro-bot-gateway-1 and fro-bot-caddy-1 (the known static container names)
+    const gatewayRm = dockerRmCmds.some(c => c.includes('fro-bot-gateway-1'))
+    const caddyRm = dockerRmCmds.some(c => c.includes('fro-bot-caddy-1'))
+    expect(gatewayRm).toBe(true)
+    expect(caddyRm).toBe(true)
+  })
+
+  test('caddy-disabled: endpoint release does not use docker compose rm (which requires caddy in current config)', async () => {
+    // `docker compose rm -f -s gateway caddy` requires caddy to be in the
+    // current compose config. When caddy is disabled, this command fails with
+    // "no such service: caddy", leaving the stale network wedged.
+    // The fix uses `docker rm -f fro-bot-gateway-1` / `docker rm -f fro-bot-caddy-1` instead.
+    const {removeStaleGatewayNet} = await import('./deploy')
+    const composeRmCmds: string[] = []
+    let networkRmCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        networkRmCount++
+        if (networkRmCount === 1) {
+          // First rm fails: active endpoints
+          return makeSpawnResult({
+            exitCode: 1,
+            stderr: 'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints',
+          })
+        }
+        // Second rm succeeds (after endpoint release)
+        return makeSpawnResult()
+      }
+      // Track docker compose rm calls — these must NOT be used
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' rm ')) {
+        composeRmCmds.push(cmdStr)
+        // Simulate caddy-disabled failure: caddy not in current compose config
+        return makeSpawnResult({exitCode: 1, stderr: 'no such service: caddy'})
+      }
+      // Allow direct docker rm -f (the correct approach)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        return makeSpawnResult()
+      }
+      return undefined
+    })
+
+    const deployEnv = {PATH: '/usr/bin:/bin', HOME: '/root', GATEWAY_HOST: 'gateway.fro.bot'}
+    // Must succeed (not throw) even when caddy is absent from current compose config
+    await expect(removeStaleGatewayNet('gateway.fro.bot', deployEnv, spawnFn)).resolves.toBeUndefined()
+    // Must NOT have used docker compose rm (which fails without caddy in config)
+    expect(composeRmCmds).toHaveLength(0)
+  })
+
+  test('caddy-disabled: full deploy reaches docker compose up --remove-orphans after orphan caddy endpoint release', async () => {
+    // RED: when caddy is absent from current compose config and active endpoints
+    // include orphan caddy, the deploy must still reach `docker compose up --remove-orphans`.
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+    let networkRmCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+        })
+      }
+      if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+        networkRmCount++
+        if (networkRmCount === 1) {
+          return makeSpawnResult({
+            exitCode: 1,
+            stderr:
+              'Error response from daemon: network fro-bot_gateway-net id abc has active endpoints (name:"fro-bot-gateway-1" ..., name:"fro-bot-caddy-1" ...)',
+          })
+        }
+        eventLog.push('network-rm-retry')
+        return makeSpawnResult()
+      }
+      // docker compose rm must NOT be used (caddy absent from current config)
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' rm ')) {
+        // Simulate caddy-disabled failure
+        return makeSpawnResult({exitCode: 1, stderr: 'no such service: caddy'})
+      }
+      // Direct docker rm -f succeeds (handles orphan caddy gracefully)
+      if (cmdStr.includes('docker rm') && cmdStr.includes('-f') && !cmdStr.includes('docker compose')) {
+        eventLog.push('docker-rm-f')
+        return makeSpawnResult()
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' pull')) {
+        eventLog.push('compose-pull')
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        eventLog.push('compose-up')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv(), // non-operator: caddy disabled
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Pull must have happened
+    expect(eventLog).toContain('compose-pull')
+    // Direct docker rm -f must have been used for endpoint release
+    expect(eventLog).toContain('docker-rm-f')
+    // Network rm retry must have happened
+    expect(eventLog).toContain('network-rm-retry')
+    // Deploy must have reached compose up
+    expect(eventLog).toContain('compose-up')
+    // Ordering: pull → docker-rm-f → network-rm-retry → compose-up
+    expect(eventLog.indexOf('compose-pull')).toBeLessThan(eventLog.indexOf('docker-rm-f'))
+    expect(eventLog.indexOf('docker-rm-f')).toBeLessThan(eventLog.indexOf('network-rm-retry'))
+    expect(eventLog.indexOf('network-rm-retry')).toBeLessThan(eventLog.indexOf('compose-up'))
+  })
+
+  test('stale network warning text says "after compose pull / before compose up" (not "before compose pull/up")', async () => {
+    // RED: current warning says "removing before compose pull/up" which is wrong —
+    // cleanup now runs AFTER pull and BEFORE up.
+    const {removeStaleGatewayNet} = await import('./deploy')
+    const warnMessages: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.map(String).join(' '))
+    }
+
+    try {
+      const {spawnFn} = makeSpawnMock(cmd => {
+        const cmdStr = cmd.join(' ')
+        if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+          return makeSpawnResult({
+            stdout: JSON.stringify([{IPAM: {Config: [{Subnet: '172.20.0.0/16'}]}}]),
+          })
+        }
+        if (cmdStr.includes('docker network rm') && cmdStr.includes('fro-bot_gateway-net')) {
+          return makeSpawnResult()
+        }
+        return undefined
+      })
+
+      const deployEnv = {PATH: '/usr/bin:/bin', HOME: '/root', GATEWAY_HOST: 'gateway.fro.bot'}
+      await removeStaleGatewayNet('gateway.fro.bot', deployEnv, spawnFn)
+    } finally {
+      console.warn = originalWarn
+    }
+
+    // Find the stale-subnet warning message
+    const staleWarning = warnMessages.find(m => m.includes('stale subnet'))
+    expect(staleWarning).toBeDefined()
+    // Must NOT say "before compose pull/up" (that was the old incorrect text)
+    expect(staleWarning).not.toMatch(/before compose pull\/up/i)
+    // Must say something like "after compose pull" or "before compose up"
+    expect(staleWarning).toMatch(/after.*pull|before.*up/i)
   })
 })

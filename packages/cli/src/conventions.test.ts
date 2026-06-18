@@ -645,6 +645,206 @@ describe('dorny/paths-filter quantifier guard', () => {
   })
 })
 
+// ─── Unit 5: operator auth/config secrets and tuning vars ────────────────────
+//
+// RED tests for Unit 5 of 2026-06-18-002-feat-gateway-operator-auth-config-plan.md
+// These assert the four new auth/config secrets and three optional tuning vars are
+// wired through deploy-gateway.yaml (workflow_call.secrets + inputs + deploy step env),
+// deploy.yaml (fan-out secrets + with inputs), and the CLI passthrough.
+
+const OPERATOR_AUTH_SECRETS = [
+  'GATEWAY_OPERATOR_GITHUB_CLIENT_ID',
+  'GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET',
+  'GATEWAY_OPERATOR_CSRF_SECRET',
+  'GATEWAY_OPERATOR_ALLOWLIST',
+] as const
+
+const OPERATOR_TUNING_SECRETS = [
+  'GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS',
+  'GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS',
+  'GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS',
+] as const
+
+describe('deploy-gateway.yaml: operator auth/config secrets in workflow_call.secrets', () => {
+  const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
+
+  for (const secret of OPERATOR_AUTH_SECRETS) {
+    it(`workflow_call.secrets declares ${secret} as optional (required: false)`, async () => {
+      const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}}
+      const secrets = parsed?.on?.workflow_call?.secrets ?? {}
+      expect(secrets).toHaveProperty(secret)
+      expect(secrets[secret]?.required).toBe(false)
+    })
+  }
+})
+
+describe('deploy-gateway.yaml: operator tuning vars in workflow_call.secrets', () => {
+  const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
+
+  for (const secret of OPERATOR_TUNING_SECRETS) {
+    it(`workflow_call.secrets declares ${secret} as optional (required: false)`, async () => {
+      const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}}
+      const secrets = parsed?.on?.workflow_call?.secrets ?? {}
+      expect(secrets).toHaveProperty(secret)
+      expect(secrets[secret]?.required).toBe(false)
+    })
+  }
+
+  it('workflow_call.inputs does NOT declare any GATEWAY_OPERATOR_OAUTH_ tuning vars', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {on?: {workflow_call?: {inputs?: Record<string, unknown>}}}
+    const inputs = parsed?.on?.workflow_call?.inputs ?? {}
+    for (const secret of OPERATOR_TUNING_SECRETS) {
+      expect(inputs).not.toHaveProperty(secret)
+    }
+  })
+})
+
+describe('deploy-gateway.yaml: deploy step env forwards operator auth/config vars', () => {
+  const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
+
+  for (const secret of OPERATOR_AUTH_SECRETS) {
+    it(`Deploy gateway step env forwards ${secret}`, async () => {
+      const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {
+        jobs?: {'deploy-gateway'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
+      }
+      const steps = parsed?.jobs?.['deploy-gateway']?.steps ?? []
+      const deployStep = steps.find(s => s.name === 'Deploy gateway')
+      expect(deployStep).toBeDefined()
+      expect(deployStep?.env).toHaveProperty(secret)
+      expect(deployStep?.env?.[secret]).toContain(secret)
+    })
+  }
+
+  for (const secret of OPERATOR_TUNING_SECRETS) {
+    it(`Deploy gateway step env forwards ${secret} from secrets context (not inputs)`, async () => {
+      const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {
+        jobs?: {'deploy-gateway'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
+      }
+      const steps = parsed?.jobs?.['deploy-gateway']?.steps ?? []
+      const deployStep = steps.find(s => s.name === 'Deploy gateway')
+      expect(deployStep).toBeDefined()
+      expect(deployStep?.env).toHaveProperty(secret)
+      // Must source from secrets context, not inputs context
+      expect(deployStep?.env?.[secret]).toMatch(/\$\{\{\s*secrets\./)
+    })
+  }
+})
+
+describe('deploy.yaml: fan-out passes operator auth/config secrets to deploy-gateway job', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  for (const secret of OPERATOR_AUTH_SECRETS) {
+    it(`deploy-gateway job secrets block passes ${secret}`, async () => {
+      const text = await Bun.file(DEPLOY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {
+        jobs?: {'deploy-gateway'?: {secrets?: Record<string, string>}}
+      }
+      const secrets = parsed?.jobs?.['deploy-gateway']?.secrets ?? {}
+      expect(secrets).toHaveProperty(secret)
+      expect(secrets[secret]).toContain(secret)
+    })
+  }
+})
+
+describe('deploy.yaml: fan-out passes operator tuning vars via secrets: to deploy-gateway job', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  for (const secret of OPERATOR_TUNING_SECRETS) {
+    it(`deploy-gateway job secrets block passes ${secret}`, async () => {
+      const text = await Bun.file(DEPLOY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {
+        jobs?: {'deploy-gateway'?: {secrets?: Record<string, string>}}
+      }
+      const secrets = parsed?.jobs?.['deploy-gateway']?.secrets ?? {}
+      expect(secrets).toHaveProperty(secret)
+      expect(secrets[secret]).toContain(secret)
+    })
+  }
+
+  it('deploy-gateway job does NOT have a with: block for GATEWAY_OPERATOR_OAUTH_ tuning vars', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-gateway'?: {with?: Record<string, unknown>}}
+    }
+    const withBlock = parsed?.jobs?.['deploy-gateway']?.with ?? {}
+    for (const secret of OPERATOR_TUNING_SECRETS) {
+      expect(withBlock).not.toHaveProperty(secret)
+    }
+  })
+})
+
+describe('CLI getGatewayDeployEnv: operator auth/config passthrough', () => {
+  it('getGatewayDeployEnv includes all four operator auth/config secret vars', async () => {
+    const {getGatewayDeployEnv} = await import('./commands/gateway/deploy')
+    // Provide required env vars
+    const origEnv = {...process.env}
+    process.env.PATH = '/usr/bin'
+    process.env.HOME = '/home/test'
+    process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'
+    try {
+      const env = getGatewayDeployEnv()
+      for (const secret of OPERATOR_AUTH_SECRETS) {
+        expect(env).toHaveProperty(secret)
+      }
+    } finally {
+      Object.assign(process.env, origEnv)
+    }
+  })
+
+  it('getGatewayDeployEnv includes all three operator tuning vars', async () => {
+    const {getGatewayDeployEnv} = await import('./commands/gateway/deploy')
+    const origEnv = {...process.env}
+    process.env.PATH = '/usr/bin'
+    process.env.HOME = '/home/test'
+    process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'
+    try {
+      const env = getGatewayDeployEnv()
+      for (const secret of OPERATOR_TUNING_SECRETS) {
+        expect(env).toHaveProperty(secret)
+      }
+    } finally {
+      Object.assign(process.env, origEnv)
+    }
+  })
+
+  it('getGatewayDeployEnv includes GATEWAY_IMAGE_DIGEST', async () => {
+    const {getGatewayDeployEnv} = await import('./commands/gateway/deploy')
+    const origEnv = {...process.env}
+    process.env.PATH = '/usr/bin'
+    process.env.HOME = '/home/test'
+    process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'
+    process.env.GATEWAY_IMAGE_DIGEST = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    try {
+      const env = getGatewayDeployEnv()
+      expect(env).toHaveProperty('GATEWAY_IMAGE_DIGEST')
+      expect(env.GATEWAY_IMAGE_DIGEST).toBe('sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+    } finally {
+      Object.assign(process.env, origEnv)
+    }
+  })
+
+  it('getGatewayDeployEnv includes WORKSPACE_IMAGE_DIGEST', async () => {
+    const {getGatewayDeployEnv} = await import('./commands/gateway/deploy')
+    const origEnv = {...process.env}
+    process.env.PATH = '/usr/bin'
+    process.env.HOME = '/home/test'
+    process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'
+    process.env.WORKSPACE_IMAGE_DIGEST = 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    try {
+      const env = getGatewayDeployEnv()
+      expect(env).toHaveProperty('WORKSPACE_IMAGE_DIGEST')
+      expect(env.WORKSPACE_IMAGE_DIGEST).toBe('sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
+    } finally {
+      Object.assign(process.env, origEnv)
+    }
+  })
+})
+
 // ─── deploy.yaml: aggregate router passes operator secrets to deploy-gateway ──
 
 describe('deploy.yaml: aggregate router forwards operator secrets to deploy-gateway job', () => {

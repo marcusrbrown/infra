@@ -59,6 +59,20 @@ on:
         required: false
       GATEWAY_OPERATOR_PUBLIC_ORIGIN:
         required: false
+      GATEWAY_OPERATOR_GITHUB_CLIENT_ID:
+        required: false
+      GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET:
+        required: false
+      GATEWAY_OPERATOR_CSRF_SECRET:
+        required: false
+      GATEWAY_OPERATOR_ALLOWLIST:
+        required: false
+      GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS:
+        required: false
+      GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS:
+        required: false
+      GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS:
+        required: false
 
 concurrency:
   group: deploy-gateway-${{ github.ref_name }}
@@ -200,5 +214,12 @@ jobs:
           GATEWAY_OPERATOR_BIND_HOST: ${{ secrets.GATEWAY_OPERATOR_BIND_HOST }}
           GATEWAY_OPERATOR_BIND_PORT: ${{ secrets.GATEWAY_OPERATOR_BIND_PORT }}
           GATEWAY_OPERATOR_PUBLIC_ORIGIN: ${{ secrets.GATEWAY_OPERATOR_PUBLIC_ORIGIN }}
+          GATEWAY_OPERATOR_GITHUB_CLIENT_ID: ${{ secrets.GATEWAY_OPERATOR_GITHUB_CLIENT_ID }}
+          GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: ${{ secrets.GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET }}
+          GATEWAY_OPERATOR_CSRF_SECRET: ${{ secrets.GATEWAY_OPERATOR_CSRF_SECRET }}
+          GATEWAY_OPERATOR_ALLOWLIST: ${{ secrets.GATEWAY_OPERATOR_ALLOWLIST }}
+          GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS }}
+          GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS }}
+          GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS }}
           GATEWAY_IMAGE_DIGEST: ${{ needs.build-images.outputs.gateway_digest }}
           WORKSPACE_IMAGE_DIGEST: ${{ needs.build-images.outputs.workspace_digest }}

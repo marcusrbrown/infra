@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import {Buffer} from 'node:buffer'
 import {chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
@@ -115,6 +116,40 @@ export const CADDY_CONTAINER_NAME = `${COMPOSE_PROJECT_NAME}-caddy-1`
 // Referenced from both buildSecretFileList (content) and buildComposeOverride (bind-mount source).
 export const ANNOUNCE_WEBHOOK_SECRET_FILE = 'gateway-webhook-secret'
 export const ANNOUNCE_PRESENCE_CHANNEL_FILE = 'gateway-presence-channel-id'
+
+/**
+ * Operator auth/config secret specs — single source of truth for the four operator auth secrets.
+ *
+ * Each entry carries:
+ *   - envKey:        the environment variable name (SCREAMING_SNAKE_CASE)
+ *   - hostFile:      the kebab-case file name written to the droplet secrets dir
+ *   - containerPath: the snake_case path inside the container (/run/secrets/<snake_case>)
+ *
+ * Used in buildSecretFileList (content materialization), main() buildComposeOverride call
+ * (file-name args), and buildComposeOverride (bind-mount source/target).
+ */
+export const OPERATOR_AUTH_SECRET_SPECS = [
+  {
+    envKey: 'GATEWAY_OPERATOR_GITHUB_CLIENT_ID',
+    hostFile: 'gateway-operator-github-client-id',
+    containerPath: '/run/secrets/gateway_operator_github_client_id',
+  },
+  {
+    envKey: 'GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET',
+    hostFile: 'gateway-operator-github-client-secret',
+    containerPath: '/run/secrets/gateway_operator_github_client_secret',
+  },
+  {
+    envKey: 'GATEWAY_OPERATOR_CSRF_SECRET',
+    hostFile: 'gateway-operator-csrf-secret',
+    containerPath: '/run/secrets/gateway_operator_csrf_secret',
+  },
+  {
+    envKey: 'GATEWAY_OPERATOR_ALLOWLIST',
+    hostFile: 'gateway-operator-allowlist',
+    containerPath: '/run/secrets/gateway_operator_allowlist',
+  },
+] as const
 const DEPLOY_DIR = `${REMOTE_DIR}/deploy`
 const SECRETS_DIR = `${DEPLOY_DIR}/secrets`
 // Checksum lives OUTSIDE deploy/ so git clean -xfd doesn't destroy it
@@ -466,6 +501,111 @@ export function getAnnounceState(env: Record<string, string>): 'enabled' | 'disa
   if (hasWebhookSecret && hasChannelId) return 'enabled'
   if (!hasWebhookSecret && !hasChannelId) return 'disabled'
   return 'invalid'
+}
+
+/** Strict base64url character set: A-Z, a-z, 0-9, -, _ (no padding, no whitespace). */
+const BASE64URL_RE = /^[\w-]+$/
+
+/**
+ * Returns the operator auth/config state based on the presence of all four auth vars.
+ *
+ * - 'enabled':  all four vars are present and non-empty (whitespace-only = absent).
+ * - 'disabled': all four are absent (unset or whitespace-only).
+ * - 'invalid':  one to three are present — the all-or-none gate is violated.
+ */
+export function getOperatorAuthState(env: Record<string, string>): 'enabled' | 'disabled' | 'invalid' {
+  const hasClientId = Boolean(env.GATEWAY_OPERATOR_GITHUB_CLIENT_ID?.trim())
+  const hasClientSecret = Boolean(env.GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET?.trim())
+  const hasCsrfSecret = Boolean(env.GATEWAY_OPERATOR_CSRF_SECRET?.trim())
+  const hasAllowlist = Boolean(env.GATEWAY_OPERATOR_ALLOWLIST?.trim())
+
+  const count = [hasClientId, hasClientSecret, hasCsrfSecret, hasAllowlist].filter(Boolean).length
+
+  if (count === 4) return 'enabled'
+  if (count === 0) return 'disabled'
+  return 'invalid'
+}
+
+/**
+ * Validates the operator auth/config values.
+ * Throws with a descriptive message on any validation failure.
+ *
+ * - githubClientId: non-empty string.
+ * - githubClientSecret: non-empty string.
+ * - csrfSecret: strict base64url (no padding, no whitespace/newlines), decoded byte length ≥ 32.
+ * - allowlist: non-empty; blank/whitespace-only lines and full-line `#` comments (after optional
+ *   leading whitespace) are ignored; at least one numeric GitHub user ID must remain after
+ *   filtering; non-numeric non-comment lines are rejected. Mirrors upstream fro-bot/agent v0.69.0
+ *   allowlist parser semantics.
+ */
+export function validateOperatorAuthConfig(opts: {
+  githubClientId: string
+  githubClientSecret: string
+  csrfSecret: string
+  allowlist: string
+}): void {
+  const {githubClientId, githubClientSecret, csrfSecret, allowlist} = opts
+
+  if (!githubClientId) {
+    throw new Error('GATEWAY_OPERATOR_GITHUB_CLIENT_ID is required and must be non-empty.')
+  }
+
+  if (!githubClientSecret) {
+    throw new Error('GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET is required and must be non-empty.')
+  }
+
+  if (!csrfSecret) {
+    throw new Error(
+      'GATEWAY_OPERATOR_CSRF_SECRET is required. Must be strict base64url (no padding, no whitespace), decoded byte length ≥ 32.',
+    )
+  }
+
+  if (!BASE64URL_RE.test(csrfSecret)) {
+    throw new Error(
+      `GATEWAY_OPERATOR_CSRF_SECRET contains invalid characters. ` +
+        'Must be strict base64url: only A-Z, a-z, 0-9, -, _ (no padding =, no whitespace, no newlines).',
+    )
+  }
+
+  // Decode and check byte length. base64url → base64 → Buffer.
+  const base64 = csrfSecret.replaceAll('-', '+').replaceAll('_', '/')
+  const decoded = Buffer.from(base64, 'base64')
+  if (decoded.length < 32) {
+    throw new Error(
+      `GATEWAY_OPERATOR_CSRF_SECRET decodes to ${decoded.length} bytes; minimum is 32. ` +
+        'Generate a 32-byte random value encoded as base64url (no padding).',
+    )
+  }
+
+  if (!allowlist) {
+    throw new Error('GATEWAY_OPERATOR_ALLOWLIST is required and must be non-empty.')
+  }
+
+  // Upstream fro-bot/agent v0.69.0 allowlist parser semantics:
+  //   - blank/whitespace-only lines are ignored
+  //   - full-line comments beginning with # (after optional whitespace) are ignored
+  //   - at least one numeric GitHub user ID must remain after filtering
+  const lines = allowlist.split('\n')
+  let effectiveCount = 0
+  for (const [i, line] of lines.entries()) {
+    const trimmed = line.trim()
+    // Skip blank/whitespace-only lines and full-line # comments
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    if (!/^\d+$/.test(trimmed)) {
+      throw new Error(
+        `GATEWAY_OPERATOR_ALLOWLIST line ${i + 1} "${line}" is not a numeric GitHub user ID. ` +
+          'Each line must contain only digits.',
+      )
+    }
+    effectiveCount++
+  }
+
+  if (effectiveCount === 0) {
+    throw new Error(
+      'GATEWAY_OPERATOR_ALLOWLIST contains no numeric GitHub user IDs after ignoring blank lines and comments. ' +
+        'At least one numeric user ID is required.',
+    )
+  }
 }
 
 /**
@@ -841,6 +981,19 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
     })
   }
 
+  // Operator auth/config secret files: only materialized when operator listener is enabled
+  // AND all four auth/config vars are present. When operator is disabled, no auth files are
+  // emitted. When invalid (partial set), main() throws before reaching here.
+  if (getOperatorState(env) === 'enabled' && getOperatorAuthState(env) === 'enabled') {
+    for (const spec of OPERATOR_AUTH_SECRET_SPECS) {
+      secrets.push({
+        name: spec.hostFile,
+        content: env[spec.envKey] ?? '',
+        required: false,
+      })
+    }
+  }
+
   return secrets
 }
 
@@ -886,6 +1039,25 @@ export interface ComposeOverrideOpts {
   operatorBindPort?: string
   /** The HTTPS origin for the operator public surface (e.g. "https://operator.example.com"). */
   operatorPublicOrigin?: string
+  /**
+   * When true, emits the four operator auth _FILE env vars and bind mounts.
+   * Requires all four operatorXxxFile fields to be non-empty.
+   */
+  operatorAuthEnabled?: boolean
+  /** Kebab-case secret file name for the GitHub OAuth client ID. */
+  operatorGithubClientIdFile?: string
+  /** Kebab-case secret file name for the GitHub OAuth client secret. */
+  operatorGithubClientSecretFile?: string
+  /** Kebab-case secret file name for the CSRF secret. */
+  operatorCsrfSecretFile?: string
+  /** Kebab-case secret file name for the allowlist. */
+  operatorAllowlistFile?: string
+  /** Optional tuning: comma-separated same-origin post-auth paths. */
+  operatorOauthAllowedReturnPaths?: string
+  /** Optional tuning: OAuth state TTL in ms. */
+  operatorOauthStateTtlMs?: string
+  /** Optional tuning: max outstanding OAuth attempts. */
+  operatorOauthMaxOutstandingAttempts?: string
 }
 
 const GATEWAY_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-gateway'
@@ -922,6 +1094,14 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
     operatorBindHost,
     operatorBindPort,
     operatorPublicOrigin,
+    operatorAuthEnabled,
+    operatorGithubClientIdFile,
+    operatorGithubClientSecretFile,
+    operatorCsrfSecretFile,
+    operatorAllowlistFile,
+    operatorOauthAllowedReturnPaths,
+    operatorOauthStateTtlMs,
+    operatorOauthMaxOutstandingAttempts,
   } = opts
 
   // Caddy is needed when either announce or operator is enabled.
@@ -940,7 +1120,49 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
       GATEWAY_OPERATOR_PUBLIC_ORIGIN: ${operatorPublicOrigin}`
       : ''
 
-  const envLines = [announceEnvLines, operatorEnvLines].filter(Boolean).join('\n')
+  // Operator auth _FILE env vars: only emitted when operatorAuthEnabled is true.
+  // All four file-name opts are required — missing/empty/whitespace-only is a programming bug; throw fast.
+  if (operatorAuthEnabled) {
+    const missing = (
+      [
+        ['operatorGithubClientIdFile', operatorGithubClientIdFile],
+        ['operatorGithubClientSecretFile', operatorGithubClientSecretFile],
+        ['operatorCsrfSecretFile', operatorCsrfSecretFile],
+        ['operatorAllowlistFile', operatorAllowlistFile],
+      ] as [string, string | undefined][]
+    )
+      .filter(([, v]) => !v?.trim())
+      .map(([k]) => k)
+    if (missing.length > 0) {
+      throw new Error(
+        `buildComposeOverride: operatorAuthEnabled is true but the following file-name opts are missing or empty: ${missing.join(', ')}`,
+      )
+    }
+  }
+
+  // Derive _FILE env vars from OPERATOR_AUTH_SECRET_SPECS — single source of truth for env key → container path.
+  const operatorAuthFileLines = operatorAuthEnabled
+    ? OPERATOR_AUTH_SECRET_SPECS.map(spec => `      ${spec.envKey}_FILE: ${spec.containerPath}`).join('\n')
+    : ''
+
+  // Optional tuning vars: plain env entries, only when present.
+  const operatorOauthTuningLines = operatorAuthEnabled
+    ? [
+        operatorOauthAllowedReturnPaths
+          ? `      GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS: ${operatorOauthAllowedReturnPaths}`
+          : '',
+        operatorOauthStateTtlMs ? `      GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS: ${operatorOauthStateTtlMs}` : '',
+        operatorOauthMaxOutstandingAttempts
+          ? `      GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS: ${operatorOauthMaxOutstandingAttempts}`
+          : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : ''
+
+  const envLines = [announceEnvLines, operatorEnvLines, operatorAuthFileLines, operatorOauthTuningLines]
+    .filter(Boolean)
+    .join('\n')
   const environmentSection = envLines
     ? `
     environment:
@@ -963,9 +1185,24 @@ ${envLines}`
           create_host_path: false`
     : ''
 
-  const volumesSection2 = announceVolumes
+  // Operator auth bind mounts: only emitted when operatorAuthEnabled is true.
+  // Derived from OPERATOR_AUTH_SECRET_SPECS — single source of truth for host file → container path.
+  const operatorAuthVolumes = operatorAuthEnabled
+    ? OPERATOR_AUTH_SECRET_SPECS.map(
+        spec => `
+      - type: bind
+        source: ./secrets/${spec.hostFile}
+        target: ${spec.containerPath}
+        read_only: true
+        bind:
+          create_host_path: false`,
+      ).join('')
+    : ''
+
+  const allVolumes = announceVolumes + operatorAuthVolumes
+  const volumesSection2 = allVolumes
     ? `
-    volumes:${announceVolumes}`
+    volumes:${allVolumes}`
     : ''
 
   // Static gateway-net IP for deterministic operator listener bind address.
@@ -1750,9 +1987,46 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     })
   }
 
+  // Phase 3f: Validate operator auth/config gate before any SSH.
+  // When operator listener is enabled, all four auth/config vars are required (v0.69.0 contract).
+  // 'disabled' (0 of 4) is not valid when listener is enabled — fail-closed.
+  // 'invalid' (1–3 of 4) is a partial set — fail-closed.
+  // Rollback: clear both listener trio AND auth vars together; listener trio present + auth absent is not valid.
+  if (operatorState === 'enabled') {
+    const operatorAuthState = getOperatorAuthState(env)
+    if (operatorAuthState !== 'enabled') {
+      // Both 'disabled' and 'invalid' are rejected when listener is enabled.
+      const hasClientId = Boolean(env.GATEWAY_OPERATOR_GITHUB_CLIENT_ID?.trim())
+      const hasClientSecret = Boolean(env.GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET?.trim())
+      const hasCsrfSecret = Boolean(env.GATEWAY_OPERATOR_CSRF_SECRET?.trim())
+      const hasAllowlist = Boolean(env.GATEWAY_OPERATOR_ALLOWLIST?.trim())
+      const missingAuth = [
+        !hasClientId && 'GATEWAY_OPERATOR_GITHUB_CLIENT_ID',
+        !hasClientSecret && 'GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET',
+        !hasCsrfSecret && 'GATEWAY_OPERATOR_CSRF_SECRET',
+        !hasAllowlist && 'GATEWAY_OPERATOR_ALLOWLIST',
+      ]
+        .filter(Boolean)
+        .join(', ')
+      throw new Error(
+        `Operator listener is enabled but auth/config vars are missing: ${missingAuth}. ` +
+          'All four of GATEWAY_OPERATOR_GITHUB_CLIENT_ID, GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET, ' +
+          'GATEWAY_OPERATOR_CSRF_SECRET, and GATEWAY_OPERATOR_ALLOWLIST are required when the operator listener is enabled. ' +
+          'To disable the operator listener, clear all three of GATEWAY_OPERATOR_BIND_HOST, GATEWAY_OPERATOR_BIND_PORT, and GATEWAY_OPERATOR_PUBLIC_ORIGIN.',
+      )
+    }
+    validateOperatorAuthConfig({
+      githubClientId: env.GATEWAY_OPERATOR_GITHUB_CLIENT_ID ?? '',
+      githubClientSecret: env.GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET ?? '',
+      csrfSecret: env.GATEWAY_OPERATOR_CSRF_SECRET ?? '',
+      allowlist: env.GATEWAY_OPERATOR_ALLOWLIST ?? '',
+    })
+  }
+
   if (isDryRun) {
     const announceEnabled = announceState === 'enabled'
     const operatorEnabledDry = operatorState === 'enabled'
+    const operatorAuthEnabledDry = operatorEnabledDry && getOperatorAuthState(env) === 'enabled'
     const caddyEnabledDry = announceEnabled || operatorEnabledDry
     const caddyWiringDesc = [announceEnabled ? 'announce' : '', operatorEnabledDry ? 'operator' : '']
       .filter(Boolean)
@@ -1766,6 +2040,11 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     )
     if (caddyEnabledDry) {
       console.warn(`  3c. Caddy enabled (${caddyWiringDesc}) — materialize Caddyfile under ${DEPLOY_DIR}`)
+    }
+    if (operatorAuthEnabledDry) {
+      const callbackUrl = `${env.GATEWAY_OPERATOR_PUBLIC_ORIGIN}/operator/auth/github/callback`
+      console.warn(`  [preflight] Expected OAuth callback URL: ${callbackUrl}`)
+      console.warn(`  [preflight] Verify this URL is registered in the GitHub OAuth App settings before enablement.`)
     }
     console.warn(`  3d. Run upstream stack validation: cd ${REMOTE_DIR} && bash deploy/validate-stack.sh`)
     console.warn(`  4. Write .env to ${ENV_PATH}`)
@@ -1905,6 +2184,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     const operatorBindHost = operatorEnabled ? (env.GATEWAY_OPERATOR_BIND_HOST ?? '') : undefined
     const operatorBindPort = operatorEnabled ? (env.GATEWAY_OPERATOR_BIND_PORT ?? '') : undefined
     const operatorPublicOrigin = operatorEnabled ? (env.GATEWAY_OPERATOR_PUBLIC_ORIGIN ?? '') : undefined
+    const operatorAuthEnabled = operatorEnabled && getOperatorAuthState(env) === 'enabled'
     const overrideContent = buildComposeOverride({
       gatewayDigest,
       workspaceDigest,
@@ -1913,6 +2193,19 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       operatorBindHost,
       operatorBindPort,
       operatorPublicOrigin,
+      operatorAuthEnabled,
+      // Derive file names from OPERATOR_AUTH_SECRET_SPECS — single source of truth.
+      operatorGithubClientIdFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[0].hostFile : undefined,
+      operatorGithubClientSecretFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[1].hostFile : undefined,
+      operatorCsrfSecretFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[2].hostFile : undefined,
+      operatorAllowlistFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[3].hostFile : undefined,
+      operatorOauthAllowedReturnPaths: operatorAuthEnabled
+        ? env.GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS || undefined
+        : undefined,
+      operatorOauthStateTtlMs: operatorAuthEnabled ? env.GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS || undefined : undefined,
+      operatorOauthMaxOutstandingAttempts: operatorAuthEnabled
+        ? env.GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS || undefined
+        : undefined,
     })
     const operatorTarget =
       operatorEnabled && operatorBindHost && operatorBindPort ? `${operatorBindHost}:${operatorBindPort}` : undefined
@@ -2192,12 +2485,16 @@ SCRIPT`
     }
 
     // Phase 9b2: Post-deploy operator health probe — warning-only, only when operator is enabled.
-    // Probes GET /operator/health through the public Caddy route (via GATEWAY_OPERATOR_PUBLIC_ORIGIN).
+    // Probes GET /operator/health through the gateway-side Caddy route (https://<GATEWAY_HOST>/operator/health).
+    // The dashboard→gateway private path is not yet active; the gateway Caddy /operator/* route is the
+    // correct liveness origin for this topology stage. GATEWAY_OPERATOR_PUBLIC_ORIGIN (dashboard origin)
+    // is NOT used here — it is only used for the OAuth callback preflight in dry-run output.
+    // See docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md and AGENTS.md.
     // Requires HTTP 200 — the /operator/health route contract is a health check that returns 200 on success.
     // 3xx/4xx/5xx are not treated as success (unlike the announce probe which accepts any 2xx/4xx).
     // Connection/TLS errors are treated as transient (cert may still be issuing); we warn and continue.
-    if (operatorEnabled && operatorPublicOrigin) {
-      const operatorHealthUrl = new URL('/operator/health', operatorPublicOrigin).toString()
+    if (operatorEnabled) {
+      const operatorHealthUrl = `https://${host}/operator/health`
       console.warn(`\u001B[1;34m==>\u001B[0m Probing operator health endpoint`)
       let operatorProbeOk = false
       for (let attempt = 1; attempt <= probeAttempts; attempt++) {

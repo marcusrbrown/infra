@@ -270,13 +270,100 @@ For verifying a real control-plane go-live end-to-end (live log monitoring, succ
 
 `buildSecretFileList`, `getAnnounceState`, `buildComposeOverride`, `buildCaddyfile` in `apps/gateway/src/deploy.ts`.
 
+## OPERATOR AUTH
+
+The operator auth gate is part of the operator listener feature. When the operator listener trio is enabled, all four auth/config secrets are required. The deploy fails before any SSH if the listener trio is set but any of the four auth/config secrets is missing or partially set.
+
+### Required auth/config secrets
+
+| GitHub Environment secret | `_FILE` env var in compose override | Description |
+| --- | --- | --- |
+| `GATEWAY_OPERATOR_GITHUB_CLIENT_ID` | `GATEWAY_OPERATOR_GITHUB_CLIENT_ID_FILE` | GitHub OAuth App client ID |
+| `GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET` | `GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET_FILE` | GitHub OAuth App client secret |
+| `GATEWAY_OPERATOR_CSRF_SECRET` | `GATEWAY_OPERATOR_CSRF_SECRET_FILE` | Strict base64url, no padding/newlines, ≥32 decoded bytes |
+| `GATEWAY_OPERATOR_ALLOWLIST` | `GATEWAY_OPERATOR_ALLOWLIST_FILE` | Newline-separated numeric GitHub user IDs; fail-closed if missing/empty/malformed |
+
+All four are all-or-none with the operator listener trio. Setting one to three of the four fails the deploy before any SSH. Leaving all four unset when the listener trio is also unset is the disabled state.
+
+### Optional OAuth tuning vars
+
+These are plain env vars (not file-backed). Set them in the `gateway` GitHub Environment if needed; leave unset to use upstream defaults.
+
+| GitHub Environment secret | Default | Description |
+| --- | --- | --- |
+| `GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS` | `/operator` | Comma-separated same-origin post-auth paths |
+| `GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS` | `600000` | OAuth state TTL in milliseconds |
+| `GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS` | `5` | Max concurrent outstanding OAuth attempts |
+
+These are transported as optional secrets in the workflow (not `workflow_call.inputs`) for consistency with the gateway deploy pipeline.
+
+### Callback URL
+
+The GitHub OAuth App must be configured with:
+
+```
+https://dashboard.fro.bot/operator/auth/github/callback
+```
+
+This is a GitHub OAuth App (client ID/secret) — not the existing gateway GitHub App (`GH_APP_ID`). Register the callback URL in the GitHub Developer Portal before enabling operator auth. The deploy dry-run prints the expected callback URL for manual cross-check against the portal.
+
+### Session semantics
+
+Sessions are in-memory. A gateway restart (deploy, force-recreate, container crash) invalidates all active operator sessions. Operators must re-authenticate after each restart. No session-persistence deploy var exists at this version.
+
+### Rollback path
+
+To disable operator auth/config wiring after deployment:
+
+1. Remove or clear **both** the listener trio **and** the four auth/config secrets from the `gateway` GitHub Environment:
+   - Listener trio: `GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`, `GATEWAY_OPERATOR_PUBLIC_ORIGIN`
+   - Auth/config secrets: `GATEWAY_OPERATOR_GITHUB_CLIENT_ID`, `GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET`, `GATEWAY_OPERATOR_CSRF_SECRET`, `GATEWAY_OPERATOR_ALLOWLIST`
+2. Trigger a gateway deploy: `bunx @marcusrbrown/infra gateway deploy`.
+3. Approve the environment gate.
+4. The deploy detects the operator listener is disabled, skips all operator auth/config wiring, and runs `docker compose up --remove-orphans`.
+5. The gateway restarts with the operator listener disabled. All active operator sessions are invalidated (in-memory — no data rollback needed).
+6. Verify: `bunx @marcusrbrown/infra gateway status` shows all services healthy.
+
+**Note:** Listener trio present + auth/config secrets absent is not a valid state — the deploy fails before any SSH. The only supported rollback is to clear **both** the listener trio and the four auth/config secrets together.
+
+### Post-enable verification
+
+After the first deploy with operator auth/config wiring:
+
+1. **Gateway-side liveness probe:** Verify the operator listener is up using the gateway Caddy route:
+   ```
+   GET https://gateway.fro.bot/operator/health
+   ```
+   Or probe the listener directly from the droplet:
+   ```bash
+   curl -sf http://172.21.0.2:9300/operator/health
+   ```
+
+   **⚠ Liveness probe warning:** Do **not** use `https://dashboard.fro.bot/operator/health` or any `https://dashboard.fro.bot/operator/*` URL as a liveness probe. The dashboard Caddy `/operator/*` reverse proxy and private dashboard→gateway path are out of scope and deferred to `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`. Use `https://gateway.fro.bot/operator/health` (public gateway Caddy route) or `http://172.21.0.2:9300/operator/health` (droplet-local gateway-net probe) for gateway-side liveness verification. The OAuth callback URL registration uses the dashboard origin (`https://dashboard.fro.bot/operator/auth/github/callback`) — this is a GitHub OAuth App setting, not a live HTTP probe target. Do not use dashboard-origin URLs as liveness probes until the private path task lands.
+
+2. **Auth gate coarse check:** `GET https://gateway.fro.bot/operator/` should return a non-5xx, non-404 response — likely a redirect to the GitHub OAuth flow or a structured auth-required response.
+
+3. **Callback URL preflight:** Before triggering the OAuth flow, verify the expected callback URL string. The deploy dry-run output prints:
+   ```
+   Expected OAuth callback URL: https://dashboard.fro.bot/operator/auth/github/callback
+   ```
+   Cross-check this string against the **Authorization callback URL** field in the GitHub OAuth App settings (GitHub Developer Portal → OAuth Apps → your app). The portal check is manual and must be completed before enablement.
+
+4. **Allowlist enforcement:** Attempt to complete the OAuth flow with a GitHub account that is NOT in the allowlist. Confirm the response is a coarse auth-failure (non-5xx, no route or allowlist detail leaked).
+
+5. **Session invalidation on restart:** After a successful auth, trigger a gateway restart (`docker compose restart gateway` on the droplet). Confirm the session is invalidated and re-authentication is required.
+
+6. **No host-published operator port:** `docker compose ps` on the gateway droplet must not show a `9300->9300` mapping.
+
+For the full operator auth lifecycle runbook (OAuth App setup, CSRF secret generation, allowlist format, secret seeding, rotation, rollback), see [`docs/runbooks/gateway-operator-auth-lifecycle.md`](../../docs/runbooks/gateway-operator-auth-lifecycle.md).
+
 ## OPERATOR LISTENER
 
 The gateway operator listener is opt-in. When enabled, it exposes `GET /operator/health` (and future privileged operator routes) on a `gateway-net`-only address. Caddy routes `/operator/*` traffic from the public HTTPS edge to the listener over `gateway-net` — the listener has no host-published port.
 
 **Browser-visible operator origin:** The ratified target for the browser-visible operator API is `https://dashboard.fro.bot/operator/*`. `GATEWAY_OPERATOR_PUBLIC_ORIGIN` must be set to `https://dashboard.fro.bot` when the operator listener is enabled for production use. The gateway-side Caddy `/operator/*` route is topology scaffolding — it proves the gateway listener and Caddy wiring work, but `gateway.fro.bot/operator/*` is not the production browser origin and must not be used as such. See `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md` for the full decision record.
 
-**Current state:** The operator listener is **enabled in production**. `GATEWAY_OPERATOR_BIND_HOST=172.21.0.2`, `GATEWAY_OPERATOR_BIND_PORT=9300`, and `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot` are set in the `gateway` GitHub Environment. Deploy run [27740787921](https://github.com/marcusrbrown/infra/actions/runs/27740787921) succeeded; the `/operator/health` probe ran through the public Caddy route. The current public operator surface is `GET /operator/health` only. The dashboard Caddy `/operator/*` route is not yet deployed. No privileged operator route is production-ready until `infra#580` auth/session/CSRF/allowlist (or an equivalent upstream auth gate) lands; the dashboard live client remains separate.
+**Current state:** The operator listener is **enabled in production**. `GATEWAY_OPERATOR_BIND_HOST=172.21.0.2`, `GATEWAY_OPERATOR_BIND_PORT=9300`, and `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot` are set in the `gateway` GitHub Environment. Deploy run [27740787921](https://github.com/marcusrbrown/infra/actions/runs/27740787921) succeeded; the `/operator/health` probe ran through the public Caddy route. The current public operator surface is `GET /operator/health` (unauthenticated liveness) and the auth-gated operator routes introduced in upstream v0.69.0, available once the operator auth/config secrets (`GATEWAY_OPERATOR_GITHUB_CLIENT_ID`, `GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET`, `GATEWAY_OPERATOR_CSRF_SECRET`, `GATEWAY_OPERATOR_ALLOWLIST`) are seeded in the `gateway` GitHub Environment. The dashboard Caddy `/operator/*` route and the dashboard live client are not yet deployed and remain separate.
 
 ### Enabling
 
@@ -296,14 +383,14 @@ The deploy:
 - Sets a static `ipv4_address` on `gateway-net` for the gateway service so the bind address is deterministic.
 - Adds a `/operator/*` Caddy route with `flush_interval -1` (no response buffering, ready for future SSE).
 - **Auto-cleans stale `fro-bot_gateway-net`** — after `docker compose pull` and before `docker compose up`, inspects the remote Docker network. If it exists with the old `172.20.0.0/16` subnet, removes it so Docker can recreate it with `172.21.0.0/16`. Missing or already-correct networks are skipped. Pull happens first so images are cached before any container disruption — if the pull fails, gateway/caddy containers are never removed. If the first removal fails due to active endpoints (gateway/caddy still attached), the deploy removes those two containers directly via `docker rm -f fro-bot-gateway-1` and `docker rm -f fro-bot-caddy-1` (tolerating missing containers so recovery works when caddy is absent from the current compose config) and retries the removal (`stop` alone is insufficient — stopped containers retain network endpoints). Any other removal failure, or failure of the container removal/retry, fails the deploy closed before `docker compose up`. `GATEWAY_OPERATOR_BIND_HOST` must be in the `172.21.x.x` range (e.g. `172.21.0.2`).
-- Probes `GET <GATEWAY_OPERATOR_PUBLIC_ORIGIN>/operator/health` after compose up (warning-only; connection errors do not fail the deploy).
+- Probes `GET https://${GATEWAY_HOST}/operator/health` (i.e. `https://gateway.fro.bot/operator/health`) after compose up (warning-only; connection errors do not fail the deploy).
 
 ### Security posture
 
 - The operator listener has no host `ports:` entry — it is only reachable via Caddy over `gateway-net`.
 - The workspace (`sandbox-net`) has no path to the operator listener.
 - `/v1/announce` and `/operator/*` are separate Caddy `handle` blocks with distinct trust boundaries.
-- Auth/session/CSRF wiring for privileged operator routes is deferred to `infra#580`, pending upstream auth/session work in `fro-bot/agent`.
+- Auth/session/CSRF/allowlist wiring for privileged operator routes is live; the four operator auth/config secrets must be seeded in the `gateway` GitHub Environment to activate the auth gate (see [Enabling](#enabling) and [`docs/runbooks/gateway-operator-auth-lifecycle.md`](../../docs/runbooks/gateway-operator-auth-lifecycle.md)).
 - The gateway Caddy `/operator/*` route is topology scaffolding. The production browser operator path is `https://dashboard.fro.bot/operator/*` via the dashboard Caddy proxy — not `gateway.fro.bot/operator/*` directly.
 
 ### Post-enable verification
@@ -311,7 +398,7 @@ The deploy:
 After the first enabling deploy:
 
 1. `bunx @marcusrbrown/infra gateway status` — confirm `caddy` and `gateway` services appear healthy.
-2. `curl -sI <GATEWAY_OPERATOR_PUBLIC_ORIGIN>/operator/health` — confirm a 200 response.
+2. `curl -sI https://gateway.fro.bot/operator/health` — confirm a 200 response.
 3. Confirm no host port for the operator listener: `docker compose --project-directory /opt/gateway/deploy ps` — the `gateway` service must not show a `9300->9300` port mapping.
 4. Confirm workspace is not on `gateway-net`: `docker network inspect gateway-net` — the `workspace` container must not appear.
 

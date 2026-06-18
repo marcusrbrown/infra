@@ -247,16 +247,21 @@ export function getOperatorState(env: Record<string, string>): 'enabled' | 'disa
  *   - bindHost: rejects 0.0.0.0 (all-interface), 127.x (loopback), 10.x (sandbox-net), IPv6
  *   - bindPort: must be a positive integer in [1, 65535]
  *   - publicOrigin: must be a valid HTTPS URL that is a true origin (no path, query, hash, or credentials)
- *     and whose hostname must equal gatewayHost (single-host deploy topology constraint).
+ *
+ * The ratified browser-visible operator origin is https://dashboard.fro.bot — set
+ * GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot for production use.
+ * The gateway Caddy /operator/* route is topology scaffolding; gateway.fro.bot/operator/*
+ * is not the production browser origin. This is enforced by convention and documentation,
+ * not by the validator — any valid HTTPS origin is accepted here.
  */
 export function validateOperatorConfig(opts: {
   bindHost: string
   bindPort: string
   publicOrigin: string
-  /** The expected gateway hostname (GATEWAY_HOST). When provided, publicOrigin hostname must match. */
+  /** Unused — retained for call-site backward compatibility. No hostname constraint is enforced. */
   gatewayHost?: string
 }): void {
-  const {bindHost, bindPort, publicOrigin, gatewayHost} = opts
+  const {bindHost, bindPort, publicOrigin} = opts
 
   // Validate bind host
   if (!bindHost) {
@@ -398,16 +403,6 @@ export function validateOperatorConfig(opts: {
       `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" specifies a non-default port (:${parsedOrigin.port}). ` +
         'Only the default HTTPS port (443) is supported by the current Caddy topology. ' +
         'Use a bare HTTPS origin without an explicit port (e.g. "https://gateway.fro.bot").',
-    )
-  }
-
-  // Require hostname to match GATEWAY_HOST (single-host deploy topology constraint).
-  // This avoids multi-site Caddy complexity — the Caddyfile is built for GATEWAY_HOST only.
-  if (gatewayHost && parsedOrigin.hostname !== gatewayHost) {
-    throw new Error(
-      `GATEWAY_OPERATOR_PUBLIC_ORIGIN hostname "${parsedOrigin.hostname}" does not match GATEWAY_HOST "${gatewayHost}". ` +
-        'The operator public origin must use the same hostname as the gateway (single-host topology). ' +
-        `Expected: "https://${gatewayHost}"`,
     )
   }
 }

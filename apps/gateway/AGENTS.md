@@ -127,7 +127,7 @@ After provisioning: commit the updated `.github/known_hosts`.
 | `GATEWAY_PRESENCE_CHANNEL_ID` | opt-in† | Discord channel ID where the daemon posts presence embeds as the Fro Bot user. Set together with `GATEWAY_WEBHOOK_SECRET`. |
 | `GATEWAY_OPERATOR_BIND_HOST` | opt-in‡ | Gateway-net IPv4 address for the operator listener bind (e.g. `172.20.0.2`). Rejects `0.0.0.0`, loopback, sandbox-net, and IPv6. |
 | `GATEWAY_OPERATOR_BIND_PORT` | opt-in‡ | Port for the operator listener (e.g. `9300`). Must be a positive integer in [1, 65535]. |
-| `GATEWAY_OPERATOR_PUBLIC_ORIGIN` | opt-in‡ | HTTPS origin for the operator public surface (e.g. `https://operator.example.com`). Must be HTTPS. |
+| `GATEWAY_OPERATOR_PUBLIC_ORIGIN` | opt-in‡ | HTTPS origin for the browser-visible operator API. The ratified value is `https://dashboard.fro.bot` — set this for production use. Must be a bare HTTPS origin (no path, query, hash, credentials, or non-default port). |
 | `GATEWAY_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-gateway` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.gateway_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually (see [Break-glass runbook](#break-glass-runbook)). |
 | `WORKSPACE_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-workspace` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.workspace_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually. |
 

@@ -300,7 +300,7 @@ deploy code, Caddyfiles, routing changes, or tests are introduced here.
 - No deploy code changes. No Caddyfile changes. No test changes.
 - `GATEWAY_OPERATOR_PUBLIC_ORIGIN` must be set to `https://dashboard.fro.bot` (not
   `https://gateway.fro.bot`) when the operator listener is enabled for production. This is enforced
-  by documentation and operator convention; the deploy script accepts any HTTPS origin.
+  by documentation and operator convention; the deploy script accepts any valid HTTPS origin.
 - The gateway Caddy `/operator/*` route remains topology scaffolding. Agents and operators reading
   `apps/gateway/AGENTS.md` are directed to this plan for the full rationale.
 - The dashboard Caddy `/operator/*` route is not deployed. Agents and operators reading

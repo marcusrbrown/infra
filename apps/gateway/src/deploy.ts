@@ -80,6 +80,27 @@ export interface DeployArgs {
 
 const REMOTE_DIR = '/opt/gateway'
 
+/**
+ * The Docker Compose project name for the gateway stack.
+ * Derived from `name: fro-bot` in the upstream fro-bot/agent compose.yaml.
+ * Docker Compose prefixes network names with the project name, so the
+ * gateway-net network is `fro-bot_gateway-net` on the remote host.
+ */
+export const COMPOSE_PROJECT_NAME = 'fro-bot'
+
+/**
+ * The expected gateway-net subnet after the 172.20→172.21 migration.
+ * Any existing network with a different subnet is stale and must be removed
+ * before `docker compose pull/up` to prevent Docker IPAM pool overlap errors.
+ */
+export const GATEWAY_NET_EXPECTED_SUBNET = '172.21.0.0/16'
+
+/**
+ * The fully-qualified Docker network name for the gateway-net network.
+ * Format: `<project>_<network-key>` where project = COMPOSE_PROJECT_NAME.
+ */
+export const GATEWAY_NET_FULL_NAME = `${COMPOSE_PROJECT_NAME}_gateway-net`
+
 // Announce secret file names (kebab-case, matching upstream compose contract).
 // Referenced from both buildSecretFileList (content) and buildComposeOverride (bind-mount source).
 export const ANNOUNCE_WEBHOOK_SECRET_FILE = 'gateway-webhook-secret'
@@ -246,19 +267,16 @@ export function getOperatorState(env: Record<string, string>): 'enabled' | 'disa
  * Rejection rules (mirrors upstream deploy/validate-stack.sh):
  *   - bindHost: rejects 0.0.0.0 (all-interface), 127.x (loopback), 10.x (sandbox-net), IPv6
  *   - bindPort: must be a positive integer in [1, 65535]
- *   - publicOrigin: must be a valid HTTPS URL that is a true origin (no path, query, hash, or credentials)
- *
- * The ratified browser-visible operator origin is https://dashboard.fro.bot — set
- * GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot for production use.
- * The gateway Caddy /operator/* route is topology scaffolding; gateway.fro.bot/operator/*
- * is not the production browser origin. This is enforced by convention and documentation,
- * not by the validator — any valid HTTPS origin is accepted here.
+ *   - publicOrigin: must be a valid bare HTTPS origin (no path, query, hash, or credentials).
+ *     The ratified production convention is https://dashboard.fro.bot, but the validator enforces
+ *     URL safety only — any valid bare HTTPS origin is accepted. The host convention is documented
+ *     in AGENTS.md and enforced by operator practice, not by this function.
  */
 export function validateOperatorConfig(opts: {
   bindHost: string
   bindPort: string
   publicOrigin: string
-  /** Unused — retained for call-site backward compatibility. No hostname constraint is enforced. */
+  /** The expected gateway hostname (GATEWAY_HOST). Accepted for API compatibility; no hostname constraint is enforced. */
   gatewayHost?: string
 }): void {
   const {bindHost, bindPort, publicOrigin} = opts
@@ -268,7 +286,7 @@ export function validateOperatorConfig(opts: {
     throw new Error('GATEWAY_OPERATOR_BIND_HOST is required when operator listener is enabled.')
   }
 
-  // Reject IP:port format (contains colon but is not IPv6 — e.g. 172.20.0.2:9300)
+  // Reject IP:port format (contains colon but is not IPv6 — e.g. 172.21.0.2:9300)
   // Check this before the IPv6 check to give a more accurate error message.
   if (bindHost.includes(':')) {
     // Distinguish IPv6 (multiple colons or starts with ::) from IP:port (single colon, starts with digit)
@@ -276,13 +294,13 @@ export function validateOperatorConfig(opts: {
     if (colonCount === 1 && /^\d/.test(bindHost)) {
       throw new Error(
         `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" contains a colon — this looks like an IP:port format. ` +
-          'Provide only the IPv4 address without a port (e.g. 172.20.0.2). ' +
+          'Provide only the IPv4 address without a port (e.g. 172.21.0.2). ' +
           'The port is configured separately via GATEWAY_OPERATOR_BIND_PORT.',
       )
     }
     throw new Error(
       `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is an IPv6 address. ` +
-        'Only IPv4 gateway-net addresses are supported (e.g. 172.20.0.2).',
+        'Only IPv4 gateway-net addresses are supported (e.g. 172.21.0.2).',
     )
   }
 
@@ -290,7 +308,7 @@ export function validateOperatorConfig(opts: {
   if (bindHost === '0.0.0.0') {
     throw new Error(
       `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is an all-interface bind (0.0.0.0). ` +
-        'Use a specific gateway-net IPv4 address (e.g. 172.20.0.2).',
+        'Use a specific gateway-net IPv4 address (e.g. 172.21.0.2).',
     )
   }
 
@@ -310,14 +328,28 @@ export function validateOperatorConfig(opts: {
     )
   }
 
-  // Validate bind host is inside gateway-net (172.20.0.0/16).
-  // The gateway-net subnet is 172.20.0.0/16 — only 172.20.x.x addresses are valid.
-  // This rejects addresses outside the gateway-net range (e.g. 172.21.x.x, 192.168.x.x).
-  if (!bindHost.startsWith('172.20.')) {
+  // Reject 172.20.x.x — this is the known conflicted Docker subnet from the failed operator deploy.
+  // The live fro-bot_sandbox-net is declared without explicit IPAM; Docker may allocate from the
+  // default bridge address pools, and the failed deploy showed a live/default-pool collision with
+  // 172.20.0.0/16. gateway-net uses 172.21.0.0/16 to avoid reusing that conflicted subnet.
+  if (bindHost.startsWith('172.20.')) {
     throw new Error(
-      `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is not in the gateway-net subnet (172.20.0.0/16). ` +
-        'The operator listener must bind to a gateway-net IPv4 address in the 172.20.x.x range ' +
-        '(e.g. 172.20.0.2).',
+      `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is in the 172.20.0.0/16 range. ` +
+        '172.20.0.0/16 is the known conflicted Docker subnet from the failed operator deploy — ' +
+        'gateway-net uses 172.21.0.0/16 to avoid reusing it. ' +
+        'The operator listener must bind to a gateway-net IPv4 address in the 172.21.x.x range ' +
+        '(e.g. 172.21.0.2).',
+    )
+  }
+
+  // Validate bind host is inside gateway-net (172.21.0.0/16).
+  // The gateway-net subnet is 172.21.0.0/16 — only 172.21.x.x addresses are valid.
+  // This rejects addresses outside the gateway-net range (e.g. 172.22.x.x, 192.168.x.x).
+  if (!bindHost.startsWith('172.21.')) {
+    throw new Error(
+      `GATEWAY_OPERATOR_BIND_HOST "${bindHost}" is not in the gateway-net subnet (172.21.0.0/16). ` +
+        'The operator listener must bind to a gateway-net IPv4 address in the 172.21.x.x range ' +
+        '(e.g. 172.21.0.2).',
     )
   }
 
@@ -351,7 +383,7 @@ export function validateOperatorConfig(opts: {
   } catch {
     throw new Error(
       `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" is not a valid URL. ` +
-        'Must be a valid HTTPS origin (e.g. "https://gateway.fro.bot").',
+        'Must be a valid HTTPS origin (e.g. "https://dashboard.fro.bot").',
     )
   }
 
@@ -366,7 +398,7 @@ export function validateOperatorConfig(opts: {
   if (parsedOrigin.username || parsedOrigin.password) {
     throw new Error(
       `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" must not contain credentials (username/password). ` +
-        'Must be a bare HTTPS origin (e.g. "https://gateway.fro.bot").',
+        'Must be a bare HTTPS origin (e.g. "https://dashboard.fro.bot").',
     )
   }
 
@@ -374,7 +406,7 @@ export function validateOperatorConfig(opts: {
   if (parsedOrigin.pathname !== '/') {
     throw new Error(
       `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" must not contain a path. ` +
-        'Must be a bare HTTPS origin with no path, query, or fragment (e.g. "https://gateway.fro.bot").',
+        'Must be a bare HTTPS origin with no path, query, or fragment (e.g. "https://dashboard.fro.bot").',
     )
   }
 
@@ -382,7 +414,7 @@ export function validateOperatorConfig(opts: {
   if (parsedOrigin.search) {
     throw new Error(
       `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" must not contain a query string. ` +
-        'Must be a bare HTTPS origin (e.g. "https://gateway.fro.bot").',
+        'Must be a bare HTTPS origin (e.g. "https://dashboard.fro.bot").',
     )
   }
 
@@ -390,7 +422,7 @@ export function validateOperatorConfig(opts: {
   if (parsedOrigin.hash) {
     throw new Error(
       `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" must not contain a hash/fragment. ` +
-        'Must be a bare HTTPS origin (e.g. "https://gateway.fro.bot").',
+        'Must be a bare HTTPS origin (e.g. "https://dashboard.fro.bot").',
     )
   }
 
@@ -402,7 +434,7 @@ export function validateOperatorConfig(opts: {
     throw new Error(
       `GATEWAY_OPERATOR_PUBLIC_ORIGIN "${publicOrigin}" specifies a non-default port (:${parsedOrigin.port}). ` +
         'Only the default HTTPS port (443) is supported by the current Caddy topology. ' +
-        'Use a bare HTTPS origin without an explicit port (e.g. "https://gateway.fro.bot").',
+        'Use a bare HTTPS origin without an explicit port (e.g. "https://dashboard.fro.bot").',
     )
   }
 }
@@ -970,13 +1002,18 @@ ${envLines}`
 
   // When operator is enabled, declare a top-level networks section with explicit IPAM
   // so the static ipv4_address assignment has a deterministic subnet contract.
-  // The /16 subnet covers the 172.20.x.x range used by the upstream gateway-net.
+  // The /16 subnet covers the 172.21.x.x range used by the upstream gateway-net.
+  // NOTE: 172.20.0.0/16 is intentionally NOT used here — it is the known conflicted Docker
+  // subnet from the failed operator deploy. The upstream fro-bot_sandbox-net is declared without
+  // explicit IPAM; Docker may allocate from the default bridge address pools, and the failed deploy
+  // showed a live/default-pool collision with 172.20.0.0/16. Docker rejects overlapping IPAM pools
+  // with "Pool overlaps with other one on this address space".
   const networksSection = operatorEnabled
     ? `networks:
   gateway-net:
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.21.0.0/16
 `
     : ''
 
@@ -1005,7 +1042,7 @@ export interface CaddyfileOperatorOpts {
   announceEnabled?: boolean
   /** When true, adds the /operator/* route. */
   operatorEnabled: boolean
-  /** The operator listener target (e.g. "172.20.0.2:9300"). */
+  /** The operator listener target (e.g. "172.21.0.2:9300"). */
   operatorTarget?: string
 }
 
@@ -1403,6 +1440,94 @@ async function readRemoteChecksum(
   return stdout.trim()
 }
 
+/**
+ * Inspects the remote `fro-bot_gateway-net` Docker network and removes it if
+ * it exists with a stale subnet (anything other than GATEWAY_NET_EXPECTED_SUBNET).
+ *
+ * Runs on every deploy (not just operator deploys). The live `fro-bot_gateway-net`
+ * may have a stale subnet from a previous operator deploy. The upstream
+ * fro-bot_sandbox-net is declared without explicit IPAM; Docker may allocate from
+ * the default bridge address pools, and the failed operator deploy showed a
+ * live/default-pool collision with 172.20.0.0/16. gateway-net uses 172.21.0.0/16
+ * to avoid reusing that conflicted subnet.
+ *
+ * Behavior:
+ *   - Network missing (inspect exits non-zero) → OK, skip removal
+ *   - Network exists with correct subnet (172.21.0.0/16) → OK, skip removal
+ *   - Network exists with any other subnet → remove it; throw on failure (fail-closed)
+ *
+ * Shell safety: the network name (GATEWAY_NET_FULL_NAME) is a static constant
+ * containing only alphanumeric characters, underscores, and hyphens — safe to
+ * embed in a shell command string without quoting risks.
+ */
+export async function removeStaleGatewayNet(
+  host: string,
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  keyPath?: string,
+  controlPath?: string,
+): Promise<void> {
+  // Step 1: Inspect the network to check if it exists and what subnet it has.
+  // `docker network inspect` exits non-zero when the network does not exist.
+  const inspectProc = spawnFn(
+    sshCommand(host, `docker network inspect ${GATEWAY_NET_FULL_NAME}`, keyPath, controlPath),
+    {env: deployEnv, stdout: 'pipe', stderr: 'pipe'},
+  )
+  const inspectStdout = await new Response(inspectProc.stdout).text()
+  const inspectExitCode = await inspectProc.exited
+
+  if (inspectExitCode !== 0) {
+    // Network does not exist — nothing to clean up
+    console.warn(`\u001B[1;34m==>\u001B[0m ${GATEWAY_NET_FULL_NAME} not found — no stale network cleanup needed`)
+    return
+  }
+
+  // Step 2: Parse the subnet from the inspect output.
+  let existingSubnet = ''
+  try {
+    const parsed = JSON.parse(inspectStdout.trim()) as unknown
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const network = parsed[0] as Record<string, unknown>
+      const ipam = network.IPAM as Record<string, unknown> | undefined
+      const config = ipam?.Config as Record<string, unknown>[] | undefined
+      existingSubnet = (config?.[0]?.Subnet as string | undefined) ?? ''
+    }
+  } catch {
+    // If we can't parse the subnet, treat as stale to be safe (fail-closed)
+    existingSubnet = ''
+  }
+
+  if (existingSubnet === GATEWAY_NET_EXPECTED_SUBNET) {
+    // Network already has the correct subnet — no cleanup needed
+    console.warn(
+      `\u001B[1;32m✓\u001B[0m ${GATEWAY_NET_FULL_NAME} already has correct subnet (${existingSubnet}) — no cleanup needed`,
+    )
+    return
+  }
+
+  // Step 3: Remove the stale network.
+  console.warn(
+    `\u001B[1;33m[warn]\u001B[0m ${GATEWAY_NET_FULL_NAME} has stale subnet (${existingSubnet || 'unknown'}), expected ${GATEWAY_NET_EXPECTED_SUBNET} — removing before compose pull/up`,
+  )
+
+  const rmProc = spawnFn(sshCommand(host, `docker network rm ${GATEWAY_NET_FULL_NAME}`, keyPath, controlPath), {
+    env: deployEnv,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const rmStderr = await new Response(rmProc.stderr).text()
+  const rmExitCode = await rmProc.exited
+
+  if (rmExitCode !== 0) {
+    throw new Error(
+      `Failed to remove stale ${GATEWAY_NET_FULL_NAME} network (exit ${rmExitCode}): ${rmStderr.trim()}. ` +
+        `Stop any containers using this network and retry the deploy.`,
+    )
+  }
+
+  console.warn(`\u001B[1;32m✓\u001B[0m Removed stale ${GATEWAY_NET_FULL_NAME} network`)
+}
+
 // ─── main orchestrator ────────────────────────────────────────────────────────
 
 export async function main(opts: MainOpts = {}): Promise<void> {
@@ -1760,7 +1885,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     //   - caddy is gateway-net only
     //   - caddy publishes only 80/443 host ports
     //   - gateway publishes no host ports for the operator listener
-    //   - top-level gateway-net IPAM includes the expected subnet (172.20.0.0/16)
+    //   - top-level gateway-net IPAM includes the expected subnet (172.21.0.0/16)
     //
     // This gate runs AFTER upstream validate-stack.sh (which validates the base stack) and
     // BEFORE docker compose pull/up and checksum persistence. Non-zero exit aborts the deploy.
@@ -1773,7 +1898,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     // bun, node, and jq which are not guaranteed on the droplet.
     if (operatorEnabled && operatorBindHost) {
       // operatorBindHost is validated before reaching here (validateOperatorConfig).
-      // It is a safe 172.20.x.x IPv4 address — safe to embed in the heredoc body.
+      // It is a safe 172.21.x.x IPv4 address — safe to embed in the heredoc body.
       const expectedBindHost = operatorBindHost
       const validateScript = `bash <<'SCRIPT'
 set -euo pipefail
@@ -1785,7 +1910,7 @@ fi
 GW_IP=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); n=c.get('services',{}).get('gateway',{}).get('networks',{}).get('gateway-net',{}); print(n.get('ipv4_address',''))")
 if [ "$GW_IP" != "${expectedBindHost}" ]; then echo "FAIL: gateway gateway-net ipv4_address is '$GW_IP', expected '${expectedBindHost}'"; exit 1; fi
 GW_SUBNET=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); cfg=c.get('networks',{}).get('gateway-net',{}).get('ipam',{}).get('config',[]); print(cfg[0].get('subnet','') if cfg else '')")
-if [ "$GW_SUBNET" != "172.20.0.0/16" ]; then echo "FAIL: gateway-net IPAM subnet is '$GW_SUBNET', expected '172.20.0.0/16'"; exit 1; fi
+if [ "$GW_SUBNET" != "172.21.0.0/16" ]; then echo "FAIL: gateway-net IPAM subnet is '$GW_SUBNET', expected '172.21.0.0/16'"; exit 1; fi
 GW_PORTS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); p=c.get('services',{}).get('gateway',{}).get('ports',[]); print(len(p))")
 if [ "$GW_PORTS" != "0" ] && [ -n "$GW_PORTS" ]; then echo "FAIL: gateway publishes host ports (operator listener must not have host ports): $GW_PORTS port(s)"; exit 1; fi
 GW_SANDBOX=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); nets=list(c.get('services',{}).get('gateway',{}).get('networks',{}).keys()); print('yes' if 'sandbox-net' in nets else 'no')")
@@ -1805,6 +1930,23 @@ SCRIPT`
         spawnFn,
       )
     }
+
+    // Phase 5e: Remove stale gateway-net network (all deploys).
+    // The live `fro-bot_gateway-net` Docker network may have a stale subnet from a previous
+    // operator deploy (e.g. 172.20.0.0/16 — the known conflicted subnet from the failed operator
+    // deploy). If the existing network differs from the expected 172.21.0.0/16 subnet, Docker will
+    // refuse to create the new network with "Pool overlaps with other one on this address space".
+    // We inspect the existing network and remove it if stale — before docker compose pull/up so
+    // the compose up can recreate it with the correct subnet.
+    //
+    // Behavior:
+    //   - Network missing → OK, skip removal
+    //   - Network exists with correct subnet (172.21.0.0/16) → OK, skip removal
+    //   - Network exists with any other subnet → remove it; throw on failure (fail-closed)
+    //
+    // This phase runs AFTER rendered-config validation (Phase 5d, operator-only) and BEFORE
+    // checksum read and pull/up. Non-operator deploys skip Phase 5d but still run Phase 5e.
+    await removeStaleGatewayNet(host, deployEnv, spawnFn, keyPath, controlPath)
 
     // Compute current checksum and read prior checksum to detect rotation.
     // The override is always included (image pins change when digests change, which

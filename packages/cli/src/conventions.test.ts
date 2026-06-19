@@ -1118,3 +1118,31 @@ describe('deploy.yaml: aggregate router forwards VPC bridge secrets', () => {
     })
   }
 })
+
+// ─── deploy.yaml: gateway→dashboard ordering (PR #603) ───────────────────────
+//
+// The dashboard operator route depends on the gateway VPC bridge being live.
+// deploy-dashboard must declare needs: deploy-gateway so it runs after the
+// gateway deploy, and its if: must reference needs.deploy-gateway.result so
+// it proceeds when gateway is skipped (unchanged) but blocks on gateway failure.
+
+describe('deploy.yaml: deploy-dashboard is ordered after deploy-gateway', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  it('deploy-dashboard needs: includes deploy-gateway', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {needs?: string | string[]}}
+    }
+    const needs = parsed?.jobs?.['deploy-dashboard']?.needs ?? []
+    const needsArr = Array.isArray(needs) ? needs : [needs]
+    expect(needsArr).toContain('deploy-gateway')
+  })
+
+  it('deploy-dashboard if: references needs.deploy-gateway.result (fail-aware ordering)', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    // Plain-text check: the if: expression must reference needs.deploy-gateway.result
+    // so that dashboard is blocked on gateway failure, not just ordered after it.
+    expect(text).toMatch(/needs\.deploy-gateway\.result/)
+  })
+})

@@ -120,7 +120,7 @@ Leave these unset to use upstream defaults (`/operator`, `600000`, `5`).
 
 7. **Session invalidation on restart:** After a successful auth, trigger a gateway restart (`docker compose restart gateway` on the droplet). Confirm the session is invalidated and re-authentication is required. Sessions are in-memory — a restart always invalidates all active sessions.
 
-8. **No host-published operator port:** `docker compose ps` on the gateway droplet must not show a `9300->9300` mapping.
+8. **VPC-scoped operator port:** `docker compose ps` on the gateway droplet shows the operator port published only on the VPC IP (`10.116.0.3:9300->9300`), never on `0.0.0.0`/all interfaces. The port is further restricted to the dashboard droplet by a `DOCKER-USER` iptables rule (per-deploy) and a DigitalOcean Cloud Firewall (provisioning). Confirm public `gateway.fro.bot:9300` is unreachable.
 
 ---
 

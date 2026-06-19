@@ -127,6 +127,46 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
         ].join('\n'),
       })
     }
+    // Default doctl firewall calls: return success responses so existing tests that use VPC env
+    // don't need to mock the firewall reconcile phase individually.
+    // Tests that need different behavior (e.g. no-firewall, idempotent) override via handler.
+    if (
+      cmdStr.includes('doctl') &&
+      cmdStr.includes('compute') &&
+      cmdStr.includes('droplet') &&
+      cmdStr.includes('get') &&
+      cmdStr.includes('dashboard')
+    ) {
+      return makeSpawnResult({stdout: '222222222\n'})
+    }
+    if (
+      cmdStr.includes('doctl') &&
+      cmdStr.includes('compute') &&
+      cmdStr.includes('droplet') &&
+      cmdStr.includes('get')
+    ) {
+      return makeSpawnResult({stdout: '111111111\n'})
+    }
+    if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+      return makeSpawnResult({
+        stdout:
+          'fw-default-test-id    gateway-fw    succeeded    2026-01-01T00:00:00Z    protocol:tcp,ports:22,address:0.0.0.0/0    protocol:tcp,ports:all,address:0.0.0.0/0    111111111        ',
+      })
+    }
+    if (
+      cmdStr.includes('doctl') &&
+      cmdStr.includes('firewall') &&
+      cmdStr.includes('get') &&
+      cmdStr.includes('InboundRules')
+    ) {
+      // Default: rule already present (idempotent no-op) so tests don't need to mock add-rules
+      return makeSpawnResult({
+        stdout: 'protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:222222222',
+      })
+    }
+    if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('add-rules')) {
+      return makeSpawnResult({stdout: ''})
+    }
     return makeSpawnResult()
   }
   return {spawnFn, calls}
@@ -9957,11 +9997,12 @@ describe('buildComposeOverride — VPC port publish', () => {
 
 // ─── Phase 5d rendered-config gate — VPC-scoped port allowlist ───────────────
 
-/** Build env with operator listener trio + auth/config vars + VPC IPs. */
+/** Build env with operator listener trio + auth/config vars + VPC IPs + DO token. */
 function makeVpcOperatorEnv(overrides: Record<string, string> = {}): Record<string, string> {
   return makeOperatorAuthEnv({
     GATEWAY_VPC_IP: '10.116.0.3',
     DASHBOARD_VPC_IP: '10.116.0.5',
+    DIGITALOCEAN_ACCESS_TOKEN: 'dop_v1_test_token',
     ...overrides,
   })
 }
@@ -10633,5 +10674,412 @@ describe('Unit 2: DOCKER-USER source restriction — main() integration', () => 
     ).rejects.toThrow(/DASHBOARD_VPC_IP/)
 
     expect(calls).toHaveLength(0)
+  })
+})
+
+// ─── DO Cloud Firewall reconcile (Unit 3) ────────────────────────────────────
+//
+// Tests for the provider-level firewall reconcile phase in main().
+// Gated on operatorEnabled && getOperatorVpcState === 'enabled'.
+// Uses DIGITALOCEAN_ACCESS_TOKEN (not a gateway SSH secret) for doctl calls.
+//
+// The reconcile is additive-only: it finds the EXISTING firewall attached to the
+// gateway droplet and adds a single inbound rule (tcp/9300 from dashboard droplet-id).
+// It never creates, deletes, or removes-rules from any firewall.
+
+// Helper: env with operator + VPC + DO token enabled
+function makeFirewallEnv(overrides: Record<string, string> = {}): Record<string, string> {
+  return makeEnv({
+    GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
+    GATEWAY_OPERATOR_BIND_PORT: '9300',
+    GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
+    GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123',
+    GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-abc123',
+    GATEWAY_OPERATOR_CSRF_SECRET: 'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY',
+    GATEWAY_OPERATOR_ALLOWLIST: '12345678',
+    GATEWAY_VPC_IP: '10.116.0.3',
+    DASHBOARD_VPC_IP: '10.116.0.5',
+    DIGITALOCEAN_ACCESS_TOKEN: 'dop_v1_test_token',
+    ...overrides,
+  })
+}
+
+// Firewall list-by-droplet output (table format, no header):
+// <fw-id>  <name>  <status>  <created>  <inbound-rules>  <outbound-rules>  <droplet-ids>  <tags>  <pending>
+const FIREWALL_ID = 'fw-aaaa-bbbb-cccc-dddd'
+const GATEWAY_DROPLET_ID = '111111111'
+const DASHBOARD_DROPLET_ID = '222222222'
+
+// Simulated doctl output for firewall list-by-droplet (no existing 9300 rule)
+const FIREWALL_LIST_NO_9300 = `${FIREWALL_ID}    gateway-fw    succeeded    2026-01-01T00:00:00Z    protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:80,address:0.0.0.0/0 protocol:tcp,ports:443,address:0.0.0.0/0    protocol:tcp,ports:all,address:0.0.0.0/0    ${GATEWAY_DROPLET_ID}        `
+
+// Simulated doctl output for firewall get InboundRules (no 9300 rule)
+const FIREWALL_INBOUND_NO_9300 = `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:80,address:0.0.0.0/0 protocol:tcp,ports:443,address:0.0.0.0/0`
+
+// Simulated doctl output for firewall get InboundRules (9300 rule already present)
+const FIREWALL_INBOUND_WITH_9300 = `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:80,address:0.0.0.0/0 protocol:tcp,ports:443,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`
+
+describe('DO Cloud Firewall reconcile', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.69.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('happy path: operator+VPC enabled + token present → reconcile adds 9300 rule to EXISTING firewall', async () => {
+    const {main} = await import('./deploy')
+    const addRulesCalls: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // doctl compute droplet get dashboard --format ID → dashboard droplet ID
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('dashboard')
+      ) {
+        return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
+      }
+      // doctl compute droplet get <gateway-host> --format ID (to find its firewall)
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('gateway.fro.bot')
+      ) {
+        return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
+      }
+      // list-by-droplet → returns one firewall
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
+      }
+      // firewall get InboundRules → no 9300 rule yet
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        return makeSpawnResult({stdout: FIREWALL_INBOUND_NO_9300})
+      }
+      // add-rules call
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('add-rules')) {
+        addRulesCalls.push(cmd)
+        return makeSpawnResult({stdout: ''})
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeFirewallEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // add-rules must have been called exactly once
+    expect(addRulesCalls).toHaveLength(1)
+    const addRulesCmd = addRulesCalls[0]!.join(' ')
+    // Must target the existing firewall ID
+    expect(addRulesCmd).toContain(FIREWALL_ID)
+    // Must use the dashboard droplet-id as source
+    expect(addRulesCmd).toContain(`droplet_id:${DASHBOARD_DROPLET_ID}`)
+    // Must specify tcp/9300
+    expect(addRulesCmd).toContain('protocol:tcp')
+    expect(addRulesCmd).toContain('ports:9300')
+    // Must use --inbound-rules flag
+    expect(addRulesCmd).toContain('--inbound-rules')
+  })
+
+  test('idempotent: rule already present → no add-rules call', async () => {
+    const {main} = await import('./deploy')
+    const addRulesCalls: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('dashboard')
+      ) {
+        return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('gateway.fro.bot')
+      ) {
+        return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
+      }
+      // Rule already present
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        return makeSpawnResult({stdout: FIREWALL_INBOUND_WITH_9300})
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('add-rules')) {
+        addRulesCalls.push(cmd)
+        return makeSpawnResult({stdout: ''})
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeFirewallEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // No add-rules call when rule already present
+    expect(addRulesCalls).toHaveLength(0)
+  })
+
+  test('operator disabled → no doctl firewall calls', async () => {
+    const {main} = await import('./deploy')
+    const firewallCalls: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall')) {
+        firewallCalls.push(cmd)
+      }
+      return undefined
+    })
+
+    // No operator vars → operator disabled
+    await main({
+      env: makeEnv({DIGITALOCEAN_ACCESS_TOKEN: 'dop_v1_test_token'}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(firewallCalls).toHaveLength(0)
+  })
+
+  test('operator enabled but VPC disabled → no doctl firewall calls', async () => {
+    const {main} = await import('./deploy')
+    const firewallCalls: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall')) {
+        firewallCalls.push(cmd)
+      }
+      return undefined
+    })
+
+    // Operator enabled but no VPC IPs
+    await main({
+      env: makeEnv({
+        GATEWAY_OPERATOR_BIND_HOST: '172.21.0.2',
+        GATEWAY_OPERATOR_BIND_PORT: '9300',
+        GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
+        GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123',
+        GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-abc123',
+        GATEWAY_OPERATOR_CSRF_SECRET: 'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY',
+        GATEWAY_OPERATOR_ALLOWLIST: '12345678',
+        DIGITALOCEAN_ACCESS_TOKEN: 'dop_v1_test_token',
+        // No GATEWAY_VPC_IP or DASHBOARD_VPC_IP
+      }),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(firewallCalls).toHaveLength(0)
+  })
+
+  test('DIGITALOCEAN_ACCESS_TOKEN absent → fails closed with actionable error, no doctl firewall call', async () => {
+    const {main} = await import('./deploy')
+    const firewallCalls: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall')) {
+        firewallCalls.push(cmd)
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv({DIGITALOCEAN_ACCESS_TOKEN: ''}),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/DIGITALOCEAN_ACCESS_TOKEN/)
+
+    expect(firewallCalls).toHaveLength(0)
+  })
+
+  test('dashboard droplet ID not found → fails closed', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // doctl compute droplet get dashboard --format ID → not found (empty output)
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('dashboard')
+      ) {
+        return makeSpawnResult({stdout: ''})
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/dashboard/)
+  })
+
+  test('gateway droplet has no existing firewall → fails closed with guidance, never creates one', async () => {
+    const {main} = await import('./deploy')
+    const createCalls: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('dashboard')
+      ) {
+        return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('gateway.fro.bot')
+      ) {
+        return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
+      }
+      // No firewall attached to gateway droplet
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        return makeSpawnResult({stdout: ''})
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('create')) {
+        createCalls.push(cmd)
+        return makeSpawnResult({stdout: ''})
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/firewall/)
+
+    // Must never auto-create a firewall
+    expect(createCalls).toHaveLength(0)
+  })
+
+  test('safety: reconcile never issues firewall create, delete, or remove-rules', async () => {
+    const {main} = await import('./deploy')
+    const dangerousCalls: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('dashboard')
+      ) {
+        return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('gateway.fro.bot')
+      ) {
+        return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        return makeSpawnResult({stdout: FIREWALL_INBOUND_NO_9300})
+      }
+      // Track dangerous calls
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        (cmdStr.includes('create') || cmdStr.includes('delete') || cmdStr.includes('remove-rules'))
+      ) {
+        dangerousCalls.push(cmd)
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeFirewallEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(dangerousCalls).toHaveLength(0)
   })
 })

@@ -2714,6 +2714,136 @@ SCRIPT`
       )
     }
 
+    // Phase 8d: DO Cloud Firewall reconcile (operator + VPC enabled only).
+    //
+    // Provider-level rule: allows TCP 9300 to the gateway droplet ONLY from the dashboard
+    // droplet. This is the reboot-durable, load-bearing control — the DO Cloud Firewall
+    // survives reboots (unlike the DOCKER-USER rule which is reapplied every deploy).
+    //
+    // SAFETY CONSTRAINTS:
+    //   - DO Cloud Firewalls are ALLOWLIST / default-deny. Attaching a NEW firewall that
+    //     only allows 9300 would LOCK OUT SSH(22)/HTTP(80)/HTTPS(443)/announce.
+    //     Therefore: reconcile the EXISTING firewall attached to the gateway droplet by
+    //     ADDING a single inbound rule. NEVER create/attach a fresh firewall, and NEVER
+    //     remove/replace existing inbound rules.
+    //   - If the gateway droplet has no existing firewall, FAIL CLOSED with actionable
+    //     guidance (do not auto-create a restrictive one).
+    //   - Source = dashboard DROPLET-ID (stable across rebuild), NOT private IP
+    //     (rebuild-reassignable). Resolved inline via `doctl compute droplet get dashboard --format ID --no-header`.
+    //   - DIGITALOCEAN_ACCESS_TOKEN must be present — verify first, fail closed if absent.
+    //
+    // Idempotent: check whether the rule already exists before adding it.
+    // Gate: operatorEnabled && getOperatorVpcState(env) === 'enabled'.
+    if (operatorEnabled && getOperatorVpcState(env) === 'enabled') {
+      const doToken = env.DIGITALOCEAN_ACCESS_TOKEN?.trim()
+      if (!doToken) {
+        throw new Error(
+          'DIGITALOCEAN_ACCESS_TOKEN is required for the DO Cloud Firewall reconcile phase ' +
+            'but is absent or empty. ' +
+            'Add DIGITALOCEAN_ACCESS_TOKEN to the gateway GitHub Environment and local .env ' +
+            'before enabling the VPC port publish. ' +
+            'The firewall reconcile cannot proceed without it.',
+        )
+      }
+
+      // Build a doctl-capable env: extends deployEnv with the DO token.
+      const doctlEnv: DeployEnv = {...deployEnv, DIGITALOCEAN_ACCESS_TOKEN: doToken}
+
+      // Step 1: Resolve the dashboard droplet ID (stable across rebuild).
+      // Uses `doctl compute droplet get <name> --format ID --no-header`.
+      const {stdout: dashboardIdRaw} = await runCommand(
+        'Resolving dashboard droplet ID',
+        ['doctl', 'compute', 'droplet', 'get', 'dashboard', '--format', 'ID', '--no-header'],
+        doctlEnv,
+        spawnFn,
+      )
+      const dashboardDropletId = dashboardIdRaw.trim()
+      if (!dashboardDropletId) {
+        throw new Error(
+          'Dashboard droplet "dashboard" not found in DigitalOcean account. ' +
+            'Run `doctl compute droplet list` to see available droplets. ' +
+            'The DO Cloud Firewall reconcile cannot proceed without the dashboard droplet ID.',
+        )
+      }
+
+      // Step 2: Resolve the gateway droplet ID (needed to find its firewall).
+      const {stdout: gatewayIdRaw} = await runCommand(
+        'Resolving gateway droplet ID',
+        ['doctl', 'compute', 'droplet', 'get', host, '--format', 'ID', '--no-header'],
+        doctlEnv,
+        spawnFn,
+      )
+      const gatewayDropletId = gatewayIdRaw.trim()
+      if (!gatewayDropletId) {
+        throw new Error(
+          `Gateway droplet "${host}" not found in DigitalOcean account. ` +
+            'Run `doctl compute droplet list` to see available droplets.',
+        )
+      }
+
+      // Step 3: Find the EXISTING firewall attached to the gateway droplet.
+      // Uses `doctl compute firewall list-by-droplet <id> --format ID --no-header`.
+      // If no firewall is attached, fail closed — never auto-create a restrictive allowlist.
+      const {stdout: firewallListRaw} = await runCommand(
+        'Finding existing firewall for gateway droplet',
+        ['doctl', 'compute', 'firewall', 'list-by-droplet', gatewayDropletId, '--format', 'ID', '--no-header'],
+        doctlEnv,
+        spawnFn,
+      )
+      const firewallId = firewallListRaw.trim().split('\n')[0]?.trim()
+      if (!firewallId) {
+        throw new Error(
+          `No existing firewall found attached to the gateway droplet (ID: ${gatewayDropletId}). ` +
+            'The DO Cloud Firewall reconcile requires an EXISTING firewall to add the 9300 rule to. ' +
+            'Attaching a new firewall that only allows 9300 would lock out SSH(22)/HTTP(80)/HTTPS(443). ' +
+            'Create a firewall with the required base rules (22, 80, 443) and attach it to the gateway ' +
+            'droplet first, then re-run the deploy.',
+        )
+      }
+
+      // Step 4: Check whether the inbound rule already exists (idempotent).
+      // Uses `doctl compute firewall get <id> --format InboundRules --no-header`.
+      // The rule is present if the output contains `droplet_id:<dashboardDropletId>` with `ports:9300`.
+      const {stdout: inboundRulesRaw} = await runCommand(
+        'Checking existing firewall inbound rules',
+        ['doctl', 'compute', 'firewall', 'get', firewallId, '--format', 'InboundRules', '--no-header'],
+        doctlEnv,
+        spawnFn,
+      )
+
+      // Check for the exact rule: protocol:tcp,ports:9300,droplet_id:<dashboardDropletId>
+      // The doctl output format uses space-separated rules, each as key:value,key:value pairs.
+      const ruleAlreadyPresent =
+        inboundRulesRaw.includes(`droplet_id:${dashboardDropletId}`) && inboundRulesRaw.includes('ports:9300')
+
+      if (ruleAlreadyPresent) {
+        console.warn(
+          `\u001B[1;32m✓\u001B[0m DO Cloud Firewall rule already present: tcp/9300 from dashboard droplet ${dashboardDropletId} on firewall ${firewallId} (no-op)`,
+        )
+      } else {
+        // Step 5: Add the inbound rule additively.
+        // `doctl compute firewall add-rules <fw-id> --inbound-rules "protocol:tcp,ports:9300,droplet_id:<id>"`
+        // This is additive-only — existing rules are preserved.
+        await runCommand(
+          'Adding DO Cloud Firewall inbound rule: tcp/9300 from dashboard droplet',
+          [
+            'doctl',
+            'compute',
+            'firewall',
+            'add-rules',
+            firewallId,
+            '--inbound-rules',
+            `protocol:tcp,ports:9300,droplet_id:${dashboardDropletId}`,
+          ],
+          doctlEnv,
+          spawnFn,
+        )
+        console.warn(
+          `\u001B[1;32m✓\u001B[0m DO Cloud Firewall rule added: tcp/9300 from dashboard droplet ${dashboardDropletId} on firewall ${firewallId}`,
+        )
+      }
+    }
+
     // Phase 9: Post-deploy probe — poll Discord slash command registration
     const applicationId = validated.DISCORD_APPLICATION_ID
     const guildId = validated.DISCORD_GUILD_ID

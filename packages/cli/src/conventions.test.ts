@@ -440,6 +440,20 @@ describe('per-app invariants', () => {
     // SHA verification is wired in and was not accidentally stripped.
     expect(buildTs).toMatch(/const\s+EXPECTED_SHA256\s*=/)
   })
+
+  it('deploy-gateway.yaml installs doctl via digitalocean/action-doctl before the deploy step', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')).text()
+    // The firewall reconcile in apps/gateway/src/deploy.ts shells out to `doctl`.
+    // doctl is not pre-installed on GitHub Actions runners, so the deploy job must
+    // install it explicitly. This test ensures the dependency cannot silently regress.
+    expect(text).toMatch(/uses:\s+digitalocean\/action-doctl@[a-f0-9]{40}/)
+    // The install step must appear before the deploy step in the file
+    const doctlIndex = text.indexOf('digitalocean/action-doctl@')
+    const deployStepIndex = text.indexOf('name: Deploy gateway')
+    expect(doctlIndex).toBeGreaterThan(-1)
+    expect(deployStepIndex).toBeGreaterThan(-1)
+    expect(doctlIndex).toBeLessThan(deployStepIndex)
+  })
 })
 
 describe('findCrossOrgSecretsInherit', () => {

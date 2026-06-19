@@ -188,6 +188,11 @@ jobs:
             exit 1
           fi
 
+      - name: Install doctl
+        uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f # v2.5.2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
       - name: Configure SSH known_hosts
         run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
 

@@ -10794,13 +10794,14 @@ describe('DO Cloud Firewall reconcile', () => {
       ) {
         return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
       }
-      // doctl compute droplet get <gateway-host> --format ID (to find its firewall)
+      // doctl compute droplet get gateway --format ID (to find its firewall)
+      // Must use the droplet NAME 'gateway', not the FQDN (GATEWAY_HOST).
       if (
         cmdStr.includes('doctl') &&
         cmdStr.includes('compute') &&
         cmdStr.includes('droplet') &&
         cmdStr.includes('get') &&
-        cmdStr.includes('gateway.fro.bot')
+        cmd[4] === 'gateway'
       ) {
         return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
       }
@@ -10873,7 +10874,7 @@ describe('DO Cloud Firewall reconcile', () => {
         cmdStr.includes('compute') &&
         cmdStr.includes('droplet') &&
         cmdStr.includes('get') &&
-        cmdStr.includes('gateway.fro.bot')
+        cmd[4] === 'gateway'
       ) {
         return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
       }
@@ -11045,7 +11046,7 @@ describe('DO Cloud Firewall reconcile', () => {
         cmdStr.includes('compute') &&
         cmdStr.includes('droplet') &&
         cmdStr.includes('get') &&
-        cmdStr.includes('gateway.fro.bot')
+        cmd[4] === 'gateway'
       ) {
         return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
       }
@@ -11098,7 +11099,7 @@ describe('DO Cloud Firewall reconcile', () => {
         cmdStr.includes('compute') &&
         cmdStr.includes('droplet') &&
         cmdStr.includes('get') &&
-        cmdStr.includes('gateway.fro.bot')
+        cmd[4] === 'gateway'
       ) {
         return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
       }
@@ -11137,6 +11138,63 @@ describe('DO Cloud Firewall reconcile', () => {
     })
 
     expect(dangerousCalls).toHaveLength(0)
+  })
+
+  test('gateway droplet lookup uses droplet name "gateway", never GATEWAY_HOST FQDN', async () => {
+    // Regression: the gateway droplet get must pass the droplet NAME ('gateway'),
+    // not GATEWAY_HOST ('gateway.fro.bot'). doctl expects a name, not a domain.
+    const {main} = await import('./deploy')
+    const dropletGetArgs: string[] = []
+    let inboundRulesCallCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Capture the argument passed to `doctl compute droplet get`
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('compute') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get')
+      ) {
+        // cmd[4] is the name/identifier argument
+        if (cmd[4] !== undefined && cmd[4] !== 'dashboard') {
+          dropletGetArgs.push(cmd[4])
+        }
+        if (cmd[4] === 'gateway') return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
+        if (cmd[4] === 'dashboard') return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        inboundRulesCallCount++
+        return makeSpawnResult({
+          stdout: inboundRulesCallCount === 1 ? FIREWALL_INBOUND_NO_9300 : FIREWALL_INBOUND_WITH_9300,
+        })
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeFirewallEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
+    })
+
+    // The gateway droplet get must use the droplet name 'gateway', not the FQDN.
+    expect(dropletGetArgs).toHaveLength(1)
+    expect(dropletGetArgs[0]).toBe('gateway')
+    // Must NOT pass the FQDN (GATEWAY_HOST value from makeEnv = 'gateway.fro.bot')
+    expect(dropletGetArgs[0]).not.toBe('gateway.fro.bot')
+    expect(dropletGetArgs[0]).not.toContain('.')
   })
 })
 

@@ -89,6 +89,17 @@ export interface DeployArgs {
 const REMOTE_DIR = '/opt/gateway'
 
 /**
+ * DigitalOcean droplet name for the gateway — matches the provisioner's DROPLET_NAME constant.
+ * Distinct from GATEWAY_HOST (the FQDN); doctl expects the droplet name, not the domain.
+ */
+const GATEWAY_DROPLET_NAME = 'gateway'
+
+/**
+ * DigitalOcean droplet name for the dashboard — sibling constant for symmetry with GATEWAY_DROPLET_NAME.
+ */
+const DASHBOARD_DROPLET_NAME = 'dashboard'
+
+/**
  * The Docker Compose project name for the gateway stack.
  * Derived from `name: fro-bot` in the upstream fro-bot/agent compose.yaml.
  * Docker Compose prefixes network names with the project name, so the
@@ -2862,7 +2873,7 @@ SCRIPT`
       // Uses `doctl compute droplet get <name> --format ID --no-header`.
       const {stdout: dashboardIdRaw} = await runCommandWithTimeout(
         'Resolving dashboard droplet ID',
-        ['doctl', 'compute', 'droplet', 'get', 'dashboard', '--format', 'ID', '--no-header'],
+        ['doctl', 'compute', 'droplet', 'get', DASHBOARD_DROPLET_NAME, '--format', 'ID', '--no-header'],
         doctlEnv,
         spawnFn,
         DOCTL_TIMEOUT_MS,
@@ -2870,16 +2881,17 @@ SCRIPT`
       const dashboardDropletId = dashboardIdRaw.trim()
       if (!dashboardDropletId) {
         throw new Error(
-          'Dashboard droplet "dashboard" not found in DigitalOcean account. ' +
+          `Dashboard droplet "${DASHBOARD_DROPLET_NAME}" not found in DigitalOcean account. ` +
             'Run `doctl compute droplet list` to see available droplets. ' +
             'The DO Cloud Firewall reconcile cannot proceed without the dashboard droplet ID.',
         )
       }
 
       // Step 2: Resolve the gateway droplet ID (needed to find its firewall).
+      // Uses the droplet NAME (GATEWAY_DROPLET_NAME = 'gateway'), not GATEWAY_HOST (the FQDN).
       const {stdout: gatewayIdRaw} = await runCommandWithTimeout(
         'Resolving gateway droplet ID',
-        ['doctl', 'compute', 'droplet', 'get', host, '--format', 'ID', '--no-header'],
+        ['doctl', 'compute', 'droplet', 'get', GATEWAY_DROPLET_NAME, '--format', 'ID', '--no-header'],
         doctlEnv,
         spawnFn,
         DOCTL_TIMEOUT_MS,
@@ -2887,7 +2899,7 @@ SCRIPT`
       const gatewayDropletId = gatewayIdRaw.trim()
       if (!gatewayDropletId) {
         throw new Error(
-          `Gateway droplet "${host}" not found in DigitalOcean account. ` +
+          `Gateway droplet "${GATEWAY_DROPLET_NAME}" not found in DigitalOcean account. ` +
             'Run `doctl compute droplet list` to see available droplets.',
         )
       }

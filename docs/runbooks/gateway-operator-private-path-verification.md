@@ -177,6 +177,46 @@ DigitalOcean console to restore the firewall rules before attempting SSH.
 
 ---
 
+## Login entry and end-to-end auth verification
+
+The operator login entry is `https://dashboard.fro.bot/operator/auth/github/start`. A `302` redirect
+to GitHub OAuth confirms the full same-origin path is live and the auth gate is wired.
+
+```sh
+curl -sI https://dashboard.fro.bot/operator/auth/github/start
+# expect: HTTP/2 302
+#         location: https://github.com/login/oauth/authorize?...client_id=<GATEWAY_OPERATOR_GITHUB_CLIENT_ID>...
+```
+
+The `location:` header points to `https://github.com/login/oauth/authorize` with query parameters
+including the operator OAuth app's client ID (`GATEWAY_OPERATOR_GITHUB_CLIENT_ID`), PKCE challenge,
+CSRF state, and `scope=read:user`. Do not hardcode the client ID value in probes — verify it matches
+the value registered in the GitHub Developer Portal (OAuth Apps → your operator app).
+
+A full browser round-trip — completing GitHub OAuth at the start URL, callback at
+`https://dashboard.fro.bot/operator/auth/github/callback` — returns the operator identity JSON:
+
+```json
+{"githubUserId":<operator-id>,"login":"<login>"}
+```
+
+This confirms the allowlist check passed (`GATEWAY_OPERATOR_ALLOWLIST` contains the GitHub user ID)
+and the full auth path is live end-to-end.
+
+**Route surface:** The gateway operator listener serves only three routes:
+
+- `GET /operator/health` — health probe; returns `200 {"ok":true}`
+- `GET /operator/auth/github/start` — login entry; returns `302` to GitHub OAuth
+- `GET /operator/auth/github/callback` — OAuth callback; returns operator identity JSON on success
+
+**Any other `/operator/*` path** — including bare `/operator/` and `/operator` — returns
+`{"error":"not-found"}` (HTTP 404) by design. This is correct behavior, not a failure. There is no
+browsable operator UI yet; the operator dashboard UI client is deferred to
+`docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`. Use `/operator/health` (not
+`/operator/`) as the health surface, and `/operator/auth/github/start` as the login surface.
+
+---
+
 ## Related
 
 - [`apps/gateway/AGENTS.md`](../../apps/gateway/AGENTS.md) — gateway deploy flow, operator listener,

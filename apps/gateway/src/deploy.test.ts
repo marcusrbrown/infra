@@ -188,6 +188,16 @@ function makeDiscordFetch(commands: {name: string}[]): typeof fetch {
   }) as unknown as typeof fetch
 }
 
+/**
+ * Default tcpConnect mock for tests: always throws (connection refused).
+ * Simulates the expected pass condition for the public-denied probe — port 9300
+ * is not publicly reachable. Tests that need a different behavior (e.g. port open)
+ * provide their own tcpConnect mock.
+ */
+const tcpConnectRefused = async (_host: string, _port: number): Promise<void> => {
+  throw new Error('connect ECONNREFUSED')
+}
+
 // ─── Test setup ───────────────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -10055,6 +10065,7 @@ describe('Phase 5d rendered-config gate — VPC-scoped port allowlist', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     const script = captureValidateScript(capturedCmds)
@@ -10079,6 +10090,7 @@ describe('Phase 5d rendered-config gate — VPC-scoped port allowlist', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     const script = captureValidateScript(capturedCmds)
@@ -10102,6 +10114,7 @@ describe('Phase 5d rendered-config gate — VPC-scoped port allowlist', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     const script = captureValidateScript(capturedCmds)
@@ -10126,6 +10139,7 @@ describe('Phase 5d rendered-config gate — VPC-scoped port allowlist', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     const script = captureValidateScript(capturedCmds)
@@ -10149,6 +10163,7 @@ describe('Phase 5d rendered-config gate — VPC-scoped port allowlist', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     const script = captureValidateScript(capturedCmds)
@@ -10343,6 +10358,7 @@ describe('DOCKER-USER source restriction — main() integration', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     const applyCmd = captureDockerUserApplyCmd(capturedCmds)
@@ -10401,6 +10417,7 @@ describe('DOCKER-USER source restriction — main() integration', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     const upIdx = eventLog.indexOf('compose-up')
@@ -10483,6 +10500,7 @@ describe('DOCKER-USER source restriction — main() integration', () => {
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/VPC interface|interface.*not.*found|no.*interface|detect.*interface/i)
   })
@@ -10506,6 +10524,7 @@ describe('DOCKER-USER source restriction — main() integration', () => {
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/VPC interface|interface.*not.*found|no.*interface|detect.*interface/i)
   })
@@ -10540,6 +10559,7 @@ describe('DOCKER-USER source restriction — main() integration', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     const readbackCmd = captureDockerUserReadbackCmd(capturedCmds)
@@ -10578,6 +10598,7 @@ describe('DOCKER-USER source restriction — main() integration', () => {
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/DOCKER-USER.*source|source.*DOCKER-USER|wrong.*source|source.*wrong|10\.116\.0\.5/i)
   })
@@ -10611,6 +10632,7 @@ describe('DOCKER-USER source restriction — main() integration', () => {
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/DOCKER-USER.*ALLOW|ALLOW.*rule.*missing|ALLOW.*not.*found|missing.*ALLOW/i)
   })
@@ -10647,6 +10669,7 @@ describe('DOCKER-USER source restriction — main() integration', () => {
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/ALLOW.*before.*DROP|DROP.*before.*ALLOW|ordering|order/i)
   })
@@ -10813,6 +10836,7 @@ describe('DO Cloud Firewall reconcile', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     // add-rules must have been called exactly once
@@ -10878,6 +10902,7 @@ describe('DO Cloud Firewall reconcile', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     // No add-rules call when rule already present
@@ -10903,6 +10928,7 @@ describe('DO Cloud Firewall reconcile', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     expect(firewallCalls).toHaveLength(0)
@@ -10937,6 +10963,7 @@ describe('DO Cloud Firewall reconcile', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     expect(firewallCalls).toHaveLength(0)
@@ -10961,6 +10988,7 @@ describe('DO Cloud Firewall reconcile', () => {
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/DIGITALOCEAN_ACCESS_TOKEN/)
 
@@ -10992,6 +11020,7 @@ describe('DO Cloud Firewall reconcile', () => {
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/dashboard/)
   })
@@ -11038,6 +11067,7 @@ describe('DO Cloud Firewall reconcile', () => {
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/firewall/)
 
@@ -11103,6 +11133,7 @@ describe('DO Cloud Firewall reconcile', () => {
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     expect(dangerousCalls).toHaveLength(0)
@@ -11160,15 +11191,6 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
   test('happy path: public gateway.fro.bot:9300 refused + firewall readback correct → deploy passes', async () => {
     const {main} = await import('./deploy')
 
-    // fetch mock: public :9300 probe throws (connection refused = pass)
-    const mockFetch = mock(async (url: string) => {
-      if (url.includes(':9300')) {
-        throw new TypeError('fetch failed: connection refused')
-      }
-      // Discord registration
-      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
-    }) as unknown as typeof fetch
-
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
       // Firewall post-state readback: rule present with correct dashboard droplet-id
@@ -11189,26 +11211,23 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
       main({
         env: makeFirewallEnv(),
         args: [],
-        fetch: mockFetch,
+        fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).resolves.toBeUndefined()
   })
 
   // ── Error: public :9300 reachable → fail closed ─────────────────────────────
 
-  test('error: public gateway.fro.bot:9300 reachable (fetch returns response) → deploy fails closed', async () => {
+  test('error: public gateway.fro.bot:9300 reachable (TCP connect succeeds) → deploy fails closed', async () => {
     const {main} = await import('./deploy')
 
-    // fetch mock: public :9300 probe returns a response (any response = reachable = fail)
-    const mockFetch = mock(async (url: string) => {
-      if (url.includes(':9300')) {
-        // Any HTTP response means the port is reachable — must fail closed
-        return new Response('', {status: 200})
-      }
-      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
-    }) as unknown as typeof fetch
+    // tcpConnect resolves (connection established) → port is reachable → fail closed
+    const tcpConnectOpen = async (_host: string, _port: number): Promise<void> => {
+      // Connection established — port is open
+    }
 
     const {spawnFn} = makeSpawnMock()
 
@@ -11216,9 +11235,10 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
       main({
         env: makeFirewallEnv(),
         args: [],
-        fetch: mockFetch,
+        fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectOpen,
       }),
     ).rejects.toThrow(/9300.*reachable|public.*9300|gateway.*9300.*public/i)
   })
@@ -11227,13 +11247,6 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
 
   test('error: DO firewall readback shows 9300 rule missing → deploy fails closed', async () => {
     const {main} = await import('./deploy')
-
-    const mockFetch = mock(async (url: string) => {
-      if (url.includes(':9300')) {
-        throw new TypeError('fetch failed: connection refused')
-      }
-      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
-    }) as unknown as typeof fetch
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
@@ -11255,9 +11268,10 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
       main({
         env: makeFirewallEnv(),
         args: [],
-        fetch: mockFetch,
+        fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/firewall.*9300|9300.*firewall|rule.*missing|missing.*rule/i)
   })
@@ -11266,13 +11280,6 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
 
   test('error: DO firewall readback shows 9300 rule with wrong source droplet-id → deploy fails closed', async () => {
     const {main} = await import('./deploy')
-
-    const mockFetch = mock(async (url: string) => {
-      if (url.includes(':9300')) {
-        throw new TypeError('fetch failed: connection refused')
-      }
-      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
-    }) as unknown as typeof fetch
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
@@ -11294,9 +11301,10 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
       main({
         env: makeFirewallEnv(),
         args: [],
-        fetch: mockFetch,
+        fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
         spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
       }),
     ).rejects.toThrow(/firewall.*source|source.*firewall|wrong.*droplet|droplet.*wrong|222222222/i)
   })
@@ -11305,12 +11313,7 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
 
   test('edge: operator disabled → public-denied probe and firewall readback skipped', async () => {
     const {main} = await import('./deploy')
-    const probedUrls: string[] = []
-
-    const mockFetch = mock(async (url: string) => {
-      probedUrls.push(url)
-      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
-    }) as unknown as typeof fetch
+    const tcpConnectCalls: {host: string; port: number}[] = []
 
     const {spawnFn} = makeSpawnMock()
 
@@ -11318,23 +11321,22 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
     await main({
       env: makeEnv(),
       args: [],
-      fetch: mockFetch,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: async (host, port) => {
+        tcpConnectCalls.push({host, port})
+        throw new Error('connect ECONNREFUSED')
+      },
     })
 
-    // No :9300 probe should have been made
-    expect(probedUrls.some(u => u.includes(':9300'))).toBe(false)
+    // No TCP connect to :9300 should have been made
+    expect(tcpConnectCalls.some(c => c.port === 9300)).toBe(false)
   })
 
   test('edge: VPC disabled (operator enabled but no VPC IPs) → public-denied probe and firewall readback skipped', async () => {
     const {main} = await import('./deploy')
-    const probedUrls: string[] = []
-
-    const mockFetch = mock(async (url: string) => {
-      probedUrls.push(url)
-      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
-    }) as unknown as typeof fetch
+    const tcpConnectCalls: {host: string; port: number}[] = []
 
     const {spawnFn} = makeSpawnMock()
 
@@ -11342,27 +11344,23 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
     await main({
       env: makeOperatorAuthEnv(),
       args: [],
-      fetch: mockFetch,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: async (host, port) => {
+        tcpConnectCalls.push({host, port})
+        throw new Error('connect ECONNREFUSED')
+      },
     })
 
-    expect(probedUrls.some(u => u.includes(':9300'))).toBe(false)
+    expect(tcpConnectCalls.some(c => c.port === 9300)).toBe(false)
   })
 
-  // ── Verify the public-denied probe targets the correct URL ───────────────────
+  // ── Verify the public-denied probe targets the correct host ──────────────────
 
-  test('public-denied probe targets https://gateway.fro.bot:9300 (not the VPC IP)', async () => {
+  test('public-denied probe targets gateway.fro.bot:9300 (not the VPC IP)', async () => {
     const {main} = await import('./deploy')
-    const probedUrls: string[] = []
-
-    const mockFetch = mock(async (url: string) => {
-      probedUrls.push(url)
-      if (url.includes(':9300')) {
-        throw new TypeError('fetch failed: connection refused')
-      }
-      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
-    }) as unknown as typeof fetch
+    const tcpConnectCalls: {host: string; port: number}[] = []
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
@@ -11382,17 +11380,21 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
     await main({
       env: makeFirewallEnv(),
       args: [],
-      fetch: mockFetch,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: async (host, port) => {
+        tcpConnectCalls.push({host, port})
+        throw new Error('connect ECONNREFUSED')
+      },
     })
 
     // Must probe the public gateway hostname, not the VPC IP
-    const port9300Probes = probedUrls.filter(u => u.includes(':9300'))
+    const port9300Probes = tcpConnectCalls.filter(c => c.port === 9300)
     expect(port9300Probes.length).toBeGreaterThan(0)
     // Must use the public hostname (gateway.fro.bot), not the VPC IP (10.116.0.3)
-    expect(port9300Probes.every(u => u.includes('gateway.fro.bot'))).toBe(true)
-    expect(port9300Probes.every(u => !u.includes('10.116.0.3'))).toBe(true)
+    expect(port9300Probes.every(c => c.host === 'gateway.fro.bot')).toBe(true)
+    expect(port9300Probes.every(c => c.host !== '10.116.0.3')).toBe(true)
   })
 
   // ── Firewall readback uses the same firewall ID resolved during reconcile ───────────
@@ -11400,13 +11402,6 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
   test('firewall post-state readback uses the same firewall ID as the add-rules step', async () => {
     const {main} = await import('./deploy')
     const firewallGetCalls: string[][] = []
-
-    const mockFetch = mock(async (url: string) => {
-      if (url.includes(':9300')) {
-        throw new TypeError('fetch failed: connection refused')
-      }
-      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
-    }) as unknown as typeof fetch
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
@@ -11431,9 +11426,10 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
     await main({
       env: makeFirewallEnv(),
       args: [],
-      fetch: mockFetch,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
       spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
     })
 
     // The firewall get call must reference the firewall ID
@@ -11441,5 +11437,562 @@ describe('gateway verification: public-denied probe + DO firewall post-state rea
     const lastGetCall = firewallGetCalls.at(-1)
     expect(lastGetCall).toBeDefined()
     expect(lastGetCall?.join(' ')).toContain(FIREWALL_ID)
+  })
+})
+
+// ─── [P0] Firewall rule: per-rule parse (not cross-rule substring match) ──────
+//
+// The idempotency check (Phase 8d) and post-state readback (Phase 8e) must assert
+// that BOTH `ports:9300` AND `droplet_id:<id>` appear in the SAME rule token, not
+// as independent substrings across the whole output. A pre-existing public rule
+// `ports:9300,address:0.0.0.0/0` plus a separate unrelated rule containing
+// `droplet_id:<id>` must NOT satisfy the check.
+//
+// Also guards against `ports:93000` false-match (port field must be exactly 9300).
+
+describe('DO Cloud Firewall reconcile — per-rule parse (P0 fix)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.69.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('cross-rule false positive: ports:9300 in one rule + droplet_id in separate rule → NOT treated as present, add-rules IS called', async () => {
+    // BUG scenario: two separate rules — one with ports:9300 open to the internet,
+    // one with droplet_id but a different port. The old code would see both substrings
+    // and skip add-rules. The fixed code must parse per-rule and still call add-rules.
+    const {main} = await import('./deploy')
+    const addRulesCalls: string[][] = []
+    let inboundRulesCallCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('dashboard')
+      ) {
+        return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('gateway.fro.bot')
+      ) {
+        return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        inboundRulesCallCount++
+        if (inboundRulesCallCount === 1) {
+          // Phase 8d check: ports:9300 open to internet in one rule, droplet_id in a SEPARATE rule
+          // Old code: both substrings present → incorrectly skips add-rules
+          // Fixed code: no single rule has both → correctly calls add-rules
+          return makeSpawnResult({
+            stdout: `protocol:tcp,ports:9300,address:0.0.0.0/0 protocol:tcp,ports:22,droplet_id:${DASHBOARD_DROPLET_ID}`,
+          })
+        }
+        // Phase 8e readback: now the correct combined rule is present
+        return makeSpawnResult({
+          stdout: `protocol:tcp,ports:9300,address:0.0.0.0/0 protocol:tcp,ports:22,droplet_id:${DASHBOARD_DROPLET_ID} protocol:tcp,ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`,
+        })
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('add-rules')) {
+        addRulesCalls.push(cmd)
+        return makeSpawnResult({stdout: ''})
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeFirewallEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
+    })
+
+    // add-rules MUST have been called — the cross-rule match must not count as present
+    expect(addRulesCalls).toHaveLength(1)
+  })
+
+  test('cross-rule false positive in Phase 8e readback: ports:9300 public + separate droplet_id → readback FAILS', async () => {
+    // After add-rules, the readback must also use per-rule parse.
+    // If the readback sees ports:9300 in one rule and droplet_id in another, it must fail.
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('dashboard')
+      ) {
+        return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('gateway.fro.bot')
+      ) {
+        return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        // Both Phase 8d and 8e: ports:9300 public + droplet_id in separate rule (no combined rule)
+        return makeSpawnResult({
+          stdout: `protocol:tcp,ports:9300,address:0.0.0.0/0 protocol:tcp,ports:22,droplet_id:${DASHBOARD_DROPLET_ID}`,
+        })
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('add-rules')) {
+        return makeSpawnResult({stdout: ''})
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
+      }),
+    ).rejects.toThrow(/firewall|9300|rule/i)
+  })
+
+  test('ports:93000 false-match: rule with ports:93000 must NOT satisfy the ports:9300 check', async () => {
+    // Guard against prefix false-match: ports:93000 contains ports:9300 as a substring.
+    // The fixed code must match the port field exactly (ports:9300 followed by , or end).
+    const {main} = await import('./deploy')
+    const addRulesCalls: string[][] = []
+    let inboundRulesCallCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('dashboard')
+      ) {
+        return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('droplet') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('gateway.fro.bot')
+      ) {
+        return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        inboundRulesCallCount++
+        if (inboundRulesCallCount === 1) {
+          // ports:93000 with the correct droplet_id — must NOT match as ports:9300
+          return makeSpawnResult({
+            stdout: `protocol:tcp,ports:93000,droplet_id:${DASHBOARD_DROPLET_ID}`,
+          })
+        }
+        // Phase 8e: correct rule now present
+        return makeSpawnResult({
+          stdout: `protocol:tcp,ports:93000,droplet_id:${DASHBOARD_DROPLET_ID} protocol:tcp,ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`,
+        })
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('add-rules')) {
+        addRulesCalls.push(cmd)
+        return makeSpawnResult({stdout: ''})
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeFirewallEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
+    })
+
+    // add-rules must be called — ports:93000 must not satisfy the ports:9300 check
+    expect(addRulesCalls).toHaveLength(1)
+  })
+})
+
+// ─── [P1] DOCKER-USER readback asserts the ALLOW rule's interface ─────────────
+//
+// The readback must assert that the ALLOW rule's `in` (interface) column matches
+// the detected vpcIface. If the ALLOW rule is bound to a different interface,
+// the deploy must fail.
+
+describe('DOCKER-USER readback — interface assertion (P1 fix)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.69.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('ALLOW rule bound to wrong interface → deploy fails closed', async () => {
+    // ip route get returns eth1 as the VPC interface, but the ALLOW rule in the chain
+    // is bound to eth0 (wrong interface). The readback must detect this and fail.
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // ip route get → returns eth1 as VPC interface
+      if (cmdStr.includes('ip route get')) {
+        return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
+      }
+      // DOCKER-USER readback: ALLOW rule is on eth0 (wrong interface), not eth1
+      if (cmdStr.includes('iptables') && cmdStr.includes('-nvL') && cmdStr.includes('DOCKER-USER')) {
+        return makeSpawnResult({
+          stdout: [
+            'Chain DOCKER-USER (1 references)',
+            'num   pkts bytes target     prot opt in     out     source               destination',
+            '1        0     0 RETURN     tcp  --  eth0   *       10.116.0.5           172.21.0.2           tcp dpt:9300',
+            '2        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300',
+            '3        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0',
+          ].join('\n'),
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
+      }),
+    ).rejects.toThrow(/interface|iface|eth0|eth1/i)
+  })
+
+  test('ALLOW rule bound to correct interface → deploy passes', async () => {
+    // ip route get returns eth1, ALLOW rule is on eth1 — should pass
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('ip route get')) {
+        return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
+      }
+      if (cmdStr.includes('iptables') && cmdStr.includes('-nvL') && cmdStr.includes('DOCKER-USER')) {
+        return makeSpawnResult({
+          stdout: [
+            'Chain DOCKER-USER (1 references)',
+            'num   pkts bytes target     prot opt in     out     source               destination',
+            '1        0     0 RETURN     tcp  --  eth1   *       10.116.0.5           172.21.0.2           tcp dpt:9300',
+            '2        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300',
+            '3        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0',
+          ].join('\n'),
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+        tcpConnect: tcpConnectRefused,
+      }),
+    ).resolves.toBeUndefined()
+  })
+})
+
+// ─── [P2] validateVpcIp — octet 0-255 range check ────────────────────────────
+//
+// validateVpcIp must reject octets outside 0-255 (e.g. 10.116.0.999, 256.0.0.1).
+
+describe('validateVpcIp — octet range check (P2 fix)', () => {
+  test('rejects octet > 255 (10.116.0.999)', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('10.116.0.999', 'GATEWAY_VPC_IP')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  test('rejects octet > 255 (256.0.0.1)', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('256.0.0.1', 'GATEWAY_VPC_IP')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  test('rejects octet > 255 (10.256.0.1)', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('10.256.0.1', 'DASHBOARD_VPC_IP')).toThrow(/DASHBOARD_VPC_IP/)
+  })
+
+  test('accepts max valid octet (255.255.255.255)', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('255.255.255.255', 'GATEWAY_VPC_IP')).not.toThrow()
+  })
+})
+
+// ─── [P2] Phase 8d/8e ID caching — no re-resolution in Phase 8e ──────────────
+//
+// The droplet IDs and firewall ID resolved in Phase 8d must be reused in Phase 8e.
+// Phase 8e must NOT issue additional doctl droplet get or list-by-droplet calls.
+
+describe('DO Cloud Firewall — Phase 8e reuses IDs from Phase 8d (P2 fix)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.69.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('droplet get and list-by-droplet called at most once each (no re-resolution in Phase 8e)', async () => {
+    const {main} = await import('./deploy')
+    const dropletGetCalls: string[][] = []
+    const listByDropletCalls: string[][] = []
+    let inboundRulesCallCount = 0
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('doctl') && cmdStr.includes('droplet') && cmdStr.includes('get')) {
+        dropletGetCalls.push(cmd)
+        if (cmdStr.includes('dashboard')) return makeSpawnResult({stdout: `${DASHBOARD_DROPLET_ID}\n`})
+        return makeSpawnResult({stdout: `${GATEWAY_DROPLET_ID}\n`})
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        listByDropletCalls.push(cmd)
+        return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        inboundRulesCallCount++
+        return makeSpawnResult({
+          stdout: inboundRulesCallCount === 1 ? FIREWALL_INBOUND_NO_9300 : FIREWALL_INBOUND_WITH_9300,
+        })
+      }
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('add-rules')) {
+        return makeSpawnResult({stdout: ''})
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeFirewallEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+      tcpConnect: tcpConnectRefused,
+    })
+
+    // dashboard droplet get: at most once
+    const dashboardGetCalls = dropletGetCalls.filter(c => c.join(' ').includes('dashboard'))
+    expect(dashboardGetCalls.length).toBeLessThanOrEqual(1)
+
+    // gateway droplet get: at most once
+    const gatewayGetCalls = dropletGetCalls.filter(c => c.join(' ').includes('gateway.fro.bot'))
+    expect(gatewayGetCalls.length).toBeLessThanOrEqual(1)
+
+    // list-by-droplet: at most once
+    expect(listByDropletCalls.length).toBeLessThanOrEqual(1)
+  })
+})
+
+// ─── [P2] Public-denied probe — TCP connect (not HTTPS fetch) ─────────────────
+//
+// The public-denied probe must use a raw TCP connect to gateway.fro.bot:9300.
+// "Connection refused / timeout" = pass. "Connected / any response" = fail.
+// A TLS error from an HTTPS fetch must NOT count as pass (false negative).
+//
+// The MainOpts interface must expose a tcpConnect injectable for testing.
+
+describe('gateway verification: public-denied probe uses TCP connect (P2 fix)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.69.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('TCP connect refused → pass (port is not publicly reachable)', async () => {
+    const {main} = await import('./deploy')
+
+    // tcpConnect throws (connection refused) → port is not reachable → deploy passes
+    const tcpConnect = mock(async (_host: string, _port: number) => {
+      throw new Error('connect ECONNREFUSED')
+    })
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        return makeSpawnResult({
+          stdout: `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`,
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+        tcpConnect: tcpConnect as unknown as (host: string, port: number) => Promise<void>,
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  test('TCP connect succeeds → fail closed (port is publicly reachable)', async () => {
+    const {main} = await import('./deploy')
+
+    // tcpConnect resolves (connection established) → port is reachable → deploy fails
+    const tcpConnect = mock(async (_host: string, _port: number) => {
+      // Connection established — port is open
+    })
+
+    const {spawnFn} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+        tcpConnect: tcpConnect as unknown as (host: string, port: number) => Promise<void>,
+      }),
+    ).rejects.toThrow(/9300.*reachable|public.*9300|gateway.*9300.*public/i)
+  })
+
+  test('TCP connect timeout → pass (port is not publicly reachable)', async () => {
+    const {main} = await import('./deploy')
+
+    // tcpConnect throws with timeout error → port is not reachable → deploy passes
+    const tcpConnect = mock(async (_host: string, _port: number) => {
+      throw new Error('connect ETIMEDOUT')
+    })
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        return makeSpawnResult({
+          stdout: `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`,
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+        tcpConnect: tcpConnect as unknown as (host: string, port: number) => Promise<void>,
+      }),
+    ).resolves.toBeUndefined()
   })
 })

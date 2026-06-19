@@ -1356,3 +1356,91 @@ describe('dashboard verification: same-origin /operator/health 200 check', () =>
     // Since fetch is called after all spawn calls complete, this ordering is guaranteed.
   })
 })
+
+// ─── [P1] /operator/health retry loop ────────────────────────────────────────
+//
+// Phase 12b must retry the /operator/health check with bounded attempts,
+// matching the existing /api/healthz probe pattern. Fail closed after all
+// attempts exhausted.
+
+describe('dashboard verification: /operator/health retry loop (P1 fix)', () => {
+  it('succeeds on a later attempt (retry works)', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    let operatorHealthAttempts = 0
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          if (url.includes('/operator/health')) {
+            operatorHealthAttempts++
+            if (operatorHealthAttempts < 3) {
+              return new Response('Service Unavailable', {status: 503})
+            }
+            return new Response(JSON.stringify({ok: true}), {status: 200})
+          }
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 5,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+
+    // Must have retried — at least 3 attempts
+    expect(operatorHealthAttempts).toBeGreaterThanOrEqual(3)
+  })
+
+  it('fails closed after all attempts non-200', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    let operatorHealthAttempts = 0
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          if (url.includes('/operator/health')) {
+            operatorHealthAttempts++
+            return new Response('Service Unavailable', {status: 503})
+          }
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 3,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+
+    // Must have exhausted all attempts
+    expect(operatorHealthAttempts).toBe(3)
+  })
+
+  it('connection error on all attempts → fails closed', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    let operatorHealthAttempts = 0
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          if (url.includes('/operator/health')) {
+            operatorHealthAttempts++
+            throw new TypeError('fetch failed: connection refused')
+          }
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 3,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+
+    expect(operatorHealthAttempts).toBeGreaterThanOrEqual(1)
+  })
+})

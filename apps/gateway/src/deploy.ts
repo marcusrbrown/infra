@@ -70,6 +70,13 @@ export interface MainOpts {
   probeIntervalMs?: number
   /** Per-attempt timeout in ms for the HTTPS ingress probe (default: 5_000). */
   probePerAttemptTimeoutMs?: number
+  /**
+   * Injectable TCP connect function for the public-denied probe (Phase 8e).
+   * Resolves when a connection is established (port open = fail).
+   * Throws when connection is refused or times out (port closed = pass).
+   * Defaults to a Bun.connect-based implementation with a 10s timeout.
+   */
+  tcpConnect?: (host: string, port: number) => Promise<void>
 }
 
 export interface DeployArgs {
@@ -682,11 +689,23 @@ export function validateVpcIp(value: string, varName: string): void {
   }
 
   // Require dotted-decimal IPv4 format: four groups of 1–3 digits, no trailing dot.
-  if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(trimmed)) {
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(trimmed)
+  if (!ipv4Match) {
     throw new Error(
       `${varName} "${trimmed}" is not a valid IPv4 address. ` +
         'Provide a dotted-decimal IPv4 address (e.g. 10.116.0.3).',
     )
+  }
+
+  // Validate each octet is in range 0-255 (mirrors validateGatewayVpcIp in dashboard deploy).
+  for (let i = 1; i <= 4; i++) {
+    const octet = Number(ipv4Match[i])
+    if (octet > 255) {
+      throw new Error(
+        `${varName} "${trimmed}" is not a valid IPv4 address. ` +
+          `Octet ${i} (${String(ipv4Match[i])}) is out of range 0-255.`,
+      )
+    }
   }
 }
 
@@ -1667,6 +1686,33 @@ function defaultSpawn(cmd: string[], opts: SpawnOpts): SpawnResult {
   return Bun.spawn(cmd, opts)
 }
 
+/**
+ * Wraps runCommand with a timeout. Throws an actionable error if the command
+ * does not complete within timeoutMs. Used for local doctl API calls that have
+ * no built-in timeout — a hung DO API would otherwise block the deploy indefinitely.
+ */
+async function runCommandWithTimeout(
+  label: string,
+  command: string[],
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  timeoutMs: number,
+): Promise<{stdout: string; stderr: string}> {
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(
+      () =>
+        reject(
+          new Error(
+            `Command timed out after ${timeoutMs}ms: ${command.join(' ')}\n` +
+              `This may indicate a hung DigitalOcean API call. Check your DIGITALOCEAN_ACCESS_TOKEN and network connectivity.`,
+          ),
+        ),
+      timeoutMs,
+    ),
+  )
+  return Promise.race([runCommand(label, command, deployEnv, spawnFn), timeoutPromise])
+}
+
 async function runCommand(
   label: string,
   command: string[],
@@ -1960,12 +2006,51 @@ export async function removeStaleGatewayNet(
 
 // ─── main orchestrator ────────────────────────────────────────────────────────
 
+/**
+ * Default TCP connect implementation for the public-denied probe.
+ * Attempts a raw TCP connection to host:port with a 10s timeout.
+ * Resolves when a connection is established (port open).
+ * Throws when connection is refused or times out (port closed/filtered).
+ */
+async function defaultTcpConnect(host: string, port: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`TCP connect to ${host}:${port} timed out after 10s`))
+    }, 10_000)
+
+    Bun.connect({
+      hostname: host,
+      port,
+      socket: {
+        open() {
+          clearTimeout(timer)
+          resolve()
+        },
+        error(_socket, error) {
+          clearTimeout(timer)
+          reject(error)
+        },
+        connectError(_socket, error) {
+          clearTimeout(timer)
+          reject(error)
+        },
+        data() {},
+        close() {},
+      },
+    }).catch(error => {
+      clearTimeout(timer)
+      reject(error)
+    })
+  })
+}
+
 export async function main(opts: MainOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
   const args = opts.args ?? process.argv.slice(2)
   const fetchFn = opts.fetch ?? globalThis.fetch
   const sleepFn = opts.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)))
   const spawnFn = opts.spawn ?? defaultSpawn
+  const tcpConnectFn = opts.tcpConnect ?? defaultTcpConnect
   const maxAttempts = opts.maxAttempts ?? 10
   const intervalMs = opts.intervalMs ?? 3000
   const probeAttempts = opts.probeAttempts ?? 5
@@ -2665,6 +2750,7 @@ SCRIPT`
       // We look for lines with dpt:<port> targeting the container IP.
       const lines = chainOutput.split('\n')
       let allowLineNum = -1
+      let allowIface: string | undefined
       let dropLineNum = -1
 
       for (const line of lines) {
@@ -2683,10 +2769,12 @@ SCRIPT`
         // With --line-numbers: fields[0]=num, fields[1]=pkts, fields[2]=bytes, fields[3]=target,
         // fields[4]=prot, fields[5]=opt, fields[6]=in, fields[7]=out, fields[8]=source, fields[9]=destination
         const target = fields[3] ?? ''
+        const inIface = fields[6] ?? ''
         const source = fields[8] ?? ''
 
         if (target === 'RETURN' && source === dashboardVpcIp) {
           allowLineNum = lineNum
+          allowIface = inIface
         } else if (target === 'DROP') {
           dropLineNum = lineNum
         }
@@ -2696,6 +2784,17 @@ SCRIPT`
         throw new Error(
           `DOCKER-USER ALLOW rule verification failed: no RETURN rule found with source=${dashboardVpcIp} ` +
             `dport=${operatorPort} dest=${containerIp} in DOCKER-USER chain. ` +
+            `Chain output:\n${chainOutput}`,
+        )
+      }
+
+      // Assert the ALLOW rule is bound to the detected VPC interface.
+      // If ip route get returned the wrong interface, the ALLOW would match the wrong iface undetected.
+      if (allowIface !== vpcIface) {
+        throw new Error(
+          `DOCKER-USER ALLOW rule verification failed: ALLOW rule at line ${allowLineNum} is bound to ` +
+            `interface "${allowIface ?? '(unknown)'}" but the detected VPC interface is "${vpcIface}". ` +
+            `The ALLOW rule must be bound to the VPC interface (-i ${vpcIface}). ` +
             `Chain output:\n${chainOutput}`,
         )
       }
@@ -2713,6 +2812,12 @@ SCRIPT`
         `\u001B[1;32m✓\u001B[0m DOCKER-USER source restriction verified: ALLOW source=${dashboardVpcIp} dport=${operatorPort} at line ${allowLineNum}${dropSuffix}`,
       )
     }
+
+    // IDs resolved in Phase 8d and reused in Phase 8e to avoid redundant doctl calls
+    // (reduces API load and eliminates the TOCTOU window between the two phases).
+    let phase8dDashboardDropletId: string | undefined
+    let phase8dFirewallId: string | undefined
+    let phase8dDoctlEnv: DeployEnv | undefined
 
     // Phase 8d: DO Cloud Firewall reconcile (operator + VPC enabled only).
     //
@@ -2749,13 +2854,18 @@ SCRIPT`
       // Build a doctl-capable env: extends deployEnv with the DO token.
       const doctlEnv: DeployEnv = {...deployEnv, DIGITALOCEAN_ACCESS_TOKEN: doToken}
 
+      // All doctl calls below are wrapped with a 30s timeout — a hung DO API would otherwise
+      // block the deploy indefinitely (unlike SSH calls which have ConnectTimeout=10).
+      const DOCTL_TIMEOUT_MS = 30_000
+
       // Step 1: Resolve the dashboard droplet ID (stable across rebuild).
       // Uses `doctl compute droplet get <name> --format ID --no-header`.
-      const {stdout: dashboardIdRaw} = await runCommand(
+      const {stdout: dashboardIdRaw} = await runCommandWithTimeout(
         'Resolving dashboard droplet ID',
         ['doctl', 'compute', 'droplet', 'get', 'dashboard', '--format', 'ID', '--no-header'],
         doctlEnv,
         spawnFn,
+        DOCTL_TIMEOUT_MS,
       )
       const dashboardDropletId = dashboardIdRaw.trim()
       if (!dashboardDropletId) {
@@ -2767,11 +2877,12 @@ SCRIPT`
       }
 
       // Step 2: Resolve the gateway droplet ID (needed to find its firewall).
-      const {stdout: gatewayIdRaw} = await runCommand(
+      const {stdout: gatewayIdRaw} = await runCommandWithTimeout(
         'Resolving gateway droplet ID',
         ['doctl', 'compute', 'droplet', 'get', host, '--format', 'ID', '--no-header'],
         doctlEnv,
         spawnFn,
+        DOCTL_TIMEOUT_MS,
       )
       const gatewayDropletId = gatewayIdRaw.trim()
       if (!gatewayDropletId) {
@@ -2784,11 +2895,12 @@ SCRIPT`
       // Step 3: Find the EXISTING firewall attached to the gateway droplet.
       // Uses `doctl compute firewall list-by-droplet <id> --format ID --no-header`.
       // If no firewall is attached, fail closed — never auto-create a restrictive allowlist.
-      const {stdout: firewallListRaw} = await runCommand(
+      const {stdout: firewallListRaw} = await runCommandWithTimeout(
         'Finding existing firewall for gateway droplet',
         ['doctl', 'compute', 'firewall', 'list-by-droplet', gatewayDropletId, '--format', 'ID', '--no-header'],
         doctlEnv,
         spawnFn,
+        DOCTL_TIMEOUT_MS,
       )
       const firewallId = firewallListRaw.trim().split('\n')[0]?.trim()
       if (!firewallId) {
@@ -2803,18 +2915,27 @@ SCRIPT`
 
       // Step 4: Check whether the inbound rule already exists (idempotent).
       // Uses `doctl compute firewall get <id> --format InboundRules --no-header`.
-      // The rule is present if the output contains `droplet_id:<dashboardDropletId>` with `ports:9300`.
-      const {stdout: inboundRulesRaw} = await runCommand(
+      // doctl --format InboundRules output is space-separated rules, each as key:value,key:value pairs.
+      // Example: `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:222222222`
+      // We parse per-rule (split on whitespace) and assert that a SINGLE rule token contains BOTH
+      // `ports:9300` (exactly — not ports:93000) AND `droplet_id:<dashboardDropletId>`.
+      // Cross-rule substring matching is a bug: a public ports:9300 rule + a separate droplet_id
+      // rule would satisfy two independent includes() checks but is NOT the restricted rule we want.
+      const {stdout: inboundRulesRaw} = await runCommandWithTimeout(
         'Checking existing firewall inbound rules',
         ['doctl', 'compute', 'firewall', 'get', firewallId, '--format', 'InboundRules', '--no-header'],
         doctlEnv,
         spawnFn,
+        DOCTL_TIMEOUT_MS,
       )
 
-      // Check for the exact rule: protocol:tcp,ports:9300,droplet_id:<dashboardDropletId>
-      // The doctl output format uses space-separated rules, each as key:value,key:value pairs.
-      const ruleAlreadyPresent =
-        inboundRulesRaw.includes(`droplet_id:${dashboardDropletId}`) && inboundRulesRaw.includes('ports:9300')
+      // Per-rule parse: split on whitespace, check each token individually.
+      // A rule token matches if it contains BOTH the exact port field AND the dashboard droplet-id.
+      // Port match: `ports:9300` followed by `,` or end-of-token (guards against ports:93000 prefix).
+      const ruleAlreadyPresent = inboundRulesRaw
+        .trim()
+        .split(/\s+/)
+        .some(rule => /(?:^|,)ports:9300(?:,|$)/.test(rule) && rule.includes(`droplet_id:${dashboardDropletId}`))
 
       if (ruleAlreadyPresent) {
         console.warn(
@@ -2824,7 +2945,7 @@ SCRIPT`
         // Step 5: Add the inbound rule additively.
         // `doctl compute firewall add-rules <fw-id> --inbound-rules "protocol:tcp,ports:9300,droplet_id:<id>"`
         // This is additive-only — existing rules are preserved.
-        await runCommand(
+        await runCommandWithTimeout(
           'Adding DO Cloud Firewall inbound rule: tcp/9300 from dashboard droplet',
           [
             'doctl',
@@ -2837,11 +2958,17 @@ SCRIPT`
           ],
           doctlEnv,
           spawnFn,
+          DOCTL_TIMEOUT_MS,
         )
         console.warn(
           `\u001B[1;32m✓\u001B[0m DO Cloud Firewall rule added: tcp/9300 from dashboard droplet ${dashboardDropletId} on firewall ${firewallId}`,
         )
       }
+
+      // Cache resolved IDs for Phase 8e reuse (avoids redundant doctl calls).
+      phase8dDashboardDropletId = dashboardDropletId
+      phase8dFirewallId = firewallId
+      phase8dDoctlEnv = doctlEnv
     }
 
     // Phase 8e: Post-deploy verification — public-denied probe + DO firewall post-state readback.
@@ -2869,109 +2996,72 @@ SCRIPT`
     //
     // Fail closed: any check failure throws.
     if (operatorEnabled && getOperatorVpcState(env) === 'enabled') {
-      const doToken = env.DIGITALOCEAN_ACCESS_TOKEN?.trim()
-
-      // 1. PUBLIC-DENIED: probe https://<GATEWAY_HOST>:9300 from the public internet.
+      // 1. PUBLIC-DENIED: raw TCP connect to <GATEWAY_HOST>:9300 from the public internet.
       //    The listener is published only on the gateway VPC IP, so public eth0:9300 must be
-      //    unreachable. A connection error (refused/timed-out) = pass. Any HTTP response = fail.
-      const publicProbeUrl = `https://${host}:9300`
+      //    unreachable. "Connection refused / timeout" = pass. "Connected" = fail.
+      //
+      //    Using raw TCP (not HTTPS fetch) avoids a false-negative: if port 9300 were open
+      //    without TLS, an HTTPS fetch would fail with a TLS error and be counted as pass.
+      //    A raw TCP connect is unambiguous: any successful connection means the port is open.
       console.warn(
-        `\u001B[1;34m==>\u001B[0m Verifying public gateway.fro.bot:9300 is unreachable (public-denied check)`,
+        `\u001B[1;34m==>\u001B[0m Verifying public ${host}:9300 is unreachable (TCP connect public-denied check)`,
       )
       let publicPortReachable = false
       try {
-        const ac = new AbortController()
-        const timer = setTimeout(() => ac.abort(), 10_000)
-        await fetchFn(publicProbeUrl, {signal: ac.signal})
-        clearTimeout(timer)
-        // If fetch resolves (any HTTP response), the port is reachable — fail closed.
+        await tcpConnectFn(host, 9300)
+        // If tcpConnect resolves, the port accepted a connection — fail closed.
         publicPortReachable = true
       } catch {
-        // Connection refused, timed out, or AbortError — expected pass condition.
+        // Connection refused or timed out — expected pass condition.
         publicPortReachable = false
       }
       if (publicPortReachable) {
         throw new Error(
-          `SECURITY: public gateway.fro.bot:9300 is reachable from the public internet. ` +
+          `SECURITY: public ${host}:9300 is reachable from the public internet (TCP connect succeeded). ` +
             `The operator listener must be published only on the gateway VPC IP (${env.GATEWAY_VPC_IP ?? ''}), ` +
             `not on the public interface. ` +
             `Check the DO Cloud Firewall and DOCKER-USER rules — the port must not be accessible from the public internet.`,
         )
       }
       console.warn(
-        `\u001B[1;32m✓\u001B[0m Public gateway.fro.bot:9300 is unreachable (connection refused/timed-out — expected)`,
+        `\u001B[1;32m✓\u001B[0m Public ${host}:9300 is unreachable (TCP connect refused/timed-out — expected)`,
       )
 
       // 2. DO FIREWALL POST-STATE READBACK: verify the 9300 rule is present with the correct
       //    dashboard droplet-id after the firewall add-rules step.
-      //    This is a post-state assertion — the add already happened; we verify the result.
-      //    We need the firewall ID and dashboard droplet ID resolved in Phase 8d.
-      //    Re-resolve them here (same doctl calls, same idempotent pattern).
-      if (doToken) {
-        const doctlEnv: DeployEnv = {...deployEnv, DIGITALOCEAN_ACCESS_TOKEN: doToken}
-
-        // Re-resolve dashboard droplet ID (same as Phase 8d)
-        const {stdout: dashboardIdRaw2} = await runCommand(
-          'Resolving dashboard droplet ID (firewall post-state readback)',
-          ['doctl', 'compute', 'droplet', 'get', 'dashboard', '--format', 'ID', '--no-header'],
-          doctlEnv,
+      //    Reuse IDs resolved in Phase 8d — no redundant doctl calls.
+      if (phase8dFirewallId && phase8dDashboardDropletId && phase8dDoctlEnv) {
+        // Read back the firewall inbound rules and assert the 9300 rule is present with the
+        // correct dashboard droplet-id as source (per-rule parse — same logic as Phase 8d).
+        const {stdout: inboundRulesReadback} = await runCommandWithTimeout(
+          'Reading back DO Cloud Firewall inbound rules (post-state verification)',
+          ['doctl', 'compute', 'firewall', 'get', phase8dFirewallId, '--format', 'InboundRules', '--no-header'],
+          phase8dDoctlEnv,
           spawnFn,
+          30_000,
         )
-        const dashboardDropletId2 = dashboardIdRaw2.trim()
 
-        // Re-resolve gateway droplet ID (same as Phase 8d)
-        const {stdout: gatewayIdRaw2} = await runCommand(
-          'Resolving gateway droplet ID (firewall post-state readback)',
-          ['doctl', 'compute', 'droplet', 'get', host, '--format', 'ID', '--no-header'],
-          doctlEnv,
-          spawnFn,
-        )
-        const gatewayDropletId2 = gatewayIdRaw2.trim()
-
-        // Re-resolve firewall ID (same as Phase 8d)
-        const {stdout: firewallListRaw2} = await runCommand(
-          'Finding existing firewall for gateway droplet (firewall post-state readback)',
-          ['doctl', 'compute', 'firewall', 'list-by-droplet', gatewayDropletId2, '--format', 'ID', '--no-header'],
-          doctlEnv,
-          spawnFn,
-        )
-        const firewallId2 = firewallListRaw2.trim().split('\n')[0]?.trim()
-
-        if (firewallId2 && dashboardDropletId2) {
-          // Read back the firewall inbound rules and assert the 9300 rule is present with the
-          // correct dashboard droplet-id as source.
-          const {stdout: inboundRulesReadback} = await runCommand(
-            'Reading back DO Cloud Firewall inbound rules (post-state verification)',
-            ['doctl', 'compute', 'firewall', 'get', firewallId2, '--format', 'InboundRules', '--no-header'],
-            doctlEnv,
-            spawnFn,
+        // Per-rule parse: assert a SINGLE rule token contains BOTH the exact port field AND
+        // the dashboard droplet-id. Cross-rule substring matching is a bug (see Phase 8d comment).
+        const readbackRulePresent = inboundRulesReadback
+          .trim()
+          .split(/\s+/)
+          .some(
+            rule => /(?:^|,)ports:9300(?:,|$)/.test(rule) && rule.includes(`droplet_id:${phase8dDashboardDropletId}`),
           )
 
-          // Assert the 9300 rule is present
-          const has9300Rule = inboundRulesReadback.includes('ports:9300')
-          if (!has9300Rule) {
-            throw new Error(
-              `DO Cloud Firewall post-state verification failed: no tcp/9300 inbound rule found on firewall ${firewallId2}. ` +
-                `The rule should have been added in Phase 8d. ` +
-                `Run 'doctl compute firewall get ${firewallId2} --format InboundRules' to inspect the current state.`,
-            )
-          }
-
-          // Assert the 9300 rule's source is exactly the dashboard droplet-id (not an IP or other source)
-          const hasCorrectSource = inboundRulesReadback.includes(`droplet_id:${dashboardDropletId2}`)
-          if (!hasCorrectSource) {
-            throw new Error(
-              `DO Cloud Firewall post-state verification failed: tcp/9300 rule on firewall ${firewallId2} ` +
-                `does not have source=droplet_id:${dashboardDropletId2} (dashboard droplet). ` +
-                `The rule source must be the dashboard droplet-id, not an IP address or other source. ` +
-                `Run 'doctl compute firewall get ${firewallId2} --format InboundRules' to inspect the current state.`,
-            )
-          }
-
-          console.warn(
-            `\u001B[1;32m✓\u001B[0m DO Cloud Firewall post-state verified: tcp/9300 rule present with source=droplet_id:${dashboardDropletId2} on firewall ${firewallId2}`,
+        if (!readbackRulePresent) {
+          throw new Error(
+            `DO Cloud Firewall post-state verification failed: no single inbound rule on firewall ${phase8dFirewallId} ` +
+              `contains both ports:9300 and source=droplet_id:${phase8dDashboardDropletId} (dashboard droplet). ` +
+              `The rule should have been added in Phase 8d. ` +
+              `Run 'doctl compute firewall get ${phase8dFirewallId} --format InboundRules' to inspect the current state.`,
           )
         }
+
+        console.warn(
+          `\u001B[1;32m✓\u001B[0m DO Cloud Firewall post-state verified: tcp/9300 rule present with source=droplet_id:${phase8dDashboardDropletId} on firewall ${phase8dFirewallId}`,
+        )
       }
     }
 

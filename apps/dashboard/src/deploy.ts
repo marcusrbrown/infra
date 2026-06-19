@@ -742,30 +742,45 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     // The public-denied gateway.fro.bot:9300 check and DO firewall readback belong to the
     // gateway deploy (Phase 8e). The DOCKER-USER readback belongs to Phase 8c of the gateway deploy.
     if (validated.GATEWAY_VPC_IP) {
+      // Bounded retry loop — DO firewall propagation and Caddy↔backend startup timing can
+      // cause transient failures. Mirrors the /api/healthz probe pattern (probeAttempts /
+      // probeIntervalMs). Fail closed after all attempts exhausted.
       const operatorHealthUrl = `https://${host}/operator/health`
       console.warn(`\u001B[1;34m==>\u001B[0m Probing same-origin operator health endpoint: ${operatorHealthUrl}`)
       let operatorHealthOk = false
-      let operatorHealthStatus = 0
-      try {
-        const response = await fetchFn(operatorHealthUrl, {
-          signal: AbortSignal.timeout(10_000),
-        })
-        operatorHealthStatus = response.status
-        if (response.status === 200) {
-          operatorHealthOk = true
+      let lastOperatorHealthStatus = 0
+      let lastOperatorHealthError: string | undefined
+
+      for (let attempt = 1; attempt <= probeAttempts; attempt++) {
+        try {
+          const response = await fetchFn(operatorHealthUrl, {
+            signal: AbortSignal.timeout(10_000),
+          })
+          lastOperatorHealthStatus = response.status
+          if (response.status === 200) {
+            operatorHealthOk = true
+            break
+          }
+        } catch (error) {
+          lastOperatorHealthError = error instanceof Error ? error.message : String(error)
         }
-      } catch (error) {
-        // Connection/TLS error — treat as a failure (not a warning-only path like /api/healthz)
-        throw new Error(
-          `Same-origin operator health check failed: could not reach ${operatorHealthUrl}. ` +
-            `Ensure the gateway deploy has completed (VPC port publish + DOCKER-USER + DO firewall) ` +
-            `before deploying the dashboard /operator/* route. ` +
-            `Original error: ${error instanceof Error ? error.message : String(error)}`,
-        )
+
+        if (attempt < probeAttempts) {
+          await sleepFn(probeIntervalMs)
+        }
       }
+
       if (!operatorHealthOk) {
+        if (lastOperatorHealthError !== undefined) {
+          throw new Error(
+            `Same-origin operator health check failed after ${probeAttempts} attempt(s): could not reach ${operatorHealthUrl}. ` +
+              `Ensure the gateway deploy has completed (VPC port publish + DOCKER-USER + DO firewall) ` +
+              `before deploying the dashboard /operator/* route. ` +
+              `Last error: ${lastOperatorHealthError}`,
+          )
+        }
         throw new Error(
-          `Same-origin operator health check failed: ${operatorHealthUrl} returned HTTP ${operatorHealthStatus} (expected 200). ` +
+          `Same-origin operator health check failed after ${probeAttempts} attempt(s): ${operatorHealthUrl} returned HTTP ${lastOperatorHealthStatus} (expected 200). ` +
             `The /operator/* Caddy route is active but the gateway operator daemon is not healthy. ` +
             `Check the gateway operator service and ensure the VPC path is correctly configured.`,
         )

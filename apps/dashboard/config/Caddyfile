@@ -1,4 +1,13 @@
 # Caddy automatically provisions and renews HTTPS certificates via Let's Encrypt.
 {$DASHBOARD_DOMAIN} {
-  reverse_proxy dashboard:3000
+	handle /operator/* {
+		reverse_proxy {$GATEWAY_VPC_IP}:9300 {
+			flush_interval -1
+			header_up Host dashboard.fro.bot
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		reverse_proxy dashboard:3000
+	}
 }

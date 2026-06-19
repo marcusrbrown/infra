@@ -6,6 +6,8 @@ services:
       - '80:80'
       - '443:443'
     env_file:
+      # .env is written by deploy.ts and includes GATEWAY_VPC_IP so Caddy can
+      # expand {$GATEWAY_VPC_IP} in the Caddyfile /operator/* route target.
       - path: .env
         required: false
     volumes:

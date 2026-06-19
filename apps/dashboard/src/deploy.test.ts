@@ -1,3 +1,6 @@
+import {readFileSync} from 'node:fs'
+import {join} from 'node:path'
+
 import {describe, expect, it} from 'bun:test'
 
 import {
@@ -6,6 +9,7 @@ import {
   deploy,
   parseComposeImageDigest,
   validateEnv,
+  validateGatewayVpcIp,
   validateSecretValue,
   type SpawnFn,
   type SpawnResult,
@@ -33,6 +37,7 @@ const VALID_ENV = {
   DASHBOARD_OAUTH_CLIENT_SECRET: 'oauthsecretvalue',
   DASHBOARD_OPERATOR_LOGIN: 'marcusrbrown',
   DASHBOARD_COOKIE_KEY: 'cookiesecretkey32byteslong123456',
+  GATEWAY_VPC_IP: '10.116.0.3',
 }
 
 /** Builds a fake SpawnResult that exits 0 with given stdout. */
@@ -915,5 +920,231 @@ describe('CI mode with DASHBOARD_SSH_KEY', () => {
     for (const call of calls) {
       expect(call.cmd.join(' ')).not.toContain('AAAA-UNIQUE-KEY-CONTENT')
     }
+  })
+})
+
+// ─── GATEWAY_VPC_IP validation ────────────────────────────────────────────────
+
+describe('validateGatewayVpcIp', () => {
+  it('accepts a valid private IPv4 address', () => {
+    expect(() => validateGatewayVpcIp('10.116.0.3')).not.toThrow()
+  })
+
+  it('accepts other valid IPv4 addresses', () => {
+    expect(() => validateGatewayVpcIp('192.168.1.1')).not.toThrow()
+    expect(() => validateGatewayVpcIp('172.16.0.1')).not.toThrow()
+    expect(() => validateGatewayVpcIp('10.0.0.1')).not.toThrow()
+  })
+
+  it('rejects an empty string', () => {
+    expect(() => validateGatewayVpcIp('')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a hostname (not an IP)', () => {
+    expect(() => validateGatewayVpcIp('gateway.fro.bot')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a value starting with a dash (injection risk)', () => {
+    expect(() => validateGatewayVpcIp('-oProxyCommand=x')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects an IPv6 address', () => {
+    expect(() => validateGatewayVpcIp('::1')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a malformed IP (too many octets)', () => {
+    expect(() => validateGatewayVpcIp('10.116.0.3.4')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a malformed IP (octet out of range)', () => {
+    expect(() => validateGatewayVpcIp('10.116.0.999')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a value with shell metacharacters', () => {
+    expect(() => validateGatewayVpcIp('10.0.0.1;rm -rf /')).toThrow(/GATEWAY_VPC_IP/)
+  })
+})
+
+// ─── Caddyfile structure ──────────────────────────────────────────────────────
+
+describe('committed Caddyfile structure', () => {
+  const caddyfilePath = join(import.meta.dir, '..', 'config', 'Caddyfile')
+  const caddyfile = readFileSync(caddyfilePath, 'utf8')
+
+  it('contains a handle /operator/* block', () => {
+    expect(caddyfile).toContain('handle /operator/*')
+  })
+
+  it('contains flush_interval -1 in the operator block', () => {
+    expect(caddyfile).toContain('flush_interval -1')
+  })
+
+  it('contains header_up Host dashboard.fro.bot', () => {
+    expect(caddyfile).toContain('header_up Host dashboard.fro.bot')
+  })
+
+  it('contains header_up X-Forwarded-Proto https', () => {
+    expect(caddyfile).toContain('header_up X-Forwarded-Proto https')
+  })
+
+  it('uses {$GATEWAY_VPC_IP}:9300 as the operator proxy target (no literal IP)', () => {
+    expect(caddyfile).toContain('{$GATEWAY_VPC_IP}:9300')
+    // Must not contain a literal IP in the proxy target
+    expect(caddyfile).not.toMatch(/reverse_proxy \d+\.\d+\.\d+\.\d+:9300/)
+  })
+
+  it('wraps the dashboard:3000 catch-all in its own handle block', () => {
+    // The catch-all must be in a bare handle block, not a bare reverse_proxy.
+    // Check structurally: the Caddyfile must contain a bare `handle {` block
+    // and a `reverse_proxy dashboard:3000` line, and the handle block must come
+    // after the /operator/* handle block.
+    expect(caddyfile).toContain('handle {')
+    expect(caddyfile).toContain('reverse_proxy dashboard:3000')
+  })
+
+  it('has the /operator/* handle block before the catch-all handle block', () => {
+    const operatorIdx = caddyfile.indexOf('handle /operator/*')
+    const catchAllIdx = caddyfile.indexOf('handle {')
+    expect(operatorIdx).toBeGreaterThan(-1)
+    expect(catchAllIdx).toBeGreaterThan(-1)
+    expect(operatorIdx).toBeLessThan(catchAllIdx)
+  })
+
+  it('does not use a bare reverse_proxy at the site-block level (must be inside handle blocks)', () => {
+    // A bare reverse_proxy at the site-block level (2-space indent) would be subject to
+    // Caddy directive ordering and could sort ahead of the /operator/* route.
+    // All reverse_proxy directives must be inside handle blocks (4+ spaces indent).
+    const lines = caddyfile.split('\n')
+    for (const line of lines) {
+      // Site-block level: exactly 2 spaces of indentation (inside the host block, outside any handle)
+      if (/^ {2}reverse_proxy\s/.test(line)) {
+        throw new Error(`Found bare reverse_proxy at site-block level: ${line}`)
+      }
+    }
+  })
+})
+
+// ─── buildEnvFileContents includes GATEWAY_VPC_IP ────────────────────────────
+
+describe('buildEnvFileContents with GATEWAY_VPC_IP', () => {
+  it('includes GATEWAY_VPC_IP when provided', () => {
+    const contents = buildEnvFileContents({
+      domain: 'dashboard.fro.bot',
+      githubAppId: '123456',
+      oauthClientId: 'Iv1.abc123',
+      oauthClientSecret: 'oauthsecret',
+      operatorLogin: 'marcusrbrown',
+      cookieKey: 'cookiekey',
+      gatewayVpcIp: '10.116.0.3',
+    })
+    expect(contents).toContain('GATEWAY_VPC_IP=10.116.0.3\n')
+  })
+
+  it('omits GATEWAY_VPC_IP when not provided', () => {
+    const contents = buildEnvFileContents({
+      domain: 'dashboard.fro.bot',
+      githubAppId: '123456',
+      oauthClientId: 'Iv1.abc123',
+      oauthClientSecret: 'oauthsecret',
+      operatorLogin: 'marcusrbrown',
+      cookieKey: 'cookiekey',
+    })
+    expect(contents).not.toContain('GATEWAY_VPC_IP')
+  })
+})
+
+// ─── deploy forwards GATEWAY_VPC_IP to caddy service ─────────────────────────
+
+describe('deploy forwards GATEWAY_VPC_IP to caddy service env', () => {
+  it('includes GATEWAY_VPC_IP in the .env written via SSH stdin', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // The .env write (stdin) must contain GATEWAY_VPC_IP
+    const envFileWrite = calls.find(c => c.stdinData.includes('DASHBOARD_DOMAIN='))
+    expect(envFileWrite).toBeDefined()
+    expect(envFileWrite?.stdinData).toContain('GATEWAY_VPC_IP=10.116.0.3')
+  })
+
+  it('does not include GATEWAY_VPC_IP in any spawn argv (only in stdin)', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    for (const call of calls) {
+      expect(call.cmd.join(' ')).not.toContain('GATEWAY_VPC_IP=')
+    }
+  })
+
+  it('succeeds without GATEWAY_VPC_IP (optional — operator route disabled when absent)', async () => {
+    const envWithoutVpcIp = {...VALID_ENV, GATEWAY_VPC_IP: ''}
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+
+    await expect(
+      deploy({
+        env: envWithoutVpcIp,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('throws before any SSH call when GATEWAY_VPC_IP is malformed', async () => {
+    const envWithBadVpcIp = {...VALID_ENV, GATEWAY_VPC_IP: 'not-an-ip'}
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: envWithBadVpcIp,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+      }),
+    ).rejects.toThrow(/GATEWAY_VPC_IP/)
+
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ─── validateEnv with GATEWAY_VPC_IP ─────────────────────────────────────────
+
+describe('validateEnv with GATEWAY_VPC_IP', () => {
+  it('accepts a valid GATEWAY_VPC_IP', () => {
+    expect(() => validateEnv({...VALID_ENV, GATEWAY_VPC_IP: '10.116.0.3'})).not.toThrow()
+  })
+
+  it('accepts missing GATEWAY_VPC_IP (optional)', () => {
+    const env: Record<string, string> = {...VALID_ENV}
+    delete env.GATEWAY_VPC_IP
+    expect(() => validateEnv(env)).not.toThrow()
+  })
+
+  it('throws when GATEWAY_VPC_IP is present but malformed', () => {
+    expect(() => validateEnv({...VALID_ENV, GATEWAY_VPC_IP: 'not-an-ip'})).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('throws when GATEWAY_VPC_IP starts with a dash', () => {
+    expect(() => validateEnv({...VALID_ENV, GATEWAY_VPC_IP: '-oProxyCommand=x'})).toThrow(/GATEWAY_VPC_IP/)
   })
 })

@@ -2570,6 +2570,150 @@ SCRIPT`
       spawnFn,
     )
 
+    // Phase 8c: DOCKER-USER source restriction (operator + VPC enabled only).
+    //
+    // The DOCKER-USER iptables chain sees traffic AFTER Docker DNAT, so we match on
+    // the post-DNAT destination (the container IP + port) rather than conntrack
+    // original-dst. This avoids requiring the conntrack module and is the standard
+    // pattern for DOCKER-USER rules.
+    //
+    // ALLOW rule: -d <operatorBindHost> --dport 9300 -s <dashboardVpcIp> -j RETURN
+    // DROP rule:  -d <operatorBindHost> --dport 9300 -j DROP
+    //
+    // Both are inserted idempotently with -C || -I before any terminal RETURN.
+    // ALLOW is inserted at position 1 (before DROP), DROP at position 2.
+    //
+    // This phase runs AFTER docker compose up because Docker recreates DOCKER-USER-adjacent
+    // chains on daemon restart / compose up — applying before would be wiped.
+    //
+    // The VPC interface is detected at deploy time via `ip route get <DASHBOARD_VPC_IP>`.
+    // Fail closed if the interface cannot be detected (VPN lesson: never hardcode eth1).
+    //
+    // Multiplexed over the existing ControlMaster connection to avoid ufw's
+    // 6-new-connections/30s lockout across the multi-SSH-call flow.
+    if (operatorEnabled && getOperatorVpcState(env) === 'enabled') {
+      const dashboardVpcIp = env.DASHBOARD_VPC_IP ?? ''
+      const containerIp = operatorBindHost ?? ''
+      const operatorPort = operatorBindPort ?? '9300'
+
+      // Detect the VPC interface at deploy time — never hardcode (VPN lesson).
+      // `ip route get <DASHBOARD_VPC_IP>` returns the route used to reach the dashboard
+      // droplet, including the local interface name in "dev <iface>".
+      let routeOutput: string
+      try {
+        const result = await runCommand(
+          'Detecting VPC interface for DOCKER-USER rule',
+          sshCommand(host, `ip route get ${dashboardVpcIp}`, keyPath, controlPath),
+          deployEnv,
+          spawnFn,
+        )
+        routeOutput = result.stdout
+      } catch (error) {
+        throw new Error(
+          `Cannot detect VPC interface for DASHBOARD_VPC_IP ${dashboardVpcIp}: ` +
+            `'ip route get ${dashboardVpcIp}' failed. ` +
+            'Ensure the gateway droplet is on the same VPC as the dashboard droplet. ' +
+            `Original error: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      const ifaceMatch = routeOutput.match(/\bdev\s+(\S+)/)
+      const vpcIface = ifaceMatch?.[1]
+      if (!vpcIface) {
+        throw new Error(
+          `Cannot detect VPC interface for DASHBOARD_VPC_IP ${dashboardVpcIp}: ` +
+            `'ip route get ${dashboardVpcIp}' returned no 'dev <iface>' field. ` +
+            'Ensure the gateway droplet is on the same VPC as the dashboard droplet.',
+        )
+      }
+
+      // Idempotent DOCKER-USER rule application.
+      // -C checks if the rule exists; if not (exit 1), -I inserts it.
+      // ALLOW rule inserted at position 1, DROP at position 2 (ALLOW before DROP).
+      // Both rules match post-DNAT destination (container IP) + dport 9300.
+      // The ALLOW rule additionally restricts source to DASHBOARD_VPC_IP.
+      // The DROP rule drops all other sources reaching dport 9300.
+      const dockerUserScript = [
+        'set -euo pipefail',
+        // ALLOW rule: source=DASHBOARD_VPC_IP, dest=container IP, dport=9300, jump=RETURN
+        `iptables -C DOCKER-USER -i ${vpcIface} -s ${dashboardVpcIp} -d ${containerIp} -p tcp --dport ${operatorPort} -j RETURN 2>/dev/null || iptables -I DOCKER-USER 1 -i ${vpcIface} -s ${dashboardVpcIp} -d ${containerIp} -p tcp --dport ${operatorPort} -j RETURN`,
+        // DROP rule: all sources, dest=container IP, dport=9300, jump=DROP
+        `iptables -C DOCKER-USER -d ${containerIp} -p tcp --dport ${operatorPort} -j DROP 2>/dev/null || iptables -I DOCKER-USER 2 -d ${containerIp} -p tcp --dport ${operatorPort} -j DROP`,
+      ].join('\n')
+
+      await runCommand(
+        'Applying DOCKER-USER source restriction (idempotent)',
+        sshCommand(host, dockerUserScript, keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+
+      // Read back the DOCKER-USER chain and verify the exact rule is in place.
+      // Presence alone is insufficient — a wrong-but-present rule (wrong source/dest/ordering)
+      // must fail verification. Assert: ALLOW rule has source==DASHBOARD_VPC_IP, dport 9300,
+      // jump RETURN, and sits before the DROP rule.
+      const {stdout: chainOutput} = await runCommand(
+        'Reading back DOCKER-USER chain for verification',
+        sshCommand(host, `iptables -nvL DOCKER-USER --line-numbers`, keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+
+      // Parse the chain output to find the ALLOW and DROP rules for dport 9300.
+      // `iptables -nvL --line-numbers` output format:
+      //   num   pkts bytes target     prot opt in     out     source               destination   [options]
+      //   1        0     0 RETURN     tcp  --  eth1   *       10.116.0.5           172.21.0.2    tcp dpt:9300
+      // We look for lines with dpt:<port> targeting the container IP.
+      const lines = chainOutput.split('\n')
+      let allowLineNum = -1
+      let dropLineNum = -1
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith('Chain') || trimmed.startsWith('num') || trimmed.startsWith('target'))
+          continue
+
+        // Check if this line is for dport 9300 targeting the container IP
+        if (!trimmed.includes(`dpt:${operatorPort}`) || !trimmed.includes(containerIp)) continue
+
+        // Extract fields: num pkts bytes target prot opt in out source destination [options]
+        const fields = trimmed.split(/\s+/)
+        const lineNum = Number.parseInt(fields[0] ?? '', 10)
+        if (!Number.isFinite(lineNum)) continue
+
+        // With --line-numbers: fields[0]=num, fields[1]=pkts, fields[2]=bytes, fields[3]=target,
+        // fields[4]=prot, fields[5]=opt, fields[6]=in, fields[7]=out, fields[8]=source, fields[9]=destination
+        const target = fields[3] ?? ''
+        const source = fields[8] ?? ''
+
+        if (target === 'RETURN' && source === dashboardVpcIp) {
+          allowLineNum = lineNum
+        } else if (target === 'DROP') {
+          dropLineNum = lineNum
+        }
+      }
+
+      if (allowLineNum === -1) {
+        throw new Error(
+          `DOCKER-USER ALLOW rule verification failed: no RETURN rule found with source=${dashboardVpcIp} ` +
+            `dport=${operatorPort} dest=${containerIp} in DOCKER-USER chain. ` +
+            `Chain output:\n${chainOutput}`,
+        )
+      }
+
+      if (dropLineNum !== -1 && allowLineNum > dropLineNum) {
+        throw new Error(
+          `DOCKER-USER rule ordering verification failed: ALLOW rule (line ${allowLineNum}) must appear ` +
+            `before DROP rule (line ${dropLineNum}) in DOCKER-USER chain. ` +
+            `Chain output:\n${chainOutput}`,
+        )
+      }
+
+      const dropSuffix = dropLineNum === -1 ? '' : `, DROP all-else at line ${dropLineNum}`
+      console.warn(
+        `\u001B[1;32m✓\u001B[0m DOCKER-USER source restriction verified: ALLOW source=${dashboardVpcIp} dport=${operatorPort} at line ${allowLineNum}${dropSuffix}`,
+      )
+    }
+
     // Phase 9: Post-deploy probe — poll Discord slash command registration
     const applicationId = validated.DISCORD_APPLICATION_ID
     const guildId = validated.DISCORD_GUILD_ID

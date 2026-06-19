@@ -96,6 +96,7 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
     const custom = handler?.(cmd)
     if (custom !== undefined) return custom
     const cmdStr = cmd.join(' ')
+    const last = cmd.at(-1) ?? ''
     // Step 1: resolve container → image SHA
     if (cmdStr.includes('docker inspect') && cmdStr.includes('{{.Image}}')) {
       return makeSpawnResult({stdout: 'sha256:mockimagesha0000000000000000000000000000000000000000000000000000'})
@@ -107,6 +108,24 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
         `ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`,
       ]
       return makeSpawnResult({stdout: JSON.stringify(digests)})
+    }
+    // Default VPC interface detection: return a valid route with dev eth1 for any VPC IP.
+    // Tests that need different behavior (e.g. interface not found) override via handler.
+    if (last.includes('ip route get')) {
+      return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
+    }
+    // Default DOCKER-USER readback: return a valid chain with ALLOW before DROP.
+    // Tests that need different behavior override via handler.
+    if (last.includes('iptables') && last.includes('-nvL') && last.includes('DOCKER-USER')) {
+      return makeSpawnResult({
+        stdout: [
+          'Chain DOCKER-USER (1 references)',
+          'num   pkts bytes target     prot opt in     out     source               destination',
+          '1        0     0 RETURN     tcp  --  eth1   *       10.116.0.5           172.21.0.2           tcp dpt:9300',
+          '2        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300',
+          '3        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0',
+        ].join('\n'),
+      })
     }
     return makeSpawnResult()
   }
@@ -10177,6 +10196,441 @@ describe('main() — GATEWAY_VPC_IP validation before SSH', () => {
         spawn: spawnFn,
       }),
     ).rejects.toThrow(/DASHBOARD_VPC_IP|VPC.*all.or.none|VPC.*invalid/i)
+
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ─── Unit 2: DOCKER-USER source restriction ───────────────────────────────────
+//
+// The DOCKER-USER iptables chain sees traffic AFTER Docker DNAT, so we match on
+// the post-DNAT destination (the container IP + port) rather than conntrack
+// original-dst. This avoids requiring the conntrack module and is the standard
+// pattern for DOCKER-USER rules. The ALLOW rule matches:
+//   -d <operatorBindHost> --dport 9300 -s <dashboardVpcIp> -j RETURN
+// The DROP rule matches:
+//   -d <operatorBindHost> --dport 9300 -j DROP
+// Both are inserted idempotently with -C || -I before any terminal RETURN.
+// The phase runs AFTER docker compose up (Docker recreates DOCKER-USER-adjacent
+// chains on daemon restart / compose up, so applying before would be wiped).
+
+/** Capture the DOCKER-USER apply SSH command from spawn calls. */
+function captureDockerUserApplyCmd(calls: string[][]): string | undefined {
+  const cmd = calls.find(c => {
+    const last = c.at(-1) ?? ''
+    return last.includes('DOCKER-USER') && last.includes('iptables')
+  })
+  return cmd?.at(-1)
+}
+
+/** Capture the DOCKER-USER readback SSH command from spawn calls. */
+function captureDockerUserReadbackCmd(calls: string[][]): string | undefined {
+  const cmd = calls.find(c => {
+    const last = c.at(-1) ?? ''
+    return (
+      last.includes('DOCKER-USER') &&
+      last.includes('-nvL') &&
+      !last.includes('iptables -C') &&
+      !last.includes('iptables -I')
+    )
+  })
+  return cmd?.at(-1)
+}
+
+describe('Unit 2: DOCKER-USER source restriction — main() integration', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('happy path: operator+VPC enabled → spawns DOCKER-USER apply with ALLOW source=DASHBOARD_VPC_IP dport 9300', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      // Return VPC interface detection result
+      const last = cmd.at(-1) ?? ''
+      if (last.includes('ip route get') && last.includes('10.116.0.5')) {
+        return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
+      }
+      // Return iptables readback with correct rule (--line-numbers format)
+      if (last.includes('iptables') && last.includes('-nvL') && last.includes('DOCKER-USER')) {
+        return makeSpawnResult({
+          stdout: [
+            'Chain DOCKER-USER (1 references)',
+            'num   pkts bytes target     prot opt in     out     source               destination',
+            '1        0     0 RETURN     tcp  --  eth1   *       10.116.0.5           172.21.0.2           tcp dpt:9300',
+            '2        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300',
+            '3        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0',
+          ].join('\n'),
+        })
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeVpcOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const applyCmd = captureDockerUserApplyCmd(capturedCmds)
+    expect(applyCmd, 'DOCKER-USER apply command must be spawned').toBeDefined()
+    // Must contain the ALLOW rule with source=DASHBOARD_VPC_IP
+    expect(applyCmd).toContain('10.116.0.5')
+    // Must contain dport 9300
+    expect(applyCmd).toContain('9300')
+    // Must contain RETURN (allow jump)
+    expect(applyCmd).toContain('RETURN')
+    // Must contain DROP rule for all-else
+    expect(applyCmd).toContain('DROP')
+    // Must use idempotent -C || -I pattern (check-then-insert)
+    expect(applyCmd).toContain('-C DOCKER-USER')
+    expect(applyCmd).toContain('-I DOCKER-USER')
+    // Must target DOCKER-USER chain
+    expect(applyCmd).toContain('DOCKER-USER')
+    // Must match post-DNAT destination (container IP)
+    expect(applyCmd).toContain('172.21.0.2')
+  })
+
+  test('happy path: DOCKER-USER apply command runs AFTER docker compose up', async () => {
+    const {main} = await import('./deploy')
+    const eventLog: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const last = cmd.at(-1) ?? ''
+      const cmdStr = cmd.join(' ')
+      if (last.includes('ip route get') && last.includes('10.116.0.5')) {
+        return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
+      }
+      if (cmdStr.includes('docker compose') && cmdStr.includes(' up ')) {
+        eventLog.push('compose-up')
+      }
+      if (last.includes('DOCKER-USER') && last.includes('iptables')) {
+        if (last.includes('-nvL')) {
+          eventLog.push('docker-user-readback')
+          return makeSpawnResult({
+            stdout: [
+              'Chain DOCKER-USER (1 references)',
+              'num   pkts bytes target     prot opt in     out     source               destination',
+              '1        0     0 RETURN     tcp  --  eth1   *       10.116.0.5           172.21.0.2           tcp dpt:9300',
+              '2        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300',
+              '3        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0',
+            ].join('\n'),
+          })
+        }
+        eventLog.push('docker-user-apply')
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeVpcOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const upIdx = eventLog.indexOf('compose-up')
+    const applyIdx = eventLog.indexOf('docker-user-apply')
+    const readbackIdx = eventLog.indexOf('docker-user-readback')
+
+    expect(upIdx, 'compose-up must have occurred').toBeGreaterThanOrEqual(0)
+    expect(applyIdx, 'docker-user-apply must have occurred').toBeGreaterThanOrEqual(0)
+    expect(readbackIdx, 'docker-user-readback must have occurred').toBeGreaterThanOrEqual(0)
+    // Apply must run AFTER compose up
+    expect(applyIdx).toBeGreaterThan(upIdx)
+    // Readback must run AFTER apply
+    expect(readbackIdx).toBeGreaterThan(applyIdx)
+  })
+
+  test('edge: operator disabled → no iptables command spawned', async () => {
+    const {main} = await import('./deploy')
+    const iptablesCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const last = cmd.at(-1) ?? ''
+      if (last.includes('iptables')) {
+        iptablesCmds.push(cmd)
+      }
+      return undefined
+    })
+
+    // Non-operator env (no operator vars)
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(iptablesCmds).toHaveLength(0)
+  })
+
+  test('edge: VPC disabled (operator enabled but no VPC IPs) → no iptables command spawned', async () => {
+    const {main} = await import('./deploy')
+    const iptablesCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const last = cmd.at(-1) ?? ''
+      if (last.includes('iptables')) {
+        iptablesCmds.push(cmd)
+      }
+      return undefined
+    })
+
+    // Operator enabled but no VPC IPs
+    await main({
+      env: makeOperatorAuthEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(iptablesCmds).toHaveLength(0)
+  })
+
+  test('error: VPC interface not detectable → deploy fails closed before declaring success', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const last = cmd.at(-1) ?? ''
+      // ip route get returns empty (no route found)
+      if (last.includes('ip route get') && last.includes('10.116.0.5')) {
+        return makeSpawnResult({stdout: '', exitCode: 1, stderr: 'RTNETLINK answers: Network is unreachable'})
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeVpcOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/VPC interface|interface.*not.*found|no.*interface|detect.*interface/i)
+  })
+
+  test('error: VPC interface detected but no dev name in output → fails closed', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const last = cmd.at(-1) ?? ''
+      // ip route get returns output without "dev <iface>" — no "dev" word at all
+      if (last.includes('ip route get') && last.includes('10.116.0.5')) {
+        return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 src 10.116.0.3 uid 0'})
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeVpcOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/VPC interface|interface.*not.*found|no.*interface|detect.*interface/i)
+  })
+
+  test('readback: deploy issues iptables -nvL DOCKER-USER and asserts ALLOW rule has correct source', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      const last = cmd.at(-1) ?? ''
+      if (last.includes('ip route get') && last.includes('10.116.0.5')) {
+        return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
+      }
+      if (last.includes('iptables') && last.includes('-nvL') && last.includes('DOCKER-USER')) {
+        return makeSpawnResult({
+          stdout: [
+            'Chain DOCKER-USER (1 references)',
+            'num   pkts bytes target     prot opt in     out     source               destination',
+            '1        0     0 RETURN     tcp  --  eth1   *       10.116.0.5           172.21.0.2           tcp dpt:9300',
+            '2        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300',
+            '3        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0',
+          ].join('\n'),
+        })
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeVpcOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const readbackCmd = captureDockerUserReadbackCmd(capturedCmds)
+    expect(readbackCmd, 'DOCKER-USER readback command must be issued').toBeDefined()
+    expect(readbackCmd).toContain('-nvL')
+    expect(readbackCmd).toContain('DOCKER-USER')
+  })
+
+  test('readback: wrong source IP in DOCKER-USER rule → deploy fails', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const last = cmd.at(-1) ?? ''
+      if (last.includes('ip route get') && last.includes('10.116.0.5')) {
+        return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
+      }
+      if (last.includes('iptables') && last.includes('-nvL') && last.includes('DOCKER-USER')) {
+        // Wrong source IP — 10.116.0.99 instead of 10.116.0.5
+        return makeSpawnResult({
+          stdout: [
+            'Chain DOCKER-USER (1 references)',
+            'num   pkts bytes target     prot opt in     out     source               destination',
+            '1        0     0 RETURN     tcp  --  eth1   *       10.116.0.99          172.21.0.2           tcp dpt:9300',
+            '2        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300',
+            '3        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0',
+          ].join('\n'),
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeVpcOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/DOCKER-USER.*source|source.*DOCKER-USER|wrong.*source|source.*wrong|10\.116\.0\.5/i)
+  })
+
+  test('readback: ALLOW rule missing from DOCKER-USER chain → deploy fails', async () => {
+    const {main} = await import('./deploy')
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const last = cmd.at(-1) ?? ''
+      if (last.includes('ip route get') && last.includes('10.116.0.5')) {
+        return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
+      }
+      if (last.includes('iptables') && last.includes('-nvL') && last.includes('DOCKER-USER')) {
+        // ALLOW rule missing — only DROP present (--line-numbers format)
+        return makeSpawnResult({
+          stdout: [
+            'Chain DOCKER-USER (1 references)',
+            'num   pkts bytes target     prot opt in     out     source               destination',
+            '1        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300',
+            '2        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0',
+          ].join('\n'),
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeVpcOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/DOCKER-USER.*ALLOW|ALLOW.*rule.*missing|ALLOW.*not.*found|missing.*ALLOW/i)
+  })
+
+  test('readback: ALLOW rule appears before DROP rule in DOCKER-USER chain', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      const last = cmd.at(-1) ?? ''
+      if (last.includes('ip route get') && last.includes('10.116.0.5')) {
+        return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
+      }
+      if (last.includes('iptables') && last.includes('-nvL') && last.includes('DOCKER-USER')) {
+        // DROP appears BEFORE ALLOW — wrong ordering (--line-numbers format)
+        return makeSpawnResult({
+          stdout: [
+            'Chain DOCKER-USER (1 references)',
+            'num   pkts bytes target     prot opt in     out     source               destination',
+            '1        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300',
+            '2        0     0 RETURN     tcp  --  eth1   *       10.116.0.5           172.21.0.2           tcp dpt:9300',
+            '3        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0',
+          ].join('\n'),
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeVpcOperatorEnv(),
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/ALLOW.*before.*DROP|DROP.*before.*ALLOW|ordering|order/i)
+  })
+
+  test('DASHBOARD_VPC_IP is validated before SSH (malformed value → throws before any SSH)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({
+          GATEWAY_VPC_IP: '10.116.0.3',
+          DASHBOARD_VPC_IP: '-oProxyCommand=evil',
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/DASHBOARD_VPC_IP/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('DASHBOARD_VPC_IP=0.0.0.0 with operator+VPC enabled → throws before any SSH', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({
+          GATEWAY_VPC_IP: '10.116.0.3',
+          DASHBOARD_VPC_IP: '0.0.0.0',
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/DASHBOARD_VPC_IP/)
 
     expect(calls).toHaveLength(0)
   })

@@ -134,15 +134,12 @@ const fetchHealthzOk = async (_url: string, _opts?: RequestInit): Promise<Respon
 }
 
 /**
- * Fake fetch that fails for /api/healthz (simulating ACME cert lag) but returns 200
- * for /operator/health (so the same-origin check passes in tests that use this mock).
- * Tests that need /operator/health to fail should use a custom fetch mock.
+ * Fake fetch that fails for /api/healthz (simulating ACME cert lag).
+ * /operator/health also throws here — since Phase 12b is non-blocking, the deploy
+ * still completes. Tests that need /operator/health to return a specific status
+ * should use a custom fetch mock.
  */
-const fetchHealthzFail = async (url: string, _opts?: RequestInit): Promise<Response> => {
-  if (url.includes('/operator/health')) {
-    // Return 200 for the operator health check — this mock simulates ACME lag only for /api/healthz
-    return new Response(JSON.stringify({ok: true}), {status: 200})
-  }
+const fetchHealthzFail = async (_url: string, _opts?: RequestInit): Promise<Response> => {
   throw new Error('fetch failed')
 }
 
@@ -1157,20 +1154,21 @@ describe('validateEnv with GATEWAY_VPC_IP', () => {
   })
 })
 
-// ─── same-origin /operator/health 200 check ──────────────
+// ─── same-origin /operator/health advisory check (non-blocking) ──────────────
 //
-// The dashboard deploy owns the /operator/* Caddy route and runs after the gateway
-// deploy. Once the route is live, the runner can probe
-// https://dashboard.fro.bot/operator/health from the public internet (the dashboard
-// is publicly reachable via Caddy → VPC → gateway operator daemon).
+// Phase 12b probes https://dashboard.fro.bot/operator/health when GATEWAY_VPC_IP is set.
+// The check is advisory: a non-200 result or unreachable endpoint emits a warning and
+// the deploy continues. The gateway bridge is deployed independently; the dashboard
+// deploy must not depend on gateway readiness.
 //
 // Gate: GATEWAY_VPC_IP is set (i.e. the operator route is active).
-// Fail closed: /operator/health != 200 → deploy throws.
+// Non-blocking: /operator/health != 200 → warn and continue (never throws).
+// Success: /operator/health == 200 → log success.
 // Edge: GATEWAY_VPC_IP absent → check skipped (only the existing /api/healthz check runs).
 //
 // The public-denied gateway.fro.bot:9300 check and DO firewall readback belong to
 // the gateway deploy (Phase 8e). The DOCKER-USER readback belongs to Phase 8c.
-// This unit adds only the same-origin health check that the dashboard deploy owns.
+// This unit covers only the same-origin advisory check that the dashboard deploy owns.
 
 describe('dashboard verification: same-origin /operator/health 200 check', () => {
   // ── Happy path ──────────────────────────────────────────────────────────────
@@ -1199,11 +1197,12 @@ describe('dashboard verification: same-origin /operator/health 200 check', () =>
     expect(probedUrls.some(u => u.includes('/operator/health'))).toBe(true)
   })
 
-  // ── Error: /operator/health != 200 → fail closed ────────────────────────────
+  // ── Non-blocking: /operator/health != 200 → warn and continue ───────────────
 
-  it('error: GATEWAY_VPC_IP set + /operator/health returns 503 → deploy fails closed', async () => {
+  it('non-blocking: GATEWAY_VPC_IP set + /operator/health returns 503 → deploy warns and completes', async () => {
     const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
 
+    // Deploy must complete (not throw) even when /operator/health returns 503
     await expect(
       deploy({
         env: VALID_ENV,
@@ -1219,12 +1218,13 @@ describe('dashboard verification: same-origin /operator/health 200 check', () =>
         probeIntervalMs: 0,
         sleep: async () => {},
       }),
-    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+    ).resolves.toBeUndefined()
   })
 
-  it('error: GATEWAY_VPC_IP set + /operator/health returns 404 → deploy fails closed', async () => {
+  it('non-blocking: GATEWAY_VPC_IP set + /operator/health returns 404 → deploy warns and completes', async () => {
     const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
 
+    // Deploy must complete (not throw) even when /operator/health returns 404
     await expect(
       deploy({
         env: VALID_ENV,
@@ -1240,7 +1240,7 @@ describe('dashboard verification: same-origin /operator/health 200 check', () =>
         probeIntervalMs: 0,
         sleep: async () => {},
       }),
-    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+    ).resolves.toBeUndefined()
   })
 
   // ── Edge: GATEWAY_VPC_IP absent → check skipped ──────────────────────────────
@@ -1359,9 +1359,9 @@ describe('dashboard verification: same-origin /operator/health 200 check', () =>
 
 // ─── [P1] /operator/health retry loop ────────────────────────────────────────
 //
-// Phase 12b must retry the /operator/health check with bounded attempts,
-// matching the existing /api/healthz probe pattern. Fail closed after all
-// attempts exhausted.
+// Phase 12b retries the /operator/health check with bounded attempts,
+// matching the existing /api/healthz probe pattern. Non-blocking: after all
+// attempts exhausted, emits a warning and continues (never throws).
 
 describe('dashboard verification: /operator/health retry loop (P1 fix)', () => {
   it('succeeds on a later attempt (retry works)', async () => {
@@ -1393,10 +1393,11 @@ describe('dashboard verification: /operator/health retry loop (P1 fix)', () => {
     expect(operatorHealthAttempts).toBeGreaterThanOrEqual(3)
   })
 
-  it('fails closed after all attempts non-200', async () => {
+  it('warns and completes after all attempts non-200 (non-blocking)', async () => {
     const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
     let operatorHealthAttempts = 0
 
+    // Deploy must complete (not throw) even after exhausting all /operator/health attempts
     await expect(
       deploy({
         env: VALID_ENV,
@@ -1413,16 +1414,17 @@ describe('dashboard verification: /operator/health retry loop (P1 fix)', () => {
         probeIntervalMs: 0,
         sleep: async () => {},
       }),
-    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+    ).resolves.toBeUndefined()
 
     // Must have exhausted all attempts
     expect(operatorHealthAttempts).toBe(3)
   })
 
-  it('connection error on all attempts → fails closed', async () => {
+  it('connection error on all attempts → warns and completes (non-blocking)', async () => {
     const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
     let operatorHealthAttempts = 0
 
+    // Deploy must complete (not throw) even when all /operator/health probes throw
     await expect(
       deploy({
         env: VALID_ENV,
@@ -1439,7 +1441,7 @@ describe('dashboard verification: /operator/health retry loop (P1 fix)', () => {
         probeIntervalMs: 0,
         sleep: async () => {},
       }),
-    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+    ).resolves.toBeUndefined()
 
     expect(operatorHealthAttempts).toBeGreaterThanOrEqual(1)
   })

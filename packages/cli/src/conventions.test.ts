@@ -1151,30 +1151,30 @@ describe('deploy.yaml: aggregate router forwards VPC bridge secrets', () => {
   }
 })
 
-// ─── deploy.yaml: gateway→dashboard ordering (PR #603) ───────────────────────
+// ─── deploy.yaml: deploy-dashboard is decoupled from deploy-gateway ──────────
 //
-// The dashboard operator route depends on the gateway VPC bridge being live.
-// deploy-dashboard must declare needs: deploy-gateway so it runs after the
-// gateway deploy, and its if: must reference needs.deploy-gateway.result so
-// it proceeds when gateway is skipped (unchanged) but blocks on gateway failure.
+// The dashboard is a standalone deployment. A gateway failure or slowness must
+// not block dashboard deploys. deploy-dashboard must NOT declare needs: deploy-gateway,
+// and its if: must NOT reference needs.deploy-gateway — locking in the decoupling
+// so it cannot silently regress.
 
-describe('deploy.yaml: deploy-dashboard is ordered after deploy-gateway', () => {
+describe('deploy.yaml: deploy-dashboard is decoupled from deploy-gateway', () => {
   const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
 
-  it('deploy-dashboard needs: includes deploy-gateway', async () => {
+  it('deploy-dashboard needs: does NOT include deploy-gateway (standalone job)', async () => {
     const text = await Bun.file(DEPLOY_WORKFLOW).text()
     const parsed = parseYaml(text) as {
       jobs?: {'deploy-dashboard'?: {needs?: string | string[]}}
     }
     const needs = parsed?.jobs?.['deploy-dashboard']?.needs ?? []
     const needsArr = Array.isArray(needs) ? needs : [needs]
-    expect(needsArr).toContain('deploy-gateway')
+    expect(needsArr).not.toContain('deploy-gateway')
   })
 
-  it('deploy-dashboard if: references needs.deploy-gateway.result (fail-aware ordering)', async () => {
+  it('deploy-dashboard if: does NOT reference needs.deploy-gateway (no gateway coupling)', async () => {
     const text = await Bun.file(DEPLOY_WORKFLOW).text()
-    // Plain-text check: the if: expression must reference needs.deploy-gateway.result
-    // so that dashboard is blocked on gateway failure, not just ordered after it.
-    expect(text).toMatch(/needs\.deploy-gateway\.result/)
+    // The if: expression must not reference needs.deploy-gateway in any form —
+    // gateway state must not gate the dashboard deploy.
+    expect(text).not.toMatch(/needs\.deploy-gateway/)
   })
 })

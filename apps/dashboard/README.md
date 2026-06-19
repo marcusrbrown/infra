@@ -63,6 +63,46 @@ Key operational notes:
 - Never add `--build` to the deploy — the deploy pulls the digest-pinned image from `ghcr.io/fro-bot/dashboard`; on-droplet builds are not supported.
 - Never pass secret bytes via SSH argv — the deploy pipes them through stdin only.
 
+## GitHub App key revocation
+
+The dashboard authenticates to GitHub as the **Fro Bot Agent** app (App ID 3918015) using a private key file-mounted at `/run/secrets/github-app.pem`. The gateway uses the same GitHub App but holds a **separate** private key. Revoking the dashboard's key invalidates only that key — the gateway's key is unaffected and the gateway keeps working.
+
+### When to revoke
+
+- The dashboard's GitHub App private key is suspected leaked or compromised.
+- Routine key rotation.
+
+### Procedure
+
+Order matters: add and verify the new key **before** deleting the old one to avoid downtime.
+
+1. **Generate a new key.** In the GitHub App settings for Fro Bot Agent → _Private keys_ → _Generate a private key_. GitHub downloads a new PEM. This does not invalidate any existing key.
+
+2. **Update the secret.** Set `DASHBOARD_GITHUB_APP_KEY` in the `dashboard` GitHub Environment to the new PEM content. Update your local `.env` to match.
+
+3. **Redeploy.**
+
+   ```bash
+   bunx @marcusrbrown/infra dashboard deploy           # remote (GitHub Actions)
+   bunx @marcusrbrown/infra dashboard deploy --local   # direct SSH
+   ```
+
+   The deploy uploads the new PEM to `/opt/dashboard/config/github-app.pem` (0600, via SSH stdin) and restarts the container.
+
+4. **Verify.** Confirm `https://dashboard.fro.bot/api/healthz` returns 200. Check dashboard logs for successful installation-token minting or `metadata/repos.yaml loaded` — no auth errors should appear.
+
+   ```bash
+   bunx @marcusrbrown/infra dashboard logs dashboard --tail 50
+   ```
+
+5. **Delete the old key.** Only after the new key is confirmed working, go to GitHub App settings → _Private keys_ → delete the old/compromised key.
+
+6. **Confirm gateway is unaffected.** The gateway never used the dashboard's key. Optionally verify:
+
+   ```bash
+   bunx @marcusrbrown/infra gateway status
+   ```
+
 ## CLI
 
 ```bash

@@ -609,6 +609,88 @@ export function validateOperatorAuthConfig(opts: {
 }
 
 /**
+ * Returns the VPC state based on the presence of both VPC IP vars.
+ *
+ * - 'enabled':  both GATEWAY_VPC_IP and DASHBOARD_VPC_IP are present and non-empty.
+ * - 'disabled': both are absent (unset or whitespace-only).
+ * - 'invalid':  exactly one is present — the all-or-none gate is violated.
+ *
+ * These vars are only meaningful when the operator listener is enabled.
+ * Mirrors the empty/whitespace-only = absent semantics used by validateRequiredEnv.
+ */
+export function getOperatorVpcState(env: Record<string, string>): 'enabled' | 'disabled' | 'invalid' {
+  const hasGatewayVpcIp = Boolean(env.GATEWAY_VPC_IP?.trim())
+  const hasDashboardVpcIp = Boolean(env.DASHBOARD_VPC_IP?.trim())
+
+  const count = [hasGatewayVpcIp, hasDashboardVpcIp].filter(Boolean).length
+
+  if (count === 2) return 'enabled'
+  if (count === 0) return 'disabled'
+  return 'invalid'
+}
+
+/**
+ * Validates a VPC IPv4 address value.
+ * Throws with a descriptive message when the value is unsafe or invalid.
+ *
+ * Rejection rules:
+ *   - Empty or whitespace-only: required.
+ *   - Dash-prefixed: SSH flag injection risk (mirrors validateGatewayHost).
+ *   - 0.0.0.0: all-interface bind — VPC IPs must be specific addresses.
+ *   - Non-IPv4 format: must match dotted-decimal IPv4 (four octets, digits only).
+ *   - IPv6 or IP:port format: not accepted.
+ *
+ * @param value - The raw value to validate.
+ * @param varName - The env var name, used in error messages (e.g. 'GATEWAY_VPC_IP').
+ */
+export function validateVpcIp(value: string, varName: string): void {
+  const trimmed = value.trim()
+
+  if (!trimmed) {
+    throw new Error(`${varName} is required but is empty or whitespace-only.`)
+  }
+
+  // Reject dash-prefixed values (SSH flag injection risk — mirrors validateGatewayHost).
+  if (trimmed.startsWith('-')) {
+    throw new Error(
+      `${varName} "${trimmed}" starts with a dash. ` +
+        'SSH treats dash-prefixed values as flags (including -oProxyCommand=). ' +
+        'Provide a valid VPC IPv4 address (e.g. 10.116.0.3).',
+    )
+  }
+
+  // Reject all-interface bind.
+  if (trimmed === '0.0.0.0') {
+    throw new Error(
+      `${varName} "${trimmed}" is an all-interface address (0.0.0.0). ` +
+        'Provide a specific VPC IPv4 address (e.g. 10.116.0.3).',
+    )
+  }
+
+  // Reject IPv6 (contains colon but not a single-colon IP:port).
+  if (trimmed.includes(':')) {
+    const colonCount = (trimmed.match(/:/g) ?? []).length
+    if (colonCount === 1 && /^\d/.test(trimmed)) {
+      throw new Error(
+        `${varName} "${trimmed}" contains a colon — this looks like an IP:port format. ` +
+          'Provide only the IPv4 address without a port (e.g. 10.116.0.3).',
+      )
+    }
+    throw new Error(
+      `${varName} "${trimmed}" is an IPv6 address. ` + 'Only IPv4 VPC addresses are supported (e.g. 10.116.0.3).',
+    )
+  }
+
+  // Require dotted-decimal IPv4 format: four groups of 1–3 digits, no trailing dot.
+  if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(trimmed)) {
+    throw new Error(
+      `${varName} "${trimmed}" is not a valid IPv4 address. ` +
+        'Provide a dotted-decimal IPv4 address (e.g. 10.116.0.3).',
+    )
+  }
+}
+
+/**
  * Returns the list of missing WORKSPACE_OPENCODE_MODEL / WORKSPACE_OPENCODE_CONFIG
  * variable names. The name reflects what it returns — a list of missing vars.
  */
@@ -1058,6 +1140,14 @@ export interface ComposeOverrideOpts {
   operatorOauthStateTtlMs?: string
   /** Optional tuning: max outstanding OAuth attempts. */
   operatorOauthMaxOutstandingAttempts?: string
+  /**
+   * The gateway's VPC IPv4 address (GATEWAY_VPC_IP). When set alongside operatorEnabled,
+   * the gateway service publishes the operator listener port on this VPC IP only
+   * (`${operatorVpcIp}:${operatorBindPort}:${operatorBindPort}`), never on 0.0.0.0.
+   * The daemon stays bound to its gateway-net address (operatorBindHost); this is a
+   * host-side Docker port publish, not a daemon rebind.
+   */
+  operatorVpcIp?: string
 }
 
 const GATEWAY_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-gateway'
@@ -1102,6 +1192,7 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
     operatorOauthAllowedReturnPaths,
     operatorOauthStateTtlMs,
     operatorOauthMaxOutstandingAttempts,
+    operatorVpcIp,
   } = opts
 
   // Caddy is needed when either announce or operator is enabled.
@@ -1216,6 +1307,18 @@ ${envLines}`
         ipv4_address: ${operatorBindHost}`
       : ''
 
+  // VPC-scoped host port publish for the operator listener.
+  // Published on the gateway's VPC IP only — never on 0.0.0.0 or all interfaces.
+  // The daemon stays bound to its gateway-net address (operatorBindHost); this is a
+  // host-side Docker port publish, not a daemon rebind.
+  // Only emitted when operator is enabled AND the VPC IP is configured.
+  const portsSection =
+    operatorEnabled && operatorVpcIp && operatorBindPort
+      ? `
+    ports:
+      - '${operatorVpcIp}:${operatorBindPort}:${operatorBindPort}'`
+      : ''
+
   const caddySection = caddyEnabled
     ? `  caddy:
     image: ${CADDY_IMAGE}
@@ -1266,7 +1369,7 @@ ${envLines}`
 
   return `services:
   gateway:
-    image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${environmentSection}${volumesSection2}${gatewayNetworksSection}
+    image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${environmentSection}${volumesSection2}${portsSection}${gatewayNetworksSection}
   workspace:
     image: ${WORKSPACE_IMAGE_NAME}@${workspaceDigest}
     environment:
@@ -2023,6 +2126,29 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     })
   }
 
+  // Phase 3g: Validate VPC IP all-or-none gate before any SSH.
+  // GATEWAY_VPC_IP and DASHBOARD_VPC_IP are only meaningful when the operator listener is enabled.
+  // When the operator is enabled, both must be present together (all-or-none).
+  // When the operator is disabled, VPC vars are ignored (no gate).
+  if (operatorState === 'enabled') {
+    const operatorVpcState = getOperatorVpcState(env)
+    if (operatorVpcState === 'invalid') {
+      const hasGatewayVpcIp = Boolean(env.GATEWAY_VPC_IP?.trim())
+      const hasDashboardVpcIp = Boolean(env.DASHBOARD_VPC_IP?.trim())
+      const missing = [!hasGatewayVpcIp && 'GATEWAY_VPC_IP', !hasDashboardVpcIp && 'DASHBOARD_VPC_IP']
+        .filter(Boolean)
+        .join(', ')
+      throw new Error(
+        `VPC IP inputs must be set together (all-or-none) when the operator listener is enabled. Missing: ${missing}. ` +
+          'Set both GATEWAY_VPC_IP and DASHBOARD_VPC_IP, or leave both unset to disable the VPC port publish.',
+      )
+    }
+    if (operatorVpcState === 'enabled') {
+      validateVpcIp(env.GATEWAY_VPC_IP ?? '', 'GATEWAY_VPC_IP')
+      validateVpcIp(env.DASHBOARD_VPC_IP ?? '', 'DASHBOARD_VPC_IP')
+    }
+  }
+
   if (isDryRun) {
     const announceEnabled = announceState === 'enabled'
     const operatorEnabledDry = operatorState === 'enabled'
@@ -2185,6 +2311,9 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     const operatorBindPort = operatorEnabled ? (env.GATEWAY_OPERATOR_BIND_PORT ?? '') : undefined
     const operatorPublicOrigin = operatorEnabled ? (env.GATEWAY_OPERATOR_PUBLIC_ORIGIN ?? '') : undefined
     const operatorAuthEnabled = operatorEnabled && getOperatorAuthState(env) === 'enabled'
+    // VPC port publish: only when operator is enabled AND both VPC IPs are configured.
+    const operatorVpcIp =
+      operatorEnabled && getOperatorVpcState(env) === 'enabled' ? (env.GATEWAY_VPC_IP ?? '') : undefined
     const overrideContent = buildComposeOverride({
       gatewayDigest,
       workspaceDigest,
@@ -2194,6 +2323,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       operatorBindPort,
       operatorPublicOrigin,
       operatorAuthEnabled,
+      operatorVpcIp,
       // Derive file names from OPERATOR_AUTH_SECRET_SPECS — single source of truth.
       operatorGithubClientIdFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[0].hostFile : undefined,
       operatorGithubClientSecretFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[1].hostFile : undefined,
@@ -2270,7 +2400,10 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     //   - workspace is sandbox-net only (not gateway-net/egress-net)
     //   - caddy is gateway-net only
     //   - caddy publishes only 80/443 host ports
-    //   - gateway publishes no host ports for the operator listener
+    //   - gateway port 9300: allowlist gate — when VPC publish is enabled, the ONLY accepted
+    //     published 9300 mapping is exactly ${GATEWAY_VPC_IP}:9300:9300; any other host-bind
+    //     (0.0.0.0, [::], bare 9300:9300, any non-VPC host) is rejected. When VPC publish is
+    //     disabled, no 9300 host port is accepted at all. Fail-closed on anything unexpected.
     //   - top-level gateway-net IPAM includes the expected subnet (172.21.0.0/16)
     //
     // This gate runs AFTER upstream validate-stack.sh (which validates the base stack) and
@@ -2279,13 +2412,16 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     //
     // Shell safety: uses a single-quoted heredoc (<<'SCRIPT'...SCRIPT) so the outer shell
     // does NOT expand $CONFIG or $(...) before the inner bash runs. The expected bind host
-    // is interpolated at script-build time (before SSH), not inside the heredoc.
+    // and VPC IP are interpolated at script-build time (before SSH), not inside the heredoc.
     // Tooling: uses Python (always available on Ubuntu/Debian) to parse JSON — avoids
     // bun, node, and jq which are not guaranteed on the droplet.
     if (operatorEnabled && operatorBindHost) {
       // operatorBindHost is validated before reaching here (validateOperatorConfig).
       // It is a safe 172.21.x.x IPv4 address — safe to embed in the heredoc body.
       const expectedBindHost = operatorBindHost
+      // operatorVpcIp is validated before reaching here (validateVpcIp) when set.
+      // It is a safe dotted-decimal IPv4 address — safe to embed in the heredoc body.
+      const expectedVpcIp = operatorVpcIp ?? ''
       const validateScript = `bash <<'SCRIPT'
 set -euo pipefail
 CONFIG=$(docker compose --project-directory ${DEPLOY_DIR} config --format json)
@@ -2297,8 +2433,23 @@ GW_IP=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); n=
 if [ "$GW_IP" != "${expectedBindHost}" ]; then echo "FAIL: gateway gateway-net ipv4_address is '$GW_IP', expected '${expectedBindHost}'"; exit 1; fi
 GW_SUBNET=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); cfg=c.get('networks',{}).get('gateway-net',{}).get('ipam',{}).get('config',[]); print(cfg[0].get('subnet','') if cfg else '')")
 if [ "$GW_SUBNET" != "172.21.0.0/16" ]; then echo "FAIL: gateway-net IPAM subnet is '$GW_SUBNET', expected '172.21.0.0/16'"; exit 1; fi
-GW_PORTS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); p=c.get('services',{}).get('gateway',{}).get('ports',[]); print(len(p))")
-if [ "$GW_PORTS" != "0" ] && [ -n "$GW_PORTS" ]; then echo "FAIL: gateway publishes host ports (operator listener must not have host ports): $GW_PORTS port(s)"; exit 1; fi
+GW_PORT_9300=$(echo "$CONFIG" | python3 -c "
+import json,sys
+c=json.load(sys.stdin)
+ports=c.get('services',{}).get('gateway',{}).get('ports',[])
+for p in ports:
+  if isinstance(p,dict) and str(p.get('target',''))=='9300':
+    host_ip=str(p.get('host_ip',''))
+    published=str(p.get('published',''))
+    print(host_ip+':'+published+':9300')
+    sys.exit(0)
+print('')
+")
+if [ -n "${expectedVpcIp}" ]; then
+  if [ "$GW_PORT_9300" != "${expectedVpcIp}:9300:9300" ]; then echo "FAIL: gateway 9300 port publish is '$GW_PORT_9300', expected exactly '${expectedVpcIp}:9300:9300' (VPC-scoped only; 0.0.0.0, [::], and bare 9300:9300 are rejected)"; exit 1; fi
+else
+  if [ -n "$GW_PORT_9300" ]; then echo "FAIL: gateway publishes 9300 host port '$GW_PORT_9300' but VPC publish is not configured (no GATEWAY_VPC_IP set)"; exit 1; fi
+fi
 GW_SANDBOX=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); nets=list(c.get('services',{}).get('gateway',{}).get('networks',{}).keys()); print('yes' if 'sandbox-net' in nets else 'no')")
 if [ "$GW_SANDBOX" != "yes" ]; then echo "FAIL: gateway is missing sandbox-net (required for workspace communication)"; exit 1; fi
 WS_NETS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); nets=list(c.get('services',{}).get('workspace',{}).get('networks',{}).keys()); print(','.join(nets))")

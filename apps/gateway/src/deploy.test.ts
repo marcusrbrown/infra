@@ -9736,3 +9736,448 @@ describe('main() — dry-run with operator auth enabled → callback URL preflig
     expect(allOutput).toContain('https://dashboard.fro.bot/operator/auth/github/callback')
   })
 })
+
+// ─── getOperatorVpcState ──────────────────────────────────────────────────────
+
+describe('getOperatorVpcState', () => {
+  test('both GATEWAY_VPC_IP and DASHBOARD_VPC_IP present → enabled', async () => {
+    const {getOperatorVpcState} = await import('./deploy')
+    const state = getOperatorVpcState(
+      makeEnv({
+        GATEWAY_VPC_IP: '10.116.0.3',
+        DASHBOARD_VPC_IP: '10.116.0.5',
+      }),
+    )
+    expect(state).toBe('enabled')
+  })
+
+  test('neither GATEWAY_VPC_IP nor DASHBOARD_VPC_IP present → disabled', async () => {
+    const {getOperatorVpcState} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_VPC_IP
+    delete (env as Record<string, string>).DASHBOARD_VPC_IP
+    const state = getOperatorVpcState(env)
+    expect(state).toBe('disabled')
+  })
+
+  test('only GATEWAY_VPC_IP set → invalid (partial config)', async () => {
+    const {getOperatorVpcState} = await import('./deploy')
+    const env = makeEnv({GATEWAY_VPC_IP: '10.116.0.3'})
+    delete (env as Record<string, string>).DASHBOARD_VPC_IP
+    const state = getOperatorVpcState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('only DASHBOARD_VPC_IP set → invalid (partial config)', async () => {
+    const {getOperatorVpcState} = await import('./deploy')
+    const env = makeEnv({DASHBOARD_VPC_IP: '10.116.0.5'})
+    delete (env as Record<string, string>).GATEWAY_VPC_IP
+    const state = getOperatorVpcState(env)
+    expect(state).toBe('invalid')
+  })
+
+  test('whitespace-only GATEWAY_VPC_IP treated as absent → invalid', async () => {
+    const {getOperatorVpcState} = await import('./deploy')
+    const state = getOperatorVpcState(
+      makeEnv({
+        GATEWAY_VPC_IP: '   ',
+        DASHBOARD_VPC_IP: '10.116.0.5',
+      }),
+    )
+    expect(state).toBe('invalid')
+  })
+
+  test('whitespace-only DASHBOARD_VPC_IP treated as absent → invalid', async () => {
+    const {getOperatorVpcState} = await import('./deploy')
+    const state = getOperatorVpcState(
+      makeEnv({
+        GATEWAY_VPC_IP: '10.116.0.3',
+        DASHBOARD_VPC_IP: '   ',
+      }),
+    )
+    expect(state).toBe('invalid')
+  })
+})
+
+// ─── validateVpcIp ────────────────────────────────────────────────────────────
+
+describe('validateVpcIp', () => {
+  test('accepts a valid VPC IPv4 address', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('10.116.0.3', 'GATEWAY_VPC_IP')).not.toThrow()
+  })
+
+  test('accepts another valid VPC IPv4 address', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('10.116.0.5', 'DASHBOARD_VPC_IP')).not.toThrow()
+  })
+
+  test('rejects empty string', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('', 'GATEWAY_VPC_IP')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  test('rejects dash-prefixed value (SSH flag injection risk)', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('-oProxyCommand=evil', 'GATEWAY_VPC_IP')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  test('rejects 0.0.0.0 (all-interface)', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('0.0.0.0', 'GATEWAY_VPC_IP')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  test('rejects non-IPv4 value (hostname)', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('gateway.fro.bot', 'GATEWAY_VPC_IP')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  test('rejects IPv6 address', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('::1', 'GATEWAY_VPC_IP')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  test('rejects IP:port format', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('10.116.0.3:9300', 'GATEWAY_VPC_IP')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  test('rejects whitespace-only value', async () => {
+    const {validateVpcIp} = await import('./deploy')
+    expect(() => validateVpcIp('   ', 'GATEWAY_VPC_IP')).toThrow(/GATEWAY_VPC_IP/)
+  })
+})
+
+// ─── buildComposeOverride — VPC port publish ──────────────────────────────────
+
+describe('buildComposeOverride — VPC port publish', () => {
+  const OPERATOR_VPC_OPTS = {
+    gatewayDigest: GATEWAY_DIGEST,
+    workspaceDigest: WORKSPACE_DIGEST,
+    announceEnabled: false,
+    operatorEnabled: true,
+    operatorBindHost: '172.21.0.2',
+    operatorBindPort: '9300',
+    operatorPublicOrigin: 'https://dashboard.fro.bot',
+    operatorVpcIp: '10.116.0.3',
+  }
+
+  test('operator enabled + operatorVpcIp set → gateway service publishes VPC-scoped port', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_VPC_OPTS)
+    expect(yaml).toContain("'10.116.0.3:9300:9300'")
+  })
+
+  test('operator enabled + operatorVpcIp set → daemon still bound to gateway-net (ipv4_address present)', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_VPC_OPTS)
+    expect(yaml).toContain('ipv4_address: 172.21.0.2')
+  })
+
+  test('operator enabled + operatorVpcIp set → ports section is on gateway service (before workspace)', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_VPC_OPTS)
+    const gatewayIdx = yaml.indexOf('  gateway:')
+    const workspaceIdx = yaml.indexOf('  workspace:')
+    const portIdx = yaml.indexOf('10.116.0.3:9300:9300')
+    expect(portIdx).toBeGreaterThan(gatewayIdx)
+    expect(portIdx).toBeLessThan(workspaceIdx)
+  })
+
+  test('operator disabled → gateway service has NO ports section', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: false,
+    })
+    // No ports section at all on gateway service
+    expect(yaml).not.toContain('10.116.0.3:9300:9300')
+    expect(yaml).not.toMatch(/^\s+ports:/m)
+  })
+
+  test('operator enabled but operatorVpcIp absent → gateway service has NO ports section', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorEnabled: true,
+      operatorBindHost: '172.21.0.2',
+      operatorBindPort: '9300',
+      operatorPublicOrigin: 'https://dashboard.fro.bot',
+      // operatorVpcIp intentionally omitted
+    })
+    expect(yaml).not.toContain(':9300:9300')
+  })
+
+  test('VPC publish does not appear on workspace service', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(OPERATOR_VPC_OPTS)
+    const workspaceIdx = yaml.indexOf('  workspace:')
+    const afterWorkspace = yaml.slice(workspaceIdx)
+    const nextSectionMatch = afterWorkspace.match(/\n {2}[a-z]|\nvolumes:/)
+    const workspaceSection = nextSectionMatch ? afterWorkspace.slice(0, nextSectionMatch.index) : afterWorkspace
+    expect(workspaceSection).not.toContain('9300')
+  })
+
+  test('VPC publish does not appear on caddy service', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      ...OPERATOR_VPC_OPTS,
+      announceEnabled: true,
+    })
+    const caddyIdx = yaml.indexOf('  caddy:')
+    const afterCaddy = yaml.slice(caddyIdx)
+    const nextSectionMatch = afterCaddy.match(/\nvolumes:/)
+    const caddySection = nextSectionMatch ? afterCaddy.slice(0, nextSectionMatch.index) : afterCaddy
+    expect(caddySection).not.toContain('9300')
+  })
+})
+
+// ─── Phase 5d rendered-config gate — VPC-scoped port allowlist ───────────────
+
+/** Build env with operator listener trio + auth/config vars + VPC IPs. */
+function makeVpcOperatorEnv(overrides: Record<string, string> = {}): Record<string, string> {
+  return makeOperatorAuthEnv({
+    GATEWAY_VPC_IP: '10.116.0.3',
+    DASHBOARD_VPC_IP: '10.116.0.5',
+    ...overrides,
+  })
+}
+
+describe('Phase 5d rendered-config gate — VPC-scoped port allowlist', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('Phase 5d script accepts exact VPC-scoped publish (10.116.0.3:9300:9300)', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeVpcOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // The script must accept the exact VPC-scoped publish
+    expect(script).toContain('10.116.0.3')
+    expect(script).toContain('9300')
+  })
+
+  test('Phase 5d script rejects 0.0.0.0:9300:9300 (all-interface publish)', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeVpcOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // The script must explicitly reject 0.0.0.0 publishes
+    expect(script).toMatch(/0\.0\.0\.0|all.interface|not.*VPC|FAIL.*9300/i)
+  })
+
+  test('Phase 5d script rejects bare 9300:9300 (no host-bind)', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeVpcOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // The script must enforce the exact VPC host-bind (allowlist, not denylist)
+    // It checks the published host equals the VPC IP — anything else fails
+    expect(script).toMatch(/GATEWAY_VPC_IP|10\.116\.0\.3|expected.*VPC|FAIL.*9300/i)
+  })
+
+  test('Phase 5d script embeds the gateway VPC IP from env', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeVpcOperatorEnv({GATEWAY_VPC_IP: '10.116.0.99'}),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+    // The VPC IP must be interpolated at build time (not a shell variable)
+    expect(script).toContain('10.116.0.99')
+  })
+
+  test('Phase 5d script is present when VPC state is enabled', async () => {
+    const {main} = await import('./deploy')
+    const capturedCmds: string[][] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      capturedCmds.push(cmd)
+      return undefined
+    })
+
+    await main({
+      env: makeVpcOperatorEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const script = captureValidateScript(capturedCmds)
+    expect(script).toBeDefined()
+  })
+})
+
+// ─── main() — GATEWAY_VPC_IP validation before SSH ───────────────────────────
+
+describe('main() — GATEWAY_VPC_IP validation before SSH', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('GATEWAY_VPC_IP=0.0.0.0 with operator enabled → throws before any SSH', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({
+          GATEWAY_VPC_IP: '0.0.0.0',
+          DASHBOARD_VPC_IP: '10.116.0.5',
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_VPC_IP/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('GATEWAY_VPC_IP=-oProxyCommand=evil with operator enabled → throws before any SSH', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({
+          GATEWAY_VPC_IP: '-oProxyCommand=evil',
+          DASHBOARD_VPC_IP: '10.116.0.5',
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_VPC_IP/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('GATEWAY_VPC_IP=not-an-ip with operator enabled → throws before any SSH', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({
+          GATEWAY_VPC_IP: 'not-an-ip',
+          DASHBOARD_VPC_IP: '10.116.0.5',
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_VPC_IP/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  test('getOperatorVpcState=invalid (only GATEWAY_VPC_IP set) with operator enabled → throws before any SSH', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({
+          GATEWAY_VPC_IP: '10.116.0.3',
+          // DASHBOARD_VPC_IP intentionally absent
+        }),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/DASHBOARD_VPC_IP|VPC.*all.or.none|VPC.*invalid/i)
+
+    expect(calls).toHaveLength(0)
+  })
+})

@@ -727,6 +727,52 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
+    // Phase 12b: Same-origin /operator/health 200 check.
+    //
+    // Gated on GATEWAY_VPC_IP being set — this indicates the /operator/* Caddy route is active.
+    // When GATEWAY_VPC_IP is absent, the route is not configured and this check is skipped.
+    //
+    // The dashboard deploy owns the /operator/* Caddy route and runs after the gateway deploy.
+    // Once Caddy is up (Phase 11), the runner can probe https://dashboard.fro.bot/operator/health
+    // from the public internet — the route proxies through Caddy → VPC → gateway operator daemon.
+    //
+    // Fail closed: /operator/health != 200 → deploy throws.
+    // This proves the same-origin path works end-to-end (Caddy route + VPC reach + daemon guard).
+    //
+    // The public-denied gateway.fro.bot:9300 check and DO firewall readback belong to the
+    // gateway deploy (Phase 8e). The DOCKER-USER readback belongs to Phase 8c of the gateway deploy.
+    if (validated.GATEWAY_VPC_IP) {
+      const operatorHealthUrl = `https://${host}/operator/health`
+      console.warn(`\u001B[1;34m==>\u001B[0m Probing same-origin operator health endpoint: ${operatorHealthUrl}`)
+      let operatorHealthOk = false
+      let operatorHealthStatus = 0
+      try {
+        const response = await fetchFn(operatorHealthUrl, {
+          signal: AbortSignal.timeout(10_000),
+        })
+        operatorHealthStatus = response.status
+        if (response.status === 200) {
+          operatorHealthOk = true
+        }
+      } catch (error) {
+        // Connection/TLS error — treat as a failure (not a warning-only path like /api/healthz)
+        throw new Error(
+          `Same-origin operator health check failed: could not reach ${operatorHealthUrl}. ` +
+            `Ensure the gateway deploy has completed (VPC port publish + DOCKER-USER + DO firewall) ` +
+            `before deploying the dashboard /operator/* route. ` +
+            `Original error: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      if (!operatorHealthOk) {
+        throw new Error(
+          `Same-origin operator health check failed: ${operatorHealthUrl} returned HTTP ${operatorHealthStatus} (expected 200). ` +
+            `The /operator/* Caddy route is active but the gateway operator daemon is not healthy. ` +
+            `Check the gateway operator service and ensure the VPC path is correctly configured.`,
+        )
+      }
+      console.warn(`\u001B[1;32m✓\u001B[0m Same-origin operator health check passed: ${operatorHealthUrl} → 200`)
+    }
+
     // Phase 12: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
     let probeOk = false
     for (let attempt = 1; attempt <= probeAttempts; attempt++) {

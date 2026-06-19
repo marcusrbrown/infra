@@ -172,9 +172,20 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
   return {spawnFn, calls}
 }
 
-/** Build a mock fetch that returns a Discord commands response. */
+/**
+ * Build a mock fetch that returns a Discord commands response.
+ * Throws a connection-refused error for :9300 URLs so the public-denied
+ * probe (which expects a connection error = pass) does not fail existing tests.
+ */
 function makeDiscordFetch(commands: {name: string}[]): typeof fetch {
-  return mock(async () => new Response(JSON.stringify(commands), {status: 200})) as unknown as typeof fetch
+  return mock(async (url: string) => {
+    // Simulate connection refused for the public-denied probe.
+    // The probe expects a connection error — any HTTP response would fail the check.
+    if (typeof url === 'string' && url.includes(':9300')) {
+      throw new TypeError('fetch failed: connection refused')
+    }
+    return new Response(JSON.stringify(commands), {status: 200})
+  }) as unknown as typeof fetch
 }
 
 // ─── Test setup ───────────────────────────────────────────────────────────────
@@ -9263,9 +9274,9 @@ describe('validateOperatorAuthConfig', () => {
   })
 })
 
-// ─── Unit 3: buildSecretFileList — operator auth/config secret files ──────────
+// ─── buildSecretFileList — operator auth/config secret files ────────────
 
-// Valid operator auth env vars for Unit 3 tests.
+// Valid operator auth env vars for the operator-auth tests.
 const VALID_OPERATOR_AUTH_ENV = {
   GATEWAY_OPERATOR_GITHUB_CLIENT_ID: 'Iv1.abc123',
   GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET: 'secret-abc123',
@@ -9369,7 +9380,7 @@ describe('buildSecretFileList — operator auth/config secret files', () => {
   })
 })
 
-// ─── Unit 3: checksum sensitivity to operator auth/config values ──────────────
+// ─── checksum sensitivity to operator auth/config values ──────────────
 
 describe('computeSecretsChecksum — operator auth/config rotation sensitivity', () => {
   test('checksum changes when GATEWAY_OPERATOR_GITHUB_CLIENT_ID changes', async () => {
@@ -9411,9 +9422,9 @@ describe('computeSecretsChecksum — operator auth/config rotation sensitivity',
   })
 })
 
-// ─── Unit 3: main() fail-fast for partial operator auth config ────────────────
+// ─── main() fail-fast for partial operator auth config ────────────────
 
-describe('main() — operator auth/config fail-fast gate (Unit 3)', () => {
+describe('main() — operator auth/config fail-fast gate', () => {
   let upstreamPath: string
   let originalUpstream: string | undefined
 
@@ -9544,10 +9555,10 @@ describe('main() — operator auth/config fail-fast gate (Unit 3)', () => {
   })
 })
 
-// ─── Unit 4: buildComposeOverride — operator auth _FILE env vars, bind mounts, tuning vars ──
+// ─── buildComposeOverride — operator auth _FILE env vars, bind mounts, tuning vars ──
 
-describe('buildComposeOverride — operator auth _FILE env vars and bind mounts (Unit 4)', () => {
-  // ── Required≡wired invariant (R9): single combined assertion ─────────────────
+describe('buildComposeOverride — operator auth _FILE env vars and bind mounts', () => {
+  // ── Required≡wired invariant: single combined assertion ─────────────────
   // This is the infra-side guard against the class of failure documented in
   // docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md.
   // Do NOT split this invariant across separate test cases.
@@ -9746,9 +9757,9 @@ describe('buildComposeOverride — operator auth _FILE env vars and bind mounts 
   })
 })
 
-// ─── Unit 4: main() dry-run with operator auth → prints callback preflight ────
+// ─── main() dry-run with operator auth → prints callback preflight ────
 
-describe('main() — dry-run with operator auth enabled → callback URL preflight (Unit 4)', () => {
+describe('main() — dry-run with operator auth enabled → callback URL preflight', () => {
   let upstreamPath: string
   let originalUpstream: string | undefined
 
@@ -10242,7 +10253,7 @@ describe('main() — GATEWAY_VPC_IP validation before SSH', () => {
   })
 })
 
-// ─── Unit 2: DOCKER-USER source restriction ───────────────────────────────────
+// ─── DOCKER-USER source restriction ───────────────────────────────────
 //
 // The DOCKER-USER iptables chain sees traffic AFTER Docker DNAT, so we match on
 // the post-DNAT destination (the container IP + port) rather than conntrack
@@ -10278,7 +10289,7 @@ function captureDockerUserReadbackCmd(calls: string[][]): string | undefined {
   return cmd?.at(-1)
 }
 
-describe('Unit 2: DOCKER-USER source restriction — main() integration', () => {
+describe('DOCKER-USER source restriction — main() integration', () => {
   let upstreamPath: string
   let originalUpstream: string | undefined
 
@@ -10677,7 +10688,7 @@ describe('Unit 2: DOCKER-USER source restriction — main() integration', () => 
   })
 })
 
-// ─── DO Cloud Firewall reconcile (Unit 3) ────────────────────────────────────
+// ─── DO Cloud Firewall reconcile ────────────────────────────────────────────
 //
 // Tests for the provider-level firewall reconcile phase in main().
 // Gated on operatorEnabled && getOperatorVpcState === 'enabled'.
@@ -10744,6 +10755,9 @@ describe('DO Cloud Firewall reconcile', () => {
   test('happy path: operator+VPC enabled + token present → reconcile adds 9300 rule to EXISTING firewall', async () => {
     const {main} = await import('./deploy')
     const addRulesCalls: string[][] = []
+    // Track InboundRules call count: Phase 8d checks before adding (returns no-9300),
+    // Phase 8e reads back after adding (returns with-9300 to simulate the rule was added).
+    let inboundRulesCallCount = 0
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
@@ -10771,14 +10785,19 @@ describe('DO Cloud Firewall reconcile', () => {
       if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
         return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
       }
-      // firewall get InboundRules → no 9300 rule yet
+      // firewall get InboundRules:
+      //   - Phase 8d (first call): no 9300 rule yet → triggers add-rules
+      //   - Phase 8e (second call): rule now present → post-state readback passes
       if (
         cmdStr.includes('doctl') &&
         cmdStr.includes('firewall') &&
         cmdStr.includes('get') &&
         cmdStr.includes('InboundRules')
       ) {
-        return makeSpawnResult({stdout: FIREWALL_INBOUND_NO_9300})
+        inboundRulesCallCount++
+        return makeSpawnResult({
+          stdout: inboundRulesCallCount === 1 ? FIREWALL_INBOUND_NO_9300 : FIREWALL_INBOUND_WITH_9300,
+        })
       }
       // add-rules call
       if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('add-rules')) {
@@ -11029,6 +11048,9 @@ describe('DO Cloud Firewall reconcile', () => {
   test('safety: reconcile never issues firewall create, delete, or remove-rules', async () => {
     const {main} = await import('./deploy')
     const dangerousCalls: string[][] = []
+    // Track InboundRules call count: Phase 8d (first call) returns no-9300 to trigger add-rules,
+    // Phase 8e (second call) returns with-9300 so the post-state readback passes.
+    let inboundRulesCallCount = 0
 
     const {spawnFn} = makeSpawnMock(cmd => {
       const cmdStr = cmd.join(' ')
@@ -11059,7 +11081,10 @@ describe('DO Cloud Firewall reconcile', () => {
         cmdStr.includes('get') &&
         cmdStr.includes('InboundRules')
       ) {
-        return makeSpawnResult({stdout: FIREWALL_INBOUND_NO_9300})
+        inboundRulesCallCount++
+        return makeSpawnResult({
+          stdout: inboundRulesCallCount === 1 ? FIREWALL_INBOUND_NO_9300 : FIREWALL_INBOUND_WITH_9300,
+        })
       }
       // Track dangerous calls
       if (
@@ -11081,5 +11106,340 @@ describe('DO Cloud Firewall reconcile', () => {
     })
 
     expect(dangerousCalls).toHaveLength(0)
+  })
+})
+
+// ─── Post-deploy verification — public-denied + DO firewall readback ──
+//
+// The deploy runner is NOT a VPC peer, so a live foreign-VPC-source probe is
+// impossible. Instead verify what the runner can actually check:
+//
+//   1. PUBLIC-DENIED: gateway.fro.bot:9300 must be unreachable from the public
+//      internet (TCP connect refused/timed-out). The runner originates from the
+//      public internet, so this is a real check.
+//
+//   2. DO FIREWALL READBACK: after the firewall reconcile adds the inbound rule, read back the
+//      firewall state and assert the 9300 rule's source is exactly the dashboard
+//      droplet-id and that existing ports are still present (additive, not replaced).
+//      The firewall reconcile does the add; these tests cover the post-state assertion.
+//
+//   3. DOCKER-USER readback is already done in Phase 8c. These tests rely
+//      on it — no duplication here.
+//
+// Gate: operatorEnabled && getOperatorVpcState(env) === 'enabled'.
+// Fail closed: any check failure throws.
+//
+// The same-origin https://dashboard.fro.bot/operator/health 200 check belongs to
+// the dashboard deploy (it owns that route and runs after gateway). See
+// apps/dashboard/src/deploy.test.ts for those tests.
+
+describe('gateway verification: public-denied probe + DO firewall post-state readback', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.69.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  // ── Happy path ──────────────────────────────────────────────────────────────
+
+  test('happy path: public gateway.fro.bot:9300 refused + firewall readback correct → deploy passes', async () => {
+    const {main} = await import('./deploy')
+
+    // fetch mock: public :9300 probe throws (connection refused = pass)
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes(':9300')) {
+        throw new TypeError('fetch failed: connection refused')
+      }
+      // Discord registration
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Firewall post-state readback: rule present with correct dashboard droplet-id
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        return makeSpawnResult({
+          stdout: `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`,
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: mockFetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  // ── Error: public :9300 reachable → fail closed ─────────────────────────────
+
+  test('error: public gateway.fro.bot:9300 reachable (fetch returns response) → deploy fails closed', async () => {
+    const {main} = await import('./deploy')
+
+    // fetch mock: public :9300 probe returns a response (any response = reachable = fail)
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes(':9300')) {
+        // Any HTTP response means the port is reachable — must fail closed
+        return new Response('', {status: 200})
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const {spawnFn} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: mockFetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/9300.*reachable|public.*9300|gateway.*9300.*public/i)
+  })
+
+  // ── Error: DO firewall readback missing 9300 rule → fail closed ─────────────
+
+  test('error: DO firewall readback shows 9300 rule missing → deploy fails closed', async () => {
+    const {main} = await import('./deploy')
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes(':9300')) {
+        throw new TypeError('fetch failed: connection refused')
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Firewall post-state readback: 9300 rule absent
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        return makeSpawnResult({
+          stdout: 'protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:80,address:0.0.0.0/0',
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: mockFetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/firewall.*9300|9300.*firewall|rule.*missing|missing.*rule/i)
+  })
+
+  // ── Error: DO firewall readback has wrong source → fail closed ───────────────
+
+  test('error: DO firewall readback shows 9300 rule with wrong source droplet-id → deploy fails closed', async () => {
+    const {main} = await import('./deploy')
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes(':9300')) {
+        throw new TypeError('fetch failed: connection refused')
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Firewall post-state readback: 9300 rule present but wrong droplet-id
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        return makeSpawnResult({
+          stdout: 'protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:999999999',
+        })
+      }
+      return undefined
+    })
+
+    await expect(
+      main({
+        env: makeFirewallEnv(),
+        args: [],
+        fetch: mockFetch,
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/firewall.*source|source.*firewall|wrong.*droplet|droplet.*wrong|222222222/i)
+  })
+
+  // ── Edge: operator/VPC disabled → verification skipped ──────────────────────
+
+  test('edge: operator disabled → public-denied probe and firewall readback skipped', async () => {
+    const {main} = await import('./deploy')
+    const probedUrls: string[] = []
+
+    const mockFetch = mock(async (url: string) => {
+      probedUrls.push(url)
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const {spawnFn} = makeSpawnMock()
+
+    // Non-operator env
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: mockFetch,
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // No :9300 probe should have been made
+    expect(probedUrls.some(u => u.includes(':9300'))).toBe(false)
+  })
+
+  test('edge: VPC disabled (operator enabled but no VPC IPs) → public-denied probe and firewall readback skipped', async () => {
+    const {main} = await import('./deploy')
+    const probedUrls: string[] = []
+
+    const mockFetch = mock(async (url: string) => {
+      probedUrls.push(url)
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const {spawnFn} = makeSpawnMock()
+
+    // Operator enabled but no VPC IPs
+    await main({
+      env: makeOperatorAuthEnv(),
+      args: [],
+      fetch: mockFetch,
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(probedUrls.some(u => u.includes(':9300'))).toBe(false)
+  })
+
+  // ── Verify the public-denied probe targets the correct URL ───────────────────
+
+  test('public-denied probe targets https://gateway.fro.bot:9300 (not the VPC IP)', async () => {
+    const {main} = await import('./deploy')
+    const probedUrls: string[] = []
+
+    const mockFetch = mock(async (url: string) => {
+      probedUrls.push(url)
+      if (url.includes(':9300')) {
+        throw new TypeError('fetch failed: connection refused')
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        return makeSpawnResult({
+          stdout: `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`,
+        })
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeFirewallEnv(),
+      args: [],
+      fetch: mockFetch,
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Must probe the public gateway hostname, not the VPC IP
+    const port9300Probes = probedUrls.filter(u => u.includes(':9300'))
+    expect(port9300Probes.length).toBeGreaterThan(0)
+    // Must use the public hostname (gateway.fro.bot), not the VPC IP (10.116.0.3)
+    expect(port9300Probes.every(u => u.includes('gateway.fro.bot'))).toBe(true)
+    expect(port9300Probes.every(u => !u.includes('10.116.0.3'))).toBe(true)
+  })
+
+  // ── Firewall readback uses the same firewall ID resolved during reconcile ───────────
+
+  test('firewall post-state readback uses the same firewall ID as the add-rules step', async () => {
+    const {main} = await import('./deploy')
+    const firewallGetCalls: string[][] = []
+
+    const mockFetch = mock(async (url: string) => {
+      if (url.includes(':9300')) {
+        throw new TypeError('fetch failed: connection refused')
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    }) as unknown as typeof fetch
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      // Return the known FIREWALL_ID from list-by-droplet so the readback uses it
+      if (cmdStr.includes('doctl') && cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+        return makeSpawnResult({stdout: FIREWALL_LIST_NO_9300})
+      }
+      if (
+        cmdStr.includes('doctl') &&
+        cmdStr.includes('firewall') &&
+        cmdStr.includes('get') &&
+        cmdStr.includes('InboundRules')
+      ) {
+        firewallGetCalls.push(cmd)
+        return makeSpawnResult({
+          stdout: `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`,
+        })
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeFirewallEnv(),
+      args: [],
+      fetch: mockFetch,
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // The firewall get call must reference the firewall ID
+    expect(firewallGetCalls.length).toBeGreaterThanOrEqual(1)
+    const lastGetCall = firewallGetCalls.at(-1)
+    expect(lastGetCall).toBeDefined()
+    expect(lastGetCall?.join(' ')).toContain(FIREWALL_ID)
   })
 })

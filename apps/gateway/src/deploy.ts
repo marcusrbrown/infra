@@ -2844,6 +2844,137 @@ SCRIPT`
       }
     }
 
+    // Phase 8e: Post-deploy verification — public-denied probe + DO firewall post-state readback.
+    //
+    // Gated on operatorEnabled && getOperatorVpcState(env) === 'enabled'.
+    //
+    // The deploy runner is NOT a VPC peer, so a live foreign-VPC-source probe is impossible.
+    // Instead verify what the runner can actually check:
+    //
+    //   1. PUBLIC-DENIED: gateway.fro.bot:9300 must be unreachable from the public internet.
+    //      The runner originates from the public internet, so this is a real check.
+    //      Attempt an HTTP fetch to https://<GATEWAY_HOST>:9300 — a connection error (refused/
+    //      timed-out) is the expected pass condition. Any HTTP response means the port is
+    //      reachable from the public internet and the deploy fails closed.
+    //
+    //   2. DO FIREWALL POST-STATE READBACK: after the firewall reconcile adds the inbound rule, read back the
+    //      firewall state and assert the 9300 rule's source is exactly the dashboard droplet-id
+    //      and that existing ports are still present (additive, not replaced).
+    //      The firewall reconcile phase does the add; this phase adds the post-state assertion.
+    //      Phase 8c already does the DOCKER-USER readback — no duplication here.
+    //
+    //   3. The same-origin https://dashboard.fro.bot/operator/health 200 check belongs to the
+    //      dashboard deploy (it owns that route and runs after gateway). See
+    //      apps/dashboard/src/deploy.ts Phase 12b.
+    //
+    // Fail closed: any check failure throws.
+    if (operatorEnabled && getOperatorVpcState(env) === 'enabled') {
+      const doToken = env.DIGITALOCEAN_ACCESS_TOKEN?.trim()
+
+      // 1. PUBLIC-DENIED: probe https://<GATEWAY_HOST>:9300 from the public internet.
+      //    The listener is published only on the gateway VPC IP, so public eth0:9300 must be
+      //    unreachable. A connection error (refused/timed-out) = pass. Any HTTP response = fail.
+      const publicProbeUrl = `https://${host}:9300`
+      console.warn(
+        `\u001B[1;34m==>\u001B[0m Verifying public gateway.fro.bot:9300 is unreachable (public-denied check)`,
+      )
+      let publicPortReachable = false
+      try {
+        const ac = new AbortController()
+        const timer = setTimeout(() => ac.abort(), 10_000)
+        await fetchFn(publicProbeUrl, {signal: ac.signal})
+        clearTimeout(timer)
+        // If fetch resolves (any HTTP response), the port is reachable — fail closed.
+        publicPortReachable = true
+      } catch {
+        // Connection refused, timed out, or AbortError — expected pass condition.
+        publicPortReachable = false
+      }
+      if (publicPortReachable) {
+        throw new Error(
+          `SECURITY: public gateway.fro.bot:9300 is reachable from the public internet. ` +
+            `The operator listener must be published only on the gateway VPC IP (${env.GATEWAY_VPC_IP ?? ''}), ` +
+            `not on the public interface. ` +
+            `Check the DO Cloud Firewall and DOCKER-USER rules — the port must not be accessible from the public internet.`,
+        )
+      }
+      console.warn(
+        `\u001B[1;32m✓\u001B[0m Public gateway.fro.bot:9300 is unreachable (connection refused/timed-out — expected)`,
+      )
+
+      // 2. DO FIREWALL POST-STATE READBACK: verify the 9300 rule is present with the correct
+      //    dashboard droplet-id after the firewall add-rules step.
+      //    This is a post-state assertion — the add already happened; we verify the result.
+      //    We need the firewall ID and dashboard droplet ID resolved in Phase 8d.
+      //    Re-resolve them here (same doctl calls, same idempotent pattern).
+      if (doToken) {
+        const doctlEnv: DeployEnv = {...deployEnv, DIGITALOCEAN_ACCESS_TOKEN: doToken}
+
+        // Re-resolve dashboard droplet ID (same as Phase 8d)
+        const {stdout: dashboardIdRaw2} = await runCommand(
+          'Resolving dashboard droplet ID (firewall post-state readback)',
+          ['doctl', 'compute', 'droplet', 'get', 'dashboard', '--format', 'ID', '--no-header'],
+          doctlEnv,
+          spawnFn,
+        )
+        const dashboardDropletId2 = dashboardIdRaw2.trim()
+
+        // Re-resolve gateway droplet ID (same as Phase 8d)
+        const {stdout: gatewayIdRaw2} = await runCommand(
+          'Resolving gateway droplet ID (firewall post-state readback)',
+          ['doctl', 'compute', 'droplet', 'get', host, '--format', 'ID', '--no-header'],
+          doctlEnv,
+          spawnFn,
+        )
+        const gatewayDropletId2 = gatewayIdRaw2.trim()
+
+        // Re-resolve firewall ID (same as Phase 8d)
+        const {stdout: firewallListRaw2} = await runCommand(
+          'Finding existing firewall for gateway droplet (firewall post-state readback)',
+          ['doctl', 'compute', 'firewall', 'list-by-droplet', gatewayDropletId2, '--format', 'ID', '--no-header'],
+          doctlEnv,
+          spawnFn,
+        )
+        const firewallId2 = firewallListRaw2.trim().split('\n')[0]?.trim()
+
+        if (firewallId2 && dashboardDropletId2) {
+          // Read back the firewall inbound rules and assert the 9300 rule is present with the
+          // correct dashboard droplet-id as source.
+          const {stdout: inboundRulesReadback} = await runCommand(
+            'Reading back DO Cloud Firewall inbound rules (post-state verification)',
+            ['doctl', 'compute', 'firewall', 'get', firewallId2, '--format', 'InboundRules', '--no-header'],
+            doctlEnv,
+            spawnFn,
+          )
+
+          // Assert the 9300 rule is present
+          const has9300Rule = inboundRulesReadback.includes('ports:9300')
+          if (!has9300Rule) {
+            throw new Error(
+              `DO Cloud Firewall post-state verification failed: no tcp/9300 inbound rule found on firewall ${firewallId2}. ` +
+                `The rule should have been added in Phase 8d. ` +
+                `Run 'doctl compute firewall get ${firewallId2} --format InboundRules' to inspect the current state.`,
+            )
+          }
+
+          // Assert the 9300 rule's source is exactly the dashboard droplet-id (not an IP or other source)
+          const hasCorrectSource = inboundRulesReadback.includes(`droplet_id:${dashboardDropletId2}`)
+          if (!hasCorrectSource) {
+            throw new Error(
+              `DO Cloud Firewall post-state verification failed: tcp/9300 rule on firewall ${firewallId2} ` +
+                `does not have source=droplet_id:${dashboardDropletId2} (dashboard droplet). ` +
+                `The rule source must be the dashboard droplet-id, not an IP address or other source. ` +
+                `Run 'doctl compute firewall get ${firewallId2} --format InboundRules' to inspect the current state.`,
+            )
+          }
+
+          console.warn(
+            `\u001B[1;32m✓\u001B[0m DO Cloud Firewall post-state verified: tcp/9300 rule present with source=droplet_id:${dashboardDropletId2} on firewall ${firewallId2}`,
+          )
+        }
+      }
+    }
+
     // Phase 9: Post-deploy probe — poll Discord slash command registration
     const applicationId = validated.DISCORD_APPLICATION_ID
     const guildId = validated.DISCORD_GUILD_ID

@@ -153,25 +153,48 @@ When unset, it falls back to ssh-agent.
 
 The ratified browser-visible operator API origin is `https://dashboard.fro.bot/operator/*`. The
 dashboard Caddy instance owns the `/operator/*` route and proxies it to the gateway operator
-listener over a private dashboard→gateway path. This makes the operator API same-origin with the
+listener over the shared DigitalOcean VPC. This makes the operator API same-origin with the
 dashboard UI.
 
-**Current state:** The dashboard Caddy `/operator/*` route is not yet deployed. No routing is
-active. Do not add a `/operator/*` block to `apps/dashboard/config/Caddyfile` until all
-prerequisites are met.
+**Current state:** The dashboard Caddy `/operator/*` route is **live**. The route is a `handle`
+block before the `dashboard:3000` catch-all in `apps/dashboard/config/Caddyfile`, targeting
+`{$GATEWAY_VPC_IP}:9300` over the VPC. The gateway operator listener is reachable from the
+dashboard droplet via the shared DigitalOcean VPC (`nyc1`; gateway VPC IP `10.116.0.3`, dashboard
+VPC IP `10.116.0.5` — example values; actual IPs are set via `GATEWAY_VPC_IP`).
 
-**Prerequisites before enabling:**
+**Route configuration:**
 
-1. A private network path from the dashboard droplet to the gateway operator listener must exist
-   (e.g. DigitalOcean VPC or private network peering). The gateway operator listener must not be
-   reachable from the public internet directly.
-2. Upstream auth/session/CSRF readiness — `fro-bot/agent` must ship the auth/session/CSRF contract
-   for privileged operator routes (`marcusrbrown/infra#580`).
-3. The dashboard Caddy `/operator/*` reverse proxy block must include `flush_interval -1` to disable
-   response buffering so future SSE streams are not silently buffered.
+```
+handle /operator/* {
+    flush_interval -1
+    header_up Host dashboard.fro.bot
+    header_up X-Forwarded-Proto https
+    reverse_proxy {$GATEWAY_VPC_IP}:9300
+}
+```
+
+- `flush_interval -1` — disables response buffering for future SSE streams.
+- `header_up Host dashboard.fro.bot` + `header_up X-Forwarded-Proto https` — satisfies the gateway
+  daemon's forwarded-header guard (`X-Forwarded-Host` must match `PUBLIC_ORIGIN` host).
+- `{$GATEWAY_VPC_IP}` — Caddy native env expansion; the dashboard `caddy` service receives
+  `GATEWAY_VPC_IP` from the deploy `.env`. Never use a literal IP in the Caddyfile.
+- The `handle` block must appear **before** the `reverse_proxy dashboard:3000` catch-all — Caddy
+  compiles directives in fixed order, not source order; a bare catch-all sorts ahead and self-404s
+  a matched route.
+
+**Required env var:**
+
+| Variable | Where set | Description |
+| --- | --- | --- |
+| `GATEWAY_VPC_IP` | `dashboard` GitHub Environment + local `.env` | Gateway droplet's DigitalOcean VPC IP (e.g. `10.116.0.3`). The dashboard `caddy` service expands `{$GATEWAY_VPC_IP}` from `.env`. Caddy fails to start if the var is set but unresolved. |
+
+Seed `GATEWAY_VPC_IP` in the `dashboard` GitHub Environment before deploying the route. The
+same-origin path only works after the gateway VPC bridge is live (see
+`apps/gateway/AGENTS.md` [Operator private path](#operator-private-path-dashboard-same-origin) and
+`docs/plans/2026-06-18-003-feat-dashboard-operator-private-path-plan.md`).
 
 See `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md` for the full decision
-record and implementation slices.
+record.
 
 ## Anti-patterns
 
@@ -189,6 +212,12 @@ record and implementation slices.
 - **Never skip `validateDashboardHost`** — it rejects `-`-prefixed values and characters outside the
   allowed alphabet. SSH treats `-`-prefixed hostnames as flags (including `-oProxyCommand=`).
 - **Never wire `apps/dashboard/config/Caddyfile` to proxy `/operator/*` to `gateway.fro.bot`** —
-  that would route browser operator calls to the public gateway edge, not through a private path.
-  The dashboard→gateway path must be private (not public internet). See the operator same-origin
-  target section above.
+  that would route browser operator calls to the public gateway edge, not through the private VPC
+  path. The dashboard→gateway path must use `{$GATEWAY_VPC_IP}` (config), never a literal IP or
+  the public gateway hostname. See the operator same-origin target section above.
+- **Never put the `/operator/*` handle block after the `dashboard:3000` catch-all** — Caddy
+  compiles directives in fixed order; a bare `reverse_proxy` catch-all sorts ahead and self-404s
+  any route that follows it. The `/operator/*` block must be a `handle` block before the catch-all.
+- **Never set `GATEWAY_VPC_IP` to a literal IP in the Caddyfile** — use `{$GATEWAY_VPC_IP}` and
+  inject the value via the `caddy` service env. Hardcoded IPs break on droplet rebuild and make
+  the config non-auditable.

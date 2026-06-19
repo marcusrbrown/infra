@@ -167,14 +167,11 @@ jobs:
       VPN_HOST: ${{ secrets.VPN_HOST }}
       VPN_PEERS: ${{ secrets.VPN_PEERS }}
 
-  # The dashboard operator route proxies to the gateway VPC bridge; needs: deploy-gateway
-  # orders dashboard after gateway and the if: lets dashboard proceed when gateway is skipped.
   deploy-dashboard:
-    needs: [detect-changes, deploy-gateway]
+    needs: detect-changes
     if: >-
-      !cancelled() &&
-      needs.deploy-gateway.result != 'failure' &&
-      (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.dashboard == 'true')
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.dashboard == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/deploy-dashboard.yaml

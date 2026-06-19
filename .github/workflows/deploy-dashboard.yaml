@@ -23,6 +23,8 @@ on:
         required: true
       DASHBOARD_COOKIE_KEY:
         required: true
+      GATEWAY_VPC_IP:
+        required: false
 
 concurrency:
   group: deploy-dashboard-${{ github.ref_name }}
@@ -80,4 +82,5 @@ jobs:
           DASHBOARD_OAUTH_CLIENT_SECRET: ${{ secrets.DASHBOARD_OAUTH_CLIENT_SECRET }}
           DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
           DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}
+          GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
         run: bun run --cwd apps/dashboard deploy

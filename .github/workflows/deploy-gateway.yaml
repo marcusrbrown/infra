@@ -73,6 +73,12 @@ on:
         required: false
       GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS:
         required: false
+      GATEWAY_VPC_IP:
+        required: false
+      DASHBOARD_VPC_IP:
+        required: false
+      DIGITALOCEAN_ACCESS_TOKEN:
+        required: false
 
 concurrency:
   group: deploy-gateway-${{ github.ref_name }}
@@ -221,5 +227,8 @@ jobs:
           GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS }}
           GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS }}
           GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS }}
+          GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
+          DASHBOARD_VPC_IP: ${{ secrets.DASHBOARD_VPC_IP }}
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           GATEWAY_IMAGE_DIGEST: ${{ needs.build-images.outputs.gateway_digest }}
           WORKSPACE_IMAGE_DIGEST: ${{ needs.build-images.outputs.workspace_digest }}

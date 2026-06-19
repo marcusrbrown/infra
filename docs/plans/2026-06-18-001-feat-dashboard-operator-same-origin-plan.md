@@ -67,13 +67,13 @@ session.
 
 ### Deferred to Separate Tasks
 
-| Deferred item | Tracking |
-| ------------- | -------- |
-| Private network path from dashboard droplet to gateway operator listener (DigitalOcean VPC or private network peering) | Future infra task |
-| Upstream auth/session/CSRF contract for privileged operator routes | `marcusrbrown/infra#580` (blocked on `fro-bot/agent`) |
-| Dashboard Caddy `/operator/*` reverse proxy block with `flush_interval -1` | Future dashboard deploy task |
-| Post-deploy probes for the live operator path | Follows dashboard Caddy route deployment |
-| Operator auth/session wiring in the dashboard app | Follows `infra#580` |
+| Deferred item | Status |
+| ------------- | ------ |
+| Private network path from dashboard droplet to gateway operator listener | **Implemented** — the shared DigitalOcean VPC is the private path; bridge implemented in `docs/plans/2026-06-18-003-feat-dashboard-operator-private-path-plan.md`. |
+| Upstream auth/session/CSRF contract for privileged operator routes | **Implemented** — `marcusrbrown/infra#580` shipped; all four auth/config secrets are live. |
+| Dashboard Caddy `/operator/*` reverse proxy block with `flush_interval -1` | **Implemented** — live in `apps/dashboard/config/Caddyfile` (see plan #003). |
+| Post-deploy probes for the live operator path | **Implemented** — `GET https://dashboard.fro.bot/operator/health` returns 200; see `docs/runbooks/gateway-operator-private-path-verification.md`. |
+| Operator auth/session wiring in the dashboard app (browser UI client) | Open — separate `fro-bot/dashboard` app work. |
 
 ---
 
@@ -141,9 +141,9 @@ the dashboard-origin approach. Rejected as unnecessary complexity.
 
 | Question | Status |
 | -------- | ------ |
-| What private network topology connects the dashboard droplet to the gateway operator listener? (DigitalOcean VPC, private network peering, or WireGuard tunnel?) | Open — deferred to the private-path implementation task |
-| What is the auth/session/CSRF contract for privileged operator routes? | Blocked on `fro-bot/agent` upstream work (`infra#580`) |
-| Should the gateway operator listener bind address be configurable per-environment or fixed? | Open — current topology uses `GATEWAY_OPERATOR_BIND_HOST` per-deploy |
+| What private network topology connects the dashboard droplet to the gateway operator listener? (DigitalOcean VPC, private network peering, or WireGuard tunnel?) | **Resolved** — the shared DigitalOcean VPC (`nyc1`) already exists; both droplets are on it. The private path is a VPC-IP-scoped Docker port publish + DOCKER-USER iptables rule + DO Cloud Firewall, implemented in `docs/plans/2026-06-18-003-feat-dashboard-operator-private-path-plan.md`. |
+| What is the auth/session/CSRF contract for privileged operator routes? | **Resolved** — operator auth shipped in `marcusrbrown/infra#580`; all four auth/config secrets are live in the `gateway` GitHub Environment. |
+| Should the gateway operator listener bind address be configurable per-environment or fixed? | **Resolved** — `GATEWAY_OPERATOR_BIND_HOST` per-deploy (current topology). |
 
 ---
 
@@ -152,147 +152,27 @@ the dashboard-origin approach. Rejected as unnecessary complexity.
 This is a docs-only ratification plan. The implementation units are documentation updates only — no
 deploy code, Caddyfiles, routing changes, or tests are introduced here.
 
-- [ ] **Unit 1: Write same-origin plan**
+- [x] **Write same-origin plan** — this document. Ratifies `https://dashboard.fro.bot` as the
+  browser-visible operator API origin, documents rejected alternatives, records current production
+  state, and specifies the implementation slices required before the privileged/dashboard operator
+  API is live.
 
-  **Goal:** Author this ratification plan document, establishing `https://dashboard.fro.bot` as the
-  browser-visible operator API origin, documenting rejected alternatives, recording current production
-  state, and specifying the implementation slices required before the privileged/dashboard operator API is live.
+- [x] **Update root operator note** — root `AGENTS.md` references this plan in the gateway operator
+  listener note.
 
-  **Requirements:**
-  - R1 — same-origin contract ratified in writing.
-  - R2 — cross-origin credentialed calls explicitly rejected.
-  - R3 — gateway listener public-internet exposure rejected.
-  - R4 — gateway Caddy `/operator/*` route documented as topology scaffolding only.
-  - R5 — `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot` convention documented.
-  - R6 — `flush_interval -1` requirement documented as a prerequisite.
-  - R7 — dashboard proxy gated on auth/session/CSRF contract (`infra#580`).
+- [x] **Update gateway operator docs** — `apps/gateway/AGENTS.md` OPERATOR LISTENER section
+  references this plan and reinforces that `gateway.fro.bot/operator/*` is topology scaffolding.
 
-  **Dependencies:** None — this is the first unit.
+- [x] **Update dashboard operator docs** — `apps/dashboard/AGENTS.md` documents the operator
+  same-origin contract, current state, and prerequisites.
 
-  **Files:**
-  - Create `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`
+- [x] **Private dashboard→gateway path** — implemented in
+  `docs/plans/2026-06-18-003-feat-dashboard-operator-private-path-plan.md`. The shared
+  DigitalOcean VPC is the private path; the bridge (VPC-IP publish + DOCKER-USER + DO Cloud
+  Firewall + dashboard Caddy route) is live.
 
-  **Approach:** Write the plan with frontmatter, Overview, Problem Frame, Requirements Trace, Scope
-  Boundaries, Context & Research, Key Technical Decisions, Open Questions, Implementation Units,
-  System-Wide Impact, Risks & Dependencies, Documentation / Operational Notes, and Sources &
-  References sections. Keep all content docs-only; no shell recipes or deploy code.
-
-  **Patterns to follow:** Standard ce:plan structure. Frontmatter fields: `title`, `type`, `status`,
-  `date`. Requirements table with `ID` / `Requirement` columns. Deferred items table. Key Technical
-  Decisions with explicit rejected-alternative subsections.
-
-  **Test scenarios:**
-  Test expectation: none — docs-only ratification; verification is documentation review and grep gates.
-
-  **Verification:**
-  - File exists at the expected path with correct frontmatter.
-  - All seven requirements (R1–R7) appear in the Requirements Trace table.
-  - Rejected alternatives (`gateway.fro.bot`, cross-origin credentialed calls, third origin) each have
-    a dedicated Key Technical Decisions subsection.
-  - Current production state (gateway operator listener enabled; `GET /operator/health` live; dashboard Caddy `/operator/*` route not yet deployed) is documented in Documentation / Operational Notes.
-
----
-
-- [ ] **Unit 2: Update root operator note**
-
-  **Goal:** Update the root `AGENTS.md` to reference this plan in the gateway operator listener note,
-  so agents and operators reading the root knowledge base are directed to the full rationale and the
-  ratified `GATEWAY_OPERATOR_PUBLIC_ORIGIN` convention.
-
-  **Requirements:**
-  - R4 — gateway Caddy `/operator/*` route documented as topology scaffolding only.
-  - R5 — `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot` convention referenced.
-
-  **Dependencies:** Unit 1 (plan document must exist before it can be referenced).
-
-  **Files:**
-  - Modify `AGENTS.md`
-
-  **Approach:** Locate the existing gateway operator listener note in the NOTES section of `AGENTS.md`
-  (the sentence beginning "The gateway Caddy `/operator/*` route is topology scaffolding"). Append a
-  reference to this plan document so the note reads: "See `apps/gateway/AGENTS.md` for constraints and
-  `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md` for the decision record."
-  Do not introduce plan-taxonomy strings (R-IDs, Unit labels, version tags) into `AGENTS.md`.
-
-  **Patterns to follow:** Existing `AGENTS.md` note style — prose sentences, no structured taxonomy.
-  Keep the note self-contained; do not duplicate the full rationale.
-
-  **Test scenarios:**
-  Test expectation: none — docs-only ratification; verification is documentation review and grep gates.
-
-  **Verification:**
-  - `AGENTS.md` contains a reference to `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`.
-  - No plan-taxonomy strings (`R[0-9]+`, `Unit [0-9]+`, `(v[0-9]+)`) appear in `AGENTS.md`.
-
----
-
-- [ ] **Unit 3: Update gateway operator docs**
-
-  **Goal:** Update `apps/gateway/AGENTS.md` to reference this plan in the OPERATOR LISTENER section,
-  reinforcing that `gateway.fro.bot/operator/*` is topology scaffolding and directing agents to the
-  full rationale for the rejected-gateway-origin decision.
-
-  **Requirements:**
-  - R4 — gateway Caddy `/operator/*` route documented as topology scaffolding only.
-  - R5 — `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot` convention referenced.
-
-  **Dependencies:** Unit 1 (plan document must exist before it can be referenced).
-
-  **Files:**
-  - Modify `apps/gateway/AGENTS.md`
-
-  **Approach:** Locate the OPERATOR LISTENER section in `apps/gateway/AGENTS.md`. Add or update a
-  sentence that directs agents to this plan for the full same-origin rationale and the rejected
-  `gateway.fro.bot` alternative. Do not introduce plan-taxonomy strings into the AGENTS file.
-
-  **Patterns to follow:** Existing `apps/gateway/AGENTS.md` section style — prose or short bullet
-  notes. Keep the reference concise; the plan document holds the full rationale.
-
-  **Test scenarios:**
-  Test expectation: none — docs-only ratification; verification is documentation review and grep gates.
-
-  **Verification:**
-  - `apps/gateway/AGENTS.md` contains a reference to `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`.
-  - No plan-taxonomy strings (`R[0-9]+`, `Unit [0-9]+`, `(v[0-9]+)`) appear in `apps/gateway/AGENTS.md`.
-
----
-
-- [ ] **Unit 4: Update dashboard operator docs**
-
-  **Goal:** Update `apps/dashboard/AGENTS.md` to document the operator same-origin contract, the
-  current state (gateway operator listener enabled; dashboard Caddy `/operator/*` route not yet
-  deployed), the prerequisites that must land before the dashboard Caddy `/operator/*` route is
-  deployed, and a reference to this plan.
-
-  **Requirements:**
-  - R1 — same-origin contract (`dashboard.fro.bot`) documented.
-  - R3 — privileged/dashboard operator calls must not be publicly reachable without private path and auth/session prerequisites; dashboard Caddy is the only browser ingress for privileged/dashboard operator calls.
-  - R6 — `flush_interval -1` documented as a prerequisite for the dashboard Caddy route.
-  - R7 — dashboard proxy gated on auth/session/CSRF contract (`infra#580`).
-
-  **Dependencies:** Unit 1 (plan document must exist before it can be referenced).
-
-  **Files:**
-  - Modify `apps/dashboard/AGENTS.md`
-
-  **Approach:** Add or update an OPERATOR SAME-ORIGIN section in `apps/dashboard/AGENTS.md` that
-  states: (a) the ratified origin is `https://dashboard.fro.bot`; (b) the dashboard Caddy
-  `/operator/*` route is not yet deployed; (c) prerequisites — private dashboard→gateway path,
-  auth/session/CSRF contract (`infra#580`), and `flush_interval -1` in the Caddy block — must all
-  land first; (d) reference to this plan for the full rationale. Do not introduce plan-taxonomy
-  strings into the AGENTS file.
-
-  **Patterns to follow:** Existing `apps/dashboard/AGENTS.md` section style. Anti-patterns block
-  should note that the dashboard Caddy `/operator/*` route must not be added before prerequisites are
-  met. Keep the section concise; the plan document holds the full rationale.
-
-  **Test scenarios:**
-  Test expectation: none — docs-only ratification; verification is documentation review and grep gates.
-
-  **Verification:**
-  - `apps/dashboard/AGENTS.md` contains a reference to `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`.
-  - The section documents the current state (gateway operator listener enabled; dashboard Caddy `/operator/*` route not yet deployed) and the three prerequisites.
-  - No plan-taxonomy strings (`R[0-9]+`, `Unit [0-9]+`, `(v[0-9]+)`) appear in `apps/dashboard/AGENTS.md`.
+- [ ] **Dashboard UI operator client** — browser-side operator client in `fro-bot/dashboard`.
+  Deferred; separate `fro-bot/dashboard` app work.
 
 ---
 
@@ -327,39 +207,18 @@ deploy code, Caddyfiles, routing changes, or tests are introduced here.
 The gateway operator listener is **enabled in production**. `GATEWAY_OPERATOR_BIND_HOST=172.21.0.2`,
 `GATEWAY_OPERATOR_BIND_PORT=9300`, and `GATEWAY_OPERATOR_PUBLIC_ORIGIN=https://dashboard.fro.bot`
 are set in the `gateway` GitHub Environment. Deploy run
-[27740787921](https://github.com/marcusrbrown/infra/actions/runs/27740787921) succeeded; the
-`/operator/health` probe ran through the public Caddy route. The current public operator surface is
-`GET /operator/health` only. No dashboard Caddy `/operator/*` route is deployed. The gateway-side
-Caddy `/operator/*` route is topology scaffolding only — it is not the production browser origin.
+[27740787921](https://github.com/marcusrbrown/infra/actions/runs/27740787921) succeeded.
 
-### Required implementation slices before privileged/dashboard operator API is live
+The dashboard Caddy `/operator/*` route is **live**. The private path (VPC-IP-scoped Docker port
+publish + DOCKER-USER iptables rule + DigitalOcean Cloud Firewall + dashboard Caddy route) was
+implemented in `docs/plans/2026-06-18-003-feat-dashboard-operator-private-path-plan.md`. The
+shared DigitalOcean VPC (`nyc1`) is the private path — no new VPC or peering was required.
+`GET https://dashboard.fro.bot/operator/health` returns 200 through the dashboard Caddy proxy.
 
-The following work must land before the privileged/dashboard operator API is live for browser clients:
+The gateway-side Caddy `/operator/*` route remains topology scaffolding — it is not the production
+browser origin. The production browser operator path is `https://dashboard.fro.bot/operator/*`.
 
-1. **Private dashboard→gateway path and trust boundary.** A private network path from the dashboard
-   droplet to the gateway operator listener must be established (e.g. a DigitalOcean VPC or private
-   network peering). Privileged operator routes and dashboard browser operator calls must not be
-   reachable from the public internet without the private path and auth/session prerequisites in place;
-   the dashboard Caddy proxy is the only intended ingress for privileged/dashboard browser operator
-   calls. (The public Caddy health/topology route `GET /operator/health` is intentionally reachable
-   now and is not blocked by this prerequisite.)
-
-2. **Upstream auth/session/CSRF readiness.** `fro-bot/agent` must ship the auth/session/CSRF contract
-   for privileged operator routes (tracked in `marcusrbrown/infra#580`). The dashboard `/operator/*`
-   proxy must not be wired before the upstream auth surface is defined.
-
-3. **Dashboard Caddy `/operator/*` route with SSE buffering disabled.** `apps/dashboard/config/Caddyfile`
-   must add a `/operator/*` reverse proxy block targeting the gateway operator listener over the
-   private path. The route must include `flush_interval -1` to disable response buffering so future
-   SSE streams are not silently buffered.
-
-4. **Post-deploy probes.** After the dashboard Caddy route lands, verify:
-   - `GET https://dashboard.fro.bot/operator/health` returns 200 through the dashboard Caddy proxy.
-   - The gateway operator listener has no host-published port (`docker compose ps` on the gateway
-     droplet must not show a `9300->9300` mapping).
-   - The workspace container is not on `gateway-net`.
-   - Cross-origin requests from `dashboard.fro.bot` to `gateway.fro.bot/operator/*` are rejected
-     (the gateway Caddy route is scaffolding, not a production path).
+The remaining open slice is the dashboard UI operator client (browser-side, in `fro-bot/dashboard`).
 
 ### Operator env var convention
 

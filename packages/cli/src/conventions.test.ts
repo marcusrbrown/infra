@@ -645,10 +645,9 @@ describe('dorny/paths-filter quantifier guard', () => {
   })
 })
 
-// ─── Unit 5: operator auth/config secrets and tuning vars ────────────────────
+// ─── operator auth/config secrets and tuning vars ────────────────────────────
 //
-// RED tests for Unit 5 of 2026-06-18-002-feat-gateway-operator-auth-config-plan.md
-// These assert the four new auth/config secrets and three optional tuning vars are
+// These assert the four operator auth/config secrets and three optional tuning vars are
 // wired through deploy-gateway.yaml (workflow_call.secrets + inputs + deploy step env),
 // deploy.yaml (fan-out secrets + with inputs), and the CLI passthrough.
 
@@ -843,6 +842,22 @@ describe('CLI getGatewayDeployEnv: operator auth/config passthrough', () => {
       Object.assign(process.env, origEnv)
     }
   })
+
+  it('getGatewayDeployEnv includes all three VPC bridge vars', async () => {
+    const {getGatewayDeployEnv} = await import('./commands/gateway/deploy')
+    const origEnv = {...process.env}
+    process.env.PATH = '/usr/bin'
+    process.env.HOME = '/home/test'
+    process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'
+    try {
+      const env = getGatewayDeployEnv()
+      for (const secret of ['GATEWAY_VPC_IP', 'DASHBOARD_VPC_IP', 'DIGITALOCEAN_ACCESS_TOKEN'] as const) {
+        expect(env).toHaveProperty(secret)
+      }
+    } finally {
+      Object.assign(process.env, origEnv)
+    }
+  })
 })
 
 // ─── deploy.yaml: aggregate router passes operator secrets to deploy-gateway ──
@@ -986,5 +1001,148 @@ describe('deploy-gateway.yaml: optional operator secret declarations (issue 1)',
     expect(validateStep?.env ?? {}).not.toHaveProperty('GATEWAY_OPERATOR_BIND_HOST')
     expect(validateStep?.env ?? {}).not.toHaveProperty('GATEWAY_OPERATOR_BIND_PORT')
     expect(validateStep?.env ?? {}).not.toHaveProperty('GATEWAY_OPERATOR_PUBLIC_ORIGIN')
+  })
+})
+
+// ─── VPC bridge secrets: CI-vs-local parity (PR #603) ────────────────────────
+//
+// GATEWAY_VPC_IP, DASHBOARD_VPC_IP, DIGITALOCEAN_ACCESS_TOKEN are optional
+// (all-or-none via getOperatorVpcState) but must be forwarded through CI so
+// the operator VPC bridge is not silently disabled when the secrets are set.
+// These tests assert the end-to-end wiring without adding them to the required
+// validation preflight (they are opt-in, like the operator listener vars).
+
+const VPC_GATEWAY_SECRETS = ['GATEWAY_VPC_IP', 'DASHBOARD_VPC_IP', 'DIGITALOCEAN_ACCESS_TOKEN'] as const
+const VPC_DASHBOARD_SECRETS = ['GATEWAY_VPC_IP'] as const
+
+describe('deploy-gateway.yaml: VPC bridge secrets wired end-to-end', () => {
+  const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
+
+  for (const secret of VPC_GATEWAY_SECRETS) {
+    it(`workflow_call.secrets declares ${secret} as optional (required: false)`, async () => {
+      const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}}
+      const secrets = parsed?.on?.workflow_call?.secrets ?? {}
+      expect(secrets).toHaveProperty(secret)
+      expect(secrets[secret]?.required).toBe(false)
+    })
+
+    it(`Deploy gateway step env forwards ${secret} from secrets context`, async () => {
+      const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {
+        jobs?: {'deploy-gateway'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
+      }
+      const steps = parsed?.jobs?.['deploy-gateway']?.steps ?? []
+      const deployStep = steps.find(s => s.name === 'Deploy gateway')
+      expect(deployStep).toBeDefined()
+      expect(deployStep?.env).toHaveProperty(secret)
+      expect(deployStep?.env?.[secret]).toMatch(/\$\{\{\s*secrets\./)
+    })
+  }
+
+  it('VPC bridge secrets are NOT in the required-secret validation step env', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-gateway'?: {steps?: {name?: string; env?: Record<string, string>; run?: string}[]}}
+    }
+    const steps = parsed?.jobs?.['deploy-gateway']?.steps ?? []
+    const validateStep = steps.find(s => s.name === 'Validate required secrets')
+    expect(validateStep).toBeDefined()
+    for (const secret of VPC_GATEWAY_SECRETS) {
+      expect(validateStep?.env ?? {}).not.toHaveProperty(secret)
+    }
+  })
+})
+
+describe('deploy-dashboard.yaml: VPC bridge secret wired end-to-end', () => {
+  const DEPLOY_DASHBOARD_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')
+
+  for (const secret of VPC_DASHBOARD_SECRETS) {
+    it(`workflow_call.secrets declares ${secret} as optional (required: false)`, async () => {
+      const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+      const parsed = parseYaml(text) as {on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}}
+      const secrets = parsed?.on?.workflow_call?.secrets ?? {}
+      expect(secrets).toHaveProperty(secret)
+      expect(secrets[secret]?.required).toBe(false)
+    })
+
+    it(`Deploy step env forwards ${secret} from secrets context`, async () => {
+      const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+      const parsed = parseYaml(text) as {
+        jobs?: {'deploy-dashboard'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
+      }
+      const steps = parsed?.jobs?.['deploy-dashboard']?.steps ?? []
+      const deployStep = steps.find(s => s.name === 'Deploy')
+      expect(deployStep).toBeDefined()
+      expect(deployStep?.env).toHaveProperty(secret)
+      expect(deployStep?.env?.[secret]).toMatch(/\$\{\{\s*secrets\./)
+    })
+  }
+
+  it('GATEWAY_VPC_IP is NOT in the required-secret validation step env', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {steps?: {name?: string; env?: Record<string, string>; run?: string}[]}}
+    }
+    const steps = parsed?.jobs?.['deploy-dashboard']?.steps ?? []
+    const validateStep = steps.find(s => s.name === 'Validate required secrets')
+    expect(validateStep).toBeDefined()
+    expect(validateStep?.env ?? {}).not.toHaveProperty('GATEWAY_VPC_IP')
+  })
+})
+
+describe('deploy.yaml: aggregate router forwards VPC bridge secrets', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  for (const secret of VPC_GATEWAY_SECRETS) {
+    it(`deploy-gateway job secrets block passes ${secret}`, async () => {
+      const text = await Bun.file(DEPLOY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {
+        jobs?: {'deploy-gateway'?: {secrets?: Record<string, string>}}
+      }
+      const secrets = parsed?.jobs?.['deploy-gateway']?.secrets ?? {}
+      expect(secrets).toHaveProperty(secret)
+      expect(secrets[secret]).toContain(secret)
+    })
+  }
+
+  for (const secret of VPC_DASHBOARD_SECRETS) {
+    it(`deploy-dashboard job secrets block passes ${secret}`, async () => {
+      const text = await Bun.file(DEPLOY_WORKFLOW).text()
+      const parsed = parseYaml(text) as {
+        jobs?: {'deploy-dashboard'?: {secrets?: Record<string, string>}}
+      }
+      const secrets = parsed?.jobs?.['deploy-dashboard']?.secrets ?? {}
+      expect(secrets).toHaveProperty(secret)
+      expect(secrets[secret]).toContain(secret)
+    })
+  }
+})
+
+// ─── deploy.yaml: gateway→dashboard ordering (PR #603) ───────────────────────
+//
+// The dashboard operator route depends on the gateway VPC bridge being live.
+// deploy-dashboard must declare needs: deploy-gateway so it runs after the
+// gateway deploy, and its if: must reference needs.deploy-gateway.result so
+// it proceeds when gateway is skipped (unchanged) but blocks on gateway failure.
+
+describe('deploy.yaml: deploy-dashboard is ordered after deploy-gateway', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  it('deploy-dashboard needs: includes deploy-gateway', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {needs?: string | string[]}}
+    }
+    const needs = parsed?.jobs?.['deploy-dashboard']?.needs ?? []
+    const needsArr = Array.isArray(needs) ? needs : [needs]
+    expect(needsArr).toContain('deploy-gateway')
+  })
+
+  it('deploy-dashboard if: references needs.deploy-gateway.result (fail-aware ordering)', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    // Plain-text check: the if: expression must reference needs.deploy-gateway.result
+    // so that dashboard is blocked on gateway failure, not just ordered after it.
+    expect(text).toMatch(/needs\.deploy-gateway\.result/)
   })
 })

@@ -70,6 +70,13 @@ export interface MainOpts {
   probeIntervalMs?: number
   /** Per-attempt timeout in ms for the HTTPS ingress probe (default: 5_000). */
   probePerAttemptTimeoutMs?: number
+  /**
+   * Injectable TCP connect function for the public-denied probe (Phase 8e).
+   * Resolves when a connection is established (port open = fail).
+   * Throws when connection is refused or times out (port closed = pass).
+   * Defaults to a Bun.connect-based implementation with a 10s timeout.
+   */
+  tcpConnect?: (host: string, port: number) => Promise<void>
 }
 
 export interface DeployArgs {
@@ -609,6 +616,100 @@ export function validateOperatorAuthConfig(opts: {
 }
 
 /**
+ * Returns the VPC state based on the presence of both VPC IP vars.
+ *
+ * - 'enabled':  both GATEWAY_VPC_IP and DASHBOARD_VPC_IP are present and non-empty.
+ * - 'disabled': both are absent (unset or whitespace-only).
+ * - 'invalid':  exactly one is present — the all-or-none gate is violated.
+ *
+ * These vars are only meaningful when the operator listener is enabled.
+ * Mirrors the empty/whitespace-only = absent semantics used by validateRequiredEnv.
+ */
+export function getOperatorVpcState(env: Record<string, string>): 'enabled' | 'disabled' | 'invalid' {
+  const hasGatewayVpcIp = Boolean(env.GATEWAY_VPC_IP?.trim())
+  const hasDashboardVpcIp = Boolean(env.DASHBOARD_VPC_IP?.trim())
+
+  const count = [hasGatewayVpcIp, hasDashboardVpcIp].filter(Boolean).length
+
+  if (count === 2) return 'enabled'
+  if (count === 0) return 'disabled'
+  return 'invalid'
+}
+
+/**
+ * Validates a VPC IPv4 address value.
+ * Throws with a descriptive message when the value is unsafe or invalid.
+ *
+ * Rejection rules:
+ *   - Empty or whitespace-only: required.
+ *   - Dash-prefixed: SSH flag injection risk (mirrors validateGatewayHost).
+ *   - 0.0.0.0: all-interface bind — VPC IPs must be specific addresses.
+ *   - Non-IPv4 format: must match dotted-decimal IPv4 (four octets, digits only).
+ *   - IPv6 or IP:port format: not accepted.
+ *
+ * @param value - The raw value to validate.
+ * @param varName - The env var name, used in error messages (e.g. 'GATEWAY_VPC_IP').
+ */
+export function validateVpcIp(value: string, varName: string): void {
+  const trimmed = value.trim()
+
+  if (!trimmed) {
+    throw new Error(`${varName} is required but is empty or whitespace-only.`)
+  }
+
+  // Reject dash-prefixed values (SSH flag injection risk — mirrors validateGatewayHost).
+  if (trimmed.startsWith('-')) {
+    throw new Error(
+      `${varName} "${trimmed}" starts with a dash. ` +
+        'SSH treats dash-prefixed values as flags (including -oProxyCommand=). ' +
+        'Provide a valid VPC IPv4 address (e.g. 10.116.0.3).',
+    )
+  }
+
+  // Reject all-interface bind.
+  if (trimmed === '0.0.0.0') {
+    throw new Error(
+      `${varName} "${trimmed}" is an all-interface address (0.0.0.0). ` +
+        'Provide a specific VPC IPv4 address (e.g. 10.116.0.3).',
+    )
+  }
+
+  // Reject IPv6 (contains colon but not a single-colon IP:port).
+  if (trimmed.includes(':')) {
+    const colonCount = (trimmed.match(/:/g) ?? []).length
+    if (colonCount === 1 && /^\d/.test(trimmed)) {
+      throw new Error(
+        `${varName} "${trimmed}" contains a colon — this looks like an IP:port format. ` +
+          'Provide only the IPv4 address without a port (e.g. 10.116.0.3).',
+      )
+    }
+    throw new Error(
+      `${varName} "${trimmed}" is an IPv6 address. ` + 'Only IPv4 VPC addresses are supported (e.g. 10.116.0.3).',
+    )
+  }
+
+  // Require dotted-decimal IPv4 format: four groups of 1–3 digits, no trailing dot.
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(trimmed)
+  if (!ipv4Match) {
+    throw new Error(
+      `${varName} "${trimmed}" is not a valid IPv4 address. ` +
+        'Provide a dotted-decimal IPv4 address (e.g. 10.116.0.3).',
+    )
+  }
+
+  // Validate each octet is in range 0-255 (mirrors validateGatewayVpcIp in dashboard deploy).
+  for (let i = 1; i <= 4; i++) {
+    const octet = Number(ipv4Match[i])
+    if (octet > 255) {
+      throw new Error(
+        `${varName} "${trimmed}" is not a valid IPv4 address. ` +
+          `Octet ${i} (${String(ipv4Match[i])}) is out of range 0-255.`,
+      )
+    }
+  }
+}
+
+/**
  * Returns the list of missing WORKSPACE_OPENCODE_MODEL / WORKSPACE_OPENCODE_CONFIG
  * variable names. The name reflects what it returns — a list of missing vars.
  */
@@ -1058,6 +1159,14 @@ export interface ComposeOverrideOpts {
   operatorOauthStateTtlMs?: string
   /** Optional tuning: max outstanding OAuth attempts. */
   operatorOauthMaxOutstandingAttempts?: string
+  /**
+   * The gateway's VPC IPv4 address (GATEWAY_VPC_IP). When set alongside operatorEnabled,
+   * the gateway service publishes the operator listener port on this VPC IP only
+   * (`${operatorVpcIp}:${operatorBindPort}:${operatorBindPort}`), never on 0.0.0.0.
+   * The daemon stays bound to its gateway-net address (operatorBindHost); this is a
+   * host-side Docker port publish, not a daemon rebind.
+   */
+  operatorVpcIp?: string
 }
 
 const GATEWAY_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-gateway'
@@ -1102,6 +1211,7 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
     operatorOauthAllowedReturnPaths,
     operatorOauthStateTtlMs,
     operatorOauthMaxOutstandingAttempts,
+    operatorVpcIp,
   } = opts
 
   // Caddy is needed when either announce or operator is enabled.
@@ -1216,6 +1326,18 @@ ${envLines}`
         ipv4_address: ${operatorBindHost}`
       : ''
 
+  // VPC-scoped host port publish for the operator listener.
+  // Published on the gateway's VPC IP only — never on 0.0.0.0 or all interfaces.
+  // The daemon stays bound to its gateway-net address (operatorBindHost); this is a
+  // host-side Docker port publish, not a daemon rebind.
+  // Only emitted when operator is enabled AND the VPC IP is configured.
+  const portsSection =
+    operatorEnabled && operatorVpcIp && operatorBindPort
+      ? `
+    ports:
+      - '${operatorVpcIp}:${operatorBindPort}:${operatorBindPort}'`
+      : ''
+
   const caddySection = caddyEnabled
     ? `  caddy:
     image: ${CADDY_IMAGE}
@@ -1266,7 +1388,7 @@ ${envLines}`
 
   return `services:
   gateway:
-    image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${environmentSection}${volumesSection2}${gatewayNetworksSection}
+    image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${environmentSection}${volumesSection2}${portsSection}${gatewayNetworksSection}
   workspace:
     image: ${WORKSPACE_IMAGE_NAME}@${workspaceDigest}
     environment:
@@ -1564,6 +1686,33 @@ function defaultSpawn(cmd: string[], opts: SpawnOpts): SpawnResult {
   return Bun.spawn(cmd, opts)
 }
 
+/**
+ * Wraps runCommand with a timeout. Throws an actionable error if the command
+ * does not complete within timeoutMs. Used for local doctl API calls that have
+ * no built-in timeout — a hung DO API would otherwise block the deploy indefinitely.
+ */
+async function runCommandWithTimeout(
+  label: string,
+  command: string[],
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  timeoutMs: number,
+): Promise<{stdout: string; stderr: string}> {
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(
+      () =>
+        reject(
+          new Error(
+            `Command timed out after ${timeoutMs}ms: ${command.join(' ')}\n` +
+              `This may indicate a hung DigitalOcean API call. Check your DIGITALOCEAN_ACCESS_TOKEN and network connectivity.`,
+          ),
+        ),
+      timeoutMs,
+    ),
+  )
+  return Promise.race([runCommand(label, command, deployEnv, spawnFn), timeoutPromise])
+}
+
 async function runCommand(
   label: string,
   command: string[],
@@ -1857,12 +2006,51 @@ export async function removeStaleGatewayNet(
 
 // ─── main orchestrator ────────────────────────────────────────────────────────
 
+/**
+ * Default TCP connect implementation for the public-denied probe.
+ * Attempts a raw TCP connection to host:port with a 10s timeout.
+ * Resolves when a connection is established (port open).
+ * Throws when connection is refused or times out (port closed/filtered).
+ */
+async function defaultTcpConnect(host: string, port: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`TCP connect to ${host}:${port} timed out after 10s`))
+    }, 10_000)
+
+    Bun.connect({
+      hostname: host,
+      port,
+      socket: {
+        open() {
+          clearTimeout(timer)
+          resolve()
+        },
+        error(_socket, error) {
+          clearTimeout(timer)
+          reject(error)
+        },
+        connectError(_socket, error) {
+          clearTimeout(timer)
+          reject(error)
+        },
+        data() {},
+        close() {},
+      },
+    }).catch(error => {
+      clearTimeout(timer)
+      reject(error)
+    })
+  })
+}
+
 export async function main(opts: MainOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
   const args = opts.args ?? process.argv.slice(2)
   const fetchFn = opts.fetch ?? globalThis.fetch
   const sleepFn = opts.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)))
   const spawnFn = opts.spawn ?? defaultSpawn
+  const tcpConnectFn = opts.tcpConnect ?? defaultTcpConnect
   const maxAttempts = opts.maxAttempts ?? 10
   const intervalMs = opts.intervalMs ?? 3000
   const probeAttempts = opts.probeAttempts ?? 5
@@ -2021,6 +2209,29 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       csrfSecret: env.GATEWAY_OPERATOR_CSRF_SECRET ?? '',
       allowlist: env.GATEWAY_OPERATOR_ALLOWLIST ?? '',
     })
+  }
+
+  // Phase 3g: Validate VPC IP all-or-none gate before any SSH.
+  // GATEWAY_VPC_IP and DASHBOARD_VPC_IP are only meaningful when the operator listener is enabled.
+  // When the operator is enabled, both must be present together (all-or-none).
+  // When the operator is disabled, VPC vars are ignored (no gate).
+  if (operatorState === 'enabled') {
+    const operatorVpcState = getOperatorVpcState(env)
+    if (operatorVpcState === 'invalid') {
+      const hasGatewayVpcIp = Boolean(env.GATEWAY_VPC_IP?.trim())
+      const hasDashboardVpcIp = Boolean(env.DASHBOARD_VPC_IP?.trim())
+      const missing = [!hasGatewayVpcIp && 'GATEWAY_VPC_IP', !hasDashboardVpcIp && 'DASHBOARD_VPC_IP']
+        .filter(Boolean)
+        .join(', ')
+      throw new Error(
+        `VPC IP inputs must be set together (all-or-none) when the operator listener is enabled. Missing: ${missing}. ` +
+          'Set both GATEWAY_VPC_IP and DASHBOARD_VPC_IP, or leave both unset to disable the VPC port publish.',
+      )
+    }
+    if (operatorVpcState === 'enabled') {
+      validateVpcIp(env.GATEWAY_VPC_IP ?? '', 'GATEWAY_VPC_IP')
+      validateVpcIp(env.DASHBOARD_VPC_IP ?? '', 'DASHBOARD_VPC_IP')
+    }
   }
 
   if (isDryRun) {
@@ -2185,6 +2396,9 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     const operatorBindPort = operatorEnabled ? (env.GATEWAY_OPERATOR_BIND_PORT ?? '') : undefined
     const operatorPublicOrigin = operatorEnabled ? (env.GATEWAY_OPERATOR_PUBLIC_ORIGIN ?? '') : undefined
     const operatorAuthEnabled = operatorEnabled && getOperatorAuthState(env) === 'enabled'
+    // VPC port publish: only when operator is enabled AND both VPC IPs are configured.
+    const operatorVpcIp =
+      operatorEnabled && getOperatorVpcState(env) === 'enabled' ? (env.GATEWAY_VPC_IP ?? '') : undefined
     const overrideContent = buildComposeOverride({
       gatewayDigest,
       workspaceDigest,
@@ -2194,6 +2408,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       operatorBindPort,
       operatorPublicOrigin,
       operatorAuthEnabled,
+      operatorVpcIp,
       // Derive file names from OPERATOR_AUTH_SECRET_SPECS — single source of truth.
       operatorGithubClientIdFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[0].hostFile : undefined,
       operatorGithubClientSecretFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[1].hostFile : undefined,
@@ -2270,7 +2485,10 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     //   - workspace is sandbox-net only (not gateway-net/egress-net)
     //   - caddy is gateway-net only
     //   - caddy publishes only 80/443 host ports
-    //   - gateway publishes no host ports for the operator listener
+    //   - gateway port 9300: allowlist gate — when VPC publish is enabled, the ONLY accepted
+    //     published 9300 mapping is exactly ${GATEWAY_VPC_IP}:9300:9300; any other host-bind
+    //     (0.0.0.0, [::], bare 9300:9300, any non-VPC host) is rejected. When VPC publish is
+    //     disabled, no 9300 host port is accepted at all. Fail-closed on anything unexpected.
     //   - top-level gateway-net IPAM includes the expected subnet (172.21.0.0/16)
     //
     // This gate runs AFTER upstream validate-stack.sh (which validates the base stack) and
@@ -2279,13 +2497,16 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     //
     // Shell safety: uses a single-quoted heredoc (<<'SCRIPT'...SCRIPT) so the outer shell
     // does NOT expand $CONFIG or $(...) before the inner bash runs. The expected bind host
-    // is interpolated at script-build time (before SSH), not inside the heredoc.
+    // and VPC IP are interpolated at script-build time (before SSH), not inside the heredoc.
     // Tooling: uses Python (always available on Ubuntu/Debian) to parse JSON — avoids
     // bun, node, and jq which are not guaranteed on the droplet.
     if (operatorEnabled && operatorBindHost) {
       // operatorBindHost is validated before reaching here (validateOperatorConfig).
       // It is a safe 172.21.x.x IPv4 address — safe to embed in the heredoc body.
       const expectedBindHost = operatorBindHost
+      // operatorVpcIp is validated before reaching here (validateVpcIp) when set.
+      // It is a safe dotted-decimal IPv4 address — safe to embed in the heredoc body.
+      const expectedVpcIp = operatorVpcIp ?? ''
       const validateScript = `bash <<'SCRIPT'
 set -euo pipefail
 CONFIG=$(docker compose --project-directory ${DEPLOY_DIR} config --format json)
@@ -2297,8 +2518,23 @@ GW_IP=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); n=
 if [ "$GW_IP" != "${expectedBindHost}" ]; then echo "FAIL: gateway gateway-net ipv4_address is '$GW_IP', expected '${expectedBindHost}'"; exit 1; fi
 GW_SUBNET=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); cfg=c.get('networks',{}).get('gateway-net',{}).get('ipam',{}).get('config',[]); print(cfg[0].get('subnet','') if cfg else '')")
 if [ "$GW_SUBNET" != "172.21.0.0/16" ]; then echo "FAIL: gateway-net IPAM subnet is '$GW_SUBNET', expected '172.21.0.0/16'"; exit 1; fi
-GW_PORTS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); p=c.get('services',{}).get('gateway',{}).get('ports',[]); print(len(p))")
-if [ "$GW_PORTS" != "0" ] && [ -n "$GW_PORTS" ]; then echo "FAIL: gateway publishes host ports (operator listener must not have host ports): $GW_PORTS port(s)"; exit 1; fi
+GW_PORT_9300=$(echo "$CONFIG" | python3 -c "
+import json,sys
+c=json.load(sys.stdin)
+ports=c.get('services',{}).get('gateway',{}).get('ports',[])
+for p in ports:
+  if isinstance(p,dict) and str(p.get('target',''))=='9300':
+    host_ip=str(p.get('host_ip',''))
+    published=str(p.get('published',''))
+    print(host_ip+':'+published+':9300')
+    sys.exit(0)
+print('')
+")
+if [ -n "${expectedVpcIp}" ]; then
+  if [ "$GW_PORT_9300" != "${expectedVpcIp}:9300:9300" ]; then echo "FAIL: gateway 9300 port publish is '$GW_PORT_9300', expected exactly '${expectedVpcIp}:9300:9300' (VPC-scoped only; 0.0.0.0, [::], and bare 9300:9300 are rejected)"; exit 1; fi
+else
+  if [ -n "$GW_PORT_9300" ]; then echo "FAIL: gateway publishes 9300 host port '$GW_PORT_9300' but VPC publish is not configured (no GATEWAY_VPC_IP set)"; exit 1; fi
+fi
 GW_SANDBOX=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); nets=list(c.get('services',{}).get('gateway',{}).get('networks',{}).keys()); print('yes' if 'sandbox-net' in nets else 'no')")
 if [ "$GW_SANDBOX" != "yes" ]; then echo "FAIL: gateway is missing sandbox-net (required for workspace communication)"; exit 1; fi
 WS_NETS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); nets=list(c.get('services',{}).get('workspace',{}).get('networks',{}).keys()); print(','.join(nets))")
@@ -2418,6 +2654,416 @@ SCRIPT`
       deployEnv,
       spawnFn,
     )
+
+    // Phase 8c: DOCKER-USER source restriction (operator + VPC enabled only).
+    //
+    // The DOCKER-USER iptables chain sees traffic AFTER Docker DNAT, so we match on
+    // the post-DNAT destination (the container IP + port) rather than conntrack
+    // original-dst. This avoids requiring the conntrack module and is the standard
+    // pattern for DOCKER-USER rules.
+    //
+    // ALLOW rule: -d <operatorBindHost> --dport 9300 -s <dashboardVpcIp> -j RETURN
+    // DROP rule:  -d <operatorBindHost> --dport 9300 -j DROP
+    //
+    // Both are inserted idempotently with -C || -I before any terminal RETURN.
+    // ALLOW is inserted at position 1 (before DROP), DROP at position 2.
+    //
+    // This phase runs AFTER docker compose up because Docker recreates DOCKER-USER-adjacent
+    // chains on daemon restart / compose up — applying before would be wiped.
+    //
+    // The VPC interface is detected at deploy time via `ip route get <DASHBOARD_VPC_IP>`.
+    // Fail closed if the interface cannot be detected (VPN lesson: never hardcode eth1).
+    //
+    // Multiplexed over the existing ControlMaster connection to avoid ufw's
+    // 6-new-connections/30s lockout across the multi-SSH-call flow.
+    if (operatorEnabled && getOperatorVpcState(env) === 'enabled') {
+      const dashboardVpcIp = env.DASHBOARD_VPC_IP ?? ''
+      const containerIp = operatorBindHost ?? ''
+      const operatorPort = operatorBindPort ?? '9300'
+
+      // Detect the VPC interface at deploy time — never hardcode (VPN lesson).
+      // `ip route get <DASHBOARD_VPC_IP>` returns the route used to reach the dashboard
+      // droplet, including the local interface name in "dev <iface>".
+      let routeOutput: string
+      try {
+        const result = await runCommand(
+          'Detecting VPC interface for DOCKER-USER rule',
+          sshCommand(host, `ip route get ${dashboardVpcIp}`, keyPath, controlPath),
+          deployEnv,
+          spawnFn,
+        )
+        routeOutput = result.stdout
+      } catch (error) {
+        throw new Error(
+          `Cannot detect VPC interface for DASHBOARD_VPC_IP ${dashboardVpcIp}: ` +
+            `'ip route get ${dashboardVpcIp}' failed. ` +
+            'Ensure the gateway droplet is on the same VPC as the dashboard droplet. ' +
+            `Original error: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      const ifaceMatch = routeOutput.match(/\bdev\s+(\S+)/)
+      const vpcIface = ifaceMatch?.[1]
+      if (!vpcIface) {
+        throw new Error(
+          `Cannot detect VPC interface for DASHBOARD_VPC_IP ${dashboardVpcIp}: ` +
+            `'ip route get ${dashboardVpcIp}' returned no 'dev <iface>' field. ` +
+            'Ensure the gateway droplet is on the same VPC as the dashboard droplet.',
+        )
+      }
+
+      // Idempotent DOCKER-USER rule application.
+      // -C checks if the rule exists; if not (exit 1), -I inserts it.
+      // ALLOW rule inserted at position 1, DROP at position 2 (ALLOW before DROP).
+      // Both rules match post-DNAT destination (container IP) + dport 9300.
+      // The ALLOW rule additionally restricts source to DASHBOARD_VPC_IP.
+      // The DROP rule drops all other sources reaching dport 9300.
+      const dockerUserScript = [
+        'set -euo pipefail',
+        // ALLOW rule: source=DASHBOARD_VPC_IP, dest=container IP, dport=9300, jump=RETURN
+        `iptables -C DOCKER-USER -i ${vpcIface} -s ${dashboardVpcIp} -d ${containerIp} -p tcp --dport ${operatorPort} -j RETURN 2>/dev/null || iptables -I DOCKER-USER 1 -i ${vpcIface} -s ${dashboardVpcIp} -d ${containerIp} -p tcp --dport ${operatorPort} -j RETURN`,
+        // DROP rule: all sources, dest=container IP, dport=9300, jump=DROP
+        `iptables -C DOCKER-USER -d ${containerIp} -p tcp --dport ${operatorPort} -j DROP 2>/dev/null || iptables -I DOCKER-USER 2 -d ${containerIp} -p tcp --dport ${operatorPort} -j DROP`,
+      ].join('\n')
+
+      await runCommand(
+        'Applying DOCKER-USER source restriction (idempotent)',
+        sshCommand(host, dockerUserScript, keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+
+      // Read back the DOCKER-USER chain and verify the exact rule is in place.
+      // Presence alone is insufficient — a wrong-but-present rule (wrong source/dest/ordering)
+      // must fail verification. Assert: ALLOW rule has source==DASHBOARD_VPC_IP, dport 9300,
+      // jump RETURN, and sits before the DROP rule.
+      const {stdout: chainOutput} = await runCommand(
+        'Reading back DOCKER-USER chain for verification',
+        sshCommand(host, `iptables -nvL DOCKER-USER --line-numbers`, keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+
+      // Parse the chain output to find the ALLOW and DROP rules for dport 9300.
+      // `iptables -nvL --line-numbers` output format:
+      //   num   pkts bytes target     prot opt in     out     source               destination   [options]
+      //   1        0     0 RETURN     tcp  --  eth1   *       10.116.0.5           172.21.0.2    tcp dpt:9300
+      // We look for lines with dpt:<port> targeting the container IP.
+      const lines = chainOutput.split('\n')
+      let allowLineNum = -1
+      let allowIface: string | undefined
+      let dropLineNum = -1
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith('Chain') || trimmed.startsWith('num') || trimmed.startsWith('target'))
+          continue
+
+        // Check if this line is for dport 9300 targeting the container IP
+        if (!trimmed.includes(`dpt:${operatorPort}`) || !trimmed.includes(containerIp)) continue
+
+        // Extract fields: num pkts bytes target prot opt in out source destination [options]
+        const fields = trimmed.split(/\s+/)
+        const lineNum = Number.parseInt(fields[0] ?? '', 10)
+        if (!Number.isFinite(lineNum)) continue
+
+        // With --line-numbers: fields[0]=num, fields[1]=pkts, fields[2]=bytes, fields[3]=target,
+        // fields[4]=prot, fields[5]=opt, fields[6]=in, fields[7]=out, fields[8]=source, fields[9]=destination
+        const target = fields[3] ?? ''
+        const inIface = fields[6] ?? ''
+        const source = fields[8] ?? ''
+
+        if (target === 'RETURN' && source === dashboardVpcIp) {
+          allowLineNum = lineNum
+          allowIface = inIface
+        } else if (target === 'DROP') {
+          dropLineNum = lineNum
+        }
+      }
+
+      if (allowLineNum === -1) {
+        throw new Error(
+          `DOCKER-USER ALLOW rule verification failed: no RETURN rule found with source=${dashboardVpcIp} ` +
+            `dport=${operatorPort} dest=${containerIp} in DOCKER-USER chain. ` +
+            `Chain output:\n${chainOutput}`,
+        )
+      }
+
+      // Assert the ALLOW rule is bound to the detected VPC interface.
+      // If ip route get returned the wrong interface, the ALLOW would match the wrong iface undetected.
+      if (allowIface !== vpcIface) {
+        throw new Error(
+          `DOCKER-USER ALLOW rule verification failed: ALLOW rule at line ${allowLineNum} is bound to ` +
+            `interface "${allowIface ?? '(unknown)'}" but the detected VPC interface is "${vpcIface}". ` +
+            `The ALLOW rule must be bound to the VPC interface (-i ${vpcIface}). ` +
+            `Chain output:\n${chainOutput}`,
+        )
+      }
+
+      if (dropLineNum !== -1 && allowLineNum > dropLineNum) {
+        throw new Error(
+          `DOCKER-USER rule ordering verification failed: ALLOW rule (line ${allowLineNum}) must appear ` +
+            `before DROP rule (line ${dropLineNum}) in DOCKER-USER chain. ` +
+            `Chain output:\n${chainOutput}`,
+        )
+      }
+
+      const dropSuffix = dropLineNum === -1 ? '' : `, DROP all-else at line ${dropLineNum}`
+      console.warn(
+        `\u001B[1;32m✓\u001B[0m DOCKER-USER source restriction verified: ALLOW source=${dashboardVpcIp} dport=${operatorPort} at line ${allowLineNum}${dropSuffix}`,
+      )
+    }
+
+    // IDs resolved in Phase 8d and reused in Phase 8e to avoid redundant doctl calls
+    // (reduces API load and eliminates the TOCTOU window between the two phases).
+    let phase8dDashboardDropletId: string | undefined
+    let phase8dFirewallId: string | undefined
+    let phase8dDoctlEnv: DeployEnv | undefined
+
+    // Phase 8d: DO Cloud Firewall reconcile (operator + VPC enabled only).
+    //
+    // Provider-level rule: allows TCP 9300 to the gateway droplet ONLY from the dashboard
+    // droplet. This is the reboot-durable, load-bearing control — the DO Cloud Firewall
+    // survives reboots (unlike the DOCKER-USER rule which is reapplied every deploy).
+    //
+    // SAFETY CONSTRAINTS:
+    //   - DO Cloud Firewalls are ALLOWLIST / default-deny. Attaching a NEW firewall that
+    //     only allows 9300 would LOCK OUT SSH(22)/HTTP(80)/HTTPS(443)/announce.
+    //     Therefore: reconcile the EXISTING firewall attached to the gateway droplet by
+    //     ADDING a single inbound rule. NEVER create/attach a fresh firewall, and NEVER
+    //     remove/replace existing inbound rules.
+    //   - If the gateway droplet has no existing firewall, FAIL CLOSED with actionable
+    //     guidance (do not auto-create a restrictive one).
+    //   - Source = dashboard DROPLET-ID (stable across rebuild), NOT private IP
+    //     (rebuild-reassignable). Resolved inline via `doctl compute droplet get dashboard --format ID --no-header`.
+    //   - DIGITALOCEAN_ACCESS_TOKEN must be present — verify first, fail closed if absent.
+    //
+    // Idempotent: check whether the rule already exists before adding it.
+    // Gate: operatorEnabled && getOperatorVpcState(env) === 'enabled'.
+    if (operatorEnabled && getOperatorVpcState(env) === 'enabled') {
+      const doToken = env.DIGITALOCEAN_ACCESS_TOKEN?.trim()
+      if (!doToken) {
+        throw new Error(
+          'DIGITALOCEAN_ACCESS_TOKEN is required for the DO Cloud Firewall reconcile phase ' +
+            'but is absent or empty. ' +
+            'Add DIGITALOCEAN_ACCESS_TOKEN to the gateway GitHub Environment and local .env ' +
+            'before enabling the VPC port publish. ' +
+            'The firewall reconcile cannot proceed without it.',
+        )
+      }
+
+      // Build a doctl-capable env: extends deployEnv with the DO token.
+      const doctlEnv: DeployEnv = {...deployEnv, DIGITALOCEAN_ACCESS_TOKEN: doToken}
+
+      // All doctl calls below are wrapped with a 30s timeout — a hung DO API would otherwise
+      // block the deploy indefinitely (unlike SSH calls which have ConnectTimeout=10).
+      const DOCTL_TIMEOUT_MS = 30_000
+
+      // Step 1: Resolve the dashboard droplet ID (stable across rebuild).
+      // Uses `doctl compute droplet get <name> --format ID --no-header`.
+      const {stdout: dashboardIdRaw} = await runCommandWithTimeout(
+        'Resolving dashboard droplet ID',
+        ['doctl', 'compute', 'droplet', 'get', 'dashboard', '--format', 'ID', '--no-header'],
+        doctlEnv,
+        spawnFn,
+        DOCTL_TIMEOUT_MS,
+      )
+      const dashboardDropletId = dashboardIdRaw.trim()
+      if (!dashboardDropletId) {
+        throw new Error(
+          'Dashboard droplet "dashboard" not found in DigitalOcean account. ' +
+            'Run `doctl compute droplet list` to see available droplets. ' +
+            'The DO Cloud Firewall reconcile cannot proceed without the dashboard droplet ID.',
+        )
+      }
+
+      // Step 2: Resolve the gateway droplet ID (needed to find its firewall).
+      const {stdout: gatewayIdRaw} = await runCommandWithTimeout(
+        'Resolving gateway droplet ID',
+        ['doctl', 'compute', 'droplet', 'get', host, '--format', 'ID', '--no-header'],
+        doctlEnv,
+        spawnFn,
+        DOCTL_TIMEOUT_MS,
+      )
+      const gatewayDropletId = gatewayIdRaw.trim()
+      if (!gatewayDropletId) {
+        throw new Error(
+          `Gateway droplet "${host}" not found in DigitalOcean account. ` +
+            'Run `doctl compute droplet list` to see available droplets.',
+        )
+      }
+
+      // Step 3: Find the EXISTING firewall attached to the gateway droplet.
+      // Uses `doctl compute firewall list-by-droplet <id> --format ID --no-header`.
+      // If no firewall is attached, fail closed — never auto-create a restrictive allowlist.
+      const {stdout: firewallListRaw} = await runCommandWithTimeout(
+        'Finding existing firewall for gateway droplet',
+        ['doctl', 'compute', 'firewall', 'list-by-droplet', gatewayDropletId, '--format', 'ID', '--no-header'],
+        doctlEnv,
+        spawnFn,
+        DOCTL_TIMEOUT_MS,
+      )
+      const firewallId = firewallListRaw.trim().split('\n')[0]?.trim()
+      if (!firewallId) {
+        throw new Error(
+          `No existing firewall found attached to the gateway droplet (ID: ${gatewayDropletId}). ` +
+            'The DO Cloud Firewall reconcile requires an EXISTING firewall to add the 9300 rule to. ' +
+            'Attaching a new firewall that only allows 9300 would lock out SSH(22)/HTTP(80)/HTTPS(443). ' +
+            'Create a firewall with the required base rules (22, 80, 443) and attach it to the gateway ' +
+            'droplet first, then re-run the deploy.',
+        )
+      }
+
+      // Step 4: Check whether the inbound rule already exists (idempotent).
+      // Uses `doctl compute firewall get <id> --format InboundRules --no-header`.
+      // doctl --format InboundRules output is space-separated rules, each as key:value,key:value pairs.
+      // Example: `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:222222222`
+      // We parse per-rule (split on whitespace) and assert that a SINGLE rule token contains BOTH
+      // `ports:9300` (exactly — not ports:93000) AND `droplet_id:<dashboardDropletId>`.
+      // Cross-rule substring matching is a bug: a public ports:9300 rule + a separate droplet_id
+      // rule would satisfy two independent includes() checks but is NOT the restricted rule we want.
+      const {stdout: inboundRulesRaw} = await runCommandWithTimeout(
+        'Checking existing firewall inbound rules',
+        ['doctl', 'compute', 'firewall', 'get', firewallId, '--format', 'InboundRules', '--no-header'],
+        doctlEnv,
+        spawnFn,
+        DOCTL_TIMEOUT_MS,
+      )
+
+      // Per-rule parse: split on whitespace, check each token individually.
+      // A rule token matches if it contains BOTH the exact port field AND the dashboard droplet-id.
+      // Port match: `ports:9300` followed by `,` or end-of-token (guards against ports:93000 prefix).
+      const ruleAlreadyPresent = inboundRulesRaw
+        .trim()
+        .split(/\s+/)
+        .some(rule => /(?:^|,)ports:9300(?:,|$)/.test(rule) && rule.includes(`droplet_id:${dashboardDropletId}`))
+
+      if (ruleAlreadyPresent) {
+        console.warn(
+          `\u001B[1;32m✓\u001B[0m DO Cloud Firewall rule already present: tcp/9300 from dashboard droplet ${dashboardDropletId} on firewall ${firewallId} (no-op)`,
+        )
+      } else {
+        // Step 5: Add the inbound rule additively.
+        // `doctl compute firewall add-rules <fw-id> --inbound-rules "protocol:tcp,ports:9300,droplet_id:<id>"`
+        // This is additive-only — existing rules are preserved.
+        await runCommandWithTimeout(
+          'Adding DO Cloud Firewall inbound rule: tcp/9300 from dashboard droplet',
+          [
+            'doctl',
+            'compute',
+            'firewall',
+            'add-rules',
+            firewallId,
+            '--inbound-rules',
+            `protocol:tcp,ports:9300,droplet_id:${dashboardDropletId}`,
+          ],
+          doctlEnv,
+          spawnFn,
+          DOCTL_TIMEOUT_MS,
+        )
+        console.warn(
+          `\u001B[1;32m✓\u001B[0m DO Cloud Firewall rule added: tcp/9300 from dashboard droplet ${dashboardDropletId} on firewall ${firewallId}`,
+        )
+      }
+
+      // Cache resolved IDs for Phase 8e reuse (avoids redundant doctl calls).
+      phase8dDashboardDropletId = dashboardDropletId
+      phase8dFirewallId = firewallId
+      phase8dDoctlEnv = doctlEnv
+    }
+
+    // Phase 8e: Post-deploy verification — public-denied probe + DO firewall post-state readback.
+    //
+    // Gated on operatorEnabled && getOperatorVpcState(env) === 'enabled'.
+    //
+    // The deploy runner is NOT a VPC peer, so a live foreign-VPC-source probe is impossible.
+    // Instead verify what the runner can actually check:
+    //
+    //   1. PUBLIC-DENIED: gateway.fro.bot:9300 must be unreachable from the public internet.
+    //      The runner originates from the public internet, so this is a real check.
+    //      Attempt an HTTP fetch to https://<GATEWAY_HOST>:9300 — a connection error (refused/
+    //      timed-out) is the expected pass condition. Any HTTP response means the port is
+    //      reachable from the public internet and the deploy fails closed.
+    //
+    //   2. DO FIREWALL POST-STATE READBACK: after the firewall reconcile adds the inbound rule, read back the
+    //      firewall state and assert the 9300 rule's source is exactly the dashboard droplet-id
+    //      and that existing ports are still present (additive, not replaced).
+    //      The firewall reconcile phase does the add; this phase adds the post-state assertion.
+    //      Phase 8c already does the DOCKER-USER readback — no duplication here.
+    //
+    //   3. The same-origin https://dashboard.fro.bot/operator/health 200 check belongs to the
+    //      dashboard deploy (it owns that route and runs after gateway). See
+    //      apps/dashboard/src/deploy.ts Phase 12b.
+    //
+    // Fail closed: any check failure throws.
+    if (operatorEnabled && getOperatorVpcState(env) === 'enabled') {
+      // 1. PUBLIC-DENIED: raw TCP connect to <GATEWAY_HOST>:9300 from the public internet.
+      //    The listener is published only on the gateway VPC IP, so public eth0:9300 must be
+      //    unreachable. "Connection refused / timeout" = pass. "Connected" = fail.
+      //
+      //    Using raw TCP (not HTTPS fetch) avoids a false-negative: if port 9300 were open
+      //    without TLS, an HTTPS fetch would fail with a TLS error and be counted as pass.
+      //    A raw TCP connect is unambiguous: any successful connection means the port is open.
+      console.warn(
+        `\u001B[1;34m==>\u001B[0m Verifying public ${host}:9300 is unreachable (TCP connect public-denied check)`,
+      )
+      let publicPortReachable = false
+      try {
+        await tcpConnectFn(host, 9300)
+        // If tcpConnect resolves, the port accepted a connection — fail closed.
+        publicPortReachable = true
+      } catch {
+        // Connection refused or timed out — expected pass condition.
+        publicPortReachable = false
+      }
+      if (publicPortReachable) {
+        throw new Error(
+          `SECURITY: public ${host}:9300 is reachable from the public internet (TCP connect succeeded). ` +
+            `The operator listener must be published only on the gateway VPC IP (${env.GATEWAY_VPC_IP ?? ''}), ` +
+            `not on the public interface. ` +
+            `Check the DO Cloud Firewall and DOCKER-USER rules — the port must not be accessible from the public internet.`,
+        )
+      }
+      console.warn(
+        `\u001B[1;32m✓\u001B[0m Public ${host}:9300 is unreachable (TCP connect refused/timed-out — expected)`,
+      )
+
+      // 2. DO FIREWALL POST-STATE READBACK: verify the 9300 rule is present with the correct
+      //    dashboard droplet-id after the firewall add-rules step.
+      //    Reuse IDs resolved in Phase 8d — no redundant doctl calls.
+      if (phase8dFirewallId && phase8dDashboardDropletId && phase8dDoctlEnv) {
+        // Read back the firewall inbound rules and assert the 9300 rule is present with the
+        // correct dashboard droplet-id as source (per-rule parse — same logic as Phase 8d).
+        const {stdout: inboundRulesReadback} = await runCommandWithTimeout(
+          'Reading back DO Cloud Firewall inbound rules (post-state verification)',
+          ['doctl', 'compute', 'firewall', 'get', phase8dFirewallId, '--format', 'InboundRules', '--no-header'],
+          phase8dDoctlEnv,
+          spawnFn,
+          30_000,
+        )
+
+        // Per-rule parse: assert a SINGLE rule token contains BOTH the exact port field AND
+        // the dashboard droplet-id. Cross-rule substring matching is a bug (see Phase 8d comment).
+        const readbackRulePresent = inboundRulesReadback
+          .trim()
+          .split(/\s+/)
+          .some(
+            rule => /(?:^|,)ports:9300(?:,|$)/.test(rule) && rule.includes(`droplet_id:${phase8dDashboardDropletId}`),
+          )
+
+        if (!readbackRulePresent) {
+          throw new Error(
+            `DO Cloud Firewall post-state verification failed: no single inbound rule on firewall ${phase8dFirewallId} ` +
+              `contains both ports:9300 and source=droplet_id:${phase8dDashboardDropletId} (dashboard droplet). ` +
+              `The rule should have been added in Phase 8d. ` +
+              `Run 'doctl compute firewall get ${phase8dFirewallId} --format InboundRules' to inspect the current state.`,
+          )
+        }
+
+        console.warn(
+          `\u001B[1;32m✓\u001B[0m DO Cloud Firewall post-state verified: tcp/9300 rule present with source=droplet_id:${phase8dDashboardDropletId} on firewall ${phase8dFirewallId}`,
+        )
+      }
+    }
 
     // Phase 9: Post-deploy probe — poll Discord slash command registration
     const applicationId = validated.DISCORD_APPLICATION_ID

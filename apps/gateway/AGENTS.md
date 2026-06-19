@@ -129,12 +129,17 @@ After provisioning: commit the updated `.github/known_hosts`.
 | `GATEWAY_OPERATOR_BIND_HOST` | opt-in‡ | Gateway-net IPv4 address for the operator listener bind (e.g. `172.21.0.2`). Rejects `0.0.0.0`, loopback, sandbox-net (`10.*`), `172.20.*` (the known conflicted Docker subnet from the failed operator deploy), and IPv6. |
 | `GATEWAY_OPERATOR_BIND_PORT` | opt-in‡ | Port for the operator listener (e.g. `9300`). Must be a positive integer in [1, 65535]. |
 | `GATEWAY_OPERATOR_PUBLIC_ORIGIN` | opt-in‡ | HTTPS origin for the browser-visible operator API. The ratified value is `https://dashboard.fro.bot` — set this for production use. Must be a bare HTTPS origin (no path, query, hash, credentials, or non-default port). |
+| `GATEWAY_VPC_IP` | opt-in§ | Gateway droplet's DigitalOcean VPC IP (e.g. `10.116.0.3`). Required for the VPC-IP-scoped operator port publish and DOCKER-USER rule. All-or-none with `DASHBOARD_VPC_IP` and the operator listener trio. |
+| `DASHBOARD_VPC_IP` | opt-in§ | Dashboard droplet's DigitalOcean VPC IP (e.g. `10.116.0.5`). Required for the DOCKER-USER source restriction. All-or-none with `GATEWAY_VPC_IP` and the operator listener trio. |
+| `DIGITALOCEAN_ACCESS_TOKEN` | opt-in§ | DigitalOcean API token for the Cloud Firewall reconcile. Required when the operator VPC bridge is enabled; the firewall step fails closed if absent. |
 | `GATEWAY_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-gateway` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.gateway_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually (see [Break-glass runbook](#break-glass-runbook)). |
 | `WORKSPACE_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-workspace` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.workspace_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually. |
 
 †Both-or-neither: set both to enable the announce/presence webhook; set neither to disable. Setting exactly one is an error — the deploy fails fast with a message naming the missing input, before any SSH connection is made.
 
 ‡All-or-none: set all three to enable the operator listener; set none to disable. Setting one or two is an error — the deploy fails fast before any SSH. See [Operator Listener](#operator-listener) for bind host/port/origin constraints.
+
+§All-or-none with the operator listener trio: set all three (`GATEWAY_VPC_IP`, `DASHBOARD_VPC_IP`, `DIGITALOCEAN_ACCESS_TOKEN`) together with the listener trio to enable the VPC bridge; set none to disable. Setting the listener trio without the VPC vars disables the bridge (the listener is reachable only via gateway-net Caddy). See [Operator private path](#operator-private-path-dashboard-same-origin) for the full bridge topology.
 
 ## GHCR IMAGES
 
@@ -350,13 +355,13 @@ After the first deploy with operator auth/config wiring:
 
 5. **Session invalidation on restart:** After a successful auth, trigger a gateway restart (`docker compose restart gateway` on the droplet). Confirm the session is invalidated and re-authentication is required.
 
-6. **No host-published operator port:** `docker compose ps` on the gateway droplet must not show a `9300->9300` mapping.
+6. **Operator port is VPC-scoped, not public:** `docker compose --project-directory /opt/gateway/deploy ps` shows a `<vpc-ip>:9300->9300` mapping (VPC-scoped, e.g. `10.116.0.3:9300->9300`). A `0.0.0.0:9300`, `[::]:9300`, or bare `9300:9300` mapping is a defect — the publish must be bound to the gateway VPC IP only. Access is further restricted to the dashboard droplet by a DOCKER-USER iptables rule and a DigitalOcean Cloud Firewall rule (see [Operator private path](#operator-private-path-dashboard-same-origin)).
 
 For the full operator auth lifecycle runbook (OAuth App setup, CSRF secret generation, allowlist format, secret seeding, rotation, rollback), see [`docs/runbooks/gateway-operator-auth-lifecycle.md`](../../docs/runbooks/gateway-operator-auth-lifecycle.md).
 
 ## OPERATOR LISTENER
 
-The gateway operator listener is opt-in. When enabled, it exposes `GET /operator/health` (and future privileged operator routes) on a `gateway-net`-only address. Caddy routes `/operator/*` traffic from the public HTTPS edge to the listener over `gateway-net` — the listener has no host-published port.
+The gateway operator listener is opt-in. When enabled, it exposes `GET /operator/health` (and future privileged operator routes) on a `gateway-net`-only address. Caddy routes `/operator/*` traffic from the public HTTPS edge to the listener over `gateway-net`. The listener is also published on the gateway VPC IP (`${GATEWAY_VPC_IP}:9300`) so the dashboard droplet can reach it over the shared DigitalOcean VPC — see [Operator private path](#operator-private-path-dashboard-same-origin) for the full bridge topology.
 
 **Browser-visible operator origin:** The ratified target for the browser-visible operator API is `https://dashboard.fro.bot/operator/*`. `GATEWAY_OPERATOR_PUBLIC_ORIGIN` must be set to `https://dashboard.fro.bot` when the operator listener is enabled for production use. The gateway-side Caddy `/operator/*` route is topology scaffolding — it proves the gateway listener and Caddy wiring work, but `gateway.fro.bot/operator/*` is not the production browser origin and must not be used as such. See `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md` for the full decision record.
 
@@ -384,7 +389,8 @@ The deploy:
 
 ### Security posture
 
-- The operator listener has no host `ports:` entry — it is only reachable via Caddy over `gateway-net`.
+- The operator listener is published **only on the gateway VPC IP** (`${GATEWAY_VPC_IP}:9300`, e.g. `10.116.0.3:9300`), never on `0.0.0.0` or the public `eth0`. A `0.0.0.0:9300` or bare `9300:9300` publish is a defect.
+- Access to the published VPC port is restricted to the dashboard droplet by two independent controls: a DOCKER-USER iptables rule (reapplied every deploy; load-bearing because Docker DNAT bypasses ufw) and a DigitalOcean Cloud Firewall rule (additive reconcile of the existing firewall; reboot-durable provider-level control). Both must be in place before the dashboard route goes live.
 - The workspace (`sandbox-net`) has no path to the operator listener.
 - `/v1/announce` and `/operator/*` are separate Caddy `handle` blocks with distinct trust boundaries.
 - Auth/session/CSRF/allowlist wiring for privileged operator routes is live; the four operator auth/config secrets must be seeded in the `gateway` GitHub Environment to activate the auth gate (see [Enabling](#enabling) and [`docs/runbooks/gateway-operator-auth-lifecycle.md`](../../docs/runbooks/gateway-operator-auth-lifecycle.md)).
@@ -396,8 +402,41 @@ After the first enabling deploy:
 
 1. `bunx @marcusrbrown/infra gateway status` — confirm `caddy` and `gateway` services appear healthy.
 2. `curl -sf http://172.21.0.2:9300/operator/health` — confirm a `200 {"ok":true}` response (droplet-local direct probe). Note: `https://gateway.fro.bot/operator/health` returns 400 by design (v0.69.0 forwarded-header guard); use the direct probe for liveness confirmation.
-3. Confirm no host port for the operator listener: `docker compose --project-directory /opt/gateway/deploy ps` — the `gateway` service must not show a `9300->9300` port mapping.
+3. Confirm the operator port publish is VPC-scoped: `docker compose --project-directory /opt/gateway/deploy ps` — the `gateway` service must show a `<GATEWAY_VPC_IP>:9300->9300` mapping (e.g. `10.116.0.3:9300->9300`). A `0.0.0.0:9300`, `[::]:9300`, or bare `9300:9300` mapping is a defect.
 4. Confirm workspace is not on `gateway-net`: `docker network inspect gateway-net` — the `workspace` container must not appear.
+5. Confirm the DOCKER-USER source restriction is in place: `iptables -nvL DOCKER-USER --line-numbers` — an ACCEPT rule for `--dport 9300 -s <DASHBOARD_VPC_IP>` must appear before a DROP rule for `--dport 9300`. See [`docs/runbooks/gateway-operator-private-path-verification.md`](../../docs/runbooks/gateway-operator-private-path-verification.md) for the full verification procedure.
+
+## OPERATOR PRIVATE PATH (DASHBOARD SAME-ORIGIN)
+
+The dashboard droplet reaches the gateway operator listener over the shared DigitalOcean VPC (`nyc1`, uuid `d95c26cc-…`). The gateway VPC IP is `10.116.0.3` and the dashboard VPC IP is `10.116.0.5` (example values; the actual IPs are set via `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP`). The daemon stays bound to `gateway-net 172.21.0.2:9300`; the bridge is a host-side Docker port publish, not a daemon rebind.
+
+### Bridge topology
+
+1. **VPC-IP-scoped Docker port publish** — the gateway service publishes `${GATEWAY_VPC_IP}:9300:9300` in the compose override. The daemon stays bound to `172.21.0.2:9300` on `gateway-net`; Docker DNAT forwards VPC-IP traffic to it. The publish is gated all-or-none with the operator listener + `GATEWAY_VPC_IP`/`DASHBOARD_VPC_IP` vars.
+
+2. **DOCKER-USER iptables rule** — applied over SSH after `docker compose up` (Docker recreates DOCKER-USER-adjacent chains on daemon restart, so the rule must be reapplied last). The rule allows `--dport 9300` from `${DASHBOARD_VPC_IP}` and drops all other sources. Applied idempotently (`-C || -I`); exact-readback-verified (source/dport/jump/ordering). This rule is **load-bearing** — the daemon's forwarded-header guard is forgeable by anyone who can reach `:9300`; Docker DNAT bypasses ufw. The rule is lost on reboot until the next deploy; the DO Cloud Firewall covers the reboot window.
+
+3. **DigitalOcean Cloud Firewall** — the gateway deploy additively reconciles the **existing** gateway firewall (never creates a fresh allowlist; never removes existing rules). It adds a single inbound rule: `protocol:tcp,ports:9300,source:droplet:<dashboard-droplet-id>`. Source is the dashboard droplet-id (stable across rebuild), not the private IP. Reboot-durable provider-level control. `DIGITALOCEAN_ACCESS_TOKEN` must be present in the gateway deploy env; the step fails closed if absent or if the gateway droplet has no existing firewall.
+
+4. **Dashboard Caddy `/operator/*` route** — the dashboard Caddy proxies `/operator/*` to `{$GATEWAY_VPC_IP}:9300` over the VPC. The route is a `handle` block before the `dashboard:3000` catch-all, with `flush_interval -1` and `header_up Host dashboard.fro.bot` + `header_up X-Forwarded-Proto https` to satisfy the daemon's forwarded-header guard.
+
+### Required env vars (all-or-none with the operator listener)
+
+| Variable | Where set | Description |
+| --- | --- | --- |
+| `GATEWAY_VPC_IP` | `gateway` GitHub Environment + local `.env` | Gateway droplet's DigitalOcean VPC IP (e.g. `10.116.0.3`). Required for the VPC-IP publish and DOCKER-USER rule. |
+| `DASHBOARD_VPC_IP` | `gateway` GitHub Environment + local `.env` | Dashboard droplet's DigitalOcean VPC IP (e.g. `10.116.0.5`). Required for the DOCKER-USER source restriction. |
+| `DIGITALOCEAN_ACCESS_TOKEN` | `gateway` GitHub Environment + local `.env` | Required for the DO Cloud Firewall reconcile. Fail-closed if absent. |
+
+`GATEWAY_VPC_IP` is also required in the `dashboard` GitHub Environment so the dashboard Caddy service can expand `{$GATEWAY_VPC_IP}` in the Caddyfile.
+
+### First-deploy order
+
+Deploy the **gateway bridge first** (VPC publish + DOCKER-USER + DO firewall), verify the bridge is live and restricted, **then** deploy the **dashboard `/operator/*` route**. The dashboard route must not go live before its target is reachable and restricted — a partial state where the route is live but the bridge is absent or unrestricted is a security defect.
+
+### Verification
+
+See [`docs/runbooks/gateway-operator-private-path-verification.md`](../../docs/runbooks/gateway-operator-private-path-verification.md) for the full verification procedure (positive probes, control readback, negative-control caveat, and break-glass).
 
 ## CA RESTORE PROCEDURE
 
@@ -449,6 +488,9 @@ For the full operator-facing rotation and emergency revocation procedure (includ
 - **Never bind-mount config files outside `/opt/gateway/deploy/secrets/`** — `init-certs.sh` and `docker-compose.yaml` are upstream's; this repo materializes secrets only.
 - **Never run `pollRegistration` with an unbounded per-attempt timeout** — each fetch is wrapped in an `AbortController` with `perAttemptTimeoutMs` (defaults to `max(6000, intervalMs * 2)`).
 - **Never run `docker compose down -v` or `docker volume prune` on the gateway stack** — this wipes named Docker volumes including `caddy_data` (TLS certs), `mitmproxy-certs` (CA key), and `workspace-repos` (all cloned repo checkouts). Normal deploys and `git clean -xfd` do NOT touch Docker volumes. Losing `caddy_data` forces Let's Encrypt re-issuance (rate-limit risk); losing `mitmproxy-certs` breaks workspace egress trust (requires CA restore); losing `workspace-repos` destroys all cloned repos (they will be re-cloned automatically on the next mention, but the volume loss itself is irreversible).
+- **Never publish the operator port on `0.0.0.0` or without a VPC-IP bind** — the operator listener must be published only on `${GATEWAY_VPC_IP}:9300`, never on `0.0.0.0:9300`, `[::]:9300`, or as a bare `9300:9300` mapping. A public-internet-reachable operator port is a security defect; the DOCKER-USER rule and DO Cloud Firewall are the access controls, but they are only effective when the publish is VPC-scoped.
+- **Never apply the DOCKER-USER rule before `docker compose up`** — Docker recreates DOCKER-USER-adjacent chains on daemon restart and `compose up`, wiping any rule applied before the stack comes up. The rule must be reapplied after `compose up` completes.
+- **Never create a fresh DO Cloud Firewall for the operator port** — DO Cloud Firewalls are default-deny/allowlist; attaching a new firewall that only allows `:9300` would lock out `:22`/`:80`/`:443`/announce. The deploy additively reconciles the **existing** gateway firewall only (`add-rules`). If the gateway droplet has no existing firewall, the step fails closed with guidance — it does not auto-create a restrictive allowlist.
 
 ## DECOMMISSIONING
 

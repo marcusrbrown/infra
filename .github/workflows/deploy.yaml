@@ -140,6 +140,9 @@ jobs:
       GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_ALLOWED_RETURN_PATHS }}
       GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_STATE_TTL_MS }}
       GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS }}
+      GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
+      DASHBOARD_VPC_IP: ${{ secrets.DASHBOARD_VPC_IP }}
+      DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
 
   deploy-umami:
     needs: detect-changes
@@ -165,11 +168,14 @@ jobs:
       VPN_HOST: ${{ secrets.VPN_HOST }}
       VPN_PEERS: ${{ secrets.VPN_PEERS }}
 
+  # The dashboard operator route proxies to the gateway VPC bridge; needs: deploy-gateway
+  # orders dashboard after gateway and the if: lets dashboard proceed when gateway is skipped.
   deploy-dashboard:
-    needs: detect-changes
+    needs: [detect-changes, deploy-gateway]
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      needs.detect-changes.outputs.dashboard == 'true'
+      !cancelled() &&
+      needs.deploy-gateway.result != 'failure' &&
+      (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.dashboard == 'true')
     permissions:
       contents: read
     uses: ./.github/workflows/deploy-dashboard.yaml
@@ -182,3 +188,4 @@ jobs:
       DASHBOARD_OAUTH_CLIENT_SECRET: ${{ secrets.DASHBOARD_OAUTH_CLIENT_SECRET }}
       DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
       DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}
+      GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}

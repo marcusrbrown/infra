@@ -1,3 +1,6 @@
+import {readFileSync} from 'node:fs'
+import {join} from 'node:path'
+
 import {describe, expect, it} from 'bun:test'
 
 import {
@@ -6,6 +9,7 @@ import {
   deploy,
   parseComposeImageDigest,
   validateEnv,
+  validateGatewayVpcIp,
   validateSecretValue,
   type SpawnFn,
   type SpawnResult,
@@ -33,6 +37,7 @@ const VALID_ENV = {
   DASHBOARD_OAUTH_CLIENT_SECRET: 'oauthsecretvalue',
   DASHBOARD_OPERATOR_LOGIN: 'marcusrbrown',
   DASHBOARD_COOKIE_KEY: 'cookiesecretkey32byteslong123456',
+  GATEWAY_VPC_IP: '10.116.0.3',
 }
 
 /** Builds a fake SpawnResult that exits 0 with given stdout. */
@@ -128,8 +133,16 @@ const fetchHealthzOk = async (_url: string, _opts?: RequestInit): Promise<Respon
   return new Response(JSON.stringify({ok: true}), {status: 200})
 }
 
-/** Fake fetch that always fails. */
-const fetchHealthzFail = async (_url: string, _opts?: RequestInit): Promise<Response> => {
+/**
+ * Fake fetch that fails for /api/healthz (simulating ACME cert lag) but returns 200
+ * for /operator/health (so the same-origin check passes in tests that use this mock).
+ * Tests that need /operator/health to fail should use a custom fetch mock.
+ */
+const fetchHealthzFail = async (url: string, _opts?: RequestInit): Promise<Response> => {
+  if (url.includes('/operator/health')) {
+    // Return 200 for the operator health check — this mock simulates ACME lag only for /api/healthz
+    return new Response(JSON.stringify({ok: true}), {status: 200})
+  }
   throw new Error('fetch failed')
 }
 
@@ -915,5 +928,519 @@ describe('CI mode with DASHBOARD_SSH_KEY', () => {
     for (const call of calls) {
       expect(call.cmd.join(' ')).not.toContain('AAAA-UNIQUE-KEY-CONTENT')
     }
+  })
+})
+
+// ─── GATEWAY_VPC_IP validation ────────────────────────────────────────────────
+
+describe('validateGatewayVpcIp', () => {
+  it('accepts a valid private IPv4 address', () => {
+    expect(() => validateGatewayVpcIp('10.116.0.3')).not.toThrow()
+  })
+
+  it('accepts other valid IPv4 addresses', () => {
+    expect(() => validateGatewayVpcIp('192.168.1.1')).not.toThrow()
+    expect(() => validateGatewayVpcIp('172.16.0.1')).not.toThrow()
+    expect(() => validateGatewayVpcIp('10.0.0.1')).not.toThrow()
+  })
+
+  it('rejects an empty string', () => {
+    expect(() => validateGatewayVpcIp('')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a hostname (not an IP)', () => {
+    expect(() => validateGatewayVpcIp('gateway.fro.bot')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a value starting with a dash (injection risk)', () => {
+    expect(() => validateGatewayVpcIp('-oProxyCommand=x')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects an IPv6 address', () => {
+    expect(() => validateGatewayVpcIp('::1')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a malformed IP (too many octets)', () => {
+    expect(() => validateGatewayVpcIp('10.116.0.3.4')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a malformed IP (octet out of range)', () => {
+    expect(() => validateGatewayVpcIp('10.116.0.999')).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('rejects a value with shell metacharacters', () => {
+    expect(() => validateGatewayVpcIp('10.0.0.1;rm -rf /')).toThrow(/GATEWAY_VPC_IP/)
+  })
+})
+
+// ─── Caddyfile structure ──────────────────────────────────────────────────────
+
+describe('committed Caddyfile structure', () => {
+  const caddyfilePath = join(import.meta.dir, '..', 'config', 'Caddyfile')
+  const caddyfile = readFileSync(caddyfilePath, 'utf8')
+
+  it('contains a handle /operator/* block', () => {
+    expect(caddyfile).toContain('handle /operator/*')
+  })
+
+  it('contains flush_interval -1 in the operator block', () => {
+    expect(caddyfile).toContain('flush_interval -1')
+  })
+
+  it('contains header_up Host dashboard.fro.bot', () => {
+    expect(caddyfile).toContain('header_up Host dashboard.fro.bot')
+  })
+
+  it('contains header_up X-Forwarded-Proto https', () => {
+    expect(caddyfile).toContain('header_up X-Forwarded-Proto https')
+  })
+
+  it('uses {$GATEWAY_VPC_IP}:9300 as the operator proxy target (no literal IP)', () => {
+    expect(caddyfile).toContain('{$GATEWAY_VPC_IP}:9300')
+    // Must not contain a literal IP in the proxy target
+    expect(caddyfile).not.toMatch(/reverse_proxy \d+\.\d+\.\d+\.\d+:9300/)
+  })
+
+  it('wraps the dashboard:3000 catch-all in its own handle block', () => {
+    // The catch-all must be in a bare handle block, not a bare reverse_proxy.
+    // Check structurally: the Caddyfile must contain a bare `handle {` block
+    // and a `reverse_proxy dashboard:3000` line, and the handle block must come
+    // after the /operator/* handle block.
+    expect(caddyfile).toContain('handle {')
+    expect(caddyfile).toContain('reverse_proxy dashboard:3000')
+  })
+
+  it('has the /operator/* handle block before the catch-all handle block', () => {
+    const operatorIdx = caddyfile.indexOf('handle /operator/*')
+    const catchAllIdx = caddyfile.indexOf('handle {')
+    expect(operatorIdx).toBeGreaterThan(-1)
+    expect(catchAllIdx).toBeGreaterThan(-1)
+    expect(operatorIdx).toBeLessThan(catchAllIdx)
+  })
+
+  it('does not use a bare reverse_proxy at the site-block level (must be inside handle blocks)', () => {
+    // A bare reverse_proxy at the site-block level (2-space indent) would be subject to
+    // Caddy directive ordering and could sort ahead of the /operator/* route.
+    // All reverse_proxy directives must be inside handle blocks (4+ spaces indent).
+    const lines = caddyfile.split('\n')
+    for (const line of lines) {
+      // Site-block level: exactly 2 spaces of indentation (inside the host block, outside any handle)
+      if (/^ {2}reverse_proxy\s/.test(line)) {
+        throw new Error(`Found bare reverse_proxy at site-block level: ${line}`)
+      }
+    }
+  })
+})
+
+// ─── buildEnvFileContents includes GATEWAY_VPC_IP ────────────────────────────
+
+describe('buildEnvFileContents with GATEWAY_VPC_IP', () => {
+  it('includes GATEWAY_VPC_IP when provided', () => {
+    const contents = buildEnvFileContents({
+      domain: 'dashboard.fro.bot',
+      githubAppId: '123456',
+      oauthClientId: 'Iv1.abc123',
+      oauthClientSecret: 'oauthsecret',
+      operatorLogin: 'marcusrbrown',
+      cookieKey: 'cookiekey',
+      gatewayVpcIp: '10.116.0.3',
+    })
+    expect(contents).toContain('GATEWAY_VPC_IP=10.116.0.3\n')
+  })
+
+  it('omits GATEWAY_VPC_IP when not provided', () => {
+    const contents = buildEnvFileContents({
+      domain: 'dashboard.fro.bot',
+      githubAppId: '123456',
+      oauthClientId: 'Iv1.abc123',
+      oauthClientSecret: 'oauthsecret',
+      operatorLogin: 'marcusrbrown',
+      cookieKey: 'cookiekey',
+    })
+    expect(contents).not.toContain('GATEWAY_VPC_IP')
+  })
+})
+
+// ─── deploy forwards GATEWAY_VPC_IP to caddy service ─────────────────────────
+
+describe('deploy forwards GATEWAY_VPC_IP to caddy service env', () => {
+  it('includes GATEWAY_VPC_IP in the .env written via SSH stdin', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // The .env write (stdin) must contain GATEWAY_VPC_IP
+    const envFileWrite = calls.find(c => c.stdinData.includes('DASHBOARD_DOMAIN='))
+    expect(envFileWrite).toBeDefined()
+    expect(envFileWrite?.stdinData).toContain('GATEWAY_VPC_IP=10.116.0.3')
+  })
+
+  it('does not include GATEWAY_VPC_IP in any spawn argv (only in stdin)', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    for (const call of calls) {
+      expect(call.cmd.join(' ')).not.toContain('GATEWAY_VPC_IP=')
+    }
+  })
+
+  it('succeeds without GATEWAY_VPC_IP (optional — operator route disabled when absent)', async () => {
+    const envWithoutVpcIp = {...VALID_ENV, GATEWAY_VPC_IP: ''}
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+
+    await expect(
+      deploy({
+        env: envWithoutVpcIp,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('throws before any SSH call when GATEWAY_VPC_IP is malformed', async () => {
+    const envWithBadVpcIp = {...VALID_ENV, GATEWAY_VPC_IP: 'not-an-ip'}
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: envWithBadVpcIp,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+      }),
+    ).rejects.toThrow(/GATEWAY_VPC_IP/)
+
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ─── validateEnv with GATEWAY_VPC_IP ─────────────────────────────────────────
+
+describe('validateEnv with GATEWAY_VPC_IP', () => {
+  it('accepts a valid GATEWAY_VPC_IP', () => {
+    expect(() => validateEnv({...VALID_ENV, GATEWAY_VPC_IP: '10.116.0.3'})).not.toThrow()
+  })
+
+  it('accepts missing GATEWAY_VPC_IP (optional)', () => {
+    const env: Record<string, string> = {...VALID_ENV}
+    delete env.GATEWAY_VPC_IP
+    expect(() => validateEnv(env)).not.toThrow()
+  })
+
+  it('throws when GATEWAY_VPC_IP is present but malformed', () => {
+    expect(() => validateEnv({...VALID_ENV, GATEWAY_VPC_IP: 'not-an-ip'})).toThrow(/GATEWAY_VPC_IP/)
+  })
+
+  it('throws when GATEWAY_VPC_IP starts with a dash', () => {
+    expect(() => validateEnv({...VALID_ENV, GATEWAY_VPC_IP: '-oProxyCommand=x'})).toThrow(/GATEWAY_VPC_IP/)
+  })
+})
+
+// ─── same-origin /operator/health 200 check ──────────────
+//
+// The dashboard deploy owns the /operator/* Caddy route and runs after the gateway
+// deploy. Once the route is live, the runner can probe
+// https://dashboard.fro.bot/operator/health from the public internet (the dashboard
+// is publicly reachable via Caddy → VPC → gateway operator daemon).
+//
+// Gate: GATEWAY_VPC_IP is set (i.e. the operator route is active).
+// Fail closed: /operator/health != 200 → deploy throws.
+// Edge: GATEWAY_VPC_IP absent → check skipped (only the existing /api/healthz check runs).
+//
+// The public-denied gateway.fro.bot:9300 check and DO firewall readback belong to
+// the gateway deploy (Phase 8e). The DOCKER-USER readback belongs to Phase 8c.
+// This unit adds only the same-origin health check that the dashboard deploy owns.
+
+describe('dashboard verification: same-origin /operator/health 200 check', () => {
+  // ── Happy path ──────────────────────────────────────────────────────────────
+
+  it('happy path: GATEWAY_VPC_IP set + /operator/health returns 200 → deploy passes', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    const probedUrls: string[] = []
+
+    await expect(
+      deploy({
+        env: VALID_ENV, // VALID_ENV includes GATEWAY_VPC_IP: '10.116.0.3'
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          probedUrls.push(url)
+          // Both /api/healthz and /operator/health return 200
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+
+    // Must have probed /operator/health
+    expect(probedUrls.some(u => u.includes('/operator/health'))).toBe(true)
+  })
+
+  // ── Error: /operator/health != 200 → fail closed ────────────────────────────
+
+  it('error: GATEWAY_VPC_IP set + /operator/health returns 503 → deploy fails closed', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          if (url.includes('/operator/health')) {
+            return new Response('Service Unavailable', {status: 503})
+          }
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+  })
+
+  it('error: GATEWAY_VPC_IP set + /operator/health returns 404 → deploy fails closed', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          if (url.includes('/operator/health')) {
+            return new Response('Not Found', {status: 404})
+          }
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+  })
+
+  // ── Edge: GATEWAY_VPC_IP absent → check skipped ──────────────────────────────
+
+  it('edge: GATEWAY_VPC_IP absent → /operator/health check skipped, deploy succeeds', async () => {
+    const envWithoutVpcIp = {...VALID_ENV, GATEWAY_VPC_IP: ''}
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    const probedUrls: string[] = []
+
+    await expect(
+      deploy({
+        env: envWithoutVpcIp,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          probedUrls.push(url)
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+
+    // Must NOT have probed /operator/health when GATEWAY_VPC_IP is absent
+    expect(probedUrls.some(u => u.includes('/operator/health'))).toBe(false)
+  })
+
+  it('edge: GATEWAY_VPC_IP absent → only /api/healthz is probed (existing check still runs)', async () => {
+    const envWithoutVpcIp = {...VALID_ENV, GATEWAY_VPC_IP: ''}
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    const probedUrls: string[] = []
+
+    await deploy({
+      env: envWithoutVpcIp,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: async (url: string, _opts?: RequestInit) => {
+        probedUrls.push(url)
+        return new Response(JSON.stringify({ok: true}), {status: 200})
+      },
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // The existing /api/healthz check must still run
+    expect(probedUrls.some(u => u.includes('/api/healthz'))).toBe(true)
+    // But /operator/health must not be probed
+    expect(probedUrls.some(u => u.includes('/operator/health'))).toBe(false)
+  })
+
+  // ── Probe targets the correct URL ────────────────────────────────────────────
+
+  it('probes https://dashboard.fro.bot/operator/health (the same-origin path)', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    const probedUrls: string[] = []
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: async (url: string, _opts?: RequestInit) => {
+        probedUrls.push(url)
+        return new Response(JSON.stringify({ok: true}), {status: 200})
+      },
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const operatorHealthProbes = probedUrls.filter(u => u.includes('/operator/health'))
+    expect(operatorHealthProbes.length).toBeGreaterThan(0)
+    // Must use the dashboard domain (same-origin), not the gateway VPC IP
+    expect(operatorHealthProbes.every(u => u.includes('dashboard.fro.bot'))).toBe(true)
+    expect(operatorHealthProbes.every(u => !u.includes('10.116.0.3'))).toBe(true)
+  })
+
+  // ── /operator/health check runs after Caddy is up ────────────────────────────
+
+  it('/operator/health check runs after Caddy is started (Caddy must be up for the route to work)', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+    const eventLog: string[] = []
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: async (url: string, _opts?: RequestInit) => {
+        if (url.includes('/operator/health')) {
+          eventLog.push('operator-health-probe')
+        }
+        return new Response(JSON.stringify({ok: true}), {status: 200})
+      },
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // Find when Caddy was started
+    const caddyUpIdx = calls.findIndex(c => {
+      const s = c.cmd.join(' ')
+      return s.includes('docker compose up') && s.includes('caddy')
+    })
+
+    const operatorHealthIdx = eventLog.indexOf('operator-health-probe')
+
+    expect(caddyUpIdx).toBeGreaterThan(-1)
+    expect(operatorHealthIdx).toBeGreaterThanOrEqual(0)
+    // The operator health probe must happen after Caddy is started
+    // (We verify this by checking the probe appears in the event log, which is populated
+    // during the fetch calls that happen after all spawn calls for compose up)
+    // Since fetch is called after all spawn calls complete, this ordering is guaranteed.
+  })
+})
+
+// ─── [P1] /operator/health retry loop ────────────────────────────────────────
+//
+// Phase 12b must retry the /operator/health check with bounded attempts,
+// matching the existing /api/healthz probe pattern. Fail closed after all
+// attempts exhausted.
+
+describe('dashboard verification: /operator/health retry loop (P1 fix)', () => {
+  it('succeeds on a later attempt (retry works)', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    let operatorHealthAttempts = 0
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          if (url.includes('/operator/health')) {
+            operatorHealthAttempts++
+            if (operatorHealthAttempts < 3) {
+              return new Response('Service Unavailable', {status: 503})
+            }
+            return new Response(JSON.stringify({ok: true}), {status: 200})
+          }
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 5,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+
+    // Must have retried — at least 3 attempts
+    expect(operatorHealthAttempts).toBeGreaterThanOrEqual(3)
+  })
+
+  it('fails closed after all attempts non-200', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    let operatorHealthAttempts = 0
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          if (url.includes('/operator/health')) {
+            operatorHealthAttempts++
+            return new Response('Service Unavailable', {status: 503})
+          }
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 3,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+
+    // Must have exhausted all attempts
+    expect(operatorHealthAttempts).toBe(3)
+  })
+
+  it('connection error on all attempts → fails closed', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    let operatorHealthAttempts = 0
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string, _opts?: RequestInit) => {
+          if (url.includes('/operator/health')) {
+            operatorHealthAttempts++
+            throw new TypeError('fetch failed: connection refused')
+          }
+          return new Response(JSON.stringify({ok: true}), {status: 200})
+        },
+        probeAttempts: 3,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/operator.*health|health.*operator|\/operator\/health/i)
+
+    expect(operatorHealthAttempts).toBeGreaterThanOrEqual(1)
   })
 })

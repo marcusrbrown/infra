@@ -74,6 +74,7 @@ export interface ValidatedEnv {
   DASHBOARD_COOKIE_KEY: string
   SSH_AUTH_SOCK?: string
   DASHBOARD_SSH_KEY?: string
+  GATEWAY_VPC_IP?: string
 }
 
 // ─── Exported helpers ─────────────────────────────────────────────────────────
@@ -128,6 +129,46 @@ export function validateSecretValue(value: string, name: string): void {
   if (match) {
     throw new Error(`${name} contains a disallowed shell metacharacter. Remove shell metacharacters before deploying.`)
   }
+}
+
+// IPv4 address: four decimal octets 0-255 separated by dots, nothing else.
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
+
+/**
+ * Validates that GATEWAY_VPC_IP is a well-formed IPv4 address.
+ *
+ * Accepts: dotted-decimal IPv4 addresses with all octets in 0-255.
+ * Rejects: empty strings, hostnames, IPv6, values starting with `-`,
+ *   values with shell metacharacters, and malformed octets.
+ *
+ * @throws {Error} when the value is not a valid IPv4 address.
+ * @returns The validated IP string (unchanged).
+ */
+export function validateGatewayVpcIp(ip: string): string {
+  if (!ip) {
+    throw new Error('GATEWAY_VPC_IP is required when set: value is empty')
+  }
+
+  const match = IPV4_RE.exec(ip)
+  if (!match) {
+    throw new Error(
+      'GATEWAY_VPC_IP must be a valid IPv4 address (e.g. 10.116.0.3). ' +
+        'Hostnames, IPv6 addresses, and non-IP values are not accepted.',
+    )
+  }
+
+  // Validate each octet is in range 0-255
+  for (let i = 1; i <= 4; i++) {
+    const octet = Number(match[i])
+    if (octet > 255) {
+      throw new Error(
+        'GATEWAY_VPC_IP must be a valid IPv4 address (e.g. 10.116.0.3). ' +
+          `Octet ${i} (${String(match[i])}) is out of range 0-255.`,
+      )
+    }
+  }
+
+  return ip
 }
 
 /**
@@ -192,6 +233,14 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
   // Validate host before any SSH argv construction
   validateDashboardHost(domain)
 
+  // GATEWAY_VPC_IP is optional — only validated when present and non-empty.
+  // When absent, the /operator/* Caddy route will fail to start (Caddy cannot
+  // expand {$GATEWAY_VPC_IP}); this is intentional fail-closed behavior.
+  const gatewayVpcIp = env.GATEWAY_VPC_IP
+  if (gatewayVpcIp) {
+    validateGatewayVpcIp(gatewayVpcIp)
+  }
+
   return {
     PATH: path,
     HOME: home,
@@ -204,6 +253,7 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
     DASHBOARD_COOKIE_KEY: cookieKey,
     ...(env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: env.SSH_AUTH_SOCK} : {}),
     ...(env.DASHBOARD_SSH_KEY ? {DASHBOARD_SSH_KEY: env.DASHBOARD_SSH_KEY} : {}),
+    ...(gatewayVpcIp ? {GATEWAY_VPC_IP: gatewayVpcIp} : {}),
   }
 }
 
@@ -216,6 +266,10 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
  *
  * NOTE: Image pinning is done via the committed docker-compose.yaml digest pin,
  * not via an override file or env var.
+ *
+ * NOTE: GATEWAY_VPC_IP is included when provided so the Caddy container can
+ * expand {$GATEWAY_VPC_IP} in the Caddyfile /operator/* route target. Both
+ * the caddy and dashboard services read from the same .env file.
  */
 export function buildEnvFileContents(opts: {
   domain: string
@@ -224,18 +278,22 @@ export function buildEnvFileContents(opts: {
   oauthClientSecret: string
   operatorLogin: string
   cookieKey: string
+  gatewayVpcIp?: string
 }): string {
-  const {domain, githubAppId, oauthClientId, oauthClientSecret, operatorLogin, cookieKey} = opts
-  return (
-    `DASHBOARD_DOMAIN=${domain}\n` +
-    `DASHBOARD_GITHUB_APP_ID=${githubAppId}\n` +
-    `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem\n` +
-    `DASHBOARD_OAUTH_CLIENT_ID=${oauthClientId}\n` +
-    `DASHBOARD_OAUTH_CLIENT_SECRET=${oauthClientSecret}\n` +
-    `DASHBOARD_OAUTH_REDIRECT_URI=https://${domain}/auth/callback\n` +
-    `DASHBOARD_OPERATOR_LOGIN=${operatorLogin}\n` +
-    `DASHBOARD_COOKIE_KEY=${cookieKey}\n`
-  )
+  const {domain, githubAppId, oauthClientId, oauthClientSecret, operatorLogin, cookieKey, gatewayVpcIp} = opts
+  const lines = [
+    `DASHBOARD_DOMAIN=${domain}`,
+    `DASHBOARD_GITHUB_APP_ID=${githubAppId}`,
+    `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem`,
+    `DASHBOARD_OAUTH_CLIENT_ID=${oauthClientId}`,
+    `DASHBOARD_OAUTH_CLIENT_SECRET=${oauthClientSecret}`,
+    `DASHBOARD_OAUTH_REDIRECT_URI=https://${domain}/auth/callback`,
+    `DASHBOARD_OPERATOR_LOGIN=${operatorLogin}`,
+    `DASHBOARD_COOKIE_KEY=${cookieKey}`,
+    ...(gatewayVpcIp ? [`GATEWAY_VPC_IP=${gatewayVpcIp}`] : []),
+    '',
+  ]
+  return lines.join('\n')
 }
 
 /**
@@ -523,6 +581,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       oauthClientSecret: validated.DASHBOARD_OAUTH_CLIENT_SECRET,
       operatorLogin: validated.DASHBOARD_OPERATOR_LOGIN,
       cookieKey: validated.DASHBOARD_COOKIE_KEY,
+      gatewayVpcIp: validated.GATEWAY_VPC_IP,
     })
     await writeRemoteFile(
       `Writing ${REMOTE_ENV_PATH}`,
@@ -667,6 +726,67 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       deployEnv,
       spawnFn,
     )
+
+    // Phase 12b: Same-origin /operator/health 200 check.
+    //
+    // Gated on GATEWAY_VPC_IP being set — this indicates the /operator/* Caddy route is active.
+    // When GATEWAY_VPC_IP is absent, the route is not configured and this check is skipped.
+    //
+    // The dashboard deploy owns the /operator/* Caddy route and runs after the gateway deploy.
+    // Once Caddy is up (Phase 11), the runner can probe https://dashboard.fro.bot/operator/health
+    // from the public internet — the route proxies through Caddy → VPC → gateway operator daemon.
+    //
+    // Fail closed: /operator/health != 200 → deploy throws.
+    // This proves the same-origin path works end-to-end (Caddy route + VPC reach + daemon guard).
+    //
+    // The public-denied gateway.fro.bot:9300 check and DO firewall readback belong to the
+    // gateway deploy (Phase 8e). The DOCKER-USER readback belongs to Phase 8c of the gateway deploy.
+    if (validated.GATEWAY_VPC_IP) {
+      // Bounded retry loop — DO firewall propagation and Caddy↔backend startup timing can
+      // cause transient failures. Mirrors the /api/healthz probe pattern (probeAttempts /
+      // probeIntervalMs). Fail closed after all attempts exhausted.
+      const operatorHealthUrl = `https://${host}/operator/health`
+      console.warn(`\u001B[1;34m==>\u001B[0m Probing same-origin operator health endpoint: ${operatorHealthUrl}`)
+      let operatorHealthOk = false
+      let lastOperatorHealthStatus = 0
+      let lastOperatorHealthError: string | undefined
+
+      for (let attempt = 1; attempt <= probeAttempts; attempt++) {
+        try {
+          const response = await fetchFn(operatorHealthUrl, {
+            signal: AbortSignal.timeout(10_000),
+          })
+          lastOperatorHealthStatus = response.status
+          if (response.status === 200) {
+            operatorHealthOk = true
+            break
+          }
+        } catch (error) {
+          lastOperatorHealthError = error instanceof Error ? error.message : String(error)
+        }
+
+        if (attempt < probeAttempts) {
+          await sleepFn(probeIntervalMs)
+        }
+      }
+
+      if (!operatorHealthOk) {
+        if (lastOperatorHealthError !== undefined) {
+          throw new Error(
+            `Same-origin operator health check failed after ${probeAttempts} attempt(s): could not reach ${operatorHealthUrl}. ` +
+              `Ensure the gateway deploy has completed (VPC port publish + DOCKER-USER + DO firewall) ` +
+              `before deploying the dashboard /operator/* route. ` +
+              `Last error: ${lastOperatorHealthError}`,
+          )
+        }
+        throw new Error(
+          `Same-origin operator health check failed after ${probeAttempts} attempt(s): ${operatorHealthUrl} returned HTTP ${lastOperatorHealthStatus} (expected 200). ` +
+            `The /operator/* Caddy route is active but the gateway operator daemon is not healthy. ` +
+            `Check the gateway operator service and ensure the VPC path is correctly configured.`,
+        )
+      }
+      console.warn(`\u001B[1;32m✓\u001B[0m Same-origin operator health check passed: ${operatorHealthUrl} → 200`)
+    }
 
     // Phase 12: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
     let probeOk = false

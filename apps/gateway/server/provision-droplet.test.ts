@@ -7,8 +7,11 @@ import {validateGatewayHost} from '../src/host'
 import {
   checkDropletExistence,
   establishSshAccess,
+  getFirewallVpcState,
   getGatewaySshFingerprint,
   parseProvisionArgs,
+  ruleHas9300FromDroplet,
+  setupOperatorFirewall,
   validateRequiredEnv,
 } from './provision-droplet'
 
@@ -419,5 +422,251 @@ describe('provision-droplet', () => {
 
       expect(capturedOpts?.identityFile).toBeUndefined()
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// getFirewallVpcState
+// ---------------------------------------------------------------------------
+
+describe('getFirewallVpcState', () => {
+  it('returns enabled when both VPC IPs are set', () => {
+    expect(getFirewallVpcState({GATEWAY_VPC_IP: '10.116.0.3', DASHBOARD_VPC_IP: '10.116.0.5'})).toBe('enabled')
+  })
+
+  it('returns disabled when both VPC IPs are absent', () => {
+    expect(getFirewallVpcState({})).toBe('disabled')
+  })
+
+  it('returns disabled when both VPC IPs are whitespace-only', () => {
+    expect(getFirewallVpcState({GATEWAY_VPC_IP: '   ', DASHBOARD_VPC_IP: ''})).toBe('disabled')
+  })
+
+  it('returns misconfigured when only GATEWAY_VPC_IP is set', () => {
+    expect(getFirewallVpcState({GATEWAY_VPC_IP: '10.116.0.3'})).toBe('misconfigured')
+  })
+
+  it('returns misconfigured when only DASHBOARD_VPC_IP is set', () => {
+    expect(getFirewallVpcState({DASHBOARD_VPC_IP: '10.116.0.5'})).toBe('misconfigured')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ruleHas9300FromDroplet
+// ---------------------------------------------------------------------------
+
+describe('ruleHas9300FromDroplet', () => {
+  it('matches a rule with exact ports:9300 and the correct droplet_id', () => {
+    expect(ruleHas9300FromDroplet('protocol:tcp,ports:9300,droplet_id:222222222', '222222222')).toBe(true)
+  })
+
+  it('does not match ports:93000 (prefix false-match guard)', () => {
+    expect(ruleHas9300FromDroplet('protocol:tcp,ports:93000,droplet_id:222222222', '222222222')).toBe(false)
+  })
+
+  it('does not match when droplet_id is wrong', () => {
+    expect(ruleHas9300FromDroplet('protocol:tcp,ports:9300,droplet_id:999999999', '222222222')).toBe(false)
+  })
+
+  it('does not match when only ports:9300 is present (no droplet_id)', () => {
+    expect(ruleHas9300FromDroplet('protocol:tcp,ports:9300,address:0.0.0.0/0', '222222222')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// setupOperatorFirewall
+// ---------------------------------------------------------------------------
+
+describe('setupOperatorFirewall', () => {
+  const GATEWAY_DROPLET_ID = '111111111'
+  const DASHBOARD_DROPLET_ID = '222222222'
+  const FIREWALL_ID = 'fw-test-id'
+
+  it('skips silently when both VPC IPs are absent', async () => {
+    const runCaptureCalls: string[][] = []
+    const runCalls: string[][] = []
+
+    await setupOperatorFirewall(
+      GATEWAY_DROPLET_ID,
+      {},
+      {
+        runCaptureFn: async cmd => {
+          runCaptureCalls.push(cmd)
+          return ''
+        },
+        runFn: async (_label, cmd) => {
+          runCalls.push(cmd)
+        },
+      },
+    )
+
+    // No doctl firewall calls when VPC is disabled
+    expect(runCaptureCalls.some(c => c.join(' ').includes('firewall'))).toBe(false)
+    expect(runCalls.some(c => c.join(' ').includes('firewall'))).toBe(false)
+  })
+
+  it('warns and skips when only one VPC IP is set (misconfiguration)', async () => {
+    const runCaptureCalls: string[][] = []
+    const runCalls: string[][] = []
+
+    await setupOperatorFirewall(
+      GATEWAY_DROPLET_ID,
+      {GATEWAY_VPC_IP: '10.116.0.3'},
+      {
+        runCaptureFn: async cmd => {
+          runCaptureCalls.push(cmd)
+          return ''
+        },
+        runFn: async (_label, cmd) => {
+          runCalls.push(cmd)
+        },
+      },
+    )
+
+    // No doctl firewall calls on misconfiguration
+    expect(runCaptureCalls.some(c => c.join(' ').includes('firewall'))).toBe(false)
+    expect(runCalls.some(c => c.join(' ').includes('firewall'))).toBe(false)
+  })
+
+  it('warns and skips when dashboard droplet is not found', async () => {
+    const runCalls: string[][] = []
+
+    await setupOperatorFirewall(
+      GATEWAY_DROPLET_ID,
+      {GATEWAY_VPC_IP: '10.116.0.3', DASHBOARD_VPC_IP: '10.116.0.5'},
+      {
+        runCaptureFn: async cmd => {
+          // dashboard droplet get → not found
+          if (
+            cmd.join(' ').includes('droplet') &&
+            cmd.join(' ').includes('get') &&
+            cmd.join(' ').includes('dashboard')
+          ) {
+            return ''
+          }
+          return ''
+        },
+        runFn: async (_label, cmd) => {
+          runCalls.push(cmd)
+        },
+      },
+    )
+
+    // No firewall create or add-rules when dashboard not found
+    expect(runCalls.some(c => c.join(' ').includes('firewall'))).toBe(false)
+  })
+
+  it('creates firewall with base rules (22/80/443) + 9300-from-dashboard when no firewall exists', async () => {
+    const runCalls: {label: string; cmd: string[]}[] = []
+
+    await setupOperatorFirewall(
+      GATEWAY_DROPLET_ID,
+      {GATEWAY_VPC_IP: '10.116.0.3', DASHBOARD_VPC_IP: '10.116.0.5'},
+      {
+        runCaptureFn: async cmd => {
+          const cmdStr = cmd.join(' ')
+          // dashboard droplet get → returns ID
+          if (cmdStr.includes('droplet') && cmdStr.includes('get') && cmdStr.includes('dashboard')) {
+            return DASHBOARD_DROPLET_ID
+          }
+          // list-by-droplet → no existing firewall
+          if (cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+            return ''
+          }
+          return ''
+        },
+        runFn: async (label, cmd) => {
+          runCalls.push({label, cmd})
+        },
+      },
+    )
+
+    // Must have called firewall create
+    const createCall = runCalls.find(c => c.cmd.join(' ').includes('firewall') && c.cmd.join(' ').includes('create'))
+    expect(createCall).toBeDefined()
+
+    const createCmdStr = createCall?.cmd.join(' ') ?? ''
+
+    // Must include base rules: 22, 80, 443
+    expect(createCmdStr).toContain('ports:22')
+    expect(createCmdStr).toContain('ports:80')
+    expect(createCmdStr).toContain('ports:443')
+
+    // Must include 9300 from dashboard droplet-id
+    expect(createCmdStr).toContain(`ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`)
+
+    // Must attach to gateway droplet
+    expect(createCmdStr).toContain(GATEWAY_DROPLET_ID)
+
+    // Must include outbound rules (gateway needs to reach Discord/S3/cliproxy)
+    expect(createCmdStr).toContain('--outbound-rules')
+  })
+
+  it('adds only the 9300 rule when firewall exists but rule is missing', async () => {
+    const runCalls: {label: string; cmd: string[]}[] = []
+
+    await setupOperatorFirewall(
+      GATEWAY_DROPLET_ID,
+      {GATEWAY_VPC_IP: '10.116.0.3', DASHBOARD_VPC_IP: '10.116.0.5'},
+      {
+        runCaptureFn: async cmd => {
+          const cmdStr = cmd.join(' ')
+          if (cmdStr.includes('droplet') && cmdStr.includes('get') && cmdStr.includes('dashboard')) {
+            return DASHBOARD_DROPLET_ID
+          }
+          if (cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+            return FIREWALL_ID
+          }
+          // Existing firewall has 22/80/443 but NOT 9300
+          if (cmdStr.includes('firewall') && cmdStr.includes('get') && cmdStr.includes('InboundRules')) {
+            return 'protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:80,address:0.0.0.0/0 protocol:tcp,ports:443,address:0.0.0.0/0'
+          }
+          return ''
+        },
+        runFn: async (label, cmd) => {
+          runCalls.push({label, cmd})
+        },
+      },
+    )
+
+    // Must have called add-rules (not create)
+    const addRulesCall = runCalls.find(c => c.cmd.join(' ').includes('add-rules'))
+    expect(addRulesCall).toBeDefined()
+    expect(addRulesCall?.cmd.join(' ')).toContain(`droplet_id:${DASHBOARD_DROPLET_ID}`)
+    expect(addRulesCall?.cmd.join(' ')).toContain('ports:9300')
+
+    // Must NOT have called create
+    expect(runCalls.some(c => c.cmd.join(' ').includes('firewall') && c.cmd.join(' ').includes('create'))).toBe(false)
+  })
+
+  it('is a no-op when the 9300 rule is already present', async () => {
+    const runCalls: string[][] = []
+
+    await setupOperatorFirewall(
+      GATEWAY_DROPLET_ID,
+      {GATEWAY_VPC_IP: '10.116.0.3', DASHBOARD_VPC_IP: '10.116.0.5'},
+      {
+        runCaptureFn: async cmd => {
+          const cmdStr = cmd.join(' ')
+          if (cmdStr.includes('droplet') && cmdStr.includes('get') && cmdStr.includes('dashboard')) {
+            return DASHBOARD_DROPLET_ID
+          }
+          if (cmdStr.includes('firewall') && cmdStr.includes('list-by-droplet')) {
+            return FIREWALL_ID
+          }
+          // Rule already present
+          if (cmdStr.includes('firewall') && cmdStr.includes('get') && cmdStr.includes('InboundRules')) {
+            return `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:${DASHBOARD_DROPLET_ID}`
+          }
+          return ''
+        },
+        runFn: async (_label, cmd) => {
+          runCalls.push(cmd)
+        },
+      },
+    )
+
+    // No mutating calls (no create, no add-rules)
+    expect(runCalls.some(c => c.join(' ').includes('firewall'))).toBe(false)
   })
 })

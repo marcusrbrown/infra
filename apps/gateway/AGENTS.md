@@ -131,7 +131,7 @@ After provisioning: commit the updated `.github/known_hosts`.
 | `GATEWAY_OPERATOR_PUBLIC_ORIGIN` | opt-in‡ | HTTPS origin for the browser-visible operator API. The ratified value is `https://dashboard.fro.bot` — set this for production use. Must be a bare HTTPS origin (no path, query, hash, credentials, or non-default port). |
 | `GATEWAY_VPC_IP` | opt-in§ | Gateway droplet's DigitalOcean VPC IP (e.g. `10.116.0.3`). Required for the VPC-IP-scoped operator port publish and DOCKER-USER rule. All-or-none with `DASHBOARD_VPC_IP` and the operator listener trio. |
 | `DASHBOARD_VPC_IP` | opt-in§ | Dashboard droplet's DigitalOcean VPC IP (e.g. `10.116.0.5`). Required for the DOCKER-USER source restriction. All-or-none with `GATEWAY_VPC_IP` and the operator listener trio. |
-| `DIGITALOCEAN_ACCESS_TOKEN` | opt-in§ | DigitalOcean API token for the Cloud Firewall reconcile. Required when the operator VPC bridge is enabled; the firewall step fails closed if absent. |
+| `DIGITALOCEAN_ACCESS_TOKEN` | provisioning-only | DigitalOcean API token used by `provision-droplet.ts` to create the `gateway-operator-fw` Cloud Firewall. Not a deploy secret — not required in the `gateway` GitHub Environment. |
 | `GATEWAY_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-gateway` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.gateway_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually (see [Break-glass runbook](#break-glass-runbook)). |
 | `WORKSPACE_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the `ghcr.io/marcusrbrown/infra-workspace` image pushed by the `build-images` job. Threaded from `needs.build-images.outputs.workspace_digest`. Required for the deploy to pin and verify the running image. For a local/break-glass deploy, supply manually. |
 
@@ -139,7 +139,7 @@ After provisioning: commit the updated `.github/known_hosts`.
 
 ‡All-or-none: set all three to enable the operator listener; set none to disable. Setting one or two is an error — the deploy fails fast before any SSH. See [Operator Listener](#operator-listener) for bind host/port/origin constraints.
 
-§All-or-none with the operator listener trio: set all three (`GATEWAY_VPC_IP`, `DASHBOARD_VPC_IP`, `DIGITALOCEAN_ACCESS_TOKEN`) together with the listener trio to enable the VPC bridge; set none to disable. Setting the listener trio without the VPC vars disables the bridge (the listener is reachable only via gateway-net Caddy). See [Operator private path](#operator-private-path-dashboard-same-origin) for the full bridge topology.
+§All-or-none with the operator listener trio: set both `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` together with the listener trio to enable the VPC bridge; set none to disable. Setting the listener trio without the VPC vars disables the bridge (the listener is reachable only via gateway-net Caddy). `DIGITALOCEAN_ACCESS_TOKEN` is a provisioning-only concern (used locally by `provision-droplet.ts` to create the Cloud Firewall) — it is not part of this all-or-none group and is not required in the `gateway` GitHub Environment. See [Operator private path](#operator-private-path-dashboard-same-origin) for the full bridge topology.
 
 ## GHCR IMAGES
 
@@ -390,7 +390,7 @@ The deploy:
 ### Security posture
 
 - The operator listener is published **only on the gateway VPC IP** (`${GATEWAY_VPC_IP}:9300`, e.g. `10.116.0.3:9300`), never on `0.0.0.0` or the public `eth0`. A `0.0.0.0:9300` or bare `9300:9300` publish is a defect.
-- Access to the published VPC port is restricted to the dashboard droplet by two independent controls: a DOCKER-USER iptables rule (reapplied every deploy; load-bearing because Docker DNAT bypasses ufw) and a DigitalOcean Cloud Firewall rule (additive reconcile of the existing firewall; reboot-durable provider-level control). Both must be in place before the dashboard route goes live.
+- Access to the published VPC port is restricted to the dashboard droplet by two independent controls: a DOCKER-USER iptables rule (reapplied every deploy; load-bearing because Docker DNAT bypasses ufw) and a DigitalOcean Cloud Firewall rule (created by provisioning via `setupOperatorFirewall()`; reboot-durable provider-level control). Both must be in place before the dashboard route goes live.
 - The workspace (`sandbox-net`) has no path to the operator listener.
 - `/v1/announce` and `/operator/*` are separate Caddy `handle` blocks with distinct trust boundaries.
 - Auth/session/CSRF/allowlist wiring for privileged operator routes is live; the four operator auth/config secrets must be seeded in the `gateway` GitHub Environment to activate the auth gate (see [Enabling](#enabling) and [`docs/runbooks/gateway-operator-auth-lifecycle.md`](../../docs/runbooks/gateway-operator-auth-lifecycle.md)).
@@ -416,7 +416,7 @@ The dashboard droplet reaches the gateway operator listener over the shared Digi
 
 2. **DOCKER-USER iptables rule** — applied over SSH after `docker compose up` (Docker recreates DOCKER-USER-adjacent chains on daemon restart, so the rule must be reapplied last). The rule allows `--dport 9300` from `${DASHBOARD_VPC_IP}` and drops all other sources. Applied idempotently (`-C || -I`); exact-readback-verified (source/dport/jump/ordering). This rule is **load-bearing** — the daemon's forwarded-header guard is forgeable by anyone who can reach `:9300`; Docker DNAT bypasses ufw. The rule is lost on reboot until the next deploy; the DO Cloud Firewall covers the reboot window.
 
-3. **DigitalOcean Cloud Firewall** — the gateway deploy additively reconciles the **existing** gateway firewall (never creates a fresh allowlist; never removes existing rules). It adds a single inbound rule: `protocol:tcp,ports:9300,source:droplet:<dashboard-droplet-id>`. Source is the dashboard droplet-id (stable across rebuild), not the private IP. Reboot-durable provider-level control. `DIGITALOCEAN_ACCESS_TOKEN` must be present in the gateway deploy env; the step fails closed if absent or if the gateway droplet has no existing firewall.
+3. **DigitalOcean Cloud Firewall** — created and maintained by **provisioning** (`provision-droplet.ts` / `bun run provision:gateway`) via `setupOperatorFirewall()`, not by the deploy. Provisioning creates a firewall named `gateway-operator-fw` with base inbound rules (SSH 22, HTTP 80, HTTPS 443) plus inbound tcp/9300 from the dashboard droplet-id, and attaches it to the gateway droplet. The operation is idempotent: create-if-absent, add-9300-rule-if-missing, no-op if already present. Requires `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` to be set at provisioning time. Source is the dashboard droplet-id (stable across rebuild), not the private IP. Reboot-durable provider-level control. `DIGITALOCEAN_ACCESS_TOKEN` is a provisioning-time concern (repo-level, used locally) — it is not required in the `gateway` GitHub Environment for deploy.
 
 4. **Dashboard Caddy `/operator/*` route** — the dashboard Caddy proxies `/operator/*` to `{$GATEWAY_VPC_IP}:9300` over the VPC. The route is a `handle` block before the `dashboard:3000` catch-all, with `flush_interval -1` and `header_up Host dashboard.fro.bot` + `header_up X-Forwarded-Proto https` to satisfy the daemon's forwarded-header guard.
 
@@ -426,9 +426,11 @@ The dashboard droplet reaches the gateway operator listener over the shared Digi
 | --- | --- | --- |
 | `GATEWAY_VPC_IP` | `gateway` GitHub Environment + local `.env` | Gateway droplet's DigitalOcean VPC IP (e.g. `10.116.0.3`). Required for the VPC-IP publish and DOCKER-USER rule. |
 | `DASHBOARD_VPC_IP` | `gateway` GitHub Environment + local `.env` | Dashboard droplet's DigitalOcean VPC IP (e.g. `10.116.0.5`). Required for the DOCKER-USER source restriction. |
-| `DIGITALOCEAN_ACCESS_TOKEN` | `gateway` GitHub Environment + local `.env` | Required for the DO Cloud Firewall reconcile. Fail-closed if absent. |
+| `DIGITALOCEAN_ACCESS_TOKEN` | local `.env` only (provisioning-time) | Used by `provision-droplet.ts` to create the `gateway-operator-fw` Cloud Firewall. Not a deploy secret — not required in the `gateway` GitHub Environment. |
 
 `GATEWAY_VPC_IP` is also required in the `dashboard` GitHub Environment so the dashboard Caddy service can expand `{$GATEWAY_VPC_IP}` in the Caddyfile.
+
+**First-deploy prerequisite:** the dashboard droplet must already exist before running `bun run provision:gateway` with the firewall setup, because provisioning resolves the dashboard droplet-id to set the 9300 inbound source. Run `bun run provision:dashboard` first, then `bun run provision:gateway` with `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` set.
 
 ### First-deploy order
 
@@ -490,7 +492,7 @@ For the full operator-facing rotation and emergency revocation procedure (includ
 - **Never run `docker compose down -v` or `docker volume prune` on the gateway stack** — this wipes named Docker volumes including `caddy_data` (TLS certs), `mitmproxy-certs` (CA key), and `workspace-repos` (all cloned repo checkouts). Normal deploys and `git clean -xfd` do NOT touch Docker volumes. Losing `caddy_data` forces Let's Encrypt re-issuance (rate-limit risk); losing `mitmproxy-certs` breaks workspace egress trust (requires CA restore); losing `workspace-repos` destroys all cloned repos (they will be re-cloned automatically on the next mention, but the volume loss itself is irreversible).
 - **Never publish the operator port on `0.0.0.0` or without a VPC-IP bind** — the operator listener must be published only on `${GATEWAY_VPC_IP}:9300`, never on `0.0.0.0:9300`, `[::]:9300`, or as a bare `9300:9300` mapping. A public-internet-reachable operator port is a security defect; the DOCKER-USER rule and DO Cloud Firewall are the access controls, but they are only effective when the publish is VPC-scoped.
 - **Never apply the DOCKER-USER rule before `docker compose up`** — Docker recreates DOCKER-USER-adjacent chains on daemon restart and `compose up`, wiping any rule applied before the stack comes up. The rule must be reapplied after `compose up` completes.
-- **Never create a fresh DO Cloud Firewall for the operator port** — DO Cloud Firewalls are default-deny/allowlist; attaching a new firewall that only allows `:9300` would lock out `:22`/`:80`/`:443`/announce. The deploy additively reconciles the **existing** gateway firewall only (`add-rules`). If the gateway droplet has no existing firewall, the step fails closed with guidance — it does not auto-create a restrictive allowlist.
+- **Never create a fresh DO Cloud Firewall for the operator port outside of provisioning** — DO Cloud Firewalls are default-deny/allowlist; attaching a new firewall that only allows `:9300` would lock out `:22`/`:80`/`:443`/announce. Provisioning (`setupOperatorFirewall()`) creates `gateway-operator-fw` with all required base rules (22, 80, 443) plus the 9300 source restriction, idempotently. The deploy does not touch the DO firewall.
 
 ## DECOMMISSIONING
 

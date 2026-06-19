@@ -89,17 +89,6 @@ export interface DeployArgs {
 const REMOTE_DIR = '/opt/gateway'
 
 /**
- * DigitalOcean droplet name for the gateway — matches the provisioner's DROPLET_NAME constant.
- * Distinct from GATEWAY_HOST (the FQDN); doctl expects the droplet name, not the domain.
- */
-const GATEWAY_DROPLET_NAME = 'gateway'
-
-/**
- * DigitalOcean droplet name for the dashboard — sibling constant for symmetry with GATEWAY_DROPLET_NAME.
- */
-const DASHBOARD_DROPLET_NAME = 'dashboard'
-
-/**
  * The Docker Compose project name for the gateway stack.
  * Derived from `name: fro-bot` in the upstream fro-bot/agent compose.yaml.
  * Docker Compose prefixes network names with the project name, so the
@@ -1697,33 +1686,6 @@ function defaultSpawn(cmd: string[], opts: SpawnOpts): SpawnResult {
   return Bun.spawn(cmd, opts)
 }
 
-/**
- * Wraps runCommand with a timeout. Throws an actionable error if the command
- * does not complete within timeoutMs. Used for local doctl API calls that have
- * no built-in timeout — a hung DO API would otherwise block the deploy indefinitely.
- */
-async function runCommandWithTimeout(
-  label: string,
-  command: string[],
-  deployEnv: DeployEnv,
-  spawnFn: SpawnFn,
-  timeoutMs: number,
-): Promise<{stdout: string; stderr: string}> {
-  const timeoutPromise = new Promise<never>((_, reject) =>
-    setTimeout(
-      () =>
-        reject(
-          new Error(
-            `Command timed out after ${timeoutMs}ms: ${command.join(' ')}\n` +
-              `This may indicate a hung DigitalOcean API call. Check your DIGITALOCEAN_ACCESS_TOKEN and network connectivity.`,
-          ),
-        ),
-      timeoutMs,
-    ),
-  )
-  return Promise.race([runCommand(label, command, deployEnv, spawnFn), timeoutPromise])
-}
-
 async function runCommand(
   label: string,
   command: string[],
@@ -2824,197 +2786,29 @@ SCRIPT`
       )
     }
 
-    // IDs resolved in Phase 8d and reused in Phase 8e to avoid redundant doctl calls
-    // (reduces API load and eliminates the TOCTOU window between the two phases).
-    let phase8dDashboardDropletId: string | undefined
-    let phase8dFirewallId: string | undefined
-    let phase8dDoctlEnv: DeployEnv | undefined
-
-    // Phase 8d: DO Cloud Firewall reconcile (operator + VPC enabled only).
-    //
-    // Provider-level rule: allows TCP 9300 to the gateway droplet ONLY from the dashboard
-    // droplet. This is the reboot-durable, load-bearing control — the DO Cloud Firewall
-    // survives reboots (unlike the DOCKER-USER rule which is reapplied every deploy).
-    //
-    // SAFETY CONSTRAINTS:
-    //   - DO Cloud Firewalls are ALLOWLIST / default-deny. Attaching a NEW firewall that
-    //     only allows 9300 would LOCK OUT SSH(22)/HTTP(80)/HTTPS(443)/announce.
-    //     Therefore: reconcile the EXISTING firewall attached to the gateway droplet by
-    //     ADDING a single inbound rule. NEVER create/attach a fresh firewall, and NEVER
-    //     remove/replace existing inbound rules.
-    //   - If the gateway droplet has no existing firewall, FAIL CLOSED with actionable
-    //     guidance (do not auto-create a restrictive one).
-    //   - Source = dashboard DROPLET-ID (stable across rebuild), NOT private IP
-    //     (rebuild-reassignable). Resolved inline via `doctl compute droplet get dashboard --format ID --no-header`.
-    //   - DIGITALOCEAN_ACCESS_TOKEN must be present — verify first, fail closed if absent.
-    //
-    // Idempotent: check whether the rule already exists before adding it.
-    // Gate: operatorEnabled && getOperatorVpcState(env) === 'enabled'.
-    if (operatorEnabled && getOperatorVpcState(env) === 'enabled') {
-      const doToken = env.DIGITALOCEAN_ACCESS_TOKEN?.trim()
-      if (!doToken) {
-        throw new Error(
-          'DIGITALOCEAN_ACCESS_TOKEN is required for the DO Cloud Firewall reconcile phase ' +
-            'but is absent or empty. ' +
-            'Add DIGITALOCEAN_ACCESS_TOKEN to the gateway GitHub Environment and local .env ' +
-            'before enabling the VPC port publish. ' +
-            'The firewall reconcile cannot proceed without it.',
-        )
-      }
-
-      // Build a doctl-capable env: extends deployEnv with the DO token.
-      const doctlEnv: DeployEnv = {...deployEnv, DIGITALOCEAN_ACCESS_TOKEN: doToken}
-
-      // All doctl calls below are wrapped with a 30s timeout — a hung DO API would otherwise
-      // block the deploy indefinitely (unlike SSH calls which have ConnectTimeout=10).
-      const DOCTL_TIMEOUT_MS = 30_000
-
-      // Step 1: Resolve the dashboard droplet ID (stable across rebuild).
-      // Uses `doctl compute droplet get <name> --format ID --no-header`.
-      const {stdout: dashboardIdRaw} = await runCommandWithTimeout(
-        'Resolving dashboard droplet ID',
-        ['doctl', 'compute', 'droplet', 'get', DASHBOARD_DROPLET_NAME, '--format', 'ID', '--no-header'],
-        doctlEnv,
-        spawnFn,
-        DOCTL_TIMEOUT_MS,
-      )
-      const dashboardDropletId = dashboardIdRaw.trim()
-      if (!dashboardDropletId) {
-        throw new Error(
-          `Dashboard droplet "${DASHBOARD_DROPLET_NAME}" not found in DigitalOcean account. ` +
-            'Run `doctl compute droplet list` to see available droplets. ' +
-            'The DO Cloud Firewall reconcile cannot proceed without the dashboard droplet ID.',
-        )
-      }
-
-      // Step 2: Resolve the gateway droplet ID (needed to find its firewall).
-      // Uses the droplet NAME (GATEWAY_DROPLET_NAME = 'gateway'), not GATEWAY_HOST (the FQDN).
-      const {stdout: gatewayIdRaw} = await runCommandWithTimeout(
-        'Resolving gateway droplet ID',
-        ['doctl', 'compute', 'droplet', 'get', GATEWAY_DROPLET_NAME, '--format', 'ID', '--no-header'],
-        doctlEnv,
-        spawnFn,
-        DOCTL_TIMEOUT_MS,
-      )
-      const gatewayDropletId = gatewayIdRaw.trim()
-      if (!gatewayDropletId) {
-        throw new Error(
-          `Gateway droplet "${GATEWAY_DROPLET_NAME}" not found in DigitalOcean account. ` +
-            'Run `doctl compute droplet list` to see available droplets.',
-        )
-      }
-
-      // Step 3: Find the EXISTING firewall attached to the gateway droplet.
-      // Uses `doctl compute firewall list-by-droplet <id> --format ID --no-header`.
-      // If no firewall is attached, fail closed — never auto-create a restrictive allowlist.
-      const {stdout: firewallListRaw} = await runCommandWithTimeout(
-        'Finding existing firewall for gateway droplet',
-        ['doctl', 'compute', 'firewall', 'list-by-droplet', gatewayDropletId, '--format', 'ID', '--no-header'],
-        doctlEnv,
-        spawnFn,
-        DOCTL_TIMEOUT_MS,
-      )
-      const firewallId = firewallListRaw.trim().split('\n')[0]?.trim()
-      if (!firewallId) {
-        throw new Error(
-          `No existing firewall found attached to the gateway droplet (ID: ${gatewayDropletId}). ` +
-            'The DO Cloud Firewall reconcile requires an EXISTING firewall to add the 9300 rule to. ' +
-            'Attaching a new firewall that only allows 9300 would lock out SSH(22)/HTTP(80)/HTTPS(443). ' +
-            'Create a firewall with the required base rules (22, 80, 443) and attach it to the gateway ' +
-            'droplet first, then re-run the deploy.',
-        )
-      }
-
-      // Step 4: Check whether the inbound rule already exists (idempotent).
-      // Uses `doctl compute firewall get <id> --format InboundRules --no-header`.
-      // doctl --format InboundRules output is space-separated rules, each as key:value,key:value pairs.
-      // Example: `protocol:tcp,ports:22,address:0.0.0.0/0 protocol:tcp,ports:9300,droplet_id:222222222`
-      // We parse per-rule (split on whitespace) and assert that a SINGLE rule token contains BOTH
-      // `ports:9300` (exactly — not ports:93000) AND `droplet_id:<dashboardDropletId>`.
-      // Cross-rule substring matching is a bug: a public ports:9300 rule + a separate droplet_id
-      // rule would satisfy two independent includes() checks but is NOT the restricted rule we want.
-      const {stdout: inboundRulesRaw} = await runCommandWithTimeout(
-        'Checking existing firewall inbound rules',
-        ['doctl', 'compute', 'firewall', 'get', firewallId, '--format', 'InboundRules', '--no-header'],
-        doctlEnv,
-        spawnFn,
-        DOCTL_TIMEOUT_MS,
-      )
-
-      // Per-rule parse: split on whitespace, check each token individually.
-      // A rule token matches if it contains BOTH the exact port field AND the dashboard droplet-id.
-      // Port match: `ports:9300` followed by `,` or end-of-token (guards against ports:93000 prefix).
-      const ruleAlreadyPresent = inboundRulesRaw
-        .trim()
-        .split(/\s+/)
-        .some(rule => /(?:^|,)ports:9300(?:,|$)/.test(rule) && rule.includes(`droplet_id:${dashboardDropletId}`))
-
-      if (ruleAlreadyPresent) {
-        console.warn(
-          `\u001B[1;32m✓\u001B[0m DO Cloud Firewall rule already present: tcp/9300 from dashboard droplet ${dashboardDropletId} on firewall ${firewallId} (no-op)`,
-        )
-      } else {
-        // Step 5: Add the inbound rule additively.
-        // `doctl compute firewall add-rules <fw-id> --inbound-rules "protocol:tcp,ports:9300,droplet_id:<id>"`
-        // This is additive-only — existing rules are preserved.
-        await runCommandWithTimeout(
-          'Adding DO Cloud Firewall inbound rule: tcp/9300 from dashboard droplet',
-          [
-            'doctl',
-            'compute',
-            'firewall',
-            'add-rules',
-            firewallId,
-            '--inbound-rules',
-            `protocol:tcp,ports:9300,droplet_id:${dashboardDropletId}`,
-          ],
-          doctlEnv,
-          spawnFn,
-          DOCTL_TIMEOUT_MS,
-        )
-        console.warn(
-          `\u001B[1;32m✓\u001B[0m DO Cloud Firewall rule added: tcp/9300 from dashboard droplet ${dashboardDropletId} on firewall ${firewallId}`,
-        )
-      }
-
-      // Cache resolved IDs for Phase 8e reuse (avoids redundant doctl calls).
-      phase8dDashboardDropletId = dashboardDropletId
-      phase8dFirewallId = firewallId
-      phase8dDoctlEnv = doctlEnv
-    }
-
-    // Phase 8e: Post-deploy verification — public-denied probe + DO firewall post-state readback.
+    // Phase 8e: Post-deploy verification — public-denied probe.
     //
     // Gated on operatorEnabled && getOperatorVpcState(env) === 'enabled'.
     //
     // The deploy runner is NOT a VPC peer, so a live foreign-VPC-source probe is impossible.
     // Instead verify what the runner can actually check:
     //
-    //   1. PUBLIC-DENIED: gateway.fro.bot:9300 must be unreachable from the public internet.
-    //      The runner originates from the public internet, so this is a real check.
-    //      Attempt an HTTP fetch to https://<GATEWAY_HOST>:9300 — a connection error (refused/
-    //      timed-out) is the expected pass condition. Any HTTP response means the port is
-    //      reachable from the public internet and the deploy fails closed.
+    //   PUBLIC-DENIED: gateway.fro.bot:9300 must be unreachable from the public internet.
+    //   The runner originates from the public internet, so this is a real check.
+    //   Using raw TCP (not HTTPS fetch) avoids a false-negative: if port 9300 were open
+    //   without TLS, an HTTPS fetch would fail with a TLS error and be counted as pass.
+    //   A raw TCP connect is unambiguous: any successful connection means the port is open.
+    //   "Connection refused / timeout" = pass. "Connected" = fail.
     //
-    //   2. DO FIREWALL POST-STATE READBACK: after the firewall reconcile adds the inbound rule, read back the
-    //      firewall state and assert the 9300 rule's source is exactly the dashboard droplet-id
-    //      and that existing ports are still present (additive, not replaced).
-    //      The firewall reconcile phase does the add; this phase adds the post-state assertion.
-    //      Phase 8c already does the DOCKER-USER readback — no duplication here.
+    //   The DO Cloud Firewall is created in provisioning (provision-droplet.ts), not here.
+    //   Phase 8c already does the DOCKER-USER readback — no duplication here.
     //
-    //   3. The same-origin https://dashboard.fro.bot/operator/health 200 check belongs to the
-    //      dashboard deploy (it owns that route and runs after gateway). See
-    //      apps/dashboard/src/deploy.ts Phase 12b.
+    //   The same-origin https://dashboard.fro.bot/operator/health 200 check belongs to the
+    //   dashboard deploy (it owns that route and runs after gateway). See
+    //   apps/dashboard/src/deploy.ts Phase 12b.
     //
     // Fail closed: any check failure throws.
     if (operatorEnabled && getOperatorVpcState(env) === 'enabled') {
-      // 1. PUBLIC-DENIED: raw TCP connect to <GATEWAY_HOST>:9300 from the public internet.
-      //    The listener is published only on the gateway VPC IP, so public eth0:9300 must be
-      //    unreachable. "Connection refused / timeout" = pass. "Connected" = fail.
-      //
-      //    Using raw TCP (not HTTPS fetch) avoids a false-negative: if port 9300 were open
-      //    without TLS, an HTTPS fetch would fail with a TLS error and be counted as pass.
-      //    A raw TCP connect is unambiguous: any successful connection means the port is open.
       console.warn(
         `\u001B[1;34m==>\u001B[0m Verifying public ${host}:9300 is unreachable (TCP connect public-denied check)`,
       )
@@ -3032,49 +2826,12 @@ SCRIPT`
           `SECURITY: public ${host}:9300 is reachable from the public internet (TCP connect succeeded). ` +
             `The operator listener must be published only on the gateway VPC IP (${env.GATEWAY_VPC_IP ?? ''}), ` +
             `not on the public interface. ` +
-            `Check the DO Cloud Firewall and DOCKER-USER rules — the port must not be accessible from the public internet.`,
+            `Check the DO Cloud Firewall (created in provisioning) and DOCKER-USER rules — the port must not be accessible from the public internet.`,
         )
       }
       console.warn(
         `\u001B[1;32m✓\u001B[0m Public ${host}:9300 is unreachable (TCP connect refused/timed-out — expected)`,
       )
-
-      // 2. DO FIREWALL POST-STATE READBACK: verify the 9300 rule is present with the correct
-      //    dashboard droplet-id after the firewall add-rules step.
-      //    Reuse IDs resolved in Phase 8d — no redundant doctl calls.
-      if (phase8dFirewallId && phase8dDashboardDropletId && phase8dDoctlEnv) {
-        // Read back the firewall inbound rules and assert the 9300 rule is present with the
-        // correct dashboard droplet-id as source (per-rule parse — same logic as Phase 8d).
-        const {stdout: inboundRulesReadback} = await runCommandWithTimeout(
-          'Reading back DO Cloud Firewall inbound rules (post-state verification)',
-          ['doctl', 'compute', 'firewall', 'get', phase8dFirewallId, '--format', 'InboundRules', '--no-header'],
-          phase8dDoctlEnv,
-          spawnFn,
-          30_000,
-        )
-
-        // Per-rule parse: assert a SINGLE rule token contains BOTH the exact port field AND
-        // the dashboard droplet-id. Cross-rule substring matching is a bug (see Phase 8d comment).
-        const readbackRulePresent = inboundRulesReadback
-          .trim()
-          .split(/\s+/)
-          .some(
-            rule => /(?:^|,)ports:9300(?:,|$)/.test(rule) && rule.includes(`droplet_id:${phase8dDashboardDropletId}`),
-          )
-
-        if (!readbackRulePresent) {
-          throw new Error(
-            `DO Cloud Firewall post-state verification failed: no single inbound rule on firewall ${phase8dFirewallId} ` +
-              `contains both ports:9300 and source=droplet_id:${phase8dDashboardDropletId} (dashboard droplet). ` +
-              `The rule should have been added in Phase 8d. ` +
-              `Run 'doctl compute firewall get ${phase8dFirewallId} --format InboundRules' to inspect the current state.`,
-          )
-        }
-
-        console.warn(
-          `\u001B[1;32m✓\u001B[0m DO Cloud Firewall post-state verified: tcp/9300 rule present with source=droplet_id:${phase8dDashboardDropletId} on firewall ${phase8dFirewallId}`,
-        )
-      }
     }
 
     // Phase 9: Post-deploy probe — poll Discord slash command registration

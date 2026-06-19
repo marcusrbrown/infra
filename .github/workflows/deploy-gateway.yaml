@@ -77,8 +77,6 @@ on:
         required: false
       DASHBOARD_VPC_IP:
         required: false
-      DIGITALOCEAN_ACCESS_TOKEN:
-        required: false
 
 concurrency:
   group: deploy-gateway-${{ github.ref_name }}
@@ -188,11 +186,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install doctl
-        uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f # v2.5.2
-        with:
-          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-
       - name: Configure SSH known_hosts
         run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
 
@@ -234,6 +227,5 @@ jobs:
           GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS: ${{ secrets.GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS }}
           GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
           DASHBOARD_VPC_IP: ${{ secrets.DASHBOARD_VPC_IP }}
-          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           GATEWAY_IMAGE_DIGEST: ${{ needs.build-images.outputs.gateway_digest }}
           WORKSPACE_IMAGE_DIGEST: ${{ needs.build-images.outputs.workspace_digest }}

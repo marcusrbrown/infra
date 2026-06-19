@@ -12,9 +12,12 @@ that all four controls are in place and the path is healthy.
 
 - The gateway operator listener is enabled: `GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`,
   and `GATEWAY_OPERATOR_PUBLIC_ORIGIN` are set in the `gateway` GitHub Environment.
-- The VPC bridge is enabled: `GATEWAY_VPC_IP`, `DASHBOARD_VPC_IP`, and `DIGITALOCEAN_ACCESS_TOKEN`
-  are set in the `gateway` GitHub Environment; `GATEWAY_VPC_IP` is set in the `dashboard` GitHub
-  Environment.
+- The VPC bridge is enabled: `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` are set in the `gateway`
+  GitHub Environment; `GATEWAY_VPC_IP` is set in the `dashboard` GitHub Environment.
+- The `gateway-operator-fw` Cloud Firewall was created by provisioning (`bun run provision:gateway`
+  with `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` set). `DIGITALOCEAN_ACCESS_TOKEN` is a
+  provisioning-time concern (local `.env` only) — it is not required in the `gateway` GitHub
+  Environment for deploy.
 - SSH access to the gateway droplet via `GATEWAY_SSH_KEY` from the repo-root `.env`.
 - `doctl` authenticated locally (`doctl auth init`).
 
@@ -102,7 +105,8 @@ covers the reboot window.
 
 ### DigitalOcean Cloud Firewall
 
-Find the gateway droplet's firewall and verify the `:9300` inbound rule:
+The `gateway-operator-fw` firewall is created by provisioning (`bun run provision:gateway`), not by
+the deploy. Verify it is attached and correctly configured:
 
 ```sh
 # List firewalls attached to the gateway droplet
@@ -117,9 +121,10 @@ In the `InboundRules` output, verify a rule exists with:
 - Ports: `9300`
 - Sources: `droplet:<dashboard-droplet-id>` (the dashboard droplet-id, not a private IP)
 
-The rule must be additive — all other inbound rules (`:22`, `:80`, `:443`, announce) must remain
-present. A missing `:22` rule would indicate the firewall was replaced rather than additively
-reconciled — a critical defect.
+All base inbound rules (`:22`, `:80`, `:443`) must also be present — provisioning creates them
+alongside the 9300 rule. A missing `:22` rule indicates the firewall was replaced or corrupted —
+a critical defect. If the 9300 rule is missing, re-run `bun run provision:gateway` (idempotent:
+adds the missing rule without touching existing rules).
 
 ### VPC-scoped Docker port publish
 
@@ -143,8 +148,8 @@ The `gateway` service must show a `<GATEWAY_VPC_IP>:9300->9300` mapping (e.g.
 | `curl http://172.21.0.2:9300/operator/health` → non-200 | Operator listener not running | Check gateway daemon logs: `bunx @marcusrbrown/infra gateway logs gateway --tail 100` |
 | `curl http://gateway.fro.bot:9300` → 200 | VPC publish leaked to public interface | Immediate: redeploy the gateway to restore the VPC-scoped publish; verify the DOCKER-USER rule and DO firewall are in place |
 | DOCKER-USER rule missing or wrong | Rule was wiped (reboot or `compose up` without reapply) | Redeploy the gateway — the deploy reapplies the rule after `compose up` |
-| DO firewall `:9300` rule missing | Firewall reconcile failed or was manually removed | Redeploy the gateway; verify `DIGITALOCEAN_ACCESS_TOKEN` is set in the gateway env |
-| DO firewall `:22` rule missing | Firewall was replaced (not additively reconciled) | **Critical** — restore the existing firewall rules immediately; SSH access may be lost |
+| DO firewall `:9300` rule missing | Firewall rule was manually removed, or provisioning was not run with VPC vars set | Re-run `bun run provision:gateway` with `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` set (idempotent; adds the missing rule) |
+| DO firewall `:22` rule missing | Firewall was replaced or corrupted | **Critical** — restore the existing firewall rules immediately via `doctl compute firewall update`; SSH access may be lost |
 
 ---
 
@@ -159,11 +164,12 @@ If a bad iptables rule or firewall configuration locks out the dashboard from th
    ```sh
    doctl compute droplet-action power-cycle <gateway-droplet-id>
    ```
-3. **Redeploy the gateway** — the deploy reapplies the DOCKER-USER rule and reconciles the DO
-   firewall after `compose up`:
+3. **Redeploy the gateway** — the deploy reapplies the DOCKER-USER rule after `compose up`:
    ```sh
    bunx @marcusrbrown/infra gateway deploy
    ```
+   The DO Cloud Firewall is a provisioning artifact and is not touched by the deploy. If the
+   firewall rule is also missing, re-run `bun run provision:gateway` separately.
 4. **Verify** using the probes above before declaring the path healthy.
 
 If the DO Cloud Firewall is misconfigured and SSH access to the gateway is lost, use the

@@ -9,6 +9,7 @@ import {
   materializeIdentityFile,
   pinHostKeys,
   run,
+  runCapture,
   validateDoctl,
   waitForSsh,
 } from '@marcusrbrown/infra-shared/server/droplet-helpers'
@@ -132,6 +133,224 @@ export async function establishSshAccess(
 }
 
 // ---------------------------------------------------------------------------
+// DO Cloud Firewall setup (exported for testability)
+// ---------------------------------------------------------------------------
+
+/**
+ * Operator VPC state for the firewall setup gate.
+ * Mirrors the all-or-none semantics used in deploy.ts getOperatorVpcState.
+ */
+export type FirewallVpcState = 'enabled' | 'disabled' | 'misconfigured'
+
+/**
+ * Returns the VPC state for the firewall setup gate.
+ * - 'enabled':       both GATEWAY_VPC_IP and DASHBOARD_VPC_IP are set and non-empty.
+ * - 'disabled':      both are absent (unset or whitespace-only).
+ * - 'misconfigured': exactly one is set — all-or-none gate violated.
+ */
+export function getFirewallVpcState(env: Partial<Record<string, string>>): FirewallVpcState {
+  const hasGateway = Boolean(env.GATEWAY_VPC_IP?.trim())
+  const hasDashboard = Boolean(env.DASHBOARD_VPC_IP?.trim())
+  if (hasGateway && hasDashboard) return 'enabled'
+  if (!hasGateway && !hasDashboard) return 'disabled'
+  return 'misconfigured'
+}
+
+/**
+ * Checks whether a single inbound rule token contains BOTH the exact port field
+ * (ports:9300, not ports:93000) AND the dashboard droplet-id in the same token.
+ * Per-rule parse guards against cross-rule false positives.
+ */
+export function ruleHas9300FromDroplet(ruleToken: string, dashboardDropletId: string): boolean {
+  return /(?:^|,)ports:9300(?:,|$)/.test(ruleToken) && ruleToken.includes(`droplet_id:${dashboardDropletId}`)
+}
+
+export interface SetupFirewallDeps {
+  /** Injectable runCapture for testing. Defaults to the shared runCapture. */
+  runCaptureFn?: (cmd: string[]) => Promise<string>
+  /** Injectable run (fire-and-forget) for testing. Defaults to the shared run. */
+  runFn?: (label: string, cmd: string[]) => Promise<void>
+}
+
+/**
+ * Idempotently creates or updates the DO Cloud Firewall for the gateway operator port.
+ *
+ * Gate: only runs when both GATEWAY_VPC_IP and DASHBOARD_VPC_IP are set.
+ * If neither is set, skips silently. If exactly one is set, warns and skips (misconfiguration).
+ *
+ * Firewall name: 'gateway-operator-fw'.
+ *
+ * If no firewall is attached to the gateway droplet:
+ *   Creates a new firewall with base rules (22/80/443 inbound + 9300 from dashboard droplet-id)
+ *   and default-allow outbound, then attaches it to the gateway droplet.
+ *   CRITICAL: DO firewalls are default-deny. Creating without 22/80/443 inbound would lock out SSH.
+ *
+ * If a firewall is already attached:
+ *   Checks whether the 9300-from-dashboard rule is present (per-rule parse).
+ *   If missing, adds it additively (never removes/replaces existing rules).
+ *   If already present, no-op.
+ *
+ * Dashboard droplet must be provisioned first. If not found, warns and skips (does not fail provision).
+ */
+export async function setupOperatorFirewall(
+  gatewayDropletId: string,
+  env: Partial<Record<string, string>>,
+  deps: SetupFirewallDeps = {},
+): Promise<void> {
+  const vpcState = getFirewallVpcState(env)
+
+  if (vpcState === 'disabled') {
+    console.log('  (skipping DO Cloud Firewall setup — GATEWAY_VPC_IP and DASHBOARD_VPC_IP not set)')
+    return
+  }
+
+  if (vpcState === 'misconfigured') {
+    console.warn(
+      '\u001B[1;33m[warn]\u001B[0m DO Cloud Firewall setup skipped: exactly one of GATEWAY_VPC_IP / DASHBOARD_VPC_IP is set. ' +
+        'Set both or neither to enable the operator VPC bridge.',
+    )
+    return
+  }
+
+  console.log('\u001B[1;34m==>\u001B[0m Configuring DO Cloud Firewall for operator port (9300 from dashboard)')
+
+  const capture = deps.runCaptureFn ?? runCapture
+  const runCmd = deps.runFn ?? run
+
+  // Resolve the dashboard droplet ID (stable across rebuild).
+  let dashboardDropletId: string
+  try {
+    dashboardDropletId = await capture([
+      'doctl',
+      'compute',
+      'droplet',
+      'get',
+      'dashboard',
+      '--format',
+      'ID',
+      '--no-header',
+    ])
+  } catch {
+    dashboardDropletId = ''
+  }
+
+  if (!dashboardDropletId) {
+    console.warn(
+      '\u001B[1;33m[warn]\u001B[0m DO Cloud Firewall setup skipped: dashboard droplet not found. ' +
+        'Provision the dashboard droplet first, then re-run gateway provisioning.',
+    )
+    return
+  }
+
+  // Check whether a firewall is already attached to the gateway droplet.
+  let existingFirewallId: string
+  try {
+    const listOutput = await capture([
+      'doctl',
+      'compute',
+      'firewall',
+      'list-by-droplet',
+      gatewayDropletId,
+      '--format',
+      'ID',
+      '--no-header',
+    ])
+    existingFirewallId = listOutput.split('\n')[0]?.trim() ?? ''
+  } catch {
+    existingFirewallId = ''
+  }
+
+  if (!existingFirewallId) {
+    // No firewall attached — create one with base rules so the droplet is not locked out.
+    // DO firewalls are default-deny: creating without 22/80/443 inbound would break the gateway.
+    // Outbound: allow all tcp/udp/icmp so the gateway can reach Discord/S3/cliproxy.
+    const inboundRules = [
+      'protocol:tcp,ports:22,address:0.0.0.0/0',
+      'protocol:tcp,ports:22,address:::/0',
+      'protocol:tcp,ports:80,address:0.0.0.0/0',
+      'protocol:tcp,ports:80,address:::/0',
+      'protocol:tcp,ports:443,address:0.0.0.0/0',
+      'protocol:tcp,ports:443,address:::/0',
+      `protocol:tcp,ports:9300,droplet_id:${dashboardDropletId}`,
+    ].join(' ')
+    const outboundRules = [
+      'protocol:tcp,ports:all,address:0.0.0.0/0',
+      'protocol:tcp,ports:all,address:::/0',
+      'protocol:udp,ports:all,address:0.0.0.0/0',
+      'protocol:udp,ports:all,address:::/0',
+      'protocol:icmp,address:0.0.0.0/0',
+      'protocol:icmp,address:::/0',
+    ].join(' ')
+
+    await runCmd('Creating DO Cloud Firewall gateway-operator-fw with base rules + 9300 from dashboard', [
+      'doctl',
+      'compute',
+      'firewall',
+      'create',
+      '--name',
+      'gateway-operator-fw',
+      '--inbound-rules',
+      inboundRules,
+      '--outbound-rules',
+      outboundRules,
+      '--droplet-ids',
+      gatewayDropletId,
+    ])
+
+    console.log(
+      `\u001B[1;32m✓\u001B[0m DO Cloud Firewall created with base rules (22/80/443) + tcp/9300 from dashboard droplet ${dashboardDropletId}`,
+    )
+    return
+  }
+
+  // Firewall exists — check whether the 9300-from-dashboard rule is already present.
+  let inboundRulesRaw: string
+  try {
+    inboundRulesRaw = await capture([
+      'doctl',
+      'compute',
+      'firewall',
+      'get',
+      existingFirewallId,
+      '--format',
+      'InboundRules',
+      '--no-header',
+    ])
+  } catch {
+    inboundRulesRaw = ''
+  }
+
+  // Per-rule parse: split on whitespace, check each token individually.
+  // A rule token matches if it contains BOTH the exact port field AND the dashboard droplet-id.
+  const ruleAlreadyPresent = inboundRulesRaw
+    .trim()
+    .split(/\s+/)
+    .some(rule => ruleHas9300FromDroplet(rule, dashboardDropletId))
+
+  if (ruleAlreadyPresent) {
+    console.log(
+      `\u001B[1;32m✓\u001B[0m DO Cloud Firewall rule already present: tcp/9300 from dashboard droplet ${dashboardDropletId} on firewall ${existingFirewallId} (no-op)`,
+    )
+    return
+  }
+
+  // Add the 9300 rule additively — never remove or replace existing rules.
+  await runCmd('Adding DO Cloud Firewall inbound rule: tcp/9300 from dashboard droplet', [
+    'doctl',
+    'compute',
+    'firewall',
+    'add-rules',
+    existingFirewallId,
+    '--inbound-rules',
+    `protocol:tcp,ports:9300,droplet_id:${dashboardDropletId}`,
+  ])
+
+  console.log(
+    `\u001B[1;32m✓\u001B[0m DO Cloud Firewall rule added: tcp/9300 from dashboard droplet ${dashboardDropletId} on firewall ${existingFirewallId}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main orchestrator
 // ---------------------------------------------------------------------------
 
@@ -194,6 +413,19 @@ export async function main(): Promise<void> {
   await pinHostKeys(gatewayHost, dropletIp, knownHostsPath, {
     marker: `# gateway droplet (${dropletIp} / ${gatewayHost})`,
   })
+
+  // Resolve the gateway droplet ID for the firewall setup step.
+  const gatewayDropletId = await runCapture([
+    'doctl',
+    'compute',
+    'droplet',
+    'get',
+    DROPLET_NAME,
+    '--format',
+    'ID',
+    '--no-header',
+  ])
+  await setupOperatorFirewall(gatewayDropletId, process.env as Record<string, string>)
 
   printOperatorSetupMessage(dropletIp, gatewayHost)
 }

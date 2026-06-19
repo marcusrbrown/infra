@@ -70,7 +70,6 @@ export function getGatewayDeployEnv(): Record<string, string> {
     GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS: process.env.GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS ?? '',
     GATEWAY_VPC_IP: process.env.GATEWAY_VPC_IP ?? '',
     DASHBOARD_VPC_IP: process.env.DASHBOARD_VPC_IP ?? '',
-    DIGITALOCEAN_ACCESS_TOKEN: process.env.DIGITALOCEAN_ACCESS_TOKEN ?? '',
     GATEWAY_IMAGE_DIGEST: process.env.GATEWAY_IMAGE_DIGEST ?? '',
     WORKSPACE_IMAGE_DIGEST: process.env.WORKSPACE_IMAGE_DIGEST ?? '',
   }

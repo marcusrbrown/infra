@@ -302,6 +302,17 @@ reconcile command shape + idempotent no-op on rerun.
 **Verification:** Rule reconciled additively + idempotently against the existing firewall; existing ports
 preserved; token absence fails closed; disabled state emits nothing; `getDropletId` covered.
 
+> **Architecture change (post-planning):** The DO Cloud Firewall was moved OUT of the per-deploy
+> reconcile path and INTO provisioning (`provision-droplet.ts` → `setupOperatorFirewall()`). The
+> deploy-path firewall reconcile described in this unit was removed after deploy failures — no
+> existing firewall was present to reconcile, causing the deploy to fail closed. Provisioning now
+> creates `gateway-operator-fw` (base rules 22/80/443 + inbound tcp/9300 from dashboard droplet-id)
+> once, idempotently, when `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` are set. `DIGITALOCEAN_ACCESS_TOKEN`
+> is a provisioning-only concern (local `.env`); it is not required in the `gateway` GitHub
+> Environment for deploy. The three access-control layers remain: (1) VPC-IP-only Docker publish
+> [deploy], (2) DOCKER-USER iptables restriction [deploy, reapplied each run], (3) DO Cloud Firewall
+> inbound 9300 from dashboard droplet-id [provisioning, reboot-durable].
+
 - [ ] **Unit 4: Dashboard Caddy `/operator/*` route**
 
 **Goal:** `dashboard.fro.bot/operator/*` proxies to the gateway VPC IP, satisfying the daemon guard.

@@ -441,18 +441,33 @@ describe('per-app invariants', () => {
     expect(buildTs).toMatch(/const\s+EXPECTED_SHA256\s*=/)
   })
 
-  it('deploy-gateway.yaml installs doctl via digitalocean/action-doctl before the deploy step', async () => {
+  it('deploy-gateway.yaml does NOT install doctl (firewall is provisioning-only, not deploy-time)', async () => {
     const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')).text()
-    // The firewall reconcile in apps/gateway/src/deploy.ts shells out to `doctl`.
-    // doctl is not pre-installed on GitHub Actions runners, so the deploy job must
-    // install it explicitly. This test ensures the dependency cannot silently regress.
-    expect(text).toMatch(/uses:\s+digitalocean\/action-doctl@[a-f0-9]{40}/)
-    // The install step must appear before the deploy step in the file
-    const doctlIndex = text.indexOf('digitalocean/action-doctl@')
+    // The DO Cloud Firewall is created in provisioning (provision-droplet.ts), not in the deploy hot path.
+    // The deploy job must NOT install doctl — it no longer needs it.
+    expect(text).not.toMatch(/uses:\s+digitalocean\/action-doctl@[a-f0-9]{40}/)
+    expect(text).not.toContain('digitalocean/action-doctl')
+  })
+
+  it('deploy-gateway.yaml does NOT forward DIGITALOCEAN_ACCESS_TOKEN to the deploy step', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')).text()
+    // DIGITALOCEAN_ACCESS_TOKEN is only needed for provisioning, not for the deploy hot path.
+    // Verify it is not forwarded to the deploy step env block.
     const deployStepIndex = text.indexOf('name: Deploy gateway')
-    expect(doctlIndex).toBeGreaterThan(-1)
     expect(deployStepIndex).toBeGreaterThan(-1)
-    expect(doctlIndex).toBeLessThan(deployStepIndex)
+    const afterDeployStep = text.slice(deployStepIndex)
+    expect(afterDeployStep).not.toContain('DIGITALOCEAN_ACCESS_TOKEN')
+  })
+
+  it('deploy-gateway.yaml still forwards GATEWAY_VPC_IP and DASHBOARD_VPC_IP to the deploy step', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')).text()
+    // GATEWAY_VPC_IP and DASHBOARD_VPC_IP are still needed by deploy.ts for the compose VPC-IP
+    // publish and the DOCKER-USER iptables rule.
+    const deployStepIndex = text.indexOf('name: Deploy gateway')
+    expect(deployStepIndex).toBeGreaterThan(-1)
+    const afterDeployStep = text.slice(deployStepIndex)
+    expect(afterDeployStep).toContain('GATEWAY_VPC_IP')
+    expect(afterDeployStep).toContain('DASHBOARD_VPC_IP')
   })
 })
 
@@ -857,7 +872,7 @@ describe('CLI getGatewayDeployEnv: operator auth/config passthrough', () => {
     }
   })
 
-  it('getGatewayDeployEnv includes all three VPC bridge vars', async () => {
+  it('getGatewayDeployEnv includes GATEWAY_VPC_IP and DASHBOARD_VPC_IP (but NOT DIGITALOCEAN_ACCESS_TOKEN)', async () => {
     const {getGatewayDeployEnv} = await import('./commands/gateway/deploy')
     const origEnv = {...process.env}
     process.env.PATH = '/usr/bin'
@@ -865,9 +880,11 @@ describe('CLI getGatewayDeployEnv: operator auth/config passthrough', () => {
     process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'
     try {
       const env = getGatewayDeployEnv()
-      for (const secret of ['GATEWAY_VPC_IP', 'DASHBOARD_VPC_IP', 'DIGITALOCEAN_ACCESS_TOKEN'] as const) {
-        expect(env).toHaveProperty(secret)
-      }
+      // VPC IPs are still needed by deploy.ts for compose publish + DOCKER-USER rule
+      expect(env).toHaveProperty('GATEWAY_VPC_IP')
+      expect(env).toHaveProperty('DASHBOARD_VPC_IP')
+      // DIGITALOCEAN_ACCESS_TOKEN is provisioning-only — must NOT be in the deploy env
+      expect(env).not.toHaveProperty('DIGITALOCEAN_ACCESS_TOKEN')
     } finally {
       Object.assign(process.env, origEnv)
     }
@@ -1018,15 +1035,16 @@ describe('deploy-gateway.yaml: optional operator secret declarations (issue 1)',
   })
 })
 
-// ─── VPC bridge secrets: CI-vs-local parity (PR #603) ────────────────────────
+// ─── VPC bridge secrets: CI-vs-local parity ──────────────────────────────────
 //
-// GATEWAY_VPC_IP, DASHBOARD_VPC_IP, DIGITALOCEAN_ACCESS_TOKEN are optional
-// (all-or-none via getOperatorVpcState) but must be forwarded through CI so
-// the operator VPC bridge is not silently disabled when the secrets are set.
+// GATEWAY_VPC_IP and DASHBOARD_VPC_IP are optional (all-or-none via getOperatorVpcState)
+// but must be forwarded through CI so the operator VPC bridge is not silently disabled
+// when the secrets are set. DIGITALOCEAN_ACCESS_TOKEN is provisioning-only and must NOT
+// be forwarded to the deploy step.
 // These tests assert the end-to-end wiring without adding them to the required
 // validation preflight (they are opt-in, like the operator listener vars).
 
-const VPC_GATEWAY_SECRETS = ['GATEWAY_VPC_IP', 'DASHBOARD_VPC_IP', 'DIGITALOCEAN_ACCESS_TOKEN'] as const
+const VPC_GATEWAY_SECRETS = ['GATEWAY_VPC_IP', 'DASHBOARD_VPC_IP'] as const
 const VPC_DASHBOARD_SECRETS = ['GATEWAY_VPC_IP'] as const
 
 describe('deploy-gateway.yaml: VPC bridge secrets wired end-to-end', () => {

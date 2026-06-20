@@ -66,12 +66,6 @@ describe('dist/cli.js', () => {
   })
 })
 
-describe('dist/commands/vpn/peers.js', () => {
-  it('exists', () => {
-    expect(existsSync(join(distDir, 'commands', 'vpn', 'peers.js'))).toBe(true)
-  })
-})
-
 describe('known_hosts asset', () => {
   it('is present in dist/', () => {
     // Bun emits the asset with a content-hash suffix (e.g. known_hosts-<hash>.)

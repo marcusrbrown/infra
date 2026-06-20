@@ -19,10 +19,7 @@
   "author": "Marcus R. Brown <contact@marcusrbrown.com>",
   "type": "module",
   "exports": {
-    "./vpn/peers": {
-      "types": "./src/commands/vpn/peers.ts",
-      "default": "./dist/commands/vpn/peers.js"
-    }
+    "./vpn/peers": "./src/commands/vpn/peers.ts"
   },
   "bin": {
     "infra": "./dist/cli.js"

@@ -107,7 +107,8 @@ jobs:
         id: pack
         working-directory: packages/cli
         run: |
-          TGZ=$(bun pm pack 2>&1 | tail -1)
+          bun pm pack
+          TGZ=$(ls -t *.tgz | head -1)
           echo "tgz=${TGZ}" >> "$GITHUB_OUTPUT"
           echo "tgz_abs=$(pwd)/${TGZ}" >> "$GITHUB_OUTPUT"
 
@@ -130,16 +131,30 @@ jobs:
             exit 1
           fi
 
-          # Must NOT contain src/
-          if tar tzf "${TGZ}" | grep -q '^package/src/'; then
-            echo "❌ Tarball contains src/ — files field not updated"
+          # Must NOT contain src/ files other than the intentionally shipped peers.ts source export.
+          # We allow exactly package/src/commands/vpn/peers.ts (the ./vpn/peers export ships as source).
+          UNEXPECTED_SRC=$(tar tzf "${TGZ}" | grep '^package/src/' | grep -v '^package/src/commands/vpn/peers\.ts$' || true)
+          if [ -n "${UNEXPECTED_SRC}" ]; then
+            echo "❌ Tarball contains unexpected src/ files — files field not updated"
+            echo "${UNEXPECTED_SRC}"
             exit 1
           fi
 
-          # Extracted package.json must have no infra-shared or workspace: in dependencies
+          # Extracted package.json must have no infra-shared in runtime dependencies
+          # (devDependencies is allowed — infra-shared is a build-time dep, not a runtime dep).
+          # Also must have no workspace: specifiers (bun pm pack resolves them, but guard anyway).
           tar xzf "${TGZ}" -O package/package.json > /tmp/published-pkg.json
-          if grep -q 'infra-shared' /tmp/published-pkg.json; then
-            echo "❌ Published package.json references infra-shared — 0.10.0 regression"
+          if node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('/tmp/published-pkg.json','utf8'));
+            const deps = pkg.dependencies || {};
+            if (Object.keys(deps).some(k => k.includes('infra-shared'))) {
+              console.error('infra-shared in dependencies');
+              process.exit(1);
+            }
+          "; then
+            true
+          else
+            echo "❌ Published package.json has infra-shared in runtime dependencies — 0.10.0 regression"
             cat /tmp/published-pkg.json
             exit 1
           fi

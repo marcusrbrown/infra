@@ -56,19 +56,18 @@ export async function build(): Promise<void> {
   }
   mkdirSync(distDir, {recursive: true})
 
-  // 2. Run Bun.build with two entrypoints
-  logStep('Bundling CLI entrypoints')
+  // 2. Run Bun.build — only the CLI bin entrypoint.
+  // The ./vpn/peers export ships as raw source (src/commands/vpn/peers.ts),
+  // so it does not need a dist artifact.
+  logStep('Bundling CLI entrypoint')
   const result = await Bun.build({
-    entrypoints: [join(srcDir, 'cli.ts'), join(srcDir, 'commands', 'vpn', 'peers.ts')],
+    entrypoints: [join(srcDir, 'cli.ts')],
     outdir: distDir,
     target: 'bun',
     format: 'esm',
     external: [...EXTERNAL_DEPS],
-    // Bun preserves the relative structure under the common ancestor (src/).
-    // With entrypoints at src/cli.ts and src/commands/vpn/peers.ts, the
-    // common ancestor is src/, so outputs land at:
+    // With a single entrypoint at src/cli.ts, the output lands at:
     //   dist/cli.js
-    //   dist/commands/vpn/peers.js
     // The known_hosts file-asset is auto-copied to dist/ with a content-hash
     // suffix (e.g. known_hosts-<hash>.) and the path constant in the bundle
     // is rewritten to the dist-relative path.
@@ -83,15 +82,11 @@ export async function build(): Promise<void> {
 
   logSuccess(`Bundled ${result.outputs.length} output(s)`)
 
-  // 3. Verify expected outputs exist
+  // 3. Verify expected output exists
   const cliBin = join(distDir, 'cli.js')
-  const peersOut = join(distDir, 'commands', 'vpn', 'peers.js')
 
   if (!existsSync(cliBin)) {
     throw new Error(`Expected output missing: ${cliBin}`)
-  }
-  if (!existsSync(peersOut)) {
-    throw new Error(`Expected output missing: ${peersOut}`)
   }
 
   // 4. Shebang + exec bit

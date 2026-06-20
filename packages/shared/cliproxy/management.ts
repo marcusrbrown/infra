@@ -13,7 +13,7 @@ export interface OAuthModelAliasEntry {
 
 /**
  * The `oauth-model-alias` configuration object.
- * Keyed by provider; only `claude` is used today but the shape is extensible.
+ * Keyed by provider; only `claude` is supported today.
  */
 export interface OAuthModelAlias {
   claude: OAuthModelAliasEntry[]
@@ -123,8 +123,61 @@ function emptyAlias(): OAuthModelAlias {
 }
 
 /**
+ * Coerce a raw `fork` field value to boolean.
+ * Accepts: true, false, "true", "false".
+ * Returns undefined for any other value (signals rejection).
+ *
+ * The server read-back may return fork as a JSON string "true"/"false" instead
+ * of a boolean — this normalizes both representations.
+ */
+function coerceFork(value: unknown): boolean | undefined {
+  if (value === true || value === false) return value
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return undefined
+}
+
+/**
+ * Parse and validate an array of raw claude alias entries.
+ *
+ * - Accepts `fork` as boolean OR string "true"/"false" (server read-back may return strings).
+ * - Rejects entries with missing/empty name or alias, or unrecognized fork values.
+ * - Calls `onDrop(index)` for each rejected entry so callers can warn.
+ */
+export function parseClaudeEntries(raw: unknown, onDrop?: (index: number) => void): OAuthModelAliasEntry[] {
+  if (!Array.isArray(raw)) return []
+
+  const result: OAuthModelAliasEntry[] = []
+  for (const [i, entry] of raw.entries()) {
+    if (entry === null || typeof entry !== 'object') {
+      onDrop?.(i)
+      continue
+    }
+    const e = entry as Record<string, unknown>
+    const name = e.name
+    const alias = e.alias
+    const forkCoerced = coerceFork(e.fork)
+
+    if (
+      typeof name !== 'string' ||
+      name === '' ||
+      typeof alias !== 'string' ||
+      alias === '' ||
+      forkCoerced === undefined
+    ) {
+      onDrop?.(i)
+      continue
+    }
+
+    result.push({name, alias, fork: forkCoerced})
+  }
+  return result
+}
+
+/**
  * Read the `oauth-model-alias` block from a CLIProxyAPI config YAML file.
  * Returns an empty alias object when the key is absent or the file has no alias block.
+ * Warns via console.warn when entries are dropped due to malformed shape.
  */
 export function readOAuthModelAliasFromConfig(configPath: string): OAuthModelAlias {
   const raw = readFileSync(configPath, 'utf8')
@@ -146,16 +199,14 @@ export function readOAuthModelAliasFromConfig(configPath: string): OAuthModelAli
     return emptyAlias()
   }
 
-  const claude: OAuthModelAliasEntry[] = claudeEntries
-    .filter(
-      (entry): entry is {name: string; alias: string; fork: boolean} =>
-        entry !== null &&
-        typeof entry === 'object' &&
-        typeof (entry as Record<string, unknown>).name === 'string' &&
-        typeof (entry as Record<string, unknown>).alias === 'string' &&
-        typeof (entry as Record<string, unknown>).fork === 'boolean',
+  const dropped: number[] = []
+  const claude = parseClaudeEntries(claudeEntries, index => dropped.push(index))
+
+  if (dropped.length > 0) {
+    console.warn(
+      `\u001B[1;33m⚠\u001B[0m  oauth-model-alias: dropped ${dropped.length} malformed entr${dropped.length === 1 ? 'y' : 'ies'} at index ${dropped.join(', ')} in ${configPath} (missing/invalid name, alias, or fork field)`,
     )
-    .map(entry => ({name: entry.name, alias: entry.alias, fork: entry.fork}))
+  }
 
   return {claude}
 }
@@ -198,6 +249,7 @@ export async function applyOAuthModelAlias({
  * Read back the current `oauth-model-alias` from the CLIProxyAPI management API.
  * The GET response wraps the value as `{"oauth-model-alias": {...}}`.
  * Returns an empty alias when the field is null or absent.
+ * Tolerates `fork` returned as string "true"/"false" (server shape variance).
  */
 export async function readBackOAuthModelAlias({
   baseUrl,
@@ -246,16 +298,8 @@ export async function readBackOAuthModelAlias({
     return emptyAlias()
   }
 
-  const claude: OAuthModelAliasEntry[] = claudeEntries
-    .filter(
-      (entry): entry is {name: string; alias: string; fork: boolean} =>
-        entry !== null &&
-        typeof entry === 'object' &&
-        typeof (entry as Record<string, unknown>).name === 'string' &&
-        typeof (entry as Record<string, unknown>).alias === 'string' &&
-        typeof (entry as Record<string, unknown>).fork === 'boolean',
-    )
-    .map(entry => ({name: entry.name, alias: entry.alias, fork: entry.fork}))
+  // No onDrop warning here — server shape variance (string fork) is expected and normalized silently.
+  const claude = parseClaudeEntries(claudeEntries)
 
   return {claude}
 }

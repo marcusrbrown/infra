@@ -3,7 +3,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, mock, spyOn, test} from 'bun:test'
 
-import {applyOAuthModelAliasStep} from './deploy'
+import {applyOAuthModelAliasStep, preflightManagementKeyCheck} from './deploy'
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -73,6 +73,9 @@ function makeDeployEnv(overrides: Partial<{CLIPROXY_DOMAIN: string; CLIPROXY_MAN
     ...overrides,
   }
 }
+
+/** No-op sleep for tests — avoids real delays in retry logic. */
+const noopSleep = async (_ms: number): Promise<void> => {}
 
 /** Build a mock fetch that handles PUT and GET for oauth-model-alias. */
 function makeAliasFetch(
@@ -156,6 +159,55 @@ afterEach(() => {
   delete process.env.CLIPROXY_API_KEY
 })
 
+// ─── preflightManagementKeyCheck ──────────────────────────────────────────────
+
+describe('preflightManagementKeyCheck', () => {
+  test('throws early when key is empty and alias block is non-empty', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(configPath, ALIAS_YAML)
+
+    const env = makeDeployEnv({CLIPROXY_MANAGEMENT_KEY: ''})
+
+    await expect(preflightManagementKeyCheck(env, {config: configPath})).rejects.toThrow(
+      /oauth-model-alias block present.*CLIPROXY_MANAGEMENT_KEY is not set/,
+    )
+  })
+
+  test('early-throw message does not contain any key value', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(configPath, ALIAS_YAML)
+
+    const env = makeDeployEnv({CLIPROXY_MANAGEMENT_KEY: ''})
+
+    let errorMessage = ''
+    try {
+      await preflightManagementKeyCheck(env, {config: configPath})
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).toContain('CLIPROXY_MANAGEMENT_KEY')
+    // The key value itself (empty string) is not the concern here — but the key name is safe
+    expect(errorMessage).not.toContain('super-secret-key')
+  })
+
+  test('warns (does not throw) when key is empty and alias block is empty', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(configPath, EMPTY_ALIAS_YAML)
+
+    const env = makeDeployEnv({CLIPROXY_MANAGEMENT_KEY: ''})
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await expect(preflightManagementKeyCheck(env, {config: configPath})).resolves.toBeUndefined()
+      const warnCalls = warnSpy.mock.calls.map(call => call.join(' ')).join('\n')
+      expect(warnCalls).toMatch(/CLIPROXY_MANAGEMENT_KEY not set/)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+})
+
 // ─── applyOAuthModelAliasStep ─────────────────────────────────────────────────
 
 describe('applyOAuthModelAliasStep', () => {
@@ -168,7 +220,7 @@ describe('applyOAuthModelAliasStep', () => {
     const env = makeDeployEnv()
     const {fetchFn, requests} = makeAliasFetch()
 
-    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)).resolves.toBeUndefined()
+    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).resolves.toBeUndefined()
 
     const putReq = requests.find(r => r.method === 'PUT' && r.url.includes('/v0/management/oauth-model-alias'))
     expect(putReq).toBeDefined()
@@ -184,7 +236,7 @@ describe('applyOAuthModelAliasStep', () => {
     const env = makeDeployEnv()
     const {fetchFn, requests} = makeAliasFetch()
 
-    await applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)
+    await applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)
 
     const putReq = requests.find(r => r.method === 'PUT')
     expect(putReq?.body).toBeDefined()
@@ -233,7 +285,7 @@ describe('applyOAuthModelAliasStep', () => {
       return new Response('Not Found', {status: 404})
     }) as unknown as typeof globalThis.fetch
 
-    await applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)
+    await applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)
 
     expect(capturedHeaders?.get('x-management-key')).toBe('super-secret-key')
   })
@@ -249,7 +301,7 @@ describe('applyOAuthModelAliasStep', () => {
       async () => new Response('should not be called', {status: 200}),
     ) as unknown as typeof globalThis.fetch
 
-    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)).rejects.toThrow(
+    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).rejects.toThrow(
       /CLIPROXY_MANAGEMENT_KEY/,
     )
     expect(fetchFn).not.toHaveBeenCalled()
@@ -264,7 +316,7 @@ describe('applyOAuthModelAliasStep', () => {
 
     let errorMessage = ''
     try {
-      await applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)
+      await applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : String(error)
     }
@@ -276,7 +328,7 @@ describe('applyOAuthModelAliasStep', () => {
 
   // ── Error: read-back mismatch ────────────────────────────────────────────────
 
-  test('error: read-back set differs from desired → throws with diff message', async () => {
+  test('error: read-back set differs from desired → throws with diff message showing name/alias/fork', async () => {
     const configPath = join(tmpDir, 'config.yaml')
     writeFileSync(configPath, ALIAS_YAML)
 
@@ -290,7 +342,18 @@ describe('applyOAuthModelAliasStep', () => {
       },
     })
 
-    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)).rejects.toThrow(/read-back mismatch/)
+    let errorMessage = ''
+    try {
+      await applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(errorMessage).toMatch(/read-back mismatch/)
+    // Error must show full canonical key (name + alias + fork), not just alias
+    expect(errorMessage).toMatch(/name=/)
+    expect(errorMessage).toMatch(/alias=/)
+    expect(errorMessage).toMatch(/fork=/)
   })
 
   test('error: read-back mismatch error does not contain management key', async () => {
@@ -308,13 +371,124 @@ describe('applyOAuthModelAliasStep', () => {
 
     let errorMessage = ''
     try {
-      await applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)
+      await applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : String(error)
     }
 
     expect(errorMessage).toContain('read-back mismatch')
     expect(errorMessage).not.toContain('my-secret-mgmt-key')
+  })
+
+  // ── Retry: bounded read-back retry for hot-reload race (Fix 5) ──────────────
+
+  test('retry: first read-back returns stale/empty, second returns correct → succeeds', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(configPath, ALIAS_YAML)
+
+    const env = makeDeployEnv()
+    let getCallCount = 0
+
+    const fetchFn = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url
+      const method = init?.method ?? 'GET'
+
+      if (urlStr.includes('/v0/management/oauth-model-alias')) {
+        if (method === 'PUT') return new Response(JSON.stringify({status: 'ok'}), {status: 200})
+        if (method === 'GET') {
+          getCallCount++
+          if (getCallCount === 1) {
+            // First read-back: stale/empty
+            return new Response(JSON.stringify({'oauth-model-alias': {claude: []}}), {status: 200})
+          }
+          // Second read-back: correct
+          return new Response(
+            JSON.stringify({
+              'oauth-model-alias': {
+                claude: [
+                  {name: 'claude-3-5-haiku-20241022', alias: 'claude-3-5-haiku-latest', fork: true},
+                  {name: 'claude-haiku-4-5-20251001', alias: 'claude-haiku-4-5', fork: true},
+                  {name: 'claude-opus-4-20250514', alias: 'claude-opus-4-0', fork: true},
+                  {name: 'claude-opus-4-1-20250805', alias: 'claude-opus-4-1', fork: true},
+                  {name: 'claude-opus-4-5-20251101', alias: 'claude-opus-4-5', fork: true},
+                  {name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-0', fork: true},
+                  {name: 'claude-sonnet-4-5-20250929', alias: 'claude-sonnet-4-5', fork: true},
+                ],
+              },
+            }),
+            {status: 200},
+          )
+        }
+      }
+      return new Response('Not Found', {status: 404})
+    }) as unknown as typeof globalThis.fetch
+
+    // Should succeed after retry — no throw
+    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).resolves.toBeUndefined()
+    // Must have retried (2 GET calls)
+    expect(getCallCount).toBe(2)
+  })
+
+  test('retry: persistent mismatch after all 3 attempts → throws diff error', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(configPath, ALIAS_YAML)
+
+    const env = makeDeployEnv()
+    let getCallCount = 0
+
+    const fetchFn = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url
+      const method = init?.method ?? 'GET'
+
+      if (urlStr.includes('/v0/management/oauth-model-alias')) {
+        if (method === 'PUT') return new Response(JSON.stringify({status: 'ok'}), {status: 200})
+        if (method === 'GET') {
+          getCallCount++
+          // Always return stale/wrong data
+          return new Response(
+            JSON.stringify({
+              'oauth-model-alias': {
+                claude: [{name: 'claude-sonnet-4-5-20250929', alias: 'claude-sonnet-4-5', fork: true}],
+              },
+            }),
+            {status: 200},
+          )
+        }
+      }
+      return new Response('Not Found', {status: 404})
+    }) as unknown as typeof globalThis.fetch
+
+    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).rejects.toThrow(
+      /read-back mismatch/,
+    )
+    // Must have tried all 3 attempts
+    expect(getCallCount).toBe(3)
+  })
+
+  test('retry: HTTP error from read-back propagates immediately (no retry on HTTP error)', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(configPath, ALIAS_YAML)
+
+    const env = makeDeployEnv()
+    let getCallCount = 0
+
+    const fetchFn = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url
+      const method = init?.method ?? 'GET'
+
+      if (urlStr.includes('/v0/management/oauth-model-alias')) {
+        if (method === 'PUT') return new Response(JSON.stringify({status: 'ok'}), {status: 200})
+        if (method === 'GET') {
+          getCallCount++
+          return new Response('Internal Server Error', {status: 500})
+        }
+      }
+      return new Response('Not Found', {status: 404})
+    }) as unknown as typeof globalThis.fetch
+
+    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).rejects.toThrow(/HTTP 500/)
+    // HTTP error should propagate immediately — only 1 GET attempt
+    expect(getCallCount).toBe(1)
   })
 
   // ── Edge: empty/absent alias block ──────────────────────────────────────────
@@ -328,7 +502,7 @@ describe('applyOAuthModelAliasStep', () => {
       async () => new Response('should not be called', {status: 200}),
     ) as unknown as typeof globalThis.fetch
 
-    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)).resolves.toBeUndefined()
+    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).resolves.toBeUndefined()
     expect(fetchFn).not.toHaveBeenCalled()
   })
 
@@ -340,13 +514,13 @@ describe('applyOAuthModelAliasStep', () => {
     const fetchFn = mock(async () => new Response('', {status: 200})) as unknown as typeof globalThis.fetch
 
     // Should not throw even though key is empty — nothing to apply
-    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)).resolves.toBeUndefined()
+    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).resolves.toBeUndefined()
     expect(fetchFn).not.toHaveBeenCalled()
   })
 
   // ── Edge: fork verification ──────────────────────────────────────────────────
 
-  test('fork verification: with CLIPROXY_API_KEY set and /v1/models missing an alias → warns, does not throw', async () => {
+  test('fork verification: with CLIPROXY_API_KEY set and /v1/models missing an alias → warns with /v1/models context, does not throw', async () => {
     const configPath = join(tmpDir, 'config.yaml')
     writeFileSync(configPath, ALIAS_YAML)
 
@@ -367,11 +541,10 @@ describe('applyOAuthModelAliasStep', () => {
 
     try {
       // Should NOT throw despite missing models
-      await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)).resolves.toBeUndefined()
-      // Should have warned about missing IDs
-      expect(warnSpy).toHaveBeenCalled()
+      await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).resolves.toBeUndefined()
+      // Should have warned about missing IDs — assert message content
       const warnArgs = warnSpy.mock.calls.map(call => call.join(' ')).join('\n')
-      expect(warnArgs).toContain('Fork verification')
+      expect(warnArgs).toMatch(/Fork verification.*missing expected IDs/)
     } finally {
       warnSpy.mockRestore()
     }
@@ -387,14 +560,14 @@ describe('applyOAuthModelAliasStep', () => {
     const env = makeDeployEnv()
     const {fetchFn, requests} = makeAliasFetch()
 
-    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)).resolves.toBeUndefined()
+    await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).resolves.toBeUndefined()
 
     // /v1/models should NOT have been called
     const modelsReq = requests.find(r => r.url.includes('/v1/models'))
     expect(modelsReq).toBeUndefined()
   })
 
-  test('fork verification: /v1/models HTTP error → warns, does not throw', async () => {
+  test('fork verification: /v1/models HTTP error → warns with HTTP status, does not throw', async () => {
     const configPath = join(tmpDir, 'config.yaml')
     writeFileSync(configPath, ALIAS_YAML)
 
@@ -406,14 +579,16 @@ describe('applyOAuthModelAliasStep', () => {
     const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
 
     try {
-      await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)).resolves.toBeUndefined()
-      expect(warnSpy).toHaveBeenCalled()
+      await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).resolves.toBeUndefined()
+      // Assert warn message content includes HTTP status
+      const warnArgs = warnSpy.mock.calls.map(call => call.join(' ')).join('\n')
+      expect(warnArgs).toMatch(/Fork verification.*HTTP 401/)
     } finally {
       warnSpy.mockRestore()
     }
   })
 
-  test('fork verification: /v1/models network error → warns, does not throw', async () => {
+  test('fork verification: /v1/models network error → warns with error message, does not throw', async () => {
     const configPath = join(tmpDir, 'config.yaml')
     writeFileSync(configPath, ALIAS_YAML)
 
@@ -454,8 +629,10 @@ describe('applyOAuthModelAliasStep', () => {
     const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
 
     try {
-      await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn)).resolves.toBeUndefined()
-      expect(warnSpy).toHaveBeenCalled()
+      await expect(applyOAuthModelAliasStep(env, {config: configPath}, fetchFn, noopSleep)).resolves.toBeUndefined()
+      // Assert warn message content includes the error text
+      const warnArgs = warnSpy.mock.calls.map(call => call.join(' ')).join('\n')
+      expect(warnArgs).toMatch(/Fork verification.*probe failed.*connection refused/)
     } finally {
       warnSpy.mockRestore()
     }

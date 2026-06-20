@@ -1,11 +1,12 @@
 import {mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {afterEach, beforeEach, describe, expect, mock, test} from 'bun:test'
+import {afterEach, beforeEach, describe, expect, mock, spyOn, test} from 'bun:test'
 
 import {
   applyOAuthModelAlias,
   managementHeaders,
+  parseClaudeEntries,
   parseManagementKeyList,
   readBackOAuthModelAlias,
   readOAuthModelAliasFromConfig,
@@ -164,6 +165,98 @@ describe('parseManagementKeyList', () => {
   })
 })
 
+// ─── parseClaudeEntries ───────────────────────────────────────────────────────
+
+describe('parseClaudeEntries', () => {
+  test('returns [] for non-array input', () => {
+    expect(parseClaudeEntries(null)).toEqual([])
+    expect(parseClaudeEntries('string')).toEqual([])
+    expect(parseClaudeEntries(42)).toEqual([])
+    expect(parseClaudeEntries({})).toEqual([])
+  })
+
+  test('parses valid entries with boolean fork', () => {
+    const raw = [
+      {name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-0', fork: true},
+      {name: 'claude-opus-4-20250514', alias: 'claude-opus-4-0', fork: false},
+    ]
+    expect(parseClaudeEntries(raw)).toEqual(raw)
+  })
+
+  test('normalizes fork string "true" to boolean true', () => {
+    const raw = [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-0', fork: 'true'}]
+    const result = parseClaudeEntries(raw)
+    expect(result).toHaveLength(1)
+    const entry = result[0]
+    if (!entry) throw new Error('Expected entry at index 0')
+    expect(entry.fork).toBe(true)
+    expect(typeof entry.fork).toBe('boolean')
+  })
+
+  test('normalizes fork string "false" to boolean false', () => {
+    const raw = [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-0', fork: 'false'}]
+    const result = parseClaudeEntries(raw)
+    expect(result).toHaveLength(1)
+    const entry = result[0]
+    if (!entry) throw new Error('Expected entry at index 0')
+    expect(entry.fork).toBe(false)
+    expect(typeof entry.fork).toBe('boolean')
+  })
+
+  test('drops entries with missing name', () => {
+    const dropped: number[] = []
+    const raw = [{alias: 'claude-sonnet-4-0', fork: true}]
+    const result = parseClaudeEntries(raw, i => dropped.push(i))
+    expect(result).toHaveLength(0)
+    expect(dropped).toEqual([0])
+  })
+
+  test('drops entries with empty name', () => {
+    const dropped: number[] = []
+    const raw = [{name: '', alias: 'claude-sonnet-4-0', fork: true}]
+    const result = parseClaudeEntries(raw, i => dropped.push(i))
+    expect(result).toHaveLength(0)
+    expect(dropped).toEqual([0])
+  })
+
+  test('drops entries with missing alias', () => {
+    const dropped: number[] = []
+    const raw = [{name: 'claude-sonnet-4-20250514', fork: true}]
+    const result = parseClaudeEntries(raw, i => dropped.push(i))
+    expect(result).toHaveLength(0)
+    expect(dropped).toEqual([0])
+  })
+
+  test('drops entries with unrecognized fork value', () => {
+    const dropped: number[] = []
+    const raw = [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-0', fork: 1}]
+    const result = parseClaudeEntries(raw, i => dropped.push(i))
+    expect(result).toHaveLength(0)
+    expect(dropped).toEqual([0])
+  })
+
+  test('drops null/non-object entries', () => {
+    const dropped: number[] = []
+    const raw = [null, 'string', 42]
+    const result = parseClaudeEntries(raw, i => dropped.push(i))
+    expect(result).toHaveLength(0)
+    expect(dropped).toEqual([0, 1, 2])
+  })
+
+  test('calls onDrop with correct indices for mixed valid/invalid', () => {
+    const dropped: number[] = []
+    const raw = [
+      {name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-0', fork: true}, // valid [0]
+      {name: '', alias: 'bad', fork: true}, // invalid [1]
+      {name: 'claude-opus-4-20250514', alias: 'claude-opus-4-0', fork: false}, // valid [2]
+      {alias: 'no-name', fork: true}, // invalid [3]
+    ]
+    const result = parseClaudeEntries(raw, i => dropped.push(i))
+    expect(result).toHaveLength(2)
+    expect(dropped).toEqual([1, 3])
+  })
+})
+
 // ─── readOAuthModelAliasFromConfig ────────────────────────────────────────────
 
 describe('readOAuthModelAliasFromConfig', () => {
@@ -177,41 +270,42 @@ describe('readOAuthModelAliasFromConfig', () => {
     rmSync(tmpDir, {recursive: true, force: true})
   })
 
-  test('parses a config with the 7-entry claude block', () => {
+  test('parses a config with the 7-entry claude block (name=DATED upstream, alias=SHORT client)', () => {
     const configPath = join(tmpDir, 'config.yaml')
     writeFileSync(
       configPath,
       `
 oauth-model-alias:
   claude:
-    - name: claude-opus-4-5
-      alias: claude-opus-4-20250514
+    - name: claude-opus-4-20250514
+      alias: claude-opus-4-5
       fork: true
-    - name: claude-sonnet-4-5
-      alias: claude-sonnet-4-20250514
+    - name: claude-sonnet-4-20250514
+      alias: claude-sonnet-4-5
       fork: true
-    - name: claude-haiku-4-5
-      alias: claude-haiku-4-20250514
+    - name: claude-haiku-4-20250514
+      alias: claude-haiku-4-5
       fork: true
-    - name: claude-sonnet-4-6
-      alias: claude-sonnet-4-20250514
+    - name: claude-sonnet-4-6-20250514
+      alias: claude-sonnet-4-6
       fork: true
-    - name: claude-opus-4
-      alias: claude-opus-4-20250514
+    - name: claude-opus-4-20250514
+      alias: claude-opus-4
       fork: true
-    - name: claude-sonnet-4
-      alias: claude-sonnet-4-20250514
+    - name: claude-sonnet-4-20250514
+      alias: claude-sonnet-4
       fork: true
-    - name: claude-haiku-3-5
-      alias: claude-haiku-3-5-20241022
+    - name: claude-haiku-3-5-20241022
+      alias: claude-haiku-3-5
       fork: true
 `.trim(),
     )
 
     const result = readOAuthModelAliasFromConfig(configPath)
     expect(result.claude).toHaveLength(7)
-    expect(result.claude[0]).toEqual({name: 'claude-opus-4-5', alias: 'claude-opus-4-20250514', fork: true})
-    expect(result.claude[6]).toEqual({name: 'claude-haiku-3-5', alias: 'claude-haiku-3-5-20241022', fork: true})
+    // name = dated upstream id, alias = short client-facing id
+    expect(result.claude[0]).toEqual({name: 'claude-opus-4-20250514', alias: 'claude-opus-4-5', fork: true})
+    expect(result.claude[6]).toEqual({name: 'claude-haiku-3-5-20241022', alias: 'claude-haiku-3-5', fork: true})
   })
 
   test('returns empty alias object when oauth-model-alias key is absent', () => {
@@ -235,6 +329,63 @@ debug: false
     const result = readOAuthModelAliasFromConfig(configPath)
     expect(result.claude).toEqual([])
   })
+
+  test('drops malformed entry (frok typo / missing fork) and emits console.warn', () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(
+      configPath,
+      `
+oauth-model-alias:
+  claude:
+    - name: claude-sonnet-4-20250514
+      alias: claude-sonnet-4-0
+      fork: true
+    - name: claude-opus-4-20250514
+      alias: claude-opus-4-0
+      frok: true
+`.trim(),
+    )
+
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const result = readOAuthModelAliasFromConfig(configPath)
+      // Only the valid entry survives
+      expect(result.claude).toHaveLength(1)
+      expect(result.claude[0]).toEqual({name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-0', fork: true})
+      // A warning must have been emitted about the dropped entry
+      const warnCalls = warnSpy.mock.calls.map(call => call.join(' ')).join('\n')
+      expect(warnCalls).toMatch(/dropped 1 malformed/)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  test('returns empty when oauth-model-alias is a non-object (string)', () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(configPath, 'oauth-model-alias: "not-an-object"\n')
+    const result = readOAuthModelAliasFromConfig(configPath)
+    expect(result.claude).toEqual([])
+  })
+
+  test('returns empty when oauth-model-alias is a boolean', () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(configPath, 'oauth-model-alias: true\n')
+    const result = readOAuthModelAliasFromConfig(configPath)
+    expect(result.claude).toEqual([])
+  })
+
+  test('returns empty when claude is not an array', () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    writeFileSync(
+      configPath,
+      `
+oauth-model-alias:
+  claude: "not-an-array"
+`.trim(),
+    )
+    const result = readOAuthModelAliasFromConfig(configPath)
+    expect(result.claude).toEqual([])
+  })
 })
 
 // ─── applyOAuthModelAlias ─────────────────────────────────────────────────────
@@ -245,8 +396,9 @@ describe('applyOAuthModelAlias', () => {
 
   const sampleAlias = {
     claude: [
-      {name: 'claude-sonnet-4-5', alias: 'claude-sonnet-4-20250514', fork: true},
-      {name: 'claude-opus-4-5', alias: 'claude-opus-4-20250514', fork: true},
+      // name = dated upstream id, alias = short client-facing id
+      {name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: true},
+      {name: 'claude-opus-4-20250514', alias: 'claude-opus-4-5', fork: true},
     ],
   }
 
@@ -361,7 +513,8 @@ describe('readBackOAuthModelAlias', () => {
   test('returns parsed alias from GET response', async () => {
     const responsePayload = {
       'oauth-model-alias': {
-        claude: [{name: 'claude-sonnet-4-5', alias: 'claude-sonnet-4-20250514', fork: true}],
+        // name = dated upstream id, alias = short client-facing id
+        claude: [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: true}],
       },
     }
     const mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(responsePayload), {status: 200})))
@@ -372,7 +525,7 @@ describe('readBackOAuthModelAlias', () => {
       fetch: mockFetch as unknown as typeof fetch,
     })
     expect(result.claude).toHaveLength(1)
-    expect(result.claude[0]).toEqual({name: 'claude-sonnet-4-5', alias: 'claude-sonnet-4-20250514', fork: true})
+    expect(result.claude[0]).toEqual({name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: true})
   })
 
   test('returns empty alias when oauth-model-alias field is null', async () => {
@@ -409,13 +562,80 @@ describe('readBackOAuthModelAlias', () => {
     await readBackOAuthModelAlias({baseUrl: BASE_URL, key: MGMT_KEY, fetch: mockFetch as unknown as typeof fetch})
     expect(capturedUrl).toBe(`${BASE_URL}/v0/management/oauth-model-alias`)
   })
+
+  test('throws on non-ok response (500)', async () => {
+    const mockFetch = mock(() => Promise.resolve(new Response('Internal Server Error', {status: 500})))
+
+    await expect(
+      readBackOAuthModelAlias({
+        baseUrl: BASE_URL,
+        key: MGMT_KEY,
+        fetch: mockFetch as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(/GET .*oauth-model-alias failed with HTTP 500/)
+  })
+
+  test('throws on malformed JSON response', async () => {
+    const mockFetch = mock(() =>
+      Promise.resolve(new Response('not-valid-json{{{', {status: 200, headers: {'content-type': 'application/json'}})),
+    )
+
+    await expect(
+      readBackOAuthModelAlias({
+        baseUrl: BASE_URL,
+        key: MGMT_KEY,
+        fetch: mockFetch as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(/returned malformed JSON/)
+  })
+
+  test('normalizes fork string "true" from server to boolean true', async () => {
+    const responsePayload = {
+      'oauth-model-alias': {
+        // Server returns fork as string — must be normalized to boolean
+        claude: [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: 'true'}],
+      },
+    }
+    const mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(responsePayload), {status: 200})))
+
+    const result = await readBackOAuthModelAlias({
+      baseUrl: BASE_URL,
+      key: MGMT_KEY,
+      fetch: mockFetch as unknown as typeof fetch,
+    })
+    expect(result.claude).toHaveLength(1)
+    const entry = result.claude[0]
+    if (!entry) throw new Error('Expected entry at index 0')
+    expect(entry.fork).toBe(true)
+    expect(typeof entry.fork).toBe('boolean')
+  })
+
+  test('string fork "true" from server matches boolean fork true in setEqualOAuthModelAlias', async () => {
+    const desired = {
+      claude: [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: true}],
+    }
+    const responsePayload = {
+      'oauth-model-alias': {
+        claude: [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: 'true'}],
+      },
+    }
+    const mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify(responsePayload), {status: 200})))
+
+    const actual = await readBackOAuthModelAlias({
+      baseUrl: BASE_URL,
+      key: MGMT_KEY,
+      fetch: mockFetch as unknown as typeof fetch,
+    })
+    // After normalization, set equality must hold
+    expect(setEqualOAuthModelAlias(desired, actual)).toBe(true)
+  })
 })
 
 // ─── setEqualOAuthModelAlias ──────────────────────────────────────────────────
 
 describe('setEqualOAuthModelAlias', () => {
-  const entry1 = {name: 'claude-sonnet-4-5', alias: 'claude-sonnet-4-20250514', fork: true}
-  const entry2 = {name: 'claude-opus-4-5', alias: 'claude-opus-4-20250514', fork: true}
+  const entry1 = {name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: true}
+  const entry2 = {name: 'claude-opus-4-20250514', alias: 'claude-opus-4-5', fork: true}
 
   test('returns true for identical sets', () => {
     const a = {claude: [entry1, entry2]}
@@ -436,20 +656,20 @@ describe('setEqualOAuthModelAlias', () => {
   })
 
   test('returns false when name differs', () => {
-    const a = {claude: [{name: 'claude-sonnet-4-5', alias: 'claude-sonnet-4-20250514', fork: true}]}
-    const b = {claude: [{name: 'claude-sonnet-4-6', alias: 'claude-sonnet-4-20250514', fork: true}]}
+    const a = {claude: [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: true}]}
+    const b = {claude: [{name: 'claude-sonnet-4-6-20250514', alias: 'claude-sonnet-4-5', fork: true}]}
     expect(setEqualOAuthModelAlias(a, b)).toBe(false)
   })
 
   test('returns false when alias differs', () => {
-    const a = {claude: [{name: 'claude-sonnet-4-5', alias: 'claude-sonnet-4-20250514', fork: true}]}
-    const b = {claude: [{name: 'claude-sonnet-4-5', alias: 'claude-sonnet-4-20250999', fork: true}]}
+    const a = {claude: [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: true}]}
+    const b = {claude: [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-999', fork: true}]}
     expect(setEqualOAuthModelAlias(a, b)).toBe(false)
   })
 
   test('returns false when fork differs', () => {
-    const a = {claude: [{name: 'claude-sonnet-4-5', alias: 'claude-sonnet-4-20250514', fork: true}]}
-    const b = {claude: [{name: 'claude-sonnet-4-5', alias: 'claude-sonnet-4-20250514', fork: false}]}
+    const a = {claude: [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: true}]}
+    const b = {claude: [{name: 'claude-sonnet-4-20250514', alias: 'claude-sonnet-4-5', fork: false}]}
     expect(setEqualOAuthModelAlias(a, b)).toBe(false)
   })
 

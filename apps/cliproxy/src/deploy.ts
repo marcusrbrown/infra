@@ -140,7 +140,9 @@ async function healthCheck(env: DeployEnv): Promise<void> {
     headers.set('x-management-key', env.CLIPROXY_MANAGEMENT_KEY)
   }
 
-  const response = await fetch(url, {headers})
+  // healthCheck runs after compose-up (irreversible),
+  // give slow startup 30s room while still bounding the wait.
+  const response = await fetch(url, {headers, signal: AbortSignal.timeout(30_000)})
 
   if (!response.ok) {
     const body = await response.text()
@@ -150,11 +152,19 @@ async function healthCheck(env: DeployEnv): Promise<void> {
   console.warn(`\u001B[1;32m✓\u001B[0m Health check passed: ${url}`)
 }
 
-async function preflightManagementKeyCheck(env: DeployEnv): Promise<void> {
+export async function preflightManagementKeyCheck(env: DeployEnv, files: {config: string}): Promise<void> {
   const key = env.CLIPROXY_MANAGEMENT_KEY
   const host = env.CLIPROXY_DOMAIN
 
   if (!key) {
+    // If the alias block is non-empty, fail early BEFORE compose-up rather
+    // than wasting ~90s and failing mid-deploy in applyOAuthModelAliasStep.
+    const desired = readOAuthModelAliasFromConfig(files.config)
+    if (desired.claude.length > 0) {
+      throw new Error(
+        'oauth-model-alias block present in config.yaml but CLIPROXY_MANAGEMENT_KEY is not set — aliases cannot be applied. Set CLIPROXY_MANAGEMENT_KEY or remove the block.',
+      )
+    }
     console.warn('\u001B[1;33m⚠\u001B[0m  CLIPROXY_MANAGEMENT_KEY not set — skipping pre-deploy validation')
     return
   }
@@ -190,6 +200,11 @@ async function preflightManagementKeyCheck(env: DeployEnv): Promise<void> {
   }
 }
 
+/** Sleep helper — injectable in tests to avoid real delays. */
+async function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 /**
  * Apply the `oauth-model-alias` block from the tracked config to the live proxy
  * via the management API. Runs after `docker compose up -d --wait` (the management
@@ -197,13 +212,14 @@ async function preflightManagementKeyCheck(env: DeployEnv): Promise<void> {
  *
  * - Empty alias block → skip (nothing to apply).
  * - Non-empty block + missing management key → hard-fail (operator intent is clear).
- * - PUT → read-back → set-equality check → hard-fail on mismatch.
+ * - PUT → read-back (with bounded retry for hot-reload race) → set-equality check → hard-fail on mismatch.
  * - Fork verification via /v1/models is best-effort: warns on mismatch, never throws.
  */
 export async function applyOAuthModelAliasStep(
   env: DeployEnv,
   files: {config: string},
   fetchImpl: typeof globalThis.fetch,
+  sleepFn: (ms: number) => Promise<void> = sleep,
 ): Promise<void> {
   const desired = readOAuthModelAliasFromConfig(files.config)
 
@@ -224,15 +240,37 @@ export async function applyOAuthModelAliasStep(
   console.warn(`\u001B[1;34m==>\u001B[0m Applying ${desired.claude.length} oauth-model-alias entries`)
   await applyOAuthModelAlias({baseUrl, key, body: desired, fetch: fetchImpl})
 
-  const actual = await readBackOAuthModelAlias({baseUrl, key, fetch: fetchImpl})
-  if (!setEqualOAuthModelAlias(desired, actual)) {
-    const desiredNames = desired.claude.map(e => e.alias).join(', ')
-    const actualNames = actual.claude.map(e => e.alias).join(', ')
-    throw new Error(
+  // Bounded retry for hot-reload race — daemon may reload config async after PUT.
+  // Retry up to 3 times on mismatch only; HTTP errors from readback propagate immediately.
+  const MAX_ATTEMPTS = 3
+  const BACKOFFS = [0, 500, 1000] // ms before each attempt (0 = immediate first try)
+  let lastMismatchError: Error | null = null
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const backoff = BACKOFFS[attempt] ?? 0
+    if (backoff > 0) {
+      await sleepFn(backoff)
+    }
+
+    const actual = await readBackOAuthModelAlias({baseUrl, key, fetch: fetchImpl})
+    if (setEqualOAuthModelAlias(desired, actual)) {
+      lastMismatchError = null
+      break
+    }
+
+    // Show full canonical key per entry (name + alias + fork) so mismatches
+    // where only name or fork differs are visible, not just alias.
+    const desiredLines = desired.claude.map(e => `    name=${e.name} alias=${e.alias} fork=${e.fork}`).join('\n')
+    const actualLines = actual.claude.map(e => `    name=${e.name} alias=${e.alias} fork=${e.fork}`).join('\n')
+    lastMismatchError = new Error(
       `oauth-model-alias read-back mismatch after PUT.\n` +
-        `  desired (${desired.claude.length} entries): ${desiredNames}\n` +
-        `  actual  (${actual.claude.length} entries): ${actualNames}`,
+        `  desired (${desired.claude.length} entries):\n${desiredLines}\n` +
+        `  actual  (${actual.claude.length} entries):\n${actualLines}`,
     )
+  }
+
+  if (lastMismatchError) {
+    throw lastMismatchError
   }
 
   // Fork verification: best-effort only — requires a downstream api-key, not the management key.
@@ -299,8 +337,9 @@ async function deploy(opts: {fetch?: typeof globalThis.fetch} = {}): Promise<voi
 
   await runCommand('Creating remote directories', sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`), env)
 
-  // Validate management key before uploading files or restarting containers
-  await preflightManagementKeyCheck(env)
+  // Validate management key before uploading files or restarting containers.
+  // Also reads alias block and throws early if key missing + block non-empty.
+  await preflightManagementKeyCheck(env, files)
 
   await runCommand(
     'Uploading docker-compose.yaml',

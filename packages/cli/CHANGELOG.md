@@ -1,5 +1,20 @@
 # @marcusrbrown/infra
 
+## 0.13.0
+### Minor Changes
+
+
+- Add an upstream provider-auth probe to `cliproxy status`. The new check sends a minimal Anthropic completion through the proxy (via `--api-key` or `CLIPROXY_API_KEY`) and reports an error with a `cliproxy login claude` remediation when the proxy's upstream Claude auth is unavailable — catching expired-OAuth failures that the `/healthz` and management checks miss. Skips gracefully when no downstream API key is configured. ([#620](https://github.com/marcusrbrown/infra/pull/620))
+
+
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.20` to `7.2.21` ([#615](https://github.com/marcusrbrown/infra/pull/615))
+
+
+- 📦 Update npm dependency `all` ([#617](https://github.com/marcusrbrown/infra/pull/617))
+
 ## 0.12.3
 ### Patch Changes
 

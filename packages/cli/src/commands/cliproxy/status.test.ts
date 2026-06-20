@@ -3,6 +3,7 @@ import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
 import {
   checkHttpReachability,
+  checkProviderAuth,
   checkUsageStats,
   checkVersion,
   cliproxyStatusAction,
@@ -837,5 +838,320 @@ describe('cliproxyStatusAction — ambient key does not follow agent-supplied UR
 
     const output = [...captured.stdout, ...captured.stderr].join('\n')
     expect(output).toMatch(/CLIPROXY_MANAGEMENT_KEY|no key|skipping/i)
+  })
+})
+
+// ─── checkProviderAuth ────────────────────────────────────────────────────────
+
+describe('checkProviderAuth', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('returns ok when POST /v1/chat/completions returns 200', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify({choices: [{message: {content: 'pong'}}]}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result.level).toBe('ok')
+    expect(result.title).toBe('Upstream provider auth (anthropic)')
+    expect(result.summary).toContain('anthropic route OK')
+    expect(result.summary).toContain('claude-sonnet-4-6')
+  })
+
+  it('returns error when POST returns 401', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('Unauthorized', {status: 401}))
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result.level).toBe('error')
+    expect(result.summary).toContain('401')
+    expect(result.summary).toContain('cliproxy login claude')
+  })
+
+  it('returns error when POST returns 503 with auth_unavailable body', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () => new Response('auth_unavailable: no auth available (providers=claude)', {status: 503}),
+    )
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result.level).toBe('error')
+    expect(result.summary).toContain('503')
+    expect(result.summary).toContain('cliproxy login claude')
+  })
+
+  it('returns error when POST returns 503 with "no auth available" in body', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('no auth available', {status: 503}))
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result.level).toBe('error')
+    expect(result.summary).toContain('cliproxy login claude')
+  })
+
+  it('returns error when POST returns 503 with "providers=claude" in body', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () => new Response('{"error":"providers=claude unavailable"}', {status: 503}),
+    )
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result.level).toBe('error')
+    expect(result.summary).toContain('cliproxy login claude')
+  })
+
+  it('returns warning when POST returns 503 without auth-unavailable markers', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('Service Unavailable', {status: 503}))
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result.level).toBe('warning')
+    expect(result.summary).toContain('503')
+    expect(result.summary).not.toContain('cliproxy login claude')
+  })
+
+  it('returns warning when POST returns other non-2xx (e.g. 500)', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('Internal Server Error', {status: 500}))
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result.level).toBe('warning')
+    expect(result.summary).toContain('500')
+  })
+
+  it('returns warning (not error) when fetch throws (network/timeout)', async () => {
+    globalThis.fetch = createFetchImplementation(async () => {
+      throw new Error('The operation was aborted due to timeout')
+    })
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result.level).toBe('warning')
+    expect(result.summary).toContain('Anthropic probe failed')
+    expect(result.summary).toContain('aborted')
+  })
+
+  it('never includes the apiKey in summary or details', async () => {
+    const secretKey = 'super-secret-api-key-do-not-leak'
+
+    globalThis.fetch = createFetchImplementation(async () => new Response('Unauthorized', {status: 401}))
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', secretKey)
+
+    expect(result.summary).not.toContain(secretKey)
+    const detailsText = (result.details ?? []).join('\n')
+    expect(detailsText).not.toContain(secretKey)
+  })
+
+  it('uses the default model claude-sonnet-4-6 when no model override given', async () => {
+    let capturedBody = ''
+
+    globalThis.fetch = createFetchImplementation(async (_url, init) => {
+      capturedBody = typeof init?.body === 'string' ? init.body : ''
+      return new Response(JSON.stringify({choices: []}), {
+        status: 200,
+        headers: {'content-type': 'application/json'},
+      })
+    })
+
+    await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(capturedBody).toContain('claude-sonnet-4-6')
+  })
+
+  it('uses the model override when options.model is provided', async () => {
+    let capturedBody = ''
+
+    globalThis.fetch = createFetchImplementation(async (_url, init) => {
+      capturedBody = typeof init?.body === 'string' ? init.body : ''
+      return new Response(JSON.stringify({choices: []}), {
+        status: 200,
+        headers: {'content-type': 'application/json'},
+      })
+    })
+
+    await checkProviderAuth('https://cliproxy.example.com', 'test-api-key', {model: 'claude-opus-4-5'})
+
+    expect(capturedBody).toContain('claude-opus-4-5')
+    expect(capturedBody).not.toContain('claude-sonnet-4-6')
+  })
+
+  it('includes verbose details (URL, model, status) when verbose=true', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify({choices: []}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const result = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key', {verbose: true})
+
+    expect(result.details).toBeDefined()
+    const detailsText = (result.details ?? []).join('\n')
+    expect(detailsText).toContain('https://cliproxy.example.com')
+    expect(detailsText).toContain('claude-sonnet-4-6')
+  })
+})
+
+// ─── cliproxyStatusAction — provider auth wiring ─────────────────────────────
+
+describe('cliproxyStatusAction — provider auth probe wiring', () => {
+  let originalEnv: Record<string, string | undefined>
+
+  beforeEach(() => {
+    originalEnv = {
+      CLIPROXY_URL: process.env.CLIPROXY_URL,
+      CLIPROXY_MANAGEMENT_KEY: process.env.CLIPROXY_MANAGEMENT_KEY,
+      CLIPROXY_API_KEY: process.env.CLIPROXY_API_KEY,
+    }
+    delete process.env.CLIPROXY_URL
+    delete process.env.CLIPROXY_MANAGEMENT_KEY
+    delete process.env.CLIPROXY_API_KEY
+  })
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(originalEnv)) {
+      if (v === undefined) {
+        delete process.env[k]
+      } else {
+        process.env[k] = v
+      }
+    }
+    globalThis.fetch = originalFetch
+  })
+
+  it('shows a warning (not error) when no provider key is available', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output).toMatch(/CLIPROXY_API_KEY|skipping upstream provider probe/i)
+    // Must be a warning, not an error — no exit(1) for missing key
+    expect(captured.exit).toBeNull()
+  })
+
+  it('runs the provider auth probe when --api-key is provided', async () => {
+    const fetchedUrls: string[] = []
+
+    globalThis.fetch = createFetchImplementation(async url => {
+      fetchedUrls.push(url)
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.includes('/v1/chat/completions'))
+        return new Response(JSON.stringify({choices: []}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction({url: 'https://cliproxy.example.com', apiKey: 'my-api-key'}, ctx)
+
+    expect(fetchedUrls.some(u => u.includes('/v1/chat/completions'))).toBe(true)
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output).toContain('Upstream provider auth')
+  })
+
+  it('does NOT forward ambient CLIPROXY_API_KEY to an explicit --url override', async () => {
+    process.env.CLIPROXY_API_KEY = 'ambient-api-key-secret'
+
+    const capturedAuthHeaders: string[] = []
+
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      const hdrs = init?.headers
+      let auth: string | null = null
+      if (hdrs instanceof Headers) {
+        auth = hdrs.get('authorization')
+      } else if (hdrs !== null && hdrs !== undefined && typeof hdrs === 'object') {
+        const hdrsObj = hdrs as Record<string, string>
+        auth = hdrsObj.authorization ?? hdrsObj.Authorization ?? null
+      }
+      if (auth) capturedAuthHeaders.push(auth)
+
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.includes('/v1/chat/completions')) return new Response(JSON.stringify({choices: []}), {status: 200})
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx} = createCapturedCtx()
+    // Explicit --url override to a non-trusted host — ambient key must NOT follow
+    await cliproxyStatusAction({url: 'https://evil.example.com'}, ctx)
+
+    // The ambient API key must not appear in any Authorization header sent to evil host
+    expect(capturedAuthHeaders.some(h => h.includes('ambient-api-key-secret'))).toBe(false)
+  })
+
+  it('uses ambient CLIPROXY_API_KEY when URL is the trusted default', async () => {
+    process.env.CLIPROXY_API_KEY = 'ambient-api-key-trusted'
+
+    const capturedAuthHeaders: string[] = []
+
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      const hdrs = init?.headers
+      let auth: string | null = null
+      if (hdrs instanceof Headers) {
+        auth = hdrs.get('authorization')
+      } else if (hdrs !== null && hdrs !== undefined && typeof hdrs === 'object') {
+        const hdrsObj = hdrs as Record<string, string>
+        auth = hdrsObj.authorization ?? hdrsObj.Authorization ?? null
+      }
+      if (auth) capturedAuthHeaders.push(auth)
+
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.includes('/v1/chat/completions'))
+        return new Response(JSON.stringify({choices: []}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      // Management endpoints — return ok so management checks don't block
+      if (url.includes('/v0/management/config'))
+        return new Response('{}', {status: 200, headers: {'content-type': 'application/json'}})
+      if (url.includes('/v0/management/usage-queue'))
+        return new Response('[]', {status: 200, headers: {'content-type': 'application/json'}})
+      if (url.includes('/v0/management/latest-version'))
+        return new Response(JSON.stringify({'latest-version': 'v1.0.0'}), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        })
+      return new Response('ok', {status: 200})
+    })
+
+    const {ctx} = createCapturedCtx()
+    // Default trusted URL — ambient key SHOULD be used
+    await cliproxyStatusAction({url: 'https://cliproxy.fro.bot'}, ctx)
+
+    expect(capturedAuthHeaders.some(h => h.includes('ambient-api-key-trusted'))).toBe(true)
+  })
+
+  it('provider auth error (401) causes exit(1) — dead upstream is a real error', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.includes('/v1/chat/completions')) return new Response('Unauthorized', {status: 401})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    let threw: unknown
+    try {
+      await cliproxyStatusAction({url: 'https://cliproxy.example.com', apiKey: 'my-api-key'}, ctx)
+    } catch (error) {
+      threw = error
+    }
+
+    expect(threw).toBeInstanceOf(MockProcessExit)
+    expect(captured.exit?.code).toBe(1)
   })
 })

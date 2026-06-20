@@ -28,6 +28,7 @@ Commands:
 
     --url [url]                        Base URL for CLIProxyAPI health checks. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --api-key [key]                    Downstream API key (bearer) for the upstream provider-auth probe. Falls back to CLIPROXY_API_KEY. Skipped when absent.
     --verbose                          Enable verbose output for all commands
 
 

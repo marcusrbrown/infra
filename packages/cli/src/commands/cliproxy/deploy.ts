@@ -1,8 +1,9 @@
 import type {goke} from 'goke'
 
 import {existsSync} from 'node:fs'
-import {resolve} from 'node:path'
+import {join} from 'node:path'
 import {z} from 'zod'
+import {findRepoRoot} from '../../lib/repo-root'
 
 const REPO = 'marcusrbrown/infra'
 const WORKFLOW_NAME = 'Deploy CLIProxy'
@@ -11,12 +12,7 @@ const WORKFLOW_URL = 'https://github.com/marcusrbrown/infra/actions/workflows/de
 type CliInstance = ReturnType<typeof goke>
 
 export function resolveLocalDeployScriptPath(): string {
-  const primary = resolve(import.meta.dir, '../../../../../apps/cliproxy/src/deploy.ts')
-  if (existsSync(primary)) {
-    return primary
-  }
-
-  return resolve(import.meta.dir, '../../../../apps/cliproxy/src/deploy.ts')
+  return join(findRepoRoot(), 'apps', 'cliproxy', 'src', 'deploy.ts')
 }
 
 export function getLocalDeployEnv(): Record<string, string> {

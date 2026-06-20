@@ -1,7 +1,8 @@
 import type {goke} from 'goke'
 import {existsSync} from 'node:fs'
-import {resolve} from 'node:path'
+import {join} from 'node:path'
 import {z} from 'zod'
+import {findRepoRoot} from '../../lib/repo-root'
 
 const REPO = 'marcusrbrown/infra'
 const WORKFLOW_NAME = 'Deploy KeeWeb'
@@ -14,17 +15,11 @@ const DEFAULT_SITE_DIR = '/home/user-data/www/kw.igg.ms'
 type CliInstance = ReturnType<typeof goke>
 
 export function resolveDeployScriptPath(): string {
-  const primary = resolve(import.meta.dir, '../../../../../apps/keeweb/deploy.sh')
-
-  if (existsSync(primary)) {
-    return primary
-  }
-
-  return resolve(import.meta.dir, '../../../../apps/keeweb/deploy.sh')
+  return join(findRepoRoot(), 'apps', 'keeweb', 'deploy.sh')
 }
 
 export function resolveDistIndexPath(): string {
-  return resolve(import.meta.dir, '../../../../../apps/keeweb/dist/index.html')
+  return join(findRepoRoot(), 'apps', 'keeweb', 'dist', 'index.html')
 }
 
 export function getLocalDeployEnv(): Record<string, string> {

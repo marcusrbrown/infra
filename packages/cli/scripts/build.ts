@@ -112,17 +112,10 @@ export async function build(): Promise<void> {
   // content-hash suffix (e.g. known_hosts-<hash>.).
   const assetFiles = result.outputs.filter(o => o.kind === 'asset')
   if (assetFiles.length === 0) {
-    // Fallback: Bun did not auto-copy the asset — copy it explicitly.
-    logStep('known_hosts asset not auto-copied; copying explicitly')
-    const srcAsset = join(srcDir, 'resources', 'known_hosts')
-    const distResourcesDir = join(distDir, 'resources')
-    mkdirSync(distResourcesDir, {recursive: true})
-    await Bun.write(join(distResourcesDir, 'known_hosts'), Bun.file(srcAsset))
-    logSuccess('Copied known_hosts to dist/resources/known_hosts (explicit fallback)')
-  } else {
-    for (const asset of assetFiles) {
-      logSuccess(`Asset emitted: ${asset.path}`)
-    }
+    throw new Error('known_hosts file-asset was not emitted by bun build — the bundle would fail-closed at runtime')
+  }
+  for (const asset of assetFiles) {
+    logSuccess(`Asset emitted: ${asset.path}`)
   }
 
   logSuccess(`Build complete → ${distDir}`)

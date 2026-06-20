@@ -28,7 +28,8 @@
     "infra": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "src/commands/vpn/peers.ts"
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",

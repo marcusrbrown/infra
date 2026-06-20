@@ -226,6 +226,113 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
   }
 }
 
+const DEFAULT_PROVIDER_MODEL = 'claude-sonnet-4-6'
+
+export interface ProviderAuthOptions {
+  model?: string
+  verbose?: boolean
+}
+
+/**
+ * Probe the upstream provider auth by sending a minimal chat completion request.
+ * Returns a CheckResult — never throws.
+ *
+ * - 200 → ok
+ * - 401 OR (503 with auth-unavailable body markers) → error with remediation hint
+ * - other non-2xx → warning (don't fail status on unrelated upstream issues)
+ * - fetch throw (timeout/network) → warning (flaky probe should not fail status)
+ *
+ * The apiKey is NEVER included in summary or details output.
+ */
+export async function checkProviderAuth(
+  baseUrl: string,
+  apiKey: string,
+  options?: ProviderAuthOptions,
+): Promise<CheckResult> {
+  const model = options?.model ?? DEFAULT_PROVIDER_MODEL
+  const verbose = options?.verbose === true
+  const endpoint = `${baseUrl}/v1/chat/completions`
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{role: 'user', content: 'ping'}],
+        max_tokens: 1,
+      }),
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    })
+
+    const details: string[] = []
+    if (verbose) {
+      details.push(`URL: ${endpoint}`)
+      details.push(`Model: ${model}`)
+      details.push(`Status: ${response.status}`)
+    }
+
+    if (response.ok) {
+      return {
+        title: 'Upstream provider auth (anthropic)',
+        level: 'ok',
+        summary: `anthropic route OK (${model})`,
+        details: details.length > 0 ? details : undefined,
+      }
+    }
+
+    // 401 is always an auth failure
+    if (response.status === 401) {
+      return {
+        title: 'Upstream provider auth (anthropic)',
+        level: 'error',
+        summary: `Anthropic upstream auth unavailable (${response.status}) — run: cliproxy login claude`,
+        details: details.length > 0 ? details : undefined,
+      }
+    }
+
+    // 503 may be auth_unavailable — check body for known markers
+    if (response.status === 503) {
+      let bodyText = ''
+      try {
+        bodyText = await response.text()
+      } catch {
+        // ignore body read failure
+      }
+
+      const isAuthUnavailable = /auth_unavailable|no auth available|providers=claude/i.test(bodyText)
+
+      if (isAuthUnavailable) {
+        return {
+          title: 'Upstream provider auth (anthropic)',
+          level: 'error',
+          summary: `Anthropic upstream auth unavailable (${response.status}) — run: cliproxy login claude`,
+          details: details.length > 0 ? details : undefined,
+        }
+      }
+    }
+
+    // Any other non-2xx: warning (don't fail status on unrelated upstream issues)
+    return {
+      title: 'Upstream provider auth (anthropic)',
+      level: 'warning',
+      summary: `Anthropic probe returned HTTP ${response.status}`,
+      details: details.length > 0 ? details : undefined,
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      title: 'Upstream provider auth (anthropic)',
+      level: 'warning',
+      summary: `Anthropic probe failed: ${message}`,
+      details: verbose ? [`URL: ${endpoint}`, `Model: ${model}`] : undefined,
+    }
+  }
+}
+
 /**
  * Probe the management API with a cheap auth check before issuing parallel calls.
  * Returns null on success, or a CheckResult describing the auth failure.
@@ -377,6 +484,8 @@ export async function getCliproxyStatusSummary(baseUrl: string, key: string, ver
 export interface StatusOptions {
   url?: string
   key?: string
+  /** Downstream API key (bearer) for the upstream provider-auth probe. Maps from --api-key CLI flag. */
+  apiKey?: string
   verbose?: boolean
 }
 
@@ -395,6 +504,10 @@ export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCt
     // An explicit --key is always honored (operator knows what they're doing).
     // An ambient env key is only forwarded when the resolved baseUrl is trusted.
     const managementKey = options.key ?? (urlIsExplicitlyOverridden ? undefined : process.env.CLIPROXY_MANAGEMENT_KEY)
+
+    // Provider (downstream) API key for the upstream provider-auth probe.
+    // Same trusted-URL guard: ambient CLIPROXY_API_KEY only follows to the trusted URL.
+    const providerKey = options.apiKey ?? (urlIsExplicitlyOverridden ? undefined : process.env.CLIPROXY_API_KEY)
 
     ctx.console.log('CLIProxyAPI status')
     ctx.console.log('')
@@ -417,6 +530,17 @@ export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCt
     } else {
       capturedUsageResult = mgmt.usage
       results.push(mgmt.usage, mgmt.version)
+    }
+
+    // Upstream provider-auth probe — only when a downstream API key is available.
+    if (providerKey) {
+      results.push(await checkProviderAuth(baseUrl, providerKey, {verbose}))
+    } else {
+      results.push({
+        title: 'Upstream provider auth',
+        level: 'warning',
+        summary: 'CLIPROXY_API_KEY not set — skipping upstream provider probe.',
+      })
     }
 
     for (const result of results) {
@@ -459,6 +583,14 @@ export function registerCliproxyStatus(cli: ReturnType<typeof goke>): void {
     .option(
       '--key [key]',
       z.string().describe('Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.'),
+    )
+    .option(
+      '--api-key [key]',
+      z
+        .string()
+        .describe(
+          'Downstream API key (bearer) for the upstream provider-auth probe. Falls back to CLIPROXY_API_KEY. Skipped when absent.',
+        ),
     )
     .option('--verbose', 'Enable verbose output for all commands')
     .action(cliproxyStatusAction)

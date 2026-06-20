@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.13.4
+### Patch Changes
+
+
+- 📦 Update GitHub Actions workflow dependencies: `@aws-sdk/client-lightsail`, `fro-bot/agent` ([#629](https://github.com/marcusrbrown/infra/pull/629))
+
 ## 0.13.3
 ### Patch Changes
 

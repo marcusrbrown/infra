@@ -4,8 +4,8 @@
  * Build script for @marcusrbrown/infra CLI.
  *
  * Bundles packages/cli into dist/ with:
- * - 5 public deps kept EXTERNAL (not inlined)
- * - @marcusrbrown/infra-shared INLINED (once Unit 4 adds the import)
+ * - The public runtime deps kept EXTERNAL (resolved from node_modules at runtime)
+ * - The private @marcusrbrown/infra-shared INLINED into the bundle
  * - known_hosts file-asset copied into dist/ by Bun's asset loader
  * - Shebang + executable bit on dist/cli.js (Bun sets these automatically)
  *

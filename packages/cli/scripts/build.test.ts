@@ -43,7 +43,7 @@ beforeAll(async () => {
 }, 60_000)
 
 afterAll(() => {
-  // Leave dist/ in place — it's gitignored (added in Unit 4).
+  // Leave dist/ in place — it's gitignored build output.
   // Cleaning here would break incremental dev workflows.
 })
 

@@ -349,6 +349,9 @@ describe('.env file contents', () => {
     expect(contents).toContain('DASHBOARD_OAUTH_REDIRECT_URI=https://dashboard.fro.bot/auth/callback\n')
     // Image ref must NOT be in .env — it's pinned in docker-compose.yaml
     expect(contents).not.toContain('DASHBOARD_IMAGE_REF')
+    // Operator UI flags must always be present (static constants, not secrets)
+    expect(contents).toContain('DASHBOARD_OPERATOR_UI_ENABLED=true\n')
+    expect(contents).toContain('DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true\n')
   })
 
   it('does NOT put the raw PEM in .env', () => {

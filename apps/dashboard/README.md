@@ -50,6 +50,10 @@ GitHub Environment: **`dashboard`**
 
 Repository secret: `DIGITALOCEAN_ACCESS_TOKEN` (used by the provision script).
 
+## Operator UI
+
+The operator UI is enabled same-origin. The deploy sets `DASHBOARD_OPERATOR_UI_ENABLED=true` and `DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true` as static constants in the `.env` — no new secrets required. The SSE run-stream UI is reachable at `https://dashboard.fro.bot/operator/*` behind the operator auth boundary. `DASHBOARD_GATEWAY_OPERATOR_ORIGIN` defaults to `https://dashboard.fro.bot` and is not set explicitly.
+
 ## Operations
 
 Full deploy flow, secret rotation runbooks, upgrade flow, container hardening details, and anti-patterns: [`apps/dashboard/AGENTS.md`](AGENTS.md).

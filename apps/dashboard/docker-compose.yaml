@@ -19,7 +19,7 @@ services:
         condition: service_healthy
 
   dashboard:
-    image: ghcr.io/fro-bot/dashboard:2026.06.30@sha256:bca84c93cecd90305229dfc3d2f8bc8a9fecf3cb4e75f9a264a8d1c4319c489c
+    image: ghcr.io/fro-bot/dashboard:2026.06.34@sha256:2d779f7e807bce8eab7c3726d3aee83587ff8a71913631ddacba28cea7902e7e
     restart: unless-stopped
     env_file:
       - path: .env

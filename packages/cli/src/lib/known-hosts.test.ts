@@ -1,8 +1,9 @@
+import * as nodeFs from 'node:fs'
 import {existsSync, mkdirSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 
-import {describe, expect, it} from 'bun:test'
+import {afterEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {buildKnownHostsArgs, resolveKnownHostsPath, resolveRepoKnownHostsPath} from './known-hosts'
 
@@ -46,41 +47,26 @@ describe('resolveRepoKnownHostsPath', () => {
   })
 })
 
-// ─── resolveKnownHostsPath (new: multi-layout resolution) ────────────────────
+// ─── resolveKnownHostsPath (multi-layout resolution) ─────────────────────────
 
 describe('resolveKnownHostsPath', () => {
-  it('returns the packaged resource path when only src/resources/known_hosts exists (installed package layout)', () => {
-    // Simulate: node_modules/@marcusrbrown/infra/src/lib/known-hosts.ts
-    // Only src/resources/known_hosts exists; no .github/known_hosts at any ancestor.
-    const tmpDir = join(tmpdir(), `known-hosts-installed-${Date.now()}`)
-    const libDir = join(tmpDir, 'node_modules', '@marcusrbrown', 'infra', 'src', 'lib')
-    const resourcesDir = join(tmpDir, 'node_modules', '@marcusrbrown', 'infra', 'src', 'resources')
-    mkdirSync(libDir, {recursive: true})
-    mkdirSync(resourcesDir, {recursive: true})
-    writeFileSync(join(resourcesDir, 'known_hosts'), 'example.com ssh-ed25519 AAAA...\n')
+  it('returns .github/known_hosts when running from repo checkout (Layout 1)', () => {
+    // The actual repo has .github/known_hosts — no libDir override needed
+    const result = resolveKnownHostsPath()
 
-    try {
-      // Pass the simulated import.meta.dir (the lib dir inside the package)
-      const result = resolveKnownHostsPath(libDir)
-      expect(result).not.toBeNull()
-      expect(result).toBe(join(resourcesDir, 'known_hosts'))
-    } finally {
-      rmSync(tmpDir, {recursive: true, force: true})
-    }
+    expect(result).toMatch(/\.github[/\\]known_hosts$/)
+    expect(existsSync(result)).toBe(true)
   })
 
-  it('prefers .github/known_hosts over packaged resource when both exist (repo checkout layout)', () => {
+  it('prefers .github/known_hosts over asset path when both exist (repo checkout layout)', () => {
     // Mirror the real layout: packages/cli/src/lib is 4 levels deep from repo root.
     // tmpDir is the "repo root"; libDir is tmpDir/packages/cli/src/lib.
     const tmpDir = join(tmpdir(), `known-hosts-both-${Date.now()}`)
     const libDir = join(tmpDir, 'packages', 'cli', 'src', 'lib')
     const githubDir = join(tmpDir, '.github')
-    const resourcesDir = join(tmpDir, 'packages', 'cli', 'src', 'resources')
     mkdirSync(libDir, {recursive: true})
     mkdirSync(githubDir, {recursive: true})
-    mkdirSync(resourcesDir, {recursive: true})
     writeFileSync(join(githubDir, 'known_hosts'), 'repo.example.com ssh-ed25519 AAAA...\n')
-    writeFileSync(join(resourcesDir, 'known_hosts'), 'packaged.example.com ssh-ed25519 AAAA...\n')
 
     try {
       // lib is at tmpDir/packages/cli/src/lib — 4 levels up is tmpDir (the "repo root")
@@ -93,15 +79,81 @@ describe('resolveKnownHostsPath', () => {
     }
   })
 
-  it('throws a clear error when neither .github/known_hosts nor packaged resource exists', () => {
+  // ── Asset-path (Layout 2) tests ──────────────────────────────────────────────
+  // The file-asset import `knownHostsAssetPath` is a module-level constant resolved
+  // by Bun at source-run time to the real src/resources/known_hosts path.
+  // Under `bun build`, the bundler copies the asset to dist/ and rewrites the path.
+  // We test the asset branch by mocking existsSync so Layout 1 (repo candidate) is
+  // absent but the asset path is present.
+
+  describe('asset-path (Layout 2) branch', () => {
+    let existsSyncSpy: ReturnType<typeof spyOn>
+
+    afterEach(() => {
+      existsSyncSpy?.mockRestore()
+    })
+
+    it('returns the file-asset path when the repo candidate is absent but the asset exists', () => {
+      // The real asset path is packages/cli/src/resources/known_hosts (exists on disk).
+      // We mock existsSync so the repo candidate returns false, asset path returns true.
+      // Capture the original before spying to avoid infinite recursion in the mock.
+      const originalExistsSync = nodeFs.existsSync
+      existsSyncSpy = spyOn(nodeFs, 'existsSync').mockImplementation((p: unknown) => {
+        const path = String(p)
+        // Suppress Layout 1 (repo .github/known_hosts) so we fall through to Layout 2
+        if (path.includes('.github') && path.endsWith('known_hosts')) return false
+        // Let the real asset path through (call original, not the spy)
+        return originalExistsSync(path)
+      })
+
+      const result = resolveKnownHostsPath()
+
+      // Should return the asset path (src/resources/known_hosts)
+      expect(result).toMatch(/resources[/\\]known_hosts$/)
+      expect(existsSync(result)).toBe(true)
+      // Must NOT be a system known_hosts path
+      expect(result).not.toMatch(/\.ssh/)
+      expect(result).not.toMatch(/\/etc\//)
+    })
+
+    it('throws FAIL_CLOSED_ERROR when neither repo candidate nor asset path exists (SECURITY)', () => {
+      // Both Layout 1 and Layout 2 absent → must throw, never fall back to system paths
+      existsSyncSpy = spyOn(nodeFs, 'existsSync').mockImplementation((_p: unknown) => false)
+
+      expect(() => resolveKnownHostsPath()).toThrow(
+        'Pinned SSH known_hosts file not found; reinstall @marcusrbrown/infra or run from the repo checkout',
+      )
+    })
+
+    it('SECURITY: never returns a ~/.ssh or system path when resolution fails', () => {
+      existsSyncSpy = spyOn(nodeFs, 'existsSync').mockImplementation((_p: unknown) => false)
+
+      let threw = false
+      let result: string | undefined
+      try {
+        result = resolveKnownHostsPath()
+      } catch {
+        threw = true
+      }
+
+      // Must throw — never silently return a system path
+      expect(threw).toBe(true)
+      expect(result).toBeUndefined()
+    })
+  })
+
+  it('returns asset path when libDir points to a temp dir (Layout 1 miss, Layout 2 hit)', () => {
+    // With libDir pointing to a temp dir, Layout 1 won't find .github/known_hosts.
+    // Layout 2 uses the module-level asset path (real src/resources/known_hosts),
+    // which DOES exist on disk — so it should return the asset path.
     const tmpDir = join(tmpdir(), `known-hosts-none-${Date.now()}`)
     const libDir = join(tmpDir, 'src', 'lib')
     mkdirSync(libDir, {recursive: true})
 
     try {
-      expect(() => resolveKnownHostsPath(libDir)).toThrow(
-        'Pinned SSH known_hosts file not found; reinstall @marcusrbrown/infra or run from the repo checkout',
-      )
+      const result = resolveKnownHostsPath(libDir)
+      // Layout 2 (asset path) should be found since src/resources/known_hosts exists
+      expect(result).toMatch(/resources[/\\]known_hosts$/)
     } finally {
       rmSync(tmpDir, {recursive: true, force: true})
     }
@@ -122,34 +174,14 @@ describe('buildKnownHostsArgs', () => {
   })
 
   it('throws when no known_hosts file exists (fail-closed behavior)', () => {
-    const tmpDir = join(tmpdir(), `known-hosts-test-${Date.now()}`)
-    const libDir = join(tmpDir, 'src', 'lib')
-    mkdirSync(libDir, {recursive: true})
+    const existsSyncSpy = spyOn(nodeFs, 'existsSync').mockImplementation((_p: unknown) => false)
 
     try {
-      expect(() => buildKnownHostsArgs(libDir)).toThrow(
+      expect(() => buildKnownHostsArgs()).toThrow(
         'Pinned SSH known_hosts file not found; reinstall @marcusrbrown/infra or run from the repo checkout',
       )
     } finally {
-      rmSync(tmpDir, {recursive: true, force: true})
-    }
-  })
-
-  it('returns UserKnownHostsFile args pointing to the packaged resource in installed layout', () => {
-    const tmpDir = join(tmpdir(), `known-hosts-installed-${Date.now()}`)
-    const libDir = join(tmpDir, 'node_modules', '@marcusrbrown', 'infra', 'src', 'lib')
-    const resourcesDir = join(tmpDir, 'node_modules', '@marcusrbrown', 'infra', 'src', 'resources')
-    mkdirSync(libDir, {recursive: true})
-    mkdirSync(resourcesDir, {recursive: true})
-    writeFileSync(join(resourcesDir, 'known_hosts'), 'example.com ssh-ed25519 AAAA...\n')
-
-    try {
-      const args = buildKnownHostsArgs(libDir)
-      expect(args).toHaveLength(2)
-      expect(args[0]).toBe('-o')
-      expect(args[1]).toBe(`UserKnownHostsFile=${join(resourcesDir, 'known_hosts')}`)
-    } finally {
-      rmSync(tmpDir, {recursive: true, force: true})
+      existsSyncSpy.mockRestore()
     }
   })
 

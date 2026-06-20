@@ -1,10 +1,9 @@
 /// <reference types="bun" />
 
 import type {SpinnerResult} from '@clack/prompts'
-
 import {confirm, log, spinner} from '@clack/prompts'
+import {managementHeaders, parseManagementKeyList, requestJson} from '@marcusrbrown/infra-shared/cliproxy/management'
 
-import {managementHeaders, parseManagementKeyList, requestJson} from '../shared'
 import {cancelAndExit, promptValue} from './prompts'
 
 // ─── Types ────────────────────────────────────────────────────────────────────

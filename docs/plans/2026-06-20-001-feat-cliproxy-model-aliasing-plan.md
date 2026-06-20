@@ -42,7 +42,9 @@ Harnesses configured with opencode short Anthropic IDs cannot use them through `
 - `apps/cliproxy/src/deploy.ts` — `deploy()` flow: mkdir → `preflightManagementKeyCheck` → scp compose/Caddyfile → scp `config.yaml` (skip unless absent/`--force-config`) → `docker compose up -d --wait --wait-timeout 90` → `healthCheck`. `CLIPROXY_MANAGEMENT_KEY` is optional in `getDeployEnv` (defaults to `''`); `preflightManagementKeyCheck` skips when empty.
 - `apps/cliproxy/config/config.yaml` — tracked template, uploaded as-is (mounted at `/CLIProxyAPI/config.yaml`); has `api-keys: []`. No `oauth-model-alias` block today.
 - `apps/gateway/src/deploy.ts` + `deploy.test.ts` — reference pattern for an **injectable, testable** deploy: `SpawnFn`/`fetch` injection via an opts object, mock helpers in the test.
-- `packages/cli/src/commands/cliproxy/shared.ts` — `managementHeaders` (x-management-key + content-type), `HTTP_TIMEOUT_MS = 10_000`, `requestJson` (timeout + strict non-2xx + strict-JSON). **Cannot be imported** from `apps/` (apps never import packages/cli) — replicate the small slice in a new cliproxy-app helper.
+- `packages/cli/src/commands/cliproxy/shared.ts` — `managementHeaders` (x-management-key + content-type), `HTTP_TIMEOUT_MS = 10_000`, `requestJson` (timeout + strict non-2xx + strict-JSON), `parseManagementKeyList`, `toStringArray`. These now move to `packages/shared` (see Key Technical Decisions — the `packages/cli ↛ packages/shared` boundary was removed in v0.13.2 / `bun build` publish step; both `apps/cliproxy` and `packages/cli` can import `@marcusrbrown/infra-shared`).
+- `packages/shared/server/droplet-helpers.ts` — existing shared lib (SSH/SCP/DO helpers), exported as `@marcusrbrown/infra-shared/server/droplet-helpers`. The new cliproxy management helpers get a sibling export `@marcusrbrown/infra-shared/cliproxy/management`.
+- `apps/cliproxy/package.json` already depends on `@marcusrbrown/infra-shared` (`workspace:*`); `packages/cli` adds it (inlined at build per the v0.13.2 model).
 - `packages/cli/src/commands/cliproxy/status.ts` — `probeManagementAuth` single-probe-before-parallel + IP-ban-on-403 pattern; key-redaction-in-output convention.
 
 ### Institutional Learnings
@@ -60,9 +62,10 @@ Harnesses configured with opencode short Anthropic IDs cannot use them through `
 - **Missing-key policy: hard-fail when the tracked config has a non-empty alias block.** If `config.yaml` carries an `oauth-model-alias` block, the operator intends it to apply, so an absent/invalid `CLIPROXY_MANAGEMENT_KEY` fails the deploy with a clear error. If the block is empty/absent, skip silently (nothing to apply).
 - **Read-back fail-closed.** After the PUT, GET `/v0/management/oauth-model-alias` and compare to the desired set with strict set-equality on the `claude` array (order-insensitive; entries compared on `name`/`alias`/`fork`). Mismatch fails the deploy with a diff in the error (catches the silent-no-op PUT shape).
 - **`fork: true` verification.** After read-back passes, GET `/v1/models` and assert each short alias **and** its dated counterpart appear (guards against a future version dropping the dated model or changing `fork`).
-- **Helper location: `apps/cliproxy/src/management.ts` (new).** Cliproxy-specific; apps can't import `packages/cli`, and `packages/shared` is provisioning-only. Re-share later only if a second consumer appears.
-- **Injectable `fetch` for testability.** Add a minimal opts seam to the apply path (`{fetch?: typeof globalThis.fetch}`) mirroring the gateway pattern, so the new logic is unit-testable without live network. The SSH/compose portions stay as-is.
-- **No changeset.** `apps/cliproxy` is not a versioned/published package; only `packages/cli/src` runtime changes get changesets.
+- **Helper location: `packages/shared/cliproxy/management.ts` (new shared module), consumed by BOTH `apps/cliproxy` deploy AND `packages/cli` cliproxy commands.** The `packages/cli ↛ packages/shared` boundary was removed in v0.13.2 (the `bun build` publish step inlines `infra-shared`), so the management HTTP primitives no longer need duplicating. Move `managementHeaders`, `requestJson`, `HTTP_TIMEOUT_MS`, `parseManagementKeyList`, `toStringArray` from `packages/cli/src/commands/cliproxy/shared.ts` into the shared module, add the new alias functions (`OAuthModelAlias` type, `readOAuthModelAliasFromConfig`, `applyOAuthModelAlias`, `readBackOAuthModelAlias`, `setEqualOAuthModelAlias`) there, export via `@marcusrbrown/infra-shared/cliproxy/management`. `packages/cli/src/commands/cliproxy/shared.ts` re-exports from the shared module (keeps existing cli imports working) OR the cli commands import directly — implementer's call, whichever is cleaner. `apps/cliproxy/src/deploy.ts` imports the alias functions from the shared module.
+- **Scope guard on the consolidation.** Moving the shared HTTP primitives touches the cli's existing cliproxy commands (status/keys/config/models import them). Keep this a pure move + re-export so those commands are unaffected (no behavior change); their tests must stay green. If the move balloons, fall back to: put ONLY the new alias functions in `packages/shared/cliproxy/management.ts` (importing the HTTP primitives it needs, which also move), and leave the cli's `shared.ts` re-exporting — do not rewrite every cli command's import in this plan.
+- **Injectable `fetch` for testability.** The shared alias functions take a `{fetch?: typeof globalThis.fetch}` seam so both the cli and the deploy path can unit-test without live network.
+- **Changeset: patch.** The shared management helpers are inlined into the published `@marcusrbrown/infra` bin at build time, so consolidating them IS a published-runtime change (the bundle content changes). Add a patch changeset. (This differs from the original no-changeset call, which assumed the helper stayed apps-only.)
 
 ## Open Questions
 
@@ -134,39 +137,46 @@ deploy() in apps/cliproxy/src/deploy.ts
 **Verification:**
 - `docker compose config` / YAML parse still valid; the block matches the brainstorm's 7-entry table.
 
-- [ ] **Unit 2: New management helper — parse, PUT, read-back, compare**
+- [ ] **Unit 2: Shared cliproxy management module — consolidate HTTP helpers + add alias functions**
 
-**Goal:** A cliproxy-app-local helper that reads the alias block, applies it via the field-scoped bare-object PUT, reads it back, and compares.
+**Goal:** A single shared module that both `apps/cliproxy` deploy and the `packages/cli` cliproxy commands import: the management HTTP primitives (moved from the cli) plus the new alias parse/PUT/read-back/compare functions.
 
 **Requirements:** R1, R3, R4, R5
 
 **Dependencies:** Unit 1 (for the fixture shape)
 
 **Files:**
-- Create: `apps/cliproxy/src/management.ts`
-- Create: `apps/cliproxy/src/management.test.ts`
+- Create: `packages/shared/cliproxy/management.ts`
+- Create: `packages/shared/cliproxy/management.test.ts`
+- Modify: `packages/shared/package.json` (add `"./cliproxy/management"` export)
+- Modify: `packages/cli/src/commands/cliproxy/shared.ts` (re-export the moved primitives from the shared module so existing cli command imports keep working — pure move, no behavior change)
+- Modify: `packages/cli/package.json` (add `@marcusrbrown/infra-shared` — inlined at build per v0.13.2)
 
 **Approach:**
-- `OAuthModelAlias` type: `{claude: Array<{name: string; alias: string; fork: boolean}>}` (extensible to other provider keys, but only `claude` used now).
-- `readOAuthModelAliasFromConfig(configPath): OAuthModelAlias` — read the tracked `config.yaml`, extract top-level `oauth-model-alias`; return `{}`-equivalent (empty) when absent.
-- `applyOAuthModelAlias({baseUrl, key, body, fetch?})` — `PUT /v0/management/oauth-model-alias` with `managementHeaders(key)` (replicate: `x-management-key` + `content-type: application/json`) and **bare-object** body; `AbortSignal.timeout(HTTP_TIMEOUT_MS=10_000)`; throw on non-2xx with status + body (never echo the key).
-- `readBackOAuthModelAlias({baseUrl, key, fetch?})` — `GET` the same endpoint, return the parsed `oauth-model-alias` value.
-- `setEqualOAuthModelAlias(desired, actual)` — order-insensitive comparison on `name`/`alias`/`fork`.
+- **Move** `HTTP_TIMEOUT_MS`, `managementHeaders`, `requestJson`, `parseManagementKeyList`, `toStringArray` from `packages/cli/src/commands/cliproxy/shared.ts` into `packages/shared/cliproxy/management.ts`. Have `shared.ts` re-export them so the existing cli commands (status/keys/config/models) are untouched (pure move + re-export).
+- **Add** the alias functions in the shared module:
+  - `OAuthModelAlias` type: `{claude: Array<{name: string; alias: string; fork: boolean}>}` (extensible; only `claude` used now).
+  - `readOAuthModelAliasFromConfig(configPath): OAuthModelAlias` — read the tracked `config.yaml`, extract top-level `oauth-model-alias`; return empty when absent.
+  - `applyOAuthModelAlias({baseUrl, key, body, fetch?})` — `PUT /v0/management/oauth-model-alias` with `managementHeaders(key)` and **bare-object** body; `AbortSignal.timeout(HTTP_TIMEOUT_MS)`; throw on non-2xx with status + body (never echo the key).
+  - `readBackOAuthModelAlias({baseUrl, key, fetch?})` — `GET` the same endpoint, return the parsed value.
+  - `setEqualOAuthModelAlias(desired, actual)` — order-insensitive comparison on `name`/`alias`/`fork`.
 
 **Patterns to follow:**
-- `packages/cli/src/commands/cliproxy/shared.ts` `managementHeaders`/`requestJson`/timeout idiom (replicate, do not import).
-- `apps/gateway/src/deploy.test.ts` injectable-fetch mock style.
+- `packages/shared/server/droplet-helpers.ts` for the shared-module/export style; `apps/gateway/src/deploy.test.ts` injectable-fetch mock style.
+
+**Scope guard:** keep the primitive move a pure move + re-export; the cli commands' tests must stay green with no behavior change. If the move balloons, fall back to: the alias functions live in the shared module and import the primitives (which also move there), and `shared.ts` re-exports — do not rewrite every cli command's import site.
 
 **Test scenarios:**
 - Happy path: `readOAuthModelAliasFromConfig` parses a fixture config with the 7-entry block → returns the expected object.
 - Edge case: config with no `oauth-model-alias` key → returns empty.
-- Happy path: `applyOAuthModelAlias` issues a PUT with the **bare object** body (assert the body has no `value`/`oauth-model-alias` wrapper) and `x-management-key` header; management key never appears in thrown errors.
+- Happy path: `applyOAuthModelAlias` issues a PUT with the **bare object** body (assert no `value`/`oauth-model-alias` wrapper) and `x-management-key` header; management key never appears in thrown errors.
 - Error path: PUT returns non-2xx → throws with status + body.
 - Happy path: `readBackOAuthModelAlias` parses the GET response's `oauth-model-alias` field.
 - Happy path/edge: `setEqualOAuthModelAlias` true for same set in different order; false when an entry's `name`/`alias`/`fork` differs or count differs.
+- Regression: the moved primitives still behave identically (the existing cli `shared.test.ts` / command tests pass via the re-export).
 
 **Verification:**
-- `bun test apps/cliproxy/src/management.test.ts` passes; `tsc` clean; no `as any`.
+- `bun test packages/shared/cliproxy/management.test.ts` passes; `bun test packages/cli/src/commands/cliproxy/` passes (re-export regression); `tsc` clean; no `as any`.
 
 - [ ] **Unit 3: Wire the apply step into deploy with fail-closed + fork verification**
 
@@ -181,6 +191,7 @@ deploy() in apps/cliproxy/src/deploy.ts
 - Modify/Create: `apps/cliproxy/src/deploy.test.ts` (new test file if absent)
 
 **Approach:**
+- Import the alias functions from `@marcusrbrown/infra-shared/cliproxy/management` (Unit 2). `apps/cliproxy` already depends on `infra-shared`.
 - Add an `applyAliasStep` invoked between `docker compose up -d --wait` and `healthCheck(env)`.
 - Read the alias block from the tracked `files.config`. If empty → skip. If non-empty and `CLIPROXY_MANAGEMENT_KEY` is empty → **throw** ("alias block present but CLIPROXY_MANAGEMENT_KEY not set").
 - PUT → read-back → `setEqual`; on mismatch throw with the diff.
@@ -212,11 +223,13 @@ deploy() in apps/cliproxy/src/deploy.ts
 
 **Files:**
 - Modify: `apps/cliproxy/AGENTS.md`
+- Create: `.changeset/*.md` (patch — the shared management helpers are inlined into the published bin, so the bundle content changes)
 
 **Approach:**
 - Document the new post-`--wait` apply step in the DEPLOY FLOW section (4 steps → 5).
 - Add an `oauth-model-alias` row to the management API endpoint table noting the **bare-object** body (no `{value: ...}` wrapper).
 - Note the `--force-config` interaction: the alias block in the template does not make `--force-config` safe.
+- Add a patch changeset for `@marcusrbrown/infra` (present-tense, first-person, no plan-taxonomy).
 - After deploy: confirm `cliproxy models anthropic` and `/v1/models` list all 7 short IDs + dated counterparts; run a `/v1/chat/completions` with one short ID and confirm 200 + dated upstream in the response. Confirm the runtime api-keys are intact (count unchanged).
 
 **Test expectation:** none — docs + operational verification.

@@ -63,7 +63,7 @@
     },
     "packages/cli": {
       "name": "@marcusrbrown/infra",
-      "version": "0.13.1",
+      "version": "0.13.2",
       "bin": {
         "infra": "./dist/cli.js",
       },
@@ -84,6 +84,7 @@
       "name": "@marcusrbrown/infra-shared",
       "version": "0.0.0",
       "dependencies": {
+        "yaml": "2.9.0",
         "zod": "^4.3.6",
       },
     },

@@ -1,11 +1,8 @@
 import type {goke} from 'goke'
-
 import type {ActionCtx} from '../../lib/action-ctx'
 import {chmodSync} from 'node:fs'
-
+import {managementHeaders, requestJson} from '@marcusrbrown/infra-shared/cliproxy/management'
 import {z} from 'zod'
-
-import {managementHeaders, requestJson} from './shared'
 
 /** Minimal ctx surface consumed by cliproxy config actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape

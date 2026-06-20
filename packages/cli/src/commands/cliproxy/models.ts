@@ -1,9 +1,7 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
-
+import {requestJson} from '@marcusrbrown/infra-shared/cliproxy/management'
 import {z} from 'zod'
-
-import {requestJson} from './shared'
 
 declare const process: {
   env: Record<string, string | undefined>

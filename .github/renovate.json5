@@ -82,13 +82,11 @@
       // Each fro-bot/agent bump rebuilds and redeploys the executable gateway daemon, so it must
       // not inherit the fro-bot/** minor+patch automerge from the shared preset. Require explicit
       // operator approval (dashboard checkbox to create the PR, manual merge) so every daemon bump
-      // gets a source-contract verification pass before landing — the v0.46.1 crash-loop and
-      // the workspace-agent secret additions are why this gate exists.
+      // gets a source-contract verification pass before landing — verify no new boot-required
+      // secrets before the ceiling moves; v0.73.0+ needs that deliberate pass.
       automerge: false,
       dependencyDashboardApproval: true,
-      // Allow v0.64.x patch/hotfix PRs; v0.65.0+ needs a deliberate source-contract pass
-      // (verify no new boot-required secrets) before the ceiling moves.
-      allowedVersions: '<0.65.0',
+      allowedVersions: '<0.73.0',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in apps/gateway/upstream.json so new

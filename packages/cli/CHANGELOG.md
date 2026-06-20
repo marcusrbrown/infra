@@ -1,5 +1,14 @@
 # @marcusrbrown/infra
 
+## 0.13.5
+### Patch Changes
+
+
+- Update the Fro Bot gateway daemon to fro-bot/agent v0.72.0 (operator run-stream SSE, server-side operator token, repos.yaml redaction). ([#631](https://github.com/marcusrbrown/infra/pull/631))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.22` to `7.2.23` ([#635](https://github.com/marcusrbrown/infra/pull/635))
+
 ## 0.13.4
 ### Patch Changes
 

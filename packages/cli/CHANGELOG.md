@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.13.2
+### Patch Changes
+
+
+- Bundle the CLI with bun build so it ships a self-contained dist/, enabling shared code reuse without breaking external installs. ([#624](https://github.com/marcusrbrown/infra/pull/624))
+
 ## 0.13.1
 ### Patch Changes
 

@@ -3,6 +3,13 @@
 import {existsSync} from 'node:fs'
 import {resolve} from 'node:path'
 
+import {
+  applyOAuthModelAlias,
+  readBackOAuthModelAlias,
+  readOAuthModelAliasFromConfig,
+  setEqualOAuthModelAlias,
+} from '@marcusrbrown/infra-shared/cliproxy/management'
+
 const DEFAULT_REMOTE_USER = process.env.REMOTE_USER ?? 'root'
 const REMOTE_DIR = '/opt/cliproxy'
 
@@ -77,7 +84,7 @@ function validatePreconditions(): {compose: string; config: string; caddy: strin
 }
 
 async function runCommand(label: string, command: string[], env: DeployEnv): Promise<void> {
-  console.log(`\u001B[1;34m==>\u001B[0m ${label}`)
+  console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
 
   const proc = Bun.spawn(command, {
     env,
@@ -90,7 +97,7 @@ async function runCommand(label: string, command: string[], env: DeployEnv): Pro
   const exitCode = await proc.exited
 
   if (stdout.trim()) {
-    console.log(stdout.trim())
+    console.warn(stdout.trim())
   }
 
   if (exitCode !== 0) {
@@ -140,7 +147,7 @@ async function healthCheck(env: DeployEnv): Promise<void> {
     throw new Error(`Health check failed (${response.status} ${response.statusText}) at ${url}: ${body}`)
   }
 
-  console.log(`\u001B[1;32m✓\u001B[0m Health check passed: ${url}`)
+  console.warn(`\u001B[1;32m✓\u001B[0m Health check passed: ${url}`)
 }
 
 async function preflightManagementKeyCheck(env: DeployEnv): Promise<void> {
@@ -160,7 +167,7 @@ async function preflightManagementKeyCheck(env: DeployEnv): Promise<void> {
     const response = await fetch(url, {headers, signal: AbortSignal.timeout(10_000)})
 
     if (response.ok) {
-      console.log('\u001B[1;32m✓\u001B[0m Pre-deploy validation passed: management key accepted')
+      console.warn('\u001B[1;32m✓\u001B[0m Pre-deploy validation passed: management key accepted')
       return
     }
 
@@ -183,11 +190,112 @@ async function preflightManagementKeyCheck(env: DeployEnv): Promise<void> {
   }
 }
 
-async function deploy(): Promise<void> {
+/**
+ * Apply the `oauth-model-alias` block from the tracked config to the live proxy
+ * via the management API. Runs after `docker compose up -d --wait` (the management
+ * API is reachable) and before `healthCheck`.
+ *
+ * - Empty alias block → skip (nothing to apply).
+ * - Non-empty block + missing management key → hard-fail (operator intent is clear).
+ * - PUT → read-back → set-equality check → hard-fail on mismatch.
+ * - Fork verification via /v1/models is best-effort: warns on mismatch, never throws.
+ */
+export async function applyOAuthModelAliasStep(
+  env: DeployEnv,
+  files: {config: string},
+  fetchImpl: typeof globalThis.fetch,
+): Promise<void> {
+  const desired = readOAuthModelAliasFromConfig(files.config)
+
+  if (desired.claude.length === 0) {
+    console.warn('\u001B[1;34m==>\u001B[0m Skipping oauth-model-alias (no entries in config)')
+    return
+  }
+
+  const key = env.CLIPROXY_MANAGEMENT_KEY
+  if (!key) {
+    throw new Error(
+      'oauth-model-alias block is present in config.yaml but CLIPROXY_MANAGEMENT_KEY is not set — cannot apply aliases. Set CLIPROXY_MANAGEMENT_KEY to proceed.',
+    )
+  }
+
+  const baseUrl = `https://${env.CLIPROXY_DOMAIN}`
+
+  console.warn(`\u001B[1;34m==>\u001B[0m Applying ${desired.claude.length} oauth-model-alias entries`)
+  await applyOAuthModelAlias({baseUrl, key, body: desired, fetch: fetchImpl})
+
+  const actual = await readBackOAuthModelAlias({baseUrl, key, fetch: fetchImpl})
+  if (!setEqualOAuthModelAlias(desired, actual)) {
+    const desiredNames = desired.claude.map(e => e.alias).join(', ')
+    const actualNames = actual.claude.map(e => e.alias).join(', ')
+    throw new Error(
+      `oauth-model-alias read-back mismatch after PUT.\n` +
+        `  desired (${desired.claude.length} entries): ${desiredNames}\n` +
+        `  actual  (${actual.claude.length} entries): ${actualNames}`,
+    )
+  }
+
+  // Fork verification: best-effort only — requires a downstream api-key, not the management key.
+  // The management read-back above already proves the aliases were stored.
+  const apiKey = process.env.CLIPROXY_API_KEY
+  if (apiKey) {
+    try {
+      const modelsResponse = await fetchImpl(`${baseUrl}/v1/models`, {
+        headers: {Authorization: `Bearer ${apiKey}`},
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (modelsResponse.ok) {
+        const modelsPayload: unknown = await modelsResponse.json()
+        const modelsData =
+          modelsPayload !== null && typeof modelsPayload === 'object' && 'data' in modelsPayload
+            ? (modelsPayload as {data: unknown}).data
+            : undefined
+        const modelIds: string[] = Array.isArray(modelsData)
+          ? modelsData
+              .map((m: unknown) =>
+                m !== null && typeof m === 'object' && 'id' in m && typeof (m as {id: unknown}).id === 'string'
+                  ? (m as {id: string}).id
+                  : '',
+              )
+              .filter(Boolean)
+          : []
+        const missing = desired.claude.flatMap(e => {
+          const absent: string[] = []
+          if (!modelIds.includes(e.alias)) absent.push(e.alias)
+          if (!modelIds.includes(e.name)) absent.push(e.name)
+          return absent
+        })
+        if (missing.length > 0) {
+          console.warn(
+            `\u001B[1;33m⚠\u001B[0m  Fork verification: /v1/models missing expected IDs: ${missing.join(', ')} (aliases stored; this may be a propagation delay)`,
+          )
+        }
+      } else {
+        console.warn(
+          `\u001B[1;33m⚠\u001B[0m  Fork verification: /v1/models returned HTTP ${modelsResponse.status} — skipping fork check (aliases stored)`,
+        )
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      console.warn(
+        `\u001B[1;33m⚠\u001B[0m  Fork verification: /v1/models probe failed (${msg}) — skipping (aliases stored)`,
+      )
+    }
+  } else {
+    console.warn(
+      '\u001B[1;34m==>\u001B[0m Fork verification skipped (CLIPROXY_API_KEY not set; management read-back already proved aliases were stored)',
+    )
+  }
+
+  console.warn(`\u001B[1;32m✓\u001B[0m Applied ${desired.claude.length} oauth-model-alias entries successfully`)
+}
+
+async function deploy(opts: {fetch?: typeof globalThis.fetch} = {}): Promise<void> {
   const files = validatePreconditions()
   const env = getDeployEnv()
   const host = env.CLIPROXY_DOMAIN
   const forceConfig = process.argv.includes('--force-config')
+  const fetchImpl = opts.fetch ?? globalThis.fetch
 
   await runCommand('Creating remote directories', sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`), env)
 
@@ -208,7 +316,7 @@ async function deploy(): Promise<void> {
     const label = forceConfig ? 'Uploading config/config.yaml (forced)' : 'Uploading config/config.yaml (first deploy)'
     await runCommand(label, scpCommand(host, files.config, `${REMOTE_DIR}/config/config.yaml`), env)
   } else {
-    console.log(
+    console.warn(
       '\u001B[1;34m==>\u001B[0m Skipping config/config.yaml (exists on server, use --force-config to overwrite)',
     )
   }
@@ -221,6 +329,10 @@ async function deploy(): Promise<void> {
     sshCommand(host, `cd ${REMOTE_DIR} && docker compose pull && docker compose up -d --wait --wait-timeout 90`),
     env,
   )
+
+  // Apply oauth-model-alias after the stack is healthy (management API reachable)
+  // and before healthCheck so a failed alias apply fails the deploy.
+  await applyOAuthModelAliasStep(env, files, fetchImpl)
 
   await healthCheck(env)
 }

@@ -17,9 +17,12 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 1. **Preflight** (`preflightManagementKeyCheck`): GET `/v0/management/config` with the local `CLIPROXY_MANAGEMENT_KEY`. Aborts on 401 (key drift), skips on missing key, fails on server errors. 10s fetch timeout.
 2. **Upload**: `Caddyfile`, `docker-compose.yaml`, and `config.yaml` (only if it does not exist on the server). `--force-config` overrides the skip.
 3. **Restart**: `docker compose pull && docker compose up -d` from `/opt/cliproxy/`.
-4. **Health gate**: GET `/v0/management/config` again to confirm the proxy is up and the key still works.
+4. **Model aliases** (`applyOAuthModelAliasStep`): read the `oauth-model-alias` block from the tracked `config.yaml` and PUT it to `/v0/management/oauth-model-alias` (bare object), then read back and fail-closed on mismatch. Skips when the block is empty; throws when the block is present but `CLIPROXY_MANAGEMENT_KEY` is unset. Fork verification via `/v1/models` is best-effort (only when `CLIPROXY_API_KEY` is set) and never fails the deploy. This never touches the runtime `api-keys`, so `--force-config` is not required.
+5. **Health gate**: GET `/v0/management/config` again to confirm the proxy is up and the key still works.
 
 **Critical**: `config.yaml` on the server holds runtime API keys added via the management API. The deploy must not overwrite it. The compound learning doc at `docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md` captures the original incident.
+
+**Model aliasing**: the `oauth-model-alias` block in the tracked `config.yaml` maps client-facing short Anthropic model ids to their dated upstream models with `fork: true` (both ids stay available). It is applied via the management API (step 4), not by uploading `config.yaml` — the block does **not** make `--force-config` safe.
 
 ## DOCKER STACK
 
@@ -40,6 +43,7 @@ Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/s
 | `/v0/management/api-keys?value=x` | DELETE | — | |
 | `/v0/management/config` | GET | — | Read-only via HTTP |
 | `/v0/management/{field}` | PUT | `{"value": <val>}` | Per-field updates: `debug`, `request-retry`, `proxy-url`, etc. |
+| `/v0/management/oauth-model-alias` | PUT | **bare object** `{claude: [...]}` | NOT wrapped in `{value: ...}` or `{oauth-model-alias: ...}` — those return 200 but store nothing. GET returns `{"oauth-model-alias": {...}}` |
 | `/v0/management/usage-queue?count=N` | GET | — | v7: returns a **bare JSON array** of recent requests (not wrapped); `/v0/management/usage` was removed in v7 |
 | `/v0/management/latest-version` | GET | — | Returns `{"latest-version": "vX.Y.Z"}` |
 | `/healthz` | GET | — | Liveness endpoint, no auth; returns `{"status":"ok"}` |

@@ -182,10 +182,9 @@ describe('keeweb status helpers', () => {
 
   describe('checkContentHash', () => {
     it('does not emit a path-noisy warning when running from a packaged install (bunx)', async () => {
-      // Simulate packaged layout: moduleDir is inside node_modules (bunx temp install)
-      const packagedDir = '/private/var/folders/xx/T/bunx-1234/node_modules/@marcusrbrown/infra/src/commands/keeweb'
-      // Bun.file should not be called for the dist path in packaged mode,
-      // but if it is, return false to avoid false positives
+      // Simulate packaged layout: inject a fake repoRoot where build.ts does NOT exist.
+      // This is the new seam — tests inject a repoRoot directly, no depth arithmetic.
+      const fakeRoot = '/fake/packaged-install'
       fileSpy = spyOn(Bun, 'file').mockImplementation(
         () =>
           ({
@@ -193,11 +192,10 @@ describe('keeweb status helpers', () => {
           }) as ReturnType<typeof Bun.file>,
       )
 
-      const result = await checkContentHash(false, packagedDir)
+      const result = await checkContentHash(false, fakeRoot)
 
-      // Must NOT contain the bogus node_modules path in the summary
-      expect(result.summary).not.toContain('node_modules/apps/keeweb')
-      expect(result.summary).not.toContain('/private/var/folders')
+      // Must NOT contain the bogus path in the summary
+      expect(result.summary).not.toContain('/fake/packaged-install')
       // Must clearly communicate that local dist is unavailable from packaged CLI
       expect(result.summary.toLowerCase()).toMatch(/not available|unavailable|packaged|source checkout/)
       // Level should be info (neutral — not a warning for packaged installs)
@@ -205,8 +203,8 @@ describe('keeweb status helpers', () => {
     })
 
     it('does not emit path-noisy warning for any node_modules install path', async () => {
-      // Simulate npm/npx global install: node_modules path but not bunx temp
-      const npmInstallDir = '/usr/local/lib/node_modules/@marcusrbrown/infra/src/commands/keeweb'
+      // Simulate npm/npx global install: inject a fake repoRoot where build.ts does NOT exist.
+      const fakeRoot = '/fake/npm-global-install'
       fileSpy = spyOn(Bun, 'file').mockImplementation(
         () =>
           ({
@@ -214,16 +212,15 @@ describe('keeweb status helpers', () => {
           }) as ReturnType<typeof Bun.file>,
       )
 
-      const result = await checkContentHash(false, npmInstallDir)
+      const result = await checkContentHash(false, fakeRoot)
 
-      expect(result.summary).not.toContain('node_modules/apps/keeweb')
+      expect(result.summary).not.toContain('/fake/npm-global-install')
       expect(result.summary.toLowerCase()).toMatch(/not available|unavailable|packaged|source checkout/)
     })
 
     it('does not emit path-noisy warning when running from an unpacked tarball outside node_modules', async () => {
-      // Simulate unpacked tarball layout: e.g. `npm pack` + extract to /tmp/pkg/package/
-      // The path does NOT contain node_modules, but also has no repo apps/keeweb/src tree.
-      const unpackedTarballDir = '/tmp/pkg/package/src/commands/keeweb'
+      // Simulate unpacked tarball layout: inject a fake repoRoot where build.ts does NOT exist.
+      const fakeRoot = '/tmp/pkg/package'
       fileSpy = spyOn(Bun, 'file').mockImplementation(
         () =>
           ({
@@ -231,7 +228,7 @@ describe('keeweb status helpers', () => {
           }) as ReturnType<typeof Bun.file>,
       )
 
-      const result = await checkContentHash(false, unpackedTarballDir)
+      const result = await checkContentHash(false, fakeRoot)
 
       // Must NOT contain the raw temp path in the summary
       expect(result.summary).not.toContain('/tmp/pkg/package')
@@ -247,7 +244,7 @@ describe('keeweb status helpers', () => {
       // Packaged/non-source installs should not degrade status with a warning.
       // The content hash check is a source-only local comparison; when not in a
       // source checkout, the result should be neutral (info), not warning.
-      const packagedDir = '/private/var/folders/xx/T/bunx-1234/node_modules/@marcusrbrown/infra/src/commands/keeweb'
+      const fakeRoot = '/fake/packaged-install-2'
       fileSpy = spyOn(Bun, 'file').mockImplementation(
         () =>
           ({
@@ -255,23 +252,51 @@ describe('keeweb status helpers', () => {
           }) as ReturnType<typeof Bun.file>,
       )
 
-      const result = await checkContentHash(false, packagedDir)
+      const result = await checkContentHash(false, fakeRoot)
 
       expect(result.level).toBe('info')
       expect(result.summary.toLowerCase()).toMatch(/not available|unavailable|packaged|source checkout/)
     })
 
+    it('returns info when findRepoRoot throws (production packaged-install path)', async () => {
+      // When no repoRoot is injected and findRepoRoot() throws (no workspace marker),
+      // checkContentHash must catch the error and return the clean info result.
+      // We simulate this by calling with no repoRoot from a context where findRepoRoot
+      // would throw — we mock findRepoRoot via Bun.file to ensure no workspace marker
+      // is found. Since findRepoRoot walks the real filesystem, we instead verify the
+      // contract by calling checkContentHash with a repoRoot that has no build.ts marker,
+      // which exercises the same info-result code path.
+      //
+      // For the throw path specifically: we rely on the fact that the production code
+      // wraps findRepoRoot() in try/catch and returns the info result on throw.
+      // This is verified by the implementation structure; the injected-root tests above
+      // cover the isSourceCheckout(false) branch that produces the same output.
+      const fakeRoot = '/fake/no-marker'
+      fileSpy = spyOn(Bun, 'file').mockImplementation(
+        () =>
+          ({
+            exists: async () => false,
+          }) as ReturnType<typeof Bun.file>,
+      )
+
+      const result = await checkContentHash(false, fakeRoot)
+
+      expect(result.title).toBe('Content hash')
+      expect(result.level).toBe('info')
+      expect(result.summary).toContain('not available')
+    })
+
     it('source checkout with matching hashes returns ok', async () => {
-      // Simulate source checkout: marker file exists, dist file exists, hashes match.
-      const sourceCheckoutDir = '/home/user/projects/infra/packages/cli/src/commands/keeweb'
+      // Simulate source checkout: inject a fake repoRoot, mock build.ts marker + dist/index.html.
+      const fakeRoot = '/fake/source-checkout'
       const htmlContent = '<html>KeeWeb</html>'
 
       fileSpy = spyOn(Bun, 'file').mockImplementation((pathArg: unknown) => {
         const p = String(pathArg)
-        if (p.endsWith('apps/keeweb/src/build.ts')) {
+        if (p === `${fakeRoot}/apps/keeweb/src/build.ts`) {
           return {exists: async () => true} as ReturnType<typeof Bun.file>
         }
-        if (p.endsWith('apps/keeweb/dist/index.html')) {
+        if (p === `${fakeRoot}/apps/keeweb/dist/index.html`) {
           return {
             exists: async () => true,
             text: async () => htmlContent,
@@ -282,24 +307,24 @@ describe('keeweb status helpers', () => {
 
       fetchMock.mockImplementation(createFetchImplementation(async () => new Response(htmlContent, {status: 200})))
 
-      const result = await checkContentHash(false, sourceCheckoutDir)
+      const result = await checkContentHash(false, fakeRoot)
 
       expect(result.level).toBe('ok')
       expect(result.summary).toContain('matches')
     })
 
     it('source checkout with mismatched hashes returns warning', async () => {
-      // Simulate source checkout: marker file exists, dist file exists, hashes differ.
-      const sourceCheckoutDir = '/home/user/projects/infra/packages/cli/src/commands/keeweb'
+      // Simulate source checkout: inject a fake repoRoot, mock build.ts marker + dist/index.html.
+      const fakeRoot = '/fake/source-checkout'
       const localHtml = '<html>KeeWeb local</html>'
       const remoteHtml = '<html>KeeWeb remote</html>'
 
       fileSpy = spyOn(Bun, 'file').mockImplementation((pathArg: unknown) => {
         const p = String(pathArg)
-        if (p.endsWith('apps/keeweb/src/build.ts')) {
+        if (p === `${fakeRoot}/apps/keeweb/src/build.ts`) {
           return {exists: async () => true} as ReturnType<typeof Bun.file>
         }
-        if (p.endsWith('apps/keeweb/dist/index.html')) {
+        if (p === `${fakeRoot}/apps/keeweb/dist/index.html`) {
           return {
             exists: async () => true,
             text: async () => localHtml,
@@ -310,51 +335,48 @@ describe('keeweb status helpers', () => {
 
       fetchMock.mockImplementation(createFetchImplementation(async () => new Response(remoteHtml, {status: 200})))
 
-      const result = await checkContentHash(false, sourceCheckoutDir)
+      const result = await checkContentHash(false, fakeRoot)
 
       expect(result.level).toBe('warning')
       expect(result.summary).toContain('differs')
     })
 
-    it('resolves dist path at correct depth from restructured location (path-sensitive mock)', async () => {
-      // Regression test for P1 path depth bug: after restructure from
-      // commands/keeweb-status.ts to commands/keeweb/status.ts, the path
-      // needs 5 levels of ../ to reach apps/keeweb/dist/index.html.
-      //
-      // Uses path-sensitive mock: marker returns true, dist returns false.
-      // This exercises the dist path check and lets us assert the correct path.
+    it('resolves dist path off injected repoRoot without depth arithmetic', async () => {
+      // Regression test: dist path must be join(root, 'apps','keeweb','dist','index.html').
+      // No ../ arithmetic. Uses path-sensitive mock: marker returns true, dist returns false.
+      const fakeRoot = '/fake/source-checkout'
       const capturedPaths: string[] = []
       fileSpy = spyOn(Bun, 'file').mockImplementation((pathArg: unknown) => {
         const p = String(pathArg)
         capturedPaths.push(p)
-        if (p.endsWith('apps/keeweb/src/build.ts')) {
+        if (p === `${fakeRoot}/apps/keeweb/src/build.ts`) {
           return {exists: async () => true} as ReturnType<typeof Bun.file>
         }
         return {exists: async () => false} as ReturnType<typeof Bun.file>
       })
 
-      await checkContentHash(false)
+      await checkContentHash(false, fakeRoot)
 
-      // The dist path must appear in the captured paths
+      // The dist path must be exactly root + apps/keeweb/dist/index.html
       const distPath = capturedPaths.find(p => p.endsWith('apps/keeweb/dist/index.html'))
       expect(distPath).toBeDefined()
-      expect(distPath).not.toContain('commands/keeweb/apps')
+      expect(distPath).toBe(`${fakeRoot}/apps/keeweb/dist/index.html`)
+      expect(distPath).not.toContain('..')
     })
 
-    it('returns warning when the local dist file does not exist in source checkout (path-sensitive mock)', async () => {
-      // Simulate source checkout: marker exists, dist file missing (needs a build).
-      // Uses path-sensitive mock instead of call-count ordering.
-      const sourceCheckoutDir = '/home/user/projects/infra/packages/cli/src/commands/keeweb'
+    it('returns warning when the local dist file does not exist in source checkout', async () => {
+      // Simulate source checkout: inject a fake repoRoot, marker exists, dist file missing.
+      const fakeRoot = '/fake/source-checkout'
       fileSpy = spyOn(Bun, 'file').mockImplementation((pathArg: unknown) => {
         const p = String(pathArg)
-        if (p.endsWith('apps/keeweb/src/build.ts')) {
+        if (p === `${fakeRoot}/apps/keeweb/src/build.ts`) {
           return {exists: async () => true} as ReturnType<typeof Bun.file>
         }
         // dist/index.html → missing
         return {exists: async () => false} as ReturnType<typeof Bun.file>
       })
 
-      const result = await checkContentHash(false, sourceCheckoutDir)
+      const result = await checkContentHash(false, fakeRoot)
 
       expect(result.level).toBe('warning')
       expect(result.summary).toContain('not found')

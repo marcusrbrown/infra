@@ -1,6 +1,4 @@
-import {chmodSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
-import {tmpdir} from 'node:os'
-import {join} from 'node:path'
+import {materializeIdentityFile as sharedMaterializeIdentityFile} from '@marcusrbrown/infra-shared/server/droplet-helpers'
 
 /**
  * A materialized private-key file plus a best-effort cleanup callback.
@@ -11,10 +9,6 @@ export interface MaterializedIdentity {
   cleanup: () => void
 }
 
-// NOTE: This intentionally duplicates the key-materialization logic in
-// packages/shared/server/droplet-helpers.ts. The published CLI must not depend
-// on @marcusrbrown/infra-shared (that dep breaks npm install for external users).
-
 /**
  * Writes a private key to a 0600 temp file (with a guaranteed single trailing
  * newline) and returns its path plus an idempotent best-effort cleanup callback.
@@ -22,30 +16,12 @@ export interface MaterializedIdentity {
  * The trailing newline guards against env/secret injection stripping it
  * (OpenSSH rejects keys without it). Empty/whitespace-key guards live in
  * `buildIdentityArgs`; this function materializes whatever key bytes it receives.
+ *
+ * Delegates to the shared implementation in @marcusrbrown/infra-shared, which is
+ * inlined by `bun build` — no workspace:* dep reaches the published package.
  */
 export function materializeIdentityFile(privateKey: string): MaterializedIdentity {
-  const dir = mkdtempSync(join(tmpdir(), 'infra-ssh-key-'))
-  const path = join(dir, 'id')
-
-  const cleanup = (): void => {
-    try {
-      rmSync(dir, {recursive: true, force: true})
-    } catch {
-      // Best-effort: a missing temp dir (already cleaned) is fine.
-    }
-  }
-
-  try {
-    const contents = privateKey.endsWith('\n') ? privateKey : `${privateKey}\n`
-    writeFileSync(path, contents, {mode: 0o600})
-    chmodSync(path, 0o600)
-  } catch (error) {
-    // Don't leave a partial 0600 key (or its temp dir) behind on write failure.
-    cleanup()
-    throw error
-  }
-
-  return {path, cleanup}
+  return sharedMaterializeIdentityFile(privateKey)
 }
 
 /**

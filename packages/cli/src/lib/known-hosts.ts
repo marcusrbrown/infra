@@ -1,6 +1,13 @@
 import {existsSync} from 'node:fs'
 import {join, resolve} from 'node:path'
 
+// File-asset import: at source-run time Bun resolves this to the real
+// src/resources/known_hosts path. Under `bun build`, the bundler copies the
+// asset into the output directory and rewrites this constant to the dist-relative
+// path — so the packaged binary always finds the file regardless of where dist/
+// lands relative to the original source tree.
+import knownHostsAssetPath from '../resources/known_hosts' with {type: 'file'}
+
 const FAIL_CLOSED_ERROR =
   'Pinned SSH known_hosts file not found; reinstall @marcusrbrown/infra or run from the repo checkout'
 
@@ -32,15 +39,17 @@ export function resolveRepoKnownHostsPath(repoRoot?: string): string | null {
  *
  * 1. Repo checkout: `.github/known_hosts` at the monorepo root (4 levels up
  *    from `src/lib/`).
- * 2. Installed package: `src/resources/known_hosts` bundled alongside the
- *    source (1 level up from `src/lib/`, then into `resources/`).
+ * 2. Installed/bundled package: the file-asset import `knownHostsAssetPath`
+ *    — at source-run time this is `src/resources/known_hosts`; under
+ *    `bun build` the bundler copies the asset to `dist/` and rewrites the
+ *    path so the bundle always resolves correctly.
  *
  * Prefers the repo checkout layout when both exist. Throws a clear error if
  * neither is found — fail-closed, never silently falls back to user
  * `~/.ssh/known_hosts`.
  *
  * @param libDir - Override for the directory containing this file (for tests).
- *   Defaults to `import.meta.dir`.
+ *   Defaults to `import.meta.dir`. Only affects Layout 1 (repo checkout walk-up).
  * @returns Absolute path to the pinned known_hosts file.
  * @throws Error if no pinned known_hosts file is found.
  */
@@ -52,9 +61,10 @@ export function resolveKnownHostsPath(libDir?: string): string {
   const repoCandidate = join(repoRoot, '.github', 'known_hosts')
   if (existsSync(repoCandidate)) return repoCandidate
 
-  // Layout 2: installed package — src/resources/known_hosts is 1 level up from src/lib
-  const packagedCandidate = resolve(dir, '..', 'resources', 'known_hosts')
-  if (existsSync(packagedCandidate)) return packagedCandidate
+  // Layout 2: installed/bundled package — use the file-asset import path.
+  // At source-run time: resolves to src/resources/known_hosts.
+  // Under `bun build`: bundler copies asset to dist/ and rewrites this path.
+  if (existsSync(knownHostsAssetPath)) return knownHostsAssetPath
 
   throw new Error(FAIL_CLOSED_ERROR)
 }

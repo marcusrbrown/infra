@@ -1,9 +1,10 @@
 import type {goke} from 'goke'
 
 import {mkdir, writeFile} from 'node:fs/promises'
-import {resolve} from 'node:path'
+import {join, resolve} from 'node:path'
 
 import {z} from 'zod'
+import {findRepoRoot} from '../../lib/repo-root'
 import {addPeer, readPeersOrEmpty, removePeer, renderClientConfig, writePeers, type Peer} from './peers'
 
 declare const process: {
@@ -357,13 +358,11 @@ export async function vpnClientRemove(
 // ─── Default paths ────────────────────────────────────────────────────────────
 
 function resolveDefaultPeersJsonPath(): string {
-  // packages/cli/src/commands/vpn/ → repo root → apps/vpn/config/peers.json
-  return resolve(import.meta.dir, '..', '..', '..', '..', '..', 'apps', 'vpn', 'config', 'peers.json')
+  return join(findRepoRoot(), 'apps', 'vpn', 'config', 'peers.json')
 }
 
 function resolveDefaultClientsDir(): string {
-  // packages/cli/src/commands/vpn/ → repo root → apps/vpn/clients/
-  return resolve(import.meta.dir, '..', '..', '..', '..', '..', 'apps', 'vpn', 'clients')
+  return join(findRepoRoot(), 'apps', 'vpn', 'clients')
 }
 
 // ─── Command registration ─────────────────────────────────────────────────────

@@ -22,13 +22,16 @@
     "./vpn/peers": "./src/commands/vpn/peers.ts"
   },
   "bin": {
-    "infra": "src/cli.ts"
+    "infra": "./dist/cli.js"
   },
   "files": [
-    "src/"
+    "dist",
+    "src/commands/vpn/peers.ts"
   ],
   "scripts": {
+    "build": "bun run scripts/build.ts",
     "cli": "bun run src/cli.ts",
+    "prepack": "bun run build",
     "test": "bun test"
   },
   "dependencies": {
@@ -39,6 +42,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@marcusrbrown/infra-shared": "workspace:*",
     "@modelcontextprotocol/sdk": "1.29.0",
     "yaml": "2.9.0"
   },

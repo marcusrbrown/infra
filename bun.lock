@@ -63,9 +63,9 @@
     },
     "packages/cli": {
       "name": "@marcusrbrown/infra",
-      "version": "0.12.3",
+      "version": "0.13.1",
       "bin": {
-        "infra": "src/cli.ts",
+        "infra": "./dist/cli.js",
       },
       "dependencies": {
         "@clack/prompts": "^1.2.0",
@@ -75,6 +75,7 @@
         "zod": "^4.3.6",
       },
       "devDependencies": {
+        "@marcusrbrown/infra-shared": "workspace:*",
         "@modelcontextprotocol/sdk": "1.29.0",
         "yaml": "2.9.0",
       },

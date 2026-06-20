@@ -3,8 +3,9 @@ import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
 
-import path from 'node:path'
+import {join} from 'node:path'
 import {z} from 'zod'
+import {findRepoRoot} from '../../lib/repo-root'
 
 const SITE_URL = 'https://kw.igg.ms/'
 const GH_REPO = 'marcusrbrown/infra'
@@ -197,32 +198,47 @@ export async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
 }
 
 /**
- * Detect whether moduleDir belongs to a source checkout of this monorepo.
+ * Detect whether root is a source checkout of this monorepo.
  *
- * A source checkout has the repo root at 5 levels above the keeweb command
- * directory (packages/cli/src/commands/keeweb → repo root). We confirm the
- * layout by checking for a source-only marker file that is never shipped in
- * the CLI package. This is more robust than checking for `node_modules` in
- * the path, which misses unpacked tarballs and global-style installs.
+ * A source checkout has the repo root discoverable from the module directory.
+ * We confirm the layout by checking for a source-only marker file that is
+ * never shipped in the CLI package. This is more robust than checking for
+ * `node_modules` in the path, which misses unpacked tarballs and global-style
+ * installs.
  */
-async function isSourceCheckout(resolvedModuleDir: string): Promise<boolean> {
-  // Candidate repo root is 5 levels up from packages/cli/src/commands/keeweb
-  const candidateRoot = path.resolve(resolvedModuleDir, '../../../../../')
+async function isSourceCheckout(root: string): Promise<boolean> {
   // apps/keeweb/src/build.ts is a source-only file never included in the CLI package
-  const sourceMarker = path.join(candidateRoot, 'apps', 'keeweb', 'src', 'build.ts')
+  const sourceMarker = join(root, 'apps', 'keeweb', 'src', 'build.ts')
   return Bun.file(sourceMarker).exists()
 }
 
-export async function checkContentHash(verbose: boolean, moduleDir?: string): Promise<CheckResult> {
-  const resolvedModuleDir = moduleDir ?? import.meta.dir
-  const distIndexPath = path.resolve(resolvedModuleDir, '../../../../../apps/keeweb/dist/index.html')
-
+export async function checkContentHash(verbose: boolean, repoRoot?: string): Promise<CheckResult> {
   // When running from a packaged install (bunx, npm global, unpacked tarball, etc.),
-  // the resolved path has no repo apps/keeweb source tree — the KeeWeb dist is not
-  // shipped with the CLI package. Emit a clean, non-path-noisy message instead of
-  // a scary temp path. We detect source checkout by looking for a source-only marker
-  // file rather than relying on `node_modules` in the path (which misses tarballs).
-  const sourceCheckout = await isSourceCheckout(resolvedModuleDir)
+  // findRepoRoot() throws because there is no workspace marker. Treat that as
+  // "not a source checkout" and return a clean, non-path-noisy info result.
+  let root: string
+  if (repoRoot === undefined) {
+    try {
+      root = findRepoRoot()
+    } catch {
+      return {
+        title: 'Content hash',
+        level: 'info',
+        summary: 'Content hash not available: local KeeWeb dist is only present in a source checkout',
+        details: verbose
+          ? ['Clone the repo and run: bun run --cwd apps/keeweb build', 'Then re-run status from the source checkout']
+          : undefined,
+      }
+    }
+  } else {
+    root = repoRoot
+  }
+
+  const distIndexPath = join(root, 'apps', 'keeweb', 'dist', 'index.html')
+
+  // When the injected root has no source marker (e.g. tests simulating packaged installs),
+  // return the same clean info result.
+  const sourceCheckout = await isSourceCheckout(root)
   if (!sourceCheckout) {
     return {
       title: 'Content hash',

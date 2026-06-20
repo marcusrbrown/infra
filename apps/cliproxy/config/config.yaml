@@ -14,3 +14,32 @@ claude-api-key: []
 debug: false
 request-retry: 3
 usage-statistics-enabled: true
+
+# Client-facing model aliases applied at deploy time via the management API
+# (PUT /v0/management/oauth-model-alias), not by uploading this file. Setting
+# fork: true keeps both the short alias and the dated upstream id available.
+# This block does NOT make --force-config safe — that still overwrites runtime
+# api-keys on the server.
+oauth-model-alias:
+  claude:
+    - name: claude-3-5-haiku-20241022
+      alias: claude-3-5-haiku-latest
+      fork: true
+    - name: claude-haiku-4-5-20251001
+      alias: claude-haiku-4-5
+      fork: true
+    - name: claude-opus-4-20250514
+      alias: claude-opus-4-0
+      fork: true
+    - name: claude-opus-4-1-20250805
+      alias: claude-opus-4-1
+      fork: true
+    - name: claude-opus-4-5-20251101
+      alias: claude-opus-4-5
+      fork: true
+    - name: claude-sonnet-4-20250514
+      alias: claude-sonnet-4-0
+      fork: true
+    - name: claude-sonnet-4-5-20250929
+      alias: claude-sonnet-4-5
+      fork: true

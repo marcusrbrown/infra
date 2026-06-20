@@ -2,9 +2,8 @@ import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 import type {StatusSummary} from '../status'
 
+import {HTTP_TIMEOUT_MS, managementHeaders} from '@marcusrbrown/infra-shared/cliproxy/management'
 import {z} from 'zod'
-
-import {HTTP_TIMEOUT_MS, managementHeaders} from './shared'
 
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape

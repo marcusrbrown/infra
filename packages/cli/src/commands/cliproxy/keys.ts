@@ -1,12 +1,14 @@
 import type {goke} from 'goke'
-
 import type {ActionCtx} from '../../lib/action-ctx'
-
+import {
+  managementHeaders,
+  parseManagementKeyList,
+  requestJson,
+  toStringArray,
+} from '@marcusrbrown/infra-shared/cliproxy/management'
 import {z} from 'zod'
 
-import {managementHeaders, parseManagementKeyList, requestJson, toStringArray} from './shared'
-
-export {toStringArray} from './shared'
+export {toStringArray} from '@marcusrbrown/infra-shared/cliproxy/management'
 
 /** Minimal ctx surface consumed by cliproxy keys actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape

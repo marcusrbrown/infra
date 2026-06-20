@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.13.3
+### Patch Changes
+
+
+- Apply CLIProxyAPI model aliases on deploy so harnesses can use short Anthropic model ids (e.g. `claude-sonnet-4-5`) that resolve to the dated upstream models, and consolidate the cliproxy management helpers into the shared package. ([#626](https://github.com/marcusrbrown/infra/pull/626))
+
 ## 0.13.2
 ### Patch Changes
 

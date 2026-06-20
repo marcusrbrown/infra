@@ -55,7 +55,7 @@
     "apps/vpn": {
       "name": "@marcusrbrown/infra-vpn",
       "dependencies": {
-        "@aws-sdk/client-lightsail": "3.1070.0",
+        "@aws-sdk/client-lightsail": "3.1071.0",
         "@marcusrbrown/infra": "workspace:*",
         "@marcusrbrown/infra-shared": "workspace:*",
         "zod": "^4.3.6",
@@ -63,7 +63,7 @@
     },
     "packages/cli": {
       "name": "@marcusrbrown/infra",
-      "version": "0.13.2",
+      "version": "0.13.3",
       "bin": {
         "infra": "./dist/cli.js",
       },
@@ -100,7 +100,7 @@
 
     "@aws-crypto/util": ["@aws-crypto/util@5.2.0", "", { "dependencies": { "@aws-sdk/types": "^3.222.0", "@smithy/util-utf8": "^2.0.0", "tslib": "^2.6.2" } }, "sha512-4RkU9EsI6ZpBve5fseQlGNUWKMa1RLPQ1dnjnQoe07ldfIzcsGb5hC5W0Dm7u423KWzawlrpbjXBrXCEv9zazQ=="],
 
-    "@aws-sdk/client-lightsail": ["@aws-sdk/client-lightsail@3.1070.0", "", { "dependencies": { "@aws-crypto/sha256-browser": "5.2.0", "@aws-crypto/sha256-js": "5.2.0", "@aws-sdk/core": "^3.974.21", "@aws-sdk/credential-provider-node": "^3.972.56", "@aws-sdk/types": "^3.973.13", "@smithy/core": "^3.24.6", "@smithy/fetch-http-handler": "^5.4.6", "@smithy/node-http-handler": "^4.7.6", "@smithy/types": "^4.14.3", "tslib": "^2.6.2" } }, "sha512-ph9l03QleZRNckaossFM3uTENEQAkbyEw/VdweKOtpZMDmNk11tOSJH1ksch8C0x7SP43WGcUADx1fmlg5y8lg=="],
+    "@aws-sdk/client-lightsail": ["@aws-sdk/client-lightsail@3.1071.0", "", { "dependencies": { "@aws-crypto/sha256-browser": "5.2.0", "@aws-crypto/sha256-js": "5.2.0", "@aws-sdk/core": "^3.974.22", "@aws-sdk/credential-provider-node": "^3.972.57", "@aws-sdk/types": "^3.973.13", "@smithy/core": "^3.24.6", "@smithy/fetch-http-handler": "^5.4.6", "@smithy/node-http-handler": "^4.7.6", "@smithy/types": "^4.14.3", "tslib": "^2.6.2" } }, "sha512-gpVlwIkNjBlBOX33Gt1mL6hv3musinvAKKUowSEu0zWh510ASI1hAdcu5cti+09dVyziIhAaSBygvL/35TVB5g=="],
 
     "@aws-sdk/core": ["@aws-sdk/core@3.974.22", "", { "dependencies": { "@aws-sdk/types": "^3.973.13", "@aws-sdk/xml-builder": "^3.972.30", "@aws/lambda-invoke-store": "^0.2.2", "@smithy/core": "^3.24.6", "@smithy/signature-v4": "^5.4.6", "@smithy/types": "^4.14.3", "bowser": "^2.11.0", "tslib": "^2.6.2" } }, "sha512-YofH63shc6YRdXjz80BJkpJW+Bkn0Cuu2dn4Rv7s9G2Idt58tgtzQEWxrR2xVljlVfIBeUjPuULnSVYLke3sUQ=="],
 

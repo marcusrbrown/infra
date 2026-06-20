@@ -290,6 +290,8 @@ export function buildEnvFileContents(opts: {
     `DASHBOARD_OAUTH_REDIRECT_URI=https://${domain}/auth/callback`,
     `DASHBOARD_OPERATOR_LOGIN=${operatorLogin}`,
     `DASHBOARD_COOKIE_KEY=${cookieKey}`,
+    `DASHBOARD_OPERATOR_UI_ENABLED=true`,
+    `DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true`,
     ...(gatewayVpcIp ? [`GATEWAY_VPC_IP=${gatewayVpcIp}`] : []),
     '',
   ]

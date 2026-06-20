@@ -149,7 +149,14 @@ SSH auth during provisioning: when `DASHBOARD_SSH_KEY` is set, the script materi
 temp key file and pins it with `-i` + `IdentitiesOnly=yes` (no ssh-agent needed; cleaned up after).
 When unset, it falls back to ssh-agent.
 
-## Operator same-origin target
+## Operator UI (same-origin)
+
+The operator UI is **enabled same-origin**. The deploy sets `DASHBOARD_OPERATOR_UI_ENABLED=true`
+and `DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true` as static constants in the `.env` written by
+`buildEnvFileContents` — no new secrets required. The SSE run-stream UI is reachable at
+`https://dashboard.fro.bot/operator/*` behind the operator auth boundary. The gateway operator
+session mode is active (same-origin path); `DASHBOARD_GATEWAY_OPERATOR_ORIGIN` defaults to
+`https://dashboard.fro.bot` and is not set explicitly.
 
 The ratified browser-visible operator API origin is `https://dashboard.fro.bot/operator/*`. The
 dashboard Caddy instance owns the `/operator/*` route and proxies it to the gateway operator

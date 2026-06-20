@@ -106,12 +106,14 @@ describe('dist/cli.js inline/external split', () => {
     cliText = await Bun.file(join(distDir, 'cli.js')).text()
   })
 
-  it('does NOT contain @marcusrbrown/infra-shared import', () => {
-    // infra-shared must be inlined (no import specifier in the bundle).
-    // This assertion is trivially true now (Unit 3 — no infra-shared import
-    // exists yet). It becomes the meaningful regression guard after Unit 4
-    // adds the import and the build inlines it.
-    expect(cliText).not.toContain('@marcusrbrown/infra-shared')
+  it('does NOT contain @marcusrbrown/infra-shared import specifier', () => {
+    // infra-shared must be inlined (no import/require specifier in the bundle).
+    // Note: the inlined package.json JSON data contains the string as a devDependency
+    // key — we check for an actual import/require call, not just any string occurrence.
+    // Check for ESM `from "..."` or CJS `require("...")` import specifier.
+    // Two separate checks to avoid overlapping quantifiers (regexp/no-super-linear-backtracking).
+    expect(cliText).not.toMatch(/from ["']@marcusrbrown\/infra-shared/)
+    expect(cliText).not.toMatch(/require\(["']@marcusrbrown\/infra-shared/)
   })
 
   it('retains external import specifiers for all 5 public deps', () => {

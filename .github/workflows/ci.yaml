@@ -79,10 +79,109 @@ jobs:
       - name: Run tests
         run: bun test --recursive
 
+  package-smoke:
+    name: Package smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Build CLI
+        run: bun run --cwd packages/cli build
+
+      - name: Pack tarball
+        id: pack
+        working-directory: packages/cli
+        run: |
+          TGZ=$(bun pm pack 2>&1 | tail -1)
+          echo "tgz=${TGZ}" >> "$GITHUB_OUTPUT"
+          echo "tgz_abs=$(pwd)/${TGZ}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tarball contents
+        working-directory: packages/cli
+        run: |
+          TGZ="${{ steps.pack.outputs.tgz }}"
+          echo "==> Tarball file list:"
+          tar tzf "${TGZ}"
+
+          # Must contain dist/ (including the known_hosts asset)
+          if ! tar tzf "${TGZ}" | grep -q '^package/dist/'; then
+            echo "❌ Tarball missing dist/ — publish wiring broken"
+            exit 1
+          fi
+
+          # Must contain the known_hosts asset (content-hashed filename)
+          if ! tar tzf "${TGZ}" | grep -q 'known_hosts'; then
+            echo "❌ Tarball missing known_hosts asset"
+            exit 1
+          fi
+
+          # Must NOT contain src/
+          if tar tzf "${TGZ}" | grep -q '^package/src/'; then
+            echo "❌ Tarball contains src/ — files field not updated"
+            exit 1
+          fi
+
+          # Extracted package.json must have no infra-shared or workspace: in dependencies
+          tar xzf "${TGZ}" -O package/package.json > /tmp/published-pkg.json
+          if grep -q 'infra-shared' /tmp/published-pkg.json; then
+            echo "❌ Published package.json references infra-shared — 0.10.0 regression"
+            cat /tmp/published-pkg.json
+            exit 1
+          fi
+          if grep -q 'workspace:' /tmp/published-pkg.json; then
+            echo "❌ Published package.json contains workspace: specifier"
+            cat /tmp/published-pkg.json
+            exit 1
+          fi
+
+          echo "✅ Tarball contents verified"
+
+      - name: Clean-room install and smoke test
+        run: |
+          TGZ_ABS="${{ steps.pack.outputs.tgz_abs }}"
+          TMPDIR=$(mktemp -d)
+          echo "==> Installing in clean room: ${TMPDIR}"
+          cd "${TMPDIR}"
+          bun add "${TGZ_ABS}"
+
+          # Basic help — must exit 0
+          echo "==> Running: infra --help"
+          ./node_modules/.bin/infra --help
+
+          # Real status path: triggers resolveKnownHostsPath without needing network/secrets.
+          # We expect the command to fail on network/SSH, NOT on missing known_hosts.
+          # The fail-closed error string is the canary — its presence means the asset is broken.
+          FAIL_CLOSED_MSG="Pinned SSH known_hosts file not found"
+          echo "==> Running: infra cliproxy status (expect network failure, not missing known_hosts)"
+          STATUS_OUT=$(./node_modules/.bin/infra cliproxy status --url https://example.invalid 2>&1 || true)
+          echo "${STATUS_OUT}"
+          if echo "${STATUS_OUT}" | grep -q "${FAIL_CLOSED_MSG}"; then
+            echo "❌ known_hosts asset not found in installed package — fail-closed error triggered"
+            exit 1
+          fi
+          echo "✅ known_hosts resolved (no fail-closed error)"
+
+          # Verify dist/cli.js has no @marcusrbrown/infra-shared import/require specifier (it's inlined).
+          # Note: the inlined package.json JSON data may contain the string as a devDependency key,
+          # so we check for an actual import/require call, not just any string occurrence.
+          CLI_JS="${TMPDIR}/node_modules/@marcusrbrown/infra/dist/cli.js"
+          if grep -qE '(from|require)\s*\(?\s*["'"'"']@marcusrbrown/infra-shared' "${CLI_JS}"; then
+            echo "❌ dist/cli.js still imports @marcusrbrown/infra-shared — not inlined by build"
+            exit 1
+          fi
+          echo "✅ dist/cli.js has no @marcusrbrown/infra-shared import specifier (correctly inlined)"
+
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [lint, type-check, test]
+    needs: [lint, type-check, test, package-smoke]
     if: always()
     steps:
       - name: Check all jobs
@@ -94,6 +193,16 @@ jobs:
 
           if [[ "${{ needs.type-check.result }}" != "success" ]]; then
             echo "❌ Type checking failed"
+            exit 1
+          fi
+
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "❌ Tests failed"
+            exit 1
+          fi
+
+          if [[ "${{ needs.package-smoke.result }}" != "success" ]]; then
+            echo "❌ Package smoke test failed"
             exit 1
           fi
 

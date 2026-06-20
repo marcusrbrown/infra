@@ -19,17 +19,21 @@
   "author": "Marcus R. Brown <contact@marcusrbrown.com>",
   "type": "module",
   "exports": {
-    "./vpn/peers": "./src/commands/vpn/peers.ts"
+    "./vpn/peers": {
+      "types": "./src/commands/vpn/peers.ts",
+      "default": "./dist/commands/vpn/peers.js"
+    }
   },
   "bin": {
-    "infra": "src/cli.ts"
+    "infra": "./dist/cli.js"
   },
   "files": [
-    "src/"
+    "dist"
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
     "cli": "bun run src/cli.ts",
+    "prepack": "bun run build",
     "test": "bun test"
   },
   "dependencies": {
@@ -40,6 +44,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@marcusrbrown/infra-shared": "workspace:*",
     "@modelcontextprotocol/sdk": "1.29.0",
     "yaml": "2.9.0"
   },

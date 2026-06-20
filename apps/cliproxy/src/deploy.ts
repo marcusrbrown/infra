@@ -376,7 +376,9 @@ async function deploy(opts: {fetch?: typeof globalThis.fetch} = {}): Promise<voi
   await healthCheck(env)
 }
 
-deploy().catch((error: unknown) => {
-  console.error(error)
-  process.exit(1)
-})
+if (import.meta.main) {
+  deploy().catch((error: unknown) => {
+    console.error(error)
+    process.exit(1)
+  })
+}

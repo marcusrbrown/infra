@@ -28,6 +28,7 @@
     "src/"
   ],
   "scripts": {
+    "build": "bun run scripts/build.ts",
     "cli": "bun run src/cli.ts",
     "test": "bun test"
   },

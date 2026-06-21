@@ -2568,6 +2568,38 @@ SCRIPT`
       spawnFn,
     )
 
+    // Phase 7b: Reclaim disk before pulling new images (best-effort, non-fatal).
+    //
+    // The droplet only PULLS prebuilt images — it never builds. Superseded image versions
+    // and build cache accumulate unbounded until the disk hits 100% and `docker compose pull`
+    // fails with "no space left on device". Pruning BEFORE pull is intentional: the
+    // about-to-be-pulled image is not present yet, and running containers protect their
+    // current images (docker image prune -a only removes images not referenced by any
+    // container — running or stopped).
+    //
+    // SAFETY CONSTRAINTS:
+    //   - Do NOT use `docker system prune --volumes` — volumes (OAuth tokens, workspace
+    //     repos, S3 state) must NEVER be pruned.
+    //   - `docker image prune -af` removes all images not referenced by any container.
+    //     Running containers protect their images; only superseded versions are reclaimed.
+    //   - `docker builder prune -af` clears build cache. Safe: the off-droplet build model
+    //     means the droplet never builds, so build cache is pure waste.
+    //   - Prune is BEST-EFFORT: a prune failure must NOT abort the deploy. Reclaiming disk
+    //     is housekeeping; if it fails the pull may still succeed or fail on its own.
+    for (const [label, cmd] of [
+      ['Pruning unused images (disk reclaim)', `docker image prune -af`],
+      ['Pruning build cache (disk reclaim)', `docker builder prune -af`],
+    ] as const) {
+      try {
+        await runCommand(label, sshCommand(host, cmd, keyPath, controlPath), deployEnv, spawnFn)
+      } catch (error) {
+        console.warn(
+          `[deploy] ${label} failed (non-fatal, continuing):`,
+          error instanceof Error ? error.message : error,
+        )
+      }
+    }
+
     // Phase 8: Pull prebuilt GHCR images, then bring up the stack without building.
     // The compose.override.yaml written in phase 5b pins gateway and workspace to the
     // CI-pushed digests. docker compose pull fetches those exact images; docker compose up

@@ -83,10 +83,10 @@
       // not inherit the fro-bot/** minor+patch automerge from the shared preset. Require explicit
       // operator approval (dashboard checkbox to create the PR, manual merge) so every daemon bump
       // gets a source-contract verification pass before landing — verify no new boot-required
-      // secrets before the ceiling moves; v0.73.0+ needs that deliberate pass.
+      // secrets before the ceiling moves; v0.74.0+ needs that deliberate pass.
       automerge: false,
       dependencyDashboardApproval: true,
-      allowedVersions: '<0.73.0',
+      allowedVersions: '<0.74.0',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in apps/gateway/upstream.json so new

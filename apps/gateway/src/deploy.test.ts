@@ -10894,3 +10894,151 @@ describe('gateway verification: public-denied probe uses TCP connect (P2 fix)', 
     ).resolves.toBeUndefined()
   })
 })
+
+// ─── disk-reclaim (docker prune) before pull ─────────────────────────────────
+
+describe('disk-reclaim prune before pull', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('deploy spawns docker image prune -af and docker builder prune -af before docker compose pull', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    // Extract the remote command string from each SSH call (last element of argv)
+    const remoteCmds = calls.filter(cmd => cmd[0] === 'ssh').map(cmd => cmd.at(-1) ?? '')
+
+    const imagePruneIdx = remoteCmds.findIndex(s => s.includes('docker image prune'))
+    const builderPruneIdx = remoteCmds.findIndex(s => s.includes('docker builder prune'))
+    const pullIdx = remoteCmds.findIndex(s => s.includes('docker compose') && s.includes(' pull'))
+
+    expect(imagePruneIdx).toBeGreaterThanOrEqual(0)
+    expect(builderPruneIdx).toBeGreaterThanOrEqual(0)
+    expect(pullIdx).toBeGreaterThanOrEqual(0)
+
+    // Both prune steps must precede the pull
+    expect(imagePruneIdx).toBeLessThan(pullIdx)
+    expect(builderPruneIdx).toBeLessThan(pullIdx)
+  })
+
+  test('docker image prune uses -af flag (all unused images, force)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const remoteCmds = calls.filter(cmd => cmd[0] === 'ssh').map(cmd => cmd.at(-1) ?? '')
+    const imagePruneCmd = remoteCmds.find(s => s.includes('docker image prune'))
+
+    expect(imagePruneCmd).toBeDefined()
+    expect(imagePruneCmd).toContain('-af')
+
+    // Safety: never prune volumes (OAuth tokens, workspace repos, S3 state must persist)
+    // and never use the broad `docker system prune` which can reach volumes/networks.
+    for (const cmd of remoteCmds) {
+      expect(cmd).not.toContain('--volumes')
+      expect(cmd).not.toContain('docker system prune')
+    }
+  })
+
+  test('docker builder prune uses -af flag (all cache, force)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const remoteCmds = calls.filter(cmd => cmd[0] === 'ssh').map(cmd => cmd.at(-1) ?? '')
+    const builderPruneCmd = remoteCmds.find(s => s.includes('docker builder prune'))
+
+    expect(builderPruneCmd).toBeDefined()
+    expect(builderPruneCmd).toContain('-af')
+  })
+
+  test('prune failure is best-effort: docker compose pull still runs when image prune exits non-zero', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const last = cmd.at(-1) ?? ''
+      // Fail the image prune step
+      if (last.includes('docker image prune')) {
+        return makeSpawnResult({exitCode: 1, stderr: 'prune failed: device busy'})
+      }
+      return undefined
+    })
+
+    // Deploy must succeed despite prune failure
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const remoteCmds = calls.filter(cmd => cmd[0] === 'ssh').map(cmd => cmd.at(-1) ?? '')
+    const pullCmd = remoteCmds.find(s => s.includes('docker compose') && s.includes(' pull'))
+    expect(pullCmd).toBeDefined()
+  })
+
+  test('prune failure is best-effort: docker compose pull still runs when builder prune exits non-zero', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const last = cmd.at(-1) ?? ''
+      // Fail the builder prune step
+      if (last.includes('docker builder prune')) {
+        return makeSpawnResult({exitCode: 1, stderr: 'prune failed: daemon error'})
+      }
+      return undefined
+    })
+
+    // Deploy must succeed despite prune failure
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const remoteCmds = calls.filter(cmd => cmd[0] === 'ssh').map(cmd => cmd.at(-1) ?? '')
+    const pullCmd = remoteCmds.find(s => s.includes('docker compose') && s.includes(' pull'))
+    expect(pullCmd).toBeDefined()
+  })
+})

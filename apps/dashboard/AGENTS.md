@@ -155,7 +155,7 @@ The operator UI is **enabled same-origin**. The deploy sets `DASHBOARD_OPERATOR_
 and `DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true` as static constants in the `.env` written by
 `buildEnvFileContents` — no new secrets required. The SSE run-stream UI is reachable at
 `https://dashboard.fro.bot/operator/*` behind the operator auth boundary. The gateway operator
-session mode is active (same-origin path); `DASHBOARD_GATEWAY_OPERATOR_ORIGIN` defaults to
+session is the single auth authority; `DASHBOARD_GATEWAY_OPERATOR_ORIGIN` defaults to
 `https://dashboard.fro.bot` and is not set explicitly.
 
 The ratified browser-visible operator API origin is `https://dashboard.fro.bot/operator/*`. The
@@ -168,6 +168,15 @@ block before the `dashboard:3000` catch-all in `apps/dashboard/config/Caddyfile`
 `{$GATEWAY_VPC_IP}:9300` over the VPC. The gateway operator listener is reachable from the
 dashboard droplet via the shared DigitalOcean VPC (`nyc1`; gateway VPC IP `10.116.0.3`, dashboard
 VPC IP `10.116.0.5` — example values; actual IPs are set via `GATEWAY_VPC_IP`).
+
+**Docker network alias:** The `caddy` service declares a Docker network alias `dashboard.fro.bot`
+on the shared `default` network. The dashboard server validates every request by calling
+`https://dashboard.fro.bot/operator/session` server-side. Without the alias, that call hairpins to
+the droplet's public IP — DigitalOcean has no NAT loopback, so it times out. The alias routes the
+call to Caddy via Docker DNS; Caddy's `/operator/*` handle block proxies it to the gateway VPC.
+Both services are explicitly attached to the `default` network so existing DNS (`dashboard:3000`)
+remains intact. The alias is in the committed `docker-compose.yaml` base file — not an override —
+because Phase 7.5 of the deploy removes any `docker-compose.override.yaml` on every run.
 
 **Route configuration:**
 
@@ -228,3 +237,9 @@ record.
 - **Never set `GATEWAY_VPC_IP` to a literal IP in the Caddyfile** — use `{$GATEWAY_VPC_IP}` and
   inject the value via the `caddy` service env. Hardcoded IPs break on droplet rebuild and make
   the config non-auditable.
+- **Never move the `dashboard.fro.bot` alias to a `docker-compose.override.yaml`** — Phase 7.5 of
+  the deploy runs `rm -f /opt/dashboard/docker-compose.override.yaml` on every deploy. The alias
+  must live in the committed base `docker-compose.yaml`.
+- **Never set `DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=false`** — the gateway operator session
+  is the single auth authority. Setting it false disables session validation and breaks the operator
+  UI auth boundary.

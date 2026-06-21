@@ -17,6 +17,15 @@ services:
     depends_on:
       dashboard:
         condition: service_healthy
+    # The dashboard server validates operator sessions by calling
+    # https://dashboard.fro.bot/operator/session server-side. Without this alias,
+    # that call hairpins to the droplet's public IP — DigitalOcean has no NAT
+    # loopback, so it times out. The alias routes the call to Caddy via Docker DNS;
+    # Caddy's /operator/* handle block proxies it to the gateway VPC.
+    networks:
+      default:
+        aliases:
+          - dashboard.fro.bot
 
   dashboard:
     image: ghcr.io/fro-bot/dashboard:2026.06.34@sha256:2d779f7e807bce8eab7c3726d3aee83587ff8a71913631ddacba28cea7902e7e
@@ -49,7 +58,13 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      default:
 
 volumes:
   caddy_data:
   caddy_config:
+
+networks:
+  default:
+    name: dashboard_default

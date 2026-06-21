@@ -52,7 +52,9 @@ Repository secret: `DIGITALOCEAN_ACCESS_TOKEN` (used by the provision script).
 
 ## Operator UI
 
-The operator UI is enabled same-origin. The deploy sets `DASHBOARD_OPERATOR_UI_ENABLED=true` and `DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true` as static constants in the `.env` — no new secrets required. The SSE run-stream UI is reachable at `https://dashboard.fro.bot/operator/*` behind the operator auth boundary. `DASHBOARD_GATEWAY_OPERATOR_ORIGIN` defaults to `https://dashboard.fro.bot` and is not set explicitly.
+The operator UI is enabled same-origin. The deploy sets `DASHBOARD_OPERATOR_UI_ENABLED=true` and `DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true` as static constants in the `.env` — no new secrets required. The gateway operator session is the single auth authority. The SSE run-stream UI is reachable at `https://dashboard.fro.bot/operator/*` behind the operator auth boundary. `DASHBOARD_GATEWAY_OPERATOR_ORIGIN` defaults to `https://dashboard.fro.bot` and is not set explicitly.
+
+The `caddy` service has a Docker network alias `dashboard.fro.bot` on the shared default network. The dashboard server validates sessions by calling `https://dashboard.fro.bot/operator/session` server-side; the alias routes that call to Caddy via Docker DNS (Caddy proxies `/operator/*` to the gateway VPC) instead of hairpinning to the droplet's public IP, which DigitalOcean does not NAT-loopback. The alias is in the committed `docker-compose.yaml` base file — not an override — because the deploy removes any override file on every run.
 
 ## Operations
 

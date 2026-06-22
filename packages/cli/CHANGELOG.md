@@ -1,5 +1,20 @@
 # @marcusrbrown/infra
 
+## 0.13.7
+### Patch Changes
+
+
+- Update the Fro Bot gateway daemon to fro-bot/agent v0.74.0 (operator OAuth callback honors return_to redirect). ([#647](https://github.com/marcusrbrown/infra/pull/647))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.26` to `7.2.27` ([#650](https://github.com/marcusrbrown/infra/pull/650))
+
+
+- 📦 Update npm dependency `all` ([#651](https://github.com/marcusrbrown/infra/pull/651))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.24` to `7.2.26` ([#644](https://github.com/marcusrbrown/infra/pull/644))
+
 ## 0.13.6
 ### Patch Changes
 

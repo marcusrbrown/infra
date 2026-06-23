@@ -1,5 +1,20 @@
 # @marcusrbrown/infra
 
+## 0.13.8
+### Patch Changes
+
+
+- Update the Fro Bot gateway daemon to fro-bot/agent v0.76.0 (web tool-approval support, gateway approval contract 1.4.0). ([#661](https://github.com/marcusrbrown/infra/pull/661))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.27` to `7.2.28` ([#656](https://github.com/marcusrbrown/infra/pull/656))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.29` to `7.2.31` ([#659](https://github.com/marcusrbrown/infra/pull/659))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.31` to `7.2.32` ([#660](https://github.com/marcusrbrown/infra/pull/660))
+
 ## 0.13.7
 ### Patch Changes
 

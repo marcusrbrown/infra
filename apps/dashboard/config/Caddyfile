@@ -7,7 +7,12 @@
 			header_up X-Forwarded-Proto https
 		}
 	}
+	@owned path /api/* /auth/* /assets/* /manifest.webmanifest /icon-*
+	handle @owned {
+		reverse_proxy dashboard:3000
+	}
 	handle {
+		rewrite * /
 		reverse_proxy dashboard:3000
 	}
 }

@@ -1018,6 +1018,46 @@ describe('committed Caddyfile structure', () => {
     expect(operatorIdx).toBeLessThan(catchAllIdx)
   })
 
+  it('contains an owned-paths handle covering /api/*', () => {
+    expect(caddyfile).toContain('/api/*')
+  })
+
+  it('contains an owned-paths handle covering /auth/*', () => {
+    expect(caddyfile).toContain('/auth/*')
+  })
+
+  it('contains an owned-paths handle covering /assets/*', () => {
+    expect(caddyfile).toContain('/assets/*')
+  })
+
+  it('contains an owned-paths handle covering /manifest.webmanifest', () => {
+    expect(caddyfile).toContain('/manifest.webmanifest')
+  })
+
+  it('contains an owned-paths handle covering /icon-*', () => {
+    expect(caddyfile).toContain('/icon-*')
+  })
+
+  it('has /operator/* before the owned-paths handle, and owned-paths before the catch-all', () => {
+    const operatorIdx = caddyfile.indexOf('handle /operator/*')
+    // The owned-paths handle block is identified by `handle @owned`
+    const ownedPathsIdx = caddyfile.indexOf('handle @owned')
+    const catchAllIdx = caddyfile.lastIndexOf('handle {')
+    expect(operatorIdx).toBeGreaterThan(-1)
+    expect(ownedPathsIdx).toBeGreaterThan(-1)
+    expect(catchAllIdx).toBeGreaterThan(-1)
+    expect(operatorIdx).toBeLessThan(ownedPathsIdx)
+    expect(ownedPathsIdx).toBeLessThan(catchAllIdx)
+  })
+
+  it('has rewrite * / before reverse_proxy dashboard:3000 in the catch-all handle', () => {
+    const rewriteIdx = caddyfile.indexOf('rewrite * /')
+    const catchAllProxyIdx = caddyfile.lastIndexOf('reverse_proxy dashboard:3000')
+    expect(rewriteIdx).toBeGreaterThan(-1)
+    expect(catchAllProxyIdx).toBeGreaterThan(-1)
+    expect(rewriteIdx).toBeLessThan(catchAllProxyIdx)
+  })
+
   it('does not use a bare reverse_proxy at the site-block level (must be inside handle blocks)', () => {
     // A bare reverse_proxy at the site-block level (2-space indent) would be subject to
     // Caddy directive ordering and could sort ahead of the /operator/* route.

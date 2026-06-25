@@ -1035,6 +1035,48 @@ describe('deploy-gateway.yaml: optional operator secret declarations (issue 1)',
   })
 })
 
+// ─── deploy.yaml: aggregate concurrency guard ────────────────────────────────
+//
+// The aggregate deploy.yaml must NOT have a top-level concurrency block.
+// A top-level concurrency group cancels the entire fan-out run when a new
+// merge arrives while the run waits at a per-app approval gate, stranding
+// all pending app deploys. Each per-app reusable workflow already has its
+// own concurrency group, so the aggregate group is redundant and harmful.
+//
+// Each per-app deploy workflow MUST have its own concurrency block with
+// group `deploy-<app>-` and cancel-in-progress: false.
+
+describe('deploy.yaml: no aggregate-level concurrency (regression guard)', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  it('deploy.yaml does not contain the deploy-aggregate concurrency group string', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    expect(text).not.toContain('deploy-aggregate')
+  })
+
+  it('deploy.yaml has no top-level concurrency: key (no line starting with "concurrency:" at column 0)', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const lines = text.split(/\r?\n/)
+    const topLevelConcurrencyLines = lines.filter(line => line.startsWith('concurrency:'))
+    expect(topLevelConcurrencyLines).toEqual([])
+  })
+})
+
+describe('per-app deploy workflows: each has its own concurrency block', () => {
+  const APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard'] as const
+
+  for (const app of APPS) {
+    it(`deploy-${app}.yaml has concurrency group deploy-${app}- with cancel-in-progress: false`, async () => {
+      const workflowPath = resolve(REPO_ROOT, `.github/workflows/deploy-${app}.yaml`)
+      const text = await Bun.file(workflowPath).text()
+      const parsed = parseYaml(text) as {concurrency?: {group?: string; 'cancel-in-progress'?: boolean}}
+      expect(parsed.concurrency).toBeDefined()
+      expect(parsed.concurrency?.group).toContain(`deploy-${app}-`)
+      expect(parsed.concurrency?.['cancel-in-progress']).toBe(false)
+    })
+  }
+})
+
 // ─── VPC bridge secrets: CI-vs-local parity ──────────────────────────────────
 //
 // GATEWAY_VPC_IP and DASHBOARD_VPC_IP are optional (all-or-none via getOperatorVpcState)

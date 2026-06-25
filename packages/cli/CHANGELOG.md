@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.13.10
+### Patch Changes
+
+
+- 📦 Update npm dependency `@aws-sdk/client-lightsail` from `3.1073.0` to `3.1074.0` ([#680](https://github.com/marcusrbrown/infra/pull/680))
+
 ## 0.13.9
 ### Patch Changes
 

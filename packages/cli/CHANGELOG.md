@@ -1,5 +1,32 @@
 # @marcusrbrown/infra
 
+## 0.13.9
+### Patch Changes
+
+
+- 📦 Update 6 GitHub Actions workflow dependencies ([#672](https://github.com/marcusrbrown/infra/pull/672))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.36` to `7.2.37` ([#668](https://github.com/marcusrbrown/infra/pull/668))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.38` to `7.2.40` ([#674](https://github.com/marcusrbrown/infra/pull/674))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.32` to `7.2.35` ([#665](https://github.com/marcusrbrown/infra/pull/665))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.37` to `7.2.38` ([#673](https://github.com/marcusrbrown/infra/pull/673))
+
+
+- 🐳 Update Docker image `umamisoftware/umami` from `3.1.0` to `3.2.0` ([#670](https://github.com/marcusrbrown/infra/pull/670))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.35` to `7.2.36` ([#667](https://github.com/marcusrbrown/infra/pull/667))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.40` to `7.2.41` ([#678](https://github.com/marcusrbrown/infra/pull/678))
+
 ## 0.13.8
 ### Patch Changes
 

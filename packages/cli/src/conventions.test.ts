@@ -1224,9 +1224,9 @@ describe('deploy.yaml: deploy-dashboard is decoupled from deploy-gateway', () =>
 // ─── deploy-dashboard.yaml: dispatch/call inputs and job structure ────────────
 //
 // Verifies the workflow contract for the dashboard release dispatch:
-// - dispatch/call inputs version, digest, contract_version with defaults
+// - dispatch/call inputs version and digest with defaults
 // - validate-inputs job exists and deploy-dashboard needs it
-// - deploy step forwards DEPLOY_VERSION, DEPLOY_DIGEST, DEPLOY_CONTRACT_VERSION
+// - deploy step forwards DEPLOY_VERSION, DEPLOY_DIGEST
 // - no direct ${{ inputs.* }} interpolation inside run: script bodies
 // - audit path does not push to HEAD:main and uses a PR branch/gh pr create
 // - deploy router dashboard job skips audit pin commits on push but not workflow_dispatch
@@ -1262,18 +1262,22 @@ describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => 
     expect(parsed.on?.workflow_call?.inputs?.digest?.default).toBe('')
   })
 
-  it('workflow_dispatch and workflow_call both declare contract_version input with default empty string', async () => {
+  it('does not declare or forward the removed release fuse input', async () => {
     const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const removedInputName = ['contract', 'version'].join('_')
+    const removedEnvName = ['DEPLOY', 'CONTRACT', 'VERSION'].join('_')
     const parsed = parseYaml(text) as {
       on?: {
-        workflow_dispatch?: {inputs?: Record<string, {default?: unknown}>}
-        workflow_call?: {inputs?: Record<string, {default?: unknown}>}
+        workflow_dispatch?: {inputs?: Record<string, unknown>}
+        workflow_call?: {inputs?: Record<string, unknown>}
       }
+      jobs?: {'deploy-dashboard'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
     }
-    expect(parsed.on?.workflow_dispatch?.inputs).toHaveProperty('contract_version')
-    expect(parsed.on?.workflow_dispatch?.inputs?.contract_version?.default).toBe('')
-    expect(parsed.on?.workflow_call?.inputs).toHaveProperty('contract_version')
-    expect(parsed.on?.workflow_call?.inputs?.contract_version?.default).toBe('')
+    const deployStep = parsed.jobs?.['deploy-dashboard']?.steps?.find(step => step.name === 'Deploy')
+
+    expect(parsed.on?.workflow_dispatch?.inputs).not.toHaveProperty(removedInputName)
+    expect(parsed.on?.workflow_call?.inputs).not.toHaveProperty(removedInputName)
+    expect(deployStep?.env).not.toHaveProperty(removedEnvName)
   })
 
   it('validate-inputs job exists', async () => {
@@ -1312,18 +1316,6 @@ describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => 
     expect(deployStep).toBeDefined()
     expect(deployStep?.env).toHaveProperty('DEPLOY_DIGEST')
     expect(deployStep?.env?.DEPLOY_DIGEST).toContain('inputs.digest')
-  })
-
-  it('Deploy step env forwards DEPLOY_CONTRACT_VERSION from inputs', async () => {
-    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
-    const parsed = parseYaml(text) as {
-      jobs?: {'deploy-dashboard'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
-    }
-    const steps = parsed.jobs?.['deploy-dashboard']?.steps ?? []
-    const deployStep = steps.find(s => s.name === 'Deploy')
-    expect(deployStep).toBeDefined()
-    expect(deployStep?.env).toHaveProperty('DEPLOY_CONTRACT_VERSION')
-    expect(deployStep?.env?.DEPLOY_CONTRACT_VERSION).toContain('inputs.contract_version')
   })
 
   it('no direct inputs.* interpolation inside run: script bodies', async () => {

@@ -160,12 +160,32 @@ env:
        branch. Group related lint/format/convention fixes into a single PR.
 
     5. DEPLOY PIPELINE HEALTH
-       Verify deploy infrastructure for all four deployed apps is
+       Verify deploy infrastructure for all six deployed apps is
        operational.
+
+       STRANDED-DEPLOY CHECK (applies to every app below): a deploy run
+       can be CANCELLED — not failed — and silently strand an app on an
+       old version. This happened once: a umami image bump landed on main
+       but the deploy run was cancelled at its approval gate, so the app
+       ran the old version for ~3 weeks. A cancelled run is NOT a failed
+       run, so "if it failed" misses it. For each app, treat the most
+       recent deploy run as a finding when its conclusion is `cancelled`
+       or otherwise incomplete (not `success`), NOT only when it is
+       `failure`. Apply supersede-awareness: a cancelled/incomplete run
+       that is followed by a LATER SUCCESSFUL deploy for the SAME app has
+       self-healed and is NOT a finding — flag only when the
+       cancelled/incomplete run remains the latest deploy for that app
+       (i.e. main has a committed change for the app that never reached a
+       successful deploy). Use `gh run list --workflow=deploy.yaml` (and
+       the per-app deploy job conclusions) to evaluate this; report a
+       stranded app as a finding with the app, the run, and the committed
+       change that was not deployed. Reporting only — do not redeploy.
 
        KeeWeb:
        - Check the most recent Deploy workflow run (deploy-keeweb job)
-         on main. If it failed, diagnose from logs and open an issue.
+         on main. If it failed OR was cancelled/incomplete without a later
+         successful deploy (see STRANDED-DEPLOY CHECK), diagnose from logs
+         and open an issue.
        - Verify kw.igg.ms is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://kw.igg.ms` should return 200.
        - Verify the keeweb environment exists with DEPLOY_SSH_KEY and
@@ -175,7 +195,9 @@ env:
 
        CLIProxy:
        - Check the most recent Deploy workflow run (deploy-cliproxy job)
-         on main. If it failed, diagnose from logs and open an issue.
+         on main. If it failed OR was cancelled/incomplete without a later
+         successful deploy (see STRANDED-DEPLOY CHECK), diagnose from logs
+         and open an issue.
          Note: if the last cliproxy deploy succeeded, the post-deploy
          management-key health gate (PUT /v0/management/config) passed,
          which means the management API and the OAuth token were both
@@ -202,7 +224,9 @@ env:
 
        Gateway:
        - Check the most recent Deploy Gateway workflow run (deploy-gateway
-         job) on main. If it failed, diagnose from logs and open an issue.
+         job) on main. If it failed OR was cancelled/incomplete without a
+         later successful deploy (see STRANDED-DEPLOY CHECK), diagnose from
+         logs and open an issue.
          Note: gateway has NO public HTTP surface — it connects outbound
          to Discord and S3 only. The deploy waits on docker compose
          service health, so a successful deploy run IS the health signal;
@@ -216,7 +240,9 @@ env:
 
        Umami:
        - Check the most recent Deploy Umami workflow run (deploy-umami
-         job) on main. If it failed, diagnose from logs and open an issue.
+         job) on main. If it failed OR was cancelled/incomplete without a
+         later successful deploy (see STRANDED-DEPLOY CHECK), diagnose from
+         logs and open an issue.
        - Verify metrics.fro.bot is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://metrics.fro.bot/api/heartbeat` should
          return 200. A 5xx, connection error, or timeout means the
@@ -226,6 +252,39 @@ env:
          UMAMI_ADMIN_PASSWORD configured.
        - Check .github/known_hosts contains host keys for metrics.fro.bot
          (both domain and droplet IP entries).
+
+       Dashboard:
+       - Check the most recent Deploy Dashboard workflow run
+         (deploy-dashboard job) on main. If it failed OR was
+         cancelled/incomplete without a later successful deploy (see
+         STRANDED-DEPLOY CHECK), diagnose from logs and open an issue.
+       - Verify dashboard.fro.bot is reachable: `curl -sf -o /dev/null -w
+         "%{http_code}" https://dashboard.fro.bot/api/healthz` should
+         return 200. A 5xx, connection error, or timeout means the
+         dashboard app is down. (Note: /operator/* is auth-gated; do not
+         treat a 302/401/404 on operator routes as a deploy-health
+         failure — only /api/healthz is the public health surface.)
+       - Verify the dashboard environment exists with DASHBOARD_SSH_KEY,
+         DASHBOARD_DOMAIN, DASHBOARD_GITHUB_APP_ID, DASHBOARD_GITHUB_APP_KEY,
+         DASHBOARD_OAUTH_CLIENT_ID, DASHBOARD_OAUTH_CLIENT_SECRET,
+         DASHBOARD_OPERATOR_LOGIN, and DASHBOARD_COOKIE_KEY configured.
+       - Check .github/known_hosts contains host keys for dashboard.fro.bot
+         (both domain and droplet IP entries).
+
+       VPN:
+       - Check the most recent Deploy VPN workflow run (deploy-vpn job) on
+         main. If it failed OR was cancelled/incomplete without a later
+         successful deploy (see STRANDED-DEPLOY CHECK), diagnose from logs
+         and open an issue.
+         Note: the VPN egress box has NO public HTTP surface — it serves
+         WireGuard over UDP 51820 only. The deploy verifies wg-quick@wg0 is
+         active, so a successful deploy run IS the health signal; there is
+         no URL to curl.
+       - Verify the vpn environment exists with VPN_SSH_KEY, VPN_HOST, and
+         VPN_PEERS configured. AWS provisioning credentials are
+         operator-local only — they are NOT in the vpn environment.
+       - Check .github/known_hosts contains host keys for the VPN box
+         (hashed static-IP entries).
 
        Report findings as issues only for this category. Do NOT modify
        deploy scripts, workflow files, or the deployed servers.
@@ -456,22 +515,29 @@ env:
     ### Deploy Pipeline Health
     | App | Check | Status | Details |
     | --- | --- | --- | --- |
-    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail | [run link] |
+    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) | [run link] |
     | keeweb | kw.igg.ms reachable | ✅ 200 / ❌ Error | [HTTP status] |
     | keeweb | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | keeweb | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / — Skipped | [run link] |
+    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | cliproxy | cliproxy.fro.bot reachable | ✅ 401/200 / ❌ 5xx/timeout | [HTTP status] |
     | cliproxy | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | cliproxy | Host keys | ✅ Current / ⚠️ Stale | [details] |
     | cliproxy | OAuth token (indirect) | ✅ Fresh / ⚠️ Recent 401s | [this run's status or prior run links] |
-    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / — Skipped | [run link] |
+    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | gateway | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | gateway | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / — Skipped | [run link] |
+    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | umami | metrics.fro.bot reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | umami | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | umami | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | dashboard | Last deploy-dashboard run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | dashboard | dashboard.fro.bot/api/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
+    | dashboard | Env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | dashboard | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | vpn | Last deploy-vpn run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | vpn | Env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | vpn | Host keys | ✅ Current / ⚠️ Stale | [details] |
 
     ### Live Site Review
     | Check | Status | Details |

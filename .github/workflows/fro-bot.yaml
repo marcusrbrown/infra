@@ -160,7 +160,7 @@ env:
        branch. Group related lint/format/convention fixes into a single PR.
 
     5. DEPLOY PIPELINE HEALTH
-       Verify deploy infrastructure for all four deployed apps is
+       Verify deploy infrastructure for all six deployed apps is
        operational.
 
        STRANDED-DEPLOY CHECK (applies to every app below): a deploy run
@@ -252,6 +252,39 @@ env:
          UMAMI_ADMIN_PASSWORD configured.
        - Check .github/known_hosts contains host keys for metrics.fro.bot
          (both domain and droplet IP entries).
+
+       Dashboard:
+       - Check the most recent Deploy Dashboard workflow run
+         (deploy-dashboard job) on main. If it failed OR was
+         cancelled/incomplete without a later successful deploy (see
+         STRANDED-DEPLOY CHECK), diagnose from logs and open an issue.
+       - Verify dashboard.fro.bot is reachable: `curl -sf -o /dev/null -w
+         "%{http_code}" https://dashboard.fro.bot/api/healthz` should
+         return 200. A 5xx, connection error, or timeout means the
+         dashboard app is down. (Note: /operator/* is auth-gated; do not
+         treat a 302/401/404 on operator routes as a deploy-health
+         failure — only /api/healthz is the public health surface.)
+       - Verify the dashboard environment exists with DASHBOARD_SSH_KEY,
+         DASHBOARD_DOMAIN, DASHBOARD_GITHUB_APP_ID, DASHBOARD_GITHUB_APP_KEY,
+         DASHBOARD_OAUTH_CLIENT_ID, DASHBOARD_OAUTH_CLIENT_SECRET,
+         DASHBOARD_OPERATOR_LOGIN, and DASHBOARD_COOKIE_KEY configured.
+       - Check .github/known_hosts contains host keys for dashboard.fro.bot
+         (both domain and droplet IP entries).
+
+       VPN:
+       - Check the most recent Deploy VPN workflow run (deploy-vpn job) on
+         main. If it failed OR was cancelled/incomplete without a later
+         successful deploy (see STRANDED-DEPLOY CHECK), diagnose from logs
+         and open an issue.
+         Note: the VPN egress box has NO public HTTP surface — it serves
+         WireGuard over UDP 51820 only. The deploy verifies wg-quick@wg0 is
+         active, so a successful deploy run IS the health signal; there is
+         no URL to curl.
+       - Verify the vpn environment exists with VPN_SSH_KEY, VPN_HOST, and
+         VPN_PEERS configured. AWS provisioning credentials are
+         operator-local only — they are NOT in the vpn environment.
+       - Check .github/known_hosts contains host keys for the VPN box
+         (hashed static-IP entries).
 
        Report findings as issues only for this category. Do NOT modify
        deploy scripts, workflow files, or the deployed servers.

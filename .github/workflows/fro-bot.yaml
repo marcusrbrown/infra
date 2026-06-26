@@ -163,9 +163,29 @@ env:
        Verify deploy infrastructure for all four deployed apps is
        operational.
 
+       STRANDED-DEPLOY CHECK (applies to every app below): a deploy run
+       can be CANCELLED — not failed — and silently strand an app on an
+       old version. This happened once: a umami image bump landed on main
+       but the deploy run was cancelled at its approval gate, so the app
+       ran the old version for ~3 weeks. A cancelled run is NOT a failed
+       run, so "if it failed" misses it. For each app, treat the most
+       recent deploy run as a finding when its conclusion is `cancelled`
+       or otherwise incomplete (not `success`), NOT only when it is
+       `failure`. Apply supersede-awareness: a cancelled/incomplete run
+       that is followed by a LATER SUCCESSFUL deploy for the SAME app has
+       self-healed and is NOT a finding — flag only when the
+       cancelled/incomplete run remains the latest deploy for that app
+       (i.e. main has a committed change for the app that never reached a
+       successful deploy). Use `gh run list --workflow=deploy.yaml` (and
+       the per-app deploy job conclusions) to evaluate this; report a
+       stranded app as a finding with the app, the run, and the committed
+       change that was not deployed. Reporting only — do not redeploy.
+
        KeeWeb:
        - Check the most recent Deploy workflow run (deploy-keeweb job)
-         on main. If it failed, diagnose from logs and open an issue.
+         on main. If it failed OR was cancelled/incomplete without a later
+         successful deploy (see STRANDED-DEPLOY CHECK), diagnose from logs
+         and open an issue.
        - Verify kw.igg.ms is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://kw.igg.ms` should return 200.
        - Verify the keeweb environment exists with DEPLOY_SSH_KEY and
@@ -175,7 +195,9 @@ env:
 
        CLIProxy:
        - Check the most recent Deploy workflow run (deploy-cliproxy job)
-         on main. If it failed, diagnose from logs and open an issue.
+         on main. If it failed OR was cancelled/incomplete without a later
+         successful deploy (see STRANDED-DEPLOY CHECK), diagnose from logs
+         and open an issue.
          Note: if the last cliproxy deploy succeeded, the post-deploy
          management-key health gate (PUT /v0/management/config) passed,
          which means the management API and the OAuth token were both
@@ -202,7 +224,9 @@ env:
 
        Gateway:
        - Check the most recent Deploy Gateway workflow run (deploy-gateway
-         job) on main. If it failed, diagnose from logs and open an issue.
+         job) on main. If it failed OR was cancelled/incomplete without a
+         later successful deploy (see STRANDED-DEPLOY CHECK), diagnose from
+         logs and open an issue.
          Note: gateway has NO public HTTP surface — it connects outbound
          to Discord and S3 only. The deploy waits on docker compose
          service health, so a successful deploy run IS the health signal;
@@ -216,7 +240,9 @@ env:
 
        Umami:
        - Check the most recent Deploy Umami workflow run (deploy-umami
-         job) on main. If it failed, diagnose from logs and open an issue.
+         job) on main. If it failed OR was cancelled/incomplete without a
+         later successful deploy (see STRANDED-DEPLOY CHECK), diagnose from
+         logs and open an issue.
        - Verify metrics.fro.bot is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://metrics.fro.bot/api/heartbeat` should
          return 200. A 5xx, connection error, or timeout means the

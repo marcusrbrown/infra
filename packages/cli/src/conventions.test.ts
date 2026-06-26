@@ -1220,3 +1220,364 @@ describe('deploy.yaml: deploy-dashboard is decoupled from deploy-gateway', () =>
     expect(text).not.toMatch(/needs\.deploy-gateway/)
   })
 })
+
+// ─── deploy-dashboard.yaml: dispatch/call inputs and job structure ────────────
+//
+// Verifies the workflow contract for the dashboard release dispatch:
+// - dispatch/call inputs version, digest, contract_version with defaults
+// - validate-inputs job exists and deploy-dashboard needs it
+// - deploy step forwards DEPLOY_VERSION, DEPLOY_DIGEST, DEPLOY_CONTRACT_VERSION
+// - no direct ${{ inputs.* }} interpolation inside run: script bodies
+// - audit path does not push to HEAD:main and uses a PR branch/gh pr create
+// - deploy router dashboard job skips audit pin commits on push but not workflow_dispatch
+
+describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => {
+  const DEPLOY_DASHBOARD_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')
+
+  it('workflow_dispatch and workflow_call both declare version input with default empty string', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      on?: {
+        workflow_dispatch?: {inputs?: Record<string, {default?: unknown}>}
+        workflow_call?: {inputs?: Record<string, {default?: unknown}>}
+      }
+    }
+    expect(parsed.on?.workflow_dispatch?.inputs).toHaveProperty('version')
+    expect(parsed.on?.workflow_dispatch?.inputs?.version?.default).toBe('')
+    expect(parsed.on?.workflow_call?.inputs).toHaveProperty('version')
+    expect(parsed.on?.workflow_call?.inputs?.version?.default).toBe('')
+  })
+
+  it('workflow_dispatch and workflow_call both declare digest input with default empty string', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      on?: {
+        workflow_dispatch?: {inputs?: Record<string, {default?: unknown}>}
+        workflow_call?: {inputs?: Record<string, {default?: unknown}>}
+      }
+    }
+    expect(parsed.on?.workflow_dispatch?.inputs).toHaveProperty('digest')
+    expect(parsed.on?.workflow_dispatch?.inputs?.digest?.default).toBe('')
+    expect(parsed.on?.workflow_call?.inputs).toHaveProperty('digest')
+    expect(parsed.on?.workflow_call?.inputs?.digest?.default).toBe('')
+  })
+
+  it('workflow_dispatch and workflow_call both declare contract_version input with default empty string', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      on?: {
+        workflow_dispatch?: {inputs?: Record<string, {default?: unknown}>}
+        workflow_call?: {inputs?: Record<string, {default?: unknown}>}
+      }
+    }
+    expect(parsed.on?.workflow_dispatch?.inputs).toHaveProperty('contract_version')
+    expect(parsed.on?.workflow_dispatch?.inputs?.contract_version?.default).toBe('')
+    expect(parsed.on?.workflow_call?.inputs).toHaveProperty('contract_version')
+    expect(parsed.on?.workflow_call?.inputs?.contract_version?.default).toBe('')
+  })
+
+  it('validate-inputs job exists', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: Record<string, unknown>}
+    expect(parsed.jobs).toHaveProperty('validate-inputs')
+  })
+
+  it('deploy-dashboard job needs validate-inputs', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {needs?: string | string[]}}}
+    const needs = parsed.jobs?.['deploy-dashboard']?.needs ?? []
+    const needsArr = Array.isArray(needs) ? needs : [needs]
+    expect(needsArr).toContain('validate-inputs')
+  })
+
+  it('Deploy step env forwards DEPLOY_VERSION from inputs', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
+    }
+    const steps = parsed.jobs?.['deploy-dashboard']?.steps ?? []
+    const deployStep = steps.find(s => s.name === 'Deploy')
+    expect(deployStep).toBeDefined()
+    expect(deployStep?.env).toHaveProperty('DEPLOY_VERSION')
+    expect(deployStep?.env?.DEPLOY_VERSION).toContain('inputs.version')
+  })
+
+  it('Deploy step env forwards DEPLOY_DIGEST from inputs', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
+    }
+    const steps = parsed.jobs?.['deploy-dashboard']?.steps ?? []
+    const deployStep = steps.find(s => s.name === 'Deploy')
+    expect(deployStep).toBeDefined()
+    expect(deployStep?.env).toHaveProperty('DEPLOY_DIGEST')
+    expect(deployStep?.env?.DEPLOY_DIGEST).toContain('inputs.digest')
+  })
+
+  it('Deploy step env forwards DEPLOY_CONTRACT_VERSION from inputs', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
+    }
+    const steps = parsed.jobs?.['deploy-dashboard']?.steps ?? []
+    const deployStep = steps.find(s => s.name === 'Deploy')
+    expect(deployStep).toBeDefined()
+    expect(deployStep?.env).toHaveProperty('DEPLOY_CONTRACT_VERSION')
+    expect(deployStep?.env?.DEPLOY_CONTRACT_VERSION).toContain('inputs.contract_version')
+  })
+
+  it('no direct inputs.* interpolation inside run: script bodies', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: Record<string, {steps?: {run?: string; env?: unknown}[]}>}
+    // Pattern: ${{ inputs.* }} in run: body is a shell injection risk.
+    // Inputs must be passed via step env: and referenced as shell vars.
+    // Use non-global regex to avoid stateful lastIndex issues in loops.
+    const inputsInRunRe = /\$\{\{\s*inputs\./
+    const jobsWithViolations: string[] = []
+    for (const [jobId, job] of Object.entries(parsed.jobs ?? {})) {
+      for (const step of job.steps ?? []) {
+        if (typeof step.run !== 'string') continue
+        if (inputsInRunRe.test(step.run)) {
+          jobsWithViolations.push(jobId)
+          break
+        }
+      }
+    }
+    expect(jobsWithViolations).toEqual([])
+  })
+
+  it('audit path does not push directly to HEAD:main', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    // Direct push to HEAD:main is blocked by branch protection
+    expect(text).not.toContain('HEAD:main')
+  })
+
+  it('audit path uses gh pr create (PR-based write-back)', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    expect(text).toContain('gh pr create')
+  })
+
+  it('workflow_call.secrets declares APPLICATION_ID as required', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}}
+    const secrets = parsed.on?.workflow_call?.secrets ?? {}
+    expect(secrets).toHaveProperty('APPLICATION_ID')
+    expect(secrets.APPLICATION_ID?.required).toBe(true)
+  })
+
+  it('workflow_call.secrets declares APPLICATION_PRIVATE_KEY as required', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}}
+    const secrets = parsed.on?.workflow_call?.secrets ?? {}
+    expect(secrets).toHaveProperty('APPLICATION_PRIVATE_KEY')
+    expect(secrets.APPLICATION_PRIVATE_KEY?.required).toBe(true)
+  })
+
+  it('does not use github.token anywhere (app token only)', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    expect(text).not.toContain('github.token')
+  })
+
+  it('Get app token step has no if: condition (runs unconditionally)', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {steps?: {name?: string; if?: unknown}[]}}
+    }
+    const steps = parsed.jobs?.['deploy-dashboard']?.steps ?? []
+    const getTokenStep = steps.find(s => s.name === 'Get app token')
+    expect(getTokenStep).toBeDefined()
+    expect(getTokenStep?.if).toBeUndefined()
+  })
+
+  it('has top-level permissions: contents: read (project convention — no GITHUB_TOKEN write)', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {permissions?: {contents?: string}}
+    expect(parsed.permissions).toBeDefined()
+    expect(parsed.permissions?.contents).toBe('read')
+  })
+
+  it('deploy-dashboard job has no job-level permissions: block (no GITHUB_TOKEN write needed)', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {permissions?: unknown}}}
+    expect(parsed.jobs?.['deploy-dashboard']?.permissions).toBeUndefined()
+  })
+})
+
+describe('deploy.yaml: dashboard job skips audit pin commits on push', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  it('deploy-dashboard if: skips commits whose message contains the audit pin prefix on push', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    // The if: condition must exclude audit pin commits on push events
+    // by checking the head commit message does not contain the pin prefix
+    expect(text).toContain('chore(dashboard): pin image to')
+  })
+
+  it('deploy.yaml passes APPLICATION_ID to deploy-dashboard job', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {secrets?: Record<string, string>}}
+    }
+    const secrets = parsed.jobs?.['deploy-dashboard']?.secrets ?? {}
+    expect(secrets).toHaveProperty('APPLICATION_ID')
+    expect(secrets.APPLICATION_ID).toContain('APPLICATION_ID')
+  })
+
+  it('deploy.yaml passes APPLICATION_PRIVATE_KEY to deploy-dashboard job', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {secrets?: Record<string, string>}}
+    }
+    const secrets = parsed.jobs?.['deploy-dashboard']?.secrets ?? {}
+    expect(secrets).toHaveProperty('APPLICATION_PRIVATE_KEY')
+    expect(secrets.APPLICATION_PRIVATE_KEY).toContain('APPLICATION_PRIVATE_KEY')
+  })
+
+  it('deploy-dashboard job in deploy.yaml has no permissions: block (no GITHUB_TOKEN used)', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {permissions?: unknown}}}
+    expect(parsed.jobs?.['deploy-dashboard']?.permissions).toBeUndefined()
+  })
+})
+
+// ─── deploy-dashboard.yaml: pre-gate digest validation step ──────────────────
+//
+// A `Validate digest format` step must exist in the `validate-inputs` job,
+// before the `Validate input mode` step. It must:
+// - only run when inputs.digest != ''
+// - expose INPUT_DIGEST via env (not direct interpolation in run:)
+// - validate ^sha256:[0-9a-f]{64}$ and fail with a clear message on mismatch
+
+describe('deploy-dashboard.yaml: pre-gate digest validation step', () => {
+  const DEPLOY_DASHBOARD_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')
+
+  it('validate-inputs job has a "Validate digest format" step', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: {'validate-inputs'?: {steps?: {name?: string}[]}}}
+    const steps = parsed.jobs?.['validate-inputs']?.steps ?? []
+    const digestStep = steps.find(s => s.name === 'Validate digest format')
+    expect(digestStep).toBeDefined()
+  })
+
+  it('"Validate digest format" step has if: inputs.digest != \'\'', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'validate-inputs'?: {steps?: {name?: string; if?: unknown}[]}}
+    }
+    const steps = parsed.jobs?.['validate-inputs']?.steps ?? []
+    const digestStep = steps.find(s => s.name === 'Validate digest format')
+    expect(digestStep).toBeDefined()
+    // The if: condition must reference inputs.digest
+    expect(String(digestStep?.if ?? '')).toContain('inputs.digest')
+  })
+
+  it('"Validate digest format" step exposes INPUT_DIGEST via env (not direct interpolation)', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'validate-inputs'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
+    }
+    const steps = parsed.jobs?.['validate-inputs']?.steps ?? []
+    const digestStep = steps.find(s => s.name === 'Validate digest format')
+    expect(digestStep).toBeDefined()
+    expect(digestStep?.env).toHaveProperty('INPUT_DIGEST')
+    expect(digestStep?.env?.INPUT_DIGEST).toContain('inputs.digest')
+  })
+
+  it('"Validate digest format" step run: validates sha256:<64hex> pattern', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'validate-inputs'?: {steps?: {name?: string; run?: string}[]}}
+    }
+    const steps = parsed.jobs?.['validate-inputs']?.steps ?? []
+    const digestStep = steps.find(s => s.name === 'Validate digest format')
+    expect(digestStep).toBeDefined()
+    // Must contain the sha256 hex pattern
+    expect(digestStep?.run ?? '').toMatch(/sha256[^\d\n\ra-f\u2028\u2029]*[\da-f].*64|sha256:\[0-9a-f\]/)
+  })
+
+  it('"Validate digest format" step appears before "Validate input mode" step', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'validate-inputs'?: {steps?: {name?: string}[]}}
+    }
+    const steps = parsed.jobs?.['validate-inputs']?.steps ?? []
+    const digestIdx = steps.findIndex(s => s.name === 'Validate digest format')
+    const inputModeIdx = steps.findIndex(s => s.name === 'Validate input mode')
+    expect(digestIdx).toBeGreaterThan(-1)
+    expect(inputModeIdx).toBeGreaterThan(-1)
+    expect(digestIdx).toBeLessThan(inputModeIdx)
+  })
+})
+
+// ─── deploy-dashboard.yaml: audit step hardening ─────────────────────────────
+//
+// The audit PR step must:
+// - revalidate version with CalVer before constructing branch/commit strings
+// - use a unique branch per run: dashboard-pin-${version}-${GITHUB_RUN_ID}
+// - use `gh pr list --state open --head "${branch}"` (not just --head)
+// - NOT use `|| true` around push/pr create (audit failures must fail the step)
+
+describe('deploy-dashboard.yaml: audit step hardening', () => {
+  const DEPLOY_DASHBOARD_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')
+
+  it('audit PR step branch name includes github.run_id for uniqueness', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    // The branch must include run_id to avoid collision on re-runs
+    expect(text).toMatch(/run_id|GITHUB_RUN_ID/)
+    // And it must be in the context of the audit PR step (after "Open audit PR")
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    expect(afterAudit).toMatch(/run_id|GITHUB_RUN_ID/)
+  })
+
+  it('audit PR step uses --state open in gh pr list', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    expect(afterAudit).toContain('--state open')
+  })
+
+  it('audit PR step revalidates version with CalVer regex before branch construction', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    // Must contain a CalVer regex check (YYYY.MM.N pattern) — look for the bash =~ pattern
+    // The audit step must revalidate version before constructing branch/commit strings.
+    // We check for the presence of a numeric range pattern used in bash =~ checks.
+    expect(afterAudit).toContain('[0-9]')
+  })
+
+  it('audit PR step does NOT use || true around push or pr create', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    // || true around push or pr create silences audit failures — must not be present
+    expect(afterAudit).not.toMatch(/git push[^#\n]*\|\|\s*true/)
+    expect(afterAudit).not.toMatch(/gh pr create[^#\n]*\|\|\s*true/)
+  })
+})
+
+// ─── deploy-dashboard.yaml: job timeout-minutes ──────────────────────────────
+//
+// Both validate-inputs and deploy-dashboard jobs must have timeout-minutes set.
+// Conservative values: validate 5, deploy 30.
+
+describe('deploy-dashboard.yaml: job timeout-minutes', () => {
+  const DEPLOY_DASHBOARD_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')
+
+  it('validate-inputs job has timeout-minutes: 5', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: {'validate-inputs'?: {'timeout-minutes'?: number}}}
+    expect(parsed.jobs?.['validate-inputs']?.['timeout-minutes']).toBe(5)
+  })
+
+  it('deploy-dashboard job has timeout-minutes: 30', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {'timeout-minutes'?: number}}}
+    expect(parsed.jobs?.['deploy-dashboard']?.['timeout-minutes']).toBe(30)
+  })
+})

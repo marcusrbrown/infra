@@ -1,4 +1,5 @@
-import {readFileSync} from 'node:fs'
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
 import {describe, expect, it} from 'bun:test'
@@ -7,7 +8,11 @@ import {
   assertRunningImageDigest,
   buildEnvFileContents,
   deploy,
+  generateComposeContent,
   parseComposeImageDigest,
+  RELEASE_CONTRACT_VERSION,
+  validateCalVer,
+  validateContractVersion,
   validateEnv,
   validateGatewayVpcIp,
   validateSecretValue,
@@ -1487,5 +1492,964 @@ describe('dashboard verification: /operator/health retry loop (P1 fix)', () => {
     ).resolves.toBeUndefined()
 
     expect(operatorHealthAttempts).toBeGreaterThanOrEqual(1)
+  })
+})
+
+// ─── validateCalVer ───────────────────────────────────────────────────────────
+
+describe('validateCalVer', () => {
+  it('accepts a valid CalVer string', () => {
+    expect(() => validateCalVer('2026.06.15')).not.toThrow()
+    expect(() => validateCalVer('2026.06.47')).not.toThrow()
+    expect(() => validateCalVer('2024.01.0')).not.toThrow()
+  })
+
+  it('rejects "latest"', () => {
+    expect(() => validateCalVer('latest')).toThrow(/version/)
+  })
+
+  it('rejects an empty string', () => {
+    expect(() => validateCalVer('')).toThrow(/version/)
+  })
+
+  it('rejects a semver string (not CalVer)', () => {
+    expect(() => validateCalVer('1.2.3')).toThrow(/version/)
+  })
+
+  it('rejects a version with extra components', () => {
+    expect(() => validateCalVer('2026.06.15.1')).toThrow(/version/)
+  })
+
+  it('rejects a version with non-numeric parts', () => {
+    expect(() => validateCalVer('2026.06.abc')).toThrow(/version/)
+  })
+
+  it('rejects injection strings', () => {
+    expect(() => validateCalVer('2026.06.15; rm -rf /')).toThrow(/version/)
+    expect(() => validateCalVer('$(evil)')).toThrow(/version/)
+    expect(() => validateCalVer('`evil`')).toThrow(/version/)
+  })
+
+  it('rejects a version starting with a dash', () => {
+    expect(() => validateCalVer('-oProxyCommand=x')).toThrow(/version/)
+  })
+})
+
+// ─── validateContractVersion ──────────────────────────────────────────────────
+
+describe('validateContractVersion', () => {
+  it('passes when contract matches the expected constant and version is set', () => {
+    expect(() => validateContractVersion(RELEASE_CONTRACT_VERSION, '2026.06.15', '')).not.toThrow()
+  })
+
+  it('passes when contract matches and digest is set', () => {
+    expect(() => validateContractVersion(RELEASE_CONTRACT_VERSION, '', `sha256:${'a'.repeat(64)}`)).not.toThrow()
+  })
+
+  it('passes when contract matches and both version and digest are set', () => {
+    expect(() =>
+      validateContractVersion(RELEASE_CONTRACT_VERSION, '2026.06.15', `sha256:${'a'.repeat(64)}`),
+    ).not.toThrow()
+  })
+
+  it('passes when all inputs are empty (no-version fallback — contract not required)', () => {
+    expect(() => validateContractVersion('', '', '')).not.toThrow()
+  })
+
+  it('throws when version is set but contract is empty', () => {
+    expect(() => validateContractVersion('', '2026.06.15', '')).toThrow(/contract/)
+  })
+
+  it('throws when digest is set but contract is empty', () => {
+    expect(() => validateContractVersion('', '', `sha256:${'a'.repeat(64)}`)).toThrow(/contract/)
+  })
+
+  it('throws when contract is wrong (version set)', () => {
+    expect(() => validateContractVersion('wrong-contract', '2026.06.15', '')).toThrow(/contract/)
+  })
+
+  it('throws when contract is wrong (digest set)', () => {
+    expect(() => validateContractVersion('wrong-contract', '', `sha256:${'a'.repeat(64)}`)).toThrow(/contract/)
+  })
+
+  it('RELEASE_CONTRACT_VERSION is a stable non-empty string', () => {
+    expect(typeof RELEASE_CONTRACT_VERSION).toBe('string')
+    expect(RELEASE_CONTRACT_VERSION.length).toBeGreaterThan(0)
+  })
+})
+
+// ─── generateComposeContent ───────────────────────────────────────────────────
+
+describe('generateComposeContent', () => {
+  const SAMPLE_COMPOSE = `services:
+  dashboard:
+    image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:${'a'.repeat(64)}
+    restart: unless-stopped
+`
+
+  it('replaces the image line with version@digest', () => {
+    const newDigest = `sha256:${'b'.repeat(64)}`
+    const result = generateComposeContent(SAMPLE_COMPOSE, '2026.06.47', newDigest)
+    expect(result).toContain(`ghcr.io/fro-bot/dashboard:2026.06.47@${newDigest}`)
+  })
+
+  it('does not contain the old version after replacement', () => {
+    const newDigest = `sha256:${'b'.repeat(64)}`
+    const result = generateComposeContent(SAMPLE_COMPOSE, '2026.06.47', newDigest)
+    expect(result).not.toContain('2026.06.15@sha256:')
+  })
+
+  it('preserves the rest of the compose file', () => {
+    const newDigest = `sha256:${'b'.repeat(64)}`
+    const result = generateComposeContent(SAMPLE_COMPOSE, '2026.06.47', newDigest)
+    expect(result).toContain('restart: unless-stopped')
+  })
+
+  it('throws when no fro-bot/dashboard image line is found', () => {
+    const badCompose = `services:\n  other:\n    image: nginx:latest\n`
+    expect(() => generateComposeContent(badCompose, '2026.06.47', `sha256:${'b'.repeat(64)}`)).toThrow()
+  })
+})
+
+// ─── versioned deploy path ────────────────────────────────────────────────────
+//
+// When version + contractVersion are provided:
+// - resolves digest via `docker buildx imagetools inspect`
+// - compares resolved digest to dispatched digest (if provided)
+// - generates compose content with version@resolvedDigest
+// - uploads generated compose (not the committed file)
+// - verifies running image against resolvedDigest
+
+const RESOLVED_DIGEST = `sha256:${'c'.repeat(64)}`
+
+/**
+ * Builds happy-path responses for a versioned deploy.
+ * Prepends the imagetools inspect call (returns resolved digest) before the
+ * standard deploy sequence. The compose upload is now via stdin (writeRemoteFile),
+ * so the scp call for docker-compose.yaml is replaced by a stdin write.
+ *
+ * Call order for versioned deploy:
+ *   0: docker buildx imagetools inspect (resolve digest)
+ *   1: mkdir -p /opt/dashboard/config
+ *   2: write .env (stdin)
+ *   3: write docker-compose.yaml (stdin — generated content)
+ *   4: scp Caddyfile
+ *   5: write github-app.pem (stdin)
+ *   6: chmod 0600 github-app.pem
+ *   7: chown 1000:1000 github-app.pem
+ *   8: rm -f docker-compose.override.yaml
+ *   9: docker compose pull
+ *  10: docker compose up -d --no-build --wait dashboard
+ *  11: docker inspect (resolve image SHA)
+ *  12: docker inspect (RepoDigests)
+ *  13: docker compose up -d --no-build --wait caddy
+ *  14: (buffer)
+ */
+function makeVersionedHappyPathResponses(): SpawnResult[] {
+  const repoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@${RESOLVED_DIGEST}`])
+  return [
+    makeSpawnResult(RESOLVED_DIGEST), // 0: imagetools inspect → resolved digest
+    makeSpawnResult(), // 1: mkdir
+    makeSpawnResult(), // 2: write .env
+    makeSpawnResult(), // 3: write docker-compose.yaml (stdin)
+    makeSpawnResult(), // 4: scp Caddyfile
+    makeSpawnResult(), // 5: write github-app.pem
+    makeSpawnResult(), // 6: chmod 0600
+    makeSpawnResult(), // 7: chown 1000:1000
+    makeSpawnResult(), // 8: rm -f docker-compose.override.yaml
+    makeSpawnResult(), // 9: compose pull
+    makeSpawnResult(), // 10: compose up dashboard
+    makeSpawnResult('sha256:imageid123'), // 11: docker inspect (image SHA)
+    makeSpawnResult(repoDigestsJson), // 12: docker inspect (RepoDigests)
+    makeSpawnResult(), // 13: compose up caddy
+    makeSpawnResult(), // 14: buffer
+  ]
+}
+
+describe('versioned deploy path', () => {
+  it('rejects invalid CalVer before any SSH/spawn', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: 'latest',
+        contractVersion: RELEASE_CONTRACT_VERSION,
+      }),
+    ).rejects.toThrow(/version/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  it('rejects missing contract when version is set, before any SSH/spawn', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        contractVersion: '',
+      }),
+    ).rejects.toThrow(/contract/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  it('rejects wrong contract when version is set, before any SSH/spawn', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        contractVersion: 'wrong-contract-v99',
+      }),
+    ).rejects.toThrow(/contract/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  it('rejects digest mismatch when resolved digest differs from dispatched digest', async () => {
+    const wrongDispatchedDigest = `sha256:${'d'.repeat(64)}`
+    const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: wrongDispatchedDigest,
+        contractVersion: RELEASE_CONTRACT_VERSION,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/digest/)
+  })
+
+  it('completes successfully with valid version + matching digest + correct contract', async () => {
+    const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: RESOLVED_DIGEST,
+        contractVersion: RELEASE_CONTRACT_VERSION,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('uploads generated compose content with version@resolvedDigest via stdin', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      version: '2026.06.47',
+      digest: RESOLVED_DIGEST,
+      contractVersion: RELEASE_CONTRACT_VERSION,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // The compose upload must contain the version@resolvedDigest image reference
+    const composeWrite = calls.find(c => c.stdinData.includes('fro-bot/dashboard:2026.06.47@'))
+    expect(composeWrite).toBeDefined()
+    expect(composeWrite?.stdinData).toContain(`ghcr.io/fro-bot/dashboard:2026.06.47@${RESOLVED_DIGEST}`)
+  })
+
+  it('verifies running image against resolvedDigest (not committed compose digest)', async () => {
+    // The RepoDigests response matches RESOLVED_DIGEST (not COMPOSE_DIGEST)
+    const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+    // Should pass because makeVersionedHappyPathResponses returns RESOLVED_DIGEST in RepoDigests
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: RESOLVED_DIGEST,
+        contractVersion: RELEASE_CONTRACT_VERSION,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('fails when running image digest does not match resolvedDigest', async () => {
+    const wrongRepoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@sha256:${'e'.repeat(64)}`])
+    const responses = makeVersionedHappyPathResponses()
+    // Override the RepoDigests response (index 12) with a mismatched digest
+    responses[12] = makeSpawnResult(wrongRepoDigestsJson)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: RESOLVED_DIGEST,
+        contractVersion: RELEASE_CONTRACT_VERSION,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/digest/)
+  })
+
+  it('calls docker buildx imagetools inspect to resolve digest', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      version: '2026.06.47',
+      digest: RESOLVED_DIGEST,
+      contractVersion: RELEASE_CONTRACT_VERSION,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const imagetoolsCall = calls.find(c => c.cmd.join(' ').includes('imagetools inspect'))
+    expect(imagetoolsCall).toBeDefined()
+    expect(imagetoolsCall?.cmd.join(' ')).toContain('ghcr.io/fro-bot/dashboard:2026.06.47')
+  })
+
+  it('succeeds without dispatched digest (resolves and uses resolved digest only)', async () => {
+    const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+    // No dispatched digest — should resolve and use the resolved digest
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: '',
+        contractVersion: RELEASE_CONTRACT_VERSION,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
+})
+
+// ─── no-version fallback ──────────────────────────────────────────────────────
+//
+// When no version is dispatched, the committed compose file is the source of
+// truth. No imagetools inspect, no generated compose content, no audit commit.
+
+describe('no-version fallback', () => {
+  it('uses committed compose digest when no version is provided', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // No imagetools inspect call
+    const imagetoolsCall = calls.find(c => c.cmd.join(' ').includes('imagetools inspect'))
+    expect(imagetoolsCall).toBeUndefined()
+  })
+
+  it('does not upload generated compose content (uses committed file via scp)', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    // The compose upload must be via scp (not stdin with generated content)
+    const scpComposeCall = calls.find(c => {
+      const s = c.cmd.join(' ')
+      return s.includes('scp') && s.includes('docker-compose.yaml')
+    })
+    expect(scpComposeCall).toBeDefined()
+
+    // No stdin write should contain a version@digest image reference for a new version
+    // (the committed compose content may contain the existing pinned digest, but not a new one)
+    const generatedComposeWrite = calls.find(c => c.stdinData.includes('fro-bot/dashboard:2026.06.47@'))
+    expect(generatedComposeWrite).toBeUndefined()
+  })
+
+  it('succeeds without version, digest, or contractVersion', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
+})
+
+// ─── Gap 2: validateContractVersion with contract_version alone ───────────────
+//
+// The fuse must trigger when ANY versioned-release input is non-empty:
+// version, digest, OR contract_version. Previously only version/digest were
+// checked, so a stale payload with only contract_version set would slip through.
+
+describe('validateContractVersion: contract_version alone triggers fuse', () => {
+  it('throws when contract_version is non-empty but wrong, with version and digest empty', () => {
+    // contract_version alone is a versioned-release input — wrong value must fail
+    expect(() => validateContractVersion('wrong-contract', '', '')).toThrow(/contract/)
+  })
+
+  it('throws when contract_version is non-empty but wrong (stale payload)', () => {
+    expect(() => validateContractVersion('dashboard-release-dispatch-v0', '', '')).toThrow(/contract/)
+  })
+
+  it('passes when contract_version alone equals RELEASE_CONTRACT_VERSION', () => {
+    // A dispatch with only contract_version set (no version/digest) is unusual but valid
+    expect(() => validateContractVersion(RELEASE_CONTRACT_VERSION, '', '')).not.toThrow()
+  })
+
+  it('deploy() rejects wrong contract_version alone before any SSH/spawn', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '',
+        digest: '',
+        contractVersion: 'stale-contract-v0',
+      }),
+    ).rejects.toThrow(/contract/)
+
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ─── Gap 1: versioned deploy writes local compose path ───────────────────────
+//
+// After a successful versioned deploy, the local compose file at localComposePath
+// must be updated to reflect version@resolvedDigest. This is what the workflow's
+// `git add apps/dashboard/docker-compose.yaml` step reads for the audit commit.
+//
+// Tests use an injectable localComposePath (temp file) so the real
+// apps/dashboard/docker-compose.yaml is never mutated.
+
+describe('versioned deploy: writes local compose path after successful deploy', () => {
+  const SAMPLE_COMPOSE_FOR_WRITE = `services:
+  caddy:
+    image: caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
+    restart: unless-stopped
+  dashboard:
+    image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:${'a'.repeat(64)}
+    restart: unless-stopped
+`
+
+  it('writes version@resolvedDigest to localComposePath after successful versioned deploy', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'deploy-test-compose-'))
+    const tmpComposePath = join(tmpDir, 'docker-compose.yaml')
+    writeFileSync(tmpComposePath, SAMPLE_COMPOSE_FOR_WRITE, 'utf8')
+
+    try {
+      const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+      await deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: RESOLVED_DIGEST,
+        contractVersion: RELEASE_CONTRACT_VERSION,
+        localComposePath: tmpComposePath,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      })
+
+      const written = readFileSync(tmpComposePath, 'utf8')
+      expect(written).toContain(`ghcr.io/fro-bot/dashboard:2026.06.47@${RESOLVED_DIGEST}`)
+      // Old version must be gone
+      expect(written).not.toContain('2026.06.15@sha256:')
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+
+  it('does NOT write local compose path on failed versioned deploy (digest mismatch)', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'deploy-test-compose-'))
+    const tmpComposePath = join(tmpDir, 'docker-compose.yaml')
+    writeFileSync(tmpComposePath, SAMPLE_COMPOSE_FOR_WRITE, 'utf8')
+
+    try {
+      const wrongDispatchedDigest = `sha256:${'d'.repeat(64)}`
+      const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+      await expect(
+        deploy({
+          env: VALID_ENV,
+          spawn: spawnFn,
+          resolve: resolvesOk,
+          fetch: fetchHealthzOk,
+          version: '2026.06.47',
+          digest: wrongDispatchedDigest, // mismatch → throws before deploy
+          contractVersion: RELEASE_CONTRACT_VERSION,
+          localComposePath: tmpComposePath,
+          probeAttempts: 1,
+          probeIntervalMs: 0,
+          sleep: async () => {},
+        }),
+      ).rejects.toThrow(/digest/)
+
+      // Local compose must be unchanged
+      const written = readFileSync(tmpComposePath, 'utf8')
+      expect(written).toBe(SAMPLE_COMPOSE_FOR_WRITE)
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+
+  it('does NOT write local compose path on no-version fallback deploy', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'deploy-test-compose-'))
+    const tmpComposePath = join(tmpDir, 'docker-compose.yaml')
+    writeFileSync(tmpComposePath, SAMPLE_COMPOSE_FOR_WRITE, 'utf8')
+
+    try {
+      const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+
+      await deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        localComposePath: tmpComposePath,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      })
+
+      // No-version fallback must not mutate the local compose
+      const written = readFileSync(tmpComposePath, 'utf8')
+      expect(written).toBe(SAMPLE_COMPOSE_FOR_WRITE)
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+
+  it('does NOT write local compose path when caddy up fails (late deploy failure)', async () => {
+    // Verifies that the local compose write only happens after the full deploy
+    // succeeds. If caddy up (Phase 11) throws, the write must be skipped.
+    const tmpDir = mkdtempSync(join(tmpdir(), 'deploy-test-compose-'))
+    const tmpComposePath = join(tmpDir, 'docker-compose.yaml')
+    writeFileSync(tmpComposePath, SAMPLE_COMPOSE_FOR_WRITE, 'utf8')
+
+    try {
+      // Replace the caddy up response (index 13) with a failing exit code.
+      const responses = makeVersionedHappyPathResponses()
+      responses[13] = makeSpawnResult('', 'caddy up failed', 1)
+      const {spawnFn} = makeFakeSpawn(responses)
+
+      await expect(
+        deploy({
+          env: VALID_ENV,
+          spawn: spawnFn,
+          resolve: resolvesOk,
+          fetch: fetchHealthzOk,
+          version: '2026.06.47',
+          digest: RESOLVED_DIGEST,
+          contractVersion: RELEASE_CONTRACT_VERSION,
+          localComposePath: tmpComposePath,
+          probeAttempts: 1,
+          probeIntervalMs: 0,
+          sleep: async () => {},
+        }),
+      ).rejects.toThrow()
+
+      // Local compose must be unchanged — write only happens after full success
+      const written = readFileSync(tmpComposePath, 'utf8')
+      expect(written).toBe(SAMPLE_COMPOSE_FOR_WRITE)
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+})
+
+// ─── Explicit input mode validation ──────────────────────────────────────────
+//
+// Valid modes:
+//   a) all release inputs empty => no-version fallback
+//   b) version (CalVer) + contract_version === RELEASE_CONTRACT_VERSION + optional digest
+//
+// Invalid: digest without version, contract_version without version (even correct contract),
+//          malformed digest, malformed version.
+
+describe('explicit input mode validation', () => {
+  it('rejects digest-only (no version) before any SSH/spawn', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '',
+        digest: FAKE_DIGEST,
+        contractVersion: '',
+      }),
+    ).rejects.toThrow(/contract|version|mode/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  it('rejects correct contract_version alone (no version) before any SSH/spawn', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '',
+        digest: '',
+        contractVersion: RELEASE_CONTRACT_VERSION,
+      }),
+    ).rejects.toThrow(/version|mode/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  it('rejects malformed digest (not sha256:<64hex>) before any SSH/spawn', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: 'sha256:tooshort',
+        contractVersion: RELEASE_CONTRACT_VERSION,
+      }),
+    ).rejects.toThrow(/digest/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  it('rejects digest without sha256: prefix before any SSH/spawn', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: 'a'.repeat(64),
+        contractVersion: RELEASE_CONTRACT_VERSION,
+      }),
+    ).rejects.toThrow(/digest/)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  it('accepts valid version with omitted digest (empty string)', async () => {
+    const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: '',
+        contractVersion: RELEASE_CONTRACT_VERSION,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('rejects digest-only + correct contract (no version) before any SSH/spawn', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '',
+        digest: FAKE_DIGEST,
+        contractVersion: RELEASE_CONTRACT_VERSION,
+      }),
+    ).rejects.toThrow(/version|mode/)
+
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ─── RED: generateComposeContent digest validation ───────────────────────────
+//
+// generateComposeContent must validate the digest with DIGEST_RE and throw on
+// malformed input. It must also throw when more than one fro-bot/dashboard
+// image line is found (silent multi-service drift guard).
+
+describe('generateComposeContent: digest validation and duplicate guard', () => {
+  it('throws on malformed digest (not sha256:<64hex>)', () => {
+    const compose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:${'a'.repeat(64)}\n`
+    expect(() => generateComposeContent(compose, '2026.06.47', 'sha256:tooshort')).toThrow(/digest/)
+  })
+
+  it('throws on digest without sha256: prefix', () => {
+    const compose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:${'a'.repeat(64)}\n`
+    expect(() => generateComposeContent(compose, '2026.06.47', 'a'.repeat(64))).toThrow(/digest/)
+  })
+
+  it('throws on empty digest', () => {
+    const compose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:${'a'.repeat(64)}\n`
+    expect(() => generateComposeContent(compose, '2026.06.47', '')).toThrow(/digest/)
+  })
+
+  it('throws when more than one fro-bot/dashboard image line is found', () => {
+    const compose = `services:
+  dashboard:
+    image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:${'a'.repeat(64)}
+  dashboard2:
+    image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:${'a'.repeat(64)}
+`
+    expect(() => generateComposeContent(compose, '2026.06.47', `sha256:${'b'.repeat(64)}`)).toThrow(
+      /fro-bot\/dashboard|multiple|more than one/,
+    )
+  })
+
+  it('accepts exactly one fro-bot/dashboard image line with valid digest', () => {
+    const compose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:${'a'.repeat(64)}\n`
+    const newDigest = `sha256:${'b'.repeat(64)}`
+    expect(() => generateComposeContent(compose, '2026.06.47', newDigest)).not.toThrow()
+  })
+})
+
+// ─── RED: resolveImageDigest fallback and error paths ────────────────────────
+//
+// resolveImageDigest must:
+// - parse "Digest: sha256:<hex>" fallback output when template format unavailable
+// - throw with a clear message on unparseable output
+
+describe('resolveImageDigest: fallback Digest: output and unparseable output', () => {
+  it('versioned deploy succeeds when imagetools returns "Digest: sha256:<hex>" fallback format', async () => {
+    // Simulate imagetools returning plain "Digest: sha256:<hex>" instead of template format
+    const fallbackOutput = `Name:      ghcr.io/fro-bot/dashboard:2026.06.47\nDigest: ${RESOLVED_DIGEST}\nManifest: application/vnd.oci.image.index.v1+json\n`
+    const responses = makeVersionedHappyPathResponses()
+    responses[0] = makeSpawnResult(fallbackOutput) // override imagetools inspect response
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: RESOLVED_DIGEST,
+        contractVersion: RELEASE_CONTRACT_VERSION,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('versioned deploy fails with clear message when imagetools output is unparseable', async () => {
+    const responses = makeVersionedHappyPathResponses()
+    responses[0] = makeSpawnResult('Error: manifest unknown') // unparseable — no sha256 digest
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: RESOLVED_DIGEST,
+        contractVersion: RELEASE_CONTRACT_VERSION,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/digest|imagetools|parse/)
+  })
+})
+
+// ─── RED: public probe final warning includes last error/status ───────────────
+//
+// When the public HTTPS probe fails, the final warning must include either the
+// last fetch error message or the last non-OK HTTP status code. This mirrors
+// the operator-health diagnostics pattern and helps diagnose DNS/routing/ACME.
+
+describe('public probe: final warning includes last error or status', () => {
+  it('warning includes last HTTP status when probe returns non-ok status', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.map(String).join(' '))
+    }
+
+    try {
+      await deploy({
+        env: {...VALID_ENV, GATEWAY_VPC_IP: ''}, // skip operator health check
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (_url: string, _opts?: RequestInit) => {
+          return new Response('Service Unavailable', {status: 503})
+        },
+        probeAttempts: 2,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      })
+    } finally {
+      console.warn = origWarn
+    }
+
+    // The final warning for /api/healthz must include the last HTTP status
+    const healthzWarning = warnMessages.find(m => m.includes('healthz') || m.includes('TLS') || m.includes('cert'))
+    expect(healthzWarning).toBeDefined()
+    expect(healthzWarning).toMatch(/503|status/)
+  })
+
+  it('warning includes last error message when probe throws', async () => {
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.map(String).join(' '))
+    }
+
+    try {
+      await deploy({
+        env: {...VALID_ENV, GATEWAY_VPC_IP: ''}, // skip operator health check
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (_url: string, _opts?: RequestInit) => {
+          throw new TypeError('ECONNREFUSED: connection refused')
+        },
+        probeAttempts: 2,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      })
+    } finally {
+      console.warn = origWarn
+    }
+
+    // The final warning for /api/healthz must include the last error message
+    const healthzWarning = warnMessages.find(m => m.includes('healthz') || m.includes('TLS') || m.includes('cert'))
+    expect(healthzWarning).toBeDefined()
+    expect(healthzWarning).toMatch(/ECONNREFUSED|connection refused|error/i)
+  })
+})
+
+// ─── RED: --wait-timeout 120 in compose up commands ──────────────────────────
+//
+// Both `docker compose up -d --no-build --wait dashboard` and
+// `docker compose up -d --no-build --wait caddy` must include `--wait-timeout 120`
+// to bound the wait and surface clear timeout errors.
+
+describe('docker compose up: --wait-timeout 120', () => {
+  it('dashboard compose up includes --wait-timeout 120', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const dashboardUpCall = calls.find(c => {
+      const s = c.cmd.join(' ')
+      return s.includes('docker compose up') && s.includes('dashboard') && !s.includes('caddy')
+    })
+    expect(dashboardUpCall).toBeDefined()
+    expect(dashboardUpCall?.cmd.join(' ')).toContain('--wait-timeout 120')
+  })
+
+  it('caddy compose up includes --wait-timeout 120', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const caddyUpCall = calls.find(c => {
+      const s = c.cmd.join(' ')
+      return s.includes('docker compose up') && s.includes('caddy')
+    })
+    expect(caddyUpCall).toBeDefined()
+    expect(caddyUpCall?.cmd.join(' ')).toContain('--wait-timeout 120')
   })
 })

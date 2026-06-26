@@ -6,6 +6,20 @@ import {join} from 'node:path'
 
 import {validateDashboardHost} from './host'
 
+// ─── Release dispatch contract ────────────────────────────────────────────────
+
+/**
+ * Contract version fuse for versioned release dispatches.
+ *
+ * When any versioned-release input (version, digest, or contract_version) is
+ * non-empty, the dispatched contract_version must match this constant exactly.
+ * This prevents accidental or stale dispatch payloads from deploying.
+ *
+ * The value is intentionally stable — bump it only when the dispatch contract
+ * itself changes in a breaking way.
+ */
+export const RELEASE_CONTRACT_VERSION = 'dashboard-release-dispatch-v1'
+
 // ─── Remote paths ─────────────────────────────────────────────────────────────
 
 const REMOTE_DIR = '/opt/dashboard'
@@ -20,6 +34,9 @@ const DEFAULT_REMOTE_USER = 'root'
 // ─── Shell metacharacter deny-list ────────────────────────────────────────────
 // These characters are dangerous when interpolated into remote shell context.
 const SHELL_METACHAR_RE = /[\n\r`$|;&'"\\]/
+
+// CalVer: YYYY.MM.N — four-digit year, two-digit month, non-negative integer patch.
+const CALVER_RE = /^\d{4}\.\d{2}\.\d+$/
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -59,6 +76,34 @@ export interface DeployOpts {
   probeAttempts?: number
   /** Interval between probe attempts in ms (default: 5_000). */
   probeIntervalMs?: number
+  /**
+   * CalVer version to deploy (e.g. "2026.06.47").
+   * When set, the deploy resolves the image digest from GHCR, generates
+   * compose content pinned to version@resolvedDigest, and uploads it.
+   * When empty/absent, the committed docker-compose.yaml is the source of truth.
+   */
+  version?: string
+  /**
+   * Expected sha256 digest for the versioned image (e.g. "sha256:abc...").
+   * When set alongside version, the resolved digest must match this value exactly.
+   * When empty, the resolved digest is used without a cross-check.
+   */
+  digest?: string
+  /**
+   * Contract version fuse — must equal RELEASE_CONTRACT_VERSION when any
+   * versioned-release input (version, digest, or contractVersion) is non-empty.
+   */
+  contractVersion?: string
+  /**
+   * Local path to write the updated docker-compose.yaml after a successful
+   * versioned deploy. When omitted, no local file is written — callers that
+   * need the write (production entry point, tests asserting the write) must
+   * pass this explicitly.
+   *
+   * Only written on the versioned path (when version is set) and only after
+   * the full deploy completes successfully.
+   */
+  localComposePath?: string
 }
 
 /** Validated, typed environment required for deploy. */
@@ -78,6 +123,139 @@ export interface ValidatedEnv {
 }
 
 // ─── Exported helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Validates that a version string is a well-formed CalVer (YYYY.MM.N).
+ *
+ * Accepts: strings matching `^\d{4}\.\d{2}\.\d+$` (e.g. "2026.06.47").
+ * Rejects: "latest", semver, injection strings, empty strings, and anything
+ *   that does not match the CalVer pattern.
+ *
+ * @throws {Error} when the version is not a valid CalVer string.
+ */
+export function validateCalVer(version: string): void {
+  if (!version || !CALVER_RE.test(version)) {
+    throw new Error(
+      `Invalid version "${version}": must be a CalVer string matching YYYY.MM.N (e.g. 2026.06.47). ` +
+        `"latest", semver, and injection strings are not accepted.`,
+    )
+  }
+}
+
+/**
+ * Validates the release dispatch contract fuse.
+ *
+ * When any versioned-release input (version, digest, or contractVersion) is
+ * non-empty, contractVersion must match RELEASE_CONTRACT_VERSION exactly.
+ * When all inputs are empty (no-version fallback), no contract is required.
+ *
+ * @throws {Error} when versioned inputs are present but contract is missing or wrong.
+ */
+export function validateContractVersion(contractVersion: string, version: string, digest: string): void {
+  const hasVersionedInput = Boolean(version || digest || contractVersion)
+  if (!hasVersionedInput) return
+
+  if (!contractVersion || contractVersion !== RELEASE_CONTRACT_VERSION) {
+    throw new Error(
+      `Release dispatch contract mismatch. ` +
+        `Expected contract_version="${RELEASE_CONTRACT_VERSION}" but got "${contractVersion}". ` +
+        `Set contract_version to "${RELEASE_CONTRACT_VERSION}" when dispatching a versioned release.`,
+    )
+  }
+}
+
+// sha256 digest: exactly "sha256:" followed by 64 lowercase hex characters.
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/
+
+/**
+ * Validates the explicit input mode for a deploy invocation.
+ *
+ * Valid modes:
+ *   a) All release inputs empty (version, digest, contractVersion) — no-version fallback.
+ *   b) version (CalVer) + contractVersion === RELEASE_CONTRACT_VERSION + optional digest.
+ *
+ * Invalid:
+ *   - digest without version (digest-only)
+ *   - contractVersion without version (contract-only, even if correct)
+ *   - malformed digest (must match ^sha256:[0-9a-f]{64}$)
+ *
+ * This is enforced before env validation and SSH so the error is surfaced early.
+ *
+ * @throws {Error} when the input combination is invalid.
+ */
+export function validateInputMode(version: string, digest: string, contractVersion: string): void {
+  const hasVersion = Boolean(version)
+  const hasDigest = Boolean(digest)
+  const hasContract = Boolean(contractVersion)
+
+  // Mode (a): all empty — no-version fallback, nothing to validate here.
+  if (!hasVersion && !hasDigest && !hasContract) return
+
+  // Mode (b) requires version. Reject digest-only and contract-only.
+  if (!hasVersion) {
+    throw new Error(
+      `Invalid deploy input mode: version is required when digest or contract_version is set. ` +
+        `Either omit all inputs (no-version fallback) or provide version + contract_version="${RELEASE_CONTRACT_VERSION}".`,
+    )
+  }
+
+  // Validate digest format when provided.
+  if (hasDigest && !DIGEST_RE.test(digest)) {
+    throw new Error(
+      `Invalid digest "${digest}": must match sha256:<64 hex chars> (e.g. sha256:abc...def). ` +
+        `Malformed digests are not accepted.`,
+    )
+  }
+}
+
+/**
+ * Generates docker-compose.yaml content with the image line replaced to pin
+ * the given version and digest.
+ *
+ * Replaces the `image: ghcr.io/fro-bot/dashboard:...` line with
+ * `image: ghcr.io/fro-bot/dashboard:<version>@<digest>`.
+ *
+ * @throws {Error} when digest is malformed (must match ^sha256:[0-9a-f]{64}$).
+ * @throws {Error} when no fro-bot/dashboard image line is found in the content.
+ * @throws {Error} when more than one fro-bot/dashboard image line is found (drift guard).
+ */
+export function generateComposeContent(originalContent: string, version: string, digest: string): string {
+  if (!digest || !DIGEST_RE.test(digest)) {
+    throw new Error(
+      `Invalid digest "${digest}": must match sha256:<64 hex chars> (e.g. sha256:abc...def). ` +
+        `Malformed digests are not accepted.`,
+    )
+  }
+
+  const lines = originalContent.split('\n')
+  let matchCount = 0
+
+  const newLines = lines.map(line => {
+    if (line.includes('fro-bot/dashboard')) {
+      matchCount++
+      // Preserve leading whitespace
+      const indent = line.match(/^(\s*)/)?.[1] ?? ''
+      return `${indent}image: ghcr.io/fro-bot/dashboard:${version}@${digest}`
+    }
+    return line
+  })
+
+  if (matchCount === 0) {
+    throw new Error(
+      'Could not find a fro-bot/dashboard image line in docker-compose.yaml. ' +
+        'Cannot generate versioned compose content.',
+    )
+  }
+
+  if (matchCount > 1) {
+    throw new Error(
+      `Found ${matchCount} fro-bot/dashboard image lines in docker-compose.yaml — expected exactly one. ` +
+        `Multiple matches risk silent multi-service drift. Inspect the compose file and ensure only one service uses this image.`,
+    )
+  }
+
+  return newLines.join('\n')
+}
 
 /**
  * Parses the sha256 digest from a docker-compose image line.
@@ -476,30 +654,81 @@ async function defaultResolve(host: string): Promise<void> {
   }
 }
 
+/**
+ * Resolves the top-level multi-arch digest for a versioned GHCR image.
+ *
+ * Uses `docker buildx imagetools inspect <image>:<version> --format '{{ .Manifest.Digest }}'`
+ * to retrieve the top-level index/manifest digest. Falls back to parsing
+ * plain `Digest: sha256:<hex>` output if the template format is unavailable.
+ *
+ * @throws {Error} when the digest cannot be resolved or parsed.
+ */
+async function resolveImageDigest(version: string, spawnFn: SpawnFn, deployEnv: DeployEnv): Promise<string> {
+  const imageRef = `ghcr.io/fro-bot/dashboard:${version}`
+  const {stdout} = await runCommand(
+    `Resolving image digest for ${imageRef}`,
+    ['docker', 'buildx', 'imagetools', 'inspect', imageRef, '--format', '{{ .Manifest.Digest }}'],
+    deployEnv,
+    spawnFn,
+  )
+
+  const trimmed = stdout.trim()
+
+  // Primary: template output is the digest directly (e.g. "sha256:abc...")
+  if (/^sha256:[0-9a-f]{64}$/.test(trimmed)) {
+    return trimmed
+  }
+
+  // Fallback: parse "Digest: sha256:<hex>" from plain output
+  const fallbackMatch = /Digest:\s*(sha256:[0-9a-f]{64})/.exec(trimmed)
+  if (fallbackMatch?.[1]) {
+    return fallbackMatch[1]
+  }
+
+  throw new Error(
+    `Could not parse image digest from imagetools inspect output for ${imageRef}.\n` +
+      `Output: ${trimmed.slice(0, 200)}`,
+  )
+}
+
 // ─── Main deploy orchestrator ─────────────────────────────────────────────────
 
 /**
  * Deploys the Dashboard stack to the remote droplet.
  *
+ * Two modes:
+ *
+ * **Versioned path** (version + contractVersion provided):
+ *   Pre-gate: validate CalVer, validate contract fuse (no secrets required).
+ *   Then: resolve digest via `docker buildx imagetools inspect`, cross-check
+ *   against dispatched digest (if provided), generate compose content pinned to
+ *   version@resolvedDigest, upload via SSH stdin.
+ *
+ * **No-version fallback** (no version):
+ *   Read digest from committed docker-compose.yaml; scp the committed file.
+ *
  * Order of operations:
- * 1. Validate env (throws before any SSH on failure)
- * 2. Validate host (SSH argv injection defense)
- * 3. Read expected digest from committed docker-compose.yaml (fail closed if not pinned)
+ * 1. Pre-gate: validate contract fuse + CalVer (no secrets, before environment gate)
+ * 2. Validate env (throws before any SSH on failure)
+ * 3. Validate host (SSH argv injection defense)
  * 4. DNS preflight
  * 5. ControlMaster SSH multiplexing setup (dual-tmpdir: key under os.tmpdir(), socket under /tmp)
- * 6. Remote prep: mkdir -p /opt/dashboard/config
- * 7. Materialize /opt/dashboard/.env via SSH stdin (includes DASHBOARD_GITHUB_APP_KEY_FILE path)
- * 8. scp docker-compose.yaml + config/Caddyfile
- * 9. Upload GitHub App private key via SSH stdin to /opt/dashboard/config/github-app.pem (0600)
- *    SECURITY: PEM bytes flow through stdin ONLY — never in argv, never in a local temp file
- * 10. chown 1000:1000 github-app.pem so the container's node user (UID 1000) can read it
- * 11. rm -f /opt/dashboard/docker-compose.override.yaml (idempotent legacy cleanup — old deploys
- *     wrote this file; Docker Compose auto-merges it if present, which would override the image pin)
- * 12. docker compose pull (pulls digest-pinned GHCR image from docker-compose.yaml)
- * 13. docker compose up -d --no-build --wait dashboard (app health gate first)
- * 14. Verify RepoDigests: assert running image includes digest from docker-compose.yaml (fail closed)
- * 15. docker compose up -d --no-build --wait caddy (public exposure after app healthy)
- * 16. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
+ * 6. Versioned: resolve digest via imagetools inspect + cross-check; generate compose content
+ *    No-version: read digest from committed docker-compose.yaml
+ * 7. Remote prep: mkdir -p /opt/dashboard/config
+ * 8. Materialize /opt/dashboard/.env via SSH stdin (includes DASHBOARD_GITHUB_APP_KEY_FILE path)
+ * 9. Versioned: upload generated compose via SSH stdin
+ *    No-version: scp committed docker-compose.yaml
+ *    Both: scp config/Caddyfile
+ * 10. Upload GitHub App private key via SSH stdin to /opt/dashboard/config/github-app.pem (0600)
+ *     SECURITY: PEM bytes flow through stdin ONLY — never in argv, never in a local temp file
+ * 11. chown 1000:1000 github-app.pem so the container's node user (UID 1000) can read it
+ * 12. rm -f /opt/dashboard/docker-compose.override.yaml (idempotent legacy cleanup)
+ * 13. docker compose pull (pulls digest-pinned GHCR image from docker-compose.yaml)
+ * 14. docker compose up -d --no-build --wait dashboard (app health gate first)
+ * 15. Verify RepoDigests: assert running image includes selected digest (fail closed)
+ * 16. docker compose up -d --no-build --wait caddy (public exposure after app healthy)
+ * 17. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
  */
 export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
@@ -509,14 +738,33 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const sleepFn = opts.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)))
   const probeAttempts = opts.probeAttempts ?? 10
   const probeIntervalMs = opts.probeIntervalMs ?? 5_000
+  const version = opts.version ?? ''
+  const dispatchedDigest = opts.digest ?? ''
+  const contractVersion = opts.contractVersion ?? ''
+  // localComposePath: when provided, the versioned deploy writes the generated
+  // compose content back here after success (for the workflow audit PR step).
+  // When undefined, the write is skipped — callers that need the write (production
+  // entry point, tests asserting the write) must pass this explicitly.
+  const localComposePath = opts.localComposePath
+
+  // ── Pre-gate: no-secret validation (runs before environment gate) ──────────
+  // These checks require no secrets and can run before the environment gate.
+
+  // Input mode: enforce valid combinations before contract/CalVer checks.
+  validateInputMode(version, dispatchedDigest, contractVersion)
+
+  // Contract fuse: if any versioned-release input is present, contract must match.
+  validateContractVersion(contractVersion, version, dispatchedDigest)
+
+  // CalVer validation: reject invalid version strings before any SSH/spawn.
+  if (version) {
+    validateCalVer(version)
+  }
 
   // Phase 1: Validate env — throws before any SSH on failure
   const validated = validateEnv(env)
 
   const host = validated.DASHBOARD_DOMAIN
-
-  // Phase 2: Read expected digest from committed docker-compose.yaml (fail closed)
-  const imageDigest = readComposeDigest()
 
   // Boundary-validate secret values before any SSH
   validateSecretValue(validated.DASHBOARD_OAUTH_CLIENT_SECRET, 'DASHBOARD_OAUTH_CLIENT_SECRET')
@@ -565,6 +813,40 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     // %C expands to a hash of the connection tuple.
     const controlPath = join(controlTmpDir, 'cm-%C')
 
+    // Phase 2: Determine image digest and compose content
+    // - Versioned path: resolve digest from GHCR, compare to dispatched digest, generate compose
+    // - No-version fallback: read digest from committed docker-compose.yaml, scp the file
+    let imageDigest: string
+    let composeContentForUpload: string | null = null // null = use scp of committed file
+
+    if (version) {
+      // Versioned path: resolve top-level digest via imagetools inspect
+      const resolvedDigest = await resolveImageDigest(version, spawnFn, deployEnv)
+
+      // Cross-check: if a dispatched digest was provided, it must match the resolved digest
+      if (dispatchedDigest && resolvedDigest !== dispatchedDigest) {
+        throw new Error(
+          `Image digest mismatch for ghcr.io/fro-bot/dashboard:${version}.\n` +
+            `  Dispatched digest: ${dispatchedDigest}\n` +
+            `  Resolved digest:   ${resolvedDigest}\n` +
+            `The dispatched digest does not match the current GHCR image. ` +
+            `Re-dispatch with the correct digest or omit the digest field.`,
+        )
+      }
+
+      imageDigest = resolvedDigest
+
+      // Generate compose content with version@resolvedDigest.
+      // Always read from the committed file (source of truth for the template).
+      // localComposePath (if provided) is the write-back target after success.
+      const committedComposePath = join(import.meta.dir, '..', 'docker-compose.yaml')
+      const originalCompose = readFileSync(committedComposePath, 'utf8')
+      composeContentForUpload = generateComposeContent(originalCompose, version, resolvedDigest)
+    } else {
+      // No-version fallback: read digest from committed docker-compose.yaml
+      imageDigest = readComposeDigest()
+    }
+
     // Phase 4: Remote prep
     await runCommand(
       'Creating remote directories',
@@ -596,16 +878,31 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       controlPath,
     )
 
-    // Phase 6: scp docker-compose.yaml and Caddyfile
-    const localCompose = join(import.meta.dir, '..', 'docker-compose.yaml')
+    // Phase 6: Upload docker-compose.yaml and Caddyfile
     const localCaddyfile = join(import.meta.dir, '..', 'config', 'Caddyfile')
 
-    await runCommand(
-      'Copying docker-compose.yaml',
-      scpCommand(localCompose, host, REMOTE_COMPOSE_PATH, keyPath, controlPath),
-      deployEnv,
-      spawnFn,
-    )
+    if (composeContentForUpload === null) {
+      // No-version fallback: scp the committed docker-compose.yaml
+      const committedComposePath = join(import.meta.dir, '..', 'docker-compose.yaml')
+      await runCommand(
+        'Copying docker-compose.yaml',
+        scpCommand(committedComposePath, host, REMOTE_COMPOSE_PATH, keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+    } else {
+      // Versioned path: upload generated compose content via SSH stdin
+      await writeRemoteFile(
+        `Writing ${REMOTE_COMPOSE_PATH} (versioned: ${version}@${imageDigest.slice(0, 19)}...)`,
+        host,
+        REMOTE_COMPOSE_PATH,
+        composeContentForUpload,
+        deployEnv,
+        spawnFn,
+        keyPath,
+        controlPath,
+      )
+    }
 
     await runCommand(
       'Copying Caddyfile',
@@ -676,9 +973,15 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 
     // Phase 9: Start dashboard only (Caddy NOT started — no public exposure yet).
     // --no-build enforces digest-pinned image; never builds from source on the droplet.
+    // --wait-timeout 120 bounds the health-check wait and surfaces clear timeout errors.
     await runCommand(
       'Starting dashboard (internal only)',
-      sshCommand(host, `cd ${REMOTE_DIR} && docker compose up -d --no-build --wait dashboard`, keyPath, controlPath),
+      sshCommand(
+        host,
+        `cd ${REMOTE_DIR} && docker compose up -d --no-build --wait --wait-timeout 120 dashboard`,
+        keyPath,
+        controlPath,
+      ),
       deployEnv,
       spawnFn,
     )
@@ -722,9 +1025,15 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     console.warn('\u001B[1;32m✓\u001B[0m dashboard image digest verified')
 
     // Phase 11: Start Caddy — now safe to expose publicly (app is healthy + digest verified).
+    // --wait-timeout 120 bounds the health-check wait and surfaces clear timeout errors.
     await runCommand(
       'Starting Caddy (public exposure)',
-      sshCommand(host, `cd ${REMOTE_DIR} && docker compose up -d --no-build --wait caddy`, keyPath, controlPath),
+      sshCommand(
+        host,
+        `cd ${REMOTE_DIR} && docker compose up -d --no-build --wait --wait-timeout 120 caddy`,
+        keyPath,
+        controlPath,
+      ),
       deployEnv,
       spawnFn,
     )
@@ -792,17 +1101,20 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 
     // Phase 12: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
     let probeOk = false
+    let lastProbeStatus = 0
+    let lastProbeError: string | undefined
     for (let attempt = 1; attempt <= probeAttempts; attempt++) {
       try {
         const response = await fetchFn(`https://${host}${HEALTH_PATH}`, {
           signal: AbortSignal.timeout(10_000),
         })
+        lastProbeStatus = response.status
         if (response.ok) {
           probeOk = true
           break
         }
-      } catch {
-        // Transient failure — retry
+      } catch (error) {
+        lastProbeError = error instanceof Error ? error.message : String(error)
       }
 
       if (attempt < probeAttempts) {
@@ -812,11 +1124,28 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 
     if (probeOk) {
       console.warn(`\u001B[1;32m✓\u001B[0m Public HTTPS probe succeeded: https://${host}${HEALTH_PATH}`)
+    } else if (lastProbeError) {
+      console.warn(
+        `\u001B[1;33m[warn]\u001B[0m containers healthy; TLS cert may still be issuing — ` +
+          `verify at https://${host}${HEALTH_PATH}. ` +
+          `Last error: ${lastProbeError}`,
+      )
     } else {
       console.warn(
-        `\u001B[1;33m[warn]\u001B[0m containers healthy; TLS cert still issuing — ` +
-          `verify at https://${host}${HEALTH_PATH}`,
+        `\u001B[1;33m[warn]\u001B[0m containers healthy; TLS cert may still be issuing — ` +
+          `verify at https://${host}${HEALTH_PATH}. ` +
+          `Last HTTP status: ${lastProbeStatus}`,
       )
+    }
+
+    // Versioned path: write the generated compose content back to the local file.
+    // This is the audit record committed by the workflow's audit PR step.
+    // Only written after the full deploy completes successfully — never on failure.
+    // Only written when localComposePath is explicitly provided (production entry point passes it;
+    // tests that don't need the write omit it for isolation).
+    if (composeContentForUpload !== null && localComposePath !== undefined) {
+      writeFileSync(localComposePath, composeContentForUpload, 'utf8')
+      console.warn(`\u001B[1;32m✓\u001B[0m Updated local compose pin: ${localComposePath}`)
     }
 
     console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
@@ -834,7 +1163,14 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 if (import.meta.main) {
-  deploy().catch((error: unknown) => {
+  deploy({
+    version: process.env.DEPLOY_VERSION ?? '',
+    digest: process.env.DEPLOY_DIGEST ?? '',
+    contractVersion: process.env.DEPLOY_CONTRACT_VERSION ?? '',
+    // Pass the committed compose path explicitly so the versioned deploy writes
+    // the updated pin back for the workflow's audit PR step.
+    localComposePath: join(import.meta.dir, '..', 'docker-compose.yaml'),
+  }).catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : error)
     process.exit(1)
   })

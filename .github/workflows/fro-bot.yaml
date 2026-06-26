@@ -515,22 +515,29 @@ env:
     ### Deploy Pipeline Health
     | App | Check | Status | Details |
     | --- | --- | --- | --- |
-    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail | [run link] |
+    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) | [run link] |
     | keeweb | kw.igg.ms reachable | ✅ 200 / ❌ Error | [HTTP status] |
     | keeweb | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | keeweb | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / — Skipped | [run link] |
+    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | cliproxy | cliproxy.fro.bot reachable | ✅ 401/200 / ❌ 5xx/timeout | [HTTP status] |
     | cliproxy | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | cliproxy | Host keys | ✅ Current / ⚠️ Stale | [details] |
     | cliproxy | OAuth token (indirect) | ✅ Fresh / ⚠️ Recent 401s | [this run's status or prior run links] |
-    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / — Skipped | [run link] |
+    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | gateway | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | gateway | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / — Skipped | [run link] |
+    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | umami | metrics.fro.bot reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | umami | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | umami | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | dashboard | Last deploy-dashboard run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | dashboard | dashboard.fro.bot/api/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
+    | dashboard | Env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | dashboard | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | vpn | Last deploy-vpn run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | vpn | Env secrets | ✅ Set / ⚠️ Missing | [details] |
+    | vpn | Host keys | ✅ Current / ⚠️ Stale | [details] |
 
     ### Live Site Review
     | Check | Status | Details |

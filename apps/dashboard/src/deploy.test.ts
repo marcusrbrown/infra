@@ -10,9 +10,7 @@ import {
   deploy,
   generateComposeContent,
   parseComposeImageDigest,
-  RELEASE_CONTRACT_VERSION,
   validateCalVer,
-  validateContractVersion,
   validateEnv,
   validateGatewayVpcIp,
   validateSecretValue,
@@ -1535,49 +1533,6 @@ describe('validateCalVer', () => {
   })
 })
 
-// ─── validateContractVersion ──────────────────────────────────────────────────
-
-describe('validateContractVersion', () => {
-  it('passes when contract matches the expected constant and version is set', () => {
-    expect(() => validateContractVersion(RELEASE_CONTRACT_VERSION, '2026.06.15', '')).not.toThrow()
-  })
-
-  it('passes when contract matches and digest is set', () => {
-    expect(() => validateContractVersion(RELEASE_CONTRACT_VERSION, '', `sha256:${'a'.repeat(64)}`)).not.toThrow()
-  })
-
-  it('passes when contract matches and both version and digest are set', () => {
-    expect(() =>
-      validateContractVersion(RELEASE_CONTRACT_VERSION, '2026.06.15', `sha256:${'a'.repeat(64)}`),
-    ).not.toThrow()
-  })
-
-  it('passes when all inputs are empty (no-version fallback — contract not required)', () => {
-    expect(() => validateContractVersion('', '', '')).not.toThrow()
-  })
-
-  it('throws when version is set but contract is empty', () => {
-    expect(() => validateContractVersion('', '2026.06.15', '')).toThrow(/contract/)
-  })
-
-  it('throws when digest is set but contract is empty', () => {
-    expect(() => validateContractVersion('', '', `sha256:${'a'.repeat(64)}`)).toThrow(/contract/)
-  })
-
-  it('throws when contract is wrong (version set)', () => {
-    expect(() => validateContractVersion('wrong-contract', '2026.06.15', '')).toThrow(/contract/)
-  })
-
-  it('throws when contract is wrong (digest set)', () => {
-    expect(() => validateContractVersion('wrong-contract', '', `sha256:${'a'.repeat(64)}`)).toThrow(/contract/)
-  })
-
-  it('RELEASE_CONTRACT_VERSION is a stable non-empty string', () => {
-    expect(typeof RELEASE_CONTRACT_VERSION).toBe('string')
-    expect(RELEASE_CONTRACT_VERSION.length).toBeGreaterThan(0)
-  })
-})
-
 // ─── generateComposeContent ───────────────────────────────────────────────────
 
 describe('generateComposeContent', () => {
@@ -1613,7 +1568,7 @@ describe('generateComposeContent', () => {
 
 // ─── versioned deploy path ────────────────────────────────────────────────────
 //
-// When version + contractVersion are provided:
+// When version is provided:
 // - resolves digest via `docker buildx imagetools inspect`
 // - compares resolved digest to dispatched digest (if provided)
 // - generates compose content with version@resolvedDigest
@@ -1677,43 +1632,8 @@ describe('versioned deploy path', () => {
         resolve: resolvesOk,
         fetch: fetchHealthzOk,
         version: 'latest',
-        contractVersion: RELEASE_CONTRACT_VERSION,
       }),
     ).rejects.toThrow(/version/)
-
-    expect(calls).toHaveLength(0)
-  })
-
-  it('rejects missing contract when version is set, before any SSH/spawn', async () => {
-    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
-
-    await expect(
-      deploy({
-        env: VALID_ENV,
-        spawn: spawnFn,
-        resolve: resolvesOk,
-        fetch: fetchHealthzOk,
-        version: '2026.06.47',
-        contractVersion: '',
-      }),
-    ).rejects.toThrow(/contract/)
-
-    expect(calls).toHaveLength(0)
-  })
-
-  it('rejects wrong contract when version is set, before any SSH/spawn', async () => {
-    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
-
-    await expect(
-      deploy({
-        env: VALID_ENV,
-        spawn: spawnFn,
-        resolve: resolvesOk,
-        fetch: fetchHealthzOk,
-        version: '2026.06.47',
-        contractVersion: 'wrong-contract-v99',
-      }),
-    ).rejects.toThrow(/contract/)
 
     expect(calls).toHaveLength(0)
   })
@@ -1730,7 +1650,6 @@ describe('versioned deploy path', () => {
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: wrongDispatchedDigest,
-        contractVersion: RELEASE_CONTRACT_VERSION,
         probeAttempts: 1,
         probeIntervalMs: 0,
         sleep: async () => {},
@@ -1738,7 +1657,7 @@ describe('versioned deploy path', () => {
     ).rejects.toThrow(/digest/)
   })
 
-  it('completes successfully with valid version + matching digest + correct contract', async () => {
+  it('completes successfully with valid version + matching digest', async () => {
     const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
 
     await expect(
@@ -1749,7 +1668,6 @@ describe('versioned deploy path', () => {
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: RESOLVED_DIGEST,
-        contractVersion: RELEASE_CONTRACT_VERSION,
         probeAttempts: 1,
         probeIntervalMs: 0,
         sleep: async () => {},
@@ -1767,7 +1685,6 @@ describe('versioned deploy path', () => {
       fetch: fetchHealthzOk,
       version: '2026.06.47',
       digest: RESOLVED_DIGEST,
-      contractVersion: RELEASE_CONTRACT_VERSION,
       probeAttempts: 1,
       probeIntervalMs: 0,
       sleep: async () => {},
@@ -1792,7 +1709,6 @@ describe('versioned deploy path', () => {
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: RESOLVED_DIGEST,
-        contractVersion: RELEASE_CONTRACT_VERSION,
         probeAttempts: 1,
         probeIntervalMs: 0,
         sleep: async () => {},
@@ -1816,7 +1732,6 @@ describe('versioned deploy path', () => {
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: RESOLVED_DIGEST,
-        contractVersion: RELEASE_CONTRACT_VERSION,
         probeAttempts: 1,
         probeIntervalMs: 0,
         sleep: async () => {},
@@ -1834,7 +1749,6 @@ describe('versioned deploy path', () => {
       fetch: fetchHealthzOk,
       version: '2026.06.47',
       digest: RESOLVED_DIGEST,
-      contractVersion: RELEASE_CONTRACT_VERSION,
       probeAttempts: 1,
       probeIntervalMs: 0,
       sleep: async () => {},
@@ -1857,7 +1771,6 @@ describe('versioned deploy path', () => {
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: '',
-        contractVersion: RELEASE_CONTRACT_VERSION,
         probeAttempts: 1,
         probeIntervalMs: 0,
         sleep: async () => {},
@@ -1916,7 +1829,7 @@ describe('no-version fallback', () => {
     expect(generatedComposeWrite).toBeUndefined()
   })
 
-  it('succeeds without version, digest, or contractVersion', async () => {
+  it('succeeds without version or digest', async () => {
     const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
 
     await expect(
@@ -1930,46 +1843,6 @@ describe('no-version fallback', () => {
         sleep: async () => {},
       }),
     ).resolves.toBeUndefined()
-  })
-})
-
-// ─── Gap 2: validateContractVersion with contract_version alone ───────────────
-//
-// The fuse must trigger when ANY versioned-release input is non-empty:
-// version, digest, OR contract_version. Previously only version/digest were
-// checked, so a stale payload with only contract_version set would slip through.
-
-describe('validateContractVersion: contract_version alone triggers fuse', () => {
-  it('throws when contract_version is non-empty but wrong, with version and digest empty', () => {
-    // contract_version alone is a versioned-release input — wrong value must fail
-    expect(() => validateContractVersion('wrong-contract', '', '')).toThrow(/contract/)
-  })
-
-  it('throws when contract_version is non-empty but wrong (stale payload)', () => {
-    expect(() => validateContractVersion('dashboard-release-dispatch-v0', '', '')).toThrow(/contract/)
-  })
-
-  it('passes when contract_version alone equals RELEASE_CONTRACT_VERSION', () => {
-    // A dispatch with only contract_version set (no version/digest) is unusual but valid
-    expect(() => validateContractVersion(RELEASE_CONTRACT_VERSION, '', '')).not.toThrow()
-  })
-
-  it('deploy() rejects wrong contract_version alone before any SSH/spawn', async () => {
-    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
-
-    await expect(
-      deploy({
-        env: VALID_ENV,
-        spawn: spawnFn,
-        resolve: resolvesOk,
-        fetch: fetchHealthzOk,
-        version: '',
-        digest: '',
-        contractVersion: 'stale-contract-v0',
-      }),
-    ).rejects.toThrow(/contract/)
-
-    expect(calls).toHaveLength(0)
   })
 })
 
@@ -2007,7 +1880,6 @@ describe('versioned deploy: writes local compose path after successful deploy', 
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: RESOLVED_DIGEST,
-        contractVersion: RELEASE_CONTRACT_VERSION,
         localComposePath: tmpComposePath,
         probeAttempts: 1,
         probeIntervalMs: 0,
@@ -2040,7 +1912,6 @@ describe('versioned deploy: writes local compose path after successful deploy', 
           fetch: fetchHealthzOk,
           version: '2026.06.47',
           digest: wrongDispatchedDigest, // mismatch → throws before deploy
-          contractVersion: RELEASE_CONTRACT_VERSION,
           localComposePath: tmpComposePath,
           probeAttempts: 1,
           probeIntervalMs: 0,
@@ -2104,7 +1975,6 @@ describe('versioned deploy: writes local compose path after successful deploy', 
           fetch: fetchHealthzOk,
           version: '2026.06.47',
           digest: RESOLVED_DIGEST,
-          contractVersion: RELEASE_CONTRACT_VERSION,
           localComposePath: tmpComposePath,
           probeAttempts: 1,
           probeIntervalMs: 0,
@@ -2125,10 +1995,9 @@ describe('versioned deploy: writes local compose path after successful deploy', 
 //
 // Valid modes:
 //   a) all release inputs empty => no-version fallback
-//   b) version (CalVer) + contract_version === RELEASE_CONTRACT_VERSION + optional digest
+//   b) version (CalVer) + optional digest
 //
-// Invalid: digest without version, contract_version without version (even correct contract),
-//          malformed digest, malformed version.
+// Invalid: digest without version, malformed digest, malformed version.
 
 describe('explicit input mode validation', () => {
   it('rejects digest-only (no version) before any SSH/spawn', async () => {
@@ -2142,25 +2011,6 @@ describe('explicit input mode validation', () => {
         fetch: fetchHealthzOk,
         version: '',
         digest: FAKE_DIGEST,
-        contractVersion: '',
-      }),
-    ).rejects.toThrow(/contract|version|mode/)
-
-    expect(calls).toHaveLength(0)
-  })
-
-  it('rejects correct contract_version alone (no version) before any SSH/spawn', async () => {
-    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
-
-    await expect(
-      deploy({
-        env: VALID_ENV,
-        spawn: spawnFn,
-        resolve: resolvesOk,
-        fetch: fetchHealthzOk,
-        version: '',
-        digest: '',
-        contractVersion: RELEASE_CONTRACT_VERSION,
       }),
     ).rejects.toThrow(/version|mode/)
 
@@ -2178,7 +2028,6 @@ describe('explicit input mode validation', () => {
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: 'sha256:tooshort',
-        contractVersion: RELEASE_CONTRACT_VERSION,
       }),
     ).rejects.toThrow(/digest/)
 
@@ -2196,7 +2045,6 @@ describe('explicit input mode validation', () => {
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: 'a'.repeat(64),
-        contractVersion: RELEASE_CONTRACT_VERSION,
       }),
     ).rejects.toThrow(/digest/)
 
@@ -2214,30 +2062,11 @@ describe('explicit input mode validation', () => {
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: '',
-        contractVersion: RELEASE_CONTRACT_VERSION,
         probeAttempts: 1,
         probeIntervalMs: 0,
         sleep: async () => {},
       }),
     ).resolves.toBeUndefined()
-  })
-
-  it('rejects digest-only + correct contract (no version) before any SSH/spawn', async () => {
-    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
-
-    await expect(
-      deploy({
-        env: VALID_ENV,
-        spawn: spawnFn,
-        resolve: resolvesOk,
-        fetch: fetchHealthzOk,
-        version: '',
-        digest: FAKE_DIGEST,
-        contractVersion: RELEASE_CONTRACT_VERSION,
-      }),
-    ).rejects.toThrow(/version|mode/)
-
-    expect(calls).toHaveLength(0)
   })
 })
 
@@ -2305,7 +2134,6 @@ describe('resolveImageDigest: fallback Digest: output and unparseable output', (
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: RESOLVED_DIGEST,
-        contractVersion: RELEASE_CONTRACT_VERSION,
         probeAttempts: 1,
         probeIntervalMs: 0,
         sleep: async () => {},
@@ -2327,7 +2155,6 @@ describe('resolveImageDigest: fallback Digest: output and unparseable output', (
         fetch: fetchHealthzOk,
         version: '2026.06.47',
         digest: RESOLVED_DIGEST,
-        contractVersion: RELEASE_CONTRACT_VERSION,
         probeAttempts: 1,
         probeIntervalMs: 0,
         sleep: async () => {},

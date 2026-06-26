@@ -6,20 +6,6 @@ import {join} from 'node:path'
 
 import {validateDashboardHost} from './host'
 
-// ─── Release dispatch contract ────────────────────────────────────────────────
-
-/**
- * Contract version fuse for versioned release dispatches.
- *
- * When any versioned-release input (version, digest, or contract_version) is
- * non-empty, the dispatched contract_version must match this constant exactly.
- * This prevents accidental or stale dispatch payloads from deploying.
- *
- * The value is intentionally stable — bump it only when the dispatch contract
- * itself changes in a breaking way.
- */
-export const RELEASE_CONTRACT_VERSION = 'dashboard-release-dispatch-v1'
-
 // ─── Remote paths ─────────────────────────────────────────────────────────────
 
 const REMOTE_DIR = '/opt/dashboard'
@@ -90,11 +76,6 @@ export interface DeployOpts {
    */
   digest?: string
   /**
-   * Contract version fuse — must equal RELEASE_CONTRACT_VERSION when any
-   * versioned-release input (version, digest, or contractVersion) is non-empty.
-   */
-  contractVersion?: string
-  /**
    * Local path to write the updated docker-compose.yaml after a successful
    * versioned deploy. When omitted, no local file is written — callers that
    * need the write (production entry point, tests asserting the write) must
@@ -142,28 +123,6 @@ export function validateCalVer(version: string): void {
   }
 }
 
-/**
- * Validates the release dispatch contract fuse.
- *
- * When any versioned-release input (version, digest, or contractVersion) is
- * non-empty, contractVersion must match RELEASE_CONTRACT_VERSION exactly.
- * When all inputs are empty (no-version fallback), no contract is required.
- *
- * @throws {Error} when versioned inputs are present but contract is missing or wrong.
- */
-export function validateContractVersion(contractVersion: string, version: string, digest: string): void {
-  const hasVersionedInput = Boolean(version || digest || contractVersion)
-  if (!hasVersionedInput) return
-
-  if (!contractVersion || contractVersion !== RELEASE_CONTRACT_VERSION) {
-    throw new Error(
-      `Release dispatch contract mismatch. ` +
-        `Expected contract_version="${RELEASE_CONTRACT_VERSION}" but got "${contractVersion}". ` +
-        `Set contract_version to "${RELEASE_CONTRACT_VERSION}" when dispatching a versioned release.`,
-    )
-  }
-}
-
 // sha256 digest: exactly "sha256:" followed by 64 lowercase hex characters.
 const DIGEST_RE = /^sha256:[0-9a-f]{64}$/
 
@@ -171,31 +130,29 @@ const DIGEST_RE = /^sha256:[0-9a-f]{64}$/
  * Validates the explicit input mode for a deploy invocation.
  *
  * Valid modes:
- *   a) All release inputs empty (version, digest, contractVersion) — no-version fallback.
- *   b) version (CalVer) + contractVersion === RELEASE_CONTRACT_VERSION + optional digest.
+ *   a) All release inputs empty (version, digest) — no-version fallback.
+ *   b) version (CalVer) + optional digest.
  *
  * Invalid:
  *   - digest without version (digest-only)
- *   - contractVersion without version (contract-only, even if correct)
  *   - malformed digest (must match ^sha256:[0-9a-f]{64}$)
  *
  * This is enforced before env validation and SSH so the error is surfaced early.
  *
  * @throws {Error} when the input combination is invalid.
  */
-export function validateInputMode(version: string, digest: string, contractVersion: string): void {
+export function validateInputMode(version: string, digest: string): void {
   const hasVersion = Boolean(version)
   const hasDigest = Boolean(digest)
-  const hasContract = Boolean(contractVersion)
 
   // Mode (a): all empty — no-version fallback, nothing to validate here.
-  if (!hasVersion && !hasDigest && !hasContract) return
+  if (!hasVersion && !hasDigest) return
 
-  // Mode (b) requires version. Reject digest-only and contract-only.
+  // Mode (b) requires version. Reject digest-only.
   if (!hasVersion) {
     throw new Error(
-      `Invalid deploy input mode: version is required when digest or contract_version is set. ` +
-        `Either omit all inputs (no-version fallback) or provide version + contract_version="${RELEASE_CONTRACT_VERSION}".`,
+      `Invalid deploy input mode: version is required when digest is set. ` +
+        `Either omit all inputs (no-version fallback) or provide version with an optional digest.`,
     )
   }
 
@@ -698,8 +655,8 @@ async function resolveImageDigest(version: string, spawnFn: SpawnFn, deployEnv: 
  *
  * Two modes:
  *
- * **Versioned path** (version + contractVersion provided):
- *   Pre-gate: validate CalVer, validate contract fuse (no secrets required).
+ * **Versioned path** (version provided):
+ *   Pre-gate: validate CalVer and digest shape (no secrets required).
  *   Then: resolve digest via `docker buildx imagetools inspect`, cross-check
  *   against dispatched digest (if provided), generate compose content pinned to
  *   version@resolvedDigest, upload via SSH stdin.
@@ -708,7 +665,7 @@ async function resolveImageDigest(version: string, spawnFn: SpawnFn, deployEnv: 
  *   Read digest from committed docker-compose.yaml; scp the committed file.
  *
  * Order of operations:
- * 1. Pre-gate: validate contract fuse + CalVer (no secrets, before environment gate)
+ * 1. Pre-gate: validate input mode, digest shape, and CalVer
  * 2. Validate env (throws before any SSH on failure)
  * 3. Validate host (SSH argv injection defense)
  * 4. DNS preflight
@@ -740,7 +697,6 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const probeIntervalMs = opts.probeIntervalMs ?? 5_000
   const version = opts.version ?? ''
   const dispatchedDigest = opts.digest ?? ''
-  const contractVersion = opts.contractVersion ?? ''
   // localComposePath: when provided, the versioned deploy writes the generated
   // compose content back here after success (for the workflow audit PR step).
   // When undefined, the write is skipped — callers that need the write (production
@@ -750,11 +706,8 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   // ── Pre-gate: no-secret validation (runs before environment gate) ──────────
   // These checks require no secrets and can run before the environment gate.
 
-  // Input mode: enforce valid combinations before contract/CalVer checks.
-  validateInputMode(version, dispatchedDigest, contractVersion)
-
-  // Contract fuse: if any versioned-release input is present, contract must match.
-  validateContractVersion(contractVersion, version, dispatchedDigest)
+  // Input mode: enforce valid combinations before CalVer checks.
+  validateInputMode(version, dispatchedDigest)
 
   // CalVer validation: reject invalid version strings before any SSH/spawn.
   if (version) {
@@ -1166,7 +1119,6 @@ if (import.meta.main) {
   deploy({
     version: process.env.DEPLOY_VERSION ?? '',
     digest: process.env.DEPLOY_DIGEST ?? '',
-    contractVersion: process.env.DEPLOY_CONTRACT_VERSION ?? '',
     // Pass the committed compose path explicitly so the versioned deploy writes
     // the updated pin back for the workflow's audit PR step.
     localComposePath: join(import.meta.dir, '..', 'docker-compose.yaml'),

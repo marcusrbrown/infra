@@ -1,4 +1,4 @@
-# Dispatch input contract (dashboard-release-dispatch-v1):
+# Dispatch input contract:
 #
 #   version          CalVer string (YYYY.MM.N, e.g. 2026.06.47). Optional.
 #                    When set, the deploy resolves the GHCR image digest,
@@ -10,13 +10,9 @@
 #                    When set alongside `version`, the resolved digest must
 #                    match this value exactly — mismatch fails hard.
 #
-#   contract_version Contract fuse. Must equal "dashboard-release-dispatch-v1"
-#                    when any versioned-release input (version, digest, OR
-#                    contract_version itself) is non-empty. Prevents stale or
-#                    accidental dispatch payloads from deploying.
-#
-# No-version fallback: omit all three inputs (or leave empty). The committed
+# No-version fallback: omit both inputs (or leave empty). The committed
 # docker-compose.yaml digest is the source of truth; no audit PR is opened.
+#
 
 name: Deploy Dashboard
 
@@ -35,11 +31,6 @@ on:
         required: false
         type: string
         default: ''
-      contract_version:
-        description: 'Contract fuse — must be "dashboard-release-dispatch-v1" when version, digest, or contract_version is set.'
-        required: false
-        type: string
-        default: ''
   workflow_call:
     inputs:
       version:
@@ -49,11 +40,6 @@ on:
         default: ''
       digest:
         description: Expected sha256 digest (e.g. sha256:abc...). Leave empty to skip cross-check.
-        required: false
-        type: string
-        default: ''
-      contract_version:
-        description: 'Contract fuse — must be "dashboard-release-dispatch-v1" when version, digest, or contract_version is set.'
         required: false
         type: string
         default: ''
@@ -127,25 +113,11 @@ jobs:
             exit 1
           fi
 
-      - name: Validate contract fuse
-        if: inputs.version != '' || inputs.digest != '' || inputs.contract_version != ''
-        env:
-          INPUT_CONTRACT_VERSION: ${{ inputs.contract_version }}
-        run: |
-          contract="${INPUT_CONTRACT_VERSION}"
-          expected="dashboard-release-dispatch-v1"
-          if [[ "$contract" != "$expected" ]]; then
-            echo "Release dispatch contract mismatch."
-            printf 'Expected contract_version=%q but got %q.\n' "$expected" "$contract"
-            printf 'Set contract_version to %q when dispatching a versioned release.\n' "$expected"
-            exit 1
-          fi
-
       - name: Validate input mode
-        if: inputs.version == '' && (inputs.digest != '' || inputs.contract_version != '')
+        if: inputs.version == '' && inputs.digest != ''
         run: |
-          echo "Invalid deploy input mode: version is required when digest or contract_version is set."
-          echo "Either omit all inputs (no-version fallback) or provide version + contract_version=dashboard-release-dispatch-v1."
+          echo "Invalid deploy input mode: version is required when digest is set."
+          echo "Either omit all inputs (no-version fallback) or provide version (+ optional digest)."
           exit 1
 
   deploy-dashboard:
@@ -217,7 +189,6 @@ jobs:
           GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
           DEPLOY_VERSION: ${{ inputs.version }}
           DEPLOY_DIGEST: ${{ inputs.digest }}
-          DEPLOY_CONTRACT_VERSION: ${{ inputs.contract_version }}
         run: bun run --cwd apps/dashboard deploy
 
       - name: Open audit PR for compose pin

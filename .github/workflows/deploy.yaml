@@ -167,9 +167,8 @@ jobs:
     needs: detect-changes
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      needs.detect-changes.outputs.dashboard == 'true'
-    permissions:
-      contents: read
+      (needs.detect-changes.outputs.dashboard == 'true' &&
+       !startsWith(github.event.head_commit.message, 'chore(dashboard): pin image to '))
     uses: ./.github/workflows/deploy-dashboard.yaml
     secrets:
       DASHBOARD_SSH_KEY: ${{ secrets.DASHBOARD_SSH_KEY }}
@@ -181,3 +180,5 @@ jobs:
       DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
       DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}
       GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
+      APPLICATION_ID: ${{ secrets.APPLICATION_ID }}
+      APPLICATION_PRIVATE_KEY: ${{ secrets.APPLICATION_PRIVATE_KEY }}

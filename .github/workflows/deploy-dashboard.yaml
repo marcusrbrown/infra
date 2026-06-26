@@ -1,11 +1,62 @@
+# Dispatch input contract (dashboard-release-dispatch-v1):
+#
+#   version          CalVer string (YYYY.MM.N, e.g. 2026.06.47). Optional.
+#                    When set, the deploy resolves the GHCR image digest,
+#                    cross-checks it against `digest` (if provided), generates
+#                    a pinned docker-compose.yaml, and opens an audit PR to
+#                    record the updated pin.
+#
+#   digest           Expected sha256 digest (e.g. sha256:abc...). Optional.
+#                    When set alongside `version`, the resolved digest must
+#                    match this value exactly — mismatch fails hard.
+#
+#   contract_version Contract fuse. Must equal "dashboard-release-dispatch-v1"
+#                    when any versioned-release input (version, digest, OR
+#                    contract_version itself) is non-empty. Prevents stale or
+#                    accidental dispatch payloads from deploying.
+#
+# No-version fallback: omit all three inputs (or leave empty). The committed
+# docker-compose.yaml digest is the source of truth; no audit PR is opened.
+
 name: Deploy Dashboard
 
-permissions:
-  contents: read
+run-name: Deploy dashboard ${{ inputs.version || 'latest pin' }}
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: CalVer version to deploy (e.g. 2026.06.47). Leave empty to use committed pin.
+        required: false
+        type: string
+        default: ''
+      digest:
+        description: Expected sha256 digest (e.g. sha256:abc...). Leave empty to skip cross-check.
+        required: false
+        type: string
+        default: ''
+      contract_version:
+        description: 'Contract fuse — must be "dashboard-release-dispatch-v1" when version, digest, or contract_version is set.'
+        required: false
+        type: string
+        default: ''
   workflow_call:
+    inputs:
+      version:
+        description: CalVer version to deploy (e.g. 2026.06.47). Leave empty to use committed pin.
+        required: false
+        type: string
+        default: ''
+      digest:
+        description: Expected sha256 digest (e.g. sha256:abc...). Leave empty to skip cross-check.
+        required: false
+        type: string
+        default: ''
+      contract_version:
+        description: 'Contract fuse — must be "dashboard-release-dispatch-v1" when version, digest, or contract_version is set.'
+        required: false
+        type: string
+        default: ''
     secrets:
       DASHBOARD_SSH_KEY:
         required: true
@@ -25,18 +76,95 @@ on:
         required: true
       GATEWAY_VPC_IP:
         required: false
+      APPLICATION_ID:
+        required: true
+      APPLICATION_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
 
 concurrency:
   group: deploy-dashboard-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  deploy-dashboard:
+  # Pre-gate: no-secret validation. Runs before the environment gate so the
+  # approver sees the version and any input errors before spending an approval.
+  validate-inputs:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Log version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DIGEST: ${{ inputs.digest }}
+        run: |
+          printf 'version: %s\n' "${INPUT_VERSION:-"(none — using committed pin)"}"
+          printf 'digest:  %s\n' "${INPUT_DIGEST:-"(none — no cross-check)"}"
+
+      - name: Validate digest format
+        if: inputs.digest != ''
+        env:
+          INPUT_DIGEST: ${{ inputs.digest }}
+        run: |
+          digest="${INPUT_DIGEST}"
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf 'Invalid digest %q: must match sha256:<64 hex chars> (e.g. sha256:abc...def).\n' "$digest"
+            echo "Rejected: malformed digests are not accepted."
+            exit 1
+          fi
+
+      - name: Validate CalVer format
+        if: inputs.version != ''
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          version="${INPUT_VERSION}"
+          if ! [[ "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]+$ ]]; then
+            printf 'Invalid version %q: must match YYYY.MM.N (e.g. 2026.06.47).\n' "$version"
+            echo "Rejected: 'latest', semver, and injection strings are not accepted."
+            exit 1
+          fi
+
+      - name: Validate contract fuse
+        if: inputs.version != '' || inputs.digest != '' || inputs.contract_version != ''
+        env:
+          INPUT_CONTRACT_VERSION: ${{ inputs.contract_version }}
+        run: |
+          contract="${INPUT_CONTRACT_VERSION}"
+          expected="dashboard-release-dispatch-v1"
+          if [[ "$contract" != "$expected" ]]; then
+            echo "Release dispatch contract mismatch."
+            printf 'Expected contract_version=%q but got %q.\n' "$expected" "$contract"
+            printf 'Set contract_version to %q when dispatching a versioned release.\n' "$expected"
+            exit 1
+          fi
+
+      - name: Validate input mode
+        if: inputs.version == '' && (inputs.digest != '' || inputs.contract_version != '')
+        run: |
+          echo "Invalid deploy input mode: version is required when digest or contract_version is set."
+          echo "Either omit all inputs (no-version fallback) or provide version + contract_version=dashboard-release-dispatch-v1."
+          exit 1
+
+  deploy-dashboard:
+    needs: validate-inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: dashboard
     steps:
+      - name: Get app token
+        id: get-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APPLICATION_ID }}
+          private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          token: ${{ steps.get-app-token.outputs.token }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -54,6 +182,8 @@ jobs:
           DASHBOARD_OAUTH_CLIENT_SECRET: ${{ secrets.DASHBOARD_OAUTH_CLIENT_SECRET }}
           DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
           DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}
+          APPLICATION_ID: ${{ secrets.APPLICATION_ID }}
+          APPLICATION_PRIVATE_KEY: ${{ secrets.APPLICATION_PRIVATE_KEY }}
         run: |
           missing=()
           [[ -n "${DASHBOARD_SSH_KEY}" ]] || missing+=("DASHBOARD_SSH_KEY")
@@ -64,6 +194,8 @@ jobs:
           [[ -n "${DASHBOARD_OAUTH_CLIENT_SECRET}" ]] || missing+=("DASHBOARD_OAUTH_CLIENT_SECRET")
           [[ -n "${DASHBOARD_OPERATOR_LOGIN}" ]] || missing+=("DASHBOARD_OPERATOR_LOGIN")
           [[ -n "${DASHBOARD_COOKIE_KEY}" ]] || missing+=("DASHBOARD_COOKIE_KEY")
+          [[ -n "${APPLICATION_ID}" ]] || missing+=("APPLICATION_ID")
+          [[ -n "${APPLICATION_PRIVATE_KEY}" ]] || missing+=("APPLICATION_PRIVATE_KEY")
           if (( ${#missing[@]} > 0 )); then
             echo "Missing required secret(s): ${missing[*]}"
             exit 1
@@ -83,4 +215,55 @@ jobs:
           DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
           DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}
           GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
+          DEPLOY_VERSION: ${{ inputs.version }}
+          DEPLOY_DIGEST: ${{ inputs.digest }}
+          DEPLOY_CONTRACT_VERSION: ${{ inputs.contract_version }}
         run: bun run --cwd apps/dashboard deploy
+
+      - name: Open audit PR for compose pin
+        if: inputs.version != ''
+        env:
+          GH_TOKEN: ${{ steps.get-app-token.outputs.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          GIT_USER_NAME: ${{ format('{0}[bot]', steps.get-app-token.outputs.app-slug) }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          version="${INPUT_VERSION}"
+
+          # Revalidate CalVer before constructing branch/commit strings.
+          # Prevents unsanitized ref names from reaching git/gh argv.
+          if ! [[ "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]+$ ]]; then
+            printf 'Audit step: invalid version %q — must match YYYY.MM.N.\n' "$version"
+            exit 1
+          fi
+
+          # Unique branch per run to avoid collision on re-runs of the same version.
+          branch="dashboard-pin-${version}-${GITHUB_RUN_ID}"
+          commit_msg="chore(dashboard): pin image to ${version}"
+
+          USER_ID=$(gh api "/users/${GIT_USER_NAME}" --jq .id)
+          git config user.name "${GIT_USER_NAME}"
+          git config user.email "${USER_ID}+${GIT_USER_NAME}@users.noreply.github.com"
+
+          git checkout -b "${branch}"
+          git add apps/dashboard/docker-compose.yaml
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit — compose pin already up to date."
+            exit 0
+          fi
+
+          git commit -m "${commit_msg}"
+          git push origin "${branch}" --force-with-lease
+
+          # Open PR if none exists for this branch (open PRs only — closed stale PRs are not reused).
+          existing_pr=$(gh pr list --state open --head "${branch}" --json url --jq '.[0].url' 2>/dev/null)
+          if [[ -n "${existing_pr}" ]]; then
+            echo "Audit PR already exists: ${existing_pr}"
+          else
+            gh pr create \
+              --title "${commit_msg}" \
+              --body "Pins the dashboard image to \`${version}\` after a successful deploy. Merge to record the audit trail in main." \
+              --head "${branch}" \
+              --base main
+          fi

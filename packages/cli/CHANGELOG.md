@@ -1,5 +1,17 @@
 # @marcusrbrown/infra
 
+## 0.13.11
+### Patch Changes
+
+
+- Update gateway daemon to fro-bot/agent v0.77.0. ([#686](https://github.com/marcusrbrown/infra/pull/686))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.41` to `7.2.42` ([#692](https://github.com/marcusrbrown/infra/pull/692))
+
+
+- 📦 Update npm dependency `@aws-sdk/client-lightsail` from `3.1074.0` to `3.1075.0` ([#690](https://github.com/marcusrbrown/infra/pull/690))
+
 ## 0.13.10
 ### Patch Changes
 

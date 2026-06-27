@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.13.12
+### Patch Changes
+
+
+- Add `--image-version` and `--digest` flags to `infra dashboard deploy` for versioned remote workflow dispatch. ([#699](https://github.com/marcusrbrown/infra/pull/699))
+
 ## 0.13.11
 ### Patch Changes
 

@@ -124,8 +124,6 @@ describe('getDashboardDeployEnv', () => {
 
     expect(env.DASHBOARD_SSH_KEY).toBe('ssh-ed25519 AAAA...')
     expect('SSH_AUTH_SOCK' in env).toBe(false)
-    expect(env.DASHBOARD_SSH_KEY).toBe('ssh-ed25519 AAAA...')
-    expect('SSH_AUTH_SOCK' in env).toBe(false)
   })
 
   it('forwards all DASHBOARD_* vars from process.env (not a selective subset)', () => {
@@ -191,7 +189,9 @@ describe('deploy command', () => {
 
     expect(exitCode).toBe(0)
     expect(stdout).toContain('Dry run')
-    expect(stdout).toContain('Deploy Dashboard')
+    expect(stdout).toContain('gh workflow run "Deploy Dashboard" --repo marcusrbrown/infra')
+    expect(stdout).not.toContain('-f version=')
+    expect(stdout).not.toContain('-f digest=')
   })
 
   it('dry-run local mode prints planned bun command without executing', async () => {
@@ -211,5 +211,306 @@ describe('deploy command', () => {
     expect(exitCode).toBe(0)
     expect(stdout).toContain('Dry run')
     expect(stdout).toContain('apps/dashboard')
+  })
+
+  it('dry-run remote with --image-version prints -f version= in planned command', async () => {
+    const proc = Bun.spawn(
+      ['bun', 'run', 'packages/cli/src/cli.ts', 'dashboard', 'deploy', '--image-version', '2026.06.50', '--dry-run'],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [stdout, _stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain('Deploy Dashboard')
+    expect(stdout).toContain('-f version=2026.06.50')
+    expect(stdout).not.toContain('-f digest=')
+  })
+
+  it('dry-run remote with --image-version and --digest prints both -f entries in planned command', async () => {
+    const digest = `sha256:${'a'.repeat(64)}`
+    const proc = Bun.spawn(
+      [
+        'bun',
+        'run',
+        'packages/cli/src/cli.ts',
+        'dashboard',
+        'deploy',
+        '--image-version',
+        '2026.06.50',
+        '--digest',
+        digest,
+        '--dry-run',
+      ],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [stdout, _stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain('Deploy Dashboard')
+    expect(stdout).toContain('-f version=2026.06.50')
+    expect(stdout).toContain(`-f digest=${digest}`)
+  })
+
+  it('rejects --digest without --image-version with a non-zero exit and helpful message', async () => {
+    const digest = `sha256:${'b'.repeat(64)}`
+    const proc = Bun.spawn(
+      ['bun', 'run', 'packages/cli/src/cli.ts', 'dashboard', 'deploy', '--digest', digest, '--dry-run'],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('--digest requires --image-version')
+  })
+
+  it('rejects --image-version without a value', async () => {
+    const proc = Bun.spawn(
+      ['bun', 'run', 'packages/cli/src/cli.ts', 'dashboard', 'deploy', '--image-version', '--dry-run'],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('image-version')
+  })
+
+  it('rejects --digest without a value', async () => {
+    const proc = Bun.spawn(['bun', 'run', 'packages/cli/src/cli.ts', 'dashboard', 'deploy', '--digest', '--dry-run'], {
+      cwd: repoRoot,
+      env: {...process.env, NO_COLOR: '1'},
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('digest')
+  })
+
+  it('rejects an invalid CalVer image version before dispatching', async () => {
+    const proc = Bun.spawn(
+      ['bun', 'run', 'packages/cli/src/cli.ts', 'dashboard', 'deploy', '--image-version', 'latest', '--dry-run'],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('Invalid version')
+  })
+
+  it('rejects a semver image version string before dispatching', async () => {
+    const proc = Bun.spawn(
+      ['bun', 'run', 'packages/cli/src/cli.ts', 'dashboard', 'deploy', '--image-version', 'v1.2.3', '--dry-run'],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('Invalid version')
+  })
+
+  it('rejects a malformed digest (too short) before dispatching', async () => {
+    const proc = Bun.spawn(
+      [
+        'bun',
+        'run',
+        'packages/cli/src/cli.ts',
+        'dashboard',
+        'deploy',
+        '--image-version',
+        '2026.06.50',
+        '--digest',
+        'sha256:bad',
+        '--dry-run',
+      ],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('Invalid digest')
+  })
+
+  it('rejects digest without image-version before checking digest shape', async () => {
+    const proc = Bun.spawn(
+      ['bun', 'run', 'packages/cli/src/cli.ts', 'dashboard', 'deploy', '--digest', 'sha256:bad', '--dry-run'],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('--digest requires --image-version')
+  })
+
+  it('rejects a non-sha256 digest algorithm before dispatching', async () => {
+    const proc = Bun.spawn(
+      [
+        'bun',
+        'run',
+        'packages/cli/src/cli.ts',
+        'dashboard',
+        'deploy',
+        '--image-version',
+        '2026.06.50',
+        '--digest',
+        `md5:${'c'.repeat(64)}`,
+        '--dry-run',
+      ],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('Invalid digest')
+  })
+
+  it('rejects --image-version with --local as a remote-only flag combination', async () => {
+    const proc = Bun.spawn(
+      [
+        'bun',
+        'run',
+        'packages/cli/src/cli.ts',
+        'dashboard',
+        'deploy',
+        '--local',
+        '--image-version',
+        '2026.06.50',
+        '--dry-run',
+      ],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('--local')
+    expect(stderr).toContain('--image-version')
+  })
+
+  it('rejects --digest with --local as a remote-only flag combination', async () => {
+    const digest = `sha256:${'d'.repeat(64)}`
+    const proc = Bun.spawn(
+      ['bun', 'run', 'packages/cli/src/cli.ts', 'dashboard', 'deploy', '--local', '--digest', digest, '--dry-run'],
+      {
+        cwd: repoRoot,
+        env: {...process.env, NO_COLOR: '1'},
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+
+    const [_stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('--local')
+    expect(stderr).toContain('--digest')
   })
 })

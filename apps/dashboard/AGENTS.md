@@ -130,7 +130,7 @@ For rollback procedures, see [`docs/runbooks/dashboard-released-image-rollback.m
 | Command                                    | Purpose                                                                    |
 | ------------------------------------------ | -------------------------------------------------------------------------- |
 | `infra dashboard status`                   | SSH `docker compose ps` → service/state/health rows (MCP-exposed)          |
-| `infra dashboard deploy`                   | Dispatch the Deploy Dashboard workflow (default) or `--local`              |
+| `infra dashboard deploy [--image-version <calver>] [--digest <sha256>]` | Dispatch the Deploy Dashboard workflow (default), optionally with explicit image inputs, or `--local`; image flags are remote-only and `--digest` requires `--image-version` |
 | `infra dashboard logs [service] [--tail N]`| Stream container logs via SSH (CI-guarded; emits a sensitive-data warning) |
 
 `infra status` includes a `dashboard` row (and a `dashboard` key under `--json`).

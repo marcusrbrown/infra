@@ -160,6 +160,8 @@ Commands:
 
     --local                            Run local deployment with Bun using apps/dashboard instead of triggering GitHub Actions. (default: false)
     --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
+    --image-version <version>          CalVer version to deploy (e.g. 2026.06.47). Remote-only. Triggers the versioned release path and requires dashboard environment approval. Must match YYYY.MM.N. Forwarded as -f version=<value> to gh workflow run.
+    --digest <digest>                  Expected sha256 digest (e.g. sha256:abc...def). Remote-only. Requires --image-version. When set, the workflow fails if GHCR resolves the tag to a different digest. Must match sha256:<64 hex chars>.
 
 
   dashboard logs [service]             Stream logs from a dashboard service via SSH and docker compose.

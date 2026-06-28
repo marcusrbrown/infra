@@ -304,15 +304,16 @@ const MODEL_ALLOWLIST_RE = /^[\w.-]+\/[\w.-]+$/
  * This is a human-in-the-loop tripwire layered on top of the container and
  * mitmproxy egress boundary — not a hard sandbox.
  */
-export const WORKSPACE_PERMISSION_POLICY = {
+export const WORKSPACE_PERMISSION_POLICY = Object.freeze({
   external_directory: 'allow',
   doom_loop: 'allow',
-  bash: {
+  bash: Object.freeze({
     '*': 'allow',
     'rm *': 'ask',
     'rmdir *': 'ask',
     'git push *--force*': 'ask',
     'git push *-f*': 'ask',
+    'git push +*': 'ask',
     'git reset --hard*': 'ask',
     'git clean *-f*': 'ask',
     'sudo *': 'ask',
@@ -327,8 +328,9 @@ export const WORKSPACE_PERMISSION_POLICY = {
     'apt-get install*': 'ask',
     'pip install*': 'ask',
     'npm install -g*': 'ask',
-  },
-} as const
+    'npm i -g*': 'ask',
+  }),
+} as const)
 
 /**
  * Returns the operator listener state based on the presence of all three operator inputs.
@@ -937,11 +939,9 @@ export function buildGatewayEnvFileContents(opts: {
   }
 
   // Inject the code-owned permission policy, overwriting any `permission` block the secret carries.
-  // Casting to Record<string, unknown> is safe — we already verified parsed is a plain object above.
   ;(configObj as Record<string, unknown>).permission = WORKSPACE_PERMISSION_POLICY
 
-  // Re-serialize after injection. JSON.stringify never emits embedded newlines for non-newline
-  // input values, so a second newline check on the output is not needed.
+  // Re-serialize after injection.
   const serializedConfig = JSON.stringify(configObj)
 
   // Guard the final serialized string against the size cap — the injected policy adds bytes.

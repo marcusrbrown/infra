@@ -3043,6 +3043,34 @@ describe('buildGatewayEnvFileContents — permission policy injection', () => {
     const options = anthropic.options as Record<string, unknown>
     expect(options.baseURL).toBe('https://cliproxy.fro.bot/v1')
   })
+
+  test('size cap fires after permission injection for a config that passes the input-length check', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    // Build a valid config (passes provider/baseURL guard and the input-length check)
+    // whose serialized length after policy injection exceeds 16384 bytes.
+    const padding = 'x'.repeat(16_000)
+    const config = `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1","pad":"${padding}"}}}}`
+    expect(config.length).toBeLessThanOrEqual(16_384) // passes the input-length check
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6',
+        config,
+      }),
+    ).toThrow(/too large after permission policy injection/)
+  })
+
+  test('injected permission.bash deep-equals WORKSPACE_PERMISSION_POLICY.bash (all destructive categories)', async () => {
+    const {buildGatewayEnvFileContents, WORKSPACE_PERMISSION_POLICY} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    const bash = (parsed.permission as Record<string, unknown>).bash
+    expect(bash).toEqual(WORKSPACE_PERMISSION_POLICY.bash)
+  })
 })
 
 // ─── main() — negative integration tests (validation aborts before SSH) ───────

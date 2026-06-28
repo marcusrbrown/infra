@@ -226,6 +226,7 @@ After deploying a new daemon version, run these checks in order — each gate mu
 - If the gateway or workspace restarts while a prompt is open, the prompt is abandoned — the run does not resume.
 - Cloned repos live in the `workspace-repos` named volume at `/workspace/repos`. The volume persists repo contents across container recreation and daemon upgrades. Missing repos are re-cloned automatically on the next mention. **Never run `docker compose down -v`** — it destroys all cloned repos. Do not put secrets in repo contents — authorized runs may access the active workspace/repo surface. To fully clear a cloned repo, delete the volume and let the next mention re-clone it.
 - `WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev` is required for the workspace to reach the LLM proxy and the OpenCode model catalog. Without `models.dev`, OpenCode cannot start and the mention loop fails entirely.
+- The workspace bash approval policy is owned by deploy code (`WORKSPACE_PERMISSION_POLICY` in `apps/gateway/src/deploy.ts`) and injected into `WORKSPACE_OPENCODE_CONFIG` at deploy time, overwriting any `permission` block the secret carries. Destructive commands — file deletion (`rm`, `rmdir`), force-push/hard-reset/clean, `sudo`, `chmod`/`chown`, exfil-shaped `curl`/`wget`, and package installs — route through the Discord Approve/Deny gate; ordinary commands run autonomously.
 
 ## ANNOUNCE/PRESENCE WEBHOOK
 

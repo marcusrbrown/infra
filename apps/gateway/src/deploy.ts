@@ -291,6 +291,48 @@ export function resolveUpstreamPin(jsonPath?: string): UpstreamPin {
 const MODEL_ALLOWLIST_RE = /^[\w.-]+\/[\w.-]+$/
 
 /**
+ * Authoritative OpenCode permission policy for the gateway workspace.
+ *
+ * Deploy code owns this policy so the autonomous-shell approval boundary is
+ * auditable in git rather than hidden in an opaque secret. It is injected into
+ * WORKSPACE_OPENCODE_CONFIG at deploy time, overwriting any `permission` block
+ * the secret carries.
+ *
+ * OpenCode evaluates bash patterns with last-matching-rule-wins, so the `"*"`
+ * catch-all is listed first and destructive patterns follow. `"ask"` routes a
+ * command through the Discord Approve/Deny gate; `"allow"` runs it autonomously.
+ * This is a human-in-the-loop tripwire layered on top of the container and
+ * mitmproxy egress boundary — not a hard sandbox.
+ */
+export const WORKSPACE_PERMISSION_POLICY = Object.freeze({
+  external_directory: 'allow',
+  doom_loop: 'allow',
+  bash: Object.freeze({
+    '*': 'allow',
+    'rm *': 'ask',
+    'rmdir *': 'ask',
+    'git push *--force*': 'ask',
+    'git push *-f*': 'ask',
+    'git push +*': 'ask',
+    'git reset --hard*': 'ask',
+    'git clean *-f*': 'ask',
+    'sudo *': 'ask',
+    'chmod *': 'ask',
+    'chown *': 'ask',
+    'curl *-X POST*': 'ask',
+    'curl *-d *': 'ask',
+    'curl *-T *': 'ask',
+    'wget *--post-data*': 'ask',
+    'wget *--post-file*': 'ask',
+    'apt install*': 'ask',
+    'apt-get install*': 'ask',
+    'pip install*': 'ask',
+    'npm install -g*': 'ask',
+    'npm i -g*': 'ask',
+  }),
+} as const)
+
+/**
  * Returns the operator listener state based on the presence of all three operator inputs.
  *
  * - 'enabled':  all three vars (GATEWAY_OPERATOR_BIND_HOST, GATEWAY_OPERATOR_BIND_PORT,
@@ -896,11 +938,24 @@ export function buildGatewayEnvFileContents(opts: {
     )
   }
 
+  // Inject the code-owned permission policy, overwriting any `permission` block the secret carries.
+  ;(configObj as Record<string, unknown>).permission = WORKSPACE_PERMISSION_POLICY
+
+  // Re-serialize after injection.
+  const serializedConfig = JSON.stringify(configObj)
+
+  // Guard the final serialized string against the size cap — the injected policy adds bytes.
+  if (serializedConfig.length > 16_384) {
+    throw new Error(
+      `WORKSPACE_OPENCODE_CONFIG is too large after permission policy injection (${serializedConfig.length} bytes; max 16384). Reduce the config size before deploying.`,
+    )
+  }
+
   // Escape $ → $$ so docker-compose interpolation does not expand $VAR sequences.
   // docker-compose converts $$ → $ when passing the value to the container.
   // Note: String.replaceAll('$', '$$') does NOT work — '$$' in a string replacement
   // is a special pattern meaning "insert a literal $", so it's a no-op. Use split/join.
-  const escapedConfig = config.split('$').join('$$')
+  const escapedConfig = serializedConfig.split('$').join('$$')
 
   // Validate readyTimeoutMs if provided — must be a safe positive integer within bounds.
   // validateReadyTimeout handles string input; here we guard the numeric form directly.

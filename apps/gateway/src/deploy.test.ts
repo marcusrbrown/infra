@@ -2524,9 +2524,14 @@ describe('buildGatewayEnvFileContents', () => {
     expect(configLine).toBeDefined()
     // The raw .env line must have $$ where the original had $
     expect(configLine).toContain('$$SECRET_VAL')
-    // Simulating docker-compose interpolation: replace $$ → $ to recover original
+    // Simulating docker-compose interpolation: replace $$ → $ to recover the config value
     const rawValue = configLine!.slice('WORKSPACE_OPENCODE_CONFIG='.length).replaceAll('$$', '$')
-    expect(rawValue).toBe(config)
+    const parsed = JSON.parse(rawValue) as Record<string, unknown>
+    // Provider and baseURL content must survive the permission injection and re-serialization
+    const options = ((parsed.provider as Record<string, unknown>).anthropic as Record<string, unknown>)
+      .options as Record<string, unknown>
+    expect(options.baseURL).toBe('https://cliproxy.fro.bot/v1')
+    expect(options.key).toBe('$SECRET_VAL')
   })
 
   test('config containing $ survives docker-compose interpolation: $$ round-trip', async () => {
@@ -2544,9 +2549,14 @@ describe('buildGatewayEnvFileContents', () => {
     expect(configLine).toBeDefined()
     // The raw .env line must have $$ where the original had $
     expect(configLine).toContain('$$')
-    // Simulating docker-compose interpolation: replace $$ → $ to recover original
+    // Simulating docker-compose interpolation: replace $$ → $ to recover the config value
     const rawValue = configLine!.slice('WORKSPACE_OPENCODE_CONFIG='.length).replaceAll('$$', '$')
-    expect(rawValue).toBe(config)
+    const parsed = JSON.parse(rawValue) as Record<string, unknown>
+    // Provider and baseURL content must survive the permission injection and re-serialization
+    const options = ((parsed.provider as Record<string, unknown>).anthropic as Record<string, unknown>)
+      .options as Record<string, unknown>
+    expect(options.baseURL).toBe('https://cliproxy.fro.bot/v1')
+    expect(options.key).toBe('value$with$dollars')
   })
 
   test('config with actual backslash payload round-trips intact', async () => {
@@ -2564,7 +2574,13 @@ describe('buildGatewayEnvFileContents', () => {
     expect(configLine).toContain('\\\\')
     // Recover: $$ → $ (docker-compose interpolation simulation); backslashes pass through unchanged
     const rawValue = configLine!.slice('WORKSPACE_OPENCODE_CONFIG='.length).replaceAll('$$', '$')
-    expect(rawValue).toBe(config)
+    const parsed = JSON.parse(rawValue) as Record<string, unknown>
+    // Provider and baseURL content must survive the permission injection and re-serialization
+    const options = ((parsed.provider as Record<string, unknown>).anthropic as Record<string, unknown>)
+      .options as Record<string, unknown>
+    expect(options.baseURL).toBe('https://cliproxy.fro.bot/v1')
+    // Backslash payload survives re-serialization (JSON.stringify preserves the value)
+    expect(options.path).toBe(String.raw`C:\Users\agent`)
   })
 
   test('SHELL_METACHAR_RE is NOT applied to config (would reject valid JSON)', async () => {
@@ -2893,6 +2909,167 @@ describe('buildGatewayEnvFileContents — CONFIG semantic validation', () => {
         config: '{"provider":{"openai":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
       }),
     ).not.toThrow()
+  })
+})
+
+// ─── buildGatewayEnvFileContents — permission policy injection ───────────────
+
+function extractParsedConfig(result: string): Record<string, unknown> {
+  const configLine = result.split('\n').find(l => l.startsWith('WORKSPACE_OPENCODE_CONFIG='))
+  if (!configLine) throw new Error('WORKSPACE_OPENCODE_CONFIG line not found')
+  const rawValue = configLine.slice('WORKSPACE_OPENCODE_CONFIG='.length).replaceAll('$$', '$')
+  return JSON.parse(rawValue) as Record<string, unknown>
+}
+
+describe('buildGatewayEnvFileContents — permission policy injection', () => {
+  const VALID_CONFIG = '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}'
+
+  test('injected permission.bash catch-all "*" is the first key with value "allow"', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    const permission = parsed.permission as Record<string, unknown>
+    const bash = permission.bash as Record<string, string>
+    expect(typeof bash).toBe('object')
+    expect(Object.keys(bash)[0]).toBe('*')
+    expect(bash['*']).toBe('allow')
+  })
+
+  test('injected permission.bash["rm *"] === "ask"', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    const bash = (parsed.permission as Record<string, unknown>).bash as Record<string, string>
+    expect(bash['rm *']).toBe('ask')
+  })
+
+  test('injected permission.bash["sudo *"] === "ask"', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    const bash = (parsed.permission as Record<string, unknown>).bash as Record<string, string>
+    expect(bash['sudo *']).toBe('ask')
+  })
+
+  test('injected permission.bash["curl *-X POST*"] === "ask"', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    const bash = (parsed.permission as Record<string, unknown>).bash as Record<string, string>
+    expect(bash['curl *-X POST*']).toBe('ask')
+  })
+
+  test('injected permission.external_directory === "allow" and permission.doom_loop === "allow"', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    const permission = parsed.permission as Record<string, unknown>
+    expect(permission.external_directory).toBe('allow')
+    expect(permission.doom_loop).toBe('allow')
+  })
+
+  test('secret permission block is overwritten by code policy (not the secret value)', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const configWithSecretPermission =
+      '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}},"permission":{"bash":"allow","external_directory":"deny"}}'
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: configWithSecretPermission,
+    })
+    const parsed = extractParsedConfig(result)
+    const permission = parsed.permission as Record<string, unknown>
+    // bash must be the object form from code policy, not the string "allow" from the secret
+    expect(typeof permission.bash).toBe('object')
+    // external_directory must be "allow" from code policy, not "deny" from the secret
+    expect(permission.external_directory).toBe('allow')
+  })
+
+  test('config with no permission key still gets the injected policy', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    expect(parsed.permission).toBeDefined()
+    const permission = parsed.permission as Record<string, unknown>
+    expect(typeof permission.bash).toBe('object')
+  })
+
+  test('catch-all ordering invariant: Object.keys(permission.bash)[0] === "*" (last-match-wins load-bearing)', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    const bash = (parsed.permission as Record<string, unknown>).bash as Record<string, string>
+    expect(Object.keys(bash)[0]).toBe('*')
+  })
+
+  test('provider and baseURL content survive the permission injection (re-serialization preserves existing fields)', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    const provider = parsed.provider as Record<string, unknown>
+    const anthropic = provider.anthropic as Record<string, unknown>
+    const options = anthropic.options as Record<string, unknown>
+    expect(options.baseURL).toBe('https://cliproxy.fro.bot/v1')
+  })
+
+  test('size cap fires after permission injection for a config that passes the input-length check', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    // Build a valid config (passes provider/baseURL guard and the input-length check)
+    // whose serialized length after policy injection exceeds 16384 bytes.
+    const padding = 'x'.repeat(16_000)
+    const config = `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1","pad":"${padding}"}}}}`
+    expect(config.length).toBeLessThanOrEqual(16_384) // passes the input-length check
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: 'anthropic/claude-sonnet-4-6',
+        config,
+      }),
+    ).toThrow(/too large after permission policy injection/)
+  })
+
+  test('injected permission.bash deep-equals WORKSPACE_PERMISSION_POLICY.bash (all destructive categories)', async () => {
+    const {buildGatewayEnvFileContents, WORKSPACE_PERMISSION_POLICY} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: 'anthropic/claude-sonnet-4-6',
+      config: VALID_CONFIG,
+    })
+    const parsed = extractParsedConfig(result)
+    const bash = (parsed.permission as Record<string, unknown>).bash
+    expect(bash).toEqual(WORKSPACE_PERMISSION_POLICY.bash)
   })
 })
 

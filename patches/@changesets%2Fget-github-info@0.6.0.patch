@@ -1,0 +1,90 @@
+diff --git a/dist/changesets-get-github-info.cjs.js b/dist/changesets-get-github-info.cjs.js
+index a74df59f8a5988f458a3476087399f5e6dfe4818..e6d349a6230c1c5e215899e2bf9718e18e2923f3 100644
+--- a/dist/changesets-get-github-info.cjs.js
++++ b/dist/changesets-get-github-info.cjs.js
+@@ -167,15 +167,31 @@ const GHDataLoader = new DataLoader__default["default"](async requests => {
+ 
+     repos[repo].push(data);
+   });
+-  const data = await fetch__default["default"]("https://api.github.com/graphql", {
+-    method: "POST",
+-    headers: {
+-      Authorization: `Token ${process.env.GITHUB_TOKEN}`
+-    },
+-    body: JSON.stringify({
+-      query: makeQuery(repos)
+-    })
+-  }).then(x => x.json());
++  const data = await (async () => {
++    let lastErr;
++    for (let attempt = 0; attempt < 4; attempt++) {
++      try {
++        const res = await fetch__default["default"]("https://api.github.com/graphql", {
++          method: "POST",
++          headers: {
++            Authorization: `Token ${process.env.GITHUB_TOKEN}`
++          },
++          body: JSON.stringify({
++            query: makeQuery(repos)
++          }),
++          compress: false
++        });
++        return await res.json();
++      } catch (err) {
++        lastErr = err;
++        if (attempt < 3) {
++          await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
++          continue;
++        }
++      }
++    }
++    throw lastErr;
++  })();
+ 
+   if (data.errors) {
+     throw new Error(`An error occurred when fetching data from GitHub\n${JSON.stringify(data.errors, null, 2)}`);
+diff --git a/dist/changesets-get-github-info.esm.js b/dist/changesets-get-github-info.esm.js
+index 27e5c972ab1202ff16f5124b471f4bbcc46be2b5..82d29ae6f23520c58cd842bc6bb626f011c6e0fa 100644
+--- a/dist/changesets-get-github-info.esm.js
++++ b/dist/changesets-get-github-info.esm.js
+@@ -158,15 +158,31 @@ const GHDataLoader = new DataLoader(async requests => {
+ 
+     repos[repo].push(data);
+   });
+-  const data = await fetch("https://api.github.com/graphql", {
+-    method: "POST",
+-    headers: {
+-      Authorization: `Token ${process.env.GITHUB_TOKEN}`
+-    },
+-    body: JSON.stringify({
+-      query: makeQuery(repos)
+-    })
+-  }).then(x => x.json());
++  const data = await (async () => {
++    let lastErr;
++    for (let attempt = 0; attempt < 4; attempt++) {
++      try {
++        const res = await fetch("https://api.github.com/graphql", {
++          method: "POST",
++          headers: {
++            Authorization: `Token ${process.env.GITHUB_TOKEN}`
++          },
++          body: JSON.stringify({
++            query: makeQuery(repos)
++          }),
++          compress: false
++        });
++        return await res.json();
++      } catch (err) {
++        lastErr = err;
++        if (attempt < 3) {
++          await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
++          continue;
++        }
++      }
++    }
++    throw lastErr;
++  })();
+ 
+   if (data.errors) {
+     throw new Error(`An error occurred when fetching data from GitHub\n${JSON.stringify(data.errors, null, 2)}`);

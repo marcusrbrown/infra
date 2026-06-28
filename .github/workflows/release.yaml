@@ -71,5 +71,5 @@ jobs:
           setupGitUser: false
           commit: 'chore(changesets): version packages'
           title: 'chore(🦋📦): version packages'
-          version: npm run version-changesets
+          version: bun run version-changesets
           publish: bunx changeset publish

@@ -1,6 +1,7 @@
 ---
 title: Gateway mention loop hangs on tool-using prompts (unanswered permission.asked + empty workspace)
 date: 2026-06-05
+last_updated: 2026-06-28
 category: docs/solutions/integration-issues/
 module: apps/gateway
 problem_type: integration_issue
@@ -55,6 +56,8 @@ Add a `permission` block to `WORKSPACE_OPENCODE_CONFIG` (a single-line JSON secr
 ```
 
 Update the GitHub secret via stdin and the local `.env`, then redeploy the gateway. The workspace must restart for the new permission config to load.
+
+> **Superseded (2026-06-28):** the `permission` block is no longer owned by the secret. Deploy code injects an authoritative policy (`WORKSPACE_PERMISSION_POLICY` in `apps/gateway/src/deploy.ts`) that overwrites whatever `permission` the secret carries. Allowing only `external_directory`/`doom_loop` (as above) left `bash` at OpenCode's default `allow`, so destructive commands never hit the Discord Approve/Deny gate. See `docs/solutions/integration-issues/gateway-bash-approval-default-allow-2026-06-28.md`.
 
 ### Fix 2 — the cloned repo does not survive deploys
 

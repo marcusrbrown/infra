@@ -381,6 +381,85 @@ describe('startupReconcile — startup gate ordering', () => {
 })
 
 // ---------------------------------------------------------------------------
+// sweepExpired — error path: revokeKey failure is reported via injected logger
+// ---------------------------------------------------------------------------
+
+describe('sweepExpired — error path: revokeKey failure reported via logger', () => {
+  test('calls logger.error with key prefix when revokeKey throws during sweepExpired', async () => {
+    const now = 1_000_000
+    const key = 'ghact-run-fail-abc123xyz'
+    const entry = makeEntry(key, now - 1)
+
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {
+      throw new Error('upstream revoke failed')
+    })
+    const removeKey = mock((_key: string) => {})
+    const listLive = mock(() => [entry])
+    const loggerError = mock((_msg: string) => {})
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey,
+      listLive,
+      listApiKeys: mock(async () => []),
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+      logger: {error: loggerError},
+    }
+
+    await sweepExpired(now, deps)
+
+    expect(loggerError).toHaveBeenCalledTimes(1)
+    const msg: string = loggerError.mock.calls[0]?.[0] ?? ''
+    expect(msg).toContain('[sweeper] sweepExpired: revokeKey failed for key prefix')
+    expect(msg).toContain(key.slice(0, 12))
+    expect(msg).toContain('upstream revoke failed')
+    // Ensure the full key is NOT logged
+    expect(msg).not.toContain(key.slice(12))
+    // removeKey is still called after the error
+    expect(removeKey).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// reconcile — error path: revokeKey failure is reported via injected logger
+// ---------------------------------------------------------------------------
+
+describe('reconcile — error path: revokeKey failure reported via logger', () => {
+  test('calls logger.error with key prefix when revokeKey throws during reconcile', async () => {
+    const staleKey = 'ghact-run-stale-fail-xyz'
+
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {
+      throw new Error('revoke network error')
+    })
+    const removeKey = mock((_key: string) => {})
+    const listLive = mock(() => [] as LiveEntry[])
+    const listApiKeys = mock(async () => [staleKey])
+    const loggerError = mock((_msg: string) => {})
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey,
+      listLive,
+      listApiKeys,
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+      logger: {error: loggerError},
+    }
+
+    await reconcile(deps)
+
+    expect(loggerError).toHaveBeenCalledTimes(1)
+    const msg: string = loggerError.mock.calls[0]?.[0] ?? ''
+    expect(msg).toContain('[sweeper] reconcile: revokeKey failed for key prefix')
+    expect(msg).toContain(staleKey.slice(0, 12))
+    expect(msg).toContain('revoke network error')
+    // Ensure the full key is NOT logged
+    expect(msg).not.toContain(staleKey.slice(12))
+  })
+})
+
+// ---------------------------------------------------------------------------
 // startSweeper — periodic ticks via injected timer
 // ---------------------------------------------------------------------------
 

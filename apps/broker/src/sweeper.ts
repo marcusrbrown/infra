@@ -40,6 +40,11 @@ export type RevokeKeyFn = (key: string, deps: MintDeps) => Promise<void>
 /** Signature of listApiKeys from mint.ts (injectable for tests). */
 export type ListApiKeysFn = (deps: MintDeps) => Promise<string[]>
 
+/** Minimal logger interface for sweeper error reporting. */
+export interface SweeperLogger {
+  error: (msg: string) => void
+}
+
 /** Injectable dependencies for the sweeper. */
 export interface SweeperDeps {
   /** Revoke a cliproxy key. Injected from mint.ts. */
@@ -54,6 +59,8 @@ export interface SweeperDeps {
   markReady: () => void
   /** MintDeps forwarded to revokeKey and listApiKeys. */
   mintDeps: MintDeps
+  /** Logger for error reporting. Defaults to console when omitted. */
+  logger?: SweeperLogger
 }
 
 /** Injectable options for startSweeper. */
@@ -96,7 +103,7 @@ const DEFAULT_RECONCILE_INTERVAL_MS = 300_000
  * other sweeps).
  */
 export async function sweepExpired(now: number, deps: SweeperDeps): Promise<void> {
-  const {revokeKey, removeKey, listLive, mintDeps} = deps
+  const {revokeKey, removeKey, listLive, mintDeps, logger = console} = deps
   const entries = listLive()
 
   for (const entry of entries) {
@@ -108,7 +115,7 @@ export async function sweepExpired(now: number, deps: SweeperDeps): Promise<void
         // TTL is the mandatory backstop; a single revoke failure must not
         // block the rest of the sweep.
         const message = error instanceof Error ? error.message : String(error)
-        console.error(`[sweeper] sweepExpired: revokeKey failed for key prefix ${entry.key.slice(0, 12)}…: ${message}`)
+        logger.error(`[sweeper] sweepExpired: revokeKey failed for key prefix ${entry.key.slice(0, 12)}…: ${message}`)
       }
       removeKey(entry.key)
     }
@@ -131,7 +138,7 @@ export async function sweepExpired(now: number, deps: SweeperDeps): Promise<void
  * This guard is explicit and tested.
  */
 export async function reconcile(deps: SweeperDeps): Promise<void> {
-  const {revokeKey, listApiKeys, listLive, mintDeps} = deps
+  const {revokeKey, listApiKeys, listLive, mintDeps, logger = console} = deps
 
   const [allKeys, liveEntries] = await Promise.all([listApiKeys(mintDeps), Promise.resolve(listLive())])
 
@@ -150,7 +157,7 @@ export async function reconcile(deps: SweeperDeps): Promise<void> {
         await revokeKey(key, mintDeps)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        console.error(`[sweeper] reconcile: revokeKey failed for key prefix ${key.slice(0, 12)}…: ${message}`)
+        logger.error(`[sweeper] reconcile: revokeKey failed for key prefix ${key.slice(0, 12)}…: ${message}`)
       }
     }
   }

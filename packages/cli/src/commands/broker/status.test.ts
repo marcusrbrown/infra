@@ -161,7 +161,7 @@ describe('brokerStatusAction (ctx capture)', () => {
   it('uses BROKER_DOMAIN env when no --url provided', async () => {
     process.env.BROKER_DOMAIN = 'broker.example.com'
     globalThis.fetch = createFetchImplementation(async url => {
-      if (url.includes('broker.example.com')) return new Response('{"status":"ok"}', {status: 200})
+      if (new URL(url).hostname === 'broker.example.com') return new Response('{"status":"ok"}', {status: 200})
       throw new Error(`Unexpected fetch: ${url}`)
     })
 
@@ -175,7 +175,7 @@ describe('brokerStatusAction (ctx capture)', () => {
   it('uses BROKER_HOST env as fallback when BROKER_DOMAIN is not set', async () => {
     process.env.BROKER_HOST = 'broker.example.com'
     globalThis.fetch = createFetchImplementation(async url => {
-      if (url.includes('broker.example.com')) return new Response('{"status":"ok"}', {status: 200})
+      if (new URL(url).hostname === 'broker.example.com') return new Response('{"status":"ok"}', {status: 200})
       throw new Error(`Unexpected fetch: ${url}`)
     })
 

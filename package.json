@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "changeset": "changeset",
+    "deploy:broker": "bun run apps/broker/src/deploy.ts",
     "deploy:cliproxy": "bun run apps/cliproxy/src/deploy.ts",
     "deploy:dashboard": "bun run apps/dashboard/src/deploy.ts",
     "deploy:gateway": "bun run apps/gateway/src/deploy.ts",
@@ -16,6 +17,7 @@
     "fix": "eslint --fix",
     "lint": "eslint",
     "prepare": "simple-git-hooks",
+    "provision:broker": "bun run apps/broker/server/provision-droplet.ts",
     "provision:cliproxy": "bun run apps/cliproxy/server/provision-droplet.ts",
     "provision:dashboard": "bun run apps/dashboard/server/provision-droplet.ts",
     "provision:gateway": "bun run apps/gateway/server/provision-droplet.ts",

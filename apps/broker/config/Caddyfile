@@ -1,0 +1,15 @@
+# Caddy automatically provisions and renews HTTPS certificates via Let's Encrypt.
+# Only /v1/mint and /healthz are exposed — all other paths return 404.
+{$BROKER_HOST} {
+  handle /v1/mint {
+    reverse_proxy broker:3000
+  }
+
+  handle /healthz {
+    reverse_proxy broker:3000
+  }
+
+  handle {
+    respond 404
+  }
+}

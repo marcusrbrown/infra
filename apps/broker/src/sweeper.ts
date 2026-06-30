@@ -27,8 +27,12 @@
  * no real timers.
  */
 
+import type {AuditLoggerDeps} from './audit'
 import type {LiveEntry} from './live-set'
 import type {MintDeps} from './mint'
+
+import {auditRevoke} from './audit'
+import {KEY_PREFIX} from './mint'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,6 +65,8 @@ export interface SweeperDeps {
   mintDeps: MintDeps
   /** Logger for error reporting. Defaults to console when omitted. */
   logger?: SweeperLogger
+  /** Audit logger for revoke events. When omitted, revoke events are not audited. */
+  auditLogger?: AuditLoggerDeps
 }
 
 /** Injectable options for startSweeper. */
@@ -81,9 +87,6 @@ export interface SweeperOpts {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Key prefix for broker-minted keys. Must match KEY_PREFIX in mint.ts. */
-const BROKER_KEY_PREFIX = 'ghact-'
-
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000
 const DEFAULT_RECONCILE_INTERVAL_MS = 300_000
 
@@ -103,21 +106,27 @@ const DEFAULT_RECONCILE_INTERVAL_MS = 300_000
  * other sweeps).
  */
 export async function sweepExpired(now: number, deps: SweeperDeps): Promise<void> {
-  const {revokeKey, removeKey, listLive, mintDeps, logger = console} = deps
+  const {revokeKey, removeKey, listLive, mintDeps, logger = console, auditLogger} = deps
   const entries = listLive()
+  const ts = new Date(now).toISOString()
 
   for (const entry of entries) {
     if (entry.expiresAt <= now) {
       try {
         await revokeKey(entry.key, mintDeps)
+        // Only remove from live set on successful revoke so the next tick retries.
+        removeKey(entry.key)
+        // Emit revoke audit event — never log the key value, only run identity.
+        if (auditLogger) {
+          auditRevoke({ts, srcIp: 'sweeper', runId: entry.runId, jti: entry.jti, reason: 'ttl-expired'}, auditLogger)
+        }
       } catch (error) {
-        // Log the failure but continue sweeping other entries.
+        // Log the failure but leave the entry in the live set so the next tick retries.
         // TTL is the mandatory backstop; a single revoke failure must not
         // block the rest of the sweep.
         const message = error instanceof Error ? error.message : String(error)
         logger.error(`[sweeper] sweepExpired: revokeKey failed for key prefix ${entry.key.slice(0, 12)}…: ${message}`)
       }
-      removeKey(entry.key)
     }
   }
 }
@@ -140,14 +149,23 @@ export async function sweepExpired(now: number, deps: SweeperDeps): Promise<void
 export async function reconcile(deps: SweeperDeps): Promise<void> {
   const {revokeKey, listApiKeys, listLive, mintDeps, logger = console} = deps
 
-  const [allKeys, liveEntries] = await Promise.all([listApiKeys(mintDeps), Promise.resolve(listLive())])
+  let allKeys: string[]
+  try {
+    allKeys = await listApiKeys(mintDeps)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    logger.error(`[sweeper] reconcile: listApiKeys failed — skipping this tick: ${message}`)
+    return
+  }
+
+  const liveEntries = listLive()
 
   // Build a set of keys currently in the live set for O(1) lookup.
   const liveKeys = new Set(liveEntries.map(e => e.key))
 
   for (const key of allKeys) {
     // SAFETY: only touch broker-owned keys. Never delete non-ghact- keys.
-    if (!key.startsWith(BROKER_KEY_PREFIX)) {
+    if (!key.startsWith(KEY_PREFIX)) {
       continue
     }
 
@@ -163,16 +181,49 @@ export async function reconcile(deps: SweeperDeps): Promise<void> {
   }
 }
 
+/** Maximum attempts for the startup reconcile before proceeding. */
+const STARTUP_RECONCILE_MAX_ATTEMPTS = 3
+
+/** Backoff delays between startup reconcile attempts (ms). */
+const STARTUP_RECONCILE_BACKOFF_MS = [500, 1_000] as const
+
 /**
- * Run the startup reconcile once, then mark the broker as ready.
+ * Run the startup reconcile (with bounded retry), then mark the broker as ready.
  *
  * Order is mandatory: reconcile BEFORE markReady. The HTTP service gates
  * /v1/mint on the ready flag (returns 503 until ready). This ensures stale
  * keys from a previous broker instance are cleared before any new mint is
  * accepted.
+ *
+ * If reconcile fails on all attempts, logs the error and proceeds to markReady
+ * anyway — the TTL sweeper is the mandatory backstop, and blocking startup
+ * permanently is worse than a brief stale-key window.
  */
 export async function startupReconcile(deps: SweeperDeps): Promise<void> {
-  await reconcile(deps)
+  const {logger = console} = deps
+
+  for (let attempt = 0; attempt < STARTUP_RECONCILE_MAX_ATTEMPTS; attempt++) {
+    try {
+      await reconcile(deps)
+      deps.markReady()
+      return
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const remaining = STARTUP_RECONCILE_MAX_ATTEMPTS - attempt - 1
+      if (remaining > 0) {
+        const delay = STARTUP_RECONCILE_BACKOFF_MS[attempt] ?? 1_000
+        logger.error(
+          `[sweeper] startupReconcile: attempt ${attempt + 1}/${STARTUP_RECONCILE_MAX_ATTEMPTS} failed — retrying in ${delay}ms: ${message}`,
+        )
+        await new Promise<void>(resolve => setTimeout(resolve, delay))
+      } else {
+        logger.error(
+          `[sweeper] startupReconcile: all ${STARTUP_RECONCILE_MAX_ATTEMPTS} attempts failed — proceeding to ready (TTL sweeper is the backstop): ${message}`,
+        )
+      }
+    }
+  }
+
   deps.markReady()
 }
 

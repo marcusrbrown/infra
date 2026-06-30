@@ -156,6 +156,34 @@ describe('evaluateClaims — missing claims', () => {
 })
 
 // ---------------------------------------------------------------------------
+// ref allowlist
+// ---------------------------------------------------------------------------
+
+describe('evaluateClaims — ref allowlist', () => {
+  test('ref not in allowed_refs → deny', () => {
+    const claims = {
+      ...validClaims(),
+      ref: 'refs/heads/feature-branch', // not in allowed_refs
+    }
+    const result = evaluateClaims(claims, BROKER_TRUST_POLICY)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toMatch(/ref not in allowlist/i)
+    }
+  })
+
+  test('ref in allowed_refs → passes ref check', () => {
+    const claims = {
+      ...validClaims(),
+      ref: BROKER_TRUST_POLICY.allowed_refs[0] ?? 'refs/heads/main',
+    }
+    const result = evaluateClaims(claims, BROKER_TRUST_POLICY)
+    // Should pass (assuming all other claims are valid)
+    expect(result.ok).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // runner_environment and repository_visibility
 // ---------------------------------------------------------------------------
 

@@ -190,8 +190,7 @@ async function handleMint(req: Request, deps: ServerDeps): Promise<Response> {
   const jti = claims.jti
   const repositoryId = claims.repository_id
   const workflowRef = claims.workflow_ref
-  // run_id is a GitHub Actions claim not in the base OidcClaims type; access via index.
-  const runId = (claims as Record<string, unknown>).run_id as string | undefined
+  const runId = claims.run_id
 
   // 4. Rate-limit check (per-repo and global). Check after verify so we have repositoryId.
   const repoIdForLimit = repositoryId ?? 'unknown'

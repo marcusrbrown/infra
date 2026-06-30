@@ -18,6 +18,7 @@ import {isReady, listLive, markReady, recordMint, removeKey} from './live-set'
 import {listApiKeys, mintKey, revokeKey} from './mint'
 import {verifyOidcToken} from './oidc'
 import {BROKER_TRUST_POLICY, evaluateClaims} from './policy'
+import {createRateLimiter} from './rate-limit'
 import {serve} from './server'
 import {startSweeper, startupReconcile} from './sweeper'
 
@@ -25,7 +26,8 @@ import {startSweeper, startupReconcile} from './sweeper'
 // Configuration from environment
 // ---------------------------------------------------------------------------
 
-const PORT = Number(process.env.BROKER_PORT ?? '3000')
+const _rawPort = Number(process.env.BROKER_PORT ?? '3000')
+const PORT = Number.isInteger(_rawPort) && _rawPort > 0 ? _rawPort : 3000
 const MANAGEMENT_URL = process.env.CLIPROXY_MANAGEMENT_URL ?? 'https://cliproxy.fro.bot'
 const MANAGEMENT_KEY = process.env.CLIPROXY_MANAGEMENT_KEY ?? ''
 const BROKER_AUD = process.env.BROKER_AUD ?? ''
@@ -60,6 +62,7 @@ const sweeperDeps = {
   removeKey,
   markReady,
   mintDeps,
+  auditLogger: defaultAuditLogger,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,46 +71,7 @@ const sweeperDeps = {
 
 // Token bucket rate limiter: 10 mints per repo per minute, 50 global per minute.
 // Sized above realistic max-parallel-CI but bounding abuse/DoS.
-const repoTokens = new Map<string, {count: number; resetAt: number}>()
-let globalCount = 0
-let globalResetAt = Date.now() + 60_000
-
-const rateLimiter = {
-  check: (repositoryId: string) => {
-    const now = Date.now()
-
-    // Reset global bucket if expired
-    if (now >= globalResetAt) {
-      globalCount = 0
-      globalResetAt = now + 60_000
-    }
-
-    // Reset per-repo bucket if expired
-    const repoState = repoTokens.get(repositoryId)
-    if (!repoState || now >= repoState.resetAt) {
-      repoTokens.set(repositoryId, {count: 0, resetAt: now + 60_000})
-    }
-
-    const repo = repoTokens.get(repositoryId)
-    if (!repo) {
-      // Should not happen — we just set it above, but guard for type safety
-      return {allowed: false, reason: 'internal rate limiter error'}
-    }
-
-    if (globalCount >= 50) {
-      return {allowed: false, reason: 'global rate limit exceeded'}
-    }
-
-    if (repo.count >= 10) {
-      return {allowed: false, reason: `per-repository rate limit exceeded for ${repositoryId}`}
-    }
-
-    globalCount++
-    repo.count++
-
-    return {allowed: true}
-  },
-}
+const rateLimiter = createRateLimiter()
 
 const serverDeps = {
   verifyOidcToken: (token: string) => verifyOidcToken(token, {audience: BROKER_AUD}),

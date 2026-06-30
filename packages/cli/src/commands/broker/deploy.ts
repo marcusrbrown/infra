@@ -38,6 +38,8 @@ export function getLocalDeployEnv(): Record<string, string> {
     SSH_AUTH_SOCK: sshAuthSock,
     BROKER_DOMAIN: process.env.BROKER_DOMAIN ?? '',
     BROKER_HOST: process.env.BROKER_HOST ?? '',
+    CLIPROXY_MANAGEMENT_KEY: process.env.CLIPROXY_MANAGEMENT_KEY ?? '',
+    BROKER_AUD: process.env.BROKER_AUD ?? '',
   }
 }
 

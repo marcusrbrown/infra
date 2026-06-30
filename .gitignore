@@ -7,6 +7,7 @@ packages/cli/dist/
 .env.*
 !.env.example
 .cliproxy-management-key
+.broker-management-key
 
 # VPN client configs contain private keys — never tracked (keep the dir via .gitkeep)
 apps/vpn/clients/*

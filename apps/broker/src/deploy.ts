@@ -42,6 +42,7 @@ export interface DeployEnv {
   BROKER_HOST: string
   CLIPROXY_MANAGEMENT_URL: string
   CLIPROXY_MANAGEMENT_KEY: string
+  BROKER_AUD: string
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,7 @@ export function getDeployEnv(): DeployEnv {
     BROKER_HOST: brokerHost,
     CLIPROXY_MANAGEMENT_URL: process.env.CLIPROXY_MANAGEMENT_URL ?? 'https://cliproxy.fro.bot',
     CLIPROXY_MANAGEMENT_KEY: process.env.CLIPROXY_MANAGEMENT_KEY ?? '',
+    BROKER_AUD: process.env.BROKER_AUD ?? '',
   }
 }
 
@@ -225,6 +227,10 @@ export async function preflightChecks(env: DeployEnv, deps: DeployDeps = {}): Pr
     throw new Error('CLIPROXY_MANAGEMENT_KEY is not set — cannot verify cliproxy reachability before deploy.')
   }
 
+  if (!env.BROKER_AUD) {
+    throw new Error('BROKER_AUD is not set — cannot deploy without the OIDC audience value.')
+  }
+
   const apiKeysUrl = `${env.CLIPROXY_MANAGEMENT_URL}/v0/management/api-keys`
 
   try {
@@ -301,6 +307,7 @@ export async function writeRemoteEnvFile(
     `BROKER_HOST=${env.BROKER_HOST}`,
     `CLIPROXY_MANAGEMENT_URL=${env.CLIPROXY_MANAGEMENT_URL}`,
     `CLIPROXY_MANAGEMENT_KEY=${env.CLIPROXY_MANAGEMENT_KEY}`,
+    `BROKER_AUD=${env.BROKER_AUD}`,
   ].join('\n')}\n`
 
   const spawnFn = deps.spawn ?? Bun.spawn

@@ -77,7 +77,7 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
 const MAX_READBACK_ATTEMPTS = 3
 
 /** Key prefix for broker-minted keys. Greppable; never trust slug identity. */
-const KEY_PREFIX = 'ghact'
+const KEY_PREFIX = 'ghact-'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -85,11 +85,14 @@ const KEY_PREFIX = 'ghact'
 
 /**
  * Generate a unique broker key for the given run.
- * Format: `ghact-<runId>-<random>` — greppable prefix, random suffix for uniqueness.
+ * Format: `ghact-<runId>-<random>` — greppable prefix, CSPRNG hex suffix for uniqueness.
+ * Uses crypto.getRandomValues for a cryptographically secure random suffix.
  */
 function generateKey(runId: string): string {
-  const random = Math.random().toString(36).slice(2, 10)
-  return `${KEY_PREFIX}-${runId}-${random}`
+  const bytes = new Uint8Array(8)
+  crypto.getRandomValues(bytes)
+  const random = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+  return `${KEY_PREFIX}${runId}-${random}`
 }
 
 /**
@@ -250,7 +253,9 @@ export async function listApiKeys(deps: MintDeps): Promise<string[]> {
 }
 
 /**
- * The greppable key prefix used for all broker-minted keys.
- * Exported so the sweeper can identify broker-owned keys without trusting slug identity.
+ * The greppable key prefix used for all broker-minted keys (includes trailing dash).
+ * Value: `'ghact-'`. Exported so the sweeper can identify broker-owned keys without
+ * trusting slug identity. The reconcile guard that prevents deleting non-broker keys
+ * MUST use this constant — never a local copy.
  */
 export {KEY_PREFIX}

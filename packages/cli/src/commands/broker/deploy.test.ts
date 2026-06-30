@@ -5,7 +5,15 @@ import {getLocalDeployEnv, resolveLocalDeployScriptPath, validateRemotePrecondit
 
 const cliDir = resolve(import.meta.dir, '../../..')
 
-const envKeys = ['BROKER_DOMAIN', 'BROKER_HOST', 'HOME', 'PATH', 'SSH_AUTH_SOCK'] as const
+const envKeys = [
+  'BROKER_AUD',
+  'BROKER_DOMAIN',
+  'BROKER_HOST',
+  'CLIPROXY_MANAGEMENT_KEY',
+  'HOME',
+  'PATH',
+  'SSH_AUTH_SOCK',
+] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
 
@@ -95,16 +103,20 @@ describe('broker deploy', () => {
   describe('getLocalDeployEnv', () => {
     it('returns the expected deploy environment when required variables are present', () => {
       setManagedEnv({
+        BROKER_AUD: 'broker.fro.bot',
         BROKER_DOMAIN: 'broker.example.com',
         BROKER_HOST: '',
+        CLIPROXY_MANAGEMENT_KEY: 'test-mgmt-key',
         HOME: '/tmp/test-home',
         PATH: '/usr/bin:/bin',
         SSH_AUTH_SOCK: '/tmp/test-sock',
       })
 
       expect(getLocalDeployEnv()).toEqual({
+        BROKER_AUD: 'broker.fro.bot',
         BROKER_DOMAIN: 'broker.example.com',
         BROKER_HOST: '',
+        CLIPROXY_MANAGEMENT_KEY: 'test-mgmt-key',
         HOME: '/tmp/test-home',
         PATH: '/usr/bin:/bin',
         SSH_AUTH_SOCK: '/tmp/test-sock',

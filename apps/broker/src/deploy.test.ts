@@ -26,6 +26,7 @@ const managedEnvKeys = [
   'BROKER_HOST',
   'CLIPROXY_MANAGEMENT_URL',
   'CLIPROXY_MANAGEMENT_KEY',
+  'BROKER_AUD',
 ] as const
 
 let savedEnv: Partial<Record<(typeof managedEnvKeys)[number], string | undefined>>
@@ -52,6 +53,7 @@ function setValidEnv(): void {
   process.env.BROKER_HOST = 'broker.fro.bot'
   process.env.CLIPROXY_MANAGEMENT_URL = 'https://cliproxy.fro.bot'
   process.env.CLIPROXY_MANAGEMENT_KEY = 'cliproxy-mgmt-key-xyz789'
+  process.env.BROKER_AUD = 'broker.fro.bot'
 }
 
 function makeValidEnv() {
@@ -62,6 +64,7 @@ function makeValidEnv() {
     BROKER_HOST: 'broker.fro.bot',
     CLIPROXY_MANAGEMENT_URL: 'https://cliproxy.fro.bot',
     CLIPROXY_MANAGEMENT_KEY: 'cliproxy-mgmt-key-xyz789',
+    BROKER_AUD: 'broker.fro.bot',
   }
 }
 
@@ -162,6 +165,11 @@ describe('deploy (broker)', () => {
     it('throws when CLIPROXY_MANAGEMENT_KEY is missing', async () => {
       const env = {...makeValidEnv(), CLIPROXY_MANAGEMENT_KEY: ''}
       await expect(preflightChecks(env)).rejects.toThrow(/CLIPROXY_MANAGEMENT_KEY/)
+    })
+
+    it('throws when BROKER_AUD is missing', async () => {
+      const env = {...makeValidEnv(), BROKER_AUD: ''}
+      await expect(preflightChecks(env)).rejects.toThrow(/BROKER_AUD/)
     })
 
     it('throws when cliproxy returns 401 (invalid management key)', async () => {
@@ -268,8 +276,9 @@ describe('deploy (broker)', () => {
         spawn: mockSpawn as unknown as typeof Bun.spawn,
       })
 
-      // Secret must appear in stdin
+      // Secrets must appear in stdin
       expect(capturedStdinWrite).toContain('CLIPROXY_MANAGEMENT_KEY=cliproxy-mgmt-key-xyz789')
+      expect(capturedStdinWrite).toContain('BROKER_AUD=broker.fro.bot')
     })
 
     it('env file contains all required keys', async () => {
@@ -295,6 +304,7 @@ describe('deploy (broker)', () => {
       expect(capturedStdinWrite).toContain('BROKER_HOST=')
       expect(capturedStdinWrite).toContain('CLIPROXY_MANAGEMENT_URL=')
       expect(capturedStdinWrite).toContain('CLIPROXY_MANAGEMENT_KEY=')
+      expect(capturedStdinWrite).toContain('BROKER_AUD=')
     })
 
     it('uses the provided controlPath in the SSH command', async () => {

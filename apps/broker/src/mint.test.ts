@@ -456,6 +456,43 @@ describe('listApiKeys — exported helper', () => {
 })
 
 // ---------------------------------------------------------------------------
+// CSPRNG suffix: hex format + uniqueness
+// ---------------------------------------------------------------------------
+
+describe('mintKey — CSPRNG suffix', () => {
+  test('minted key suffix is hex-encoded (no Math.random base36 chars like z)', async () => {
+    const store: string[] = []
+    const key = await mintKey('run-csprng', makeDeps(makeStoreFetch(store)))
+
+    // Format: ghact-<runId>-<hex>
+    expect(key).toMatch(/^ghact-run-csprng-[0-9a-f]+$/)
+  })
+
+  test('two mints for the same runId produce different hex suffixes', async () => {
+    const store1: string[] = []
+    const store2: string[] = []
+
+    const key1 = await mintKey('run-same-id', makeDeps(makeStoreFetch(store1)))
+    const key2 = await mintKey('run-same-id', makeDeps(makeStoreFetch(store2)))
+
+    expect(key1).toMatch(/^ghact-run-same-id-[0-9a-f]+$/)
+    expect(key2).toMatch(/^ghact-run-same-id-[0-9a-f]+$/)
+    expect(key1).not.toBe(key2)
+  })
+
+  test('100 mints for the same runId produce unique keys (CSPRNG collision resistance)', async () => {
+    const keys = new Set<string>()
+    for (let i = 0; i < 100; i++) {
+      const store: string[] = []
+      const key = await mintKey('run-collision', makeDeps(makeStoreFetch(store)))
+      keys.add(key)
+    }
+    // All 100 keys must be unique
+    expect(keys.size).toBe(100)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Management key is never logged
 // ---------------------------------------------------------------------------
 

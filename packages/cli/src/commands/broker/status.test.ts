@@ -143,14 +143,19 @@ describe('brokerStatusAction (ctx capture)', () => {
     expect(expectCapturedToInclude(captured, 'ERROR')).toBe(true)
   })
 
-  it('shows graceful warning when no host is set (no env, no --url)', async () => {
+  it('exits 1 and writes warning to stderr when no host is set (no env, no --url)', async () => {
     const {ctx, captured} = createCapturedCtx()
-    await brokerStatusAction({}, ctx)
+    let threw: unknown
+    try {
+      await brokerStatusAction({}, ctx)
+    } catch (error) {
+      threw = error
+    }
 
-    const output = [...captured.stdout, ...captured.stderr].join('\n')
-    expect(output).toMatch(/BROKER_DOMAIN|BROKER_HOST|host not set/i)
-    // Must not exit(1) — graceful degradation
-    expect(captured.exit).toBeNull()
+    expect(threw).toBeInstanceOf(MockProcessExit)
+    expect(captured.exit?.code).toBe(1)
+    // Warning must go to stderr
+    expect(captured.stderr.join('\n')).toMatch(/BROKER_DOMAIN|BROKER_HOST|host not set/i)
   })
 
   it('uses BROKER_DOMAIN env when no --url provided', async () => {

@@ -416,8 +416,142 @@ describe('sweepExpired — error path: revokeKey failure reported via logger', (
     expect(msg).toContain('upstream revoke failed')
     // Ensure the full key is NOT logged
     expect(msg).not.toContain(key.slice(12))
-    // removeKey is still called after the error
+    // removeKey is NOT called when revoke fails — entry stays for retry
+    expect(removeKey).not.toHaveBeenCalled()
+  })
+
+  test('revoke fails → entry remains in live set → next tick retries', async () => {
+    const now = 1_000_000
+    const key = 'ghact-run-retry-abc123xyz'
+    const entry = makeEntry(key, now - 1)
+
+    let revokeCallCount = 0
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {
+      revokeCallCount++
+      if (revokeCallCount === 1) {
+        throw new Error('transient revoke failure')
+      }
+      // Second call succeeds
+    })
+    const removeKey = mock((_key: string) => {})
+    // listLive always returns the entry (simulating it stays in the live set)
+    const listLive = mock(() => [entry])
+    const loggerError = mock((_msg: string) => {})
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey,
+      listLive,
+      listApiKeys: mock(async () => []),
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+      logger: {error: loggerError},
+    }
+
+    // First tick: revoke fails, entry stays
+    await sweepExpired(now, deps)
+    expect(revokeKey).toHaveBeenCalledTimes(1)
+    expect(removeKey).not.toHaveBeenCalled()
+    expect(loggerError).toHaveBeenCalledTimes(1)
+
+    // Second tick: revoke succeeds, entry removed
+    await sweepExpired(now + 1, deps)
+    expect(revokeKey).toHaveBeenCalledTimes(2)
     expect(removeKey).toHaveBeenCalledTimes(1)
+    expect(removeKey.mock.calls[0]?.[0]).toBe(key)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sweepExpired — auditRevoke is called on successful revoke
+// ---------------------------------------------------------------------------
+
+describe('sweepExpired — auditRevoke on successful revoke', () => {
+  test('calls auditLogger.log with revoke decision on successful revoke', async () => {
+    const now = 1_000_000
+    const entry = makeEntry('ghact-run-audit-abc', now - 1, 'run-audit', 'jti-audit')
+
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {})
+    const removeKey = mock((_key: string) => {})
+    const listLive = mock(() => [entry])
+    const auditLogEvents: unknown[] = []
+    const auditLogger = {log: mock((e: unknown) => auditLogEvents.push(e))}
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey,
+      listLive,
+      listApiKeys: mock(async () => []),
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+      auditLogger,
+    }
+
+    await sweepExpired(now, deps)
+
+    expect(auditLogger.log).toHaveBeenCalledTimes(1)
+    const event = auditLogEvents[0] as {decision: string; runId: string; jti: string; srcIp: string}
+    expect(event.decision).toBe('revoke')
+    expect(event.runId).toBe('run-audit')
+    expect(event.jti).toBe('jti-audit')
+    expect(event.srcIp).toBe('sweeper')
+  })
+
+  test('does not call auditLogger when revoke fails', async () => {
+    const now = 1_000_000
+    const entry = makeEntry('ghact-run-fail-audit', now - 1)
+
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {
+      throw new Error('revoke failed')
+    })
+    const auditLogger = {log: mock((_e: unknown) => {})}
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey: mock((_key: string) => {}),
+      listLive: mock(() => [entry]),
+      listApiKeys: mock(async () => []),
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+      auditLogger,
+    }
+
+    await sweepExpired(now, deps)
+
+    expect(auditLogger.log).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// reconcile — error path: listApiKeys failure is caught and logged
+// ---------------------------------------------------------------------------
+
+describe('reconcile — error path: listApiKeys failure caught', () => {
+  test('logs error and returns (does not throw) when listApiKeys fails', async () => {
+    const loggerError = mock((_msg: string) => {})
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {})
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey: mock((_key: string) => {}),
+      listLive: mock(() => [] as LiveEntry[]),
+      listApiKeys: mock(async () => {
+        throw new Error('cliproxy unreachable')
+      }),
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+      logger: {error: loggerError},
+    }
+
+    // Must not throw
+    await expect(reconcile(deps)).resolves.toBeUndefined()
+
+    expect(loggerError).toHaveBeenCalledTimes(1)
+    const msg: string = loggerError.mock.calls[0]?.[0] ?? ''
+    expect(msg).toContain('[sweeper] reconcile: listApiKeys failed')
+    expect(msg).toContain('cliproxy unreachable')
+    // revokeKey must not be called when listApiKeys fails
+    expect(revokeKey).not.toHaveBeenCalled()
   })
 })
 
@@ -456,6 +590,56 @@ describe('reconcile — error path: revokeKey failure reported via logger', () =
     expect(msg).toContain('revoke network error')
     // Ensure the full key is NOT logged
     expect(msg).not.toContain(staleKey.slice(12))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// startupReconcile — bounded retry on listApiKeys failure
+// ---------------------------------------------------------------------------
+
+describe('startupReconcile — bounded retry on listApiKeys failure', () => {
+  test('calls markReady even when all reconcile attempts fail', async () => {
+    const loggerError = mock((_msg: string) => {})
+    const markReady = mock(() => {})
+
+    const deps: SweeperDeps = {
+      revokeKey: mock(async () => {}),
+      removeKey: mock(() => {}),
+      listLive: mock(() => [] as LiveEntry[]),
+      listApiKeys: mock(async () => {
+        throw new Error('persistent cliproxy failure')
+      }),
+      markReady,
+      mintDeps: makeMintDeps(),
+      logger: {error: loggerError},
+    }
+
+    // Must not throw even when all attempts fail
+    await expect(startupReconcile(deps)).resolves.toBeUndefined()
+
+    // markReady must still be called
+    expect(markReady).toHaveBeenCalledTimes(1)
+    // Error must be logged
+    expect(loggerError.mock.calls.length).toBeGreaterThan(0)
+  })
+
+  test('succeeds on first attempt when listApiKeys works', async () => {
+    const markReady = mock(() => {})
+    const revokeKey = mock(async () => {})
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey: mock(() => {}),
+      listLive: mock(() => [] as LiveEntry[]),
+      listApiKeys: mock(async () => ['ghact-run-stale-abc']),
+      markReady,
+      mintDeps: makeMintDeps(),
+    }
+
+    await startupReconcile(deps)
+
+    expect(markReady).toHaveBeenCalledTimes(1)
+    expect(revokeKey).toHaveBeenCalledTimes(1)
   })
 })
 

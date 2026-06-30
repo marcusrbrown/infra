@@ -79,14 +79,18 @@ export async function brokerStatusAction(options: BrokerStatusOptions, ctx: Acti
   let errorCount = 0
 
   try {
-    const baseUrl = options.url ?? process.env.BROKER_DOMAIN ?? process.env.BROKER_HOST ?? DEFAULT_BROKER_URL
+    // --key selects which env var to read the host from; default is BROKER_HOST.
+    const hostEnvKey = options.key ?? 'BROKER_HOST'
+    const hostFromEnv = process.env[hostEnvKey] ?? process.env.BROKER_DOMAIN ?? process.env.BROKER_HOST
+    const baseUrl = options.url ?? hostFromEnv ?? DEFAULT_BROKER_URL
 
-    if (!options.url && !process.env.BROKER_DOMAIN && !process.env.BROKER_HOST) {
+    if (!options.url && !hostFromEnv) {
       ctx.console.log('Broker status')
       ctx.console.log('')
-      ctx.console.log(
+      ctx.console.error(
         '[WARN] Broker host not set. Export BROKER_DOMAIN or BROKER_HOST, or pass --url. Skipping health check.',
       )
+      ctx.process.exit(1)
       return
     }
 

@@ -27,6 +27,12 @@ export type OidcClaims = JWTPayload & {
   event_name?: string
   runner_environment?: string
   repository_visibility?: string
+  /** GitHub Actions run ID. Present in GitHub Actions OIDC tokens. */
+  run_id?: string
+  /** GitHub Actions runner environment. */
+  runner_os?: string
+  /** GitHub Actions job workflow ref. */
+  job_workflow_ref?: string
 }
 
 export type VerifyResult = {ok: true; claims: OidcClaims} | {ok: false; reason: string}

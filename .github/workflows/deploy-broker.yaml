@@ -6,6 +6,12 @@ permissions:
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      broker_aud:
+        description: OIDC audience value for the broker (not a secret)
+        required: false
+        type: string
+        default: ''
     secrets:
       BROKER_SSH_KEY:
         required: true
@@ -58,6 +64,7 @@ jobs:
         env:
           BROKER_HOST: ${{ secrets.BROKER_HOST }}
           CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
+          BROKER_AUD: ${{ inputs.broker_aud || vars.BROKER_AUD }}
 
       - name: Post-deploy health check
         run: >-

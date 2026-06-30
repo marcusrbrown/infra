@@ -22,7 +22,7 @@ OIDC-authenticated credential broker at `broker.fro.bot`. Docker Compose stack (
 
 1. **Preflight** (`preflightChecks`): verifies `CLIPROXY_MANAGEMENT_KEY` is set, then GETs cliproxy `/v0/management/api-keys` with the cliproxy management key. Aborts on 401/403 (key drift) or network failure. No compose change happens until this passes.
 2. **Upload**: `docker-compose.yaml` and `config/Caddyfile` are SCP'd to `/opt/broker/` on the droplet.
-3. **Secrets**: the broker `.env` file (`BROKER_HOST`, `CLIPROXY_MANAGEMENT_URL`, `CLIPROXY_MANAGEMENT_KEY`) is written via SSH stdin — never in argv.
+3. **Secrets**: the broker `.env` file (`BROKER_HOST`, `CLIPROXY_MANAGEMENT_URL`, `CLIPROXY_MANAGEMENT_KEY`, `BROKER_AUD`) is written via SSH stdin — never in argv.
 4. **Restart**: `docker compose pull && docker compose up -d --wait --wait-timeout 90` from `/opt/broker/`.
 5. **Health gate**: GET `https://<BROKER_HOST>/healthz` confirms the stack is serving.
 
@@ -81,15 +81,16 @@ After provisioning: commit the updated `.github/known_hosts` before the first CI
 4. Commit the updated `.github/known_hosts`
 5. First deploy: `bunx @marcusrbrown/infra broker deploy`
 
-## REQUIRED SECRETS
+## REQUIRED SECRETS AND VARIABLES
 
-| Secret | Required | Description |
-| --- | --- | --- |
-| `BROKER_SSH_KEY` | ✓ | Ed25519 private key for the broker droplet (`fro-bot-broker` keypair) |
-| `BROKER_HOST` | ✓ | FQDN of the broker droplet (e.g. `broker.fro.bot`) |
-| `CLIPROXY_MANAGEMENT_KEY` | ✓ | cliproxy management key — broker uses this to mint/revoke `api-keys` via the cliproxy management API |
+| Name | Kind | Required | Description |
+| --- | --- | --- | --- |
+| `BROKER_SSH_KEY` | secret | ✓ | Ed25519 private key for the broker droplet (`fro-bot-broker` keypair) |
+| `BROKER_HOST` | secret | ✓ | FQDN of the broker droplet (e.g. `broker.fro.bot`) |
+| `CLIPROXY_MANAGEMENT_KEY` | secret | ✓ | cliproxy management key — broker uses this to mint/revoke `api-keys` via the cliproxy management API |
+| `BROKER_AUD` | variable | ✓ | OIDC audience value for the broker. Not a secret — it is a cross-context replay defense. Set as a `broker` GitHub Environment **variable** (not a secret). Also required in the local `.env` for provisioning. |
 
-All four secrets are scoped to the `broker` GitHub Environment. `BROKER_AUD` (the OIDC audience value) is materialized on the droplet at provision time via `BROKER_AUD` in the local `.env`; it is not a GitHub Environment secret.
+Secrets and the `BROKER_AUD` variable are scoped to the `broker` GitHub Environment. `BROKER_AUD` flows at both provision time (written to the droplet `.env` by `provision-droplet.ts`) and deploy time (passed as `vars.BROKER_AUD` from the `deploy-broker.yaml` workflow).
 
 ## CLI COMMANDS
 
@@ -112,7 +113,7 @@ Each `POST /v1/mint` request:
 4. Records the entry in the in-memory live set with a 30-minute TTL.
 5. Returns the OpenCode `auth.json` payload (same shape as `apps/cliproxy/AGENTS.md`).
 
-At run end (success/fail/cancel), the harness calls `POST /v1/mint` with a revoke signal (best-effort). The TTL sweeper and reconcile are the mandatory backstop.
+At run end (success/fail/cancel), revocation is handled exclusively by the TTL sweeper and reconcile — there is no run-end revoke endpoint. The sweeper is the mandatory backstop.
 
 ### TTL sweeper and reconcile
 

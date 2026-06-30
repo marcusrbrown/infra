@@ -11,8 +11,6 @@ on:
         required: true
       BROKER_HOST:
         required: true
-      BROKER_MANAGEMENT_KEY:
-        required: false
       CLIPROXY_MANAGEMENT_KEY:
         required: false
 
@@ -59,7 +57,6 @@ jobs:
         run: bun run deploy:broker
         env:
           BROKER_HOST: ${{ secrets.BROKER_HOST }}
-          BROKER_MANAGEMENT_KEY: ${{ secrets.BROKER_MANAGEMENT_KEY }}
           CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
 
       - name: Post-deploy health check

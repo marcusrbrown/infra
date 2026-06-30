@@ -40,7 +40,6 @@ export interface DeployEnv {
   HOME: string
   SSH_AUTH_SOCK: string
   BROKER_HOST: string
-  BROKER_MANAGEMENT_KEY: string
   CLIPROXY_MANAGEMENT_URL: string
   CLIPROXY_MANAGEMENT_KEY: string
 }
@@ -83,7 +82,6 @@ export function getDeployEnv(): DeployEnv {
     HOME: home,
     SSH_AUTH_SOCK: sshAuthSock,
     BROKER_HOST: brokerHost,
-    BROKER_MANAGEMENT_KEY: process.env.BROKER_MANAGEMENT_KEY ?? '',
     CLIPROXY_MANAGEMENT_URL: process.env.CLIPROXY_MANAGEMENT_URL ?? 'https://cliproxy.fro.bot',
     CLIPROXY_MANAGEMENT_KEY: process.env.CLIPROXY_MANAGEMENT_KEY ?? '',
   }
@@ -209,11 +207,10 @@ async function runCommand(label: string, command: string[], env: DeployEnv, deps
 // ---------------------------------------------------------------------------
 
 /**
- * Preflight: verify the broker management key is present and the cliproxy
+ * Preflight: verify the cliproxy management key is present and the cliproxy
  * management API is reachable and can list api-keys.
  *
  * Aborts BEFORE any compose change if:
- *   - BROKER_MANAGEMENT_KEY is not set
  *   - CLIPROXY_MANAGEMENT_KEY is not set
  *   - cliproxy management API is unreachable or returns 401/403
  *   - api-keys list is not readable
@@ -223,10 +220,6 @@ async function runCommand(label: string, command: string[], env: DeployEnv, deps
  */
 export async function preflightChecks(env: DeployEnv, deps: DeployDeps = {}): Promise<void> {
   const fetchFn: FetchFn = deps.fetch ?? globalThis.fetch
-
-  if (!env.BROKER_MANAGEMENT_KEY) {
-    throw new Error('BROKER_MANAGEMENT_KEY is not set — cannot deploy without the broker management key.')
-  }
 
   if (!env.CLIPROXY_MANAGEMENT_KEY) {
     throw new Error('CLIPROXY_MANAGEMENT_KEY is not set — cannot verify cliproxy reachability before deploy.')
@@ -305,7 +298,6 @@ export async function writeRemoteEnvFile(
   deps: DeployDeps = {},
 ): Promise<void> {
   const envFile = `${[
-    `BROKER_MANAGEMENT_KEY=${env.BROKER_MANAGEMENT_KEY}`,
     `BROKER_HOST=${env.BROKER_HOST}`,
     `CLIPROXY_MANAGEMENT_URL=${env.CLIPROXY_MANAGEMENT_URL}`,
     `CLIPROXY_MANAGEMENT_KEY=${env.CLIPROXY_MANAGEMENT_KEY}`,

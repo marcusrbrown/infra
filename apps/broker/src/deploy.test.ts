@@ -24,7 +24,6 @@ const managedEnvKeys = [
   'HOME',
   'SSH_AUTH_SOCK',
   'BROKER_HOST',
-  'BROKER_MANAGEMENT_KEY',
   'CLIPROXY_MANAGEMENT_URL',
   'CLIPROXY_MANAGEMENT_KEY',
 ] as const
@@ -51,7 +50,6 @@ function setValidEnv(): void {
   process.env.HOME = '/root'
   process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'
   process.env.BROKER_HOST = 'broker.fro.bot'
-  process.env.BROKER_MANAGEMENT_KEY = 'broker-mgmt-key-abc123'
   process.env.CLIPROXY_MANAGEMENT_URL = 'https://cliproxy.fro.bot'
   process.env.CLIPROXY_MANAGEMENT_KEY = 'cliproxy-mgmt-key-xyz789'
 }
@@ -62,7 +60,6 @@ function makeValidEnv() {
     HOME: '/root',
     SSH_AUTH_SOCK: '/tmp/ssh.sock',
     BROKER_HOST: 'broker.fro.bot',
-    BROKER_MANAGEMENT_KEY: 'broker-mgmt-key-abc123',
     CLIPROXY_MANAGEMENT_URL: 'https://cliproxy.fro.bot',
     CLIPROXY_MANAGEMENT_KEY: 'cliproxy-mgmt-key-xyz789',
   }
@@ -90,7 +87,6 @@ describe('deploy (broker)', () => {
       setValidEnv()
       const env = getDeployEnv()
       expect(env.BROKER_HOST).toBe('broker.fro.bot')
-      expect(env.BROKER_MANAGEMENT_KEY).toBe('broker-mgmt-key-abc123')
       expect(env.CLIPROXY_MANAGEMENT_URL).toBe('https://cliproxy.fro.bot')
       expect(env.CLIPROXY_MANAGEMENT_KEY).toBe('cliproxy-mgmt-key-xyz789')
     })
@@ -163,11 +159,6 @@ describe('deploy (broker)', () => {
   // ---------------------------------------------------------------------------
 
   describe('preflightChecks', () => {
-    it('throws when BROKER_MANAGEMENT_KEY is missing', async () => {
-      const env = {...makeValidEnv(), BROKER_MANAGEMENT_KEY: ''}
-      await expect(preflightChecks(env)).rejects.toThrow(/BROKER_MANAGEMENT_KEY/)
-    })
-
     it('throws when CLIPROXY_MANAGEMENT_KEY is missing', async () => {
       const env = {...makeValidEnv(), CLIPROXY_MANAGEMENT_KEY: ''}
       await expect(preflightChecks(env)).rejects.toThrow(/CLIPROXY_MANAGEMENT_KEY/)
@@ -257,7 +248,7 @@ describe('deploy (broker)', () => {
   // ---------------------------------------------------------------------------
 
   describe('writeRemoteEnvFile', () => {
-    it('pipes BROKER_MANAGEMENT_KEY through stdin, never in argv', async () => {
+    it('pipes CLIPROXY_MANAGEMENT_KEY through stdin, never in argv', async () => {
       const env = makeValidEnv()
       let capturedStdinWrite = ''
 
@@ -278,9 +269,6 @@ describe('deploy (broker)', () => {
       })
 
       // Secret must appear in stdin
-      expect(capturedStdinWrite).toContain('BROKER_MANAGEMENT_KEY=broker-mgmt-key-abc123')
-      // Secret must NOT appear in the SSH command (which is the first arg to spawn)
-      // We can't easily capture the argv here, but we verify the stdin path is used
       expect(capturedStdinWrite).toContain('CLIPROXY_MANAGEMENT_KEY=cliproxy-mgmt-key-xyz789')
     })
 
@@ -304,7 +292,6 @@ describe('deploy (broker)', () => {
         spawn: mockSpawn as unknown as typeof Bun.spawn,
       })
 
-      expect(capturedStdinWrite).toContain('BROKER_MANAGEMENT_KEY=')
       expect(capturedStdinWrite).toContain('BROKER_HOST=')
       expect(capturedStdinWrite).toContain('CLIPROXY_MANAGEMENT_URL=')
       expect(capturedStdinWrite).toContain('CLIPROXY_MANAGEMENT_KEY=')
@@ -354,15 +341,15 @@ describe('deploy (broker)', () => {
   // ---------------------------------------------------------------------------
 
   describe('deploy — preflight abort', () => {
-    it('aborts before any compose change when BROKER_MANAGEMENT_KEY is missing', async () => {
+    it('aborts before any compose change when CLIPROXY_MANAGEMENT_KEY is missing', async () => {
       setValidEnv()
-      process.env.BROKER_MANAGEMENT_KEY = ''
+      process.env.CLIPROXY_MANAGEMENT_KEY = ''
 
       // Mock fetch to return 200 (cliproxy is reachable) — but preflight should fail on missing key
       const mockFetch: FetchFn = async () => new Response(JSON.stringify([]), {status: 200})
 
       // deploy() calls validatePreconditions() which calls getDeployEnv() which throws
-      // when BROKER_MANAGEMENT_KEY is empty — but preflightChecks also checks it.
+      // when CLIPROXY_MANAGEMENT_KEY is empty — but preflightChecks also checks it.
       // Either way, no compose command should run.
       let spawnCalled = false
       const mockSpawn = (_cmd: string[], _opts: unknown) => {
@@ -442,32 +429,6 @@ describe('deploy (broker)', () => {
   // ---------------------------------------------------------------------------
 
   describe('security: no secret bytes in SSH argv', () => {
-    it('writeRemoteEnvFile does not put BROKER_MANAGEMENT_KEY in SSH argv', async () => {
-      const env = makeValidEnv()
-      const secretKey = 'super-secret-broker-mgmt-key-never-in-argv'
-      env.BROKER_MANAGEMENT_KEY = secretKey
-
-      let capturedArgv: string[] = []
-
-      const mockSpawn = (cmd: string[], _opts: unknown) => {
-        capturedArgv = cmd
-        return {
-          stdin: {write: () => {}, end: () => {}},
-          stdout: new ReadableStream(),
-          stderr: new ReadableStream(),
-          exited: Promise.resolve(0),
-        }
-      }
-
-      await writeRemoteEnvFile('broker.fro.bot', env, '/tmp/test.sock', {
-        spawn: mockSpawn as unknown as typeof Bun.spawn,
-      })
-
-      // The secret must NOT appear in any argv element
-      const argvStr = capturedArgv.join(' ')
-      expect(argvStr).not.toContain(secretKey)
-    })
-
     it('writeRemoteEnvFile does not put CLIPROXY_MANAGEMENT_KEY in SSH argv', async () => {
       const env = makeValidEnv()
       const secretKey = 'super-secret-cliproxy-mgmt-key-never-in-argv'

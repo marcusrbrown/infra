@@ -199,5 +199,4 @@ jobs:
     secrets:
       BROKER_SSH_KEY: ${{ secrets.BROKER_SSH_KEY }}
       BROKER_HOST: ${{ secrets.BROKER_HOST }}
-      BROKER_MANAGEMENT_KEY: ${{ secrets.BROKER_MANAGEMENT_KEY }}
       CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}

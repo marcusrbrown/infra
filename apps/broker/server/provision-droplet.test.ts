@@ -319,7 +319,7 @@ describe('provision-droplet (broker)', () => {
       expect(capturedArgv?.join(' ')).not.toContain(brokerAud)
     })
 
-    it('env file contains BROKER_MANAGEMENT_KEY, BROKER_HOST, and BROKER_AUD', async () => {
+    it('env file contains CLIPROXY_MANAGEMENT_KEY, BROKER_HOST, and BROKER_AUD', async () => {
       let capturedStdinWrite = ''
 
       const spawnSpy = spyOn(Bun, 'spawn').mockReturnValue({
@@ -336,7 +336,7 @@ describe('provision-droplet (broker)', () => {
 
       spawnSpy.mockRestore()
 
-      expect(capturedStdinWrite).toContain('BROKER_MANAGEMENT_KEY=test-mgmt-key')
+      expect(capturedStdinWrite).toContain('CLIPROXY_MANAGEMENT_KEY=test-mgmt-key')
       expect(capturedStdinWrite).toContain('BROKER_HOST=broker.fro.bot')
       expect(capturedStdinWrite).toContain('BROKER_AUD=test-aud')
     })

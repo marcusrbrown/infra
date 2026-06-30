@@ -102,7 +102,7 @@ export async function copyComposeFiles(host: string, identityFile?: string): Pro
  * Writes the broker .env file to the remote host via SSH stdin.
  *
  * Contains:
- *   - BROKER_MANAGEMENT_KEY: the broker→cliproxy management key (secret)
+ *   - CLIPROXY_MANAGEMENT_KEY: the broker→cliproxy management key (secret)
  *   - BROKER_HOST: the broker's own FQDN
  *   - BROKER_AUD: the broker-minted OIDC audience value
  *
@@ -117,7 +117,7 @@ export async function writeRemoteEnvFile(
   brokerAud: string,
   identityFile?: string,
 ): Promise<void> {
-  const envFile = `${[`BROKER_MANAGEMENT_KEY=${managementKey}`, `BROKER_HOST=${brokerHost}`, `BROKER_AUD=${brokerAud}`].join('\n')}\n`
+  const envFile = `${[`CLIPROXY_MANAGEMENT_KEY=${managementKey}`, `BROKER_HOST=${brokerHost}`, `BROKER_AUD=${brokerAud}`].join('\n')}\n`
 
   const opts = identityFile ? {identityFile} : undefined
 
@@ -245,9 +245,9 @@ async function provision(): Promise<void> {
   const dropletIp = await getDropletIpWithWait(DROPLET_NAME)
 
   // Required secrets from environment
-  const managementKey = process.env.BROKER_MANAGEMENT_KEY
+  const managementKey = process.env.CLIPROXY_MANAGEMENT_KEY
   if (!managementKey) {
-    throw new Error('BROKER_MANAGEMENT_KEY is required — the broker→cliproxy management key')
+    throw new Error('CLIPROXY_MANAGEMENT_KEY is required — the broker→cliproxy management key')
   }
 
   const brokerAud = process.env.BROKER_AUD
@@ -264,7 +264,7 @@ async function provision(): Promise<void> {
   console.log(`Droplet IP: ${dropletIp}`)
   console.log(`Management key written to: ${keyFilePath} (mode 0600)`)
   console.log(
-    '\n⚠️  Save this key now — it cannot be recovered. Copy it into BROKER_MANAGEMENT_KEY (GitHub secret + local .env), then delete the file.',
+    '\n⚠️  Save this key now — it cannot be recovered. Copy it into CLIPROXY_MANAGEMENT_KEY (GitHub secret + local .env), then delete the file.',
   )
   console.log('\nCommit the updated .github/known_hosts before triggering a CI deploy.')
 }

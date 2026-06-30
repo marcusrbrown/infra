@@ -4,7 +4,7 @@ System shape and invariants for this monorepo. For where things live, see [`STRU
 
 ## Bird's Eye Overview
 
-This is a Bun-workspace monorepo that deploys and manages personal infrastructure: KeeWeb (`box.heatvision.co`), a CLIProxyAPI Claude proxy (`cliproxy.fro.bot`), the Fro Bot Discord gateway (`gateway.fro.bot`), Umami analytics (`metrics.fro.bot`), a Fro Bot monitoring dashboard (`dashboard.fro.bot`), and a WireGuard VPN egress box on AWS Lightsail (`eu-west-1`). Each deployable lives under `apps/`; each is self-contained (its own Docker Compose stack or build, a TypeScript deploy script, and a provisioning script). DigitalOcean droplets host the Docker apps; KeeWeb deploys to a Mail-in-a-Box server over SSH/rsync; the VPN box runs native `wg-quick@wg0` + systemd on AWS Lightsail, provisioned via `@aws-sdk/client-lightsail`.
+This is a Bun-workspace monorepo that deploys and manages personal infrastructure: KeeWeb (`box.heatvision.co`), a CLIProxyAPI Claude proxy (`cliproxy.fro.bot`), the Fro Bot Discord gateway (`gateway.fro.bot`), Umami analytics (`metrics.fro.bot`), a Fro Bot monitoring dashboard (`dashboard.fro.bot`), an OIDC credential broker (`broker.fro.bot`), and a WireGuard VPN egress box on AWS Lightsail (`eu-west-1`). Each deployable lives under `apps/`; each is self-contained (its own Docker Compose stack or build, a TypeScript deploy script, and a provisioning script). DigitalOcean droplets host the Docker apps; KeeWeb deploys to a Mail-in-a-Box server over SSH/rsync; the VPN box runs native `wg-quick@wg0` + systemd on AWS Lightsail, provisioned via `@aws-sdk/client-lightsail`.
 
 `packages/cli` is the unified operator surface — a goke CLI (`@marcusrbrown/infra`) with one command group per app plus a unified `status` dashboard. `packages/shared` holds cross-app provisioning helpers. The same CLI exposes a read-only subset of its commands over an MCP bridge so coding agents can query deployment state. GitHub Actions runs the deploy pipeline (one gated workflow per app behind a per-app GitHub Environment) and automation (Fro Bot review, Renovate, releases via Changesets).
 
@@ -14,7 +14,7 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 
 | Role | Path |
 | --- | --- |
-| CLI entry point (goke) | `packages/cli/src/cli.ts` (`registerKeewebCommands`, `registerCliproxyCommands`, `registerGatewayCommands`, `registerUmamiCommands`, `registerVpnCommands`, `registerDashboardCommands`, `registerStatus`, `registerMcp`) |
+| CLI entry point (goke) | `packages/cli/src/cli.ts` (`registerKeewebCommands`, `registerCliproxyCommands`, `registerGatewayCommands`, `registerUmamiCommands`, `registerVpnCommands`, `registerDashboardCommands`, `registerBrokerCommands`, `registerStatus`, `registerMcp`) |
 | Per-app CLI command groups | `packages/cli/src/commands/<app>/` (each `<action>.ts` + barrel `index.ts`) |
 | Unified status dashboard | `packages/cli/src/commands/status.ts` |
 | MCP bridge + allowlist | `packages/cli/src/commands/mcp.ts` (`MCP_ALLOWLIST`, `registerMcp`) |
@@ -22,7 +22,7 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 | Executable conventions enforcement | `packages/cli/src/conventions.test.ts` |
 | App deploy scripts | `apps/<name>/src/deploy.ts` (`main`/`deploy`) — except keeweb |
 | KeeWeb build + deploy | `apps/keeweb/src/build.ts`, `apps/keeweb/deploy.sh` |
-| Droplet provisioning | `apps/<name>/server/provision-droplet.ts` (cliproxy, gateway, umami, dashboard) |
+| Droplet provisioning | `apps/<name>/server/provision-droplet.ts` (cliproxy, gateway, umami, dashboard, broker) |
 | Dashboard deploy script | `apps/dashboard/src/deploy.ts` (`deploy`, `validateEnv`, `buildEnvFileContents`, `assertRunningImageDigest`) |
 | Dashboard provisioning | `apps/dashboard/server/provision-droplet.ts` (`main`, `validateRequiredEnv`, `checkDropletExistence`, `getDashboardSshFingerprint`, `establishSshAccess`) |
 | Dashboard host validators | `apps/dashboard/src/host.ts` (`validateDashboardHost`), `packages/cli/src/commands/dashboard/host.ts` (`validateDashboardHost`) |
@@ -32,6 +32,11 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 | VPN peer model | `packages/cli/src/commands/vpn/peers.ts` (`readPeers`, `writePeers`, `parsePeersJson`, `renderServerConfig`, `Peer`), exported as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn/src/deploy.ts` |
 | Shared SSH/SCP/DO helpers | `packages/shared/server/droplet-helpers.ts` (`ssh`, `scp`, `waitForSsh`, `getSshFingerprint`, `pinHostKeys`, `materializeIdentityFile`) |
 | Gateway upstream daemon pin | `apps/gateway/upstream.json` |
+| Broker OIDC verification | `apps/broker/src/oidc.ts` (`verifyOidcToken`, `assertNotReplayed`) |
+| Broker trust policy | `apps/broker/src/policy.ts` (`BROKER_TRUST_POLICY`, `evaluateClaims`) |
+| Broker mint/revoke client | `apps/broker/src/mint.ts` (`mintKey`, `revokeKey`, `listApiKeys`, single-flight lock) |
+| Broker sweeper | `apps/broker/src/sweeper.ts` (`sweepExpired`, `reconcile`, `startupReconcile`, `startSweeper`) |
+| Broker CLI command group | `packages/cli/src/commands/broker/` (`status.ts`, `deploy.ts`, `logs.ts`, `index.ts` → `registerBrokerCommands`) |
 | Per-app host validators | `apps/<name>/src/host.ts` and `packages/cli/src/commands/<app>/host.ts` |
 | Deploy pipeline | `.github/workflows/deploy.yaml` (router) + `deploy-<app>.yaml` |
 | Pinned SSH host keys | `.github/known_hosts` |
@@ -49,7 +54,7 @@ operator (CLI) or agent (MCP)
   → result captured via ctx (MCP) or printed (terminal)
 ```
 
-**MCP bridge:** `registerMcp` exposes only the `MCP_ALLOWLIST` set — `gateway status`, `cliproxy status`, `cliproxy models`, `keeweb status`, `umami status`, `dashboard status`, `vpn status`, and unified `status`. All mutating commands (keys, config, deploy, backup, logs, client management) are source-gated out of MCP. Allowlisted actions thread `ctx` (`packages/cli/src/lib/action-ctx.ts`) so captured output reaches the agent; global `console`/`process.stdout` bypass capture and must not be used in MCP-exposed bodies.
+**MCP bridge:** `registerMcp` exposes only the `MCP_ALLOWLIST` set — `gateway status`, `cliproxy status`, `cliproxy models`, `keeweb status`, `umami status`, `dashboard status`, `vpn status`, `broker status`, and unified `status`. All mutating commands (keys, config, deploy, backup, logs, client management) are source-gated out of MCP. Allowlisted actions thread `ctx` (`packages/cli/src/lib/action-ctx.ts`) so captured output reaches the agent; global `console`/`process.stdout` bypass capture and must not be used in MCP-exposed bodies.
 
 **Deploy pipeline:** a push to `main` triggers `.github/workflows/deploy.yaml`, which runs `dorny/paths-filter` (`predicate-quantifier: every`) and routes to the matching `deploy-<app>.yaml`. Each app deploy waits at its per-app GitHub Environment approval gate before touching the droplet.
 
@@ -71,7 +76,7 @@ Enforceable rules. Many are gated by `packages/cli/src/conventions.test.ts`, ESL
 ## Cross-Cutting Concerns
 
 - **Secret materialization.** Deploy scripts write secrets to droplet files over SSH stdin (never argv), and CI loads GitHub Environment secrets into the deploy step. Local runs load the repo-root `.env` (Bun loads `.env` from CWD only — run via root `provision:<app>` / `deploy:<app>` wrappers).
-- **Deploy gating.** Each app has a GitHub Environment (`keeweb`, `cliproxy`, `gateway`, `umami`, `vpn`, `dashboard`) with a required reviewer and a main-only branch policy. Merging a deploy-triggering change holds at the approval gate.
+- **Deploy gating.** Each app has a GitHub Environment (`keeweb`, `cliproxy`, `gateway`, `umami`, `vpn`, `dashboard`, `broker`) with a required reviewer and a main-only branch policy. Merging a deploy-triggering change holds at the approval gate.
 - **Host-key pinning.** `.github/known_hosts` pins both domain (unhashed) and IP (hashed) entries; CI connects with strict host-key checking against only that file.
 - **Upstream pinning + verify-at-tag.** The gateway daemon source is pinned in `apps/gateway/upstream.json`; bumping it requires diffing the daemon's required-secret contract against the compose wiring at the new tag before deploy. This is independent of the Fro Bot review Action SHA pinned in `.github/workflows/fro-bot.yaml` (see `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md`). The dashboard image is pinned by tag and digest directly in `apps/dashboard/docker-compose.yaml`; Renovate tracks `ghcr.io/fro-bot/dashboard` and opens PRs to bump the pin when a new release is published. The deploy pulls the compose-pinned digest — no CI image build step. The former `ghcr.io/marcusrbrown/infra-dashboard` image is retired and can be deleted manually from the GitHub Container Registry once no references remain.
 - **Executable conventions.** `packages/cli/src/conventions.test.ts` enforces several invariants above (SHA-pinned actions, `.yaml` extension, no stray Bash scripts, no `ssh-keyscan` in workflows, no `bundledDependencies`) as part of the test suite.

@@ -6,7 +6,7 @@
 
 ## OVERVIEW
 
-Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, Fro Bot gateway deployment, Umami analytics, WireGuard VPN egress box, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), `metrics.fro.bot` (Umami analytics on DigitalOcean), and a static IP on AWS Lightsail `eu-west-1` (WireGuard VPN).
+Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, Fro Bot gateway deployment, Umami analytics, WireGuard VPN egress box, OIDC credential broker, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), `metrics.fro.bot` (Umami analytics on DigitalOcean), `broker.fro.bot` (credential broker on DigitalOcean), and a static IP on AWS Lightsail `eu-west-1` (WireGuard VPN).
 
 ## STRUCTURE
 
@@ -17,6 +17,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── apps/dashboard/     Fro Bot operator dashboard deploy package (see apps/dashboard/AGENTS.md)
 ├── apps/umami/         Umami analytics deploy package (see apps/umami/AGENTS.md)
 ├── apps/vpn/           WireGuard VPN egress box (see apps/vpn/AGENTS.md)
+├── apps/broker/        OIDC credential broker (see apps/broker/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── packages/shared/    Shared provisioning helpers (see packages/shared/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
@@ -55,6 +56,9 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Manage VPN peers | `bunx @marcusrbrown/infra vpn client add\|list\|remove` | CLI-only (mutating/sensitive) |
 | VPN operator docs | `apps/vpn/AGENTS.md` | Deploy flow, provisioning, server-key invariants, anti-patterns |
 | VPN runbook | `docs/runbooks/vpn-egress-box.md` | Bootstrap ordering, reprovision recovery, client onboarding, old-EC2 teardown |
+| Check broker health | `bunx @marcusrbrown/infra broker status` | HTTP reachability via /healthz |
+| Trigger broker deploy | `bunx @marcusrbrown/infra broker deploy` | Remote (default) or `--local` |
+| Broker operator docs | `apps/broker/AGENTS.md` | Deploy flow, mint/revoke lifecycle, sweeper, key-rotation, anti-patterns |
 | Unified status | `bunx @marcusrbrown/infra status` | All deployments, `--json` for machine output |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
@@ -138,6 +142,9 @@ bunx @marcusrbrown/infra vpn logs                 # Stream journalctl -u wg-quic
 bunx @marcusrbrown/infra vpn client add <name>    # Generate keypair, assign tunnel IP, write client .conf, redeploy
 bunx @marcusrbrown/infra vpn client list          # List peers (name, tunnel IP, public key)
 bunx @marcusrbrown/infra vpn client remove <name> # Remove peer, trigger redeploy
+bunx @marcusrbrown/infra broker status            # HTTP reachability via /healthz
+bunx @marcusrbrown/infra broker deploy            # Trigger broker deploy (GitHub Actions)
+bunx @marcusrbrown/infra broker logs              # Stream broker service logs (--tail N)
 bunx @marcusrbrown/infra status                   # Unified status (all deployments)
 bunx @marcusrbrown/infra status --json            # Machine-readable status
 bunx @marcusrbrown/infra mcp                      # Start MCP server
@@ -146,6 +153,8 @@ bun run provision:umami                         # Provision umami droplet (loads
 bun run deploy:umami                            # Local umami deploy (loads root .env; also :cliproxy, :gateway)
 bun run provision:vpn                           # Provision VPN Lightsail instance (loads root .env; prints static IP)
 bun run deploy:vpn                              # Local VPN deploy (loads root .env)
+bun run provision:broker                        # Provision broker droplet (loads root .env)
+bun run deploy:broker                           # Local broker deploy (loads root .env)
 ```
 
 ## NOTES
@@ -156,6 +165,7 @@ bun run deploy:vpn                              # Local VPN deploy (loads root .
 - `DASHBOARD_SSH_KEY`, `DASHBOARD_DOMAIN`, `DASHBOARD_GITHUB_APP_ID`, `DASHBOARD_GITHUB_APP_KEY`, `DASHBOARD_OAUTH_CLIENT_ID`, `DASHBOARD_OAUTH_CLIENT_SECRET`, `DASHBOARD_OPERATOR_LOGIN`, and `DASHBOARD_COOKIE_KEY` are scoped to `dashboard` environment. Deploy reads the GitHub App private key from a file mount (`DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem`), never an env-string fallback. The dashboard Caddy `/operator/*` same-origin route is **live and verified**: `https://dashboard.fro.bot/operator/*` routes through dashboard Caddy → VPC `10.116.0.3:9300` → gateway operator listener. Login entry: `https://dashboard.fro.bot/operator/auth/github/start` (302 → GitHub OAuth). Only `/operator/health`, `/operator/auth/github/start`, and `/operator/auth/github/callback` exist; bare `/operator/` returns 404 by design. The operator dashboard UI client is still deferred — see `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`.
 - `UMAMI_SSH_KEY`, `UMAMI_DOMAIN`, `UMAMI_APP_SECRET`, `UMAMI_DB_PASSWORD`, and `UMAMI_ADMIN_PASSWORD` are scoped to `umami` environment. `UMAMI_DB_PASSWORD` is volume-coupled — rotate only via the `ALTER USER` runbook in `apps/umami/AGENTS.md`.
 - `VPN_SSH_KEY`, `VPN_HOST`, and `VPN_PEERS` are scoped to `vpn` environment. `VPN_PEERS` holds the peer roster JSON and is auto-synced by `vpn client add/remove`. AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status.
+- `BROKER_SSH_KEY`, `BROKER_HOST`, `BROKER_MANAGEMENT_KEY`, and `CLIPROXY_MANAGEMENT_KEY` are scoped to `broker` environment. `BROKER_AUD` (the OIDC audience value) is materialized on the droplet at provision time from the local `.env`; it is not a GitHub Environment secret.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.
 - `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets.

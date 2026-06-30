@@ -41,7 +41,6 @@ services:
       - path: .env
         required: false
     environment:
-      BROKER_MANAGEMENT_KEY: ${BROKER_MANAGEMENT_KEY:-}
       BROKER_HOST: ${BROKER_HOST:-}
       BROKER_AUD: ${BROKER_AUD:-}
       CLIPROXY_MANAGEMENT_URL: ${CLIPROXY_MANAGEMENT_URL:-https://cliproxy.fro.bot}

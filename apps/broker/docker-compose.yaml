@@ -46,9 +46,9 @@ services:
       CLIPROXY_MANAGEMENT_URL: ${CLIPROXY_MANAGEMENT_URL:-https://cliproxy.fro.bot}
       CLIPROXY_MANAGEMENT_KEY: ${CLIPROXY_MANAGEMENT_KEY:-}
     volumes:
-      - ./:/app:ro
+      - ./dist/main.js:/app/main.js:ro
     working_dir: /app
-    command: [bun, run, src/main.ts]
+    command: [bun, main.js]
     expose:
       - '3000'
 

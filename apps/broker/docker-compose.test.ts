@@ -37,4 +37,15 @@ describe('broker docker compose', () => {
     expect(compose).toContain('cliproxy.fro.bot')
     expect(compose).toContain('PUBLIC')
   })
+
+  it('broker service mounts only the bundle (no source bind-mount)', () => {
+    // Must mount the pre-built bundle at /app/main.js, not the whole source tree
+    expect(compose).toContain('./dist/main.js:/app/main.js:ro')
+    expect(compose).not.toContain('./:/app')
+  })
+
+  it('broker service runs bun main.js (not bun run src/main.ts)', () => {
+    expect(compose).toContain('command: [bun, main.js]')
+    expect(compose).not.toContain('src/main.ts')
+  })
 })

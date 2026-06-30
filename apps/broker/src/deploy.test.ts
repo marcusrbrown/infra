@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {
+  buildBundle,
   deploy,
   getDeployEnv,
   healthCheck,
@@ -66,6 +67,19 @@ function makeValidEnv() {
     CLIPROXY_MANAGEMENT_KEY: 'cliproxy-mgmt-key-xyz789',
     BROKER_AUD: 'broker.fro.bot',
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Returns a ReadableStream that closes immediately with no bytes. */
+function emptyStream(): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(c) {
+      c.close()
+    },
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +361,53 @@ describe('deploy (broker)', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // buildBundle — builds before any remote mutation
+  // ---------------------------------------------------------------------------
+
+  describe('buildBundle', () => {
+    it('invokes bun build with the correct arguments', async () => {
+      const capturedCmds: string[][] = []
+
+      const mockSpawn = (cmd: string[], _opts: unknown) => {
+        capturedCmds.push(cmd)
+        return {
+          stdin: {write: () => {}, end: () => {}},
+          stdout: emptyStream(),
+          stderr: emptyStream(),
+          exited: Promise.resolve(0),
+        }
+      }
+
+      await buildBundle('/fake/app', {spawn: mockSpawn as unknown as typeof Bun.spawn})
+
+      expect(capturedCmds).toHaveLength(1)
+      const cmd = capturedCmds[0]
+      expect(cmd).toBeDefined()
+      if (!cmd) return
+      expect(cmd[0]).toBe('bun')
+      expect(cmd.join(' ')).toContain('build')
+      expect(cmd.join(' ')).toContain('src/main.ts')
+      expect(cmd.join(' ')).toContain('--target')
+      expect(cmd.join(' ')).toContain('bun')
+      expect(cmd.join(' ')).toContain('--outfile')
+      expect(cmd.join(' ')).toContain('dist/main.js')
+    })
+
+    it('throws when bun build exits non-zero', async () => {
+      const mockSpawn = (_cmd: string[], _opts: unknown) => ({
+        stdin: {write: () => {}, end: () => {}},
+        stdout: emptyStream(),
+        stderr: emptyStream(),
+        exited: Promise.resolve(1),
+      })
+
+      await expect(buildBundle('/fake/app', {spawn: mockSpawn as unknown as typeof Bun.spawn})).rejects.toThrow(
+        /bun build failed/,
+      )
+    })
+  })
+
+  // ---------------------------------------------------------------------------
   // deploy — preflight aborts before compose change
   // ---------------------------------------------------------------------------
 
@@ -402,6 +463,47 @@ describe('deploy (broker)', () => {
 
       // No SSH/SCP commands should have been spawned
       expect(spawnCalled).toBe(false)
+    })
+
+    it('aborts before any SSH/SCP when bun build fails', async () => {
+      setValidEnv()
+
+      // Preflight passes (cliproxy reachable)
+      const mockFetch: FetchFn = async () => new Response(JSON.stringify([]), {status: 200})
+
+      const sshCommands: string[][] = []
+      let buildCallCount = 0
+
+      const mockSpawn = (cmd: string[], _opts: unknown) => {
+        const isBuildCmd = cmd[0] === 'bun' && cmd.includes('build')
+        if (isBuildCmd) {
+          buildCallCount++
+          // Build fails — streams must close so Response.text() resolves
+          return {
+            stdin: {write: () => {}, end: () => {}},
+            stdout: emptyStream(),
+            stderr: emptyStream(),
+            exited: Promise.resolve(1),
+          }
+        }
+        // Any SSH/SCP call after build should not happen
+        sshCommands.push(cmd)
+        return {
+          stdin: {write: () => {}, end: () => {}},
+          stdout: emptyStream(),
+          stderr: emptyStream(),
+          exited: Promise.resolve(0),
+        }
+      }
+
+      await expect(deploy({fetch: mockFetch, spawn: mockSpawn as unknown as typeof Bun.spawn})).rejects.toThrow(
+        /bun build failed/,
+      )
+
+      // Build was attempted
+      expect(buildCallCount).toBe(1)
+      // No SSH/SCP commands ran after the failed build
+      expect(sshCommands).toHaveLength(0)
     })
   })
 

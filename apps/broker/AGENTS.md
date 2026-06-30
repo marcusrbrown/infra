@@ -21,14 +21,17 @@ OIDC-authenticated credential broker at `broker.fro.bot`. Docker Compose stack (
 ## DEPLOY FLOW
 
 1. **Preflight** (`preflightChecks`): verifies `CLIPROXY_MANAGEMENT_KEY` is set, then GETs cliproxy `/v0/management/api-keys` with the cliproxy management key. Aborts on 401/403 (key drift) or network failure. No compose change happens until this passes.
-2. **Upload**: `docker-compose.yaml` and `config/Caddyfile` are SCP'd to `/opt/broker/` on the droplet.
-3. **Secrets**: the broker `.env` file (`BROKER_HOST`, `CLIPROXY_MANAGEMENT_URL`, `CLIPROXY_MANAGEMENT_KEY`, `BROKER_AUD`) is written via SSH stdin — never in argv.
-4. **Restart**: `docker compose pull && docker compose up -d --wait --wait-timeout 90` from `/opt/broker/`.
-5. **Health gate**: GET `https://<BROKER_HOST>/healthz` confirms the stack is serving.
+2. **Build** (`buildBundle`): runs `bun build src/main.ts --target bun --outfile dist/main.js` (cwd `apps/broker/`). Produces a self-contained ~300KB bundle with `jose` inlined via Web Crypto. Aborts on non-zero exit — no remote mutation happens if the build fails.
+3. **Upload**: `docker-compose.yaml`, `config/Caddyfile`, and `dist/main.js` are SCP'd to `/opt/broker/` on the droplet (`dist/main.js` → `/opt/broker/dist/main.js`).
+4. **Secrets**: the broker `.env` file (`BROKER_HOST`, `CLIPROXY_MANAGEMENT_URL`, `CLIPROXY_MANAGEMENT_KEY`, `BROKER_AUD`) is written via SSH stdin — never in argv.
+5. **Restart**: `docker compose pull && docker compose up -d --wait --wait-timeout 90` from `/opt/broker/`.
+6. **Health gate**: GET `https://<BROKER_HOST>/healthz` confirms the stack is serving.
 
 All SSH calls in a single deploy share one ControlPath socket (avoids UFW rate-limit at 6 connections/30s).
 
 **Critical**: the broker `.env` on the droplet holds the cliproxy management key. The deploy always overwrites it via stdin. Never embed secret bytes in SSH argv.
+
+`dist/main.js` is a deploy-time build artifact — it is gitignored and never committed.
 
 ## STARTUP GATE
 
@@ -37,8 +40,8 @@ On boot, the broker runs a reconcile sweep (list cliproxy `api-keys`, delete any
 ## DOCKER STACK
 
 - **Caddy**: HTTPS termination, auto Let's Encrypt. `restart: unless-stopped`. Healthcheck probes `http://broker:3000/healthz` across the compose network.
-- **broker**: `oven/bun` (pinned digest, Renovate-managed). Bun HTTP service on port 3000 (internal only). `restart: unless-stopped`.
-- **Volumes**: `caddy_data`, `caddy_config`.
+- **broker**: `oven/bun` (pinned digest, Renovate-managed). Runs `bun main.js` against the pre-built bundle mounted at `/app/main.js:ro`. No source bind-mount; no node_modules on the droplet. Bun HTTP service on port 3000 (internal only). `restart: unless-stopped`.
+- **Volumes**: `caddy_data`, `caddy_config`, `./dist/main.js:/app/main.js:ro` (bundle, read-only).
 - **Env file**: `BROKER_HOST`, `BROKER_AUD`, `CLIPROXY_MANAGEMENT_URL`, `CLIPROXY_MANAGEMENT_KEY` injected from host `.env`.
 
 ## ONE-TIME PROVISIONING

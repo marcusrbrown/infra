@@ -93,16 +93,17 @@ export function getDeployEnv(): DeployEnv {
 // File resolution
 // ---------------------------------------------------------------------------
 
-function resolveDeployFiles(): {compose: string; caddy: string} {
+function resolveDeployFiles(): {compose: string; caddy: string; bundle: string} {
   const appRoot = resolve(import.meta.dir, '..')
 
   return {
     compose: resolve(appRoot, 'docker-compose.yaml'),
     caddy: resolve(appRoot, 'config/Caddyfile'),
+    bundle: resolve(appRoot, 'dist/main.js'),
   }
 }
 
-function validatePreconditions(): {compose: string; caddy: string} {
+function validatePreconditions(): {compose: string; caddy: string; bundle: string} {
   const files = resolveDeployFiles()
 
   if (!existsSync(files.compose)) {
@@ -329,6 +330,41 @@ export async function writeRemoteEnvFile(
 }
 
 // ---------------------------------------------------------------------------
+// Bundle build
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the self-contained Bun bundle from src/main.ts.
+ * Must succeed before any remote mutation — fail closed.
+ */
+export async function buildBundle(appRoot: string, deps: DeployDeps = {}): Promise<void> {
+  const spawnFn = deps.spawn ?? Bun.spawn
+  const proc = spawnFn(['bun', 'build', 'src/main.ts', '--target', 'bun', '--outfile', 'dist/main.js'], {
+    cwd: appRoot,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  const stdout = await new Response(proc.stdout).text()
+  const stderr = await new Response(proc.stderr).text()
+  const exitCode = await proc.exited
+
+  if (stdout.trim()) {
+    console.warn(stdout.trim())
+  }
+
+  if (exitCode !== 0) {
+    console.error('\u001B[1;31mFAILED:\u001B[0m bun build')
+    if (stderr.trim()) {
+      console.error(stderr.trim())
+    }
+    throw new Error(`bun build failed with exit code ${exitCode}`)
+  }
+
+  console.warn('\u001B[1;32m✓\u001B[0m Bundle built: dist/main.js')
+}
+
+// ---------------------------------------------------------------------------
 // Main deploy orchestration
 // ---------------------------------------------------------------------------
 
@@ -336,6 +372,7 @@ export async function deploy(deps: DeployDeps = {}): Promise<void> {
   const files = validatePreconditions()
   const env = getDeployEnv()
   const host = env.BROKER_HOST
+  const appRoot = resolve(import.meta.dir, '..')
 
   // Validate host before any SSH argv construction.
   validateBrokerHost(host)
@@ -346,15 +383,18 @@ export async function deploy(deps: DeployDeps = {}): Promise<void> {
   // Preflight: verify management keys and cliproxy reachability BEFORE any compose change.
   await preflightChecks(env, deps)
 
+  // Build the self-contained bundle BEFORE any remote mutation.
+  await buildBundle(appRoot, deps)
+
   // Create remote directories.
   await runCommand(
     'Creating remote directories',
-    sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`, controlPath),
+    sshCommand(host, `mkdir -p ${REMOTE_DIR}/config ${REMOTE_DIR}/dist`, controlPath),
     env,
     deps,
   )
 
-  // Upload compose and Caddyfile.
+  // Upload compose, Caddyfile, and bundle.
   await runCommand(
     'Uploading docker-compose.yaml',
     scpCommand(host, files.compose, `${REMOTE_DIR}/docker-compose.yaml`, controlPath),
@@ -364,6 +404,12 @@ export async function deploy(deps: DeployDeps = {}): Promise<void> {
   await runCommand(
     'Uploading config/Caddyfile',
     scpCommand(host, files.caddy, `${REMOTE_DIR}/config/Caddyfile`, controlPath),
+    env,
+    deps,
+  )
+  await runCommand(
+    'Uploading dist/main.js',
+    scpCommand(host, files.bundle, `${REMOTE_DIR}/dist/main.js`, controlPath),
     env,
     deps,
   )

@@ -102,6 +102,27 @@ Commands:
     --ack-key-reuse                    Acknowledge that --key matches the bearer token inside the existing OPENCODE_AUTH_JSON. Required in non-interactive mode when --key is supplied for a repo with existing OPENCODE_AUTH_JSON. (default: false)
 
 
+  broker status                        Show operational health of the credential broker.
+
+    --url [url]                        Base URL for broker health checks. Falls back to BROKER_DOMAIN, BROKER_HOST, or https://broker.fro.bot.
+    --key [key]                        Environment variable name holding the broker host. Falls back to BROKER_DOMAIN when omitted.
+    --verbose                          Enable verbose output for all commands
+
+
+  broker deploy                        Deploy the credential broker. Default mode triggers the GitHub Deploy Broker workflow, while --local runs apps/broker/src/deploy.ts directly with Bun.
+
+    --local                            Run local deployment with Bun using apps/broker/src/deploy.ts instead of triggering GitHub Actions. (default: false)
+    --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
+
+
+  broker logs                          Stream credential broker service logs via SSH.
+
+    --tail [n]                         Number of log lines to tail. (default: 100)
+    --service [service]                Docker Compose service name to stream logs from. (default: broker)
+    --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive broker data. (default: false)
+    --key [key]                        Environment variable name holding the SSH host. Falls back to BROKER_HOST when omitted.
+
+
   gateway status                       Show operational health of the gateway deployment via docker compose ps.
 
     --key [key]                        Environment variable name holding the SSH host. Falls back to GATEWAY_HOST when omitted.
@@ -206,7 +227,7 @@ Commands:
 
   status                               Show status of all deployments
 
-    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, and vpn summary objects.
+    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, vpn, and broker summary objects.
     --verbose                          Include verbose per-app health check details when building the summary rows.
 
 

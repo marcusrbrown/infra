@@ -60,6 +60,15 @@ const healthyDashboard: StatusSummary = {
   usageStats: '—',
 }
 
+const healthyBroker: StatusSummary = {
+  app: 'broker',
+  http: 'OK: GET https://broker.fro.bot/healthz → 200 (42ms)',
+  lastDeploy: '—',
+  version: '—',
+  contentHash: '—',
+  usageStats: '—',
+}
+
 function makeDeps(overrides?: Partial<Parameters<typeof registerStatus>[1]>): Parameters<typeof registerStatus>[1] {
   return {
     getKeewebStatusSummary: async () => healthyKeeweb,
@@ -68,6 +77,7 @@ function makeDeps(overrides?: Partial<Parameters<typeof registerStatus>[1]>): Pa
     getUmamiStatusSummary: async () => healthyUmami,
     getDashboardStatusSummary: async () => healthyDashboard,
     getVpnStatusSummary: async () => healthyVpn,
+    getBrokerStatusSummary: async () => healthyBroker,
     ...overrides,
   }
 }
@@ -188,6 +198,7 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
       umami: {http: string}
       dashboard: {http: string}
       vpn: {http: string}
+      broker: {http: string}
     }
 
     expect(parsed.keeweb.http).toBe('OK')
@@ -196,6 +207,7 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     expect(parsed.umami.http).toBe('OK: umami:running/healthy')
     expect(parsed.dashboard.http).toBe('OK: dashboard:running/healthy')
     expect(parsed.vpn.http).toBe('OK: wg0 up, pubkey:TESTKEY== 1 peer(s)')
+    expect(parsed.broker.http).toContain('OK')
   })
 
   it('does not write to global console (output is captured via ctx)', async () => {

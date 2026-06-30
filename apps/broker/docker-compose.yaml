@@ -1,0 +1,57 @@
+services:
+  caddy:
+    # renovate: datasource=docker depName=caddy versioning=docker
+    image: caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./config/Caddyfile:/etc/caddy/Caddyfile
+    depends_on:
+      broker:
+        condition: service_started
+    healthcheck:
+      # Caddy-side healthcheck: probes the broker's /healthz endpoint over the
+      # internal docker network. A healthy Caddy response transitively proves
+      # the broker service is serving.
+      test: [CMD, wget, --spider, -q, 'http://broker:3000/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  broker:
+    # Broker→cliproxy reachability: the broker runs on its OWN separate DigitalOcean
+    # droplet (not co-located with cliproxy). It reaches cliproxy over the PUBLIC
+    # internet via https://cliproxy.fro.bot — NOT via an internal docker network.
+    # The hairpin concern (DO droplets don't NAT-loopback) only applies to same-host
+    # container-to-container calls; it does not apply here because the broker and
+    # cliproxy are on separate droplets.
+    #
+    # renovate: datasource=docker depName=oven/bun versioning=docker
+    image: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BROKER_HOST: ${BROKER_HOST:-}
+      BROKER_AUD: ${BROKER_AUD:-}
+      CLIPROXY_MANAGEMENT_URL: ${CLIPROXY_MANAGEMENT_URL:-https://cliproxy.fro.bot}
+      CLIPROXY_MANAGEMENT_KEY: ${CLIPROXY_MANAGEMENT_KEY:-}
+    volumes:
+      - ./dist/main.js:/app/main.js:ro
+    working_dir: /app
+    command: [bun, main.js]
+    expose:
+      - '3000'
+
+volumes:
+  caddy_data:
+  caddy_config:

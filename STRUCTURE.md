@@ -11,7 +11,8 @@ Where things live and where to put new code. For system shape, data flow, and in
 │   ├── gateway/                Fro Bot Discord gateway (DigitalOcean + Docker Compose)
 │   ├── umami/                  Umami analytics (DigitalOcean + Docker Compose)
 │   ├── dashboard/              Fro Bot monitoring dashboard (DigitalOcean + Docker Compose + GHCR image build)
-│   └── vpn/                    WireGuard egress box (AWS Lightsail eu-west-1, native wg-quick@wg0)
+│   ├── vpn/                    WireGuard egress box (AWS Lightsail eu-west-1, native wg-quick@wg0)
+│   └── broker/                 OIDC credential broker (DigitalOcean + Docker Compose)
 ├── packages/                   Reusable libraries (never import from apps/)
 │   ├── cli/                    @marcusrbrown/infra goke CLI + MCP bridge + VPN peer model
 │   └── shared/                 Cross-app SSH/SCP/provisioning helpers
@@ -25,7 +26,7 @@ Where things live and where to put new code. For system shape, data flow, and in
 
 ### `apps/`
 
-One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (except keeweb — `server/provision-droplet.ts` for the DigitalOcean Docker apps including dashboard, `server/provision.ts` for the `@aws-sdk/client-lightsail` VPN box), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`, and the VPN peer model is published from `packages/cli`.
+One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (except keeweb — `server/provision-droplet.ts` for the DigitalOcean Docker apps including dashboard and broker, `server/provision.ts` for the `@aws-sdk/client-lightsail` VPN box), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`, and the VPN peer model is published from `packages/cli`.
 
 ### `packages/`
 
@@ -62,7 +63,7 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 
 | File | Role |
 | --- | --- |
-| `apps/<name>/server/provision-droplet.ts` | DigitalOcean droplet provisioning (cliproxy, gateway, umami, dashboard) |
+| `apps/<name>/server/provision-droplet.ts` | DigitalOcean droplet provisioning (cliproxy, gateway, umami, dashboard, broker) |
 | `apps/vpn/server/provision.ts` | Lightsail provisioning (`@aws-sdk/client-lightsail`) |
 | `apps/<name>/src/host.ts` | Deploy-side host validator (rejects `-`-prefixed / invalid hosts) |
 | `apps/gateway/upstream.json` | Pinned `fro-bot/agent` daemon ref |

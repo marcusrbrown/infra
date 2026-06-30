@@ -29,6 +29,7 @@ import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js'
 import {afterAll, afterEach, beforeAll, beforeEach, describe, expect, test} from 'bun:test'
 import {goke} from 'goke'
 
+import {registerBrokerCommands} from './broker'
 import {registerCliproxyCommands} from './cliproxy'
 import {registerDashboardCommands} from './dashboard'
 import {registerGatewayCommands} from './gateway'
@@ -46,6 +47,7 @@ import {registerVpnCommands} from './vpn'
  * per the Tier-1 test bar in packages/cli/AGENTS.md. Seven read-only tools.
  */
 const EXPECTED_TOOLS = [
+  'broker_status',
   'cliproxy_models',
   'cliproxy_status',
   'dashboard_status',
@@ -89,6 +91,9 @@ const CLI_ONLY_TOOLS = [
   'vpn_client_add',
   'vpn_client_list',
   'vpn_client_remove',
+  // Broker: mutating / sensitive — CLI-only
+  'broker_deploy',
+  'broker_logs',
 ].sort()
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -98,6 +103,7 @@ function buildTestCli(): ReturnType<typeof goke> {
   cli.option('--verbose', 'Enable verbose output for all commands')
   registerKeewebCommands(cli)
   registerCliproxyCommands(cli)
+  registerBrokerCommands(cli)
   registerGatewayCommands(cli)
   registerUmamiCommands(cli)
   registerDashboardCommands(cli)

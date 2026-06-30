@@ -4,6 +4,7 @@ import type {ActionCtx} from '../lib/action-ctx'
 
 import {z} from 'zod'
 
+import {getBrokerStatusSummary} from './broker/status'
 import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getDashboardStatusSummary} from './dashboard'
 import {getGatewayStatusSummary} from './gateway'
@@ -16,7 +17,7 @@ declare const process: {
 }
 
 export interface StatusSummary {
-  app: 'keeweb' | 'cliproxy' | 'gateway' | 'umami' | 'dashboard' | 'vpn'
+  app: 'keeweb' | 'cliproxy' | 'gateway' | 'umami' | 'dashboard' | 'vpn' | 'broker'
   http: string
   lastDeploy: string
   version: string
@@ -33,6 +34,7 @@ interface StatusDependencies {
   getUmamiStatusSummary: (host: string) => Promise<StatusSummary>
   getDashboardStatusSummary: (host: string) => Promise<StatusSummary>
   getVpnStatusSummary: (host: string) => Promise<StatusSummary>
+  getBrokerStatusSummary: (host: string) => Promise<StatusSummary>
 }
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
@@ -72,6 +74,7 @@ function toJsonPayload(rows: StatusSummary[]): Record<AppName, StatusSummary> {
     umami: rows.find(row => row.app === 'umami') ?? errorSummary('umami', 'missing result'),
     dashboard: rows.find(row => row.app === 'dashboard') ?? errorSummary('dashboard', 'missing result'),
     vpn: rows.find(row => row.app === 'vpn') ?? errorSummary('vpn', 'missing result'),
+    broker: rows.find(row => row.app === 'broker') ?? errorSummary('broker', 'missing result'),
   }
 }
 
@@ -90,6 +93,7 @@ export async function unifiedStatusAction(
     getUmamiStatusSummary,
     getDashboardStatusSummary,
     getVpnStatusSummary,
+    getBrokerStatusSummary,
   },
 ): Promise<void> {
   const verbose = options.verbose === true
@@ -99,6 +103,7 @@ export async function unifiedStatusAction(
   const umamiHost = process.env.UMAMI_DOMAIN ?? ''
   const dashboardHost = process.env.DASHBOARD_DOMAIN ?? ''
   const vpnHost = process.env.VPN_HOST ?? ''
+  const brokerHost = process.env.BROKER_DOMAIN ?? process.env.BROKER_HOST ?? ''
 
   const results = await Promise.allSettled([
     dependencies.getKeewebStatusSummary(verbose),
@@ -107,9 +112,10 @@ export async function unifiedStatusAction(
     dependencies.getUmamiStatusSummary(umamiHost),
     dependencies.getDashboardStatusSummary(dashboardHost),
     dependencies.getVpnStatusSummary(vpnHost),
+    dependencies.getBrokerStatusSummary(brokerHost),
   ])
 
-  const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn']
+  const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker']
   const rows: StatusSummary[] = results.map((result, index) => {
     const app = appNames[index] ?? 'keeweb'
     if (result.status === 'fulfilled') {
@@ -141,6 +147,7 @@ export function registerStatus(
     getUmamiStatusSummary,
     getDashboardStatusSummary,
     getVpnStatusSummary,
+    getBrokerStatusSummary,
   },
 ): void {
   cli
@@ -150,7 +157,7 @@ export function registerStatus(
       z
         .boolean()
         .describe(
-          'Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, and vpn summary objects.',
+          'Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, vpn, and broker summary objects.',
         ),
     )
     .option(

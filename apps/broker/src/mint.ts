@@ -236,6 +236,20 @@ export async function revokeKey(key: string, deps: MintDeps): Promise<void> {
 }
 
 /**
+ * List the current api-keys from cliproxy.
+ *
+ * Exported so the sweeper can reuse the same fetch path (and benefit from the
+ * single-flight lock context) without duplicating the GET logic.
+ *
+ * Runs under the single-flight lock so a concurrent mint's GET-modify-write
+ * cycle is never interleaved with a reconcile list.
+ */
+export async function listApiKeys(deps: MintDeps): Promise<string[]> {
+  const {managementUrl, managementKey, fetch: fetchFn = globalThis.fetch} = deps
+  return withLock(() => getApiKeys(managementUrl, managementKey, fetchFn))
+}
+
+/**
  * The greppable key prefix used for all broker-minted keys.
  * Exported so the sweeper can identify broker-owned keys without trusting slug identity.
  */

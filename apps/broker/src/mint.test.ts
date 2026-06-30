@@ -8,7 +8,7 @@
 import type {FetchFn} from './mint'
 
 import {describe, expect, mock, test} from 'bun:test'
-import {mintKey, revokeKey} from './mint'
+import {listApiKeys, mintKey, revokeKey} from './mint'
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -410,6 +410,48 @@ describe('mintKey — single-flight lock (concurrency)', () => {
 
     // The original existing key must still be there
     expect(sharedStore).toContain('existing-key')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// listApiKeys — exported helper for sweeper
+// ---------------------------------------------------------------------------
+
+describe('listApiKeys — exported helper', () => {
+  test('returns the current api-keys list from cliproxy', async () => {
+    const keys = ['existing-key-1', 'ghact-run-123-abc']
+
+    const fetchMock: FetchFn = mock(async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+      return jsonResponse(keys)
+    })
+
+    const result = await listApiKeys(makeDeps(fetchMock))
+
+    expect(result).toEqual(keys)
+  })
+
+  test('throws on non-2xx response (fail-closed)', async () => {
+    const fetchMock: FetchFn = mock(async (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+      return errorResponse(401, 'Unauthorized')
+    })
+
+    await expect(listApiKeys(makeDeps(fetchMock))).rejects.toThrow(/401/)
+  })
+
+  test('runs under the single-flight lock — serializes with concurrent mint', async () => {
+    // Shared store: listApiKeys should see the state after a concurrent mint completes
+    const store: string[] = ['pre-existing']
+
+    const fetchMock = makeStoreFetch(store)
+    const deps = makeDeps(fetchMock)
+
+    // Fire a mint and a listApiKeys concurrently
+    const [mintedKey, listedKeys] = await Promise.all([mintKey('run-list-concurrent', deps), listApiKeys(deps)])
+
+    // The listed keys should include the pre-existing key
+    expect(listedKeys).toContain('pre-existing')
+    // The minted key should be in the store
+    expect(store).toContain(mintedKey)
   })
 })
 

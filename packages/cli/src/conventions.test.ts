@@ -48,6 +48,9 @@ const SENSITIVE_MCP_COMMANDS: readonly string[] = [
   'vpn client add',
   'vpn client list',
   'vpn client remove',
+  // Broker: mutating / sensitive — CLI-only
+  'broker deploy',
+  'broker logs',
 ]
 
 // Accepted version-comment forms on SHA-pinned `uses:` lines:

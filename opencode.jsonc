@@ -57,6 +57,11 @@
     "infra_vpn_client_add": "deny",
     "infra_vpn_client_list": "deny",
     "infra_vpn_client_remove": "deny",
+    // Broker: mutating / sensitive — CLI-only (defense-in-depth backstop)
+    // Primary gate: these commands are NOT in MCP_ALLOWLIST (packages/cli/src/commands/mcp.ts).
+    // broker deploy mutates a live droplet; broker logs may reveal run identities and minted key prefixes.
+    "infra_broker_deploy": "deny",
+    "infra_broker_logs": "deny",
     // Discord MCP (saseq/discord-mcp) exposes 65 guild tools. opencode resolves
     // the LAST matching permission rule, so the wildcard baseline comes first and
     // the explicit denies below it win for destructive tools. Tool ids use the

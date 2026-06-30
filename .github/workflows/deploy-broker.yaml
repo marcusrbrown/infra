@@ -1,0 +1,70 @@
+name: Deploy Broker
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      BROKER_SSH_KEY:
+        required: true
+      BROKER_HOST:
+        required: true
+      BROKER_MANAGEMENT_KEY:
+        required: false
+      CLIPROXY_MANAGEMENT_KEY:
+        required: false
+
+concurrency:
+  group: deploy-broker-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-broker:
+    runs-on: ubuntu-latest
+    environment: broker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Validate required secrets
+        env:
+          BROKER_SSH_KEY: ${{ secrets.BROKER_SSH_KEY }}
+          BROKER_HOST: ${{ secrets.BROKER_HOST }}
+        run: |
+          missing=()
+          [[ -n "${BROKER_SSH_KEY}" ]] || missing+=("BROKER_SSH_KEY")
+          [[ -n "${BROKER_HOST}" ]] || missing+=("BROKER_HOST")
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required secret(s): ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Configure SSH known_hosts
+        run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.BROKER_SSH_KEY }}
+
+      - name: Deploy broker
+        run: bun run deploy:broker
+        env:
+          BROKER_HOST: ${{ secrets.BROKER_HOST }}
+          BROKER_MANAGEMENT_KEY: ${{ secrets.BROKER_MANAGEMENT_KEY }}
+          CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
+
+      - name: Post-deploy health check
+        run: >-
+          curl -sf -o /dev/null -w "%{http_code}" "https://${BROKER_HOST}/healthz"
+          | grep -q "^200"
+        env:
+          BROKER_HOST: ${{ secrets.BROKER_HOST }}

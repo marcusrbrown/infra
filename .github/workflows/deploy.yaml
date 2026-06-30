@@ -19,6 +19,7 @@ jobs:
       umami: ${{ steps.filter.outputs.umami }}
       vpn: ${{ steps.filter.outputs.vpn }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
+      broker: ${{ steps.filter.outputs.broker }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -69,6 +70,12 @@ jobs:
               - '!apps/dashboard/**/*.test.ts'
               - '!apps/dashboard/**/__fixtures__/**'
               - '!apps/dashboard/**/__snapshots__/**'
+            broker:
+              - 'apps/broker/**'
+              - '!apps/broker/**/*.md'
+              - '!apps/broker/**/*.test.ts'
+              - '!apps/broker/**/__fixtures__/**'
+              - '!apps/broker/**/__snapshots__/**'
 
   # Keep deploys independent by design: one app failing should not block the other.
   deploy-keeweb:
@@ -182,3 +189,15 @@ jobs:
       GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
       APPLICATION_ID: ${{ secrets.APPLICATION_ID }}
       APPLICATION_PRIVATE_KEY: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+
+  deploy-broker:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.broker == 'true'
+    uses: ./.github/workflows/deploy-broker.yaml
+    secrets:
+      BROKER_SSH_KEY: ${{ secrets.BROKER_SSH_KEY }}
+      BROKER_HOST: ${{ secrets.BROKER_HOST }}
+      BROKER_MANAGEMENT_KEY: ${{ secrets.BROKER_MANAGEMENT_KEY }}
+      CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}

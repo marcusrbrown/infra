@@ -1,5 +1,5 @@
 ---
-title: 'Broker first deploy: 5-hit cascade, all from prior solution docs'
+title: 'Broker first deploy: 6-hit cascade, all from prior solution docs'
 problem_type: workflow_issue
 component: development_workflow
 root_cause: incomplete_setup
@@ -20,13 +20,13 @@ related_docs:
   - docs/solutions/integration-issues/ssh-agent-too-many-authentication-failures-2026-06-13.md
 ---
 
-# Broker First Deploy: 5-Hit Cascade
+# Broker First Deploy: 6-Hit Cascade
 
 ## Problem
 
-The first bring-up of `apps/broker` (the OIDC credential broker) to `broker.fro.bot` — a new public-HTTPS DigitalOcean droplet app — surfaced five deploy-path failures. Unlike the earlier cascades where each wave was a *novel* discovery, **every hit here already had a solution doc**: the failures were re-encounters, and each was resolved by applying the documented fix rather than re-diagnosing. The lesson this time is about the operator, not the code: the recovery was fast only after switching from ad-hoc retry to reading `docs/solutions/`.
+The first bring-up of `apps/broker` (the OIDC credential broker) to `broker.fro.bot` — a new public-HTTPS DigitalOcean droplet app — surfaced six deploy-path failures. Unlike the earlier cascades where each wave was a *novel* discovery, **every hit here already had a solution doc**: the failures were re-encounters, and each was resolved by applying the documented fix rather than re-diagnosing. The lesson this time is about the operator, not the code: the recovery was fast only after switching from ad-hoc retry to reading `docs/solutions/`.
 
-One hit was a genuine ordering bug specific to the bundle-deploy model (`dist/main.js` auto-created as a directory). The other four were the known SSH/DNS/environment gauntlet every new droplet app runs.
+One hit was a genuine ordering bug specific to the bundle-deploy model (`dist/main.js` auto-created as a directory). The other five were the known SSH/DNS/environment gauntlet every new droplet app runs.
 
 The broker app shipped in [PR #733](https://github.com/marcusrbrown/infra/pull/733); the host-key pin in [PR #735](https://github.com/marcusrbrown/infra/pull/735). The consuming-side integration is tracked in [fro-bot/agent#1060](https://github.com/fro-bot/agent/issues/1060).
 

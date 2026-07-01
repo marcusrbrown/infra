@@ -508,6 +508,57 @@ describe('deploy (broker)', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // deploy — compose-up command forces recreation of the running stack
+  // ---------------------------------------------------------------------------
+  //
+  // Regression test: the broker container bind-mounts dist/main.js and loads it
+  // into memory at process start. `docker compose up -d` alone does not restart
+  // a container when only the bind-mounted file content changes (compose spec,
+  // image, and env are otherwise identical) — the running process keeps
+  // executing the stale bundle. `--force-recreate` guarantees the container
+  // (and therefore the bun process) always restarts and reloads the freshly
+  // uploaded bundle.
+
+  describe('deploy — compose-up forces recreation', () => {
+    it('runs docker compose up with --force-recreate', async () => {
+      setValidEnv()
+
+      const mockFetch: FetchFn = async () => new Response(JSON.stringify([]), {status: 200})
+
+      const sshCommands: string[][] = []
+
+      const mockSpawn = (cmd: string[], _opts: unknown) => {
+        if (cmd[0] === 'bun' && cmd.includes('build')) {
+          // Bundle build succeeds.
+          return {
+            stdin: {write: () => {}, end: () => {}},
+            stdout: emptyStream(),
+            stderr: emptyStream(),
+            exited: Promise.resolve(0),
+          }
+        }
+        sshCommands.push(cmd)
+        return {
+          stdin: {write: () => {}, end: () => {}},
+          stdout: emptyStream(),
+          stderr: emptyStream(),
+          exited: Promise.resolve(0),
+        }
+      }
+
+      await deploy({fetch: mockFetch, spawn: mockSpawn as unknown as typeof Bun.spawn})
+
+      const composeUpCommand = sshCommands.map(cmd => cmd.join(' ')).find(cmd => cmd.includes('docker compose up'))
+
+      expect(composeUpCommand).toBeDefined()
+      expect(composeUpCommand).toContain('--force-recreate')
+      expect(composeUpCommand).toContain(
+        'docker compose pull && docker compose up -d --force-recreate --wait --wait-timeout 90',
+      )
+    })
+  })
+
+  // ---------------------------------------------------------------------------
   // deploy — single controlPath threaded through all SSH/SCP calls
   // ---------------------------------------------------------------------------
 

@@ -1,8 +1,7 @@
 /**
  * Tests for the BROKER_TRUST_POLICY allowlist and evaluateClaims function.
  *
- * The policy pins specific claim values. The exact fro-bot/agent numeric IDs
- * and workflow path are placeholders here — filled at integration time (#1060).
+ * The policy pins specific claim values sourced from fro-bot/agent#1081.
  * These tests verify the evaluation logic against the policy structure.
  */
 import {describe, expect, test} from 'bun:test'
@@ -19,13 +18,13 @@ function validClaims(): Record<string, string> {
     repository: BROKER_TRUST_POLICY.repository,
     repository_id: BROKER_TRUST_POLICY.repository_id,
     repository_owner_id: BROKER_TRUST_POLICY.repository_owner_id,
-    workflow_ref: BROKER_TRUST_POLICY.workflow_ref,
+    job_workflow_ref: BROKER_TRUST_POLICY.job_workflow_ref,
     ref: BROKER_TRUST_POLICY.allowed_refs[0] ?? 'refs/heads/main',
     ref_type: 'branch',
     ref_protected: 'true',
     event_name: 'workflow_dispatch',
     runner_environment: 'github-hosted',
-    repository_visibility: 'private',
+    repository_visibility: 'public',
   }
 }
 
@@ -44,17 +43,18 @@ describe('evaluateClaims — happy path', () => {
 // Forgeable-name trap
 // ---------------------------------------------------------------------------
 
-describe('evaluateClaims — workflow_ref vs workflow name', () => {
-  test('workflow_ref path differs from policy → deny', () => {
+describe('evaluateClaims — job_workflow_ref vs workflow name', () => {
+  test('job_workflow_ref path differs from policy → deny', () => {
     const claims = {
       ...validClaims(),
-      // Same repo, same workflow name in the path, but different file path
-      workflow_ref: `fro-bot/agent/.github/workflows/other-workflow.yaml@refs/heads/main`,
+      // Same repo, but a different workflow file path (e.g. the harness-release
+      // caller rather than the pinned harness-integrate file).
+      job_workflow_ref: `fro-bot/agent/.github/workflows/harness-release.yaml@refs/heads/main`,
     }
     const result = evaluateClaims(claims, BROKER_TRUST_POLICY)
     expect(result.ok).toBe(false)
     if (!result.ok) {
-      expect(result.reason).toMatch(/workflow_ref/i)
+      expect(result.reason).toMatch(/job_workflow_ref/i)
     }
   })
 })
@@ -133,7 +133,7 @@ describe('evaluateClaims — missing claims', () => {
   const requiredClaims = [
     'repository_id',
     'repository_owner_id',
-    'workflow_ref',
+    'job_workflow_ref',
     'ref',
     'ref_type',
     'ref_protected',
@@ -197,8 +197,8 @@ describe('evaluateClaims — environment and visibility', () => {
     }
   })
 
-  test('repository_visibility: public → deny', () => {
-    const claims = {...validClaims(), repository_visibility: 'public'}
+  test('repository_visibility: private → deny', () => {
+    const claims = {...validClaims(), repository_visibility: 'private'}
     const result = evaluateClaims(claims, BROKER_TRUST_POLICY)
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -240,7 +240,7 @@ describe('BROKER_TRUST_POLICY structure', () => {
     expect(BROKER_TRUST_POLICY.runner_environment).toBe('github-hosted')
   })
 
-  test('policy requires private repository', () => {
-    expect(BROKER_TRUST_POLICY.repository_visibility).toBe('private')
+  test('policy requires public repository', () => {
+    expect(BROKER_TRUST_POLICY.repository_visibility).toBe('public')
   })
 })

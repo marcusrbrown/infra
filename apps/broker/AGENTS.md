@@ -111,7 +111,7 @@ Secrets and the `BROKER_AUD` variable are scoped to the `broker` GitHub Environm
 
 Each `POST /v1/mint` request:
 1. Verifies the OIDC JWT (RS256, GitHub issuer, broker-minted audience, `exp`/`nbf`/`jti` replay check).
-2. Evaluates claims against `BROKER_TRUST_POLICY` (`repository_id`, `repository_owner_id`, `workflow_ref`, `ref`, `ref_type`, `ref_protected`, `event_name`, `runner_environment`, `repository_visibility`).
+2. Evaluates claims against `BROKER_TRUST_POLICY` (`repository_id`, `repository_owner_id`, `job_workflow_ref`, `ref`, `ref_type`, `ref_protected`, `event_name`, `runner_environment`, `repository_visibility`).
 3. Mints a `ghact-<run_id>-<random>` key via cliproxy management API (GET-modify-write + read-back, single-flight lock).
 4. Records the entry in the in-memory live set with a 30-minute TTL.
 5. Returns the OpenCode `auth.json` payload (same shape as `apps/cliproxy/AGENTS.md`).
@@ -182,8 +182,8 @@ Do not edit the `.env` on the droplet directly — the next deploy overwrites it
 
 ## NOTES
 
-- **Trust policy placeholders**: `BROKER_TRUST_POLICY` in `apps/broker/src/policy.ts` has placeholder values for `repository_id`, `repository_owner_id`, and `workflow_ref`. These must be replaced with the real `fro-bot/agent` numeric IDs and workflow path before the broker is deployed. Obtain them with `gh api repos/fro-bot/agent --jq .id` and `gh api orgs/fro-bot --jq .id`. Tracked in `fro-bot/agent#1060`.
-- **Cross-repo handoff**: once the broker ships, update `fro-bot/agent#1060` with a `@fro-bot` mention so the consuming-side integration (OIDC token request, broker call, `auth.json` injection) is picked up there.
+- **Trust policy**: `BROKER_TRUST_POLICY` in `apps/broker/src/policy.ts` pins the `fro-bot/agent` harness integrate identity — `repository_id` `1126485011`, `repository_owner_id` `80104189`, and `job_workflow_ref` `fro-bot/agent/.github/workflows/harness-integrate.yaml@refs/heads/main`. The broker pins `job_workflow_ref` (the reusable integrate file that requests the token), not `workflow_ref` (which is the `harness-release` caller). `repository_visibility` is `public` (fro-bot/agent is a public repo). Values sourced from `fro-bot/agent#1081` and verified against the live GitHub API. If the integrate workflow file, ref, or repo identity changes, update the policy and redeploy.
+- **Cross-repo integration**: the consuming side (OIDC token request at audience `https://broker.fro.bot`, broker call, `auth.json` injection) lands in `fro-bot/agent` via `harness-integrate.yaml` — see `fro-bot/agent#1081`. The mint fails closed until this policy matches the integrate workflow's OIDC claims.
 - **Broker→cliproxy reachability**: the broker runs on its own separate DigitalOcean droplet (not co-located with cliproxy). It reaches cliproxy over the public internet via `https://cliproxy.fro.bot`. The hairpin concern (DO droplets don't NAT-loopback) does not apply here — that only affects same-host container-to-container calls.
 - **Pre-first-deploy checklist**: create the `broker` GitHub Environment (reviewer + main-only) before merging the deploy workflow; add `broker`-scoped secrets after the environment is gated; pin broker FQDN host keys in both `.github/known_hosts` and `packages/cli/src/resources/known_hosts` (byte-identical).
 - **First deploy**: budget for a live contract cascade (host-key domain pin, SSH identity, paths-filter glob, ControlMaster). After the first deploy, author a `docs/solutions/` compound doc capturing cascade waves and any mint/revoke surprises.

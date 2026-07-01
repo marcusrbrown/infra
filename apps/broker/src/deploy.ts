@@ -422,7 +422,7 @@ export async function deploy(deps: DeployDeps = {}): Promise<void> {
     'Updating Docker Compose stack',
     sshCommand(
       host,
-      `cd ${REMOTE_DIR} && docker compose pull && docker compose up -d --wait --wait-timeout 90`,
+      `cd ${REMOTE_DIR} && docker compose pull && docker compose up -d --force-recreate --wait --wait-timeout 90`,
       controlPath,
     ),
     env,

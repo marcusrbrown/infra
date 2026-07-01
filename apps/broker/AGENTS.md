@@ -24,7 +24,7 @@ OIDC-authenticated credential broker at `broker.fro.bot`. Docker Compose stack (
 2. **Build** (`buildBundle`): runs `bun build src/main.ts --target bun --outfile dist/main.js` (cwd `apps/broker/`). Produces a self-contained ~300KB bundle with `jose` inlined via Web Crypto. Aborts on non-zero exit — no remote mutation happens if the build fails.
 3. **Upload**: `docker-compose.yaml`, `config/Caddyfile`, and `dist/main.js` are SCP'd to `/opt/broker/` on the droplet (`dist/main.js` → `/opt/broker/dist/main.js`).
 4. **Secrets**: the broker `.env` file (`BROKER_HOST`, `CLIPROXY_MANAGEMENT_URL`, `CLIPROXY_MANAGEMENT_KEY`, `BROKER_AUD`) is written via SSH stdin — never in argv.
-5. **Restart**: `docker compose pull && docker compose up -d --wait --wait-timeout 90` from `/opt/broker/`.
+5. **Restart**: `docker compose pull && docker compose up -d --force-recreate --wait --wait-timeout 90` from `/opt/broker/`. `--force-recreate` is required because `dist/main.js` is bind-mounted (`ro`) into the broker container and loaded into memory at process start — a bundle-only change leaves the compose spec, image, and env byte-identical, so without `--force-recreate` compose would see no config change and skip recreating the container, leaving the old process running the stale bundle. Named volumes (`caddy_data`, `caddy_config`) persist across recreation, so Let's Encrypt certs are unaffected.
 6. **Health gate**: GET `https://<BROKER_HOST>/healthz` confirms the stack is serving.
 
 All SSH calls in a single deploy share one ControlPath socket (avoids UFW rate-limit at 6 connections/30s).

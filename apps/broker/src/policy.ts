@@ -5,11 +5,11 @@
  * claim values that a GitHub Actions OIDC token must satisfy before the broker
  * will mint a cliproxy credential.
  *
- * The exact fro-bot/agent numeric IDs and workflow path are filled at
- * integration time (cross-repo, tracked in fro-bot/agent#1060). The
- * placeholder values below MUST be replaced with real values before the broker
- * is deployed. They are intentionally non-numeric strings so a type-check or
- * test will catch an unset placeholder.
+ * The fro-bot/agent numeric IDs and the integrate workflow ref were supplied
+ * at integration time (cross-repo, fro-bot/agent#1081). The broker pins
+ * job_workflow_ref (the reusable integrate file), not workflow_ref (which is
+ * the harness-release caller), because the integrate job runs as a reusable
+ * workflow.
  *
  * Pattern: apps/gateway/src/deploy.ts WORKSPACE_PERMISSION_POLICY
  */
@@ -23,20 +23,21 @@ export interface BrokerTrustPolicy {
   readonly repository: string
   /**
    * Numeric GitHub repository ID. Survives renames; prevents typosquat.
-   * PLACEHOLDER — replace with the real fro-bot/agent repository_id.
    */
   readonly repository_id: string
   /**
    * Numeric GitHub owner (org/user) ID. Survives renames.
-   * PLACEHOLDER — replace with the real fro-bot org repository_owner_id.
    */
   readonly repository_owner_id: string
   /**
-   * Exact workflow_ref value: "owner/repo/.github/workflows/<file>@<ref>".
-   * Pin this, never the forgeable `workflow` name claim.
-   * PLACEHOLDER — replace with the real integrate workflow path and ref.
+   * Exact job_workflow_ref value: "owner/repo/.github/workflows/<file>@<ref>".
+   * Pins the reusable workflow file that requested the token (authorizes any
+   * job in that file), never the forgeable `workflow` name claim. The integrate
+   * job runs in a reusable workflow called by harness-release.yaml, so the
+   * token's `workflow_ref` is the caller (harness-release) while
+   * `job_workflow_ref` is the integrate file — the correct claim to pin.
    */
-  readonly workflow_ref: string
+  readonly job_workflow_ref: string
   /** Allowed ref values (e.g. refs/heads/main). */
   readonly allowed_refs: readonly string[]
   /** ref_type must be "branch". */
@@ -59,26 +60,23 @@ export interface BrokerTrustPolicy {
 // ---------------------------------------------------------------------------
 
 /**
- * The broker trust policy.
- *
- * IMPORTANT: repository_id, repository_owner_id, and workflow_ref are
- * PLACEHOLDERS. Replace them with the real fro-bot/agent values before
- * deploying. See fro-bot/agent#1060.
+ * The broker trust policy for the fro-bot/agent harness integrate job.
+ * Values sourced from fro-bot/agent#1081 and verified against the live
+ * GitHub API.
  */
 export const BROKER_TRUST_POLICY: BrokerTrustPolicy = Object.freeze({
   repository: 'fro-bot/agent',
 
-  // PLACEHOLDER: replace with the real numeric repository ID from
-  // `gh api repos/fro-bot/agent --jq .id`
-  repository_id: 'PLACEHOLDER_REPOSITORY_ID',
+  // Numeric repository ID (gh api repos/fro-bot/agent --jq .id).
+  repository_id: '1126485011',
 
-  // PLACEHOLDER: replace with the real numeric owner ID from
-  // `gh api orgs/fro-bot --jq .id` (or `gh api users/fro-bot --jq .id`)
-  repository_owner_id: 'PLACEHOLDER_REPOSITORY_OWNER_ID',
+  // Numeric owner ID for the fro-bot org (gh api users/fro-bot --jq .id).
+  repository_owner_id: '80104189',
 
-  // PLACEHOLDER: replace with the exact workflow_ref for the integrate
-  // workflow, e.g. "fro-bot/agent/.github/workflows/integrate.yaml@refs/heads/main"
-  workflow_ref: 'PLACEHOLDER_WORKFLOW_REF',
+  // The reusable integrate workflow file that requests the OIDC token.
+  // Pinning job_workflow_ref authorizes any job in this file; harness-integrate
+  // documents a one-job invariant so minting authority is not silently shared.
+  job_workflow_ref: 'fro-bot/agent/.github/workflows/harness-integrate.yaml@refs/heads/main',
 
   allowed_refs: Object.freeze(['refs/heads/main']),
 
@@ -92,7 +90,8 @@ export const BROKER_TRUST_POLICY: BrokerTrustPolicy = Object.freeze({
 
   runner_environment: 'github-hosted',
 
-  repository_visibility: 'private',
+  // fro-bot/agent is a public repository.
+  repository_visibility: 'public',
 } as const)
 
 // ---------------------------------------------------------------------------
@@ -137,10 +136,10 @@ export function evaluateClaims(claims: Record<string, string | undefined>, polic
       return null
     },
     () => {
-      const v = claims.workflow_ref
-      if (v === undefined) return {ok: false, reason: 'missing required claim: workflow_ref'}
-      if (v !== policy.workflow_ref)
-        return {ok: false, reason: `workflow_ref mismatch: got ${v}, expected ${policy.workflow_ref}`}
+      const v = claims.job_workflow_ref
+      if (v === undefined) return {ok: false, reason: 'missing required claim: job_workflow_ref'}
+      if (v !== policy.job_workflow_ref)
+        return {ok: false, reason: `job_workflow_ref mismatch: got ${v}, expected ${policy.job_workflow_ref}`}
       return null
     },
     () => {

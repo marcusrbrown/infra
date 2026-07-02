@@ -5,6 +5,13 @@
  * management API using a single-flight lock to prevent lost-update races on
  * the shared `api-keys` array.
  *
+ * Key names are self-describing: `ghact-<runId>-<expiresAtEpochMs>-<hexrand>`.
+ * The embedded expiry makes key-lifecycle decisions time-based instead of
+ * dependent on in-memory live-set membership — the sweeper's `reconcile` can
+ * parse a key's expiry straight from its name after a broker restart, when
+ * the live set is empty but a run may still be legitimately in-flight.
+ * See `parseKeyExpiry`.
+ *
  * Single-instance invariant: the lock is valid because there is exactly one
  * broker instance (single droplet, no horizontal scaling). If the broker is
  * ever scaled out, this in-process lock is insufficient and a distributed lock
@@ -84,15 +91,53 @@ const KEY_PREFIX = 'ghact-'
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a unique broker key for the given run.
- * Format: `ghact-<runId>-<random>` — greppable prefix, CSPRNG hex suffix for uniqueness.
+ * Generate a unique, self-describing broker key for the given run.
+ *
+ * Format: `ghact-<runId>-<expiresAtEpochMs>-<hexrand>` — greppable prefix,
+ * embedded expiry as the second-to-last hyphen segment, CSPRNG hex suffix as
+ * the last segment. The runId may itself contain hyphens/digits; parsing
+ * (see `parseKeyExpiry`) anchors on the last two segments, so this is safe.
+ *
  * Uses crypto.getRandomValues for a cryptographically secure random suffix.
  */
-function generateKey(runId: string): string {
+function generateKey(runId: string, expiresAt: number): string {
   const bytes = new Uint8Array(8)
   crypto.getRandomValues(bytes)
   const random = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
-  return `${KEY_PREFIX}${runId}-${random}`
+  return `${KEY_PREFIX}${runId}-${expiresAt}-${random}`
+}
+
+/**
+ * Regex anchoring on the LAST TWO hyphen-delimited segments of a `ghact-`
+ * key: an all-digit expiry (epoch ms) followed by an all-hex random suffix.
+ * Everything between the `ghact-` prefix and those two segments is the
+ * runId, which may itself contain hyphens or digits — greedy backtracking
+ * on the runId capture group resolves the ambiguity correctly.
+ */
+const KEY_EXPIRY_PATTERN = /^ghact-.+-(\d+)-[0-9a-f]+$/
+
+/**
+ * Parses the embedded expiry (epoch ms) out of a broker-minted key name.
+ *
+ * Returns the expiry as a number for a well-formed `ghact-<runId>-<epochMs>-<hex>`
+ * key. Returns `null` for a non-`ghact-` key OR a malformed/legacy `ghact-`
+ * key that has no numeric expiry segment (e.g. the pre-fix format
+ * `ghact-<runId>-<hex>`). This is a strict parse — never best-effort — so
+ * callers can safely treat `null` as "cannot prove this key's expiry" and
+ * refuse to revoke it.
+ */
+export function parseKeyExpiry(key: string): number | null {
+  if (!key.startsWith(KEY_PREFIX)) {
+    return null
+  }
+
+  const match = KEY_EXPIRY_PATTERN.exec(key)
+  if (!match) {
+    return null
+  }
+
+  const expiry = Number(match[1])
+  return Number.isSafeInteger(expiry) ? expiry : null
 }
 
 /**
@@ -153,8 +198,11 @@ async function putApiKeys(baseUrl: string, managementKey: string, keys: string[]
 /**
  * Mint a short-lived cliproxy key for the given run.
  *
- * Generates a key with the format `ghact-<runId>-<random>`, then — holding
- * the single-flight lock — performs:
+ * Generates a key with the format `ghact-<runId>-<expiresAtEpochMs>-<hexrand>`
+ * — the caller computes `expiresAt` ONCE and passes it in, so the embedded
+ * expiry always matches whatever the caller records elsewhere (e.g. the
+ * live-set entry in server.ts). Then — holding the single-flight lock —
+ * performs:
  *   1. GET /v0/management/api-keys (read current list)
  *   2. Append the new key (preserving ALL existing keys)
  *   3. PUT the full array back
@@ -166,9 +214,9 @@ async function putApiKeys(baseUrl: string, managementKey: string, keys: string[]
  *
  * Returns the minted key string. Never logs the key value or the management key.
  */
-export async function mintKey(runId: string, deps: MintDeps): Promise<string> {
+export async function mintKey(runId: string, expiresAt: number, deps: MintDeps): Promise<string> {
   const {managementUrl, managementKey, fetch: fetchFn = globalThis.fetch} = deps
-  const key = generateKey(runId)
+  const key = generateKey(runId, expiresAt)
 
   return withLock(async () => {
     // Step 1: GET current list (strict parse — throws on malformed)

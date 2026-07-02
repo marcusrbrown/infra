@@ -46,8 +46,8 @@ export interface ServerDeps {
   verifyOidcToken: (token: string) => Promise<VerifyResult>
   /** Evaluates verified claims against the trust policy. */
   evaluateClaims: (claims: Record<string, string | undefined>) => EvaluateResult
-  /** Mints a cliproxy key for the given run ID. */
-  mintKey: (runId: string) => Promise<string>
+  /** Mints a cliproxy key for the given run ID, expiring at the given epoch ms. */
+  mintKey: (runId: string, expiresAt: number) => Promise<string>
   /** Records a minted entry in the live set. */
   recordMint: (entry: LiveEntry) => void
   /** Returns true when the startup reconcile has completed. */
@@ -211,10 +211,13 @@ async function handleMint(req: Request, deps: ServerDeps): Promise<Response> {
     return jsonResponse(403, {error: 'claims do not satisfy trust policy'})
   }
 
-  // 6. Mint the key. On failure, return a generic 5xx with no secret bytes.
+  // 6. Mint the key. expiresAt is computed ONCE and passed to mintKey so the
+  //    embedded key-name expiry and the live-set record always agree.
+  //    On failure, return a generic 5xx with no secret bytes.
+  const expiresAt = now + DEFAULT_KEY_TTL_MS
   let mintedKey: string
   try {
-    mintedKey = await mintKey(runId ?? 'unknown')
+    mintedKey = await mintKey(runId ?? 'unknown', expiresAt)
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'mint failed'
     auditError({ts, srcIp, jti, repositoryId, workflowRef, reason}, auditLogger)
@@ -222,12 +225,12 @@ async function handleMint(req: Request, deps: ServerDeps): Promise<Response> {
     return jsonResponse(500, {error: 'internal error — mint failed'})
   }
 
-  // 7. Record in live set. expiresAt is now + DEFAULT_KEY_TTL_MS.
+  // 7. Record in live set with the SAME expiresAt passed to mintKey.
   recordMint({
     key: mintedKey,
     runId: runId ?? 'unknown',
     jti: jti ?? 'unknown',
-    expiresAt: now + DEFAULT_KEY_TTL_MS,
+    expiresAt,
   })
 
   // 8. Audit the successful mint. Never log the minted key value.

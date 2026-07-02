@@ -76,7 +76,7 @@ const rateLimiter = createRateLimiter()
 const serverDeps = {
   verifyOidcToken: (token: string) => verifyOidcToken(token, {audience: BROKER_AUD}),
   evaluateClaims: (claims: Record<string, string | undefined>) => evaluateClaims(claims, BROKER_TRUST_POLICY),
-  mintKey: (runId: string) => mintKey(runId, mintDeps),
+  mintKey: (runId: string, expiresAt: number) => mintKey(runId, expiresAt, mintDeps),
   recordMint,
   isReady,
   rateLimiter,

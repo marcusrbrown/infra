@@ -4,17 +4,27 @@
  * Guarantees minted keys are revoked even when a run crashes or cancels
  * without signalling. Two mechanisms:
  *
- * 1. `sweepExpired(now, deps)` — for each live entry with expiresAt <= now,
- *    revokes the key and removes it from the live set. This is the mandatory
- *    TTL backstop, independent of any run-end callback.
+ * 1. `sweepExpired(now, deps)` — for each live entry, revokes the key when
+ *    its AUTHORITATIVE expiry (parsed from the key name via `parseKeyExpiry`,
+ *    falling back to the live-set's `expiresAt` only if the key is
+ *    unparseable) is `<= now`. This is the mandatory TTL backstop,
+ *    independent of any run-end callback.
  *
- * 2. `reconcile(deps)` — lists cliproxy's current api-keys; for every key
- *    that starts with KEY_PREFIX (`ghact-`) AND is NOT in the current live
- *    set, revokes it. Recovers from a broker restart where the in-memory live
- *    set is empty but stale broker-owned keys remain in cliproxy.
+ * 2. `reconcile(now, deps)` — lists cliproxy's current api-keys and makes a
+ *    TIME-BASED decision per key, using ONLY the key name — never live-set
+ *    membership:
+ *      - non-`ghact-` key → skip (never touched).
+ *      - `ghact-` key with a parseable expiry `<= now` → revoke (truly expired).
+ *      - `ghact-` key with a parseable expiry `> now` → keep (still valid,
+ *        regardless of live-set membership — this is what makes an in-flight
+ *        key survive a broker restart, when the live set is empty).
+ *      - `ghact-` key with NO parseable expiry (legacy/malformed) → keep and
+ *        log a warning. We can never prove a key we cannot parse is expired,
+ *        so the safe default is to leave it for manual cleanup.
  *
  *    SAFETY INVARIANT: reconcile NEVER deletes a non-`ghact-` key. The prefix
- *    guard is explicit and tested hard.
+ *    guard is explicit and tested hard. The live set is a cache/audit aid
+ *    only — it is never consulted for revocation evidence.
  *
  * 3. `startupReconcile(deps)` — runs reconcile once, then calls markReady().
  *    Order is mandatory: reconcile BEFORE markReady so /v1/mint cannot serve
@@ -32,7 +42,7 @@ import type {LiveEntry} from './live-set'
 import type {MintDeps} from './mint'
 
 import {auditRevoke} from './audit'
-import {KEY_PREFIX} from './mint'
+import {KEY_PREFIX, parseKeyExpiry} from './mint'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -67,6 +77,8 @@ export interface SweeperDeps {
   logger?: SweeperLogger
   /** Audit logger for revoke events. When omitted, revoke events are not audited. */
   auditLogger?: AuditLoggerDeps
+  /** Injectable clock returning current epoch ms (default: Date.now). Used by startupReconcile. */
+  clock?: () => number
 }
 
 /** Injectable options for startSweeper. */
@@ -95,7 +107,15 @@ const DEFAULT_RECONCILE_INTERVAL_MS = 300_000
 // ---------------------------------------------------------------------------
 
 /**
- * Sweep all live entries whose expiresAt <= now.
+ * Sweep all live entries whose AUTHORITATIVE expiry is <= now.
+ *
+ * The authoritative expiry is `parseKeyExpiry(entry.key)` when the key name
+ * parses (the normal case for every key minted since this fix); it falls
+ * back to the live-set's own `entry.expiresAt` only when the key is
+ * unparseable (shouldn't happen for new keys, but keeps this function
+ * correct for any legacy live-set entry). This keeps a single source of
+ * truth — the key name — while preserving the live set's role for
+ * runId/jti audit and the happy-path revoke.
  *
  * For each expired entry: revokes the key via cliproxy management API, then
  * removes it from the live set. This is the mandatory TTL backstop —
@@ -111,7 +131,8 @@ export async function sweepExpired(now: number, deps: SweeperDeps): Promise<void
   const ts = new Date(now).toISOString()
 
   for (const entry of entries) {
-    if (entry.expiresAt <= now) {
+    const authoritativeExpiry = parseKeyExpiry(entry.key) ?? entry.expiresAt
+    if (authoritativeExpiry <= now) {
       try {
         await revokeKey(entry.key, mintDeps)
         // Only remove from live set on successful revoke so the next tick retries.
@@ -132,22 +153,35 @@ export async function sweepExpired(now: number, deps: SweeperDeps): Promise<void
 }
 
 /**
- * Reconcile cliproxy's api-keys list against the in-memory live set.
+ * Reconcile cliproxy's api-keys list using a TIME-BASED decision per key —
+ * never live-set membership. The live set is a cache/audit aid only; it is
+ * not consulted here.
  *
- * Lists all current cliproxy api-keys. For every key that:
- *   - starts with the broker prefix (`ghact-`), AND
- *   - is NOT present in the current live set
- * → revokes it.
+ * Lists all current cliproxy api-keys. For each key:
+ *   - non-`ghact-` prefix → skip (SAFETY INVARIANT: never touch non-broker
+ *     keys — durable key, other consumers' keys).
+ *   - `ghact-` key with a parseable expiry `<= now` → revoke (truly expired).
+ *   - `ghact-` key with a parseable expiry `> now` → keep, regardless of
+ *     live-set membership. This is what makes an in-flight key survive a
+ *     broker restart: the live set is empty after restart, but the key name
+ *     itself proves the key is still valid.
+ *   - `ghact-` key with NO parseable expiry (legacy/malformed — e.g. the
+ *     pre-fix `ghact-<runId>-<hex>` format with no expiry segment) → keep
+ *     and log a warning. We can never prove an unparseable key is expired,
+ *     so the safe default is to leave it in place rather than delete a
+ *     possibly-active key.
  *
  * This recovers from a broker restart where the in-memory live set is empty
- * but stale broker-owned keys remain in cliproxy.
+ * but a still-valid, in-flight run's key remains in cliproxy — the old
+ * membership-based logic would incorrectly treat that as stale and revoke
+ * it, causing 401s in the running job.
  *
  * SAFETY INVARIANT: only keys starting with `ghact-` are ever revoked.
  * Non-broker keys (durable key, other consumers' keys) are NEVER touched.
  * This guard is explicit and tested.
  */
-export async function reconcile(deps: SweeperDeps): Promise<void> {
-  const {revokeKey, listApiKeys, listLive, mintDeps, logger = console} = deps
+export async function reconcile(now: number, deps: SweeperDeps): Promise<void> {
+  const {revokeKey, listApiKeys, mintDeps, logger = console} = deps
 
   let allKeys: string[]
   try {
@@ -158,25 +192,34 @@ export async function reconcile(deps: SweeperDeps): Promise<void> {
     return
   }
 
-  const liveEntries = listLive()
-
-  // Build a set of keys currently in the live set for O(1) lookup.
-  const liveKeys = new Set(liveEntries.map(e => e.key))
-
   for (const key of allKeys) {
     // SAFETY: only touch broker-owned keys. Never delete non-ghact- keys.
     if (!key.startsWith(KEY_PREFIX)) {
       continue
     }
 
-    // Key is broker-owned but not in the live set → stale, revoke it.
-    if (!liveKeys.has(key)) {
-      try {
-        await revokeKey(key, mintDeps)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        logger.error(`[sweeper] reconcile: revokeKey failed for key prefix ${key.slice(0, 12)}…: ${message}`)
-      }
+    const expiry = parseKeyExpiry(key)
+
+    if (expiry === null) {
+      // Legacy/malformed ghact- key — cannot prove expiry, do not revoke.
+      logger.error(
+        `[sweeper] reconcile: skipping unparseable ghact- key ${key.slice(0, 12)}… — not revoking (legacy/malformed)`,
+      )
+      continue
+    }
+
+    if (expiry > now) {
+      // Still valid per the key's own embedded expiry — keep it, even if
+      // the live set has no record of it (e.g. post-restart).
+      continue
+    }
+
+    // Expiry <= now — truly expired, revoke it.
+    try {
+      await revokeKey(key, mintDeps)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error(`[sweeper] reconcile: revokeKey failed for key prefix ${key.slice(0, 12)}…: ${message}`)
     }
   }
 }
@@ -200,11 +243,11 @@ const STARTUP_RECONCILE_BACKOFF_MS = [500, 1_000] as const
  * permanently is worse than a brief stale-key window.
  */
 export async function startupReconcile(deps: SweeperDeps): Promise<void> {
-  const {logger = console} = deps
+  const {logger = console, clock = Date.now} = deps
 
   for (let attempt = 0; attempt < STARTUP_RECONCILE_MAX_ATTEMPTS; attempt++) {
     try {
-      await reconcile(deps)
+      await reconcile(clock(), deps)
       deps.markReady()
       return
     } catch (error) {
@@ -253,7 +296,7 @@ export function startSweeper(deps: SweeperDeps, opts: SweeperOpts = {}): () => v
   }, sweepIntervalMs)
 
   const reconcileId = setIntervalFn(async () => {
-    await reconcile(deps)
+    await reconcile(clock(), deps)
   }, reconcileIntervalMs)
 
   return () => {

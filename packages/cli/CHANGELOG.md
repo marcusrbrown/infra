@@ -1,5 +1,29 @@
 # @marcusrbrown/infra
 
+## 0.13.14
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.46` to `7.2.47` ([#723](https://github.com/marcusrbrown/infra/pull/723))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.45` to `7.2.46` ([#722](https://github.com/marcusrbrown/infra/pull/722))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.48` to `7.2.49` ([#742](https://github.com/marcusrbrown/infra/pull/742))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.43` to `7.2.44` ([#716](https://github.com/marcusrbrown/infra/pull/716))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.47` to `7.2.48` ([#738](https://github.com/marcusrbrown/infra/pull/738))
+
+
+- 📦 Update 7 GitHub Actions workflow dependencies ([#732](https://github.com/marcusrbrown/infra/pull/732))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.44` to `7.2.45` ([#719](https://github.com/marcusrbrown/infra/pull/719))
+
 ## 0.13.13
 ### Patch Changes
 

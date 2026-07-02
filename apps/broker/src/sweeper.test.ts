@@ -28,6 +28,11 @@ function makeEntry(key: string, expiresAt: number, runId = 'run-1', jti = 'jti-1
   return {key, runId, jti, expiresAt}
 }
 
+/** Build a well-formed, self-describing `ghact-<runId>-<expiresAt>-<hex>` key for tests. */
+function ghactKey(runId: string, expiresAt: number, suffix = 'abcd1234'): string {
+  return `ghact-${runId}-${expiresAt}-${suffix}`
+}
+
 // ---------------------------------------------------------------------------
 // sweepExpired — happy path: entry past TTL is swept
 // ---------------------------------------------------------------------------
@@ -176,42 +181,18 @@ describe('sweepExpired — integration: crashed run', () => {
 })
 
 // ---------------------------------------------------------------------------
-// reconcile — integration: restart recovery
+// reconcile — integration: restart recovery (TIME-BASED, not live-set-based)
 // ---------------------------------------------------------------------------
 
 describe('reconcile — integration: restart recovery', () => {
-  test('revokes a ghact- key present in cliproxy but absent from live set', async () => {
-    const staleKey = 'ghact-run-stale-abc'
+  test('KEEPS an active post-restart key: live-set empty, key expiry is in the future', async () => {
+    const now = 1_000_000
+    const activeKey = ghactKey('run123', now + 60_000)
 
     const revokeKey = mock(async (_key: string, _deps: unknown) => {})
     const removeKey = mock((_key: string) => {})
-    // Live set is empty (broker restarted)
+    // Live set is empty (broker restarted) — must NOT be consulted for this decision.
     const listLive = mock(() => [] as LiveEntry[])
-    // cliproxy still has the stale key
-    const listApiKeys = mock(async () => [staleKey])
-
-    const deps: SweeperDeps = {
-      revokeKey,
-      removeKey,
-      listLive,
-      listApiKeys,
-      markReady: mock(() => {}),
-      mintDeps: makeMintDeps(),
-    }
-
-    await reconcile(deps)
-
-    expect(revokeKey).toHaveBeenCalledTimes(1)
-    expect(revokeKey.mock.calls[0]?.[0]).toBe(staleKey)
-  })
-
-  test('does not revoke a ghact- key that IS in the live set (active run)', async () => {
-    const activeKey = 'ghact-run-active-abc'
-    const activeEntry = makeEntry(activeKey, Date.now() + 60_000)
-
-    const revokeKey = mock(async (_key: string, _deps: unknown) => {})
-    const removeKey = mock((_key: string) => {})
-    const listLive = mock(() => [activeEntry])
     const listApiKeys = mock(async () => [activeKey])
 
     const deps: SweeperDeps = {
@@ -223,9 +204,122 @@ describe('reconcile — integration: restart recovery', () => {
       mintDeps: makeMintDeps(),
     }
 
-    await reconcile(deps)
+    await reconcile(now, deps)
 
     expect(revokeKey).not.toHaveBeenCalled()
+  })
+
+  test('REVOKES an expired post-restart key: live-set empty, key expiry is in the past', async () => {
+    const now = 1_000_000
+    const expiredKey = ghactKey('run123', now - 60_000)
+
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {})
+    const removeKey = mock((_key: string) => {})
+    const listLive = mock(() => [] as LiveEntry[])
+    const listApiKeys = mock(async () => [expiredKey])
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey,
+      listLive,
+      listApiKeys,
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+    }
+
+    await reconcile(now, deps)
+
+    expect(revokeKey).toHaveBeenCalledTimes(1)
+    expect(revokeKey.mock.calls[0]?.[0]).toBe(expiredKey)
+  })
+
+  test('live-set membership does NOT protect an expired key — revokes anyway', async () => {
+    const now = 1_000_000
+    const expiredKey = ghactKey('run-active', now - 1)
+    // Key IS in the live set (e.g. stale entry that outlived its own TTL sweep).
+    const liveEntry = makeEntry(expiredKey, now + 60_000, 'run-active')
+
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {})
+    const removeKey = mock((_key: string) => {})
+    const listLive = mock(() => [liveEntry])
+    const listApiKeys = mock(async () => [expiredKey])
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey,
+      listLive,
+      listApiKeys,
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+    }
+
+    await reconcile(now, deps)
+
+    // The key-name expiry (past) is authoritative — live-set membership is irrelevant.
+    expect(revokeKey).toHaveBeenCalledTimes(1)
+    expect(revokeKey.mock.calls[0]?.[0]).toBe(expiredKey)
+  })
+
+  test('boundary: expiry === now → revoke; expiry === now + 1 → keep', async () => {
+    const now = 1_000_000
+    const atBoundaryKey = ghactKey('run-boundary', now, 'aaaa1111')
+    const justAfterKey = ghactKey('run-boundary', now + 1, 'bbbb2222')
+
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {})
+    const removeKey = mock((_key: string) => {})
+    const listLive = mock(() => [] as LiveEntry[])
+    const listApiKeys = mock(async () => [atBoundaryKey, justAfterKey])
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey,
+      listLive,
+      listApiKeys,
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+    }
+
+    await reconcile(now, deps)
+
+    expect(revokeKey).toHaveBeenCalledTimes(1)
+    expect(revokeKey.mock.calls[0]?.[0]).toBe(atBoundaryKey)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// reconcile — legacy/malformed ghact- keys: never revoked (migration safety)
+// ---------------------------------------------------------------------------
+
+describe('reconcile — legacy/malformed ghact- key handling', () => {
+  test('does NOT revoke a legacy ghact- key with no numeric expiry segment, logs a warning', async () => {
+    const now = 1_000_000
+    const legacyKey = 'ghact-run123-abcd'
+
+    const revokeKey = mock(async (_key: string, _deps: unknown) => {})
+    const removeKey = mock((_key: string) => {})
+    const listLive = mock(() => [] as LiveEntry[])
+    const listApiKeys = mock(async () => [legacyKey])
+    const loggerError = mock((_msg: string) => {})
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey,
+      listLive,
+      listApiKeys,
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+      logger: {error: loggerError},
+    }
+
+    await reconcile(now, deps)
+
+    expect(revokeKey).not.toHaveBeenCalled()
+    expect(loggerError).toHaveBeenCalledTimes(1)
+    const msg: string = loggerError.mock.calls[0]?.[0] ?? ''
+    expect(msg).toContain('skipping unparseable ghact- key')
+    expect(msg).toContain('legacy/malformed')
+    // Only a short prefix of the key is logged, not the full key.
+    expect(msg).toContain(legacyKey.slice(0, 12))
   })
 })
 
@@ -234,17 +328,18 @@ describe('reconcile — integration: restart recovery', () => {
 // ---------------------------------------------------------------------------
 
 describe('reconcile — safety: never deletes non-ghact- keys', () => {
-  test('only revokes the stale ghact- key; leaves durable key and other consumers untouched', async () => {
+  test('only revokes the expired ghact- key; leaves durable key and other consumers untouched', async () => {
+    const now = 1_000_000
     const durableKey = 'sk-ant-durable-key-abc123'
     const otherConsumerKey = 'some-other-consumer-key'
-    const staleGhactKey = 'ghact-run-stale-xyz'
+    const expiredGhactKey = ghactKey('run-stale', now - 1)
 
     const revokeKey = mock(async (_key: string, _deps: unknown) => {})
     const removeKey = mock((_key: string) => {})
     // Live set is empty (broker restarted)
     const listLive = mock(() => [] as LiveEntry[])
     // cliproxy has all three keys
-    const listApiKeys = mock(async () => [durableKey, otherConsumerKey, staleGhactKey])
+    const listApiKeys = mock(async () => [durableKey, otherConsumerKey, expiredGhactKey])
 
     const deps: SweeperDeps = {
       revokeKey,
@@ -255,11 +350,11 @@ describe('reconcile — safety: never deletes non-ghact- keys', () => {
       mintDeps: makeMintDeps(),
     }
 
-    await reconcile(deps)
+    await reconcile(now, deps)
 
-    // Only the stale ghact- key is revoked
+    // Only the expired ghact- key is revoked
     expect(revokeKey).toHaveBeenCalledTimes(1)
-    expect(revokeKey.mock.calls[0]?.[0]).toBe(staleGhactKey)
+    expect(revokeKey.mock.calls[0]?.[0]).toBe(expiredGhactKey)
 
     // The durable key and other consumer key are never touched
     const revokedKeys = revokeKey.mock.calls.map(c => c[0])
@@ -267,15 +362,16 @@ describe('reconcile — safety: never deletes non-ghact- keys', () => {
     expect(revokedKeys).not.toContain(otherConsumerKey)
   })
 
-  test('revokes multiple stale ghact- keys but leaves all non-ghact- keys', async () => {
+  test('revokes multiple expired ghact- keys but leaves all non-ghact- keys', async () => {
+    const now = 1_000_000
     const durableKey = 'sk-ant-durable-key-abc123'
-    const staleKey1 = 'ghact-run-stale-1-abc'
-    const staleKey2 = 'ghact-run-stale-2-xyz'
+    const expiredKey1 = ghactKey('run-stale-1', now - 1, 'aaaa0001')
+    const expiredKey2 = ghactKey('run-stale-2', now - 1, 'bbbb0002')
 
     const revokeKey = mock(async (_key: string, _deps: unknown) => {})
     const removeKey = mock((_key: string) => {})
     const listLive = mock(() => [] as LiveEntry[])
-    const listApiKeys = mock(async () => [durableKey, staleKey1, staleKey2])
+    const listApiKeys = mock(async () => [durableKey, expiredKey1, expiredKey2])
 
     const deps: SweeperDeps = {
       revokeKey,
@@ -286,16 +382,17 @@ describe('reconcile — safety: never deletes non-ghact- keys', () => {
       mintDeps: makeMintDeps(),
     }
 
-    await reconcile(deps)
+    await reconcile(now, deps)
 
     expect(revokeKey).toHaveBeenCalledTimes(2)
     const revokedKeys = revokeKey.mock.calls.map(c => c[0])
-    expect(revokedKeys).toContain(staleKey1)
-    expect(revokedKeys).toContain(staleKey2)
+    expect(revokedKeys).toContain(expiredKey1)
+    expect(revokedKeys).toContain(expiredKey2)
     expect(revokedKeys).not.toContain(durableKey)
   })
 
   test('does nothing when cliproxy has no ghact- keys', async () => {
+    const now = 1_000_000
     const revokeKey = mock(async (_key: string, _deps: unknown) => {})
     const removeKey = mock((_key: string) => {})
     const listLive = mock(() => [] as LiveEntry[])
@@ -310,7 +407,7 @@ describe('reconcile — safety: never deletes non-ghact- keys', () => {
       mintDeps: makeMintDeps(),
     }
 
-    await reconcile(deps)
+    await reconcile(now, deps)
 
     expect(revokeKey).not.toHaveBeenCalled()
   })
@@ -322,8 +419,9 @@ describe('reconcile — safety: never deletes non-ghact- keys', () => {
 
 describe('startupReconcile — startup gate ordering', () => {
   test('runs reconcile BEFORE markReady — stale key is gone before ready flips', async () => {
+    const now = 1_000_000
     const callOrder: string[] = []
-    const staleKey = 'ghact-run-stale-boot-abc'
+    const staleKey = ghactKey('run-stale-boot', now - 1)
 
     const revokeKey = mock(async (_key: string, _deps: unknown) => {
       callOrder.push('revokeKey')
@@ -345,6 +443,7 @@ describe('startupReconcile — startup gate ordering', () => {
       listApiKeys,
       markReady,
       mintDeps: makeMintDeps(),
+      clock: () => now,
     }
 
     await startupReconcile(deps)
@@ -544,7 +643,7 @@ describe('reconcile — error path: listApiKeys failure caught', () => {
     }
 
     // Must not throw
-    await expect(reconcile(deps)).resolves.toBeUndefined()
+    await expect(reconcile(1_000_000, deps)).resolves.toBeUndefined()
 
     expect(loggerError).toHaveBeenCalledTimes(1)
     const msg: string = loggerError.mock.calls[0]?.[0] ?? ''
@@ -561,7 +660,8 @@ describe('reconcile — error path: listApiKeys failure caught', () => {
 
 describe('reconcile — error path: revokeKey failure reported via logger', () => {
   test('calls logger.error with key prefix when revokeKey throws during reconcile', async () => {
-    const staleKey = 'ghact-run-stale-fail-xyz'
+    const now = 1_000_000
+    const staleKey = ghactKey('run-stale-fail', now - 1, 'abcd1234')
 
     const revokeKey = mock(async (_key: string, _deps: unknown) => {
       throw new Error('revoke network error')
@@ -581,7 +681,7 @@ describe('reconcile — error path: revokeKey failure reported via logger', () =
       logger: {error: loggerError},
     }
 
-    await reconcile(deps)
+    await reconcile(now, deps)
 
     expect(loggerError).toHaveBeenCalledTimes(1)
     const msg: string = loggerError.mock.calls[0]?.[0] ?? ''
@@ -624,6 +724,7 @@ describe('startupReconcile — bounded retry on listApiKeys failure', () => {
   })
 
   test('succeeds on first attempt when listApiKeys works', async () => {
+    const now = 1_000_000
     const markReady = mock(() => {})
     const revokeKey = mock(async () => {})
 
@@ -631,9 +732,10 @@ describe('startupReconcile — bounded retry on listApiKeys failure', () => {
       revokeKey,
       removeKey: mock(() => {}),
       listLive: mock(() => [] as LiveEntry[]),
-      listApiKeys: mock(async () => ['ghact-run-stale-abc']),
+      listApiKeys: mock(async () => [ghactKey('run-stale', now - 1)]),
       markReady,
       mintDeps: makeMintDeps(),
+      clock: () => now,
     }
 
     await startupReconcile(deps)
@@ -736,8 +838,8 @@ describe('startSweeper — periodic ticks', () => {
     expect(clearedIds).toHaveLength(2)
   })
 
-  test('reconcile tick revokes stale ghact- keys via injected setInterval', async () => {
-    const staleKey = 'ghact-run-reconcile-tick-abc'
+  test('reconcile tick revokes expired ghact- keys via injected setInterval', async () => {
+    const staleKey = ghactKey('run-reconcile-tick', Date.now() - 1)
     let reconcileTickFn: (() => void) | undefined
     let callCount = 0
 

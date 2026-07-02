@@ -8,7 +8,7 @@
 import type {FetchFn} from './mint'
 
 import {describe, expect, mock, test} from 'bun:test'
-import {listApiKeys, mintKey, revokeKey} from './mint'
+import {listApiKeys, mintKey, parseKeyExpiry, revokeKey} from './mint'
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -16,6 +16,9 @@ import {listApiKeys, mintKey, revokeKey} from './mint'
 
 const TEST_URL = 'https://cliproxy.example.test'
 const TEST_KEY = 'test-management-key'
+
+/** A representative future expiry (epoch ms) for tests that don't care about the exact value. */
+const TEST_EXPIRY = Date.now() + 30 * 60 * 1000
 
 /** Build a minimal deps object with a custom fetch mock. */
 function makeDeps(fetchFn: FetchFn) {
@@ -77,7 +80,7 @@ describe('mintKey — happy path', () => {
     const existingKeys = ['existing-key-1', 'existing-key-2']
     const store = [...existingKeys]
 
-    const key = await mintKey('run-123', makeDeps(makeStoreFetch(store)))
+    const key = await mintKey('run-123', TEST_EXPIRY, makeDeps(makeStoreFetch(store)))
 
     // Key has the greppable prefix
     expect(key).toMatch(/^ghact-run-123-/)
@@ -97,7 +100,7 @@ describe('mintKey — happy path', () => {
   test('GET-back confirms the new key is present before returning', async () => {
     const store: string[] = []
 
-    const key = await mintKey('run-456', makeDeps(makeStoreFetch(store)))
+    const key = await mintKey('run-456', TEST_EXPIRY, makeDeps(makeStoreFetch(store)))
 
     expect(store).toContain(key)
     expect(key).toMatch(/^ghact-run-456-/)
@@ -114,7 +117,7 @@ describe('mintKey — preserves existing keys', () => {
     const existingKeys = Array.from({length: N}, (_, i) => `key-${i}`)
     const store = [...existingKeys]
 
-    const key = await mintKey('run-preserve', makeDeps(makeStoreFetch(store)))
+    const key = await mintKey('run-preserve', TEST_EXPIRY, makeDeps(makeStoreFetch(store)))
 
     expect(store).toHaveLength(N + 1)
     expect(store).toContain(key)
@@ -126,7 +129,7 @@ describe('mintKey — preserves existing keys', () => {
   test('works when existing api-keys list is empty', async () => {
     const store: string[] = []
 
-    const key = await mintKey('run-empty', makeDeps(makeStoreFetch(store)))
+    const key = await mintKey('run-empty', TEST_EXPIRY, makeDeps(makeStoreFetch(store)))
 
     expect(store).toHaveLength(1)
     expect(store[0]).toBe(key)
@@ -157,7 +160,7 @@ describe('mintKey — GET-back mismatch retry', () => {
       throw new Error(`Unexpected fetch: ${method} ${urlStr}`)
     })
 
-    await expect(mintKey('run-mismatch', makeDeps(fetchMock))).rejects.toThrow(
+    await expect(mintKey('run-mismatch', TEST_EXPIRY, makeDeps(fetchMock))).rejects.toThrow(
       /read-back.*not found|not found.*read-back|key not present|mismatch/i,
     )
   })
@@ -191,7 +194,7 @@ describe('mintKey — GET-back mismatch retry', () => {
       throw new Error(`Unexpected fetch: ${method} ${urlStr}`)
     })
 
-    const key = await mintKey('run-retry', makeDeps(fetchMock))
+    const key = await mintKey('run-retry', TEST_EXPIRY, makeDeps(fetchMock))
 
     expect(key).toMatch(/^ghact-run-retry-/)
     expect(store).toContain(key)
@@ -211,7 +214,7 @@ describe('mintKey — HTTP errors throw immediately', () => {
       return errorResponse(401, 'Unauthorized')
     })
 
-    await expect(mintKey('run-401', makeDeps(fetchMock))).rejects.toThrow(/401/)
+    await expect(mintKey('run-401', TEST_EXPIRY, makeDeps(fetchMock))).rejects.toThrow(/401/)
 
     // Only one call — no retry on auth failure
     expect(callCount).toBe(1)
@@ -225,7 +228,7 @@ describe('mintKey — HTTP errors throw immediately', () => {
       return errorResponse(403, 'Forbidden')
     })
 
-    await expect(mintKey('run-403', makeDeps(fetchMock))).rejects.toThrow(/403/)
+    await expect(mintKey('run-403', TEST_EXPIRY, makeDeps(fetchMock))).rejects.toThrow(/403/)
 
     expect(callCount).toBe(1)
   })
@@ -238,7 +241,7 @@ describe('mintKey — HTTP errors throw immediately', () => {
       return errorResponse(500, 'Internal Server Error')
     })
 
-    await expect(mintKey('run-500', makeDeps(fetchMock))).rejects.toThrow(/500/)
+    await expect(mintKey('run-500', TEST_EXPIRY, makeDeps(fetchMock))).rejects.toThrow(/500/)
 
     expect(callCount).toBe(1)
   })
@@ -289,8 +292,8 @@ describe('mintKey — unique prefix per run', () => {
     const store1: string[] = []
     const store2: string[] = []
 
-    const key1 = await mintKey('run-aaa', makeDeps(makeStoreFetch(store1)))
-    const key2 = await mintKey('run-bbb', makeDeps(makeStoreFetch(store2)))
+    const key1 = await mintKey('run-aaa', TEST_EXPIRY, makeDeps(makeStoreFetch(store1)))
+    const key2 = await mintKey('run-bbb', TEST_EXPIRY, makeDeps(makeStoreFetch(store2)))
 
     expect(key1).toMatch(/^ghact-run-aaa-/)
     expect(key2).toMatch(/^ghact-run-bbb-/)
@@ -301,8 +304,8 @@ describe('mintKey — unique prefix per run', () => {
     const store1: string[] = []
     const store2: string[] = []
 
-    const key1 = await mintKey('run-same', makeDeps(makeStoreFetch(store1)))
-    const key2 = await mintKey('run-same', makeDeps(makeStoreFetch(store2)))
+    const key1 = await mintKey('run-same', TEST_EXPIRY, makeDeps(makeStoreFetch(store1)))
+    const key2 = await mintKey('run-same', TEST_EXPIRY, makeDeps(makeStoreFetch(store2)))
 
     expect(key1).toMatch(/^ghact-run-same-/)
     expect(key2).toMatch(/^ghact-run-same-/)
@@ -346,7 +349,10 @@ describe('mintKey — single-flight lock (concurrency)', () => {
     const deps = makeDeps(fetchMock)
 
     // Fire both mints concurrently
-    const [key1, key2] = await Promise.all([mintKey('run-concurrent-1', deps), mintKey('run-concurrent-2', deps)])
+    const [key1, key2] = await Promise.all([
+      mintKey('run-concurrent-1', TEST_EXPIRY, deps),
+      mintKey('run-concurrent-2', TEST_EXPIRY, deps),
+    ])
 
     // Both keys must be present in the final store
     expect(sharedStore).toContain(key1)
@@ -396,11 +402,11 @@ describe('mintKey — single-flight lock (concurrency)', () => {
     const deps = makeDeps(fetchMock)
 
     // First mint to get a key to revoke
-    const keyToRevoke = await mintKey('run-serial-1', deps)
+    const keyToRevoke = await mintKey('run-serial-1', TEST_EXPIRY, deps)
     expect(sharedStore).toContain(keyToRevoke)
 
     // Now run a mint and a revoke concurrently
-    const [key2] = await Promise.all([mintKey('run-serial-2', deps), revokeKey(keyToRevoke, deps)])
+    const [key2] = await Promise.all([mintKey('run-serial-2', TEST_EXPIRY, deps), revokeKey(keyToRevoke, deps)])
 
     // The new key must be present
     expect(sharedStore).toContain(key2)
@@ -446,7 +452,10 @@ describe('listApiKeys — exported helper', () => {
     const deps = makeDeps(fetchMock)
 
     // Fire a mint and a listApiKeys concurrently
-    const [mintedKey, listedKeys] = await Promise.all([mintKey('run-list-concurrent', deps), listApiKeys(deps)])
+    const [mintedKey, listedKeys] = await Promise.all([
+      mintKey('run-list-concurrent', TEST_EXPIRY, deps),
+      listApiKeys(deps),
+    ])
 
     // The listed keys should include the pre-existing key
     expect(listedKeys).toContain('pre-existing')
@@ -462,21 +471,21 @@ describe('listApiKeys — exported helper', () => {
 describe('mintKey — CSPRNG suffix', () => {
   test('minted key suffix is hex-encoded (no Math.random base36 chars like z)', async () => {
     const store: string[] = []
-    const key = await mintKey('run-csprng', makeDeps(makeStoreFetch(store)))
+    const key = await mintKey('run-csprng', TEST_EXPIRY, makeDeps(makeStoreFetch(store)))
 
-    // Format: ghact-<runId>-<hex>
-    expect(key).toMatch(/^ghact-run-csprng-[0-9a-f]+$/)
+    // Format: ghact-<runId>-<expiresAtEpochMs>-<hex>
+    expect(key).toMatch(/^ghact-run-csprng-\d+-[0-9a-f]+$/)
   })
 
   test('two mints for the same runId produce different hex suffixes', async () => {
     const store1: string[] = []
     const store2: string[] = []
 
-    const key1 = await mintKey('run-same-id', makeDeps(makeStoreFetch(store1)))
-    const key2 = await mintKey('run-same-id', makeDeps(makeStoreFetch(store2)))
+    const key1 = await mintKey('run-same-id', TEST_EXPIRY, makeDeps(makeStoreFetch(store1)))
+    const key2 = await mintKey('run-same-id', TEST_EXPIRY, makeDeps(makeStoreFetch(store2)))
 
-    expect(key1).toMatch(/^ghact-run-same-id-[0-9a-f]+$/)
-    expect(key2).toMatch(/^ghact-run-same-id-[0-9a-f]+$/)
+    expect(key1).toMatch(/^ghact-run-same-id-\d+-[0-9a-f]+$/)
+    expect(key2).toMatch(/^ghact-run-same-id-\d+-[0-9a-f]+$/)
     expect(key1).not.toBe(key2)
   })
 
@@ -484,7 +493,7 @@ describe('mintKey — CSPRNG suffix', () => {
     const keys = new Set<string>()
     for (let i = 0; i < 100; i++) {
       const store: string[] = []
-      const key = await mintKey('run-collision', makeDeps(makeStoreFetch(store)))
+      const key = await mintKey('run-collision', TEST_EXPIRY, makeDeps(makeStoreFetch(store)))
       keys.add(key)
     }
     // All 100 keys must be unique
@@ -504,7 +513,7 @@ describe('mintKey — no secret leakage in errors', () => {
 
     let thrownError: Error | undefined
     try {
-      await mintKey('run-leak-check', makeDeps(fetchMock))
+      await mintKey('run-leak-check', TEST_EXPIRY, makeDeps(fetchMock))
     } catch (error) {
       thrownError = error instanceof Error ? error : new Error(String(error))
     }
@@ -512,5 +521,54 @@ describe('mintKey — no secret leakage in errors', () => {
     expect(thrownError).toBeDefined()
     // The management key value must not appear in the error message
     expect(thrownError?.message).not.toContain(TEST_KEY)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// mintKey — embedded expiry matches the caller-supplied value
+// ---------------------------------------------------------------------------
+
+describe('mintKey — embedded expiry matches caller-supplied value', () => {
+  test('the generated key embeds exactly the expiresAt passed to mintKey', async () => {
+    const store: string[] = []
+    const expiresAt = Date.now() + 45 * 60 * 1000
+
+    const key = await mintKey('run-expiry-match', expiresAt, makeDeps(makeStoreFetch(store)))
+
+    expect(parseKeyExpiry(key)).toBe(expiresAt)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseKeyExpiry — pure unit tests
+// ---------------------------------------------------------------------------
+
+describe('parseKeyExpiry', () => {
+  test('returns the embedded expiry for a well-formed ghact- key', () => {
+    expect(parseKeyExpiry('ghact-run123-1750000000000-abcd1234')).toBe(1750000000000)
+  })
+
+  test('returns null for a non-ghact- key', () => {
+    expect(parseKeyExpiry('sk-ant-durable-key-abc123')).toBeNull()
+  })
+
+  test('returns null for a ghact- key with a non-numeric expiry segment (legacy format)', () => {
+    // Legacy/malformed: ghact-<runId>-<hex> with no numeric expiry segment.
+    expect(parseKeyExpiry('ghact-run123-abcd1234')).toBeNull()
+  })
+
+  test('returns null for a ghact- key missing the random suffix entirely', () => {
+    expect(parseKeyExpiry('ghact-run123-1750000000000')).toBeNull()
+  })
+
+  test('parses correctly when runId itself contains hyphens and digits', () => {
+    // runId = "run-42-abc-99"; anchors on the LAST two segments.
+    const key = 'ghact-run-42-abc-99-1750000000000-deadbeef'
+    expect(parseKeyExpiry(key)).toBe(1750000000000)
+  })
+
+  test('returns null when the hex suffix contains non-hex characters', () => {
+    // 'z' is not a valid hex digit — this must NOT best-effort parse.
+    expect(parseKeyExpiry('ghact-run123-1750000000000-zzzz')).toBeNull()
   })
 })

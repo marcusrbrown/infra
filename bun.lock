@@ -19,7 +19,7 @@
         "eslint-plugin-prettier": "5.5.6",
         "jiti": "2.7.0",
         "lint-staged": "17.0.8",
-        "prettier": "3.8.5",
+        "prettier": "3.9.1",
         "simple-git-hooks": "2.13.1",
         "typescript": "6.0.3",
       },
@@ -76,7 +76,7 @@
       },
       "dependencies": {
         "@clack/prompts": "^1.2.0",
-        "@goke/mcp": "^0.0.10",
+        "@goke/mcp": "^0.0.11",
         "goke": "^6.3.2",
         "string-dedent": "^3.0.2",
         "zod": "^4.3.6",
@@ -226,7 +226,7 @@
 
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.7.2", "", { "dependencies": { "@eslint/core": "^1.2.1", "levn": "^0.4.1" } }, "sha512-+CNAzxglkrpNf/kKywqQfk74QjtceuOE7Qm+AF8miRvPF/wmmK5+OJOgVh3AVTT3RP2mH3+FOaxlE5v72owk0A=="],
 
-    "@goke/mcp": ["@goke/mcp@0.0.10", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.0.0", "js-yaml": "^4.1.1" }, "peerDependencies": { "goke": "*" } }, "sha512-BKDVBo1bhGtJwCXFkWMJe0cgcZutEjt5o04RspJu8v7w4I/PVJ8AAlcqjvUKEo6CqA/jmrcp5xvnAkHMbdoD4Q=="],
+    "@goke/mcp": ["@goke/mcp@0.0.11", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.0.0", "js-yaml": "^4.1.1" }, "peerDependencies": { "goke": "*" } }, "sha512-bl64ebV5fgWy6ICkRtCQZx3QU0X2RWGU0SPaznz4BLDUOl1ifroGmkf+tXtMRmvqduvYox3yMLlKj2O/nc0QPA=="],
 
     "@hono/node-server": ["@hono/node-server@1.19.12", "", { "peerDependencies": { "hono": "^4" } }, "sha512-txsUW4SQ1iilgE0l9/e9VQWmELXifEFvmdA1j6WFh/aFPj99hIntrSsq/if0UWyGVkmrRPKA1wCeP+UCr1B9Uw=="],
 
@@ -952,7 +952,7 @@
 
     "prelude-ls": ["prelude-ls@1.2.1", "", {}, "sha512-vkcDPrRZo1QZLbn5RLGPpg/WmIQ65qoWWhcGKf/b5eplkkarX0m9z8ppCat4mlOqUsWpyNuYgO3VRyrYHSzX5g=="],
 
-    "prettier": ["prettier@3.8.5", "", { "bin": { "prettier": "bin/prettier.cjs" } }, "sha512-zxcTTCedNGJM4R8sj/Cq/F0W/c4iE0afWBcBwMTRtw4WHYP9TWkYjdiH3npPRUYsXQCPR0hTU9yjovOu+E6EQA=="],
+    "prettier": ["prettier@3.9.1", "", { "bin": { "prettier": "bin/prettier.cjs" } }, "sha512-ppiDo2CSwexck1eyZUwJHg/N3nf1+6IRCv7W/VJ5vaLnVCmB7+3CdRfMwoCHBBX6xTrREDTksZ4OZl5SSf4zXA=="],
 
     "prettier-linter-helpers": ["prettier-linter-helpers@1.0.1", "", { "dependencies": { "fast-diff": "^1.1.2" } }, "sha512-SxToR7P8Y2lWmv/kTzVLC1t/GDI2WGjMwNhLLE9qtH8Q13C+aEmuRlzDst4Up4s0Wc8sF2M+J57iB3cMLqftfg=="],
 

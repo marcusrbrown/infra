@@ -8,6 +8,6 @@
   },
   "dependencies": {
     "@marcusrbrown/infra-shared": "workspace:*",
-    "jose": "^5.0.0"
+    "jose": "^6.0.0"
   }
 }

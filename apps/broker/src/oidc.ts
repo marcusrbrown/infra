@@ -1,4 +1,4 @@
-import type {JWTPayload, JWTVerifyOptions, KeyLike} from 'jose'
+import type {CryptoKey, JWTPayload, JWTVerifyOptions} from 'jose'
 /**
  * OIDC JWT verification for GitHub Actions tokens.
  *
@@ -114,7 +114,7 @@ export function clearReplayDenylist(): void {
 type JwksFunction = (
   protectedHeader: {kid?: string; alg?: string},
   token?: {payload: Uint8Array; signature: Uint8Array},
-) => Promise<KeyLike | Uint8Array> | KeyLike | Uint8Array
+) => Promise<CryptoKey | Uint8Array> | CryptoKey | Uint8Array
 
 // ---------------------------------------------------------------------------
 // Verification options

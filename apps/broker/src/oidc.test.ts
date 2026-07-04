@@ -4,7 +4,7 @@
  * All tests use a throwaway RS256 keypair and a local JWKS stub — no network calls.
  */
 import {afterEach, beforeAll, describe, expect, test} from 'bun:test'
-import {generateKeyPair, SignJWT, type KeyLike} from 'jose'
+import {generateKeyPair, SignJWT, type CryptoKey} from 'jose'
 import {assertNotReplayed, clearReplayDenylist, verifyOidcToken} from './oidc'
 
 // ---------------------------------------------------------------------------
@@ -23,8 +23,8 @@ function toBase64Url(input: string): string {
 // Test keypair + JWKS stub
 // ---------------------------------------------------------------------------
 
-let privateKey: KeyLike
-let publicKey: KeyLike
+let privateKey: CryptoKey
+let publicKey: CryptoKey
 
 const TEST_KID = 'test-key-1'
 const TEST_ISS = 'https://token.actions.githubusercontent.com'
@@ -66,7 +66,7 @@ function baseClaims() {
 async function signJwt(
   claims: Record<string, unknown>,
   opts: {
-    privateKey?: KeyLike
+    privateKey?: CryptoKey
     kid?: string
     alg?: string
     exp?: number

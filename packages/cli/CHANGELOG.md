@@ -1,5 +1,24 @@
 # @marcusrbrown/infra
 
+## 0.13.15
+### Patch Changes
+
+
+- 📦 Update GitHub Actions workflow dependencies: `@aws-sdk/client-lightsail`, `dorny/paths-filter` ([#752](https://github.com/marcusrbrown/infra/pull/752))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.49` to `7.2.50` ([#762](https://github.com/marcusrbrown/infra/pull/762))
+
+
+- ⚠️ Update npm dependency `jose` to `^6.0.0` ([#759](https://github.com/marcusrbrown/infra/pull/759))
+  
+  ⚠️ **Breaking Changes**: This update includes breaking changes that may require code modifications.
+
+- 🐳 Update Docker image `postgres` ([#757](https://github.com/marcusrbrown/infra/pull/757))
+
+
+- 📦 Update npm dependency `@aws-sdk/client-lightsail` from `3.1076.0` to `3.1077.0` ([#765](https://github.com/marcusrbrown/infra/pull/765))
+
 ## 0.13.14
 ### Patch Changes
 

@@ -62,7 +62,7 @@
     "apps/vpn": {
       "name": "@marcusrbrown/infra-vpn",
       "dependencies": {
-        "@aws-sdk/client-lightsail": "3.1077.0",
+        "@aws-sdk/client-lightsail": "3.1078.0",
         "@marcusrbrown/infra": "workspace:*",
         "@marcusrbrown/infra-shared": "workspace:*",
         "zod": "^4.3.6",
@@ -70,7 +70,7 @@
     },
     "packages/cli": {
       "name": "@marcusrbrown/infra",
-      "version": "0.13.14",
+      "version": "0.13.15",
       "bin": {
         "infra": "./dist/cli.js",
       },
@@ -100,7 +100,7 @@
     "@changesets/get-github-info@0.6.0": "patches/@changesets%2Fget-github-info@0.6.0.patch",
   },
   "packages": {
-    "@aws-sdk/client-lightsail": ["@aws-sdk/client-lightsail@3.1077.0", "", { "dependencies": { "@aws-sdk/core": "^3.974.25", "@aws-sdk/credential-provider-node": "^3.972.60", "@aws-sdk/types": "^3.973.14", "@smithy/core": "^3.28.0", "@smithy/fetch-http-handler": "^5.6.1", "@smithy/node-http-handler": "^4.9.1", "@smithy/types": "^4.15.0", "tslib": "^2.6.2" } }, "sha512-Lb7S5f6oMbXRe6BjBsnIWCnqoLJvDKbXPuLDYwY2mHdCkz3yAQfQYYbjY6gUqCC2U0jINuWmZyfDlaeciB4iGQ=="],
+    "@aws-sdk/client-lightsail": ["@aws-sdk/client-lightsail@3.1078.0", "", { "dependencies": { "@aws-sdk/core": "^3.974.26", "@aws-sdk/credential-provider-node": "^3.972.61", "@aws-sdk/types": "^3.973.15", "@smithy/core": "^3.29.0", "@smithy/fetch-http-handler": "^5.6.2", "@smithy/node-http-handler": "^4.9.2", "@smithy/types": "^4.15.1", "tslib": "^2.6.2" } }, "sha512-/dpxGNr4uqPYIzb8PxqTFHRlVb97d9a1ZwvSrGo4LTBCmcqoEzV5QAPkLxzdPKTiHX1ktrfnji6i21z3URAONA=="],
 
     "@aws-sdk/core": ["@aws-sdk/core@3.974.27", "", { "dependencies": { "@aws-sdk/types": "^3.973.15", "@aws-sdk/xml-builder": "^3.972.33", "@aws/lambda-invoke-store": "^0.3.0", "@smithy/core": "^3.29.0", "@smithy/signature-v4": "^5.6.1", "@smithy/types": "^4.15.1", "bowser": "^2.11.0", "tslib": "^2.6.2" } }, "sha512-WRWEgIq6vx+NU6ot3VrRu4Jovj9MIObitSi6of/GV5THDDPccBhivCRNkWJutMM+m3GvdeI3l/UbGNcoOobxOA=="],
 

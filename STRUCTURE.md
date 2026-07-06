@@ -10,7 +10,7 @@ Where things live and where to put new code. For system shape, data flow, and in
 │   ├── cliproxy/               CLIProxyAPI Claude proxy (DigitalOcean + Docker Compose)
 │   ├── gateway/                Fro Bot Discord gateway (DigitalOcean + Docker Compose)
 │   ├── umami/                  Umami analytics (DigitalOcean + Docker Compose)
-│   ├── dashboard/              Fro Bot monitoring dashboard (DigitalOcean + Docker Compose + GHCR image build)
+│   ├── dashboard/              Fro Bot monitoring dashboard (DigitalOcean + Docker Compose)
 │   ├── vpn/                    WireGuard egress box (AWS Lightsail eu-west-1, native wg-quick@wg0)
 │   └── broker/                 OIDC credential broker (DigitalOcean + Docker Compose)
 ├── packages/                   Reusable libraries (never import from apps/)

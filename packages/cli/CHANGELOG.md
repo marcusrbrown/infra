@@ -1,5 +1,14 @@
 # @marcusrbrown/infra
 
+## 0.13.16
+### Patch Changes
+
+
+- 📦 Update npm dependency `@aws-sdk/client-lightsail` from `3.1078.0` to `3.1079.0` ([#778](https://github.com/marcusrbrown/infra/pull/778))
+
+
+- 📦 Update GitHub Actions workflow dependencies: `@aws-sdk/client-lightsail`, `fro-bot/agent` ([#773](https://github.com/marcusrbrown/infra/pull/773))
+
 ## 0.13.15
 ### Patch Changes
 

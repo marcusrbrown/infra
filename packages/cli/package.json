@@ -1,6 +1,6 @@
 {
   "name": "@marcusrbrown/infra",
-  "version": "0.13.16",
+  "version": "0.13.17",
   "description": "Infrastructure management CLI — deploy automation, health checks, and MCP bridge",
   "keywords": [
     "infra",

@@ -1,5 +1,32 @@
 # @marcusrbrown/infra
 
+## 0.13.17
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.57` to `7.2.58` ([#798](https://github.com/marcusrbrown/infra/pull/798))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.51` to `7.2.52` ([#786](https://github.com/marcusrbrown/infra/pull/786))
+
+
+- 📦 Update GitHub Actions workflow dependencies: `@aws-sdk/client-lightsail`, `fro-bot/agent` ([#797](https://github.com/marcusrbrown/infra/pull/797))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.50` to `7.2.51` ([#781](https://github.com/marcusrbrown/infra/pull/781))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.53` to `7.2.54` ([#792](https://github.com/marcusrbrown/infra/pull/792))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.55` to `7.2.57` ([#796](https://github.com/marcusrbrown/infra/pull/796))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.52` to `7.2.53` ([#790](https://github.com/marcusrbrown/infra/pull/790))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.54` to `7.2.55` ([#795](https://github.com/marcusrbrown/infra/pull/795))
+
 ## 0.13.16
 ### Patch Changes
 

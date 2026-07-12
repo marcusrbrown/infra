@@ -42,7 +42,7 @@ GitHub Apps support multiple simultaneously active private keys — this is what
 2. **Seed the new value via stdin pipe** — never shell substitution (`--body "$(cat ...)"`), which corrupts secrets with trailing newlines and exposes the value in process argv (see `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md`):
 
    ```bash
-   printf '%s' "$(cat new-private-key.pem)" | gh secret set --env gateway GH_APP_PRIVATE_KEY
+   gh secret set --env gateway GH_APP_PRIVATE_KEY < new-private-key.pem
    ```
 
    Update the local `.env` copy the same way if you deploy locally. Delete the downloaded PEM file (`rm -f new-private-key.pem`) once seeded.
@@ -64,7 +64,7 @@ GitHub Apps support multiple simultaneously active private keys — this is what
 
    Then run the `/fro-bot add-project` clone smoke against a repo the App is installed on — confirm the clone completes without error. This is the only proof the new key actually works end-to-end (see the post-cutover verification ritual in `apps/gateway/AGENTS.md`).
 
-6. **Delete the old key** in the App settings portal only after step 5 passes. Deleting a key invalidates all installation tokens minted from it and rejects any new JWT signed with it.
+6. **Delete the old key** in the App settings portal only after step 5 passes. Deleting a key rejects any new JWT signed with it, blocking new token mints immediately; installation tokens already minted from it keep working until their own ≤1h expiry (see [In-flight request handling](#in-flight-request-handling)).
 
 7. **Scrub shell history** if the PEM ever touched a command line:
 
@@ -140,7 +140,7 @@ If you're responding to an incident that might touch more than one of these, tre
 
 ## Related
 
-- [`apps/gateway/AGENTS.md`](../apps/gateway/AGENTS.md) — `### GitHub App` section, deploy flow, provisioning, anti-patterns
+- [`apps/gateway/AGENTS.md`](../../apps/gateway/AGENTS.md) — `### GitHub App` section, deploy flow, provisioning, anti-patterns
 - [`docs/runbooks/discord-token-lifecycle.md`](discord-token-lifecycle.md) — secret file mapping mechanism, checksum-gated `--force-recreate`, stdin-pipe seeding pattern
 - [`docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md`](../solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md) — `gh secret set` shell-substitution corruption warning; PEM newline gotcha
 - `apps/gateway/src/deploy.ts` line references:

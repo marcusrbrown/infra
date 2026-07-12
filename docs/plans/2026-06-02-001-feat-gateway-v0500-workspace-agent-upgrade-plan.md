@@ -1,7 +1,7 @@
 ---
 title: 'feat: Upgrade gateway daemon to fro-bot/agent v0.50.0 with workspace mention loop'
 type: feat
-status: active
+status: superseded
 date: 2026-06-02
 ---
 

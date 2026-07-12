@@ -1,7 +1,7 @@
 ---
 title: 'feat: Cut the gateway daemon over to fro-bot/agent v0.51.0 (workspace mention loop)'
 type: feat
-status: active
+status: completed
 date: 2026-06-03
 ---
 

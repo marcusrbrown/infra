@@ -1,7 +1,7 @@
 ---
 title: 'refactor: Dashboard consumes the released image by digest'
 type: refactor
-status: active
+status: completed
 date: 2026-06-15
 origin: docs/brainstorms/2026-06-15-dashboard-consume-released-image-requirements.md
 ---

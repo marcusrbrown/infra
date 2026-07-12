@@ -1,7 +1,7 @@
 ---
 title: 'feat: Add fro-bot dashboard deploy stack (apps/dashboard)'
 type: feat
-status: active
+status: completed
 date: 2026-06-15
 origin: docs/brainstorms/2026-06-15-dashboard-deploy-stack-requirements.md
 ---

@@ -1,7 +1,7 @@
 ---
 title: 'feat: Discord token-lifecycle runbook'
 type: feat
-status: active
+status: completed
 date: 2026-05-20
 origin: https://github.com/marcusrbrown/infra/issues/269
 ---

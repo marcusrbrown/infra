@@ -1,7 +1,7 @@
 ---
 title: 'feat: Add cliproxy models subcommand'
 type: feat
-status: active
+status: completed
 date: 2026-06-13
 origin: docs/brainstorms/2026-06-13-cliproxy-models-subcommand-requirements.md
 ---

@@ -1,7 +1,7 @@
 ---
 title: "feat: gateway v0.72.0 + dashboard 2026.06.34 operator UI go-live"
 type: feat
-status: active
+status: completed
 date: 2026-06-20
 ---
 

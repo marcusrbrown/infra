@@ -1,7 +1,7 @@
 ---
 title: "feat: Gateway operator auth/config secrets — wire GitHub OAuth, CSRF, and allowlist into deploy"
 type: feat
-status: active
+status: completed
 date: 2026-06-18
 ---
 

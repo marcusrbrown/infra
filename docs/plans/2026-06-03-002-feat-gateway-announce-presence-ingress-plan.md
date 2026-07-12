@@ -1,7 +1,7 @@
 ---
 title: "feat: Gateway announce/presence ingress (Caddy + announce secrets)"
 type: feat
-status: active
+status: completed
 date: 2026-06-03
 origin: docs/brainstorms/2026-06-03-gateway-announce-presence-ingress-requirements.md
 deepened: 2026-06-03

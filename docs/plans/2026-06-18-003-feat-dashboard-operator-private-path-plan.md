@@ -1,7 +1,7 @@
 ---
 title: 'feat: Dashboard operator same-origin — private VPC path to the gateway operator listener'
 type: feat
-status: active
+status: completed
 date: 2026-06-18
 origin: docs/brainstorms/2026-06-18-dashboard-operator-private-path-requirements.md
 ---

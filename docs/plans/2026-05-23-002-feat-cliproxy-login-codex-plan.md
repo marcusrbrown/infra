@@ -1,7 +1,7 @@
 ---
 title: 'feat: cliproxy login codex'
 type: feat
-status: active
+status: completed
 date: 2026-05-23
 origin: docs/brainstorms/2026-05-23-cliproxy-login-codex-and-providers-requirements.md
 ---

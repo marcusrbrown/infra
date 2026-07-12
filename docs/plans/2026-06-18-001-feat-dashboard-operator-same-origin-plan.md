@@ -1,7 +1,7 @@
 ---
 title: "feat: Dashboard operator same-origin — ratify dashboard.fro.bot as the browser-visible operator API origin"
 type: feat
-status: active
+status: completed
 date: 2026-06-18
 ---
 

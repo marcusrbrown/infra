@@ -1,7 +1,7 @@
 ---
 title: 'fix: SSH identity-file support for droplet provisioning'
 type: fix
-status: active
+status: completed
 date: 2026-05-28
 ---
 

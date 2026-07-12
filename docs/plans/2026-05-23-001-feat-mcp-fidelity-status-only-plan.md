@@ -1,7 +1,7 @@
 ---
 title: MCP Fidelity for Read-Style CLI Commands
 type: feat
-status: active
+status: completed
 date: 2026-05-23
 origin: docs/brainstorms/2026-05-23-mcp-fidelity-status-only-requirements.md
 ---

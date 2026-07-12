@@ -1,7 +1,7 @@
 ---
 title: 'feat: cliproxy setup OpenAI provider opt-in'
 type: feat
-status: active
+status: completed
 date: 2026-05-25
 origin: docs/brainstorms/2026-05-25-fro-bot-openai-routing-opt-in-requirements.md
 ---

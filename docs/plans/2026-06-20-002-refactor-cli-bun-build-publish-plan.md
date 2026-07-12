@@ -1,7 +1,7 @@
 ---
 title: "refactor: bun build publish step for @marcusrbrown/infra (remove packages/cli → packages/shared boundary)"
 type: refactor
-status: active
+status: completed
 date: 2026-06-20
 origin: docs/brainstorms/2026-06-20-cli-bun-build-publish-requirements.md
 ---

@@ -1,7 +1,7 @@
 ---
 title: "feat: Dashboard Caddy SPA fallback for client-side deep links"
 type: feat
-status: active
+status: completed
 date: 2026-06-25
 ---
 

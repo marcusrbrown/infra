@@ -1,7 +1,7 @@
 ---
 title: 'feat: CLIProxyAPI v6 → v7 upgrade (minimal compatibility)'
 type: feat
-status: active
+status: completed
 date: 2026-05-29
 origin: docs/brainstorms/2026-05-29-cliproxy-v7-upgrade-requirements.md
 ---

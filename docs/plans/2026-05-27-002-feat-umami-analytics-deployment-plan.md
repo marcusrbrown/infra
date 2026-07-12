@@ -1,7 +1,7 @@
 ---
 title: 'feat: self-hosted Umami analytics deployment (apps/umami)'
 type: feat
-status: active
+status: completed
 date: 2026-05-27
 origin: 'GitHub issue #315 + Fro Bot triage (comment 4560738565)'
 deepened: 2026-05-27

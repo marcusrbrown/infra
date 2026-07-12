@@ -1,7 +1,7 @@
 ---
 title: "feat: Adopt fro-bot/agent v0.46.x — GitHub App secret materialization + cutover"
 type: feat
-status: active
+status: completed
 date: 2026-05-30
 ---
 

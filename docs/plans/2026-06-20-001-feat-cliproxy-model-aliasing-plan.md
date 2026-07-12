@@ -1,7 +1,7 @@
 ---
 title: "feat: CLIProxyAPI model aliasing for short-ID routing parity"
 type: feat
-status: active
+status: completed
 date: 2026-06-20
 origin: docs/brainstorms/2026-06-20-cliproxy-model-aliasing-requirements.md
 ---

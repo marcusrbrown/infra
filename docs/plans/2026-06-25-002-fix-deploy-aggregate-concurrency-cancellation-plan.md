@@ -1,7 +1,7 @@
 ---
 title: "fix: Stop aggregate deploy concurrency from cancelling gated deploys"
 type: fix
-status: active
+status: completed
 date: 2026-06-25
 ---
 

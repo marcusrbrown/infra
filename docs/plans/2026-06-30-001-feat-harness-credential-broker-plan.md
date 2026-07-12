@@ -1,7 +1,7 @@
 ---
 title: 'feat: Harness merge-agent credential broker'
 type: feat
-status: active
+status: completed
 date: 2026-06-30
 origin: docs/brainstorms/2026-06-30-harness-credential-broker-requirements.md
 ---

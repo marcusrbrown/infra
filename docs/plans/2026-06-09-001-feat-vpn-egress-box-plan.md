@@ -1,7 +1,7 @@
 ---
 title: 'feat: Add WireGuard VPN egress box (apps/vpn)'
 type: feat
-status: active
+status: completed
 date: 2026-06-09
 origin: docs/brainstorms/2026-06-09-vpn-egress-box-requirements.md
 ---

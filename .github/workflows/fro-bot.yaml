@@ -140,8 +140,14 @@ env:
        code-aware agent can catch:
        - Run `bun run lint` and report any failures.
        - Run `bunx tsc --noEmit` and report any type errors.
-       - Run `bun run --cwd apps/keeweb build` and verify the build
-         succeeds (dist/ contains index.html and config.json).
+       - Run `DROPBOX_APP_SECRET=placeholder bun run --cwd apps/keeweb build`
+         and verify the build succeeds (dist/ contains index.html and
+         config.json). The placeholder is required: the real secret is
+         scoped to the `keeweb` GitHub Environment and is intentionally
+         NOT available to this job, and build.ts fails closed in CI when
+         the value is empty. This job never deploys, so the placeholder
+         never reaches production. Do not report the missing secret as a
+         finding.
        - Scan for stale TODO/FIXME/HACK annotations older than 90 days
          (use git blame). Collect them into a single issue or update an
          existing "Stale TODOs" issue.
@@ -223,10 +229,16 @@ env:
           `bunx @marcusrbrown/infra cliproxy login claude`.
 
        Gateway:
-       - Check the most recent Deploy Gateway workflow run (deploy-gateway
-         job) on main. If it failed OR was cancelled/incomplete without a
-         later successful deploy (see STRANDED-DEPLOY CHECK), diagnose from
-         logs and open an issue.
+       - Check the most recent gateway deploy on main. AUTHORITATIVE
+         SIGNAL: the `deploy-gateway` JOB inside the Deploy router runs
+         (`gh run list --workflow=deploy.yaml`), same as every other app.
+         Standalone `deploy-gateway.yaml` workflow runs exist only for
+         rare manual dispatches and can be months stale — a red run there
+         is NOT evidence the pipeline is broken when later router runs
+         deployed the gateway successfully. If the latest router deploy
+         that touched the gateway failed OR was cancelled/incomplete
+         without a later successful deploy (see STRANDED-DEPLOY CHECK),
+         diagnose from logs and open an issue.
          Note: gateway has NO public HTTP surface — it connects outbound
          to Discord and S3 only. The deploy waits on docker compose
          service health, so a successful deploy run IS the health signal;

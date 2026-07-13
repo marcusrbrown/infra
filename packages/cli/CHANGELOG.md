@@ -1,5 +1,17 @@
 # @marcusrbrown/infra
 
+## 0.13.19
+### Patch Changes
+
+
+- 📦 Update npm dependency `@aws-sdk/client-lightsail` from `3.1083.0` to `3.1084.0` ([#828](https://github.com/marcusrbrown/infra/pull/828))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.67` to `7.2.68` ([#824](https://github.com/marcusrbrown/infra/pull/824))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.68` to `7.2.71` ([#826](https://github.com/marcusrbrown/infra/pull/826))
+
 ## 0.13.18
 ### Patch Changes
 

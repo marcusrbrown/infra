@@ -1858,7 +1858,7 @@ describe('no-version fallback', () => {
 describe('versioned deploy: writes local compose path after successful deploy', () => {
   const SAMPLE_COMPOSE_FOR_WRITE = `services:
   caddy:
-    image: caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
   dashboard:
     image: ghcr.io/fro-bot/dashboard:2026.06.15@sha256:${'a'.repeat(64)}

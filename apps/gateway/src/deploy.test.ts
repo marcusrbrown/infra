@@ -3539,7 +3539,7 @@ describe('buildComposeOverride', () => {
     expect(yaml).toContain('caddy_config')
   })
 
-  test('caddy image is pinned to the same digest as cliproxy (caddy:2.11.3-alpine@sha256:...)', async () => {
+  test('caddy image is pinned to the same digest as cliproxy (caddy:2.11.4-alpine@sha256:...)', async () => {
     const {buildComposeOverride} = await import('./deploy')
     const yaml = buildComposeOverride(OVERRIDE_OPTS_ANNOUNCE)
     // Must use a pinned digest (sha256:)

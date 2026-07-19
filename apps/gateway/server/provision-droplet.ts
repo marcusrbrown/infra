@@ -3,6 +3,13 @@
 import {join, resolve} from 'node:path'
 
 import {
+  GetBucketLifecycleConfigurationCommand,
+  PutBucketLifecycleConfigurationCommand,
+  S3Client,
+  type LifecycleRule,
+  type S3ClientConfig,
+} from '@aws-sdk/client-s3'
+import {
   dropletExists,
   getDropletIpWithWait,
   getSshFingerprint,
@@ -43,6 +50,161 @@ export interface DropletExistenceState {
 export function validateRequiredEnv(env: Partial<Record<string, string>>): string[] {
   const required = ['DIGITALOCEAN_ACCESS_TOKEN', 'GATEWAY_HOST']
   return required.filter(key => !env[key])
+}
+
+type LifecycleS3Client = Pick<S3Client, 'send'>
+type LifecycleEnv = Partial<Record<string, string>>
+
+export const RUN_STATE_LIFECYCLE_RULE: LifecycleRule = {
+  ID: 'run-state-30d-expiration',
+  Filter: {Tag: {Key: 'object-type', Value: 'run-state'}},
+  Status: 'Enabled',
+  Expiration: {Days: 30},
+}
+
+function isRunStateLifecycleRule(rule: LifecycleRule | undefined): boolean {
+  if (!rule) return false
+
+  if (
+    rule.ID !== RUN_STATE_LIFECYCLE_RULE.ID ||
+    rule.Status !== RUN_STATE_LIFECYCLE_RULE.Status ||
+    rule.Expiration?.Days !== RUN_STATE_LIFECYCLE_RULE.Expiration?.Days
+  ) {
+    return false
+  }
+
+  const filter = rule.Filter
+  if (!filter) return false
+
+  const hasTopLevelSizeConstraint =
+    filter.ObjectSizeGreaterThan !== undefined || filter.ObjectSizeLessThan !== undefined
+  const directTagIsCanonical =
+    filter.Tag?.Key === 'object-type' &&
+    filter.Tag.Value === 'run-state' &&
+    filter.And === undefined &&
+    filter.Prefix === undefined &&
+    !hasTopLevelSizeConstraint
+
+  if (directTagIsCanonical) return true
+
+  const and = filter.And
+  if (
+    !and ||
+    filter.Tag !== undefined ||
+    filter.Prefix !== undefined ||
+    hasTopLevelSizeConstraint ||
+    and.Prefix !== undefined ||
+    and.ObjectSizeGreaterThan !== undefined ||
+    and.ObjectSizeLessThan !== undefined ||
+    and.Tags?.length !== 1
+  ) {
+    return false
+  }
+
+  const [tag] = and.Tags
+  return tag?.Key === 'object-type' && tag.Value === 'run-state'
+}
+
+interface LifecycleSecret {
+  name: string
+  content: string
+}
+
+function redactLifecycleError(error: unknown, secrets: LifecycleSecret[]): Error {
+  const base = error instanceof Error ? error.message : String(error)
+  let sanitized = base
+  for (const secret of secrets) {
+    if (secret.content) {
+      const escaped = secret.content.replaceAll(/[$()*+.?[\\\]^{|}]/g, String.raw`\$&`)
+      sanitized = sanitized.replaceAll(new RegExp(escaped, 'g'), `<redacted:${secret.name}>`)
+    }
+  }
+  return new Error(sanitized)
+}
+
+/** Ensures AWS-native S3 expires tagged run-state objects after 30 days. */
+export async function ensureRunStateLifecycleRule(
+  env: LifecycleEnv,
+  client?: LifecycleS3Client,
+  log: (message: string) => void = message => console.warn(message),
+): Promise<void> {
+  if (env.S3_ENDPOINT?.trim()) {
+    log('skipped: custom S3 endpoint, run-state tagging not applied by daemon')
+    return
+  }
+
+  const required = ['S3_BUCKET', 'S3_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] as const
+  const missing = required.filter(key => !env[key]?.trim())
+  if (missing.length > 0) {
+    log(`skipped: missing S3 lifecycle environment variables (${missing.join(', ')})`)
+    return
+  }
+
+  const bucket = env.S3_BUCKET
+  const region = env.S3_REGION
+  const accessKeyId = env.AWS_ACCESS_KEY_ID
+  const secretAccessKey = env.AWS_SECRET_ACCESS_KEY
+  if (!bucket || !region || !accessKeyId || !secretAccessKey) return
+
+  const lifecycleSecrets: LifecycleSecret[] = [
+    {name: 'aws-access-key-id', content: accessKeyId},
+    {name: 'aws-secret-access-key', content: secretAccessKey},
+  ]
+  if (env.AWS_SESSION_TOKEN) {
+    lifecycleSecrets.push({name: 'aws-session-token', content: env.AWS_SESSION_TOKEN})
+  }
+
+  const s3 =
+    client ??
+    new S3Client({
+      region,
+      maxAttempts: 2,
+      credentials: {
+        accessKeyId,
+        secretAccessKey,
+        ...(env.AWS_SESSION_TOKEN ? {sessionToken: env.AWS_SESSION_TOKEN} : {}),
+      },
+    } satisfies S3ClientConfig)
+
+  const getConfig = async () => {
+    try {
+      return await s3.send(new GetBucketLifecycleConfigurationCommand({Bucket: bucket}))
+    } catch (error) {
+      if (error instanceof Error && error.name === 'NoSuchLifecycleConfiguration') return undefined
+      throw redactLifecycleError(error, lifecycleSecrets)
+    }
+  }
+
+  const existingRules: LifecycleRule[] = (await getConfig())?.Rules ?? []
+  const desiredRules = [
+    ...existingRules.filter(rule => rule.ID !== RUN_STATE_LIFECYCLE_RULE.ID),
+    RUN_STATE_LIFECYCLE_RULE,
+  ]
+  const existingRunStateRule = existingRules.find(rule => rule.ID === RUN_STATE_LIFECYCLE_RULE.ID)
+
+  if (existingRunStateRule && isRunStateLifecycleRule(existingRunStateRule)) {
+    log('S3 run-state lifecycle rule is already current')
+  } else {
+    try {
+      await s3.send(
+        new PutBucketLifecycleConfigurationCommand({
+          Bucket: bucket,
+          LifecycleConfiguration: {Rules: desiredRules},
+        }),
+      )
+    } catch (error) {
+      throw redactLifecycleError(error, lifecycleSecrets)
+    }
+  }
+
+  const readback = await getConfig()
+  if (!readback?.Rules?.some(isRunStateLifecycleRule)) {
+    throw new Error(
+      'S3 run-state lifecycle rule readback failed: run-state-30d-expiration is missing or incorrect. ' +
+        'Expected tag object-type=run-state, expiration Days=30, and Status=Enabled.',
+    )
+  }
+  log('S3 run-state lifecycle rule verified')
 }
 
 /**
@@ -426,6 +588,8 @@ export async function main(): Promise<void> {
     '--no-header',
   ])
   await setupOperatorFirewall(gatewayDropletId, process.env as Record<string, string>)
+
+  await ensureRunStateLifecycleRule(process.env)
 
   printOperatorSetupMessage(dropletIp, gatewayHost)
 }

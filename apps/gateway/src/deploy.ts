@@ -119,8 +119,36 @@ function isRunStateLifecycleRule(rule: LifecycleRule | undefined): boolean {
     return false
   }
 
-  const tags = [rule.Filter?.Tag, ...(rule.Filter?.And?.Tags ?? [])]
-  return tags.some(tag => tag?.Key === 'object-type' && tag.Value === 'run-state')
+  const filter = rule.Filter
+  if (!filter) return false
+
+  const hasTopLevelSizeConstraint =
+    filter.ObjectSizeGreaterThan !== undefined || filter.ObjectSizeLessThan !== undefined
+  const directTagIsCanonical =
+    filter.Tag?.Key === 'object-type' &&
+    filter.Tag.Value === 'run-state' &&
+    filter.And === undefined &&
+    filter.Prefix === undefined &&
+    !hasTopLevelSizeConstraint
+
+  if (directTagIsCanonical) return true
+
+  const and = filter.And
+  if (
+    !and ||
+    filter.Tag !== undefined ||
+    filter.Prefix !== undefined ||
+    hasTopLevelSizeConstraint ||
+    and.Prefix !== undefined ||
+    and.ObjectSizeGreaterThan !== undefined ||
+    and.ObjectSizeLessThan !== undefined ||
+    and.Tags?.length !== 1
+  ) {
+    return false
+  }
+
+  const [tag] = and.Tags
+  return tag?.Key === 'object-type' && tag.Value === 'run-state'
 }
 
 /** Ensures AWS-native S3 retains tagged run-state objects for 30 days. */

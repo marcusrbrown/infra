@@ -287,6 +287,60 @@ describe('ensureRunStateLifecycleRule', () => {
     await expect(ensureRunStateLifecycleRule(env, client)).resolves.toBeUndefined()
   })
 
+  test('repairs an And-wrapped tag filter that also contains a prefix', async () => {
+    const {ensureRunStateLifecycleRule} = await import('./deploy')
+    const driftedRule = {
+      ...canonicalRule,
+      Filter: {And: {Prefix: 'x/', Tags: [{Key: 'object-type', Value: 'run-state'}]}},
+    }
+    const {client, inputs} = makeS3Client([{Rules: [driftedRule]}, {Rules: [canonicalRule]}])
+
+    await ensureRunStateLifecycleRule(env, client)
+
+    const putInput = inputs.find(isPutLifecycleInput)
+    expect(putInput?.LifecycleConfiguration?.Rules).toEqual([canonicalRule])
+  })
+
+  test('repairs an And-wrapped filter containing an extra tag', async () => {
+    const {ensureRunStateLifecycleRule} = await import('./deploy')
+    const driftedRule = {
+      ...canonicalRule,
+      Filter: {
+        And: {
+          Tags: [
+            {Key: 'object-type', Value: 'run-state'},
+            {Key: 'something', Value: 'else'},
+          ],
+        },
+      },
+    }
+    const {client, inputs} = makeS3Client([{Rules: [driftedRule]}, {Rules: [canonicalRule]}])
+
+    await ensureRunStateLifecycleRule(env, client)
+
+    const putInput = inputs.find(isPutLifecycleInput)
+    expect(putInput?.LifecycleConfiguration?.Rules).toEqual([canonicalRule])
+  })
+
+  test('repairs a tag filter containing an object-size constraint', async () => {
+    const {ensureRunStateLifecycleRule} = await import('./deploy')
+    const driftedRule = {
+      ...canonicalRule,
+      Filter: {
+        And: {
+          ObjectSizeGreaterThan: 100,
+          Tags: [{Key: 'object-type', Value: 'run-state'}],
+        },
+      },
+    }
+    const {client, inputs} = makeS3Client([{Rules: [driftedRule]}, {Rules: [canonicalRule]}])
+
+    await ensureRunStateLifecycleRule(env, client)
+
+    const putInput = inputs.find(isPutLifecycleInput)
+    expect(putInput?.LifecycleConfiguration?.Rules).toEqual([canonicalRule])
+  })
+
   test('rejects readback with the wrong expiration days', async () => {
     const {ensureRunStateLifecycleRule} = await import('./deploy')
     const wrongDaysRule = {

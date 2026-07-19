@@ -109,7 +109,18 @@ interface LifecycleEnv {
 }
 
 function isRunStateLifecycleRule(rule: LifecycleRule | undefined): boolean {
-  return JSON.stringify(rule) === JSON.stringify(RUN_STATE_LIFECYCLE_RULE)
+  if (!rule) return false
+
+  if (
+    rule.ID !== RUN_STATE_LIFECYCLE_RULE.ID ||
+    rule.Status !== RUN_STATE_LIFECYCLE_RULE.Status ||
+    rule.Expiration?.Days !== RUN_STATE_LIFECYCLE_RULE.Expiration?.Days
+  ) {
+    return false
+  }
+
+  const tags = [rule.Filter?.Tag, ...(rule.Filter?.And?.Tags ?? [])]
+  return tags.some(tag => tag?.Key === 'object-type' && tag.Value === 'run-state')
 }
 
 /** Ensures AWS-native S3 retains tagged run-state objects for 30 days. */
@@ -123,45 +134,61 @@ export async function ensureRunStateLifecycleRule(
     return
   }
 
+  const s3Secrets: SecretFile[] = [
+    {name: 'aws-access-key-id', content: env.AWS_ACCESS_KEY_ID, required: true},
+    {name: 'aws-secret-access-key', content: env.AWS_SECRET_ACCESS_KEY, required: true},
+  ]
+  if (env.AWS_SESSION_TOKEN) {
+    s3Secrets.push({name: 'aws-session-token', content: env.AWS_SESSION_TOKEN, required: false})
+  }
+
   const s3 =
     client ??
     new S3Client({
       region: env.S3_REGION,
+      maxAttempts: 2,
       credentials: {
         accessKeyId: env.AWS_ACCESS_KEY_ID,
         secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+        ...(env.AWS_SESSION_TOKEN ? {sessionToken: env.AWS_SESSION_TOKEN} : {}),
       },
     } satisfies S3ClientConfig)
 
-  const getConfig = () => s3.send(new GetBucketLifecycleConfigurationCommand({Bucket: env.S3_BUCKET}))
-  let existingRules: LifecycleRule[]
-  try {
-    existingRules = (await getConfig()).Rules ?? []
-  } catch (error) {
-    if (error instanceof Error && error.name === 'NoSuchLifecycleConfiguration') {
-      existingRules = []
-    } else {
-      throw error
+  const getConfig = async () => {
+    try {
+      return await s3.send(new GetBucketLifecycleConfigurationCommand({Bucket: env.S3_BUCKET}))
+    } catch (error) {
+      if (error instanceof Error && error.name === 'NoSuchLifecycleConfiguration') {
+        return undefined
+      }
+      throw redactSecretsFromError(error, s3Secrets)
     }
   }
+
+  const existingRules: LifecycleRule[] = (await getConfig())?.Rules ?? []
 
   const desiredRules = [
     ...existingRules.filter(rule => rule.ID !== RUN_STATE_LIFECYCLE_RULE.ID),
     RUN_STATE_LIFECYCLE_RULE,
   ]
-  if (JSON.stringify(desiredRules) === JSON.stringify(existingRules)) {
+  const existingRunStateRule = existingRules.find(rule => rule.ID === RUN_STATE_LIFECYCLE_RULE.ID)
+  if (existingRunStateRule && isRunStateLifecycleRule(existingRunStateRule)) {
     log('S3 run-state lifecycle rule is already current')
   } else {
-    await s3.send(
-      new PutBucketLifecycleConfigurationCommand({
-        Bucket: env.S3_BUCKET,
-        LifecycleConfiguration: {Rules: desiredRules},
-      }),
-    )
+    try {
+      await s3.send(
+        new PutBucketLifecycleConfigurationCommand({
+          Bucket: env.S3_BUCKET,
+          LifecycleConfiguration: {Rules: desiredRules},
+        }),
+      )
+    } catch (error) {
+      throw redactSecretsFromError(error, s3Secrets)
+    }
   }
 
   const readback = await getConfig()
-  if (!readback.Rules?.some(isRunStateLifecycleRule)) {
+  if (!readback?.Rules?.some(isRunStateLifecycleRule)) {
     throw new Error(
       'S3 run-state lifecycle rule readback failed: run-state-30d-expiration is missing or incorrect. ' +
         'Expected tag object-type=run-state, expiration Days=30, and Status=Enabled.',

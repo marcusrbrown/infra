@@ -1,4 +1,7 @@
-import type {PutBucketLifecycleConfigurationCommandInput} from '@aws-sdk/client-s3'
+import type {
+  GetBucketLifecycleConfigurationCommandInput,
+  PutBucketLifecycleConfigurationCommandInput,
+} from '@aws-sdk/client-s3'
 import type {SpawnFn, SpawnResult} from './deploy'
 import {existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
@@ -160,15 +163,22 @@ const tcpConnectRefused = async (_host: string, _port: number): Promise<void> =>
   throw new Error('connect ECONNREFUSED')
 }
 
-function makeS3Client(responses: unknown[]) {
-  const inputs: unknown[] = []
+type S3CommandInput = GetBucketLifecycleConfigurationCommandInput | PutBucketLifecycleConfigurationCommandInput
+
+function isPutLifecycleInput(input: S3CommandInput): input is PutBucketLifecycleConfigurationCommandInput {
+  return 'LifecycleConfiguration' in input
+}
+
+function makeS3Client(responses: unknown[], putResponse: unknown = {}) {
+  const inputs: S3CommandInput[] = []
   return {
     inputs,
     client: {
-      send: async (command: {input: unknown}) => {
+      send: async (command: {input: S3CommandInput}) => {
         inputs.push(command.input)
-        if (typeof command.input === 'object' && command.input !== null && 'LifecycleConfiguration' in command.input) {
-          return {}
+        if (isPutLifecycleInput(command.input)) {
+          if (putResponse instanceof Error) throw putResponse
+          return putResponse
         }
         const response = responses.shift()
         if (response instanceof Error) throw response
@@ -204,9 +214,8 @@ describe('ensureRunStateLifecycleRule', () => {
 
     expect(inputs).toHaveLength(3)
     expect(inputs[0]).toEqual({Bucket: env.S3_BUCKET})
-    expect((inputs[1] as PutBucketLifecycleConfigurationCommandInput).LifecycleConfiguration?.Rules).toEqual([
-      canonicalRule,
-    ])
+    const putInput = inputs.find(isPutLifecycleInput)
+    expect(putInput?.LifecycleConfiguration?.Rules).toEqual([canonicalRule])
     expect(inputs[2]).toEqual({Bucket: env.S3_BUCKET})
   })
 
@@ -217,10 +226,8 @@ describe('ensureRunStateLifecycleRule', () => {
 
     await ensureRunStateLifecycleRule(env, client)
 
-    expect((inputs[1] as PutBucketLifecycleConfigurationCommandInput).LifecycleConfiguration?.Rules).toEqual([
-      unrelated,
-      canonicalRule,
-    ])
+    const putInput = inputs.find(isPutLifecycleInput)
+    expect(putInput?.LifecycleConfiguration?.Rules).toEqual([unrelated, canonicalRule])
   })
 
   test('does not PUT when the canonical rule is already current', async () => {
@@ -239,9 +246,8 @@ describe('ensureRunStateLifecycleRule', () => {
 
     await ensureRunStateLifecycleRule(env, client)
 
-    expect((inputs[1] as PutBucketLifecycleConfigurationCommandInput).LifecycleConfiguration?.Rules).toEqual([
-      canonicalRule,
-    ])
+    const putInput = inputs.find(isPutLifecycleInput)
+    expect(putInput?.LifecycleConfiguration?.Rules).toEqual([canonicalRule])
   })
 
   test('skips custom S3 endpoints without making S3 calls', async () => {
@@ -266,6 +272,58 @@ describe('ensureRunStateLifecycleRule', () => {
     const {RUN_STATE_LIFECYCLE_RULE} = await import('./deploy')
 
     expect(RUN_STATE_LIFECYCLE_RULE).toEqual(canonicalRule)
+  })
+
+  test('accepts normalized readback with an And-wrapped tag filter', async () => {
+    const {ensureRunStateLifecycleRule} = await import('./deploy')
+    const normalizedRule = {
+      Expiration: {Days: 30},
+      ID: 'run-state-30d-expiration',
+      Status: 'Enabled' as const,
+      Filter: {And: {Tags: [{Value: 'run-state', Key: 'object-type'}]}, ExpiredObjectDeleteMarker: false},
+    }
+    const {client} = makeS3Client([{Rules: [normalizedRule]}, {Rules: [normalizedRule]}])
+
+    await expect(ensureRunStateLifecycleRule(env, client)).resolves.toBeUndefined()
+  })
+
+  test('rejects readback with the wrong expiration days', async () => {
+    const {ensureRunStateLifecycleRule} = await import('./deploy')
+    const wrongDaysRule = {
+      ...canonicalRule,
+      Expiration: {Days: 7},
+    }
+    const {client} = makeS3Client([{Rules: [wrongDaysRule]}, {Rules: [wrongDaysRule]}])
+
+    await expect(ensureRunStateLifecycleRule(env, client)).rejects.toThrow(/readback/i)
+  })
+
+  test('creates the rule when the initial configuration has no Rules array', async () => {
+    const {ensureRunStateLifecycleRule} = await import('./deploy')
+    const {client} = makeS3Client([{}, {Rules: [canonicalRule]}])
+
+    await expect(ensureRunStateLifecycleRule(env, client)).resolves.toBeUndefined()
+  })
+
+  test('redacts S3 credential values from propagated errors', async () => {
+    const {ensureRunStateLifecycleRule} = await import('./deploy')
+    const secretEnv = {
+      ...env,
+      AWS_ACCESS_KEY_ID: 'fake-access-secret',
+      AWS_SECRET_ACCESS_KEY: 'fake-secret-value',
+      AWS_SESSION_TOKEN: 'fake-session-secret',
+    }
+    const {client} = makeS3Client([new Error('request failed: fake-secret-value')])
+
+    await expect(ensureRunStateLifecycleRule(secretEnv, client)).rejects.toThrow(/<redacted:aws-secret-access-key>/)
+  })
+
+  test('propagates and redacts PUT failures', async () => {
+    const {ensureRunStateLifecycleRule} = await import('./deploy')
+    const secretEnv = {...env, AWS_SECRET_ACCESS_KEY: 'put-secret-value'}
+    const {client} = makeS3Client([{Rules: []}], new Error('PUT failed: put-secret-value'))
+
+    await expect(ensureRunStateLifecycleRule(secretEnv, client)).rejects.toThrow(/<redacted:aws-secret-access-key>/)
   })
 })
 

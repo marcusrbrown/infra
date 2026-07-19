@@ -1,5 +1,5 @@
 import {existsSync} from 'node:fs'
-import {join, resolve} from 'node:path'
+import {isAbsolute, join, resolve} from 'node:path'
 
 // File-asset import: at source-run time Bun resolves this to the real
 // src/resources/known_hosts path. Under `bun build`, the bundler copies the
@@ -62,9 +62,13 @@ export function resolveKnownHostsPath(libDir?: string): string {
   if (existsSync(repoCandidate)) return repoCandidate
 
   // Layout 2: installed/bundled package — use the file-asset import path.
-  // At source-run time: resolves to src/resources/known_hosts.
-  // Under `bun build`: bundler copies asset to dist/ and rewrites this path.
-  if (existsSync(knownHostsAssetPath)) return knownHostsAssetPath
+  // At source-run time Bun returns an absolute path. Under `bun build`, the
+  // bundler returns a relative filename for the asset emitted beside the
+  // bundle, so resolve it relative to this module rather than process.cwd().
+  const assetPath = isAbsolute(knownHostsAssetPath)
+    ? knownHostsAssetPath
+    : resolve(import.meta.dir, knownHostsAssetPath)
+  if (existsSync(assetPath)) return assetPath
 
   throw new Error(FAIL_CLOSED_ERROR)
 }

@@ -13,7 +13,8 @@
  * Running the build as a subprocess sidesteps this entirely.
  */
 
-import {existsSync, statSync} from 'node:fs'
+import {existsSync, mkdirSync, rmSync, statSync} from 'node:fs'
+import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 
 import {afterAll, beforeAll, describe, expect, it} from 'bun:test'
@@ -89,6 +90,37 @@ describe('known_hosts asset', () => {
       expect(new Uint8Array(distBytes)).toEqual(new Uint8Array(srcBytes))
     }
   })
+
+  it('resolves the asset when the built CLI runs from a foreign working directory', async () => {
+    const foreignCwd = join(tmpdir(), `infra-cli-built-${Date.now()}`)
+    mkdirSync(foreignCwd, {recursive: true})
+
+    try {
+      const proc = Bun.spawn([process.execPath, join(distDir, 'cli.js'), 'gateway', 'status'], {
+        cwd: foreignCwd,
+        env: {
+          ...process.env,
+          GATEWAY_HOST: 'localhost',
+          NO_COLOR: '1',
+        },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ])
+
+      expect(`${stdout}\n${stderr}`).not.toContain(
+        'Pinned SSH known_hosts file not found; reinstall @marcusrbrown/infra or run from the repo checkout',
+      )
+      expect(`${stdout}\n${stderr}`).toContain('SSH command failed')
+      expect(exitCode).not.toBe(127)
+    } finally {
+      rmSync(foreignCwd, {recursive: true, force: true})
+    }
+  }, 60_000)
 })
 
 // ── Edge: inline/external split ───────────────────────────────────────────────

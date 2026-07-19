@@ -5,6 +5,13 @@ import {chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 
+import {
+  GetBucketLifecycleConfigurationCommand,
+  PutBucketLifecycleConfigurationCommand,
+  S3Client,
+  type LifecycleRule,
+  type S3ClientConfig,
+} from '@aws-sdk/client-s3'
 import {validateGatewayHost} from './host'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -82,6 +89,140 @@ export interface MainOpts {
 export interface DeployArgs {
   dryRun: boolean
   forceRecreate: boolean
+}
+
+export const RUN_STATE_LIFECYCLE_RULE: LifecycleRule = {
+  ID: 'run-state-30d-expiration',
+  Filter: {Tag: {Key: 'object-type', Value: 'run-state'}},
+  Status: 'Enabled',
+  Expiration: {Days: 30},
+}
+
+type LifecycleS3Client = Pick<S3Client, 'send'>
+interface LifecycleEnv {
+  [key: string]: string | undefined
+  S3_BUCKET: string
+  S3_REGION: string
+  AWS_ACCESS_KEY_ID: string
+  AWS_SECRET_ACCESS_KEY: string
+  S3_ENDPOINT?: string
+}
+
+function isRunStateLifecycleRule(rule: LifecycleRule | undefined): boolean {
+  if (!rule) return false
+
+  if (
+    rule.ID !== RUN_STATE_LIFECYCLE_RULE.ID ||
+    rule.Status !== RUN_STATE_LIFECYCLE_RULE.Status ||
+    rule.Expiration?.Days !== RUN_STATE_LIFECYCLE_RULE.Expiration?.Days
+  ) {
+    return false
+  }
+
+  const filter = rule.Filter
+  if (!filter) return false
+
+  const hasTopLevelSizeConstraint =
+    filter.ObjectSizeGreaterThan !== undefined || filter.ObjectSizeLessThan !== undefined
+  const directTagIsCanonical =
+    filter.Tag?.Key === 'object-type' &&
+    filter.Tag.Value === 'run-state' &&
+    filter.And === undefined &&
+    filter.Prefix === undefined &&
+    !hasTopLevelSizeConstraint
+
+  if (directTagIsCanonical) return true
+
+  const and = filter.And
+  if (
+    !and ||
+    filter.Tag !== undefined ||
+    filter.Prefix !== undefined ||
+    hasTopLevelSizeConstraint ||
+    and.Prefix !== undefined ||
+    and.ObjectSizeGreaterThan !== undefined ||
+    and.ObjectSizeLessThan !== undefined ||
+    and.Tags?.length !== 1
+  ) {
+    return false
+  }
+
+  const [tag] = and.Tags
+  return tag?.Key === 'object-type' && tag.Value === 'run-state'
+}
+
+/** Ensures AWS-native S3 retains tagged run-state objects for 30 days. */
+export async function ensureRunStateLifecycleRule(
+  env: LifecycleEnv,
+  client?: LifecycleS3Client,
+  log: (message: string) => void = message => console.warn(message),
+): Promise<void> {
+  if (env.S3_ENDPOINT) {
+    log('skipped: custom S3 endpoint, run-state tagging not applied by daemon')
+    return
+  }
+
+  const s3Secrets: SecretFile[] = [
+    {name: 'aws-access-key-id', content: env.AWS_ACCESS_KEY_ID, required: true},
+    {name: 'aws-secret-access-key', content: env.AWS_SECRET_ACCESS_KEY, required: true},
+  ]
+  if (env.AWS_SESSION_TOKEN) {
+    s3Secrets.push({name: 'aws-session-token', content: env.AWS_SESSION_TOKEN, required: false})
+  }
+
+  const s3 =
+    client ??
+    new S3Client({
+      region: env.S3_REGION,
+      maxAttempts: 2,
+      credentials: {
+        accessKeyId: env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+        ...(env.AWS_SESSION_TOKEN ? {sessionToken: env.AWS_SESSION_TOKEN} : {}),
+      },
+    } satisfies S3ClientConfig)
+
+  const getConfig = async () => {
+    try {
+      return await s3.send(new GetBucketLifecycleConfigurationCommand({Bucket: env.S3_BUCKET}))
+    } catch (error) {
+      if (error instanceof Error && error.name === 'NoSuchLifecycleConfiguration') {
+        return undefined
+      }
+      throw redactSecretsFromError(error, s3Secrets)
+    }
+  }
+
+  const existingRules: LifecycleRule[] = (await getConfig())?.Rules ?? []
+
+  const desiredRules = [
+    ...existingRules.filter(rule => rule.ID !== RUN_STATE_LIFECYCLE_RULE.ID),
+    RUN_STATE_LIFECYCLE_RULE,
+  ]
+  const existingRunStateRule = existingRules.find(rule => rule.ID === RUN_STATE_LIFECYCLE_RULE.ID)
+  if (existingRunStateRule && isRunStateLifecycleRule(existingRunStateRule)) {
+    log('S3 run-state lifecycle rule is already current')
+  } else {
+    try {
+      await s3.send(
+        new PutBucketLifecycleConfigurationCommand({
+          Bucket: env.S3_BUCKET,
+          LifecycleConfiguration: {Rules: desiredRules},
+        }),
+      )
+    } catch (error) {
+      throw redactSecretsFromError(error, s3Secrets)
+    }
+  }
+
+  const readback = await getConfig()
+  if (!readback?.Rules?.some(isRunStateLifecycleRule)) {
+    throw new Error(
+      'S3 run-state lifecycle rule readback failed: run-state-30d-expiration is missing or incorrect. ' +
+        'Expected tag object-type=run-state, expiration Days=30, and Status=Enabled.',
+    )
+  }
+  log('S3 run-state lifecycle rule verified')
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -3076,6 +3217,11 @@ SCRIPT`
       assertRunningImageDigest(repoDigests, expectedDigest, service)
       console.warn(`\u001B[1;32m✓\u001B[0m ${service} image digest verified`)
     }
+
+    // Phase 9d: Ensure AWS-native S3 expires tagged run-state objects after 30 days.
+    // This runs after compose and running-image verification, and merges by rule ID
+    // because PutBucketLifecycleConfiguration replaces the whole bucket configuration.
+    await ensureRunStateLifecycleRule({...validated, S3_ENDPOINT: env.S3_ENDPOINT})
 
     // Phase 10: Persist checksum AFTER compose + registration + digest verification succeed
     // If any of phase 8, 9, or 9c threw, we never reach here — prior checksum stays in place

@@ -84,6 +84,11 @@ Commands:
     --verbose                          Show owned_by and created date for each model.
 
 
+  cliproxy monitor                     Reconcile Anthropic provider authentication with one canonical GitHub issue and transition-only Discord alerts.
+
+    --validation [mode]                Validation mode (live, synthetic-dead, or synthetic-healthy): live probes Anthropic; synthetic modes are owner-only isolated test transitions. (default: live)
+
+
   cliproxy open                        Launch CLIProxyAPI TUI dashboard via SSH.
 
     --host [host]                      SSH host for CLIProxyAPI server. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.

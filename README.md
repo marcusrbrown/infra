@@ -60,6 +60,8 @@ bunx @marcusrbrown/infra status --json   # machine-readable
 bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 ```
 
+`bunx @marcusrbrown/infra cliproxy monitor` runs the Anthropic auth monitor from the CLI; see `apps/cliproxy/README.md` for setup and recovery.
+
 ## CI/CD
 
 ### Workflows
@@ -78,6 +80,7 @@ bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 | **Renovate** | Schedule, issue/PR edits, post-deploy | Automated dependency updates |
 | **Renovate Changesets** | Renovate PRs | Auto-create changeset files for dependency updates |
 | **Fro Bot** | PRs, @mentions, daily schedule, `workflow_dispatch` | AI code review and autohealing |
+| **CLIProxy Anthropic auth monitor** | Nominal 15-minute schedule, `workflow_dispatch` | Probe Anthropic auth and reconcile GitHub issue/Discord transition alerts |
 | **Copilot Setup Steps** | `workflow_dispatch`, changes to workflow file | Prepare environment for Copilot coding agent |
 | **Scorecard** | Weekly, push to `main` | OpenSSF security analysis |
 | **Update Repo Settings** | Daily, push to `main` | Sync repo settings from `.github/settings.yml` |
@@ -178,15 +181,17 @@ AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are 
 
 **Repository secrets:**
 
-| Secret                      | Description                                                                |
-| --------------------------- | -------------------------------------------------------------------------- |
-| `APPLICATION_ID`            | GitHub App ID for Renovate and repo settings sync                          |
-| `APPLICATION_PRIVATE_KEY`   | GitHub App private key                                                     |
-| `DIGITALOCEAN_ACCESS_TOKEN` | DigitalOcean API token (used by cliproxy, gateway, and umami provisioning) |
-| `FRO_BOT_PAT`               | PAT for the `fro-bot` user (agent identity for `@fro-bot` mentions)        |
-| `NPM_TOKEN`                 | npm publish token for `@marcusrbrown/infra` package                        |
-| `OPENCODE_AUTH_JSON`        | LLM provider credentials JSON injected into Fro Bot runs                   |
-| `OPENCODE_CONFIG`           | OpenCode provider config JSON (e.g. Anthropic `baseURL` override)          |
+| Secret                                  | Description                                                                |
+| --------------------------------------- | -------------------------------------------------------------------------- |
+| `APPLICATION_ID`                        | GitHub App ID for Renovate and repo settings sync                          |
+| `APPLICATION_PRIVATE_KEY`               | GitHub App private key                                                     |
+| `DIGITALOCEAN_ACCESS_TOKEN`             | DigitalOcean API token (used by cliproxy, gateway, and umami provisioning) |
+| `FRO_BOT_PAT`                           | PAT for the `fro-bot` user (agent identity for `@fro-bot` mentions)        |
+| `NPM_TOKEN`                             | npm publish token for `@marcusrbrown/infra` package                        |
+| `OPENCODE_AUTH_JSON`                    | LLM provider credentials JSON injected into Fro Bot runs                   |
+| `OPENCODE_CONFIG`                       | OpenCode provider config JSON (e.g. Anthropic `baseURL` override)          |
+| `CLIPROXY_API_KEY`                      | Downstream API key for the Anthropic auth monitor probe                    |
+| `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK` | Dedicated outbound Discord webhook for monitor transitions                 |
 
 **Repository variables:**
 

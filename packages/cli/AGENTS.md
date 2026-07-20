@@ -11,6 +11,7 @@ Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcu
 | Add standalone command | `src/commands/<name>.ts` | Export `register<Name>(cli)`, import directly in cli.ts |
 | Modify CLI skeleton | `src/cli.ts` | Barrel imports + standalone commands, parse pattern |
 | Onboard new repo | `bunx @marcusrbrown/infra cliproxy setup` | Interactive wizard or `--key --repo --harness` flags |
+| Monitor Anthropic auth | `bunx @marcusrbrown/infra cliproxy monitor` | Live provider probe with GitHub issue and Discord transition alerts; CLI-only |
 | CLI tests | `src/cli.test.ts` | Snapshots in `src/__snapshots__/` |
 | Command tests | `src/commands/<app>/<name>.test.ts` | Colocated alongside each command |
 

@@ -276,7 +276,7 @@ stateDiagram-v2
   - **Failure path:** missing/revoked secrets or API permissions produce a failed workflow with actionable private logs and no unsafe public payload.
 - **Verification:** manual dispatch succeeds on a healthy route and repository Actions shows the schedule enabled on the default branch; documentation states cadence is nominal, not guaranteed.
 
-- [ ] **Unit 4: Document and release the operator capability**
+- [x] **Unit 4: Document and release the operator capability**
 
 - **Goal:** make setup, recovery, and maintenance explicit and version the user-facing CLI addition.
 - **Requirements:** R3, R8-R11; success criteria from the origin document.

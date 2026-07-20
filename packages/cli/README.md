@@ -42,16 +42,17 @@ bunx @marcusrbrown/infra keeweb open
 
 Manage the CLIProxyAPI proxy on `cliproxy.fro.bot`.
 
-| Subcommand        | Description                                                              |
-| ----------------- | ------------------------------------------------------------------------ |
-| `cliproxy status` | HTTP reachability, usage stats, version                                  |
-| `cliproxy models` | List models served at /v1/models; optional `[provider]` filter           |
-| `cliproxy deploy` | Trigger deployment (GitHub Actions by default; `--local` for direct SSH) |
-| `cliproxy config` | Get or set proxy configuration via the management API                    |
-| `cliproxy keys`   | List, add, or remove API keys via the management API                     |
-| `cliproxy login`  | Authenticate a provider (claude or codex) via SSH                        |
-| `cliproxy open`   | Open an interactive TUI via SSH                                          |
-| `cliproxy setup`  | Interactive wizard to onboard a repo to CLIProxyAPI                      |
+| Subcommand         | Description                                                              |
+| ------------------ | ------------------------------------------------------------------------ |
+| `cliproxy status`  | HTTP reachability, usage stats, version                                  |
+| `cliproxy models`  | List models served at /v1/models; optional `[provider]` filter           |
+| `cliproxy deploy`  | Trigger deployment (GitHub Actions by default; `--local` for direct SSH) |
+| `cliproxy config`  | Get or set proxy configuration via the management API                    |
+| `cliproxy keys`    | List, add, or remove API keys via the management API                     |
+| `cliproxy login`   | Authenticate a provider (claude or codex) via SSH                        |
+| `cliproxy monitor` | Probe Anthropic auth and send issue/Discord transition alerts            |
+| `cliproxy open`    | Open an interactive TUI via SSH                                          |
+| `cliproxy setup`   | Interactive wizard to onboard a repo to CLIProxyAPI                      |
 
 ```bash
 bunx @marcusrbrown/infra cliproxy status
@@ -65,6 +66,7 @@ bunx @marcusrbrown/infra cliproxy keys add
 bunx @marcusrbrown/infra cliproxy keys remove
 bunx @marcusrbrown/infra cliproxy login claude
 bunx @marcusrbrown/infra cliproxy login codex
+bunx @marcusrbrown/infra cliproxy monitor
 bunx @marcusrbrown/infra cliproxy open
 bunx @marcusrbrown/infra cliproxy setup
 bunx @marcusrbrown/infra cliproxy setup --repo OWNER/REPO --harness opencode

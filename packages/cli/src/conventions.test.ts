@@ -194,6 +194,79 @@ export function findPathsFilterQuantifierViolations(workflowText: string): Paths
 }
 
 describe('repo conventions', () => {
+  it('requires the CLIProxy auth monitor workflow', async () => {
+    const workflowPath = resolve(REPO_ROOT, '.github/workflows/cliproxy-auth-monitor.yaml')
+
+    expect(await Bun.file(workflowPath).exists()).toBe(true)
+  })
+
+  it('defines the monitor schedule and exact manual validation choices', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/cliproxy-auth-monitor.yaml')).text()
+    const parsed = parseYaml(text) as {
+      on?: {
+        schedule?: {cron?: string}[]
+        workflow_dispatch?: {
+          inputs?: {
+            validation?: {type?: string; default?: string; options?: string[]}
+          }
+        }
+      }
+    }
+
+    expect(parsed.on?.schedule).toEqual([{cron: '7,22,37,52 * * * *'}])
+    const validation = parsed.on?.workflow_dispatch?.inputs?.validation
+    expect({type: validation?.type, default: validation?.default, options: validation?.options}).toEqual({
+      type: 'choice',
+      default: 'live',
+      options: ['live', 'synthetic-dead', 'synthetic-healthy'],
+    })
+    expect(text).not.toMatch(/pull_request(?:_target)?\s*:/)
+    expect(text).toContain('VALIDATION=live')
+  })
+
+  it('keeps monitor workflow permissions, concurrency, and checkout hardened', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/cliproxy-auth-monitor.yaml')).text()
+
+    expect(text).toContain('contents: read')
+    expect(text).toContain('issues: write')
+    expect(text).toContain('group: cliproxy-auth-monitor')
+    expect(text).toContain('cancel-in-progress: false')
+    expect(text).not.toContain('environment:')
+    expect(text).not.toContain('secrets: inherit')
+    expect(text).toContain('persist-credentials: false')
+    expect(text).toContain('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1')
+    expect(text).toContain('oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0')
+    expect(text).toContain('bun install --frozen-lockfile --ignore-scripts')
+  })
+
+  it('binds only the monitor inputs and preserves safe output plus exit status', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/cliproxy-auth-monitor.yaml')).text()
+
+    for (const binding of [
+      'GITHUB_TOKEN: $' + '{{ github.token }}',
+      'GITHUB_REPOSITORY: $' + '{{ github.repository }}',
+      'GITHUB_ACTOR: $' + '{{ github.actor }}',
+      'GITHUB_REPOSITORY_OWNER: $' + '{{ github.repository_owner }}',
+      'CLIPROXY_API_KEY: $' + '{{ secrets.CLIPROXY_API_KEY }}',
+      'CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK: $' + '{{ secrets.CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK }}',
+    ]) {
+      expect(text).toContain(binding)
+    }
+
+    expect(text).toContain('bun run packages/cli/src/cli.ts cliproxy monitor')
+    expect(text).toContain('$GITHUB_STEP_SUMMARY')
+    expect(text).toMatch(/STATUS=\$\?/)
+    expect(text).toMatch(/exit ["']?\$STATUS["']?/)
+    expect(text).toContain('set -e')
+    expect(text).toContain(String.raw`printf '%s\n' "$OUTPUT" >> "$GITHUB_STEP_SUMMARY"`)
+    expect(text).toMatch(/STATUS=\$\?\s+set -e\s+OUTPUT=\$\(cat monitor-output\.txt\)\s+printf '%s\\n' "\$OUTPUT"/)
+    expect(text).not.toContain('cat monitor-output.txt >> "$GITHUB_STEP_SUMMARY"')
+    expect(text).toContain('NO_COLOR: 1')
+    expect(text).not.toContain('ref: $' + '{{ github.event.repository.default_branch }}')
+    expect(text).not.toContain('CLIPROXY_URL')
+    expect(text).not.toMatch(/--api-key|--webhook|CLIPROXY_API_KEY.*\$VALIDATION/)
+  })
+
   it('tripwire: workflow glob resolves to at least one file (catches dot-dir glob regressions)', () => {
     const workflows = listWorkflowFiles('.yaml')
     expect(workflows.length).toBeGreaterThan(0)

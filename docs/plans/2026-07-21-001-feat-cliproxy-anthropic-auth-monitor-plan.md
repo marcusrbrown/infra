@@ -245,7 +245,7 @@ stateDiagram-v2
   - **Defense in depth:** command is absent from `MCP_ALLOWLIST` and denied by the OpenCode infra-tool permission backstop.
 - **Verification:** the command passes the complete state matrix, produces no secrets or raw errors in public payloads, and is unavailable through MCP.
 
-- [ ] **Unit 3: Add the unattended scheduled workflow**
+- [x] **Unit 3: Add the unattended scheduled workflow**
 
 - **Goal:** run the monitor from the default branch at nominal 15-minute intervals with least privilege, serialized execution, and a manual validation path.
 - **Requirements:** R2, R3, R5.

@@ -33,6 +33,7 @@ import {createMcpAction} from '@goke/mcp'
  * - `vpn client remove`    — mutating: removes peer + triggers redeploy; CLI-only
  * - `broker deploy`         — mutating: deploys the credential broker to a live droplet; CLI-only
  * - `broker logs`           — sensitive: streams logs that may reveal run identities and minted key prefixes; CLI-only
+ * - `cliproxy monitor`      — mutating: reconciles GitHub issue and Discord alert state; CLI-only
  *
  * A defense-in-depth backstop also denies these in opencode.jsonc `permission`
  * so that even if MCP_ALLOWLIST were mistakenly re-expanded, opencode's native

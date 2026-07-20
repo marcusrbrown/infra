@@ -51,6 +51,7 @@ const SENSITIVE_MCP_COMMANDS: readonly string[] = [
   // Broker: mutating / sensitive — CLI-only
   'broker deploy',
   'broker logs',
+  'cliproxy monitor',
 ]
 
 // Accepted version-comment forms on SHA-pinned `uses:` lines:

@@ -195,7 +195,7 @@ stateDiagram-v2
   - **Regression:** existing status action still exits nonzero only for error-level checks and remains MCP-capturable.
 - **Verification:** status behavior is unchanged for operators, while a test can consume structured state without parsing summary text.
 
-- [ ] **Unit 2: Implement the issue-backed monitor state machine**
+- [x] **Unit 2: Implement the issue-backed monitor state machine**
 
 - **Goal:** add the CLI-only command that reconciles live provider state, canonical issue state, and Discord notification state safely and idempotently.
 - **Requirements:** R3, R5-R11.

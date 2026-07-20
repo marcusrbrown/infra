@@ -232,6 +232,20 @@ export interface ProviderAuthOptions {
   verbose?: boolean
 }
 
+export type ProviderAuthState = 'healthy' | 'dead' | 'unknown'
+
+export type ProviderAuthReason = 'ok' | 'auth-401' | 'auth-unavailable-503' | 'unrelated-http' | 'timeout' | 'network'
+
+export interface ProviderAuthClassification {
+  state: ProviderAuthState
+  reason: ProviderAuthReason
+}
+
+interface ProviderAuthProbeResult {
+  classification: ProviderAuthClassification
+  human: CheckResult
+}
+
 /**
  * Probe the upstream provider auth by sending a minimal chat completion request.
  * Returns a CheckResult — never throws.
@@ -243,11 +257,11 @@ export interface ProviderAuthOptions {
  *
  * The apiKey is NEVER included in summary or details output.
  */
-export async function checkProviderAuth(
+async function runProviderAuthProbe(
   baseUrl: string,
   apiKey: string,
   options?: ProviderAuthOptions,
-): Promise<CheckResult> {
+): Promise<ProviderAuthProbeResult> {
   const model = options?.model ?? DEFAULT_PROVIDER_MODEL
   const verbose = options?.verbose === true
   const endpoint = `${baseUrl}/v1/chat/completions`
@@ -276,20 +290,26 @@ export async function checkProviderAuth(
 
     if (response.ok) {
       return {
-        title: 'Upstream provider auth (anthropic)',
-        level: 'ok',
-        summary: `anthropic route OK (${model})`,
-        details: details.length > 0 ? details : undefined,
+        classification: {state: 'healthy', reason: 'ok'},
+        human: {
+          title: 'Upstream provider auth (anthropic)',
+          level: 'ok',
+          summary: `anthropic route OK (${model})`,
+          details: details.length > 0 ? details : undefined,
+        },
       }
     }
 
     // 401 is always an auth failure
     if (response.status === 401) {
       return {
-        title: 'Upstream provider auth (anthropic)',
-        level: 'error',
-        summary: `Anthropic upstream auth unavailable (${response.status}) — run: cliproxy login claude`,
-        details: details.length > 0 ? details : undefined,
+        classification: {state: 'dead', reason: 'auth-401'},
+        human: {
+          title: 'Upstream provider auth (anthropic)',
+          level: 'error',
+          summary: `Anthropic upstream auth unavailable (${response.status}) — run: cliproxy login claude`,
+          details: details.length > 0 ? details : undefined,
+        },
       }
     }
 
@@ -306,30 +326,59 @@ export async function checkProviderAuth(
 
       if (isAuthUnavailable) {
         return {
-          title: 'Upstream provider auth (anthropic)',
-          level: 'error',
-          summary: `Anthropic upstream auth unavailable (${response.status}) — run: cliproxy login claude`,
-          details: details.length > 0 ? details : undefined,
+          classification: {state: 'dead', reason: 'auth-unavailable-503'},
+          human: {
+            title: 'Upstream provider auth (anthropic)',
+            level: 'error',
+            summary: `Anthropic upstream auth unavailable (${response.status}) — run: cliproxy login claude`,
+            details: details.length > 0 ? details : undefined,
+          },
         }
       }
     }
 
     // Any other non-2xx: warning (don't fail status on unrelated upstream issues)
     return {
-      title: 'Upstream provider auth (anthropic)',
-      level: 'warning',
-      summary: `Anthropic probe returned HTTP ${response.status}`,
-      details: details.length > 0 ? details : undefined,
+      classification: {state: 'unknown', reason: 'unrelated-http'},
+      human: {
+        title: 'Upstream provider auth (anthropic)',
+        level: 'warning',
+        summary: `Anthropic probe returned HTTP ${response.status}`,
+        details: details.length > 0 ? details : undefined,
+      },
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
+    const errorName = error instanceof Error ? error.name : ''
+    const isTimeout = /timeout|timed out|aborted/i.test(`${errorName} ${message}`)
     return {
-      title: 'Upstream provider auth (anthropic)',
-      level: 'warning',
-      summary: `Anthropic probe failed: ${message}`,
-      details: verbose ? [`URL: ${endpoint}`, `Model: ${model}`] : undefined,
+      classification: {state: 'unknown', reason: isTimeout ? 'timeout' : 'network'},
+      human: {
+        title: 'Upstream provider auth (anthropic)',
+        level: 'warning',
+        summary: `Anthropic probe failed: ${message}`,
+        details: verbose ? [`URL: ${endpoint}`, `Model: ${model}`] : undefined,
+      },
     }
   }
+}
+
+export async function checkProviderAuthState(
+  baseUrl: string,
+  apiKey: string,
+  options?: ProviderAuthOptions,
+): Promise<ProviderAuthClassification> {
+  const probe = await runProviderAuthProbe(baseUrl, apiKey, options)
+  return probe.classification
+}
+
+export async function checkProviderAuth(
+  baseUrl: string,
+  apiKey: string,
+  options?: ProviderAuthOptions,
+): Promise<CheckResult> {
+  const probe = await runProviderAuthProbe(baseUrl, apiKey, options)
+  return probe.human
 }
 
 /**

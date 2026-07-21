@@ -665,10 +665,15 @@ env:
        comment on repaired PRs.
     g. End state: exactly one open trusted managed report. Untrusted prefix
        collisions do not count toward this invariant and remain untouched.
-    h. Do not post autoheal-summary comments on individual finding issues.
-       The only issue comments created during final report reconciliation
-       are the required one-line supersession comments on closed
-       trusted managed reports described in (e) above.
+    h. NEVER comment on the canonical daily report. Forbidden: `gh issue
+      comment <canonical-number> ...` and the issue-comments API against
+      the canonical issue number. Update it only by editing its body in
+      place (per (d)).
+    i. The final run summary goes to workflow logs only — never posted as
+      an issue comment.
+    j. No autoheal-summary comments on finding issues. The only issue
+      comments allowed here are the one-line supersession comments on
+      closed trusted managed reports (per (e)).
 
     The issue body MUST use this structure. If a section has no rows, do
     not emit an empty table — write "None." directly under that heading.

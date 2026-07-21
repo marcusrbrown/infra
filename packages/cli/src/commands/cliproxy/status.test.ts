@@ -4,6 +4,7 @@ import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../..
 import {
   checkHttpReachability,
   checkProviderAuth,
+  checkProviderAuthState,
   checkUsageStats,
   checkVersion,
   cliproxyStatusAction,
@@ -863,6 +864,65 @@ describe('checkProviderAuth', () => {
     expect(result.title).toBe('Upstream provider auth (anthropic)')
     expect(result.summary).toContain('anthropic route OK')
     expect(result.summary).toContain('claude-sonnet-4-6')
+  })
+
+  it('returns an automation-safe healthy state for a minimal successful completion', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response(JSON.stringify({choices: []}), {status: 200}))
+
+    const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result).toEqual({state: 'healthy', reason: 'ok'})
+  })
+
+  it('classifies an aborted provider probe as an unknown timeout with a bounded reason', async () => {
+    globalThis.fetch = createFetchImplementation(async () => {
+      throw new DOMException('', 'TimeoutError')
+    })
+
+    const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result).toEqual({state: 'unknown', reason: 'timeout'})
+  })
+
+  it('returns only a bounded dead classification for HTTP 401', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('secret upstream diagnostic', {status: 401}))
+
+    const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result).toEqual({state: 'dead', reason: 'auth-401'})
+    expect(Object.keys(result).sort()).toEqual(['reason', 'state'])
+    expect(JSON.stringify(result)).not.toContain('secret upstream diagnostic')
+  })
+
+  it('classifies supported 503 auth-unavailable markers as dead', async () => {
+    for (const body of ['auth_unavailable', 'no auth available', 'providers=claude']) {
+      globalThis.fetch = createFetchImplementation(async () => new Response(`raw: ${body}`, {status: 503}))
+
+      const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+      expect(result).toEqual({state: 'dead', reason: 'auth-unavailable-503'})
+    }
+  })
+
+  it('classifies unrelated HTTP failures as unknown without response data', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('secret upstream diagnostic', {status: 503}))
+
+    const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result).toEqual({state: 'unknown', reason: 'unrelated-http'})
+    expect(JSON.stringify(result)).not.toContain('secret upstream diagnostic')
+  })
+
+  it('classifies network failures as unknown without exception text', async () => {
+    globalThis.fetch = createFetchImplementation(async () => {
+      throw new Error('secret socket details and URL https://private.example')
+    })
+
+    const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result).toEqual({state: 'unknown', reason: 'network'})
+    expect(JSON.stringify(result)).not.toContain('secret socket details')
+    expect(JSON.stringify(result)).not.toContain('private.example')
   })
 
   it('returns error when POST returns 401', async () => {

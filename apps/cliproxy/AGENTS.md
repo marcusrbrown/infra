@@ -95,3 +95,41 @@ Anthropic-only repos use the single-provider subset of these shapes (unchanged f
 - **Run provisioning via the root wrapper**: `bun run provision:cliproxy` (loads the repo-root `.env`; `bun run --cwd apps/cliproxy provision` would miss it).
 - **OAuth refresh**: Claude OAuth tokens auto-refresh in `cliproxy_auth` volume. Manual refresh: `bunx @marcusrbrown/infra cliproxy login claude`.
 - **API key recovery**: There is no recovery tooling. If keys are wiped, regenerate via `cliproxy keys add` and redistribute. `cliproxy config get --output backup.json` (with `0600` perms) is the safest backup mechanism.
+
+## ANTHROPIC AUTH MONITOR
+
+The repository includes the CLI-only `infra cliproxy monitor` command and the scheduled workflow at `.github/workflows/cliproxy-auth-monitor.yaml`. The workflow runs at nominal 15-minute intervals (`7,22,37,52` minutes past each hour); GitHub schedule delivery is best-effort. Manual dispatch accepts `live`, `synthetic-dead`, or `synthetic-healthy` validation. Scheduled runs always use `live`.
+
+The monitor probes the Anthropic route with `CLIPROXY_API_KEY`, then reconciles one canonical GitHub issue and a dedicated outbound Discord webhook. GitHub calls go through a `gh api` subprocess parsed with Zod — never a direct REST `fetch` — and the GitHub token is passed only through the child process's allowlisted environment, never argv, request body, or logs. An open issue represents dead provider auth; a closed or absent issue represents healthy auth. Discord messages are sent only on state transitions, with safe bounded summaries and a last-check heartbeat while an outage remains open. Public issue and Discord text is fixed and sanitized; raw provider responses and exception text never cross that boundary. Synthetic-mode Discord alerts are prefixed `[synthetic test]` so they are never mistaken for a real outage.
+
+The dedicated label (`cliproxy-auth-monitor` / `cliproxy-auth-monitor-test`), not the hidden identity marker, is the trust anchor for issue adoption. An issue carrying the marker but not the label is ignored — the monitor never adopts it or restores the label onto it. An issue carrying the label but not the marker fails the run closed rather than being silently adopted. If a race produces more than one labeled+marked issue, resolution deterministically picks the lowest issue number so every later run converges on one canonical issue. GitHub's Issues API has no atomic create-if-absent primitive, so a rare simultaneous first-create can still send a duplicate initial alert; deterministic selection prevents that race from causing persistent reconciliation failure, but it does not eliminate the one-time duplicate.
+
+`gh` is a prerequisite only when running `cliproxy monitor` directly on a local machine (it must be installed and authenticated, or `GITHUB_TOKEN` must be set). The scheduled workflow already provides `gh` in its runner image and remains the preferred entrypoint for both live and synthetic validation.
+
+### Setup and validation
+
+1. Create a dedicated Discord incoming webhook for monitor alerts. Do not reuse the gateway's inbound HMAC webhook. Test it with a fixed message, then store its URL as the repository secret `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK` without logging or copying the URL into a command argument.
+2. Confirm the existing repository secret `CLIPROXY_API_KEY` is available. The canonical proxy URL is non-secret and defaults to `https://cliproxy.fro.bot`.
+3. Run manual validation as the repository owner:
+
+   ```bash
+   gh workflow run cliproxy-auth-monitor.yaml -f validation=live
+   gh workflow run cliproxy-auth-monitor.yaml -f validation=synthetic-dead
+   gh workflow run cliproxy-auth-monitor.yaml -f validation=synthetic-healthy
+   ```
+
+   Confirm the live monitor summary proves the provider probe ran without creating an outage transition while auth is healthy. Synthetic validation uses the isolated test issue identity, never probes Anthropic, and never mutates production monitor state.
+
+Go/no-go: enable unattended monitoring only when the workflow is on the default branch, `issues: write` is available, both repository secrets are present, the production canonical issue has at most one identity match, live validation is healthy, both synthetic transitions complete without touching production state, and GitHub workflow-failure notifications reach an operator.
+
+### Recovery and rollback
+
+When the provider is dead, run `bunx @marcusrbrown/infra cliproxy login claude`. After the browser reaches the localhost connection-refused page, copy the full callback URL and paste it into the login prompt. Verify with `bunx @marcusrbrown/infra cliproxy status`, then trigger an immediate manual live monitor run rather than waiting for the next scheduled invocation:
+
+```bash
+gh workflow run cliproxy-auth-monitor.yaml -f validation=live
+```
+
+Recovery is complete when the provider is healthy, the canonical issue is closed, the recovery notification is delivered when required, and the healthy marker is persisted.
+
+To roll back monitoring, disable or revert `.github/workflows/cliproxy-auth-monitor.yaml`, or rotate/remove `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK` if the destination is wrong or exposed. Preserve the canonical issue history. Rollback stops monitor activity; it does not restore Claude authentication.

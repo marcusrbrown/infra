@@ -1,5 +1,35 @@
 # @marcusrbrown/infra
 
+## 0.14.0
+### Minor Changes
+
+
+- Add scheduled CLIProxy Anthropic auth detection with GitHub issue and Discord transition alerts. ([#898](https://github.com/marcusrbrown/infra/pull/898))
+
+
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.89` to `7.2.90` ([#889](https://github.com/marcusrbrown/infra/pull/889))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.88` to `7.2.89` ([#885](https://github.com/marcusrbrown/infra/pull/885))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#896](https://github.com/marcusrbrown/infra/pull/896))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.92` to `7.2.93` ([#900](https://github.com/marcusrbrown/infra/pull/900))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#891](https://github.com/marcusrbrown/infra/pull/891))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.90` to `7.2.91` ([#890](https://github.com/marcusrbrown/infra/pull/890))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.91` to `7.2.92` ([#894](https://github.com/marcusrbrown/infra/pull/894))
+
 ## 0.13.22
 ### Patch Changes
 

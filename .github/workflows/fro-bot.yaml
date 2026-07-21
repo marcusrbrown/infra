@@ -397,12 +397,17 @@ env:
        b. Wait for load: `npx agent-browser wait --load networkidle`
        c. Full screenshot: `npx agent-browser screenshot --full`
        d. Snapshot interactive elements: `npx agent-browser snapshot -i`
+       e. Use the snapshot ref to click `More`, then snapshot interactive
+          elements again. KeeWeb keeps storage providers collapsed under
+          `More`; do not judge provider visibility from the initial launcher.
 
        Checks to perform:
        - Page loads without errors or blank content.
        - KeeWeb app initializes (main UI container renders, no spinner
          stuck indefinitely).
-       - Dropbox storage option is visible in the open-file dialog.
+       - After expanding `More`, the Dropbox storage option is visible in
+         the provider menu. Its absence from the collapsed launcher is not
+         a failure.
        - No console errors or failed network requests to Dropbox API
          endpoints.
        - Service worker registers successfully.
@@ -424,8 +429,9 @@ env:
 
        For new issues, create a GitHub issue with:
        - Page URL and description of the problem.
-       - Screenshot filename/path and a short text description of what it
-         shows.
+       - Publicly reproducible text evidence. Include a screenshot only when
+         it has a durable, reader-accessible URL; never cite runner-local
+         screenshot paths as public evidence.
        - Label: `bug` for broken functionality, `enhancement` for UX.
        Do NOT push code changes for site review findings. Issues only.
 

@@ -1,8 +1,17 @@
+import {chmod, mkdtemp, rm, writeFile} from 'node:fs/promises'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 
 import {createCapturedCtx, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
-import {cliproxyMonitorAction, createGhEnvironment, registerCliproxyMonitor} from './monitor'
+import {
+  cliproxyMonitorAction,
+  createGhEnvironment,
+  interpretGhApiResult,
+  registerCliproxyMonitor,
+  runGhApiOnce,
+} from './monitor'
 
 const originalFetch = globalThis.fetch
 const originalSetTimeout = globalThis.setTimeout
@@ -167,6 +176,53 @@ describe('cliproxy monitor', () => {
     expect(environment.CLIPROXY_API_KEY).toBeUndefined()
     expect(environment.CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK).toBeUndefined()
     expect(environment.ARBITRARY_REPO_SECRET).toBeUndefined()
+  })
+
+  it('parses a valid --include HTTP 404 response even when gh exits nonzero', () => {
+    const stdout = 'HTTP/2.0 404 Not Found\r\ncontent-type: application/json\r\n\r\n{"message":"Not Found"}'
+
+    expect(interpretGhApiResult(1, stdout)).toEqual({status: 404, body: '{"message":"Not Found"}'})
+  })
+
+  it('maps a nonzero gh exit with no parseable included response to github-transient', () => {
+    expect(() => interpretGhApiResult(1, 'gh: connection reset by peer\n')).toThrow('github-transient')
+  })
+
+  it('keeps a zero gh exit with malformed output as github-invalid-response', () => {
+    expect(() => interpretGhApiResult(0, 'not a valid http response')).toThrow('github-invalid-response')
+  })
+
+  it('runGhApiOnce parses a real 404 --include response from a nonzero-exit gh process', async () => {
+    const originalPath = process.env.PATH
+    const tempDir = await mkdtemp(join(tmpdir(), 'monitor-gh-boundary-'))
+    const jsonBody = '{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}'
+
+    try {
+      const ghScriptPath = join(tempDir, 'gh')
+      await writeFile(
+        ghScriptPath,
+        [
+          '#!/bin/sh',
+          String.raw`printf 'HTTP/2.0 404 Not Found\r\ncontent-type: application/json; charset=utf-8\r\n\r\n${jsonBody}'`,
+          "echo 'gh: Not Found (HTTP 404)' >&2",
+          'exit 1',
+          '',
+        ].join('\n'),
+      )
+      await chmod(ghScriptPath, 0o755)
+      process.env.PATH = `${tempDir}${originalPath ? `:${originalPath}` : ''}`
+
+      const response = await runGhApiOnce('github-token', '/labels/cliproxy-auth-monitor-test', 'GET')
+
+      expect(response).toEqual({status: 404, body: jsonBody})
+    } finally {
+      if (originalPath === undefined) {
+        delete process.env.PATH
+      } else {
+        process.env.PATH = originalPath
+      }
+      await rm(tempDir, {recursive: true, force: true})
+    }
   })
 
   it('retries transient GitHub responses with bounded backoff', async () => {

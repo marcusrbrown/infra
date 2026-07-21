@@ -190,18 +190,30 @@ export function createGhEnvironment(token: string): Record<string, string> {
   return environment
 }
 
-function parseGhResponse(output: string): MonitorGhResponse {
+function tryParseGhResponse(output: string): MonitorGhResponse | null {
   const separator = output.indexOf('\r\n\r\n')
   const splitLength = separator === -1 ? 2 : 4
   const splitAt = separator === -1 ? output.indexOf('\n\n') : separator
-  if (splitAt < 0) throw new Error('github-invalid-response')
+  if (splitAt < 0) return null
   const headers = output.slice(0, splitAt)
   const status = /^HTTP\/\S+\s+(\d{3})/m.exec(headers)?.[1]
-  if (!status) throw new Error('github-invalid-response')
+  if (!status) return null
   return {status: Number(status), body: output.slice(splitAt + splitLength)}
 }
 
-async function runGhApiOnce(token: string, path: string, method: string, body?: string): Promise<MonitorGhResponse> {
+export function interpretGhApiResult(exitCode: number, stdout: string): MonitorGhResponse {
+  const parsed = tryParseGhResponse(stdout)
+  if (parsed) return parsed
+  if (exitCode !== 0) throw new Error('github-transient')
+  throw new Error('github-invalid-response')
+}
+
+export async function runGhApiOnce(
+  token: string,
+  path: string,
+  method: string,
+  body?: string,
+): Promise<MonitorGhResponse> {
   const child = Bun.spawn(['gh', 'api', path, '--include', '--method', method, ...(body ? ['--input', '-'] : [])], {
     stdin: body ? 'pipe' : 'ignore',
     stdout: 'pipe',
@@ -224,8 +236,7 @@ async function runGhApiOnce(token: string, path: string, method: string, body?: 
   })
   try {
     const [stdout, _stderr, exitCode] = await Promise.race([operation, timeout])
-    if (exitCode !== 0) throw new Error('github-transient')
-    return parseGhResponse(stdout)
+    return interpretGhApiResult(exitCode, stdout)
   } catch (error) {
     if (timedOut || (error instanceof Error && error.message.startsWith('github-'))) throw error
     throw new Error('github-transient')

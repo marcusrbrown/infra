@@ -1,7 +1,7 @@
 ---
 title: 'feat: Monitor CLIProxyAPI Anthropic authentication'
 type: feat
-status: active
+status: completed
 date: 2026-07-21
 origin: docs/brainstorms/2026-07-21-cliproxy-anthropic-auth-monitoring-requirements.md
 deepened: 2026-07-21
@@ -91,12 +91,13 @@ The existing `cliproxy status` path already performs the correct end-to-end prov
 - **Dual-surface probe contract:** automation receives only safe state and bounded reason categories, while existing human status output may retain diagnostic detail. The monitor never consumes presentation strings or raw exceptions.
 - **Focused public CLI command:** add `cliproxy monitor` as an automation-facing, CLI-only command. It receives secret-bearing inputs through environment variables only and remains outside `MCP_ALLOWLIST`.
 - **Monitor-specific trusted origin:** forward the environment API key only to the exact canonical HTTPS proxy origin. Reject arbitrary origins, userinfo, paths, query strings, and non-HTTPS configuration before any network request or mutation.
-- **Direct REST adapters:** use Bun `fetch` for GitHub and Discord rather than adding an SDK or spawning `gh`; both integrations remain easy to mock at the network boundary.
+- **`gh api` GitHub adapter:** shell out to the repo-standard `gh api` subprocess (matching CLI convention, not octokit or raw `fetch`) and parse every response through Zod. The GitHub token is passed only through the child process's allowlisted environment, never through argv, request body, or logs. Discord still uses Bun `fetch` directly, since it needs no repo-scoped credential.
 - **Issue-backed state:** one issue represents the lifecycle: open means dead, closed or absent means healthy. A dedicated label and fixed hidden identity marker locate it even if the operator edits the title.
-- **Deterministic issue lookup:** search all issue states for the identity marker, prefer the unique label-plus-marker match, restore a missing label from a unique marker-only match, and fail before mutation when identity is ambiguous. Never adopt a label-only issue with no marker.
-- **Fixed issue identities:** production uses the dedicated `cliproxy-auth-monitor` label; isolated validation uses `cliproxy-auth-monitor-test`. Label creation/restoration is required state reconciliation, and failure is terminal rather than silently falling back to title matching.
+- **Label is the trust anchor:** the dedicated label, not the hidden identity marker, is what makes an issue eligible for the monitor to adopt. An issue carrying only the identity marker without the label is ignored entirely — it is never adopted, and its label is never auto-restored. An issue carrying the label without the marker is a trusted-but-foreign issue and fails the run closed rather than being silently adopted or skipped. When more than one issue carries both the label and an active marker (e.g. from a concurrent first create), resolution deterministically selects the lowest issue number, so every later run converges on the same canonical issue.
+- **Fixed issue identities:** production uses the dedicated `cliproxy-auth-monitor` label; isolated validation uses `cliproxy-auth-monitor-test`. Label creation is required state reconciliation when opening a new issue, and failure is terminal rather than silently falling back to title matching. Notified-state markers are namespaced per validation mode, so a test run's marker can never be read as the production marker or vice versa.
 - **Issue-first ordering:** persist the target issue state before Discord delivery. Write the Discord-notified marker only after successful delivery so the next run retries a lagging notification.
 - **At-least-once Discord:** accept a rare duplicate when Discord succeeds but marker persistence fails; preventing that last ambiguity would require a larger outbox/idempotency system that does not pay rent here.
+- **No atomic issue-creation uniqueness:** the GitHub Issues API has no compare-and-swap or unique-constraint primitive for "create only if absent." Two runs that both observe no canonical issue can each create one and each send an outage alert, producing a duplicate first-create alert/issue in that narrow race. Deterministic lowest-issue-number selection on the next run converges every subsequent run onto one canonical issue, so the race causes a bounded one-time duplicate rather than a persistent reconciliation failure or a split-brain state.
 - **Unknown preserves state:** network timeouts and unrelated warnings neither open nor close the issue. They remain visible in workflow logs but do not create alert churn.
 - **Known outage is monitor success:** an active or newly detected outage exits successfully after required state and notification work completes. Missing inputs, GitHub API failures, and exhausted Discord delivery failures fail the workflow.
 - **Public output allowlist:** issue and Discord bodies use fixed templates plus UTC timestamps. Raw provider responses, hostnames, URLs, headers, exception strings, and credentials never cross the public alert boundary.
@@ -210,8 +211,8 @@ stateDiagram-v2
 - **Approach:**
   - Read the downstream API key, GitHub token/repository identity, and Discord webhook from environment-only inputs; reject missing values before any mutation.
   - Validate the proxy destination against an exact monitor-specific HTTPS origin before forwarding the environment API key. Reject hostile or malformed overrides before the provider probe, GitHub mutation, or Discord request.
-  - Query all issue states through GitHub REST. Locate the canonical issue by label plus fixed identity marker, fall back to a unique marker-only match to repair a removed label, and fail on duplicates or ambiguous identity. Never rely on title or adopt label-only matches.
-  - Ensure the fixed production label `cliproxy-auth-monitor` exists when the first outage issue must be created; use `cliproxy-auth-monitor-test` for synthetic validation. Keep issue title/body and Discord messages fixed and generic, with only UTC timestamps dynamic.
+  - Query all issue states through the `gh api` subprocess, parsing every response through Zod; the GitHub token flows only through the child's allowlisted environment, never argv, body, or logs. Locate the canonical issue by requiring the dedicated label as the trust anchor; among labeled issues, an active identity marker selects it, and a labeled issue with no marker fails the run closed rather than being adopted. Ignore marker-only issues that lack the label entirely — never auto-restore the label onto them. When multiple labeled issues carry an active marker, deterministically select the lowest issue number so a concurrent double-create still converges.
+  - Ensure the fixed production label `cliproxy-auth-monitor` exists when the first outage issue must be created; use `cliproxy-auth-monitor-test` for synthetic validation. Keep issue title/body and Discord messages fixed and generic, with only UTC timestamps dynamic. The dead-state issue body names the recovery command (`cliproxy login claude`) but never a raw provider error or secret value.
   - Treat open issue as dead and closed/absent issue as healthy. A definitive probe result computes the target state; unknown leaves canonical state unchanged.
   - Reconcile in strict order: persist issue state, deliver Discord if marker lags, then persist the notified marker. Update a last-check timestamp while an outage issue remains open.
   - Send Discord with mentions disabled. Retry only bounded transient/rate-limit failures; treat a revoked webhook as terminal.
@@ -232,8 +233,8 @@ stateDiagram-v2
   - **Recovery transition:** open issue + healthy probe closes before Discord recovery, then writes the healthy marker.
   - **Transient while healthy/dead:** unknown probe result preserves issue state and sends no notification.
   - **Manual issue close:** closed issue + still-dead probe reopens and alerts again.
-  - **Operator edits:** changed title or removed label still resolves through the hidden marker and restores the dedicated label.
-  - **Identity ambiguity:** multiple marker matches or a label-only/no-marker issue fails before mutation; deleting both marker and label is documented as unsupported manual breakage.
+  - **Operator edits:** changed title still resolves through label plus marker; a manually removed label makes the monitor treat the issue as unlabeled/foreign rather than auto-restoring the label onto it.
+  - **Identity ambiguity:** a labeled issue with no active marker fails the run closed before mutation; multiple labeled issues with an active marker resolve deterministically to the lowest issue number instead of failing.
   - **Discord lag:** target issue state already persisted but marker stale retries only the missing Discord transition.
   - **Partial delivery:** GitHub mutation failure prevents Discord; Discord failure leaves marker stale and exits nonzero; marker write failure after Discord may duplicate once on retry and exits nonzero.
   - **Discord API:** `429` honors retry guidance, transient 5xx/network failure uses bounded retry, `404` fails immediately, and messages disable mentions.
@@ -307,7 +308,7 @@ stateDiagram-v2
 
 ## System-Wide Impact
 
-- **Interaction graph:** scheduled workflow → CLI monitor → provider probe + GitHub issue REST + Discord webhook. Existing status/MCP paths share only the structured provider probe.
+- **Interaction graph:** scheduled workflow → CLI monitor → provider probe + `gh api` GitHub issue subprocess + Discord webhook. Existing status/MCP paths share only the structured provider probe.
 - **Error propagation:** definitive provider auth death becomes durable issue state, not workflow failure. Monitor machinery and delivery reconciliation failures fail the workflow and retain retryable markers.
 - **State lifecycle risks:** issue open/closed and notification marker can diverge under partial failure; strict ordering and next-run reconciliation make divergence self-healing with at-least-once Discord semantics.
 - **API surface parity:** `cliproxy status` remains read-only and MCP-exposed; `cliproxy monitor` is mutating and CLI-only.

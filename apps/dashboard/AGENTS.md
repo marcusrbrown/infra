@@ -25,25 +25,35 @@ release is published. Caddy depends on the `dashboard` service being healthy bef
    `DASHBOARD_COOKIE_KEY`, plus SSH context) and the host string before any SSH argv is built.
 2. DNS preflight — resolves `DASHBOARD_DOMAIN` and fails fast if it does not resolve.
 3. ControlMaster SSH multiplexing setup — a shared socket is created; subsequent steps reuse it.
-4. Remote prep: `mkdir -p /opt/dashboard/config` on the droplet.
-5. Materializes `/opt/dashboard/.env` over SSH **stdin** (never argv). The `.env` includes
+4. Remote prep: a constant-only fail-closed command rejects `/opt/dashboard` and
+   `/opt/dashboard/config` when either is a symlink or existing non-directory before any install or
+   ownership operation. It then creates/converges both as root-owned real directories and verifies
+   `realpath -e` resolves to the literal expected paths.
+5. Remote prep: fail-closed validation rejects `/opt/dashboard/data` when it is a symlink or an
+   existing non-directory before any ownership or mode operation. It then runs a constant-only
+   `set -eu` command that creates/converges the directory with `install -d -m 0700 -o 1000 -g 1000`,
+   recursively chowns existing contents to `1000:1000`, reapplies mode `0700` to the root, and
+   verifies the path remains a real directory. Deploy-time convergence is the ownership authority for
+   existing and newly provisioned hosts, and it completes before materialization or compose operations.
+6. Materializes `/opt/dashboard/.env` over SSH **stdin** (never argv). The `.env` includes
    `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem` (the file path only — the PEM content
    is never written to `.env`) and `DASHBOARD_OAUTH_REDIRECT_URI=https://$DASHBOARD_DOMAIN/auth/callback`
    (derived from `DASHBOARD_DOMAIN`; no separate secret required).
-6. Uploads `docker-compose.yaml` and `config/Caddyfile` via `scp`.
-7. **Uploads the GitHub App private key** to `/opt/dashboard/config/github-app.pem` (0600) via SSH
+7. Uploads `docker-compose.yaml` and `config/Caddyfile` via `scp`.
+8. **Uploads the GitHub App private key** to `/opt/dashboard/config/github-app.pem` (0600) via SSH
    stdin — never as an env var, never logged. PEM bytes flow through stdin only; `umask 077` plus an
-   explicit `chmod 0600` ensure the file is readable only by root.
-8. `docker compose pull` — pulls the digest-pinned image from `ghcr.io/fro-bot/dashboard`.
-9. `docker compose up -d --no-build --wait dashboard` — starts the app only; Caddy is **NOT** started
-   yet. `--no-build` enforces the prebuilt digest; `--wait` uses the container healthcheck
-   (`/api/healthz` on `:3000`) as the authoritative success signal.
-10. **RepoDigests verification** — resolves the running container's image SHA, then inspects the
+   explicit `chmod 0600` and subsequent `chown 1000:1000` ensure the file is owned by UID 1000 and
+   readable only by UID 1000 for the non-root container.
+9. `docker compose pull` — pulls the digest-pinned image from `ghcr.io/fro-bot/dashboard`.
+10. `docker compose up -d --no-build --wait dashboard` — starts the app only; Caddy is **NOT** started
+    yet. `--no-build` enforces the prebuilt digest; `--wait` uses the container healthcheck
+    (`/api/healthz` on `:3000`) as the authoritative success signal.
+11. **RepoDigests verification** — resolves the running container's image SHA, then inspects the
     image's `RepoDigests` and asserts that the compose-pinned digest appears in at least one entry.
     Fails closed with an actionable message if the running image does not match the pinned digest.
-11. `docker compose up -d --no-build --wait caddy` — publicly exposes the service **only after** the
-    app is healthy and the digest is verified.
-12. **Bounded public HTTPS probe** — retries `https://$DASHBOARD_DOMAIN/api/healthz` up to 10 times
+12. `docker compose up -d --no-build --wait caddy` — publicly exposes the service **only after**
+    the app is healthy and the digest is verified.
+13. **Bounded public HTTPS probe** — retries `https://$DASHBOARD_DOMAIN/api/healthz` up to 10 times
     (5 s interval). On first-deploy Caddy ACME issuance lag it emits a warning and still succeeds
     (containers are already healthy); re-running once the cert lands is safe.
 
@@ -75,12 +85,28 @@ tmpfs:
   - /tmp
 ```
 
-- **`read_only: true`** — the container filesystem is read-only; only `/tmp` (tmpfs) and the
-  App-key mount are writable surfaces.
+- **`read_only: true`** — the container filesystem is read-only; `/tmp` (tmpfs) and the listener data
+  mount are the writable surfaces. The App-key mount remains read-only.
 - **`cap_drop: [ALL]`** — drops all Linux capabilities; the Hono app needs none.
 - **`no-new-privileges: true`** — prevents privilege escalation via setuid/setgid binaries.
 - **`user: node`** — runs as the non-root `node` user baked into the upstream image.
 - **`tmpfs: /tmp`** — provides a writable scratch space without touching the host filesystem.
+
+**Persistent listener storage:**
+
+```yaml
+volumes:
+  - type: bind
+    source: /opt/dashboard/data
+    target: /data
+    bind:
+      create_host_path: false
+```
+
+The `/data` bind mount is the writable surface for the dashboard's listener SQLite state. The host
+directory is converged at deploy time to mode `0700`, owner `1000:1000`, and persists across container
+recreation. `bind.create_host_path: false` prevents Compose from silently creating a missing or
+mis-typed host path; deploy must establish the validated directory first.
 
 **GitHub App private key mount:**
 
@@ -220,6 +246,9 @@ record.
   path.
 - **Never `docker compose down -v`** — destroys the `caddy_data` volume (Caddy TLS certificates and
   ACME state). Use `docker compose down` (no `-v`) to stop services without losing TLS data.
+- **Never remove `/opt/dashboard/data` casually** — it contains persistent listener SQLite state and
+  removing it destroys Inbox data across container recreation. Treat deletion as an explicit destructive
+  storage reset.
 - **Never add `--build` to the dashboard deploy** — the deploy pulls the digest-pinned image from
   `ghcr.io/fro-bot/dashboard`; on-droplet builds are not supported and `--no-build` is enforced in
   the deploy script.

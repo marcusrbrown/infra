@@ -12,6 +12,28 @@ const REMOTE_DIR = '/opt/dashboard'
 const REMOTE_ENV_PATH = `${REMOTE_DIR}/.env`
 const REMOTE_COMPOSE_PATH = `${REMOTE_DIR}/docker-compose.yaml`
 const REMOTE_CONFIG_DIR = `${REMOTE_DIR}/config`
+const REMOTE_DATA_DIR = `${REMOTE_DIR}/data`
+const REMOTE_ROOT_SETUP_COMMAND = [
+  'set -eu',
+  `if [ -L '${REMOTE_DIR}' ]; then echo 'Refusing dashboard root symlink' >&2; exit 1; fi`,
+  `if [ -e '${REMOTE_DIR}' ] && [ ! -d '${REMOTE_DIR}' ]; then echo 'Refusing dashboard root non-directory' >&2; exit 1; fi`,
+  `if [ -L '${REMOTE_CONFIG_DIR}' ]; then echo 'Refusing dashboard config symlink' >&2; exit 1; fi`,
+  `if [ -e '${REMOTE_CONFIG_DIR}' ] && [ ! -d '${REMOTE_CONFIG_DIR}' ]; then echo 'Refusing dashboard config non-directory' >&2; exit 1; fi`,
+  `install -d -m 0755 -o 0 -g 0 '${REMOTE_DIR}'`,
+  `install -d -m 0755 -o 0 -g 0 '${REMOTE_CONFIG_DIR}'`,
+  `chown 0:0 '${REMOTE_DIR}' '${REMOTE_CONFIG_DIR}'`,
+  `[ "$(realpath -e '${REMOTE_DIR}')" = '${REMOTE_DIR}' ]`,
+  `[ "$(realpath -e '${REMOTE_CONFIG_DIR}')" = '${REMOTE_CONFIG_DIR}' ]`,
+].join('; ')
+const REMOTE_DATA_SETUP_COMMAND = [
+  'set -eu',
+  `if [ -L '${REMOTE_DATA_DIR}' ]; then echo 'Refusing listener data path symlink' >&2; exit 1; fi`,
+  `if [ -e '${REMOTE_DATA_DIR}' ] && [ ! -d '${REMOTE_DATA_DIR}' ]; then echo 'Refusing listener data path non-directory' >&2; exit 1; fi`,
+  `install -d -m 0700 -o 1000 -g 1000 '${REMOTE_DATA_DIR}'`,
+  `chown -R 1000:1000 '${REMOTE_DATA_DIR}'`,
+  `chmod 0700 '${REMOTE_DATA_DIR}'`,
+  `[ -d '${REMOTE_DATA_DIR}' ] && [ ! -L '${REMOTE_DATA_DIR}' ] && [ "$(realpath -e '${REMOTE_DATA_DIR}')" = '${REMOTE_DATA_DIR}' ]`,
+].join('; ')
 const REMOTE_CADDYFILE_PATH = `${REMOTE_CONFIG_DIR}/Caddyfile`
 const REMOTE_APP_KEY_PATH = `${REMOTE_CONFIG_DIR}/github-app.pem`
 const HEALTH_PATH = '/api/healthz'
@@ -672,20 +694,25 @@ async function resolveImageDigest(version: string, spawnFn: SpawnFn, deployEnv: 
  * 5. ControlMaster SSH multiplexing setup (dual-tmpdir: key under os.tmpdir(), socket under /tmp)
  * 6. Versioned: resolve digest via imagetools inspect + cross-check; generate compose content
  *    No-version: read digest from committed docker-compose.yaml
- * 7. Remote prep: mkdir -p /opt/dashboard/config
- * 8. Materialize /opt/dashboard/.env via SSH stdin (includes DASHBOARD_GITHUB_APP_KEY_FILE path)
- * 9. Versioned: upload generated compose via SSH stdin
+ * 7. Remote prep: constant-only fail-closed validation/convergence for /opt/dashboard and
+ *    /opt/dashboard/config; reject symlinks and existing non-directories before mutation,
+ *    create both as root-owned real directories, and verify their physical paths with realpath -e
+ * 8. Remote prep: reject a symlink or existing non-directory at /opt/dashboard/data, then
+ *    install it with mode 0700 and owner 1000:1000, recursively chown existing contents, reapply
+ *    mode 0700 to the root, and verify it remains a real directory
+ * 9. Materialize /opt/dashboard/.env via SSH stdin (includes DASHBOARD_GITHUB_APP_KEY_FILE path)
+ * 10. Versioned: upload generated compose via SSH stdin
  *    No-version: scp committed docker-compose.yaml
  *    Both: scp config/Caddyfile
- * 10. Upload GitHub App private key via SSH stdin to /opt/dashboard/config/github-app.pem (0600)
+ * 11. Upload GitHub App private key via SSH stdin to /opt/dashboard/config/github-app.pem (0600)
  *     SECURITY: PEM bytes flow through stdin ONLY — never in argv, never in a local temp file
- * 11. chown 1000:1000 github-app.pem so the container's node user (UID 1000) can read it
- * 12. rm -f /opt/dashboard/docker-compose.override.yaml (idempotent legacy cleanup)
- * 13. docker compose pull (pulls digest-pinned GHCR image from docker-compose.yaml)
- * 14. docker compose up -d --no-build --wait dashboard (app health gate first)
- * 15. Verify RepoDigests: assert running image includes selected digest (fail closed)
- * 16. docker compose up -d --no-build --wait caddy (public exposure after app healthy)
- * 17. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
+ * 12. chown 1000:1000 github-app.pem so the container's node user (UID 1000) can read it
+ * 13. rm -f /opt/dashboard/docker-compose.override.yaml (idempotent legacy cleanup)
+ * 14. docker compose pull (pulls digest-pinned GHCR image from docker-compose.yaml)
+ * 15. docker compose up -d --no-build --wait dashboard (app health gate first)
+ * 16. Verify RepoDigests: assert running image includes selected digest (fail closed)
+ * 17. docker compose up -d --no-build --wait caddy (public exposure after app healthy)
+ * 18. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
  */
 export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
@@ -803,7 +830,16 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     // Phase 4: Remote prep
     await runCommand(
       'Creating remote directories',
-      sshCommand(host, `mkdir -p ${REMOTE_CONFIG_DIR}`, keyPath, controlPath),
+      sshCommand(host, REMOTE_ROOT_SETUP_COMMAND, keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    // Phase 4b: Converge persistent listener storage ownership and permissions.
+    // This is the authority for both existing and newly provisioned hosts.
+    await runCommand(
+      'Creating remote listener data directory',
+      sshCommand(host, REMOTE_DATA_SETUP_COMMAND, keyPath, controlPath),
       deployEnv,
       spawnFn,
     )

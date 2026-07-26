@@ -1146,6 +1146,11 @@ describe('validateGatewayVpcIp', () => {
 describe('committed Caddyfile structure', () => {
   const caddyfilePath = join(import.meta.dir, '..', 'config', 'Caddyfile')
   const caddyfile = readFileSync(caddyfilePath, 'utf8')
+  const handleSection = (header: string, nextHeader?: string) => {
+    const start = caddyfile.indexOf(header)
+    const end = nextHeader ? caddyfile.indexOf(nextHeader, start + header.length) : caddyfile.length
+    return caddyfile.slice(start, end === -1 ? caddyfile.length : end)
+  }
 
   it('contains a handle /operator/* block', () => {
     expect(caddyfile).toContain('handle /operator/*')
@@ -1186,44 +1191,54 @@ describe('committed Caddyfile structure', () => {
     expect(operatorIdx).toBeLessThan(catchAllIdx)
   })
 
-  it('contains an owned-paths handle covering /api/*', () => {
-    expect(caddyfile).toContain('/api/*')
-  })
-
-  it('contains an owned-paths handle covering /auth/*', () => {
-    expect(caddyfile).toContain('/auth/*')
-  })
-
-  it('contains an owned-paths handle covering /assets/*', () => {
-    expect(caddyfile).toContain('/assets/*')
-  })
-
-  it('contains an owned-paths handle covering /manifest.webmanifest', () => {
-    expect(caddyfile).toContain('/manifest.webmanifest')
-  })
-
-  it('contains an owned-paths handle covering /icon-*', () => {
-    expect(caddyfile).toContain('/icon-*')
-  })
-
-  it('has /operator/* before the owned-paths handle, and owned-paths before the catch-all', () => {
-    const operatorIdx = caddyfile.indexOf('handle /operator/*')
-    // The owned-paths handle block is identified by `handle @owned`
-    const ownedPathsIdx = caddyfile.indexOf('handle @owned')
+  it('proxies /api/* and /auth/* at their real paths before the catch-all', () => {
     const catchAllIdx = caddyfile.lastIndexOf('handle {')
-    expect(operatorIdx).toBeGreaterThan(-1)
-    expect(ownedPathsIdx).toBeGreaterThan(-1)
-    expect(catchAllIdx).toBeGreaterThan(-1)
-    expect(operatorIdx).toBeLessThan(ownedPathsIdx)
-    expect(ownedPathsIdx).toBeLessThan(catchAllIdx)
+    const apiSection = handleSection('handle /api/*', 'handle /auth/*')
+    const authSection = handleSection('handle /auth/*', 'handle @assets')
+
+    expect(caddyfile.indexOf('handle /api/*')).toBeLessThan(catchAllIdx)
+    expect(caddyfile.indexOf('handle /auth/*')).toBeLessThan(catchAllIdx)
+    expect(apiSection).toMatch(/reverse_proxy\s+dashboard:3000/)
+    expect(authSection).toMatch(/reverse_proxy\s+dashboard:3000/)
+    expect(apiSection).not.toContain('rewrite * /')
+    expect(authSection).not.toContain('rewrite * /')
   })
 
-  it('has rewrite * / before reverse_proxy dashboard:3000 in the catch-all handle', () => {
-    const rewriteIdx = caddyfile.indexOf('rewrite * /')
-    const catchAllProxyIdx = caddyfile.lastIndexOf('reverse_proxy dashboard:3000')
-    expect(rewriteIdx).toBeGreaterThan(-1)
-    expect(catchAllProxyIdx).toBeGreaterThan(-1)
-    expect(rewriteIdx).toBeLessThan(catchAllProxyIdx)
+  it('routes extension-based files through a real-path asset proxy', () => {
+    const matcherIdx = caddyfile.indexOf('@assets path_regexp')
+    const assetsHandleIdx = caddyfile.indexOf('handle @assets')
+    const catchAllIdx = caddyfile.lastIndexOf('handle {')
+    const assetsSection = handleSection('handle @assets', 'handle {')
+
+    expect(caddyfile).toMatch(/@assets\s+path_regexp/)
+    expect(caddyfile).toContain(String.raw`path_regexp \.[A-Za-z0-9]+$`)
+    expect(matcherIdx).toBeGreaterThan(-1)
+    expect(matcherIdx).toBeLessThan(assetsHandleIdx)
+    expect(assetsHandleIdx).toBeLessThan(catchAllIdx)
+    expect(assetsSection).toMatch(/reverse_proxy\s+dashboard:3000/)
+    expect(assetsSection).not.toContain('rewrite * /')
+  })
+
+  it('does not use a hand-maintained static asset allowlist', () => {
+    expect(caddyfile).not.toContain('@owned')
+    expect(caddyfile).not.toMatch(/\/assets\/\*|\/manifest\.webmanifest|\/icon-\*/)
+  })
+
+  it('keeps the SPA rewrite only in the final catch-all handle', () => {
+    const operatorIdx = caddyfile.indexOf('handle /operator/*')
+    const catchAllIdx = caddyfile.lastIndexOf('handle {')
+    const handleHeaders = caddyfile
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.startsWith('handle') && line.endsWith('{'))
+    const catchAllSection = caddyfile.slice(catchAllIdx)
+
+    expect(operatorIdx).toBeGreaterThan(-1)
+    expect(catchAllIdx).toBeGreaterThan(-1)
+    expect(handleHeaders.at(-1)).toBe('handle {')
+    expect(caddyfile.slice(0, catchAllIdx)).not.toContain('rewrite * /')
+    expect(catchAllSection.indexOf('rewrite * /')).toBeGreaterThan(-1)
+    expect(catchAllSection.indexOf('rewrite * /')).toBeLessThan(catchAllSection.indexOf('reverse_proxy dashboard:3000'))
   })
 
   it('does not use a bare reverse_proxy at the site-block level (must be inside handle blocks)', () => {

@@ -1,5 +1,47 @@
 # @marcusrbrown/infra
 
+## 0.14.1
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.100` to `7.2.101` ([#951](https://github.com/marcusrbrown/infra/pull/951))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.96` to `7.2.97` ([#929](https://github.com/marcusrbrown/infra/pull/929))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.94` to `7.2.95` ([#922](https://github.com/marcusrbrown/infra/pull/922))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#946](https://github.com/marcusrbrown/infra/pull/946))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.97` to `7.2.98` ([#939](https://github.com/marcusrbrown/infra/pull/939))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#956](https://github.com/marcusrbrown/infra/pull/956))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.101` to `7.2.102` ([#958](https://github.com/marcusrbrown/infra/pull/958))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3`, `ossf/scorecard-action` ([#931](https://github.com/marcusrbrown/infra/pull/931))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#940](https://github.com/marcusrbrown/infra/pull/940))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.95` to `7.2.96` ([#928](https://github.com/marcusrbrown/infra/pull/928))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.99` to `7.2.100` ([#945](https://github.com/marcusrbrown/infra/pull/945))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.98` to `7.2.99` ([#941](https://github.com/marcusrbrown/infra/pull/941))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.93` to `7.2.94` ([#917](https://github.com/marcusrbrown/infra/pull/917))
+
 ## 0.14.0
 ### Minor Changes
 

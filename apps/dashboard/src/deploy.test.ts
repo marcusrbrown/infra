@@ -162,10 +162,10 @@ const fetchHealthzFail = async (_url: string, _opts?: RequestInit): Promise<Resp
  *   7: chown 1000:1000 github-app.pem
  *   8: rm -f docker-compose.override.yaml (stale legacy override cleanup)
  *   9: docker compose pull
- *  10: docker compose up -d --no-build --wait dashboard
+ *  10: docker compose up -d --no-build --wait --wait-timeout 120 dashboard
  *  11: docker inspect (resolve image SHA for dashboard)
  *  12: docker inspect (RepoDigests for dashboard image)
- *  13: docker compose up -d --no-build --wait caddy
+ *  13: docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy
  *  14: (extra buffer)
  */
 function makeHappyPathResponses(): SpawnResult[] {
@@ -1775,10 +1775,10 @@ const RESOLVED_DIGEST = `sha256:${'c'.repeat(64)}`
  *   8: chown 1000:1000 github-app.pem
  *   9: rm -f docker-compose.override.yaml
  *  10: docker compose pull
- *  11: docker compose up -d --no-build --wait dashboard
+ *  11: docker compose up -d --no-build --wait --wait-timeout 120 dashboard
  *  12: docker inspect (resolve image SHA)
  *  13: docker inspect (RepoDigests)
- *  14: docker compose up -d --no-build --wait caddy
+ *  14: docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy
  *  15: (buffer)
  */
 function makeVersionedHappyPathResponses(): SpawnResult[] {
@@ -2413,11 +2413,10 @@ describe('public probe: final warning includes last error or status', () => {
   })
 })
 
-// ─── RED: --wait-timeout 120 in compose up commands ──────────────────────────
+// ─── compose up safety flags ─────────────────────────────────────────────────
 //
-// Both `docker compose up -d --no-build --wait dashboard` and
-// `docker compose up -d --no-build --wait caddy` must include `--wait-timeout 120`
-// to bound the wait and surface clear timeout errors.
+// The dashboard app must remain digest-gated without forced recreation. Caddy
+// must force recreation so bind-mounted Caddyfile content changes are loaded.
 
 describe('docker compose up: --wait-timeout 120', () => {
   it('dashboard compose up includes --wait-timeout 120', async () => {
@@ -2439,9 +2438,11 @@ describe('docker compose up: --wait-timeout 120', () => {
     })
     expect(dashboardUpCall).toBeDefined()
     expect(dashboardUpCall?.cmd.join(' ')).toContain('--wait-timeout 120')
+    expect(dashboardUpCall?.cmd.join(' ')).toContain('--no-build')
+    expect(dashboardUpCall?.cmd.join(' ')).not.toContain('--force-recreate')
   })
 
-  it('caddy compose up includes --wait-timeout 120', async () => {
+  it('caddy compose up includes --force-recreate, --wait-timeout 120, and --no-build', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
     await deploy({
@@ -2459,6 +2460,8 @@ describe('docker compose up: --wait-timeout 120', () => {
       return s.includes('docker compose up') && s.includes('caddy')
     })
     expect(caddyUpCall).toBeDefined()
+    expect(caddyUpCall?.cmd.join(' ')).toContain('--force-recreate')
     expect(caddyUpCall?.cmd.join(' ')).toContain('--wait-timeout 120')
+    expect(caddyUpCall?.cmd.join(' ')).toContain('--no-build')
   })
 })

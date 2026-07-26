@@ -1,6 +1,7 @@
 ---
 title: Dashboard SPA deep links 404 without a Caddy catch-all rewrite
 date: 2026-06-25
+last_updated: 2026-07-26
 category: docs/solutions/integration-issues/
 module: apps/dashboard
 problem_type: integration_issue
@@ -57,16 +58,24 @@ The dashboard `/` view was rebuilt as a Vite + React SPA served from the contain
             header_up X-Forwarded-Proto https
         }
     }
-    @owned path /api/* /auth/* /assets/* /manifest.webmanifest /icon-*
-    handle @owned {
-        reverse_proxy dashboard:3000   # backend-owned + assets, original path unchanged
+    handle /api/* {                   # backend routes, original path unchanged
+        reverse_proxy dashboard:3000
+    }
+    handle /auth/* {
+        reverse_proxy dashboard:3000
+    }
+    @assets path_regexp \.[A-Za-z0-9]+$   # any file-with-extension -> app, original path
+    handle @assets {
+        reverse_proxy dashboard:3000
     }
     handle {
-        rewrite * /                    # unknown client route -> /
+        rewrite * /                    # unknown (extensionless) client route -> /
         reverse_proxy dashboard:3000   # backend serves index.html at /
     }
 }
 ```
+
+> **Update (2026-07-26, [#953](https://github.com/marcusrbrown/infra/pull/953)):** the original fix used a hand-maintained `@owned path /api/* /auth/* /assets/* /manifest.webmanifest /icon-*` allowlist. That allowlist **drifted**: the operator UI shipped root-level assets (`operator-stream.js`, `sw.js`, `static/operator-*.js`) that were never added to it, so the catch-all rewrote them to `/` and served the SPA HTML shell — the browser rejected the module script and service worker for MIME `text/html` and the operator Runs view went "Service unavailable". The block above shows the current, drift-proof shape: route any path **with a file extension** to the app at its real path (subsuming `/assets/*`, `/manifest.webmanifest`, `/icon-*`), and rewrite only extensionless client routes to the SPA entrypoint. See [dashboard-caddy-bind-mount-stale-reload-2026-07-26.md](./dashboard-caddy-bind-mount-stale-reload-2026-07-26.md) for the follow-on deploy trap where this Caddyfile change did not load until the caddy container was force-recreated.
 
 Validate the rendered config with `caddy adapt` against the pinned image:
 
@@ -82,7 +91,7 @@ docker run --rm -i caddy:2.11.3-alpine caddy adapt --adapter caddyfile - < apps/
 
 - **Verification method — compare the unknown route to `/`, not to the SPA document.** An unknown client route must return the *same* response as `/`. Here both return `302 → /operator/auth/github/start?return_to=/operator` because `/` is auth-gated in SESSION mode. The `302`-equals-`/` result (not a backend `404` for the deep-link path) proves `rewrite * /` reached the backend at `/`. An unauthenticated probe correctly gets the auth redirect rather than the SPA doc; an authenticated browser gets `index.html`. Expecting the SPA document from an unauthenticated probe on an auth-gated root is a false-negative trap.
 - Also confirm the unchanged paths after deploy: `/api/healthz` still `200`, `/operator/health` unchanged, asset paths still proxy unchanged.
-- Use this pattern whenever a reverse proxy fronts a container-served SPA plus same-origin backend: enumerate owned paths explicitly, then fall back the rest to the SPA entrypoint via `rewrite * /` (not `file_server`, since assets are in the container).
+- Use this pattern whenever a reverse proxy fronts a container-served SPA plus same-origin backend: route file-with-extension paths to the app at their real path, then fall back extensionless client routes to the SPA entrypoint via `rewrite * /` (not `file_server`, since assets are in the container). Prefer this over a hand-maintained asset allowlist — an allowlist silently drifts as the app adds root-level assets ([#953](https://github.com/marcusrbrown/infra/pull/953)).
 - Prefer named matchers for multi-path groups in Caddy — inline multi-path `handle` is rejected.
 - Always `caddy adapt`-validate edge config against the pinned image to catch directive-ordering and syntax mistakes before deploy.
 - A Caddyfile structure test (in `apps/dashboard/src/deploy.test.ts`) pins owned-paths-before-fallback ordering and the `rewrite * /`-before-`reverse_proxy` shape so the routing contract can't silently regress.
@@ -90,6 +99,8 @@ docker run --rm -i caddy:2.11.3-alpine caddy adapt --adapter caddyfile - < apps/
 ## Related Issues
 
 - infra#669 (closed via PR #676) — the issue this resolves.
+- [#953](https://github.com/marcusrbrown/infra/pull/953) — replaced this doc's `@owned` allowlist with extension-based routing after the allowlist drifted and served operator assets as `text/html`.
+- [dashboard-caddy-bind-mount-stale-reload-2026-07-26.md](./dashboard-caddy-bind-mount-stale-reload-2026-07-26.md) — the follow-on trap: the [#953](https://github.com/marcusrbrown/infra/pull/953) Caddyfile change did not load until the caddy container was force-recreated on deploy ([#954](https://github.com/marcusrbrown/infra/pull/954)).
 - [gateway-caddy-announce-ingress-self-404-2026-06-04.md](./gateway-caddy-announce-ingress-self-404-2026-06-04.md) — direct Caddy lineage: directive-ordering self-404 trap, same `caddy adapt` + mutually-exclusive `handle` discipline (different failure class).
 - [dashboard-operator-session-container-hairpin-2026-06-21.md](./dashboard-operator-session-container-hairpin-2026-06-21.md) — broader dashboard/operator Caddy routing context (container hairpin, not SPA fallback).
 - `docs/plans/2026-06-18-003-feat-dashboard-operator-private-path-plan.md` — established the dashboard `/operator/*` Caddy route and the `caddy adapt` validation precedent.

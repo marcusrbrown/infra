@@ -28,6 +28,9 @@ const COMPOSE_DIGEST = parseComposeImageDigest(dashboardImageLine) ?? ''
 if (!COMPOSE_DIGEST) throw new Error('Could not derive COMPOSE_DIGEST from docker-compose.yaml')
 
 const FAKE_DIGEST = `sha256:${'a'.repeat(64)}`
+const REMOTE_DIR_PATH = '/opt/dashboard'
+const REMOTE_CONFIG_DIR_PATH = '/opt/dashboard/config'
+const DATA_DIR_PATH = '/opt/dashboard/data'
 
 const VALID_ENV = {
   PATH: '/usr/bin:/bin',
@@ -149,39 +152,49 @@ const fetchHealthzFail = async (_url: string, _opts?: RequestInit): Promise<Resp
 /**
  * Builds a standard set of responses for a happy-path deploy.
  * Call order (no override upload — digest is sourced from committed compose file):
- *   0: mkdir -p /opt/dashboard/config
- *   1: write .env (stdin)
- *   2: scp docker-compose.yaml
- *   3: scp Caddyfile
- *   4: write github-app.pem (stdin)
- *   5: chmod 0600 github-app.pem
- *   6: chown 1000:1000 github-app.pem
- *   7: rm -f docker-compose.override.yaml (stale legacy override cleanup)
- *   8: docker compose pull
- *   9: docker compose up -d --no-build --wait dashboard
- *  10: docker inspect (resolve image SHA for dashboard)
- *  11: docker inspect (RepoDigests for dashboard image)
- *  12: docker compose up -d --no-build --wait caddy
- *  13: (extra buffer)
+ *   0: constant-only root/config validation and convergence
+ *   1: install -d /opt/dashboard/data (persistent listener storage)
+ *   2: write .env (stdin)
+ *   3: scp docker-compose.yaml
+ *   4: scp Caddyfile
+ *   5: write github-app.pem (stdin)
+ *   6: chmod 0600 github-app.pem
+ *   7: chown 1000:1000 github-app.pem
+ *   8: rm -f docker-compose.override.yaml (stale legacy override cleanup)
+ *   9: docker compose pull
+ *  10: docker compose up -d --no-build --wait dashboard
+ *  11: docker inspect (resolve image SHA for dashboard)
+ *  12: docker inspect (RepoDigests for dashboard image)
+ *  13: docker compose up -d --no-build --wait caddy
+ *  14: (extra buffer)
  */
 function makeHappyPathResponses(): SpawnResult[] {
   const repoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@${COMPOSE_DIGEST}`])
   return [
-    makeSpawnResult(), // 0: mkdir
-    makeSpawnResult(), // 1: write .env
-    makeSpawnResult(), // 2: scp compose
-    makeSpawnResult(), // 3: scp Caddyfile
-    makeSpawnResult(), // 4: write github-app.pem
-    makeSpawnResult(), // 5: chmod 0600
-    makeSpawnResult(), // 6: chown 1000:1000
-    makeSpawnResult(), // 7: rm -f docker-compose.override.yaml
-    makeSpawnResult(), // 8: compose pull
-    makeSpawnResult(), // 9: compose up dashboard
-    makeSpawnResult('sha256:imageid123'), // 10: docker inspect (image SHA)
-    makeSpawnResult(repoDigestsJson), // 11: docker inspect (RepoDigests)
-    makeSpawnResult(), // 12: compose up caddy
-    makeSpawnResult(), // 13: buffer
+    makeSpawnResult(), // 0: root/config validation and convergence
+    makeSpawnResult(), // 1: install -d data directory
+    makeSpawnResult(), // 2: write .env
+    makeSpawnResult(), // 3: scp compose
+    makeSpawnResult(), // 4: scp Caddyfile
+    makeSpawnResult(), // 5: write github-app.pem
+    makeSpawnResult(), // 6: chmod 0600
+    makeSpawnResult(), // 7: chown 1000:1000
+    makeSpawnResult(), // 8: rm -f docker-compose.override.yaml
+    makeSpawnResult(), // 9: compose pull
+    makeSpawnResult(), // 10: compose up dashboard
+    makeSpawnResult('sha256:imageid123'), // 11: docker inspect (image SHA)
+    makeSpawnResult(repoDigestsJson), // 12: docker inspect (RepoDigests)
+    makeSpawnResult(), // 13: compose up caddy
+    makeSpawnResult(), // 14: buffer
   ]
+}
+
+function getDataDirectorySetupCommand(calls: SpawnCall[]): string {
+  return calls.find(c => c.cmd.at(-1)?.includes(DATA_DIR_PATH))?.cmd.at(-1) ?? ''
+}
+
+function getRemoteRootSetupCommand(calls: SpawnCall[]): string {
+  return calls.find(c => c.cmd[0] === 'ssh' && c.cmd.at(-1)?.includes(REMOTE_CONFIG_DIR_PATH))?.cmd.at(-1) ?? ''
 }
 
 // ─── parseComposeImageDigest ──────────────────────────────────────────────────
@@ -425,6 +438,158 @@ describe('happy path deploy', () => {
     ).resolves.toBeUndefined()
   })
 
+  it('converges persistent listener storage before materialization and compose operations', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const dataSetupCalls = calls.filter(c => c.cmd.at(-1)?.includes(DATA_DIR_PATH))
+    expect(dataSetupCalls).toHaveLength(1)
+
+    const dataSetupIdx = calls.findIndex(c => c.cmd.at(-1)?.includes(DATA_DIR_PATH))
+    const envWriteIdx = calls.findIndex(c => c.stdinData.includes('DASHBOARD_DOMAIN='))
+    const appKeyWriteIdx = calls.findIndex(c => c.stdinData.includes('BEGIN RSA PRIVATE KEY'))
+    const composeOperationIndices = calls.flatMap((call, index) => {
+      const command = call.cmd.join(' ')
+      return command.includes('docker compose pull') || command.includes('docker compose up') ? [index] : []
+    })
+
+    expect(dataSetupIdx).toBeLessThan(envWriteIdx)
+    expect(dataSetupIdx).toBeLessThan(appKeyWriteIdx)
+    expect(composeOperationIndices.length).toBeGreaterThanOrEqual(3)
+    expect(composeOperationIndices.every(index => dataSetupIdx < index)).toBe(true)
+  })
+
+  it('fails closed and physically validates the remote root and config directories before mutation', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const command = getRemoteRootSetupCommand(calls)
+    const guards = [
+      `if [ -L '${REMOTE_DIR_PATH}' ]; then echo 'Refusing dashboard root symlink' >&2; exit 1; fi`,
+      `if [ -e '${REMOTE_DIR_PATH}' ] && [ ! -d '${REMOTE_DIR_PATH}' ]; then echo 'Refusing dashboard root non-directory' >&2; exit 1; fi`,
+      `if [ -L '${REMOTE_CONFIG_DIR_PATH}' ]; then echo 'Refusing dashboard config symlink' >&2; exit 1; fi`,
+      `if [ -e '${REMOTE_CONFIG_DIR_PATH}' ] && [ ! -d '${REMOTE_CONFIG_DIR_PATH}' ]; then echo 'Refusing dashboard config non-directory' >&2; exit 1; fi`,
+    ]
+    const firstMutationIndex = Math.min(
+      ...['install -d', 'mkdir -p', 'chown'].map(token => command.indexOf(token)).filter(index => index >= 0),
+    )
+
+    expect(calls.filter(c => c.cmd[0] === 'ssh' && c.cmd.at(-1) === command)).toHaveLength(1)
+    expect(calls.some(c => c.cmd.join(' ').includes('mkdir -p /opt/dashboard/config'))).toBe(false)
+    expect(command).toContain('set -eu')
+    for (const guard of guards) {
+      expect(command).toContain(guard)
+      expect(command.indexOf(guard)).toBeLessThan(firstMutationIndex)
+    }
+    expect(command).toContain(`install -d -m 0755 -o 0 -g 0 '${REMOTE_DIR_PATH}'`)
+    expect(command).toContain(`install -d -m 0755 -o 0 -g 0 '${REMOTE_CONFIG_DIR_PATH}'`)
+    expect(command).toContain(`chown 0:0 '${REMOTE_DIR_PATH}' '${REMOTE_CONFIG_DIR_PATH}'`)
+    expect(command).toContain(`[ "$(realpath -e '${REMOTE_DIR_PATH}')" = '${REMOTE_DIR_PATH}' ]`)
+    expect(command).toContain(`[ "$(realpath -e '${REMOTE_CONFIG_DIR_PATH}')" = '${REMOTE_CONFIG_DIR_PATH}' ]`)
+    expect(command).not.toContain(VALID_ENV.DASHBOARD_DOMAIN)
+    expect(command).not.toContain(VALID_ENV.DASHBOARD_OAUTH_CLIENT_SECRET)
+    expect(command).not.toContain(VALID_ENV.DASHBOARD_COOKIE_KEY)
+  })
+
+  it('rejects symlinks and existing non-directories before changing listener storage', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const command = getDataDirectorySetupCommand(calls)
+    const symlinkGuard = `if [ -L '${DATA_DIR_PATH}' ]; then echo 'Refusing listener data path symlink' >&2; exit 1; fi`
+    const nonDirectoryGuard =
+      `if [ -e '${DATA_DIR_PATH}' ] && [ ! -d '${DATA_DIR_PATH}' ]; then ` +
+      `echo 'Refusing listener data path non-directory' >&2; exit 1; fi`
+    const installIndex = command.indexOf('install -d -m 0700 -o 1000 -g 1000')
+    const chownIndex = command.indexOf('chown -R 1000:1000')
+    const chmodIndex = command.indexOf(`chmod 0700 '${DATA_DIR_PATH}'`)
+
+    expect(command).toContain('set -eu')
+    expect(command).toContain(symlinkGuard)
+    expect(command).toContain(nonDirectoryGuard)
+    expect(installIndex).toBeGreaterThan(command.indexOf(symlinkGuard))
+    expect(installIndex).toBeGreaterThan(command.indexOf(nonDirectoryGuard))
+    expect(chownIndex).toBeGreaterThan(installIndex)
+    expect(chmodIndex).toBeGreaterThan(chownIndex)
+    expect(command).toContain(
+      `[ -d '${DATA_DIR_PATH}' ] && [ ! -L '${DATA_DIR_PATH}' ] && ` +
+        `[ "$(realpath -e '${DATA_DIR_PATH}')" = '${DATA_DIR_PATH}' ]`,
+    )
+  })
+
+  it('recursively converges listener storage ownership and preserves the root mode', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const command = getDataDirectorySetupCommand(calls)
+    expect(command).toContain(`chown -R 1000:1000 '${DATA_DIR_PATH}'`)
+    expect(command).toContain(`chmod 0700 '${DATA_DIR_PATH}'`)
+    expect(command).toContain(
+      `[ -d '${DATA_DIR_PATH}' ] && [ ! -L '${DATA_DIR_PATH}' ] && ` +
+        `[ "$(realpath -e '${DATA_DIR_PATH}')" = '${DATA_DIR_PATH}' ]`,
+    )
+  })
+
+  it('aborts before image pull or start when persistent listener storage setup fails', async () => {
+    const responses = makeHappyPathResponses()
+    responses[1] = makeSpawnResult('', 'data directory setup failed', 1)
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/exit code 1/)
+
+    const dataSetupIdx = calls.findIndex(c => c.cmd.at(-1)?.includes(DATA_DIR_PATH))
+    expect(dataSetupIdx).toBeGreaterThan(-1)
+    expect(calls.some(c => c.cmd.join(' ').includes('docker compose pull'))).toBe(false)
+    expect(calls.some(c => c.cmd.join(' ').includes('docker compose up'))).toBe(false)
+    expect(calls.some(c => c.stdinData.includes('DASHBOARD_DOMAIN='))).toBe(false)
+  })
+
   it('materializes .env via SSH stdin (not argv)', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
@@ -608,7 +773,7 @@ describe('happy path deploy', () => {
   it('uses digest from committed compose file for assertRunningImageDigest', async () => {
     // Provide a RepoDigests response that matches the compose-pinned digest
     const responses = makeHappyPathResponses()
-    // responses[11] already returns COMPOSE_DIGEST — deploy should pass
+    // responses[12] already returns COMPOSE_DIGEST — deploy should pass
     const {spawnFn} = makeFakeSpawn(responses)
 
     await expect(
@@ -757,8 +922,8 @@ describe('edge cases', () => {
     const wrongRepoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@${wrongDigest}`])
 
     const responses = makeHappyPathResponses()
-    // Override the RepoDigests response (index 11) with a mismatched digest
-    responses[11] = makeSpawnResult(wrongRepoDigestsJson)
+    // Override the RepoDigests response (index 12) with a mismatched digest
+    responses[12] = makeSpawnResult(wrongRepoDigestsJson)
 
     const {spawnFn} = makeFakeSpawn(responses)
 
@@ -1585,39 +1750,41 @@ const RESOLVED_DIGEST = `sha256:${'c'.repeat(64)}`
  *
  * Call order for versioned deploy:
  *   0: docker buildx imagetools inspect (resolve digest)
- *   1: mkdir -p /opt/dashboard/config
- *   2: write .env (stdin)
- *   3: write docker-compose.yaml (stdin — generated content)
- *   4: scp Caddyfile
- *   5: write github-app.pem (stdin)
- *   6: chmod 0600 github-app.pem
- *   7: chown 1000:1000 github-app.pem
- *   8: rm -f docker-compose.override.yaml
- *   9: docker compose pull
- *  10: docker compose up -d --no-build --wait dashboard
- *  11: docker inspect (resolve image SHA)
- *  12: docker inspect (RepoDigests)
- *  13: docker compose up -d --no-build --wait caddy
- *  14: (buffer)
+ *   1: constant-only root/config validation and convergence
+ *   2: install -d /opt/dashboard/data (persistent listener storage)
+ *   3: write .env (stdin)
+ *   4: write docker-compose.yaml (stdin — generated content)
+ *   5: scp Caddyfile
+ *   6: write github-app.pem (stdin)
+ *   7: chmod 0600 github-app.pem
+ *   8: chown 1000:1000 github-app.pem
+ *   9: rm -f docker-compose.override.yaml
+ *  10: docker compose pull
+ *  11: docker compose up -d --no-build --wait dashboard
+ *  12: docker inspect (resolve image SHA)
+ *  13: docker inspect (RepoDigests)
+ *  14: docker compose up -d --no-build --wait caddy
+ *  15: (buffer)
  */
 function makeVersionedHappyPathResponses(): SpawnResult[] {
   const repoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@${RESOLVED_DIGEST}`])
   return [
     makeSpawnResult(RESOLVED_DIGEST), // 0: imagetools inspect → resolved digest
-    makeSpawnResult(), // 1: mkdir
-    makeSpawnResult(), // 2: write .env
-    makeSpawnResult(), // 3: write docker-compose.yaml (stdin)
-    makeSpawnResult(), // 4: scp Caddyfile
-    makeSpawnResult(), // 5: write github-app.pem
-    makeSpawnResult(), // 6: chmod 0600
-    makeSpawnResult(), // 7: chown 1000:1000
-    makeSpawnResult(), // 8: rm -f docker-compose.override.yaml
-    makeSpawnResult(), // 9: compose pull
-    makeSpawnResult(), // 10: compose up dashboard
-    makeSpawnResult('sha256:imageid123'), // 11: docker inspect (image SHA)
-    makeSpawnResult(repoDigestsJson), // 12: docker inspect (RepoDigests)
-    makeSpawnResult(), // 13: compose up caddy
-    makeSpawnResult(), // 14: buffer
+    makeSpawnResult(), // 1: root/config validation and convergence
+    makeSpawnResult(), // 2: install -d data directory
+    makeSpawnResult(), // 3: write .env
+    makeSpawnResult(), // 4: write docker-compose.yaml (stdin)
+    makeSpawnResult(), // 5: scp Caddyfile
+    makeSpawnResult(), // 6: write github-app.pem
+    makeSpawnResult(), // 7: chmod 0600
+    makeSpawnResult(), // 8: chown 1000:1000
+    makeSpawnResult(), // 9: rm -f docker-compose.override.yaml
+    makeSpawnResult(), // 10: compose pull
+    makeSpawnResult(), // 11: compose up dashboard
+    makeSpawnResult('sha256:imageid123'), // 12: docker inspect (image SHA)
+    makeSpawnResult(repoDigestsJson), // 13: docker inspect (RepoDigests)
+    makeSpawnResult(), // 14: compose up caddy
+    makeSpawnResult(), // 15: buffer
   ]
 }
 
@@ -1719,8 +1886,8 @@ describe('versioned deploy path', () => {
   it('fails when running image digest does not match resolvedDigest', async () => {
     const wrongRepoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@sha256:${'e'.repeat(64)}`])
     const responses = makeVersionedHappyPathResponses()
-    // Override the RepoDigests response (index 12) with a mismatched digest
-    responses[12] = makeSpawnResult(wrongRepoDigestsJson)
+    // Override the RepoDigests response (index 13) with a mismatched digest
+    responses[13] = makeSpawnResult(wrongRepoDigestsJson)
 
     const {spawnFn} = makeFakeSpawn(responses)
 
@@ -1964,7 +2131,7 @@ describe('versioned deploy: writes local compose path after successful deploy', 
     try {
       // Replace the caddy up response (index 13) with a failing exit code.
       const responses = makeVersionedHappyPathResponses()
-      responses[13] = makeSpawnResult('', 'caddy up failed', 1)
+      responses[14] = makeSpawnResult('', 'caddy up failed', 1)
       const {spawnFn} = makeFakeSpawn(responses)
 
       await expect(

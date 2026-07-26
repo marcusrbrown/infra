@@ -19,6 +19,19 @@ describe('dashboard docker compose', () => {
     expect(compose).toContain('read_only: true')
   })
 
+  it('bind-mounts persistent listener storage with fail-closed host-path creation', () => {
+    const dashboardSection = compose.slice(compose.indexOf('  dashboard:'))
+
+    expect(dashboardSection).toContain('read_only: true')
+    expect(dashboardSection).toContain('user: node')
+    expect(dashboardSection).toContain(`
+      - type: bind
+        source: /opt/dashboard/data
+        target: /data
+        bind:
+          create_host_path: false`)
+  })
+
   it('drops ALL capabilities on the dashboard service (security hardening)', () => {
     expect(compose).toContain('cap_drop:')
     expect(compose).toContain('- ALL')

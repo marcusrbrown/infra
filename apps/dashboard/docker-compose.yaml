@@ -47,6 +47,12 @@ services:
     tmpfs:
       - /tmp
     volumes:
+      # Listener SQLite state writable surface; the rest of the root filesystem remains read-only.
+      - type: bind
+        source: /opt/dashboard/data
+        target: /data
+        bind:
+          create_host_path: false
       # Host path (uploaded by deploy.ts, 0600) : container path : read-only
       - /opt/dashboard/config/github-app.pem:/run/secrets/github-app.pem:ro
     healthcheck:

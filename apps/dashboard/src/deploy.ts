@@ -709,9 +709,9 @@ async function resolveImageDigest(version: string, spawnFn: SpawnFn, deployEnv: 
  * 12. chown 1000:1000 github-app.pem so the container's node user (UID 1000) can read it
  * 13. rm -f /opt/dashboard/docker-compose.override.yaml (idempotent legacy cleanup)
  * 14. docker compose pull (pulls digest-pinned GHCR image from docker-compose.yaml)
- * 15. docker compose up -d --no-build --wait dashboard (app health gate first)
+ * 15. docker compose up -d --no-build --wait --wait-timeout 120 dashboard (app health gate first)
  * 16. Verify RepoDigests: assert running image includes selected digest (fail closed)
- * 17. docker compose up -d --no-build --wait caddy (public exposure after app healthy)
+ * 17. docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy (public exposure after app healthy)
  * 18. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
  */
 export async function deploy(opts: DeployOpts = {}): Promise<void> {
@@ -1015,11 +1015,12 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 
     // Phase 11: Start Caddy — now safe to expose publicly (app is healthy + digest verified).
     // --wait-timeout 120 bounds the health-check wait and surfaces clear timeout errors.
+    // Bind-mounted Caddyfile content changes do not trigger recreation; force reload it every deploy.
     await runCommand(
       'Starting Caddy (public exposure)',
       sshCommand(
         host,
-        `cd ${REMOTE_DIR} && docker compose up -d --no-build --wait --wait-timeout 120 caddy`,
+        `cd ${REMOTE_DIR} && docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy`,
         keyPath,
         controlPath,
       ),

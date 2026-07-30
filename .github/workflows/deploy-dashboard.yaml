@@ -270,13 +270,14 @@ jobs:
 
           supersede_open_pin_prs() {
             local stable_pr_number="$1"
-            local pr_rows pr_number head_ref
-            if ! pr_rows=$(gh pr list --state open --limit 1000 --json number,headRefName --jq '.[] | select(.headRefName == "dashboard-pin" or (.headRefName | startswith("dashboard-pin-"))) | [.number, .headRefName] | @tsv'); then
+            local pr_rows pr_number head_ref author_login
+            if ! pr_rows=$(gh pr list --state open --limit 1000 --json number,headRefName,isCrossRepository,author --jq '.[] | select(.isCrossRepository == false and (.headRefName == "dashboard-pin" or (.headRefName | startswith("dashboard-pin-")))) | [.number, .headRefName, .author.login] | @tsv'); then
               echo "Audit step: unable to list open dashboard pin PRs." >&2
               return 1
             fi
-            while IFS=$'\t' read -r pr_number head_ref; do
+            while IFS=$'\t' read -r pr_number head_ref author_login; do
               [[ -n "${pr_number}" ]] || continue
+              [[ "${author_login}" == "${GIT_USER_NAME}" ]] || continue
               if [[ -n "${stable_pr_number}" && "${pr_number}" == "${stable_pr_number}" ]]; then
                 continue
               fi

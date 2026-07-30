@@ -1646,6 +1646,10 @@ describe('deploy-dashboard.yaml: audit step hardening', () => {
     expect(jqQuery).toBeDefined()
     expect(jqQuery).toContain('headRefName')
     expect(jqQuery).toContain('startswith("dashboard-pin-")')
+    expect(jqQuery).toContain('isCrossRepository == false')
+    expect(jqQuery).toContain('.author.login')
+    expect(supersedeBlock).toContain('author_login')
+    expect(supersedeBlock).toMatch(/\[\[\s*"\$\{author_login\}"\s*==\s*"\$\{GIT_USER_NAME\}"\s*\]\]\s*\|\|\s*continue/)
     expect(jqQuery).not.toContain('title')
   })
 

@@ -11326,6 +11326,8 @@ describe('operator push VAPID structural validation', () => {
     const malformed = [
       {value: `${TEST_VAPID_PUBLIC_KEY}=`, reason: 'padding'},
       {value: `${TEST_VAPID_PUBLIC_KEY}!`, reason: 'invalid base64url'},
+      {value: `${TEST_VAPID_PUBLIC_KEY.slice(0, -1)}+`, reason: 'standard base64 plus'},
+      {value: `${TEST_VAPID_PUBLIC_KEY.slice(0, -1)}/`, reason: 'standard base64 slash'},
       {value: Buffer.alloc(64, 0x11).toString('base64url'), reason: 'wrong length'},
       {
         value: Buffer.concat([Buffer.from([0x03]), Buffer.alloc(64, 0x11)]).toString('base64url'),
@@ -11356,6 +11358,8 @@ describe('operator push VAPID structural validation', () => {
     const malformed = [
       `${TEST_VAPID_PRIVATE_KEY}=`,
       `${TEST_VAPID_PRIVATE_KEY}!`,
+      `${TEST_VAPID_PRIVATE_KEY.slice(0, -1)}+`,
+      `${TEST_VAPID_PRIVATE_KEY.slice(0, -1)}/`,
       Buffer.alloc(31, 0x22).toString('base64url'),
       Buffer.alloc(33, 0x22).toString('base64url'),
     ]
@@ -11379,7 +11383,7 @@ describe('operator push VAPID structural validation', () => {
   })
 
   test('blank, non-mailto, and non-https subjects are rejected', async () => {
-    const {validatePushVapidConfig} = await import('./deploy')
+    const {main, validatePushVapidConfig} = await import('./deploy')
     for (const subject of [
       '',
       '   ',
@@ -11394,12 +11398,18 @@ describe('operator push VAPID structural validation', () => {
           keyVersion: TEST_VAPID_KEY_VERSION,
         }),
       ).toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT/)
+
+      const {spawnFn, calls} = makeSpawnMock()
+      await expect(
+        main({env: makePushEnv({GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT: subject}), args: [], spawn: spawnFn}),
+      ).rejects.toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT/)
+      expect(calls).toHaveLength(0)
     }
   })
 
   test('zero, negative, float, and nonnumeric key versions are rejected', async () => {
     const {main, validatePushVapidConfig} = await import('./deploy')
-    for (const keyVersion of ['0', '-1', '1.5', 'abc']) {
+    for (const keyVersion of ['0', '-1', '1.5', 'abc', '+1', '01', '1.0']) {
       expect(() =>
         validatePushVapidConfig({
           publicKey: TEST_VAPID_PUBLIC_KEY,
@@ -11483,7 +11493,7 @@ describe('operator push VAPID secret files and compose wiring', () => {
   })
 
   test('changing each quartet value or rendered push wiring changes the existing checksum', async () => {
-    const {buildComposeOverride, buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const {buildComposeOverride, buildSecretFileList, computeSecretsChecksum, main} = await import('./deploy')
     const checksumFor = (env: Record<string, string>, operatorPushEnabled = true) =>
       computeSecretsChecksum([
         ...buildSecretFileList(env),
@@ -11510,6 +11520,25 @@ describe('operator push VAPID secret files and compose wiring', () => {
     for (const key of PUSH_VAPID_ENV_KEYS) {
       const changed = makePushEnv({[key]: changedValues[key]})
       expect(checksumFor(changed), key).not.toBe(baseChecksum)
+
+      const {spawnFn, calls} = makeSpawnMock(cmd => {
+        const command = cmd.join(' ')
+        if (command.includes('.secrets-checksum') && command.includes("cat '")) {
+          return makeSpawnResult({stdout: baseChecksum})
+        }
+        return undefined
+      })
+
+      await main({
+        env: changed,
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      })
+
+      const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+      expect(upCall?.join(' '), key).toContain('--force-recreate')
     }
     expect(checksumFor(baseEnv, false)).not.toBe(baseChecksum)
   })

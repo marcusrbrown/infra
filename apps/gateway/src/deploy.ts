@@ -158,12 +158,6 @@ export const OPERATOR_AUTH_SECRET_SPECS = [
   },
 ] as const
 
-/** Infra-owned host file names for the gateway operator push VAPID quartet. */
-export const OPERATOR_PUSH_VAPID_PUBLIC_KEY_FILE = 'gateway-operator-push-vapid-public-key'
-export const OPERATOR_PUSH_VAPID_PRIVATE_KEY_FILE = 'gateway-operator-push-vapid-private-key'
-export const OPERATOR_PUSH_VAPID_SUBJECT_FILE = 'gateway-operator-push-vapid-subject'
-export const OPERATOR_PUSH_VAPID_KEY_VERSION_FILE = 'gateway-operator-push-vapid-key-version'
-
 /**
  * Operator push VAPID secret specs — single source of truth for env keys,
  * infra-owned host files, and upstream run-secrets container paths.
@@ -171,22 +165,22 @@ export const OPERATOR_PUSH_VAPID_KEY_VERSION_FILE = 'gateway-operator-push-vapid
 export const OPERATOR_PUSH_VAPID_SECRET_SPECS = [
   {
     envKey: 'GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY',
-    hostFile: OPERATOR_PUSH_VAPID_PUBLIC_KEY_FILE,
+    hostFile: 'gateway-operator-push-vapid-public-key',
     containerPath: '/run/secrets/gateway_operator_push_vapid_public_key',
   },
   {
     envKey: 'GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY',
-    hostFile: OPERATOR_PUSH_VAPID_PRIVATE_KEY_FILE,
+    hostFile: 'gateway-operator-push-vapid-private-key',
     containerPath: '/run/secrets/gateway_operator_push_vapid_private_key',
   },
   {
     envKey: 'GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT',
-    hostFile: OPERATOR_PUSH_VAPID_SUBJECT_FILE,
+    hostFile: 'gateway-operator-push-vapid-subject',
     containerPath: '/run/secrets/gateway_operator_push_vapid_subject',
   },
   {
     envKey: 'GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION',
-    hostFile: OPERATOR_PUSH_VAPID_KEY_VERSION_FILE,
+    hostFile: 'gateway-operator-push-vapid-key-version',
     containerPath: '/run/secrets/gateway_operator_push_vapid_key_version',
   },
 ] as const
@@ -585,14 +579,14 @@ export function getAnnounceState(env: Record<string, string>): 'enabled' | 'disa
   return 'invalid'
 }
 
+/** Strict base64url character set: A-Z, a-z, 0-9, -, _ (no padding, no whitespace). */
+const BASE64URL_RE = /^[\w-]+$/
+
 /**
  * Returns the operator push VAPID state based on the presence of all four
  * quartet inputs. The independent upstream enable flag is intentionally not
  * part of this state machine.
  */
-/** Strict base64url character set: A-Z, a-z, 0-9, -, _ (no padding, no whitespace). */
-const BASE64URL_RE = /^[\w-]+$/
-
 export function getPushState(env: Record<string, string>): 'enabled' | 'disabled' | 'invalid' {
   const present = OPERATOR_PUSH_VAPID_SECRET_SPECS.map(spec => Boolean(env[spec.envKey]?.trim()))
   const count = present.filter(Boolean).length

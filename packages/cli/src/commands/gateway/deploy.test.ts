@@ -13,6 +13,10 @@ const envKeys = [
   'DISCORD_GUILD_ID',
   'DISCORD_TOKEN',
   'GATEWAY_HOST',
+  'GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION',
+  'GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY',
+  'GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY',
+  'GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT',
   'GATEWAY_PRESENCE_CHANNEL_ID',
   'GATEWAY_TRIGGER_ROLE_ID',
   'GATEWAY_WEBHOOK_SECRET',
@@ -400,6 +404,26 @@ describe('gateway deploy', () => {
       })
       const env = getGatewayDeployEnv()
       expect(env.GATEWAY_PRESENCE_CHANNEL_ID).toBe('111222333444555666')
+    })
+
+    it('forwards all four operator push VAPID vars with exact values', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION: '7',
+        GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY: 'private-key-material-without-logging',
+        GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY: 'public-key-material',
+        GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT: 'mailto:operator@example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+
+      const env = getGatewayDeployEnv()
+
+      expect(env.GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY).toBe('public-key-material')
+      expect(env.GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY).toBe('private-key-material-without-logging')
+      expect(env.GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT).toBe('mailto:operator@example.com')
+      expect(env.GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION).toBe('7')
     })
 
     it('GATEWAY_PRESENCE_CHANNEL_ID unset → forwarded as empty string', () => {

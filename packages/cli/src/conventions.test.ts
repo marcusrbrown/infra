@@ -770,6 +770,14 @@ const OPERATOR_TUNING_SECRETS = [
   'GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS',
 ] as const
 
+const OPERATOR_PUSH_VAPID_VARS = [
+  'GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY',
+  'GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT',
+  'GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION',
+] as const
+
+const OPERATOR_PUSH_VAPID_PRIVATE_KEY = 'GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY' as const
+
 describe('deploy-gateway.yaml: operator auth/config secrets in workflow_call.secrets', () => {
   const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
 
@@ -880,6 +888,105 @@ describe('deploy.yaml: fan-out passes operator tuning vars via secrets: to deplo
     for (const secret of OPERATOR_TUNING_SECRETS) {
       expect(withBlock).not.toHaveProperty(secret)
     }
+  })
+})
+
+// ─── operator push VAPID workflow forwarding ──────────────────────────────────
+
+describe('deploy-gateway.yaml: operator push VAPID workflow contract', () => {
+  const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
+
+  async function readWorkflow() {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}
+      jobs?: {
+        'deploy-gateway'?: {
+          steps?: {name?: string; env?: Record<string, string>; run?: string}[]
+        }
+      }
+    }
+    const steps = parsed?.jobs?.['deploy-gateway']?.steps ?? []
+    return {text, parsed, steps}
+  }
+
+  it('declares only the private VAPID key as an optional workflow_call secret', async () => {
+    const {parsed} = await readWorkflow()
+    const secrets = parsed?.on?.workflow_call?.secrets ?? {}
+
+    expect(secrets).toHaveProperty(OPERATOR_PUSH_VAPID_PRIVATE_KEY)
+    expect(secrets[OPERATOR_PUSH_VAPID_PRIVATE_KEY]?.required).toBe(false)
+    for (const variable of OPERATOR_PUSH_VAPID_VARS) {
+      expect(secrets).not.toHaveProperty(variable)
+    }
+  })
+
+  it('forwards push metadata from vars and the private key from secrets only in the deploy step', async () => {
+    const {steps} = await readWorkflow()
+    const deployStep = steps.find(s => s.name === 'Deploy gateway')
+    expect(deployStep).toBeDefined()
+
+    for (const variable of OPERATOR_PUSH_VAPID_VARS) {
+      expect(deployStep?.env).toHaveProperty(variable)
+      expect(deployStep?.env?.[variable]).toBe(`\${{ vars.${variable} }}`)
+    }
+
+    expect(deployStep?.env).toHaveProperty(OPERATOR_PUSH_VAPID_PRIVATE_KEY)
+    expect(deployStep?.env?.[OPERATOR_PUSH_VAPID_PRIVATE_KEY]).toBe(
+      `\${{ secrets.${OPERATOR_PUSH_VAPID_PRIVATE_KEY} }}`,
+    )
+    expect(deployStep?.env).not.toHaveProperty('GATEWAY_OPERATOR_PUSH_ENABLED')
+
+    const nonDeploySteps = steps.filter(s => s !== deployStep)
+    for (const step of nonDeploySteps) {
+      expect(JSON.stringify(step)).not.toContain(OPERATOR_PUSH_VAPID_PRIVATE_KEY)
+    }
+  })
+
+  it('keeps VAPID values out of required-secret validation', async () => {
+    const {steps} = await readWorkflow()
+    const validationStep = steps.find(s => s.name === 'Validate required secrets')
+    expect(validationStep).toBeDefined()
+
+    const validationText = JSON.stringify(validationStep)
+    for (const variable of [...OPERATOR_PUSH_VAPID_VARS, OPERATOR_PUSH_VAPID_PRIVATE_KEY]) {
+      expect(validationText).not.toContain(variable)
+    }
+  })
+
+  it('does not expose an independently operator-set gateway push enabled input', async () => {
+    const {text, parsed} = await readWorkflow()
+    const inputs = (parsed?.on?.workflow_call as {inputs?: Record<string, unknown>} | undefined)?.inputs ?? {}
+    expect(text).not.toContain('GATEWAY_OPERATOR_PUSH_ENABLED')
+    expect(inputs).not.toHaveProperty('GATEWAY_OPERATOR_PUSH_ENABLED')
+  })
+})
+
+describe('deploy.yaml: aggregate router forwards the optional operator push private key', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  it('passes the private VAPID key through the deploy-gateway job secrets block', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-gateway'?: {secrets?: Record<string, string>}}
+    }
+    const secrets = parsed?.jobs?.['deploy-gateway']?.secrets ?? {}
+
+    expect(secrets).toHaveProperty(OPERATOR_PUSH_VAPID_PRIVATE_KEY)
+    expect(secrets[OPERATOR_PUSH_VAPID_PRIVATE_KEY]).toBe(`\${{ secrets.${OPERATOR_PUSH_VAPID_PRIVATE_KEY} }}`)
+  })
+
+  it('does not pass non-secret push metadata or an independent enabled flag through the aggregate router', async () => {
+    const text = await Bun.file(DEPLOY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-gateway'?: {secrets?: Record<string, string>}}
+    }
+    const secrets = parsed?.jobs?.['deploy-gateway']?.secrets ?? {}
+
+    for (const variable of OPERATOR_PUSH_VAPID_VARS) {
+      expect(secrets).not.toHaveProperty(variable)
+    }
+    expect(text).not.toContain('GATEWAY_OPERATOR_PUSH_ENABLED')
   })
 })
 

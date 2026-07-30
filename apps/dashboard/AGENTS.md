@@ -238,6 +238,19 @@ same-origin path only works after the gateway VPC bridge is live (see
 See `docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md` for the full decision
 record.
 
+## OPERATOR PUSH
+
+`DASHBOARD_OPERATOR_PUSH_ENABLED` is an independent, server-side dashboard flag. Only the exact
+string `true` is rendered as `DASHBOARD_OPERATOR_PUSH_ENABLED=true`; absent, false, whitespace-variant,
+or malformed input is omitted and remains default-off.
+
+The dashboard deploy accepts no VAPID material and no endpoint pointer. At runtime, the existing
+consent flow and a trusted user gesture own subscription; the flag alone never auto-prompts or
+auto-subscribes. That flow fetches the public key from the gateway's authenticated
+`GET /operator/push/vapid-key` route. A disabled or guard-denied gateway route is a disabled result.
+Dashboard and gateway activation are independently actionable, but real end-to-end push requires both
+sides and the `fro-bot/dashboard#238` privacy-policy prerequisite.
+
 ## Anti-patterns
 
 - **Never put the GitHub App private key in an env var** — use the file mount

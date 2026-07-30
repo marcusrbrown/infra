@@ -1358,6 +1358,171 @@ describe('deploy forwards GATEWAY_VPC_IP to caddy service env', () => {
   })
 })
 
+// ─── DASHBOARD_OPERATOR_PUSH_ENABLED rendering ───────────────────────────────
+//
+// Server-side push flag: independently controlled from the gateway VAPID quartet.
+// Exact-match semantics: the rendered line is a FIXED string
+// (`DASHBOARD_OPERATOR_PUSH_ENABLED=true`), never the raw input value, and it is
+// written ONLY when the raw input is the literal string "true" (no trim, no
+// case-folding). GitHub Environment *variables* (unlike secrets) are not subject
+// to the trailing-newline mangling that secrets can pick up, so strict raw
+// equality is safe here and gives the strictest, most auditable fail-closed
+// behavior: any whitespace or case variant is treated as disabled, matching the
+// plan's "only for the exact enabled value" / "exactly `true`" language.
+// Absent/false/malformed values are OMITTED (not an error) — the image's
+// existing disabled behavior remains the default.
+
+describe('buildEnvFileContents: DASHBOARD_OPERATOR_PUSH_ENABLED', () => {
+  const baseOpts = {
+    domain: 'dashboard.fro.bot',
+    githubAppId: '123456',
+    oauthClientId: 'Iv1.abc123',
+    oauthClientSecret: 'oauthsecret',
+    operatorLogin: 'marcusrbrown',
+    cookieKey: 'cookiekey',
+  }
+
+  it('omits the push flag line when absent', () => {
+    const contents = buildEnvFileContents({...baseOpts})
+    expect(contents).not.toContain('DASHBOARD_OPERATOR_PUSH_ENABLED')
+  })
+
+  it('omits the push flag line when explicitly false', () => {
+    const contents = buildEnvFileContents({...baseOpts, operatorPushEnabled: 'false'})
+    expect(contents).not.toContain('DASHBOARD_OPERATOR_PUSH_ENABLED')
+  })
+
+  it.each(['True', 'TRUE', ' true', 'true ', 'true\n', '1', 'yes', 'truex', ''])(
+    'omits the push flag line for malformed/whitespace-variant input %p',
+    variant => {
+      const contents = buildEnvFileContents({...baseOpts, operatorPushEnabled: variant})
+      expect(contents).not.toContain('DASHBOARD_OPERATOR_PUSH_ENABLED')
+    },
+  )
+
+  it('writes exactly DASHBOARD_OPERATOR_PUSH_ENABLED=true for the exact enabled value', () => {
+    const contents = buildEnvFileContents({...baseOpts, operatorPushEnabled: 'true'})
+    expect(contents).toContain('DASHBOARD_OPERATOR_PUSH_ENABLED=true\n')
+  })
+
+  it('never renders any VAPID key material or endpoint pointer regardless of push flag state', () => {
+    const contents = buildEnvFileContents({...baseOpts, operatorPushEnabled: 'true'})
+    expect(contents).not.toMatch(/VAPID/i)
+    expect(contents).not.toContain('PUBLIC_KEY')
+    expect(contents).not.toContain('PRIVATE_KEY')
+    expect(contents).not.toContain('ENDPOINT')
+  })
+})
+
+// ─── deploy(): DASHBOARD_OPERATOR_PUSH_ENABLED forwarding + isolation ────────
+
+describe('deploy forwards DASHBOARD_OPERATOR_PUSH_ENABLED independently of gateway VAPID state', () => {
+  it('renders only DASHBOARD_OPERATOR_PUSH_ENABLED=true in the .env stdin write when exactly "true"', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: {...VALID_ENV, DASHBOARD_OPERATOR_PUSH_ENABLED: 'true'},
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const envFileWrite = calls.find(c => c.stdinData.includes('DASHBOARD_DOMAIN='))
+    expect(envFileWrite).toBeDefined()
+    expect(envFileWrite?.stdinData).toContain('DASHBOARD_OPERATOR_PUSH_ENABLED=true\n')
+  })
+
+  it('omits the push flag from the .env stdin write when absent', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const envFileWrite = calls.find(c => c.stdinData.includes('DASHBOARD_DOMAIN='))
+    expect(envFileWrite).toBeDefined()
+    expect(envFileWrite?.stdinData).not.toContain('DASHBOARD_OPERATOR_PUSH_ENABLED')
+  })
+
+  it('ignores unrelated gateway VAPID env values present in the same process env (never read or forwarded)', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: {
+        ...VALID_ENV,
+        DASHBOARD_OPERATOR_PUSH_ENABLED: 'true',
+        // Simulates gateway-scoped VAPID values leaking into the same process env —
+        // must never be read, rendered, or forwarded by the dashboard deploy.
+        GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY: 'BPub...key',
+        GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY: 'priv-key-material',
+        GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT: 'mailto:ops@fro.bot',
+        GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION: '1',
+      },
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const envFileWrite = calls.find(c => c.stdinData.includes('DASHBOARD_DOMAIN='))
+    expect(envFileWrite).toBeDefined()
+    expect(envFileWrite?.stdinData).toContain('DASHBOARD_OPERATOR_PUSH_ENABLED=true\n')
+    expect(envFileWrite?.stdinData).not.toMatch(/VAPID/i)
+    expect(envFileWrite?.stdinData).not.toContain('BPub...key')
+    expect(envFileWrite?.stdinData).not.toContain('priv-key-material')
+
+    for (const call of calls) {
+      expect(call.cmd.join(' ')).not.toMatch(/VAPID/i)
+    }
+  })
+})
+
+// ─── deploy-dashboard.yaml: DASHBOARD_OPERATOR_PUSH_ENABLED forwarding ───────
+//
+// The flag is a non-secret, dashboard-Environment `vars` value. It must be
+// forwarded from `vars.DASHBOARD_OPERATOR_PUSH_ENABLED` in the Deploy step's
+// env block — never declared as a `workflow_call` secret, and no VAPID
+// key/endpoint values may be introduced anywhere in the workflow file.
+
+describe('deploy-dashboard.yaml: DASHBOARD_OPERATOR_PUSH_ENABLED forwarding', () => {
+  const workflowPath = new URL('../../../.github/workflows/deploy-dashboard.yaml', import.meta.url)
+
+  it('Deploy step env forwards DASHBOARD_OPERATOR_PUSH_ENABLED from the vars context', async () => {
+    const text = await Bun.file(workflowPath).text()
+    // Isolate the "Deploy" step block (from "- name: Deploy" to the next "- name:").
+    const deployStepMatch = /- name: Deploy\n[\s\S]*?(?=\n {6}- name:|\n {6}$)/.exec(text)
+    expect(deployStepMatch).not.toBeNull()
+    const deployStep = deployStepMatch?.[0] ?? ''
+    expect(deployStep).toMatch(
+      /DASHBOARD_OPERATOR_PUSH_ENABLED:\s*\$\{\{\s*vars\.DASHBOARD_OPERATOR_PUSH_ENABLED\s*\}\}/,
+    )
+  })
+
+  it('does NOT declare DASHBOARD_OPERATOR_PUSH_ENABLED as a workflow_call secret', async () => {
+    const text = await Bun.file(workflowPath).text()
+    const secretsBlockMatch = /secrets:\n[\s\S]*?(?=\npermissions:)/.exec(text)
+    expect(secretsBlockMatch).not.toBeNull()
+    expect(secretsBlockMatch?.[0]).not.toContain('DASHBOARD_OPERATOR_PUSH_ENABLED')
+  })
+
+  it('never introduces VAPID key material or an endpoint pointer anywhere in the workflow', async () => {
+    const text = await Bun.file(workflowPath).text()
+    expect(text).not.toMatch(/VAPID/i)
+    expect(text).not.toContain('PUSH_ENDPOINT')
+  })
+})
+
 // ─── validateEnv with GATEWAY_VPC_IP ─────────────────────────────────────────
 
 describe('validateEnv with GATEWAY_VPC_IP', () => {

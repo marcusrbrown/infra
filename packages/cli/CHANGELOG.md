@@ -1,5 +1,35 @@
 # @marcusrbrown/infra
 
+## 0.14.2
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.102` to `7.2.103` ([#961](https://github.com/marcusrbrown/infra/pull/961))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#983](https://github.com/marcusrbrown/infra/pull/983))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.104` to `7.2.106` ([#972](https://github.com/marcusrbrown/infra/pull/972))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.106` to `7.2.109` ([#973](https://github.com/marcusrbrown/infra/pull/973))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.103` to `7.2.104` ([#967](https://github.com/marcusrbrown/infra/pull/967))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.110` to `7.2.111` ([#982](https://github.com/marcusrbrown/infra/pull/982))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.109` to `7.2.110` ([#976](https://github.com/marcusrbrown/infra/pull/976))
+
+
+- 📦 Update npm dependency `@modelcontextprotocol/sdk` from `1.29.0` to `1.30.0` ([#980](https://github.com/marcusrbrown/infra/pull/980))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3`, `eslint` ([#964](https://github.com/marcusrbrown/infra/pull/964))
+
 ## 0.14.1
 ### Patch Changes
 

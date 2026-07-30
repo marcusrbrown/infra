@@ -436,8 +436,26 @@ export function buildEnvFileContents(opts: {
   operatorLogin: string
   cookieKey: string
   gatewayVpcIp?: string
+  /**
+   * Raw, unvalidated `DASHBOARD_OPERATOR_PUSH_ENABLED` input. Only the exact
+   * string "true" renders the flag line; any other value (absent, "false",
+   * whitespace/case variants, non-boolean text) is treated as disabled and
+   * omitted entirely. No VAPID key material or endpoint pointer is ever
+   * derived from or related to this value — the dashboard reads its own
+   * public key from the gateway's authenticated route at runtime.
+   */
+  operatorPushEnabled?: string
 }): string {
-  const {domain, githubAppId, oauthClientId, oauthClientSecret, operatorLogin, cookieKey, gatewayVpcIp} = opts
+  const {
+    domain,
+    githubAppId,
+    oauthClientId,
+    oauthClientSecret,
+    operatorLogin,
+    cookieKey,
+    gatewayVpcIp,
+    operatorPushEnabled,
+  } = opts
   const lines = [
     `DASHBOARD_DOMAIN=${domain}`,
     `DASHBOARD_GITHUB_APP_ID=${githubAppId}`,
@@ -450,6 +468,7 @@ export function buildEnvFileContents(opts: {
     `DASHBOARD_OPERATOR_UI_ENABLED=true`,
     `DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true`,
     ...(gatewayVpcIp ? [`GATEWAY_VPC_IP=${gatewayVpcIp}`] : []),
+    ...(operatorPushEnabled === 'true' ? [`DASHBOARD_OPERATOR_PUSH_ENABLED=true`] : []),
     '',
   ]
   return lines.join('\n')
@@ -855,6 +874,10 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       operatorLogin: validated.DASHBOARD_OPERATOR_LOGIN,
       cookieKey: validated.DASHBOARD_COOKIE_KEY,
       gatewayVpcIp: validated.GATEWAY_VPC_IP,
+      // Independently-controlled, non-secret server-side push flag. Read raw from
+      // process env — never validated/normalized beyond the exact-match check inside
+      // buildEnvFileContents. No VAPID material is read here or anywhere in this file.
+      operatorPushEnabled: env.DASHBOARD_OPERATOR_PUSH_ENABLED,
     })
     await writeRemoteFile(
       `Writing ${REMOTE_ENV_PATH}`,

@@ -187,6 +187,7 @@ jobs:
           DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
           DASHBOARD_COOKIE_KEY: ${{ secrets.DASHBOARD_COOKIE_KEY }}
           GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
+          DASHBOARD_OPERATOR_PUSH_ENABLED: ${{ vars.DASHBOARD_OPERATOR_PUSH_ENABLED }}
           DEPLOY_VERSION: ${{ inputs.version }}
           DEPLOY_DIGEST: ${{ inputs.digest }}
         run: bun run --cwd apps/dashboard deploy

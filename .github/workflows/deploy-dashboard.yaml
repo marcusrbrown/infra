@@ -197,9 +197,9 @@ jobs:
           GH_TOKEN: ${{ steps.get-app-token.outputs.token }}
           INPUT_VERSION: ${{ inputs.version }}
           GIT_USER_NAME: ${{ format('{0}[bot]', steps.get-app-token.outputs.app-slug) }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           version="${INPUT_VERSION}"
+          compose_file="apps/dashboard/docker-compose.yaml"
 
           # Revalidate CalVer before constructing branch/commit strings.
           # Prevents unsanitized ref names from reaching git/gh argv.
@@ -208,33 +208,122 @@ jobs:
             exit 1
           fi
 
-          # Unique branch per run to avoid collision on re-runs of the same version.
-          branch="dashboard-pin-${version}-${GITHUB_RUN_ID}"
+          # Capture the exact pin produced by Deploy before resetting the worktree.
+          if ! pinned_image_line="$(awk '
+            /^[[:space:]]*image:[[:space:]]+ghcr[.]io\/fro-bot\/dashboard:[^[:space:]]+@sha256:[0-9a-fA-F]+[[:space:]]*$/ {
+              print
+              found=1
+              exit
+            }
+            END {
+              if (!found) exit 1
+            }
+          ' "${compose_file}")"; then
+            echo "Audit step: dashboard image pin line not found in the deployed compose."
+            exit 1
+          fi
+
+          branch="dashboard-pin"
           commit_msg="chore(dashboard): pin image to ${version}"
+          commit_body="Pins the dashboard image to \`${version}\` after a successful deploy. Merge to record the audit trail in main."
 
           USER_ID=$(gh api "/users/${GIT_USER_NAME}" --jq .id)
           git config user.name "${GIT_USER_NAME}"
           git config user.email "${USER_ID}+${GIT_USER_NAME}@users.noreply.github.com"
 
-          git checkout -b "${branch}"
-          git add apps/dashboard/docker-compose.yaml
+          git fetch origin main
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+          else
+            # Remove any stale local tracking ref so a first push can lease-create the branch.
+            git update-ref -d "refs/remotes/origin/${branch}"
+          fi
+          git checkout -B "${branch}" origin/main
+
+          origin_compose="$(mktemp)"
+          if ! git show "origin/main:apps/dashboard/docker-compose.yaml" > "${origin_compose}"; then
+            rm -f "${origin_compose}"
+            echo "Audit step: dashboard compose not found on origin/main."
+            exit 1
+          fi
+
+          rewritten_compose="$(mktemp)"
+          if ! awk -v replacement="${pinned_image_line}" '
+            /^[[:space:]]*image:[[:space:]]+ghcr[.]io\/fro-bot\/dashboard:/ {
+              print replacement
+              count++
+              next
+            }
+            { print }
+            END {
+              if (count != 1) {
+                printf "Audit step: expected exactly one dashboard image line on origin/main, found %d.\n", count > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' "${origin_compose}" > "${rewritten_compose}"; then
+            rm -f "${origin_compose}" "${rewritten_compose}"
+            exit 1
+          fi
+          mv "${rewritten_compose}" "${compose_file}"
+          rm -f "${origin_compose}"
+
+          supersede_open_pin_prs() {
+            local stable_pr_number="$1"
+            local pr_rows pr_number head_ref
+            if ! pr_rows=$(gh pr list --state open --limit 1000 --json number,headRefName --jq '.[] | select(.headRefName == "dashboard-pin" or (.headRefName | startswith("dashboard-pin-"))) | [.number, .headRefName] | @tsv'); then
+              echo "Audit step: unable to list open dashboard pin PRs." >&2
+              return 1
+            fi
+            while IFS=$'\t' read -r pr_number head_ref; do
+              [[ -n "${pr_number}" ]] || continue
+              if [[ -n "${stable_pr_number}" && "${pr_number}" == "${stable_pr_number}" ]]; then
+                continue
+              fi
+              echo "Closing superseded dashboard pin PR #${pr_number} (${head_ref})"
+              gh pr close "${pr_number}" --comment "Superseded by the current dashboard pin PR."
+            done <<< "${pr_rows}"
+          }
+
+          git add "${compose_file}"
 
           if git diff --cached --quiet; then
             echo "No changes to commit — compose pin already up to date."
+            supersede_open_pin_prs ""
             exit 0
           fi
 
           git commit -m "${commit_msg}"
           git push origin "${branch}" --force-with-lease
 
-          # Open PR if none exists for this branch (open PRs only — closed stale PRs are not reused).
-          existing_pr=$(gh pr list --state open --head "${branch}" --json url --jq '.[0].url' 2>/dev/null)
-          if [[ -n "${existing_pr}" ]]; then
-            echo "Audit PR already exists: ${existing_pr}"
+          # Create or update the stable-branch PR before closing superseded pin PRs.
+          if ! existing=$(gh pr list --state open --head "${branch}" --base main --json number --jq '.[0].number // empty'); then
+            echo "Audit step: unable to look up the stable dashboard pin PR." >&2
+            exit 1
+          fi
+
+          stable_pr_number=""
+          if [[ -n "${existing}" ]]; then
+            echo "Updating audit PR #${existing}."
+            gh pr edit "${existing}" \
+              --title "${commit_msg}" \
+              --body "${commit_body}"
+            stable_pr_number="${existing}"
           else
             gh pr create \
               --title "${commit_msg}" \
-              --body "Pins the dashboard image to \`${version}\` after a successful deploy. Merge to record the audit trail in main." \
+              --body "${commit_body}" \
               --head "${branch}" \
               --base main
+            if ! stable_pr_number=$(gh pr list --state open --head "${branch}" --base main --json number --jq '.[0].number // empty'); then
+              echo "Audit step: unable to confirm the stable dashboard pin PR after creation." >&2
+              exit 1
+            fi
           fi
+
+          if [[ -z "${stable_pr_number}" ]]; then
+            echo "Audit step: stable dashboard pin PR number was not confirmed." >&2
+            exit 1
+          fi
+
+          supersede_open_pin_prs "${stable_pr_number}"

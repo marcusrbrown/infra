@@ -1582,30 +1582,33 @@ describe('deploy-dashboard.yaml: pre-gate digest validation step', () => {
 //
 // The audit PR step must:
 // - revalidate version with CalVer before constructing branch/commit strings
-// - use a unique branch per run: dashboard-pin-${version}-${GITHUB_RUN_ID}
-// - use `gh pr list --state open --head "${branch}"` (not just --head)
-// - NOT use `|| true` around push/pr create (audit failures must fail the step)
+// - use the stable `dashboard-pin` branch based on the latest origin/main
+// - reapply only the dashboard image pin with awk after resetting to origin/main
+// - supersede other open pin PRs before leaving at most one current PR
+// - NOT use `|| true` around push/PR operations (audit failures must fail the step)
 
 describe('deploy-dashboard.yaml: audit step hardening', () => {
   const DEPLOY_DASHBOARD_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')
 
-  it('audit PR step branch name includes github.run_id for uniqueness', async () => {
+  it('audit PR step uses stable dashboard-pin branch based on latest origin/main', async () => {
     const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
-    // The branch must include run_id to avoid collision on re-runs
-    expect(text).toMatch(/run_id|GITHUB_RUN_ID/)
-    // And it must be in the context of the audit PR step (after "Open audit PR")
     const auditStepIdx = text.indexOf('Open audit PR')
     expect(auditStepIdx).toBeGreaterThan(-1)
     const afterAudit = text.slice(auditStepIdx)
-    expect(afterAudit).toMatch(/run_id|GITHUB_RUN_ID/)
+    expect(afterAudit).toMatch(/branch=["']dashboard-pin["']/)
+    expect(afterAudit).not.toMatch(/run_id|GITHUB_RUN_ID/)
+    expect(afterAudit).toContain('git fetch origin main')
+    expect(afterAudit).toMatch(/git checkout -B .*origin\/main/)
   })
 
-  it('audit PR step uses --state open in gh pr list', async () => {
+  it('audit PR step reapplies only the dashboard image pin with awk', async () => {
     const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
     const auditStepIdx = text.indexOf('Open audit PR')
     expect(auditStepIdx).toBeGreaterThan(-1)
     const afterAudit = text.slice(auditStepIdx)
-    expect(afterAudit).toContain('--state open')
+    expect(afterAudit).toMatch(/awk\s+-v\s+\w+=/)
+    expect(afterAudit).toContain('apps/dashboard/docker-compose.yaml')
+    expect(afterAudit).toContain('origin/main:apps/dashboard/docker-compose.yaml')
   })
 
   it('audit PR step revalidates version with CalVer regex before branch construction', async () => {
@@ -1613,20 +1616,104 @@ describe('deploy-dashboard.yaml: audit step hardening', () => {
     const auditStepIdx = text.indexOf('Open audit PR')
     expect(auditStepIdx).toBeGreaterThan(-1)
     const afterAudit = text.slice(auditStepIdx)
-    // Must contain a CalVer regex check (YYYY.MM.N pattern) — look for the bash =~ pattern
-    // The audit step must revalidate version before constructing branch/commit strings.
-    // We check for the presence of a numeric range pattern used in bash =~ checks.
-    expect(afterAudit).toContain('[0-9]')
+    const calVerPattern = String.raw`^[0-9]{4}\.[0-9]{2}\.[0-9]+$`
+    const calVerIdx = afterAudit.indexOf(calVerPattern)
+    const branchIdx = afterAudit.indexOf('branch=')
+    expect(calVerIdx).toBeGreaterThan(-1)
+    expect(branchIdx).toBeGreaterThan(calVerIdx)
   })
 
-  it('audit PR step does NOT use || true around push or pr create', async () => {
+  it('audit PR step lists open pin PRs and closes superseded ones', async () => {
     const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
     const auditStepIdx = text.indexOf('Open audit PR')
     expect(auditStepIdx).toBeGreaterThan(-1)
     const afterAudit = text.slice(auditStepIdx)
-    // || true around push or pr create silences audit failures — must not be present
+    expect(afterAudit).toContain('gh pr list --state open')
+    expect(afterAudit).toContain('gh pr close')
+  })
+
+  it('audit PR supersede selector is limited to bot-owned dashboard pin branches', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    const supersedeStart = afterAudit.indexOf('supersede_open_pin_prs()')
+    const supersedeEnd = afterAudit.indexOf('\n          git add ', supersedeStart)
+    expect(supersedeStart).toBeGreaterThan(-1)
+    expect(supersedeEnd).toBeGreaterThan(supersedeStart)
+    const supersedeBlock = afterAudit.slice(supersedeStart, supersedeEnd)
+    const jqQuery = supersedeBlock.match(/--jq\s+'([^']+)'/)?.[1]
+    expect(jqQuery).toBeDefined()
+    expect(jqQuery).toContain('headRefName')
+    expect(jqQuery).toContain('startswith("dashboard-pin-")')
+    expect(jqQuery).not.toContain('title')
+  })
+
+  it('audit PR step pushes with force-with-lease and updates existing PRs in place', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    const branchRef = '$' + '{branch}'
+    const existingRef = '$' + '{existing}'
+    expect(afterAudit).toContain(`git push origin "${branchRef}" --force-with-lease`)
+    expect(afterAudit).toContain(`gh pr edit "${existingRef}"`)
+  })
+
+  it('audit PR step creates or updates before superseding with a confirmed stable PR number', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    const branchRef = '$' + '{branch}'
+    const existingRef = '$' + '{existing}'
+    const stablePrRef = '$' + '{stable_pr_number}'
+    const createIdx = afterAudit.indexOf('gh pr create')
+    const editIdx = afterAudit.indexOf('gh pr edit')
+    const stableSupersedeIdx = afterAudit.indexOf(`supersede_open_pin_prs "${stablePrRef}"`)
+    expect(createIdx).toBeGreaterThan(-1)
+    expect(editIdx).toBeGreaterThan(-1)
+    expect(stableSupersedeIdx).toBeGreaterThan(Math.max(createIdx, editIdx))
+    expect(afterAudit).toContain(`stable_pr_number="${existingRef}"`)
+    expect(afterAudit).toContain(
+      `stable_pr_number=$(gh pr list --state open --head "${branchRef}" --base main --json number --jq`,
+    )
+    expect(afterAudit).toContain('supersede_open_pin_prs ""')
+  })
+
+  it('audit PR reapply awk replaces exactly one dashboard image line', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    const reapplyStart = afterAudit.indexOf('if ! awk -v replacement=')
+    const rewrittenComposeRef = '$' + '{rewritten_compose}'
+    const reapplyEnd = afterAudit.indexOf(`mv "${rewrittenComposeRef}"`, reapplyStart)
+    expect(reapplyStart).toBeGreaterThan(-1)
+    expect(reapplyEnd).toBeGreaterThan(reapplyStart)
+    const reapplyBlock = afterAudit.slice(reapplyStart, reapplyEnd)
+    expect(reapplyBlock).toMatch(/count\s*!=\s*1/)
+    expect(reapplyBlock).toContain('expected exactly one dashboard image line')
+  })
+
+  it('audit PR step does NOT use || true around push or PR operations', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    // || true around push or PR operations silences audit failures — must not be present
     expect(afterAudit).not.toMatch(/git push[^#\n]*\|\|\s*true/)
     expect(afterAudit).not.toMatch(/gh pr create[^#\n]*\|\|\s*true/)
+    expect(afterAudit).not.toMatch(/gh pr edit[^#\n]*\|\|\s*true/)
+    expect(afterAudit).not.toMatch(/gh pr close[^#\n]*\|\|\s*true/)
+  })
+
+  it('audit PR step preserves the deploy.yaml-compatible commit message prefix', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    expect(afterAudit).toContain('chore(dashboard): pin image to ')
   })
 })
 

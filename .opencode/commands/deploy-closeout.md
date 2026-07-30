@@ -29,7 +29,7 @@ Close out the merged deployment described by `<target>`. Expected input is an ap
 
 4. **Monitor to terminal state**
    - After the user approves the gate, monitor the exact deploy job until success or failure.
-   - Delegate mechanical `gh` run monitoring and bounded log retrieval to `fast-generic`.
+   - Delegate mechanical `gh` run monitoring and bounded log retrieval to a command-execution subagent when available (for example, `fast-generic`); otherwise run bounded read-only `gh` commands directly.
    - On failure, fetch the exact failing step and bounded log excerpt. Report root cause separately from remediation; do not mutate production without approval.
 
 5. **Verify the live service**
@@ -51,4 +51,4 @@ Close out the merged deployment described by `<target>`. Expected input is an ap
 
 - This command is read-only except for user-approved actions at explicit gates.
 - Do not expose secrets, raw environment values, or unbounded production logs.
-- Use `explorer` for repository discovery, `librarian` for external/upstream contracts, and `fixer` only for a separately approved code change. Do not use `fast-generic` for diagnosis, architecture, docs research, or code edits.
+- Prefer a repository-search specialist for codebase discovery, a documentation specialist for external/upstream contracts, and an implementation specialist only for a separately approved code change. When named global agents are available, these map to `explorer`, `librarian`, and `fixer`. Do not route diagnosis, architecture, docs research, or code edits to a generic command-execution agent.

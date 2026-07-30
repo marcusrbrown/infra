@@ -1,4 +1,5 @@
 import type {SpawnFn, SpawnResult} from './deploy'
+import {Buffer} from 'node:buffer'
 import {existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
@@ -8,6 +9,28 @@ import {afterEach, beforeEach, describe, expect, mock, test} from 'bun:test'
 
 const GATEWAY_DIGEST = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 const WORKSPACE_DIGEST = 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+// Structurally-valid, test-only VAPID fixtures. The public value is the
+// uncompressed P-256 generator point; the private value is a bounded fixture,
+// not production key material.
+const TEST_VAPID_PUBLIC_KEY = Buffer.from(
+  '046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5',
+  'hex',
+).toString('base64url')
+const TEST_VAPID_PUBLIC_KEY_ALT = Buffer.from(
+  '046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2974fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5',
+  'hex',
+).toString('base64url')
+const TEST_VAPID_PRIVATE_KEY = Buffer.alloc(32, 0x42).toString('base64url')
+const TEST_VAPID_PRIVATE_KEY_ALT = Buffer.alloc(32, 0x43).toString('base64url')
+const TEST_VAPID_SUBJECT = 'mailto:operator-push-test@example.invalid'
+const TEST_VAPID_KEY_VERSION = '1'
+const PUSH_VAPID_ENV_KEYS = [
+  'GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY',
+  'GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY',
+  'GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT',
+  'GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION',
+] as const
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -70,6 +93,16 @@ function makeEnv(overrides: Record<string, string> = {}): Record<string, string>
     HOME: '/root',
     ...overrides,
   }
+}
+
+function makePushEnv(overrides: Record<string, string> = {}): Record<string, string> {
+  return makeEnv({
+    GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC_KEY,
+    GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY: TEST_VAPID_PRIVATE_KEY,
+    GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT: TEST_VAPID_SUBJECT,
+    GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION: TEST_VAPID_KEY_VERSION,
+    ...overrides,
+  })
 }
 
 /** Upstream fixture path helper. */
@@ -11218,5 +11251,370 @@ describe('disk-reclaim prune before pull', () => {
     const remoteCmds = calls.filter(cmd => cmd[0] === 'ssh').map(cmd => cmd.at(-1) ?? '')
     const pullCmd = remoteCmds.find(s => s.includes('docker compose') && s.includes(' pull'))
     expect(pullCmd).toBeDefined()
+  })
+})
+
+// ─── operator push VAPID quartet ──────────────────────────────────────────────
+
+describe('operator push VAPID quartet state machine', () => {
+  test('all four absent → disabled, no secret files, and no push override fields', async () => {
+    const {buildComposeOverride, buildSecretFileList, getPushState} = await import('./deploy')
+    const env = makeEnv()
+    const secrets = buildSecretFileList(env)
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+    })
+
+    expect(getPushState(env)).toBe('disabled')
+    expect(secrets.map(secret => secret.name).filter(name => name.includes('operator-push-vapid'))).toEqual([])
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_PUSH_')
+  })
+
+  test('all 14 non-empty proper subsets fail before spawn and name every missing input', async () => {
+    const {main} = await import('./deploy')
+
+    for (let mask = 1; mask < 15; mask++) {
+      const env = makePushEnv()
+      const missing: string[] = []
+      for (const [index, key] of PUSH_VAPID_ENV_KEYS.entries()) {
+        if ((mask & (1 << index)) === 0) {
+          delete env[key]
+          missing.push(key)
+        }
+      }
+
+      const {spawnFn, calls} = makeSpawnMock()
+      await expect(main({env, args: [], spawn: spawnFn})).rejects.toThrow(
+        new RegExp(missing.map(name => name.replaceAll('_', String.raw`\_`)).join('.*')),
+      )
+      expect(calls).toHaveLength(0)
+    }
+  })
+
+  test('each proper subset is classified as invalid by getPushState', async () => {
+    const {getPushState} = await import('./deploy')
+
+    for (let mask = 1; mask < 15; mask++) {
+      const env = makePushEnv()
+      for (const [index, key] of PUSH_VAPID_ENV_KEYS.entries()) {
+        if ((mask & (1 << index)) === 0) delete env[key]
+      }
+      expect(getPushState(env)).toBe('invalid')
+    }
+  })
+})
+
+describe('operator push VAPID structural validation', () => {
+  test('valid non-production quartet is accepted', async () => {
+    const {validatePushVapidConfig} = await import('./deploy')
+    for (const subject of [TEST_VAPID_SUBJECT, 'https://operator-push-test.example.invalid/contact']) {
+      expect(() =>
+        validatePushVapidConfig({
+          publicKey: TEST_VAPID_PUBLIC_KEY,
+          privateKey: TEST_VAPID_PRIVATE_KEY,
+          subject,
+          keyVersion: TEST_VAPID_KEY_VERSION,
+        }),
+      ).not.toThrow()
+    }
+  })
+
+  test('malformed public keys are rejected before any remote action', async () => {
+    const {main, validatePushVapidConfig} = await import('./deploy')
+    const malformed = [
+      {value: `${TEST_VAPID_PUBLIC_KEY}=`, reason: 'padding'},
+      {value: `${TEST_VAPID_PUBLIC_KEY}!`, reason: 'invalid base64url'},
+      {value: Buffer.alloc(64, 0x11).toString('base64url'), reason: 'wrong length'},
+      {
+        value: Buffer.concat([Buffer.from([0x03]), Buffer.alloc(64, 0x11)]).toString('base64url'),
+        reason: 'first byte',
+      },
+    ]
+
+    for (const {value, reason} of malformed) {
+      expect(() =>
+        validatePushVapidConfig({
+          publicKey: value,
+          privateKey: TEST_VAPID_PRIVATE_KEY,
+          subject: TEST_VAPID_SUBJECT,
+          keyVersion: TEST_VAPID_KEY_VERSION,
+        }),
+      ).toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY/)
+
+      const {spawnFn, calls} = makeSpawnMock()
+      await expect(
+        main({env: makePushEnv({GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY: value}), args: [], spawn: spawnFn}),
+      ).rejects.toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY/)
+      expect(calls, reason).toHaveLength(0)
+    }
+  })
+
+  test('malformed private keys are rejected before any remote action', async () => {
+    const {main, validatePushVapidConfig} = await import('./deploy')
+    const malformed = [
+      `${TEST_VAPID_PRIVATE_KEY}=`,
+      `${TEST_VAPID_PRIVATE_KEY}!`,
+      Buffer.alloc(31, 0x22).toString('base64url'),
+      Buffer.alloc(33, 0x22).toString('base64url'),
+    ]
+
+    for (const value of malformed) {
+      expect(() =>
+        validatePushVapidConfig({
+          publicKey: TEST_VAPID_PUBLIC_KEY,
+          privateKey: value,
+          subject: TEST_VAPID_SUBJECT,
+          keyVersion: TEST_VAPID_KEY_VERSION,
+        }),
+      ).toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY/)
+
+      const {spawnFn, calls} = makeSpawnMock()
+      await expect(
+        main({env: makePushEnv({GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY: value}), args: [], spawn: spawnFn}),
+      ).rejects.toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY/)
+      expect(calls).toHaveLength(0)
+    }
+  })
+
+  test('blank, non-mailto, and non-https subjects are rejected', async () => {
+    const {validatePushVapidConfig} = await import('./deploy')
+    for (const subject of [
+      '',
+      '   ',
+      'ftp://operator-push-test.example.invalid',
+      'http://operator-push-test.example.invalid',
+    ]) {
+      expect(() =>
+        validatePushVapidConfig({
+          publicKey: TEST_VAPID_PUBLIC_KEY,
+          privateKey: TEST_VAPID_PRIVATE_KEY,
+          subject,
+          keyVersion: TEST_VAPID_KEY_VERSION,
+        }),
+      ).toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT/)
+    }
+  })
+
+  test('zero, negative, float, and nonnumeric key versions are rejected', async () => {
+    const {main, validatePushVapidConfig} = await import('./deploy')
+    for (const keyVersion of ['0', '-1', '1.5', 'abc']) {
+      expect(() =>
+        validatePushVapidConfig({
+          publicKey: TEST_VAPID_PUBLIC_KEY,
+          privateKey: TEST_VAPID_PRIVATE_KEY,
+          subject: TEST_VAPID_SUBJECT,
+          keyVersion,
+        }),
+      ).toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION/)
+
+      const {spawnFn, calls} = makeSpawnMock()
+      await expect(
+        main({env: makePushEnv({GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION: keyVersion}), args: [], spawn: spawnFn}),
+      ).rejects.toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION/)
+      expect(calls).toHaveLength(0)
+    }
+  })
+})
+
+describe('operator push VAPID secret files and compose wiring', () => {
+  test('valid quartet adds exactly the four infra-owned host files', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const secrets = buildSecretFileList(makePushEnv())
+    const pushSecrets = secrets.filter(secret => secret.name.includes('operator-push-vapid'))
+
+    expect(pushSecrets.map(secret => secret.name)).toEqual([
+      'gateway-operator-push-vapid-public-key',
+      'gateway-operator-push-vapid-private-key',
+      'gateway-operator-push-vapid-subject',
+      'gateway-operator-push-vapid-key-version',
+    ])
+    expect(pushSecrets.map(secret => secret.content)).toEqual([
+      TEST_VAPID_PUBLIC_KEY,
+      TEST_VAPID_PRIVATE_KEY,
+      TEST_VAPID_SUBJECT,
+      TEST_VAPID_KEY_VERSION,
+    ])
+    expect(pushSecrets).toHaveLength(4)
+  })
+
+  test('valid quartet renders four read-only _FILE mappings, mounts, and derived true', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorPushEnabled: true,
+    })
+
+    expect(yaml).toContain('GATEWAY_OPERATOR_PUSH_ENABLED: true')
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_PUSH_ENABLED: false')
+    expect(yaml).toContain(
+      'GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY_FILE: /run/secrets/gateway_operator_push_vapid_public_key',
+    )
+    expect(yaml).toContain(
+      'GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY_FILE: /run/secrets/gateway_operator_push_vapid_private_key',
+    )
+    expect(yaml).toContain('GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT_FILE: /run/secrets/gateway_operator_push_vapid_subject')
+    expect(yaml).toContain(
+      'GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION_FILE: /run/secrets/gateway_operator_push_vapid_key_version',
+    )
+    expect(yaml).toContain('./secrets/gateway-operator-push-vapid-public-key')
+    expect(yaml).toContain('./secrets/gateway-operator-push-vapid-private-key')
+    expect(yaml).toContain('./secrets/gateway-operator-push-vapid-subject')
+    expect(yaml).toContain('./secrets/gateway-operator-push-vapid-key-version')
+    expect(yaml).toContain('read_only: true')
+    expect(yaml).toContain('create_host_path: false')
+  })
+
+  test('disabled push omits all push wiring, even when an independent env flag is supplied', async () => {
+    const {buildComposeOverride, buildSecretFileList} = await import('./deploy')
+    const env = makeEnv({GATEWAY_OPERATOR_PUSH_ENABLED: 'true'})
+    const yaml = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorPushEnabled: false,
+    })
+
+    expect(buildSecretFileList(env).some(secret => secret.name.includes('operator-push-vapid'))).toBe(false)
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_PUSH_')
+  })
+
+  test('changing each quartet value or rendered push wiring changes the existing checksum', async () => {
+    const {buildComposeOverride, buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const checksumFor = (env: Record<string, string>, operatorPushEnabled = true) =>
+      computeSecretsChecksum([
+        ...buildSecretFileList(env),
+        {
+          name: 'compose.override.yaml',
+          content: buildComposeOverride({
+            gatewayDigest: GATEWAY_DIGEST,
+            workspaceDigest: WORKSPACE_DIGEST,
+            announceEnabled: false,
+            operatorPushEnabled,
+          }),
+          required: false,
+        },
+      ])
+
+    const baseEnv = makePushEnv()
+    const baseChecksum = checksumFor(baseEnv)
+    const changedValues: Record<(typeof PUSH_VAPID_ENV_KEYS)[number], string> = {
+      GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC_KEY_ALT,
+      GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY: TEST_VAPID_PRIVATE_KEY_ALT,
+      GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT: 'mailto:operator-push-test-rotated@example.invalid',
+      GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION: '2',
+    }
+    for (const key of PUSH_VAPID_ENV_KEYS) {
+      const changed = makePushEnv({[key]: changedValues[key]})
+      expect(checksumFor(changed), key).not.toBe(baseChecksum)
+    }
+    expect(checksumFor(baseEnv, false)).not.toBe(baseChecksum)
+  })
+
+  test('private key is present only in gateway secret-file stdin, never argv or rendered override artifacts', async () => {
+    const {main} = await import('./deploy')
+    const privatePath = '/opt/gateway/deploy/secrets/gateway-operator-push-vapid-private-key'
+    const overridePath = '/opt/gateway/deploy/compose.override.yaml'
+    const capturedWrites = new Map<string, SpawnResult & {stdinData?: string}>()
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const remote = cmd.at(-1) ?? ''
+      const match = /cat > '([^']+)'/.exec(remote)
+      if (!match) return undefined
+      const result = makeSpawnResult({captureStdin: true})
+      capturedWrites.set(match[1]!, result)
+      return result
+    })
+
+    await main({
+      env: makePushEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    expect(capturedWrites.get(privatePath)?.stdinData).toBe(TEST_VAPID_PRIVATE_KEY)
+    for (const cmd of calls) expect(cmd.join(' ')).not.toContain(TEST_VAPID_PRIVATE_KEY)
+    expect(capturedWrites.get(overridePath)?.stdinData).not.toContain(TEST_VAPID_PRIVATE_KEY)
+  })
+
+  test('valid quartet checksum delta selects the existing --force-recreate path', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      const command = cmd.join(' ')
+      if (command.includes('.secrets-checksum') && command.includes("cat '")) {
+        return makeSpawnResult({stdout: 'previous-checksum-that-differs'})
+      }
+      return undefined
+    })
+
+    await main({
+      env: makePushEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const upCall = calls.find(cmd => cmd.some(s => s.includes('docker compose') && s.includes(' up ')))
+    expect(upCall?.join(' ')).toContain('--force-recreate')
+  })
+})
+
+describe('operator push VAPID enabled-to-absent cleanup', () => {
+  test('enabled → absent transition cleans exactly the four known paths before materialization', async () => {
+    const {buildComposeOverride, main} = await import('./deploy')
+    const {spawnFn: enabledSpawn, calls: enabledCalls} = makeSpawnMock()
+
+    await main({
+      env: makePushEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: enabledSpawn,
+    })
+    expect(enabledCalls.some(cmd => cmd.join(' ').includes('gateway-operator-push-vapid'))).toBe(true)
+
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv(),
+      args: [],
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+      spawn: spawnFn,
+    })
+
+    const remoteCmds = calls.filter(cmd => cmd[0] === 'ssh').map(cmd => cmd.at(-1) ?? '')
+    const cleanupCmd = remoteCmds.find(cmd => cmd.includes('gateway-operator-push-vapid-public-key'))
+    expect(cleanupCmd).toBeDefined()
+    expect(cleanupCmd).toContain('rm -f')
+    expect(cleanupCmd).not.toContain('*')
+    for (const hostFile of [
+      'gateway-operator-push-vapid-public-key',
+      'gateway-operator-push-vapid-private-key',
+      'gateway-operator-push-vapid-subject',
+      'gateway-operator-push-vapid-key-version',
+    ]) {
+      expect(cleanupCmd).toContain(`/opt/gateway/deploy/secrets/${hostFile}`)
+    }
+
+    const cleanupIndex = remoteCmds.indexOf(cleanupCmd!)
+    const secretMaterializationIndex = remoteCmds.findIndex(cmd => cmd.includes("cat > '/opt/gateway/deploy/secrets/"))
+    const composeUpIndex = remoteCmds.findIndex(cmd => cmd.includes('docker compose') && cmd.includes(' up '))
+    expect(cleanupIndex).toBeLessThan(secretMaterializationIndex)
+    expect(cleanupIndex).toBeLessThan(composeUpIndex)
+    expect(remoteCmds[composeUpIndex]).toContain('--force-recreate')
+
+    const disabledOverride = buildComposeOverride({
+      gatewayDigest: GATEWAY_DIGEST,
+      workspaceDigest: WORKSPACE_DIGEST,
+      announceEnabled: false,
+      operatorPushEnabled: false,
+    })
+    expect(disabledOverride).not.toContain('GATEWAY_OPERATOR_PUSH_VAPID')
   })
 })

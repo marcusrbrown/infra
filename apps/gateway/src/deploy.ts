@@ -157,6 +157,39 @@ export const OPERATOR_AUTH_SECRET_SPECS = [
     containerPath: '/run/secrets/gateway_operator_allowlist',
   },
 ] as const
+
+/** Infra-owned host file names for the gateway operator push VAPID quartet. */
+export const OPERATOR_PUSH_VAPID_PUBLIC_KEY_FILE = 'gateway-operator-push-vapid-public-key'
+export const OPERATOR_PUSH_VAPID_PRIVATE_KEY_FILE = 'gateway-operator-push-vapid-private-key'
+export const OPERATOR_PUSH_VAPID_SUBJECT_FILE = 'gateway-operator-push-vapid-subject'
+export const OPERATOR_PUSH_VAPID_KEY_VERSION_FILE = 'gateway-operator-push-vapid-key-version'
+
+/**
+ * Operator push VAPID secret specs — single source of truth for env keys,
+ * infra-owned host files, and upstream run-secrets container paths.
+ */
+export const OPERATOR_PUSH_VAPID_SECRET_SPECS = [
+  {
+    envKey: 'GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY',
+    hostFile: OPERATOR_PUSH_VAPID_PUBLIC_KEY_FILE,
+    containerPath: '/run/secrets/gateway_operator_push_vapid_public_key',
+  },
+  {
+    envKey: 'GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY',
+    hostFile: OPERATOR_PUSH_VAPID_PRIVATE_KEY_FILE,
+    containerPath: '/run/secrets/gateway_operator_push_vapid_private_key',
+  },
+  {
+    envKey: 'GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT',
+    hostFile: OPERATOR_PUSH_VAPID_SUBJECT_FILE,
+    containerPath: '/run/secrets/gateway_operator_push_vapid_subject',
+  },
+  {
+    envKey: 'GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION',
+    hostFile: OPERATOR_PUSH_VAPID_KEY_VERSION_FILE,
+    containerPath: '/run/secrets/gateway_operator_push_vapid_key_version',
+  },
+] as const
 const DEPLOY_DIR = `${REMOTE_DIR}/deploy`
 const SECRETS_DIR = `${DEPLOY_DIR}/secrets`
 // Checksum lives OUTSIDE deploy/ so git clean -xfd doesn't destroy it
@@ -552,8 +585,79 @@ export function getAnnounceState(env: Record<string, string>): 'enabled' | 'disa
   return 'invalid'
 }
 
+/**
+ * Returns the operator push VAPID state based on the presence of all four
+ * quartet inputs. The independent upstream enable flag is intentionally not
+ * part of this state machine.
+ */
 /** Strict base64url character set: A-Z, a-z, 0-9, -, _ (no padding, no whitespace). */
 const BASE64URL_RE = /^[\w-]+$/
+
+export function getPushState(env: Record<string, string>): 'enabled' | 'disabled' | 'invalid' {
+  const present = OPERATOR_PUSH_VAPID_SECRET_SPECS.map(spec => Boolean(env[spec.envKey]?.trim()))
+  const count = present.filter(Boolean).length
+
+  if (count === present.length) return 'enabled'
+  if (count === 0) return 'disabled'
+  return 'invalid'
+}
+
+function validateStrictBase64Url(value: string, variableName: string, expectedBytes: number): Buffer {
+  if (!BASE64URL_RE.test(value) || value.length % 4 === 1) {
+    throw new Error(
+      `${variableName} must be strict unpadded base64url (A-Z, a-z, 0-9, -, _ only; no padding or whitespace).`,
+    )
+  }
+
+  const decoded = Buffer.from(value.replaceAll('-', '+').replaceAll('_', '/'), 'base64')
+  if (decoded.toString('base64url') !== value) {
+    throw new Error(
+      `${variableName} must be strict unpadded base64url (A-Z, a-z, 0-9, -, _ only; no padding or whitespace).`,
+    )
+  }
+  if (decoded.length !== expectedBytes) {
+    throw new Error(`${variableName} decodes to ${decoded.length} bytes; expected exactly ${expectedBytes}.`)
+  }
+  return decoded
+}
+
+/** Validates the complete operator push VAPID quartet without materializing it. */
+export function validatePushVapidConfig(opts: {
+  publicKey: string
+  privateKey: string
+  subject: string
+  keyVersion: string
+}): void {
+  const {publicKey, privateKey, subject, keyVersion} = opts
+  const publicBytes = validateStrictBase64Url(publicKey, 'GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY', 65)
+  if (publicBytes[0] !== 0x04) {
+    throw new Error(
+      'GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY must decode to an uncompressed P-256 point beginning with 0x04.',
+    )
+  }
+
+  validateStrictBase64Url(privateKey, 'GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY', 32)
+
+  const trimmedSubject = subject.trim()
+  if (!trimmedSubject) {
+    throw new Error('GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT must be nonblank and use mailto: or https:.')
+  }
+  let parsedSubject: URL
+  try {
+    parsedSubject = new URL(trimmedSubject)
+  } catch {
+    throw new Error('GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT must be a valid mailto: or https: URL.')
+  }
+  if (parsedSubject.protocol !== 'mailto:' && parsedSubject.protocol !== 'https:') {
+    throw new Error(
+      `GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT must use mailto: or https: (got ${parsedSubject.protocol || 'no scheme'}).`,
+    )
+  }
+
+  if (!/^[1-9]\d*$/.test(keyVersion)) {
+    throw new Error('GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION must be a positive integer string.')
+  }
+}
 
 /**
  * Returns the operator auth/config state based on the presence of all four auth vars.
@@ -1150,6 +1254,21 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
     }
   }
 
+  // Operator push VAPID files: main() validates the enabled quartet before any
+  // remote work. Keep this guard here too so this materialization helper cannot
+  // be used to emit malformed VAPID values directly.
+  if (getPushState(env) === 'enabled') {
+    validatePushVapidConfig({
+      publicKey: env.GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY ?? '',
+      privateKey: env.GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY ?? '',
+      subject: env.GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT ?? '',
+      keyVersion: env.GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION ?? '',
+    })
+    for (const spec of OPERATOR_PUSH_VAPID_SECRET_SPECS) {
+      secrets.push({name: spec.hostFile, content: env[spec.envKey] ?? '', required: false})
+    }
+  }
+
   return secrets
 }
 
@@ -1214,6 +1333,8 @@ export interface ComposeOverrideOpts {
   operatorOauthStateTtlMs?: string
   /** Optional tuning: max outstanding OAuth attempts. */
   operatorOauthMaxOutstandingAttempts?: string
+  /** Derived from a complete, validated gateway operator push VAPID quartet. */
+  operatorPushEnabled?: boolean
   /**
    * The gateway's VPC IPv4 address (GATEWAY_VPC_IP). When set alongside operatorEnabled,
    * the gateway service publishes the operator listener port on this VPC IP only
@@ -1266,6 +1387,7 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
     operatorOauthAllowedReturnPaths,
     operatorOauthStateTtlMs,
     operatorOauthMaxOutstandingAttempts,
+    operatorPushEnabled,
     operatorVpcIp,
   } = opts
 
@@ -1325,7 +1447,22 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
         .join('\n')
     : ''
 
-  const envLines = [announceEnvLines, operatorEnvLines, operatorAuthFileLines, operatorOauthTuningLines]
+  // Operator push wiring is derived from the validated quartet in main().
+  // Never emit a false line or an independently supplied upstream flag.
+  const operatorPushEnvLines = operatorPushEnabled
+    ? [
+        '      GATEWAY_OPERATOR_PUSH_ENABLED: true',
+        ...OPERATOR_PUSH_VAPID_SECRET_SPECS.map(spec => `      ${spec.envKey}_FILE: ${spec.containerPath}`),
+      ].join('\n')
+    : ''
+
+  const envLines = [
+    announceEnvLines,
+    operatorEnvLines,
+    operatorAuthFileLines,
+    operatorOauthTuningLines,
+    operatorPushEnvLines,
+  ]
     .filter(Boolean)
     .join('\n')
   const environmentSection = envLines
@@ -1364,7 +1501,19 @@ ${envLines}`
       ).join('')
     : ''
 
-  const allVolumes = announceVolumes + operatorAuthVolumes
+  const operatorPushVolumes = operatorPushEnabled
+    ? OPERATOR_PUSH_VAPID_SECRET_SPECS.map(
+        spec => `
+      - type: bind
+        source: ./secrets/${spec.hostFile}
+        target: ${spec.containerPath}
+        read_only: true
+        bind:
+          create_host_path: false`,
+      ).join('')
+    : ''
+
+  const allVolumes = announceVolumes + operatorAuthVolumes + operatorPushVolumes
   const volumesSection2 = allVolumes
     ? `
     volumes:${allVolumes}`
@@ -2262,6 +2411,32 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     }
   }
 
+  // Phase 3h: Validate the operator push VAPID quartet before any SSH, spawn,
+  // secret materialization, or remote write. The independent upstream enable
+  // variable is deliberately ignored; a valid quartet is the only enablement.
+  const pushState = getPushState(env)
+  if (pushState === 'invalid') {
+    const missingPush = OPERATOR_PUSH_VAPID_SECRET_SPECS.filter(spec => !env[spec.envKey]?.trim())
+      .map(spec => spec.envKey)
+      .join(', ')
+    throw new Error(
+      `Operator push VAPID inputs must be set together (all-or-none). Missing: ${missingPush}. ` +
+        `Set all four ${OPERATOR_PUSH_VAPID_SECRET_SPECS.map(spec => spec.envKey).join(', ')}, or leave all unset.`,
+    )
+  }
+  if (pushState === 'enabled') {
+    validatePushVapidConfig({
+      publicKey: env.GATEWAY_OPERATOR_PUSH_VAPID_PUBLIC_KEY ?? '',
+      privateKey: env.GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY ?? '',
+      subject: env.GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT ?? '',
+      keyVersion: env.GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION ?? '',
+    })
+  }
+  const stalePushCleanup =
+    pushState === 'disabled'
+      ? ` && rm -f ${OPERATOR_PUSH_VAPID_SECRET_SPECS.map(spec => `'${SECRETS_DIR}/${spec.hostFile}'`).join(' ')}`
+      : ''
+
   if (isDryRun) {
     const announceEnabled = announceState === 'enabled'
     const operatorEnabledDry = operatorState === 'enabled'
@@ -2371,7 +2546,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       )
       await runCommand(
         'Cleaning untracked files',
-        sshCommand(host, `cd ${REMOTE_DIR} && git clean -xfd`, keyPath, controlPath),
+        sshCommand(host, `cd ${REMOTE_DIR} && git clean -xfd${stalePushCleanup}`, keyPath, controlPath),
         deployEnv,
         spawnFn,
       )
@@ -2449,6 +2624,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       operatorOauthMaxOutstandingAttempts: operatorAuthEnabled
         ? env.GATEWAY_OPERATOR_OAUTH_MAX_OUTSTANDING_ATTEMPTS || undefined
         : undefined,
+      operatorPushEnabled: pushState === 'enabled',
     })
     const operatorTarget =
       operatorEnabled && operatorBindHost && operatorBindPort ? `${operatorBindHost}:${operatorBindPort}` : undefined

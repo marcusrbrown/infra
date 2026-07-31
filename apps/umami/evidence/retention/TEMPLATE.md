@@ -14,8 +14,8 @@ Fill every `[fill]` field. Use UTC. Record counts, categories, hashes, and statu
 - Infra commit: `[fill exact commit]`
 - Retention release hash: `[fill 64-hex hash]`
 - `/opt/umami/retention/current` readlink: `[fill exact target]`
-- Umami image/version: `umamisoftware/umami:3.2.0` — digest `[fill exact digest]`
-- Postgres image/version: `postgres:15-alpine` — digest `[fill exact digest]`
+- Umami image/version: `umamisoftware/umami:3.2.0@sha256:d8111e1d6d94be54a54514cd4e1264fbfe905e5ea0d0691804b1d71e627a6fca` — `[fill confirmation]`
+- Postgres image/version: `postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e` — `[fill confirmation]`
 - `/etc/systemd/system/umami-retention.service` SHA-256: `[fill]`
 - `/etc/systemd/system/umami-retention.timer` SHA-256: `[fill]`
 - `mrbro.dev` requirements/plan revision: `[fill path, revision, or approved reference]`
@@ -25,9 +25,23 @@ Fill every `[fill]` field. Use UTC. Record counts, categories, hashes, and statu
 - Backup filename: `[fill]`
 - Backup size (bytes): `[fill]`
 - Backup SHA-256: `[fill]`
-- `gzip -t` result: `PASS` / `FAIL` — `[fill]`
+- Archive format: `PostgreSQL custom (-Fc)` — `[fill]`
+- Archive-list validation in pinned disposable container: `PASS` / `FAIL` — `[fill command/result; no local pg_restore]`
+- Source capture state: `caddy+umami stopped, db up; brief analytics downtime acknowledged` — `[fill]`
+- Source manifest path: `[fill local path]`
+- Source manifest SHA-256: `[fill]`
+- Disposable restore image: `postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e` — `[fill confirmation]`
+- Disposable restore isolation: `--network none; tmpfs /var/lib/postgresql/data; no published ports; trust auth only inside disposable container` — `[fill]`
+- Restored DB manifest query: `PASS` / `FAIL` — `[fill]`
+- Restored manifest path: `[fill local path]`
+- Restored manifest SHA-256: `[fill]`
+- Exact source/restored manifest `diff`: `PASS` / `FAIL` — `[fill]`
+- Disposable restore container removal: `PASS` / `FAIL` — `[fill]`
+- Production restart and `/api/heartbeat`: `PASS` / `FAIL` — `[fill status only]`
 - Backup timestamp (UTC): `[fill]`
 - Daily automated backup present: `NO` — `[fill any exception or concern]`
+
+GO is impossible if any recovery-point field is missing or failing.
 
 ## Pre-check (`--check`)
 
@@ -87,17 +101,30 @@ Fill every `[fill]` field. Use UTC. Record counts, categories, hashes, and statu
 - Post-check orphan deltas: `non-positive / FAIL` — `[fill]`
 - Umami heartbeat (`/api/heartbeat`): `PASS / FAIL` — `[fill status only]`
 - DB health (`pg_isready`) and container health: `PASS / FAIL` — `[fill status only]`
-- Existing Systematic dashboard health: `PASS / FAIL` — `[fill URL/status, no payload]`
-- Existing dev-like dashboard health: `PASS / FAIL` — `[fill URL/status, no payload]`
-- Fresh-record arrival proof: `[fill count/category delta only; no visitor payload]`
+- `https://fro.bot/systematic` health: `PASS / FAIL` — `[fill status, no payload]`
+- `https://mrbro.dev/dev-like` health: `PASS / FAIL` — `[fill status, no payload]`
+- Fresh-record UTC window: `[fill start/end]`
+- Fresh-record before count/category: `[fill count/category]`
+- Controlled matching interaction: `exactly one` — `[fill action/category only]`
+- Fresh-record after count/category: `[fill count/category]`
+- Fresh-record delta: `+1 / documented exact expected delta / FAIL` — `[fill counts/categories only]`
 
 ## Timer evidence
 
 - Timer enabled: `yes / no` — `[fill]`
 - Timer active: `yes / no` — `[fill]`
+- Enable timestamp (UTC): `[fill]`
+- Catch-up/scheduled service execution timestamp (UTC): `[fill exact ExecMainStartTimestamp or NOT OBSERVED]`
+- Service `Result`: `[fill exact value]`
+- Service `ExecMainStatus`: `[fill exact value]`
+- Service execution exit timestamp (UTC): `[fill exact ExecMainExitTimestamp or NOT OBSERVED]`
+- Timer journal artifact: `[fill local path and SHA-256]`
+- Successful timer-driven/catch-up service execution after enable: `YES / NO` — `[fill; GO is impossible without YES]`
 - Next run evidence: `[fill exact list-timers/status result]`
 - Timer journal evidence: `[fill artifact/path or concise status]`
 - Schedule observed: `00:30–01:00 UTC, Persistent=true` — `[fill]`
+
+GO is impossible without a successful timer-driven or catch-up service execution after enable. If no catch-up occurred, leave the record pending/NO-GO until the next actual `00:30–01:00 UTC` timer run succeeds.
 
 ## Rollback and disable verification
 

@@ -73,7 +73,7 @@ Umami is cookie-free and respects Do-Not-Track by default. The downstream tracke
 
 All analytics data lives in the `umami-db-data` Postgres volume. The deploy only ever runs `up -d` — **never `down -v`** — so the volume survives every deploy and image bump.
 
-**Retention policy:** rows strictly older than `CURRENT_TIMESTAMP - INTERVAL '13 months'` are eligible. This is a calendar-month boundary, not a fixed day count. The policy covers pageview/custom-interaction rows and child/time-series rows in `event_data`, `website_event`, `session_data`, `revenue`, `session_replay`, `session_replay_saved`, and `heatmap_event`. Monthly `website_event` and `session` parents are deleted only after their supporting children are gone; dependency-protected parent rows remain only while they support retained children. Normal monthly session lifecycle data therefore keeps session parents below 14 months when no retained dependency requires them.
+**Retention policy:** rows strictly older than `CURRENT_TIMESTAMP - INTERVAL '13 months'` are eligible. This is a calendar-month boundary, not a fixed day count. The policy covers pageview/custom-interaction rows and child/time-series rows in `event_data`, `website_event`, `session_data`, `revenue`, `session_replay`, `session_replay_saved`, and `heatmap_event`. Website-event parents and monthly session parents are deleted only after their supporting children are gone; dependency-protected website-event parents and monthly session parents remain only while they support retained children. Normal monthly session lifecycle data therefore keeps session parents below 14 months when no retained dependency requires them.
 
 `retention.sh --check` is read-only. `retention.sh --apply` runs one unbatched transaction: children are deleted before parents, then counts are recomputed. Both modes use a transaction-scoped advisory lock, a 5-second lock timeout, and a 15-minute statement timeout. The systemd service adds a 30-minute outer timeout. The daily timer is persistent and lands between 00:30 and 01:00 UTC.
 
@@ -83,21 +83,79 @@ There is **no automated daily backup**. The verified backup taken before the fir
 
 ## Backup & restore (manual runbook)
 
-Backup (over SSH, from a workstation with the deploy key):
+The approved recovery archive is a PostgreSQL custom-format `.dump` created with `pg_dump -Fc --create`. It is not plain SQL and is not gzip-compressed. Keep it on the operator workstation; never put secrets or visitor data in filenames, logs, or evidence.
+
+Backup (non-destructive, over SSH from a workstation with the deploy key):
 
 ```bash
-ssh root@metrics.fro.bot \
-  "docker compose -f /opt/umami/docker-compose.yaml exec -T db pg_dump -U umami umami" \
-  | gzip > umami-$(date +%Y%m%d).sql.gz
+set -Eeuo pipefail
+HOST="${UMAMI_DOMAIN:?Set UMAMI_DOMAIN to the exact deployed host}"
+REMOTE="root@${HOST}"
+BACKUP="umami-$(date -u +%Y%m%dT%H%M%SZ).dump"
+POSTGRES_IMAGE='postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e'
+ssh "$REMOTE" \
+  "docker compose -f /opt/umami/docker-compose.yaml exec -T db pg_dump -Fc --create -U umami -d umami" \
+  > "$BACKUP"
+test -s "$BACKUP"
+shasum -a 256 "$BACKUP"
+docker run --rm --network none -i "$POSTGRES_IMAGE" \
+  pg_restore --list < "$BACKUP" > "${BACKUP}.list"
+test -s "${BACKUP}.list"
 ```
 
-Restore into a running stack:
+The archive-list validation runs inside the exact pinned disposable Postgres image with no container network and no published ports; the operator workstation does not need a local `pg_restore`. Record the filename, byte size, SHA-256, successful `pg_restore --list`, and UTC timestamp. Do not put database passwords or other secrets in the filename, command line, evidence, or logs.
+
+Emergency live restore (destructive; use the approved custom archive, leave the timer disabled, and do not replay into a non-empty database):
 
 ```bash
-gunzip -c umami-YYYYMMDD.sql.gz \
-  | ssh root@metrics.fro.bot \
-    "docker compose -f /opt/umami/docker-compose.yaml exec -T db psql -U umami umami"
+set -Eeuo pipefail
+HOST="${UMAMI_DOMAIN:?Set UMAMI_DOMAIN to the exact deployed host}"
+REMOTE="root@${HOST}"
+BACKUP="${BACKUP:?Set BACKUP to the approved .dump path}"
+test -s "$BACKUP"
+
+restart_healthy_stack() {
+  ssh "$REMOTE" 'set -Eeuo pipefail
+    docker compose -f /opt/umami/docker-compose.yaml up -d --wait --wait-timeout 180 db umami caddy
+    docker compose -f /opt/umami/docker-compose.yaml exec -T db pg_isready -U umami -d umami
+  ' >/dev/null
+  curl -fsS -o /dev/null "https://${HOST}/api/heartbeat"
+}
+
+disable_retention_timer() {
+  ssh "$REMOTE" 'set -Eeuo pipefail
+    systemctl disable --now umami-retention.timer
+    test "$(systemctl is-enabled umami-retention.timer || true)" = disabled
+    test "$(systemctl is-active umami-retention.timer || true)" = inactive
+  '
+}
+
+restore_on_exit() {
+  status=$?
+  trap - EXIT
+  if ! disable_retention_timer; then
+    printf 'retention timer disable failed; restore is NO-GO\n' >&2
+    status=1
+  fi
+  if ! restart_healthy_stack; then
+    printf 'production restart/health-check failed; restore is NO-GO\n' >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap restore_on_exit EXIT
+
+ssh "$REMOTE" 'set -Eeuo pipefail
+  systemctl disable --now umami-retention.timer
+  docker compose -f /opt/umami/docker-compose.yaml stop caddy umami
+  docker compose -f /opt/umami/docker-compose.yaml exec -T db psql \
+    -X -v ON_ERROR_STOP=1 -U umami -d postgres \
+    -c '\''DROP DATABASE IF EXISTS umami WITH (FORCE);'\'' </dev/null
+  docker compose -f /opt/umami/docker-compose.yaml exec -T db pg_restore --exit-on-error --create --no-owner -U umami -d postgres
+' < "$BACKUP"
 ```
+
+The explicit database drop is required before `pg_restore --create`; never replay this archive into an existing `umami` database. The `EXIT` trap leaves the retention timer disabled, restarts the stack, and verifies both `pg_isready` and `/api/heartbeat` on success or failure. If any restore, restart, or health check fails, treat the operation as NO-GO.
 
 ## Retention operator runbook
 
@@ -157,21 +215,160 @@ The content address is SHA-256 over, in order, each filename, a NUL byte, the fi
 
 ### 2. Create and verify the approved recovery point
 
-This is the approved recovery point for the first apply. There is no automated daily backup. Run from the workstation, not inside the database container:
+This is the approved recovery point for the first apply. There is no automated daily backup. The source manifest and archive are captured from one write-quiesced state: `caddy` and `umami` are briefly stopped while `db` stays up. This causes brief analytics downtime. A local `EXIT` trap restarts the healthy stack on every exit, including failure, before restore verification continues. Run this block from the workstation, not inside the database container:
 
 ```bash
-BACKUP="umami-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
-ssh "$REMOTE" 'docker compose -f /opt/umami/docker-compose.yaml exec -T db pg_dump -U umami umami' \
-  | gzip > "$BACKUP"
+RECOVERY_DIR="umami-recovery-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -m 700 "$RECOVERY_DIR"
+BUNDLE="$RECOVERY_DIR/recovery.tar"
+BACKUP="$RECOVERY_DIR/umami.dump"
+SOURCE_MANIFEST="$RECOVERY_DIR/source.manifest"
+RESTORED_MANIFEST="$RECOVERY_DIR/restored.manifest"
+BACKUP_LIST="$RECOVERY_DIR/umami.dump.list"
+POSTGRES_IMAGE='postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e'
+RESTORE_CONTAINER="umami-retention-restore-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+CONTAINER_CREATED=0
+
+restart_healthy_stack() {
+  ssh "$REMOTE" 'set -Eeuo pipefail
+    docker compose -f /opt/umami/docker-compose.yaml up -d --wait --wait-timeout 180 db umami caddy
+    docker compose -f /opt/umami/docker-compose.yaml exec -T db pg_isready -U umami -d umami
+  ' >/dev/null
+  curl -fsS -o /dev/null "https://${HOST}/api/heartbeat"
+}
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  if (( CONTAINER_CREATED == 1 )); then
+    if docker container inspect "$RESTORE_CONTAINER" >/dev/null 2>&1; then
+      if ! docker rm -f "$RESTORE_CONTAINER" >/dev/null; then
+        status=1
+      fi
+    fi
+    if docker container inspect "$RESTORE_CONTAINER" >/dev/null 2>&1; then
+      printf 'disposable restore container removal=FAIL\n' >&2
+      status=1
+    else
+      printf 'disposable restore container removal=PASS\n'
+    fi
+  fi
+  if ! restart_healthy_stack; then
+    printf 'production restart/heartbeat=FAIL\n' >&2
+    status=1
+  else
+    printf 'production restart/heartbeat=PASS\n'
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+ssh "$REMOTE" 'set -Eeuo pipefail
+  compose=(docker compose -f /opt/umami/docker-compose.yaml)
+  tmpdir="$(mktemp -d)"
+  cleanup_remote() {
+    status=$?
+    trap - EXIT
+    rm -rf "$tmpdir"
+    exit "$status"
+  }
+  trap cleanup_remote EXIT
+  "${compose[@]}" stop caddy umami >&2
+  "${compose[@]}" exec -T db psql -X -v ON_ERROR_STOP=1 -At \
+    -F "$(printf '\''\t'\'')" -U umami -d umami <<'SQL' | LC_ALL=C sort > "$tmpdir/source.manifest"
+SELECT format(
+  '\''SELECT %L, count(*)::bigint FROM %I.%I;'\'',
+  c.relname,
+  n.nspname,
+  c.relname
+)
+FROM pg_catalog.pg_class AS c
+JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = '\''public'\''
+  AND c.relkind IN ('\''r'\'', '\''p'\'')
+ORDER BY c.relname;
+\gexec
+SQL
+  "${compose[@]}" exec -T db pg_dump -Fc --create -U umami -d umami > "$tmpdir/umami.dump"
+  test -s "$tmpdir/source.manifest"
+  test -s "$tmpdir/umami.dump"
+  tar -C "$tmpdir" -cf - source.manifest umami.dump
+' > "$BUNDLE"
+
+# The SSH command has finished the dump. Restart production before reading or
+# restoring the local artifacts, and fail closed if the public heartbeat fails.
+test -s "$BUNDLE"
+restart_healthy_stack
+printf 'production_restart_heartbeat=PASS\n'
+
+tar -xf "$BUNDLE" -C "$RECOVERY_DIR"
+test -s "$SOURCE_MANIFEST"
 test -s "$BACKUP"
 printf 'backup_timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf 'backup_file=%s\n' "$BACKUP"
 printf 'backup_size_bytes=%s\n' "$(wc -c < "$BACKUP")"
+printf 'source_manifest=%s\n' "$SOURCE_MANIFEST"
+shasum -a 256 "$SOURCE_MANIFEST"
 shasum -a 256 "$BACKUP"
-gzip -t "$BACKUP"
+
+docker run -d --name "$RESTORE_CONTAINER" \
+  --network none \
+  --tmpfs /var/lib/postgresql/data \
+  -e POSTGRES_USER=umami \
+  -e POSTGRES_DB=umami \
+  -e POSTGRES_HOST_AUTH_METHOD=trust \
+  "$POSTGRES_IMAGE" >/dev/null
+CONTAINER_CREATED=1
+printf 'disposable_restore_image=%s\n' "$POSTGRES_IMAGE"
+printf 'disposable_restore_isolation=network-none,tmpfs,no-published-ports,trust-auth-only-in-container\n'
+
+READY=0
+for ((attempt = 1; attempt <= 60; attempt++)); do
+  if docker exec "$RESTORE_CONTAINER" pg_isready -U umami -d postgres >/dev/null 2>&1; then
+    READY=1
+    break
+  fi
+  sleep 2
+done
+if (( READY != 1 )); then
+  printf 'disposable restore readiness failed; NO-GO\n' >&2
+  exit 1
+fi
+
+docker cp "$BACKUP" "$RESTORE_CONTAINER:/tmp/umami.dump"
+docker exec "$RESTORE_CONTAINER" pg_restore --list /tmp/umami.dump > "$BACKUP_LIST"
+test -s "$BACKUP_LIST"
+printf 'archive_list=PASS (pinned disposable container)\n'
+docker exec "$RESTORE_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U umami -d postgres \
+  -c 'DROP DATABASE IF EXISTS umami WITH (FORCE);' </dev/null
+docker exec "$RESTORE_CONTAINER" pg_restore --exit-on-error --create --no-owner -U umami -d postgres /tmp/umami.dump
+docker exec -i "$RESTORE_CONTAINER" psql -X -v ON_ERROR_STOP=1 -At \
+  -F "$(printf '\t')" -U umami -d umami <<'SQL' | LC_ALL=C sort > "$RESTORED_MANIFEST"
+SELECT format(
+  'SELECT %L, count(*)::bigint FROM %I.%I;',
+  c.relname,
+  n.nspname,
+  c.relname
+)
+FROM pg_catalog.pg_class AS c
+JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relkind IN ('r', 'p')
+ORDER BY c.relname;
+\gexec
+SQL
+test -s "$RESTORED_MANIFEST"
+printf 'restored_manifest=%s\n' "$RESTORED_MANIFEST"
+shasum -a 256 "$RESTORED_MANIFEST"
+if diff -u "$SOURCE_MANIFEST" "$RESTORED_MANIFEST"; then
+  printf 'exact_manifest_diff=PASS\n'
+else
+  printf 'exact_manifest_diff=FAIL; do not run --apply or enable the timer\n' >&2
+  exit 1
+fi
 ```
 
-Record the filename, byte size, SHA-256, successful `gzip -t`, and UTC timestamp. Do not put database passwords or other secrets in the filename, command line, evidence, or logs.
+The source and restored manifests contain only sorted `public` table names and exact row counts. `pg_restore --list`, the disposable restore, the restored DB query, exact `diff` parity, container removal, production restart, or heartbeat failure is NO-GO: do not run `--apply` or enable the timer. Record the archive path/size/SHA-256, manifest paths/SHA-256 values, archive-list PASS, pinned image digest and isolation settings, exact-diff PASS, container-removal PASS, and production restart/heartbeat PASS.
 
 ### 3. Review the read-only pre-check
 
@@ -248,18 +445,19 @@ ssh "$REMOTE" 'set -Eeuo pipefail
 docker compose -f /opt/umami/docker-compose.yaml ps --all
 docker compose -f /opt/umami/docker-compose.yaml exec -T db pg_isready -U umami -d umami
 '
-SYSTEMATIC_URL="${SYSTEMATIC_URL:-https://fro.bot/systematic}"
-DEV_LIKE_URL="${DEV_LIKE_URL:?Set DEV_LIKE_URL to the existing dev-like dashboard URL}"
-for url in "$SYSTEMATIC_URL" "$DEV_LIKE_URL"; do
+for url in \
+  'https://fro.bot/systematic' \
+  'https://mrbro.dev/dev-like'
+do
   curl -fsS -o /dev/null -w '%{http_code} %{url_effective}\n' "$url"
 done
 ```
 
-Make one controlled visit to the existing Systematic and dev-like dashboard surfaces, then verify the corresponding website in `https://metrics.fro.bot`. Record counts and event categories only: do not copy visitor payloads, URLs, query strings, identifiers, or log bodies into evidence.
+The public surfaces are `https://fro.bot/systematic` and `https://mrbro.dev/dev-like`. For fresh-record proof, select the corresponding website in the Umami dashboard and a narrow UTC window; record the before count and one known bounded event category. Perform exactly one controlled matching interaction on a public surface, wait for ingestion, then record the after count and category for the same window. Evidence requires a delta of `+1`, or a documented exact expected delta from the instrumentation; unrelated traffic is not proof. Record counts and categories only: do not copy visitor payloads, URLs, query strings, identifiers, or log bodies into evidence.
 
 ### 6. Explicitly enable and inspect the timer
 
-Only after the supervised apply and post-check are successful, type the approval phrase and enable the timer. `systemctl enable --now` enables and starts the timer; it does not invoke the retention service immediately:
+Only after the supervised apply and post-check are successful, type the approval phrase and enable the timer. Because the timer has `Persistent=true`, `systemctl enable --now` may immediately trigger a catch-up retention service run when the daily window was missed. That is safe only because the supervised apply and post-check already passed and `--apply` is idempotent and advisory-locked. Stay present for the complete possible catch-up run.
 
 ```bash
 read -r -p 'Supervised apply and post-check passed; type ENABLE UMAMI RETENTION to continue: ' APPROVAL
@@ -267,22 +465,49 @@ if [[ "$APPROVAL" != 'ENABLE UMAMI RETENTION' ]]; then
   printf 'timer remains disabled\n' >&2
   exit 1
 fi
-ssh "$REMOTE" 'systemctl enable --now umami-retention.timer'
 ```
 
-Capture enabled/active state, next run, and journal evidence:
+Capture the enable timestamp, wait only when the service is active, then capture the settled service result, exit status, execution timestamps, timer state, and journal as a local artifact:
 
 ```bash
-ssh "$REMOTE" 'set -Eeuo pipefail
-systemctl is-enabled umami-retention.timer
-systemctl is-active umami-retention.timer
-systemctl list-timers --all --no-pager umami-retention.timer
-systemctl status umami-retention.timer --no-pager
-journalctl -u umami-retention.timer -u umami-retention.service --since "24 hours ago" --no-pager
-'
+TIMER_ARTIFACT="umami-retention-timer-$(date -u +%Y%m%dT%H%M%SZ).log"
+if ssh "$REMOTE" 'set -Eeuo pipefail
+  enable_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  systemctl enable --now umami-retention.timer
+  printf "enable_timestamp_utc=%s\n" "$enable_timestamp"
+  if [[ "$(systemctl is-active umami-retention.service || true)" == active ]]; then
+    if ! timeout 1860s bash -c '\''
+      while [[ "$(systemctl is-active umami-retention.service || true)" == active ]]; do
+        sleep 5
+      done
+    '\''; then
+      printf "service_settle=TIMEOUT\n" >&2
+      exit 1
+    fi
+    printf "service_settle=PASS\n"
+  else
+    printf "service_settle=NOT_ACTIVE_NO_WAIT\n"
+  fi
+  systemctl show umami-retention.service \
+    -p Result -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp \
+    -p ActiveState -p SubState
+  printf "timer_enabled=%s\n" "$(systemctl is-enabled umami-retention.timer)"
+  printf "timer_active=%s\n" "$(systemctl is-active umami-retention.timer)"
+  systemctl list-timers --all --no-pager umami-retention.timer
+  systemctl status umami-retention.timer --no-pager
+  journalctl -u umami-retention.timer -u umami-retention.service --since "$enable_timestamp" --no-pager
+' | tee "$TIMER_ARTIFACT"; then
+  :
+else
+  status=$?
+  shasum -a 256 "$TIMER_ARTIFACT"
+  printf 'timer enable/catch-up evidence failed with exit %s; retention remains NO-GO\n' "$status" >&2
+  exit "$status"
+fi
+shasum -a 256 "$TIMER_ARTIFACT"
 ```
 
-The timer is `Persistent=true`, scheduled at `00:30:00 UTC` with up to `30m` randomized delay and `AccuracySec=1min`. The service is a root oneshot with `TimeoutStartSec=30min` and runs `/opt/umami/retention/current/retention.sh --apply --compose-file /opt/umami/docker-compose.yaml`.
+The timer is `Persistent=true`, scheduled at `00:30:00 UTC` with up to `30m` randomized delay and `AccuracySec=1min`. The service is a root oneshot with `TimeoutStartSec=30min` and runs `/opt/umami/retention/current/retention.sh --apply --compose-file /opt/umami/docker-compose.yaml`. If no catch-up occurs after enable, do not infer that the timer fired from enabled/active state or a future `list-timers` entry; the retention record remains pending/NO-GO until the next actual `00:30–01:00 UTC` timer run succeeds. GO requires one successful timer-driven or catch-up service execution after enable, evidenced by the post-enable execution timestamp, `Result=success`, `ExecMainStatus=0`, and the corresponding journal artifact.
 
 ### 7. Disable or emergency-rollback
 

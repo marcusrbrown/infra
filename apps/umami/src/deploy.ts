@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import {chmodSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -19,6 +19,13 @@ const REMOTE_COMPOSE_PATH = `${REMOTE_DIR}/docker-compose.yaml`
 const REMOTE_CONFIG_DIR = `${REMOTE_DIR}/config`
 const REMOTE_CADDYFILE_PATH = `${REMOTE_CONFIG_DIR}/Caddyfile`
 const REMOTE_FINGERPRINT_PATH = `${REMOTE_DIR}/.db-password-fingerprint`
+const REMOTE_RETENTION_DIR = `${REMOTE_DIR}/retention`
+const REMOTE_RETENTION_RELEASES_DIR = `${REMOTE_RETENTION_DIR}/releases`
+const REMOTE_RETENTION_STAGING_DIR = `${REMOTE_RETENTION_DIR}/staging`
+const REMOTE_RETENTION_SYSTEMD_STAGING_DIR = `${REMOTE_RETENTION_DIR}/systemd-staging`
+const REMOTE_RETENTION_CURRENT_PATH = `${REMOTE_RETENTION_DIR}/current`
+const REMOTE_RETENTION_SERVICE_PATH = '/etc/systemd/system/umami-retention.service'
+const REMOTE_RETENTION_TIMER_PATH = '/etc/systemd/system/umami-retention.timer'
 const DEFAULT_REMOTE_USER = 'root'
 
 // ─── Fingerprint salt ─────────────────────────────────────────────────────────
@@ -60,6 +67,8 @@ export interface DeployEnv {
 export interface DeployOpts {
   env?: Record<string, string>
   spawn?: SpawnFn
+  /** Injectable parent root for the deploy workspace; defaults to os.tmpdir(). */
+  tempRoot?: string
   /** Injectable DNS resolver — throws if host doesn't resolve. */
   resolve?: (host: string) => Promise<void>
   fetch?: (url: string, init?: RequestInit) => Promise<Response>
@@ -189,6 +198,33 @@ export function computeDbPasswordFingerprint(password: string): string {
   return hasher.digest('hex')
 }
 
+export interface RetentionRuntimeArtifacts {
+  retentionScript: Uint8Array
+  retentionCheckSql: Uint8Array
+  retentionApplySql: Uint8Array
+  retentionServiceUnit: Uint8Array
+  retentionTimerUnit: Uint8Array
+}
+
+/** Computes the content address for one complete five-file retention deployment set. */
+export function computeRetentionReleaseHash(artifacts: RetentionRuntimeArtifacts): string {
+  const hasher = new Bun.CryptoHasher('sha256')
+
+  for (const [name, contents] of [
+    ['retention.sh', artifacts.retentionScript],
+    ['retention-check.sql', artifacts.retentionCheckSql],
+    ['retention.sql', artifacts.retentionApplySql],
+    ['umami-retention.service', artifacts.retentionServiceUnit],
+    ['umami-retention.timer', artifacts.retentionTimerUnit],
+  ] as const) {
+    hasher.update(`${name}\0`)
+    hasher.update(contents)
+    hasher.update('\0')
+  }
+
+  return hasher.digest('hex')
+}
+
 // ─── SSH helpers ──────────────────────────────────────────────────────────────
 
 function sshIdentityOptions(keyPath: string | undefined): string[] {
@@ -278,6 +314,26 @@ async function runCommand(
   }
 
   return {stdout, stderr}
+}
+
+async function runCommandStatus(
+  label: string,
+  command: string[],
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+): Promise<{stdout: string; stderr: string; exitCode: number}> {
+  console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
+
+  const proc = spawnFn(command, {env: deployEnv, stdout: 'pipe', stderr: 'pipe'})
+  const stdout = await new Response(proc.stdout).text()
+  const stderr = await new Response(proc.stderr).text()
+  const exitCode = await proc.exited
+
+  if (stdout.trim()) {
+    console.warn(stdout.trim())
+  }
+
+  return {stdout, stderr, exitCode}
 }
 
 /**
@@ -612,7 +668,9 @@ async function defaultResolve(host: string): Promise<void> {
  * 10. Admin password rotation (G1: fail-closed; G2: before Caddy; G5: token via stdin)
  * 11. docker compose up -d --wait caddy (now expose publicly)
  * 12. Write DB-password fingerprint sentinel (hash only, never password)
- * 13. Public HTTPS probe (warning-only on failure — Caddy ACME cert may still be issuing)
+ * 13. Upload and validate retention artifacts and systemd units; daemon-reload;
+ *     restart an active timer or start an already-enabled inactive timer
+ * 14. Public HTTPS probe (warning-only on failure — Caddy ACME cert may still be issuing)
  */
 export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
@@ -654,7 +712,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 
   try {
     // Always create a tmpdir — used for ControlPath socket in both CI and local mode.
-    tmpDir = mkdtempSync(join(tmpdir(), 'umami-deploy-'))
+    tmpDir = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'umami-deploy-'))
 
     if (env.UMAMI_SSH_KEY) {
       keyPath = join(tmpDir, 'id')
@@ -771,7 +829,251 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       controlPath,
     )
 
-    // Phase 12: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
+    // Phase 12: upload and validate a content-addressed retention release and
+    // stage systemd units away from their live paths.
+    const localRetentionScript = join(import.meta.dir, '..', 'retention.sh')
+    const localRetentionCheckSql = join(import.meta.dir, '..', 'retention-check.sql')
+    const localRetentionApplySql = join(import.meta.dir, '..', 'retention.sql')
+    const localRetentionService = join(import.meta.dir, '..', 'systemd', 'umami-retention.service')
+    const localRetentionTimer = join(import.meta.dir, '..', 'systemd', 'umami-retention.timer')
+
+    const retentionReleaseHash = computeRetentionReleaseHash({
+      retentionScript: readFileSync(localRetentionScript),
+      retentionCheckSql: readFileSync(localRetentionCheckSql),
+      retentionApplySql: readFileSync(localRetentionApplySql),
+      retentionServiceUnit: readFileSync(localRetentionService),
+      retentionTimerUnit: readFileSync(localRetentionTimer),
+    })
+    const remoteRetentionStagingReleasePath = `${REMOTE_RETENTION_STAGING_DIR}/${retentionReleaseHash}`
+    const remoteRetentionReleasePath = `${REMOTE_RETENTION_RELEASES_DIR}/${retentionReleaseHash}`
+    const remoteRetentionSystemdStagingReleasePath = `${REMOTE_RETENTION_SYSTEMD_STAGING_DIR}/${retentionReleaseHash}`
+    const remoteRetentionCurrentCandidatePath = `${REMOTE_RETENTION_CURRENT_PATH}.next-${retentionReleaseHash}`
+    const remoteRetentionCurrentRollbackPath = `${REMOTE_RETENTION_CURRENT_PATH}.rollback-${retentionReleaseHash}`
+    const remoteRetentionServiceStagingPath = `${remoteRetentionSystemdStagingReleasePath}/umami-retention.service`
+    const remoteRetentionTimerStagingPath = `${remoteRetentionSystemdStagingReleasePath}/umami-retention.timer`
+    const remoteRetentionServiceInstallTempPath = `${REMOTE_RETENTION_SERVICE_PATH}.tmp-${retentionReleaseHash}`
+    const remoteRetentionTimerInstallTempPath = `${REMOTE_RETENTION_TIMER_PATH}.tmp-${retentionReleaseHash}`
+
+    await runCommand(
+      'Preparing retention release and unit staging directories',
+      sshCommand(
+        host,
+        `mkdir -p '${remoteRetentionStagingReleasePath}' '${REMOTE_RETENTION_RELEASES_DIR}' '${remoteRetentionSystemdStagingReleasePath}'`,
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Copying retention runner',
+      scpCommand(localRetentionScript, host, `${remoteRetentionStagingReleasePath}/retention.sh`, keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Copying retention check SQL',
+      scpCommand(
+        localRetentionCheckSql,
+        host,
+        `${remoteRetentionStagingReleasePath}/retention-check.sql`,
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Copying retention apply SQL',
+      scpCommand(
+        localRetentionApplySql,
+        host,
+        `${remoteRetentionStagingReleasePath}/retention.sql`,
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Copying retention service unit',
+      scpCommand(localRetentionService, host, remoteRetentionServiceStagingPath, keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Copying retention timer unit',
+      scpCommand(localRetentionTimer, host, remoteRetentionTimerStagingPath, keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    // Staged payloads and units are root-owned with explicit modes before any
+    // validation. The live current link and /etc/systemd files remain untouched
+    // while uploads and static runtime validation are in progress.
+    await runCommand(
+      'Setting retention artifact ownership and permissions',
+      sshCommand(
+        host,
+        [
+          `chown root:root '${remoteRetentionStagingReleasePath}' '${remoteRetentionStagingReleasePath}/retention.sh' '${remoteRetentionStagingReleasePath}/retention-check.sql' '${remoteRetentionStagingReleasePath}/retention.sql' '${remoteRetentionServiceStagingPath}' '${remoteRetentionTimerStagingPath}'`,
+          `chmod 0755 '${remoteRetentionStagingReleasePath}' '${remoteRetentionStagingReleasePath}/retention.sh'`,
+          `chmod 0644 '${remoteRetentionStagingReleasePath}/retention-check.sql' '${remoteRetentionStagingReleasePath}/retention.sql' '${remoteRetentionServiceStagingPath}' '${remoteRetentionTimerStagingPath}'`,
+        ].join(' && '),
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Validating retention runner and artifact modes',
+      sshCommand(
+        host,
+        [
+          `bash -n '${remoteRetentionStagingReleasePath}/retention.sh'`,
+          `test "$(stat -c '%a' '${remoteRetentionStagingReleasePath}/retention.sh')" = 755`,
+          `test "$(stat -c '%a' '${remoteRetentionStagingReleasePath}/retention-check.sql')" = 644`,
+          `test "$(stat -c '%a' '${remoteRetentionStagingReleasePath}/retention.sql')" = 644`,
+          `test "$(stat -c '%a' '${remoteRetentionServiceStagingPath}')" = 644`,
+          `test "$(stat -c '%a' '${remoteRetentionTimerStagingPath}')" = 644`,
+        ].join(' && '),
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Atomically promoting retention release and verifying staged units',
+      sshCommand(
+        host,
+        [
+          'set -Eeuo pipefail',
+          `staging='${remoteRetentionStagingReleasePath}'`,
+          `release='${remoteRetentionReleasePath}'`,
+          `current='${REMOTE_RETENTION_CURRENT_PATH}'`,
+          `candidate='${remoteRetentionCurrentCandidatePath}'`,
+          `rollback='${remoteRetentionCurrentRollbackPath}'`,
+          'previous_target=""',
+          String.raw`if [[ -L "$current" ]]; then previous_target="$(readlink "$current")"; elif [[ -e "$current" ]]; then printf 'error: retention current path is not a symlink: %s\n' "$current" >&2; exit 1; fi`,
+          'restore_current() { if [[ -n "$previous_target" ]]; then rm -f "$rollback"; ln -s "$previous_target" "$rollback"; mv -Tf "$rollback" "$current"; else rm -f "$current"; fi; }',
+          'rollback_on_error() { rc=$?; trap - EXIT; if ((rc != 0)); then restore_current; fi; exit "$rc"; }',
+          'trap rollback_on_error EXIT',
+          'if [[ "$previous_target" != "$release" ]]; then',
+          '  if [[ -e "$release" || -L "$release" ]]; then',
+          String.raw`    if [[ ! -d "$release" ]]; then printf 'error: retention release path is not a directory: %s\n' "$release" >&2; exit 1; fi`,
+          '    rm -rf "$staging"',
+          '  else',
+          '    mv -T "$staging" "$release"',
+          '  fi',
+          '  rm -f "$candidate"',
+          '  ln -s "$release" "$candidate"',
+          '  mv -Tf "$candidate" "$current"',
+          'else',
+          '  rm -rf "$staging"',
+          'fi',
+          `timeout 60s systemd-analyze verify '${remoteRetentionServiceStagingPath}' '${remoteRetentionTimerStagingPath}'`,
+          'trap - EXIT',
+        ].join('\n'),
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Installing retention service unit atomically',
+      sshCommand(
+        host,
+        `install -o root -g root -m 0644 '${remoteRetentionServiceStagingPath}' '${remoteRetentionServiceInstallTempPath}' && mv -Tf '${remoteRetentionServiceInstallTempPath}' '${REMOTE_RETENTION_SERVICE_PATH}'`,
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+
+    // After verification, an install failure intentionally leaves the complete
+    // new runtime current: both unit versions reference stable current, and daemon-reload has not occurred.
+    await runCommand(
+      'Installing retention timer unit atomically',
+      sshCommand(
+        host,
+        `install -o root -g root -m 0644 '${remoteRetentionTimerStagingPath}' '${remoteRetentionTimerInstallTempPath}' && mv -Tf '${remoteRetentionTimerInstallTempPath}' '${REMOTE_RETENTION_TIMER_PATH}'`,
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Reloading systemd manager for retention units',
+      sshCommand(host, 'timeout 60s systemctl daemon-reload', keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+
+    const activeTimerStatus = await runCommandStatus(
+      'Checking retention timer activity',
+      sshCommand(host, 'timeout 60s systemctl is-active umami-retention.timer', keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+    const activeTimerState = activeTimerStatus.stdout.trim()
+
+    if (activeTimerStatus.exitCode === 0 && activeTimerState === 'active') {
+      await runCommand(
+        'Restarting active retention timer',
+        sshCommand(host, 'timeout 60s systemctl restart umami-retention.timer', keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+    } else {
+      const inactiveState =
+        activeTimerStatus.exitCode === 3 && ['inactive', 'failed', 'dead'].includes(activeTimerState)
+      if (!inactiveState) {
+        const detail = activeTimerStatus.stderr.trim()
+        throw new Error(
+          `Failed to determine retention timer activity (exit ${activeTimerStatus.exitCode}, state ${activeTimerState || 'unknown'}).${detail ? ` ${detail}` : ''}`,
+        )
+      }
+
+      const enabledTimerStatus = await runCommandStatus(
+        'Checking retention timer enablement',
+        sshCommand(host, 'timeout 60s systemctl is-enabled umami-retention.timer', keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+      const enabledTimerState = enabledTimerStatus.stdout.trim()
+
+      if (enabledTimerStatus.exitCode === 0 && ['enabled', 'enabled-runtime'].includes(enabledTimerState)) {
+        await runCommand(
+          'Starting enabled retention timer',
+          sshCommand(host, 'timeout 60s systemctl start umami-retention.timer', keyPath, controlPath),
+          deployEnv,
+          spawnFn,
+        )
+      } else if (enabledTimerStatus.exitCode === 1 && ['disabled', 'static', 'indirect'].includes(enabledTimerState)) {
+        console.warn('\u001B[1;33m[info]\u001B[0m Retention timer is disabled; leaving first-install state unchanged.')
+      } else {
+        const detail = enabledTimerStatus.stderr.trim()
+        throw new Error(
+          `Failed to determine retention timer enablement (exit ${enabledTimerStatus.exitCode}, state ${enabledTimerState || 'unknown'}).${detail ? ` ${detail}` : ''}`,
+        )
+      }
+    }
+
+    // Phase 13: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
     let probeOk = false
     for (let attempt = 1; attempt <= probeAttempts; attempt++) {
       try {

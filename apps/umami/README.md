@@ -4,11 +4,15 @@
 
 Privacy-respecting, self-hosted web analytics at [metrics.fro.bot](https://metrics.fro.bot).
 
-Three-service Docker Compose stack (umami + postgres + caddy) on a dedicated DigitalOcean droplet. Caddy handles automatic HTTPS. Postgres is reachable only on the internal compose network — port 5432 is never published to the host. Images are digest-pinned and tracked by Renovate. `DISABLE_TELEMETRY=1` and `PRIVATE_MODE=1` are set in the compose layer; Umami is cookie-free and respects Do-Not-Track by default.
+Three-service Docker Compose stack (Umami 3.2.0 + PostgreSQL 15 + Caddy) on a dedicated DigitalOcean droplet. Caddy handles automatic HTTPS. Postgres is reachable only on the internal compose network — port 5432 is never published to the host. Images are digest-pinned and tracked by Renovate. `DISABLE_TELEMETRY=1` and `PRIVATE_MODE=1` are set in the compose layer; Umami is cookie-free and respects Do-Not-Track by default.
 
 ## Deploy
 
-Validates env and host, runs a DNS preflight, materializes `/opt/umami/.env` via SSH stdin (never argv), uploads `docker-compose.yaml` and `Caddyfile`, pulls images, brings up `db` and `umami` (health-gated), rotates the admin password before Caddy starts, then brings up `caddy`. A DB-password fingerprint guard prevents volume-bricking password changes.
+Validates env and host, runs a DNS preflight, materializes `/opt/umami/.env` via SSH stdin (never argv), uploads `docker-compose.yaml` and `Caddyfile`, pulls images, brings up `db` and `umami` (health-gated), rotates the admin password before Caddy starts, then brings up `caddy`. It also validates and atomically installs the content-addressed retention runtime and systemd units before the HTTPS probe. A DB-password fingerprint guard prevents volume-bricking password changes.
+
+**First-install warning:** deploy installs the retention runtime but does **not** arm a new disabled/inactive timer and never runs retention during deploy. Take and verify the approved backup, review `--check`, supervise the first `--apply`, then enable the timer explicitly.
+
+Retention removes eligible analytics rows older than 13 calendar months. Saved replay markers are unique by `(website_id, visit_id)` and expire when their own timestamp or any matching replay chunk crosses the cutoff; markers are deleted before payloads and swept again to prevent same-run stale metadata. Dependency-protected website-event parents and monthly session parents remain only while they support retained children. The daily timer runs between 00:30 and 01:00 UTC with transactional, fail-closed guards. The exact mechanics and operator gates are in [`apps/umami/AGENTS.md`](AGENTS.md); use [`evidence/retention/TEMPLATE.md`](evidence/retention/TEMPLATE.md) for the version-controlled attestation.
 
 ```bash
 bun run --cwd apps/umami deploy
@@ -57,7 +61,7 @@ Repository secret: `DIGITALOCEAN_ACCESS_TOKEN` (used by the provision script).
 
 ## Operations
 
-Full deploy flow, secret rotation runbooks, backup/restore procedure, upgrade flow, and anti-patterns: [`apps/umami/AGENTS.md`](AGENTS.md).
+Full deploy flow, retention runbook, secret rotation runbooks, backup/restore procedure, upgrade flow, and anti-patterns: [`apps/umami/AGENTS.md`](AGENTS.md).
 
 Key operational notes:
 

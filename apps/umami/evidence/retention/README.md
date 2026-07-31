@@ -1,6 +1,6 @@
 # Umami retention evidence
 
-Retention attestations are version-controlled, dated Markdown records of one supervised rollout or explicit NO-GO. The procedure is defined by [`apps/umami/AGENTS.md`](../../AGENTS.md); copy [`TEMPLATE.md`](TEMPLATE.md) for each new record.
+Retention attestations are version-controlled, dated Markdown records of one supervised rollout, an explicit operator-override GO, or an explicit NO-GO. The procedure is defined by [`apps/umami/AGENTS.md`](../../AGENTS.md); copy [`TEMPLATE.md`](TEMPLATE.md) for each new record.
 
 ## Naming
 

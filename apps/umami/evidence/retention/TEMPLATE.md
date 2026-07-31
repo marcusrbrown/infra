@@ -6,7 +6,7 @@ Fill every `[fill]` field. Use UTC. Record counts, categories, hashes, and statu
 
 - Date/time (UTC): `[fill]`
 - Operator: `[fill]`
-- Status: `GO` / `NO-GO` — `[fill]`
+- Status: `GO (timer-driven/catch-up)` / `GO (operator override)` / `NO-GO` — `[fill]`
 - Scope: `first supervised apply` / `routine evidence refresh` / `rollback` — `[fill]`
 
 ## Version and release identity
@@ -119,12 +119,17 @@ GO is impossible if any recovery-point field is missing or failing.
 - Service `ExecMainStatus`: `[fill exact value]`
 - Service execution exit timestamp (UTC): `[fill exact ExecMainExitTimestamp or NOT OBSERVED]`
 - Timer journal artifact: `[fill local path and SHA-256]`
-- Successful timer-driven/catch-up service execution after enable: `YES / NO` — `[fill; GO is impossible without YES]`
+- Successful timer-driven/catch-up service execution after enable: `YES / NO` — `[fill; required for the timer-driven/catch-up path; `NO` is allowed only for a documented operator override]`
 - Next run evidence: `[fill exact list-timers/status result]`
 - Timer journal evidence: `[fill artifact/path or concise status]`
 - Schedule observed: `00:30–01:00 UTC, Persistent=true` — `[fill]`
+- First-enable semantics: `Persistent=true` does not guarantee a catch-up on first-ever enable because no prior timer stamp exists; the next scheduled run may be the first timer edge — `[fill]`
+- GO path: `timer-driven/catch-up` / `operator override` — `[fill]`
+- Exact gate overridden: `observed timer edge before activation` / `not applicable` — `[fill]`
+- Accepted residual risk: `[fill; required for operator override]`
+- Mandatory post-activation confirmation of the first scheduled timer run: `[fill required follow-up evidence and owner]`
 
-GO is impossible without a successful timer-driven or catch-up service execution after enable. If no catch-up occurred, leave the record pending/NO-GO until the next actual `00:30–01:00 UTC` timer run succeeds.
+GO is allowed either with a successful timer-driven or catch-up service execution after enable, or through an explicit operator override. For the override path, the timer edge may remain `NOT OBSERVED`, but the record must include accepted residual risk, `systemd-analyze verify` success, service `Result=success` and `ExecMainStatus=0`, timer enabled/active state, the bound service and next scheduled run, plus mandatory post-activation confirmation of the first scheduled timer run. Never claim a calendar or catch-up timer run occurred when it remains unobserved.
 
 ## Rollback and disable verification
 

@@ -67,6 +67,8 @@ export interface DeployEnv {
 export interface DeployOpts {
   env?: Record<string, string>
   spawn?: SpawnFn
+  /** Injectable parent root for the deploy workspace; defaults to os.tmpdir(). */
+  tempRoot?: string
   /** Injectable DNS resolver — throws if host doesn't resolve. */
   resolve?: (host: string) => Promise<void>
   fetch?: (url: string, init?: RequestInit) => Promise<Response>
@@ -710,7 +712,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 
   try {
     // Always create a tmpdir — used for ControlPath socket in both CI and local mode.
-    tmpDir = mkdtempSync(join(tmpdir(), 'umami-deploy-'))
+    tmpDir = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'umami-deploy-'))
 
     if (env.UMAMI_SSH_KEY) {
       keyPath = join(tmpDir, 'id')

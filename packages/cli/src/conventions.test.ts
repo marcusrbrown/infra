@@ -5,7 +5,7 @@ import {MCP_ALLOWLIST} from './commands/mcp'
 
 const REPO_ROOT = resolve(import.meta.dir, '../../..')
 const INTERNAL_ORGS = new Set(['marcusrbrown'])
-const ALLOWED_SHELL_SCRIPTS = new Set(['apps/keeweb/deploy.sh'])
+const ALLOWED_SHELL_SCRIPTS = new Set(['apps/keeweb/deploy.sh', 'apps/umami/retention.sh'])
 
 // ---------------------------------------------------------------------------
 // MCP drift-guard: sensitive tool set (two-layer security model)
@@ -358,10 +358,13 @@ describe('repo conventions', () => {
     expect(files.map(f => relative(REPO_ROOT, f))).toEqual([])
   })
 
-  it('no `.sh` files outside `apps/keeweb/deploy.sh`', () => {
+  it('allows only the exact approved shell script allowlist', () => {
     const files = listShellScriptFiles()
     const offenders = files.map(f => relative(REPO_ROOT, f)).filter(f => !ALLOWED_SHELL_SCRIPTS.has(f))
-    expect(offenders).toEqual([])
+    expect(
+      offenders,
+      `Shell scripts must match the exact allowlist (${[...ALLOWED_SHELL_SCRIPTS].join(', ')}):`,
+    ).toEqual([])
   })
 
   it('opencode.jsonc mcp.infra.command uses local repo source (not bunx published package)', async () => {
@@ -448,7 +451,7 @@ describe('repo conventions', () => {
 // Manifest keys are unique substrings of the AGENTS.md bullet text.
 // Values describe where the enforcement lives — they are documentation only.
 const ENFORCED_MANIFEST: Record<string, string> = {
-  'Only bash script': 'conventions.test.ts: no .sh files outside apps/keeweb/deploy.sh',
+  'Approved shell scripts': 'conventions.test.ts: exact allowlist for shell scripts',
   'GitHub Actions': 'conventions.test.ts: .yaml extension + SHA-pin version comment',
   'Cross-org reusable workflows': 'conventions.test.ts: no secrets: inherit on cross-org jobs',
   'as any': 'eslint.config.ts: @typescript-eslint/no-explicit-any + ban-ts-comment at error',

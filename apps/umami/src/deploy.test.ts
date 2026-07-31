@@ -1,3 +1,5 @@
+import {mkdirSync, mkdtempSync, rmSync} from 'node:fs'
+import {join} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 
 import {
@@ -1388,20 +1390,37 @@ describe('retention deployment integration', () => {
       return undefined
     })
 
-    await deploy({
-      env: VALID_ENV,
-      spawn: spawnFn,
-      resolve: resolvesOk,
-      fetch: fetchHeartbeatOk,
-    })
+    const tempParent = mkdtempSync('/tmp/umami-retention-test-')
+    const tempRoot = join(tempParent, 'provided-root')
+    mkdirSync(tempRoot)
 
-    const graph = commandGraph(calls)
-    expect(graph).not.toContain('systemctl restart umami-retention.timer')
-    expect(graph).not.toContain('systemctl start umami-retention.timer')
-    expect(graph).not.toContain('systemctl enable')
-    expect(graph).not.toContain('retention.sh --apply')
-    expect(graph).not.toContain('retention.sh --check')
-    expect(graph).not.toMatch(/(?:docker compose|psql).*retention(?:\.sql|\.sh)/)
+    try {
+      await deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+        tempRoot,
+      })
+
+      const graph = commandGraph(calls)
+      expect(graph).not.toContain('systemctl restart umami-retention.timer')
+      expect(graph).not.toContain('systemctl start umami-retention.timer')
+      expect(graph).not.toContain('systemctl enable')
+      expect(graph).not.toContain('retention.sh --apply')
+      expect(graph).not.toContain('retention.sh --check')
+      expect(graph).not.toMatch(/(?:docker compose|psql).*retention(?:\.sql|\.sh)/)
+
+      const controlPathArgs = calls.flatMap(call => call.cmd.filter(arg => arg.startsWith('ControlPath=')))
+      expect(controlPathArgs.length).toBeGreaterThan(0)
+      expect(controlPathArgs.every(arg => arg.startsWith(`ControlPath=${tempRoot}/`))).toBe(true)
+
+      const workspacePathArgs = calls.flatMap(call => call.cmd.filter(arg => arg.includes('/umami-deploy-')))
+      expect(workspacePathArgs.length).toBeGreaterThan(0)
+      expect(workspacePathArgs.every(arg => arg.includes(`${tempRoot}/umami-deploy-`))).toBe(true)
+    } finally {
+      rmSync(tempParent, {recursive: true, force: true})
+    }
   })
 })
 

@@ -34,7 +34,7 @@ Images are pinned to numbered tags by digest and tracked by Renovate (changelog-
     - validates shell syntax, ownership/modes, and both units with `systemd-analyze verify`;
     - atomically promotes the runtime to `/opt/umami/retention/releases/<hash>` and updates the `/opt/umami/retention/current` symlink;
     - atomically installs `/etc/systemd/system/umami-retention.service` and `/etc/systemd/system/umami-retention.timer`, then runs `systemctl daemon-reload`. The hash covers all five runtime/unit files. A staged validation failure restores the prior `current` target. Deploy never runs `retention.sh --check` or `retention.sh --apply`.
-14. Refreshes only an existing active/enabled timer: an active timer is restarted; an enabled but inactive timer is started; a disabled/inactive timer is left disabled/inactive. First install therefore remains unarmed.
+14. Refreshes only an existing active/enabled timer: an active timer is restarted; an enabled but inactive timer is started; a disabled/inactive timer is left disabled/inactive. First install therefore remains unarmed. Because no prior timer stamp exists, `Persistent=true` does not guarantee a catch-up on first-ever enable; the next scheduled run may be the first timer edge.
 15. **Bounded public-HTTPS probe** — retries `https://$UMAMI_DOMAIN/api/heartbeat` for `{"ok":true}`. On first-deploy Caddy ACME issuance lag it emits a WARNING and still succeeds (containers are already healthy); `compose up` is idempotent, so re-running once the cert lands is safe.
 
 In CI the SSH key is materialized from `UMAMI_SSH_KEY` to a temp file with a trailing newline (GitHub strips trailing whitespace from secrets) and `chmod 600`; locally it uses the ssh-agent.
@@ -457,7 +457,7 @@ The public surfaces are `https://fro.bot/systematic` and `https://mrbro.dev/dev-
 
 ### 6. Explicitly enable and inspect the timer
 
-Only after the supervised apply and post-check are successful, type the approval phrase and enable the timer. Because the timer has `Persistent=true`, `systemctl enable --now` may immediately trigger a catch-up retention service run when the daily window was missed. That is safe only because the supervised apply and post-check already passed and `--apply` is idempotent and advisory-locked. Stay present for the complete possible catch-up run.
+Only after the supervised apply and post-check are successful, type the approval phrase and enable the timer. Because the timer has `Persistent=true`, `systemctl enable --now` may immediately trigger a catch-up retention service run when an already-enabled timer has a recorded missed activation. `Persistent=true` does not guarantee a catch-up on first-ever enable because no prior timer stamp exists; the next scheduled run may be the first timer edge. That is safe only because the supervised apply and post-check already passed and `--apply` is idempotent and advisory-locked. Stay present for the complete possible catch-up run.
 
 ```bash
 read -r -p 'Supervised apply and post-check passed; type ENABLE UMAMI RETENTION to continue: ' APPROVAL
@@ -467,17 +467,20 @@ if [[ "$APPROVAL" != 'ENABLE UMAMI RETENTION' ]]; then
 fi
 ```
 
-Capture the enable timestamp, wait only when the service is active, then capture the settled service result, exit status, execution timestamps, timer state, and journal as a local artifact:
+Capture the ISO enable timestamp for evidence and a separate journalctl-parseable UTC timestamp, wait while the oneshot is active or activating, then capture the settled service result, exit status, execution timestamps, timer state, and journal as a local artifact:
 
 ```bash
 TIMER_ARTIFACT="umami-retention-timer-$(date -u +%Y%m%dT%H%M%SZ).log"
 if ssh "$REMOTE" 'set -Eeuo pipefail
   enable_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  journal_since_timestamp="$(date -u '\''+%Y-%m-%d %H:%M:%S UTC'\'')"
   systemctl enable --now umami-retention.timer
   printf "enable_timestamp_utc=%s\n" "$enable_timestamp"
-  if [[ "$(systemctl is-active umami-retention.service || true)" == active ]]; then
+  printf "journal_since_timestamp_utc=%s\n" "$journal_since_timestamp"
+  service_state="$(systemctl is-active umami-retention.service || true)"
+  if [[ "$service_state" == active || "$service_state" == activating ]]; then
     if ! timeout 1860s bash -c '\''
-      while [[ "$(systemctl is-active umami-retention.service || true)" == active ]]; do
+      while service_state="$(systemctl is-active umami-retention.service || true)"; [[ "$service_state" == active || "$service_state" == activating ]]; do
         sleep 5
       done
     '\''; then
@@ -495,7 +498,7 @@ if ssh "$REMOTE" 'set -Eeuo pipefail
   printf "timer_active=%s\n" "$(systemctl is-active umami-retention.timer)"
   systemctl list-timers --all --no-pager umami-retention.timer
   systemctl status umami-retention.timer --no-pager
-  journalctl -u umami-retention.timer -u umami-retention.service --since "$enable_timestamp" --no-pager
+  journalctl -u umami-retention.timer -u umami-retention.service --since "$journal_since_timestamp" --no-pager
 ' | tee "$TIMER_ARTIFACT"; then
   :
 else
@@ -507,7 +510,7 @@ fi
 shasum -a 256 "$TIMER_ARTIFACT"
 ```
 
-The timer is `Persistent=true`, scheduled at `00:30:00 UTC` with up to `30m` randomized delay and `AccuracySec=1min`. The service is a root oneshot with `TimeoutStartSec=30min` and runs `/opt/umami/retention/current/retention.sh --apply --compose-file /opt/umami/docker-compose.yaml`. If no catch-up occurs after enable, do not infer that the timer fired from enabled/active state or a future `list-timers` entry; the retention record remains pending/NO-GO until the next actual `00:30–01:00 UTC` timer run succeeds. GO requires one successful timer-driven or catch-up service execution after enable, evidenced by the post-enable execution timestamp, `Result=success`, `ExecMainStatus=0`, and the corresponding journal artifact.
+The timer is `Persistent=true`, scheduled at `00:30:00 UTC` with up to `30m` randomized delay and `AccuracySec=1min`. The service is a root oneshot with `TimeoutStartSec=30min` and runs `/opt/umami/retention/current/retention.sh --apply --compose-file /opt/umami/docker-compose.yaml`. If no catch-up occurs after enable, do not infer that the timer fired from enabled/active state or a future `list-timers` entry; record the timer edge as unobserved. GO is allowed through either one successful timer-driven or catch-up service execution after enable, evidenced by the post-enable execution timestamp, `Result=success`, `ExecMainStatus=0`, and the corresponding journal artifact, or an explicit operator override. The override must name the exact gate overridden as `observed timer edge before activation`, state the accepted residual risk, record `systemd-analyze verify` success plus service `Result=success`/`ExecMainStatus=0`, timer enabled/active state, its bound service, and its next scheduled run, and require mandatory post-activation confirmation of the first scheduled timer run. That first scheduled or catch-up edge remains explicitly unobserved until its evidence is captured.
 
 ### 7. Disable or emergency-rollback
 

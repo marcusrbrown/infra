@@ -4,6 +4,8 @@ import {describe, expect, it} from 'bun:test'
 const appDirectory = new URL('.', import.meta.url).pathname
 const servicePath = `${appDirectory}systemd/umami-retention.service`
 const timerPath = `${appDirectory}systemd/umami-retention.timer`
+const runbookPath = `${appDirectory}AGENTS.md`
+const evidenceTemplatePath = `${appDirectory}evidence/retention/TEMPLATE.md`
 const runnerPath = `${appDirectory}retention.sh`
 const checkSqlPath = `${appDirectory}retention-check.sql`
 const applySqlPath = `${appDirectory}retention.sql`
@@ -76,5 +78,36 @@ describe('Umami retention deployment artifact modes', () => {
         expect(file.mode & 0o777).toBe(mode)
       }),
     )
+  })
+})
+
+describe('Umami retention enable runbook contract', () => {
+  it('separates the journal timestamp and waits through oneshot activation', async () => {
+    const runbook = await artifact(runbookPath)
+
+    expect(runbook).toContain('enable_timestamp_utc=%s')
+    expect(runbook).toContain(String.raw`journal_since_timestamp="$(date -u '\''+%Y-%m-%d %H:%M:%S UTC'\'')"`)
+    expect(runbook).toContain(
+      'journalctl -u umami-retention.timer -u umami-retention.service --since "$journal_since_timestamp"',
+    )
+    expect(runbook).toContain('[[ "$service_state" == active || "$service_state" == activating ]]')
+  })
+})
+
+describe('Umami retention activation evidence contract', () => {
+  it('documents conditional GO paths and first-enable timer semantics', async () => {
+    const [runbook, template] = await Promise.all([artifact(runbookPath), artifact(evidenceTemplatePath)])
+
+    expect(runbook).toContain('`Persistent=true` does not guarantee a catch-up on first-ever enable')
+    expect(runbook).toContain('the next scheduled run may be the first timer edge')
+    expect(runbook).toContain('observed timer edge before activation')
+    expect(runbook).toContain('accepted residual risk')
+    expect(runbook).toContain('mandatory post-activation confirmation of the first scheduled timer run')
+
+    expect(template).toContain('GO (timer-driven/catch-up)')
+    expect(template).toContain('GO (operator override)')
+    expect(template).toContain('observed timer edge before activation')
+    expect(template).toContain('accepted residual risk')
+    expect(template).toContain('mandatory post-activation confirmation of the first scheduled timer run')
   })
 })

@@ -1705,7 +1705,18 @@ describe('deploy-dashboard.yaml: audit step hardening', () => {
     expect(afterAudit).toMatch(/branch=["']dashboard-pin["']/)
     expect(afterAudit).not.toMatch(/run_id|GITHUB_RUN_ID/)
     expect(afterAudit).toContain('git fetch origin main')
-    expect(afterAudit).toMatch(/git checkout -B .*origin\/main/)
+    expect(afterAudit).toMatch(/git checkout (?:-f )?-B .*origin\/main/)
+  })
+
+  it('audit PR step force-checks out the stable branch after capturing the deployed pin', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const auditStepIdx = text.indexOf('Open audit PR')
+    expect(auditStepIdx).toBeGreaterThan(-1)
+    const afterAudit = text.slice(auditStepIdx)
+    const pinCaptureIdx = afterAudit.indexOf('pinned_image_line=')
+    const checkoutIdx = afterAudit.indexOf('git checkout -f -B')
+    expect(pinCaptureIdx).toBeGreaterThan(-1)
+    expect(checkoutIdx).toBeGreaterThan(pinCaptureIdx)
   })
 
   it('audit PR step reapplies only the dashboard image pin with awk', async () => {

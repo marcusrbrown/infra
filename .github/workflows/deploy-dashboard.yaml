@@ -239,7 +239,7 @@ jobs:
             # Remove any stale local tracking ref so a first push can lease-create the branch.
             git update-ref -d "refs/remotes/origin/${branch}"
           fi
-          git checkout -B "${branch}" origin/main
+          git checkout -f -B "${branch}" origin/main
 
           origin_compose="$(mktemp)"
           if ! git show "origin/main:apps/dashboard/docker-compose.yaml" > "${origin_compose}"; then

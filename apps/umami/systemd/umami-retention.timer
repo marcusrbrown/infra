@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Umami analytics retention policy
+
+[Timer]
+# The run lands between 00:30 and 01:00 UTC.
+OnCalendar=*-*-* 00:30:00 UTC
+Persistent=true
+RandomizedDelaySec=30m
+AccuracySec=1min
+Unit=umami-retention.service
+
+[Install]
+WantedBy=timers.target

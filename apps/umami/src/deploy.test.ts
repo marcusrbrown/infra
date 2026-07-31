@@ -3,6 +3,7 @@ import {describe, expect, it} from 'bun:test'
 import {
   buildEnvFileContents,
   computeDbPasswordFingerprint,
+  computeRetentionReleaseHash,
   deploy,
   validateEnv,
   validateSecretValue,
@@ -54,16 +55,28 @@ interface SpawnCall {
 
 /**
  * Builds a fake SpawnFn that records all calls and returns configurable results.
- * `responses` is consumed in order; the last entry is repeated for remaining calls.
+ * `responses` is consumed in order; additional calls receive fresh successful
+ * results so a response stream is never consumed twice.
  */
-function makeFakeSpawn(responses: SpawnResult[]): {spawnFn: SpawnFn; calls: SpawnCall[]} {
+function makeFakeSpawn(
+  responses: SpawnResult[],
+  override?: (cmd: string[], callIndex: number) => SpawnResult | undefined,
+): {spawnFn: SpawnFn; calls: SpawnCall[]} {
   const calls: SpawnCall[] = []
   let idx = 0
 
   const spawnFn: SpawnFn = (cmd, opts) => {
     const call: SpawnCall = {cmd: [...cmd], stdinData: ''}
 
-    const result = responses[Math.min(idx++, responses.length - 1)] ?? makeSpawnResult()
+    const callIndex = idx++
+    const command = cmd.join(' ')
+    const result =
+      override?.(cmd, callIndex) ??
+      (command.includes('systemctl is-active')
+        ? makeSpawnResult('inactive\n', '', 3)
+        : command.includes('systemctl is-enabled')
+          ? makeSpawnResult('disabled\n', '', 1)
+          : (responses[callIndex] ?? makeSpawnResult()))
 
     if (opts.stdin === 'pipe') {
       // Intercept stdin writes
@@ -1112,3 +1125,286 @@ describe('bearer token never appears in any spawned argv', () => {
     expect(tokenInStdin).toBe(true)
   })
 })
+
+// ─── retention deployment integration ─────────────────────────────────────────
+
+describe('retention deployment integration', () => {
+  it('computes a deterministic content-addressed hash from all runtime artifact bytes', () => {
+    const encoder = new TextEncoder()
+    const artifacts = {
+      retentionScript: encoder.encode('script-v1'),
+      retentionCheckSql: encoder.encode('check-v1'),
+      retentionApplySql: encoder.encode('apply-v1'),
+      retentionServiceUnit: encoder.encode('service-v1'),
+      retentionTimerUnit: encoder.encode('timer-v1'),
+    }
+
+    const first = computeRetentionReleaseHash(artifacts)
+    const second = computeRetentionReleaseHash(artifacts)
+    const changed = computeRetentionReleaseHash({...artifacts, retentionApplySql: encoder.encode('apply-v2')})
+    const changedUnit = computeRetentionReleaseHash({...artifacts, retentionTimerUnit: encoder.encode('timer-v2')})
+
+    expect(first).toMatch(/^[0-9a-f]{64}$/)
+    expect(second).toBe(first)
+    expect(changed).not.toBe(first)
+    expect(changedUnit).not.toBe(first)
+  })
+
+  it('uploads exact retention artifacts and systemd units before host verification and reload', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 30}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    const scpCalls = calls.filter(call => call.cmd[0] === 'scp')
+    const expectedUploads = [
+      ['retention.sh', '/opt/umami/retention/staging/'],
+      ['retention-check.sql', '/opt/umami/retention/staging/'],
+      ['retention.sql', '/opt/umami/retention/staging/'],
+      ['umami-retention.service', '/opt/umami/retention/systemd-staging/'],
+      ['umami-retention.timer', '/opt/umami/retention/systemd-staging/'],
+    ] as const
+
+    const uploadIndexes = expectedUploads.map(([sourceName, destination]) => {
+      const index = calls.findIndex(call => {
+        const command = call.cmd.join(' ')
+        return call.cmd[0] === 'scp' && command.includes(`/${sourceName}`) && command.includes(destination)
+      })
+      expect(index).toBeGreaterThan(-1)
+      return index
+    })
+
+    expect(scpCalls).toHaveLength(7)
+    expect(new Set(uploadIndexes).size).toBe(expectedUploads.length)
+    expect(
+      scpCalls
+        .filter(call => call.cmd.join(' ').includes('/opt/umami/retention/systemd-staging/'))
+        .every(call => /\/systemd-staging\/[0-9a-f]{64}\//.test(call.cmd.join(' '))),
+    ).toBe(true)
+
+    const permissionIndex = calls.findIndex(call => call.cmd.join(' ').includes('chmod 0755'))
+    const shellVerifyIndex = calls.findIndex(call => call.cmd.join(' ').includes('bash -n'))
+    const currentSwapIndex = calls.findIndex(
+      call => call.cmd.join(' ').includes('mv -Tf') && call.cmd.join(' ').includes('/opt/umami/retention/current'),
+    )
+    const unitVerifyIndex = calls.findIndex(call => call.cmd.join(' ').includes('systemd-analyze verify'))
+    const serviceInstallIndex = calls.findIndex(call => call.cmd.join(' ').includes('umami-retention.service.tmp'))
+    const reloadIndex = calls.findIndex(call => call.cmd.join(' ').includes('systemctl daemon-reload'))
+
+    expect(permissionIndex).toBeGreaterThan(-1)
+    expect(shellVerifyIndex).toBeGreaterThan(permissionIndex)
+    expect(currentSwapIndex).toBeGreaterThan(shellVerifyIndex)
+    expect(unitVerifyIndex).toBeGreaterThan(shellVerifyIndex)
+    expect(unitVerifyIndex).toBeGreaterThanOrEqual(currentSwapIndex)
+    const promotionCommand = calls[currentSwapIndex]?.cmd.join(' ') ?? ''
+    expect(promotionCommand.indexOf('mv -Tf')).toBeLessThan(promotionCommand.indexOf('systemd-analyze verify'))
+    expect(serviceInstallIndex).toBeGreaterThan(unitVerifyIndex)
+    expect(reloadIndex).toBeGreaterThan(unitVerifyIndex)
+    for (const uploadIndex of uploadIndexes) {
+      expect(uploadIndex).toBeLessThan(permissionIndex)
+      expect(uploadIndex).toBeLessThan(unitVerifyIndex)
+      expect(uploadIndex).toBeLessThan(reloadIndex)
+    }
+
+    expect(
+      calls.filter(call => call.cmd[0] === 'scp').every(call => !call.cmd.join(' ').includes('/etc/systemd/system/')),
+    ).toBe(true)
+    expect(commandGraph(calls)).toContain('ln -s')
+    expect(commandGraph(calls)).toContain('mv -Tf')
+    expect(commandGraph(calls)).toMatch(/\/opt\/umami\/retention\/releases\/[0-9a-f]{64}/)
+    expect(commandGraph(calls)).toContain('/opt/umami/retention/current')
+    expect(commandGraph(calls)).toContain('timeout 60s systemd-analyze verify')
+    expect(commandGraph(calls)).toContain('timeout 60s systemctl daemon-reload')
+  })
+
+  it('does not touch current when a runtime upload is interrupted', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 40}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    responses[11] = makeSpawnResult('', 'interrupted upload', 1)
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow()
+
+    const graph = commandGraph(calls)
+    expect(graph).toContain('/opt/umami/retention/staging/')
+    expect(graph).not.toContain('mv -Tf')
+    expect(graph).not.toContain('systemctl daemon-reload')
+  })
+
+  it('does not touch current when staged runtime validation fails', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 40}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    responses[17] = makeSpawnResult('', 'invalid staged runtime', 1)
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow()
+
+    const graph = commandGraph(calls)
+    expect(graph).toContain('bash -n')
+    expect(graph).not.toContain('mv -Tf')
+    expect(graph).not.toContain('systemd-analyze verify')
+  })
+
+  it('rolls current back when staged unit verification fails before unit installation', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 40}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    responses[18] = makeSpawnResult('', 'systemd-analyze failed', 1)
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow()
+
+    const graph = commandGraph(calls)
+    expect(graph).toContain('trap rollback_on_error EXIT')
+    expect(graph).toContain('restore_current()')
+    expect(graph).toContain('ln -s "$previous_target" "$rollback"')
+    expect(graph).toContain('mv -Tf "$rollback" "$current"')
+    expect(graph).not.toContain('Installing retention service unit atomically')
+    expect(graph).not.toContain('Installing retention timer unit atomically')
+    expect(graph).not.toContain('systemctl daemon-reload')
+    expect(graph).not.toContain('systemctl restart umami-retention.timer')
+    expect(graph).not.toContain('systemctl start umami-retention.timer')
+  })
+
+  it('propagates a systemd timeout without mutating timer state', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 40}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    const {spawnFn, calls} = makeFakeSpawn(responses, command => {
+      if (command.join(' ').includes('systemctl is-active')) {
+        return makeSpawnResult('', 'systemctl timed out', 124)
+      }
+      return undefined
+    })
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/exit 124/)
+
+    const graph = commandGraph(calls)
+    expect(graph).toContain('timeout 60s systemctl is-active umami-retention.timer')
+    expect(graph).not.toContain('systemctl is-enabled umami-retention.timer')
+    expect(graph).not.toContain('systemctl restart umami-retention.timer')
+    expect(graph).not.toContain('systemctl start umami-retention.timer')
+  })
+
+  it('refreshes an active timer with bounded restart and no start', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from({length: 30}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    const {spawnFn, calls} = makeFakeSpawn(responses, command => {
+      const commandText = command.join(' ')
+      if (commandText.includes('systemctl is-active')) return makeSpawnResult('active\n')
+      return undefined
+    })
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    const reloadIndex = calls.findIndex(call => call.cmd.join(' ').includes('systemctl daemon-reload'))
+    const restartIndex = calls.findIndex(call => call.cmd.join(' ').includes('systemctl restart umami-retention.timer'))
+    const startIndex = calls.findIndex(call => call.cmd.join(' ').includes('systemctl start umami-retention.timer'))
+    const activeIndex = calls.findIndex(call =>
+      call.cmd.join(' ').includes('systemctl is-active umami-retention.timer'),
+    )
+
+    expect(reloadIndex).toBeGreaterThan(-1)
+    expect(activeIndex).toBeGreaterThan(reloadIndex)
+    expect(restartIndex).toBeGreaterThan(activeIndex)
+    expect(startIndex).toBe(-1)
+    expect(commandGraph(calls)).toContain('timeout 60s systemctl restart umami-retention.timer')
+  })
+
+  it('starts an enabled but inactive timer after daemon-reload', async () => {
+    const responses = Array.from({length: 30}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult(computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD))
+    const {spawnFn, calls} = makeFakeSpawn(responses, command => {
+      const commandText = command.join(' ')
+      if (commandText.includes('systemctl is-active')) return makeSpawnResult('inactive\n', '', 3)
+      if (commandText.includes('systemctl is-enabled')) return makeSpawnResult('enabled\n')
+      return undefined
+    })
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    const graph = commandGraph(calls)
+    expect(graph).toContain('timeout 60s systemctl is-enabled umami-retention.timer')
+    expect(graph).toContain('timeout 60s systemctl start umami-retention.timer')
+    expect(graph).not.toContain('systemctl restart umami-retention.timer')
+    expect(graph).not.toContain('systemctl enable')
+  })
+
+  it('leaves a disabled inactive timer untouched and never runs retention during deploy', async () => {
+    const responses = Array.from({length: 30}, () => makeSpawnResult())
+    responses[1] = makeSpawnResult('')
+    const {spawnFn, calls} = makeFakeSpawn(responses, command => {
+      const commandText = command.join(' ')
+      if (commandText.includes('systemctl is-active')) return makeSpawnResult('inactive\n', '', 3)
+      if (commandText.includes('systemctl is-enabled')) return makeSpawnResult('disabled\n', '', 1)
+      return undefined
+    })
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    const graph = commandGraph(calls)
+    expect(graph).not.toContain('systemctl restart umami-retention.timer')
+    expect(graph).not.toContain('systemctl start umami-retention.timer')
+    expect(graph).not.toContain('systemctl enable')
+    expect(graph).not.toContain('retention.sh --apply')
+    expect(graph).not.toContain('retention.sh --check')
+    expect(graph).not.toMatch(/(?:docker compose|psql).*retention(?:\.sql|\.sh)/)
+  })
+})
+
+function commandGraph(calls: SpawnCall[]): string {
+  return calls.map(call => call.cmd.join(' ')).join('\n')
+}

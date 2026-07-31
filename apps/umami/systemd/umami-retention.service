@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply Umami analytics retention policy
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/umami
+ExecStart=/opt/umami/retention/current/retention.sh --apply --compose-file /opt/umami/docker-compose.yaml
+TimeoutStartSec=30min
+Restart=no

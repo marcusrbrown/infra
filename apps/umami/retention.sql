@@ -75,6 +75,17 @@ BEGIN
 END
 $$;
 
+CREATE TEMP TABLE retention_expired_replay_keys (
+  website_id uuid NOT NULL,
+  visit_id uuid NOT NULL,
+  PRIMARY KEY (website_id, visit_id)
+) ON COMMIT DROP;
+
+INSERT INTO retention_expired_replay_keys (website_id, visit_id)
+SELECT DISTINCT session_replay.website_id, session_replay.visit_id
+FROM session_replay, retention_context
+WHERE session_replay.created_at < retention_context.cutoff;
+
 CREATE TEMP TABLE retention_counts (
   sort_order integer PRIMARY KEY,
   table_name text NOT NULL,
@@ -108,6 +119,12 @@ UNION ALL
 SELECT 6, 'session_replay_saved', count(*)
 FROM session_replay_saved, retention_context
 WHERE session_replay_saved.created_at < retention_context.cutoff
+  OR EXISTS (
+    SELECT 1
+    FROM retention_expired_replay_keys
+    WHERE retention_expired_replay_keys.website_id = session_replay_saved.website_id
+      AND retention_expired_replay_keys.visit_id = session_replay_saved.visit_id
+  )
 UNION ALL
 SELECT 7, 'heatmap_event', count(*)
 FROM heatmap_event, retention_context
@@ -209,6 +226,22 @@ UPDATE retention_counts
 SET deleted_count = (SELECT count(*) FROM deleted)
 WHERE table_name = 'revenue';
 
+-- first saved-marker sweep
+WITH deleted AS (
+  DELETE FROM session_replay_saved
+  WHERE session_replay_saved.created_at < (SELECT cutoff FROM retention_context)
+    OR EXISTS (
+      SELECT 1
+      FROM retention_expired_replay_keys
+      WHERE retention_expired_replay_keys.website_id = session_replay_saved.website_id
+        AND retention_expired_replay_keys.visit_id = session_replay_saved.visit_id
+    )
+  RETURNING 1
+)
+UPDATE retention_counts
+SET deleted_count = (SELECT count(*) FROM deleted)
+WHERE table_name = 'session_replay_saved';
+
 WITH deleted AS (
   DELETE FROM session_replay
   WHERE session_replay.created_at < (SELECT cutoff FROM retention_context)
@@ -218,13 +251,20 @@ UPDATE retention_counts
 SET deleted_count = (SELECT count(*) FROM deleted)
 WHERE table_name = 'session_replay';
 
+-- second saved-marker sweep
 WITH deleted AS (
   DELETE FROM session_replay_saved
   WHERE session_replay_saved.created_at < (SELECT cutoff FROM retention_context)
+    OR EXISTS (
+      SELECT 1
+      FROM retention_expired_replay_keys
+      WHERE retention_expired_replay_keys.website_id = session_replay_saved.website_id
+        AND retention_expired_replay_keys.visit_id = session_replay_saved.visit_id
+    )
   RETURNING 1
 )
 UPDATE retention_counts
-SET deleted_count = (SELECT count(*) FROM deleted)
+SET deleted_count = retention_counts.deleted_count + (SELECT count(*) FROM deleted)
 WHERE table_name = 'session_replay_saved';
 
 WITH deleted AS (
@@ -325,11 +365,18 @@ SET remaining_count = (
 )
 WHERE table_name = 'session_replay';
 
+-- final saved-marker remaining count
 UPDATE retention_counts
 SET remaining_count = (
   SELECT count(*)
   FROM session_replay_saved
   WHERE session_replay_saved.created_at < (SELECT cutoff FROM retention_context)
+    OR EXISTS (
+      SELECT 1
+      FROM retention_expired_replay_keys
+      WHERE retention_expired_replay_keys.website_id = session_replay_saved.website_id
+        AND retention_expired_replay_keys.visit_id = session_replay_saved.visit_id
+    )
 )
 WHERE table_name = 'session_replay_saved';
 

@@ -12,7 +12,7 @@ Validates env and host, runs a DNS preflight, materializes `/opt/umami/.env` via
 
 **First-install warning:** deploy installs the retention runtime but does **not** arm a new disabled/inactive timer and never runs retention during deploy. Take and verify the approved backup, review `--check`, supervise the first `--apply`, then enable the timer explicitly.
 
-Retention removes eligible analytics rows older than 13 calendar months. Dependency-protected website-event parents and monthly session parents remain only while they support retained children. The daily timer runs between 00:30 and 01:00 UTC with transactional, fail-closed guards. The exact mechanics and operator gates are in [`apps/umami/AGENTS.md`](AGENTS.md); use [`evidence/retention/TEMPLATE.md`](evidence/retention/TEMPLATE.md) for the version-controlled attestation.
+Retention removes eligible analytics rows older than 13 calendar months. Saved replay markers are unique by `(website_id, visit_id)` and expire when their own timestamp or any matching replay chunk crosses the cutoff; markers are deleted before payloads and swept again to prevent same-run stale metadata. Dependency-protected website-event parents and monthly session parents remain only while they support retained children. The daily timer runs between 00:30 and 01:00 UTC with transactional, fail-closed guards. The exact mechanics and operator gates are in [`apps/umami/AGENTS.md`](AGENTS.md); use [`evidence/retention/TEMPLATE.md`](evidence/retention/TEMPLATE.md) for the version-controlled attestation.
 
 ```bash
 bun run --cwd apps/umami deploy

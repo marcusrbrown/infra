@@ -47,11 +47,17 @@ CREATE TABLE revenue (
 );
 CREATE TABLE session_replay (
   replay_id uuid PRIMARY KEY,
+  website_id uuid NOT NULL,
   session_id uuid,
+  visit_id uuid NOT NULL,
+  chunk_index integer NOT NULL,
   created_at timestamptz
 );
 CREATE TABLE session_replay_saved (
   saved_replay_id uuid PRIMARY KEY,
+  website_id uuid NOT NULL,
+  visit_id uuid NOT NULL,
+  UNIQUE (website_id, visit_id),
   created_at timestamptz
 );
 CREATE TABLE heatmap_event (
@@ -194,11 +200,11 @@ INSERT INTO revenue VALUES
   ('40000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', CURRENT_TIMESTAMP - INTERVAL '14 months'),
   ('40000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', CURRENT_TIMESTAMP - INTERVAL '12 months');
 INSERT INTO session_replay VALUES
-  ('50000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', CURRENT_TIMESTAMP - INTERVAL '14 months'),
-  ('50000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', CURRENT_TIMESTAMP - INTERVAL '12 months');
+  ('50000000-0000-0000-0000-000000000001', '80000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', '90000000-0000-0000-0000-000000000001', 0, CURRENT_TIMESTAMP - INTERVAL '14 months'),
+  ('50000000-0000-0000-0000-000000000002', '80000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', '90000000-0000-0000-0000-000000000002', 0, CURRENT_TIMESTAMP - INTERVAL '12 months');
 INSERT INTO session_replay_saved VALUES
-  ('60000000-0000-0000-0000-000000000001', CURRENT_TIMESTAMP - INTERVAL '14 months'),
-  ('60000000-0000-0000-0000-000000000002', CURRENT_TIMESTAMP - INTERVAL '12 months');
+  ('60000000-0000-0000-0000-000000000001', '80000000-0000-0000-0000-000000000001', '90000000-0000-0000-0000-000000000001', CURRENT_TIMESTAMP - INTERVAL '14 months'),
+  ('60000000-0000-0000-0000-000000000002', '80000000-0000-0000-0000-000000000002', '90000000-0000-0000-0000-000000000002', CURRENT_TIMESTAMP - INTERVAL '12 months');
 INSERT INTO heatmap_event VALUES
   ('70000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', CURRENT_TIMESTAMP - INTERVAL '14 months'),
   ('70000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000002', CURRENT_TIMESTAMP - INTERVAL '12 months');
@@ -244,6 +250,91 @@ ORDER BY 1;`,
         }
 
         await resetDatabase(container)
+        const savedMarkerWithExpiredChunk = await psql(
+          container,
+          String.raw`INSERT INTO session VALUES
+  ('00000000-0000-0000-0000-000000000100', CURRENT_TIMESTAMP - INTERVAL '1 month'),
+  ('00000000-0000-0000-0000-000000000101', CURRENT_TIMESTAMP - INTERVAL '1 month');
+INSERT INTO session_replay VALUES
+  ('50000000-0000-0000-0000-000000000100', '80000000-0000-0000-0000-000000000100', '00000000-0000-0000-0000-000000000100', '90000000-0000-0000-0000-000000000100', 0, CURRENT_TIMESTAMP - INTERVAL '14 months'),
+  ('50000000-0000-0000-0000-000000000101', '80000000-0000-0000-0000-000000000101', '00000000-0000-0000-0000-000000000101', '90000000-0000-0000-0000-000000000101', 0, CURRENT_TIMESTAMP - INTERVAL '1 month');
+INSERT INTO session_replay_saved VALUES
+  ('60000000-0000-0000-0000-000000000100', '80000000-0000-0000-0000-000000000100', '90000000-0000-0000-0000-000000000100', CURRENT_TIMESTAMP - INTERVAL '1 month'),
+  ('60000000-0000-0000-0000-000000000101', '80000000-0000-0000-0000-000000000101', '90000000-0000-0000-0000-000000000101', CURRENT_TIMESTAMP - INTERVAL '1 month');`,
+        )
+        expect(savedMarkerWithExpiredChunk.exitCode).toBe(0)
+
+        const savedMarkerCheck = await runRetention(container, checkSqlPath)
+        expect(savedMarkerCheck.exitCode).toBe(0)
+        expectOutput(
+          savedMarkerCheck,
+          'RETENTION|mode=check|table=session_replay_saved|before=1|deleted=0|protected=0|remaining=1',
+        )
+
+        const savedMarkerApply = await runRetention(container, applySqlPath)
+        expect(savedMarkerApply.exitCode).toBe(0)
+        expectOutput(
+          savedMarkerApply,
+          'RETENTION|mode=apply|table=session_replay|before=1|deleted=1|protected=0|remaining=0',
+        )
+        expectOutput(
+          savedMarkerApply,
+          'RETENTION|mode=apply|table=session_replay_saved|before=1|deleted=1|protected=0|remaining=0',
+        )
+        expect(
+          queryLines(
+            await psql(
+              container,
+              `SELECT count(*) FROM session_replay WHERE website_id = '80000000-0000-0000-0000-000000000100' AND visit_id = '90000000-0000-0000-0000-000000000100';
+SELECT count(*) FROM session_replay_saved WHERE website_id = '80000000-0000-0000-0000-000000000100' AND visit_id = '90000000-0000-0000-0000-000000000100';
+SELECT count(*) FROM session_replay WHERE website_id = '80000000-0000-0000-0000-000000000101' AND visit_id = '90000000-0000-0000-0000-000000000101';
+SELECT count(*) FROM session_replay_saved WHERE website_id = '80000000-0000-0000-0000-000000000101' AND visit_id = '90000000-0000-0000-0000-000000000101';`,
+            ),
+          ),
+        ).toEqual(['0', '0', '1', '1'])
+
+        await resetDatabase(container)
+        const concurrentSavedMarkerFixture = await psql(
+          container,
+          String.raw`INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000102', CURRENT_TIMESTAMP - INTERVAL '1 month');
+INSERT INTO session_replay VALUES
+  ('50000000-0000-0000-0000-000000000102', '80000000-0000-0000-0000-000000000102', '00000000-0000-0000-0000-000000000102', '90000000-0000-0000-0000-000000000102', 0, CURRENT_TIMESTAMP - INTERVAL '14 months');
+INSERT INTO session_replay_saved VALUES
+  ('60000000-0000-0000-0000-000000000102', '80000000-0000-0000-0000-000000000102', '90000000-0000-0000-0000-000000000102', CURRENT_TIMESTAMP - INTERVAL '1 month');
+CREATE FUNCTION resave_replay_marker_during_chunk_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO session_replay_saved (saved_replay_id, website_id, visit_id, created_at)
+  VALUES ('60000000-0000-0000-0000-000000000103', OLD.website_id, OLD.visit_id, CURRENT_TIMESTAMP);
+  RETURN OLD;
+END
+$$;
+CREATE TRIGGER resave_replay_marker_trigger
+AFTER DELETE ON session_replay
+FOR EACH ROW EXECUTE FUNCTION resave_replay_marker_during_chunk_delete();`,
+        )
+        expect(concurrentSavedMarkerFixture.exitCode).toBe(0)
+
+        const concurrentSavedMarkerApply = await runRetention(container, applySqlPath)
+        expect(concurrentSavedMarkerApply.exitCode).toBe(0)
+        expectOutput(
+          concurrentSavedMarkerApply,
+          'RETENTION|mode=apply|table=session_replay_saved|before=1|deleted=2|protected=0|remaining=0',
+        )
+        expectOutput(
+          concurrentSavedMarkerApply,
+          'RETENTION|mode=apply|table=session_replay|before=1|deleted=1|protected=0|remaining=0',
+        )
+        expect(
+          queryLines(
+            await psql(
+              container,
+              `SELECT count(*) FROM session_replay WHERE website_id = '80000000-0000-0000-0000-000000000102' AND visit_id = '90000000-0000-0000-0000-000000000102';
+SELECT count(*) FROM session_replay_saved WHERE website_id = '80000000-0000-0000-0000-000000000102' AND visit_id = '90000000-0000-0000-0000-000000000102';`,
+            ),
+          ),
+        ).toEqual(['0', '0'])
+
+        await resetDatabase(container)
         const transitiveFixture = await psql(
           container,
           String.raw`INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000012', CURRENT_TIMESTAMP - INTERVAL '14 months');
@@ -286,8 +377,8 @@ INSERT INTO event_data VALUES ('20000000-0000-0000-0000-000000000010', '10000000
 INSERT INTO session_data VALUES ('30000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO revenue VALUES ('40000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO session_replay VALUES
-  ('50000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP - INTERVAL '12 months'),
-  ('50000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP - INTERVAL '14 months');
+  ('50000000-0000-0000-0000-000000000010', '80000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-000000000010', '90000000-0000-0000-0000-000000000010', 0, CURRENT_TIMESTAMP - INTERVAL '12 months'),
+  ('50000000-0000-0000-0000-000000000011', '80000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-000000000010', '90000000-0000-0000-0000-000000000010', 1, CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO heatmap_event VALUES
   ('70000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP - INTERVAL '12 months'),
   ('70000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP - INTERVAL '14 months');`,

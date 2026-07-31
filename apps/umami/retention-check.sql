@@ -93,6 +93,10 @@ FROM retention_context;
 
 WITH retention_context AS (
   SELECT CURRENT_TIMESTAMP - INTERVAL '13 months' AS cutoff
+), expired_session_replay_keys AS MATERIALIZED (
+  SELECT DISTINCT session_replay.website_id, session_replay.visit_id
+  FROM session_replay, retention_context
+  WHERE session_replay.created_at < retention_context.cutoff
 ), table_counts AS (
   SELECT 1 AS sort_order, 'event_data' AS table_name, count(*) AS before_count, 0::bigint AS protected_count
   FROM event_data, retention_context
@@ -128,6 +132,12 @@ WITH retention_context AS (
   SELECT 6, 'session_replay_saved', count(*), 0::bigint
   FROM session_replay_saved, retention_context
   WHERE session_replay_saved.created_at < retention_context.cutoff
+    OR EXISTS (
+      SELECT 1
+      FROM expired_session_replay_keys
+      WHERE expired_session_replay_keys.website_id = session_replay_saved.website_id
+        AND expired_session_replay_keys.visit_id = session_replay_saved.visit_id
+    )
   UNION ALL
   SELECT 7, 'heatmap_event', count(*), 0::bigint
   FROM heatmap_event, retention_context

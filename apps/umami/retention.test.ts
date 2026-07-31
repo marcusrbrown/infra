@@ -13,8 +13,8 @@ const tables = [
   'website_event',
   'session_data',
   'revenue',
-  'session_replay',
   'session_replay_saved',
+  'session_replay',
   'heatmap_event',
   'session',
 ] as const
@@ -121,6 +121,42 @@ describe('Umami retention SQL', () => {
 
     expect(applySql).toContain('created_at < (SELECT cutoff FROM retention_context)')
     expect(applySql).not.toContain('created_at <= (SELECT cutoff FROM retention_context)')
+  })
+
+  it('materializes expired replay keys and uses them for both saved-marker sweeps and remaining checks', async () => {
+    const [checkSql, applySql] = await Promise.all([artifact(checkSqlPath), artifact(applySqlPath)])
+
+    const keyMaterialization = applySql.indexOf('CREATE TEMP TABLE retention_expired_replay_keys')
+    const beforeCounts = applySql.indexOf('INSERT INTO retention_counts')
+    const firstSweep = applySql.indexOf('first saved-marker sweep')
+    const chunkDelete = applySql.search(/DELETE FROM session_replay(?:\s|$)/i)
+    const secondSweep = applySql.indexOf('second saved-marker sweep')
+    const savedRemaining = applySql.indexOf('final saved-marker remaining count')
+
+    expect(keyMaterialization).toBeGreaterThanOrEqual(0)
+    expect(keyMaterialization).toBeLessThan(beforeCounts)
+    expect(applySql).toContain('PRIMARY KEY (website_id, visit_id)')
+    expect(applySql).toContain('SELECT DISTINCT session_replay.website_id, session_replay.visit_id')
+    expect(firstSweep).toBeGreaterThanOrEqual(0)
+    expect(chunkDelete).toBeGreaterThanOrEqual(0)
+    expect(secondSweep).toBeGreaterThanOrEqual(0)
+    expect(savedRemaining).toBeGreaterThanOrEqual(0)
+    expect(firstSweep).toBeLessThan(chunkDelete)
+    expect(chunkDelete).toBeLessThan(secondSweep)
+    expect(secondSweep).toBeLessThan(savedRemaining)
+    expect(applySql.slice(beforeCounts, firstSweep)).toContain('FROM retention_expired_replay_keys')
+    expect(applySql.slice(firstSweep, chunkDelete)).toContain('DELETE FROM session_replay_saved')
+    expect(applySql.slice(firstSweep, chunkDelete)).toContain('FROM retention_expired_replay_keys')
+    expect(applySql.slice(secondSweep, savedRemaining)).toContain('DELETE FROM session_replay_saved')
+    expect(applySql.slice(secondSweep, savedRemaining)).toContain('FROM retention_expired_replay_keys')
+    expect(applySql.slice(secondSweep, savedRemaining)).toContain(
+      'retention_counts.deleted_count + (SELECT count(*) FROM deleted)',
+    )
+    expect(applySql.slice(savedRemaining)).toContain('FROM retention_expired_replay_keys')
+
+    expect(checkSql).toContain('expired_session_replay_keys AS MATERIALIZED')
+    expect(checkSql).toContain('FROM expired_session_replay_keys')
+    expect(checkSql).toContain('session_replay_saved.created_at < retention_context.cutoff')
   })
 
   it('keeps check mode read-only and reports zero deletions', async () => {

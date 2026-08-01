@@ -19,6 +19,10 @@ const CONTENT_EVENTS = new Set([
   'discussion',
   'discussion_comment',
 ])
+// Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION, PINNED_ACTION_REF, and PINNED_ACTION_SHA.
+const VERIFIED_ACTION_REFS_BY_LAYOUT: Readonly<Record<string, ReadonlySet<string>>> = {
+  'fro-bot/agent@v0.96.0': new Set(['v0.96.0', 'c29ac295b8da06768b140c32e5bd0ae3aff45dc6']),
+}
 const REQUIRED_S3_INPUTS = {
   's3-backup': undefined,
   's3-bucket': 'FRO_BOT_S3_BUCKET',
@@ -494,7 +498,7 @@ function stepValues(job: Mapping): Mapping[] {
   return job.steps.filter(isMapping)
 }
 
-function checkStorageAction(jobId: string, job: Mapping, violations: string[]): void {
+function checkStorageAction(jobId: string, job: Mapping, manifest: StorageManifest, violations: string[]): void {
   if (typeof job.uses === 'string') return
   if (!Array.isArray(job.steps)) {
     violations.push(`Storage job '${jobId}' must define steps containing fro-bot/agent.`)
@@ -506,6 +510,11 @@ function checkStorageAction(jobId: string, job: Mapping, violations: string[]): 
   if (agentSteps.length === 0) {
     violations.push(`Storage job '${jobId}' must contain a fro-bot/agent action step.`)
     return
+  }
+
+  const verifiedRefs = VERIFIED_ACTION_REFS_BY_LAYOUT[manifest.key_layout_version]
+  if (!verifiedRefs) {
+    violations.push(`Unknown key_layout_version '${manifest.key_layout_version}'; refusing to verify fro-bot/agent.`)
   }
 
   const firstAgentIndex = steps.findIndex(
@@ -544,8 +553,11 @@ function checkStorageAction(jobId: string, job: Mapping, violations: string[]): 
   for (const [index, step] of agentSteps.entries()) {
     const uses = String(step.uses)
     const ref = uses.split('@').at(-1) ?? ''
-    if (!/^[0-9a-f]{40}$/i.test(ref))
-      violations.push(`Storage job '${jobId}' agent step ${index + 1} is not SHA-pinned.`)
+    if (verifiedRefs && !verifiedRefs.has(ref)) {
+      violations.push(
+        `Storage job '${jobId}' action ref '${ref}' is not the verified layout for '${manifest.key_layout_version}'.`,
+      )
+    }
 
     if (!isMapping(step.with)) {
       violations.push(`Storage job '${jobId}' agent step ${index + 1} is missing its S3 inputs.`)
@@ -660,7 +672,7 @@ function formatStorageWorkflowSnippet(): string {
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
           aws-region: \${{ vars.FRO_BOT_S3_REGION }}
-      - uses: fro-bot/agent@<40-character-commit-sha>
+      - uses: fro-bot/agent@c29ac295b8da06768b140c32e5bd0ae3aff45dc6
         with:
           s3-backup: true
           s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}
@@ -793,6 +805,7 @@ async function readWorkflow(
 
 async function inspectWorkflowYaml(
   content: string,
+  manifest: StorageManifest,
   deps: WorkflowVerifyDeps,
 ): Promise<{violations: string[]; reusableChecks: Promise<void>[]}> {
   const violations: string[] = []
@@ -883,7 +896,7 @@ async function inspectWorkflowYaml(
       violations.push(`Storage job '${jobId}' must set a positive explicit timeout-minutes value.`)
     }
 
-    checkStorageAction(jobId, job, violations)
+    checkStorageAction(jobId, job, manifest, violations)
     reusableChecks.push(...checkReusableWorkflow(jobId, job, deps, violations))
 
     const ancestorIds = ancestors(jobId, analyses)
@@ -907,14 +920,14 @@ async function inspectWorkflowYaml(
 
 export async function inspectWorkflow(
   repo: string,
-  _manifest: StorageManifest,
+  manifest: StorageManifest,
   deps: WorkflowVerifyDeps = {},
 ): Promise<WorkflowVerificationResult> {
   const gh = deps.runGh ?? runGh
   const workflow = await readWorkflow(repo, gh)
   const workflowInspection = workflow.violation
     ? {violations: [workflow.violation], reusableChecks: [] as Promise<void>[]}
-    : await inspectWorkflowYaml(workflow.content ?? '', deps)
+    : await inspectWorkflowYaml(workflow.content ?? '', manifest, deps)
   await Promise.all(workflowInspection.reusableChecks)
   const workflowViolations = workflowInspection.violations
   const environment = await verifyEnvironmentPolicy(repo, gh)
@@ -931,14 +944,14 @@ export async function inspectWorkflow(
 
 export async function verifyWorkflow(
   repo: string,
-  _manifest: StorageManifest,
+  manifest: StorageManifest,
   deps: WorkflowVerifyDeps = {},
 ): Promise<void> {
   const gh = deps.runGh ?? runGh
   const workflow = await readWorkflow(repo, gh)
   const workflowInspection = workflow.violation
     ? {violations: [workflow.violation], reusableChecks: [] as Promise<void>[]}
-    : await inspectWorkflowYaml(workflow.content ?? '', deps)
+    : await inspectWorkflowYaml(workflow.content ?? '', manifest, deps)
   await Promise.all(workflowInspection.reusableChecks)
   const environment = await verifyEnvironmentPolicy(repo, gh)
   const workflowViolations = workflowInspection.violations

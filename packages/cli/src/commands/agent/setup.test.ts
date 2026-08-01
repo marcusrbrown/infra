@@ -199,7 +199,8 @@ describe('agent setup command', () => {
       role_arn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-owner-repo',
       policy_name: 'fro-bot-agent-storage-owner-repo',
       action_ref_verified: true,
-      key_layout_version: 'fro-bot-agent@v0.96.0',
+      // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
+      key_layout_version: 'fro-bot/agent@v0.96.0',
     }
     const storageDeps = {
       readManifest: mock(async () => JSON.stringify(storageManifest)),
@@ -254,7 +255,8 @@ describe('agent setup command', () => {
       role_arn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-owner-repo',
       policy_name: 'fro-bot-agent-storage-owner-repo',
       action_ref_verified: true,
-      key_layout_version: 'fro-bot-agent@v0.96.0',
+      // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
+      key_layout_version: 'fro-bot/agent@v0.96.0',
     }
     const storageDeps = {
       readManifest: mock(async () => JSON.stringify(storageManifest)),

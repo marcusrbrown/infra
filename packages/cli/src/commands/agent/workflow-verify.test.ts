@@ -4,7 +4,10 @@ import {describe, expect, it, mock} from 'bun:test'
 
 import {inspectWorkflow, verifyWorkflow, type EnvironmentReadback, type WorkflowVerifyDeps} from './workflow-verify'
 
-const SHA = '0123456789abcdef0123456789abcdef01234567'
+// Must match apps/agent/src/key-layout.ts PINNED_ACTION_SHA.
+const SHA = 'c29ac295b8da06768b140c32e5bd0ae3aff45dc6'
+// Must match apps/agent/src/key-layout.ts PINNED_ACTION_REF.
+const ACTION_TAG = 'v0.96.0'
 const CREDENTIALS_STEP = `      - uses: aws-actions/configure-aws-credentials@${SHA}
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
@@ -32,7 +35,8 @@ const manifest = {
   role_arn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-owner-repo',
   policy_name: 'fro-bot-agent-storage-owner-repo',
   action_ref_verified: true as const,
-  key_layout_version: 'fro-bot-agent@v0.96.0',
+  // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
+  key_layout_version: 'fro-bot/agent@v0.96.0',
 }
 
 const environment: EnvironmentReadback = {
@@ -119,6 +123,38 @@ describe('workflow storage verifier', () => {
     expect(report.environmentPolicyVerified).toBe(true)
     expect(report.violations).toEqual([])
     await expect(verifyWorkflow('owner/repo', manifest, deps)).resolves.toBeUndefined()
+  })
+
+  it('accepts the verified action SHA and tag for the manifest layout', async () => {
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(workflowJob()))).resolves.toBeUndefined()
+
+    const tagged = workflowJob().replace(`fro-bot/agent@${SHA}`, `fro-bot/agent@${ACTION_TAG}`)
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(tagged))).resolves.toBeUndefined()
+  })
+
+  it('rejects an unverified action SHA for the manifest layout', async () => {
+    const otherSha = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+    const unsafe = workflowJob().replace(`fro-bot/agent@${SHA}`, `fro-bot/agent@${otherSha}`)
+
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(
+      /action ref .* is not the verified layout/i,
+    )
+  })
+
+  it('rejects a wrong action tag for the manifest layout', async () => {
+    const unsafe = workflowJob().replace(`fro-bot/agent@${SHA}`, 'fro-bot/agent@v0.95.0')
+
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(
+      /action ref .* is not the verified layout/i,
+    )
+  })
+
+  it('fails closed when the manifest layout is unknown', async () => {
+    const unknownManifest = {...manifest, key_layout_version: 'fro-bot/agent@v0.95.0'}
+
+    await expect(verifyWorkflow('owner/repo', unknownManifest, makeDeps(workflowJob()))).rejects.toThrow(
+      /unknown.*key_layout_version|unknown.*layout/i,
+    )
   })
 
   it('rejects workflow-level id-token write', async () => {
@@ -245,7 +281,7 @@ describe('workflow storage verifier', () => {
 
   it('flags an unpinned agent step and missing S3 inputs', async () => {
     const missing = workflowJob()
-      .replace(`fro-bot/agent@${SHA}`, 'fro-bot/agent@v0.96.0')
+      .replace(`fro-bot/agent@${SHA}`, 'fro-bot/agent@v0.95.0')
       .replace('s3-prefix:', 'other-prefix:')
     const report = await inspectWorkflow('owner/repo', manifest, makeDeps(missing))
 

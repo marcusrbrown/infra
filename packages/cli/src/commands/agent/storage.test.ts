@@ -26,7 +26,8 @@ const manifest: StorageManifest = {
   role_arn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-owner-repo',
   policy_name: 'fro-bot-agent-storage-owner-repo',
   action_ref_verified: true,
-  key_layout_version: 'fro-bot-agent@v0.96.0',
+  // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
+  key_layout_version: 'fro-bot/agent@v0.96.0',
 }
 
 function makeGhResult(stdout: string, exitCode = 0, stderr = '') {
@@ -196,6 +197,16 @@ describe('agent S3 durable storage wiring', () => {
     expect(writes).toEqual([])
   })
 
+  it('accepts the literal key layout version emitted by the provisioner', async () => {
+    const writes: {kind: string; name: string; value: string}[] = []
+    const deps = makeDeps(writes, {
+      // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
+      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot/agent@v0.96.0'})),
+    })
+
+    await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).resolves.toBeUndefined()
+  })
+
   it('reports partial wiring when a later storage variable write fails', async () => {
     const writes: {kind: string; name: string; value: string}[] = []
     let writeCount = 0
@@ -245,11 +256,11 @@ jobs:
       id-token: write
     timeout-minutes: 30
     steps:
-      - uses: aws-actions/configure-aws-credentials@0123456789abcdef0123456789abcdef01234567
+      - uses: aws-actions/configure-aws-credentials@c29ac295b8da06768b140c32e5bd0ae3aff45dc6
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
           aws-region: \${{ vars.FRO_BOT_S3_REGION }}
-      - uses: fro-bot/agent@0123456789abcdef0123456789abcdef01234567
+      - uses: fro-bot/agent@c29ac295b8da06768b140c32e5bd0ae3aff45dc6
         with:
           s3-backup: true
           s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}

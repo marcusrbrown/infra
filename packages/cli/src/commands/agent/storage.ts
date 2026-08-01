@@ -19,8 +19,8 @@ export const STORAGE_VARIABLE_NAMES = {
   expectedBucketOwner: 'FRO_BOT_S3_EXPECTED_BUCKET_OWNER',
 } as const
 
-/** Must match the provisioner's pinned KEY_LAYOUT_VERSION. Unknown layouts fail closed. */
-export const KNOWN_KEY_LAYOUT_VERSION = 'fro-bot-agent@v0.96.0'
+/** Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION. Unknown layouts fail closed. */
+export const KNOWN_KEY_LAYOUT_VERSION = 'fro-bot/agent@v0.96.0'
 
 export interface StorageManifest {
   owner: string

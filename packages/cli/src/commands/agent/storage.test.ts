@@ -45,6 +45,10 @@ function makeDeps(writes: {kind: string; name: string; value: string}[], overrid
     runGh,
     readManifest: mock(async () => JSON.stringify(manifest)),
     verifyResources: mock(async () => {}),
+    // Existing storage tests isolate manifest/resource/identity/OIDC checks.
+    // Workflow verification is opted out explicitly rather than by injecting
+    // the low-level gh seam.
+    verifyWorkflow: mock(async () => {}),
     applyGhValue: mock(async (kind: 'secret' | 'variable', name: string, _repo: string, value: string) => {
       writes.push({kind, name, value})
     }),
@@ -142,7 +146,7 @@ describe('agent S3 durable storage wiring', () => {
     expect(writes).toEqual([])
   })
 
-  it('calls the optional Unit-7 workflow verifier after S3 variables are wired', async () => {
+  it('calls an explicit workflow verifier override after S3 variables are wired', async () => {
     const writes: {kind: string; name: string; value: string}[] = []
     const verifyWorkflow = mock(async () => {})
     const deps = makeDeps(writes, {verifyWorkflow})
@@ -151,5 +155,69 @@ describe('agent S3 durable storage wiring', () => {
 
     expect(verifyWorkflow).toHaveBeenCalledWith('owner/repo', manifest)
     expect(writes.every(write => write.kind === 'variable')).toBe(true)
+  })
+
+  it('invokes the real workflow verifier by default when no explicit opt-out is provided', async () => {
+    const writes: {kind: string; name: string; value: string}[] = []
+    const calls: string[][] = []
+    const workflow = `
+name: Fro Bot
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  storage:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    environment: fro-bot-storage
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 30
+    steps:
+      - uses: fro-bot/agent@0123456789abcdef0123456789abcdef01234567
+        with:
+          role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
+          s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}
+          aws-region: \${{ vars.FRO_BOT_S3_REGION }}
+          s3-prefix: \${{ vars.FRO_BOT_S3_PREFIX }}
+          s3-expected-bucket-owner: \${{ vars.FRO_BOT_S3_EXPECTED_BUCKET_OWNER }}
+`
+    const deps = makeDeps(writes, {
+      verifyWorkflow: undefined,
+      runGh: mock(async (args: string[]) => {
+        calls.push(args)
+        const path = args.at(-1) ?? ''
+        if (path.includes('/contents/.github/workflows/fro-bot.yaml')) return makeGhResult(workflow)
+        if (path.endsWith('/environments/fro-bot-storage')) {
+          return makeGhResult(
+            JSON.stringify({
+              protection_rules: [{type: 'required_reviewers', reviewers: [{type: 'User'}]}],
+              deployment_branch_policy: {protected_branches: false, custom_branch_policies: true},
+            }),
+          )
+        }
+        if (path.endsWith('/deployment-branch-policies')) {
+          return makeGhResult(JSON.stringify({branch_policies: [{name: 'main', type: 'branch'}]}))
+        }
+        if (args[1]?.includes('/actions/oidc/customization/sub')) {
+          return makeGhResult(JSON.stringify({use_default: true, use_immutable_subject: false}))
+        }
+        return makeGhResult(
+          JSON.stringify({
+            id: Number(manifest.repository_id),
+            name: manifest.repo,
+            owner: {login: manifest.owner, id: Number(manifest.repository_owner_id)},
+          }),
+        )
+      }),
+    })
+
+    await runStorageSetup('owner/repo', {manifest: '-'}, deps)
+
+    expect(calls.some(args => args.at(-1)?.includes('/contents/.github/workflows/fro-bot.yaml'))).toBe(true)
+    expect(calls.some(args => args.at(-1)?.endsWith('/environments/fro-bot-storage'))).toBe(true)
   })
 })

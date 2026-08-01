@@ -6,6 +6,7 @@ import {log} from '@clack/prompts'
 import {z} from 'zod'
 
 import {applyGhValue, runGh, type CommandResult} from './setup-core/gh'
+import {verifyWorkflow} from './workflow-verify'
 
 // These names intentionally mirror the fro-bot/agent action inputs. They are
 // repository VARIABLES, never secrets, and are the only GitHub values this
@@ -402,12 +403,10 @@ export async function applyStorageSetup(prepared: PreparedStorageSetup, deps: St
     await apply('variable', variable.name, prepared.repo, variable.value)
   }
 
-  // Unit 7 attaches the effective-job-graph verifier at this explicit seam.
-  // Until then, storage wiring remains usable without pretending the workflow
-  // graph has been verified.
-  if (deps.verifyWorkflow) {
-    await deps.verifyWorkflow(prepared.repo, prepared.manifest)
-  }
+  const verify =
+    deps.verifyWorkflow ??
+    ((repo: string, manifest: StorageManifest) => verifyWorkflow(repo, manifest, {runGh: deps.runGh}))
+  await verify(prepared.repo, prepared.manifest)
 }
 
 export async function runStorageSetup(

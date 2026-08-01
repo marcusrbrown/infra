@@ -37,6 +37,20 @@ Commands:
     --ack-key-reuse                    Acknowledge that --key matches the bearer token inside the existing OPENCODE_AUTH_JSON. Required in non-interactive mode when --key is supplied for a repo with existing OPENCODE_AUTH_JSON. (default: false)
 
 
+  agent storage                        Verify the provisioned S3 handoff and wire non-secret GitHub storage variables.
+
+    --repo [repo]                      Target GitHub repository in owner/repo format.
+    --manifest [manifest]              Handoff manifest path, or - to read JSON from stdin. (default: -)
+
+
+  agent storage teardown               Unwire S3 variables and remove the repo-scoped storage resources.
+
+    --repo [repo]                      Target GitHub repository in owner/repo format.
+    --manifest [manifest]              Handoff manifest path, or - to read JSON from stdin. (default: -)
+    --purge-state                      Delete versioned session-prefix objects instead of retaining them.
+    --plan                             Read back and report teardown actions without mutating.
+
+
   cliproxy status                      Show operational health of CLIProxyAPI and its management endpoints.
 
     --url [url]                        Base URL for CLIProxyAPI health checks. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.

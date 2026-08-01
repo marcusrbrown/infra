@@ -1,11 +1,14 @@
 import {relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
+import {goke} from 'goke'
 import {parse as parseYaml} from 'yaml'
+import {registerAgentCommands} from './commands/agent'
 import {MCP_ALLOWLIST} from './commands/mcp'
 
 const REPO_ROOT = resolve(import.meta.dir, '../../..')
 const INTERNAL_ORGS = new Set(['marcusrbrown'])
 const ALLOWED_SHELL_SCRIPTS = new Set(['apps/keeweb/deploy.sh', 'apps/umami/retention.sh'])
+const AGENT_MUTATING_COMMANDS = ['agent setup', 'agent storage', 'agent storage teardown'] as const
 
 // ---------------------------------------------------------------------------
 // MCP drift-guard: sensitive tool set (two-layer security model)
@@ -194,6 +197,27 @@ export function findPathsFilterQuantifierViolations(workflowText: string): Paths
 }
 
 describe('repo conventions', () => {
+  it('registers the agent command group and its storage commands in the CLI bootstrap', async () => {
+    const cliSource = await Bun.file(resolve(REPO_ROOT, 'packages/cli/src/cli.ts')).text()
+    expect(cliSource).toContain("import {registerAgentCommands} from './commands/agent'")
+    expect(cliSource).toMatch(/registerAgentCommands\(cli\)/)
+
+    const cli = goke('infra')
+    registerAgentCommands(cli)
+    cli.help()
+
+    expect(cli.helpText()).toContain('agent setup')
+    expect(cli.helpText()).toContain('agent storage')
+    expect(cli.helpText()).toContain('agent storage teardown')
+  })
+
+  it('keeps every mutating agent command out of the MCP allowlist', () => {
+    for (const command of AGENT_MUTATING_COMMANDS) {
+      expect(MCP_ALLOWLIST.has(command), `${command} must remain CLI-only`).toBe(false)
+    }
+    expect([...MCP_ALLOWLIST].some(command => command.startsWith('agent '))).toBe(false)
+  })
+
   it('requires the CLIProxy auth monitor workflow', async () => {
     const workflowPath = resolve(REPO_ROOT, '.github/workflows/cliproxy-auth-monitor.yaml')
 

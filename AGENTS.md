@@ -1,8 +1,6 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-04-13
-**Commit:** 1331fda
-**Branch:** main
+**Generated:** 2026-04-13 **Commit:** 1331fda **Branch:** main
 
 ## OVERVIEW
 
@@ -18,6 +16,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── apps/umami/         Umami analytics deploy package (see apps/umami/AGENTS.md)
 ├── apps/vpn/           WireGuard VPN egress box (see apps/vpn/AGENTS.md)
 ├── apps/broker/        OIDC credential broker (see apps/broker/AGENTS.md)
+├── apps/agent/         Operator-run AWS S3 durable-storage provisioner (see apps/agent/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── packages/shared/    Shared provisioning helpers (see packages/shared/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
@@ -38,7 +37,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Open KeeWeb | `bunx @marcusrbrown/infra keeweb open` | Opens in browser, fire-and-forget |
 | Check proxy health | `bunx @marcusrbrown/infra cliproxy status` | HTTP, usage stats, version |
 | List proxy models | `bunx @marcusrbrown/infra cliproxy models [provider]` | Models at /v1/models; filter to `anthropic` or `openai` |
-| Manage proxy | `bunx @marcusrbrown/infra cliproxy config|keys|login` | Management API |
+| Manage proxy | `bunx @marcusrbrown/infra cliproxy config | keys | login` | Management API |
 | Trigger proxy deploy | `bunx @marcusrbrown/infra cliproxy deploy` | Remote (default) or `--local` |
 | Open proxy TUI | `bunx @marcusrbrown/infra cliproxy open` | SSH + interactive TUI |
 | Onboard repo | `bunx @marcusrbrown/infra cliproxy setup` | Interactive wizard with @clack/prompts |
@@ -59,6 +58,12 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Check broker health | `bunx @marcusrbrown/infra broker status` | HTTP reachability via /healthz |
 | Trigger broker deploy | `bunx @marcusrbrown/infra broker deploy` | Remote (default) or `--local` |
 | Broker operator docs | `apps/broker/AGENTS.md` | Deploy flow, mint/revoke lifecycle, sweeper, key-rotation, anti-patterns |
+| Provision agent storage | `bun run provision:agent` | Operator-local AWS OIDC/S3/IAM provisioner; prints the handoff manifest |
+| Agent operator docs | `apps/agent/AGENTS.md` | Dedicated AWS credentials, bucket/role policy, drift, teardown |
+| Agent storage runbook | `docs/runbooks/agent-s3-durable-storage.md` | Protected-environment rollout, workflow split, Go/No-Go, rollback, monitoring |
+| Configure agent action | `bunx @marcusrbrown/infra agent setup` | Generalized model-credential setup; absorbs `cliproxy setup` |
+| Wire agent storage | `bunx @marcusrbrown/infra agent storage --repo OWNER/REPO --manifest FILE` | Fail-closed resource/OIDC prechecks, non-secret S3 variables, workflow verification |
+| Teardown agent storage | `bunx @marcusrbrown/infra agent storage teardown --repo OWNER/REPO --manifest FILE` | Unwire variables and remove repo-scoped resources; retain state by default |
 | Unified status | `bunx @marcusrbrown/infra status` | All deployments, `--json` for machine output |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
@@ -145,6 +150,9 @@ bunx @marcusrbrown/infra vpn client remove <name> # Remove peer, trigger redeplo
 bunx @marcusrbrown/infra broker status            # HTTP reachability via /healthz
 bunx @marcusrbrown/infra broker deploy            # Trigger broker deploy (GitHub Actions)
 bunx @marcusrbrown/infra broker logs              # Stream broker service logs (--tail N)
+bunx @marcusrbrown/infra agent setup              # Generalized fro-bot/agent model-credential setup
+bunx @marcusrbrown/infra agent storage --repo OWNER/REPO --manifest FILE  # Wire non-secret S3 vars + verify workflow
+bunx @marcusrbrown/infra agent storage teardown --repo OWNER/REPO --manifest FILE  # Unwire + remove repo resources
 bunx @marcusrbrown/infra status                   # Unified status (all deployments)
 bunx @marcusrbrown/infra status --json            # Machine-readable status
 bunx @marcusrbrown/infra mcp                      # Start MCP server
@@ -155,6 +163,7 @@ bun run provision:vpn                           # Provision VPN Lightsail instan
 bun run deploy:vpn                              # Local VPN deploy (loads root .env)
 bun run provision:broker                        # Provision broker droplet (loads root .env)
 bun run deploy:broker                           # Local broker deploy (loads root .env)
+bun run provision:agent                         # Provision agent OIDC/S3/IAM resources (loads root .env)
 ```
 
 ## NOTES
@@ -167,6 +176,8 @@ bun run deploy:broker                           # Local broker deploy (loads roo
 - `UMAMI_SSH_KEY`, `UMAMI_DOMAIN`, `UMAMI_APP_SECRET`, `UMAMI_DB_PASSWORD`, and `UMAMI_ADMIN_PASSWORD` are scoped to `umami` environment. `UMAMI_DB_PASSWORD` is volume-coupled — rotate only via the `ALTER USER` runbook in `apps/umami/AGENTS.md`.
 - `VPN_SSH_KEY`, `VPN_HOST`, and `VPN_PEERS` are scoped to `vpn` environment. `VPN_PEERS` holds the peer roster JSON and is auto-synced by `vpn client add/remove`. AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status.
 - `BROKER_SSH_KEY`, `BROKER_HOST`, and `CLIPROXY_MANAGEMENT_KEY` are scoped to `broker` environment. `BROKER_AUD` (the OIDC audience value) is a `broker` GitHub Environment **variable** (not a secret) — it flows at both provision time (from local `.env`) and deploy time (from `vars.BROKER_AUD` in the workflow).
+- Agent storage uses dedicated operator-local provisioning inputs: `AGENT_AWS_ACCESS_KEY_ID`, `AGENT_AWS_SECRET_ACCESS_KEY`, optional `AGENT_AWS_SESSION_TOKEN` and `AGENT_AWS_REGION`, plus the `AGENT_S3_*`, `AGENT_REPOSITORY_*`, and `AGENT_ACTION_REF` values required by `apps/agent/server/provision.ts`. These values belong in the repo-root `.env` only; the provisioner ignores ambient `AWS_*` credentials and no static AWS credential is written to GitHub.
+- `FRO_BOT_S3_ROLE_TO_ASSUME`, `FRO_BOT_S3_BUCKET`, `FRO_BOT_S3_REGION`, `FRO_BOT_S3_PREFIX`, and `FRO_BOT_S3_EXPECTED_BUCKET_OWNER` are non-secret repository variables written by `agent storage` from the provisioner handoff manifest. The consumer repository must pre-create the `fro-bot-storage` GitHub Environment with a required reviewer and an exact main-only deployment-branch policy before the workflow references it. The storage preflight requires the local `aws` CLI; the storage workflow uses GitHub OIDC → AWS STS and never static AWS keys.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.
 - `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets.

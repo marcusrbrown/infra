@@ -2,7 +2,14 @@
 
 import {describe, expect, it, mock} from 'bun:test'
 
-import {runStorageSetup, STORAGE_VARIABLE_NAMES, type StorageManifest, type StorageSetupDeps} from './storage'
+import {
+  runStorageSetup,
+  runStorageTeardown,
+  STORAGE_VARIABLE_NAMES,
+  unwireStorageVariables,
+  type StorageManifest,
+  type StorageSetupDeps,
+} from './storage'
 
 const manifest: StorageManifest = {
   owner: 'owner',
@@ -219,5 +226,94 @@ jobs:
 
     expect(calls.some(args => args.at(-1)?.includes('/contents/.github/workflows/fro-bot.yaml'))).toBe(true)
     expect(calls.some(args => args.at(-1)?.endsWith('/environments/fro-bot-storage'))).toBe(true)
+  })
+})
+
+describe('agent S3 durable storage unwire', () => {
+  it('deletes exactly the five S3 variables and leaves model variables and secrets untouched', async () => {
+    const calls: string[][] = []
+    const runGh = mock(async (args: string[]) => {
+      calls.push(args)
+      if (args[0] === 'variable' && args[1] === 'list') {
+        return makeGhResult(
+          JSON.stringify([...Object.values(STORAGE_VARIABLE_NAMES).map(name => ({name})), {name: 'FRO_BOT_MODEL'}]),
+        )
+      }
+      if (args[0] === 'variable' && args[1] === 'delete') return makeGhResult('')
+      throw new Error(`unexpected gh command: ${args.join(' ')}`)
+    })
+
+    await unwireStorageVariables('owner/repo', {runGh})
+
+    expect(calls.filter(args => args[1] === 'delete')).toEqual(
+      Object.values(STORAGE_VARIABLE_NAMES).map(name => ['variable', 'delete', name, '--repo', 'owner/repo', '--yes']),
+    )
+    expect(calls.some(args => args[0] === 'secret')).toBe(false)
+    expect(calls.some(args => args.includes('FRO_BOT_MODEL'))).toBe(false)
+  })
+
+  it('is idempotent when no S3 variables are present', async () => {
+    const calls: string[][] = []
+    const runGh = mock(async (args: string[]) => {
+      calls.push(args)
+      if (args[0] === 'variable' && args[1] === 'list') return makeGhResult('[]')
+      throw new Error(`unexpected gh command: ${args.join(' ')}`)
+    })
+
+    await expect(unwireStorageVariables('owner/repo', {runGh})).resolves.toBeUndefined()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toEqual(['variable', 'list', '--repo', 'owner/repo', '--json', 'name'])
+  })
+
+  it('still deletes variables when a log callback is supplied outside plan mode', async () => {
+    const calls: string[][] = []
+    const runGh = mock(async (args: string[]) => {
+      calls.push(args)
+      if (args[0] === 'variable' && args[1] === 'list') {
+        return makeGhResult(JSON.stringify([{name: STORAGE_VARIABLE_NAMES.bucket}]))
+      }
+      if (args[0] === 'variable' && args[1] === 'delete') return makeGhResult('')
+      throw new Error(`unexpected gh command: ${args.join(' ')}`)
+    })
+
+    await unwireStorageVariables('owner/repo', {runGh, log: () => {}})
+
+    expect(calls.some(args => args[1] === 'delete')).toBe(true)
+  })
+
+  it('unwires before invoking provisioner teardown and passes purge-state through', async () => {
+    const events: string[] = []
+    const deps = {
+      runGh: mock(async (args: string[]) => {
+        if (args[0] === 'api') {
+          if (args[1]?.includes('/actions/oidc/customization/sub')) {
+            return makeGhResult(JSON.stringify({use_default: true, use_immutable_subject: false}))
+          }
+          return makeGhResult(
+            JSON.stringify({
+              id: Number(manifest.repository_id),
+              name: manifest.repo,
+              owner: {login: manifest.owner, id: Number(manifest.repository_owner_id)},
+            }),
+          )
+        }
+        if (args[0] === 'variable' && args[1] === 'list') {
+          return makeGhResult(JSON.stringify([{name: STORAGE_VARIABLE_NAMES.bucket}]))
+        }
+        if (args[0] === 'variable' && args[1] === 'delete') {
+          events.push(`delete:${args[2]}`)
+          return makeGhResult('')
+        }
+        throw new Error(`unexpected gh command: ${args.join(' ')}`)
+      }),
+      readManifest: mock(async () => JSON.stringify(manifest)),
+      runProvisioner: mock(async (_raw: string, options: {purgeState?: boolean; plan?: boolean}) => {
+        events.push(`provisioner:${String(options.purgeState)}:${String(options.plan)}`)
+      }),
+    }
+
+    await runStorageTeardown('owner/repo', {manifest: '-', purgeState: true}, deps)
+
+    expect(events).toEqual([`delete:${STORAGE_VARIABLE_NAMES.bucket}`, 'provisioner:true:false'])
   })
 })

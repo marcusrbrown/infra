@@ -54,6 +54,11 @@ export interface StorageOptions {
   AWS_SECRET_ACCESS_KEY?: string
 }
 
+export interface StorageTeardownOptions extends StorageOptions {
+  purgeState?: boolean
+  plan?: boolean
+}
+
 export interface StorageSetupDeps {
   runGh?: typeof runGh
   applyGhValue?: typeof applyGhValue
@@ -62,6 +67,9 @@ export interface StorageSetupDeps {
   runAws?: (args: string[]) => Promise<CommandResult>
   /** Unit 7 attaches the effective-job-graph verifier here. */
   verifyWorkflow?: (repo: string, manifest: StorageManifest) => Promise<void>
+  /** Injected provisioner boundary used by teardown tests and operator wrappers. */
+  runProvisioner?: (manifest: string, options: {purgeState?: boolean; plan?: boolean}) => Promise<void>
+  log?: (message: string) => void
 }
 
 export interface PreparedStorageSetup {
@@ -187,6 +195,27 @@ async function runAwsCommand(args: string[]): Promise<CommandResult> {
   ])
 
   return {stdout, stderr, exitCode}
+}
+
+async function runProvisionerCommand(manifest: string, options: {purgeState?: boolean; plan?: boolean}): Promise<void> {
+  const args = ['run', 'provision:agent', '--', '--teardown', '--manifest', '-']
+  if (options.purgeState) args.push('--purge-state')
+  if (options.plan) args.push('--plan')
+
+  const child = Bun.spawn(['bun', ...args], {
+    stdin: new Blob([manifest]).stream(),
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: process.env,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  if (exitCode !== 0) {
+    throw new Error(`Agent storage provisioner teardown failed: ${stderr.trim() || stdout.trim()}`.trim())
+  }
 }
 
 function parseAwsJson(result: CommandResult, operation: string): Record<string, unknown> {
@@ -418,6 +447,75 @@ export async function runStorageSetup(
   await applyStorageSetup(prepared, deps)
 }
 
+function parseGhVariableNames(result: CommandResult, repo: string): string[] {
+  if (result.exitCode !== 0) {
+    throw new Error(`Unable to list GitHub variables for ${repo}. ${result.stderr.trim()}`.trim())
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(result.stdout)
+    if (!Array.isArray(parsed)) throw new Error('response was not an array')
+    return parsed.flatMap(entry => {
+      if (typeof entry !== 'object' || entry === null || !('name' in entry) || typeof entry.name !== 'string') {
+        throw new Error('response contained an invalid variable name')
+      }
+      return [entry.name]
+    })
+  } catch (error) {
+    throw new Error(`GitHub variable list for ${repo} returned malformed JSON: ${extractErrorMessage(error)}`)
+  }
+}
+
+/** Removes only the five S3 variables owned by this command. */
+export async function unwireStorageVariables(
+  repo: string,
+  deps: Pick<StorageSetupDeps, 'runGh' | 'log'> & {plan?: boolean} = {},
+): Promise<void> {
+  assertRepoFormat(repo)
+  const gh = deps.runGh ?? runGh
+  const result = await gh(['variable', 'list', '--repo', repo, '--json', 'name'])
+  const existingNames = parseGhVariableNames(result, repo)
+  const namesToDelete = Object.values(STORAGE_VARIABLE_NAMES).filter(name => existingNames.includes(name))
+
+  for (const name of namesToDelete) {
+    if (deps.plan) {
+      deps.log?.(`Would delete GitHub variable ${name} from ${repo}.`)
+      continue
+    }
+    const deleteResult = await gh(['variable', 'delete', name, '--repo', repo, '--yes'])
+    if (
+      deleteResult &&
+      deleteResult.exitCode !== 0 &&
+      !/not found|does not exist|could not find/i.test(deleteResult.stderr)
+    ) {
+      throw new Error(`gh variable delete ${name} failed: ${deleteResult.stderr.trim()}`.trim())
+    }
+  }
+}
+
+export async function runStorageTeardown(
+  repo: string,
+  options: StorageTeardownOptions = {},
+  deps: StorageSetupDeps = {},
+): Promise<void> {
+  assertRepoFormat(repo)
+  assertNoStaticCredentials(options)
+
+  const loadManifest = deps.readManifest ?? readManifest
+  const rawManifest = await loadManifest(options.manifest ?? '-')
+  const manifest = parseManifest(rawManifest)
+  await verifyRepoIdentity(repo, manifest, deps.runGh ?? runGh)
+
+  if (options.plan) {
+    await unwireStorageVariables(repo, {runGh: deps.runGh, log: deps.log, plan: true})
+  } else {
+    await unwireStorageVariables(repo, {runGh: deps.runGh})
+  }
+
+  const runProvisioner = deps.runProvisioner ?? runProvisionerCommand
+  await runProvisioner(rawManifest, {purgeState: options.purgeState, plan: options.plan ?? false})
+}
+
 /**
  * Standalone opt-in command. `agent setup` can also pass `storage` through its
  * programmatic entrypoint; this command provides the CLI surface without
@@ -439,5 +537,31 @@ export function registerAgentStorageCommand(cli: ReturnType<typeof goke>): void 
       }
       await runStorageSetup(options.repo, {manifest: options.manifest ?? '-'})
       log.success(`S3 storage variables wired for ${options.repo}.`)
+    })
+
+  cli
+    .command('agent storage teardown', 'Unwire S3 variables and remove the repo-scoped storage resources.')
+    .option('--repo [repo]', z.string().describe('Target GitHub repository in owner/repo format.'))
+    .option(
+      '--manifest [manifest]',
+      z.string().default('-').describe('Handoff manifest path, or - to read JSON from stdin.'),
+    )
+    .option(
+      '--purge-state',
+      z.boolean().optional().describe('Delete versioned session-prefix objects instead of retaining them.'),
+    )
+    .option('--plan', z.boolean().optional().describe('Read back and report teardown actions without mutating.'))
+    .example('infra agent storage teardown --repo owner/repo --manifest handoff.json')
+    .example('infra agent storage teardown --repo owner/repo --purge-state --manifest handoff.json')
+    .action(async options => {
+      if (!options.repo) {
+        throw new Error('--repo is required for agent storage teardown.')
+      }
+      await runStorageTeardown(options.repo, {
+        manifest: options.manifest ?? '-',
+        purgeState: options.purgeState,
+        plan: options.plan,
+      })
+      log.success(`S3 storage teardown completed for ${options.repo}.`)
     })
 }

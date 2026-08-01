@@ -2,6 +2,7 @@ import {describe, expect, it} from 'bun:test'
 
 import {AGENT_ACTION_LAYOUT_VERSION} from '../src/key-layout'
 import {
+  auditAgentStorageResources,
   buildAgentStoragePolicy,
   canonicalizeS3Prefix,
   createIamClientFromEnv,
@@ -12,6 +13,7 @@ import {
   GITHUB_OIDC_AUDIENCE,
   GITHUB_OIDC_PROVIDER_URL,
   performProvisioning,
+  performTeardown,
   type AgentBucketConfig,
   type AgentRepositoryConfig,
   type AgentRoleProvisionResult,
@@ -192,6 +194,100 @@ const storagePolicyConfig = {
   repo: roleRepository.repo,
   s3Prefix: 'fro-bot-state',
   actionVersion: AGENT_ACTION_LAYOUT_VERSION,
+}
+
+const teardownManifest = {
+  owner: roleRepository.owner,
+  repo: roleRepository.repo,
+  repository_id: roleRepository.repositoryId,
+  repository_owner_id: roleRepository.repositoryOwnerId,
+  bucket: bucketConfig.bucket,
+  bucket_region: bucketConfig.region,
+  expected_bucket_owner: bucketConfig.expectedBucketOwner,
+  s3_prefix: 'fro-bot-state',
+  session_prefix: 'fro-bot-state/github/marcusrbrown-infra/storage/',
+  lock_key: 'fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock',
+  role_name: 'fro-bot-agent-storage-marcusrbrown-infra',
+  role_arn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra',
+  policy_name: 'fro-bot-agent-storage-marcusrbrown-infra',
+  action_ref_verified: true as const,
+  key_layout_version: AGENT_ACTION_LAYOUT_VERSION,
+  oidc_provider_arn: roleProviderArn,
+}
+
+function makeTeardownClients(
+  options: {
+    role?: Record<string, unknown>
+    policy?: string
+    stateError?: Error
+    lockError?: Error
+    versionError?: Error
+    versionResponses?: Record<string, unknown>[]
+  } = {},
+) {
+  let role = options.role ?? {
+    Arn: teardownManifest.role_arn,
+    RoleName: teardownManifest.role_name,
+    AssumeRolePolicyDocument: JSON.stringify(canonicalRoleTrust()),
+    MaxSessionDuration: 7200,
+    Tags: managedRoleTags(),
+  }
+  let policy = options.policy ?? JSON.stringify(buildAgentStoragePolicy(storagePolicyConfig).document)
+  let versionResponseIndex = 0
+  const iam = makeClient(async command => {
+    switch (command.constructor.name) {
+      case 'GetOpenIDConnectProviderCommand':
+        return providerDetails(roleProviderArn)
+      case 'GetRoleCommand':
+        if (!role) throw namedError('NoSuchEntity')
+        return roleResponse(role)
+      case 'GetRolePolicyCommand':
+        if (!role || !policy) throw namedError('NoSuchEntity')
+        return {PolicyDocument: encodeURIComponent(policy)}
+      case 'DeleteRolePolicyCommand':
+        policy = ''
+        return {}
+      case 'DeleteRoleCommand':
+        role = undefined as unknown as Record<string, unknown>
+        return {}
+      default:
+        throw new Error(`Unexpected IAM teardown command: ${command.constructor.name}`)
+    }
+  })
+
+  const deletedObjects: Record<string, unknown>[] = []
+  const s3 = makeS3Client(async command => {
+    switch (command.constructor.name) {
+      case 'HeadBucketCommand':
+        return {BucketRegion: bucketConfig.region, BucketOwner: bucketConfig.expectedBucketOwner}
+      case 'DeleteObjectCommand':
+        if (options.lockError ?? options.stateError) throw options.lockError ?? options.stateError
+        deletedObjects.push(command.input)
+        return {}
+      case 'ListObjectVersionsCommand':
+        if (options.versionError ?? options.stateError) throw options.versionError ?? options.stateError
+        return (
+          options.versionResponses?.[versionResponseIndex++] ?? {
+            Versions: [
+              {Key: `${teardownManifest.session_prefix}session.json`, VersionId: 'v1'},
+              {Key: `${teardownManifest.session_prefix}session.json`, VersionId: 'v2', IsLatest: true},
+            ],
+            DeleteMarkers: [{Key: `${teardownManifest.session_prefix}deleted.json`, VersionId: 'd1'}],
+          }
+        )
+      case 'DeleteObjectsCommand':
+        deletedObjects.push(command.input)
+        return {}
+      default:
+        throw new Error(`Unexpected S3 teardown command: ${command.constructor.name}`)
+    }
+  })
+
+  return {iam, s3, deletedObjects}
+}
+
+function teardownRepository(): AgentRepositoryConfig {
+  return roleRepository
 }
 
 const canonicalLifecycleRules = [
@@ -1028,5 +1124,297 @@ describe('agent action-state S3 bucket provisioning', () => {
         Condition: {Bool: {'aws:SecureTransport': 'false'}},
       },
     ])
+  })
+})
+
+describe('agent storage teardown', () => {
+  it('deletes the repo policy, role, and lock while retaining session objects and shared resources by default', async () => {
+    const {iam, s3, deletedObjects} = makeTeardownClients()
+    const result = await performTeardown({
+      client: iam.client,
+      s3Client: s3.client,
+      manifest: teardownManifest,
+      repository: teardownRepository(),
+    })
+
+    expect(result.stateRetained).toBe(true)
+    expect(result.statePurgeImpossible).toBe(false)
+    expect(iam.calls.map(call => call.name)).toContain('DeleteRolePolicyCommand')
+    expect(iam.calls.map(call => call.name)).toContain('DeleteRoleCommand')
+    expect(deletedObjects).toEqual([
+      {
+        Bucket: bucketConfig.bucket,
+        Key: teardownManifest.lock_key,
+        ExpectedBucketOwner: bucketConfig.expectedBucketOwner,
+      },
+    ])
+    expect(iam.calls.some(call => call.name === 'DeleteOpenIDConnectProviderCommand')).toBe(false)
+    expect(s3.calls.some(call => call.name === 'DeleteBucketCommand')).toBe(false)
+    expect(s3.calls.some(call => call.name === 'DeleteObjectsCommand')).toBe(false)
+  })
+
+  it('purges all versioned session-prefix objects when purge-state is requested', async () => {
+    const {iam, s3, deletedObjects} = makeTeardownClients()
+
+    const result = await performTeardown({
+      client: iam.client,
+      s3Client: s3.client,
+      manifest: teardownManifest,
+      repository: teardownRepository(),
+      purgeState: true,
+    })
+
+    expect(result.stateRetained).toBe(false)
+    expect(result.sessionObjectsPurged).toBe(true)
+    expect(deletedObjects).toEqual([
+      {
+        Bucket: bucketConfig.bucket,
+        Key: teardownManifest.lock_key,
+        ExpectedBucketOwner: bucketConfig.expectedBucketOwner,
+      },
+      {
+        Bucket: bucketConfig.bucket,
+        ExpectedBucketOwner: bucketConfig.expectedBucketOwner,
+        Delete: {
+          Objects: [
+            {Key: `${teardownManifest.session_prefix}session.json`, VersionId: 'v1'},
+            {Key: `${teardownManifest.session_prefix}session.json`, VersionId: 'v2'},
+            {Key: `${teardownManifest.session_prefix}deleted.json`, VersionId: 'd1'},
+          ],
+        },
+      },
+    ])
+  })
+
+  it('paginates session-prefix version deletion', async () => {
+    const {iam, s3, deletedObjects} = makeTeardownClients({
+      versionResponses: [
+        {
+          IsTruncated: true,
+          NextKeyMarker: `${teardownManifest.session_prefix}first.json`,
+          NextVersionIdMarker: 'v1',
+          Versions: [{Key: `${teardownManifest.session_prefix}first.json`, VersionId: 'v1'}],
+          DeleteMarkers: [],
+        },
+        {
+          IsTruncated: false,
+          Versions: [{Key: `${teardownManifest.session_prefix}second.json`, VersionId: 'v2'}],
+          DeleteMarkers: [],
+        },
+      ],
+    })
+
+    await performTeardown({
+      client: iam.client,
+      s3Client: s3.client,
+      manifest: teardownManifest,
+      repository: teardownRepository(),
+      purgeState: true,
+    })
+
+    expect(s3.calls.filter(call => call.name === 'ListObjectVersionsCommand')).toHaveLength(2)
+    const deleteInput = deletedObjects.find(input => 'Delete' in input)
+    expect((deleteInput?.Delete as {Objects?: unknown[]})?.Objects).toHaveLength(2)
+  })
+
+  it('is idempotent when the role and policy are already absent', async () => {
+    const {iam, s3} = makeTeardownClients()
+    await performTeardown({
+      client: iam.client,
+      s3Client: s3.client,
+      manifest: teardownManifest,
+      repository: teardownRepository(),
+    })
+
+    await expect(
+      performTeardown({
+        client: iam.client,
+        s3Client: s3.client,
+        manifest: teardownManifest,
+        repository: teardownRepository(),
+      }),
+    ).resolves.toMatchObject({roleDeleted: false, policyDeleted: false})
+  })
+
+  it('refuses to delete a role whose tags do not identify the target repository', async () => {
+    const foreignRole = {
+      Arn: teardownManifest.role_arn,
+      RoleName: teardownManifest.role_name,
+      AssumeRolePolicyDocument: JSON.stringify(canonicalRoleTrust()),
+      MaxSessionDuration: 7200,
+      Tags: managedRoleTags().map(tag => (tag.Key === 'repo' ? {...tag, Value: 'other-repo'} : tag)),
+    }
+    const {iam, s3} = makeTeardownClients({role: foreignRole})
+
+    await expect(
+      performTeardown({
+        client: iam.client,
+        s3Client: s3.client,
+        manifest: teardownManifest,
+        repository: teardownRepository(),
+      }),
+    ).rejects.toThrow(/foreign|identity|refus/i)
+    expect(iam.calls.some(call => call.name === 'DeleteRolePolicyCommand')).toBe(false)
+    expect(iam.calls.some(call => call.name === 'DeleteRoleCommand')).toBe(false)
+    expect(s3.calls.some(call => call.name === 'DeleteObjectCommand')).toBe(false)
+  })
+
+  it('refuses to delete a role whose trust policy does not match the target repository', async () => {
+    const driftedTrust = canonicalRoleTrust()
+    const statement = (driftedTrust.Statement as Record<string, unknown>[])[0]
+    const condition = statement?.Condition as {StringEquals: Record<string, unknown>}
+    condition.StringEquals['token.actions.githubusercontent.com:repository_id'] = '999999'
+    const {iam, s3} = makeTeardownClients({
+      role: {
+        Arn: teardownManifest.role_arn,
+        RoleName: teardownManifest.role_name,
+        AssumeRolePolicyDocument: JSON.stringify(driftedTrust),
+        MaxSessionDuration: 7200,
+        Tags: managedRoleTags(),
+      },
+    })
+
+    await expect(
+      performTeardown({
+        client: iam.client,
+        s3Client: s3.client,
+        manifest: teardownManifest,
+        repository: teardownRepository(),
+      }),
+    ).rejects.toThrow(/trust|identity|refus/i)
+    expect(iam.calls.some(call => call.name === 'DeleteRoleCommand')).toBe(false)
+    expect(s3.calls.some(call => call.name === 'DeleteObjectCommand')).toBe(false)
+  })
+
+  it('refuses a malformed handoff manifest before touching AWS', async () => {
+    const {iam, s3} = makeTeardownClients()
+    const malformedManifest = {...teardownManifest, oidc_provider_arn: undefined} as unknown as typeof teardownManifest
+
+    await expect(
+      performTeardown({
+        client: iam.client,
+        s3Client: s3.client,
+        manifest: malformedManifest,
+        repository: teardownRepository(),
+      }),
+    ).rejects.toThrow(/manifest.*OIDC|provider ARN/i)
+    expect(iam.calls).toEqual([])
+    expect(s3.calls).toEqual([])
+  })
+
+  it('reports the plan without mutating AWS', async () => {
+    const {iam, s3} = makeTeardownClients()
+    const report: string[] = []
+
+    const result = await performTeardown({
+      client: iam.client,
+      s3Client: s3.client,
+      manifest: teardownManifest,
+      repository: teardownRepository(),
+      purgeState: true,
+      plan: true,
+      log: message => report.push(message),
+    })
+
+    expect(result.planned).toBe(true)
+    expect(report.join('\n')).toMatch(/would delete.*lock|would purge.*session/i)
+    expect(iam.calls.some(call => call.name.startsWith('Delete'))).toBe(false)
+    expect(s3.calls.some(call => call.name.startsWith('Delete'))).toBe(false)
+  })
+
+  it('continues scoped IAM cleanup when state deletion is impossible', async () => {
+    const {iam, s3} = makeTeardownClients({
+      stateError: namedError('AccessDenied', 'administrator credentials unavailable'),
+    })
+    const report: string[] = []
+
+    const result = await performTeardown({
+      client: iam.client,
+      s3Client: s3.client,
+      manifest: teardownManifest,
+      repository: teardownRepository(),
+      log: message => report.push(message),
+    })
+
+    expect(result.statePurgeImpossible).toBe(true)
+    expect(report.join('\n')).toMatch(/state purge impossible/i)
+    expect(iam.calls.some(call => call.name === 'DeleteRolePolicyCommand')).toBe(true)
+    expect(iam.calls.some(call => call.name === 'DeleteRoleCommand')).toBe(true)
+  })
+
+  it('attempts session purge independently when lock deletion fails', async () => {
+    const {iam, s3, deletedObjects} = makeTeardownClients({lockError: namedError('AccessDenied', 'lock access denied')})
+    const result = await performTeardown({
+      client: iam.client,
+      s3Client: s3.client,
+      manifest: teardownManifest,
+      repository: teardownRepository(),
+      purgeState: true,
+    })
+
+    expect(result.statePurgeImpossible).toBe(true)
+    expect(result.sessionObjectsPurged).toBe(true)
+    expect(s3.calls.map(call => call.name)).toContain('ListObjectVersionsCommand')
+    expect(deletedObjects.some(input => 'Delete' in input)).toBe(true)
+    expect(iam.calls.some(call => call.name === 'DeleteRoleCommand')).toBe(true)
+  })
+
+  it('reports stranded roles and stale S3 resources without mutating shared infrastructure', async () => {
+    const iam = makeClient(async command => {
+      if (command.constructor.name === 'ListRolesCommand') {
+        return {
+          Roles: [
+            {
+              RoleName: teardownManifest.role_name,
+              Tags: managedRoleTags(),
+            },
+            {RoleName: 'unrelated-role', Tags: []},
+          ],
+        }
+      }
+      throw new Error(`Unexpected IAM audit command: ${command.constructor.name}`)
+    })
+    const old = new Date('2026-07-31T00:00:00.000Z')
+    const s3 = makeS3Client(async command => {
+      switch (command.constructor.name) {
+        case 'ListObjectsV2Command':
+          return {
+            Contents: [
+              {Key: teardownManifest.lock_key, LastModified: old},
+              {Key: `${teardownManifest.lock_key}.fresh`, LastModified: new Date('2026-08-01T00:00:00.000Z')},
+            ],
+          }
+        case 'ListMultipartUploadsCommand':
+          return {
+            Uploads: [{Key: `${teardownManifest.session_prefix}upload.bin`, UploadId: 'upload-1', Initiated: old}],
+          }
+        case 'ListObjectVersionsCommand':
+          return {
+            Versions: [
+              {Key: `${teardownManifest.session_prefix}orphan.json`, VersionId: 'orphan-v1', IsLatest: false},
+              {Key: `${teardownManifest.session_prefix}current.json`, VersionId: 'current-v2', IsLatest: true},
+              {Key: `${teardownManifest.session_prefix}current.json`, VersionId: 'current-v1', IsLatest: false},
+            ],
+            DeleteMarkers: [],
+          }
+        default:
+          throw new Error(`Unexpected S3 audit command: ${command.constructor.name}`)
+      }
+    })
+
+    const result = await auditAgentStorageResources({
+      client: iam.client,
+      s3Client: s3.client,
+      bucket: bucketConfig,
+      now: new Date('2026-08-01T01:00:00.000Z'),
+      hasRepoVariables: async () => false,
+    })
+
+    expect(result.strandedRoles).toEqual([teardownManifest.role_name])
+    expect(result.staleLocks).toEqual([teardownManifest.lock_key])
+    expect(result.incompleteMultipartUploads).toEqual([`${teardownManifest.session_prefix}upload.bin#upload-1`])
+    expect(result.orphanedNoncurrentVersions).toEqual([`${teardownManifest.session_prefix}orphan.json#orphan-v1`])
+    expect(iam.calls.some(call => call.name.startsWith('Delete'))).toBe(false)
+    expect(s3.calls.some(call => call.name.startsWith('Delete'))).toBe(false)
   })
 })

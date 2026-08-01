@@ -4,11 +4,14 @@ import {
   AddClientIDToOpenIDConnectProviderCommand,
   CreateOpenIDConnectProviderCommand,
   CreateRoleCommand,
+  DeleteRoleCommand,
+  DeleteRolePolicyCommand,
   GetOpenIDConnectProviderCommand,
   GetRoleCommand,
   GetRolePolicyCommand,
   IAMClient,
   ListOpenIDConnectProvidersCommand,
+  ListRolesCommand,
   PutRolePolicyCommand,
   TagRoleCommand,
   UpdateAssumeRolePolicyCommand,
@@ -16,12 +19,17 @@ import {
 } from '@aws-sdk/client-iam'
 import {
   CreateBucketCommand,
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
   GetBucketEncryptionCommand,
   GetBucketLifecycleConfigurationCommand,
   GetBucketPolicyCommand,
   GetBucketVersioningCommand,
   GetPublicAccessBlockCommand,
   HeadBucketCommand,
+  ListMultipartUploadsCommand,
+  ListObjectsV2Command,
+  ListObjectVersionsCommand,
   PutBucketEncryptionCommand,
   PutBucketLifecycleConfigurationCommand,
   PutBucketPolicyCommand,
@@ -183,6 +191,52 @@ export interface ProvisionDeps {
   printLine?: (line: string) => void
   /** Credential values to redact from AWS error messages. */
   redactionSecrets?: RedactionSecret[]
+}
+
+export interface AgentTeardownDeps {
+  /** Same handoff manifest emitted by provisioning. */
+  manifest: AgentHandoffManifest
+  /** Live repository identity used to validate the role trust boundary. */
+  repository: AgentRepositoryConfig
+  client?: IAMClientLike
+  s3Client?: S3ClientLike
+  purgeState?: boolean
+  plan?: boolean
+  env?: Partial<Record<string, string | undefined>>
+  log?: (message: string) => void
+  redactionSecrets?: RedactionSecret[]
+}
+
+export interface AgentTeardownResult {
+  planned: boolean
+  roleDeleted: boolean
+  policyDeleted: boolean
+  lockDeleted: boolean
+  sessionObjectsPurged: boolean
+  stateRetained: boolean
+  statePurgeImpossible: boolean
+  sharedResourcesPreserved: boolean
+}
+
+export interface AgentStorageAuditDeps {
+  client?: IAMClientLike
+  s3Client?: S3ClientLike
+  bucket: AgentBucketConfig
+  env?: Partial<Record<string, string | undefined>>
+  now?: Date
+  /** Defaults to two hours plus fifteen minutes of teardown grace. */
+  staleLockThresholdMs?: number
+  /** Return true when the repository still has the five S3 GitHub variables. */
+  hasRepoVariables?: (repository: string) => Promise<boolean>
+  redactionSecrets?: RedactionSecret[]
+}
+
+export interface AgentStorageAuditResult {
+  candidateRoles: string[]
+  strandedRoles: string[]
+  staleLocks: string[]
+  incompleteMultipartUploads: string[]
+  orphanedNoncurrentVersions: string[]
 }
 
 /** Cross-artifact contract emitted by the AWS provisioner. */
@@ -1659,6 +1713,463 @@ export async function ensureAgentStoragePolicy(
 }
 
 // ---------------------------------------------------------------------------
+// Per-repository teardown
+// ---------------------------------------------------------------------------
+
+function teardownLog(options: AgentTeardownDeps, message: string): void {
+  ;(options.log ?? (line => console.log(line)))(message)
+}
+
+function validateTeardownManifest(
+  manifest: AgentHandoffManifest,
+  repository: AgentRepositoryConfig,
+): {roleName: string; policyName: string; bucketConfig: AgentBucketConfig; layout: AgentKeyLayout} {
+  validateRepositoryConfig(repository)
+
+  const requiredStringFields = [
+    'owner',
+    'repo',
+    'repository_id',
+    'repository_owner_id',
+    'bucket',
+    'bucket_region',
+    'expected_bucket_owner',
+    's3_prefix',
+    'session_prefix',
+    'lock_key',
+    'role_name',
+    'role_arn',
+    'policy_name',
+    'key_layout_version',
+    'oidc_provider_arn',
+  ] as const
+  for (const field of requiredStringFields) {
+    const value = manifest[field]
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      throw new Error(`Teardown manifest field ${field} is missing or invalid; refusing to mutate.`)
+    }
+  }
+  if (manifest.action_ref_verified !== true) {
+    throw new Error('Teardown manifest action layout was not verified; refusing to mutate.')
+  }
+
+  const expectedRoleName = buildAgentRoleName(repository.owner, repository.repo)
+  if (manifest.owner !== repository.owner || manifest.repo !== repository.repo) {
+    throw new Error('Teardown manifest repository identity does not match the target repository; refusing to mutate.')
+  }
+  if (
+    manifest.repository_id !== repository.repositoryId ||
+    manifest.repository_owner_id !== repository.repositoryOwnerId
+  ) {
+    throw new Error('Teardown manifest repository IDs do not match the target repository; refusing to mutate.')
+  }
+  if (manifest.role_name !== expectedRoleName || manifest.policy_name !== expectedRoleName) {
+    throw new Error('Teardown manifest role or policy name does not match the target repository; refusing to mutate.')
+  }
+  if (manifest.role_arn !== `arn:aws:iam::${manifest.expected_bucket_owner}:role/${expectedRoleName}`) {
+    throw new Error('Teardown manifest role ARN does not match the target repository; refusing to mutate.')
+  }
+  if (!manifest.oidc_provider_arn.trim()) {
+    throw new Error('Teardown manifest is missing the shared GitHub OIDC provider ARN; refusing to mutate.')
+  }
+
+  const keyLayoutVersion = assertKnownKeyLayout(manifest.key_layout_version)
+  const layout = buildAgentKeyLayout(repository.owner, repository.repo, manifest.s3_prefix, keyLayoutVersion)
+  if (layout.sessionPrefix !== manifest.session_prefix || layout.lockKey !== manifest.lock_key) {
+    throw new Error('Teardown manifest S3 key layout does not match the target repository; refusing to mutate.')
+  }
+
+  return {
+    roleName: expectedRoleName,
+    policyName: expectedRoleName,
+    bucketConfig: {
+      bucket: manifest.bucket,
+      region: manifest.bucket_region,
+      expectedBucketOwner: manifest.expected_bucket_owner,
+      s3Prefix: manifest.s3_prefix,
+      sessionPrefix: manifest.session_prefix,
+    },
+    layout,
+  }
+}
+
+function assertTeardownRoleIdentity(
+  role: IamRoleReadback,
+  roleName: string,
+  repository: AgentRepositoryConfig,
+  providerArn: string,
+  expectedRoleArn: string,
+): void {
+  const expectedTrustPolicy = buildGitHubOidcTrustPolicy(repository, providerArn)
+  const state = classifyRoleState(role, roleName, repository, expectedTrustPolicy)
+  if (state.foreignDrift.length > 0 || state.managedDrift.length > 0) {
+    throw new Error(
+      `IAM role ${roleName} identity/trust does not match ${repository.owner}/${repository.repo}; refusing teardown. ${[
+        ...state.foreignDrift,
+        ...state.managedDrift,
+      ].join(', ')}`,
+    )
+  }
+  if (roleArn(role, roleName) !== expectedRoleArn) {
+    throw new Error(`IAM role ${roleName} ARN does not match the teardown manifest; refusing teardown.`)
+  }
+}
+
+async function verifyTeardownSharedResources(
+  client: IAMClientLike,
+  s3Client: S3ClientLike,
+  manifest: AgentHandoffManifest,
+  bucketConfig: AgentBucketConfig,
+  secrets: RedactionSecret[],
+): Promise<void> {
+  const provider = await readOidcProvider(client, manifest.oidc_provider_arn, secrets)
+  assertCanonicalProvider(provider)
+
+  const bucket = await headAgentBucket(s3Client, bucketConfig, secrets)
+  if (!bucket.exists || bucket.bucketRegion !== manifest.bucket_region) {
+    throw new Error(
+      `Shared S3 bucket ${manifest.bucket} is absent or mislocated; refusing repo teardown because shared resources must be preserved.`,
+    )
+  }
+}
+
+async function deleteTeardownState(
+  s3Client: S3ClientLike,
+  manifest: AgentHandoffManifest,
+  sessionPrefix: string,
+  purgeState: boolean,
+  secrets: RedactionSecret[],
+): Promise<{lockDeleted: boolean; sessionObjectsPurged: boolean; statePurgeImpossible: boolean; errors: string[]}> {
+  let lockDeleted = false
+  let sessionObjectsPurged = false
+  let statePurgeImpossible = false
+  const errors: string[] = []
+
+  try {
+    await s3Client.send(
+      new DeleteObjectCommand({
+        Bucket: manifest.bucket,
+        Key: manifest.lock_key,
+        ExpectedBucketOwner: manifest.expected_bucket_owner,
+      }),
+    )
+    lockDeleted = true
+  } catch (error: unknown) {
+    statePurgeImpossible = true
+    errors.push(`lock deletion failed: ${redactAwsError(error, secrets).message}`)
+  }
+
+  if (!purgeState) return {lockDeleted, sessionObjectsPurged, statePurgeImpossible, errors}
+
+  try {
+    const objects: {Key: string; VersionId?: string}[] = []
+    let keyMarker: string | undefined
+    let versionIdMarker: string | undefined
+    do {
+      const response = await s3Client.send(
+        new ListObjectVersionsCommand({
+          Bucket: manifest.bucket,
+          Prefix: sessionPrefix,
+          ExpectedBucketOwner: manifest.expected_bucket_owner,
+          ...(keyMarker ? {KeyMarker: keyMarker} : {}),
+          ...(versionIdMarker ? {VersionIdMarker: versionIdMarker} : {}),
+        }),
+      )
+      objects.push(
+        ...[...(response.Versions ?? []), ...(response.DeleteMarkers ?? [])]
+          .filter(
+            (entry): entry is {Key: string; VersionId?: string} =>
+              typeof entry.Key === 'string' && entry.Key.startsWith(sessionPrefix),
+          )
+          .map(entry => ({Key: entry.Key, ...(entry.VersionId ? {VersionId: entry.VersionId} : {})})),
+      )
+      keyMarker = response.IsTruncated ? response.NextKeyMarker : undefined
+      versionIdMarker = response.IsTruncated ? response.NextVersionIdMarker : undefined
+    } while (keyMarker || versionIdMarker)
+
+    for (let offset = 0; offset < objects.length; offset += 1000) {
+      const deleteResponse = await s3Client.send(
+        new DeleteObjectsCommand({
+          Bucket: manifest.bucket,
+          ExpectedBucketOwner: manifest.expected_bucket_owner,
+          Delete: {Objects: objects.slice(offset, offset + 1000)},
+        }),
+      )
+      if (deleteResponse.Errors && deleteResponse.Errors.length > 0) {
+        throw new Error(`session object deletion returned ${deleteResponse.Errors.length} object errors`)
+      }
+    }
+    sessionObjectsPurged = true
+  } catch (error: unknown) {
+    statePurgeImpossible = true
+    errors.push(`session purge failed: ${redactAwsError(error, secrets).message}`)
+  }
+
+  return {lockDeleted, sessionObjectsPurged, statePurgeImpossible, errors}
+}
+
+/**
+ * Removes one repository's inline policy, role, lock, and optionally session
+ * objects. The shared bucket and GitHub OIDC provider are read-only resources
+ * here: their presence is verified before and after the scoped cleanup.
+ */
+export async function performTeardown(options: AgentTeardownDeps): Promise<AgentTeardownResult> {
+  const env = options.env ?? process.env
+  const secrets = options.redactionSecrets ?? [
+    {name: 'agent-aws-access-key-id', content: env[AGENT_AWS_ACCESS_KEY_ID] ?? ''},
+    {name: 'agent-aws-secret-access-key', content: env[AGENT_AWS_SECRET_ACCESS_KEY] ?? ''},
+    {name: 'agent-aws-session-token', content: env[AGENT_AWS_SESSION_TOKEN] ?? ''},
+  ]
+  const identity = validateTeardownManifest(options.manifest, options.repository)
+  const client = options.client ?? createIamClientFromEnv(env)
+  const s3Client = options.s3Client ?? createS3ClientFromEnv(env, options.manifest.bucket_region)
+
+  await verifyTeardownSharedResources(client, s3Client, options.manifest, identity.bucketConfig, secrets)
+  const role = await readAgentRole(client, identity.roleName, secrets)
+  if (role !== undefined) {
+    assertTeardownRoleIdentity(
+      role,
+      identity.roleName,
+      options.repository,
+      options.manifest.oidc_provider_arn,
+      options.manifest.role_arn,
+    )
+  }
+  const policy = await readAgentStoragePolicy(client, identity.roleName, identity.policyName, secrets)
+
+  if (options.plan) {
+    teardownLog(options, `Plan: would delete ${options.manifest.lock_key} from ${options.manifest.bucket}.`)
+    if (options.purgeState) {
+      teardownLog(options, `Plan: would purge session objects under ${options.manifest.session_prefix}.`)
+    } else {
+      teardownLog(options, `Plan: would retain session objects under ${options.manifest.session_prefix}.`)
+    }
+    teardownLog(options, `Plan: would delete IAM inline policy ${identity.policyName} and role ${identity.roleName}.`)
+    teardownLog(options, 'Plan: would preserve the shared S3 bucket and GitHub OIDC provider.')
+    return {
+      planned: true,
+      roleDeleted: false,
+      policyDeleted: false,
+      lockDeleted: false,
+      sessionObjectsPurged: false,
+      stateRetained: !options.purgeState,
+      statePurgeImpossible: false,
+      sharedResourcesPreserved: true,
+    }
+  }
+
+  let lockDeleted = false
+  let sessionObjectsPurged = false
+  let statePurgeImpossible = false
+  const state = await deleteTeardownState(
+    s3Client,
+    options.manifest,
+    identity.layout.sessionPrefix,
+    options.purgeState ?? false,
+    secrets,
+  )
+  lockDeleted = state.lockDeleted
+  sessionObjectsPurged = state.sessionObjectsPurged
+  statePurgeImpossible = state.statePurgeImpossible
+  for (const error of state.errors) {
+    teardownLog(options, `state purge impossible: ${error}`)
+  }
+
+  let policyDeleted = false
+  if (policy !== undefined) {
+    try {
+      await client.send(new DeleteRolePolicyCommand({RoleName: identity.roleName, PolicyName: identity.policyName}))
+      policyDeleted = true
+    } catch (error: unknown) {
+      if (!isNamedError(error, ['NoSuchEntity'])) throw redactAwsError(error, secrets)
+    }
+  }
+
+  let roleDeleted = false
+  if (role !== undefined) {
+    try {
+      await client.send(new DeleteRoleCommand({RoleName: identity.roleName}))
+      roleDeleted = true
+    } catch (error: unknown) {
+      if (!isNamedError(error, ['NoSuchEntity'])) throw redactAwsError(error, secrets)
+    }
+  }
+
+  if ((await readAgentRole(client, identity.roleName, secrets)) !== undefined) {
+    throw new Error(`IAM role ${identity.roleName} remained after teardown readback`)
+  }
+  if ((await readAgentStoragePolicy(client, identity.roleName, identity.policyName, secrets)) !== undefined) {
+    throw new Error(`IAM inline policy ${identity.policyName} remained after teardown readback`)
+  }
+  await verifyTeardownSharedResources(client, s3Client, options.manifest, identity.bucketConfig, secrets)
+
+  return {
+    planned: false,
+    roleDeleted,
+    policyDeleted,
+    lockDeleted,
+    sessionObjectsPurged,
+    stateRetained: !(options.purgeState ?? false),
+    statePurgeImpossible,
+    sharedResourcesPreserved: true,
+  }
+}
+
+function readAuditDate(value: unknown): Date | undefined {
+  if (value instanceof Date) return value
+  if (typeof value === 'string' || typeof value === 'number') {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed
+  }
+  return undefined
+}
+
+function auditRoleRepository(tags: unknown): string | undefined {
+  if (!Array.isArray(tags)) return undefined
+  const tagMap = tagsToMap(
+    tags.filter((tag): tag is RoleTagReadback => typeof tag === 'object' && tag !== null) as RoleTagReadback[],
+  )
+  const owner = tagMap.get('owner')
+  const repo = tagMap.get('repo')
+  return owner && repo ? `${owner}/${repo}` : undefined
+}
+
+/**
+ * Report-only audit for resources left behind by a disabled repository. The
+ * GitHub variable check is injected because this operator-side AWS package
+ * deliberately does not own GitHub API credentials.
+ */
+export async function auditAgentStorageResources(options: AgentStorageAuditDeps): Promise<AgentStorageAuditResult> {
+  const env = options.env ?? process.env
+  const secrets = options.redactionSecrets ?? [
+    {name: 'agent-aws-access-key-id', content: env[AGENT_AWS_ACCESS_KEY_ID] ?? ''},
+    {name: 'agent-aws-secret-access-key', content: env[AGENT_AWS_SECRET_ACCESS_KEY] ?? ''},
+    {name: 'agent-aws-session-token', content: env[AGENT_AWS_SESSION_TOKEN] ?? ''},
+  ]
+  const client = options.client ?? createIamClientFromEnv(env)
+  const s3Client = options.s3Client ?? createS3ClientFromEnv(env, options.bucket.region)
+  const now = options.now ?? new Date()
+  const staleLockThresholdMs = options.staleLockThresholdMs ?? 2 * 60 * 60 * 1000 + 15 * 60 * 1000
+  const rolePrefix = 'fro-bot-agent-storage-'
+
+  const candidateRoles: string[] = []
+  const strandedRoles: string[] = []
+  let marker: string | undefined
+  do {
+    let response
+    try {
+      response = await client.send(new ListRolesCommand(marker ? {Marker: marker} : {}))
+    } catch (error: unknown) {
+      throw redactAwsError(error, secrets)
+    }
+    for (const role of response.Roles ?? []) {
+      if (!role.RoleName?.startsWith(rolePrefix)) continue
+      candidateRoles.push(role.RoleName)
+      const repository = auditRoleRepository(role.Tags)
+      if (repository === undefined || (options.hasRepoVariables && !(await options.hasRepoVariables(repository)))) {
+        strandedRoles.push(role.RoleName)
+      }
+    }
+    marker = response.IsTruncated ? response.Marker : undefined
+  } while (marker)
+
+  const s3Prefix = canonicalizeS3Prefix(options.bucket.s3Prefix)
+  const staleLocks: string[] = []
+  let continuationToken: string | undefined
+  do {
+    let response
+    try {
+      response = await s3Client.send(
+        new ListObjectsV2Command({
+          Bucket: options.bucket.bucket,
+          Prefix: `${s3Prefix}coordination/`,
+          ExpectedBucketOwner: options.bucket.expectedBucketOwner,
+          ...(continuationToken ? {ContinuationToken: continuationToken} : {}),
+        }),
+      )
+    } catch (error: unknown) {
+      throw redactAwsError(error, secrets)
+    }
+    for (const object of response.Contents ?? []) {
+      const modified = readAuditDate(object.LastModified)
+      if (
+        object.Key?.includes('/locks/') &&
+        modified !== undefined &&
+        now.getTime() - modified.getTime() > staleLockThresholdMs
+      ) {
+        staleLocks.push(object.Key)
+      }
+    }
+    continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined
+  } while (continuationToken)
+
+  const incompleteMultipartUploads: string[] = []
+  let keyMarker: string | undefined
+  let uploadIdMarker: string | undefined
+  do {
+    let response
+    try {
+      response = await s3Client.send(
+        new ListMultipartUploadsCommand({
+          Bucket: options.bucket.bucket,
+          Prefix: s3Prefix,
+          ExpectedBucketOwner: options.bucket.expectedBucketOwner,
+          ...(keyMarker ? {KeyMarker: keyMarker} : {}),
+          ...(uploadIdMarker ? {UploadIdMarker: uploadIdMarker} : {}),
+        }),
+      )
+    } catch (error: unknown) {
+      throw redactAwsError(error, secrets)
+    }
+    for (const upload of response.Uploads ?? []) {
+      if (upload.Key && upload.UploadId) incompleteMultipartUploads.push(`${upload.Key}#${upload.UploadId}`)
+    }
+    keyMarker = response.IsTruncated ? response.NextKeyMarker : undefined
+    uploadIdMarker = response.IsTruncated ? response.NextUploadIdMarker : undefined
+  } while (keyMarker || uploadIdMarker)
+
+  const orphanedNoncurrentVersions: string[] = []
+  let versionKeyMarker: string | undefined
+  let versionIdMarker: string | undefined
+  do {
+    let response
+    try {
+      response = await s3Client.send(
+        new ListObjectVersionsCommand({
+          Bucket: options.bucket.bucket,
+          Prefix: s3Prefix,
+          ExpectedBucketOwner: options.bucket.expectedBucketOwner,
+          ...(versionKeyMarker ? {KeyMarker: versionKeyMarker} : {}),
+          ...(versionIdMarker ? {VersionIdMarker: versionIdMarker} : {}),
+        }),
+      )
+    } catch (error: unknown) {
+      throw redactAwsError(error, secrets)
+    }
+    const currentKeys = new Set(
+      (response.Versions ?? [])
+        .filter(version => version.IsLatest === true && typeof version.Key === 'string')
+        .map(version => version.Key as string),
+    )
+    for (const version of response.Versions ?? []) {
+      if (version.IsLatest !== true && version.Key && version.VersionId && !currentKeys.has(version.Key)) {
+        orphanedNoncurrentVersions.push(`${version.Key}#${version.VersionId}`)
+      }
+    }
+    versionKeyMarker = response.IsTruncated ? response.NextKeyMarker : undefined
+    versionIdMarker = response.IsTruncated ? response.NextVersionIdMarker : undefined
+  } while (versionKeyMarker || versionIdMarker)
+
+  return {
+    candidateRoles,
+    strandedRoles,
+    staleLocks,
+    incompleteMultipartUploads,
+    orphanedNoncurrentVersions,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Provisioning orchestration
 // ---------------------------------------------------------------------------
 
@@ -1733,6 +2244,28 @@ function readActionRefFromEnv(env: Partial<Record<string, string | undefined>>):
   return actionRef
 }
 
+function readArgumentValue(args: string[], name: string): string | undefined {
+  const index = args.indexOf(name)
+  if (index === -1) return undefined
+  const value = args[index + 1]
+  if (!value || value.startsWith('--')) throw new Error(`${name} requires a value`)
+  return value
+}
+
+async function readTeardownManifest(source: string): Promise<AgentHandoffManifest> {
+  const raw = source === '-' ? await new Response(Bun.stdin).text() : await Bun.file(source).text()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('Teardown manifest is not valid JSON')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('Teardown manifest must be a JSON object')
+  }
+  return parsed as AgentHandoffManifest
+}
+
 export async function performProvisioning(deps: ProvisionDeps = {}): Promise<AgentHandoffManifest> {
   const env = deps.env ?? process.env
   const secrets = deps.redactionSecrets ?? [
@@ -1805,6 +2338,37 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
 
 async function main(): Promise<void> {
   const args = Bun.argv.slice(2)
+  if (args.includes('--teardown')) {
+    const unknown = args.filter(
+      (argument: string, index: number) =>
+        !['--teardown', '--purge-state', '--plan', '--manifest'].includes(argument) &&
+        (index === 0 || args[index - 1] !== '--manifest'),
+    )
+    if (unknown.length > 0) {
+      throw new Error(
+        `Unknown teardown argument(s): ${unknown.join(', ')}. Supported: --teardown --manifest <path> [--purge-state] [--plan]`,
+      )
+    }
+
+    const manifestSource = readArgumentValue(args, '--manifest')
+    if (!manifestSource) throw new Error('Teardown requires --manifest <path> or --manifest - for stdin')
+    const env = process.env
+    const manifest = await readTeardownManifest(manifestSource)
+    const repository = readRepositoryConfigFromEnv(env)
+    const client = createIamClientFromEnv(env)
+    const s3Client = createS3ClientFromEnv(env, manifest.bucket_region)
+    const result = await performTeardown({
+      client,
+      s3Client,
+      manifest,
+      repository,
+      purgeState: args.includes('--purge-state'),
+      plan: args.includes('--plan'),
+    })
+    console.log(JSON.stringify(result))
+    return
+  }
+
   const unknown = args.filter((argument: string) => argument !== '--force')
   if (unknown.length > 0) {
     throw new Error(`Unknown provision argument(s): ${unknown.join(', ')}. Supported: --force`)

@@ -1,4 +1,14 @@
-import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync} from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -65,17 +75,78 @@ const runShellProgram = async (program: string, payload: Uint8Array) => {
   return {stdout, stderr, exitCode}
 }
 
+interface ShellHarnessOptions {
+  dockerRoot?: string
+  dockerInfoOutput?: string
+  containerdRoot?: string
+  mounts?: readonly {path: string; target: string; source: string; fstype: string; freeBytes: number}[]
+  dockerDf?: readonly string[]
+  containerImages?: readonly string[]
+  runningDashboardIds?: readonly string[]
+  runningDashboardContainers?: readonly {id: string; project: string; service: string}[]
+  runningDashboardImageDigest?: string
+  runningDashboardHealth?: string
+  pruneOutput?: string
+  pruneExitCode?: number
+}
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\"'\"'")}'`
+
 const adaptProgramForUnprivilegedHarness = (
   runtimeRoot: string,
   dashboardRoot = `${runtimeRoot}-dashboard`,
+  options: ShellHarnessOptions = {},
 ): string => {
   const uid = process.getuid?.() ?? 501
   const gid = process.getgid?.() ?? 20
+  const dockerRoot = options.dockerRoot ?? `${runtimeRoot}-docker`
+  const dockerInfoOutput = options.dockerInfoOutput ?? dockerRoot
+  const containerdRoot = options.containerdRoot ?? `${runtimeRoot}-containerd-absent`
+  mkdirSync(dockerRoot, {recursive: true})
+  if (options.containerdRoot) mkdirSync(options.containerdRoot, {recursive: true})
+  const mounts = options.mounts ?? [
+    {path: dockerRoot, target: '/', source: '/dev/test-root', fstype: 'ext4', freeBytes: 8 * 1024 * 1024 * 1024},
+  ]
+  const dockerDf = options.dockerDf ?? ['Images|2|1|1GB|0B', 'Containers|1|1|100MB|0B', 'Local Volumes|0|0|0B|0B']
+  const containerImages = options.containerImages ?? [`ghcr.io/fro-bot/dashboard@${fixture.expectedDashboardDigest}`]
+  const runningDashboardIds =
+    options.runningDashboardIds ?? (existsSync(join(dashboardRoot, 'docker-compose.yaml')) ? ['abcdef123456'] : [])
+  const runningDashboardContainers =
+    options.runningDashboardContainers ??
+    runningDashboardIds.map(id => ({id, project: 'dashboard', service: 'dashboard'}))
+  const runningDashboardImageDigest = options.runningDashboardImageDigest ?? fixture.expectedDashboardDigest
+  const runningDashboardHealth = options.runningDashboardHealth ?? 'unknown'
+  const pruneOutput = options.pruneOutput ?? 'Deleted Images:\nTotal reclaimed space: 0B\n'
+  const newline = String.fromCharCode(10)
+  const dockerDfScript = dockerDf.map(line => String.raw`printf '%s\n' ${shellQuote(line)}`).join(newline)
+  const containerImagesScript = containerImages.map(line => String.raw`printf '%s\n' ${shellQuote(line)}`).join(newline)
+  const runningDashboardServiceIdsScript = runningDashboardContainers
+    .filter(container => container.service === 'dashboard')
+    .map(container => String.raw`printf '%s\n' ${shellQuote(container.id)}`)
+    .join(newline)
+  const runningDashboardProjectIdsScript = runningDashboardContainers
+    .filter(container => container.project === 'dashboard' && container.service === 'dashboard')
+    .map(container => String.raw`printf '%s\n' ${shellQuote(container.id)}`)
+    .join(newline)
+  const pruneScript = String.raw`printf '%s\n' ${shellQuote(pruneOutput.replace(/\n$/, ''))}`
+  const mountCaseScript = mounts
+    .map(
+      mount =>
+        String.raw`if [ "$path" = ${shellQuote(mount.path)} ]; then printf '%s\n' ${shellQuote(`${mount.target} ${mount.source} ${mount.fstype}`)}; return 0; fi`,
+    )
+    .join(`${newline}  `)
+  const statCaseScript = mounts
+    .map(
+      mount =>
+        String.raw`if [ "$path" = ${shellQuote(mount.path)} ]; then printf '%s\n' ${shellQuote(`${mount.freeBytes}:1`)}; return 0; fi`,
+    )
+    .join(`${newline}    `)
   const program = REMOTE_TRANSACTION_PROGRAM.replaceAll(
     '"/run/dashboard-deploy/lock"',
     JSON.stringify(`${runtimeRoot}/lock`),
   )
     .replaceAll('"/run/dashboard-deploy"', JSON.stringify(runtimeRoot))
+    .replaceAll('"/var/lib/containerd"', JSON.stringify(containerdRoot))
     .replaceAll('"/opt/dashboard"', JSON.stringify(dashboardRoot))
     .replaceAll('"/opt/dashboard/config"', JSON.stringify(`${dashboardRoot}/config`))
     .replaceAll('"/opt/dashboard/data"', JSON.stringify(`${dashboardRoot}/data`))
@@ -100,7 +171,16 @@ const adaptProgramForUnprivilegedHarness = (
     .replaceAll('realpath -e ', 'realpath ')
   return String.raw`
 stat() {
-  if [ "$1" = "-c" ]; then
+  if [ "$1" = "-f" ] && [ "$2" = "-c" ]; then
+    format="$3"
+    path="$5"
+    case "$format" in
+      "%a:%S")
+        ${statCaseScript}
+        ;;
+      *) return 1 ;;
+    esac
+  elif [ "$1" = "-c" ]; then
     format="$2"
     shift 2
     [ "$1" = "--" ] && shift
@@ -113,13 +193,51 @@ stat() {
     command stat "$@"
   fi
 }
+findmnt() {
+  path="$4"
+  ${mountCaseScript}
+  return 1
+}
 flock() { return 0; }
 docker() {
+  if [ "$1" = "info" ]; then printf '%s\n' ${shellQuote(dockerInfoOutput)}; return 0; fi
+  if [ "$1" = "system" ] && [ "$2" = "df" ]; then
+    ${dockerDfScript}
+    return 0
+  fi
+  if [ "$1" = "ps" ] && [ "$2" = "-a" ]; then
+    ${containerImagesScript}
+    return 0
+  fi
+  if [ "$1" = "ps" ]; then
+    if [[ "$*" == *"label=com.docker.compose.project=dashboard"* ]]; then
+      :
+      ${runningDashboardProjectIdsScript}
+    else
+      :
+      ${runningDashboardServiceIdsScript}
+    fi
+    return 0
+  fi
+  if [ "$1" = "image" ] && [ "$2" = "prune" ]; then
+    ${pruneScript}
+    return ${options.pruneExitCode ?? 0}
+  fi
   if [ "$1" = "compose" ] && [ "$2" = "pull" ]; then return 0; fi
   if [ "$1" = "compose" ] && [ "$2" = "up" ]; then return 0; fi
-  if [ "$1" = "compose" ] && [ "$2" = "ps" ]; then printf 'container-id\n'; return 0; fi
-  if [ "$1" = "inspect" ] && [ "$4" = "container-id" ]; then printf 'image-id\n'; return 0; fi
-  if [ "$1" = "inspect" ] && [ "$4" = "image-id" ]; then printf '["ghcr.io/fro-bot/dashboard@${fixture.expectedDashboardDigest}"]\n'; return 0; fi
+  if [ "$1" = "compose" ] && { [ "$2" = "ps" ] || [ "$4" = "ps" ]; }; then printf 'abcdef123456\n'; return 0; fi
+  if [ "$1" = "inspect" ] && [ "$4" = "abcdef123456" ]; then
+    case "$3" in
+      "{{.Image}}") printf 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n' ;;
+      "{{.State.Health.Status}}") printf '%s\n' ${shellQuote(runningDashboardHealth)} ;;
+      *) return 1 ;;
+    esac
+    return 0
+  fi
+  if [ "$1" = "inspect" ] && [ "$4" = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" ]; then
+    printf '["ghcr.io/fro-bot/dashboard@${runningDashboardImageDigest}"]\n'
+    return 0
+  fi
   return 1
 }
 ${program}`
@@ -266,6 +384,416 @@ describe('remote transaction process boundary', () => {
     }
   })
 
+  it('audits, prunes, and proves the capacity floor before the first dashboard mutation', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-gate-order-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot),
+        encodeRemotePayload(fixture),
+      )
+      expect(result.exitCode).toBe(0)
+      const lines = result.stdout.trim().split('\n')
+      const baselineIndex = lines.indexOf('stage=baseline-evidence')
+      const pruneIndex = lines.indexOf('stage=prune-complete')
+      const floorIndex = lines.indexOf('stage=post-prune-capacity')
+      const mutationIndex = lines.indexOf('stage=active-state-mutation')
+
+      expect(baselineIndex).toBeGreaterThan(-1)
+      expect(pruneIndex).toBeGreaterThan(baselineIndex)
+      expect(floorIndex).toBeGreaterThan(pruneIndex)
+      expect(mutationIndex).toBeGreaterThan(floorIndex)
+      expect(result.stdout).toContain('evidence=capacity:post-prune:free-bytes=8589934592')
+      expect(result.stdout).toContain('evidence=active-compose:baseline:absent')
+      expect(result.stdout).toContain('evidence=running-dashboard:baseline:absent')
+      expect(existsSync(dashboardRoot)).toBe(true)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('deduplicates Docker and containerd probes that share one mount', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-shared-mount-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dockerRoot = join(root, 'docker')
+    const containerdRoot = join(root, 'containerd')
+    const sharedMount = {
+      path: dockerRoot,
+      target: '/',
+      source: '/dev/test-root',
+      fstype: 'ext4',
+      freeBytes: 7 * 1024 ** 3,
+    }
+    mkdirSync(dockerRoot, {recursive: true})
+    mkdirSync(containerdRoot, {recursive: true})
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          dockerRoot,
+          containerdRoot,
+          mounts: [sharedMount, {...sharedMount, path: containerdRoot}],
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      const baselineStorage = result.stdout.split('\n').filter(line => line.startsWith('evidence=storage:baseline:'))
+      const postPruneStorage = result.stdout.split('\n').filter(line => line.startsWith('evidence=storage:post-prune:'))
+      expect(baselineStorage).toHaveLength(1)
+      expect(postPruneStorage).toHaveLength(1)
+      expect(baselineStorage[0]).toContain(`probe=${dockerRoot},${containerdRoot}`)
+      expect(result.stdout).toContain('evidence=capacity:post-prune:free-bytes=7516192768')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('gates on the minimum free bytes across distinct Docker and containerd mounts', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-multi-mount-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dockerRoot = join(root, 'docker')
+    const containerdRoot = join(root, 'containerd')
+    mkdirSync(dockerRoot, {recursive: true})
+    mkdirSync(containerdRoot, {recursive: true})
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          dockerRoot,
+          containerdRoot,
+          mounts: [
+            {path: dockerRoot, target: '/', source: '/dev/docker', fstype: 'ext4', freeBytes: 8 * 1024 ** 3},
+            {
+              path: containerdRoot,
+              target: '/var/lib/containerd',
+              source: '/dev/containerd',
+              fstype: 'ext4',
+              freeBytes: 7 * 1024 ** 3,
+            },
+          ],
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.split('\n').filter(line => line.startsWith('evidence=storage:baseline:'))).toHaveLength(2)
+      expect(result.stdout).toContain('evidence=capacity:post-prune:free-bytes=7516192768')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('keeps stopped-container image references in the protected inventory', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-protected-images-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+    const stoppedDigest = `sha256:${'b'.repeat(64)}`
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          containerImages: [
+            `ghcr.io/fro-bot/dashboard@${stoppedDigest}`,
+            `ghcr.io/fro-bot/dashboard@${stoppedDigest}`,
+            `ghcr.io/fro-bot/dashboard@${fixture.expectedDashboardDigest}`,
+          ],
+          pruneOutput: 'Deleted Images:\ndeleted: sha256:cccc\nTotal reclaimed space: 1GB\n',
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain(
+        `evidence=protected-image:baseline:ref=ghcr.io/fro-bot/dashboard@${stoppedDigest};count=2`,
+      )
+      expect(result.stdout).toContain(
+        'evidence=prune:reclaimed-bytes=1000000000;eligible-images=1;protected-containers=3',
+      )
+      expect(result.stdout).toContain(
+        `evidence=protected-image:post-prune:ref=ghcr.io/fro-bot/dashboard@${stoppedDigest};count=2`,
+      )
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('hard-stops on prune failure even when baseline space is high', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-prune-error-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {pruneExitCode: 1}),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).toContain('stage=baseline-evidence')
+      expect(result.stdout).toContain('stage=prune-started')
+      expect(result.stdout).not.toContain('stage=prune-complete')
+      expect(result.stdout).not.toContain('stage=post-prune-capacity')
+      expect(result.stdout).not.toContain('stage=active-state-written')
+      expect(existsSync(dashboardRoot)).toBe(false)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('stops below the post-prune floor before creating dashboard paths', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-low-space-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          mounts: [
+            {
+              path: `${runtimeRoot}-docker`,
+              target: '/',
+              source: '/dev/test-root',
+              fstype: 'ext4',
+              freeBytes: 6442450943,
+            },
+          ],
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).toContain('stage=post-prune-capacity')
+      expect(result.stdout).toContain('evidence=storage:post-prune:')
+      expect(result.stdout).not.toContain('stage=active-state-written')
+      expect(existsSync(dashboardRoot)).toBe(false)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('accepts exactly the 6 GiB post-prune floor', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-floor-boundary-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          mounts: [
+            {
+              path: `${runtimeRoot}-docker`,
+              target: '/',
+              source: '/dev/test-root',
+              fstype: 'ext4',
+              freeBytes: 6442450944,
+            },
+          ],
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain('evidence=capacity:post-prune:free-bytes=6442450944')
+      expect(result.stdout).toContain('stage=active-state-written')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('fails closed on missing, malformed, or contradictory storage evidence', async () => {
+    const cases: readonly [string, (root: string, runtimeRoot: string) => ShellHarnessOptions][] = [
+      ['missing Docker root', () => ({dockerInfoOutput: ''})],
+      ['malformed Docker root', () => ({dockerInfoOutput: 'relative/docker-root'})],
+      ['unresolved mount', () => ({mounts: []})],
+      [
+        'missing containerd mount evidence',
+        (root, _runtimeRoot) => ({
+          dockerRoot: join(root, 'docker'),
+          containerdRoot: join(root, 'containerd'),
+          mounts: [
+            {
+              path: join(root, 'docker'),
+              target: '/',
+              source: '/dev/test-root',
+              fstype: 'ext4',
+              freeBytes: 8 * 1024 ** 3,
+            },
+          ],
+        }),
+      ],
+      [
+        'malformed free bytes',
+        (_root, runtimeRoot) => ({
+          mounts: [
+            {path: `${runtimeRoot}-docker`, target: '/', source: '/dev/test-root', fstype: 'ext4', freeBytes: -1},
+          ],
+        }),
+      ],
+      ['malformed Docker disk summary', (_root, _runtimeRoot) => ({dockerDf: ['Images|2|1|not-bytes|0B']})],
+      [
+        'contradictory shared mount identity',
+        (root, _runtimeRoot) => ({
+          dockerRoot: join(root, 'docker'),
+          containerdRoot: join(root, 'containerd'),
+          mounts: [
+            {path: join(root, 'docker'), target: '/', source: '/dev/one', fstype: 'ext4', freeBytes: 8 * 1024 ** 3},
+            {path: join(root, 'containerd'), target: '/', source: '/dev/two', fstype: 'ext4', freeBytes: 8 * 1024 ** 3},
+          ],
+        }),
+      ],
+    ]
+
+    for (const [name, makeOptions] of cases) {
+      const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-evidence-error-'))
+      const root = realpathSync(parent)
+      const runtimeRoot = join(root, 'dashboard-deploy')
+      try {
+        const result = await runShellProgram(
+          adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, makeOptions(root, runtimeRoot)),
+          encodeRemotePayload(fixture),
+        )
+
+        expect(result.exitCode, name).not.toBe(0)
+        expect(result.stdout, name).not.toContain('stage=active-state-written')
+        expect(existsSync(`${runtimeRoot}-dashboard`), name).toBe(false)
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    }
+  })
+
+  it('records active Compose and running dashboard state when present', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-active-state-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(
+      join(dashboardRoot, 'docker-compose.yaml'),
+      `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
+    )
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain(
+        `evidence=active-compose:baseline:ref=ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest};digest=${fixture.expectedDashboardDigest}`,
+      )
+      expect(result.stdout).toContain(
+        `evidence=running-dashboard:baseline:digest=${fixture.expectedDashboardDigest};health=unknown`,
+      )
+      expect(result.stdout).toContain(
+        `evidence=active-compose:post-prune:ref=ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest};digest=${fixture.expectedDashboardDigest}`,
+      )
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('audits running dashboard independently when Compose is absent', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-runtime-without-compose-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          runningDashboardIds: ['abcdef123456'],
+          runningDashboardHealth: 'healthy',
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain('evidence=active-compose:baseline:absent')
+      expect(result.stdout).toContain(
+        `evidence=running-dashboard:baseline:digest=${fixture.expectedDashboardDigest};health=healthy`,
+      )
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('ignores a dashboard service from another Compose project', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-project-labels-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          runningDashboardContainers: [
+            {id: 'abcdef123456', project: 'dashboard', service: 'dashboard'},
+            {id: 'abcdef654321', project: 'other', service: 'dashboard'},
+          ],
+          runningDashboardHealth: 'healthy',
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain(
+        `evidence=running-dashboard:baseline:digest=${fixture.expectedDashboardDigest};health=healthy`,
+      )
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('reports no running dashboard when the fixed service label has no matches', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-no-running-dashboard-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {runningDashboardIds: []}),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain('evidence=running-dashboard:baseline:absent')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('fails closed on multiple or malformed running dashboard matches', async () => {
+    const cases = [
+      ['multiple matches', {runningDashboardIds: ['abcdef123456', 'abcdef654321']}],
+      ['malformed container identity', {runningDashboardIds: ['not-a-container-id']}],
+      [
+        'malformed image digest',
+        {runningDashboardIds: ['abcdef123456'], runningDashboardImageDigest: 'sha256:not-a-digest'},
+      ],
+    ] as const
+
+    for (const [name, options] of cases) {
+      const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-ambiguous-runtime-'))
+      const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+      const dashboardRoot = `${runtimeRoot}-dashboard`
+
+      try {
+        const result = await runShellProgram(
+          adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, options),
+          encodeRemotePayload(fixture),
+        )
+
+        expect(result.exitCode, name).not.toBe(0)
+        expect(result.stdout, name).toContain('stage=baseline-evidence')
+        expect(result.stdout, name).not.toContain('stage=prune-started')
+        expect(existsSync(dashboardRoot), name).toBe(false)
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    }
+  })
+
   it('releases the process-bound lock after interruption without stale-lock cleanup', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-interrupted-'))
     const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
@@ -301,6 +829,8 @@ describe('remote transaction process boundary', () => {
 
       expect(result.exitCode).toBe(75)
       expect(result.stdout).toBe('stage=remote-transaction-started\nstage=lock-contention\n')
+      expect(result.stdout).not.toContain('baseline-evidence')
+      expect(result.stdout).not.toContain('prune')
       expect(existsSync(dashboardRoot)).toBe(false)
       expect(readdirSync(runtimeRoot).filter(name => name.startsWith('attempt.'))).toEqual([])
     } finally {
@@ -575,7 +1105,7 @@ describe('remote transaction process boundary', () => {
           start(controller) {
             controller.enqueue(
               text.encode(
-                `stage=complete\nevidence=free-bytes:6442450944\nevidence=service:dashboard\nevidence=image:ghcr.io/fro-bot/dashboard:2026.08.01@${digest}\nevidence=secret:oauth-secret\n`,
+                `stage=complete\nevidence=free-bytes:6442450944\nevidence=storage:baseline:probe=/var/lib/docker;mount=/;source=/dev/vda1;fstype=ext4;free-bytes=6442450944\nevidence=docker-df:baseline:type=Images;count=2;active=1;size-bytes=1000;reclaimable-bytes=0\nevidence=protected-image:baseline:ref=ghcr.io/fro-bot/dashboard@${digest};count=1\nevidence=capacity:post-prune:free-bytes=6442450944\nevidence=service:dashboard\nevidence=image:ghcr.io/fro-bot/dashboard:2026.08.01@${digest}\nevidence=secret:oauth-secret\n`,
               ),
             )
             controller.close()
@@ -592,6 +1122,10 @@ describe('remote transaction process boundary', () => {
     })
 
     expect(result.evidence).toContain('evidence=free-bytes:6442450944')
+    expect(result.evidence).toContain(
+      'evidence=storage:baseline:probe=/var/lib/docker;mount=/;source=/dev/vda1;fstype=ext4;free-bytes=6442450944',
+    )
+    expect(result.evidence).toContain('evidence=capacity:post-prune:free-bytes=6442450944')
     expect(result.evidence).toContain('evidence=service:dashboard')
     expect(result.evidence).toContain(`evidence=image:ghcr.io/fro-bot/dashboard:2026.08.01@${digest}`)
     expect(result.evidence.join('\n')).not.toContain('oauth-secret')

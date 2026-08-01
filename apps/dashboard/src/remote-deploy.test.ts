@@ -1219,9 +1219,9 @@ describe('remote transaction process boundary', () => {
   })
 })
 
-describe('U4 staged image acquisition and publication ordering', () => {
+describe('staged image acquisition and publication ordering', () => {
   it('pulls and exactly verifies every staged service image before publishing Compose last', async () => {
-    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-pull-'))
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-staged-pull-'))
     const root = realpathSync(parent)
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
@@ -1274,7 +1274,7 @@ describe('U4 staged image acquisition and publication ordering', () => {
   })
 
   it('rejects a tag-only staged image before active-state mutation', async () => {
-    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-tag-only-'))
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-tag-only-'))
     const root = realpathSync(parent)
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
@@ -1317,7 +1317,7 @@ describe('U4 staged image acquisition and publication ordering', () => {
     ] as const
 
     for (const testCase of cases) {
-      const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-u4-${testCase.name}-`))
+      const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-image-case-${testCase.name}-`))
       const root = realpathSync(parent)
       const runtimeRoot = join(root, 'dashboard-deploy')
       const dashboardRoot = `${runtimeRoot}-dashboard`
@@ -1342,7 +1342,7 @@ describe('U4 staged image acquisition and publication ordering', () => {
   })
 
   it('uses the exact cached image set when registry pull fails', async () => {
-    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-cache-fallback-'))
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-cache-fallback-'))
     const root = realpathSync(parent)
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`

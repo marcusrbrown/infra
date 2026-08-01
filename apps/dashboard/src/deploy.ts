@@ -499,15 +499,8 @@ async function runCommand(
   const stderr = await new Response(proc.stderr).text()
   const exitCode = await proc.exited
 
-  if (stdout.trim()) {
-    console.warn(stdout.trim())
-  }
-
   if (exitCode !== 0) {
     console.error(`\u001B[1;31mFAILED:\u001B[0m ${label}`)
-    if (stderr.trim()) {
-      console.error(stderr.trim())
-    }
     throw new Error(`Command failed with exit code ${exitCode}: ${command.join(' ')}`)
   }
 
@@ -555,10 +548,7 @@ async function resolveImageDigest(version: string, spawnFn: SpawnFn, deployEnv: 
     return fallbackMatch[1]
   }
 
-  throw new Error(
-    `Could not parse image digest from imagetools inspect output for ${imageRef}.\n` +
-      `Output: ${trimmed.slice(0, 200)}`,
-  )
+  throw new Error(`Could not parse image digest from imagetools inspect output for ${imageRef}.`)
 }
 
 // ─── Main deploy orchestrator ─────────────────────────────────────────────────
@@ -586,10 +576,11 @@ async function resolveImageDigest(version: string, spawnFn: SpawnFn, deployEnv: 
  * 6. Versioned: resolve digest via imagetools inspect + cross-check; generate compose content
  *    No-version: read digest from committed docker-compose.yaml
  * 7. Read the committed Caddyfile and build the .env and PEM payload locally
- * 8. Start one SSH process with the framed payload; the remote process validates the
- *    runtime root, acquires flock, converges files, pulls and starts dashboard, verifies
- *    its digest and health, then converges Caddy before releasing the lock
- * 9. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
+ * 8. Start one SSH process with the framed payload. The transaction acquires the lock,
+ *    captures baseline evidence, prunes, and enforces the first gate; acquires staged
+ *    images and verifies exact digests; enforces the second gate; publishes active files
+ *    with Compose last; converges dashboard and Caddy with runtime verification; then unlocks.
+ * 9. Run advisory operator/public probes and versioned local audit write-back after unlock.
  */
 export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
@@ -721,13 +712,19 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     // Phase 5: One remote transaction owns the lock and every host mutation.
     // The lock remains held through dashboard health/digest verification and Caddy convergence.
     console.warn('\u001B[1;34m==>\u001B[0m Running locked dashboard remote transaction')
-    await runRemoteTransaction({
+    const remoteTransactionResult = await runRemoteTransaction({
       host,
       payload,
       env: deployEnv,
       keyPath,
       spawn: spawnFn,
     })
+
+    // The remote boundary has already filtered stdout to the deterministic stage
+    // and evidence allowlist. Never log raw remote stdout/stderr here.
+    for (const evidenceLine of remoteTransactionResult.evidence) {
+      console.warn(evidenceLine)
+    }
 
     console.warn('\u001B[1;32m✓\u001B[0m Remote dashboard transaction converged')
 

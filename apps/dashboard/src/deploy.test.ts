@@ -2051,6 +2051,44 @@ describe('versioned deploy path', () => {
     expect(imagetoolsCall?.cmd.join(' ')).toContain('ghcr.io/fro-bot/dashboard:2026.06.47')
   })
 
+  it('does not log raw local resolver stdout or stderr', async () => {
+    const unfilteredOutput = 'malicious resolver output oauth-secret-value'
+    const responses = makeVersionedHappyPathResponses()
+    responses[0] = makeSpawnResult(
+      `Name: ghcr.io/fro-bot/dashboard:2026.06.47\nDigest: ${RESOLVED_DIGEST}\n${unfilteredOutput}\n`,
+      `raw resolver stderr ${unfilteredOutput}`,
+    )
+    const {spawnFn} = makeFakeSpawn(responses)
+    const logMessages: string[] = []
+    const originalWarn = console.warn
+    const originalError = console.error
+    console.warn = (...args: unknown[]) => {
+      logMessages.push(args.map(String).join(' '))
+    }
+    console.error = (...args: unknown[]) => {
+      logMessages.push(args.map(String).join(' '))
+    }
+
+    try {
+      await deploy({
+        env: {...VALID_ENV, GATEWAY_VPC_IP: ''},
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        version: '2026.06.47',
+        digest: RESOLVED_DIGEST,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      })
+    } finally {
+      console.warn = originalWarn
+      console.error = originalError
+    }
+
+    expect(logMessages.join('\n')).not.toContain(unfilteredOutput)
+  })
+
   it('succeeds without dispatched digest (resolves and uses resolved digest only)', async () => {
     const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
 
@@ -2166,7 +2204,140 @@ describe('no-version fallback', () => {
   })
 })
 
-// ─── Gap 1: versioned deploy writes local compose path ───────────────────────
+// ─── Transaction readback and post-transaction audit ordering ─────────────────
+
+describe('locked transaction readback and audit ordering', () => {
+  it('logs only allowlisted transaction stages and evidence', async () => {
+    const secret = 'oauth-secret-value'
+    const {spawnFn} = makeFakeSpawn([
+      makeSpawnResult(
+        `${[
+          'stage=remote-transaction-started',
+          'evidence=capacity:post-prune:free-bytes=8589934592',
+          `evidence=unknown:operator-secret=${secret}`,
+          'stage=unknown',
+          `arbitrary remote stdout ${secret}`,
+          'stage=complete',
+        ].join('\n')}\n`,
+        `unfiltered remote stderr ${secret}`,
+      ),
+    ])
+    const logMessages: string[] = []
+    const originalWarn = console.warn
+    const originalError = console.error
+    console.warn = (...args: unknown[]) => {
+      logMessages.push(args.map(String).join(' '))
+    }
+    console.error = (...args: unknown[]) => {
+      logMessages.push(args.map(String).join(' '))
+    }
+
+    try {
+      await deploy({
+        env: {...VALID_ENV, GATEWAY_VPC_IP: ''},
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHealthzOk,
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      })
+    } finally {
+      console.warn = originalWarn
+      console.error = originalError
+    }
+
+    const logs = logMessages.join('\n')
+    expect(logs).toContain('stage=remote-transaction-started')
+    expect(logs).toContain('evidence=capacity:post-prune:free-bytes=8589934592')
+    expect(logs).toContain('stage=complete')
+    expect(logs).not.toContain('evidence=unknown')
+    expect(logs).not.toContain('stage=unknown')
+    expect(logs).not.toContain('arbitrary remote stdout')
+    expect(logs).not.toContain('unfiltered remote stderr')
+    expect(logs).not.toContain(secret)
+  })
+
+  it('surfaces the deterministic remote stage and exit code without probing or auditing', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'deploy-test-lock-failure-'))
+    const localComposePath = join(tmpDir, 'docker-compose.yaml')
+    const originalCompose = 'committed compose sentinel\n'
+    writeFileSync(localComposePath, originalCompose, 'utf8')
+    const secret = 'cookie-secret-value'
+    const responses = makeVersionedHappyPathResponses()
+    responses[1] = makeSpawnResult(`stage=lock-contention\n`, `remote stderr ${secret}`, 75)
+    const {spawnFn} = makeFakeSpawn(responses)
+    const probedUrls: string[] = []
+
+    try {
+      await expect(
+        deploy({
+          env: VALID_ENV,
+          spawn: spawnFn,
+          resolve: resolvesOk,
+          fetch: async (url: string) => {
+            probedUrls.push(url)
+            return fetchHealthzOk(url)
+          },
+          version: '2026.06.47',
+          digest: RESOLVED_DIGEST,
+          localComposePath,
+          probeAttempts: 1,
+          probeIntervalMs: 0,
+          sleep: async () => {},
+        }),
+      ).rejects.toMatchObject({
+        stage: 'lock-contention',
+        exitCode: 75,
+        message: expect.stringContaining('exit code 75'),
+      })
+
+      expect(probedUrls).toEqual([])
+      expect(readFileSync(localComposePath, 'utf8')).toBe(originalCompose)
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+
+  it('writes the versioned audit pin only after advisory probes, even when probes fail', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'deploy-test-audit-order-'))
+    const localComposePath = join(tmpDir, 'docker-compose.yaml')
+    const originalCompose = readFileSync(join(import.meta.dir, '..', 'docker-compose.yaml'), 'utf8')
+    writeFileSync(localComposePath, originalCompose, 'utf8')
+    let probeCount = 0
+
+    try {
+      const {spawnFn} = makeFakeSpawn(makeVersionedHappyPathResponses())
+      await expect(
+        deploy({
+          env: {...VALID_ENV, GATEWAY_VPC_IP: ''},
+          spawn: spawnFn,
+          resolve: resolvesOk,
+          fetch: async () => {
+            probeCount++
+            expect(readFileSync(localComposePath, 'utf8')).toBe(originalCompose)
+            throw new Error('advisory probe unavailable')
+          },
+          version: '2026.06.47',
+          digest: RESOLVED_DIGEST,
+          localComposePath,
+          probeAttempts: 1,
+          probeIntervalMs: 0,
+          sleep: async () => {},
+        }),
+      ).resolves.toBeUndefined()
+
+      expect(probeCount).toBe(1)
+      const auditedCompose = readFileSync(localComposePath, 'utf8')
+      expect(auditedCompose).toContain(`ghcr.io/fro-bot/dashboard:2026.06.47@${RESOLVED_DIGEST}`)
+      expect(auditedCompose).not.toBe(originalCompose)
+    } finally {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
+  })
+})
+
+// ─── Versioned deploy writes local compose path ──────────────────────────────
 //
 // After a successful versioned deploy, the local compose file at localComposePath
 // must be updated to reflect version@resolvedDigest. This is what the workflow's

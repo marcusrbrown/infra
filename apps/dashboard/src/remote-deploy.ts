@@ -525,7 +525,8 @@ export class RemoteTransactionError extends Error {
   readonly exitCode?: number
 
   constructor(stage: RemoteTransactionStage, reason: string, exitCode?: number) {
-    super(`Remote dashboard deploy failed at ${stage}: ${reason}`)
+    const exitSuffix = exitCode === undefined ? '' : ` (exit code ${exitCode})`
+    super(`Remote dashboard deploy failed at ${stage}${exitSuffix}: ${reason}`)
     this.name = 'RemoteTransactionError'
     this.stage = stage
     this.exitCode = exitCode

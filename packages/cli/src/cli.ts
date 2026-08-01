@@ -2,6 +2,7 @@
 
 import {goke} from 'goke'
 import pkg from '../package.json' with {type: 'json'}
+import {registerAgentCommands} from './commands/agent'
 import {registerBrokerCommands} from './commands/broker'
 import {registerCliproxyCommands} from './commands/cliproxy'
 import {registerDashboardCommands} from './commands/dashboard'
@@ -22,6 +23,7 @@ const cli = goke('infra')
 cli.option('--verbose', 'Enable verbose output for all commands')
 
 registerKeewebCommands(cli)
+registerAgentCommands(cli)
 registerCliproxyCommands(cli)
 registerBrokerCommands(cli)
 registerGatewayCommands(cli)

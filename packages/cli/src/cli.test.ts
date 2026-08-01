@@ -48,12 +48,11 @@ describe('infra CLI', () => {
     expect(stdout).toContain('--dry-run')
   })
 
-  it('falls back to root help for an unknown command', async () => {
-    const {stdout, stderr, exitCode} = await runCli('nonexistent')
+  it('errors on an unknown command', async () => {
+    const {stderr, exitCode} = await runCli('nonexistent')
 
-    expect(exitCode).toBe(0)
-    expect(stderr).toBe('')
-    expect(stdout).toContain('Usage:')
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain('Unknown command')
   })
 
   it('exits non-zero and prints an error for an invalid option', async () => {

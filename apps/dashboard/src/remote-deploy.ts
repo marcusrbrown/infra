@@ -1,6 +1,6 @@
 const textEncoder = new TextEncoder()
 
-const PAYLOAD_HEADER = 'dashboard-deploy-payload v1\n'
+const PAYLOAD_HEADER = 'dashboard-deploy-payload v2\n'
 const PAYLOAD_END = 'end\n'
 
 export const REMOTE_RUNTIME_ROOT = '/run/dashboard-deploy' as const
@@ -14,40 +14,52 @@ export const REMOTE_TRANSACTION_PROGRAM = [
   'umask 077',
   'readonly RUNTIME_ROOT="/run/dashboard-deploy"',
   'readonly LOCK_PATH="/run/dashboard-deploy/lock"',
+  'readonly DASHBOARD_ROOT="/opt/dashboard"',
+  'readonly DASHBOARD_CONFIG_DIR="/opt/dashboard/config"',
+  'readonly DASHBOARD_DATA_DIR="/opt/dashboard/data"',
+  'readonly DASHBOARD_ENV_PATH="/opt/dashboard/.env"',
+  'readonly DASHBOARD_COMPOSE_PATH="/opt/dashboard/docker-compose.yaml"',
+  'readonly DASHBOARD_CADDYFILE_PATH="/opt/dashboard/config/Caddyfile"',
+  'readonly DASHBOARD_APP_KEY_PATH="/opt/dashboard/config/github-app.pem"',
+  'readonly DASHBOARD_LEGACY_OVERRIDE_PATH="/opt/dashboard/docker-compose.override.yaml"',
   'readonly MAX_TOTAL_BYTES=786432',
   'readonly MAX_ENV_BYTES=65536',
   'readonly MAX_COMPOSE_BYTES=524288',
   'readonly MAX_CADDYFILE_BYTES=65536',
   'readonly MAX_GITHUB_APP_KEY_BYTES=131072',
+  'readonly MAX_EXPECTED_DASHBOARD_DIGEST_BYTES=71',
   'stage=""',
   String.raw`fail() { printf "%s\n" "$1" >&2; exit 1; }`,
-  'cleanup() { if [ -n "$stage" ] && [ -d "$stage" ] && [ ! -L "$stage" ]; then rm -rf -- "$stage"; fi; }',
-  'trap cleanup EXIT HUP INT TERM',
+  'cleanup() { if [ -n "$stage" ] && [ -d "$stage" ] && [ ! -L "$stage" ]; then rm -rf -- "$stage" >/dev/null 2>&1 || :; fi; }',
+  'trap cleanup EXIT',
+  'trap "exit 129" HUP',
+  'trap "exit 130" INT',
+  'trap "exit 143" TERM',
   String.raw`printf "%s\n" "stage=remote-transaction-started"`,
   'if [ -L "$RUNTIME_ROOT" ] || { [ -e "$RUNTIME_ROOT" ] && [ ! -d "$RUNTIME_ROOT" ]; }; then fail "runtime root is unsafe"; fi',
-  'if [ ! -e "$RUNTIME_ROOT" ]; then install -d -m 0700 -o 0 -g 0 "$RUNTIME_ROOT" || fail "runtime root creation failed"; fi',
+  'if [ ! -e "$RUNTIME_ROOT" ]; then install -d -m 0700 -o 0 -g 0 "$RUNTIME_ROOT" >/dev/null 2>&1 || fail "runtime root creation failed"; fi',
   '[ -d "$RUNTIME_ROOT" ] && [ ! -L "$RUNTIME_ROOT" ] || fail "runtime root is not a directory"',
-  '[ "$(realpath -e -- "$RUNTIME_ROOT")" = "$RUNTIME_ROOT" ] || fail "runtime root is not canonical"',
-  'root_stat="$(stat -c "%u:%g:%a:%F" -- "$RUNTIME_ROOT")" || fail "runtime root stat failed"',
+  '[ "$(realpath -e -- "$RUNTIME_ROOT" 2>/dev/null)" = "$RUNTIME_ROOT" ] || fail "runtime root is not canonical"',
+  'root_stat="$(stat -c "%u:%g:%a:%F" -- "$RUNTIME_ROOT" 2>/dev/null)" || fail "runtime root stat failed"',
   '[ "$root_stat" = "0:0:700:directory" ] || fail "runtime root ownership or mode is unsafe"',
   'if [ -L "$LOCK_PATH" ] || { [ -e "$LOCK_PATH" ] && [ ! -f "$LOCK_PATH" ]; }; then fail "lock path is not a regular file"; fi',
-  'if [ ! -e "$LOCK_PATH" ]; then install -m 0600 -o 0 -g 0 /dev/null "$LOCK_PATH" || fail "lock path creation failed"; fi',
+  'if [ ! -e "$LOCK_PATH" ]; then install -m 0600 -o 0 -g 0 /dev/null "$LOCK_PATH" >/dev/null 2>&1 || fail "lock path creation failed"; fi',
   '[ -f "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ] || fail "lock path is not a regular file"',
-  'lock_stat="$(stat -c "%u:%g:%a:%F" -- "$LOCK_PATH")" || fail "lock path stat failed"',
+  'lock_stat="$(stat -c "%u:%g:%a:%F" -- "$LOCK_PATH" 2>/dev/null)" || fail "lock path stat failed"',
   '[ "$lock_stat" = "0:0:600:regular file" ] || fail "lock path ownership or mode is unsafe"',
-  'exec 9>"$LOCK_PATH" || fail "lock descriptor failed"',
-  String.raw`if ! flock -w 180 9; then printf "%s\n" "stage=lock-contention"; exit 75; fi`,
+  'exec 9>"$LOCK_PATH" 2>/dev/null || fail "lock descriptor failed"',
+  String.raw`if ! flock -w 180 9 >/dev/null 2>&1; then printf "%s\n" "stage=lock-contention"; exit 75; fi`,
   String.raw`printf "%s\n" "stage=lock-acquired"`,
-  'stage="$(mktemp -d -- "$RUNTIME_ROOT/attempt.XXXXXX")" || fail "staging directory creation failed"',
-  'chown 0:0 "$stage" || fail "staging directory ownership failed"',
-  'chmod 0700 "$stage" || fail "staging directory mode failed"',
-  '[ "$(realpath -e -- "$stage")" = "$stage" ] || fail "staging directory is not canonical"',
+  'stage="$(mktemp -d -- "$RUNTIME_ROOT/attempt.XXXXXX" 2>/dev/null)" || fail "staging directory creation failed"',
+  'chown 0:0 "$stage" >/dev/null 2>&1 || fail "staging directory ownership failed"',
+  'chmod 0700 "$stage" >/dev/null 2>&1 || fail "staging directory mode failed"',
+  '[ "$(realpath -e -- "$stage" 2>/dev/null)" = "$stage" ] || fail "staging directory is not canonical"',
   'read_line() { IFS= read -r line || fail "malformed payload"; }',
   'read_line',
-  '[ "$line" = "dashboard-deploy-payload v1" ] || fail "unsupported payload protocol"',
+  '[ "$line" = "dashboard-deploy-payload v2" ] || fail "unsupported payload protocol"',
   'payload_bytes=0',
-  'seen_env=0; seen_compose=0; seen_caddyfile=0; seen_github_app_key=0',
-  'for field_number in 1 2 3 4; do',
+  'seen_env=0; seen_compose=0; seen_caddyfile=0; seen_github_app_key=0; seen_expected_dashboard_digest=0',
+  'for field_number in 1 2 3 4 5; do',
   '  read_line',
   '  [ "$line" != "end" ] || fail "missing payload field"',
   '  [[ "$line" =~ ^field[[:space:]]([a-z_]+)[[:space:]]([0-9]+)$ ]] || fail "malformed payload field header"',
@@ -58,35 +70,71 @@ export const REMOTE_TRANSACTION_PROGRAM = [
   '    compose) [ "$seen_compose" -eq 0 ] || fail "duplicate payload field"; seen_compose=1; target="$stage/compose"; field_limit="$MAX_COMPOSE_BYTES" ;;',
   '    caddyfile) [ "$seen_caddyfile" -eq 0 ] || fail "duplicate payload field"; seen_caddyfile=1; target="$stage/caddyfile"; field_limit="$MAX_CADDYFILE_BYTES" ;;',
   '    github_app_key) [ "$seen_github_app_key" -eq 0 ] || fail "duplicate payload field"; seen_github_app_key=1; target="$stage/github-app.pem"; field_limit="$MAX_GITHUB_APP_KEY_BYTES" ;;',
+  '    expected_dashboard_digest) [ "$seen_expected_dashboard_digest" -eq 0 ] || fail "duplicate payload field"; seen_expected_dashboard_digest=1; target="$stage/expected-dashboard-digest"; field_limit="$MAX_EXPECTED_DASHBOARD_DIGEST_BYTES" ;;',
   '    *) fail "unknown payload field" ;;',
   '  esac',
   '  [ "$field_length" -le "$field_limit" ] || fail "payload field exceeds size limit"',
   '  [ "$field_length" -gt 0 ] || fail "empty payload field"',
   '  payload_bytes=$((payload_bytes + field_length))',
   '  [ "$payload_bytes" -le "$MAX_TOTAL_BYTES" ] || fail "payload exceeds total size limit"',
-  '  dd of="$target" bs=1 count="$field_length" status=none || fail "payload field read failed"',
-  '  actual_size="$(stat -c "%s" -- "$target")" || fail "payload field stat failed"',
+  '  dd of="$target" bs=1 count="$field_length" status=none 2>/dev/null || fail "payload field read failed"',
+  '  actual_size="$(stat -c "%s" -- "$target" 2>/dev/null)" || fail "payload field stat failed"',
   '  [ "$actual_size" = "$field_length" ] || fail "truncated payload field"',
   'done',
   'read_line',
   '[ "$line" = "end" ] || fail "malformed payload terminator"',
-  '[ "$seen_env" -eq 1 ] && [ "$seen_compose" -eq 1 ] && [ "$seen_caddyfile" -eq 1 ] && [ "$seen_github_app_key" -eq 1 ] || fail "missing payload field"',
-  'remaining_bytes="$(dd bs=1 count=1 status=none | wc -c)"',
+  '[ "$seen_env" -eq 1 ] && [ "$seen_compose" -eq 1 ] && [ "$seen_caddyfile" -eq 1 ] && [ "$seen_github_app_key" -eq 1 ] && [ "$seen_expected_dashboard_digest" -eq 1 ] || fail "missing payload field"',
+  'remaining_bytes="$(dd bs=1 count=1 status=none 2>/dev/null | wc -c)"',
   '[ "$remaining_bytes" -eq 0 ] || fail "trailing payload data"',
   String.raw`printf "%s\n" "stage=payload-decoded"`,
+  'expected_dashboard_digest="$(cat -- "$stage/expected-dashboard-digest" 2>/dev/null)" || fail "expected dashboard digest read failed"',
+  '[[ "$expected_dashboard_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "malformed expected dashboard digest"',
+  'if [ -L "$DASHBOARD_ROOT" ] || { [ -e "$DASHBOARD_ROOT" ] && [ ! -d "$DASHBOARD_ROOT" ]; }; then fail "dashboard root is unsafe"; fi',
+  'if [ -L "$DASHBOARD_CONFIG_DIR" ] || { [ -e "$DASHBOARD_CONFIG_DIR" ] && [ ! -d "$DASHBOARD_CONFIG_DIR" ]; }; then fail "dashboard config is unsafe"; fi',
+  'install -d -m 0755 -o 0 -g 0 "$DASHBOARD_ROOT" >/dev/null 2>&1 || fail "dashboard root creation failed"',
+  'install -d -m 0755 -o 0 -g 0 "$DASHBOARD_CONFIG_DIR" >/dev/null 2>&1 || fail "dashboard config creation failed"',
+  'chown 0:0 "$DASHBOARD_ROOT" "$DASHBOARD_CONFIG_DIR" >/dev/null 2>&1 || fail "dashboard root ownership failed"',
+  '[ "$(realpath -e "$DASHBOARD_ROOT" 2>/dev/null)" = "$DASHBOARD_ROOT" ] || fail "dashboard root is not canonical"',
+  '[ "$(realpath -e "$DASHBOARD_CONFIG_DIR" 2>/dev/null)" = "$DASHBOARD_CONFIG_DIR" ] || fail "dashboard config is not canonical"',
+  'if [ -L "$DASHBOARD_DATA_DIR" ] || { [ -e "$DASHBOARD_DATA_DIR" ] && [ ! -d "$DASHBOARD_DATA_DIR" ]; }; then fail "dashboard data is unsafe"; fi',
+  'install -d -m 0700 -o 1000 -g 1000 "$DASHBOARD_DATA_DIR" >/dev/null 2>&1 || fail "dashboard data creation failed"',
+  'chown -R 1000:1000 "$DASHBOARD_DATA_DIR" >/dev/null 2>&1 || fail "dashboard data ownership failed"',
+  'chmod 0700 "$DASHBOARD_DATA_DIR" >/dev/null 2>&1 || fail "dashboard data mode failed"',
+  '[ -d "$DASHBOARD_DATA_DIR" ] && [ ! -L "$DASHBOARD_DATA_DIR" ] && [ "$(realpath -e "$DASHBOARD_DATA_DIR" 2>/dev/null)" = "$DASHBOARD_DATA_DIR" ] || fail "dashboard data is not canonical"',
+  'install -m 0600 -o 0 -g 0 "$stage/env" "$DASHBOARD_ENV_PATH" >/dev/null 2>&1 || fail "environment publication failed"',
+  'install -m 0644 -o 0 -g 0 "$stage/compose" "$DASHBOARD_COMPOSE_PATH" >/dev/null 2>&1 || fail "compose publication failed"',
+  'install -m 0644 -o 0 -g 0 "$stage/caddyfile" "$DASHBOARD_CADDYFILE_PATH" >/dev/null 2>&1 || fail "Caddyfile publication failed"',
+  'install -m 0600 -o 0 -g 0 "$stage/github-app.pem" "$DASHBOARD_APP_KEY_PATH" >/dev/null 2>&1 || fail "GitHub App key publication failed"',
+  'chmod 0600 "$DASHBOARD_APP_KEY_PATH" >/dev/null 2>&1 || fail "GitHub App key mode failed"',
+  'chown 1000:1000 "$DASHBOARD_APP_KEY_PATH" >/dev/null 2>&1 || fail "GitHub App key ownership failed"',
+  'rm -f -- "$DASHBOARD_LEGACY_OVERRIDE_PATH" >/dev/null 2>&1 || fail "legacy override removal failed"',
+  String.raw`printf "%s\n" "stage=active-state-written"`,
+  'cd "$DASHBOARD_ROOT" || fail "dashboard directory change failed"',
+  'printf "%s\n" "stage=image-acquisition"',
+  'docker compose pull >/dev/null 2>&1 || fail "compose pull failed"',
+  'docker compose up -d --no-build --wait --wait-timeout 120 dashboard >/dev/null 2>&1 || fail "dashboard convergence failed"',
+  'dashboard_container_id="$(docker compose ps -q dashboard 2>/dev/null)" || fail "dashboard container lookup failed"',
+  '[ -n "$dashboard_container_id" ] || fail "dashboard container is missing"',
+  'dashboard_image_sha="$(docker inspect --format \'{{.Image}}\' "$dashboard_container_id" 2>/dev/null)" || fail "dashboard image lookup failed"',
+  '[ -n "$dashboard_image_sha" ] || fail "dashboard image identity is missing"',
+  'dashboard_repo_digests="$(docker inspect --format \'{{json .RepoDigests}}\' "$dashboard_image_sha" 2>/dev/null)" || fail "dashboard digest lookup failed"',
+  'case "$dashboard_repo_digests" in *"$expected_dashboard_digest"*) ;; *) fail "dashboard digest verification failed" ;; esac',
+  'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy >/dev/null 2>&1 || fail "Caddy convergence failed"',
+  String.raw`printf "%s\n" "stage=runtime-converged"`,
   String.raw`printf "%s\n" "stage=complete"`,
 ].join('\n')
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\"'\"'")}'`
 const REMOTE_SSH_PROGRAM = `/usr/bin/env -i PATH=${REMOTE_COMMAND_PATH} HOME=/root DOCKER_CONTEXT=default DOCKER_HOST=unix:///var/run/docker.sock /bin/bash -c ${shellQuote(REMOTE_TRANSACTION_PROGRAM)}`
 
-export const REMOTE_PAYLOAD_PROTOCOL_VERSION = 1 as const
+export const REMOTE_PAYLOAD_PROTOCOL_VERSION = 2 as const
 
 export const REMOTE_PAYLOAD_FIELD_LIMITS = {
   env: 64 * 1024,
   compose: 512 * 1024,
   caddyfile: 64 * 1024,
   github_app_key: 128 * 1024,
+  expected_dashboard_digest: 71,
 } as const
 
 export const REMOTE_PAYLOAD_MAX_BYTES = 786432
@@ -94,7 +142,6 @@ export const REMOTE_PAYLOAD_MAX_BYTES = 786432
 export interface RemoteSshCommandOptions {
   host: string
   keyPath?: string
-  controlPath?: string
 }
 
 export interface RemoteProcess {
@@ -123,7 +170,6 @@ export interface RemoteTransactionOptions {
   env: Readonly<Record<string, string>>
   spawn: RemoteSpawnFn
   keyPath?: string
-  controlPath?: string
 }
 
 export type RemoteTransactionStage =
@@ -132,9 +178,6 @@ export type RemoteTransactionStage =
   | 'lock-contention'
   | 'lock-acquired'
   | 'payload-decoded'
-  | 'baseline-evidence'
-  | 'post-prune-evidence'
-  | 'headroom-verified'
   | 'image-acquisition'
   | 'active-state-written'
   | 'runtime-converged'
@@ -173,9 +216,6 @@ export function buildRemoteSshCommand(options: RemoteSshCommandOptions): string[
     'ConnectTimeout=10',
     '-o',
     'StrictHostKeyChecking=yes',
-    ...(options.controlPath
-      ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${options.controlPath}`, '-o', 'ControlPersist=60s']
-      : []),
     `root@${options.host}`,
     REMOTE_SSH_PROGRAM,
   ]
@@ -196,9 +236,6 @@ const ALLOWED_STAGES = new Set<string>([
   'lock-contention',
   'lock-acquired',
   'payload-decoded',
-  'baseline-evidence',
-  'post-prune-evidence',
-  'headroom-verified',
   'image-acquisition',
   'active-state-written',
   'runtime-converged',
@@ -311,6 +348,7 @@ export interface RemoteDeployPayload {
   compose: string
   caddyfile: string
   githubAppKey: string
+  expectedDashboardDigest: string
 }
 
 type PayloadField = keyof typeof REMOTE_PAYLOAD_FIELD_LIMITS
@@ -320,7 +358,10 @@ const PAYLOAD_FIELDS: readonly [PayloadField, keyof RemoteDeployPayload][] = [
   ['compose', 'compose'],
   ['caddyfile', 'caddyfile'],
   ['github_app_key', 'githubAppKey'],
+  ['expected_dashboard_digest', 'expectedDashboardDigest'],
 ]
+
+const DASHBOARD_DIGEST_RE = /^sha256:[0-9a-f]{64}$/
 
 const decodeUtf8 = (bytes: Uint8Array, context: string): string => {
   try {
@@ -364,6 +405,9 @@ export function encodeRemotePayload(payload: RemoteDeployPayload): Uint8Array {
 
   for (const [wireField, payloadField] of PAYLOAD_FIELDS) {
     const value = payload[payloadField]
+    if (payloadField === 'expectedDashboardDigest' && !DASHBOARD_DIGEST_RE.test(value)) {
+      throw new Error('Malformed remote deploy payload: invalid expected dashboard digest')
+    }
     const bytes = assertPayloadField(wireField, value)
     parts.push(textEncoder.encode(`field ${wireField} ${bytes.byteLength}\n`), bytes)
   }
@@ -475,10 +519,16 @@ export function decodeRemotePayload(encoded: Uint8Array): RemoteDeployPayload {
     throw new Error('Malformed remote deploy payload: trailing data')
   }
 
+  const expectedDashboardDigest = values.expectedDashboardDigest as string
+  if (!DASHBOARD_DIGEST_RE.test(expectedDashboardDigest)) {
+    throw new Error('Malformed remote deploy payload: invalid expected dashboard digest')
+  }
+
   return {
     env: values.env as string,
     compose: values.compose as string,
     caddyfile: values.caddyfile as string,
     githubAppKey: values.githubAppKey as string,
+    expectedDashboardDigest,
   }
 }

@@ -1,4 +1,4 @@
-import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -17,6 +17,7 @@ import {
   type SpawnFn,
   type SpawnResult,
 } from './deploy'
+import {buildRemoteSshCommand, decodeRemotePayload} from './remote-deploy'
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -28,8 +29,6 @@ const COMPOSE_DIGEST = parseComposeImageDigest(dashboardImageLine) ?? ''
 if (!COMPOSE_DIGEST) throw new Error('Could not derive COMPOSE_DIGEST from docker-compose.yaml')
 
 const FAKE_DIGEST = `sha256:${'a'.repeat(64)}`
-const REMOTE_DIR_PATH = '/opt/dashboard'
-const REMOTE_CONFIG_DIR_PATH = '/opt/dashboard/config'
 const DATA_DIR_PATH = '/opt/dashboard/data'
 
 const VALID_ENV = {
@@ -68,6 +67,10 @@ function makeSpawnResult(stdout = '', stderr = '', exitCode = 0): SpawnResult {
     },
     exited: Promise.resolve(exitCode),
   }
+}
+
+function makeRemoteFailureResponse(stage = 'payload-decoded'): SpawnResult {
+  return makeSpawnResult(`stage=${stage}\n`, '', 1)
 }
 
 /** Tracks all spawn calls for assertion. */
@@ -141,7 +144,7 @@ const fetchHealthzOk = async (_url: string, _opts?: RequestInit): Promise<Respon
 
 /**
  * Fake fetch that fails for /api/healthz (simulating ACME cert lag).
- * /operator/health also throws here — since Phase 12b is non-blocking, the deploy
+ * /operator/health also throws here — since the advisory operator check is non-blocking, the deploy
  * still completes. Tests that need /operator/health to return a specific status
  * should use a custom fetch mock.
  */
@@ -149,52 +152,27 @@ const fetchHealthzFail = async (_url: string, _opts?: RequestInit): Promise<Resp
   throw new Error('fetch failed')
 }
 
-/**
- * Builds a standard set of responses for a happy-path deploy.
- * Call order (no override upload — digest is sourced from committed compose file):
- *   0: constant-only root/config validation and convergence
- *   1: install -d /opt/dashboard/data (persistent listener storage)
- *   2: write .env (stdin)
- *   3: scp docker-compose.yaml
- *   4: scp Caddyfile
- *   5: write github-app.pem (stdin)
- *   6: chmod 0600 github-app.pem
- *   7: chown 1000:1000 github-app.pem
- *   8: rm -f docker-compose.override.yaml (stale legacy override cleanup)
- *   9: docker compose pull
- *  10: docker compose up -d --no-build --wait --wait-timeout 120 dashboard
- *  11: docker inspect (resolve image SHA for dashboard)
- *  12: docker inspect (RepoDigests for dashboard image)
- *  13: docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy
- *  14: (extra buffer)
- */
+/** Builds a successful remote transaction response for a committed local deploy. */
 function makeHappyPathResponses(): SpawnResult[] {
-  const repoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@${COMPOSE_DIGEST}`])
   return [
-    makeSpawnResult(), // 0: root/config validation and convergence
-    makeSpawnResult(), // 1: install -d data directory
-    makeSpawnResult(), // 2: write .env
-    makeSpawnResult(), // 3: scp compose
-    makeSpawnResult(), // 4: scp Caddyfile
-    makeSpawnResult(), // 5: write github-app.pem
-    makeSpawnResult(), // 6: chmod 0600
-    makeSpawnResult(), // 7: chown 1000:1000
-    makeSpawnResult(), // 8: rm -f docker-compose.override.yaml
-    makeSpawnResult(), // 9: compose pull
-    makeSpawnResult(), // 10: compose up dashboard
-    makeSpawnResult('sha256:imageid123'), // 11: docker inspect (image SHA)
-    makeSpawnResult(repoDigestsJson), // 12: docker inspect (RepoDigests)
-    makeSpawnResult(), // 13: compose up caddy
-    makeSpawnResult(), // 14: buffer
+    makeSpawnResult(
+      'stage=remote-transaction-started\nstage=lock-acquired\nstage=payload-decoded\nstage=active-state-written\nstage=image-acquisition\nstage=runtime-converged\nstage=complete\n',
+    ),
   ]
 }
 
-function getDataDirectorySetupCommand(calls: SpawnCall[]): string {
-  return calls.find(c => c.cmd.at(-1)?.includes(DATA_DIR_PATH))?.cmd.at(-1) ?? ''
+function getRemoteTransactionCommand(calls: SpawnCall[]): string {
+  return calls.find(c => c.cmd[0] === 'ssh')?.cmd.join(' ') ?? ''
 }
 
-function getRemoteRootSetupCommand(calls: SpawnCall[]): string {
-  return calls.find(c => c.cmd[0] === 'ssh' && c.cmd.at(-1)?.includes(REMOTE_CONFIG_DIR_PATH))?.cmd.at(-1) ?? ''
+function getRemoteTransactionProgram(calls: SpawnCall[]): string {
+  return calls.find(c => c.cmd[0] === 'ssh')?.cmd.at(-1) ?? ''
+}
+
+function getRemoteTransactionPayload(calls: SpawnCall[]) {
+  const transaction = calls.find(c => c.cmd[0] === 'ssh')
+  expect(transaction).toBeDefined()
+  return decodeRemotePayload(new TextEncoder().encode(transaction?.stdinData ?? ''))
 }
 
 // ─── parseComposeImageDigest ──────────────────────────────────────────────────
@@ -454,18 +432,18 @@ describe('happy path deploy', () => {
     const dataSetupCalls = calls.filter(c => c.cmd.at(-1)?.includes(DATA_DIR_PATH))
     expect(dataSetupCalls).toHaveLength(1)
 
-    const dataSetupIdx = calls.findIndex(c => c.cmd.at(-1)?.includes(DATA_DIR_PATH))
-    const envWriteIdx = calls.findIndex(c => c.stdinData.includes('DASHBOARD_DOMAIN='))
-    const appKeyWriteIdx = calls.findIndex(c => c.stdinData.includes('BEGIN RSA PRIVATE KEY'))
-    const composeOperationIndices = calls.flatMap((call, index) => {
-      const command = call.cmd.join(' ')
-      return command.includes('docker compose pull') || command.includes('docker compose up') ? [index] : []
-    })
+    const transaction = calls.find(c => c.cmd[0] === 'ssh')
+    expect(transaction).toBeDefined()
+    const command = transaction?.cmd.join(' ') ?? ''
+    const dataSetupIdx = command.indexOf('install -d -m 0700 -o 1000 -g 1000 "$DASHBOARD_DATA_DIR"')
+    const envWriteIdx = command.indexOf('install -m 0600 -o 0 -g 0 "$stage/env"')
+    const appKeyWriteIdx = command.indexOf('install -m 0600 -o 0 -g 0 "$stage/github-app.pem"')
+    const composePullIdx = command.indexOf('docker compose pull')
 
+    expect(dataSetupIdx).toBeGreaterThan(-1)
     expect(dataSetupIdx).toBeLessThan(envWriteIdx)
     expect(dataSetupIdx).toBeLessThan(appKeyWriteIdx)
-    expect(composeOperationIndices.length).toBeGreaterThanOrEqual(3)
-    expect(composeOperationIndices.every(index => dataSetupIdx < index)).toBe(true)
+    expect(composePullIdx).toBeGreaterThan(appKeyWriteIdx)
   })
 
   it('fails closed and physically validates the remote root and config directories before mutation', async () => {
@@ -481,32 +459,34 @@ describe('happy path deploy', () => {
       sleep: async () => {},
     })
 
-    const command = getRemoteRootSetupCommand(calls)
+    const command = getRemoteTransactionCommand(calls)
     const guards = [
-      `if [ -L '${REMOTE_DIR_PATH}' ]; then echo 'Refusing dashboard root symlink' >&2; exit 1; fi`,
-      `if [ -e '${REMOTE_DIR_PATH}' ] && [ ! -d '${REMOTE_DIR_PATH}' ]; then echo 'Refusing dashboard root non-directory' >&2; exit 1; fi`,
-      `if [ -L '${REMOTE_CONFIG_DIR_PATH}' ]; then echo 'Refusing dashboard config symlink' >&2; exit 1; fi`,
-      `if [ -e '${REMOTE_CONFIG_DIR_PATH}' ] && [ ! -d '${REMOTE_CONFIG_DIR_PATH}' ]; then echo 'Refusing dashboard config non-directory' >&2; exit 1; fi`,
+      'if [ -L "$DASHBOARD_ROOT" ] || { [ -e "$DASHBOARD_ROOT" ] && [ ! -d "$DASHBOARD_ROOT" ]; }; then',
+      'if [ -L "$DASHBOARD_CONFIG_DIR" ] || { [ -e "$DASHBOARD_CONFIG_DIR" ] && [ ! -d "$DASHBOARD_CONFIG_DIR" ]; }; then',
     ]
     const firstMutationIndex = Math.min(
-      ...['install -d', 'mkdir -p', 'chown'].map(token => command.indexOf(token)).filter(index => index >= 0),
+      ...['install -d -m 0755', 'chown 0:0 "$DASHBOARD_ROOT"']
+        .map(token => command.indexOf(token))
+        .filter(index => index >= 0),
     )
 
-    expect(calls.filter(c => c.cmd[0] === 'ssh' && c.cmd.at(-1) === command)).toHaveLength(1)
+    expect(calls.filter(c => c.cmd[0] === 'ssh')).toHaveLength(1)
     expect(calls.some(c => c.cmd.join(' ').includes('mkdir -p /opt/dashboard/config'))).toBe(false)
-    expect(command).toContain('set -eu')
+    expect(command).toContain('set -euo pipefail')
     for (const guard of guards) {
       expect(command).toContain(guard)
       expect(command.indexOf(guard)).toBeLessThan(firstMutationIndex)
     }
-    expect(command).toContain(`install -d -m 0755 -o 0 -g 0 '${REMOTE_DIR_PATH}'`)
-    expect(command).toContain(`install -d -m 0755 -o 0 -g 0 '${REMOTE_CONFIG_DIR_PATH}'`)
-    expect(command).toContain(`chown 0:0 '${REMOTE_DIR_PATH}' '${REMOTE_CONFIG_DIR_PATH}'`)
-    expect(command).toContain(`[ "$(realpath -e '${REMOTE_DIR_PATH}')" = '${REMOTE_DIR_PATH}' ]`)
-    expect(command).toContain(`[ "$(realpath -e '${REMOTE_CONFIG_DIR_PATH}')" = '${REMOTE_CONFIG_DIR_PATH}' ]`)
-    expect(command).not.toContain(VALID_ENV.DASHBOARD_DOMAIN)
-    expect(command).not.toContain(VALID_ENV.DASHBOARD_OAUTH_CLIENT_SECRET)
-    expect(command).not.toContain(VALID_ENV.DASHBOARD_COOKIE_KEY)
+    expect(command).toContain('readonly DASHBOARD_ROOT="/opt/dashboard"')
+    expect(command).toContain('install -d -m 0755 -o 0 -g 0 "$DASHBOARD_ROOT"')
+    expect(command).toContain('install -d -m 0755 -o 0 -g 0 "$DASHBOARD_CONFIG_DIR"')
+    expect(command).toContain('chown 0:0 "$DASHBOARD_ROOT" "$DASHBOARD_CONFIG_DIR"')
+    expect(command).toContain('[ "$(realpath -e "$DASHBOARD_ROOT" 2>/dev/null)" = "$DASHBOARD_ROOT" ]')
+    expect(command).toContain('[ "$(realpath -e "$DASHBOARD_CONFIG_DIR" 2>/dev/null)" = "$DASHBOARD_CONFIG_DIR" ]')
+    const remoteProgram = getRemoteTransactionProgram(calls)
+    expect(remoteProgram).not.toContain(VALID_ENV.DASHBOARD_DOMAIN)
+    expect(remoteProgram).not.toContain(VALID_ENV.DASHBOARD_OAUTH_CLIENT_SECRET)
+    expect(remoteProgram).not.toContain(VALID_ENV.DASHBOARD_COOKIE_KEY)
   })
 
   it('rejects symlinks and existing non-directories before changing listener storage', async () => {
@@ -522,25 +502,21 @@ describe('happy path deploy', () => {
       sleep: async () => {},
     })
 
-    const command = getDataDirectorySetupCommand(calls)
-    const symlinkGuard = `if [ -L '${DATA_DIR_PATH}' ]; then echo 'Refusing listener data path symlink' >&2; exit 1; fi`
-    const nonDirectoryGuard =
-      `if [ -e '${DATA_DIR_PATH}' ] && [ ! -d '${DATA_DIR_PATH}' ]; then ` +
-      `echo 'Refusing listener data path non-directory' >&2; exit 1; fi`
-    const installIndex = command.indexOf('install -d -m 0700 -o 1000 -g 1000')
-    const chownIndex = command.indexOf('chown -R 1000:1000')
-    const chmodIndex = command.indexOf(`chmod 0700 '${DATA_DIR_PATH}'`)
+    const command = getRemoteTransactionCommand(calls)
+    const symlinkGuard =
+      'if [ -L "$DASHBOARD_DATA_DIR" ] || { [ -e "$DASHBOARD_DATA_DIR" ] && [ ! -d "$DASHBOARD_DATA_DIR" ]; }; then'
+    const installIndex = command.indexOf('install -d -m 0700 -o 1000 -g 1000 "$DASHBOARD_DATA_DIR"')
+    const chownIndex = command.indexOf('chown -R 1000:1000 "$DASHBOARD_DATA_DIR"')
+    const chmodIndex = command.indexOf('chmod 0700 "$DASHBOARD_DATA_DIR"')
 
-    expect(command).toContain('set -eu')
+    expect(command).toContain('set -euo pipefail')
     expect(command).toContain(symlinkGuard)
-    expect(command).toContain(nonDirectoryGuard)
     expect(installIndex).toBeGreaterThan(command.indexOf(symlinkGuard))
-    expect(installIndex).toBeGreaterThan(command.indexOf(nonDirectoryGuard))
     expect(chownIndex).toBeGreaterThan(installIndex)
     expect(chmodIndex).toBeGreaterThan(chownIndex)
     expect(command).toContain(
-      `[ -d '${DATA_DIR_PATH}' ] && [ ! -L '${DATA_DIR_PATH}' ] && ` +
-        `[ "$(realpath -e '${DATA_DIR_PATH}')" = '${DATA_DIR_PATH}' ]`,
+      '[ -d "$DASHBOARD_DATA_DIR" ] && [ ! -L "$DASHBOARD_DATA_DIR" ] && ' +
+        '[ "$(realpath -e "$DASHBOARD_DATA_DIR" 2>/dev/null)" = "$DASHBOARD_DATA_DIR" ]',
     )
   })
 
@@ -557,37 +533,61 @@ describe('happy path deploy', () => {
       sleep: async () => {},
     })
 
-    const command = getDataDirectorySetupCommand(calls)
-    expect(command).toContain(`chown -R 1000:1000 '${DATA_DIR_PATH}'`)
-    expect(command).toContain(`chmod 0700 '${DATA_DIR_PATH}'`)
+    const command = getRemoteTransactionCommand(calls)
+    expect(command).toContain('chown -R 1000:1000 "$DASHBOARD_DATA_DIR"')
+    expect(command).toContain('chmod 0700 "$DASHBOARD_DATA_DIR"')
     expect(command).toContain(
-      `[ -d '${DATA_DIR_PATH}' ] && [ ! -L '${DATA_DIR_PATH}' ] && ` +
-        `[ "$(realpath -e '${DATA_DIR_PATH}')" = '${DATA_DIR_PATH}' ]`,
+      '[ -d "$DASHBOARD_DATA_DIR" ] && [ ! -L "$DASHBOARD_DATA_DIR" ] && ' +
+        '[ "$(realpath -e "$DASHBOARD_DATA_DIR" 2>/dev/null)" = "$DASHBOARD_DATA_DIR" ]',
     )
   })
 
   it('aborts before image pull or start when persistent listener storage setup fails', async () => {
     const responses = makeHappyPathResponses()
-    responses[1] = makeSpawnResult('', 'data directory setup failed', 1)
+    responses[0] = makeRemoteFailureResponse('payload-decoded')
     const {spawnFn, calls} = makeFakeSpawn(responses)
+    const probedUrls: string[] = []
 
     await expect(
       deploy({
         env: VALID_ENV,
         spawn: spawnFn,
         resolve: resolvesOk,
-        fetch: fetchHealthzOk,
+        fetch: async (url: string) => {
+          probedUrls.push(url)
+          return fetchHealthzOk(url)
+        },
         probeAttempts: 1,
         probeIntervalMs: 0,
         sleep: async () => {},
       }),
-    ).rejects.toThrow(/exit code 1/)
+    ).rejects.toThrow(/Remote dashboard deploy failed at payload-decoded/)
 
-    const dataSetupIdx = calls.findIndex(c => c.cmd.at(-1)?.includes(DATA_DIR_PATH))
-    expect(dataSetupIdx).toBeGreaterThan(-1)
-    expect(calls.some(c => c.cmd.join(' ').includes('docker compose pull'))).toBe(false)
-    expect(calls.some(c => c.cmd.join(' ').includes('docker compose up'))).toBe(false)
-    expect(calls.some(c => c.stdinData.includes('DASHBOARD_DOMAIN='))).toBe(false)
+    expect(calls.filter(c => c.cmd[0] === 'ssh')).toHaveLength(1)
+    expect(probedUrls).toEqual([])
+  })
+
+  it('surfaces lock contention without any post-lock probe or second remote mutation', async () => {
+    const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult('stage=lock-contention\n', '', 75)])
+    const probedUrls: string[] = []
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: async (url: string) => {
+          probedUrls.push(url)
+          return fetchHealthzOk(url)
+        },
+        probeAttempts: 1,
+        probeIntervalMs: 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/Remote dashboard deploy failed at lock-contention/)
+
+    expect(calls.filter(call => call.cmd[0] === 'ssh' || call.cmd[0] === 'scp')).toHaveLength(1)
+    expect(probedUrls).toEqual([])
   })
 
   it('materializes .env via SSH stdin (not argv)', async () => {
@@ -603,14 +603,12 @@ describe('happy path deploy', () => {
       sleep: async () => {},
     })
 
-    // Find the .env write call — stdin must contain DASHBOARD_DOMAIN
-    const envFileWrite = calls.find(c => c.stdinData.includes('DASHBOARD_DOMAIN='))
-    expect(envFileWrite).toBeDefined()
-    // The domain must be in stdin, not in the cmd
-    expect(envFileWrite?.cmd.join(' ')).not.toContain('DASHBOARD_DOMAIN=')
+    const payload = getRemoteTransactionPayload(calls)
+    expect(payload.env).toContain('DASHBOARD_DOMAIN=')
+    expect(getRemoteTransactionCommand(calls)).not.toContain('DASHBOARD_DOMAIN=')
   })
 
-  it('uploads docker-compose.yaml', async () => {
+  it('materializes docker-compose.yaml through the transaction payload', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
     await deploy({
@@ -623,14 +621,12 @@ describe('happy path deploy', () => {
       sleep: async () => {},
     })
 
-    const composeUpload = calls.find(c => {
-      const s = c.cmd.join(' ')
-      return s.includes('docker-compose.yaml') || (s.includes('scp') && s.includes('compose'))
-    })
-    expect(composeUpload).toBeDefined()
+    const payload = getRemoteTransactionPayload(calls)
+    expect(payload.compose).toContain('services:')
+    expect(calls.filter(c => c.cmd[0] === 'scp')).toHaveLength(0)
   })
 
-  it('uploads Caddyfile', async () => {
+  it('materializes Caddyfile through the transaction payload', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
     await deploy({
@@ -643,11 +639,9 @@ describe('happy path deploy', () => {
       sleep: async () => {},
     })
 
-    const caddyUpload = calls.find(c => {
-      const s = c.cmd.join(' ')
-      return s.includes('Caddyfile') || (s.includes('scp') && s.includes('caddy'))
-    })
-    expect(caddyUpload).toBeDefined()
+    const payload = getRemoteTransactionPayload(calls)
+    expect(payload.caddyfile).toContain('dashboard.fro.bot')
+    expect(calls.filter(c => c.cmd[0] === 'scp')).toHaveLength(0)
   })
 
   it('brings up dashboard before caddy', async () => {
@@ -663,14 +657,12 @@ describe('happy path deploy', () => {
       sleep: async () => {},
     })
 
-    const dashboardUpIdx = calls.findIndex(c => {
-      const s = c.cmd.join(' ')
-      return s.includes('docker compose up') && s.includes('dashboard') && !s.includes('caddy')
-    })
-    const caddyUpIdx = calls.findIndex(c => {
-      const s = c.cmd.join(' ')
-      return s.includes('docker compose up') && s.includes('caddy')
-    })
+    const transaction = calls.find(c => c.cmd[0] === 'ssh')
+    const command = transaction?.cmd.join(' ') ?? ''
+    const dashboardUpIdx = command.indexOf('docker compose up -d --no-build --wait --wait-timeout 120 dashboard')
+    const caddyUpIdx = command.indexOf(
+      'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy',
+    )
 
     expect(dashboardUpIdx).toBeGreaterThan(-1)
     expect(caddyUpIdx).toBeGreaterThan(-1)
@@ -690,11 +682,10 @@ describe('happy path deploy', () => {
       sleep: async () => {},
     })
 
-    const composeUpCalls = calls.filter(c => c.cmd.join(' ').includes('docker compose up'))
-    expect(composeUpCalls.length).toBeGreaterThanOrEqual(2)
-    for (const call of composeUpCalls) {
-      expect(call.cmd.join(' ')).toContain('--no-build')
-    }
+    const transaction = calls.find(c => c.cmd[0] === 'ssh')
+    const command = transaction?.cmd.join(' ') ?? ''
+    expect(command).toContain('docker compose up -d --no-build --wait --wait-timeout 120 dashboard')
+    expect(command).toContain('docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy')
   })
 
   it('probes /api/healthz', async () => {
@@ -737,16 +728,16 @@ describe('happy path deploy', () => {
     expect(rmCall).toBeDefined()
 
     // It must come before docker compose pull
-    const rmIdx = calls.findIndex(
-      c => c.cmd.join(' ').includes('rm -f') && c.cmd.join(' ').includes('docker-compose.override.yaml'),
-    )
-    const pullIdx = calls.findIndex(c => c.cmd.join(' ').includes('docker compose pull'))
+    const transaction = calls.find(c => c.cmd[0] === 'ssh')
+    const command = transaction?.cmd.join(' ') ?? ''
+    const rmIdx = command.indexOf('rm -f -- "$DASHBOARD_LEGACY_OVERRIDE_PATH"')
+    const pullIdx = command.indexOf('docker compose pull')
     expect(rmIdx).toBeGreaterThan(-1)
     expect(pullIdx).toBeGreaterThan(-1)
     expect(rmIdx).toBeLessThan(pullIdx)
   })
 
-  it('does NOT upload docker-compose.override.yaml (only removes it)', async () => {
+  it('does NOT publish docker-compose.override.yaml (only removes it)', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
     await deploy({
@@ -759,8 +750,8 @@ describe('happy path deploy', () => {
       sleep: async () => {},
     })
 
-    // No scp or stdin-write call should reference docker-compose.override.yaml
-    // (the rm -f cleanup call is expected and allowed)
+    // No SCP or payload field should reference docker-compose.override.yaml
+    // (the fixed rm -f cleanup command is expected and allowed).
     const uploadOverrideCall = calls.find(c => {
       const s = c.cmd.join(' ') + c.stdinData
       return (
@@ -918,12 +909,8 @@ describe('edge cases', () => {
   })
 
   it('fails closed when RepoDigests mismatch (compose-sourced digest)', async () => {
-    const wrongDigest = `sha256:${'b'.repeat(64)}`
-    const wrongRepoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@${wrongDigest}`])
-
     const responses = makeHappyPathResponses()
-    // Override the RepoDigests response (index 12) with a mismatched digest
-    responses[12] = makeSpawnResult(wrongRepoDigestsJson)
+    responses[0] = makeRemoteFailureResponse('runtime-converged')
 
     const {spawnFn} = makeFakeSpawn(responses)
 
@@ -1026,8 +1013,9 @@ describe('GitHub App key chown for node user', () => {
       sleep: async () => {},
     })
 
-    const chmodIdx = calls.findIndex(c => c.cmd.join(' ').includes('chmod 0600'))
-    const chownIdx = calls.findIndex(c => c.cmd.join(' ').includes('chown 1000:1000'))
+    const command = calls.find(c => c.cmd[0] === 'ssh')?.cmd.join(' ') ?? ''
+    const chmodIdx = command.indexOf('chmod 0600 "$DASHBOARD_APP_KEY_PATH"')
+    const chownIdx = command.indexOf('chown 1000:1000 "$DASHBOARD_APP_KEY_PATH"')
     expect(chmodIdx).toBeGreaterThan(-1)
     expect(chownIdx).toBeGreaterThan(-1)
     expect(chmodIdx).toBeLessThan(chownIdx)
@@ -1036,8 +1024,8 @@ describe('GitHub App key chown for node user', () => {
 
 // ─── digest-verify cwd ────────────────────────────────────────────────────────
 
-describe('digest-verify SSH command scoped to REMOTE_DIR', () => {
-  it('docker compose ps -q dashboard in digest-verify step is prefixed with cd /opt/dashboard', async () => {
+describe('digest verification runs inside the dashboard root', () => {
+  it('docker compose ps -q dashboard runs after changing to the dashboard root', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
     await deploy({
@@ -1050,20 +1038,11 @@ describe('digest-verify SSH command scoped to REMOTE_DIR', () => {
       sleep: async () => {},
     })
 
-    // Find the call that resolves the running image SHA (docker inspect + docker compose ps -q)
-    const digestVerifyCall = calls.find(c => {
-      const s = c.cmd.join(' ')
-      return s.includes('docker inspect') && s.includes('docker compose ps -q dashboard')
-    })
+    const cmdStr = calls.find(c => c.cmd[0] === 'ssh')?.cmd.join(' ') ?? ''
 
-    expect(digestVerifyCall).toBeDefined()
-    const cmdStr = digestVerifyCall?.cmd.join(' ') ?? ''
+    expect(cmdStr).toContain('cd "$DASHBOARD_ROOT"')
 
-    // The command must be scoped to /opt/dashboard before docker compose ps
-    expect(cmdStr).toContain('cd /opt/dashboard')
-
-    // cd /opt/dashboard must appear BEFORE docker compose ps -q dashboard
-    const cdIdx = cmdStr.indexOf('cd /opt/dashboard')
+    const cdIdx = cmdStr.indexOf('cd "$DASHBOARD_ROOT"')
     const psIdx = cmdStr.indexOf('docker compose ps -q dashboard')
     expect(cdIdx).toBeGreaterThan(-1)
     expect(psIdx).toBeGreaterThan(-1)
@@ -1547,7 +1526,7 @@ describe('validateEnv with GATEWAY_VPC_IP', () => {
 
 // ─── same-origin /operator/health advisory check (non-blocking) ──────────────
 //
-// Phase 12b probes https://dashboard.fro.bot/operator/health when GATEWAY_VPC_IP is set.
+// The post-transaction advisory probe checks https://dashboard.fro.bot/operator/health when GATEWAY_VPC_IP is set.
 // The check is advisory: a non-200 result or unreachable endpoint emits a warning and
 // the deploy continues. The gateway bridge is deployed independently; the dashboard
 // deploy must not depend on gateway readiness.
@@ -1558,7 +1537,7 @@ describe('validateEnv with GATEWAY_VPC_IP', () => {
 // Edge: GATEWAY_VPC_IP absent → check skipped (only the existing /api/healthz check runs).
 //
 // The public-denied gateway.fro.bot:9300 check and DO firewall readback belong to
-// the gateway deploy (Phase 8e). The DOCKER-USER readback belongs to Phase 8c.
+// the gateway deploy. The DOCKER-USER readback also belongs to the gateway deploy.
 // This unit covers only the same-origin advisory check that the dashboard deploy owns.
 
 describe('dashboard verification: same-origin /operator/health 200 check', () => {
@@ -1748,13 +1727,13 @@ describe('dashboard verification: same-origin /operator/health 200 check', () =>
   })
 })
 
-// ─── [P1] /operator/health retry loop ────────────────────────────────────────
+// ─── /operator/health retry loop ──────────────────────────────────────────────
 //
-// Phase 12b retries the /operator/health check with bounded attempts,
+// The post-transaction advisory check retries /operator/health with bounded attempts,
 // matching the existing /api/healthz probe pattern. Non-blocking: after all
 // attempts exhausted, emits a warning and continues (never throws).
 
-describe('dashboard verification: /operator/health retry loop (P1 fix)', () => {
+describe('dashboard verification: /operator/health retry loop', () => {
   it('succeeds on a later attempt (retry works)', async () => {
     const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
     let operatorHealthAttempts = 0
@@ -1917,54 +1896,18 @@ describe('generateComposeContent', () => {
 // - resolves digest via `docker buildx imagetools inspect`
 // - compares resolved digest to dispatched digest (if provided)
 // - generates compose content with version@resolvedDigest
-// - uploads generated compose (not the committed file)
+// - sends the generated compose and expected digest in the framed transaction payload
 // - verifies running image against resolvedDigest
 
 const RESOLVED_DIGEST = `sha256:${'c'.repeat(64)}`
 
-/**
- * Builds happy-path responses for a versioned deploy.
- * Prepends the imagetools inspect call (returns resolved digest) before the
- * standard deploy sequence. The compose upload is now via stdin (writeRemoteFile),
- * so the scp call for docker-compose.yaml is replaced by a stdin write.
- *
- * Call order for versioned deploy:
- *   0: docker buildx imagetools inspect (resolve digest)
- *   1: constant-only root/config validation and convergence
- *   2: install -d /opt/dashboard/data (persistent listener storage)
- *   3: write .env (stdin)
- *   4: write docker-compose.yaml (stdin — generated content)
- *   5: scp Caddyfile
- *   6: write github-app.pem (stdin)
- *   7: chmod 0600 github-app.pem
- *   8: chown 1000:1000 github-app.pem
- *   9: rm -f docker-compose.override.yaml
- *  10: docker compose pull
- *  11: docker compose up -d --no-build --wait --wait-timeout 120 dashboard
- *  12: docker inspect (resolve image SHA)
- *  13: docker inspect (RepoDigests)
- *  14: docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy
- *  15: (buffer)
- */
+/** Builds a digest-resolution plus successful remote transaction response. */
 function makeVersionedHappyPathResponses(): SpawnResult[] {
-  const repoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@${RESOLVED_DIGEST}`])
   return [
     makeSpawnResult(RESOLVED_DIGEST), // 0: imagetools inspect → resolved digest
-    makeSpawnResult(), // 1: root/config validation and convergence
-    makeSpawnResult(), // 2: install -d data directory
-    makeSpawnResult(), // 3: write .env
-    makeSpawnResult(), // 4: write docker-compose.yaml (stdin)
-    makeSpawnResult(), // 5: scp Caddyfile
-    makeSpawnResult(), // 6: write github-app.pem
-    makeSpawnResult(), // 7: chmod 0600
-    makeSpawnResult(), // 8: chown 1000:1000
-    makeSpawnResult(), // 9: rm -f docker-compose.override.yaml
-    makeSpawnResult(), // 10: compose pull
-    makeSpawnResult(), // 11: compose up dashboard
-    makeSpawnResult('sha256:imageid123'), // 12: docker inspect (image SHA)
-    makeSpawnResult(repoDigestsJson), // 13: docker inspect (RepoDigests)
-    makeSpawnResult(), // 14: compose up caddy
-    makeSpawnResult(), // 15: buffer
+    makeSpawnResult(
+      'stage=remote-transaction-started\nstage=lock-acquired\nstage=payload-decoded\nstage=active-state-written\nstage=image-acquisition\nstage=runtime-converged\nstage=complete\n',
+    ), // 1: remote transaction
   ]
 }
 
@@ -2022,6 +1965,114 @@ describe('versioned deploy path', () => {
     ).resolves.toBeUndefined()
   })
 
+  it('uses exactly one mutating SSH process for the committed local/no-version path', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const remoteMutationCalls = calls.filter(call => call.cmd[0] === 'ssh' || call.cmd[0] === 'scp')
+    expect(remoteMutationCalls).toHaveLength(1)
+    expect(remoteMutationCalls[0]?.cmd[0]).toBe('ssh')
+    expect(remoteMutationCalls[0]?.cmd).not.toContain('ControlMaster=auto')
+    expect(remoteMutationCalls[0]?.cmd.some(arg => arg.startsWith('ControlPath='))).toBe(false)
+    expect(remoteMutationCalls[0]?.cmd).not.toContain('ControlPersist=60s')
+  })
+
+  it('uses exactly one mutating SSH process for the versioned path', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      version: '2026.06.47',
+      digest: RESOLVED_DIGEST,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const remoteMutationCalls = calls.filter(call => call.cmd[0] === 'ssh' || call.cmd[0] === 'scp')
+    expect(remoteMutationCalls).toHaveLength(1)
+    expect(remoteMutationCalls[0]?.cmd[0]).toBe('ssh')
+  })
+
+  it('does not enable SSH connection multiplexing for the transaction', () => {
+    const command = buildRemoteSshCommand({host: 'dashboard.example'})
+
+    expect(command).not.toContain('ControlMaster=auto')
+    expect(command).not.toContain('ControlPath=/tmp/dash-cm/cm-%C')
+    expect(command).not.toContain('ControlPersist=60s')
+  })
+
+  it('creates and cleans only the CI key temp directory, never a ControlMaster temp directory', async () => {
+    const prefixes = ['dashboard-deploy-key-', 'dash-cm-']
+    const tempRoots = [tmpdir(), '/tmp']
+    const entriesForRoots = () =>
+      tempRoots.flatMap(root =>
+        readdirSync(root)
+          .filter(name => prefixes.some(prefix => name.startsWith(prefix)))
+          .map(name => `${root}/${name}`),
+      )
+    const existing = new Set(entriesForRoots())
+    const ciEnv: Record<string, string> = {
+      ...VALID_ENV,
+      DASHBOARD_SSH_KEY: '-----BEGIN PRIVATE KEY-----\nci-key\n-----END PRIVATE KEY-----',
+    }
+    delete ciEnv.SSH_AUTH_SOCK
+    const {spawnFn} = makeFakeSpawn(makeHappyPathResponses())
+    let entriesAtRemoteSpawn: string[] = []
+
+    const trackingSpawn: SpawnFn = (command, options) => {
+      entriesAtRemoteSpawn = entriesForRoots().filter(name => !existing.has(name))
+      return spawnFn(command, options)
+    }
+
+    await deploy({
+      env: ciEnv,
+      spawn: trackingSpawn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    expect(entriesAtRemoteSpawn.filter(name => name.includes('/dashboard-deploy-key-'))).toHaveLength(1)
+    expect(entriesAtRemoteSpawn.filter(name => name.includes('/dash-cm-'))).toHaveLength(0)
+    expect(entriesForRoots().filter(name => !existing.has(name))).toEqual([])
+
+    const localExisting = new Set(entriesForRoots())
+    const {spawnFn: localSpawn} = makeFakeSpawn(makeHappyPathResponses())
+    let localEntriesAtRemoteSpawn: string[] = []
+    const trackingLocalSpawn: SpawnFn = (command, options) => {
+      localEntriesAtRemoteSpawn = entriesForRoots().filter(name => !localExisting.has(name))
+      return localSpawn(command, options)
+    }
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: trackingLocalSpawn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    expect(localEntriesAtRemoteSpawn).toEqual([])
+    expect(entriesForRoots().filter(name => !localExisting.has(name))).toEqual([])
+  })
+
   it('uploads generated compose content with version@resolvedDigest via stdin', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeVersionedHappyPathResponses())
 
@@ -2064,10 +2115,8 @@ describe('versioned deploy path', () => {
   })
 
   it('fails when running image digest does not match resolvedDigest', async () => {
-    const wrongRepoDigestsJson = JSON.stringify([`ghcr.io/fro-bot/dashboard@sha256:${'e'.repeat(64)}`])
     const responses = makeVersionedHappyPathResponses()
-    // Override the RepoDigests response (index 13) with a mismatched digest
-    responses[13] = makeSpawnResult(wrongRepoDigestsJson)
+    responses[1] = makeRemoteFailureResponse('runtime-converged')
 
     const {spawnFn} = makeFakeSpawn(responses)
 
@@ -2083,7 +2132,7 @@ describe('versioned deploy path', () => {
         probeIntervalMs: 0,
         sleep: async () => {},
       }),
-    ).rejects.toThrow(/digest/)
+    ).rejects.toThrow(/Remote dashboard deploy failed at runtime-converged/)
   })
 
   it('calls docker buildx imagetools inspect to resolve digest', async () => {
@@ -2124,12 +2173,30 @@ describe('versioned deploy path', () => {
       }),
     ).resolves.toBeUndefined()
   })
+
+  it('includes the resolved versioned digest as the exact remote verification target', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeVersionedHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      version: '2026.06.47',
+      digest: RESOLVED_DIGEST,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    expect(getRemoteTransactionPayload(calls).expectedDashboardDigest).toBe(RESOLVED_DIGEST)
+  })
 })
 
 // ─── no-version fallback ──────────────────────────────────────────────────────
 //
 // When no version is dispatched, the committed compose file is the source of
-// truth. No imagetools inspect, no generated compose content, no audit commit.
+// truth. No imagetools inspect or generated compose content is needed.
 
 describe('no-version fallback', () => {
   it('uses committed compose digest when no version is provided', async () => {
@@ -2150,7 +2217,7 @@ describe('no-version fallback', () => {
     expect(imagetoolsCall).toBeUndefined()
   })
 
-  it('does not upload generated compose content (uses committed file via scp)', async () => {
+  it('includes the committed compose digest as the exact remote verification target', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
     await deploy({
@@ -2163,17 +2230,27 @@ describe('no-version fallback', () => {
       sleep: async () => {},
     })
 
-    // The compose upload must be via scp (not stdin with generated content)
-    const scpComposeCall = calls.find(c => {
-      const s = c.cmd.join(' ')
-      return s.includes('scp') && s.includes('docker-compose.yaml')
-    })
-    expect(scpComposeCall).toBeDefined()
+    expect(getRemoteTransactionPayload(calls).expectedDashboardDigest).toBe(COMPOSE_DIGEST)
+  })
 
-    // No stdin write should contain a version@digest image reference for a new version
-    // (the committed compose content may contain the existing pinned digest, but not a new one)
-    const generatedComposeWrite = calls.find(c => c.stdinData.includes('fro-bot/dashboard:2026.06.47@'))
-    expect(generatedComposeWrite).toBeUndefined()
+  it('materializes committed compose content in the transaction payload without SCP', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    expect(calls.filter(c => c.cmd[0] === 'scp')).toHaveLength(0)
+    const transaction = calls.find(c => c.cmd[0] === 'ssh')
+    expect(transaction).toBeDefined()
+    const payload = decodeRemotePayload(new TextEncoder().encode(transaction?.stdinData ?? ''))
+    expect(payload.compose).toContain(COMPOSE_DIGEST)
   })
 
   it('succeeds without version or digest', async () => {
@@ -2302,16 +2379,16 @@ describe('versioned deploy: writes local compose path after successful deploy', 
   })
 
   it('does NOT write local compose path when caddy up fails (late deploy failure)', async () => {
-    // Verifies that the local compose write only happens after the full deploy
-    // succeeds. If caddy up (Phase 11) throws, the write must be skipped.
+    // Verifies that the local compose write only happens after the full remote
+    // transaction succeeds. If Caddy convergence throws, the write is skipped.
     const tmpDir = mkdtempSync(join(tmpdir(), 'deploy-test-compose-'))
     const tmpComposePath = join(tmpDir, 'docker-compose.yaml')
     writeFileSync(tmpComposePath, SAMPLE_COMPOSE_FOR_WRITE, 'utf8')
 
     try {
-      // Replace the caddy up response (index 13) with a failing exit code.
+      // Replace the remote transaction response with a failing exit code.
       const responses = makeVersionedHappyPathResponses()
-      responses[14] = makeSpawnResult('', 'caddy up failed', 1)
+      responses[1] = makeRemoteFailureResponse('runtime-converged')
       const {spawnFn} = makeFakeSpawn(responses)
 
       await expect(
@@ -2597,14 +2674,12 @@ describe('docker compose up: --wait-timeout 120', () => {
       sleep: async () => {},
     })
 
-    const dashboardUpCall = calls.find(c => {
-      const s = c.cmd.join(' ')
-      return s.includes('docker compose up') && s.includes('dashboard') && !s.includes('caddy')
-    })
-    expect(dashboardUpCall).toBeDefined()
-    expect(dashboardUpCall?.cmd.join(' ')).toContain('--wait-timeout 120')
-    expect(dashboardUpCall?.cmd.join(' ')).toContain('--no-build')
-    expect(dashboardUpCall?.cmd.join(' ')).not.toContain('--force-recreate')
+    const command = calls.find(c => c.cmd[0] === 'ssh')?.cmd.join(' ') ?? ''
+    const dashboardUp = 'docker compose up -d --no-build --wait --wait-timeout 120 dashboard'
+    expect(command).toContain(dashboardUp)
+    expect(
+      command.slice(command.indexOf(dashboardUp), command.indexOf(dashboardUp) + dashboardUp.length),
+    ).not.toContain('--force-recreate')
   })
 
   it('caddy compose up includes --force-recreate, --wait-timeout 120, and --no-build', async () => {
@@ -2620,13 +2695,7 @@ describe('docker compose up: --wait-timeout 120', () => {
       sleep: async () => {},
     })
 
-    const caddyUpCall = calls.find(c => {
-      const s = c.cmd.join(' ')
-      return s.includes('docker compose up') && s.includes('caddy')
-    })
-    expect(caddyUpCall).toBeDefined()
-    expect(caddyUpCall?.cmd.join(' ')).toContain('--force-recreate')
-    expect(caddyUpCall?.cmd.join(' ')).toContain('--wait-timeout 120')
-    expect(caddyUpCall?.cmd.join(' ')).toContain('--no-build')
+    const command = calls.find(c => c.cmd[0] === 'ssh')?.cmd.join(' ') ?? ''
+    expect(command).toContain('docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy')
   })
 })

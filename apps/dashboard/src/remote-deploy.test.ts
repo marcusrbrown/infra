@@ -1,4 +1,4 @@
-import {chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync} from 'node:fs'
+import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -19,6 +19,7 @@ const fixture: RemoteDeployPayload = {
   compose: `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard@sha256:${'a'.repeat(64)}\n`,
   caddyfile: 'dashboard.example {\n  reverse_proxy dashboard:3000\n}\n',
   githubAppKey: '-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n',
+  expectedDashboardDigest: `sha256:${'a'.repeat(64)}`,
 }
 
 const localEnv = {
@@ -33,9 +34,10 @@ const requiredWireFields = (): readonly [string, string][] => [
   ['compose', fixture.compose],
   ['caddyfile', fixture.caddyfile],
   ['github_app_key', fixture.githubAppKey],
+  ['expected_dashboard_digest', fixture.expectedDashboardDigest],
 ]
 
-const makeFramedPayload = (fields: readonly [string, string][], version = 1, trailing = ''): Uint8Array => {
+const makeFramedPayload = (fields: readonly [string, string][], version = 2, trailing = ''): Uint8Array => {
   const encoder = new TextEncoder()
   const body = fields.map(([name, value]) => `field ${name} ${encoder.encode(value).byteLength}\n${value}`).join('')
   return encoder.encode(`dashboard-deploy-payload v${version}\n${body}end\n${trailing}`)
@@ -63,7 +65,10 @@ const runShellProgram = async (program: string, payload: Uint8Array) => {
   return {stdout, stderr, exitCode}
 }
 
-const adaptProgramForUnprivilegedHarness = (runtimeRoot: string): string => {
+const adaptProgramForUnprivilegedHarness = (
+  runtimeRoot: string,
+  dashboardRoot = `${runtimeRoot}-dashboard`,
+): string => {
   const uid = process.getuid?.() ?? 501
   const gid = process.getgid?.() ?? 20
   const program = REMOTE_TRANSACTION_PROGRAM.replaceAll(
@@ -71,13 +76,29 @@ const adaptProgramForUnprivilegedHarness = (runtimeRoot: string): string => {
     JSON.stringify(`${runtimeRoot}/lock`),
   )
     .replaceAll('"/run/dashboard-deploy"', JSON.stringify(runtimeRoot))
+    .replaceAll('"/opt/dashboard"', JSON.stringify(dashboardRoot))
+    .replaceAll('"/opt/dashboard/config"', JSON.stringify(`${dashboardRoot}/config`))
+    .replaceAll('"/opt/dashboard/data"', JSON.stringify(`${dashboardRoot}/data`))
+    .replaceAll('"/opt/dashboard/.env"', JSON.stringify(`${dashboardRoot}/.env`))
+    .replaceAll('"/opt/dashboard/docker-compose.yaml"', JSON.stringify(`${dashboardRoot}/docker-compose.yaml`))
+    .replaceAll('"/opt/dashboard/config/Caddyfile"', JSON.stringify(`${dashboardRoot}/config/Caddyfile`))
+    .replaceAll('"/opt/dashboard/config/github-app.pem"', JSON.stringify(`${dashboardRoot}/config/github-app.pem`))
+    .replaceAll(
+      '"/opt/dashboard/docker-compose.override.yaml"',
+      JSON.stringify(`${dashboardRoot}/docker-compose.override.yaml`),
+    )
     .replaceAll('0:0:700:directory', `${uid}:${gid}:700:Directory`)
     .replaceAll('0:0:600:regular file', `${uid}:${gid}:600:Regular File`)
     .replaceAll('install -d -m 0700 -o 0 -g 0', `install -d -m 0700 -o ${uid} -g ${gid}`)
     .replaceAll('install -m 0600 -o 0 -g 0', `install -m 0600 -o ${uid} -g ${gid}`)
+    .replaceAll('install -d -m 0755 -o 0 -g 0', `install -d -m 0755 -o ${uid} -g ${gid}`)
+    .replaceAll('install -m 0644 -o 0 -g 0', `install -m 0644 -o ${uid} -g ${gid}`)
     .replaceAll('chown 0:0', `chown ${uid}:${gid}`)
+    .replaceAll('chown -R 1000:1000', `chown -R ${uid}:${gid}`)
+    .replaceAll('chown 1000:1000', `chown ${uid}:${gid}`)
     .replaceAll('realpath -e --', 'realpath --')
-  return `
+    .replaceAll('realpath -e ', 'realpath ')
+  return String.raw`
 stat() {
   if [ "$1" = "-c" ]; then
     format="$2"
@@ -93,6 +114,14 @@ stat() {
   fi
 }
 flock() { return 0; }
+docker() {
+  if [ "$1" = "compose" ] && [ "$2" = "pull" ]; then return 0; fi
+  if [ "$1" = "compose" ] && [ "$2" = "up" ]; then return 0; fi
+  if [ "$1" = "compose" ] && [ "$2" = "ps" ]; then printf 'container-id\n'; return 0; fi
+  if [ "$1" = "inspect" ] && [ "$4" = "container-id" ]; then printf 'image-id\n'; return 0; fi
+  if [ "$1" = "inspect" ] && [ "$4" = "image-id" ]; then printf '["ghcr.io/fro-bot/dashboard@${fixture.expectedDashboardDigest}"]\n'; return 0; fi
+  return 1
+}
 ${program}`
 }
 
@@ -113,7 +142,7 @@ describe('remote deploy payload protocol', () => {
 
     expect(command.join(' ')).not.toContain(secretFixture.env)
     expect(command.join(' ')).not.toContain(secretFixture.githubAppKey)
-    expect(command.join(' ')).toContain('dashboard-deploy-payload v1')
+    expect(command.join(' ')).toContain('dashboard-deploy-payload v2')
     expect(command.join(' ')).toContain('DOCKER_CONTEXT=default')
     expect(command.join(' ')).toContain('DOCKER_HOST=unix:///var/run/docker.sock')
     expect(command.join(' ')).toContain('/usr/bin/env -i')
@@ -130,6 +159,7 @@ describe('remote deploy payload negative cases', () => {
     compose: 'c'.repeat(REMOTE_PAYLOAD_FIELD_LIMITS.compose),
     caddyfile: 'c'.repeat(REMOTE_PAYLOAD_FIELD_LIMITS.caddyfile),
     githubAppKey: 'k'.repeat(REMOTE_PAYLOAD_FIELD_LIMITS.github_app_key),
+    expectedDashboardDigest: fixture.expectedDashboardDigest,
   }
 
   const cases: readonly [string, () => void][] = [
@@ -150,7 +180,7 @@ describe('remote deploy payload negative cases', () => {
     ['total-size overflow', () => encodeRemotePayload(oversizedPayload)],
     ['empty field', () => encodeRemotePayload({...fixture, env: ''})],
     ['NUL byte', () => encodeRemotePayload({...fixture, env: 'safe\0unsafe'})],
-    ['unsupported version', () => decodeRemotePayload(makeFramedPayload(requiredWireFields(), 2))],
+    ['unsupported version', () => decodeRemotePayload(makeFramedPayload(requiredWireFields(), 1))],
   ]
 
   for (const [name, action] of cases) {
@@ -230,6 +260,48 @@ describe('remote transaction process boundary', () => {
       expect(statSync(runtimeRoot).isDirectory()).toBe(true)
       expect(statSync(runtimeRoot).mode & 0o777).toBe(0o700)
       expect(statSync(join(runtimeRoot, 'lock')).mode & 0o777).toBe(0o600)
+      expect(readdirSync(runtimeRoot).filter(name => name.startsWith('attempt.'))).toEqual([])
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('releases the process-bound lock after interruption without stale-lock cleanup', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-interrupted-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+    const program = adaptProgramForUnprivilegedHarness(runtimeRoot)
+    const interrupted = Bun.spawn(['bash', '-c', program], {stdin: 'pipe', stdout: 'pipe', stderr: 'pipe'})
+
+    try {
+      interrupted.stdin.write(new TextEncoder().encode('dashboard-deploy-payload v2\n'))
+      await Bun.sleep(10)
+      interrupted.kill('SIGTERM')
+      const interruptedExitCode = await interrupted.exited
+      expect(interruptedExitCode).not.toBe(0)
+
+      const retry = await runShellProgram(program, encodeRemotePayload(fixture))
+      expect(retry.exitCode).toBe(0)
+      expect(retry.stdout).toContain('stage=complete')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('stops at lock contention before payload decode or application mutation', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-contention-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const program = adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot).replace(
+      'flock() { return 0; }',
+      'flock() { return 1; }',
+    )
+
+    try {
+      const result = await runShellProgram(program, encodeRemotePayload(fixture))
+
+      expect(result.exitCode).toBe(75)
+      expect(result.stdout).toBe('stage=remote-transaction-started\nstage=lock-contention\n')
+      expect(existsSync(dashboardRoot)).toBe(false)
       expect(readdirSync(runtimeRoot).filter(name => name.startsWith('attempt.'))).toEqual([])
     } finally {
       rmSync(parent, {recursive: true, force: true})

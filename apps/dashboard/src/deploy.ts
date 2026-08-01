@@ -5,39 +5,9 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
 import {validateDashboardHost} from './host'
+import {runRemoteTransaction, type RemoteDeployPayload} from './remote-deploy'
 
-// ─── Remote paths ─────────────────────────────────────────────────────────────
-
-const REMOTE_DIR = '/opt/dashboard'
-const REMOTE_ENV_PATH = `${REMOTE_DIR}/.env`
-const REMOTE_COMPOSE_PATH = `${REMOTE_DIR}/docker-compose.yaml`
-const REMOTE_CONFIG_DIR = `${REMOTE_DIR}/config`
-const REMOTE_DATA_DIR = `${REMOTE_DIR}/data`
-const REMOTE_ROOT_SETUP_COMMAND = [
-  'set -eu',
-  `if [ -L '${REMOTE_DIR}' ]; then echo 'Refusing dashboard root symlink' >&2; exit 1; fi`,
-  `if [ -e '${REMOTE_DIR}' ] && [ ! -d '${REMOTE_DIR}' ]; then echo 'Refusing dashboard root non-directory' >&2; exit 1; fi`,
-  `if [ -L '${REMOTE_CONFIG_DIR}' ]; then echo 'Refusing dashboard config symlink' >&2; exit 1; fi`,
-  `if [ -e '${REMOTE_CONFIG_DIR}' ] && [ ! -d '${REMOTE_CONFIG_DIR}' ]; then echo 'Refusing dashboard config non-directory' >&2; exit 1; fi`,
-  `install -d -m 0755 -o 0 -g 0 '${REMOTE_DIR}'`,
-  `install -d -m 0755 -o 0 -g 0 '${REMOTE_CONFIG_DIR}'`,
-  `chown 0:0 '${REMOTE_DIR}' '${REMOTE_CONFIG_DIR}'`,
-  `[ "$(realpath -e '${REMOTE_DIR}')" = '${REMOTE_DIR}' ]`,
-  `[ "$(realpath -e '${REMOTE_CONFIG_DIR}')" = '${REMOTE_CONFIG_DIR}' ]`,
-].join('; ')
-const REMOTE_DATA_SETUP_COMMAND = [
-  'set -eu',
-  `if [ -L '${REMOTE_DATA_DIR}' ]; then echo 'Refusing listener data path symlink' >&2; exit 1; fi`,
-  `if [ -e '${REMOTE_DATA_DIR}' ] && [ ! -d '${REMOTE_DATA_DIR}' ]; then echo 'Refusing listener data path non-directory' >&2; exit 1; fi`,
-  `install -d -m 0700 -o 1000 -g 1000 '${REMOTE_DATA_DIR}'`,
-  `chown -R 1000:1000 '${REMOTE_DATA_DIR}'`,
-  `chmod 0700 '${REMOTE_DATA_DIR}'`,
-  `[ -d '${REMOTE_DATA_DIR}' ] && [ ! -L '${REMOTE_DATA_DIR}' ] && [ "$(realpath -e '${REMOTE_DATA_DIR}')" = '${REMOTE_DATA_DIR}' ]`,
-].join('; ')
-const REMOTE_CADDYFILE_PATH = `${REMOTE_CONFIG_DIR}/Caddyfile`
-const REMOTE_APP_KEY_PATH = `${REMOTE_CONFIG_DIR}/github-app.pem`
 const HEALTH_PATH = '/api/healthz'
-const DEFAULT_REMOTE_USER = 'root'
 
 // ─── Shell metacharacter deny-list ────────────────────────────────────────────
 // These characters are dangerous when interpolated into remote shell context.
@@ -57,7 +27,7 @@ export interface SpawnResult {
 }
 
 export interface SpawnOpts {
-  env: DeployEnv
+  env: Readonly<Record<string, string>>
   stdout: 'pipe'
   stderr: 'pipe'
   stdin?: 'pipe'
@@ -87,7 +57,7 @@ export interface DeployOpts {
   /**
    * CalVer version to deploy (e.g. "2026.06.47").
    * When set, the deploy resolves the image digest from GHCR, generates
-   * compose content pinned to version@resolvedDigest, and uploads it.
+   * compose content pinned to version@resolvedDigest for the remote transaction.
    * When empty/absent, the committed docker-compose.yaml is the source of truth.
    */
   version?: string
@@ -418,8 +388,9 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
  * Builds the contents of the remote .env file.
  * Secrets travel via SSH stdin — this function only assembles the string.
  *
- * NOTE: The GitHub App private key is NOT included here. It is uploaded as a
- * separate file (0600) via SSH stdin. The .env references the file path only.
+ * NOTE: The GitHub App private key is NOT included here. It is published as a
+ * separate file (0600) by the lock-owning remote transaction. The .env references
+ * the file path only.
  *
  * NOTE: Image pinning is done via the committed docker-compose.yaml digest pin,
  * not via an override file or env var.
@@ -501,55 +472,6 @@ export function assertRunningImageDigest(
   }
 }
 
-// ─── SSH helpers ──────────────────────────────────────────────────────────────
-
-function sshIdentityOptions(keyPath: string | undefined): string[] {
-  if (keyPath) {
-    return ['-i', keyPath, '-o', 'IdentitiesOnly=yes']
-  }
-  return []
-}
-
-function sshCommand(host: string, command: string, keyPath?: string, controlPath?: string): string[] {
-  return [
-    'ssh',
-    ...sshIdentityOptions(keyPath),
-    '-o',
-    'BatchMode=yes',
-    '-o',
-    'ConnectTimeout=10',
-    '-o',
-    'StrictHostKeyChecking=yes',
-    ...(controlPath
-      ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`, '-o', 'ControlPersist=60s']
-      : []),
-    `${DEFAULT_REMOTE_USER}@${host}`,
-    command,
-  ]
-}
-
-function scpCommand(
-  localPath: string,
-  host: string,
-  remotePath: string,
-  keyPath?: string,
-  controlPath?: string,
-): string[] {
-  return [
-    'scp',
-    ...sshIdentityOptions(keyPath),
-    '-o',
-    'BatchMode=yes',
-    '-o',
-    'StrictHostKeyChecking=yes',
-    ...(controlPath
-      ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`, '-o', 'ControlPersist=60s']
-      : []),
-    localPath,
-    `${DEFAULT_REMOTE_USER}@${host}:${remotePath}`,
-  ]
-}
-
 function buildDeployEnv(env: Record<string, string>): DeployEnv {
   return {
     PATH: env.PATH ?? '/usr/bin:/bin',
@@ -590,56 +512,6 @@ async function runCommand(
   }
 
   return {stdout, stderr}
-}
-
-/**
- * Writes content to a remote path via SSH stdin pipe.
- * Content is NEVER placed in the shell command argv — it flows through stdin only.
- *
- * SECURITY: This is the only safe way to transfer secret bytes (PEM keys, tokens)
- * to the remote host. Never use argv for secret content.
- */
-async function writeRemoteFile(
-  label: string,
-  host: string,
-  remotePath: string,
-  content: string,
-  deployEnv: DeployEnv,
-  spawnFn: SpawnFn,
-  keyPath?: string,
-  controlPath?: string,
-): Promise<void> {
-  console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
-
-  const proc = spawnFn(sshCommand(host, `umask 077; cat > '${remotePath}'`, keyPath, controlPath), {
-    env: deployEnv,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    stdin: 'pipe',
-  })
-
-  if (!proc.stdin) {
-    throw new Error(`Spawn did not provide stdin pipe for: ${label}`)
-  }
-
-  proc.stdin.write(new TextEncoder().encode(content))
-  proc.stdin.end()
-
-  const stdout = await new Response(proc.stdout).text()
-  const stderr = await new Response(proc.stderr).text()
-  const exitCode = await proc.exited
-
-  if (exitCode !== 0) {
-    console.error(`\u001B[1;31mFAILED:\u001B[0m ${label}`)
-    if (stderr.trim()) {
-      console.error(stderr.trim())
-    }
-    throw new Error(`Command failed with exit code ${exitCode}: ${label}`)
-  }
-
-  if (stdout.trim()) {
-    console.warn(stdout.trim())
-  }
 }
 
 /**
@@ -699,39 +571,25 @@ async function resolveImageDigest(version: string, spawnFn: SpawnFn, deployEnv: 
  * **Versioned path** (version provided):
  *   Pre-gate: validate CalVer and digest shape (no secrets required).
  *   Then: resolve digest via `docker buildx imagetools inspect`, cross-check
- *   against dispatched digest (if provided), generate compose content pinned to
- *   version@resolvedDigest, upload via SSH stdin.
+ *   against dispatched digest (if provided), and generate compose content pinned
+ *   to version@resolvedDigest locally.
  *
  * **No-version fallback** (no version):
- *   Read digest from committed docker-compose.yaml; scp the committed file.
+ *   Read the digest and committed docker-compose.yaml locally.
  *
  * Order of operations:
  * 1. Pre-gate: validate input mode, digest shape, and CalVer
  * 2. Validate env (throws before any SSH on failure)
  * 3. Validate host (SSH argv injection defense)
  * 4. DNS preflight
- * 5. ControlMaster SSH multiplexing setup (dual-tmpdir: key under os.tmpdir(), socket under /tmp)
+ * 5. CI-only SSH key materialization under os.tmpdir()
  * 6. Versioned: resolve digest via imagetools inspect + cross-check; generate compose content
  *    No-version: read digest from committed docker-compose.yaml
- * 7. Remote prep: constant-only fail-closed validation/convergence for /opt/dashboard and
- *    /opt/dashboard/config; reject symlinks and existing non-directories before mutation,
- *    create both as root-owned real directories, and verify their physical paths with realpath -e
- * 8. Remote prep: reject a symlink or existing non-directory at /opt/dashboard/data, then
- *    install it with mode 0700 and owner 1000:1000, recursively chown existing contents, reapply
- *    mode 0700 to the root, and verify it remains a real directory
- * 9. Materialize /opt/dashboard/.env via SSH stdin (includes DASHBOARD_GITHUB_APP_KEY_FILE path)
- * 10. Versioned: upload generated compose via SSH stdin
- *    No-version: scp committed docker-compose.yaml
- *    Both: scp config/Caddyfile
- * 11. Upload GitHub App private key via SSH stdin to /opt/dashboard/config/github-app.pem (0600)
- *     SECURITY: PEM bytes flow through stdin ONLY — never in argv, never in a local temp file
- * 12. chown 1000:1000 github-app.pem so the container's node user (UID 1000) can read it
- * 13. rm -f /opt/dashboard/docker-compose.override.yaml (idempotent legacy cleanup)
- * 14. docker compose pull (pulls digest-pinned GHCR image from docker-compose.yaml)
- * 15. docker compose up -d --no-build --wait --wait-timeout 120 dashboard (app health gate first)
- * 16. Verify RepoDigests: assert running image includes selected digest (fail closed)
- * 17. docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy (public exposure after app healthy)
- * 18. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
+ * 7. Read the committed Caddyfile and build the .env and PEM payload locally
+ * 8. Start one SSH process with the framed payload; the remote process validates the
+ *    runtime root, acquires flock, converges files, pulls and starts dashboard, verifies
+ *    its digest and health, then converges Caddy before releasing the lock
+ * 9. Probe https://$DASHBOARD_DOMAIN/api/healthz — bounded retry; warning-only on ACME lag
  */
 export async function deploy(opts: DeployOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
@@ -771,7 +629,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   // NOTE: DASHBOARD_GITHUB_APP_KEY is a PEM — it contains newlines which would fail
   // validateSecretValue. That's intentional: the PEM goes via stdin only, never shell-interpolated.
 
-  // Phase 3: DNS preflight
+  // Phase 2: DNS preflight
   try {
     await resolveFn(host)
   } catch (error) {
@@ -785,22 +643,10 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   // Local mode: keyPath stays undefined; SSH_AUTH_SOCK is forwarded via deployEnv.
   let keyPath: string | undefined
   let keyTmpDir: string | undefined
-  // ControlMaster socket lives under a SHORT /tmp-rooted dir to stay well under the
-  // 104-byte sun_path limit for unix-domain sockets. On macOS, os.tmpdir() returns a
-  // long path like /var/folders/td/f1mm.../T/ which causes ControlPath to exceed 104
-  // bytes → ssh fails with "ControlPath too long". The private key file stays in the
-  // secure os.tmpdir()-rooted dir (user-owned mode-700); only the socket moves to /tmp.
-  let controlTmpDir: string | undefined
 
   try {
-    // Key dir: secure, user-owned, under os.tmpdir() (may be long on macOS — that's fine
-    // for a regular file path; the 104-byte limit only applies to unix-domain sockets).
-    keyTmpDir = mkdtempSync(join(tmpdir(), 'dashboard-deploy-key-'))
-
-    // Control socket dir: always under /tmp so the socket path stays short.
-    controlTmpDir = mkdtempSync(join('/tmp', 'dash-cm-'))
-
     if (env.DASHBOARD_SSH_KEY) {
+      keyTmpDir = mkdtempSync(join(tmpdir(), 'dashboard-deploy-key-'))
       keyPath = join(keyTmpDir, 'id')
       const keyContent = env.DASHBOARD_SSH_KEY.endsWith('\n') ? env.DASHBOARD_SSH_KEY : `${env.DASHBOARD_SSH_KEY}\n`
       writeFileSync(keyPath, keyContent, {mode: 0o600})
@@ -808,15 +654,13 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       chmodSync(keyPath, 0o600)
     }
 
-    // ControlPath socket lives inside controlTmpDir (short /tmp-rooted path).
-    // %C expands to a hash of the connection tuple.
-    const controlPath = join(controlTmpDir, 'cm-%C')
-
-    // Phase 2: Determine image digest and compose content
+    // Phase 3: Determine image digest and compose content locally.
     // - Versioned path: resolve digest from GHCR, compare to dispatched digest, generate compose
-    // - No-version fallback: read digest from committed docker-compose.yaml, scp the file
+    // - No-version fallback: read digest and committed compose locally
     let imageDigest: string
-    let composeContentForUpload: string | null = null // null = use scp of committed file
+    let composeContentForRemote: string
+    const committedComposePath = join(import.meta.dir, '..', 'docker-compose.yaml')
+    const committedCompose = readFileSync(committedComposePath, 'utf8')
 
     if (version) {
       // Versioned path: resolve top-level digest via imagetools inspect
@@ -835,37 +679,16 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
 
       imageDigest = resolvedDigest
 
-      // Generate compose content with version@resolvedDigest.
-      // Always read from the committed file (source of truth for the template).
-      // localComposePath (if provided) is the write-back target after success.
-      const committedComposePath = join(import.meta.dir, '..', 'docker-compose.yaml')
-      const originalCompose = readFileSync(committedComposePath, 'utf8')
-      composeContentForUpload = generateComposeContent(originalCompose, version, resolvedDigest)
+      // Generate compose content with version@resolvedDigest from the committed template.
+      composeContentForRemote = generateComposeContent(committedCompose, version, resolvedDigest)
     } else {
-      // No-version fallback: read digest from committed docker-compose.yaml
+      // No-version fallback: the committed compose is the remote payload source of truth.
       imageDigest = readComposeDigest()
+      composeContentForRemote = committedCompose
     }
 
-    // Phase 4: Remote prep
-    await runCommand(
-      'Creating remote directories',
-      sshCommand(host, REMOTE_ROOT_SETUP_COMMAND, keyPath, controlPath),
-      deployEnv,
-      spawnFn,
-    )
-
-    // Phase 4b: Converge persistent listener storage ownership and permissions.
-    // This is the authority for both existing and newly provisioned hosts.
-    await runCommand(
-      'Creating remote listener data directory',
-      sshCommand(host, REMOTE_DATA_SETUP_COMMAND, keyPath, controlPath),
-      deployEnv,
-      spawnFn,
-    )
-
-    // Phase 5: Materialize /opt/dashboard/.env via SSH stdin
-    // The .env includes DASHBOARD_GITHUB_APP_KEY_FILE (file path) — NOT the PEM content.
-    // Image pinning is handled by the digest in docker-compose.yaml, not the .env.
+    // Phase 4: Build every remote file locally before opening the SSH transaction.
+    // The .env includes DASHBOARD_GITHUB_APP_KEY_FILE (file path), not the PEM content.
     const envContents = buildEnvFileContents({
       domain: host,
       githubAppId: validated.DASHBOARD_GITHUB_APP_ID,
@@ -879,179 +702,42 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       // buildEnvFileContents. No VAPID material is read here or anywhere in this file.
       operatorPushEnabled: env.DASHBOARD_OPERATOR_PUSH_ENABLED,
     })
-    await writeRemoteFile(
-      `Writing ${REMOTE_ENV_PATH}`,
-      host,
-      REMOTE_ENV_PATH,
-      envContents,
-      deployEnv,
-      spawnFn,
-      keyPath,
-      controlPath,
-    )
-
-    // Phase 6: Upload docker-compose.yaml and Caddyfile
     const localCaddyfile = join(import.meta.dir, '..', 'config', 'Caddyfile')
+    const caddyfileContents = readFileSync(localCaddyfile, 'utf8')
 
-    if (composeContentForUpload === null) {
-      // No-version fallback: scp the committed docker-compose.yaml
-      const committedComposePath = join(import.meta.dir, '..', 'docker-compose.yaml')
-      await runCommand(
-        'Copying docker-compose.yaml',
-        scpCommand(committedComposePath, host, REMOTE_COMPOSE_PATH, keyPath, controlPath),
-        deployEnv,
-        spawnFn,
-      )
-    } else {
-      // Versioned path: upload generated compose content via SSH stdin
-      await writeRemoteFile(
-        `Writing ${REMOTE_COMPOSE_PATH} (versioned: ${version}@${imageDigest.slice(0, 19)}...)`,
-        host,
-        REMOTE_COMPOSE_PATH,
-        composeContentForUpload,
-        deployEnv,
-        spawnFn,
-        keyPath,
-        controlPath,
-      )
-    }
-
-    await runCommand(
-      'Copying Caddyfile',
-      scpCommand(localCaddyfile, host, REMOTE_CADDYFILE_PATH, keyPath, controlPath),
-      deployEnv,
-      spawnFn,
-    )
-
-    // Phase 7: Upload GitHub App private key via SSH stdin (SECURITY-CRITICAL)
-    // The PEM bytes flow through stdin ONLY — never in argv, never in a local temp file.
-    // umask 077 ensures the file is created with 0600 permissions.
-    // We also explicitly chmod 0600 after write for defense-in-depth.
+    // The PEM bytes flow through the framed stdin payload only — never in argv or a local temp file.
     const normalizedPem = validated.DASHBOARD_GITHUB_APP_KEY.endsWith('\n')
       ? validated.DASHBOARD_GITHUB_APP_KEY
       : `${validated.DASHBOARD_GITHUB_APP_KEY}\n`
 
-    await writeRemoteFile(
-      `Writing ${REMOTE_APP_KEY_PATH} (GitHub App private key)`,
-      host,
-      REMOTE_APP_KEY_PATH,
-      normalizedPem,
-      deployEnv,
-      spawnFn,
-      keyPath,
-      controlPath,
-    )
-
-    // Explicit chmod 0600 for defense-in-depth (umask 077 already sets this, but be explicit)
-    await runCommand(
-      `Setting permissions on ${REMOTE_APP_KEY_PATH}`,
-      sshCommand(host, `chmod 0600 '${REMOTE_APP_KEY_PATH}'`, keyPath, controlPath),
-      deployEnv,
-      spawnFn,
-    )
-
-    // chown 1000:1000 so the container's node user (UID 1000) can read the key.
-    // docker-compose.yaml runs the dashboard container as `user: node` (UID 1000).
-    // The bind mount maps host UID 1000 → container UID 1000, so chown on the host
-    // makes the file readable by the node process inside the container.
-    // Combined with 0600, only UID 1000 (node) can read the key — least-privilege.
-    await runCommand(
-      `Setting ownership on ${REMOTE_APP_KEY_PATH} (node user UID 1000)`,
-      sshCommand(host, `chown 1000:1000 '${REMOTE_APP_KEY_PATH}'`, keyPath, controlPath),
-      deployEnv,
-      spawnFn,
-    )
-
-    // Phase 7.5: Remove stale legacy override file (idempotent).
-    // Old deploys wrote /opt/dashboard/docker-compose.override.yaml which Docker Compose
-    // auto-merges if present. The image pin now lives in the committed docker-compose.yaml,
-    // so the override must be removed before `docker compose pull` to prevent any stale
-    // image reference in the override from winning and causing confusing digest verification
-    // failures.
-    await runCommand(
-      'Removing stale docker-compose.override.yaml (legacy cleanup)',
-      sshCommand(host, `rm -f ${REMOTE_DIR}/docker-compose.override.yaml`, keyPath, controlPath),
-      deployEnv,
-      spawnFn,
-    )
-
-    // Phase 8: docker compose pull (pulls digest-pinned GHCR image from docker-compose.yaml)
-    await runCommand(
-      'Pulling Docker images',
-      sshCommand(host, `cd ${REMOTE_DIR} && docker compose pull`, keyPath, controlPath),
-      deployEnv,
-      spawnFn,
-    )
-
-    // Phase 9: Start dashboard only (Caddy NOT started — no public exposure yet).
-    // --no-build enforces digest-pinned image; never builds from source on the droplet.
-    // --wait-timeout 120 bounds the health-check wait and surfaces clear timeout errors.
-    await runCommand(
-      'Starting dashboard (internal only)',
-      sshCommand(
-        host,
-        `cd ${REMOTE_DIR} && docker compose up -d --no-build --wait --wait-timeout 120 dashboard`,
-        keyPath,
-        controlPath,
-      ),
-      deployEnv,
-      spawnFn,
-    )
-
-    // Phase 10: Verify RepoDigests — fail closed if running image doesn't match expected digest.
-    // Two-step inspect: containers have no .RepoDigests field — inspect the image instead.
-    //   1. Resolve the container's image SHA via `docker inspect --format '{{.Image}}' <container>`
-    //   2. Inspect the IMAGE's RepoDigests via `docker inspect --format '{{json .RepoDigests}}' <imageSHA>`
-    const {stdout: imageSha} = await runCommand(
-      'Resolving running image SHA: dashboard',
-      sshCommand(
-        host,
-        `cd ${REMOTE_DIR} && docker inspect --format '{{.Image}}' $(docker compose ps -q dashboard)`,
-        keyPath,
-        controlPath,
-      ),
-      deployEnv,
-      spawnFn,
-    )
-
-    const {stdout: repoDigestsJson} = await runCommand(
-      'Verifying running image digest: dashboard',
-      sshCommand(host, `docker inspect --format '{{json .RepoDigests}}' ${imageSha.trim()}`, keyPath, controlPath),
-      deployEnv,
-      spawnFn,
-    )
-
-    let repoDigests: string[]
-    try {
-      const parsed: unknown = JSON.parse(repoDigestsJson.trim())
-      if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
-        repoDigests = parsed
-      } else {
-        repoDigests = []
-      }
-    } catch {
-      repoDigests = []
+    const payload: RemoteDeployPayload = {
+      env: envContents,
+      compose: composeContentForRemote,
+      caddyfile: caddyfileContents,
+      githubAppKey: normalizedPem,
+      expectedDashboardDigest: imageDigest,
     }
 
-    assertRunningImageDigest(repoDigests, imageDigest, 'dashboard')
-    console.warn('\u001B[1;32m✓\u001B[0m dashboard image digest verified')
+    // Phase 5: One remote transaction owns the lock and every host mutation.
+    // The lock remains held through dashboard health/digest verification and Caddy convergence.
+    console.warn('\u001B[1;34m==>\u001B[0m Running locked dashboard remote transaction')
+    await runRemoteTransaction({
+      host,
+      payload,
+      env: deployEnv,
+      keyPath,
+      spawn: (command, options) =>
+        spawnFn(command, {
+          env: options.env,
+          stdout: options.stdout,
+          stderr: options.stderr,
+          stdin: options.stdin,
+        }),
+    })
 
-    // Phase 11: Start Caddy — now safe to expose publicly (app is healthy + digest verified).
-    // --wait-timeout 120 bounds the health-check wait and surfaces clear timeout errors.
-    // Bind-mounted Caddyfile content changes do not trigger recreation; force reload it every deploy.
-    await runCommand(
-      'Starting Caddy (public exposure)',
-      sshCommand(
-        host,
-        `cd ${REMOTE_DIR} && docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy`,
-        keyPath,
-        controlPath,
-      ),
-      deployEnv,
-      spawnFn,
-    )
+    console.warn('\u001B[1;32m✓\u001B[0m Remote dashboard transaction converged')
 
-    // Phase 12b: Same-origin /operator/health advisory check (non-blocking).
+    // Post-transaction: same-origin /operator/health advisory check (non-blocking).
     //
     // Gated on GATEWAY_VPC_IP being set — this indicates the /operator/* Caddy route is active.
     // When GATEWAY_VPC_IP is absent, the route is not configured and this check is skipped.
@@ -1112,7 +798,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       }
     }
 
-    // Phase 12: Public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
+    // Post-transaction: public HTTPS probe (warning-only — Caddy ACME cert may still be issuing)
     let probeOk = false
     let lastProbeStatus = 0
     let lastProbeError: string | undefined
@@ -1151,24 +837,21 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       )
     }
 
-    // Versioned path: write the generated compose content back to the local file.
+    // Post-transaction audit: write the generated compose content back to the local file.
     // This is the audit record committed by the workflow's audit PR step.
     // Only written after the full deploy completes successfully — never on failure.
     // Only written when localComposePath is explicitly provided (production entry point passes it;
     // tests that don't need the write omit it for isolation).
-    if (composeContentForUpload !== null && localComposePath !== undefined) {
-      writeFileSync(localComposePath, composeContentForUpload, 'utf8')
+    if (version && localComposePath !== undefined) {
+      writeFileSync(localComposePath, composeContentForRemote, 'utf8')
       console.warn(`\u001B[1;32m✓\u001B[0m Updated local compose pin: ${localComposePath}`)
     }
 
     console.warn('\u001B[1;32m✓\u001B[0m Deploy complete.')
   } finally {
-    // Clean up both tmp directories regardless of success or failure.
+    // Clean up CI key material regardless of success or failure.
     if (keyTmpDir) {
       rmSync(keyTmpDir, {recursive: true, force: true})
-    }
-    if (controlTmpDir) {
-      rmSync(controlTmpDir, {recursive: true, force: true})
     }
   }
 }

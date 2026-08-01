@@ -1,9 +1,12 @@
 import {describe, expect, it} from 'bun:test'
 
+import {AGENT_ACTION_LAYOUT_VERSION} from '../src/key-layout'
 import {
+  buildAgentStoragePolicy,
   canonicalizeS3Prefix,
   createIamClientFromEnv,
   ensureAgentStateBucket,
+  ensureAgentStoragePolicy,
   ensureAgentStorageRole,
   ensureGitHubOidcProvider,
   GITHUB_OIDC_AUDIENCE,
@@ -180,6 +183,15 @@ const bucketConfig: AgentBucketConfig = {
   s3Prefix: 'fro-bot-state',
   sessionPrefix: 'fro-bot-state/github/marcusrbrown-infra/storage',
   metadataArtifactsPrefix: 'fro-bot-state/github/marcusrbrown-infra/metadata',
+}
+
+const storagePolicyConfig = {
+  roleName: 'fro-bot-agent-storage-marcusrbrown-infra',
+  bucket: bucketConfig.bucket,
+  owner: roleRepository.owner,
+  repo: roleRepository.repo,
+  s3Prefix: 'fro-bot-state',
+  actionVersion: AGENT_ACTION_LAYOUT_VERSION,
 }
 
 const canonicalLifecycleRules = [
@@ -454,6 +466,7 @@ describe('GitHub OIDC provider provisioning', () => {
   it('emits the handoff manifest with the OIDC provider ARN populated', async () => {
     const providerArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'
     let role: Record<string, unknown> | undefined
+    let policy: string | undefined
     const {client} = makeClient(async command => {
       if (command.constructor.name === 'ListOpenIDConnectProvidersCommand') return listResponse()
       if (command.constructor.name === 'CreateOpenIDConnectProviderCommand') {
@@ -468,6 +481,14 @@ describe('GitHub OIDC provider provisioning', () => {
         role = roleFromCreateCall(command.input)
         return roleResponse(role)
       }
+      if (command.constructor.name === 'GetRolePolicyCommand') {
+        if (!policy) throw namedError('NoSuchEntity')
+        return {PolicyDocument: encodeURIComponent(policy)}
+      }
+      if (command.constructor.name === 'PutRolePolicyCommand') {
+        policy = String(command.input.PolicyDocument)
+        return {}
+      }
       throw new Error(`Unexpected command: ${command.constructor.name}`)
     })
     const lines: string[] = []
@@ -478,6 +499,7 @@ describe('GitHub OIDC provider provisioning', () => {
       s3Client,
       bucket: bucketConfig,
       repository: roleRepository,
+      actionRef: AGENT_ACTION_LAYOUT_VERSION,
       printLine: (line: string) => lines.push(line),
     })
 
@@ -490,7 +512,10 @@ describe('GitHub OIDC provider provisioning', () => {
     expect(manifest.repository_owner_id).toBe(roleRepository.repositoryOwnerId)
     expect(manifest.role_name).toBe('fro-bot-agent-storage-marcusrbrown-infra')
     expect(manifest.role_arn).toBe('arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra')
-    expect(manifest.key_layout_version).toBe('')
+    expect(manifest.lock_key).toBe('fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock')
+    expect(manifest.policy_name).toBe('fro-bot-agent-storage-marcusrbrown-infra')
+    expect(manifest.action_ref_verified).toBe(true)
+    expect(manifest.key_layout_version).toBe(AGENT_ACTION_LAYOUT_VERSION)
     expect(Object.keys(manifest)).toEqual(
       expect.arrayContaining([
         'owner',
@@ -526,9 +551,26 @@ describe('GitHub OIDC provider provisioning', () => {
     )
   })
 
+  it('fails closed on an unknown action layout before applying any AWS policy', async () => {
+    const {client, calls} = makeClient(async command => {
+      throw new Error(`Unexpected AWS call: ${command.constructor.name}`)
+    })
+
+    await expect(
+      performProvisioning({
+        client,
+        bucket: bucketConfig,
+        repository: roleRepository,
+        actionRef: 'fro-bot/agent@v0.0.0',
+      }),
+    ).rejects.toThrow(/unknown|unverified|widen/i)
+    expect(calls).toEqual([])
+  })
+
   it('populates bucket handoff fields from the verified S3 configuration', async () => {
     const providerArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'
     let role: Record<string, unknown> | undefined
+    let policy: string | undefined
     const {client: iamClient} = makeClient(async command => {
       if (command.constructor.name === 'ListOpenIDConnectProvidersCommand') return listResponse(providerArn)
       if (command.constructor.name === 'GetOpenIDConnectProviderCommand') return providerDetails(providerArn)
@@ -540,6 +582,14 @@ describe('GitHub OIDC provider provisioning', () => {
         role = roleFromCreateCall(command.input)
         return roleResponse(role)
       }
+      if (command.constructor.name === 'GetRolePolicyCommand') {
+        if (!policy) throw namedError('NoSuchEntity')
+        return {PolicyDocument: encodeURIComponent(policy)}
+      }
+      if (command.constructor.name === 'PutRolePolicyCommand') {
+        policy = String(command.input.PolicyDocument)
+        return {}
+      }
       throw new Error(`Unexpected IAM command: ${command.constructor.name}`)
     })
     const {client: s3Client} = makeCurrentBucketClient()
@@ -550,6 +600,7 @@ describe('GitHub OIDC provider provisioning', () => {
       s3Client,
       bucket: bucketConfig,
       repository: roleRepository,
+      actionRef: AGENT_ACTION_LAYOUT_VERSION,
       printLine: (line: string) => lines.push(line),
     })
 
@@ -662,6 +713,141 @@ describe('per-repo IAM role provisioning', () => {
       'GetRoleCommand',
       'GetRoleCommand',
       'GetRoleCommand',
+    ])
+  })
+})
+
+describe('per-repo IAM storage policy', () => {
+  it('grants session access and lock access only at their canonical boundaries', () => {
+    const built = buildAgentStoragePolicy(storagePolicyConfig)
+    const statements = built.document.Statement as Record<string, unknown>[]
+    const sessionAllow = statements.find(statement => statement.Sid === 'AllowSessionObjects')
+    const lockAllow = statements.find(statement => statement.Sid === 'AllowCoordinationLock')
+
+    expect(sessionAllow).toEqual({
+      Sid: 'AllowSessionObjects',
+      Effect: 'Allow',
+      Action: ['s3:GetObject', 's3:PutObject'],
+      Resource: ['arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/github/marcusrbrown-infra/storage/*'],
+    })
+    expect(lockAllow).toEqual({
+      Sid: 'AllowCoordinationLock',
+      Effect: 'Allow',
+      Action: ['s3:DeleteObject', 's3:GetObject', 's3:PutObject'],
+      Resource: [
+        'arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock',
+      ],
+    })
+  })
+
+  it('contains an explicit session-prefix delete deny for current and versioned objects', () => {
+    const built = buildAgentStoragePolicy(storagePolicyConfig)
+    const statements = built.document.Statement as Record<string, unknown>[]
+    const sessionDeleteDeny = statements.find(statement => statement.Sid === 'DenySessionDeletes')
+
+    expect(sessionDeleteDeny).toEqual({
+      Sid: 'DenySessionDeletes',
+      Effect: 'Deny',
+      Action: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+      Resource: ['arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/github/marcusrbrown-infra/storage/*'],
+    })
+  })
+
+  it('conditions ListBucket to the session and lock prefixes rather than the whole bucket', () => {
+    const built = buildAgentStoragePolicy(storagePolicyConfig)
+    const statements = built.document.Statement as Record<string, unknown>[]
+    const list = statements.find(statement => statement.Sid === 'AllowListRepoPrefixes')
+
+    expect(list).toEqual({
+      Sid: 'AllowListRepoPrefixes',
+      Effect: 'Allow',
+      Action: ['s3:ListBucket'],
+      Resource: ['arn:aws:s3:::fro-bot-agent-state-fixture'],
+      Condition: {
+        StringLike: {
+          's3:prefix': [
+            'fro-bot-state/github/marcusrbrown-infra/storage/*',
+            'fro-bot-state/coordination/github/marcusrbrown-infra/locks/*',
+          ],
+        },
+      },
+    })
+  })
+
+  it('does not allow DeleteObjectVersion anywhere', () => {
+    const built = buildAgentStoragePolicy(storagePolicyConfig)
+    const statements = built.document.Statement as Record<string, unknown>[]
+
+    expect(
+      statements
+        .filter(statement => statement.Effect === 'Allow')
+        .flatMap(statement => (Array.isArray(statement.Action) ? statement.Action : [statement.Action]))
+        .includes('s3:DeleteObjectVersion'),
+    ).toBe(false)
+  })
+
+  it('makes unsupported version and bucket-location operations explicit denies', () => {
+    const built = buildAgentStoragePolicy(storagePolicyConfig)
+    const statements = built.document.Statement as Record<string, unknown>[]
+    const unsupported = statements.find(statement => statement.Sid === 'DenyUnsupportedS3Actions')
+
+    expect(unsupported?.Effect).toBe('Deny')
+    expect(unsupported?.Action).toEqual([
+      's3:GetBucketLocation',
+      's3:GetObjectAttributes',
+      's3:GetObjectVersion',
+      's3:GetObjectVersionAttributes',
+      's3:ListBucketVersions',
+    ])
+  })
+
+  it('is idempotent, halts on drift, and force re-applies the inline policy', async () => {
+    let policyDocument: string | undefined = JSON.stringify(buildAgentStoragePolicy(storagePolicyConfig).document)
+    const {client, calls} = makeClient(async command => {
+      if (command.constructor.name === 'GetRolePolicyCommand') {
+        if (!policyDocument) throw namedError('NoSuchEntity')
+        return {PolicyDocument: encodeURIComponent(policyDocument)}
+      }
+      if (command.constructor.name === 'PutRolePolicyCommand') {
+        policyDocument = String(command.input.PolicyDocument)
+        return {}
+      }
+      throw new Error(`Unexpected IAM command: ${command.constructor.name}`)
+    })
+
+    const current = await ensureAgentStoragePolicy(client, storagePolicyConfig)
+    expect(current).toEqual({
+      classification: 'current',
+      changed: false,
+      policyName: storagePolicyConfig.roleName,
+      keyLayoutVersion: AGENT_ACTION_LAYOUT_VERSION,
+      sessionPrefix: 'fro-bot-state/github/marcusrbrown-infra/storage/',
+      lockKey: 'fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock',
+    })
+    expect(calls.map(call => call.name)).toEqual(['GetRolePolicyCommand'])
+
+    policyDocument = JSON.stringify({
+      ...buildAgentStoragePolicy(storagePolicyConfig).document,
+      Version: '2012-10-17-drift',
+    })
+    await expect(ensureAgentStoragePolicy(client, storagePolicyConfig)).rejects.toThrow(/managed drift/i)
+    expect(calls.map(call => call.name)).toEqual(['GetRolePolicyCommand', 'GetRolePolicyCommand'])
+
+    const forced = await ensureAgentStoragePolicy(client, storagePolicyConfig, {force: true})
+    expect(forced).toEqual({
+      classification: 'managed-drift',
+      changed: true,
+      policyName: storagePolicyConfig.roleName,
+      keyLayoutVersion: AGENT_ACTION_LAYOUT_VERSION,
+      sessionPrefix: 'fro-bot-state/github/marcusrbrown-infra/storage/',
+      lockKey: 'fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock',
+    })
+    expect(calls.map(call => call.name)).toEqual([
+      'GetRolePolicyCommand',
+      'GetRolePolicyCommand',
+      'GetRolePolicyCommand',
+      'PutRolePolicyCommand',
+      'GetRolePolicyCommand',
     ])
   })
 })

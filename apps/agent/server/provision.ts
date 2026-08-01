@@ -6,8 +6,10 @@ import {
   CreateRoleCommand,
   GetOpenIDConnectProviderCommand,
   GetRoleCommand,
+  GetRolePolicyCommand,
   IAMClient,
   ListOpenIDConnectProvidersCommand,
+  PutRolePolicyCommand,
   TagRoleCommand,
   UpdateAssumeRolePolicyCommand,
   UpdateRoleCommand,
@@ -29,6 +31,7 @@ import {
   type BucketLocationConstraint,
   type LifecycleRule,
 } from '@aws-sdk/client-s3'
+import {assertKnownKeyLayout, buildAgentKeyLayout, type AgentKeyLayout} from '../src/key-layout'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -50,6 +53,7 @@ export const AGENT_REPOSITORY_NAME = 'AGENT_REPOSITORY_NAME'
 export const AGENT_REPOSITORY_ID = 'AGENT_REPOSITORY_ID'
 export const AGENT_REPOSITORY_OWNER_ID = 'AGENT_REPOSITORY_OWNER_ID'
 export const AGENT_WORKFLOW_NAME = 'AGENT_WORKFLOW_NAME'
+export const AGENT_ACTION_REF = 'AGENT_ACTION_REF'
 
 export const AGENT_STORAGE_ENVIRONMENT = 'fro-bot-storage'
 export const AGENT_ROLE_MANAGED_BY = 'fro-bot-agent-storage'
@@ -129,6 +133,30 @@ export interface AgentRoleProvisionResult {
   roleArn: string
 }
 
+export interface AgentStoragePolicyConfig {
+  roleName: string
+  bucket: string
+  owner: string
+  repo: string
+  s3Prefix: string
+  actionVersion: string
+}
+
+export interface AgentStoragePolicyProvisionOptions {
+  force?: boolean
+  log?: (message: string) => void
+  redactionSecrets?: RedactionSecret[]
+}
+
+export interface AgentStoragePolicyProvisionResult {
+  classification: 'current' | 'absent' | 'managed-drift'
+  changed: boolean
+  policyName: string
+  keyLayoutVersion: string
+  sessionPrefix: string
+  lockKey: string
+}
+
 interface OidcProviderDetails {
   providerArn: string
   url: string
@@ -145,6 +173,8 @@ export interface ProvisionDeps {
   bucket?: AgentBucketConfig
   /** Explicit consumer repository identity; otherwise read from AGENT_REPOSITORY_* env vars. */
   repository?: AgentRepositoryConfig
+  /** Exact fro-bot/agent ref used by the consumer workflow. */
+  actionRef?: string
   /** Apply managed drift instead of warning and halting. */
   force?: boolean
   /** Environment source used to construct the default IAM client. */
@@ -1450,6 +1480,184 @@ export async function ensureAgentStorageRole(
   }
 }
 
+interface BuiltAgentStoragePolicy {
+  policyName: string
+  keyLayoutVersion: string
+  layout: AgentKeyLayout
+  document: Record<string, unknown>
+}
+
+/**
+ * Builds the exact S3 action set used by fro-bot/agent's pinned adapter.
+ *
+ * Required: ListBucket (only for the session and lock prefixes), GetObject and
+ * PutObject (session + lock), and DeleteObject (the exact coordination lock).
+ * HeadObject rides on GetObject in the pinned adapter. GetObjectAttributes,
+ * GetObjectVersion, GetObjectVersionAttributes, ListBucketVersions, and
+ * GetBucketLocation are not used by the pinned adapter and are explicitly
+ * denied. DeleteObjectVersion is never allowed and is explicitly denied on the
+ * session prefix.
+ */
+export function buildAgentStoragePolicy(config: AgentStoragePolicyConfig): BuiltAgentStoragePolicy {
+  const keyLayoutVersion = assertKnownKeyLayout(config.actionVersion)
+  const layout = buildAgentKeyLayout(config.owner, config.repo, config.s3Prefix, keyLayoutVersion)
+  const bucketArn = `arn:aws:s3:::${config.bucket}`
+  const sessionObjectArn = `${bucketArn}/${layout.sessionPrefix}*`
+  const lockObjectArn = `${bucketArn}/${layout.lockKey}`
+
+  return {
+    policyName: config.roleName,
+    keyLayoutVersion,
+    layout,
+    document: {
+      Version: '2012-10-17',
+      Statement: [
+        {
+          Sid: 'AllowListRepoPrefixes',
+          Effect: 'Allow',
+          Action: ['s3:ListBucket'],
+          Resource: [bucketArn],
+          Condition: {
+            StringLike: {
+              's3:prefix': layout.listBucketPrefixes.map(prefix => `${prefix}*`),
+            },
+          },
+        },
+        {
+          Sid: 'AllowSessionObjects',
+          Effect: 'Allow',
+          Action: ['s3:GetObject', 's3:PutObject'],
+          Resource: [sessionObjectArn],
+        },
+        {
+          Sid: 'AllowCoordinationLock',
+          Effect: 'Allow',
+          Action: ['s3:DeleteObject', 's3:GetObject', 's3:PutObject'],
+          Resource: [lockObjectArn],
+        },
+        {
+          Sid: 'DenySessionDeletes',
+          Effect: 'Deny',
+          Action: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+          Resource: [sessionObjectArn],
+        },
+        {
+          Sid: 'DenyUnsupportedS3Actions',
+          Effect: 'Deny',
+          Action: [
+            's3:GetBucketLocation',
+            's3:GetObjectAttributes',
+            's3:GetObjectVersion',
+            's3:GetObjectVersionAttributes',
+            's3:ListBucketVersions',
+          ],
+          Resource: [bucketArn, `${bucketArn}/*`],
+        },
+      ],
+    },
+  }
+}
+
+async function readAgentStoragePolicy(
+  client: IAMClientLike,
+  roleName: string,
+  policyName: string,
+  secrets: RedactionSecret[],
+): Promise<unknown | undefined> {
+  try {
+    const response = await client.send(new GetRolePolicyCommand({RoleName: roleName, PolicyName: policyName}))
+    if (response.PolicyDocument === undefined) {
+      throw new Error(`IAM role ${roleName} inline policy ${policyName} readback did not include a policy document`)
+    }
+    return response.PolicyDocument
+  } catch (error: unknown) {
+    if (isNamedError(error, ['NoSuchEntity'])) return undefined
+    throw redactAwsError(error, secrets)
+  }
+}
+
+async function readAgentStoragePolicyAfterMutation(
+  client: IAMClientLike,
+  roleName: string,
+  policyName: string,
+  expectedPolicy: Record<string, unknown>,
+  secrets: RedactionSecret[],
+): Promise<void> {
+  let lastPolicy: unknown
+  for (let attempt = 0; attempt < IAM_ROLE_READBACK_MAX_ATTEMPTS; attempt += 1) {
+    lastPolicy = await readAgentStoragePolicy(client, roleName, policyName, secrets)
+    if (lastPolicy !== undefined && jsonDocumentsEqual(lastPolicy, expectedPolicy)) return
+    if (attempt + 1 < IAM_ROLE_READBACK_MAX_ATTEMPTS) {
+      await new Promise(resolve => setTimeout(resolve, IAM_ROLE_READBACK_DELAY_MS))
+    }
+  }
+  throw new Error(
+    `IAM role ${roleName} inline policy ${policyName} readback did not converge after ${IAM_ROLE_READBACK_MAX_ATTEMPTS} attempts`,
+  )
+}
+
+function warnAndHaltStoragePolicy(
+  roleName: string,
+  policyName: string,
+  message: string,
+  options: AgentStoragePolicyProvisionOptions,
+): never {
+  const warning =
+    `IAM role ${roleName} inline policy ${policyName} managed drift detected: ${message}. ` +
+    'Refusing to mutate; re-run with --force to apply the canonical state.'
+  ;(options.log ?? (line => console.warn(line)))(warning)
+  throw new Error(warning)
+}
+
+/** Ensures the repo-scoped inline storage policy without widening its boundaries. */
+export async function ensureAgentStoragePolicy(
+  client: IAMClientLike,
+  config: AgentStoragePolicyConfig,
+  options: AgentStoragePolicyProvisionOptions = {},
+): Promise<AgentStoragePolicyProvisionResult> {
+  const built = buildAgentStoragePolicy(config)
+  const secrets = options.redactionSecrets ?? []
+  const current = await readAgentStoragePolicy(client, config.roleName, built.policyName, secrets)
+
+  if (current !== undefined && jsonDocumentsEqual(current, built.document)) {
+    return {
+      classification: 'current',
+      changed: false,
+      policyName: built.policyName,
+      keyLayoutVersion: built.keyLayoutVersion,
+      sessionPrefix: built.layout.sessionPrefix,
+      lockKey: built.layout.lockKey,
+    }
+  }
+
+  if (current !== undefined && !options.force) {
+    warnAndHaltStoragePolicy(config.roleName, built.policyName, 'policy document is not canonical', options)
+  }
+
+  try {
+    await client.send(
+      new PutRolePolicyCommand({
+        RoleName: config.roleName,
+        PolicyName: built.policyName,
+        PolicyDocument: JSON.stringify(built.document),
+      }),
+    )
+  } catch (error: unknown) {
+    throw redactAwsError(error, secrets)
+  }
+
+  await readAgentStoragePolicyAfterMutation(client, config.roleName, built.policyName, built.document, secrets)
+
+  return {
+    classification: current === undefined ? 'absent' : 'managed-drift',
+    changed: true,
+    policyName: built.policyName,
+    keyLayoutVersion: built.keyLayoutVersion,
+    sessionPrefix: built.layout.sessionPrefix,
+    lockKey: built.layout.lockKey,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Provisioning orchestration
 // ---------------------------------------------------------------------------
@@ -1515,6 +1723,16 @@ function readRepositoryConfigFromEnv(env: Partial<Record<string, string | undefi
   return {owner, repo, repositoryId, repositoryOwnerId, workflow}
 }
 
+function readActionRefFromEnv(env: Partial<Record<string, string | undefined>>): string {
+  const actionRef = env[AGENT_ACTION_REF]?.trim()
+  if (!actionRef) {
+    throw new Error(
+      `Missing dedicated agent action ref configuration. Set ${AGENT_ACTION_REF} to the pinned fro-bot/agent ref.`,
+    )
+  }
+  return actionRef
+}
+
 export async function performProvisioning(deps: ProvisionDeps = {}): Promise<AgentHandoffManifest> {
   const env = deps.env ?? process.env
   const secrets = deps.redactionSecrets ?? [
@@ -1524,16 +1742,22 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
   ]
 
   const repository = deps.repository ?? readRepositoryConfigFromEnv(env)
-  const client = deps.client ?? createIamClientFromEnv(env)
-  const provider = await ensureGitHubOidcProvider(client, secrets)
-  const manifest = createHandoffManifest(provider.providerArn)
-
   const bucketConfig = deps.bucket ?? readBucketConfigFromEnv(env)
   if (!bucketConfig) {
     throw new Error(
       `Missing dedicated agent S3 bucket configuration. Set ${AGENT_S3_BUCKET}, ${AGENT_S3_EXPECTED_BUCKET_OWNER}, and ${AGENT_S3_PREFIX}.`,
     )
   }
+
+  // Validate the action layout before constructing clients or touching shared
+  // AWS resources. An unknown layout is never made to work by widening IAM.
+  const actionRef = deps.actionRef ?? readActionRefFromEnv(env)
+  const keyLayoutVersion = assertKnownKeyLayout(actionRef)
+  const keyLayout = buildAgentKeyLayout(repository.owner, repository.repo, bucketConfig.s3Prefix, keyLayoutVersion)
+
+  const client = deps.client ?? createIamClientFromEnv(env)
+  const provider = await ensureGitHubOidcProvider(client, secrets)
+  const manifest = createHandoffManifest(provider.providerArn)
 
   const s3Client = deps.s3Client ?? createS3ClientFromEnv(env, bucketConfig.region)
   const bucket = await ensureAgentStateBucket(s3Client, bucketConfig, {
@@ -1544,6 +1768,21 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
     force: deps.force,
     redactionSecrets: secrets,
   })
+  const policy = await ensureAgentStoragePolicy(
+    client,
+    {
+      roleName: role.roleName,
+      bucket: bucket.bucket,
+      owner: repository.owner,
+      repo: repository.repo,
+      s3Prefix: bucket.s3Prefix,
+      actionVersion: keyLayoutVersion,
+    },
+    {
+      force: deps.force,
+      redactionSecrets: secrets,
+    },
+  )
   manifest.owner = repository.owner
   manifest.repo = repository.repo
   manifest.repository_id = repository.repositoryId
@@ -1552,9 +1791,13 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
   manifest.bucket_region = bucket.bucketRegion
   manifest.expected_bucket_owner = bucket.expectedBucketOwner
   manifest.s3_prefix = bucket.s3Prefix
-  manifest.session_prefix = bucket.sessionPrefix
+  manifest.session_prefix = keyLayout.sessionPrefix
+  manifest.lock_key = policy.lockKey
   manifest.role_name = role.roleName
   manifest.role_arn = role.roleArn
+  manifest.policy_name = policy.policyName
+  manifest.action_ref_verified = true
+  manifest.key_layout_version = policy.keyLayoutVersion
 
   printManifest(manifest, deps.printLine)
   return manifest

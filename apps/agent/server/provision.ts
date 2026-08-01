@@ -3,9 +3,14 @@
 import {
   AddClientIDToOpenIDConnectProviderCommand,
   CreateOpenIDConnectProviderCommand,
+  CreateRoleCommand,
   GetOpenIDConnectProviderCommand,
+  GetRoleCommand,
   IAMClient,
   ListOpenIDConnectProvidersCommand,
+  TagRoleCommand,
+  UpdateAssumeRolePolicyCommand,
+  UpdateRoleCommand,
 } from '@aws-sdk/client-iam'
 import {
   CreateBucketCommand,
@@ -40,6 +45,15 @@ export const AGENT_S3_EXPECTED_BUCKET_OWNER = 'AGENT_S3_EXPECTED_BUCKET_OWNER'
 export const AGENT_S3_PREFIX = 'AGENT_S3_PREFIX'
 export const AGENT_S3_SESSION_PREFIX = 'AGENT_S3_SESSION_PREFIX'
 export const AGENT_S3_METADATA_ARTIFACTS_PREFIX = 'AGENT_S3_METADATA_ARTIFACTS_PREFIX'
+export const AGENT_REPOSITORY_OWNER = 'AGENT_REPOSITORY_OWNER'
+export const AGENT_REPOSITORY_NAME = 'AGENT_REPOSITORY_NAME'
+export const AGENT_REPOSITORY_ID = 'AGENT_REPOSITORY_ID'
+export const AGENT_REPOSITORY_OWNER_ID = 'AGENT_REPOSITORY_OWNER_ID'
+export const AGENT_WORKFLOW_NAME = 'AGENT_WORKFLOW_NAME'
+
+export const AGENT_STORAGE_ENVIRONMENT = 'fro-bot-storage'
+export const AGENT_ROLE_MANAGED_BY = 'fro-bot-agent-storage'
+export const AGENT_ROLE_MAX_SESSION_DURATION = 7200
 
 export const AGENT_LIFECYCLE_RULE_IDS = [
   'fro-bot-agent-session-90d',
@@ -94,6 +108,27 @@ export interface AgentBucketProvisionResult {
   sessionPrefix: string
 }
 
+export interface AgentRepositoryConfig {
+  owner: string
+  repo: string
+  repositoryId: string
+  repositoryOwnerId: string
+  workflow: string
+}
+
+export interface AgentRoleProvisionOptions {
+  force?: boolean
+  log?: (message: string) => void
+  redactionSecrets?: RedactionSecret[]
+}
+
+export interface AgentRoleProvisionResult {
+  classification: 'current' | 'absent' | 'managed-drift' | 'foreign-drift'
+  changed: boolean
+  roleName: string
+  roleArn: string
+}
+
 interface OidcProviderDetails {
   providerArn: string
   url: string
@@ -108,6 +143,10 @@ export interface ProvisionDeps {
   s3Client?: S3ClientLike
   /** Explicit bucket configuration; otherwise read from AGENT_S3_* env vars. */
   bucket?: AgentBucketConfig
+  /** Explicit consumer repository identity; otherwise read from AGENT_REPOSITORY_* env vars. */
+  repository?: AgentRepositoryConfig
+  /** Apply managed drift instead of warning and halting. */
+  force?: boolean
   /** Environment source used to construct the default IAM client. */
   env?: Partial<Record<string, string | undefined>>
   /** Replaces stdout in tests; defaults to console.log. */
@@ -1018,6 +1057,400 @@ export async function ensureGitHubOidcProvider(
 }
 
 // ---------------------------------------------------------------------------
+// Per-repository role and trust-policy convergence
+// ---------------------------------------------------------------------------
+
+const IAM_ROLE_NAME_MAX_LENGTH = 64
+const IAM_ROLE_READBACK_MAX_ATTEMPTS = 5
+const IAM_ROLE_READBACK_DELAY_MS = 25
+
+interface RoleTagReadback {
+  Key?: string
+  Value?: string
+}
+
+interface IamRoleReadback {
+  Arn?: string
+  RoleName?: string
+  AssumeRolePolicyDocument?: string | Record<string, unknown>
+  MaxSessionDuration?: number
+  Tags?: RoleTagReadback[]
+}
+
+interface RoleState {
+  foreignDrift: string[]
+  managedDrift: string[]
+}
+
+function validateRepositoryConfig(repository: AgentRepositoryConfig): void {
+  const githubSegment = /^[A-Z0-9](?:[\w.-]*[A-Z0-9])?$/i
+  for (const [label, value] of [
+    ['owner', repository.owner],
+    ['repo', repository.repo],
+  ] as const) {
+    if (!githubSegment.test(value)) {
+      throw new Error(`Agent repository ${label} must be a single GitHub path segment without wildcard characters`)
+    }
+  }
+
+  for (const [label, value] of [
+    ['repository_id', repository.repositoryId],
+    ['repository_owner_id', repository.repositoryOwnerId],
+  ] as const) {
+    if (!/^\d+$/.test(value)) {
+      throw new Error(`Agent repository ${label} must contain only decimal digits`)
+    }
+  }
+
+  if (
+    repository.workflow.trim().length === 0 ||
+    repository.workflow.includes('*') ||
+    repository.workflow.includes('?')
+  ) {
+    throw new Error('Agent workflow name must be non-empty and must not contain wildcard characters')
+  }
+}
+
+function sanitizeIamRoleSegment(value: string): string {
+  return value.replaceAll(/[^\w+=,.@-]/g, '-')
+}
+
+function stableRoleNameDigest(value: string): string {
+  let first = 2166136261
+  let second = 2654435769
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    first = Math.imul(first ^ codePoint, 16777619)
+    second = Math.imul(second ^ codePoint, 2246822519)
+  }
+  return `${(first >>> 0).toString(16).padStart(8, '0')}${(second >>> 0).toString(16).padStart(8, '0')}`.slice(0, 12)
+}
+
+/** Builds a stable IAM-safe role name, hashing only when GitHub names exceed IAM's limit. */
+export function buildAgentRoleName(owner: string, repo: string): string {
+  const ownerSegment = sanitizeIamRoleSegment(owner)
+  const repoSegment = sanitizeIamRoleSegment(repo)
+  if (ownerSegment.length === 0 || repoSegment.length === 0) {
+    throw new Error('Agent role names require non-empty owner and repository segments')
+  }
+
+  const base = `fro-bot-agent-storage-${ownerSegment}-${repoSegment}`
+  if (base.length <= IAM_ROLE_NAME_MAX_LENGTH) return base
+
+  const digest = stableRoleNameDigest(`${owner}/${repo}`)
+  return `${base.slice(0, IAM_ROLE_NAME_MAX_LENGTH - digest.length - 1)}-${digest}`
+}
+
+/**
+ * Builds the only supported GitHub OIDC subjects for a storage role.
+ * The array is intentionally exact: no wildcard subject is ever constructed.
+ */
+export function buildGitHubOidcTrustPolicy(
+  repository: AgentRepositoryConfig,
+  oidcProviderArn: string,
+): Record<string, unknown> {
+  validateRepositoryConfig(repository)
+  if (oidcProviderArn.trim().length === 0) throw new Error('GitHub OIDC provider ARN is required')
+
+  const legacySubject = `repo:${repository.owner}/${repository.repo}:environment:${AGENT_STORAGE_ENVIRONMENT}`
+  const immutableSubject = `repo:${repository.owner}@${repository.repositoryOwnerId}/${repository.repo}@${repository.repositoryId}:environment:${AGENT_STORAGE_ENVIRONMENT}`
+  const subjects = [legacySubject, immutableSubject]
+
+  if (subjects.some(subject => subject.includes('*') || subject.includes('?'))) {
+    throw new Error('Agent trust policy subjects must never contain wildcard characters')
+  }
+
+  return {
+    Version: '2012-10-17',
+    Statement: [
+      {
+        Effect: 'Allow',
+        Principal: {Federated: oidcProviderArn},
+        Action: 'sts:AssumeRoleWithWebIdentity',
+        Condition: {
+          StringEquals: {
+            'token.actions.githubusercontent.com:aud': GITHUB_OIDC_AUDIENCE,
+            'token.actions.githubusercontent.com:sub': subjects,
+            'token.actions.githubusercontent.com:repository_id': repository.repositoryId,
+            'token.actions.githubusercontent.com:repository_owner_id': repository.repositoryOwnerId,
+            'token.actions.githubusercontent.com:ref': 'refs/heads/main',
+            // Defense-in-depth tripwire. The environment subject and numeric
+            // repository/ref pins remain the load-bearing trust boundary.
+            'token.actions.githubusercontent.com:workflow': repository.workflow,
+          },
+        },
+      },
+    ],
+  }
+}
+
+function roleTags(repository: AgentRepositoryConfig): {Key: string; Value: string}[] {
+  return [
+    {Key: 'owner', Value: repository.owner},
+    {Key: 'repo', Value: repository.repo},
+    {Key: 'repository_id', Value: repository.repositoryId},
+    {Key: 'repository_owner_id', Value: repository.repositoryOwnerId},
+    {Key: 'managed-by', Value: AGENT_ROLE_MANAGED_BY},
+  ]
+}
+
+function parseJsonDocument(document: unknown): unknown {
+  if (typeof document !== 'string') return document
+  try {
+    return JSON.parse(document) as unknown
+  } catch {
+    try {
+      return JSON.parse(decodeURIComponent(document)) as unknown
+    } catch {
+      return undefined
+    }
+  }
+}
+
+function jsonDocumentsEqual(actual: unknown, expected: Record<string, unknown>): boolean {
+  return JSON.stringify(normalizeJson(parseJsonDocument(actual))) === JSON.stringify(normalizeJson(expected))
+}
+
+function tagsToMap(tags: RoleTagReadback[] | undefined): Map<string, string> {
+  const result = new Map<string, string>()
+  for (const tag of tags ?? []) {
+    if (typeof tag.Key === 'string' && typeof tag.Value === 'string') result.set(tag.Key, tag.Value)
+  }
+  return result
+}
+
+function classifyRoleState(
+  role: IamRoleReadback,
+  roleName: string,
+  repository: AgentRepositoryConfig,
+  expectedTrustPolicy: Record<string, unknown>,
+): RoleState {
+  const foreignDrift: string[] = []
+  const managedDrift: string[] = []
+
+  if (role.RoleName !== undefined && role.RoleName !== roleName) foreignDrift.push('role name')
+
+  const tags = tagsToMap(role.Tags)
+  if (tags.get('managed-by') !== AGENT_ROLE_MANAGED_BY) {
+    foreignDrift.push('managed-by tag')
+  }
+
+  for (const [key, expected] of [
+    ['owner', repository.owner],
+    ['repo', repository.repo],
+    ['repository_id', repository.repositoryId],
+    ['repository_owner_id', repository.repositoryOwnerId],
+  ] as const) {
+    const actual = tags.get(key)
+    if (actual === undefined) managedDrift.push(`${key} tag`)
+    else if (actual !== expected) foreignDrift.push(`${key} tag`)
+  }
+
+  if (!jsonDocumentsEqual(role.AssumeRolePolicyDocument, expectedTrustPolicy)) {
+    managedDrift.push('trust policy')
+  }
+  if ((role.MaxSessionDuration ?? 0) < AGENT_ROLE_MAX_SESSION_DURATION) {
+    managedDrift.push('max session duration')
+  }
+
+  return {foreignDrift, managedDrift}
+}
+
+function roleIsCanonical(
+  role: IamRoleReadback,
+  roleName: string,
+  repository: AgentRepositoryConfig,
+  expectedTrustPolicy: Record<string, unknown>,
+): boolean {
+  const state = classifyRoleState(role, roleName, repository, expectedTrustPolicy)
+  return state.foreignDrift.length === 0 && state.managedDrift.length === 0
+}
+
+function roleArn(role: IamRoleReadback, roleName: string): string {
+  if (!role.Arn) throw new Error(`IAM role ${roleName} readback did not include an ARN`)
+  return role.Arn
+}
+
+async function readAgentRole(
+  client: IAMClientLike,
+  roleName: string,
+  secrets: RedactionSecret[],
+): Promise<IamRoleReadback | undefined> {
+  try {
+    const response = await client.send(new GetRoleCommand({RoleName: roleName}))
+    const role = response.Role as IamRoleReadback | undefined
+    if (!role) throw new Error(`IAM role ${roleName} readback did not include a role`)
+    return role
+  } catch (error: unknown) {
+    if (isNamedError(error, ['NoSuchEntity'])) return undefined
+    throw redactAwsError(error, secrets)
+  }
+}
+
+async function readAgentRoleAfterMutation(
+  client: IAMClientLike,
+  roleName: string,
+  secrets: RedactionSecret[],
+  matches?: (role: IamRoleReadback) => boolean,
+): Promise<IamRoleReadback> {
+  let lastRole: IamRoleReadback | undefined
+  for (let attempt = 0; attempt < IAM_ROLE_READBACK_MAX_ATTEMPTS; attempt += 1) {
+    lastRole = await readAgentRole(client, roleName, secrets)
+    if (lastRole !== undefined && (matches === undefined || matches(lastRole))) return lastRole
+    if (attempt + 1 < IAM_ROLE_READBACK_MAX_ATTEMPTS) {
+      await new Promise(resolve => setTimeout(resolve, IAM_ROLE_READBACK_DELAY_MS))
+    }
+  }
+
+  throw new Error(
+    `IAM role ${roleName} readback did not converge after ${IAM_ROLE_READBACK_MAX_ATTEMPTS} attempts${
+      lastRole === undefined ? '' : ' to the requested state'
+    }`,
+  )
+}
+
+function warnAndHaltRole(roleName: string, message: string, options: AgentRoleProvisionOptions): never {
+  const warning = `IAM role ${roleName} managed drift detected: ${message}. Refusing to mutate; re-run with --force to apply the canonical state.`
+  ;(options.log ?? (line => console.warn(line)))(warning)
+  throw new Error(warning)
+}
+
+function haltForeignRole(roleName: string, message: string, options: AgentRoleProvisionOptions): never {
+  const warning = `IAM role ${roleName} foreign/shared drift detected: ${message}. Refusing to mutate, including with --force.`
+  ;(options.log ?? (line => console.warn(line)))(warning)
+  throw new Error(warning)
+}
+
+async function convergeExistingAgentRole(
+  client: IAMClientLike,
+  role: IamRoleReadback,
+  roleName: string,
+  repository: AgentRepositoryConfig,
+  expectedTrustPolicy: Record<string, unknown>,
+  desiredTags: {Key: string; Value: string}[],
+  options: AgentRoleProvisionOptions,
+): Promise<AgentRoleProvisionResult> {
+  const secrets = options.redactionSecrets ?? []
+  const state = classifyRoleState(role, roleName, repository, expectedTrustPolicy)
+  if (state.foreignDrift.length > 0) haltForeignRole(roleName, state.foreignDrift.join(', '), options)
+  if (state.managedDrift.length === 0) {
+    return {
+      classification: 'current',
+      changed: false,
+      roleName,
+      roleArn: roleArn(role, roleName),
+    }
+  }
+  if (!options.force) warnAndHaltRole(roleName, state.managedDrift.join(', '), options)
+
+  let changed = false
+  let current = role
+  if (state.managedDrift.includes('trust policy')) {
+    try {
+      await client.send(
+        new UpdateAssumeRolePolicyCommand({
+          RoleName: roleName,
+          PolicyDocument: JSON.stringify(expectedTrustPolicy),
+        }),
+      )
+    } catch (error: unknown) {
+      throw redactAwsError(error, secrets)
+    }
+    current = await readAgentRoleAfterMutation(client, roleName, secrets, candidate =>
+      jsonDocumentsEqual(candidate.AssumeRolePolicyDocument, expectedTrustPolicy),
+    )
+    changed = true
+  }
+
+  if (state.managedDrift.includes('max session duration')) {
+    try {
+      await client.send(
+        new UpdateRoleCommand({
+          RoleName: roleName,
+          MaxSessionDuration: AGENT_ROLE_MAX_SESSION_DURATION,
+        }),
+      )
+    } catch (error: unknown) {
+      throw redactAwsError(error, secrets)
+    }
+    current = await readAgentRoleAfterMutation(
+      client,
+      roleName,
+      secrets,
+      candidate => (candidate.MaxSessionDuration ?? 0) >= AGENT_ROLE_MAX_SESSION_DURATION,
+    )
+    changed = true
+  }
+
+  if (state.managedDrift.some(drift => drift.endsWith('tag'))) {
+    try {
+      await client.send(new TagRoleCommand({RoleName: roleName, Tags: desiredTags}))
+    } catch (error: unknown) {
+      throw redactAwsError(error, secrets)
+    }
+    current = await readAgentRoleAfterMutation(client, roleName, secrets, candidate =>
+      roleIsCanonical(candidate, roleName, repository, expectedTrustPolicy),
+    )
+    changed = true
+  }
+
+  if (!roleIsCanonical(current, roleName, repository, expectedTrustPolicy)) {
+    throw new Error(`IAM role ${roleName} readback failed to match the canonical trust and tag state`)
+  }
+
+  return {
+    classification: 'managed-drift',
+    changed,
+    roleName,
+    roleArn: roleArn(current, roleName),
+  }
+}
+
+/** Ensures one repo-scoped IAM role with a pinned GitHub OIDC trust policy. */
+export async function ensureAgentStorageRole(
+  client: IAMClientLike,
+  repository: AgentRepositoryConfig,
+  oidcProviderArn: string,
+  options: AgentRoleProvisionOptions = {},
+): Promise<AgentRoleProvisionResult> {
+  validateRepositoryConfig(repository)
+  const roleName = buildAgentRoleName(repository.owner, repository.repo)
+  const expectedTrustPolicy = buildGitHubOidcTrustPolicy(repository, oidcProviderArn)
+  const desiredTags = roleTags(repository)
+  const secrets = options.redactionSecrets ?? []
+  const existing = await readAgentRole(client, roleName, secrets)
+
+  if (existing !== undefined) {
+    return convergeExistingAgentRole(client, existing, roleName, repository, expectedTrustPolicy, desiredTags, options)
+  }
+
+  try {
+    await client.send(
+      new CreateRoleCommand({
+        RoleName: roleName,
+        AssumeRolePolicyDocument: JSON.stringify(expectedTrustPolicy),
+        MaxSessionDuration: AGENT_ROLE_MAX_SESSION_DURATION,
+        Tags: desiredTags,
+      }),
+    )
+  } catch (error: unknown) {
+    if (!isEntityAlreadyExistsError(error)) throw redactAwsError(error, secrets)
+    const raced = await readAgentRoleAfterMutation(client, roleName, secrets)
+    return convergeExistingAgentRole(client, raced, roleName, repository, expectedTrustPolicy, desiredTags, options)
+  }
+
+  const created = await readAgentRoleAfterMutation(client, roleName, secrets, candidate =>
+    roleIsCanonical(candidate, roleName, repository, expectedTrustPolicy),
+  )
+  return {
+    classification: 'absent',
+    changed: true,
+    roleName,
+    roleArn: roleArn(created, roleName),
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Provisioning orchestration
 // ---------------------------------------------------------------------------
 
@@ -1057,6 +1490,31 @@ function readBucketConfigFromEnv(env: Partial<Record<string, string | undefined>
   }
 }
 
+function readRepositoryConfigFromEnv(env: Partial<Record<string, string | undefined>>): AgentRepositoryConfig {
+  const values = {
+    owner: env[AGENT_REPOSITORY_OWNER]?.trim(),
+    repo: env[AGENT_REPOSITORY_NAME]?.trim(),
+    repositoryId: env[AGENT_REPOSITORY_ID]?.trim(),
+    repositoryOwnerId: env[AGENT_REPOSITORY_OWNER_ID]?.trim(),
+    workflow: env[AGENT_WORKFLOW_NAME]?.trim(),
+  }
+  const missing = Object.entries(values)
+    .filter(([, value]) => !value)
+    .map(([key]) => key)
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing dedicated agent repository configuration: ${missing.join(', ')}. ` +
+        `Set ${AGENT_REPOSITORY_OWNER}, ${AGENT_REPOSITORY_NAME}, ${AGENT_REPOSITORY_ID}, ${AGENT_REPOSITORY_OWNER_ID}, and ${AGENT_WORKFLOW_NAME}.`,
+    )
+  }
+
+  const {owner, repo, repositoryId, repositoryOwnerId, workflow} = values
+  if (!owner || !repo || !repositoryId || !repositoryOwnerId || !workflow) {
+    throw new Error('Dedicated agent repository configuration is incomplete')
+  }
+  return {owner, repo, repositoryId, repositoryOwnerId, workflow}
+}
+
 export async function performProvisioning(deps: ProvisionDeps = {}): Promise<AgentHandoffManifest> {
   const env = deps.env ?? process.env
   const secrets = deps.redactionSecrets ?? [
@@ -1065,6 +1523,7 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
     {name: 'agent-aws-session-token', content: env[AGENT_AWS_SESSION_TOKEN] ?? ''},
   ]
 
+  const repository = deps.repository ?? readRepositoryConfigFromEnv(env)
   const client = deps.client ?? createIamClientFromEnv(env)
   const provider = await ensureGitHubOidcProvider(client, secrets)
   const manifest = createHandoffManifest(provider.providerArn)
@@ -1077,19 +1536,37 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
   }
 
   const s3Client = deps.s3Client ?? createS3ClientFromEnv(env, bucketConfig.region)
-  const bucket = await ensureAgentStateBucket(s3Client, bucketConfig, {redactionSecrets: secrets})
+  const bucket = await ensureAgentStateBucket(s3Client, bucketConfig, {
+    force: deps.force,
+    redactionSecrets: secrets,
+  })
+  const role = await ensureAgentStorageRole(client, repository, provider.providerArn, {
+    force: deps.force,
+    redactionSecrets: secrets,
+  })
+  manifest.owner = repository.owner
+  manifest.repo = repository.repo
+  manifest.repository_id = repository.repositoryId
+  manifest.repository_owner_id = repository.repositoryOwnerId
   manifest.bucket = bucket.bucket
   manifest.bucket_region = bucket.bucketRegion
   manifest.expected_bucket_owner = bucket.expectedBucketOwner
   manifest.s3_prefix = bucket.s3Prefix
   manifest.session_prefix = bucket.sessionPrefix
+  manifest.role_name = role.roleName
+  manifest.role_arn = role.roleArn
 
   printManifest(manifest, deps.printLine)
   return manifest
 }
 
 async function main(): Promise<void> {
-  await performProvisioning()
+  const args = Bun.argv.slice(2)
+  const unknown = args.filter((argument: string) => argument !== '--force')
+  if (unknown.length > 0) {
+    throw new Error(`Unknown provision argument(s): ${unknown.join(', ')}. Supported: --force`)
+  }
+  await performProvisioning({force: args.includes('--force')})
 }
 
 if (import.meta.main) {

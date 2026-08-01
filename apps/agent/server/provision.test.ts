@@ -4,11 +4,14 @@ import {
   canonicalizeS3Prefix,
   createIamClientFromEnv,
   ensureAgentStateBucket,
+  ensureAgentStorageRole,
   ensureGitHubOidcProvider,
   GITHUB_OIDC_AUDIENCE,
   GITHUB_OIDC_PROVIDER_URL,
   performProvisioning,
   type AgentBucketConfig,
+  type AgentRepositoryConfig,
+  type AgentRoleProvisionResult,
   type IAMClientLike,
   type S3ClientLike,
 } from './provision'
@@ -36,6 +39,112 @@ function makeClient(handler: CommandHandler): {client: IAMClientLike; calls: Fak
     client: {send: send as unknown as IAMClientLike['send']},
     calls,
   }
+}
+
+const roleRepository: AgentRepositoryConfig = {
+  owner: 'marcusrbrown',
+  repo: 'infra',
+  repositoryId: '1200110668',
+  repositoryOwnerId: '831617',
+  workflow: 'Fro Bot',
+}
+
+const roleProviderArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'
+
+async function ensureRoleForTest(
+  client: IAMClientLike,
+  options: {force?: boolean; log?: (message: string) => void} = {},
+): Promise<AgentRoleProvisionResult> {
+  return ensureAgentStorageRole(client, roleRepository, roleProviderArn, options)
+}
+
+function roleResponse(role: Record<string, unknown>): Record<string, unknown> {
+  return {Role: role}
+}
+
+function roleFromCreateCall(input: Record<string, unknown>): Record<string, unknown> {
+  const roleName = String(input.RoleName)
+  return {
+    Arn: `arn:aws:iam::111122223333:role/${roleName}`,
+    RoleName: roleName,
+    AssumeRolePolicyDocument: input.AssumeRolePolicyDocument,
+    MaxSessionDuration: input.MaxSessionDuration,
+    Tags: input.Tags,
+  }
+}
+
+function makeRoleClient(
+  options: {
+    role?: Record<string, unknown>
+    readbackNoSuchCount?: number
+  } = {},
+): {client: IAMClientLike; calls: FakeCall[]} {
+  let role = options.role
+  let readbackNoSuchCount = options.readbackNoSuchCount ?? 0
+  let created = false
+
+  return makeClient(async command => {
+    switch (command.constructor.name) {
+      case 'GetRoleCommand':
+        if (!role || (created && readbackNoSuchCount > 0)) {
+          if (created && readbackNoSuchCount > 0) readbackNoSuchCount -= 1
+          throw namedError('NoSuchEntity', 'role does not exist yet')
+        }
+        return roleResponse(role)
+      case 'CreateRoleCommand': {
+        role = roleFromCreateCall(command.input)
+        created = true
+        return roleResponse(role)
+      }
+      case 'UpdateAssumeRolePolicyCommand':
+        role = {...role, AssumeRolePolicyDocument: command.input.PolicyDocument}
+        return {}
+      case 'UpdateRoleCommand':
+        role = {...role, MaxSessionDuration: command.input.MaxSessionDuration}
+        return {}
+      case 'TagRoleCommand':
+        role = {...role, Tags: command.input.Tags}
+        return {}
+      default:
+        throw new Error(`Unexpected IAM command: ${command.constructor.name}`)
+    }
+  })
+}
+
+function canonicalRoleTrust(): Record<string, unknown> {
+  return {
+    Version: '2012-10-17',
+    Statement: [
+      {
+        Effect: 'Allow',
+        Principal: {Federated: roleProviderArn},
+        Action: 'sts:AssumeRoleWithWebIdentity',
+        Condition: {
+          StringEquals: {
+            'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
+            'token.actions.githubusercontent.com:sub': [
+              'repo:marcusrbrown/infra:environment:fro-bot-storage',
+              'repo:marcusrbrown@831617/infra@1200110668:environment:fro-bot-storage',
+            ],
+            'token.actions.githubusercontent.com:repository_id': '1200110668',
+            'token.actions.githubusercontent.com:repository_owner_id': '831617',
+            'token.actions.githubusercontent.com:ref': 'refs/heads/main',
+            'token.actions.githubusercontent.com:workflow': 'Fro Bot',
+          },
+        },
+      },
+    ],
+  }
+}
+
+function managedRoleTags(): Record<string, string>[] {
+  return [
+    {Key: 'owner', Value: roleRepository.owner},
+    {Key: 'repo', Value: roleRepository.repo},
+    {Key: 'repository_id', Value: roleRepository.repositoryId},
+    {Key: 'repository_owner_id', Value: roleRepository.repositoryOwnerId},
+    {Key: 'managed-by', Value: 'fro-bot-agent-storage'},
+  ]
 }
 
 function makeS3Client(handler: CommandHandler): {client: S3ClientLike; calls: FakeCall[]} {
@@ -344,23 +453,43 @@ describe('GitHub OIDC provider provisioning', () => {
 
   it('emits the handoff manifest with the OIDC provider ARN populated', async () => {
     const providerArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'
+    let role: Record<string, unknown> | undefined
     const {client} = makeClient(async command => {
       if (command.constructor.name === 'ListOpenIDConnectProvidersCommand') return listResponse()
       if (command.constructor.name === 'CreateOpenIDConnectProviderCommand') {
         return {OpenIDConnectProviderArn: providerArn}
       }
       if (command.constructor.name === 'GetOpenIDConnectProviderCommand') return providerDetails(providerArn)
+      if (command.constructor.name === 'GetRoleCommand') {
+        if (!role) throw namedError('NoSuchEntity')
+        return roleResponse(role)
+      }
+      if (command.constructor.name === 'CreateRoleCommand') {
+        role = roleFromCreateCall(command.input)
+        return roleResponse(role)
+      }
       throw new Error(`Unexpected command: ${command.constructor.name}`)
     })
     const lines: string[] = []
     const {client: s3Client} = makeCurrentBucketClient()
 
-    await performProvisioning({client, s3Client, bucket: bucketConfig, printLine: (line: string) => lines.push(line)})
+    await performProvisioning({
+      client,
+      s3Client,
+      bucket: bucketConfig,
+      repository: roleRepository,
+      printLine: (line: string) => lines.push(line),
+    })
 
     expect(lines).toHaveLength(1)
     const manifest = JSON.parse(lines[0] ?? '') as Record<string, unknown>
     expect(manifest.oidc_provider_arn).toBe(providerArn)
-    expect(manifest.owner).toBe('')
+    expect(manifest.owner).toBe(roleRepository.owner)
+    expect(manifest.repo).toBe(roleRepository.repo)
+    expect(manifest.repository_id).toBe(roleRepository.repositoryId)
+    expect(manifest.repository_owner_id).toBe(roleRepository.repositoryOwnerId)
+    expect(manifest.role_name).toBe('fro-bot-agent-storage-marcusrbrown-infra')
+    expect(manifest.role_arn).toBe('arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra')
     expect(manifest.key_layout_version).toBe('')
     expect(Object.keys(manifest)).toEqual(
       expect.arrayContaining([
@@ -392,14 +521,25 @@ describe('GitHub OIDC provider provisioning', () => {
       throw new Error(`Unexpected IAM command: ${command.constructor.name}`)
     })
 
-    await expect(performProvisioning({client})).rejects.toThrow(/agent S3.*configuration|bucket/i)
+    await expect(performProvisioning({client, repository: roleRepository})).rejects.toThrow(
+      /agent S3.*configuration|bucket/i,
+    )
   })
 
   it('populates bucket handoff fields from the verified S3 configuration', async () => {
     const providerArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'
+    let role: Record<string, unknown> | undefined
     const {client: iamClient} = makeClient(async command => {
       if (command.constructor.name === 'ListOpenIDConnectProvidersCommand') return listResponse(providerArn)
       if (command.constructor.name === 'GetOpenIDConnectProviderCommand') return providerDetails(providerArn)
+      if (command.constructor.name === 'GetRoleCommand') {
+        if (!role) throw namedError('NoSuchEntity')
+        return roleResponse(role)
+      }
+      if (command.constructor.name === 'CreateRoleCommand') {
+        role = roleFromCreateCall(command.input)
+        return roleResponse(role)
+      }
       throw new Error(`Unexpected IAM command: ${command.constructor.name}`)
     })
     const {client: s3Client} = makeCurrentBucketClient()
@@ -409,6 +549,7 @@ describe('GitHub OIDC provider provisioning', () => {
       client: iamClient,
       s3Client,
       bucket: bucketConfig,
+      repository: roleRepository,
       printLine: (line: string) => lines.push(line),
     })
 
@@ -418,6 +559,110 @@ describe('GitHub OIDC provider provisioning', () => {
     expect(manifest.expected_bucket_owner).toBe(bucketConfig.expectedBucketOwner)
     expect(manifest.s3_prefix).toBe('fro-bot-state/')
     expect(manifest.session_prefix).toBe('fro-bot-state/github/marcusrbrown-infra/storage/')
+  })
+})
+
+describe('per-repo IAM role provisioning', () => {
+  it('creates a role with both pinned environment subjects, claim conditions, tags, and STS headroom', async () => {
+    const {client, calls} = makeRoleClient()
+
+    await ensureRoleForTest(client)
+
+    const create = calls.find(call => call.name === 'CreateRoleCommand')
+    expect(create?.input.RoleName).toBe('fro-bot-agent-storage-marcusrbrown-infra')
+    expect(create?.input.MaxSessionDuration).toBeGreaterThanOrEqual(7200)
+    expect(create?.input.Tags).toEqual(expect.arrayContaining(managedRoleTags()))
+
+    const trust = JSON.parse(String(create?.input.AssumeRolePolicyDocument)) as {
+      Statement: {
+        Principal: {Federated: string}
+        Condition: {StringEquals: Record<string, unknown>}
+      }[]
+    }
+    const statement = trust.Statement[0]
+    const conditions = statement?.Condition.StringEquals
+    expect(statement?.Principal.Federated).toBe(roleProviderArn)
+    expect(conditions?.['token.actions.githubusercontent.com:aud']).toBe('sts.amazonaws.com')
+    expect(conditions?.['token.actions.githubusercontent.com:repository_id']).toBe('1200110668')
+    expect(conditions?.['token.actions.githubusercontent.com:repository_owner_id']).toBe('831617')
+    expect(conditions?.['token.actions.githubusercontent.com:ref']).toBe('refs/heads/main')
+    expect(conditions?.['token.actions.githubusercontent.com:workflow']).toBe('Fro Bot')
+    expect(conditions?.['token.actions.githubusercontent.com:sub']).toEqual([
+      'repo:marcusrbrown/infra:environment:fro-bot-storage',
+      'repo:marcusrbrown@831617/infra@1200110668:environment:fro-bot-storage',
+    ])
+    expect(JSON.stringify(conditions?.['token.actions.githubusercontent.com:sub'])).not.toContain('repo:marcusrbrown/*')
+  })
+
+  it('does not mutate an existing role when trust, tags, and session duration are current', async () => {
+    const {client, calls} = makeRoleClient({
+      role: {
+        Arn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra',
+        RoleName: 'fro-bot-agent-storage-marcusrbrown-infra',
+        AssumeRolePolicyDocument: JSON.stringify(canonicalRoleTrust()),
+        MaxSessionDuration: 7200,
+        Tags: managedRoleTags(),
+      },
+    })
+
+    const result = await ensureRoleForTest(client)
+
+    expect(result).toEqual({
+      classification: 'current',
+      changed: false,
+      roleName: 'fro-bot-agent-storage-marcusrbrown-infra',
+      roleArn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra',
+    })
+    expect(calls.map(call => call.name)).toEqual(['GetRoleCommand'])
+  })
+
+  it('warns and halts on managed trust drift, then updates only with force', async () => {
+    const driftedTrust = canonicalRoleTrust()
+    const statement = (driftedTrust.Statement as Record<string, unknown>[])[0]
+    const condition = statement?.Condition as {StringEquals: Record<string, unknown>}
+    condition.StringEquals['token.actions.githubusercontent.com:ref'] = 'refs/heads/release'
+    const {client, calls} = makeRoleClient({
+      role: {
+        Arn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra',
+        RoleName: 'fro-bot-agent-storage-marcusrbrown-infra',
+        AssumeRolePolicyDocument: JSON.stringify(driftedTrust),
+        MaxSessionDuration: 7200,
+        Tags: managedRoleTags(),
+      },
+    })
+    const warnings: string[] = []
+
+    await expect(ensureRoleForTest(client, {log: message => warnings.push(message)})).rejects.toThrow(/managed drift/i)
+    expect(warnings.some(message => /trust/i.test(message))).toBe(true)
+    expect(calls.map(call => call.name)).toEqual(['GetRoleCommand'])
+
+    await ensureRoleForTest(client, {force: true})
+    expect(calls.map(call => call.name)).toEqual([
+      'GetRoleCommand',
+      'GetRoleCommand',
+      'UpdateAssumeRolePolicyCommand',
+      'GetRoleCommand',
+    ])
+  })
+
+  it('retries role readback after create until IAM eventual consistency converges', async () => {
+    const {client, calls} = makeRoleClient({readbackNoSuchCount: 2})
+
+    const result = await ensureRoleForTest(client)
+
+    expect(result).toEqual({
+      classification: 'absent',
+      changed: true,
+      roleName: 'fro-bot-agent-storage-marcusrbrown-infra',
+      roleArn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra',
+    })
+    expect(calls.map(call => call.name)).toEqual([
+      'GetRoleCommand',
+      'CreateRoleCommand',
+      'GetRoleCommand',
+      'GetRoleCommand',
+      'GetRoleCommand',
+    ])
   })
 })
 

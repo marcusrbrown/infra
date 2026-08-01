@@ -37,20 +37,75 @@ export async function withSpinner<T>(message: string, run: (spinnerInstance: Spi
   }
 }
 
-async function runCommand(command: string, args: string[]): Promise<CommandResult> {
-  const child = Bun.spawn([command, ...args], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: process.env,
-  })
+const COMMAND_TIMEOUT_MS = 30_000
 
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
+function isErrno(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === code
+}
 
-  return {stdout, stderr, exitCode}
+function readablePipe(pipe: Bun.Subprocess['stdout']): ReadableStream<Uint8Array> {
+  if (!(pipe instanceof ReadableStream)) throw new Error('CLI subprocess did not expose piped output.')
+  return pipe
+}
+
+export async function runCommand(
+  command: string,
+  args: string[],
+  timeoutMs = COMMAND_TIMEOUT_MS,
+  stdin?: string,
+): Promise<CommandResult> {
+  const operation = `${command} ${args.join(' ')}`.trim()
+  const controller = new AbortController()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  let child: Bun.Subprocess
+
+  try {
+    if (stdin === undefined) {
+      child = Bun.spawn([command, ...args], {
+        signal: controller.signal,
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: process.env,
+      })
+    } else {
+      child = Bun.spawn([command, ...args], {
+        signal: controller.signal,
+        stdin: new Blob([stdin]).stream(),
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: process.env,
+      })
+    }
+  } catch (error) {
+    if (isErrno(error, 'ENOENT')) {
+      throw new Error(`${command} CLI not found while running ${operation}. Install ${command} and try again.`)
+    }
+    throw error
+  }
+
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort()
+        reject(new Error(`${command} CLI timed out during ${operation}.`))
+      }, timeoutMs)
+    })
+    const result = await Promise.race([
+      Promise.all([
+        new Response(readablePipe(child.stdout)).text(),
+        new Response(readablePipe(child.stderr)).text(),
+        child.exited,
+      ]),
+      timeoutPromise,
+    ])
+    const [stdout, stderr, exitCode] = result as [string, string, number]
+    return {stdout, stderr, exitCode}
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`${command} CLI timed out during ${operation}.`)
+    throw error
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
 }
 
 export async function runGh(args: string[]): Promise<CommandResult> {
@@ -227,18 +282,8 @@ export async function applyGhValue(
   value: string,
 ): Promise<void> {
   if (kind === 'secret') {
-    const child = Bun.spawn(['gh', 'secret', 'set', name, '--repo', repo], {
-      stdin: new Blob([value]).stream(),
-      stdout: 'pipe',
-      stderr: 'pipe',
-      env: process.env,
-    })
-
-    const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited])
-
-    if (exitCode !== 0) {
-      throw new Error(`gh secret set ${name} failed: ${stderr.trim()}`.trim())
-    }
+    const result = await runCommand('gh', ['secret', 'set', name, '--repo', repo], COMMAND_TIMEOUT_MS, value)
+    if (result.exitCode !== 0) throw new Error(`gh secret set ${name} failed: ${result.stderr.trim()}`.trim())
     return
   }
 

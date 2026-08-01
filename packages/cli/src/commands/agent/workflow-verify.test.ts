@@ -5,6 +5,17 @@ import {describe, expect, it, mock} from 'bun:test'
 import {inspectWorkflow, verifyWorkflow, type EnvironmentReadback, type WorkflowVerifyDeps} from './workflow-verify'
 
 const SHA = '0123456789abcdef0123456789abcdef01234567'
+const CREDENTIALS_STEP = `      - uses: aws-actions/configure-aws-credentials@${SHA}
+        with:
+          role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
+          aws-region: \${{ vars.FRO_BOT_S3_REGION }}`
+const AGENT_STEP = `      - uses: fro-bot/agent@${SHA}
+        with:
+          s3-backup: true
+          s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}
+          aws-region: \${{ vars.FRO_BOT_S3_REGION }}
+          s3-prefix: \${{ vars.FRO_BOT_S3_PREFIX }}
+          s3-expected-bucket-owner: \${{ vars.FRO_BOT_S3_EXPECTED_BUCKET_OWNER }}`
 
 const manifest = {
   owner: 'owner',
@@ -65,7 +76,7 @@ jobs:
       id-token: write
     timeout-minutes: 30
     steps:
-      ${action ? `- uses: fro-bot/agent@${SHA}\n        with:\n          role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}\n          s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}\n          aws-region: \${{ vars.FRO_BOT_S3_REGION }}\n          s3-prefix: \${{ vars.FRO_BOT_S3_PREFIX }}\n          s3-expected-bucket-owner: \${{ vars.FRO_BOT_S3_EXPECTED_BUCKET_OWNER }}` : '- run: echo storage'}
+${action ? `${CREDENTIALS_STEP}\n${AGENT_STEP}` : '      - run: echo storage'}
 `
 }
 
@@ -116,6 +127,26 @@ describe('workflow storage verifier', () => {
     await expect(verifyWorkflow('owner/repo', manifest, deps)).rejects.toThrow(/workflow-level.*id-token/i)
   })
 
+  it('rejects a content-reachable job with job-level write-all permissions', async () => {
+    const unsafe = workflowJob().replace(
+      '    permissions:\n      contents: read\n    steps:',
+      '    permissions: write-all\n    steps:',
+    )
+
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(/write-all|id-token/i)
+  })
+
+  it('rejects a storage job using write-all instead of explicit id-token write', async () => {
+    const unsafe = workflowJob().replace(
+      `    permissions:\n      contents: read\n      id-token: write`,
+      '    permissions: write-all',
+    )
+
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(
+      /explicit|write-all|storage/i,
+    )
+  })
+
   it('rejects an id-token job reachable from a content event', async () => {
     const unsafe = workflowJob().replace(
       "if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')",
@@ -154,13 +185,13 @@ describe('workflow storage verifier', () => {
 
   it('rejects an unpinned reusable workflow and permits a pinned separately verified one', async () => {
     const unpinned = workflowJob().replace(
-      `    steps:\n      - uses: fro-bot/agent@${SHA}\n        with:\n          role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}\n          s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}\n          aws-region: \${{ vars.FRO_BOT_S3_REGION }}\n          s3-prefix: \${{ vars.FRO_BOT_S3_PREFIX }}\n          s3-expected-bucket-owner: \${{ vars.FRO_BOT_S3_EXPECTED_BUCKET_OWNER }}`,
+      `    steps:\n${CREDENTIALS_STEP}\n${AGENT_STEP}`,
       '    uses: owner/storage-workflow@main',
     )
     await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unpinned))).rejects.toThrow(/reusable|pinned/i)
 
     const pinned = workflowJob().replace(
-      `    steps:\n      - uses: fro-bot/agent@${SHA}\n        with:\n          role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}\n          s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}\n          aws-region: \${{ vars.FRO_BOT_S3_REGION }}\n          s3-prefix: \${{ vars.FRO_BOT_S3_PREFIX }}\n          s3-expected-bucket-owner: \${{ vars.FRO_BOT_S3_EXPECTED_BUCKET_OWNER }}`,
+      `    steps:\n${CREDENTIALS_STEP}\n${AGENT_STEP}`,
       `    uses: owner/storage-workflow@${SHA}`,
     )
     const verifyReusableWorkflow = mock(async () => {})
@@ -168,6 +199,17 @@ describe('workflow storage verifier', () => {
       verifyWorkflow('owner/repo', manifest, makeDeps(pinned, environment, {verifyReusableWorkflow})),
     ).resolves.toBeUndefined()
     expect(verifyReusableWorkflow).toHaveBeenCalledWith(`owner/storage-workflow@${SHA}`)
+  })
+
+  it('rejects a SHA-pinned reusable storage workflow without separate verification', async () => {
+    const pinned = workflowJob().replace(
+      `    steps:\n${CREDENTIALS_STEP}\n${AGENT_STEP}`,
+      `    uses: owner/storage-workflow@${SHA}`,
+    )
+
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(pinned))).rejects.toThrow(
+      /has not been separately verified/i,
+    )
   })
 
   it('rejects a trigger outside schedule and main workflow_dispatch', async () => {
@@ -209,6 +251,26 @@ describe('workflow storage verifier', () => {
 
     expect(report.workflowYamlCompliant).toBe(false)
     expect(report.violations.join('\n')).toMatch(/SHA|S3/i)
+  })
+
+  it('requires s3-backup true on the agent action', async () => {
+    const missing = workflowJob().replace('          s3-backup: true\n', '')
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(missing))).rejects.toThrow(/s3-backup/i)
+
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(workflowJob()))).resolves.toBeUndefined()
+  })
+
+  it('requires OIDC credentials and rejects static AWS credentials in storage jobs', async () => {
+    const missingCredentials = workflowJob().replace(`${CREDENTIALS_STEP}\n`, '')
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(missingCredentials))).rejects.toThrow(
+      /configure-aws-credentials|OIDC|credentials/i,
+    )
+
+    const staticCredentials = workflowJob().replace(
+      '    timeout-minutes: 30',
+      '    timeout-minutes: 30\n    env:\n      AWS_ACCESS_KEY_ID: hard-coded\n      AWS_SECRET_ACCESS_KEY: hard-coded',
+    )
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(staticCredentials))).rejects.toThrow(/static AWS/i)
   })
 
   it.each([

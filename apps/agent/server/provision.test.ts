@@ -1,7 +1,13 @@
+import {unlink} from 'node:fs/promises'
 import {describe, expect, it} from 'bun:test'
 
-import {AGENT_ACTION_LAYOUT_VERSION} from '../src/key-layout'
+import {AGENT_ACTION_LAYOUT_VERSION, buildAgentKeyLayout} from '../src/key-layout'
 import {
+  AGENT_REPOSITORY_ID,
+  AGENT_REPOSITORY_NAME,
+  AGENT_REPOSITORY_OWNER,
+  AGENT_REPOSITORY_OWNER_ID,
+  AGENT_WORKFLOW_NAME,
   auditAgentStorageResources,
   buildAgentStoragePolicy,
   canonicalizeS3Prefix,
@@ -12,6 +18,7 @@ import {
   ensureGitHubOidcProvider,
   GITHUB_OIDC_AUDIENCE,
   GITHUB_OIDC_PROVIDER_URL,
+  main,
   performProvisioning,
   performTeardown,
   type AgentBucketConfig,
@@ -704,8 +711,55 @@ describe('GitHub OIDC provider provisioning', () => {
     expect(manifest.bucket).toBe(bucketConfig.bucket)
     expect(manifest.bucket_region).toBe(bucketConfig.region)
     expect(manifest.expected_bucket_owner).toBe(bucketConfig.expectedBucketOwner)
-    expect(manifest.s3_prefix).toBe('fro-bot-state/')
+    expect(manifest.s3_prefix).toBe('fro-bot-state')
     expect(manifest.session_prefix).toBe('fro-bot-state/github/marcusrbrown-infra/storage/')
+    expect(String(manifest.s3_prefix).endsWith('/')).toBe(false)
+    const rebuiltLayout = buildAgentKeyLayout(
+      String(manifest.owner),
+      String(manifest.repo),
+      String(manifest.s3_prefix),
+      String(manifest.key_layout_version),
+    )
+    expect(rebuiltLayout.sessionPrefix).toBe(String(manifest.session_prefix))
+    expect(rebuiltLayout.lockKey).toBe(String(manifest.lock_key))
+  })
+
+  it('reports a provisioning plan without issuing mutating AWS commands', async () => {
+    const providerArn = roleProviderArn
+    const iamRole = {
+      Arn: teardownManifest.role_arn,
+      RoleName: teardownManifest.role_name,
+      AssumeRolePolicyDocument: JSON.stringify(canonicalRoleTrust()),
+      MaxSessionDuration: 7200,
+      Tags: managedRoleTags(),
+    }
+    const iam = makeClient(async command => {
+      if (command.constructor.name === 'ListOpenIDConnectProvidersCommand') return listResponse(providerArn)
+      if (command.constructor.name === 'GetOpenIDConnectProviderCommand') return providerDetails(providerArn)
+      if (command.constructor.name === 'GetRoleCommand') return roleResponse(iamRole)
+      if (command.constructor.name === 'GetRolePolicyCommand') {
+        return {
+          PolicyDocument: encodeURIComponent(JSON.stringify(buildAgentStoragePolicy(storagePolicyConfig).document)),
+        }
+      }
+      throw new Error(`Unexpected IAM plan command: ${command.constructor.name}`)
+    })
+    const s3 = makeCurrentBucketClient()
+    const report: string[] = []
+
+    await performProvisioning({
+      client: iam.client,
+      s3Client: s3.client,
+      bucket: bucketConfig,
+      repository: roleRepository,
+      actionRef: AGENT_ACTION_LAYOUT_VERSION,
+      plan: true,
+      printLine: line => report.push(line),
+    })
+
+    expect(report.join('\n')).toMatch(/plan.*(current|would)/i)
+    expect(iam.calls.some(call => /^(?:Create|Put|Update|Tag|Add|Delete)/.test(call.name))).toBe(false)
+    expect(s3.calls.some(call => /^(?:Create|Put|Update|Delete)/.test(call.name))).toBe(false)
   })
 })
 
@@ -1300,6 +1354,38 @@ describe('agent storage teardown', () => {
     ).rejects.toThrow(/manifest.*OIDC|provider ARN/i)
     expect(iam.calls).toEqual([])
     expect(s3.calls).toEqual([])
+  })
+
+  it('rejects a malformed stdin/file manifest before the entrypoint constructs AWS clients', async () => {
+    const manifestPath = `/tmp/agent-storage-malformed-${crypto.randomUUID()}.json`
+    await Bun.write(manifestPath, JSON.stringify({...teardownManifest, bucket_region: undefined}))
+    const env = {
+      [AGENT_REPOSITORY_OWNER]: roleRepository.owner,
+      [AGENT_REPOSITORY_NAME]: roleRepository.repo,
+      [AGENT_REPOSITORY_ID]: roleRepository.repositoryId,
+      [AGENT_REPOSITORY_OWNER_ID]: roleRepository.repositoryOwnerId,
+      [AGENT_WORKFLOW_NAME]: roleRepository.workflow,
+    }
+
+    try {
+      await expect(main(['--teardown', '--manifest', manifestPath], env)).rejects.toThrow(/bucket_region/i)
+    } finally {
+      await unlink(manifestPath)
+    }
+  })
+
+  it('prints operator usage for --help without requiring AWS credentials', async () => {
+    const output: string[] = []
+
+    await expect(main(['--help'], {}, line => output.push(line))).resolves.toBeUndefined()
+
+    const usage = output.join('\n')
+    expect(usage).toMatch(/AGENT_AWS_ACCESS_KEY_ID/)
+    expect(usage).toMatch(/--force/)
+    expect(usage).toMatch(/--teardown/)
+    expect(usage).toMatch(/--plan/)
+    expect(usage).toMatch(/--manifest -/)
+    expect(usage).toMatch(/--purge-state/)
   })
 
   it('reports the plan without mutating AWS', async () => {

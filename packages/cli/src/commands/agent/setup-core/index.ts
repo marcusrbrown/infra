@@ -313,9 +313,6 @@ export function requiresDestructiveProviderChangeConfirmation(providers: Provide
   return !(providers.length === 1 && providers[0] === 'anthropic')
 }
 
-// Deprecated: use requiresDestructiveProviderChangeConfirmation. Will be removed in a future major.
-export const mustConfirmDestructive = requiresDestructiveProviderChangeConfirmation
-
 export async function buildNonInteractivePlan(
   options: SetupOptions,
   baseUrl: string,
@@ -742,11 +739,12 @@ export async function runSetupCommand(options: SetupOptions, deps: RunSetupDeps 
 }
 
 export function registerSetupCommand(cli: ReturnType<typeof goke>, commandLabel: string): void {
+  const description =
+    commandLabel === 'agent setup'
+      ? 'Configure generalized Fro Bot agent model-credential setup and GitHub secrets and variables.'
+      : 'Interactively onboard a GitHub repository to CLIProxyAPI by creating or reusing a key and wiring the required GitHub secrets and variables.'
   cli
-    .command(
-      commandLabel,
-      'Interactively onboard a GitHub repository to CLIProxyAPI by creating or reusing a key and wiring the required GitHub secrets and variables.',
-    )
+    .command(commandLabel, description)
     .option(
       '--key [key]',
       z

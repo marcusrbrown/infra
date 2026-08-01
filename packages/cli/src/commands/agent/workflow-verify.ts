@@ -19,13 +19,13 @@ const CONTENT_EVENTS = new Set([
   'discussion',
   'discussion_comment',
 ])
-const REQUIRED_S3_INPUTS = [
-  'role-to-assume',
-  's3-bucket',
-  'aws-region',
-  's3-prefix',
-  's3-expected-bucket-owner',
-] as const
+const REQUIRED_S3_INPUTS = {
+  's3-backup': undefined,
+  's3-bucket': 'FRO_BOT_S3_BUCKET',
+  'aws-region': 'FRO_BOT_S3_REGION',
+  's3-prefix': 'FRO_BOT_S3_PREFIX',
+  's3-expected-bucket-owner': 'FRO_BOT_S3_EXPECTED_BUCKET_OWNER',
+} as const
 
 type Mapping = Record<string, unknown>
 type TriState = 'true' | 'false' | 'unknown'
@@ -398,6 +398,8 @@ function validateMatrix(job: Mapping): string | undefined {
 
 function effectivePermission(workflowPermissions: unknown, job: Mapping, permission: string): unknown {
   const jobPermissions = isMapping(job.permissions) ? job.permissions : undefined
+  if (job.permissions === 'write-all') return 'write'
+  if (job.permissions === 'read-all') return 'read'
   if (jobPermissions && permission in jobPermissions) return jobPermissions[permission]
   if (workflowPermissions === 'write-all') return 'write'
   if (workflowPermissions === 'read-all') return 'read'
@@ -499,12 +501,44 @@ function checkStorageAction(jobId: string, job: Mapping, violations: string[]): 
     return
   }
 
-  const agentSteps = stepValues(job).filter(
-    step => typeof step.uses === 'string' && step.uses.startsWith('fro-bot/agent@'),
-  )
+  const steps = stepValues(job)
+  const agentSteps = steps.filter(step => typeof step.uses === 'string' && step.uses.startsWith('fro-bot/agent@'))
   if (agentSteps.length === 0) {
     violations.push(`Storage job '${jobId}' must contain a fro-bot/agent action step.`)
     return
+  }
+
+  const firstAgentIndex = steps.findIndex(
+    step => typeof step.uses === 'string' && step.uses.startsWith('fro-bot/agent@'),
+  )
+  const credentialIndex = steps.findIndex(
+    step => typeof step.uses === 'string' && step.uses.startsWith('aws-actions/configure-aws-credentials@'),
+  )
+  if (credentialIndex === -1 || credentialIndex > firstAgentIndex) {
+    violations.push(
+      `Storage job '${jobId}' must configure AWS credentials with aws-actions/configure-aws-credentials before fro-bot/agent.`,
+    )
+  } else {
+    const credentialsStep = steps[credentialIndex]
+    const credentialsUses = String(credentialsStep?.uses)
+    const credentialsRef = credentialsUses.split('@').at(-1) ?? ''
+    if (!/^[0-9a-f]{40}$/i.test(credentialsRef)) {
+      violations.push(`Storage job '${jobId}' configure-aws-credentials step is not SHA-pinned.`)
+    }
+    if (!isMapping(credentialsStep?.with) || typeof credentialsStep.with['role-to-assume'] !== 'string') {
+      violations.push(`Storage job '${jobId}' configure-aws-credentials step is missing role-to-assume.`)
+    } else if (!credentialsStep.with['role-to-assume'].includes('FRO_BOT_S3_ROLE_TO_ASSUME')) {
+      violations.push(
+        `Storage job '${jobId}' configure-aws-credentials role-to-assume must map from vars.FRO_BOT_S3_ROLE_TO_ASSUME.`,
+      )
+    }
+    if (!isMapping(credentialsStep?.with) || typeof credentialsStep.with['aws-region'] !== 'string') {
+      violations.push(`Storage job '${jobId}' configure-aws-credentials step is missing aws-region.`)
+    } else if (!credentialsStep.with['aws-region'].includes('FRO_BOT_S3_REGION')) {
+      violations.push(
+        `Storage job '${jobId}' configure-aws-credentials aws-region must map from vars.FRO_BOT_S3_REGION.`,
+      )
+    }
   }
 
   for (const [index, step] of agentSteps.entries()) {
@@ -517,10 +551,16 @@ function checkStorageAction(jobId: string, job: Mapping, violations: string[]): 
       violations.push(`Storage job '${jobId}' agent step ${index + 1} is missing its S3 inputs.`)
       continue
     }
-    for (const input of REQUIRED_S3_INPUTS) {
+    for (const [input, expectedVariable] of Object.entries(REQUIRED_S3_INPUTS)) {
       const value = step.with[input]
       if (value === undefined || value === null || value === '') {
         violations.push(`Storage job '${jobId}' agent step ${index + 1} is missing S3 input '${input}'.`)
+      } else if (input === 's3-backup' && value !== true && value !== 'true') {
+        violations.push(`Storage job '${jobId}' agent step ${index + 1} must set s3-backup: true.`)
+      } else if (expectedVariable && (typeof value !== 'string' || !value.includes(expectedVariable))) {
+        violations.push(
+          `Storage job '${jobId}' agent step ${index + 1} must map '${input}' from vars.${expectedVariable}.`,
+        )
       }
     }
   }
@@ -616,9 +656,13 @@ function formatStorageWorkflowSnippet(): string {
       id-token: write
     timeout-minutes: 30
     steps:
-      - uses: fro-bot/agent@<40-character-commit-sha>
+      - uses: aws-actions/configure-aws-credentials@<40-character-commit-sha>
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
+          aws-region: \${{ vars.FRO_BOT_S3_REGION }}
+      - uses: fro-bot/agent@<40-character-commit-sha>
+        with:
+          s3-backup: true
           s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}
           aws-region: \${{ vars.FRO_BOT_S3_REGION }}
           s3-prefix: \${{ vars.FRO_BOT_S3_PREFIX }}
@@ -803,6 +847,11 @@ async function inspectWorkflowYaml(
     const effectiveIdToken = effectivePermission(workflowPermissions, job, 'id-token')
     const storageJob = isStorageCapable(job)
 
+    if (job.permissions === 'write-all') {
+      violations.push(
+        `Job '${jobId}' uses job-level write-all permissions; declare explicit mapped permissions instead.`,
+      )
+    }
     if (jobIdToken === 'write' && !storageJob) {
       violations.push(`Job '${jobId}' grants job-level id-token: write without environment ${STORAGE_ENVIRONMENT}.`)
     }

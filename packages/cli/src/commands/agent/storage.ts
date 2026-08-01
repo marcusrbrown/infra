@@ -5,7 +5,7 @@ import type {goke} from 'goke'
 import {log} from '@clack/prompts'
 import {z} from 'zod'
 
-import {applyGhValue, runGh, type CommandResult} from './setup-core/gh'
+import {applyGhValue, runCommand, runGh, type CommandResult} from './setup-core/gh'
 import {verifyWorkflow} from './workflow-verify'
 
 // These names intentionally mirror the fro-bot/agent action inputs. They are
@@ -18,6 +18,9 @@ export const STORAGE_VARIABLE_NAMES = {
   prefix: 'FRO_BOT_S3_PREFIX',
   expectedBucketOwner: 'FRO_BOT_S3_EXPECTED_BUCKET_OWNER',
 } as const
+
+/** Must match the provisioner's pinned KEY_LAYOUT_VERSION. Unknown layouts fail closed. */
+export const KNOWN_KEY_LAYOUT_VERSION = 'fro-bot-agent@v0.96.0'
 
 export interface StorageManifest {
   owner: string
@@ -40,6 +43,8 @@ export interface StorageManifest {
 export interface StorageOptions {
   /** Handoff manifest path, or '-' to read JSON from stdin. */
   manifest?: string
+  /** Verify all preconditions and report writes without mutating GitHub. */
+  plan?: boolean
   /** Rejected deliberately; static AWS credentials are never agent config. */
   staticAwsAccessKeyId?: string
   /** Rejected deliberately; static AWS credentials are never agent config. */
@@ -65,7 +70,7 @@ export interface StorageSetupDeps {
   readManifest?: (source: string) => Promise<string>
   verifyResources?: (manifest: StorageManifest) => Promise<void>
   runAws?: (args: string[]) => Promise<CommandResult>
-  /** Unit 7 attaches the effective-job-graph verifier here. */
+  /** Explicit test/operator override; production defaults to the effective-job-graph verifier. */
   verifyWorkflow?: (repo: string, manifest: StorageManifest) => Promise<void>
   /** Injected provisioner boundary used by teardown tests and operator wrappers. */
   runProvisioner?: (manifest: string, options: {purgeState?: boolean; plan?: boolean}) => Promise<void>
@@ -139,6 +144,11 @@ function assertCanonicalPath(field: string, value: string, mustEndWithSlash: boo
 }
 
 function validateManifest(manifest: StorageManifest): void {
+  if (manifest.key_layout_version !== KNOWN_KEY_LAYOUT_VERSION) {
+    throw new Error(
+      `Unknown handoff manifest key_layout_version '${manifest.key_layout_version}'; expected ${KNOWN_KEY_LAYOUT_VERSION}.`,
+    )
+  }
   assertRepoFormat(`${manifest.owner}/${manifest.repo}`)
   assertCanonicalPath('s3_prefix', manifest.s3_prefix, false)
   assertCanonicalPath('session_prefix', manifest.session_prefix, true)
@@ -182,19 +192,7 @@ function parseManifest(raw: string): StorageManifest {
 }
 
 async function runAwsCommand(args: string[]): Promise<CommandResult> {
-  const child = Bun.spawn(['aws', ...args], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: process.env,
-  })
-
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
-
-  return {stdout, stderr, exitCode}
+  return runCommand('aws', args)
 }
 
 async function runProvisionerCommand(manifest: string, options: {purgeState?: boolean; plan?: boolean}): Promise<void> {
@@ -422,20 +420,26 @@ export async function prepareStorageSetup(
     deps.verifyResources ?? ((value: StorageManifest) => verifyProvisionedResources(value, deps.runAws))
   await verifyResources(manifest)
   await verifyOidcSubject(repo, deps.runGh ?? runGh)
+  const verifyWorkflowSetup =
+    deps.verifyWorkflow ??
+    ((value: string, handoff: StorageManifest) => verifyWorkflow(value, handoff, {runGh: deps.runGh}))
+  await verifyWorkflowSetup(repo, manifest)
 
   return {repo, manifest, variables: buildVariables(manifest)}
 }
 
 export async function applyStorageSetup(prepared: PreparedStorageSetup, deps: StorageSetupDeps = {}): Promise<void> {
   const apply = deps.applyGhValue ?? applyGhValue
-  for (const variable of prepared.variables) {
-    await apply('variable', variable.name, prepared.repo, variable.value)
+  const writtenNames: string[] = []
+  try {
+    for (const variable of prepared.variables) {
+      await apply('variable', variable.name, prepared.repo, variable.value)
+      writtenNames.push(variable.name)
+    }
+  } catch (error) {
+    const partial = writtenNames.length > 0 ? writtenNames.join(', ') : 'none'
+    throw new Error(`Repository left partially wired: ${partial}. ${extractErrorMessage(error)}`)
   }
-
-  const verify =
-    deps.verifyWorkflow ??
-    ((repo: string, manifest: StorageManifest) => verifyWorkflow(repo, manifest, {runGh: deps.runGh}))
-  await verify(prepared.repo, prepared.manifest)
 }
 
 export async function runStorageSetup(
@@ -444,6 +448,13 @@ export async function runStorageSetup(
   deps: StorageSetupDeps = {},
 ): Promise<void> {
   const prepared = await prepareStorageSetup(repo, options, deps)
+  if (options.plan) {
+    const report = deps.log ?? (message => log.info(message))
+    for (const variable of prepared.variables) {
+      report(`Would write GitHub variable ${variable.name} to ${prepared.repo}.`)
+    }
+    return
+  }
   await applyStorageSetup(prepared, deps)
 }
 
@@ -529,14 +540,18 @@ export function registerAgentStorageCommand(cli: ReturnType<typeof goke>): void 
       '--manifest [manifest]',
       z.string().default('-').describe('Handoff manifest path, or - to read JSON from stdin.'),
     )
+    .option('--plan', z.boolean().optional().describe('Verify and report storage writes without mutating GitHub.'))
+    .option('--dry-run', z.boolean().optional().describe('Alias for --plan.'))
     .example('infra agent storage --repo owner/repo --manifest handoff.json')
     .example('cat handoff.json | infra agent storage --repo owner/repo --manifest -')
     .action(async options => {
       if (!options.repo) {
         throw new Error('--repo is required for agent storage.')
       }
-      await runStorageSetup(options.repo, {manifest: options.manifest ?? '-'})
-      log.success(`S3 storage variables wired for ${options.repo}.`)
+      const plan = options.plan || options.dryRun
+      await runStorageSetup(options.repo, {manifest: options.manifest ?? '-', plan})
+      if (plan) log.info(`S3 storage plan complete for ${options.repo}; no variables were written.`)
+      else log.success(`S3 storage variables wired for ${options.repo}.`)
     })
 
   cli

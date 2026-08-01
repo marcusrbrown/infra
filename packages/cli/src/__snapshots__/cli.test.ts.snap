@@ -24,7 +24,7 @@ Commands:
   keeweb open                          Open KeeWeb in the default browser
 
 
-  agent setup                          Interactively onboard a GitHub repository to CLIProxyAPI by creating or reusing a key and wiring the required GitHub secrets and variables.
+  agent setup                          Configure generalized Fro Bot agent model-credential setup and GitHub secrets and variables.
 
     --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
     --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
@@ -41,6 +41,8 @@ Commands:
 
     --repo [repo]                      Target GitHub repository in owner/repo format.
     --manifest [manifest]              Handoff manifest path, or - to read JSON from stdin. (default: -)
+    --plan                             Verify and report storage writes without mutating GitHub.
+    --dry-run                          Alias for --plan.
 
 
   agent storage teardown               Unwire S3 variables and remove the repo-scoped storage resources.

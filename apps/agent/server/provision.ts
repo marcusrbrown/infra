@@ -185,6 +185,8 @@ export interface ProvisionDeps {
   actionRef?: string
   /** Apply managed drift instead of warning and halting. */
   force?: boolean
+  /** Read current state and report intended changes without mutating AWS. */
+  plan?: boolean
   /** Environment source used to construct the default IAM client. */
   env?: Partial<Record<string, string | undefined>>
   /** Replaces stdout in tests; defaults to console.log. */
@@ -1712,6 +1714,139 @@ export async function ensureAgentStoragePolicy(
   }
 }
 
+function actionFacingS3Prefix(prefix: string): string {
+  const canonical = canonicalizeS3Prefix(prefix)
+  return canonical.slice(0, -1)
+}
+
+interface AgentBucketPlanState {
+  bucketRegion: string
+  changes: string[]
+}
+
+async function readAgentBucketPlanState(
+  client: S3ClientLike,
+  config: AgentBucketConfig,
+  secrets: RedactionSecret[],
+): Promise<AgentBucketPlanState> {
+  const prefixes = resolveBucketPrefixes(config)
+  const existing = await headAgentBucket(client, config, secrets)
+  if (!existing.exists) {
+    return {
+      bucketRegion: config.region,
+      changes: [`create S3 bucket ${config.bucket}`, 'apply bucket security controls and lifecycle rules'],
+    }
+  }
+
+  const changes: string[] = []
+  const publicAccessBlock = await readPublicAccessBlock(client, config, secrets)
+  if (
+    publicAccessBlock?.BlockPublicAcls !== true ||
+    publicAccessBlock.IgnorePublicAcls !== true ||
+    publicAccessBlock.BlockPublicPolicy !== true ||
+    publicAccessBlock.RestrictPublicBuckets !== true
+  ) {
+    changes.push('converge S3 public-access-block')
+  }
+  if ((await readBucketVersioning(client, config, secrets)) !== 'Enabled') {
+    changes.push('enable S3 bucket versioning')
+  }
+  if (!(await readBucketEncryption(client, config, secrets)).includes('AES256')) {
+    changes.push('converge S3 AES256 encryption')
+  }
+  if (!policiesEqual(await readBucketPolicy(client, config, secrets), buildTlsOnlyBucketPolicy(config.bucket))) {
+    changes.push('converge the S3 TLS-only bucket policy')
+  }
+  const lifecycleRules = await readBucketLifecycle(client, config, secrets)
+  for (const desiredRule of buildAgentLifecycleRules(prefixes)) {
+    if (!lifecycleRulesContainRule(lifecycleRules, desiredRule)) {
+      changes.push(`converge lifecycle rule ${String(desiredRule.ID)}`)
+    }
+  }
+
+  return {bucketRegion: existing.bucketRegion, changes}
+}
+
+async function planProvisioning(options: {
+  client: IAMClientLike
+  s3Client: S3ClientLike
+  repository: AgentRepositoryConfig
+  bucketConfig: AgentBucketConfig
+  keyLayoutVersion: string
+  secrets: RedactionSecret[]
+  log: (message: string) => void
+}): Promise<AgentHandoffManifest> {
+  const {client, s3Client, repository, bucketConfig, keyLayoutVersion, secrets, log} = options
+  const provider = await discoverCanonicalProvider(client, secrets)
+  if (!provider) {
+    log('Plan: would create the shared GitHub OIDC provider.')
+  } else if (provider.clientIds.includes(GITHUB_OIDC_AUDIENCE)) {
+    log(`Plan: GitHub OIDC provider is current (${provider.providerArn}).`)
+  } else {
+    log('Plan: would add sts.amazonaws.com to the shared GitHub OIDC provider.')
+  }
+
+  const bucketState = await readAgentBucketPlanState(s3Client, bucketConfig, secrets)
+  for (const change of bucketState.changes) log(`Plan: would ${change}.`)
+  if (bucketState.changes.length === 0) log(`Plan: S3 bucket ${bucketConfig.bucket} is current.`)
+
+  const roleName = buildAgentRoleName(repository.owner, repository.repo)
+  const expectedTrustPolicy = buildGitHubOidcTrustPolicy(repository, provider?.providerArn ?? 'planned-provider-arn')
+  const role = await readAgentRole(client, roleName, secrets)
+  if (role) {
+    const roleState = classifyRoleState(role, roleName, repository, expectedTrustPolicy)
+    if (roleState.foreignDrift.length > 0) {
+      log(
+        `Plan: IAM role ${roleName} has foreign drift (${roleState.foreignDrift.join(', ')}); no mutation would be attempted.`,
+      )
+    } else if (roleState.managedDrift.length > 0) {
+      log(`Plan: would converge IAM role ${roleName} (${roleState.managedDrift.join(', ')}).`)
+    } else {
+      log(`Plan: IAM role ${roleName} is current.`)
+    }
+  } else {
+    log(`Plan: would create IAM role ${roleName}.`)
+  }
+
+  const policyConfig: AgentStoragePolicyConfig = {
+    roleName,
+    bucket: bucketConfig.bucket,
+    owner: repository.owner,
+    repo: repository.repo,
+    s3Prefix: bucketConfig.s3Prefix,
+    actionVersion: keyLayoutVersion,
+  }
+  const builtPolicy = buildAgentStoragePolicy(policyConfig)
+  const currentPolicy = await readAgentStoragePolicy(client, roleName, builtPolicy.policyName, secrets)
+  if (currentPolicy === undefined) {
+    log(`Plan: would attach IAM inline policy ${builtPolicy.policyName}.`)
+  } else if (jsonDocumentsEqual(currentPolicy, builtPolicy.document)) {
+    log(`Plan: IAM inline policy ${builtPolicy.policyName} is current.`)
+  } else {
+    log(`Plan: would converge IAM inline policy ${builtPolicy.policyName}.`)
+  }
+
+  const manifest = createHandoffManifest(provider?.providerArn ?? '')
+  manifest.owner = repository.owner
+  manifest.repo = repository.repo
+  manifest.repository_id = repository.repositoryId
+  manifest.repository_owner_id = repository.repositoryOwnerId
+  manifest.bucket = bucketConfig.bucket
+  manifest.bucket_region = bucketState.bucketRegion
+  manifest.expected_bucket_owner = bucketConfig.expectedBucketOwner
+  manifest.s3_prefix = actionFacingS3Prefix(bucketConfig.s3Prefix)
+  manifest.session_prefix = builtPolicy.layout.sessionPrefix
+  manifest.lock_key = builtPolicy.layout.lockKey
+  manifest.role_name = roleName
+  manifest.role_arn = role?.Arn ?? ''
+  manifest.policy_name = builtPolicy.policyName
+  manifest.action_ref_verified = true
+  manifest.key_layout_version = builtPolicy.keyLayoutVersion
+  log('Plan: no AWS mutations were issued.')
+  printManifest(manifest, log)
+  return manifest
+}
+
 // ---------------------------------------------------------------------------
 // Per-repository teardown
 // ---------------------------------------------------------------------------
@@ -1720,74 +1855,101 @@ function teardownLog(options: AgentTeardownDeps, message: string): void {
   ;(options.log ?? (line => console.log(line)))(message)
 }
 
-function validateTeardownManifest(
-  manifest: AgentHandoffManifest,
-  repository: AgentRepositoryConfig,
-): {roleName: string; policyName: string; bucketConfig: AgentBucketConfig; layout: AgentKeyLayout} {
+interface ValidatedTeardownManifest {
+  manifest: AgentHandoffManifest
+  roleName: string
+  policyName: string
+  bucketConfig: AgentBucketConfig
+  layout: AgentKeyLayout
+}
+
+function validateTeardownManifest(manifest: unknown, repository: AgentRepositoryConfig): ValidatedTeardownManifest {
   validateRepositoryConfig(repository)
 
-  const requiredStringFields = [
-    'owner',
-    'repo',
-    'repository_id',
-    'repository_owner_id',
-    'bucket',
-    'bucket_region',
-    'expected_bucket_owner',
-    's3_prefix',
-    'session_prefix',
-    'lock_key',
-    'role_name',
-    'role_arn',
-    'policy_name',
-    'key_layout_version',
-    'oidc_provider_arn',
-  ] as const
-  for (const field of requiredStringFields) {
-    const value = manifest[field]
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
+    throw new Error('Teardown manifest must be a JSON object; refusing to mutate.')
+  }
+  const candidate = manifest as Record<string, unknown>
+
+  type RequiredStringField =
+    | 'owner'
+    | 'repo'
+    | 'repository_id'
+    | 'repository_owner_id'
+    | 'bucket'
+    | 'bucket_region'
+    | 'expected_bucket_owner'
+    | 's3_prefix'
+    | 'session_prefix'
+    | 'lock_key'
+    | 'role_name'
+    | 'role_arn'
+    | 'policy_name'
+    | 'key_layout_version'
+    | 'oidc_provider_arn'
+  const requiredString = (field: RequiredStringField): string => {
+    const value = candidate[field]
     if (typeof value !== 'string' || value.trim().length === 0) {
       throw new Error(`Teardown manifest field ${field} is missing or invalid; refusing to mutate.`)
     }
+    return value
   }
-  if (manifest.action_ref_verified !== true) {
+  const typedManifest: AgentHandoffManifest = {
+    owner: requiredString('owner'),
+    repo: requiredString('repo'),
+    repository_id: requiredString('repository_id'),
+    repository_owner_id: requiredString('repository_owner_id'),
+    bucket: requiredString('bucket'),
+    bucket_region: requiredString('bucket_region'),
+    expected_bucket_owner: requiredString('expected_bucket_owner'),
+    s3_prefix: requiredString('s3_prefix'),
+    session_prefix: requiredString('session_prefix'),
+    lock_key: requiredString('lock_key'),
+    role_name: requiredString('role_name'),
+    role_arn: requiredString('role_arn'),
+    policy_name: requiredString('policy_name'),
+    action_ref_verified: candidate.action_ref_verified === true,
+    key_layout_version: requiredString('key_layout_version'),
+    oidc_provider_arn: requiredString('oidc_provider_arn'),
+  }
+
+  if (typedManifest.action_ref_verified !== true) {
     throw new Error('Teardown manifest action layout was not verified; refusing to mutate.')
   }
 
   const expectedRoleName = buildAgentRoleName(repository.owner, repository.repo)
-  if (manifest.owner !== repository.owner || manifest.repo !== repository.repo) {
+  if (typedManifest.owner !== repository.owner || typedManifest.repo !== repository.repo) {
     throw new Error('Teardown manifest repository identity does not match the target repository; refusing to mutate.')
   }
   if (
-    manifest.repository_id !== repository.repositoryId ||
-    manifest.repository_owner_id !== repository.repositoryOwnerId
+    typedManifest.repository_id !== repository.repositoryId ||
+    typedManifest.repository_owner_id !== repository.repositoryOwnerId
   ) {
     throw new Error('Teardown manifest repository IDs do not match the target repository; refusing to mutate.')
   }
-  if (manifest.role_name !== expectedRoleName || manifest.policy_name !== expectedRoleName) {
+  if (typedManifest.role_name !== expectedRoleName || typedManifest.policy_name !== expectedRoleName) {
     throw new Error('Teardown manifest role or policy name does not match the target repository; refusing to mutate.')
   }
-  if (manifest.role_arn !== `arn:aws:iam::${manifest.expected_bucket_owner}:role/${expectedRoleName}`) {
+  if (typedManifest.role_arn !== `arn:aws:iam::${typedManifest.expected_bucket_owner}:role/${expectedRoleName}`) {
     throw new Error('Teardown manifest role ARN does not match the target repository; refusing to mutate.')
   }
-  if (!manifest.oidc_provider_arn.trim()) {
-    throw new Error('Teardown manifest is missing the shared GitHub OIDC provider ARN; refusing to mutate.')
-  }
 
-  const keyLayoutVersion = assertKnownKeyLayout(manifest.key_layout_version)
-  const layout = buildAgentKeyLayout(repository.owner, repository.repo, manifest.s3_prefix, keyLayoutVersion)
-  if (layout.sessionPrefix !== manifest.session_prefix || layout.lockKey !== manifest.lock_key) {
+  const keyLayoutVersion = assertKnownKeyLayout(typedManifest.key_layout_version)
+  const layout = buildAgentKeyLayout(repository.owner, repository.repo, typedManifest.s3_prefix, keyLayoutVersion)
+  if (layout.sessionPrefix !== typedManifest.session_prefix || layout.lockKey !== typedManifest.lock_key) {
     throw new Error('Teardown manifest S3 key layout does not match the target repository; refusing to mutate.')
   }
 
   return {
+    manifest: typedManifest,
     roleName: expectedRoleName,
     policyName: expectedRoleName,
     bucketConfig: {
-      bucket: manifest.bucket,
-      region: manifest.bucket_region,
-      expectedBucketOwner: manifest.expected_bucket_owner,
-      s3Prefix: manifest.s3_prefix,
-      sessionPrefix: manifest.session_prefix,
+      bucket: typedManifest.bucket,
+      region: typedManifest.bucket_region,
+      expectedBucketOwner: typedManifest.expected_bucket_owner,
+      s3Prefix: typedManifest.s3_prefix,
+      sessionPrefix: typedManifest.session_prefix,
     },
     layout,
   }
@@ -1921,28 +2083,29 @@ export async function performTeardown(options: AgentTeardownDeps): Promise<Agent
     {name: 'agent-aws-session-token', content: env[AGENT_AWS_SESSION_TOKEN] ?? ''},
   ]
   const identity = validateTeardownManifest(options.manifest, options.repository)
+  const manifest = identity.manifest
   const client = options.client ?? createIamClientFromEnv(env)
-  const s3Client = options.s3Client ?? createS3ClientFromEnv(env, options.manifest.bucket_region)
+  const s3Client = options.s3Client ?? createS3ClientFromEnv(env, manifest.bucket_region)
 
-  await verifyTeardownSharedResources(client, s3Client, options.manifest, identity.bucketConfig, secrets)
+  await verifyTeardownSharedResources(client, s3Client, manifest, identity.bucketConfig, secrets)
   const role = await readAgentRole(client, identity.roleName, secrets)
   if (role !== undefined) {
     assertTeardownRoleIdentity(
       role,
       identity.roleName,
       options.repository,
-      options.manifest.oidc_provider_arn,
-      options.manifest.role_arn,
+      manifest.oidc_provider_arn,
+      manifest.role_arn,
     )
   }
   const policy = await readAgentStoragePolicy(client, identity.roleName, identity.policyName, secrets)
 
   if (options.plan) {
-    teardownLog(options, `Plan: would delete ${options.manifest.lock_key} from ${options.manifest.bucket}.`)
+    teardownLog(options, `Plan: would delete ${manifest.lock_key} from ${manifest.bucket}.`)
     if (options.purgeState) {
-      teardownLog(options, `Plan: would purge session objects under ${options.manifest.session_prefix}.`)
+      teardownLog(options, `Plan: would purge session objects under ${manifest.session_prefix}.`)
     } else {
-      teardownLog(options, `Plan: would retain session objects under ${options.manifest.session_prefix}.`)
+      teardownLog(options, `Plan: would retain session objects under ${manifest.session_prefix}.`)
     }
     teardownLog(options, `Plan: would delete IAM inline policy ${identity.policyName} and role ${identity.roleName}.`)
     teardownLog(options, 'Plan: would preserve the shared S3 bucket and GitHub OIDC provider.')
@@ -1963,7 +2126,7 @@ export async function performTeardown(options: AgentTeardownDeps): Promise<Agent
   let statePurgeImpossible = false
   const state = await deleteTeardownState(
     s3Client,
-    options.manifest,
+    manifest,
     identity.layout.sessionPrefix,
     options.purgeState ?? false,
     secrets,
@@ -2001,7 +2164,7 @@ export async function performTeardown(options: AgentTeardownDeps): Promise<Agent
   if ((await readAgentStoragePolicy(client, identity.roleName, identity.policyName, secrets)) !== undefined) {
     throw new Error(`IAM inline policy ${identity.policyName} remained after teardown readback`)
   }
-  await verifyTeardownSharedResources(client, s3Client, options.manifest, identity.bucketConfig, secrets)
+  await verifyTeardownSharedResources(client, s3Client, manifest, identity.bucketConfig, secrets)
 
   return {
     planned: false,
@@ -2252,7 +2415,7 @@ function readArgumentValue(args: string[], name: string): string | undefined {
   return value
 }
 
-async function readTeardownManifest(source: string): Promise<AgentHandoffManifest> {
+async function readTeardownManifest(source: string): Promise<unknown> {
   const raw = source === '-' ? await new Response(Bun.stdin).text() : await Bun.file(source).text()
   let parsed: unknown
   try {
@@ -2263,7 +2426,7 @@ async function readTeardownManifest(source: string): Promise<AgentHandoffManifes
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('Teardown manifest must be a JSON object')
   }
-  return parsed as AgentHandoffManifest
+  return parsed
 }
 
 export async function performProvisioning(deps: ProvisionDeps = {}): Promise<AgentHandoffManifest> {
@@ -2289,6 +2452,20 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
   const keyLayout = buildAgentKeyLayout(repository.owner, repository.repo, bucketConfig.s3Prefix, keyLayoutVersion)
 
   const client = deps.client ?? createIamClientFromEnv(env)
+  const log = deps.printLine ?? (line => console.log(line))
+  if (deps.plan) {
+    const s3Client = deps.s3Client ?? createS3ClientFromEnv(env, bucketConfig.region)
+    return planProvisioning({
+      client,
+      s3Client,
+      repository,
+      bucketConfig,
+      keyLayoutVersion,
+      secrets,
+      log,
+    })
+  }
+
   const provider = await ensureGitHubOidcProvider(client, secrets)
   const manifest = createHandoffManifest(provider.providerArn)
 
@@ -2323,7 +2500,7 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
   manifest.bucket = bucket.bucket
   manifest.bucket_region = bucket.bucketRegion
   manifest.expected_bucket_owner = bucket.expectedBucketOwner
-  manifest.s3_prefix = bucket.s3Prefix
+  manifest.s3_prefix = actionFacingS3Prefix(bucket.s3Prefix)
   manifest.session_prefix = keyLayout.sessionPrefix
   manifest.lock_key = policy.lockKey
   manifest.role_name = role.roleName
@@ -2336,12 +2513,41 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
   return manifest
 }
 
-async function main(): Promise<void> {
-  const args = Bun.argv.slice(2)
+const AGENT_USAGE = `Usage:
+  bun run apps/agent/server/provision.ts [--force] [--plan|--dry-run]
+  bun run apps/agent/server/provision.ts --teardown --manifest <path|-> [--purge-state] [--plan]
+
+Required environment:
+  AGENT_AWS_ACCESS_KEY_ID, AGENT_AWS_SECRET_ACCESS_KEY
+  AGENT_AWS_REGION, AGENT_S3_BUCKET, AGENT_S3_EXPECTED_BUCKET_OWNER, AGENT_S3_PREFIX
+  AGENT_REPOSITORY_OWNER, AGENT_REPOSITORY_NAME, AGENT_REPOSITORY_ID
+  AGENT_REPOSITORY_OWNER_ID, AGENT_WORKFLOW_NAME, AGENT_ACTION_REF
+  Optional: AGENT_AWS_SESSION_TOKEN, AGENT_S3_SESSION_PREFIX,
+  AGENT_S3_METADATA_ARTIFACTS_PREFIX
+
+Examples:
+  Provision:       bun run apps/agent/server/provision.ts
+  Force drift:     bun run apps/agent/server/provision.ts --force
+  Provision plan:  bun run apps/agent/server/provision.ts --plan
+  Teardown plan:   bun run apps/agent/server/provision.ts --teardown --manifest handoff.json --plan
+  Stdin manifest:  cat handoff.json | bun run apps/agent/server/provision.ts --teardown --manifest -
+  Purge state:     bun run apps/agent/server/provision.ts --teardown --manifest handoff.json --purge-state
+`
+
+export async function main(
+  args: string[] = Bun.argv.slice(2),
+  env: Partial<Record<string, string | undefined>> = process.env,
+  output: (line: string) => void = line => console.log(line),
+): Promise<void> {
+  if (args.includes('--help') || args.includes('-h')) {
+    output(AGENT_USAGE)
+    return
+  }
+
   if (args.includes('--teardown')) {
     const unknown = args.filter(
       (argument: string, index: number) =>
-        !['--teardown', '--purge-state', '--plan', '--manifest'].includes(argument) &&
+        !['--teardown', '--purge-state', '--plan', '--dry-run', '--manifest'].includes(argument) &&
         (index === 0 || args[index - 1] !== '--manifest'),
     )
     if (unknown.length > 0) {
@@ -2352,9 +2558,10 @@ async function main(): Promise<void> {
 
     const manifestSource = readArgumentValue(args, '--manifest')
     if (!manifestSource) throw new Error('Teardown requires --manifest <path> or --manifest - for stdin')
-    const env = process.env
-    const manifest = await readTeardownManifest(manifestSource)
+    const manifestSourceValue = await readTeardownManifest(manifestSource)
     const repository = readRepositoryConfigFromEnv(env)
+    const validated = validateTeardownManifest(manifestSourceValue, repository)
+    const manifest = validated.manifest
     const client = createIamClientFromEnv(env)
     const s3Client = createS3ClientFromEnv(env, manifest.bucket_region)
     const result = await performTeardown({
@@ -2363,17 +2570,23 @@ async function main(): Promise<void> {
       manifest,
       repository,
       purgeState: args.includes('--purge-state'),
-      plan: args.includes('--plan'),
+      plan: args.includes('--plan') || args.includes('--dry-run'),
+      env,
     })
-    console.log(JSON.stringify(result))
+    output(JSON.stringify(result))
     return
   }
 
-  const unknown = args.filter((argument: string) => argument !== '--force')
+  const unknown = args.filter((argument: string) => !['--force', '--plan', '--dry-run'].includes(argument))
   if (unknown.length > 0) {
-    throw new Error(`Unknown provision argument(s): ${unknown.join(', ')}. Supported: --force`)
+    throw new Error(`Unknown provision argument(s): ${unknown.join(', ')}. Supported: --force --plan --dry-run`)
   }
-  await performProvisioning({force: args.includes('--force')})
+  await performProvisioning({
+    force: args.includes('--force'),
+    plan: args.includes('--plan') || args.includes('--dry-run'),
+    env,
+    printLine: output,
+  })
 }
 
 if (import.meta.main) {

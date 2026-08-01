@@ -153,15 +153,76 @@ describe('agent S3 durable storage wiring', () => {
     expect(writes).toEqual([])
   })
 
-  it('calls an explicit workflow verifier override after S3 variables are wired', async () => {
+  it('calls an explicit workflow verifier override before S3 variables are wired', async () => {
     const writes: {kind: string; name: string; value: string}[] = []
-    const verifyWorkflow = mock(async () => {})
-    const deps = makeDeps(writes, {verifyWorkflow})
+    const events: string[] = []
+    const deps = makeDeps(writes, {
+      verifyWorkflow: mock(async () => {
+        events.push('verify')
+      }),
+      applyGhValue: mock(async (kind: 'secret' | 'variable', name: string, _repo: string, value: string) => {
+        events.push(`write:${name}`)
+        writes.push({kind, name, value})
+      }),
+    })
 
     await runStorageSetup('owner/repo', {manifest: '-'}, deps)
 
-    expect(verifyWorkflow).toHaveBeenCalledWith('owner/repo', manifest)
+    expect(events[0]).toBe('verify')
     expect(writes.every(write => write.kind === 'variable')).toBe(true)
+  })
+
+  it('does not write storage variables when workflow verification fails', async () => {
+    const writes: {kind: string; name: string; value: string}[] = []
+    const deps = makeDeps(writes, {
+      verifyWorkflow: mock(async () => {
+        throw new Error('unsafe workflow')
+      }),
+    })
+
+    await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).rejects.toThrow('unsafe workflow')
+    expect(writes).toEqual([])
+  })
+
+  it('rejects an unknown key layout version before writing storage variables', async () => {
+    const writes: {kind: string; name: string; value: string}[] = []
+    const deps = makeDeps(writes, {
+      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot-agent@v0.0.0'})),
+    })
+
+    await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).rejects.toThrow(
+      /key_layout_version|known layout/i,
+    )
+    expect(writes).toEqual([])
+  })
+
+  it('reports partial wiring when a later storage variable write fails', async () => {
+    const writes: {kind: string; name: string; value: string}[] = []
+    let writeCount = 0
+    const deps = makeDeps(writes, {
+      applyGhValue: mock(async (kind: 'secret' | 'variable', name: string, _repo: string, value: string) => {
+        writeCount += 1
+        if (writeCount === 2) throw new Error('gh variable set failed')
+        writes.push({kind, name, value})
+      }),
+    })
+
+    await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).rejects.toThrow(
+      /partially wired.*FRO_BOT_S3_ROLE_TO_ASSUME/i,
+    )
+  })
+
+  it('plans storage variables without applying them', async () => {
+    const writes: {kind: string; name: string; value: string}[] = []
+    const messages: string[] = []
+    const deps = makeDeps(writes, {log: message => messages.push(message)})
+
+    await runStorageSetup('owner/repo', {manifest: '-', plan: true}, deps)
+
+    expect(writes).toEqual([])
+    expect(messages).toEqual(
+      Object.values(STORAGE_VARIABLE_NAMES).map(name => `Would write GitHub variable ${name} to owner/repo.`),
+    )
   })
 
   it('invokes the real workflow verifier by default when no explicit opt-out is provided', async () => {
@@ -184,9 +245,13 @@ jobs:
       id-token: write
     timeout-minutes: 30
     steps:
-      - uses: fro-bot/agent@0123456789abcdef0123456789abcdef01234567
+      - uses: aws-actions/configure-aws-credentials@0123456789abcdef0123456789abcdef01234567
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
+          aws-region: \${{ vars.FRO_BOT_S3_REGION }}
+      - uses: fro-bot/agent@0123456789abcdef0123456789abcdef01234567
+        with:
+          s3-backup: true
           s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}
           aws-region: \${{ vars.FRO_BOT_S3_REGION }}
           s3-prefix: \${{ vars.FRO_BOT_S3_PREFIX }}

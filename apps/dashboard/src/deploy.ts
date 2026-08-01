@@ -726,13 +726,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       payload,
       env: deployEnv,
       keyPath,
-      spawn: (command, options) =>
-        spawnFn(command, {
-          env: options.env,
-          stdout: options.stdout,
-          stderr: options.stderr,
-          stdin: options.stdin,
-        }),
+      spawn: spawnFn,
     })
 
     console.warn('\u001B[1;32m✓\u001B[0m Remote dashboard transaction converged')

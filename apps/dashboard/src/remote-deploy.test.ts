@@ -4,9 +4,11 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import {tmpdir} from 'node:os'
@@ -24,9 +26,15 @@ import {
   type RemoteDeployPayload,
 } from './remote-deploy'
 
+const CADDY_DIGEST = `sha256:${'c'.repeat(64)}`
+const CADDY_IMAGE = `caddy:2.11.4-alpine@${CADDY_DIGEST}`
+const CADDY_REPO_DIGEST = `caddy@${CADDY_DIGEST}`
+const DASHBOARD_IMAGE = `ghcr.io/fro-bot/dashboard:2026.08.01@sha256:${'a'.repeat(64)}`
+const DASHBOARD_REPO_DIGEST = `ghcr.io/fro-bot/dashboard@sha256:${'a'.repeat(64)}`
+
 const fixture: RemoteDeployPayload = {
   env: 'DASHBOARD_DOMAIN=dashboard.example\n',
-  compose: `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard@sha256:${'a'.repeat(64)}\n`,
+  compose: `services:\n  caddy:\n    image: ${CADDY_IMAGE}\n  dashboard:\n    image: ${DASHBOARD_IMAGE}\n`,
   caddyfile: 'dashboard.example {\n  reverse_proxy dashboard:3000\n}\n',
   githubAppKey: '-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n',
   expectedDashboardDigest: `sha256:${'a'.repeat(64)}`,
@@ -86,8 +94,21 @@ interface ShellHarnessOptions {
   runningDashboardContainers?: readonly {id: string; project: string; service: string}[]
   runningDashboardImageDigest?: string
   runningDashboardHealth?: string
+  convergedDashboardHealth?: string
   pruneOutput?: string
   pruneExitCode?: number
+  composeImages?: readonly string[]
+  composeConfigExitCode?: number
+  composePullExitCode?: number
+  imageRepoDigests?: Readonly<Record<string, readonly string[]>>
+  postAcquisitionFreeBytes?: number
+  publicationFailureSource?: 'env' | 'caddyfile' | 'github-app.pem' | 'compose'
+  composeCommandLogPath?: string
+  dockerCommandLogPath?: string
+  composeDashboardIdsOutput?: string
+  requireDataBeforeActivePublication?: boolean
+  failComposeUpIfLegacyOverrideExists?: boolean
+  pruneLogPath?: string
 }
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\"'\"'")}'`
@@ -102,6 +123,8 @@ const adaptProgramForUnprivilegedHarness = (
   const dockerRoot = options.dockerRoot ?? `${runtimeRoot}-docker`
   const dockerInfoOutput = options.dockerInfoOutput ?? dockerRoot
   const containerdRoot = options.containerdRoot ?? `${runtimeRoot}-containerd-absent`
+  const dataPath = join(dashboardRoot, 'data')
+  const legacyOverridePath = join(dashboardRoot, 'docker-compose.override.yaml')
   mkdirSync(dockerRoot, {recursive: true})
   if (options.containerdRoot) mkdirSync(options.containerdRoot, {recursive: true})
   const mounts = options.mounts ?? [
@@ -116,10 +139,33 @@ const adaptProgramForUnprivilegedHarness = (
     runningDashboardIds.map(id => ({id, project: 'dashboard', service: 'dashboard'}))
   const runningDashboardImageDigest = options.runningDashboardImageDigest ?? fixture.expectedDashboardDigest
   const runningDashboardHealth = options.runningDashboardHealth ?? 'unknown'
+  const convergedDashboardHealth = options.convergedDashboardHealth ?? 'healthy'
+  const composeDashboardIdsOutput = options.composeDashboardIdsOutput ?? 'abcdef123456'
   const pruneOutput = options.pruneOutput ?? 'Deleted Images:\nTotal reclaimed space: 0B\n'
+  const composeImages = options.composeImages ?? [CADDY_IMAGE, DASHBOARD_IMAGE]
+  const imageRepoDigests =
+    options.imageRepoDigests ??
+    Object.fromEntries(
+      composeImages.map(image => {
+        const atIndex = image.indexOf('@')
+        const imageName = atIndex === -1 ? image : image.slice(0, atIndex)
+        const slashIndex = imageName.lastIndexOf('/')
+        const colonIndex = imageName.lastIndexOf(':')
+        const repository = colonIndex > slashIndex ? imageName.slice(0, colonIndex) : imageName
+        const canonicalImage = `${repository}${image.slice(atIndex)}`
+        return [canonicalImage, [canonicalImage]]
+      }),
+    )
   const newline = String.fromCharCode(10)
   const dockerDfScript = dockerDf.map(line => String.raw`printf '%s\n' ${shellQuote(line)}`).join(newline)
   const containerImagesScript = containerImages.map(line => String.raw`printf '%s\n' ${shellQuote(line)}`).join(newline)
+  const composeImagesScript = composeImages.map(line => String.raw`printf '%s\n' ${shellQuote(line)}`).join(newline)
+  const imageInspectScript = Object.entries(imageRepoDigests)
+    .map(([image, repoDigests]) => {
+      const output = repoDigests.map(repoDigest => String.raw`printf '%s\n' ${shellQuote(repoDigest)}`).join(newline)
+      return String.raw`if [ "$5" = ${shellQuote(image)} ]; then ${output || ':'}; return 0; fi`
+    })
+    .join(newline)
   const runningDashboardServiceIdsScript = runningDashboardContainers
     .filter(container => container.service === 'dashboard')
     .map(container => String.raw`printf '%s\n' ${shellQuote(container.id)}`)
@@ -138,7 +184,7 @@ const adaptProgramForUnprivilegedHarness = (
   const statCaseScript = mounts
     .map(
       mount =>
-        String.raw`if [ "$path" = ${shellQuote(mount.path)} ]; then printf '%s\n' ${shellQuote(`${mount.freeBytes}:1`)}; return 0; fi`,
+        String.raw`if [ "$path" = ${shellQuote(mount.path)} ]; then if [ "$current_storage_phase" = post-acquisition ] && [ ${options.postAcquisitionFreeBytes === undefined ? '0' : '1'} -eq 1 ]; then printf '%s\n' ${shellQuote(`${options.postAcquisitionFreeBytes ?? mount.freeBytes}:1`)}; else printf '%s\n' ${shellQuote(`${mount.freeBytes}:1`)}; fi; return 0; fi`,
     )
     .join(`${newline}    `)
   const program = REMOTE_TRANSACTION_PROGRAM.replaceAll(
@@ -160,16 +206,28 @@ const adaptProgramForUnprivilegedHarness = (
     )
     .replaceAll('0:0:700:directory', `${uid}:${gid}:700:Directory`)
     .replaceAll('0:0:600:regular file', `${uid}:${gid}:600:Regular File`)
+    .replaceAll('0:0:644:regular file', `${uid}:${gid}:644:Regular File`)
+    .replaceAll('1000:1000:600:regular file', `${uid}:${gid}:600:Regular File`)
+    .replaceAll('readonly ROOT_OWNER="0:0"', `readonly ROOT_OWNER="${uid}:${gid}"`)
     .replaceAll('install -d -m 0700 -o 0 -g 0', `install -d -m 0700 -o ${uid} -g ${gid}`)
     .replaceAll('install -m 0600 -o 0 -g 0', `install -m 0600 -o ${uid} -g ${gid}`)
     .replaceAll('install -d -m 0755 -o 0 -g 0', `install -d -m 0755 -o ${uid} -g ${gid}`)
     .replaceAll('install -m 0644 -o 0 -g 0', `install -m 0644 -o ${uid} -g ${gid}`)
+    .replaceAll('install -m 0600 -o 1000 -g 1000', `install -m 0600 -o ${uid} -g ${gid}`)
     .replaceAll('chown 0:0', `chown ${uid}:${gid}`)
     .replaceAll('chown -R 1000:1000', `chown -R ${uid}:${gid}`)
     .replaceAll('chown 1000:1000', `chown ${uid}:${gid}`)
     .replaceAll('realpath -e --', 'realpath --')
     .replaceAll('realpath -e ', 'realpath ')
   return String.raw`
+install() {
+  if [ "${options.publicationFailureSource ?? ''}" != "" ] && [ "$7" = "$stage/${options.publicationFailureSource ?? ''}" ]; then return 1; fi
+  if [ "${options.requireDataBeforeActivePublication ? '1' : '0'}" -eq 1 ] && { [ "$7" = "\$stage/env" ] || [ "$7" = "\$stage/caddyfile" ] || [ "$7" = "\$stage/github-app.pem" ] || [ "$7" = "\$stage/compose" ]; }; then
+    data_stat="$(stat -c "%u:%g:%a:%F" -- ${shellQuote(dataPath)} 2>/dev/null)" || return 1
+    [ "$data_stat" = ${shellQuote(`${uid}:${gid}:700:Directory`)} ] || return 1
+  fi
+  command install "$@"
+}
 stat() {
   if [ "$1" = "-f" ] && [ "$2" = "-c" ]; then
     format="$3"
@@ -199,7 +257,10 @@ findmnt() {
   return 1
 }
 flock() { return 0; }
+current_storage_phase=''
+dashboard_converged=0
 docker() {
+  ${options.dockerCommandLogPath ? String.raw`printf '%s\n' "$*" >> ${shellQuote(options.dockerCommandLogPath)}` : ':'}
   if [ "$1" = "info" ]; then printf '%s\n' ${shellQuote(dockerInfoOutput)}; return 0; fi
   if [ "$1" = "system" ] && [ "$2" = "df" ]; then
     ${dockerDfScript}
@@ -220,22 +281,37 @@ docker() {
     return 0
   fi
   if [ "$1" = "image" ] && [ "$2" = "prune" ]; then
+    ${options.pruneLogPath ? String.raw`printf '%s\n' prune >> ${shellQuote(options.pruneLogPath)}` : ':'}
     ${pruneScript}
     return ${options.pruneExitCode ?? 0}
   fi
-  if [ "$1" = "compose" ] && [ "$2" = "pull" ]; then return 0; fi
-  if [ "$1" = "compose" ] && [ "$2" = "up" ]; then return 0; fi
-  if [ "$1" = "compose" ] && { [ "$2" = "ps" ] || [ "$4" = "ps" ]; }; then printf 'abcdef123456\n'; return 0; fi
+  if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+    ${imageInspectScript}
+    return 1
+  fi
+  if [ "$1" = "compose" ]; then
+    ${options.composeCommandLogPath ? String.raw`printf '%s\n' "$*" >> ${shellQuote(options.composeCommandLogPath)}` : ':'}
+    if [[ "$*" == *" config --images"* ]]; then ${composeImagesScript}; return ${options.composeConfigExitCode ?? 0}; fi
+    if [[ "$*" == *" pull"* ]]; then return ${options.composePullExitCode ?? 0}; fi
+    if [[ "$*" == *" up "* ]] && [ ${options.failComposeUpIfLegacyOverrideExists ? '1' : '0'} -eq 1 ] && { [ -e ${shellQuote(legacyOverridePath)} ] || [ -L ${shellQuote(legacyOverridePath)} ]; }; then return 1; fi
+    if [[ "$*" == *" up "* && "$*" == *" dashboard"* ]]; then dashboard_converged=1; return 0; fi
+    if [[ "$*" == *" up "* && "$*" == *" caddy"* ]]; then return 0; fi
+    if [ "$2" = "ps" ]; then printf '%s\n' ${shellQuote(composeDashboardIdsOutput)}; return 0; fi
+  fi
   if [ "$1" = "inspect" ] && [ "$4" = "abcdef123456" ]; then
     case "$3" in
       "{{.Image}}") printf 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n' ;;
-      "{{.State.Health.Status}}") printf '%s\n' ${shellQuote(runningDashboardHealth)} ;;
+      "{{.State.Health.Status}}") if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(convergedDashboardHealth)}; else printf '%s\n' ${shellQuote(runningDashboardHealth)}; fi ;;
       *) return 1 ;;
     esac
     return 0
   fi
   if [ "$1" = "inspect" ] && [ "$4" = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" ]; then
-    printf '["ghcr.io/fro-bot/dashboard@${runningDashboardImageDigest}"]\n'
+    case "$3" in
+      "{{json .RepoDigests}}") printf '["ghcr.io/fro-bot/dashboard@${runningDashboardImageDigest}"]\n' ;;
+      "{{range .RepoDigests}}{{println .}}{{end}}") printf 'ghcr.io/fro-bot/dashboard@${runningDashboardImageDigest}\n' ;;
+      *) return 1 ;;
+    esac
     return 0
   fi
   return 1
@@ -1105,7 +1181,7 @@ describe('remote transaction process boundary', () => {
           start(controller) {
             controller.enqueue(
               text.encode(
-                `stage=complete\nevidence=free-bytes:6442450944\nevidence=storage:baseline:probe=/var/lib/docker;mount=/;source=/dev/vda1;fstype=ext4;free-bytes=6442450944\nevidence=docker-df:baseline:type=Images;count=2;active=1;size-bytes=1000;reclaimable-bytes=0\nevidence=protected-image:baseline:ref=ghcr.io/fro-bot/dashboard@${digest};count=1\nevidence=capacity:post-prune:free-bytes=6442450944\nevidence=service:dashboard\nevidence=image:ghcr.io/fro-bot/dashboard:2026.08.01@${digest}\nevidence=secret:oauth-secret\n`,
+                `stage=post-acquisition-capacity\nevidence=free-bytes:6442450944\nevidence=storage:baseline:probe=/var/lib/docker;mount=/;source=/dev/vda1;fstype=ext4;free-bytes=6442450944\nevidence=storage:post-acquisition:probe=/var/lib/docker;mount=/;source=/dev/vda1;fstype=ext4;free-bytes=6442450944\nevidence=docker-df:baseline:type=Images;count=2;active=1;size-bytes=1000;reclaimable-bytes=0\nevidence=protected-image:baseline:ref=ghcr.io/fro-bot/dashboard@${digest};count=1\nevidence=capacity:post-prune:free-bytes=6442450944\nevidence=capacity:post-acquisition:free-bytes=6442450944\nevidence=acquisition:mode=pull\nevidence=image-verified:ghcr.io/fro-bot/dashboard@${digest}\nevidence=active-state:published=compose\nevidence=runtime-digest:${digest}\nevidence=health:healthy\nevidence=service:dashboard\nevidence=container:dashboard\nevidence=mount:/var/lib/docker\nevidence=image:ghcr.io/fro-bot/dashboard:2026.08.01@${digest}\nevidence=digest:${digest}\nevidence=secret:oauth-secret\nstage=complete\n`,
               ),
             )
             controller.close()
@@ -1121,13 +1197,464 @@ describe('remote transaction process boundary', () => {
       }),
     })
 
-    expect(result.evidence).toContain('evidence=free-bytes:6442450944')
+    expect(result.evidence).not.toContain('evidence=free-bytes:6442450944')
     expect(result.evidence).toContain(
       'evidence=storage:baseline:probe=/var/lib/docker;mount=/;source=/dev/vda1;fstype=ext4;free-bytes=6442450944',
     )
     expect(result.evidence).toContain('evidence=capacity:post-prune:free-bytes=6442450944')
-    expect(result.evidence).toContain('evidence=service:dashboard')
-    expect(result.evidence).toContain(`evidence=image:ghcr.io/fro-bot/dashboard:2026.08.01@${digest}`)
+    expect(result.evidence).toContain(
+      'evidence=storage:post-acquisition:probe=/var/lib/docker;mount=/;source=/dev/vda1;fstype=ext4;free-bytes=6442450944',
+    )
+    expect(result.evidence).toContain('evidence=acquisition:mode=pull')
+    expect(result.evidence).toContain(`evidence=image-verified:ghcr.io/fro-bot/dashboard@${digest}`)
+    expect(result.evidence).toContain('evidence=active-state:published=compose')
+    expect(result.evidence).toContain(`evidence=runtime-digest:${digest}`)
+    expect(result.evidence).toContain('evidence=health:healthy')
+    expect(result.evidence).not.toContain('evidence=service:dashboard')
+    expect(result.evidence).not.toContain('evidence=container:dashboard')
+    expect(result.evidence).not.toContain('evidence=mount:/var/lib/docker')
+    expect(result.evidence).not.toContain(`evidence=image:ghcr.io/fro-bot/dashboard:2026.08.01@${digest}`)
+    expect(result.evidence).not.toContain(`evidence=digest:${digest}`)
     expect(result.evidence.join('\n')).not.toContain('oauth-secret')
+  })
+})
+
+describe('U4 staged image acquisition and publication ordering', () => {
+  it('pulls and exactly verifies every staged service image before publishing Compose last', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-pull-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const composeLogPath = join(root, 'compose.log')
+    const pruneLogPath = join(root, 'prune.log')
+    const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          composeCommandLogPath: composeLogPath,
+          pruneLogPath,
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain('evidence=acquisition:mode=pull')
+      expect(result.stdout).toContain(`evidence=image-verified:caddy@${CADDY_DIGEST}`)
+      expect(result.stdout).toContain(
+        `evidence=image-verified:ghcr.io/fro-bot/dashboard@${fixture.expectedDashboardDigest}`,
+      )
+      expect(result.stdout).toContain('stage=post-acquisition-capacity')
+      expect(result.stdout).toContain('evidence=capacity:post-acquisition:free-bytes=8589934592')
+      expect(result.stdout).toContain('evidence=active-state:published=compose')
+      expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8')).toBe(fixture.compose)
+
+      const composeCommands = readFileSync(composeLogPath, 'utf8').trim().split('\n')
+      expect(composeCommands[0]).toContain('config --images')
+      expect(composeCommands[0]).toContain(`${runtimeRoot}/attempt.`)
+      expect(composeCommands[1]).toContain('pull')
+      expect(composeCommands[1]).toContain(`${runtimeRoot}/attempt.`)
+      expect(readFileSync(pruneLogPath, 'utf8').trim().split('\n')).toHaveLength(1)
+
+      const publicationEvidence = result.stdout
+        .split('\n')
+        .filter(line => line.startsWith('evidence=active-state:published='))
+      expect(publicationEvidence).toEqual([
+        'evidence=active-state:published=env',
+        'evidence=active-state:published=caddyfile',
+        'evidence=active-state:published=pem',
+        'evidence=active-state:published=compose',
+      ])
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('rejects a tag-only staged image before active-state mutation', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-tag-only-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+    const tagOnly = 'ghcr.io/fro-bot/dashboard:latest'
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          composeImages: [tagOnly, CADDY_IMAGE],
+        }),
+        encodeRemotePayload({...fixture, compose: `services:\n  dashboard:\n    image: ${tagOnly}\n`}),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).not.toContain('stage=active-state-written')
+      expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8')).toBe(oldCompose)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('rejects duplicate and unexpected staged image identities before acquisition', async () => {
+    const cases = [
+      {
+        name: 'duplicate-canonical-identity',
+        composeImages: [
+          DASHBOARD_IMAGE,
+          `ghcr.io/fro-bot/dashboard:stable@${fixture.expectedDashboardDigest}`,
+          CADDY_IMAGE,
+        ],
+      },
+      {
+        name: 'unexpected-dashboard-digest',
+        composeImages: [`ghcr.io/fro-bot/dashboard:2026.08.01@sha256:${'b'.repeat(64)}`, CADDY_IMAGE],
+      },
+    ] as const
+
+    for (const testCase of cases) {
+      const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-u4-${testCase.name}-`))
+      const root = realpathSync(parent)
+      const runtimeRoot = join(root, 'dashboard-deploy')
+      const dashboardRoot = `${runtimeRoot}-dashboard`
+      const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+      mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+      mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+      writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+
+      try {
+        const result = await runShellProgram(
+          adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {composeImages: testCase.composeImages}),
+          encodeRemotePayload(fixture),
+        )
+
+        expect(result.exitCode, testCase.name).not.toBe(0)
+        expect(result.stdout, testCase.name).not.toContain('stage=image-acquisition')
+        expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8'), testCase.name).toBe(oldCompose)
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    }
+  })
+
+  it('uses the exact cached image set when registry pull fails', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-cache-fallback-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(
+      join(dashboardRoot, 'docker-compose.yaml'),
+      `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
+    )
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          composePullExitCode: 1,
+          imageRepoDigests: {
+            [CADDY_REPO_DIGEST]: [CADDY_REPO_DIGEST],
+            [DASHBOARD_REPO_DIGEST]: [DASHBOARD_REPO_DIGEST],
+          },
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain('evidence=acquisition:mode=cache-fallback')
+      expect(result.stdout).toContain(`evidence=image-verified:caddy@${CADDY_DIGEST}`)
+      expect(result.stdout).toContain(
+        `evidence=image-verified:ghcr.io/fro-bot/dashboard@${fixture.expectedDashboardDigest}`,
+      )
+      expect(result.stdout).toContain('stage=complete')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('accepts only one exact match among valid RepoDigests aliases', async () => {
+    const otherCaddyDigest = `sha256:${'d'.repeat(64)}`
+    const cases = [
+      {
+        name: 'expected-and-other-alias',
+        expectedExitCode: 0,
+        caddyRepoDigests: [CADDY_REPO_DIGEST, `caddy@${otherCaddyDigest}`],
+        dashboardRepoDigests: [DASHBOARD_REPO_DIGEST, `ghcr.io/fro-bot/dashboard@${otherCaddyDigest}`],
+      },
+      {
+        name: 'no-expected-alias',
+        expectedExitCode: 1,
+        caddyRepoDigests: [`caddy@${otherCaddyDigest}`],
+        dashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
+      },
+      {
+        name: 'duplicate-expected-alias',
+        expectedExitCode: 1,
+        caddyRepoDigests: [CADDY_REPO_DIGEST, CADDY_REPO_DIGEST],
+        dashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
+      },
+      {
+        name: 'malformed-alias',
+        expectedExitCode: 1,
+        caddyRepoDigests: [CADDY_REPO_DIGEST, 'not-a-repo-digest'],
+        dashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
+      },
+    ] as const
+
+    for (const testCase of cases) {
+      const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-u4-repodigests-${testCase.name}-`))
+      const root = realpathSync(parent)
+      const runtimeRoot = join(root, 'dashboard-deploy')
+      const dashboardRoot = `${runtimeRoot}-dashboard`
+      const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+      mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+      mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+      writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+
+      try {
+        const result = await runShellProgram(
+          adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+            composePullExitCode: 1,
+            imageRepoDigests: {
+              [CADDY_REPO_DIGEST]: testCase.caddyRepoDigests,
+              [DASHBOARD_REPO_DIGEST]: testCase.dashboardRepoDigests,
+            },
+          }),
+          encodeRemotePayload(fixture),
+        )
+
+        expect(result.exitCode, testCase.name).toBe(testCase.expectedExitCode)
+        if (testCase.expectedExitCode !== 0) {
+          expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8'), testCase.name).toBe(oldCompose)
+        }
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    }
+  })
+
+  it('stops on a missing or mismatched cached image without changing old Compose', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-cache-miss-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          composePullExitCode: 1,
+          imageRepoDigests: {
+            [CADDY_IMAGE]: [`caddy@sha256:${'d'.repeat(64)}`],
+            [DASHBOARD_IMAGE]: [],
+          },
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).not.toContain('stage=active-state-written')
+      expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8')).toBe(oldCompose)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('stops when a successful pull does not yield an exact staged digest', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-pull-mismatch-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          imageRepoDigests: {
+            [CADDY_IMAGE]: [`caddy@sha256:${'d'.repeat(64)}`],
+            [DASHBOARD_IMAGE]: [`ghcr.io/fro-bot/dashboard@${fixture.expectedDashboardDigest}`],
+          },
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).not.toContain('stage=active-state-mutation')
+      expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8')).toBe(oldCompose)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('fails before creating active paths when acquisition drops below 6 GiB', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-acquisition-floor-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {postAcquisitionFreeBytes: 6442450943}),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).toContain('stage=post-acquisition-capacity')
+      expect(result.stdout).toContain('evidence=capacity:post-acquisition:free-bytes=6442450943')
+      expect(result.stdout).not.toContain('stage=active-state-mutation')
+      expect(existsSync(dashboardRoot)).toBe(false)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('rejects symlink and non-regular final paths before publishing any active file', async () => {
+    const conflicts = [
+      ['env-symlink', 'env', 'symlink'],
+      ['caddyfile-directory', 'caddyfile', 'directory'],
+      ['pem-symlink', 'pem', 'symlink'],
+      ['compose-directory', 'compose', 'directory'],
+    ] as const
+
+    for (const [name, target, kind] of conflicts) {
+      const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-u4-path-${name}-`))
+      const root = realpathSync(parent)
+      const runtimeRoot = join(root, 'dashboard-deploy')
+      const dashboardRoot = `${runtimeRoot}-dashboard`
+      const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+      mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+      mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+      writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+      const path = {
+        env: join(dashboardRoot, '.env'),
+        caddyfile: join(dashboardRoot, 'config', 'Caddyfile'),
+        pem: join(dashboardRoot, 'config', 'github-app.pem'),
+        compose: join(dashboardRoot, 'docker-compose.yaml'),
+      }[target]
+
+      try {
+        if (target === 'compose') rmSync(path)
+        if (kind === 'symlink') symlinkSync(join(parent, 'target'), path)
+        else mkdirSync(path)
+
+        const result = await runShellProgram(
+          adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot),
+          encodeRemotePayload(fixture),
+        )
+
+        expect(result.exitCode, name).not.toBe(0)
+        expect(result.stdout, name).not.toContain('stage=active-state-written')
+        if (target === 'compose') expect(existsSync(path) && statSync(path).isDirectory(), name).toBe(true)
+        else expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8'), name).toBe(oldCompose)
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    }
+  })
+
+  it('leaves old Compose byte-identical when support publication fails before Compose', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-publication-failure-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {publicationFailureSource: 'compose'}),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).toContain('evidence=active-state:published=pem')
+      expect(result.stdout).not.toContain('evidence=active-state:published=compose')
+      expect(result.stdout).not.toContain('stage=active-state-written')
+      expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8')).toBe(oldCompose)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('prepares listener data and publishes the App key contract before converging without a legacy override', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-active-contracts-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const dataPath = join(dashboardRoot, 'data')
+    const appKeyPath = join(dashboardRoot, 'config', 'github-app.pem')
+    const legacyOverridePath = join(dashboardRoot, 'docker-compose.override.yaml')
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(dataPath, {recursive: true})
+    writeFileSync(
+      join(dashboardRoot, 'docker-compose.yaml'),
+      `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
+    )
+    writeFileSync(legacyOverridePath, 'stale override\n')
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          requireDataBeforeActivePublication: true,
+          failComposeUpIfLegacyOverrideExists: true,
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(statSync(dataPath).mode & 0o7777).toBe(0o700)
+      expect(statSync(appKeyPath).mode & 0o7777).toBe(0o600)
+      expect(statSync(appKeyPath).uid).toBe(process.getuid?.() ?? statSync(appKeyPath).uid)
+      expect(statSync(appKeyPath).gid).toBe(process.getgid?.() ?? statSync(appKeyPath).gid)
+      expect(existsSync(legacyOverridePath)).toBe(false)
+      expect(result.stdout).toContain('stage=complete')
+      expect(REMOTE_TRANSACTION_PROGRAM).toContain('install -m 0600 -o 1000 -g 1000')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('rejects empty, multiple, and malformed running dashboard container identities', async () => {
+    const identities = ['', 'abcdef123456\n0123456789abcdef', 'ABCDEF123456', 'abc123']
+
+    for (const identity of identities) {
+      const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-runtime-container-id-'))
+      const root = realpathSync(parent)
+      const runtimeRoot = join(root, 'dashboard-deploy')
+      const dashboardRoot = `${runtimeRoot}-dashboard`
+      const dockerLogPath = join(root, 'docker.log')
+      mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+      mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+
+      try {
+        const result = await runShellProgram(
+          adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+            composeDashboardIdsOutput: identity,
+            dockerCommandLogPath: dockerLogPath,
+          }),
+          encodeRemotePayload(fixture),
+        )
+        expect(result.exitCode, JSON.stringify(identity)).not.toBe(0)
+        const inspectCommands = readFileSync(dockerLogPath, 'utf8')
+          .split('\n')
+          .filter(line => line.startsWith('inspect '))
+        if (identity !== '') expect(inspectCommands, JSON.stringify(identity)).toEqual([])
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    }
   })
 })

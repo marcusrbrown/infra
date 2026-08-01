@@ -29,7 +29,6 @@ const COMPOSE_DIGEST = parseComposeImageDigest(dashboardImageLine) ?? ''
 if (!COMPOSE_DIGEST) throw new Error('Could not derive COMPOSE_DIGEST from docker-compose.yaml')
 
 const FAKE_DIGEST = `sha256:${'a'.repeat(64)}`
-const DATA_DIR_PATH = '/opt/dashboard/data'
 
 const VALID_ENV = {
   PATH: '/usr/bin:/bin',
@@ -416,36 +415,6 @@ describe('happy path deploy', () => {
     ).resolves.toBeUndefined()
   })
 
-  it('converges persistent listener storage before materialization and compose operations', async () => {
-    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
-
-    await deploy({
-      env: VALID_ENV,
-      spawn: spawnFn,
-      resolve: resolvesOk,
-      fetch: fetchHealthzOk,
-      probeAttempts: 1,
-      probeIntervalMs: 0,
-      sleep: async () => {},
-    })
-
-    const dataSetupCalls = calls.filter(c => c.cmd.at(-1)?.includes(DATA_DIR_PATH))
-    expect(dataSetupCalls).toHaveLength(1)
-
-    const transaction = calls.find(c => c.cmd[0] === 'ssh')
-    expect(transaction).toBeDefined()
-    const command = transaction?.cmd.join(' ') ?? ''
-    const dataSetupIdx = command.indexOf('install -d -m 0700 -o 1000 -g 1000 "$DASHBOARD_DATA_DIR"')
-    const envWriteIdx = command.indexOf('install -m 0600 -o 0 -g 0 "$stage/env"')
-    const appKeyWriteIdx = command.indexOf('install -m 0600 -o 0 -g 0 "$stage/github-app.pem"')
-    const composePullIdx = command.indexOf('docker compose pull')
-
-    expect(dataSetupIdx).toBeGreaterThan(-1)
-    expect(dataSetupIdx).toBeLessThan(envWriteIdx)
-    expect(dataSetupIdx).toBeLessThan(appKeyWriteIdx)
-    expect(composePullIdx).toBeGreaterThan(appKeyWriteIdx)
-  })
-
   it('fails closed and physically validates the remote root and config directories before mutation', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
@@ -708,35 +677,6 @@ describe('happy path deploy', () => {
     expect(probedUrls.some(u => u.includes('/api/healthz'))).toBe(true)
   })
 
-  it('removes stale docker-compose.override.yaml before docker compose pull', async () => {
-    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
-
-    await deploy({
-      env: VALID_ENV,
-      spawn: spawnFn,
-      resolve: resolvesOk,
-      fetch: fetchHealthzOk,
-      probeAttempts: 1,
-      probeIntervalMs: 0,
-      sleep: async () => {},
-    })
-
-    // Find the rm -f cleanup call
-    const rmCall = calls.find(
-      c => c.cmd.join(' ').includes('rm -f') && c.cmd.join(' ').includes('docker-compose.override.yaml'),
-    )
-    expect(rmCall).toBeDefined()
-
-    // It must come before docker compose pull
-    const transaction = calls.find(c => c.cmd[0] === 'ssh')
-    const command = transaction?.cmd.join(' ') ?? ''
-    const rmIdx = command.indexOf('rm -f -- "$DASHBOARD_LEGACY_OVERRIDE_PATH"')
-    const pullIdx = command.indexOf('docker compose pull')
-    expect(rmIdx).toBeGreaterThan(-1)
-    expect(pullIdx).toBeGreaterThan(-1)
-    expect(rmIdx).toBeLessThan(pullIdx)
-  })
-
   it('does NOT publish docker-compose.override.yaml (only removes it)', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
@@ -975,50 +915,6 @@ describe('.env does not contain image ref', () => {
     })
     expect(contents).not.toContain('DASHBOARD_IMAGE_REF')
     expect(contents).not.toContain('sha256:')
-  })
-})
-
-// ─── chown for node user ──────────────────────────────────────────────────────
-
-describe('GitHub App key chown for node user', () => {
-  it('runs chown 1000:1000 on the App key after chmod', async () => {
-    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
-
-    await deploy({
-      env: VALID_ENV,
-      spawn: spawnFn,
-      resolve: resolvesOk,
-      fetch: fetchHealthzOk,
-      probeAttempts: 1,
-      probeIntervalMs: 0,
-      sleep: async () => {},
-    })
-
-    // Find the chown call
-    const chownCall = calls.find(c => c.cmd.join(' ').includes('chown 1000:1000'))
-    expect(chownCall).toBeDefined()
-    expect(chownCall?.cmd.join(' ')).toContain('github-app.pem')
-  })
-
-  it('runs chown AFTER chmod (chmod before chown)', async () => {
-    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
-
-    await deploy({
-      env: VALID_ENV,
-      spawn: spawnFn,
-      resolve: resolvesOk,
-      fetch: fetchHealthzOk,
-      probeAttempts: 1,
-      probeIntervalMs: 0,
-      sleep: async () => {},
-    })
-
-    const command = calls.find(c => c.cmd[0] === 'ssh')?.cmd.join(' ') ?? ''
-    const chmodIdx = command.indexOf('chmod 0600 "$DASHBOARD_APP_KEY_PATH"')
-    const chownIdx = command.indexOf('chown 1000:1000 "$DASHBOARD_APP_KEY_PATH"')
-    expect(chmodIdx).toBeGreaterThan(-1)
-    expect(chownIdx).toBeGreaterThan(-1)
-    expect(chmodIdx).toBeLessThan(chownIdx)
   })
 })
 

@@ -14,6 +14,7 @@ export const REMOTE_TRANSACTION_PROGRAM = [
   'umask 077',
   'readonly RUNTIME_ROOT="/run/dashboard-deploy"',
   'readonly LOCK_PATH="/run/dashboard-deploy/lock"',
+  'readonly ROOT_OWNER="0:0"',
   'readonly CONTAINERD_ROOT="/var/lib/containerd"',
   `readonly MIN_FREE_BYTES="${REMOTE_MIN_FREE_BYTES}"`,
   'readonly DASHBOARD_ROOT="/opt/dashboard"',
@@ -31,10 +32,11 @@ export const REMOTE_TRANSACTION_PROGRAM = [
   'readonly MAX_GITHUB_APP_KEY_BYTES=131072',
   'readonly MAX_EXPECTED_DASHBOARD_DIGEST_BYTES=71',
   'stage=""',
+  'publication_tmp=""',
   'transaction_stage="remote-transaction-started"',
   String.raw`mark_stage() { transaction_stage="$1"; printf "%s\n" "stage=$1"; }`,
   String.raw`fail() { printf "%s\n" "$1" >&2; exit 1; }`,
-  'cleanup() { if [ -n "$stage" ] && [ -d "$stage" ] && [ ! -L "$stage" ]; then rm -rf -- "$stage" >/dev/null 2>&1 || :; fi; }',
+  'cleanup() { if [ -n "$publication_tmp" ] && [ -e "$publication_tmp" ] && [ ! -L "$publication_tmp" ]; then rm -f -- "$publication_tmp" >/dev/null 2>&1 || :; fi; if [ -n "$stage" ] && [ -d "$stage" ] && [ ! -L "$stage" ]; then rm -rf -- "$stage" >/dev/null 2>&1 || :; fi; }',
   'trap cleanup EXIT',
   'trap "exit 129" HUP',
   'trap "exit 130" INT',
@@ -131,7 +133,7 @@ export const REMOTE_TRANSACTION_PROGRAM = [
 declare -a storage_keys=() storage_paths=() storage_mounts=() storage_sources=() storage_fs_types=() storage_bytes=()
 reset_storage_records() { storage_keys=(); storage_paths=(); storage_mounts=(); storage_sources=(); storage_fs_types=(); storage_bytes=(); }
 capture_storage_records() {
-  phase="$1"; reset_storage_records
+  phase="$1"; current_storage_phase="$phase"; reset_storage_records
   docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || fail "Docker root evidence unavailable"
   [[ "$docker_root" =~ ^/[A-Za-z0-9._/+@=,-]+$ ]] || fail "Docker root evidence malformed"
   [ -d "$docker_root" ] || fail "Docker root path unavailable"
@@ -280,6 +282,70 @@ capture_prune() {
   printf "%s\n" "evidence=prune:reclaimed-bytes=$reclaimed_bytes;eligible-images=$eligible_images;protected-containers=$protected_container_count"
 }
 `,
+  String.raw`
+verify_repo_digest_output() {
+  repo_digest_output="$1"; expected_repository="$2"; expected_digest="$3"
+  expected_repo_digest="$expected_repository@$expected_digest"; repo_digest_matches=0
+  while IFS= read -r repo_digest; do
+    [ -n "$repo_digest" ] || continue
+    [[ "$repo_digest" =~ ^[a-z0-9][a-z0-9._/:+-]*@sha256:[0-9a-f]{64}$ ]] || return 1
+    [ "$repo_digest" = "$expected_repo_digest" ] && repo_digest_matches=$((repo_digest_matches + 1))
+  done <<< "$repo_digest_output"
+  [ "$repo_digest_matches" -eq 1 ]
+}
+verify_image_exact() {
+  expected_repository="$1"; expected_digest="$2"
+  canonical_image_ref="$expected_repository@$expected_digest"
+  image_repo_digests="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$canonical_image_ref" 2>/dev/null)" || return 1
+  verify_repo_digest_output "$image_repo_digests" "$expected_repository" "$expected_digest"
+}
+validate_final_file_path() {
+  path="$1"; label="$2"
+  if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then fail "$label final path is unsafe"; fi
+  if [ -e "$path" ]; then
+    canonical_path="$(realpath -e -- "$path" 2>/dev/null)" || fail "$label final path canonicalization failed"
+    [ "$canonical_path" = "$path" ] || fail "$label final path is not canonical"
+  fi
+}
+validate_parent_directory() {
+  path="$1"; label="$2"
+  [ -e "$path" ] || return 0
+  [ -d "$path" ] && [ ! -L "$path" ] || fail "$label parent directory is unsafe"
+  canonical_path="$(realpath -e -- "$path" 2>/dev/null)" || fail "$label parent directory canonicalization failed"
+  [ "$canonical_path" = "$path" ] || fail "$label parent directory is not canonical"
+  parent_stat="$(stat -c "%u:%g:%a:%F" -- "$path" 2>/dev/null)" || fail "$label parent directory stat failed"
+  IFS=':' read -r parent_uid parent_gid parent_mode parent_type parent_extra <<< "$parent_stat"
+  [ "$parent_uid:$parent_gid" = "$ROOT_OWNER" ] || fail "$label parent directory ownership is unsafe"
+  [[ "$parent_mode" =~ ^[0-7]{3,4}$ ]] || fail "$label parent directory mode is malformed"
+  (( (8#$parent_mode & 8#22) == 0 )) || fail "$label parent directory is writable by group or world"
+}
+publish_active_file() {
+  source_path="$1"; destination_path="$2"; label="$3"; destination_parent="$(dirname "$destination_path")"
+  validate_parent_directory "$destination_parent" "$label"
+  validate_final_file_path "$destination_path" "$label"
+  publication_tmp="$(mktemp -- "$destination_parent/.dashboard-deploy.XXXXXX" 2>/dev/null)" || fail "$label temporary file creation failed"
+  case "$label" in
+    env) install -m 0600 -o 0 -g 0 "$source_path" "$publication_tmp" >/dev/null 2>&1 || fail "environment publication failed" ;;
+    caddyfile) install -m 0644 -o 0 -g 0 "$source_path" "$publication_tmp" >/dev/null 2>&1 || fail "Caddyfile publication failed" ;;
+    pem) install -m 0600 -o 1000 -g 1000 "$source_path" "$publication_tmp" >/dev/null 2>&1 || fail "GitHub App key publication failed" ;;
+    compose) install -m 0644 -o 0 -g 0 "$source_path" "$publication_tmp" >/dev/null 2>&1 || fail "compose publication failed" ;;
+    *) fail "unknown active file" ;;
+  esac
+  [ -f "$publication_tmp" ] && [ ! -L "$publication_tmp" ] || fail "$label temporary file is unsafe"
+  mv -f "$publication_tmp" "$destination_path" >/dev/null 2>&1 || fail "$label replacement failed"
+  publication_tmp=""
+  validate_final_file_path "$destination_path" "$label"
+  case "$label" in
+    env) expected_stat="0:0:600:regular file" ;;
+    caddyfile|compose) expected_stat="0:0:644:regular file" ;;
+    pem) expected_stat="1000:1000:600:regular file" ;;
+    *) fail "unknown active file" ;;
+  esac
+  actual_stat="$(stat -c "%u:%g:%a:%F" -- "$destination_path" 2>/dev/null)" || fail "$label readback failed"
+  [ "$actual_stat" = "$expected_stat" ] || fail "$label ownership or mode is unsafe"
+  printf "%s\n" "evidence=active-state:published=$label"
+}
+`,
   'validate_dashboard_path "$DASHBOARD_ROOT" root',
   'validate_dashboard_path "$DASHBOARD_CONFIG_DIR" config',
   'validate_dashboard_path "$DASHBOARD_DATA_DIR" data',
@@ -298,6 +364,56 @@ capture_prune() {
   'capture_active_state post-prune',
   '[ "$storage_min_free" -ge "$MIN_FREE_BYTES" ] || fail "post-prune free space is below the minimum"',
   'printf "%s\n" "evidence=capacity:post-prune:free-bytes=$storage_min_free"',
+  String.raw`
+required_images_file="$stage/required-images"
+: > "$required_images_file" || fail "staged image record creation failed"
+staged_images_output="$(docker compose --project-directory "$stage" --file "$stage/compose" --env-file "$stage/env" config --images 2>/dev/null)" || fail "staged Compose image enumeration failed"
+staged_image_count=0; dashboard_image_count=0
+while IFS= read -r staged_image; do
+  [ -n "$staged_image" ] || fail "staged Compose image identity is empty"
+  [[ "$staged_image" =~ ^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]] || fail "staged Compose image identity is malformed"
+  image_name="$(printf '%s\n' "$staged_image" | cut -d@ -f1)"
+  staged_digest="$(printf '%s\n' "$staged_image" | cut -d@ -f2)"
+  staged_repository="$(printf '%s\n' "$image_name" | sed -E 's/:[A-Za-z0-9._-]+$//')"
+  staged_identity="$staged_repository@$staged_digest"
+  if grep -Fqx -- "$staged_identity" "$required_images_file"; then fail "duplicate staged image identity"; fi
+  printf '%s\t%s\t%s\n' "$staged_repository" "$staged_digest" "$staged_image" >> "$required_images_file" || fail "staged image record write failed"
+  staged_image_count=$((staged_image_count + 1))
+  if [ "$staged_repository" = "ghcr.io/fro-bot/dashboard" ]; then
+    dashboard_image_count=$((dashboard_image_count + 1))
+    [ "$staged_digest" = "$expected_dashboard_digest" ] || fail "staged dashboard digest is unexpected"
+  fi
+done <<< "$staged_images_output"
+[ "$staged_image_count" -gt 0 ] || fail "staged Compose image set is empty"
+[ "$dashboard_image_count" -eq 1 ] || fail "staged dashboard image identity is missing or ambiguous"
+mark_stage image-acquisition
+if docker compose --project-directory "$stage" --file "$stage/compose" --env-file "$stage/env" pull >/dev/null 2>&1; then
+  printf '%s\n' 'evidence=acquisition:mode=pull'
+else
+  printf '%s\n' 'evidence=acquisition:mode=cache-fallback'
+  while IFS="$(printf '\t')" read -r expected_repository expected_digest image_ref; do
+    [ -n "$image_ref" ] || fail "staged image record is malformed"
+    verify_image_exact "$expected_repository" "$expected_digest" || fail "exact cached staged image is unavailable"
+  done < "$required_images_file"
+fi
+while IFS="$(printf '\t')" read -r expected_repository expected_digest image_ref; do
+  [ -n "$image_ref" ] || fail "staged image record is malformed"
+  verify_image_exact "$expected_repository" "$expected_digest" || fail "staged image digest verification failed"
+  printf '%s\n' "evidence=image-verified:$expected_repository@$expected_digest"
+done < "$required_images_file"
+mark_stage post-acquisition-capacity
+capture_storage_records post-acquisition
+printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
+[ "$storage_min_free" -ge "$MIN_FREE_BYTES" ] || fail "post-acquisition free space is below the minimum"
+`,
+  'validate_final_file_path "$DASHBOARD_ENV_PATH" env',
+  'validate_final_file_path "$DASHBOARD_CADDYFILE_PATH" caddyfile',
+  'validate_final_file_path "$DASHBOARD_APP_KEY_PATH" pem',
+  'validate_final_file_path "$DASHBOARD_COMPOSE_PATH" compose',
+  'validate_final_file_path "$DASHBOARD_LEGACY_OVERRIDE_PATH" legacy-override',
+  'validate_parent_directory "$(dirname "$DASHBOARD_ROOT")" dashboard-parent',
+  'validate_parent_directory "$DASHBOARD_ROOT" root',
+  'validate_parent_directory "$DASHBOARD_CONFIG_DIR" config',
   'mark_stage active-state-mutation',
   'if [ -L "$DASHBOARD_ROOT" ] || { [ -e "$DASHBOARD_ROOT" ] && [ ! -d "$DASHBOARD_ROOT" ]; }; then fail "dashboard root is unsafe"; fi',
   'if [ -L "$DASHBOARD_CONFIG_DIR" ] || { [ -e "$DASHBOARD_CONFIG_DIR" ] && [ ! -d "$DASHBOARD_CONFIG_DIR" ]; }; then fail "dashboard config is unsafe"; fi',
@@ -311,24 +427,24 @@ capture_prune() {
   'chown -R 1000:1000 "$DASHBOARD_DATA_DIR" >/dev/null 2>&1 || fail "dashboard data ownership failed"',
   'chmod 0700 "$DASHBOARD_DATA_DIR" >/dev/null 2>&1 || fail "dashboard data mode failed"',
   '[ -d "$DASHBOARD_DATA_DIR" ] && [ ! -L "$DASHBOARD_DATA_DIR" ] && [ "$(realpath -e "$DASHBOARD_DATA_DIR" 2>/dev/null)" = "$DASHBOARD_DATA_DIR" ] || fail "dashboard data is not canonical"',
-  'install -m 0600 -o 0 -g 0 "$stage/env" "$DASHBOARD_ENV_PATH" >/dev/null 2>&1 || fail "environment publication failed"',
-  'install -m 0644 -o 0 -g 0 "$stage/compose" "$DASHBOARD_COMPOSE_PATH" >/dev/null 2>&1 || fail "compose publication failed"',
-  'install -m 0644 -o 0 -g 0 "$stage/caddyfile" "$DASHBOARD_CADDYFILE_PATH" >/dev/null 2>&1 || fail "Caddyfile publication failed"',
-  'install -m 0600 -o 0 -g 0 "$stage/github-app.pem" "$DASHBOARD_APP_KEY_PATH" >/dev/null 2>&1 || fail "GitHub App key publication failed"',
-  'chmod 0600 "$DASHBOARD_APP_KEY_PATH" >/dev/null 2>&1 || fail "GitHub App key mode failed"',
-  'chown 1000:1000 "$DASHBOARD_APP_KEY_PATH" >/dev/null 2>&1 || fail "GitHub App key ownership failed"',
+  'publish_active_file "$stage/env" "$DASHBOARD_ENV_PATH" env',
+  'publish_active_file "$stage/caddyfile" "$DASHBOARD_CADDYFILE_PATH" caddyfile',
+  'publish_active_file "$stage/github-app.pem" "$DASHBOARD_APP_KEY_PATH" pem',
+  'publish_active_file "$stage/compose" "$DASHBOARD_COMPOSE_PATH" compose',
   'rm -f -- "$DASHBOARD_LEGACY_OVERRIDE_PATH" >/dev/null 2>&1 || fail "legacy override removal failed"',
   String.raw`mark_stage active-state-written`,
   'cd "$DASHBOARD_ROOT" || fail "dashboard directory change failed"',
-  'mark_stage image-acquisition',
-  'docker compose pull >/dev/null 2>&1 || fail "compose pull failed"',
   'docker compose up -d --no-build --wait --wait-timeout 120 dashboard >/dev/null 2>&1 || fail "dashboard convergence failed"',
   'dashboard_container_id="$(docker compose ps -q dashboard 2>/dev/null)" || fail "dashboard container lookup failed"',
-  '[ -n "$dashboard_container_id" ] || fail "dashboard container is missing"',
+  '[[ "$dashboard_container_id" =~ ^[a-f0-9]{12,64}$ ]] || fail "dashboard container identity is malformed"',
   'dashboard_image_sha="$(docker inspect --format \'{{.Image}}\' "$dashboard_container_id" 2>/dev/null)" || fail "dashboard image lookup failed"',
   '[ -n "$dashboard_image_sha" ] || fail "dashboard image identity is missing"',
-  'dashboard_repo_digests="$(docker inspect --format \'{{json .RepoDigests}}\' "$dashboard_image_sha" 2>/dev/null)" || fail "dashboard digest lookup failed"',
-  'case "$dashboard_repo_digests" in *"$expected_dashboard_digest"*) ;; *) fail "dashboard digest verification failed" ;; esac',
+  'dashboard_repo_digests="$(docker inspect --format \'{{range .RepoDigests}}{{println .}}{{end}}\' "$dashboard_image_sha" 2>/dev/null)" || fail "dashboard digest lookup failed"',
+  'verify_repo_digest_output "$dashboard_repo_digests" ghcr.io/fro-bot/dashboard "$expected_dashboard_digest" || fail "dashboard digest verification failed"',
+  'printf "%s\n" "evidence=runtime-digest:$expected_dashboard_digest"',
+  'running_health="$(docker inspect --format \'{{.State.Health.Status}}\' "$dashboard_container_id" 2>/dev/null)" || fail "dashboard health lookup failed"',
+  '[ "$running_health" = healthy ] || fail "dashboard health verification failed"',
+  'printf "%s\n" "evidence=health:$running_health"',
   'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy >/dev/null 2>&1 || fail "Caddy convergence failed"',
   String.raw`mark_stage runtime-converged`,
   String.raw`mark_stage complete`,
@@ -392,6 +508,7 @@ export type RemoteTransactionStage =
   | 'prune-started'
   | 'prune-complete'
   | 'post-prune-capacity'
+  | 'post-acquisition-capacity'
   | 'active-state-mutation'
   | 'image-acquisition'
   | 'active-state-written'
@@ -455,6 +572,7 @@ const ALLOWED_STAGES = new Set<string>([
   'prune-started',
   'prune-complete',
   'post-prune-capacity',
+  'post-acquisition-capacity',
   'active-state-mutation',
   'image-acquisition',
   'active-state-written',
@@ -476,41 +594,45 @@ const isAllowedEvidenceLine = (line: string): boolean => {
   if (ALLOWED_STAGES.has(candidate)) return true
   if (/^evidence=active-path:(?:root|config|data):(?:absent|present)$/.test(line)) return true
   if (
-    /^evidence=storage:(?:baseline|post-prune):probe=[\w./:@+=,-]+;mount=[\w./:@+=,-]+;source=[\w./:@+=,-]+;fstype=[\w./:@+=,-]+;free-bytes=\d+$/.test(
+    /^evidence=storage:(?:baseline|post-prune|post-acquisition):probe=[\w./:@+=,-]+;mount=[\w./:@+=,-]+;source=[\w./:@+=,-]+;fstype=[\w./:@+=,-]+;free-bytes=\d+$/.test(
       line,
     )
   ) {
     return true
   }
   if (
-    /^evidence=docker-df:(?:baseline|post-prune):type=[A-Za-z][A-Za-z-]*;count=\d+;active=\d+;size-bytes=\d+;reclaimable-bytes=\d+$/.test(
+    /^evidence=docker-df:(?:baseline|post-prune|post-acquisition):type=[A-Za-z][A-Za-z-]*;count=\d+;active=\d+;size-bytes=\d+;reclaimable-bytes=\d+$/.test(
       line,
     )
   ) {
     return true
   }
-  if (/^evidence=container-inventory:(?:baseline|post-prune):count=\d+$/.test(line)) return true
-  if (/^evidence=protected-image:(?:baseline|post-prune):ref=[a-z0-9][a-z0-9._/@:+-]*;count=\d+$/.test(line))
+  if (/^evidence=container-inventory:(?:baseline|post-prune|post-acquisition):count=\d+$/.test(line)) return true
+  if (
+    /^evidence=protected-image:(?:baseline|post-prune|post-acquisition):ref=[a-z0-9][a-z0-9._/@:+-]*;count=\d+$/.test(
+      line,
+    )
+  )
     return true
   if (
-    /^evidence=active-compose:(?:baseline|post-prune):(?:absent|ref=ghcr\.io\/fro-bot\/dashboard(?::[\w.-]+)?@sha256:[a-f0-9]{64};digest=sha256:[a-f0-9]{64})$/.test(
+    /^evidence=active-compose:(?:baseline|post-prune|post-acquisition):(?:absent|ref=ghcr\.io\/fro-bot\/dashboard(?::[\w.-]+)?@sha256:[a-f0-9]{64};digest=sha256:[a-f0-9]{64})$/.test(
       line,
     )
   ) {
     return true
   }
   if (
-    /^evidence=running-dashboard:(?:baseline|post-prune):(?:absent|unavailable|digest=sha256:[a-f0-9]{64};health=(?:healthy|unhealthy|starting|unknown))$/.test(
+    /^evidence=running-dashboard:(?:baseline|post-prune|post-acquisition):(?:absent|unavailable|digest=sha256:[a-f0-9]{64};health=(?:healthy|unhealthy|starting|unknown))$/.test(
       line,
     )
   ) {
     return true
   }
-  if (/^evidence=capacity:post-prune:free-bytes=\d+$/.test(line)) return true
-  if (/^evidence=(?:service|container|mount):[a-z0-9][a-z0-9._/:@-]*$/.test(line)) return true
-  if (/^evidence=image:[a-z0-9][a-z0-9._/:@-]*@sha256:[a-f0-9]{64}$/.test(line)) return true
-  if (/^evidence=(?:digest|runtime-digest):sha256:[a-f0-9]{64}$/.test(line)) return true
-  if (/^evidence=free-bytes:\d+$/.test(line)) return true
+  if (/^evidence=capacity:(?:post-prune|post-acquisition):free-bytes=\d+$/.test(line)) return true
+  if (/^evidence=acquisition:mode=(?:pull|cache-fallback)$/.test(line)) return true
+  if (/^evidence=image-verified:[a-z0-9][a-z0-9._/:+-]*@sha256:[a-f0-9]{64}$/.test(line)) return true
+  if (/^evidence=active-state:published=(?:env|caddyfile|pem|compose)$/.test(line)) return true
+  if (/^evidence=runtime-digest:sha256:[a-f0-9]{64}$/.test(line)) return true
   if (
     /^evidence=prune:(?:reclaimed-bytes|eligible-images|protected-containers)=\d+(?:;(?:reclaimed-bytes|eligible-images|protected-containers)=\d+)*$/.test(
       line,

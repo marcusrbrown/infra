@@ -8,7 +8,9 @@ Two-service Docker Compose stack (dashboard + caddy) on a dedicated DigitalOcean
 
 ## Deploy
 
-Validates env and host, runs a DNS preflight, materializes `/opt/dashboard/.env` via SSH stdin (never argv), uploads `docker-compose.yaml` and `Caddyfile`, uploads the GitHub App private key to `/opt/dashboard/config/github-app.pem` (0600) via SSH stdin, pulls the digest-pinned image from `ghcr.io/fro-bot/dashboard`, brings up `dashboard` (health-gated), verifies the running image's RepoDigests against the compose-pinned digest, then brings up `caddy`. A public HTTPS probe to `/api/healthz` confirms end-to-end reachability.
+The deploy validates inputs and host access, resolves DNS, and generates the exact digest-pinned Compose payload locally. One SSH transaction then owns the remote work under a kernel lock at `/run/dashboard-deploy/lock` in a root-owned `0700` runtime directory. It waits up to 180 seconds for the lock; the lock is released when the owning process dies, so there is no stale-lock cleanup step.
+
+The transaction records baseline evidence, always runs `docker image prune -af`, requires at least 6 GiB of free space, stages the exact Compose image set, and verifies every `repository@digest` after pulling or from the local cache. It requires the same 6 GiB floor again before publishing `/opt/dashboard/.env`, `Caddyfile`, the GitHub App key, and Compose (last). It then verifies dashboard health and digest, converges Caddy, and unlocks. Same-origin and public probes are advisory post-deploy checks; versioned audit pin write-back happens only after the transaction succeeds.
 
 ```bash
 bun run --cwd apps/dashboard deploy
@@ -65,9 +67,17 @@ For rollback procedures (reverting to a prior image digest): [`docs/runbooks/das
 Key operational notes:
 
 - Never put the GitHub App private key in an env var — it is file-mounted at `/run/secrets/github-app.pem` and the app reads it via `DASHBOARD_GITHUB_APP_KEY_FILE`.
-- Never run `docker compose down -v` — destroys the `caddy_data` volume (Caddy TLS certificates).
+- The key is published at `/opt/dashboard/config/github-app.pem` as a regular file owned by UID/GID `1000:1000`, mode `0600`; `.env` is root-owned mode `0600`.
+- `/opt/dashboard/data` is persistent listener state and is converged to UID/GID `1000:1000`, mode `0700`. Never remove it casually.
+- Never run `docker compose down -v` — it destroys the `caddy_data` volume containing Caddy TLS certificates. Do not use Compose teardown to recover a failed deploy.
 - Never add `--build` to the deploy — the deploy pulls the digest-pinned image from `ghcr.io/fro-bot/dashboard`; on-droplet builds are not supported.
 - Never pass secret bytes via SSH argv — the deploy pipes them through stdin only.
+
+Image cleanup is intentionally narrow: `docker image prune -af` removes only images unused by all containers. Docker may reclaim image data through this command, but the deployment never directly deletes containerd storage or files. It never prunes containers or volumes or tears down Compose. Running and stopped containers keep their image references. If stopped containers leave less than 6 GiB free after pruning, inspect them and remove only specifically obsolete stopped containers manually; then rerun the deploy. There is no automatic cleanup override.
+
+If the registry pull fails, the deploy proceeds only when every staged `repository@digest` is already cached and verifies exactly. Tags alone are never trusted. Pruning happens only before acquisition, so the replaced image remains locally as one temporary rollback generation after a successful replacement; the next deployment attempt may prune it. The deploy does not promise or perform automatic rollback.
+
+Resolve the reported condition before rerunning. The deterministic failure classes are lock contention, prune failure, post-prune low headroom, acquisition/cache mismatch, post-acquisition low headroom, and active publication/runtime failure. A runtime or publication failure reports the stage reached; it does not silently restore the previous Compose or service state.
 
 ## GitHub App key revocation
 

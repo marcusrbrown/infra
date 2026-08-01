@@ -18,47 +18,63 @@ release is published. Caddy depends on the `dashboard` service being healthy bef
 
 ## Deploy flow
 
-`bun run --cwd apps/dashboard deploy` (or the **Deploy Dashboard** GitHub workflow). The deploy:
+`bun run --cwd apps/dashboard deploy` (or the **Deploy Dashboard** GitHub workflow). Both entry paths use the same deploy engine. The deploy:
 
 1. Validates env (`DASHBOARD_DOMAIN`, `DASHBOARD_GITHUB_APP_ID`, `DASHBOARD_GITHUB_APP_KEY`,
    `DASHBOARD_OAUTH_CLIENT_ID`, `DASHBOARD_OAUTH_CLIENT_SECRET`, `DASHBOARD_OPERATOR_LOGIN`,
    `DASHBOARD_COOKIE_KEY`, plus SSH context) and the host string before any SSH argv is built.
 2. DNS preflight — resolves `DASHBOARD_DOMAIN` and fails fast if it does not resolve.
-3. ControlMaster SSH multiplexing setup — a shared socket is created; subsequent steps reuse it.
-4. Remote prep: a constant-only fail-closed command rejects `/opt/dashboard` and
-   `/opt/dashboard/config` when either is a symlink or existing non-directory before any install or
-   ownership operation. It then creates/converges both as root-owned real directories and verifies
-   `realpath -e` resolves to the literal expected paths.
-5. Remote prep: fail-closed validation rejects `/opt/dashboard/data` when it is a symlink or an
-   existing non-directory before any ownership or mode operation. It then runs a constant-only
-   `set -eu` command that creates/converges the directory with `install -d -m 0700 -o 1000 -g 1000`,
-   recursively chowns existing contents to `1000:1000`, reapplies mode `0700` to the root, and
-   verifies the path remains a real directory. Deploy-time convergence is the ownership authority for
-   existing and newly provisioned hosts, and it completes before materialization or compose operations.
-6. Materializes `/opt/dashboard/.env` over SSH **stdin** (never argv). The `.env` includes
-   `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem` (the file path only — the PEM content
-   is never written to `.env`) and `DASHBOARD_OAUTH_REDIRECT_URI=https://$DASHBOARD_DOMAIN/auth/callback`
-   (derived from `DASHBOARD_DOMAIN`; no separate secret required).
-7. Uploads `docker-compose.yaml` and `config/Caddyfile` via `scp`.
-8. **Uploads the GitHub App private key** to `/opt/dashboard/config/github-app.pem` (0600) via SSH
-   stdin — never as an env var, never logged. PEM bytes flow through stdin only; `umask 077` plus an
-   explicit `chmod 0600` and subsequent `chown 1000:1000` ensure the file is owned by UID 1000 and
-   readable only by UID 1000 for the non-root container.
-9. `docker compose pull` — pulls the digest-pinned image from `ghcr.io/fro-bot/dashboard`.
-10. `docker compose up -d --no-build --wait dashboard` — starts the app only; Caddy is **NOT** started
-    yet. `--no-build` enforces the prebuilt digest; `--wait` uses the container healthcheck
-    (`/api/healthz` on `:3000`) as the authoritative success signal.
-11. **RepoDigests verification** — resolves the running container's image SHA, then inspects the
-    image's `RepoDigests` and asserts that the compose-pinned digest appears in at least one entry.
-    Fails closed with an actionable message if the running image does not match the pinned digest.
-12. `docker compose up -d --no-build --wait caddy` — publicly exposes the service **only after**
-    the app is healthy and the digest is verified.
-13. **Bounded public HTTPS probe** — retries `https://$DASHBOARD_DOMAIN/api/healthz` up to 10 times
-    (5 s interval). On first-deploy Caddy ACME issuance lag it emits a warning and still succeeds
-    (containers are already healthy); re-running once the cert lands is safe.
+3. Generates the target digest and Compose content locally. Versioned deploys resolve the GHCR
+   digest and cross-check any dispatched digest; local/no-version deploys use the committed Compose
+   pin. The `.env`, Caddyfile, and PEM payload are also assembled locally before SSH.
+4. Starts one SSH process whose remote transaction validates `/run/dashboard-deploy` as a canonical,
+   root-owned `0700` directory and acquires `/run/dashboard-deploy/lock` with a 180-second bounded
+   wait. The kernel lock is held by the process doing the work and releases on process death; there
+   is no stale-lock cleanup or separate lock-holder.
+5. After the lock, validates `/opt/dashboard`, `/opt/dashboard/config`, and `/opt/dashboard/data`
+   without accepting symlinks or unsafe types, then records baseline storage, Docker disk, container,
+   active Compose, and running dashboard evidence.
+6. Always runs `docker image prune -af`. A prune failure stops the deploy. Docker may reclaim image
+   data through this command, but the deployment never directly deletes containerd storage or files;
+   it never prunes containers or volumes or uses Compose teardown. The first 6 GiB free-space gate is
+   checked after post-prune evidence.
+7. Enumerates the staged Compose image set and runs the exact pull. If the registry pull fails, the
+   transaction may use the cache only when every staged `repository@digest` verifies exactly. Tags
+   are never trusted. The second 6 GiB gate is checked after acquisition and before active mutation.
+8. Converges `/opt/dashboard/data` to a real directory owned by `1000:1000` with mode `0700`, then
+   publishes `.env`, `Caddyfile`, the GitHub App PEM, and Compose one file at a time, with Compose
+   last. The PEM is a regular file owned by `1000:1000`, mode `0600`; `.env` is root-owned mode
+   `0600`; Caddyfile and Compose are root-owned mode `0644`.
+9. Runs `docker compose up -d --no-build --wait dashboard`, verifies the running dashboard digest
+   against the expected digest and its health, then force-recreates and waits for Caddy. The lock
+   remains held through this convergence and releases when the SSH transaction exits.
+10. After unlock, runs the same-origin operator-health and public HTTPS probes as advisory checks.
+    Versioned deploys write the local Compose pin for the audit PR only after the remote transaction
+    succeeds and both advisory probe attempts finish; probe warnings or failures do not block the
+    write-back.
 
 In CI the SSH key is materialized from `DASHBOARD_SSH_KEY` to a temp file with a trailing newline
 (GitHub strips trailing whitespace from secrets) and `chmod 600`; locally it uses the ssh-agent.
+
+### Retention and failure handling
+
+Pruning is pre-deploy only. The replaced image is left locally as one temporary rollback generation
+after a successful replacement, but the next deployment attempt may prune it. This is not an
+automatic rollback guarantee. Stopped containers pin their images just like running containers. If
+those pins keep free space below 6 GiB, inspect the stopped containers, remove only specifically
+obsolete ones manually, and rerun; no automatic override flag exists.
+
+The operator must resolve the reported condition before rerunning. Deterministic failure classes are:
+
+- **Lock contention:** wait for the other transaction to finish, then rerun.
+- **Prune failure:** resolve the Docker cleanup error; do not bypass pruning.
+- **Post-prune low headroom:** inspect storage and stopped-container pins; remove only specifically
+  obsolete stopped containers manually, then rerun.
+- **Acquisition/cache mismatch:** restore registry access or make every staged exact digest available;
+  a tag-only or wrong-digest cache entry does not qualify.
+- **Post-acquisition low headroom:** resolve capacity before allowing active publication.
+- **Active publication/runtime failure:** inspect the reported stage and actual Compose/runtime state;
+  do not assume automatic rollback, then correct the condition and rerun.
 
 ## Image source
 
@@ -202,7 +218,7 @@ the droplet's public IP — DigitalOcean has no NAT loopback, so it times out. T
 call to Caddy via Docker DNS; Caddy's `/operator/*` handle block proxies it to the gateway VPC.
 Both services are explicitly attached to the `default` network so existing DNS (`dashboard:3000`)
 remains intact. The alias is in the committed `docker-compose.yaml` base file — not an override —
-because Phase 7.5 of the deploy removes any `docker-compose.override.yaml` on every run.
+because the deploy removes any `docker-compose.override.yaml` on every run.
 
 **Route configuration:**
 
@@ -258,14 +274,14 @@ sides and the `fro-bot/dashboard#238` privacy-policy prerequisite.
   `docker inspect`, process listings, and crash dumps; long-lived key material must not travel that
   path.
 - **Never `docker compose down -v`** — destroys the `caddy_data` volume (Caddy TLS certificates and
-  ACME state). Use `docker compose down` (no `-v`) to stop services without losing TLS data.
+  ACME state). Do not use Compose teardown to recover a failed deploy.
 - **Never remove `/opt/dashboard/data` casually** — it contains persistent listener SQLite state and
   removing it destroys Inbox data across container recreation. Treat deletion as an explicit destructive
   storage reset.
 - **Never add `--build` to the dashboard deploy** — the deploy pulls the digest-pinned image from
   `ghcr.io/fro-bot/dashboard`; on-droplet builds are not supported and `--no-build` is enforced in
   the deploy script.
-- **Never put secret values in SSH argv** — the deploy pipes them via stdin (`writeRemoteFile`).
+- **Never put secret values in SSH argv** — the deploy sends them in the framed SSH stdin payload.
   Shell metacharacters in secret values are rejected before any SSH connection is opened.
 - **Never skip `validateDashboardHost`** — it rejects `-`-prefixed values and characters outside the
   allowed alphabet. SSH treats `-`-prefixed hostnames as flags (including `-oProxyCommand=`).
@@ -279,9 +295,9 @@ sides and the `fro-bot/dashboard#238` privacy-policy prerequisite.
 - **Never set `GATEWAY_VPC_IP` to a literal IP in the Caddyfile** — use `{$GATEWAY_VPC_IP}` and
   inject the value via the `caddy` service env. Hardcoded IPs break on droplet rebuild and make
   the config non-auditable.
-- **Never move the `dashboard.fro.bot` alias to a `docker-compose.override.yaml`** — Phase 7.5 of
-  the deploy runs `rm -f /opt/dashboard/docker-compose.override.yaml` on every deploy. The alias
-  must live in the committed base `docker-compose.yaml`.
+- **Never move the `dashboard.fro.bot` alias to a `docker-compose.override.yaml`** — the deploy
+  removes `/opt/dashboard/docker-compose.override.yaml` on every deploy. The alias must live in the
+  committed base `docker-compose.yaml`.
 - **Never set `DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=false`** — the gateway operator session
   is the single auth authority. Setting it false disables session validation and breaks the operator
   UI auth boundary.

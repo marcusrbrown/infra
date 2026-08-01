@@ -1395,7 +1395,7 @@ describe('runSetupCommand action handler', () => {
     // Read the setup.ts source and assert the key-reuse prompt-message template uses ${redactKey(options.key)}
     // and never `${options.key}` raw. This is a source-level guard so a future refactor that
     // accidentally drops the redaction call fails the test even if integration coverage lags.
-    const source = await Bun.file(new URL('./setup.ts', import.meta.url).pathname).text()
+    const source = await Bun.file(new URL('../agent/setup-core/index.ts', import.meta.url).pathname).text()
     const r8PromptIdx = source.indexOf('Verify it matches the bearer token')
     expect(r8PromptIdx).toBeGreaterThan(-1)
     const promptContext = source.slice(Math.max(0, r8PromptIdx - 200), r8PromptIdx + 100)

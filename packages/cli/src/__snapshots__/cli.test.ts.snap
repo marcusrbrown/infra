@@ -24,6 +24,35 @@ Commands:
   keeweb open                          Open KeeWeb in the default browser
 
 
+  agent setup                          Configure generalized Fro Bot agent model-credential setup and GitHub secrets and variables.
+
+    --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
+    --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
+    --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
+    --providers [providers]            Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai. Example: --providers anthropic,openai
+    --model [model]                    Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o
+    --force                            Overwrite existing GitHub secrets and variables without prompting.
+    --dry-run                          Print the plan without applying any changes.
+    --verify-smoke                     Run a smoke test against the proxy after setup completes.
+    --ack-key-reuse                    Acknowledge that --key matches the bearer token inside the existing OPENCODE_AUTH_JSON. Required in non-interactive mode when --key is supplied for a repo with existing OPENCODE_AUTH_JSON. (default: false)
+
+
+  agent storage                        Verify the provisioned S3 handoff and wire non-secret GitHub storage variables.
+
+    --repo [repo]                      Target GitHub repository in owner/repo format.
+    --manifest [manifest]              Handoff manifest path, or - to read JSON from stdin. (default: -)
+    --plan                             Verify and report storage writes without mutating GitHub.
+    --dry-run                          Alias for --plan.
+
+
+  agent storage teardown               Unwire S3 variables and remove the repo-scoped storage resources.
+
+    --repo [repo]                      Target GitHub repository in owner/repo format.
+    --manifest [manifest]              Handoff manifest path, or - to read JSON from stdin. (default: -)
+    --purge-state                      Delete versioned session-prefix objects instead of retaining them.
+    --plan                             Read back and report teardown actions without mutating.
+
+
   cliproxy status                      Show operational health of CLIProxyAPI and its management endpoints.
 
     --url [url]                        Base URL for CLIProxyAPI health checks. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.

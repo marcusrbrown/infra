@@ -17,6 +17,7 @@
     "fix": "eslint --fix",
     "lint": "eslint",
     "prepare": "simple-git-hooks",
+    "provision:agent": "bun run apps/agent/server/provision.ts",
     "provision:broker": "bun run apps/broker/server/provision-droplet.ts",
     "provision:cliproxy": "bun run apps/cliproxy/server/provision-droplet.ts",
     "provision:dashboard": "bun run apps/dashboard/server/provision-droplet.ts",

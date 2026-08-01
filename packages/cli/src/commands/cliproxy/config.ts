@@ -4,6 +4,8 @@ import {chmodSync} from 'node:fs'
 import {managementHeaders, requestJson} from '@marcusrbrown/infra-shared/cliproxy/management'
 import {z} from 'zod'
 
+import {resolveManagementKey as resolveSetupManagementKey} from '../agent/setup-core/management'
+
 /** Minimal ctx surface consumed by cliproxy config actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
@@ -17,15 +19,7 @@ function resolveBaseUrl(input?: string): string {
   return stripTrailingSlash(input ?? process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
 }
 
-export function resolveManagementKey(input?: string): string {
-  const key = input ?? process.env.CLIPROXY_MANAGEMENT_KEY
-
-  if (!key) {
-    throw new Error('Management API key is required. Pass --key or set CLIPROXY_MANAGEMENT_KEY.')
-  }
-
-  return key
-}
+export const resolveManagementKey = resolveSetupManagementKey
 
 export function parseBoolean(value: string): boolean {
   const normalized = value.toLowerCase()

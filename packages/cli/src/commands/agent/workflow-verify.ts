@@ -19,9 +19,10 @@ const CONTENT_EVENTS = new Set([
   'discussion',
   'discussion_comment',
 ])
-// Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION, PINNED_ACTION_REF, and PINNED_ACTION_SHA.
-const VERIFIED_ACTION_REFS_BY_LAYOUT: Readonly<Record<string, ReadonlySet<string>>> = {
-  'fro-bot/agent@v0.96.0': new Set(['v0.96.0', 'c29ac295b8da06768b140c32e5bd0ae3aff45dc6']),
+// Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION and PINNED_ACTION_SHA.
+// PINNED_ACTION_REF (v0.96.0) remains documentation only; privileged consumers require the SHA.
+const VERIFIED_ACTION_SHA_BY_LAYOUT: Readonly<Record<string, string>> = {
+  'fro-bot/agent@v0.96.0': 'c29ac295b8da06768b140c32e5bd0ae3aff45dc6',
 }
 const REQUIRED_S3_INPUTS = {
   's3-backup': undefined,
@@ -512,8 +513,8 @@ function checkStorageAction(jobId: string, job: Mapping, manifest: StorageManife
     return
   }
 
-  const verifiedRefs = VERIFIED_ACTION_REFS_BY_LAYOUT[manifest.key_layout_version]
-  if (!verifiedRefs) {
+  const verifiedSha = VERIFIED_ACTION_SHA_BY_LAYOUT[manifest.key_layout_version]
+  if (!verifiedSha) {
     violations.push(`Unknown key_layout_version '${manifest.key_layout_version}'; refusing to verify fro-bot/agent.`)
   }
 
@@ -553,9 +554,10 @@ function checkStorageAction(jobId: string, job: Mapping, manifest: StorageManife
   for (const [index, step] of agentSteps.entries()) {
     const uses = String(step.uses)
     const ref = uses.split('@').at(-1) ?? ''
-    if (verifiedRefs && !verifiedRefs.has(ref)) {
+    if (verifiedSha && ref !== verifiedSha) {
       violations.push(
-        `Storage job '${jobId}' action ref '${ref}' is not the verified layout for '${manifest.key_layout_version}'.`,
+        `Storage job '${jobId}' action ref '${ref}' is not the verified layout for '${manifest.key_layout_version}'; ` +
+          `storage job must pin fro-bot/agent to the verified SHA for '${manifest.key_layout_version}', not a moveable tag.`,
       )
     }
 

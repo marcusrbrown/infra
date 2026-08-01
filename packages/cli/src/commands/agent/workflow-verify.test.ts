@@ -125,11 +125,16 @@ describe('workflow storage verifier', () => {
     await expect(verifyWorkflow('owner/repo', manifest, deps)).resolves.toBeUndefined()
   })
 
-  it('accepts the verified action SHA and tag for the manifest layout', async () => {
+  it('accepts the exact verified action SHA for the manifest layout', async () => {
     await expect(verifyWorkflow('owner/repo', manifest, makeDeps(workflowJob()))).resolves.toBeUndefined()
+  })
 
+  it('rejects the moveable verified tag for the storage job', async () => {
     const tagged = workflowJob().replace(`fro-bot/agent@${SHA}`, `fro-bot/agent@${ACTION_TAG}`)
-    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(tagged))).resolves.toBeUndefined()
+
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(tagged))).rejects.toThrow(
+      /must pin fro-bot\/agent to the verified SHA.*not a moveable tag/i,
+    )
   })
 
   it('rejects an unverified action SHA for the manifest layout', async () => {

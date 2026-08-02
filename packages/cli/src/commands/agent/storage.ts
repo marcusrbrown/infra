@@ -70,6 +70,7 @@ export interface StorageSetupDeps {
   readManifest?: (source: string) => Promise<string>
   verifyResources?: (manifest: StorageManifest) => Promise<void>
   runAws?: (args: string[]) => Promise<CommandResult>
+  runAwsCommand?: AwsCommandRunner
   /** Explicit test/operator override; production defaults to the effective-job-graph verifier. */
   verifyWorkflow?: (repo: string, manifest: StorageManifest) => Promise<void>
   /** Injected provisioner boundary used by teardown tests and operator wrappers. */
@@ -191,8 +192,56 @@ function parseManifest(raw: string): StorageManifest {
   }
 }
 
-async function runAwsCommand(args: string[]): Promise<CommandResult> {
-  return runCommand('aws', args)
+async function runAwsCommand(
+  args: string[],
+  env: Record<string, string>,
+  redactValues: readonly string[],
+): Promise<CommandResult> {
+  return runCommand('aws', args, undefined, undefined, env, redactValues)
+}
+
+type AwsCommandRunner = typeof runAwsCommand
+
+const AWS_CHILD_LOCALE_KEYS = new Set(['LANG', 'LANGUAGE'])
+
+/**
+ * Build the least-privileged environment used by the local AWS readback.
+ * Dedicated operator credentials are required; the parent process environment
+ * is never passed through wholesale.
+ *
+ * @internal
+ */
+export function buildAwsChildEnv(
+  manifest: StorageManifest,
+  sourceEnv: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const accessKeyId = sourceEnv.AGENT_AWS_ACCESS_KEY_ID?.trim()
+  const secretAccessKey = sourceEnv.AGENT_AWS_SECRET_ACCESS_KEY?.trim()
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error(
+      'Dedicated AWS credentials are required for agent storage preflight. Set AGENT_AWS_ACCESS_KEY_ID and AGENT_AWS_SECRET_ACCESS_KEY in the operator-local environment.',
+    )
+  }
+
+  const childEnv: Record<string, string> = {}
+  for (const [key, value] of Object.entries(sourceEnv)) {
+    if (
+      value !== undefined &&
+      (key === 'PATH' || key === 'HOME' || key === 'TMPDIR' || AWS_CHILD_LOCALE_KEYS.has(key) || key.startsWith('LC_'))
+    ) {
+      childEnv[key] = value
+    }
+  }
+
+  childEnv.AWS_ACCESS_KEY_ID = accessKeyId
+  childEnv.AWS_SECRET_ACCESS_KEY = secretAccessKey
+  childEnv.AWS_REGION = sourceEnv.AGENT_AWS_REGION?.trim() || manifest.bucket_region
+  childEnv.AWS_DEFAULT_REGION = childEnv.AWS_REGION
+
+  const sessionToken = sourceEnv.AGENT_AWS_SESSION_TOKEN?.trim()
+  if (sessionToken) childEnv.AWS_SESSION_TOKEN = sessionToken
+
+  return childEnv
 }
 
 async function runProvisionerCommand(manifest: string, options: {purgeState?: boolean; plan?: boolean}): Promise<void> {
@@ -246,9 +295,20 @@ function canonicalBucketRegion(location: unknown): string {
  */
 export async function verifyProvisionedResources(
   manifest: StorageManifest,
-  runAws: (args: string[]) => Promise<CommandResult> = runAwsCommand,
+  runAws?: (args: string[]) => Promise<CommandResult>,
+  awsCommand: AwsCommandRunner = runAwsCommand,
 ): Promise<void> {
-  const roleResult = await runAws([
+  let executeAws: (args: string[]) => Promise<CommandResult>
+  if (runAws) {
+    executeAws = runAws
+  } else {
+    const awsEnv = buildAwsChildEnv(manifest)
+    const redactValues = [awsEnv.AWS_ACCESS_KEY_ID, awsEnv.AWS_SECRET_ACCESS_KEY, awsEnv.AWS_SESSION_TOKEN].filter(
+      (value): value is string => value !== undefined && value.length > 0,
+    )
+    executeAws = (args: string[]) => awsCommand(args, awsEnv, redactValues)
+  }
+  const roleResult = await executeAws([
     'iam',
     'get-role',
     '--role-name',
@@ -278,7 +338,7 @@ export async function verifyProvisionedResources(
     )
   }
 
-  const bucketResult = await runAws([
+  const bucketResult = await executeAws([
     's3api',
     'head-bucket',
     '--bucket',
@@ -293,7 +353,7 @@ export async function verifyProvisionedResources(
     )
   }
 
-  const locationResult = await runAws([
+  const locationResult = await executeAws([
     's3api',
     'get-bucket-location',
     '--bucket',
@@ -417,7 +477,8 @@ export async function prepareStorageSetup(
   await verifyRepoIdentity(repo, manifest, deps.runGh ?? runGh)
 
   const verifyResources =
-    deps.verifyResources ?? ((value: StorageManifest) => verifyProvisionedResources(value, deps.runAws))
+    deps.verifyResources ??
+    ((value: StorageManifest) => verifyProvisionedResources(value, deps.runAws, deps.runAwsCommand))
   await verifyResources(manifest)
   await verifyOidcSubject(repo, deps.runGh ?? runGh)
   const verifyWorkflowSetup =
@@ -534,7 +595,10 @@ export async function runStorageTeardown(
  */
 export function registerAgentStorageCommand(cli: ReturnType<typeof goke>): void {
   cli
-    .command('agent storage', 'Verify the provisioned S3 handoff and wire non-secret GitHub storage variables.')
+    .command(
+      'agent storage',
+      'Verify the provisioned S3 handoff and wire non-secret GitHub storage variables. AWS readback requires AGENT_AWS_ACCESS_KEY_ID and AGENT_AWS_SECRET_ACCESS_KEY and ignores ambient AWS_* values.',
+    )
     .option('--repo [repo]', z.string().describe('Target GitHub repository in owner/repo format.'))
     .option(
       '--manifest [manifest]',

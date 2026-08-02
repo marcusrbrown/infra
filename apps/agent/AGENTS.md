@@ -45,7 +45,7 @@ The `AGENT_S3_SESSION_PREFIX` and `AGENT_S3_METADATA_ARTIFACTS_PREFIX` values ar
 
 ## PROVISIONING FLOW
 
-1. Install the AWS CLI and GitHub CLI locally. The AWS CLI is also required by `agent storage` for its provision-first resource readback.
+1. Install the AWS CLI and GitHub CLI locally. The AWS CLI is also required by `agent storage` for provision-first resource readback; storage passes dedicated `AGENT_AWS_*` credentials through a restricted child environment and ignores ambient `AWS_*` values.
 2. Create the dedicated AWS credentials and seed the root `.env` with the `AGENT_*` values above.
 3. Run the root wrapper:
 
@@ -104,7 +104,7 @@ bunx @marcusrbrown/infra agent storage \
   --manifest handoff.json
 ```
 
-The command verifies live repository identity, the provisioned IAM role and S3 bucket, and the repository OIDC subject before writing only the five non-secret `FRO_BOT_S3_*` variables. It then runs the effective workflow/environment verifier. A failed workflow check emits a pasteable diff and never edits the workflow; apply the diff manually and rerun the command.
+The command verifies live repository identity, the provisioned IAM role and S3 bucket, the repository OIDC subject, and the effective workflow/environment contract before writing only the five non-secret `FRO_BOT_S3_*` variables. AWS readback requires `AGENT_AWS_ACCESS_KEY_ID` and `AGENT_AWS_SECRET_ACCESS_KEY`; ambient `AWS_*` values are ignored. A failed workflow check emits a pasteable diff and never edits the workflow; apply the diff manually and rerun the command.
 
 The storage teardown command removes those five variables and invokes the repository-scoped provisioner teardown:
 

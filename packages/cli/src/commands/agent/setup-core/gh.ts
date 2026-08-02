@@ -48,13 +48,23 @@ function readablePipe(pipe: Bun.Subprocess['stdout']): ReadableStream<Uint8Array
   return pipe
 }
 
+function redactExactValues(text: string, values: readonly string[]): string {
+  let redacted = text
+  for (const value of new Set(values)) {
+    if (value.length > 0) redacted = redacted.split(value).join('[REDACTED]')
+  }
+  return redacted
+}
+
 export async function runCommand(
   command: string,
   args: string[],
   timeoutMs = COMMAND_TIMEOUT_MS,
   stdin?: string,
+  env: Record<string, string | undefined> = process.env,
+  redactValues: readonly string[] = [],
 ): Promise<CommandResult> {
-  const operation = `${command} ${args.join(' ')}`.trim()
+  const operation = redactExactValues(`${command} ${args.join(' ')}`.trim(), redactValues)
   const controller = new AbortController()
   let timeout: ReturnType<typeof setTimeout> | undefined
   let child: Bun.Subprocess
@@ -65,7 +75,7 @@ export async function runCommand(
         signal: controller.signal,
         stdout: 'pipe',
         stderr: 'pipe',
-        env: process.env,
+        env,
       })
     } else {
       child = Bun.spawn([command, ...args], {
@@ -73,7 +83,7 @@ export async function runCommand(
         stdin: new Blob([stdin]).stream(),
         stdout: 'pipe',
         stderr: 'pipe',
-        env: process.env,
+        env,
       })
     }
   } catch (error) {
@@ -99,7 +109,11 @@ export async function runCommand(
       timeoutPromise,
     ])
     const [stdout, stderr, exitCode] = result as [string, string, number]
-    return {stdout, stderr, exitCode}
+    return {
+      stdout: redactExactValues(stdout, redactValues),
+      stderr: redactExactValues(stderr, redactValues),
+      exitCode,
+    }
   } catch (error) {
     if (controller.signal.aborted) throw new Error(`${command} CLI timed out during ${operation}.`)
     throw error

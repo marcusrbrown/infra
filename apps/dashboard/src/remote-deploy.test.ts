@@ -142,7 +142,14 @@ interface ShellHarnessOptions {
   stubFlockExitCode?: number
   emitTestChildPid?: boolean
   runningDashboardRepoDigests?: readonly string[]
+  runningDashboardRepoDigestsAfterConvergence?: readonly string[]
   imageRepoDigestsAfterPull?: Readonly<Record<string, readonly string[]>>
+  imageRepoDigestsAfterConvergence?: Readonly<Record<string, readonly string[]>>
+  postConvergenceFreeBytes?: number
+  dashboardMounts?: readonly {type: string; source: string; destination: string; rw: boolean}[]
+  runningCaddyContainers?: readonly {id: string; project: string; service: string}[]
+  caddyMounts?: readonly {type: string; name: string; destination: string; rw: boolean}[]
+  caddyVolumeLabels?: Readonly<Record<string, {project: string; composeVolume: string}>>
 }
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\"'\"'")}'`
@@ -205,6 +212,7 @@ const adaptProgramForUnprivilegedHarness = (
   )
   const imageRepoDigests = options.imageRepoDigests ?? defaultImageRepoDigests
   const imageRepoDigestsAfterPull = options.imageRepoDigestsAfterPull ?? defaultImageRepoDigests
+  const imageRepoDigestsAfterConvergence = options.imageRepoDigestsAfterConvergence ?? imageRepoDigestsAfterPull
   const newline = String.fromCharCode(10)
   const dockerDfScript = dockerDf.map(line => String.raw`printf '%s\n' ${shellQuote(line)}`).join(newline)
   const containerImagesScript = containerImages.map(line => String.raw`printf '%s\n' ${shellQuote(line)}`).join(newline)
@@ -218,22 +226,64 @@ const adaptProgramForUnprivilegedHarness = (
       .join(newline)
   const imageInspectScript = imageInspectScriptFor(imageRepoDigests)
   const imageInspectAfterPullScript = imageInspectScriptFor(imageRepoDigestsAfterPull)
+  const imageInspectAfterConvergenceScript = imageInspectScriptFor(imageRepoDigestsAfterConvergence)
   const runningDashboardServiceIdsScript = runningDashboardContainers
     .filter(container => container.service === 'dashboard')
     .map(container => String.raw`printf '%s\n' ${shellQuote(container.id)}`)
     .join(newline)
-  const runningDashboardProjectIdsScript = runningDashboardContainers
+  const runningDashboardExactIdsScript = runningDashboardContainers
     .filter(container => container.project === 'dashboard' && container.service === 'dashboard')
+    .map(container => String.raw`printf '%s\n' ${shellQuote(container.id)}`)
+    .join(newline)
+  const runningCaddyContainers = options.runningCaddyContainers ?? [
+    {id: 'caddabcdef12', project: 'dashboard', service: 'caddy'},
+  ]
+  const runningCaddyProjectIdsScript = runningCaddyContainers
+    .filter(container => container.project === 'dashboard' && container.service === 'caddy')
     .map(container => String.raw`printf '%s\n' ${shellQuote(container.id)}`)
     .join(newline)
   const pruneScript = String.raw`printf '%s\n' ${shellQuote(pruneOutput.replace(/\n$/, ''))}`
   const runningDashboardRepoDigests = options.runningDashboardRepoDigests ?? [
     `ghcr.io/fro-bot/dashboard@${runningDashboardImageDigest}`,
   ]
+  const runningDashboardRepoDigestsAfterConvergence = options.runningDashboardRepoDigestsAfterConvergence ?? [
+    `ghcr.io/fro-bot/dashboard@${fixture.expectedDashboardDigest}`,
+  ]
   const runningDashboardRepoDigestScript = runningDashboardRepoDigests
     .map(repoDigest => String.raw`printf '%s\n' ${shellQuote(repoDigest)}`)
     .join(newline)
+  const runningDashboardRepoDigestScriptAfterConvergence = runningDashboardRepoDigestsAfterConvergence
+    .map(repoDigest => String.raw`printf '%s\n' ${shellQuote(repoDigest)}`)
+    .join(newline)
   const runningDashboardRepoDigestJson = JSON.stringify(runningDashboardRepoDigests)
+  const runningDashboardRepoDigestJsonAfterConvergence = JSON.stringify(runningDashboardRepoDigestsAfterConvergence)
+  const dataMounts = options.dashboardMounts ?? [{type: 'bind', source: dataPath, destination: '/data', rw: true}]
+  const dataMountsScript = dataMounts
+    .map(
+      mount =>
+        String.raw`printf '%s\n' ${shellQuote(`${mount.type}|${mount.source}|${mount.destination}|${mount.rw ? 'true' : 'false'}`)}`,
+    )
+    .join(newline)
+  const caddyMounts = options.caddyMounts ?? [
+    {type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: true},
+    {type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: true},
+  ]
+  const caddyMountsScript = caddyMounts
+    .map(
+      mount =>
+        String.raw`printf '%s\n' ${shellQuote(`${mount.type}|${mount.name}|${mount.destination}|${mount.rw ? 'true' : 'false'}`)}`,
+    )
+    .join(newline)
+  const caddyVolumeLabels = options.caddyVolumeLabels ?? {
+    dashboard_caddy_data: {project: 'dashboard', composeVolume: 'caddy_data'},
+    dashboard_caddy_config: {project: 'dashboard', composeVolume: 'caddy_config'},
+  }
+  const caddyVolumeLabelsScript = Object.entries(caddyVolumeLabels)
+    .map(
+      ([name, labels]) =>
+        String.raw`if [ "$5" = ${shellQuote(name)} ]; then printf '%s\n' ${shellQuote(`${labels.project}|${labels.composeVolume}`)}; return 0; fi`,
+    )
+    .join(newline)
   const mountCaseScript = mounts
     .map(
       mount =>
@@ -243,7 +293,7 @@ const adaptProgramForUnprivilegedHarness = (
   const statCaseScript = mounts
     .map(
       mount =>
-        String.raw`if [ "$path" = ${shellQuote(mount.path)} ]; then if [ "$current_storage_phase" = post-acquisition ] && [ ${options.postAcquisitionFreeBytes === undefined ? '0' : '1'} -eq 1 ]; then printf '%s\n' ${shellQuote(`${options.postAcquisitionFreeBytes ?? mount.freeBytes}:1`)}; else printf '%s\n' ${shellQuote(`${mount.freeBytes}:1`)}; fi; return 0; fi`,
+        String.raw`if [ "$path" = ${shellQuote(mount.path)} ]; then if [ "$current_storage_phase" = post-acquisition ] && [ ${options.postAcquisitionFreeBytes === undefined ? '0' : '1'} -eq 1 ]; then printf '%s\n' ${shellQuote(`${options.postAcquisitionFreeBytes ?? mount.freeBytes}:1`)}; elif [ "$current_storage_phase" = post-convergence ] && [ ${options.postConvergenceFreeBytes === undefined ? '0' : '1'} -eq 1 ]; then printf '%s\n' ${shellQuote(`${options.postConvergenceFreeBytes ?? mount.freeBytes}:1`)}; else printf '%s\n' ${shellQuote(`${mount.freeBytes}:1`)}; fi; return 0; fi`,
     )
     .join(`${newline}    `)
   let program =
@@ -285,6 +335,7 @@ const adaptProgramForUnprivilegedHarness = (
   )
   program = replaceRequired(program, '0:0:644:regular file', `${uid}:${gid}:644:${expectedRegularFileType}`)
   program = replaceRequired(program, '1000:1000:600:regular file', `${uid}:${gid}:600:${expectedRegularFileType}`)
+  program = replaceRequired(program, '1000:1000:700:directory', `${uid}:${gid}:700:${expectedDirectoryType}`)
   program = replaceRequired(program, 'readonly ROOT_OWNER="0:0"', `readonly ROOT_OWNER="${uid}:${gid}"`)
   program = replaceRequired(program, 'install -d -m 0700 -o 0 -g 0', `install -d -m 0700 -o ${uid} -g ${gid}`)
   program = replaceRequired(program, 'install -d -m 0700 -o 1000 -g 1000', `install -d -m 0700 -o ${uid} -g ${gid}`)
@@ -336,7 +387,7 @@ stat() {
     command stat "$@"
   fi
 }
-findmnt() {
+  findmnt() {
   path="$4"
   ${mountCaseScript}
   return 1
@@ -345,6 +396,7 @@ ${options.stubFlock === false ? '' : options.stubFlockExitCode === undefined ? '
 compose_pulled=0
 current_storage_phase=''
 dashboard_converged=0
+convergence_completed=0
 docker() {
   ${options.dockerCommandLogPath ? String.raw`printf '%s\n' "$*" >> ${shellQuote(options.dockerCommandLogPath)}` : ':'}
   if [ "$1" = "info" ]; then printf '%s\n' ${shellQuote(dockerInfoOutput)}; return 0; fi
@@ -357,9 +409,14 @@ docker() {
     return 0
   fi
   if [ "$1" = "ps" ]; then
-    if [[ "$*" == *"label=com.docker.compose.project=dashboard"* ]]; then
+    if [[ "$*" == *"label=com.docker.compose.project=dashboard"* && "$*" == *"label=com.docker.compose.service=caddy"* ]]; then
       :
-      ${runningDashboardProjectIdsScript}
+      ${runningCaddyProjectIdsScript}
+    elif [[ "$*" == *"label=com.docker.compose.project=dashboard"* && "$*" == *"label=com.docker.compose.service=dashboard"* ]]; then
+      :
+      if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(composeDashboardIdsOutput)}; else ${runningDashboardExactIdsScript || ':'}; fi
+    elif [[ "$*" == *"label=com.docker.compose.project=dashboard"* ]]; then
+      :
     else
       :
       ${runningDashboardServiceIdsScript}
@@ -371,8 +428,10 @@ docker() {
     ${pruneScript}
     return ${options.pruneExitCode ?? 0}
   fi
-    if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
-    if [ "$compose_pulled" -eq 1 ]; then
+  if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+    if [ "$convergence_completed" -eq 1 ]; then
+      ${imageInspectAfterConvergenceScript || ':'}
+    elif [ "$compose_pulled" -eq 1 ]; then
       ${imageInspectAfterPullScript || ':'}
     else
       ${imageInspectScript || ':'}
@@ -385,28 +444,44 @@ docker() {
     if [[ "$*" == *" pull"* ]]; then compose_pulled=1; return ${options.composePullExitCode ?? 0}; fi
     if [[ "$*" == *" up "* ]] && [ ${options.failComposeUpIfLegacyOverrideExists ? '1' : '0'} -eq 1 ] && { [ -e ${shellQuote(legacyOverridePath)} ] || [ -L ${shellQuote(legacyOverridePath)} ]; }; then return 1; fi
     if [[ "$*" == *" up "* && "$*" == *" dashboard"* ]]; then dashboard_converged=1; return 0; fi
-    if [[ "$*" == *" up "* && "$*" == *" caddy"* ]]; then return 0; fi
+    if [[ "$*" == *" up "* && "$*" == *" caddy"* ]]; then convergence_completed=1; return 0; fi
     if [ "$2" = "ps" ]; then printf '%s\n' ${shellQuote(composeDashboardIdsOutput)}; return 0; fi
   fi
   if [ "$1" = "inspect" ] && [ "$4" = "abcdef123456" ]; then
     case "$3" in
       "{{.Image}}") printf 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n' ;;
       "{{.State.Health.Status}}") if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(convergedDashboardHealth)}; else printf '%s\n' ${shellQuote(runningDashboardHealth)}; fi ;;
+      "{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}") printf '%s\n' 'dashboard|dashboard' ;;
+      "{{range .Mounts}}{{printf \"%s|%s|%s|%t\n\" .Type .Source .Destination .RW}}{{end}}") ${dataMountsScript || ':'} ;;
       *) return 1 ;;
     esac
     return 0
   fi
   if [ "$1" = "inspect" ] && [ "$4" = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" ]; then
     case "$3" in
-      "{{json .RepoDigests}}") printf '%s\n' ${shellQuote(runningDashboardRepoDigestJson)} ;;
-      "{{range .RepoDigests}}{{println .}}{{end}}") ${runningDashboardRepoDigestScript} ;;
+      "{{json .RepoDigests}}") if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(runningDashboardRepoDigestJsonAfterConvergence)}; else printf '%s\n' ${shellQuote(runningDashboardRepoDigestJson)}; fi ;;
+      "{{range .RepoDigests}}{{println .}}{{end}}") if [ "$dashboard_converged" -eq 1 ]; then ${runningDashboardRepoDigestScriptAfterConvergence}; else ${runningDashboardRepoDigestScript}; fi ;;
       *) return 1 ;;
     esac
     return 0
   fi
+  if [ "$1" = "inspect" ] && [ "$4" = "caddabcdef12" ]; then
+    case "$3" in
+      "{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}") printf '%s\n' 'dashboard|caddy' ;;
+      "{{range .Mounts}}{{printf \"%s|%s|%s|%t\n\" .Type .Name .Destination .RW}}{{end}}") ${caddyMountsScript || ':'} ;;
+      *) return 1 ;;
+    esac
+    return 0
+  fi
+  if [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then
+    if [ "$3" = "--format" ]; then
+      ${caddyVolumeLabelsScript || ':'}
+    fi
+    return 1
+  fi
   return 1
 }
-export compose_pulled current_storage_phase dashboard_converged
+export compose_pulled current_storage_phase dashboard_converged convergence_completed
 export -f install stat findmnt docker
 ${program}`
 }
@@ -1179,6 +1254,325 @@ describe('remote transaction process boundary', () => {
     }
   })
 
+  it('emits post-convergence storage, active-state, persistent-mount, and prior-image evidence before completion', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-post-convergence-evidence-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const priorDigest = `sha256:${'b'.repeat(64)}`
+    const priorRepoDigest = `ghcr.io/fro-bot/dashboard@${priorDigest}`
+    const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:previous@${priorDigest}\n`
+
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          runningDashboardImageDigest: priorDigest,
+          runningDashboardRepoDigests: [priorRepoDigest],
+          runningDashboardRepoDigestsAfterConvergence: [DASHBOARD_REPO_DIGEST],
+          imageRepoDigests: {
+            [CADDY_REPO_DIGEST]: [CADDY_REPO_DIGEST],
+            [DASHBOARD_REPO_DIGEST]: [DASHBOARD_REPO_DIGEST],
+            [priorRepoDigest]: [priorRepoDigest],
+          },
+          imageRepoDigestsAfterConvergence: {
+            [CADDY_REPO_DIGEST]: [CADDY_REPO_DIGEST],
+            [DASHBOARD_REPO_DIGEST]: [DASHBOARD_REPO_DIGEST],
+            [priorRepoDigest]: [priorRepoDigest],
+          },
+        }),
+        encodeRemotePayload(fixture),
+      )
+      const lines = result.stdout.trim().split('\n')
+      const convergedIndex = lines.indexOf('stage=runtime-converged')
+      const evidenceIndex = lines.indexOf('stage=post-convergence-evidence')
+      const completeIndex = lines.indexOf('stage=complete')
+
+      expect(result.exitCode, result.stderr).toBe(0)
+      expect(convergedIndex).toBeGreaterThan(-1)
+      expect(evidenceIndex).toBeGreaterThan(convergedIndex)
+      expect(completeIndex).toBeGreaterThan(evidenceIndex)
+      expect(result.stdout).toContain('evidence=storage:post-convergence:')
+      expect(result.stdout).toContain('evidence=capacity:post-convergence:free-bytes=8589934592')
+      expect(result.stdout).toContain('evidence=docker-df:post-convergence:')
+      expect(result.stdout).toContain('evidence=container-inventory:post-convergence:count=1')
+      expect(result.stdout).toContain(
+        `evidence=active-compose:post-convergence:ref=${DASHBOARD_IMAGE};digest=${fixture.expectedDashboardDigest}`,
+      )
+      expect(result.stdout).toContain(
+        `evidence=running-dashboard:post-convergence:digest=${fixture.expectedDashboardDigest};health=healthy`,
+      )
+      expect(result.stdout).toContain(
+        'evidence=persistent-state:dashboard-data=/data,bind,writable,canonical,uidgid=1000:1000,mode=0700;caddy-data=/data,volume,writable,labels=dashboard/caddy_data;caddy-config=/config,volume,writable,labels=dashboard/caddy_config',
+      )
+      expect(result.stdout).toContain(
+        `evidence=prior-dashboard:post-convergence:digest=${priorDigest};local-inspectable=true`,
+      )
+      expect(result.stdout).not.toContain('abcdef123456')
+      expect(result.stdout).not.toContain('dashboard_caddy_data')
+      expect(result.stdout).not.toContain('dashboard_caddy_config')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('fails below the free-space floor after convergence and never completes', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-post-convergence-low-space-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          postConvergenceFreeBytes: 6 * 1024 ** 3 - 1,
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).toContain('stage=runtime-converged')
+      expect(result.stdout).toContain('stage=post-convergence-evidence')
+      expect(result.stdout).toContain('evidence=capacity:post-convergence:free-bytes=6442450943')
+      expect(result.stdout).toContain('failure=low-headroom')
+      expect(result.stdout).not.toContain('stage=complete')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('fails closed when persistent dashboard or Caddy mounts are missing, wrong, or read-only', async () => {
+    const cases: readonly [string, (root: string, runtimeRoot: string) => ShellHarnessOptions][] = [
+      ['missing dashboard data mount', () => ({dashboardMounts: []})],
+      [
+        'wrong dashboard data mount',
+        (root, _runtimeRoot) => ({
+          dashboardMounts: [{type: 'bind', source: join(root, 'wrong-data'), destination: '/data', rw: true}],
+        }),
+      ],
+      [
+        'read-only dashboard data mount',
+        (_root, runtimeRoot) => ({
+          dashboardMounts: [{type: 'bind', source: `${runtimeRoot}-dashboard/data`, destination: '/data', rw: false}],
+        }),
+      ],
+      [
+        'missing Caddy data mount',
+        () => ({caddyMounts: [{type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: true}]}),
+      ],
+      [
+        'missing Caddy config mount',
+        () => ({caddyMounts: [{type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: true}]}),
+      ],
+      [
+        'read-only Caddy data mount',
+        () => ({
+          caddyMounts: [
+            {type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: false},
+            {type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: true},
+          ],
+        }),
+      ],
+      [
+        'read-only Caddy config mount',
+        () => ({
+          caddyMounts: [
+            {type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: true},
+            {type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: false},
+          ],
+        }),
+      ],
+    ]
+
+    for (const [name, makeOptions] of cases) {
+      const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-persistent-state-${name.replaceAll(' ', '-')}-`))
+      const root = realpathSync(parent)
+      const runtimeRoot = join(root, 'dashboard-deploy')
+      try {
+        const result = await runShellProgram(
+          adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, makeOptions(root, runtimeRoot)),
+          encodeRemotePayload(fixture),
+        )
+
+        expect(result.exitCode, name).not.toBe(0)
+        expect(result.stdout, name).toContain('stage=post-convergence-evidence')
+        expect(result.stdout, name).not.toContain('stage=complete')
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    }
+  })
+
+  it('fails closed when Caddy volume project or Compose volume labels are wrong', async () => {
+    const cases = [
+      {
+        name: 'wrong project label',
+        labels: {
+          dashboard_caddy_data: {project: 'other', composeVolume: 'caddy_data'},
+          dashboard_caddy_config: {project: 'dashboard', composeVolume: 'caddy_config'},
+        },
+      },
+      {
+        name: 'wrong data volume label',
+        labels: {
+          dashboard_caddy_data: {project: 'dashboard', composeVolume: 'other_data'},
+          dashboard_caddy_config: {project: 'dashboard', composeVolume: 'caddy_config'},
+        },
+      },
+      {
+        name: 'wrong config volume label',
+        labels: {
+          dashboard_caddy_data: {project: 'dashboard', composeVolume: 'caddy_data'},
+          dashboard_caddy_config: {project: 'dashboard', composeVolume: 'other_config'},
+        },
+      },
+    ] as const
+
+    for (const testCase of cases) {
+      const parent = mkdtempSync(
+        join(tmpdir(), `dashboard-deploy-volume-labels-${testCase.name.replaceAll(' ', '-')}-`),
+      )
+      const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+      try {
+        const result = await runShellProgram(
+          adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+            caddyVolumeLabels: testCase.labels,
+          }),
+          encodeRemotePayload(fixture),
+        )
+
+        expect(result.exitCode, testCase.name).not.toBe(0)
+        expect(result.stdout, testCase.name).toContain('stage=post-convergence-evidence')
+        expect(result.stdout, testCase.name).not.toContain('stage=complete')
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    }
+  })
+
+  it('fails closed when the prior dashboard digest is no longer locally inspectable after replacement', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-prior-image-missing-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const priorDigest = `sha256:${'b'.repeat(64)}`
+    const priorRepoDigest = `ghcr.io/fro-bot/dashboard@${priorDigest}`
+
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(
+      join(dashboardRoot, 'docker-compose.yaml'),
+      `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:previous@${priorDigest}\n`,
+    )
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          runningDashboardImageDigest: priorDigest,
+          runningDashboardRepoDigests: [priorRepoDigest],
+          runningDashboardRepoDigestsAfterConvergence: [DASHBOARD_REPO_DIGEST],
+          imageRepoDigests: {
+            [CADDY_REPO_DIGEST]: [CADDY_REPO_DIGEST],
+            [DASHBOARD_REPO_DIGEST]: [DASHBOARD_REPO_DIGEST],
+            [priorRepoDigest]: [priorRepoDigest],
+          },
+          imageRepoDigestsAfterConvergence: {
+            [CADDY_REPO_DIGEST]: [CADDY_REPO_DIGEST],
+            [DASHBOARD_REPO_DIGEST]: [DASHBOARD_REPO_DIGEST],
+          },
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).toContain('stage=post-convergence-evidence')
+      expect(result.stdout).toContain('failure=convergence-failed')
+      expect(result.stdout).not.toContain('stage=complete')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('allows the same-target prior dashboard image and proves it remains locally inspectable', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-same-target-image-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(
+      join(dashboardRoot, 'docker-compose.yaml'),
+      `services:\n  dashboard:\n    image: ${DASHBOARD_IMAGE}\n`,
+    )
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          runningDashboardIds: ['abcdef123456'],
+          runningDashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
+          runningDashboardRepoDigestsAfterConvergence: [DASHBOARD_REPO_DIGEST],
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode, result.stderr).toBe(0)
+      expect(result.stdout).toContain(
+        `evidence=prior-dashboard:post-convergence:digest=${fixture.expectedDashboardDigest};local-inspectable=true`,
+      )
+      expect(result.stdout).toContain('stage=complete')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('allowlists only exact post-convergence evidence shapes and filters malformed variants', async () => {
+    const digest = `sha256:${'b'.repeat(64)}`
+    const text = new TextEncoder()
+    const validPersistentState =
+      'evidence=persistent-state:dashboard-data=/data,bind,writable,canonical,uidgid=1000:1000,mode=0700;caddy-data=/data,volume,writable,labels=dashboard/caddy_data;caddy-config=/config,volume,writable,labels=dashboard/caddy_config'
+    const validLines = [
+      'stage=post-convergence-evidence',
+      'evidence=storage:post-convergence:probe=/var/lib/docker;mount=/;source=/dev/vda1;fstype=ext4;free-bytes=6442450944',
+      'evidence=docker-df:post-convergence:type=Images;count=2;active=1;size-bytes=1000;reclaimable-bytes=0',
+      'evidence=container-inventory:post-convergence:count=1',
+      `evidence=protected-image:post-convergence:ref=ghcr.io/fro-bot/dashboard@${digest};count=1`,
+      `evidence=active-compose:post-convergence:ref=${DASHBOARD_IMAGE.replace(fixture.expectedDashboardDigest, digest)};digest=${digest}`,
+      `evidence=running-dashboard:post-convergence:digest=${digest};health=healthy`,
+      'evidence=capacity:post-convergence:free-bytes=6442450944',
+      validPersistentState,
+      `evidence=prior-dashboard:post-convergence:digest=${digest};local-inspectable=true`,
+      'stage=complete',
+    ]
+    const malformedLines = [
+      `${validPersistentState};raw-id=abcdef123456`,
+      'evidence=capacity:post-convergence:free-bytes=not-a-number',
+      `evidence=prior-dashboard:post-convergence:digest=${digest};local-inspectable=false;leak=secret`,
+    ]
+
+    const result = await runRemoteTransaction({
+      host: 'dashboard.example',
+      payload: fixture,
+      env: localEnv,
+      spawn: () => ({
+        stdout: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(text.encode(`${validLines.join('\n')}\n${malformedLines.join('\n')}\n`))
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream<Uint8Array>({start: controller => controller.close()}),
+        stdin: {write: (_data: Uint8Array) => {}, end: () => {}},
+        exited: Promise.resolve(0),
+        kill: (_signal: 'SIGTERM' | 'SIGKILL') => {},
+      }),
+    })
+
+    for (const line of validLines) expect(result.evidence).toContain(line)
+    for (const line of malformedLines) expect(result.evidence).not.toContain(line)
+  })
+
   it('audits running dashboard independently when Compose is absent', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-runtime-without-compose-'))
     const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
@@ -1196,6 +1590,56 @@ describe('remote transaction process boundary', () => {
       expect(result.stdout).toContain('evidence=active-compose:baseline:absent')
       expect(result.stdout).toContain(
         `evidence=running-dashboard:baseline:digest=${fixture.expectedDashboardDigest};health=healthy`,
+      )
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('self-heals when Compose is present but no dashboard runtime exists and reports no replaced prior image', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-compose-without-runtime-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const dockerLogPath = join(root, 'docker.log')
+
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(
+      join(dashboardRoot, 'docker-compose.yaml'),
+      `services:\n  dashboard:\n    image: ${DASHBOARD_IMAGE}\n`,
+    )
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          runningDashboardIds: [],
+          runningDashboardContainers: [{id: 'abcdef654321', project: 'dashboard', service: 'worker'}],
+          dockerCommandLogPath: dockerLogPath,
+        }),
+        encodeRemotePayload(fixture),
+      )
+      const dockerLog = readFileSync(dockerLogPath, 'utf8')
+
+      expect(result.exitCode, result.stderr).toBe(0)
+      expect(result.stdout).toContain(
+        `evidence=active-compose:baseline:ref=${DASHBOARD_IMAGE};digest=${fixture.expectedDashboardDigest}`,
+      )
+      expect(result.stdout).toContain('evidence=running-dashboard:baseline:absent')
+      expect(result.stdout).toContain(
+        `evidence=active-compose:post-convergence:ref=${DASHBOARD_IMAGE};digest=${fixture.expectedDashboardDigest}`,
+      )
+      expect(result.stdout).toContain(
+        `evidence=running-dashboard:post-convergence:digest=${fixture.expectedDashboardDigest};health=healthy`,
+      )
+      expect(result.stdout).toContain('evidence=prior-dashboard:post-convergence:absent')
+      expect(result.stdout).toContain('stage=complete')
+      expect(result.stdout).not.toContain('abcdef654321')
+      expect(dockerLog).toContain(
+        'ps --no-trunc --filter label=com.docker.compose.project=dashboard --filter label=com.docker.compose.service=dashboard',
+      )
+      expect(dockerLog).toContain(
+        'ps --no-trunc --filter label=com.docker.compose.project=dashboard --filter label=com.docker.compose.service=caddy',
       )
     } finally {
       rmSync(parent, {recursive: true, force: true})

@@ -418,9 +418,13 @@ function makeCurrentBucketClient(
   })
 }
 
-function providerDetails(arn: string, clientIds: string[] = [GITHUB_OIDC_AUDIENCE]): Record<string, unknown> {
+function providerDetails(
+  arn: string,
+  clientIds: string[] = [GITHUB_OIDC_AUDIENCE],
+  url = 'token.actions.githubusercontent.com',
+): Record<string, unknown> {
   return {
-    Url: GITHUB_OIDC_PROVIDER_URL,
+    Url: url,
     ClientIDList: clientIds,
     ThumbprintList: ['bounded-fixture-thumbprint'],
     CreateDate: new Date('2026-08-01T00:00:00.000Z'),
@@ -461,6 +465,26 @@ describe('GitHub OIDC provider provisioning', () => {
     const {client, calls} = makeClient(async command => {
       if (command.constructor.name === 'ListOpenIDConnectProvidersCommand') return listResponse(providerArn)
       if (command.constructor.name === 'GetOpenIDConnectProviderCommand') return providerDetails(providerArn)
+      throw new Error(`Unexpected command: ${command.constructor.name}`)
+    })
+
+    const result = await ensureGitHubOidcProvider(client)
+
+    expect(result).toEqual({classification: 'current', changed: false, providerArn})
+    expect(calls.map(call => call.name)).toEqual([
+      'ListOpenIDConnectProvidersCommand',
+      'GetOpenIDConnectProviderCommand',
+      'GetOpenIDConnectProviderCommand',
+    ])
+  })
+
+  it('accepts the exact HTTPS OIDC URL as current without mutation', async () => {
+    const providerArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'
+    const {client, calls} = makeClient(async command => {
+      if (command.constructor.name === 'ListOpenIDConnectProvidersCommand') return listResponse(providerArn)
+      if (command.constructor.name === 'GetOpenIDConnectProviderCommand') {
+        return providerDetails(providerArn, [GITHUB_OIDC_AUDIENCE], 'https://token.actions.githubusercontent.com')
+      }
       throw new Error(`Unexpected command: ${command.constructor.name}`)
     })
 
@@ -531,6 +555,32 @@ describe('GitHub OIDC provider provisioning', () => {
     await expect(ensureGitHubOidcProvider(client)).rejects.toThrow(/URL drifted/i)
     expect(calls.some(call => call.name === 'CreateOpenIDConnectProviderCommand')).toBe(false)
   })
+
+  for (const [label, url] of [
+    ['http scheme', 'http://token.actions.githubusercontent.com'],
+    ['trailing slash', 'token.actions.githubusercontent.com/'],
+    ['extra path', 'https://token.actions.githubusercontent.com/path'],
+    ['query string', 'https://token.actions.githubusercontent.com?query=1'],
+    ['port', 'https://token.actions.githubusercontent.com:443'],
+    ['uppercase host', 'https://TOKEN.ACTIONS.GITHUBUSERCONTENT.COM'],
+    ['prefix lookalike', 'atoken.actions.githubusercontent.com'],
+    ['suffix lookalike', 'token.actions.githubusercontent.com.attacker.com'],
+    ['malicious host', 'https://malicious.example.invalid'],
+  ] as const) {
+    it(`rejects OIDC URL near-match with ${label}`, async () => {
+      const providerArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'
+      const {client, calls} = makeClient(async command => {
+        if (command.constructor.name === 'ListOpenIDConnectProvidersCommand') return listResponse(providerArn)
+        if (command.constructor.name === 'GetOpenIDConnectProviderCommand') {
+          return providerDetails(providerArn, [GITHUB_OIDC_AUDIENCE], url)
+        }
+        throw new Error(`Unexpected command: ${command.constructor.name}`)
+      })
+
+      await expect(ensureGitHubOidcProvider(client)).rejects.toThrow(/URL drifted/i)
+      expect(calls.some(call => call.name === 'CreateOpenIDConnectProviderCommand')).toBe(false)
+    })
+  }
 
   it('confirms the canonical provider after an EntityAlreadyExists create race', async () => {
     const providerArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'

@@ -146,6 +146,7 @@ interface ShellHarnessOptions {
   imageRepoDigestsAfterPull?: Readonly<Record<string, readonly string[]>>
   imageRepoDigestsAfterConvergence?: Readonly<Record<string, readonly string[]>>
   postConvergenceFreeBytes?: number
+  convergedDashboardContainerId?: string
   dashboardMounts?: readonly {type: string; source: string; destination: string; rw: boolean}[]
   runningCaddyContainers?: readonly {id: string; project: string; service: string}[]
   caddyMounts?: readonly {type: string; name: string; destination: string; rw: boolean}[]
@@ -193,6 +194,7 @@ const adaptProgramForUnprivilegedHarness = (
   const runningDashboardContainers =
     options.runningDashboardContainers ??
     runningDashboardIds.map(id => ({id, project: 'dashboard', service: 'dashboard'}))
+  const convergedDashboardContainerId = options.convergedDashboardContainerId ?? 'abcdef1234567890'
   const runningDashboardImageDigest = options.runningDashboardImageDigest ?? fixture.expectedDashboardDigest
   const runningDashboardHealth = options.runningDashboardHealth ?? 'unknown'
   const convergedDashboardHealth = options.convergedDashboardHealth ?? 'healthy'
@@ -231,10 +233,14 @@ const adaptProgramForUnprivilegedHarness = (
     .filter(container => container.service === 'dashboard')
     .map(container => String.raw`printf '%s\n' ${shellQuote(container.id)}`)
     .join(newline)
+  const runningDashboardContainerIds = runningDashboardContainers
+    .filter(container => container.project === 'dashboard' && container.service === 'dashboard')
+    .map(container => container.id)
   const runningDashboardExactIdsScript = runningDashboardContainers
     .filter(container => container.project === 'dashboard' && container.service === 'dashboard')
     .map(container => String.raw`printf '%s\n' ${shellQuote(container.id)}`)
     .join(newline)
+  let runningDashboardInspectScript = ''
   const runningCaddyContainers = options.runningCaddyContainers ?? [
     {id: 'caddabcdef12', project: 'dashboard', service: 'caddy'},
   ]
@@ -262,6 +268,20 @@ const adaptProgramForUnprivilegedHarness = (
     .map(
       mount =>
         String.raw`printf '%s\n' ${shellQuote(`${mount.type}|${mount.source}|${mount.destination}|${mount.rw ? 'true' : 'false'}`)}`,
+    )
+    .join(newline)
+  runningDashboardInspectScript = [...runningDashboardContainerIds, convergedDashboardContainerId]
+    .map(
+      id => String.raw`if [ "$4" = ${shellQuote(id)} ]; then
+    case "$3" in
+      "{{.Image}}") printf 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n' ;;
+      "{{.State.Health.Status}}") if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(convergedDashboardHealth)}; else printf '%s\n' ${shellQuote(runningDashboardHealth)}; fi ;;
+      "{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}") printf '%s\n' 'dashboard|dashboard' ;;
+      "{{range .Mounts}}{{printf \"%s|%s|%s|%t\\n\" .Type .Source .Destination .RW}}{{end}}") ${dataMountsScript || ':'} ;;
+      *) return 1 ;;
+    esac
+    return 0
+  fi`,
     )
     .join(newline)
   const caddyMounts = options.caddyMounts ?? [
@@ -414,7 +434,7 @@ docker() {
       ${runningCaddyProjectIdsScript}
     elif [[ "$*" == *"label=com.docker.compose.project=dashboard"* && "$*" == *"label=com.docker.compose.service=dashboard"* ]]; then
       :
-      if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(composeDashboardIdsOutput)}; else ${runningDashboardExactIdsScript || ':'}; fi
+      if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(convergedDashboardContainerId)}; else ${runningDashboardExactIdsScript || ':'}; fi
     elif [[ "$*" == *"label=com.docker.compose.project=dashboard"* ]]; then
       :
     else
@@ -445,18 +465,16 @@ docker() {
     if [[ "$*" == *" up "* ]] && [ ${options.failComposeUpIfLegacyOverrideExists ? '1' : '0'} -eq 1 ] && { [ -e ${shellQuote(legacyOverridePath)} ] || [ -L ${shellQuote(legacyOverridePath)} ]; }; then return 1; fi
     if [[ "$*" == *" up "* && "$*" == *" dashboard"* ]]; then dashboard_converged=1; return 0; fi
     if [[ "$*" == *" up "* && "$*" == *" caddy"* ]]; then convergence_completed=1; return 0; fi
-    if [ "$2" = "ps" ]; then printf '%s\n' ${shellQuote(composeDashboardIdsOutput)}; return 0; fi
+    if [ "$2" = "ps" ]; then
+      if [[ "$*" == *" --no-trunc"* ]]; then
+        if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(convergedDashboardContainerId)}; else ${runningDashboardExactIdsScript || ':'}; fi
+      else
+        printf '%s\n' ${shellQuote(composeDashboardIdsOutput)}
+      fi
+      return 0
+    fi
   fi
-  if [ "$1" = "inspect" ] && [ "$4" = "abcdef123456" ]; then
-    case "$3" in
-      "{{.Image}}") printf 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n' ;;
-      "{{.State.Health.Status}}") if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(convergedDashboardHealth)}; else printf '%s\n' ${shellQuote(runningDashboardHealth)}; fi ;;
-      "{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}") printf '%s\n' 'dashboard|dashboard' ;;
-      "{{range .Mounts}}{{printf \"%s|%s|%s|%t\n\" .Type .Source .Destination .RW}}{{end}}") ${dataMountsScript || ':'} ;;
-      *) return 1 ;;
-    esac
-    return 0
-  fi
+  ${runningDashboardInspectScript || ':'}
   if [ "$1" = "inspect" ] && [ "$4" = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" ]; then
     case "$3" in
       "{{json .RepoDigests}}") if [ "$dashboard_converged" -eq 1 ]; then printf '%s\n' ${shellQuote(runningDashboardRepoDigestJsonAfterConvergence)}; else printf '%s\n' ${shellQuote(runningDashboardRepoDigestJson)}; fi ;;
@@ -965,6 +983,32 @@ describe('remote transaction process boundary', () => {
       expect(result.stdout).toContain('evidence=active-compose:baseline:absent')
       expect(result.stdout).toContain('evidence=running-dashboard:baseline:absent')
       expect(existsSync(dashboardRoot)).toBe(true)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('uses docker compose ps --no-trunc so a short compose ID still matches the full inventory ID', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-no-trunc-'))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+    const composeCommandLogPath = join(parent, 'compose.log')
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          composeDashboardIdsOutput: 'abcdef123456',
+          runningDashboardContainers: [{id: 'abcdef1234567890', project: 'dashboard', service: 'dashboard'}],
+          composeCommandLogPath,
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode, result.stderr).toBe(0)
+      expect(result.stdout).toContain('evidence=running-dashboard:post-convergence:digest=')
+
+      const composeCommands = readFileSync(composeCommandLogPath, 'utf8').trim().split('\n')
+      expect(composeCommands).toContain('compose ps --no-trunc -q dashboard')
+      expect(composeCommands).not.toContain('compose ps -q dashboard')
     } finally {
       rmSync(parent, {recursive: true, force: true})
     }
@@ -2774,7 +2818,7 @@ describe('staged image acquisition and publication ordering', () => {
       try {
         const result = await runShellProgram(
           adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
-            composeDashboardIdsOutput: identity,
+            convergedDashboardContainerId: identity,
             dockerCommandLogPath: dockerLogPath,
           }),
           encodeRemotePayload(fixture),

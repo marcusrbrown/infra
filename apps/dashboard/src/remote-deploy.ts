@@ -517,7 +517,7 @@ printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
   String.raw`mark_stage active-state-written`,
   'cd "$DASHBOARD_ROOT" || fail "convergence-failed" "dashboard directory change failed"',
   'docker compose up -d --no-build --wait --wait-timeout 120 dashboard >/dev/null 2>&1 || fail "convergence-failed" "dashboard convergence failed"',
-  'dashboard_container_id="$(docker compose ps -q dashboard 2>/dev/null)" || fail "convergence-failed" "dashboard container lookup failed"',
+  'dashboard_container_id="$(docker compose ps --no-trunc -q dashboard 2>/dev/null)" || fail "convergence-failed" "dashboard container lookup failed"',
   '[[ "$dashboard_container_id" =~ ^[a-f0-9]{12,64}$ ]] || fail "convergence-failed" "dashboard container identity is malformed"',
   'dashboard_image_sha="$(docker inspect --format \'{{.Image}}\' "$dashboard_container_id" 2>/dev/null)" || fail "convergence-failed" "dashboard image lookup failed"',
   '[ -n "$dashboard_image_sha" ] || fail "convergence-failed" "dashboard image identity is missing"',

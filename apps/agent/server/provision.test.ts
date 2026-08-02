@@ -316,15 +316,38 @@ const canonicalLifecycleRules = [
   },
   {
     ID: 'fro-bot-agent-noncurrent-30d',
+    Filter: {Prefix: ''},
     Status: 'Enabled',
     NoncurrentVersionExpiration: {NoncurrentDays: 30},
   },
   {
     ID: 'fro-bot-agent-abort-mpu-7d',
+    Filter: {Prefix: ''},
     Status: 'Enabled',
     AbortIncompleteMultipartUpload: {DaysAfterInitiation: 7},
   },
 ]
+
+function assertLifecycleRulesHaveExactlyOneSelector(rules: Record<string, unknown>[]): void {
+  const canonicalRuleIds = new Set(canonicalLifecycleRules.map(rule => rule.ID))
+
+  for (const rule of rules) {
+    const filter = rule.Filter
+    const hasFilter = typeof filter === 'object' && filter !== null && !Array.isArray(filter)
+    const hasLegacyPrefix = typeof rule.Prefix === 'string'
+    expect(Number(hasFilter) + Number(hasLegacyPrefix)).toBe(1)
+
+    if (!hasFilter) continue
+
+    const definedFilterEntries = Object.entries(filter).filter(([, value]) => value !== undefined)
+    expect(definedFilterEntries.length).toBeLessThanOrEqual(1)
+
+    if (typeof rule.ID === 'string' && canonicalRuleIds.has(rule.ID)) {
+      expect(definedFilterEntries).toEqual([['Prefix', expect.any(String)]])
+      expect(hasLegacyPrefix).toBe(false)
+    }
+  }
+}
 
 function makeCurrentBucketClient(
   options: {
@@ -336,6 +359,7 @@ function makeCurrentBucketClient(
     policy?: string | null
     headError?: Error
     readbackMismatch?: boolean
+    normalizeEmptyLifecycleFilterOnReadback?: boolean
   } = {},
 ): {client: S3ClientLike; calls: FakeCall[]} {
   let bucketExists = options.headError === undefined
@@ -408,10 +432,27 @@ function makeCurrentBucketClient(
         policy = String(command.input.Policy)
         return {}
       case 'GetBucketLifecycleConfigurationCommand':
-        return {Rules: lifecycleRules}
-      case 'PutBucketLifecycleConfigurationCommand':
-        lifecycleRules = lifecycleRulesFromCall({name: command.constructor.name, input: command.input}) ?? []
+        return {
+          Rules: options.normalizeEmptyLifecycleFilterOnReadback
+            ? lifecycleRules.map(rule => {
+                const filter = rule.Filter
+                const filterPrefix =
+                  typeof filter === 'object' && filter !== null && !Array.isArray(filter)
+                    ? (filter as {Prefix?: unknown}).Prefix
+                    : undefined
+                if (typeof filter !== 'object' || filter === null || Array.isArray(filter) || filterPrefix !== '') {
+                  return rule
+                }
+                return {...rule, Filter: {}}
+              })
+            : lifecycleRules,
+        }
+      case 'PutBucketLifecycleConfigurationCommand': {
+        const putRules = lifecycleRulesFromCall({name: command.constructor.name, input: command.input})
+        if (putRules) assertLifecycleRulesHaveExactlyOneSelector(putRules)
+        lifecycleRules = putRules ?? []
         return {}
+      }
       default:
         throw new Error(`Unexpected S3 command: ${command.constructor.name}`)
     }
@@ -1129,12 +1170,38 @@ describe('agent action-state S3 bucket provisioning', () => {
     expect(calls.map(call => call.name)).toContain('PutBucketEncryptionCommand')
     expect(calls.map(call => call.name)).toContain('PutBucketPolicyCommand')
     const lifecyclePut = calls.find(call => call.name === 'PutBucketLifecycleConfigurationCommand')
-    expect(lifecycleRulesFromCall(lifecyclePut)).toEqual(canonicalLifecycleRules)
+    const emittedRules = lifecycleRulesFromCall(lifecyclePut)
+    if (!emittedRules) throw new Error('expected lifecycle PUT payload')
+    assertLifecycleRulesHaveExactlyOneSelector(emittedRules)
+    expect(emittedRules).toEqual(canonicalLifecycleRules)
+    expect(emittedRules[2]?.Filter).toEqual({Prefix: ''})
+    expect(emittedRules[3]?.Filter).toEqual({Prefix: ''})
 
     for (const call of calls) {
       if (call.name !== 'CreateBucketCommand')
         expect(call.input.ExpectedBucketOwner).toBe(bucketConfig.expectedBucketOwner)
     }
+  })
+
+  it('accepts AWS-normalized empty global filters after canonical PUT without a second PUT', async () => {
+    const {client, calls} = makeCurrentBucketClient({
+      headError: namedError('NoSuchBucket'),
+      publicAccessBlock: null,
+      versioningStatus: null,
+      encryptionAlgorithm: null,
+      policy: null,
+      lifecycleRules: [],
+      normalizeEmptyLifecycleFilterOnReadback: true,
+    })
+
+    await ensureAgentStateBucket(client, bucketConfig)
+
+    const lifecyclePuts = calls.filter(call => call.name === 'PutBucketLifecycleConfigurationCommand')
+    expect(lifecyclePuts).toHaveLength(1)
+    const emittedRules = lifecycleRulesFromCall(lifecyclePuts[0])
+    if (!emittedRules) throw new Error('expected lifecycle PUT payload')
+    expect(emittedRules[2]?.Filter).toEqual({Prefix: ''})
+    expect(emittedRules[3]?.Filter).toEqual({Prefix: ''})
   })
 
   it('omits LocationConstraint for us-east-1 and includes it for other regions', async () => {
@@ -1172,6 +1239,14 @@ describe('agent action-state S3 bucket provisioning', () => {
     expect(result.classification).toBe('current')
     expect(result.changed).toBe(false)
     expect(calls.every(call => !call.name.startsWith('Put'))).toBe(true)
+  })
+
+  it('treats empty-prefix lifecycle filters as current without a PUT', async () => {
+    const {client, calls} = makeCurrentBucketClient()
+
+    await ensureAgentStateBucket(client, bucketConfig)
+
+    expect(calls.some(call => call.name === 'PutBucketLifecycleConfigurationCommand')).toBe(false)
   })
 
   it('halts on managed drift unless force is enabled, then reapplies and verifies it', async () => {
@@ -1219,6 +1294,44 @@ describe('agent action-state S3 bucket provisioning', () => {
 
     const lifecyclePut = calls.find(call => call.name === 'PutBucketLifecycleConfigurationCommand')
     expect(lifecycleRulesFromCall(lifecyclePut)).toEqual([unrelated, ...canonicalLifecycleRules])
+  })
+
+  it.each([
+    ['Filter with Tag', {Filter: {Tag: {Key: 'scope', Value: 'global'}}}, false],
+    ['Filter with And', {Filter: {And: [{Prefix: ''}]}}, false],
+    ['Filter with ObjectSizeGreaterThan', {Filter: {ObjectSizeGreaterThan: 1}}, false],
+    ['Filter with ObjectSizeLessThan', {Filter: {ObjectSizeLessThan: 1}}, false],
+    ['non-empty Prefix', {Filter: {Prefix: 'narrowed/'}}, false],
+    ['empty Prefix plus an extra predicate', {Filter: {Prefix: '', Tag: {Key: 'scope', Value: 'global'}}}, false],
+    ['top-level legacy Prefix with Filter', {Filter: {Prefix: ''}, Prefix: ''}, false],
+    ['missing Filter', {}, true],
+  ] as const)('treats %s as lifecycle drift', async (_name, variant, removeFilter) => {
+    const driftedRules = canonicalLifecycleRules.map((rule, index) =>
+      index === 2
+        ? removeFilter
+          ? Object.fromEntries(Object.entries(rule).filter(([key]) => key !== 'Filter'))
+          : {...rule, ...variant}
+        : rule,
+    )
+    const {client, calls} = makeCurrentBucketClient({lifecycleRules: driftedRules})
+
+    await expect(ensureAgentStateBucket(client, bucketConfig)).rejects.toThrow(/drift/i)
+    expect(calls.some(call => call.name === 'PutBucketLifecycleConfigurationCommand')).toBe(false)
+  })
+
+  it('treats missing global lifecycle filters as drift and repairs them with the canonical PUT payload', async () => {
+    const legacyMissingSelectors: Record<string, unknown>[] = canonicalLifecycleRules.map((rule, index) =>
+      index < 2 ? rule : Object.fromEntries(Object.entries(rule).filter(([key]) => key !== 'Filter')),
+    )
+    const {client, calls} = makeCurrentBucketClient({lifecycleRules: legacyMissingSelectors})
+
+    await expect(ensureAgentStateBucket(client, bucketConfig)).rejects.toThrow(/drift/i)
+    expect(calls.some(call => call.name === 'PutBucketLifecycleConfigurationCommand')).toBe(false)
+
+    await ensureAgentStateBucket(client, bucketConfig, {force: true})
+
+    const lifecyclePut = calls.find(call => call.name === 'PutBucketLifecycleConfigurationCommand')
+    expect(lifecycleRulesFromCall(lifecyclePut)).toEqual(canonicalLifecycleRules)
   })
 
   it('throws when a control readback does not match the requested state', async () => {

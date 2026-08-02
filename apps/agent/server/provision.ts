@@ -530,8 +530,15 @@ function lifecycleRulePrefix(rule: LifecycleRule): string | undefined {
 }
 
 function isGlobalLifecycleFilter(rule: LifecycleRule): boolean {
-  const prefix = lifecycleRulePrefix(rule)
-  return prefix === undefined || prefix === ''
+  const legacyRule = rule as LifecycleRule & {Prefix?: unknown}
+  if (legacyRule.Prefix !== undefined) return false
+
+  const filter = rule.Filter
+  if (typeof filter !== 'object' || filter === null || Array.isArray(filter)) return false
+
+  return Object.entries(filter)
+    .filter(([, value]) => value !== undefined)
+    .every(([key, value]) => key === 'Prefix' && value === '')
 }
 
 function isCanonicalAgentLifecycleRule(
@@ -590,11 +597,13 @@ function buildAgentLifecycleRules(prefixes: {sessionPrefix: string; metadataArti
     },
     {
       ID: AGENT_LIFECYCLE_RULE_IDS[2],
+      Filter: {Prefix: ''},
       Status: 'Enabled',
       NoncurrentVersionExpiration: {NoncurrentDays: 30},
     },
     {
       ID: AGENT_LIFECYCLE_RULE_IDS[3],
+      Filter: {Prefix: ''},
       Status: 'Enabled',
       AbortIncompleteMultipartUpload: {DaysAfterInitiation: 7},
     },

@@ -44,6 +44,8 @@ const remoteCommonSetupLines = [
   'readonly MAX_EXPECTED_DASHBOARD_DIGEST_BYTES=71',
   'stage=""',
   'publication_tmp=""',
+  'prior_dashboard_digest=""',
+  'dashboard_container_id=""',
   'transaction_stage="remote-transaction-started"',
   String.raw`mark_stage() { transaction_stage="$1"; printf "%s\n" "stage=$1"; }`,
   String.raw`fail() { code="$1"; message="$2"; printf "%s\n" "failure=$code"; printf "%s\n" "$message" >&2; exit 1; }`,
@@ -237,7 +239,7 @@ capture_container_inventory() {
 `,
   `
 capture_active_state() {
-  phase="$1"
+  phase="$1"; active_compose_digest=""; running_dashboard_id=""; running_digest=""; running_health=""
   if [ -L "$DASHBOARD_COMPOSE_PATH" ]; then
     fail "unsafe-path" "active Compose path is unsafe"
   elif [ ! -e "$DASHBOARD_COMPOSE_PATH" ]; then
@@ -286,6 +288,58 @@ capture_active_state() {
       fail "storage-evidence-malformed" "running dashboard identity is ambiguous"
       ;;
   esac
+}
+`,
+  String.raw`
+verify_persistent_state() {
+  expected_dashboard_container_id="$1"
+  [[ "$expected_dashboard_container_id" =~ ^[a-f0-9]{12,64}$ ]] || fail "convergence-failed" "dashboard container identity is malformed"
+  dashboard_labels="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$expected_dashboard_container_id" 2>/dev/null)" || fail "convergence-failed" "dashboard Compose labels unavailable"
+  [ "$dashboard_labels" = "dashboard|dashboard" ] || fail "convergence-failed" "dashboard Compose labels are unexpected"
+  data_stat="$(stat -c "%u:%g:%a:%F" -- "$DASHBOARD_DATA_DIR" 2>/dev/null)" || fail "convergence-failed" "dashboard data directory stat unavailable"
+  [ "$data_stat" = "1000:1000:700:directory" ] || fail "convergence-failed" "dashboard data directory is unexpected"
+  [ "$(realpath -e -- "$DASHBOARD_DATA_DIR" 2>/dev/null)" = "$DASHBOARD_DATA_DIR" ] || fail "convergence-failed" "dashboard data directory is not canonical"
+  dashboard_mounts="$(docker inspect --format '{{range .Mounts}}{{printf "%s|%s|%s|%t\n" .Type .Source .Destination .RW}}{{end}}' "$expected_dashboard_container_id" 2>/dev/null)" || fail "convergence-failed" "dashboard mount evidence unavailable"
+  dashboard_data_mount_matches=0
+  while IFS= read -r dashboard_mount; do
+    [ -n "$dashboard_mount" ] || continue
+    IFS='|' read -r mount_type mount_source mount_destination mount_rw mount_extra <<< "$dashboard_mount"
+    [ -n "$mount_type" ] && [ -n "$mount_source" ] && [ -n "$mount_destination" ] && [ -n "$mount_rw" ] && [ -z "$mount_extra" ] || fail "convergence-failed" "dashboard mount evidence malformed"
+    if [ "$mount_type" = "bind" ] && [ "$mount_source" = "$DASHBOARD_DATA_DIR" ] && [ "$mount_destination" = "/data" ] && [ "$mount_rw" = "true" ]; then
+      dashboard_data_mount_matches=$((dashboard_data_mount_matches + 1))
+    fi
+  done <<< "$dashboard_mounts"
+  [ "$dashboard_data_mount_matches" -eq 1 ] || fail "convergence-failed" "dashboard data mount is unexpected"
+  caddy_ids="$(docker ps --no-trunc --filter 'label=com.docker.compose.project=dashboard' --filter 'label=com.docker.compose.service=caddy' --format '{{.ID}}' 2>/dev/null)" || fail "convergence-failed" "running Caddy inventory unavailable"
+  caddy_count=0; caddy_container_id=""
+  while IFS= read -r candidate_id; do
+    [ -n "$candidate_id" ] || continue
+    [[ "$candidate_id" =~ ^[a-f0-9]{12,64}$ ]] || fail "convergence-failed" "running Caddy container identity is malformed"
+    caddy_count=$((caddy_count + 1)); caddy_container_id="$candidate_id"
+  done <<< "$caddy_ids"
+  [ "$caddy_count" -eq 1 ] || fail "convergence-failed" "running Caddy identity is ambiguous"
+  caddy_labels="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$caddy_container_id" 2>/dev/null)" || fail "convergence-failed" "Caddy Compose labels unavailable"
+  [ "$caddy_labels" = "dashboard|caddy" ] || fail "convergence-failed" "Caddy Compose labels are unexpected"
+  caddy_mounts="$(docker inspect --format '{{range .Mounts}}{{printf "%s|%s|%s|%t\n" .Type .Name .Destination .RW}}{{end}}' "$caddy_container_id" 2>/dev/null)" || fail "convergence-failed" "Caddy mount evidence unavailable"
+  verify_caddy_volume_mount() {
+    expected_destination="$1"; expected_volume="$2"; matching_mounts=0
+    while IFS= read -r caddy_mount; do
+      [ -n "$caddy_mount" ] || continue
+      IFS='|' read -r mount_type mount_name mount_destination mount_rw mount_extra <<< "$caddy_mount"
+      [ -n "$mount_type" ] && [ -n "$mount_destination" ] && [ -n "$mount_rw" ] && [ -z "$mount_extra" ] || fail "convergence-failed" "Caddy mount evidence malformed"
+      if [ "$mount_destination" = "$expected_destination" ]; then
+        [ "$mount_type" = "volume" ] && [ "$mount_rw" = "true" ] && [ -n "$mount_name" ] || fail "convergence-failed" "Caddy volume mount is unexpected"
+        validate_safe_identity "$mount_name" || fail "convergence-failed" "Caddy volume identity is malformed"
+        volume_labels="$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}' "$mount_name" 2>/dev/null)" || fail "convergence-failed" "Caddy volume labels unavailable"
+        [ "$volume_labels" = "dashboard|$expected_volume" ] || fail "convergence-failed" "Caddy volume labels are unexpected"
+        matching_mounts=$((matching_mounts + 1))
+      fi
+    done <<< "$caddy_mounts"
+    [ "$matching_mounts" -eq 1 ] || fail "convergence-failed" "Caddy volume mount is missing or ambiguous"
+  }
+  verify_caddy_volume_mount /data caddy_data
+  verify_caddy_volume_mount /config caddy_config
+  printf "%s\n" "evidence=persistent-state:dashboard-data=/data,bind,writable,canonical,uidgid=1000:1000,mode=0700;caddy-data=/data,volume,writable,labels=dashboard/caddy_data;caddy-config=/config,volume,writable,labels=dashboard/caddy_config"
 }
 `,
   `
@@ -378,6 +432,7 @@ publish_active_file() {
   'capture_docker_df baseline',
   'capture_container_inventory baseline',
   'capture_active_state baseline',
+  'prior_dashboard_digest="$running_digest"',
   'mark_stage prune-started',
   'capture_prune',
   'mark_stage prune-complete',
@@ -462,7 +517,7 @@ printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
   String.raw`mark_stage active-state-written`,
   'cd "$DASHBOARD_ROOT" || fail "convergence-failed" "dashboard directory change failed"',
   'docker compose up -d --no-build --wait --wait-timeout 120 dashboard >/dev/null 2>&1 || fail "convergence-failed" "dashboard convergence failed"',
-  'dashboard_container_id="$(docker compose ps -q dashboard 2>/dev/null)" || fail "convergence-failed" "dashboard container lookup failed"',
+  'dashboard_container_id="$(docker compose ps --no-trunc -q dashboard 2>/dev/null)" || fail "convergence-failed" "dashboard container lookup failed"',
   '[[ "$dashboard_container_id" =~ ^[a-f0-9]{12,64}$ ]] || fail "convergence-failed" "dashboard container identity is malformed"',
   'dashboard_image_sha="$(docker inspect --format \'{{.Image}}\' "$dashboard_container_id" 2>/dev/null)" || fail "convergence-failed" "dashboard image lookup failed"',
   '[ -n "$dashboard_image_sha" ] || fail "convergence-failed" "dashboard image identity is missing"',
@@ -474,6 +529,19 @@ printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
   'printf "%s\n" "evidence=health:$running_health"',
   'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy >/dev/null 2>&1 || fail "convergence-failed" "Caddy convergence failed"',
   String.raw`mark_stage runtime-converged`,
+  String.raw`mark_stage post-convergence-evidence`,
+  'capture_storage_records post-convergence',
+  'printf "%s\n" "evidence=capacity:post-convergence:free-bytes=$storage_min_free"',
+  '[ "$storage_min_free" -ge "$MIN_FREE_BYTES" ] || fail "low-headroom" "post-convergence free space is below the minimum"',
+  'capture_docker_df post-convergence',
+  'capture_container_inventory post-convergence',
+  'capture_active_state post-convergence',
+  '[ "$active_compose_digest" = "$expected_dashboard_digest" ] || fail "convergence-failed" "active Compose dashboard digest verification failed"',
+  '[ "$running_dashboard_id" = "$dashboard_container_id" ] || fail "convergence-failed" "running dashboard container differs from Compose readback"',
+  '[ "$running_digest" = "$expected_dashboard_digest" ] || fail "convergence-failed" "running dashboard digest verification failed"',
+  '[ "$running_health" = healthy ] || fail "convergence-failed" "running dashboard health verification failed"',
+  'verify_persistent_state "$dashboard_container_id"',
+  String.raw`if [ -n "$prior_dashboard_digest" ]; then verify_image_exact ghcr.io/fro-bot/dashboard "$prior_dashboard_digest" || fail "convergence-failed" "prior dashboard image is not locally inspectable"; printf "%s\n" "evidence=prior-dashboard:post-convergence:digest=$prior_dashboard_digest;local-inspectable=true"; else printf "%s\n" 'evidence=prior-dashboard:post-convergence:absent'; fi`,
   String.raw`mark_stage complete`,
 ]
 
@@ -570,6 +638,7 @@ export type RemoteTransactionStage =
   | 'image-acquisition'
   | 'active-state-written'
   | 'runtime-converged'
+  | 'post-convergence-evidence'
   | 'complete'
 
 export interface RemoteTransactionResult {
@@ -763,6 +832,7 @@ const ALLOWED_STAGES = new Set<string>([
   'image-acquisition',
   'active-state-written',
   'runtime-converged',
+  'post-convergence-evidence',
   'complete',
 ])
 
@@ -790,45 +860,58 @@ const isAllowedEvidenceLine = (line: string): boolean => {
   if (ALLOWED_STAGES.has(candidate)) return true
   if (/^evidence=active-path:(?:root|config|data):(?:absent|present)$/.test(line)) return true
   if (
-    /^evidence=storage:(?:baseline|post-prune|post-acquisition):probe=[\w./:@+=,-]+;mount=[\w./:@+=,-]+;source=[\w./:@+=,-]+;fstype=[\w./:@+=,-]+;free-bytes=\d+$/.test(
+    /^evidence=storage:(?:baseline|post-prune|post-acquisition|post-convergence):probe=[\w./:@+=,-]+;mount=[\w./:@+=,-]+;source=[\w./:@+=,-]+;fstype=[\w./:@+=,-]+;free-bytes=\d+$/.test(
       line,
     )
   ) {
     return true
   }
   if (
-    /^evidence=docker-df:(?:baseline|post-prune|post-acquisition):type=[A-Za-z][A-Za-z-]*;count=\d+;active=\d+;size-bytes=\d+;reclaimable-bytes=\d+$/.test(
+    /^evidence=docker-df:(?:baseline|post-prune|post-acquisition|post-convergence):type=[A-Za-z][A-Za-z-]*;count=\d+;active=\d+;size-bytes=\d+;reclaimable-bytes=\d+$/.test(
       line,
     )
   ) {
     return true
   }
-  if (/^evidence=container-inventory:(?:baseline|post-prune|post-acquisition):count=\d+$/.test(line)) return true
+  if (/^evidence=container-inventory:(?:baseline|post-prune|post-acquisition|post-convergence):count=\d+$/.test(line))
+    return true
   if (
-    /^evidence=protected-image:(?:baseline|post-prune|post-acquisition):ref=[a-z0-9][a-z0-9._/@:+-]*;count=\d+$/.test(
+    /^evidence=protected-image:(?:baseline|post-prune|post-acquisition|post-convergence):ref=[a-z0-9][a-z0-9._/@:+-]*;count=\d+$/.test(
       line,
     )
   )
     return true
   if (
-    /^evidence=active-compose:(?:baseline|post-prune|post-acquisition):(?:absent|ref=ghcr\.io\/fro-bot\/dashboard(?::[\w.-]+)?@sha256:[a-f0-9]{64};digest=sha256:[a-f0-9]{64})$/.test(
+    /^evidence=active-compose:(?:baseline|post-prune|post-acquisition|post-convergence):(?:absent|ref=ghcr\.io\/fro-bot\/dashboard(?::[\w.-]+)?@sha256:[a-f0-9]{64};digest=sha256:[a-f0-9]{64})$/.test(
       line,
     )
   ) {
     return true
   }
   if (
-    /^evidence=running-dashboard:(?:baseline|post-prune|post-acquisition):(?:absent|unavailable|digest=sha256:[a-f0-9]{64};health=(?:healthy|unhealthy|starting|unknown))$/.test(
+    /^evidence=running-dashboard:(?:baseline|post-prune|post-acquisition|post-convergence):(?:absent|unavailable|digest=sha256:[a-f0-9]{64};health=(?:healthy|unhealthy|starting|unknown))$/.test(
       line,
     )
   ) {
     return true
   }
-  if (/^evidence=capacity:(?:post-prune|post-acquisition):free-bytes=\d+$/.test(line)) return true
+  if (/^evidence=capacity:(?:post-prune|post-acquisition|post-convergence):free-bytes=\d+$/.test(line)) return true
   if (/^evidence=acquisition:mode=(?:cache|pull|cache-fallback)$/.test(line)) return true
   if (/^evidence=image-verified:[a-z0-9][a-z0-9._/:+-]*@sha256:[a-f0-9]{64}$/.test(line)) return true
   if (/^evidence=active-state:published=(?:env|caddyfile|pem|compose)$/.test(line)) return true
   if (/^evidence=runtime-digest:sha256:[a-f0-9]{64}$/.test(line)) return true
+  if (
+    /^evidence=persistent-state:dashboard-data=\/data,bind,writable,canonical,uidgid=1000:1000,mode=0700;caddy-data=\/data,volume,writable,labels=dashboard\/caddy_data;caddy-config=\/config,volume,writable,labels=dashboard\/caddy_config$/.test(
+      line,
+    )
+  )
+    return true
+  if (
+    /^evidence=prior-dashboard:post-convergence:(?:absent|digest=sha256:[a-f0-9]{64};local-inspectable=true)$/.test(
+      line,
+    )
+  )
+    return true
   if (
     /^evidence=prune:(?:reclaimed-bytes|eligible-images|protected-containers)=\d+(?:;(?:reclaimed-bytes|eligible-images|protected-containers)=\d+)*$/.test(
       line,

@@ -922,7 +922,7 @@ describe('.env does not contain image ref', () => {
 // ─── digest-verify cwd ────────────────────────────────────────────────────────
 
 describe('digest verification runs inside the dashboard root', () => {
-  it('docker compose ps -q dashboard runs after changing to the dashboard root', async () => {
+  it('docker compose ps --no-trunc -q dashboard runs after changing to the dashboard root', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
     await deploy({
@@ -940,7 +940,7 @@ describe('digest verification runs inside the dashboard root', () => {
     expect(cmdStr).toContain('cd "$DASHBOARD_ROOT"')
 
     const cdIdx = cmdStr.indexOf('cd "$DASHBOARD_ROOT"')
-    const psIdx = cmdStr.indexOf('docker compose ps -q dashboard')
+    const psIdx = cmdStr.indexOf('docker compose ps --no-trunc -q dashboard')
     expect(cdIdx).toBeGreaterThan(-1)
     expect(psIdx).toBeGreaterThan(-1)
     expect(cdIdx).toBeLessThan(psIdx)

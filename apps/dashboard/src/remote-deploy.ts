@@ -65,8 +65,8 @@ const remotePreLockLines = [
   'if [ -L "$LOCK_PATH" ] || { [ -e "$LOCK_PATH" ] && [ ! -f "$LOCK_PATH" ]; }; then fail "unsafe-path" "lock path is not a regular file"; fi',
   'if [ ! -e "$LOCK_PATH" ]; then install -m 0600 -o 0 -g 0 /dev/null "$LOCK_PATH" >/dev/null 2>&1 || fail "unsafe-path" "lock path creation failed"; fi',
   '[ -f "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ] || fail "unsafe-path" "lock path is not a regular file"',
-  'lock_stat="$(stat -c "%u:%g:%a:%F" -- "$LOCK_PATH" 2>/dev/null)" || fail "unsafe-path" "lock path stat failed"',
-  '[ "$lock_stat" = "0:0:600:regular file" ] || fail "unsafe-path" "lock path ownership or mode is unsafe"',
+  'lock_stat="$(stat -c "%u:%g:%a" -- "$LOCK_PATH" 2>/dev/null)" || fail "unsafe-path" "lock path stat failed"',
+  '[ "$lock_stat" = "$ROOT_OWNER:600" ] || fail "unsafe-path" "lock path ownership or mode is unsafe"',
   'true',
 ]
 

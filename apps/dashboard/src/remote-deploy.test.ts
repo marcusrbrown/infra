@@ -165,10 +165,12 @@ const adaptProgramForUnprivilegedHarness = (
   const darwinStat = process.platform === 'darwin'
   const expectedDirectoryType = darwinStat ? 'Directory' : 'directory'
   const expectedRegularFileType = darwinStat ? 'Regular File' : 'regular file'
-  const shellRawStatExpansion = `${String.fromCharCode(36)}{raw_stat/regular empty file/regular file}`
   const hostFileStat = darwinStat
     ? '/usr/bin/stat -f "%u:%g:%Lp:%HT" "$1"'
-    : String.raw`raw_stat="$(command stat -c "%u:%g:%a:%F" "$1")" || exit $?; printf "%s" "${shellRawStatExpansion}"`
+    : String.raw`command stat -c "%u:%g:%a:%F" "$1"`
+  const hostFileNumericStat = darwinStat
+    ? '/usr/bin/stat -f "%u:%g:%Lp" "$1"'
+    : String.raw`command stat -c "%u:%g:%a" "$1"`
   const hostFileSizeStat = darwinStat ? '/usr/bin/stat -f "%z" "$1"' : 'command stat -c "%s" "$1"'
   const dataPath = join(dashboardRoot, 'data')
   const legacyOverridePath = join(dashboardRoot, 'docker-compose.override.yaml')
@@ -276,7 +278,11 @@ const adaptProgramForUnprivilegedHarness = (
     JSON.stringify(`${dashboardRoot}/docker-compose.override.yaml`),
   )
   program = replaceRequired(program, '0:0:700:directory', `${uid}:${gid}:700:${expectedDirectoryType}`)
-  program = replaceRequired(program, '0:0:600:regular file', `${uid}:${gid}:600:${expectedRegularFileType}`)
+  program = replaceRequired(
+    program,
+    'env) expected_stat="0:0:600:regular file"',
+    `env) expected_stat="${uid}:${gid}:600:${expectedRegularFileType}"`,
+  )
   program = replaceRequired(program, '0:0:644:regular file', `${uid}:${gid}:644:${expectedRegularFileType}`)
   program = replaceRequired(program, '1000:1000:600:regular file', `${uid}:${gid}:600:${expectedRegularFileType}`)
   program = replaceRequired(program, 'readonly ROOT_OWNER="0:0"', `readonly ROOT_OWNER="${uid}:${gid}"`)
@@ -321,6 +327,7 @@ stat() {
     shift 2
     [ "$1" = "--" ] && shift
     case "$format" in
+      "%u:%g:%a") ${hostFileNumericStat} ;;
       "%u:%g:%a:%F") ${hostFileStat} ;;
       "%s") ${hostFileSizeStat} ;;
       *) return 1 ;;

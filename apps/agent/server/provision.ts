@@ -1375,7 +1375,7 @@ async function readAgentRole(
     if (!role) throw new Error(`IAM role ${roleName} readback did not include a role`)
     return role
   } catch (error: unknown) {
-    if (isNamedError(error, ['NoSuchEntity'])) return undefined
+    if (isNamedError(error, ['NoSuchEntity', 'NoSuchEntityException'])) return undefined
     throw redactAwsError(error, secrets)
   }
 }
@@ -1634,7 +1634,7 @@ async function readAgentStoragePolicy(
     }
     return response.PolicyDocument
   } catch (error: unknown) {
-    if (isNamedError(error, ['NoSuchEntity'])) return undefined
+    if (isNamedError(error, ['NoSuchEntity', 'NoSuchEntityException'])) return undefined
     throw redactAwsError(error, secrets)
   }
 }
@@ -2151,7 +2151,7 @@ export async function performTeardown(options: AgentTeardownDeps): Promise<Agent
       await client.send(new DeleteRolePolicyCommand({RoleName: identity.roleName, PolicyName: identity.policyName}))
       policyDeleted = true
     } catch (error: unknown) {
-      if (!isNamedError(error, ['NoSuchEntity'])) throw redactAwsError(error, secrets)
+      if (!isNamedError(error, ['NoSuchEntity', 'NoSuchEntityException'])) throw redactAwsError(error, secrets)
     }
   }
 
@@ -2161,7 +2161,7 @@ export async function performTeardown(options: AgentTeardownDeps): Promise<Agent
       await client.send(new DeleteRoleCommand({RoleName: identity.roleName}))
       roleDeleted = true
     } catch (error: unknown) {
-      if (!isNamedError(error, ['NoSuchEntity'])) throw redactAwsError(error, secrets)
+      if (!isNamedError(error, ['NoSuchEntity', 'NoSuchEntityException'])) throw redactAwsError(error, secrets)
     }
   }
 

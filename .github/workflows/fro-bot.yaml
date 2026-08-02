@@ -778,8 +778,8 @@ env:
     collisions untouched and list them under "Needs Human Attention".
 
 jobs:
-  fro-bot:
-    name: Fro Bot
+  fro-bot-content:
+    name: Fro Bot (content)
     runs-on: ubuntu-latest
     if: >-
       (
@@ -799,8 +799,6 @@ jobs:
           !endsWith(github.event.pull_request.user.login || '', '[bot]') &&
           (github.event.pull_request.user.login || '') != 'fro-bot'
         ) ||
-        github.event_name == 'schedule' ||
-        github.event_name == 'workflow_dispatch' ||
         (
           (github.event_name == 'issue_comment' ||
            github.event_name == 'pull_request_review_comment' ||
@@ -810,6 +808,8 @@ jobs:
           contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association || '')
         )
       )
+    permissions:
+      contents: read
     steps:
       # Always check out the default ref. Resolving a PR head here is unsafe:
       # an issue_comment on a fork PR is exposed only at github.event.issue.pull_request,
@@ -843,10 +843,7 @@ jobs:
           OPENCODE_PROMPT_ARTIFACT: 'true'
           PROMPT: >-
             ${{
-              (github.event_name == 'workflow_dispatch' && github.event.inputs.prompt)
-              || ((github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !github.event.inputs.prompt)) && env.SCHEDULE_PROMPT)
-              || (github.event_name == 'pull_request' && env.PR_REVIEW_PROMPT)
-              || ''
+              (github.event_name == 'pull_request' && env.PR_REVIEW_PROMPT) || ''
             }}
         with:
           github-token: ${{ secrets.FRO_BOT_PAT }}
@@ -855,3 +852,73 @@ jobs:
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
           prompt: ${{ env.PROMPT }}
           timeout: 0
+  fro-bot-storage:
+    name: Fro Bot (storage)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    environment: fro-bot-storage
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 90
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: >-
+            api.github.com:443 github.com:443 *.githubusercontent.com:443
+            *.actions.githubusercontent.com:443 nodejs.org:443 registry.npmjs.org:443
+            cliproxy.fro.bot:443 sts.amazonaws.com:443
+            sts.${{ vars.FRO_BOT_S3_REGION }}.amazonaws.com:443 s3.amazonaws.com:443
+            s3.${{ vars.FRO_BOT_S3_REGION }}.amazonaws.com:443
+            ${{ vars.FRO_BOT_S3_BUCKET }}.s3.${{ vars.FRO_BOT_S3_REGION }}.amazonaws.com:443
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.FRO_BOT_PAT }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.FRO_BOT_S3_REGION }}
+          role-duration-seconds: 7200
+          role-session-name: fro-bot-${{ github.run_id }}
+
+      - name: Run Fro Bot
+        uses: fro-bot/agent@c29ac295b8da06768b140c32e5bd0ae3aff45dc6 # v0.96.0
+        env:
+          OPENCODE_PROMPT_ARTIFACT: 'true'
+          PROMPT: >-
+            ${{
+              (github.event_name == 'workflow_dispatch' && github.event.inputs.prompt)
+              || env.SCHEDULE_PROMPT
+            }}
+        with:
+          github-token: ${{ secrets.FRO_BOT_PAT }}
+          auth-json: ${{ secrets.OPENCODE_AUTH_JSON }}
+          model: ${{ vars.FRO_BOT_MODEL }}
+          opencode-config: ${{ secrets.OPENCODE_CONFIG }}
+          prompt: ${{ env.PROMPT }}
+          timeout: 0
+          s3-backup: true
+          s3-bucket: ${{ vars.FRO_BOT_S3_BUCKET }}
+          aws-region: ${{ vars.FRO_BOT_S3_REGION }}
+          s3-prefix: ${{ vars.FRO_BOT_S3_PREFIX }}
+          s3-expected-bucket-owner: ${{ vars.FRO_BOT_S3_EXPECTED_BUCKET_OWNER }}

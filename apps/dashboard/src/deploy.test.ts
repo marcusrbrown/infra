@@ -1912,7 +1912,7 @@ describe('versioned deploy path', () => {
 
   it('creates and cleans only the CI key temp directory, never a ControlMaster temp directory', async () => {
     const prefixes = ['dashboard-deploy-key-', 'dash-cm-']
-    const tempRoots = [tmpdir(), '/tmp']
+    const tempRoots = [...new Set([tmpdir(), '/tmp'])]
     const entriesForRoots = () =>
       tempRoots.flatMap(root =>
         readdirSync(root)

@@ -281,6 +281,7 @@ const adaptProgramForUnprivilegedHarness = (
   program = replaceRequired(program, '1000:1000:600:regular file', `${uid}:${gid}:600:${expectedRegularFileType}`)
   program = replaceRequired(program, 'readonly ROOT_OWNER="0:0"', `readonly ROOT_OWNER="${uid}:${gid}"`)
   program = replaceRequired(program, 'install -d -m 0700 -o 0 -g 0', `install -d -m 0700 -o ${uid} -g ${gid}`)
+  program = replaceRequired(program, 'install -d -m 0700 -o 1000 -g 1000', `install -d -m 0700 -o ${uid} -g ${gid}`)
   program = replaceRequired(program, 'install -m 0600 -o 0 -g 0', `install -m 0600 -o ${uid} -g ${gid}`)
   program = replaceRequired(program, 'install -d -m 0755 -o 0 -g 0', `install -d -m 0755 -o ${uid} -g ${gid}`)
   program = replaceRequired(program, 'install -m 0644 -o 0 -g 0', `install -m 0644 -o ${uid} -g ${gid}`)

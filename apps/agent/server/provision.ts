@@ -47,6 +47,7 @@ import {assertKnownKeyLayout, buildAgentKeyLayout, type AgentKeyLayout} from '..
 
 export const GITHUB_OIDC_PROVIDER_URL = 'https://token.actions.githubusercontent.com'
 export const GITHUB_OIDC_AUDIENCE = 'sts.amazonaws.com'
+const GITHUB_OIDC_PROVIDER_READBACK_HOST = 'token.actions.githubusercontent.com'
 export const AGENT_AWS_ACCESS_KEY_ID = 'AGENT_AWS_ACCESS_KEY_ID'
 export const AGENT_AWS_SECRET_ACCESS_KEY = 'AGENT_AWS_SECRET_ACCESS_KEY'
 export const AGENT_AWS_SESSION_TOKEN = 'AGENT_AWS_SESSION_TOKEN'
@@ -980,6 +981,13 @@ export function printManifest(
 // OIDC provider discovery and convergence
 // ---------------------------------------------------------------------------
 
+function canonicalizeGitHubOidcProviderReadbackUrl(url: string): string {
+  if (url === GITHUB_OIDC_PROVIDER_URL || url === GITHUB_OIDC_PROVIDER_READBACK_HOST) {
+    return GITHUB_OIDC_PROVIDER_URL
+  }
+  return url
+}
+
 async function readOidcProvider(
   client: IAMClientLike,
   providerArn: string,
@@ -994,7 +1002,7 @@ async function readOidcProvider(
 
     return {
       providerArn,
-      url: response.Url,
+      url: canonicalizeGitHubOidcProviderReadbackUrl(response.Url),
       clientIds: response.ClientIDList ?? [],
       thumbprints: response.ThumbprintList ?? [],
     }

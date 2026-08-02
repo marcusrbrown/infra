@@ -226,6 +226,8 @@ function makeTeardownClients(
   options: {
     role?: Record<string, unknown>
     policy?: string
+    deletePolicyError?: Error
+    deleteRoleError?: Error
     stateError?: Error
     lockError?: Error
     versionError?: Error
@@ -253,9 +255,11 @@ function makeTeardownClients(
         return {PolicyDocument: encodeURIComponent(policy)}
       case 'DeleteRolePolicyCommand':
         policy = ''
+        if (options.deletePolicyError) throw options.deletePolicyError
         return {}
       case 'DeleteRoleCommand':
         role = undefined as unknown as Record<string, unknown>
+        if (options.deleteRoleError) throw options.deleteRoleError
         return {}
       default:
         throw new Error(`Unexpected IAM teardown command: ${command.constructor.name}`)
@@ -643,15 +647,20 @@ describe('GitHub OIDC provider provisioning', () => {
 
   it('fails closed when bucket configuration is missing', async () => {
     const providerArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'
-    const {client} = makeClient(async command => {
+    const {client, calls} = makeClient(async command => {
       if (command.constructor.name === 'ListOpenIDConnectProvidersCommand') return listResponse(providerArn)
       if (command.constructor.name === 'GetOpenIDConnectProviderCommand') return providerDetails(providerArn)
       throw new Error(`Unexpected IAM command: ${command.constructor.name}`)
     })
+    const s3 = makeS3Client(async command => {
+      throw new Error(`Unexpected S3 call: ${command.constructor.name}`)
+    })
 
-    await expect(performProvisioning({client, repository: roleRepository})).rejects.toThrow(
-      /agent S3.*configuration|bucket/i,
-    )
+    await expect(
+      performProvisioning({client, env: {}, repository: roleRepository, s3Client: s3.client}),
+    ).rejects.toThrow(/agent S3.*configuration|bucket/i)
+    expect(calls).toEqual([])
+    expect(s3.calls).toEqual([])
   })
 
   it('fails closed on an unknown action layout before applying any AWS policy', async () => {
@@ -758,6 +767,40 @@ describe('GitHub OIDC provider provisioning', () => {
     })
 
     expect(report.join('\n')).toMatch(/plan.*(current|would)/i)
+    expect(iam.calls.some(call => /^(?:Create|Put|Update|Tag|Add|Delete)/.test(call.name))).toBe(false)
+    expect(s3.calls.some(call => /^(?:Create|Put|Update|Delete)/.test(call.name))).toBe(false)
+  })
+
+  it('plans absent IAM role and inline policy reported as NoSuchEntityException', async () => {
+    const iam = makeClient(async command => {
+      switch (command.constructor.name) {
+        case 'ListOpenIDConnectProvidersCommand':
+          return listResponse(roleProviderArn)
+        case 'GetOpenIDConnectProviderCommand':
+          return providerDetails(roleProviderArn)
+        case 'GetRoleCommand':
+          throw namedError('NoSuchEntityException', 'role does not exist')
+        case 'GetRolePolicyCommand':
+          throw namedError('NoSuchEntityException', 'inline policy does not exist')
+        default:
+          throw new Error(`Unexpected IAM plan command: ${command.constructor.name}`)
+      }
+    })
+    const s3 = makeCurrentBucketClient()
+    const report: string[] = []
+
+    await performProvisioning({
+      client: iam.client,
+      s3Client: s3.client,
+      bucket: bucketConfig,
+      repository: roleRepository,
+      actionRef: AGENT_ACTION_LAYOUT_VERSION,
+      plan: true,
+      printLine: line => report.push(line),
+    })
+
+    expect(report.join('\n')).toMatch(/would create IAM role fro-bot-agent-storage-marcusrbrown-infra/i)
+    expect(report.join('\n')).toMatch(/would attach IAM inline policy fro-bot-agent-storage-marcusrbrown-infra/i)
     expect(iam.calls.some(call => /^(?:Create|Put|Update|Tag|Add|Delete)/.test(call.name))).toBe(false)
     expect(s3.calls.some(call => /^(?:Create|Put|Update|Delete)/.test(call.name))).toBe(false)
   })
@@ -1278,6 +1321,22 @@ describe('agent storage teardown', () => {
       s3Client: s3.client,
       manifest: teardownManifest,
       repository: teardownRepository(),
+    })
+
+    await expect(
+      performTeardown({
+        client: iam.client,
+        s3Client: s3.client,
+        manifest: teardownManifest,
+        repository: teardownRepository(),
+      }),
+    ).resolves.toMatchObject({roleDeleted: false, policyDeleted: false})
+  })
+
+  it('treats NoSuchEntityException during inline policy and role deletion as idempotent success', async () => {
+    const {iam, s3} = makeTeardownClients({
+      deletePolicyError: namedError('NoSuchEntityException', 'inline policy already absent'),
+      deleteRoleError: namedError('NoSuchEntityException', 'role already absent'),
     })
 
     await expect(

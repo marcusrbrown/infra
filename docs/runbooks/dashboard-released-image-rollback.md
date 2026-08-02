@@ -15,6 +15,11 @@ The compose pin is the single source of truth for which image version runs on th
 back means reverting the compose pin commit to restore the prior digest, then deploying. There is no
 separate override file or runtime flag — the compose file is the contract.
 
+A recent prior `repository@digest` may already be cached on the droplet and can speed rollback if the
+registry is unavailable, but the reviewed Compose pin plus the normal deploy remains the source of
+truth and authorization. Cache presence alone is not permission to change runtime state, and the next
+deploy attempt may prune the cached image.
+
 ---
 
 ## When to Use
@@ -75,7 +80,14 @@ Open a PR against `main`. Title it clearly, e.g.:
 Merge the PR. The Deploy Dashboard workflow triggers automatically on merge to `main`.
 
 Approve the `dashboard` environment gate in the GitHub Actions UI. The deploy pulls the reverted
-digest and ships it to the droplet.
+digest and ships it to the droplet through the single locked SSH transaction. The transaction
+validates the host, records baseline evidence, always prunes unused images, requires 6 GiB free after
+prune, verifies the exact staged image set from cache before pulling when possible; otherwise it pulls
+and verifies the complete set (or accepts a complete exact cache fallback after a failed pull),
+requires 6 GiB free again, publishes active files with Compose last, verifies dashboard digest and
+health, and only then unlocks. The remote transaction has a fixed 900-second deadline and the caller
+watchdog has a 960-second deadline; timeout failures report their safe code and last stage. Advisory
+probes and audit write-back happen after unlock.
 
 ### Step 5: Verify
 
@@ -161,10 +173,28 @@ If a newer release has already shipped and is known-good, prefer bumping forward
 rather than reverting backward. Update the compose pin to the newer digest, commit, PR, merge, and
 deploy. This avoids re-introducing the regression window.
 
+### Deployment stops before or during rollback
+
+Resolve the reported condition before rerunning. Every failure reports a stable lowercase-hyphen code
+and the last completed stage; remote stderr is not surfaced. The deterministic failure classes are
+lock contention, prune failure, post-prune low headroom, acquisition/cache mismatch, post-acquisition
+low headroom, unsafe path, payload malformed, transaction timeout, and active publication/runtime
+failure. A prune failure always stops the deployment;
+`docker image prune -af` may let Docker reclaim image data, but the deployment never directly deletes
+containerd storage or files. It never prunes containers or volumes or uses Compose teardown for
+recovery.
+
+Stopped containers pin their images. If obsolete stopped containers keep free space below 6 GiB,
+inspect them and remove only the specifically obsolete containers manually, then rerun. There is no
+automatic override flag. After a successful rollback, the superseded image is left locally as one
+temporary rollback generation because pruning occurs only before acquisition; a later deploy attempt
+may prune it. The deploy does not perform automatic rollback if publication or runtime convergence
+fails; inspect the reported stage and actual state before retrying.
+
 ---
 
 ## Related
 
 - [`apps/dashboard/AGENTS.md`](../../apps/dashboard/AGENTS.md) — deploy flow, secret rotation, container hardening, anti-patterns
 - [`apps/dashboard/README.md`](../../apps/dashboard/README.md) — quick-start, secrets table, CLI reference
-- [`docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md`](../solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md) — SSH key trailing-newline and ControlMaster lessons (apply to dashboard deploy)
+- [`docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md`](../solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md) — SSH key trailing-newline and host-key handling background

@@ -779,7 +779,7 @@ env:
 
 jobs:
   fro-bot-content:
-    name: Fro Bot (content)
+    name: Fro Bot
     runs-on: ubuntu-latest
     if: >-
       (

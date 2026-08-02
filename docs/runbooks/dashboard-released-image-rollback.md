@@ -82,10 +82,12 @@ Merge the PR. The Deploy Dashboard workflow triggers automatically on merge to `
 Approve the `dashboard` environment gate in the GitHub Actions UI. The deploy pulls the reverted
 digest and ships it to the droplet through the single locked SSH transaction. The transaction
 validates the host, records baseline evidence, always prunes unused images, requires 6 GiB free after
-prune, acquires and verifies the exact staged image set (or verifies the complete exact cache
-fallback), requires 6 GiB free again, publishes active files with Compose last, verifies dashboard
-digest and health, converges Caddy, and only then unlocks. Advisory probes and audit write-back happen
-after unlock.
+prune, verifies the exact staged image set from cache before pulling when possible; otherwise it pulls
+and verifies the complete set (or accepts a complete exact cache fallback after a failed pull),
+requires 6 GiB free again, publishes active files with Compose last, verifies dashboard digest and
+health, and only then unlocks. The remote transaction has a fixed 900-second deadline and the caller
+watchdog has a 960-second deadline; timeout failures report their safe code and last stage. Advisory
+probes and audit write-back happen after unlock.
 
 ### Step 5: Verify
 
@@ -173,9 +175,11 @@ deploy. This avoids re-introducing the regression window.
 
 ### Deployment stops before or during rollback
 
-Resolve the reported condition before rerunning. The deterministic failure classes are lock
-contention, prune failure, post-prune low headroom, acquisition/cache mismatch, post-acquisition
-low headroom, and active publication/runtime failure. A prune failure always stops the deployment;
+Resolve the reported condition before rerunning. Every failure reports a stable lowercase-hyphen code
+and the last completed stage; remote stderr is not surfaced. The deterministic failure classes are
+lock contention, prune failure, post-prune low headroom, acquisition/cache mismatch, post-acquisition
+low headroom, unsafe path, payload malformed, transaction timeout, and active publication/runtime
+failure. A prune failure always stops the deployment;
 `docker image prune -af` may let Docker reclaim image data, but the deployment never directly deletes
 containerd storage or files. It never prunes containers or volumes or uses Compose teardown for
 recovery.

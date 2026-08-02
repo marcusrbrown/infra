@@ -24,6 +24,7 @@ export interface SpawnResult {
   stderr: ReadableStream<Uint8Array>
   stdin?: {write: (data: Uint8Array) => void; end: () => void}
   exited: Promise<number>
+  kill: (signal: 'SIGTERM' | 'SIGKILL') => void
 }
 
 export interface SpawnOpts {

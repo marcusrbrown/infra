@@ -65,6 +65,7 @@ function makeSpawnResult(stdout = '', stderr = '', exitCode = 0): SpawnResult {
       end: () => {},
     },
     exited: Promise.resolve(exitCode),
+    kill: (_signal: 'SIGTERM' | 'SIGKILL') => {},
   }
 }
 
@@ -155,7 +156,7 @@ const fetchHealthzFail = async (_url: string, _opts?: RequestInit): Promise<Resp
 function makeHappyPathResponses(): SpawnResult[] {
   return [
     makeSpawnResult(
-      'stage=remote-transaction-started\nstage=lock-acquired\nstage=payload-decoded\nstage=active-state-written\nstage=image-acquisition\nstage=runtime-converged\nstage=complete\n',
+      'stage=remote-transaction-started\nstage=lock-acquired\nstage=payload-decoded\nstage=baseline-evidence\nstage=prune-started\nstage=prune-complete\nstage=post-prune-capacity\nstage=image-acquisition\nstage=post-acquisition-capacity\nstage=active-state-mutation\nstage=active-state-written\nstage=runtime-converged\nstage=complete\n',
     ),
   ]
 }
@@ -1242,8 +1243,7 @@ describe('deploy forwards GATEWAY_VPC_IP to caddy service env', () => {
 // case-folding). GitHub Environment *variables* (unlike secrets) are not subject
 // to the trailing-newline mangling that secrets can pick up, so strict raw
 // equality is safe here and gives the strictest, most auditable fail-closed
-// behavior: any whitespace or case variant is treated as disabled, matching the
-// plan's "only for the exact enabled value" / "exactly `true`" language.
+// behavior: any whitespace or case variant is treated as disabled.
 // Absent/false/malformed values are OMITTED (not an error) — the image's
 // existing disabled behavior remains the default.
 
@@ -1802,7 +1802,7 @@ function makeVersionedHappyPathResponses(): SpawnResult[] {
   return [
     makeSpawnResult(RESOLVED_DIGEST), // 0: imagetools inspect → resolved digest
     makeSpawnResult(
-      'stage=remote-transaction-started\nstage=lock-acquired\nstage=payload-decoded\nstage=active-state-written\nstage=image-acquisition\nstage=runtime-converged\nstage=complete\n',
+      'stage=remote-transaction-started\nstage=lock-acquired\nstage=payload-decoded\nstage=baseline-evidence\nstage=prune-started\nstage=prune-complete\nstage=post-prune-capacity\nstage=image-acquisition\nstage=post-acquisition-capacity\nstage=active-state-mutation\nstage=active-state-written\nstage=runtime-converged\nstage=complete\n',
     ), // 1: remote transaction
   ]
 }

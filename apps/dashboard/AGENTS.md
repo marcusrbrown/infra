@@ -30,7 +30,9 @@ release is published. Caddy depends on the `dashboard` service being healthy bef
 4. Starts one SSH process whose remote transaction validates `/run/dashboard-deploy` as a canonical,
    root-owned `0700` directory and acquires `/run/dashboard-deploy/lock` with a 180-second bounded
    wait. The kernel lock is held by the process doing the work and releases on process death; there
-   is no stale-lock cleanup or separate lock-holder.
+   is no stale-lock cleanup or separate lock-holder. The remote Bash transaction is wrapped in a fixed
+   900-second `timeout` (`TERM`, then `KILL` after 15 seconds), and the local caller has a 960-second
+   watchdog that escalates the SSH process if its lifecycle does not settle.
 5. After the lock, validates `/opt/dashboard`, `/opt/dashboard/config`, and `/opt/dashboard/data`
    without accepting symlinks or unsafe types, then records baseline storage, Docker disk, container,
    active Compose, and running dashboard evidence.
@@ -38,9 +40,11 @@ release is published. Caddy depends on the `dashboard` service being healthy bef
    data through this command, but the deployment never directly deletes containerd storage or files;
    it never prunes containers or volumes or uses Compose teardown. The first 6 GiB free-space gate is
    checked after post-prune evidence.
-7. Enumerates the staged Compose image set and runs the exact pull. If the registry pull fails, the
-   transaction may use the cache only when every staged `repository@digest` verifies exactly. Tags
-   are never trusted. The second 6 GiB gate is checked after acquisition and before active mutation.
+7. Enumerates the staged Compose image set and verifies every exact `repository@digest` locally first.
+   If all are cached, it skips the pull and records `acquisition:mode=cache`. Otherwise it runs the
+   staged Compose pull, verifies the complete exact set, and records `pull`; a failed pull is allowed
+   only when the complete exact cache is present afterward, recorded as `cache-fallback`. Tags are
+   never trusted. The second 6 GiB gate is checked after acquisition and before active mutation.
 8. Converges `/opt/dashboard/data` to a real directory owned by `1000:1000` with mode `0700`, then
    publishes `.env`, `Caddyfile`, the GitHub App PEM, and Compose one file at a time, with Compose
    last. The PEM is a regular file owned by `1000:1000`, mode `0600`; `.env` is root-owned mode
@@ -64,7 +68,9 @@ automatic rollback guarantee. Stopped containers pin their images just like runn
 those pins keep free space below 6 GiB, inspect the stopped containers, remove only specifically
 obsolete ones manually, and rerun; no automatic override flag exists.
 
-The operator must resolve the reported condition before rerunning. Deterministic failure classes are:
+The operator must resolve the reported condition before rerunning. Every remote failure returns a
+stable lowercase-hyphen code plus the last completed stage; remote stderr is intentionally not surfaced.
+Deterministic failure classes are:
 
 - **Lock contention:** wait for the other transaction to finish, then rerun.
 - **Prune failure:** resolve the Docker cleanup error; do not bypass pruning.
@@ -74,7 +80,12 @@ The operator must resolve the reported condition before rerunning. Deterministic
   a tag-only or wrong-digest cache entry does not qualify.
 - **Post-acquisition low headroom:** resolve capacity before allowing active publication.
 - **Active publication/runtime failure:** inspect the reported stage and actual Compose/runtime state;
-  do not assume automatic rollback, then correct the condition and rerun.
+   do not assume automatic rollback, then correct the condition and rerun.
+- **Transaction timeout:** inspect the reported stage and host state after the fixed remote deadline;
+  retry only after confirming the previous process is gone. The caller watchdog also terminates a
+  hung local SSH process. GNU `timeout` statuses 124 and 137 are conservatively normalized to the
+  reserved transaction-timeout code because the utility cannot distinguish a child’s independent
+  exit 137 from kill-after escalation.
 
 ## Image source
 

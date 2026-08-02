@@ -8,9 +8,9 @@ Two-service Docker Compose stack (dashboard + caddy) on a dedicated DigitalOcean
 
 ## Deploy
 
-The deploy validates inputs and host access, resolves DNS, and generates the exact digest-pinned Compose payload locally. One SSH transaction then owns the remote work under a kernel lock at `/run/dashboard-deploy/lock` in a root-owned `0700` runtime directory. It waits up to 180 seconds for the lock; the lock is released when the owning process dies, so there is no stale-lock cleanup step.
+The deploy validates inputs and host access, resolves DNS, and generates the exact digest-pinned Compose payload locally. One SSH transaction then owns the remote work under a kernel lock at `/run/dashboard-deploy/lock` in a root-owned `0700` runtime directory. It waits up to 180 seconds for the lock; the lock is released when the owning process dies, so there is no stale-lock cleanup step. The remote transaction has a fixed 900-second deadline with `TERM` followed by `KILL` after 15 seconds; the caller watchdog is 960 seconds and also terminates a wedged SSH process.
 
-The transaction records baseline evidence, always runs `docker image prune -af`, requires at least 6 GiB of free space, stages the exact Compose image set, and verifies every `repository@digest` after pulling or from the local cache. It requires the same 6 GiB floor again before publishing `/opt/dashboard/.env`, `Caddyfile`, the GitHub App key, and Compose (last). It then verifies dashboard health and digest, converges Caddy, and unlocks. Same-origin and public probes are advisory post-deploy checks; versioned audit pin write-back happens only after the transaction succeeds.
+The transaction records baseline evidence, always runs `docker image prune -af`, requires at least 6 GiB of free space, stages the exact Compose image set, and verifies every `repository@digest` before deciding whether to use `cache`, `pull`, or `cache-fallback` acquisition. It requires the same 6 GiB floor again before publishing `/opt/dashboard/.env`, `Caddyfile`, the GitHub App key, and Compose (last). It then verifies dashboard health and digest, converges Caddy, and unlocks. Same-origin and public probes are advisory post-deploy checks; versioned audit pin write-back happens only after the transaction succeeds.
 
 ```bash
 bun run --cwd apps/dashboard deploy
@@ -77,7 +77,7 @@ Image cleanup is intentionally narrow: `docker image prune -af` removes only ima
 
 If the registry pull fails, the deploy proceeds only when every staged `repository@digest` is already cached and verifies exactly. Tags alone are never trusted. Pruning happens only before acquisition, so the replaced image remains locally as one temporary rollback generation after a successful replacement; the next deployment attempt may prune it. The deploy does not promise or perform automatic rollback.
 
-Resolve the reported condition before rerunning. The deterministic failure classes are lock contention, prune failure, post-prune low headroom, acquisition/cache mismatch, post-acquisition low headroom, and active publication/runtime failure. A runtime or publication failure reports the stage reached; it does not silently restore the previous Compose or service state.
+Resolve the reported condition before rerunning. Deterministic failures report a safe lowercase-hyphen code and the last completed stage: lock contention, prune failure, post-prune low headroom, acquisition/cache mismatch, post-acquisition low headroom, unsafe path, payload malformed, or active publication/runtime failure. A transaction timeout reports `transaction-timeout` and its stage; it does not dump remote stderr or silently restore the previous Compose or service state.
 
 ## GitHub App key revocation
 

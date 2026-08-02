@@ -1,5 +1,32 @@
 # @marcusrbrown/infra
 
+## 0.15.0
+### Minor Changes
+
+
+- Add the operator-facing `agent` command group for generalized Fro Bot setup and durable S3 storage configuration. ([#1001](https://github.com/marcusrbrown/infra/pull/1001))
+
+
+### Patch Changes
+
+
+- An unknown CLI command now exits non-zero and prints `Unknown command: <name>` on stderr, instead of silently falling back to root help with a success exit code. A mistyped command is now a detectable error in scripts and CI. ([#1001](https://github.com/marcusrbrown/infra/pull/1001))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.111` to `7.2.112` ([#992](https://github.com/marcusrbrown/infra/pull/992))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-s3` ([#1003](https://github.com/marcusrbrown/infra/pull/1003))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1002](https://github.com/marcusrbrown/infra/pull/1002))
+
+
+- 📦 Update GitHub Actions workflow dependencies: `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3`, `bfra-me/.github`, `bfra-me/.github/.github/workflows/renovate.yaml`, `bfra-me/.github/.github/workflows/update-repo-settings.yaml` ([#997](https://github.com/marcusrbrown/infra/pull/997))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.112` to `7.2.113` ([#1000](https://github.com/marcusrbrown/infra/pull/1000))
+
 ## 0.14.2
 ### Patch Changes
 

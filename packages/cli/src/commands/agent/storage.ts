@@ -233,6 +233,8 @@ export function buildAwsChildEnv(
     }
   }
 
+  childEnv.AWS_CONFIG_FILE = '/dev/null'
+  childEnv.AWS_SHARED_CREDENTIALS_FILE = '/dev/null'
   childEnv.AWS_ACCESS_KEY_ID = accessKeyId
   childEnv.AWS_SECRET_ACCESS_KEY = secretAccessKey
   childEnv.AWS_REGION = sourceEnv.AGENT_AWS_REGION?.trim() || manifest.bucket_region

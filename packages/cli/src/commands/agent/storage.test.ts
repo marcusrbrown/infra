@@ -1,5 +1,9 @@
 /// <reference types="bun" />
 
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
+
 import {afterEach, beforeEach, describe, expect, it, mock, spyOn} from 'bun:test'
 
 import {runCommand} from './setup-core/gh'
@@ -164,6 +168,8 @@ describe('agent S3 durable storage wiring', () => {
         AWS_SECRET_ACCESS_KEY: dedicatedSecretKey,
         AWS_REGION: manifest.bucket_region,
         AWS_DEFAULT_REGION: manifest.bucket_region,
+        AWS_CONFIG_FILE: '/dev/null',
+        AWS_SHARED_CREDENTIALS_FILE: '/dev/null',
         PATH: sourceEnv.PATH,
         HOME: sourceEnv.HOME,
         TMPDIR: sourceEnv.TMPDIR,
@@ -175,8 +181,6 @@ describe('agent S3 durable storage wiring', () => {
     )
 
     for (const key of [
-      'AWS_CONFIG_FILE',
-      'AWS_SHARED_CREDENTIALS_FILE',
       'AWS_CA_BUNDLE',
       'AWS_ENDPOINT_URL',
       'AWS_PROFILE',
@@ -196,6 +200,32 @@ describe('agent S3 durable storage wiring', () => {
     expect(childEnv).not.toHaveProperty('AGENT_AWS_SECRET_ACCESS_KEY')
     expect(childEnv.AWS_REGION).not.toBe('ambient-region')
     expect(childEnv.AWS_DEFAULT_REGION).not.toBe('ambient-default-region')
+  })
+
+  it('neutralizes ambient AWS config and credentials files under the preserved HOME', () => {
+    const home = mkdtempSync(join(tmpdir(), 'agent-storage-home-'))
+    const awsDir = join(home, '.aws')
+    mkdirSync(awsDir)
+    writeFileSync(join(awsDir, 'config'), '[default]\nendpoint_url = http://ambient-endpoint.invalid\n')
+    writeFileSync(join(awsDir, 'credentials'), '[default]\naws_access_key_id = ambient-access-fixture\n')
+
+    try {
+      const childEnv = buildAwsChildEnv(manifest, {
+        AGENT_AWS_ACCESS_KEY_ID: 'agent-access-fixture',
+        AGENT_AWS_SECRET_ACCESS_KEY: 'agent-secret-fixture',
+        HOME: home,
+      })
+
+      expect(childEnv).toEqual(
+        expect.objectContaining({
+          HOME: home,
+          AWS_CONFIG_FILE: '/dev/null',
+          AWS_SHARED_CREDENTIALS_FILE: '/dev/null',
+        }),
+      )
+    } finally {
+      rmSync(home, {recursive: true, force: true})
+    }
   })
 
   it('fails before spawning aws when dedicated credentials are missing, partial, or whitespace-only', async () => {

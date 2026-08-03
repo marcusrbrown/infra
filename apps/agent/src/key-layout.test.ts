@@ -6,11 +6,11 @@ describe('pinned agent action S3 key layout', () => {
   it('builds canonical session, lock, and ListBucket prefixes', () => {
     const layout = buildAgentKeyLayout('marcusrbrown', 'infra', '/fro-bot-state///')
 
-    expect(layout.sessionPrefix).toBe('fro-bot-state/github/marcusrbrown-infra/storage/')
-    expect(layout.lockKey).toBe('fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock')
+    expect(layout.sessionPrefix).toBe('fro-bot-state/github/marcusrbrown/infra/')
+    expect(layout.lockKey).toBe('fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json')
     expect(layout.listBucketPrefixes).toEqual([
-      'fro-bot-state/github/marcusrbrown-infra/storage/',
-      'fro-bot-state/coordination/github/marcusrbrown-infra/locks/',
+      'fro-bot-state/github/marcusrbrown/infra/',
+      'fro-bot-state/coordination/marcusrbrown/infra/locks/',
     ])
     expect(layout.sessionPrefix.startsWith('/')).toBe(false)
     expect(layout.sessionPrefix.endsWith('//')).toBe(false)
@@ -18,10 +18,10 @@ describe('pinned agent action S3 key layout', () => {
 
   it('delimiter-bounds a repository prefix so a sibling repository is not covered', () => {
     const layout = buildAgentKeyLayout('owner', 'repo', 'fro-bot-state')
-    const siblingSessionPrefix = 'fro-bot-state/github/owner-repo-evil/storage/'
+    const siblingSessionPrefix = 'fro-bot-state/github/owner/repo-evil/'
 
     expect(siblingSessionPrefix.startsWith(layout.sessionPrefix)).toBe(false)
-    expect(layout.sessionPrefix).toBe('fro-bot-state/github/owner-repo/storage/')
+    expect(layout.sessionPrefix).toBe('fro-bot-state/github/owner/repo/')
     expect(() => buildAgentKeyLayout('owner/repo', 'infra', 'fro-bot-state')).toThrow(/single path segment/i)
   })
 

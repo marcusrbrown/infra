@@ -2,9 +2,11 @@
  * The key layout is intentionally versioned with the consuming action. Do not
  * widen this table to make an unverified action ref provision successfully.
  *
- * v0.96.0 is the only currently admitted action ref. Its session and
- * coordination paths below are the plan's pinned contract and must be
- * re-verified before adding another action version here.
+ * v0.96.0 is the only currently admitted action ref. Its session tree is
+ * `${prefix}/github/<owner>/<repo>/`, and its coordination lock is the exact
+ * `${prefix}/coordination/<owner>/<repo>/locks/repo.json` object. These paths
+ * are the pinned contract and must be re-verified before adding another action
+ * version here.
  */
 export const KEY_LAYOUT_VERSION = 'fro-bot/agent@v0.96.0' as const
 export const AGENT_ACTION_LAYOUT_VERSION = KEY_LAYOUT_VERSION
@@ -79,10 +81,9 @@ export function buildAgentKeyLayout(
   const ownerSegment = assertPathSegment(owner, 'Agent repository owner')
   const repoSegment = assertPathSegment(repo, 'Agent repository name')
   const normalizedPrefix = canonicalizePrefix(prefix)
-  const repositorySegment = `${ownerSegment}-${repoSegment}`
-  const sessionPrefix = `${normalizedPrefix}github/${repositorySegment}/storage/`
-  const lockPrefix = `${normalizedPrefix}coordination/github/${repositorySegment}/locks/`
-  const lockKey = `${lockPrefix}storage.lock`
+  const sessionPrefix = `${normalizedPrefix}github/${ownerSegment}/${repoSegment}/`
+  const lockPrefix = `${normalizedPrefix}coordination/${ownerSegment}/${repoSegment}/locks/`
+  const lockKey = `${lockPrefix}repo.json`
 
   return {
     actionVersion: verifiedVersion,

@@ -1,13 +1,34 @@
 ---
 title: "fix: Guard dashboard deploy image retention"
 type: fix
-status: active
+status: completed
 date: 2026-08-01
 origin: docs/brainstorms/2026-08-01-dashboard-deploy-image-retention-requirements.md
 deepened: 2026-08-01
+completed: 2026-08-03
 ---
 
 # fix: Guard dashboard deploy image retention
+
+> **Status note:** Completed on 2026-08-03 against current `main` (`4c006fc`). The dashboard-local retention repair shipped and passed production replacement, audit-pin, same-target, and kernel-lock evidence. This document remains the historical design intent; the dispositions and shipped hardening below record what actually landed.
+
+## Shipped Reality
+
+The shipped implementation is in `apps/dashboard/src/remote-deploy.ts`, with behavior coverage in `apps/dashboard/src/remote-deploy.test.ts`, integrated through `apps/dashboard/src/deploy.ts` and its tests. Both deploy entry paths now use one SSH transaction whose lock-owning process performs inspection, prune, acquisition, active-file mutation, and runtime convergence. The transaction uses a fixed remote program, data-only framed stdin, a sanitized remote environment, kernel `flock` at `/run/dashboard-deploy/lock` with a 180-second wait, a 900-second remote timeout with a 15-second kill-after, and a 960-second caller watchdog. It enforces the 6 GiB floor after prune and acquisition, plus a post-convergence readback; verifies exact cached `repository@digest` images before pulling; publishes active files one at a time with Compose last; and runs advisory probes and audit write-back after the lock is released.
+
+### Implementation-time deviations and hardening
+
+- ControlMaster was not retained; the shipped path uses one supervised SSH transaction rather than connection reuse or a secondary mutating session.
+- Tests include a real Linux kernel-flock lifecycle test and a deterministic stage barrier. The harness keeps BSD and GNU `stat` command forms separate.
+- The production `%F` empty-file failure was fixed in PR #1007 by checking numeric owner, group, and mode while retaining independent file-shape checks.
+- Beyond the origin document's minimum evidence wording, PR #1010 added post-convergence capacity, persistent-state, and prior-image evidence, plus full container-ID normalization for Compose/runtime readback.
+- Caller timeout handling implements the required `TERM` → bounded wait → `KILL` → process reap semantics before settling output readers.
+
+The prior image is inspectable immediately after a replacement. That guarantee ends at the next deployment attempt's pre-prune phase; the next attempt may remove it.
+
+See the shipped production-proof guidance in [`docs/solutions/workflow-issues/dashboard-deploy-proof-replacement-audit-same-target-2026-08-03.md`](../solutions/workflow-issues/dashboard-deploy-proof-replacement-audit-same-target-2026-08-03.md) and the Linux harness/deadline guidance in [`docs/solutions/workflow-issues/linux-deploy-harness-kernel-semantics-and-deadlines-2026-08-03.md`](../solutions/workflow-issues/linux-deploy-harness-kernel-semantics-and-deadlines-2026-08-03.md).
+
+---
 
 ## Overview
 
@@ -29,22 +50,22 @@ Deploy-time cleanup is the selected policy owner because the safety proof must h
 
 ## Requirements Trace
 
-| ID | Plan commitment |
-|---|---|
-| R1 | One remote process-bound lock covers inspection, cleanup, image acquisition, active-file mutation, and runtime convergence for both deploy entry paths. |
-| R2 | Every deploy records deterministic before/after container, image, mount, and integer free-byte evidence. |
-| R3 | Cleanup uses unused-image pruning only; running/stopped container references, volumes, and active Compose state are preserved. |
-| R4 | Free-space measurement resolves the filesystem backing Docker/containerd storage and fails closed on absent or malformed evidence. |
-| R5 | A fixed 6 GiB floor is proven after prune and again after acquisition; active-state mutation is blocked when either gate is unmet. |
-| R6 | Pruning is unconditional and any prune error hard-stops the deployment before target acquisition. |
-| R7 | The exact expected image set is verified locally or pulled and verified before active Compose mutation. |
-| R8 | Cleanup is pre-pull only, leaving the replaced image locally present as rollback capacity until the next deployment's pre-pull prune. |
-| R9 | GitHub Actions and local deploys converge on the same deployment engine and remote lock. |
-| R10 | Lock contention and partial failures terminate predictably without stale-lock cleanup or false success. |
-| R11 | Existing digest verification, health checks, public probes, and audit-PR behavior remain intact. |
-| R12 | Logs identify the failed stage and report redacted, deterministic retention evidence without exposing secrets. |
-| R13 | Rerunning after a failed or interrupted deployment reconciles from observed host state without manual lock removal. |
-| R14 | Lock, prune, and storage-probe commands remain fixed host-controlled operations; validated deploy inputs appear only where the selected image/config requires them. |
+| ID | Plan commitment | Disposition |
+|---|---|---|
+| R1 | One remote process-bound lock covers inspection, cleanup, image acquisition, active-file mutation, and runtime convergence for both deploy entry paths. | **Completed** — one lock-owning SSH transaction. |
+| R2 | Every deploy records deterministic before/after container, image, mount, and integer free-byte evidence. | **Completed** — baseline, post-prune, post-acquisition, and post-convergence evidence ship. |
+| R3 | Cleanup uses unused-image pruning only; running/stopped container references, volumes, and active Compose state are preserved. | **Completed** — image-only prune; container and volume state is preserved. |
+| R4 | Free-space measurement resolves the filesystem backing Docker/containerd storage and fails closed on absent or malformed evidence. | **Completed** — Docker/containerd backing mounts are resolved, deduplicated, and fail closed. |
+| R5 | A fixed 6 GiB floor is proven after prune and again after acquisition; active-state mutation is blocked when either gate is unmet. | **Completed** — both gates plus post-convergence capacity readback are enforced. |
+| R6 | Pruning is unconditional and any prune error hard-stops the deployment before target acquisition. | **Completed** — prune failure is terminal. |
+| R7 | The exact expected image set is verified locally or pulled and verified before active Compose mutation. | **Completed** — exact cache verification precedes pull and publication. |
+| R8 | Cleanup is pre-pull only, leaving the replaced image locally present as rollback capacity until the next deployment's pre-pull prune. | **Completed** — bounded prior-image inspectability is recorded honestly. |
+| R9 | GitHub Actions and local deploys converge on the same deployment engine and remote lock. | **Completed** — both paths use the same remote transaction. |
+| R10 | Lock contention and partial failures terminate predictably without stale-lock cleanup or false success. | **Completed** — contention, deadlines, stages, and process lifecycle are deterministic. |
+| R11 | Existing digest verification, health checks, public probes, and audit-PR behavior remain intact. | **Completed** — probes and audit behavior remain downstream of convergence. |
+| R12 | Logs identify the failed stage and report redacted, deterministic retention evidence without exposing secrets. | **Completed** — allowlisted evidence and safe failure codes are emitted. |
+| R13 | Rerunning after a failed or interrupted deployment reconciles from observed host state without manual lock removal. | **Completed** — kernel lock release and same-target reconciliation are verified. |
+| R14 | Lock, prune, and storage-probe commands remain fixed host-controlled operations; validated deploy inputs appear only where the selected image/config requires them. | **Completed** — fixed program, sanitized environment, and data-only payload boundary ship. |
 
 ---
 
@@ -70,8 +91,8 @@ Deploy-time cleanup is the selected policy owner because the safety proof must h
 
 ### Relevant Code and Patterns
 
-- `apps/dashboard/src/deploy.ts` is the single deployment engine used by the GitHub Actions workflow and local CLI path. Its input validation, digest resolution, secret handling, Compose generation, runtime digest check, and bounded public probes remain authoritative.
-- `apps/dashboard/src/deploy.test.ts` already injects process, DNS, fetch, and sleep seams; new failure-order and single-session coverage should extend that behavior-oriented harness.
+- `apps/dashboard/src/deploy.ts` remains the orchestrator used by the GitHub Actions workflow and local CLI path. Its input validation, digest resolution, secret handling, Compose generation, runtime digest check, and bounded public probes remain authoritative; `apps/dashboard/src/remote-deploy.ts` owns the fixed remote transaction and payload boundary.
+- `apps/dashboard/src/deploy.test.ts` and `apps/dashboard/src/remote-deploy.test.ts` cover the orchestration, process lifecycle, payload, ordering, evidence, and Linux lock seams.
 - `packages/cli/src/commands/dashboard/deploy.ts` already routes local deployment to the same dashboard deploy script and remote deployment to the existing workflow. No new entry point is needed.
 - `.github/workflows/deploy-dashboard.yaml` already serializes dashboard workflow runs and opens the compose-pin audit PR after a successful deploy. The remote host lock adds parity for local runs and protects against cross-entry overlap.
 - `apps/gateway/src/deploy.ts` demonstrates safe `docker image prune -af` usage, but its best-effort policy is not reusable because dashboard cleanup must produce evidence and fail closed.
@@ -84,6 +105,8 @@ Deploy-time cleanup is the selected policy owner because the safety proof must h
 - `docs/solutions/integration-issues/dashboard-caddy-bind-mount-stale-reload-2026-07-26.md`: file-write success does not prove live runtime state; force Caddy convergence and verify the running service.
 - `docs/solutions/integration-issues/dashboard-operator-session-container-hairpin-2026-06-21.md`: retain runner-side public probes; host/container-local public-hostname probes are not equivalent network evidence.
 - `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md`: immutable identity and a preserved rollback anchor matter more than optimistic success output.
+- [`docs/solutions/workflow-issues/dashboard-deploy-proof-replacement-audit-same-target-2026-08-03.md`](../solutions/workflow-issues/dashboard-deploy-proof-replacement-audit-same-target-2026-08-03.md): replacement, audit-pin, and same-target production proofs are distinct.
+- [`docs/solutions/workflow-issues/linux-deploy-harness-kernel-semantics-and-deadlines-2026-08-03.md`](../solutions/workflow-issues/linux-deploy-harness-kernel-semantics-and-deadlines-2026-08-03.md): preserve Linux lock, stat, stage-barrier, and deadline semantics in tests.
 
 ### External References
 
@@ -197,6 +220,7 @@ flowchart TB
   - Error path: remote process cancellation or nonzero exit surfaces the transaction stage and does not report success.
   - Syntax: the generated transaction passes non-executing shell syntax validation without snapshotting arbitrary script prose.
 - **Verification:** The transaction boundary is independently testable, secret-safe, dashboard-specific, and ready to own all remote deploy operations.
+- **Disposition:** **Completed.** `remote-deploy.ts` and `remote-deploy.test.ts` ship the fixed program, framed data-only payload, sanitized environment, allowlisted evidence, and supervised process lifecycle.
 
 ### U2. Replace fragmented SSH mutation with one locked remote transaction
 
@@ -225,6 +249,7 @@ flowchart TB
   - Entry parity: versioned workflow inputs and committed-pin local mode both invoke the same remote transaction contract.
   - Security: lock/prune/probe command text is fixed and unaffected by version, digest, domain, or secret values.
 - **Verification:** Concurrent local/workflow deploys cannot interleave remote phases, and the existing preflight boundaries remain intact.
+- **Disposition:** **Completed.** Both entry paths use one lock-owning SSH transaction; ControlMaster and secondary mutating sessions are not part of the shipped path, and the Linux lock lifecycle is tested directly.
 
 ### U3. Add deterministic audit, prune, and headroom gates
 
@@ -254,6 +279,7 @@ flowchart TB
   - Safety: the transaction never invokes volume prune, container prune, Compose teardown, `docker system prune`, or direct containerd deletion.
   - Diagnostics: a floor failure identifies the limiting mount and stopped-container image pins without logging secrets or private file contents.
 - **Verification:** Every deployment either proves trustworthy post-prune headroom or terminates before pulling/writing anything active.
+- **Disposition:** **Completed.** The shipped transaction performs unconditional image-only prune, mount-aware fail-closed evidence parsing, and the first 6 GiB gate before acquisition.
 
 ### U4. Acquire exact images before active Compose mutation
 
@@ -290,6 +316,7 @@ flowchart TB
   - Partial mutation: support-file replacement before Compose publication, Compose publication before `up`, and dashboard convergence before Caddy convergence each report distinct actual state, perform no automatic rollback, and remain safely rerunnable.
   - Retention: after successful replacement, the prior image remains local because no post-deploy prune runs; the guarantee ends at the next deployment's pre-pull prune.
 - **Verification:** Acquisition failures cannot rewrite desired state, successful deploys run the exact expected image set, and the replaced dashboard image remains local until the next deployment's cleanup phase.
+- **Disposition:** **Completed.** Exact cache verification precedes pull, the second 6 GiB gate and post-convergence readback are enforced, active files publish with Compose last, and prior-image inspectability is explicitly bounded by the next deployment attempt's pre-prune.
 
 ### U5. Preserve entry-path, probe, and audit behavior
 
@@ -320,6 +347,7 @@ flowchart TB
   - CLI parity: `--local` still rejects image inputs, remote dispatch still accepts the established version/digest contract, and no cleanup override is introduced.
   - Rerun: the same target after an interrupted post-mutation attempt re-audits, reacquires/verifies images, replaces active files with the same per-file/Compose-last ordering, and converges without manual lock cleanup.
 - **Verification:** Existing callers observe the same inputs and success artifacts while all host mutation is protected by the new lifecycle.
+- **Disposition:** **Completed.** Workflow and local modes share the transaction; advisory probes run after unlock, and versioned audit write-back remains post-success while audit-pin commits intentionally skip automatic deployment to prevent a loop.
 
 ### U6. Update dashboard operations documentation
 
@@ -337,6 +365,7 @@ flowchart TB
   - Preserve existing secret, volume, listener-data, Caddy, and no-on-host-build warnings.
 - **Test scenarios:** Test expectation: none — these files document behavior already covered by executable deploy tests and production verification; do not add file-content tests.
 - **Verification:** A future operator can distinguish lock contention, prune failure, low-headroom failure, acquisition failure, and post-mutation degradation and can rerun or roll back without destructive cleanup.
+- **Disposition:** **Completed.** `apps/dashboard/AGENTS.md`, `apps/dashboard/README.md`, and `docs/runbooks/dashboard-released-image-rollback.md` document the shipped lock, evidence, bounded retention, and rerun/rollback posture.
 
 ### U7. Verify the policy on the production deployment path
 
@@ -361,7 +390,17 @@ flowchart TB
   - Integration: normal deployment prunes eligible unused images, passes the floor, deploys the exact digest, and leaves persistent volumes/data intact.
   - Integration: same-target rerun succeeds from observed host state and emits complete redacted evidence.
   - Integration: audit PR contains the digest verified by the completed versioned transaction and is opened only after that deployment succeeds.
+
+#### Shipped evidence
+
+- **R1, R10, R13:** A separate production lock drill held `/run/dashboard-deploy/lock` for 240 seconds. The contender waited 180.241 seconds, exited 75, and stopped before payload decode or mutation. This drill was separate from the deployment runs below.
+- **R2-R8, R10-R12:** Production run `30785307051` replaced `2026.08.0` with `2026.08.1`, verified dashboard digest `sha256:85c114ef372d1aa99a281797be48a43dd651c7c0e2b878f302d94e73dd1f2f64`, and retained the prior dashboard digest locally after convergence.
+- **R7, R11:** Audit PR `#1021` pinned that exact digest. Its merge was intentionally excluded from automatic deployment so the audit write-back could not create a deployment loop.
+- **R12, R13:** Explicit environment-gated same-target run `30786511189` used committed-pin/cache mode, reconverged the identical digest, passed capacity, persistent-state, normal lock acquisition, and health evidence, and opened no audit PR.
+- The prior image remained inspectable immediately after replacement; the guarantee ends at the next deployment attempt's pre-prune phase.
+
 - **Verification:** Production remains healthy, all target/Compose/runtime/audit identities match, at least 6 GiB remains free after convergence, persistent data/volumes remain, and the replaced digest is locally inspectable immediately after deployment.
+- **Disposition:** **Completed.** U7's lock, replacement, audit-pin, and same-target proofs are recorded above.
 
 ---
 
@@ -404,12 +443,12 @@ flowchart TB
 - **Reuse boundary:** Keep implementation dashboard-local; gateway remains reference code only.
 - **Lock end:** Release after remote runtime health and digest convergence; keep advisory public probes and point-in-time audit work outside the host mutation lock.
 
-### Deferred to Implementation
+### Resolved During Implementation
 
-- **Remote script factoring:** The implementer may adjust helper names and payload framing while preserving the fixed non-secret program, data-only stdin, single mutating process, lock, and redaction contracts.
-- **Cache characterization:** Confirm Docker's local multi-arch reference representation against the real dashboard image. If exact canonical identity cannot be proven locally, retain the cache check only as a miss detector and require registry acquisition.
-- **Evidence rendering:** Exact human-readable formatting may follow existing deploy log style as long as machine-significant values remain deterministic and secrets stay redacted.
-- **Shell behavior harness:** Choose the smallest executable test harness that exercises failure ordering without adding production command configurability or file-content tests.
+- **Remote script factoring:** Implemented in `apps/dashboard/src/remote-deploy.ts` with a fixed non-secret program, data-only framed stdin, one mutating process, kernel lock, sanitized environment, and redacted evidence boundaries. No ControlMaster or secondary mutating session was retained.
+- **Cache characterization:** The shipped path verifies every staged image by exact canonical `repository@digest` before deciding to pull; committed-pin same-target production evidence exercised the cache path successfully.
+- **Evidence rendering:** Implemented as deterministic, allowlisted stage and evidence lines, including post-convergence capacity, persistent-state, prior-image, and normalized runtime identity readbacks.
+- **Shell behavior harness:** Implemented with the unprivileged deterministic harness for ordering and failure tests, a real Linux kernel-flock lifecycle test, an observed stage barrier rather than a fixed sleep, and separate BSD/GNU `stat` paths. Caller timeout tests cover `TERM`, `KILL`, reap, and settled output readers.
 
 ---
 
@@ -484,11 +523,13 @@ flowchart TB
 ## Sources and References
 
 - **Origin document:** `docs/brainstorms/2026-08-01-dashboard-deploy-image-retention-requirements.md`
-- **Primary implementation:** `apps/dashboard/src/deploy.ts`
-- **Primary tests:** `apps/dashboard/src/deploy.test.ts`
+- **Primary implementation:** `apps/dashboard/src/deploy.ts`, `apps/dashboard/src/remote-deploy.ts`
+- **Primary tests:** `apps/dashboard/src/deploy.test.ts`, `apps/dashboard/src/remote-deploy.test.ts`
 - **Workflow:** `.github/workflows/deploy-dashboard.yaml`
 - **CLI entry:** `packages/cli/src/commands/dashboard/deploy.ts`
 - **Gateway cleanup precedent:** `apps/gateway/src/deploy.ts`
 - **Rollback runbook:** `docs/runbooks/dashboard-released-image-rollback.md`
+- **Shipped proof solution:** [`docs/solutions/workflow-issues/dashboard-deploy-proof-replacement-audit-same-target-2026-08-03.md`](../solutions/workflow-issues/dashboard-deploy-proof-replacement-audit-same-target-2026-08-03.md)
+- **Linux harness solution:** [`docs/solutions/workflow-issues/linux-deploy-harness-kernel-semantics-and-deadlines-2026-08-03.md`](../solutions/workflow-issues/linux-deploy-harness-kernel-semantics-and-deadlines-2026-08-03.md)
 - **Incident recovery context:** dashboard release `2026.07.43` and infra audit PR `#994`
 - **External:** util-linux `flock(1)`, Docker image-prune docs, Linux `findmnt(8)`/`statfs(2)`, and Bun subprocess docs

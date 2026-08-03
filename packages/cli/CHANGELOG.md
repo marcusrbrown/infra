@@ -1,5 +1,23 @@
 # @marcusrbrown/infra
 
+## 0.15.1
+### Patch Changes
+
+
+- Use dedicated `AGENT_AWS_*` credentials and a restricted child environment for `agent storage` AWS preflight. ([#1014](https://github.com/marcusrbrown/infra/pull/1014))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1020](https://github.com/marcusrbrown/infra/pull/1020))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1016](https://github.com/marcusrbrown/infra/pull/1016))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.114` to `7.2.115` ([#1018](https://github.com/marcusrbrown/infra/pull/1018))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.113` to `7.2.114` ([#1015](https://github.com/marcusrbrown/infra/pull/1015))
+
 ## 0.15.0
 ### Minor Changes
 

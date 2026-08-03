@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.15.2
+### Patch Changes
+
+
+- Align agent S3 IAM grants and handoff manifests with the pinned `fro-bot/agent@v0.96.0` key-layout contract. ([#1022](https://github.com/marcusrbrown/infra/pull/1022))
+
 ## 0.15.1
 ### Patch Changes
 

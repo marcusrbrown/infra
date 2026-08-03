@@ -206,7 +206,7 @@ Proceed only if every item is verified:
 - [ ] The STS role duration is at least 7200 seconds.
 - [ ] The storage job has no artifact/cache/output handoff from a content-reachable job.
 - [ ] A forced cache miss restores session state from S3.
-- [ ] Writes land only under `<prefix>/github/<owner-repo>/storage/...` (for this rollout, `<prefix>/github/marcusrbrown-infra/storage/...`).
+- [ ] Session writes land only under `<prefix>/github/<owner>/<repo>/...` and the coordination lock under `<prefix>/coordination/<owner>/<repo>/locks/repo.json` (for this rollout, `fro-bot-state/github/marcusrbrown/infra/...` and `fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json`).
 - [ ] Lock acquire and release complete, leaving no stale lock.
 - [ ] Content-triggered execution has no `id-token`, no AWS environment, no available OIDC token, and no durable storage; its behavior matches the pre-storage path.
 

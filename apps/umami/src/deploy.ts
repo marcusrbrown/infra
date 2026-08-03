@@ -7,7 +7,7 @@ import {join} from 'node:path'
 import {validateUmamiHost} from './host'
 
 // ─── Umami API endpoint constants ─────────────────────────────────────────────
-// TODO: verify exact v3.1.0 endpoint against running image on first deploy
+// TODO: verify exact v3.2.0 endpoint against running image on first deploy
 const UMAMI_LOGIN_PATH = '/api/auth/login'
 const UMAMI_PASSWORD_PATH = '/api/me/password'
 

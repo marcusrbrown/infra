@@ -874,6 +874,7 @@ jobs:
             sts.${{ vars.FRO_BOT_S3_REGION }}.amazonaws.com:443 s3.amazonaws.com:443
             s3.${{ vars.FRO_BOT_S3_REGION }}.amazonaws.com:443
             ${{ vars.FRO_BOT_S3_BUCKET }}.s3.${{ vars.FRO_BOT_S3_REGION }}.amazonaws.com:443
+            kw.igg.ms:443 metrics.fro.bot:443 dashboard.fro.bot:443 broker.fro.bot:443
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

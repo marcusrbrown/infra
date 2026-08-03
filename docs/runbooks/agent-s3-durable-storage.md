@@ -137,13 +137,14 @@ The operator applies the verifier's diff to `.github/workflows/fro-bot.yaml`. Th
 
 The storage job must also have an explicit positive `timeout-minutes` value. Replace `timeout: 0`; an unbounded job is not an acceptable storage contract. The `aws-actions/configure-aws-credentials` step must request `role-duration-seconds` of at least `7200`, and its `role-session-name` must include the GitHub run ID (and attempt when available) for CloudTrail attribution.
 
-The storage job's harden-runner or equivalent egress policy must allow only:
+The storage job's harden-runner (or equivalent) egress policy stays in `block` mode as defense-in-depth — the scheduled autoheal run ingests untrusted content (issue/PR bodies, CI logs, other repos, live pages) and the job holds credentials (`FRO_BOT_PAT`, and STS/OIDC material reachable through the action's process tree), so an allowlist bounds arbitrary-host exfiltration. It must allow the exact set the storage job needs and nothing more:
 
-- GitHub's OIDC endpoint;
-- AWS STS; and
-- the regional S3 endpoint for the provisioned bucket.
+- GitHub's OIDC endpoint, AWS STS, and the regional S3 endpoint for the provisioned bucket (durable storage);
+- `github.com`, `*.githubusercontent.com`, `registry.npmjs.org`, `nodejs.org` (checkout, `bun install`, `npx agent-browser` binary download);
+- `cliproxy.fro.bot` (model calls); and
+- the deployment health hosts the autoheal prompt probes and reviews (`kw.igg.ms`, `metrics.fro.bot`, `dashboard.fro.bot`, `broker.fro.bot`).
 
-It must not reopen arbitrary outbound egress. Action references in workflow files use `.yaml` files and immutable SHA pins with version comments.
+Because it is fail-closed, a missing host silently breaks the corresponding report-only check (see the `#1026` regression: the four health hosts were absent, so deploy-health curls and the live-site review failed and filed a false outage). Add hosts the autoheal legitimately needs; do not switch to unrestricted egress. Action references in workflow files use `.yaml` files and immutable SHA pins with version comments.
 
 ### 5. Run the verifier again
 

@@ -190,8 +190,8 @@ const bucketConfig: AgentBucketConfig = {
   region: 'us-west-2',
   expectedBucketOwner: '111122223333',
   s3Prefix: 'fro-bot-state',
-  sessionPrefix: 'fro-bot-state/github/marcusrbrown-infra/storage',
-  metadataArtifactsPrefix: 'fro-bot-state/github/marcusrbrown-infra/metadata',
+  sessionPrefix: 'fro-bot-state/github/marcusrbrown/infra',
+  metadataArtifactsPrefix: 'fro-bot-state/github/marcusrbrown/infra/metadata',
 }
 
 const storagePolicyConfig = {
@@ -212,8 +212,8 @@ const teardownManifest = {
   bucket_region: bucketConfig.region,
   expected_bucket_owner: bucketConfig.expectedBucketOwner,
   s3_prefix: 'fro-bot-state',
-  session_prefix: 'fro-bot-state/github/marcusrbrown-infra/storage/',
-  lock_key: 'fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock',
+  session_prefix: 'fro-bot-state/github/marcusrbrown/infra/',
+  lock_key: 'fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json',
   role_name: 'fro-bot-agent-storage-marcusrbrown-infra',
   role_arn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra',
   policy_name: 'fro-bot-agent-storage-marcusrbrown-infra',
@@ -304,13 +304,13 @@ function teardownRepository(): AgentRepositoryConfig {
 const canonicalLifecycleRules = [
   {
     ID: 'fro-bot-agent-session-90d',
-    Filter: {Prefix: 'fro-bot-state/github/marcusrbrown-infra/storage/'},
+    Filter: {Prefix: 'fro-bot-state/github/marcusrbrown/infra/'},
     Status: 'Enabled',
     Expiration: {Days: 90},
   },
   {
     ID: 'fro-bot-agent-metadata-30d',
-    Filter: {Prefix: 'fro-bot-state/github/marcusrbrown-infra/metadata/'},
+    Filter: {Prefix: 'fro-bot-state/github/marcusrbrown/infra/metadata/'},
     Status: 'Enabled',
     Expiration: {Days: 30},
   },
@@ -710,7 +710,7 @@ describe('GitHub OIDC provider provisioning', () => {
     expect(manifest.repository_owner_id).toBe(roleRepository.repositoryOwnerId)
     expect(manifest.role_name).toBe('fro-bot-agent-storage-marcusrbrown-infra')
     expect(manifest.role_arn).toBe('arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra')
-    expect(manifest.lock_key).toBe('fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock')
+    expect(manifest.lock_key).toBe('fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json')
     expect(manifest.policy_name).toBe('fro-bot-agent-storage-marcusrbrown-infra')
     expect(manifest.action_ref_verified).toBe(true)
     expect(manifest.key_layout_version).toBe(AGENT_ACTION_LAYOUT_VERSION)
@@ -812,7 +812,7 @@ describe('GitHub OIDC provider provisioning', () => {
     expect(manifest.bucket_region).toBe(bucketConfig.region)
     expect(manifest.expected_bucket_owner).toBe(bucketConfig.expectedBucketOwner)
     expect(manifest.s3_prefix).toBe('fro-bot-state')
-    expect(manifest.session_prefix).toBe('fro-bot-state/github/marcusrbrown-infra/storage/')
+    expect(manifest.session_prefix).toBe('fro-bot-state/github/marcusrbrown/infra/')
     expect(String(manifest.s3_prefix).endsWith('/')).toBe(false)
     const rebuiltLayout = buildAgentKeyLayout(
       String(manifest.owner),
@@ -1012,14 +1012,14 @@ describe('per-repo IAM storage policy', () => {
       Sid: 'AllowSessionObjects',
       Effect: 'Allow',
       Action: ['s3:GetObject', 's3:PutObject'],
-      Resource: ['arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/github/marcusrbrown-infra/storage/*'],
+      Resource: ['arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/github/marcusrbrown/infra/*'],
     })
     expect(lockAllow).toEqual({
       Sid: 'AllowCoordinationLock',
       Effect: 'Allow',
       Action: ['s3:DeleteObject', 's3:GetObject', 's3:PutObject'],
       Resource: [
-        'arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock',
+        'arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json',
       ],
     })
   })
@@ -1033,7 +1033,7 @@ describe('per-repo IAM storage policy', () => {
       Sid: 'DenySessionDeletes',
       Effect: 'Deny',
       Action: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
-      Resource: ['arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/github/marcusrbrown-infra/storage/*'],
+      Resource: ['arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/github/marcusrbrown/infra/*'],
     })
   })
 
@@ -1050,8 +1050,8 @@ describe('per-repo IAM storage policy', () => {
       Condition: {
         StringLike: {
           's3:prefix': [
-            'fro-bot-state/github/marcusrbrown-infra/storage/*',
-            'fro-bot-state/coordination/github/marcusrbrown-infra/locks/*',
+            'fro-bot-state/github/marcusrbrown/infra/*',
+            'fro-bot-state/coordination/marcusrbrown/infra/locks/*',
           ],
         },
       },
@@ -1105,8 +1105,8 @@ describe('per-repo IAM storage policy', () => {
       changed: false,
       policyName: storagePolicyConfig.roleName,
       keyLayoutVersion: AGENT_ACTION_LAYOUT_VERSION,
-      sessionPrefix: 'fro-bot-state/github/marcusrbrown-infra/storage/',
-      lockKey: 'fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock',
+      sessionPrefix: 'fro-bot-state/github/marcusrbrown/infra/',
+      lockKey: 'fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json',
     })
     expect(calls.map(call => call.name)).toEqual(['GetRolePolicyCommand'])
 
@@ -1123,8 +1123,8 @@ describe('per-repo IAM storage policy', () => {
       changed: true,
       policyName: storagePolicyConfig.roleName,
       keyLayoutVersion: AGENT_ACTION_LAYOUT_VERSION,
-      sessionPrefix: 'fro-bot-state/github/marcusrbrown-infra/storage/',
-      lockKey: 'fro-bot-state/coordination/github/marcusrbrown-infra/locks/storage.lock',
+      sessionPrefix: 'fro-bot-state/github/marcusrbrown/infra/',
+      lockKey: 'fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json',
     })
     expect(calls.map(call => call.name)).toEqual([
       'GetRolePolicyCommand',
@@ -1162,7 +1162,7 @@ describe('agent action-state S3 bucket provisioning', () => {
       bucketRegion: bucketConfig.region,
       expectedBucketOwner: bucketConfig.expectedBucketOwner,
       s3Prefix: 'fro-bot-state/',
-      sessionPrefix: 'fro-bot-state/github/marcusrbrown-infra/storage/',
+      sessionPrefix: 'fro-bot-state/github/marcusrbrown/infra/',
     })
     expect(calls.map(call => call.name)).toContain('CreateBucketCommand')
     expect(calls.map(call => call.name)).toContain('PutPublicAccessBlockCommand')

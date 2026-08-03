@@ -18,7 +18,7 @@ The workflow uses native GitHub OIDC → AWS STS. No static AWS credentials are 
 
 Before provisioning:
 
-1. Install and authenticate the AWS CLI and GitHub CLI on the operator machine. The provisioner uses the AWS SDK with dedicated `AGENT_AWS_*` variables. The storage command shells out to `aws` for readback prechecks, so `aws` must be available on `PATH` and authenticated for the target account.
+1. Install and authenticate the AWS CLI and GitHub CLI on the operator machine. The provisioner and storage readback use dedicated `AGENT_AWS_*` variables; `agent storage` ignores ambient AWS identities and runs `aws` with a restricted child environment. `aws` must be available on `PATH`.
 2. Create dedicated AWS provisioning credentials with only the IAM and S3 permissions required by the provisioner. Do not use the gateway's S3 credentials and do not rely on ambient `AWS_*` credentials for provisioning.
 3. Seed the repository-root `.env` with the dedicated operator credentials and provisioner inputs:
 
@@ -102,10 +102,13 @@ The command performs fail-closed checks before writing any S3 variable:
 
 - the manifest's owner, repository, repository ID, and owner ID match live GitHub metadata;
 - the IAM role and S3 bucket exist, have the expected owner, and have the manifest's region;
-- the repository uses the approved default OIDC subject configuration; and
-- static AWS credential options are absent.
+- the repository uses the approved default OIDC subject configuration;
+- static AWS credential options are absent; and
+- the workflow and protected environment satisfy the storage contract.
 
-After those checks it writes exactly these non-secret repository variables:
+The AWS readback requires `AGENT_AWS_ACCESS_KEY_ID` and `AGENT_AWS_SECRET_ACCESS_KEY`; `AGENT_AWS_SESSION_TOKEN` and `AGENT_AWS_REGION` are optional. Credential bytes are never placed in AWS argv, error text, logs, or repository values. If any precheck or workflow verification fails, no repository variables are written.
+
+After all checks pass it writes exactly these non-secret repository variables:
 
 | Variable                           | Value                            |
 | ---------------------------------- | -------------------------------- |
@@ -115,7 +118,7 @@ After those checks it writes exactly these non-secret repository variables:
 | `FRO_BOT_S3_PREFIX`                | Manifest `s3_prefix`             |
 | `FRO_BOT_S3_EXPECTED_BUCKET_OWNER` | Manifest `expected_bucket_owner` |
 
-The command then invokes the workflow verifier. If the workflow is not yet compliant, the command reports the violations and emits a pasteable diff; it does not modify the workflow. Variables written before a workflow failure are still non-secret configuration, so apply the diff and rerun the storage command to complete verification.
+If the workflow is not yet compliant, the command reports the violations and emits a pasteable diff; it does not modify the workflow. Apply the diff and rerun the storage command to complete verification.
 
 ### 4. Apply the `fro-bot.yaml` job split
 

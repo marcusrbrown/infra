@@ -1,12 +1,19 @@
 /// <reference types="bun" />
 
-import {describe, expect, it, mock} from 'bun:test'
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 
+import {afterEach, beforeEach, describe, expect, it, mock, spyOn} from 'bun:test'
+
+import {runCommand} from './setup-core/gh'
 import {
+  buildAwsChildEnv,
   runStorageSetup,
   runStorageTeardown,
   STORAGE_VARIABLE_NAMES,
   unwireStorageVariables,
+  verifyProvisionedResources,
   type StorageManifest,
   type StorageSetupDeps,
 } from './storage'
@@ -64,7 +71,284 @@ function makeDeps(writes: {kind: string; name: string; value: string}[], overrid
   } satisfies StorageSetupDeps
 }
 
+const storageEnvKeys = [
+  'AGENT_AWS_ACCESS_KEY_ID',
+  'AGENT_AWS_SECRET_ACCESS_KEY',
+  'AGENT_AWS_SESSION_TOKEN',
+  'AGENT_AWS_REGION',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'AWS_DEFAULT_REGION',
+  'AWS_CONFIG_FILE',
+  'AWS_SHARED_CREDENTIALS_FILE',
+  'AWS_CA_BUNDLE',
+  'AWS_ENDPOINT_URL',
+  'AWS_PROFILE',
+  'AWS_DEFAULT_PROFILE',
+  'AWS_ROLE_ARN',
+  'AWS_WEB_IDENTITY_TOKEN_FILE',
+  'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+  'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+  'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+  'AWS_EC2_METADATA_DISABLED',
+  'AWS_REGION',
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'LANG',
+  'LANGUAGE',
+  'LC_ALL',
+  'LC_CTYPE',
+  'UNRELATED_REPO_SECRET',
+] as const
+
+let storageEnvBeforeEach: Record<string, string | undefined>
+
+beforeEach(() => {
+  storageEnvBeforeEach = Object.fromEntries(storageEnvKeys.map(key => [key, process.env[key]]))
+})
+
+afterEach(() => {
+  for (const key of storageEnvKeys) {
+    const value = storageEnvBeforeEach[key]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+})
+
+function setStorageEnv(values: Partial<Record<(typeof storageEnvKeys)[number], string | undefined>>): void {
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+}
+
 describe('agent S3 durable storage wiring', () => {
+  it('builds a dedicated AWS child environment with explicit preservation and default denial', () => {
+    const dedicatedAccessKey = 'agent-access-fixture'
+    const dedicatedSecretKey = 'agent-secret-fixture'
+    const ambientAccessKey = 'ambient-access-fixture'
+    const ambientSecretKey = 'ambient-secret-fixture'
+    const sourceEnv = {
+      AGENT_AWS_ACCESS_KEY_ID: dedicatedAccessKey,
+      AGENT_AWS_SECRET_ACCESS_KEY: dedicatedSecretKey,
+      AGENT_AWS_REGION: undefined,
+      AWS_ACCESS_KEY_ID: ambientAccessKey,
+      AWS_SECRET_ACCESS_KEY: ambientSecretKey,
+      AWS_REGION: 'ambient-region',
+      AWS_DEFAULT_REGION: 'ambient-default-region',
+      AWS_CONFIG_FILE: '/tmp/ambient-config',
+      AWS_SHARED_CREDENTIALS_FILE: '/tmp/ambient-credentials',
+      AWS_CA_BUNDLE: '/tmp/ambient-ca.pem',
+      AWS_ENDPOINT_URL: 'http://ambient-endpoint.invalid',
+      AWS_PROFILE: 'gateway-profile',
+      AWS_DEFAULT_PROFILE: 'gateway-profile',
+      AWS_ROLE_ARN: 'arn:aws:iam::999999999999:role/ambient',
+      AWS_WEB_IDENTITY_TOKEN_FILE: '/tmp/ambient-token',
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: '/v2/credentials/ambient',
+      AWS_CONTAINER_CREDENTIALS_FULL_URI: 'http://169.254.170.2/ambient',
+      AWS_CONTAINER_AUTHORIZATION_TOKEN: 'ambient-auth-fixture',
+      AWS_EC2_METADATA_DISABLED: 'false',
+      AWS_SESSION_TOKEN: 'ambient-session-fixture',
+      PATH: '/fixture/bin',
+      HOME: '/fixture/home',
+      TMPDIR: '/fixture/tmp',
+      LANG: 'C.UTF-8',
+      LANGUAGE: 'en_US',
+      LC_ALL: 'C.UTF-8',
+      LC_CTYPE: 'C.UTF-8',
+      UNRELATED_REPO_SECRET: 'unrelated-fixture',
+    }
+    const childEnv = buildAwsChildEnv(manifest, sourceEnv)
+
+    expect(childEnv).toEqual(
+      expect.objectContaining({
+        AWS_ACCESS_KEY_ID: dedicatedAccessKey,
+        AWS_SECRET_ACCESS_KEY: dedicatedSecretKey,
+        AWS_REGION: manifest.bucket_region,
+        AWS_DEFAULT_REGION: manifest.bucket_region,
+        AWS_CONFIG_FILE: '/dev/null',
+        AWS_SHARED_CREDENTIALS_FILE: '/dev/null',
+        PATH: sourceEnv.PATH,
+        HOME: sourceEnv.HOME,
+        TMPDIR: sourceEnv.TMPDIR,
+        LANG: sourceEnv.LANG,
+        LANGUAGE: sourceEnv.LANGUAGE,
+        LC_ALL: sourceEnv.LC_ALL,
+        LC_CTYPE: sourceEnv.LC_CTYPE,
+      }),
+    )
+
+    for (const key of [
+      'AWS_CA_BUNDLE',
+      'AWS_ENDPOINT_URL',
+      'AWS_PROFILE',
+      'AWS_DEFAULT_PROFILE',
+      'AWS_ROLE_ARN',
+      'AWS_WEB_IDENTITY_TOKEN_FILE',
+      'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+      'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+      'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+      'AWS_EC2_METADATA_DISABLED',
+      'AWS_SESSION_TOKEN',
+      'UNRELATED_REPO_SECRET',
+    ]) {
+      expect(childEnv).not.toHaveProperty(key)
+    }
+    expect(childEnv).not.toHaveProperty('AGENT_AWS_ACCESS_KEY_ID')
+    expect(childEnv).not.toHaveProperty('AGENT_AWS_SECRET_ACCESS_KEY')
+    expect(childEnv.AWS_REGION).not.toBe('ambient-region')
+    expect(childEnv.AWS_DEFAULT_REGION).not.toBe('ambient-default-region')
+  })
+
+  it('neutralizes ambient AWS config and credentials files under the preserved HOME', () => {
+    const home = mkdtempSync(join(tmpdir(), 'agent-storage-home-'))
+    const awsDir = join(home, '.aws')
+    mkdirSync(awsDir)
+    writeFileSync(join(awsDir, 'config'), '[default]\nendpoint_url = http://ambient-endpoint.invalid\n')
+    writeFileSync(join(awsDir, 'credentials'), '[default]\naws_access_key_id = ambient-access-fixture\n')
+
+    try {
+      const childEnv = buildAwsChildEnv(manifest, {
+        AGENT_AWS_ACCESS_KEY_ID: 'agent-access-fixture',
+        AGENT_AWS_SECRET_ACCESS_KEY: 'agent-secret-fixture',
+        HOME: home,
+      })
+
+      expect(childEnv).toEqual(
+        expect.objectContaining({
+          HOME: home,
+          AWS_CONFIG_FILE: '/dev/null',
+          AWS_SHARED_CREDENTIALS_FILE: '/dev/null',
+        }),
+      )
+    } finally {
+      rmSync(home, {recursive: true, force: true})
+    }
+  })
+
+  it('fails before spawning aws when dedicated credentials are missing, partial, or whitespace-only', async () => {
+    const spawnSpy = spyOn(Bun, 'spawn')
+    const cases = [
+      {AGENT_AWS_ACCESS_KEY_ID: undefined, AGENT_AWS_SECRET_ACCESS_KEY: undefined},
+      {AGENT_AWS_ACCESS_KEY_ID: 'partial-access-fixture', AGENT_AWS_SECRET_ACCESS_KEY: undefined},
+      {AGENT_AWS_ACCESS_KEY_ID: undefined, AGENT_AWS_SECRET_ACCESS_KEY: 'partial-secret-fixture'},
+      {AGENT_AWS_ACCESS_KEY_ID: '   ', AGENT_AWS_SECRET_ACCESS_KEY: 'dedicated-secret-fixture'},
+      {AGENT_AWS_ACCESS_KEY_ID: 'dedicated-access-fixture', AGENT_AWS_SECRET_ACCESS_KEY: '\t'},
+    ] as const
+
+    try {
+      for (const values of cases) {
+        setStorageEnv(values)
+        let failure: unknown
+        try {
+          await verifyProvisionedResources(manifest)
+        } catch (error) {
+          failure = error
+        }
+
+        expect(failure).toBeInstanceOf(Error)
+        const message = failure instanceof Error ? failure.message : ''
+        expect(message).toMatch(/AGENT_AWS_ACCESS_KEY_ID.*AGENT_AWS_SECRET_ACCESS_KEY/)
+        expect(message).not.toContain('partial-access-fixture')
+        expect(message).not.toContain('partial-secret-fixture')
+      }
+      expect(spawnSpy).not.toHaveBeenCalled()
+    } finally {
+      spawnSpy.mockRestore()
+    }
+  })
+
+  it('passes the dedicated session token only when configured and removes ambient session state otherwise', () => {
+    const sourceEnv = {
+      AGENT_AWS_ACCESS_KEY_ID: 'agent-access-fixture',
+      AGENT_AWS_SECRET_ACCESS_KEY: 'agent-secret-fixture',
+      AGENT_AWS_SESSION_TOKEN: 'agent-session-fixture',
+      AWS_SESSION_TOKEN: 'ambient-session-fixture',
+    }
+    expect(buildAwsChildEnv(manifest, sourceEnv).AWS_SESSION_TOKEN).toBe('agent-session-fixture')
+
+    expect(buildAwsChildEnv(manifest, {...sourceEnv, AGENT_AWS_SESSION_TOKEN: undefined})).not.toHaveProperty(
+      'AWS_SESSION_TOKEN',
+    )
+  })
+
+  it('prefers the dedicated region and falls back to the manifest region', () => {
+    const sourceEnv = {
+      AGENT_AWS_ACCESS_KEY_ID: 'agent-access-fixture',
+      AGENT_AWS_SECRET_ACCESS_KEY: 'agent-secret-fixture',
+      AGENT_AWS_REGION: 'eu-west-1',
+    }
+    expect(buildAwsChildEnv(manifest, sourceEnv).AWS_REGION).toBe('eu-west-1')
+    expect(buildAwsChildEnv(manifest, {...sourceEnv, AGENT_AWS_REGION: undefined}).AWS_REGION).toBe(
+      manifest.bucket_region,
+    )
+  })
+
+  it('keeps injected AWS runners hermetic and does not require dedicated process credentials', async () => {
+    setStorageEnv({
+      AGENT_AWS_ACCESS_KEY_ID: undefined,
+      AGENT_AWS_SECRET_ACCESS_KEY: undefined,
+      AWS_ACCESS_KEY_ID: undefined,
+      AWS_SECRET_ACCESS_KEY: undefined,
+    })
+    const runAws = mock(async (args: string[]) => {
+      if (args[0] === 'iam') return makeGhResult(JSON.stringify({Role: {Arn: manifest.role_arn}}))
+      if (args[1] === 'head-bucket') return makeGhResult('')
+      return makeGhResult(JSON.stringify({LocationConstraint: manifest.bucket_region}))
+    })
+
+    await expect(
+      runStorageSetup('owner/repo', {manifest: '-'}, makeDeps([], {verifyResources: undefined, runAws})),
+    ).resolves.toBeUndefined()
+    expect(runAws).toHaveBeenCalledTimes(3)
+  })
+
+  it('redacts dedicated credentials from default AWS stdout, stderr, and thrown preflight errors', async () => {
+    const accessKey = 'agent-access-redaction-fixture'
+    const secretKey = 'agent-secret-redaction-fixture'
+    const sessionToken = 'agent-session-redaction-fixture'
+    setStorageEnv({
+      AGENT_AWS_ACCESS_KEY_ID: accessKey,
+      AGENT_AWS_SECRET_ACCESS_KEY: secretKey,
+      AGENT_AWS_SESSION_TOKEN: sessionToken,
+    })
+
+    let captured: {stdout: string; stderr: string} | undefined
+    const awsCalls: string[][] = []
+    const runAwsCommand: NonNullable<StorageSetupDeps['runAwsCommand']> = async (args, env, redactValues) => {
+      awsCalls.push(args)
+      const outputScript = [
+        'process.stdout.write("stdout:" + process.env.AWS_ACCESS_KEY_ID + ":" + process.env.AWS_SECRET_ACCESS_KEY + ":" + process.env.AWS_SESSION_TOKEN);',
+        'process.stderr.write("stderr:" + process.env.AWS_ACCESS_KEY_ID + ":" + process.env.AWS_SECRET_ACCESS_KEY + ":" + process.env.AWS_SESSION_TOKEN);',
+      ].join(' ')
+      const result = await runCommand('bun', ['-e', outputScript], 1_000, undefined, env, redactValues)
+      captured = result
+      return {...result, exitCode: 1}
+    }
+
+    const failure = runStorageSetup(
+      'owner/repo',
+      {manifest: '-'},
+      makeDeps([], {verifyResources: undefined, runAwsCommand}),
+    )
+    await expect(failure).rejects.toThrow('AWS IAM role preflight failed')
+
+    expect(captured?.stdout).toBe('stdout:[REDACTED]:[REDACTED]:[REDACTED]')
+    expect(captured?.stderr).toBe('stderr:[REDACTED]:[REDACTED]:[REDACTED]')
+    expect(awsCalls).toHaveLength(1)
+    for (const value of [accessKey, secretKey, sessionToken]) {
+      expect(awsCalls[0]).not.toContain(value)
+    }
+    const error = await failure.catch(error_ => error_)
+    const message = error instanceof Error ? error.message : String(error)
+    expect(message).toContain('[REDACTED]')
+    expect(message).not.toContain(accessKey)
+    expect(message).not.toContain(secretKey)
+    expect(message).not.toContain(sessionToken)
+  })
+
   it('writes exactly the non-secret S3 variables after all prechecks pass', async () => {
     const writes: {kind: string; name: string; value: string}[] = []
 

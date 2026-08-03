@@ -108,6 +108,8 @@ The command performs fail-closed checks before writing any S3 variable:
 
 The AWS readback requires `AGENT_AWS_ACCESS_KEY_ID` and `AGENT_AWS_SECRET_ACCESS_KEY`; `AGENT_AWS_SESSION_TOKEN` and `AGENT_AWS_REGION` are optional. Credential bytes are never placed in AWS argv, error text, logs, or repository values. If any precheck or workflow verification fails, no repository variables are written.
 
+The `aws` subprocess runs in a hermetic, default-deny child environment sourced only from these dedicated `AGENT_AWS_*` values (plus `PATH`/`HOME`/`TMPDIR`/locale), with `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` forced to `/dev/null`. This is deliberate: because Bun auto-loads the repo-root `.env`, any ambient `AWS_*` values there (for example the object-only gateway identity) would otherwise be inherited by `aws` and silently win over the dedicated identity, failing the readback closed in a way that looks like a resource problem. Preserving `HOME` alone is not enough — without the `/dev/null` overrides the AWS CLI still reads `~/.aws/config` and `~/.aws/credentials`. See [`../solutions/best-practices/dedicated-hermetic-aws-child-env-for-cli-subprocess-2026-08-03.md`](../solutions/best-practices/dedicated-hermetic-aws-child-env-for-cli-subprocess-2026-08-03.md).
+
 After all checks pass it writes exactly these non-secret repository variables:
 
 | Variable                           | Value                            |

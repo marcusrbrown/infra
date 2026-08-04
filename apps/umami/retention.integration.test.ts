@@ -12,10 +12,15 @@ interface CommandResult {
 const appDirectory = new URL('.', import.meta.url).pathname
 const applySqlPath = `${appDirectory}/retention.sql`
 const checkSqlPath = `${appDirectory}/retention-check.sql`
+const postgresImage = 'postgres:15-alpine'
 const dockerProbe = Bun.spawnSync(['docker', 'info'])
 const dockerAvailable = dockerProbe.exitCode === 0
-const dockerReason = dockerAvailable ? '' : dockerProbe.stderr.toString().trim() || 'docker info exited non-zero'
-const integrationTest = dockerAvailable ? it : it.skip
+const imageProbe = dockerAvailable ? Bun.spawnSync(['docker', 'image', 'inspect', postgresImage]) : undefined
+const postgresImageAvailable = imageProbe?.exitCode === 0
+const dockerReason = dockerAvailable
+  ? `required image ${postgresImage} is not available locally`
+  : dockerProbe.stderr.toString().trim() || 'docker info exited non-zero'
+const integrationTest = dockerAvailable && postgresImageAvailable ? it : it.skip
 
 const schemaSql = String.raw`
 CREATE SCHEMA retention_test;
@@ -174,7 +179,7 @@ describe('Umami retention PostgreSQL 15 integration', () => {
         'POSTGRES_HOST_AUTH_METHOD=trust',
         '--env',
         'POSTGRES_USER=umami',
-        'postgres:15-alpine',
+        postgresImage,
       ])
 
       expect(start.exitCode).toBe(0)

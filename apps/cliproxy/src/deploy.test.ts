@@ -3,7 +3,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, mock, spyOn, test} from 'bun:test'
 
-import {applyOAuthModelAliasStep, applyPayloadOverrideStep, deploy, preflightManagementKeyCheck} from './deploy'
+import {applyOAuthModelAliasStep, deploy, preflightManagementKeyCheck} from './deploy'
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -62,6 +62,19 @@ remote-management:
   allow-remote: true
   secret-key: ''
 api-keys: []
+payload:
+  override:
+    - # managed-by: infra/cliproxy-clear-thinking
+      models:
+        - name: claude-opus-4-8
+          protocol: claude
+        - name: claude-sonnet-4-6
+          protocol: claude
+      params:
+        context_management: {edits: []}
+`
+
+const ALIAS_WITH_PAYLOAD_YAML = `${ALIAS_YAML.trimEnd()}
 payload:
   override:
     - # managed-by: infra/cliproxy-clear-thinking
@@ -182,55 +195,6 @@ afterEach(() => {
 // ─── preflightManagementKeyCheck ──────────────────────────────────────────────
 
 describe('preflightManagementKeyCheck', () => {
-  test('throws before any network when a non-empty payload override lacks the management key', async () => {
-    const configPath = join(tmpDir, 'config.yaml')
-    const composePath = join(tmpDir, 'docker-compose.yaml')
-    const caddyPath = join(tmpDir, 'Caddyfile')
-    writeFileSync(configPath, PAYLOAD_OVERRIDE_YAML)
-    writeFileSync(composePath, '')
-    writeFileSync(caddyPath, '')
-
-    const env = makeDeployEnv({CLIPROXY_MANAGEMENT_KEY: ''})
-    const fetchFn = mock(
-      async () => new Response('should not be called', {status: 200}),
-    ) as unknown as typeof globalThis.fetch
-
-    await expect(preflightManagementKeyCheck(env, {config: configPath}, fetchFn)).rejects.toThrow(
-      /payload.override.*CLIPROXY_MANAGEMENT_KEY is not set/,
-    )
-    expect(fetchFn).not.toHaveBeenCalled()
-  })
-
-  test('full deploy rejects before SSH spawn when the payload override lacks the management key', async () => {
-    const configPath = join(tmpDir, 'config.yaml')
-    const composePath = join(tmpDir, 'docker-compose.yaml')
-    const caddyPath = join(tmpDir, 'Caddyfile')
-    writeFileSync(configPath, PAYLOAD_OVERRIDE_YAML)
-    writeFileSync(composePath, '')
-    writeFileSync(caddyPath, '')
-    const spawnFn = mock(() => {
-      throw new Error('SSH spawn must not be reached')
-    })
-    const fetchFn = mock(
-      async () => new Response('network must not be reached', {status: 200}),
-    ) as unknown as typeof globalThis.fetch
-
-    await expect(
-      deploy({
-        files: {
-          compose: composePath,
-          config: configPath,
-          caddy: caddyPath,
-        },
-        env: makeDeployEnv({CLIPROXY_MANAGEMENT_KEY: ''}),
-        fetch: fetchFn,
-        spawn: spawnFn,
-      }),
-    ).rejects.toThrow(/payload.override.*CLIPROXY_MANAGEMENT_KEY is not set/)
-    expect(spawnFn).not.toHaveBeenCalled()
-    expect(fetchFn).not.toHaveBeenCalled()
-  })
-
   test('throws early when key is empty and alias block is non-empty', async () => {
     const configPath = join(tmpDir, 'config.yaml')
     writeFileSync(configPath, ALIAS_YAML)
@@ -736,33 +700,65 @@ describe('applyOAuthModelAliasStep', () => {
   // Docker Compose stack') and healthCheck(env).
 })
 
-describe('applyPayloadOverrideStep', () => {
-  test('applies the tracked override through raw config GET/PUT/readback', async () => {
+describe('deploy', () => {
+  test('normal deploy preserves an existing server config and never uses the raw config endpoint', async () => {
     const configPath = join(tmpDir, 'config.yaml')
-    writeFileSync(configPath, PAYLOAD_OVERRIDE_YAML)
-    const env = makeDeployEnv()
-    const liveYaml = 'api-keys: [live-client-key]\nauth-dir: /root/.cli-proxy-api\npayload:\n  override: []\n'
-    const requests: {method: string; body?: string}[] = []
-    let candidate = ''
-    let getCount = 0
-    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+    const composePath = join(tmpDir, 'docker-compose.yaml')
+    const caddyPath = join(tmpDir, 'Caddyfile')
+    writeFileSync(configPath, ALIAS_WITH_PAYLOAD_YAML)
+    writeFileSync(composePath, '')
+    writeFileSync(caddyPath, '')
+    delete process.env.CLIPROXY_API_KEY
+
+    const requests: {method: string; url: string; body?: string}[] = []
+    let aliasBody: unknown
+    const fetchFn = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlString = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url
       const method = init?.method ?? 'GET'
       const body = typeof init?.body === 'string' ? init.body : undefined
-      requests.push({method, body})
-      if (method === 'PUT') {
-        candidate = body ?? ''
-        return new Response('', {status: 200})
+      requests.push({method, url: urlString, body})
+      if (urlString.includes('/v0/management/config.yaml')) {
+        throw new Error('raw config endpoint must not be called')
       }
-      getCount++
-      return new Response(getCount === 3 ? candidate : liveYaml, {status: 200})
+      if (urlString.endsWith('/v0/management/oauth-model-alias')) {
+        if (method === 'PUT') {
+          aliasBody = body ? JSON.parse(body) : undefined
+          return new Response('', {status: 200})
+        }
+        return new Response(JSON.stringify({'oauth-model-alias': aliasBody}), {status: 200})
+      }
+      return new Response('', {status: 200})
     }) as unknown as typeof globalThis.fetch
+    const spawnFn = mock((_command: string[]) => ({
+      stdout: new Response('').body,
+      stderr: new Response('').body,
+      exited: Promise.resolve(0),
+    })) as unknown as typeof Bun.spawn
 
-    await expect(applyPayloadOverrideStep(env, {config: configPath}, fetchFn)).resolves.toBeUndefined()
-    expect(requests.filter(request => request.method === 'PUT')).toHaveLength(1)
-    expect(candidate).toContain('managed-by: infra/cliproxy-clear-thinking')
-    expect(candidate).toContain('live-client-key')
-    expect(candidate).not.toContain('api-keys: []')
-    expect(candidate).not.toContain("secret-key: ''")
+    await expect(
+      deploy({
+        files: {compose: composePath, config: configPath, caddy: caddyPath},
+        env: makeDeployEnv(),
+        fetch: fetchFn,
+        spawn: spawnFn,
+      }),
+    ).resolves.toBeUndefined()
+    expect(requests.some(request => request.url.includes('/v0/management/config.yaml'))).toBe(false)
+    const aliasPutIndex = requests.findIndex(
+      request => request.method === 'PUT' && request.url.endsWith('/v0/management/oauth-model-alias'),
+    )
+    const aliasGetIndex = requests.findIndex(
+      request => request.method === 'GET' && request.url.endsWith('/v0/management/oauth-model-alias'),
+    )
+    const healthIndex = requests.findLastIndex(
+      request => request.method === 'GET' && request.url.endsWith('/v0/management/config'),
+    )
+    expect(aliasPutIndex).toBeGreaterThan(-1)
+    expect(aliasGetIndex).toBeGreaterThan(aliasPutIndex)
+    expect(healthIndex).toBeGreaterThan(aliasGetIndex)
+    expect(aliasBody).toMatchObject({claude: expect.any(Array)})
+    expect(aliasBody).not.toHaveProperty('oauth-model-alias')
+    expect(spawnFn).toHaveBeenCalled()
   })
 
   test('fresh deploy skips raw payload apply after uploading tracked config', async () => {

@@ -94,6 +94,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **No secret values in tracked files** — `config/config.json` template has empty `dropboxSecret`; real value injected at build time from env var. (enforced)
 - **Never modify `config/config.json` in CI** — secret goes into `dist/config.json` only.
 - **Never overwrite `config.yaml` on cliproxy server** — runtime API keys live there. Deploy skips upload when file exists; `--force-config` is the explicit override.
+- **Never PUT `/v0/management/config.yaml` from unattended cliproxy deploys** — whole-document replacement is forbidden, including preservation-verified GET/merge/PUT exceptions. Managed config changes must use a field-scoped endpoint; if none exists, automation stops and escalates. Follow `docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md`.
 - **Never use `ssh-keyscan` in CI workflows** — host keys are pinned in `.github/known_hosts`. Provisioning scripts may use `ssh-keyscan` locally via the shared `pinHostKeys` helper in `packages/shared/server/droplet-helpers.ts`. (enforced)
 - **Never `secrets: inherit`** with cross-org reusable workflows. (enforced)
 - **Never use `bundledDependencies`** — Bun's `.bun/` symlink layout creates `../../` paths that npm rejects with E415. (enforced)

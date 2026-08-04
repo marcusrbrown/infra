@@ -10,9 +10,9 @@ deepened: 2026-08-04
 
 ## Overview
 
-CLIProxyAPI (at the current deployed pin `v7.2.117`, tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`) still injects a `context_management` directive — Anthropic's `clear_thinking_20251015` strategy — into outbound Claude request bodies. The regression originated in `v7.2.116` (PR #1031). For older Claude models (`claude-opus-4-8`, `claude-sonnet-4-6`) with extended thinking disabled, Anthropic rejects the request with HTTP `400` (`clear_thinking_20251015 strategy requires thinking to be enabled or adaptive`). `claude-sonnet-5` is unaffected. This makes the older models unreachable through `cliproxy.fro.bot` for any thinking-off client, which broke Fro Bot's required review check until `FRO_BOT_MODEL` was swapped to `claude-sonnet-5` as a stopgap.
+CLIProxyAPI is currently deployed at `v7.2.118@sha256:488d6ba68e55fe26f204df18ed3cd5c7a58aa8f7eacc4bd2e858d7629ad8094f`. The failed incident/source proof below is tied to the prior `v7.2.117` image at tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`, which still injected a `context_management` directive — Anthropic's `clear_thinking_20251015` strategy — into outbound Claude request bodies. The regression originated in `v7.2.116` (PR #1031). For older Claude models (`claude-opus-4-8`, `claude-sonnet-4-6`) with extended thinking disabled, Anthropic rejects the request with HTTP `400` (`clear_thinking_20251015 strategy requires thinking to be enabled or adaptive`). `claude-sonnet-5` is unaffected. This makes the older models unreachable through `cliproxy.fro.bot` for any thinking-off client, which broke Fro Bot's required review check until `FRO_BOT_MODEL` was swapped to `claude-sonnet-5` as a stopgap. No v7.2.118 source equivalence is asserted here.
 
-The fix applies a CLIProxyAPI `payload.override` rule, scoped to the affected Claude models, that sets `context_management` to `{edits: []}` — neutralizing the injected strategy while keeping thinking off. Delivery uses the full-fidelity config endpoint of the pinned `v7.2.117` image (tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`): read the raw live YAML, preserve an operator-only rollback snapshot, merge only the infra-owned override, replace the full YAML document, and read it back before reporting success. cliproxy stays pinned at `v7.2.117`.
+The tracked `config.yaml` retains a CLIProxyAPI `payload.override` rule, scoped to the affected Claude models, that sets `context_management` to `{edits: []}` — the bootstrap/template representation of the intended fix while thinking remains off. Production delivery is currently blocked: the failed PR #1042 approach attempted a raw `/v0/management/config.yaml` PUT and then failed opaque readback, violating the approved field-scoped management pattern. Automation must stop until CLIProxyAPI exposes a safe field-scoped/upstream mechanism. cliproxy stays pinned at `v7.2.118`.
 
 ## Problem Frame
 
@@ -25,12 +25,12 @@ The fix applies a CLIProxyAPI `payload.override` rule, scoped to the affected Cl
 
 - R1. `claude-opus-4-8` and `claude-sonnet-4-6` return normal completions through `cliproxy.fro.bot/v1` with thinking **disabled** (no `clear_thinking` 400).
 - R2. `claude-sonnet-5` remains healthy — no behavior or cost change for the currently-working model.
-- R3. cliproxy stays pinned at `v7.2.117` (tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`); no downgrade, no Renovate hold.
+- R3. cliproxy stays pinned at `v7.2.118@sha256:488d6ba68e55fe26f204df18ed3cd5c7a58aa8f7eacc4bd2e858d7629ad8094f`; no downgrade, no Renovate hold. This current pin is not claimed equivalent to the historical v7.2.117 source proof.
 - R4. Delivery preserves the droplet's runtime `config.yaml` `api-keys` (no `--force-config` overwrite, no key wipe).
 - R5. Thinking stays **off** for the affected models — the fix neutralizes the strategy, it does not enable thinking (avoids cost/behavior change).
 - R6. Change is verified live against the two proven failing models (`claude-opus-4-8`, `claude-sonnet-4-6`) plus the unaffected `claude-sonnet-5` control before #1036 is closed.
 - R7. Full-config handling never exposes client API keys, the management secret, or raw config contents in logs, errors, tests, snapshots, or public evidence.
-- R8. Full-config replacement aborts if the live raw YAML changes between the authoritative read and the write; no automatic rebase or retry may overwrite concurrent operator/automation changes.
+- R8. No unattended whole-document `/v0/management/config.yaml` replacement is allowed; if no field-scoped endpoint exists for the desired field, automation stops and escalates upstream.
 
 ## Scope Boundaries
 
@@ -64,25 +64,23 @@ Reproduced the failure and proved the fix by testing caller-side request bodies 
 
 ### Delivery mechanism (repo research)
 
-- `apps/cliproxy/src/deploy.ts` applies managed config via the management API, not by uploading `config.yaml`. The `oauth-model-alias` step (`packages/shared/cliproxy/management.ts` → `applyOAuthModelAlias`/`readBackOAuthModelAlias`) is the pattern: `PUT` the bare object to a `/v0/management/...` endpoint, read back, retry-on-mismatch, fail closed. Auth is `x-management-key: <CLIPROXY_MANAGEMENT_KEY>`, base `https://${CLIPROXY_DOMAIN}`.
-- Source authority at the current CLIProxyAPI `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`: `internal/api/server.go` registers `GET /v0/management/config`, `GET /v0/management/config.yaml`, and `PUT /v0/management/config.yaml`. `internal/api/handlers/management/config_basic.go` proves the YAML route returns the raw file bytes; PUT accepts raw YAML, validates it, writes the exact body as a **whole-document replacement**, and reloads it into memory. The JSON `/config` response omits fields tagged `json:"-"` and is not suitable for round-tripping. GitHub compare from `v7.2.116` (`a88197f...`) to `v7.2.117` shows `claude_executor_execute.go`, `claude_executor_cloaking.go`, `payload_helpers.go`, and `config_basic.go` unchanged, so the proven injection, payload ordering, schema, and management contract carry forward.
-- `payload.*` has **no dedicated field-scoped management route** (unlike `oauth-model-alias`); the raw-YAML full-config endpoint is the only management API path for it.
-- Exact source-order evidence at the current `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`: `internal/runtime/executor/claude_executor_execute.go` calls `injectClaudeCodeContextManagement(body)` **before** `helps.ApplyPayloadConfigWithRequest(...)`; header application and send happen later. Therefore a matching `payload.override` is allowed to replace the injected `context_management` value.
-- Exact payload-rule evidence at the current `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`: `internal/runtime/executor/helps/payload_helpers.go` applies `Default` then `DefaultRaw` (first write wins), `Override` then `OverrideRaw` (last write wins), and `Filter` last (path deletion). Matching model rules use the `*` wildcard and case-insensitive protocol comparison, with all configured conditions required to pass. A later unowned override, any matching override-raw write, or any matching filter deletion of `context_management` defeats the managed rule and must fail closed.
+- `apps/cliproxy/src/deploy.ts` applies only the supported `oauth-model-alias` field-scoped management change. The tracked `payload.override` remains bootstrap/template data; normal deploy preserves an existing runtime `config.yaml` and does not attempt a payload-specific mutation.
+- Historical source authority for the failed approach: CLIProxyAPI `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`: `internal/api/server.go` registers `GET /v0/management/config`, `GET /v0/management/config.yaml`, and `PUT /v0/management/config.yaml`. `internal/api/handlers/management/config_basic.go` proves the YAML route returns the raw file bytes; PUT accepts raw YAML, validates it, writes the exact body as a **whole-document replacement**, and reloads it into memory. The JSON `/config` response omits fields tagged `json:"-"` and is not suitable for round-tripping. GitHub compare from `v7.2.116` (`a88197f...`) to `v7.2.117` shows `claude_executor_execute.go`, `claude_executor_cloaking.go`, `payload_helpers.go`, and `config_basic.go` unchanged. This evidence is historical; no v7.2.118 source equivalence is asserted.
+- `payload.*` has **no dedicated field-scoped management route**. The raw-YAML endpoint is therefore evidence for escalation, not an approved delivery mechanism.
+- Historical source-order evidence at `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`: `internal/runtime/executor/claude_executor_execute.go` calls `injectClaudeCodeContextManagement(body)` **before** `helps.ApplyPayloadConfigWithRequest(...)`; header application and send happen later. Therefore a matching `payload.override` is allowed to replace the injected `context_management` value. No v7.2.118 source equivalence is asserted.
+- Historical payload-rule evidence at `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`: `internal/runtime/executor/helps/payload_helpers.go` applies `Default` then `DefaultRaw` (first write wins), `Override` then `OverrideRaw` (last write wins), and `Filter` last (path deletion). Matching model rules use the `*` wildcard and case-insensitive protocol comparison, with all configured conditions required to pass. A later unowned override, any matching override-raw write, or any matching filter deletion of `context_management` defeats the managed rule and must fail closed. No v7.2.118 source equivalence is asserted.
 - YAML parsing already exists in `packages/shared/cliproxy/management.ts` (used by `readOAuthModelAliasFromConfig`), so an in-process merge needs no new dependency.
-- `apps/cliproxy/src/deploy.test.ts` mocks `fetch` via `makeAliasFetch`, captures `requests[]`, branches on URL+method, and asserts bare-object bodies + `x-management-key`. New apply-step tests mirror this.
+- `apps/cliproxy/src/deploy.test.ts` mocks `fetch` via `makeAliasFetch`, captures `requests[]`, branches on URL+method, and asserts bare-object bodies + `x-management-key`. Focused deploy coverage proves normal deploys never request `/v0/management/config.yaml`.
 
 ### Delivery hazard (institutional learnings + source authority)
 
-The endpoint contract is now source-verified, but the operation remains high blast-radius because PUT replaces the entire secret-bearing document:
+The failed PR #1042 approach demonstrated why the raw endpoint is not an acceptable unattended delivery path:
 
-- **`docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md`:** the approved pattern is **field-scoped precisely to avoid touching `api-keys`**. Source authority now proves the raw-YAML GET handler performs no redaction, but that does not make whole-document replacement low-risk: the actual live file must still contain the complete key roster and required fields before any PUT, and the replacement must preserve them exactly.
+- **Production run 30931128408:** PR #1042 issued `PUT /v0/management/config.yaml` and then failed opaque readback. The failure did not make whole-document replacement safe; it exposed the exact blast radius the learning was intended to prevent.
+- **`docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md`:** the approved pattern is **field-scoped precisely to avoid touching `api-keys`**. The preservation-verified GET/merge/PUT exception introduced by #1042 violated that learning and is removed.
 - **`docs/solutions/integration-issues/cliproxy-claude-oauth-refresh-expiry-2026-06-20.md`:** a `config.yaml` overwrite has historically wiped runtime `api-keys` here; no documented recovery runbook.
-- **`docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md`:** a full-config PUT must preserve required fields (`auth-dir: /root/.cli-proxy-api`) or the server breaks on restart.
-- **Full-config bodies are secret material.** Raw YAML, diffs, response bodies, and mismatch errors must never enter logs or test output. The deploy reports only bounded field/count summaries.
-- **Scope note:** Claude **OAuth** lives in the `auth-dir` volume, not `config.yaml`, so it is safe regardless. The wipe risk is specifically the client-facing **`api-keys`** array.
-
-**Consequence:** implementation treats the tracked config as desired-state input for one owned rule only, while the raw live YAML remains authoritative for every other field. Production apply requires a full-fidelity pre-write readback, secret-safe invariant checks, an exact operator-only rollback snapshot, and explicit approval. If any invariant is ambiguous, the plan stops and escalates upstream; it does not synthesize a replacement from environment variables or invoke `--force-config`.
+- **`docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md`:** a full-config overwrite must preserve required fields (`auth-dir: /root/.cli-proxy-api`) or the server breaks on restart.
+- **Consequence:** production application remains blocked. Keep the tracked rule for first-deploy/bootstrap templates, preserve existing runtime files, and escalate until an upstream or field-scoped endpoint exists. Do not synthesize keys, use `--force-config` as a payload mutation, or retry/rebase a raw whole-document write.
 
 ### `payload.override` shape (CLIProxyAPI `config.example.yaml` @ v7.2.117, tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`)
 
@@ -102,7 +100,7 @@ payload:
 
 ### Institutional Learnings
 
-- `docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md` — field-scoped management apply (bare object, read back, fail closed); never blind-upload `config.yaml`. Direct pattern for Unit 1.
+- `docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md` — field-scoped management apply (bare object, read back, fail closed); never blind-upload or whole-document PUT `config.yaml`. The failed #1042 path is explicitly not a pattern for this plan.
 - `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md` — probe the pinned image; verify contract behavior empirically (already done here).
 - `docs/solutions/integration-issues/cliproxy-claude-oauth-refresh-expiry-2026-06-20.md` — Anthropic route auth is separate; confirm `cliproxy status` route-OK before attributing verification failures.
 
@@ -110,16 +108,13 @@ payload:
 
 - **Neutralize via `context_management: {edits: []}`, not enable thinking:** probe-proven to clear the 400 with the cleanest result (`diagnostics: null`) while keeping thinking off (R5). `{}` also works but `{edits: []}` is the more explicit "strategy applied, no edits" form Anthropic already echoes for healthy models.
 - **Model-scoped `payload.override`:** targets only `claude-opus-4-8` and `claude-sonnet-4-6`, the two models proven by #1036. `claude-sonnet-5` and every unproven alias remain untouched (R2, R6).
-- **Full-config apply is contingent and operator-gated:** CLIProxyAPI has no field-scoped `payload` endpoint. Use raw-YAML GET/PUT only because source authority proves the exact `v7.2.117` contract at tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`, and only after pre-write invariants and a rollback snapshot pass. Any ambiguity stops the rollout; it does not trigger an automatic fallback.
-- **Tracked config owns one fragment, never the live document:** parse `apps/cliproxy/config/config.yaml` only to obtain the desired infra-owned `payload.override` rule. Never merge tracked root fields (including intentionally empty `api-keys` or management settings) into the live YAML.
-- **Stable rule identity:** mark the list item with the unique YAML comment `managed-by: infra/cliproxy-clear-thinking`. Exactly one marker identifies the owned rule. Zero markers permits first-time append only when no semantically equivalent unmarked rule exists; duplicate markers or an equivalent unmarked rule are ambiguous and fail closed.
-- **Document-preserving YAML mutation:** use `yaml@2.9.0`'s document/CST API (`parseDocument`) to mutate only the marked node. Contract fixtures must preserve unrelated values, comments, tags, anchors, scalar types, unknown fields, and sequence order. Formatting may normalize; semantic equivalence for unrelated state is required. The exact pre-write bytes remain the rollback and concurrency source of truth.
-- **Optimistic concurrency, no silent rebase:** hash the authoritative raw GET. Re-GET immediately before PUT and require the hash to match; abort on drift. Any retry starts a new explicitly approved read/validate/snapshot cycle (R8). The server has no ETag contract, so a tiny GET→PUT race remains; a PUT timeout can be commit-ambiguous, but the operation is idempotent and self-heals on the next explicitly approved apply. Do not add automatic retry/rebase.
-- **Override ordering is a pre-write invariant:** Unit 1 is source-verified against `claude_executor_execute.go` and `payload_helpers.go`: the managed rule may follow earlier ordinary overrides, but later unowned `override` writes, any matching `override-raw` write, or any matching `filter` deletion of `context_management` is ambiguous and halts before PUT. Unit 2 cannot begin unless the marked rule's deterministic position is proven to win without affecting unscoped models.
+- **No unattended full-config apply:** CLIProxyAPI has no field-scoped `payload` endpoint. The raw-YAML GET/PUT contract is not an approved fallback; automation stops and escalates rather than mutating the secret-bearing document.
+- **Tracked config owns a bootstrap fragment, never the live document:** retain `apps/cliproxy/config/config.yaml`'s desired `payload.override` for first-deploy templates only. Normal deploy preserves the existing runtime file and never merges tracked root fields or payload rules into it.
+- **Source ordering remains historical evidence:** the exact `v7.2.117` source proves the injection and payload ordering, but that proof does not authorize a whole-document mutation. A future field-scoped/upstream mechanism must revalidate the same ordering before production use.
 - **Secret-bearing operations are silent by construction:** raw YAML, config diffs, API-key values, management secrets, and management response bodies are never logged. Errors report only bounded field names/counts and sanitized status.
-- **Stay on `v7.2.117`:** keeps the current deployed pin's other fixes; the readback-verified apply surfaces a future upstream change that breaks the override rather than silently regressing (R3).
-- **First/forced upload boundary:** when deploy has just uploaded tracked `config.yaml` (`!configExists` or `--force-config`), it skips the raw payload apply because the tracked file already contains the managed rule and may intentionally have empty template `api-keys`. Normal deploys preserve the server file and use only the preservation-verified raw GET/merge/PUT path.
-- **Rollback snapshot lifecycle:** Unit 1 keeps raw bodies in memory only; the operator snapshot is created by the Unit 2 mutation workflow before its first PUT, retained through readback/health verification, and is the only disk copy eligible for the three-state rollback gate. Restore compares the current raw hash to the successful apply `afterHash`, halts on a third state, and verifies exact snapshot bytes after PUT.
+- **Stay on `v7.2.118`:** preserves the current deployed pin while production application remains blocked pending a safe field-scoped/upstream mechanism (R3). No equivalence with the historical v7.2.117 source proof is claimed.
+- **First/forced upload boundary:** first deploy may upload the tracked bootstrap template; normal deploy preserves an existing `config.yaml`. Neither path authorizes an unattended raw management PUT.
+- **Failed rollback path removed:** no Unit 1 raw snapshot, restore helper, stale-hash gate, or automatic retry/rebase remains. Any future production mutation requires a separately reviewed field-scoped mechanism and rollback contract.
 
 ## Open Questions
 
@@ -128,42 +123,34 @@ payload:
 - **What clears the 400?** A proxy-side `context_management: {edits: []}` override on the affected models (probe-proven).
 - **Which cliproxy version regressed?** `v7.2.116`.
 - **Why is `sonnet-5` fine?** Anthropic gates `clear_thinking` retention by model class; only older models 400 when thinking is off.
-- **What is the management contract?** At exact `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`, `GET /v0/management/config.yaml` returns raw YAML; `PUT` accepts raw YAML, validates, replaces the complete file, and reloads it. `/v0/management/config` is JSON and omits non-JSON fields, so it is read-only observability, not a round-trip source.
+- **What was the historical management contract?** At exact `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`, `GET /v0/management/config.yaml` returns raw YAML; `PUT` accepts raw YAML, validates, replaces the complete file, and reloads it. `/v0/management/config` is JSON and omits non-JSON fields, so it is read-only observability, not a round-trip source. This raw whole-document route is forbidden for unattended deploys, not an approved payload-delivery path. No v7.2.118 source equivalence is asserted.
 
 ### Deferred to Implementation
 
-- **Exact override ordering:** resolved in Unit 1 from the exact `v7.2.117` source at tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1` and isolated contract tests before any production write. GitHub compare confirms the relevant executor/cloaking/payload-helper files are unchanged from `v7.2.116`; if ordering cannot be proven, Unit 2 is blocked and the workaround is escalated upstream.
+- **Exact override ordering:** resolved in Unit 1 from the exact `v7.2.117` source at tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1` and isolated contract tests. GitHub compare confirms the relevant executor/cloaking/payload-helper files are unchanged from `v7.2.116`; production remains blocked for lack of a safe field-scoped payload mechanism, not because the ordering evidence is unresolved.
 
 ## High-Level Technical Design
 
-Non-prescriptive data flow for the secret-bearing config update:
+Current safe data flow; no payload mutation is attempted:
 
 ```text
 tracked config.yaml
-  └─ extract only infra-owned payload.override rule
+  └─ retain infra-owned payload.override for first-deploy/bootstrap templates
 
-management API GET /config.yaml
-  └─ raw live YAML (authoritative opaque state)
-      ├─ validate secret/runtime invariants without logging values
-      ├─ hash exact bytes for optimistic concurrency
-      ├─ save exact operator-only rollback snapshot (0600 temp file)
-      └─ mutate only the uniquely marked rule through YAML Document/CST
+normal deploy
+  ├─ preserve existing server config.yaml
+  ├─ apply only field-scoped oauth-model-alias changes
+  └─ validate proxy health
 
-immediate pre-PUT GET /config.yaml
-  └─ require exact-byte hash match or abort without mutation
-
-management API PUT /config.yaml
-  └─ full-document validated replacement + live reload
-      ├─ owned-rule + semantic unrelated-state readback matches
-      ├─ runtime invariants unchanged
-      └─ API/model health checks pass
+payload.override production application
+  └─ BLOCKED: no field-scoped endpoint; stop and escalate upstream
 ```
 
 ## Implementation Units
 
-- [x] **Unit 1: Implement the secret-safe desired-rule merger and apply contract**
+- [x] **Unit 1: Retain the bootstrap template and remove unsafe unattended payload apply**
 
-**Goal:** Encode the model-scoped override and implement an idempotent full-YAML apply path that cannot source runtime fields from the tracked template, cannot log secrets, and fails before mutation when invariants are ambiguous.
+**Goal:** Retain the model-scoped override as a bootstrap/template fragment and remove the unsafe unattended full-YAML apply path. Normal deploys preserve existing runtime configuration and stop rather than attempting an unsupported payload mutation.
 
 **Requirements:** R3, R4, R5, R7, R8
 
@@ -171,61 +158,48 @@ management API PUT /config.yaml
 
 **Files:**
 - Modify: `apps/cliproxy/config/config.yaml` — add the infra-owned `payload.override` rule and its purpose.
-- Modify: `packages/shared/cliproxy/management.ts` — raw-YAML read/apply/readback helpers, exact-snapshot restore helper, desired-rule extraction, opaque merge, invariant summaries, and secret sanitization.
-- Modify: `apps/cliproxy/src/deploy.ts` — preflight the management key whenever a non-empty tracked override exists; add the apply step after existing managed fields.
+- Modify: `packages/shared/cliproxy/management.ts` — remove the unattended raw-config apply/restore surface while preserving alias/key/config helpers.
+- Modify: `apps/cliproxy/src/deploy.ts` — remove payload mutation and payload-specific management-key preflight; preserve field-scoped alias apply and health validation.
 - Test: `apps/cliproxy/src/deploy.test.ts` and the colocated shared-management tests.
 
 **Approach:**
-- Extract only the owned override fragment from tracked config. Never use tracked root fields as replacement input. The rule carries the unique comment marker `managed-by: infra/cliproxy-clear-thinking`.
-- Treat raw live YAML as authoritative opaque state. Require non-empty string `api-keys`, exact `auth-dir`, existing aliases/payload rules, and semantically preservable unknown fields before allowing mutation. The exact-tag handler proves the raw endpoint itself does not mask values; implementation still rejects placeholder/mask patterns and malformed entries defensively.
-- Parse with `yaml@2.9.0` `parseDocument` and mutate only the marked list node. Preserve unrelated values, comments, tags, anchors, scalar types, unknown fields, and sequence order; semantic preservation is required even when formatting normalizes.
-- Rule identity is fail-closed: exactly one marker updates in place; zero markers permits first-time append only when no semantically equivalent unmarked rule exists; duplicate markers or an equivalent unmarked rule halt before PUT.
-- Resolve payload override/injection ordering against the exact `v7.2.117` source at tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1` and isolated contract tests before production. Unit 2 is blocked unless the deterministic marked-rule position is proven to win and leave unscoped models untouched.
-- Extend the existing management-key preflight so a tracked override with no `CLIPROXY_MANAGEMENT_KEY` fails before any SSH, container restart, or management request.
-- Keep both raw GET bodies and the candidate PUT body in memory only. The Unit 2 rollback artifact is the sole allowed disk copy. Sanitize fetch, parse, mutation, PUT, and readback errors: no raw YAML, diffs, response bodies, key values, management secrets, bearer tokens, or environment-secret values reach stdout/stderr, exceptions, snapshots, or assertions.
-- Hash the exact authoritative GET body. Immediately before PUT, perform a second GET and require an exact hash match. Abort on drift; do not silently rebase or retry. A retry begins a new operator-approved read/validate/snapshot cycle.
-- `PUT /v0/management/config.yaml` uses raw YAML and counts as success only after exact owned-rule readback plus unchanged runtime-invariant summaries. A response status alone is insufficient.
+- Keep the exact two-model `payload.override` rule in the tracked template for bootstrap/first-deploy intent. It is not a live mutation contract.
+- Remove raw whole-document GET/merge/PUT/restore helpers and their tests from the shared package; usage analysis must leave no dead unattended payload path.
+- Remove `applyPayloadOverrideStep` and its invocation. A normal deploy with an existing server config must not request `/v0/management/config.yaml`, require a payload-specific management key, or bypass the field-scoped alias step and health gate.
+- Record the failed PR #1042 approach and block Unit 2 until an upstream or field-scoped payload endpoint exists. Do not preserve a raw-config exception, snapshot/rollback workflow, stale-hash guard, or retry/rebase guidance as executable instructions.
 
 **Test scenarios:**
-- Desired rule absent/present/drifted; unique marker add/update; duplicate-marker and equivalent-unmarked collisions halt.
-- Golden fixtures preserve unrelated comments, tags, anchors, scalar forms/types, unknown fields, and sequence order through `parseDocument` mutation/stringification.
-- Tracked template contains empty runtime fields; prove none can enter the PUT body.
-- Missing, empty, masked, malformed, or ambiguous runtime fields abort before PUT.
-- Missing management key with an override present fails during preflight.
-- Second GET hash differs from the authoritative first GET → zero PUTs and a sanitized concurrent-drift error.
-- PUT failure/readback mismatch errors expose no raw API keys, management secret, raw config, or bearer-token patterns.
-- Restore helper state machine: current bytes already equal snapshot → no-op; current bytes equal the known intended post-write bytes → PUT the exact snapshot bytes; any third-state hash → halt without overwrite. Successful restore requires byte-identical GET readback.
-- Idempotent state performs no PUT.
+- Tracked template retains the exact two-model rule and remains suitable for first-deploy/bootstrap upload.
+- Normal deploy with an existing server config and a tracked payload rule performs no raw config GET/PUT, does not require a payload-specific mutation path, applies field-scoped aliases, and reaches health validation.
+- Fresh/forced template upload behavior remains covered without a follow-up raw payload apply.
+- Shared tests retain unrelated API-key, JSON, management-header, and OAuth alias coverage after raw payload helpers/tests are removed.
 
 **Verification:**
-- Focused tests prove exact fragment ownership, runtime-state preservation, secret-safe failure behavior, and fail-closed preflight; no production write occurs in this unit.
+- Focused tests prove the surviving template/deploy boundary and field-scoped alias behavior; no production write occurs in this unit. Unit 2 is blocked pending a safe field-scoped/upstream mechanism.
 
 - [ ] **Unit 2: Apply the override through an operator-gated production rollout with rollback evidence**
 
-**Goal:** Mutate the live config only after all pre-write Go/No-Go checks pass, with an exact restricted rollback snapshot and immediate rollback triggers.
+**Goal:** Remain blocked. Do not mutate the live config until CLIProxyAPI provides a safe field-scoped payload endpoint or an upstream-reviewed mechanism that does not replace the secret-bearing document.
 
 **Requirements:** R3, R4, R7, R8
 
-**Dependencies:** Unit 1 merged; explicit cliproxy environment approval before the write.
+**Dependencies:** Unit 1 merged; safe field-scoped/upstream mechanism documented and reviewed; explicit cliproxy environment approval before any write.
 
 **Files:**
-- Create: none tracked. The pre-write raw-YAML snapshot is operator-only temporary secret material under an OS temp directory, never the repo or a user backup/sync tree.
+- Create: none until a safe field-scoped/upstream mechanism exists. No raw-config snapshot artifact is permitted for the blocked approach.
 
 **Approach:**
-- Establish pre-write baselines: management auth works; `/healthz`, `/v1/models`, and a benign `claude-sonnet-5` completion are healthy; raw YAML contains intact API-key roster, exact `auth-dir`, expected alias/payload state, and no ambiguous fields.
-- Create a fresh `mktemp -d` under the operator OS temp directory (`0700`) and write the exact raw pre-write bytes to one `0600` file using stdin/in-process bytes only — never argv, shell expansion, stdout, attachments, or the repository. Record only its path privately for this rollout.
-- Re-GET immediately before PUT and require the exact snapshot hash to match (R8). Approve and run the deploy apply step only after the concurrency gate passes.
-- Confirm raw-YAML readback preserves opaque API-key values/count, `auth-dir`, aliases, unrelated payload rules, unknown fields, and the expected semantic document; the marked desired override is present exactly once and does not target `sonnet-5`.
-- Roll back immediately with the exact snapshot if management auth, any known-valid client key, required config invariants, the control model, or readback convergence fails. The restore path calls the shared raw-config helper with the snapshot bytes: if the current GET already equals the snapshot it is a no-op; if it equals the known intended post-write hash, PUT the exact saved bytes to `/v0/management/config.yaml`; if it is any third state, halt rather than clobber concurrent drift. Rollback is complete only after byte-identical GET readback and baseline management/client/model checks recover. Keep the upstream `sonnet-5` stopgap active throughout.
-- Delete the snapshot and its temp directory after either (a) successful rollback verification or (b) Unit 3's immediate checks plus one manually dispatched auth-monitor check pass. Verify the path is absent; do not claim secure erasure on SSD storage.
-- If the safe full-config contract cannot be satisfied, stop. Do not synthesize keys from environment variables, use `--force-config`, or improvise another mutation; escalate upstream or create a separately reviewed recovery plan.
+- Do not run production probes or writes for this blocked unit.
+- Keep the `claude-sonnet-5` stopgap active and record the failed production run `30931128408` / PR #1042 as the reason for the block.
+- Request or implement only a field-scoped/upstream endpoint for `payload.override`; whole-document `/v0/management/config.yaml` PUT remains forbidden in unattended automation.
+- If no safe mechanism is available, stop and escalate. Do not synthesize keys, use `--force-config` as a payload mutation, create a raw snapshot, or add automatic retry/rebase.
 
 **Verification:**
-- Apply/readback and existing-consumer health pass with no secret leakage; otherwise the exact snapshot is restored and verified before continuing.
+- Verification is intentionally not available until the safe field-scoped/upstream mechanism is approved. Unit 3 remains blocked.
 
 - [ ] **Unit 3: Verify affected and control models, monitor, then close #1036**
 
-**Goal:** Prove the override clears the 400 with thinking off, preserves existing consumers, and remains healthy through immediate checks plus one automated-path reconciliation.
+**Goal:** Remain blocked until Unit 2 has a safe field-scoped/upstream application mechanism; then prove the override clears the 400 with thinking off, preserves existing consumers, and remains healthy through immediate checks plus one automated-path reconciliation.
 
 **Requirements:** R1, R2, R5, R6
 
@@ -248,39 +222,40 @@ management API PUT /config.yaml
 
 - **Interaction graph:** Fix is at the proxy, so every Anthropic-routed consumer of `cliproxy.fro.bot` (Fro Bot review, other repos on `anthropic/*`) is restored without per-consumer change.
 - **Error propagation:** A wrong/partial override could shift rather than remove the 400 — Unit 3 dispositions distinguish the target defect from unrelated model/provider failures before closure.
-- **State lifecycle risks:** Full-YAML PUT replaces live runtime config and reloads it immediately. Unit 1 makes unrelated state opaque/preserved; Unit 2 carries the exact rollback snapshot and validates client/management access on both apply and rollback.
-- **Secret surfaces:** Raw YAML contains client API keys and management configuration. It exists only in process memory and a temporary restricted rollback artifact; public evidence contains bounded summaries only.
+- **State lifecycle risks:** The failed PR #1042 full-YAML PUT replaced live runtime config and failed opaque readback. Normal deploy now preserves the existing file and performs no payload mutation; any future production path is blocked until it is field-scoped/upstream-reviewed.
+- **Secret surfaces:** Raw YAML contains client API keys and management configuration. Unattended deploys do not read, write, snapshot, or log the raw management document.
 - **API surface parity:** The incident override targets only the two models proven by #1036. Broader historical-alias compatibility is a separate follow-up; all unscoped models remain outside the rule.
-- **Unchanged invariants:** cliproxy stays `v7.2.117` at tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`; `oauth-model-alias` and existing managed fields unchanged; default `config.yaml` no-overwrite deploy behavior unchanged; thinking stays off.
+- **Unchanged invariants:** cliproxy stays `v7.2.118@sha256:488d6ba68e55fe26f204df18ed3cd5c7a58aa8f7eacc4bd2e858d7629ad8094f`; `oauth-model-alias` remains field-scoped; existing runtime config is preserved; default `config.yaml` no-overwrite deploy behavior remains unchanged; thinking stays off. Historical injection/order evidence remains tied to v7.2.117 only.
 
 ## Risks & Dependencies
 
 | Risk | Mitigation |
 |------|------------|
-| cliproxy applies `payload.override` before its own `context_management` injection (override loses on the proxy) | Unit 1 must prove exact-tag ordering before production and block Unit 2 if unresolved. Unit 3 confirms the live acceptance signature; keep the `sonnet-5` stopgap and escalate upstream on mismatch. |
-| Full-YAML replacement drops or changes runtime API keys, `auth-dir`, aliases, YAML constructs, unknown fields, or unrelated rules | Unit 1 uses YAML Document/CST mutation plus golden fixtures and semantic readback; Unit 2 holds the exact-byte rollback snapshot and verifies restore byte-for-byte on failure. Any ambiguity is No-Go. |
-| Raw full-config handling leaks API keys or management secrets through errors, logs, snapshots, temp files, or public evidence | Raw bodies are in-memory only except the single `0600` rollback file in an OS temp directory. Secret-aware tests cover every error boundary; the file is deleted and absence verified after rollback or bounded successful verification. |
+| cliproxy applies `payload.override` before its own `context_management` injection (override loses on the proxy) | The exact v7.2.117 source ordering remains documented, but production is blocked until a safe field-scoped/upstream mechanism is available. Keep the `sonnet-5` stopgap and escalate upstream. |
+| Full-YAML replacement drops or changes runtime API keys, `auth-dir`, aliases, YAML constructs, unknown fields, or unrelated rules | PR #1042 demonstrated this blast radius with failed opaque readback. Do not mitigate it with another raw merge/snapshot exception; require a field-scoped/upstream mechanism. |
+| Raw full-config handling leaks API keys or management secrets through errors, logs, snapshots, temp files, or public evidence | Unattended automation no longer reads, writes, snapshots, or logs raw `/config.yaml`; future safe mechanisms must retain the learning's secret boundary. |
 | The infra-owned rule collides with an existing payload rule | A unique `managed-by: infra/cliproxy-clear-thinking` comment identifies the rule. Duplicate markers or equivalent unmarked rules fail closed; unrelated rule order remains unchanged. |
-| Another operator or automation changes config between GET and PUT | Hash the exact raw GET and require an immediate pre-PUT GET hash match. Abort on drift; never silently rebase or retry. |
-| Management key is absent and deploy reaches mutation/restart before failing | Extend the existing preflight to treat non-empty tracked `payload.override` as requiring `CLIPROXY_MANAGEMENT_KEY`; test fail-fast ordering. |
+| Another operator or automation changes config between GET and PUT | This is a residual risk of the rejected raw approach, not a fix target. No unattended raw GET→PUT path is allowed; do not add automatic retry/rebase. |
+| Management key is absent and deploy reaches payload mutation/restart before failing | Payload mutation is removed. Only field-scoped OAuth alias work requires the management key; tracked payload template data does not create a payload-specific preflight requirement. |
 | A future cliproxy bump changes injection or full-config semantics | Deploy-time owned-rule readback plus Unit 3 model probes make drift loud. Re-verify the exact-tag source contract on every cliproxy bump that touches management/config/payload behavior. |
 | HTTP 200 masks fallback routing or adaptive thinking | Unit 3 asserts requested model identity, normal non-fallback completion, `thinking_tokens: 0`, no thinking blocks/diagnostics, and absence of the target error. |
 | Additional older models reproduce the same 400 | Keep them out of the incident rule and track a broader compatibility sweep separately after #1036 closes. |
-| Safe full-config apply cannot be proven or rollback cannot be guaranteed | Stop without mutation and escalate upstream or write a separately reviewed recovery plan. Environment-synthesized key rosters and automatic `--force-config` are prohibited fallbacks. |
+| Safe field-scoped/upstream payload apply cannot be provided | Stop without mutation and escalate upstream or write a separately reviewed recovery plan. Environment-synthesized key rosters, raw full-config PUTs, and automatic `--force-config` payload fallbacks are prohibited. |
 
 ## Documentation / Operational Notes
 
-- Update `apps/cliproxy/AGENTS.md` with the `payload.override` purpose (clear_thinking 400 suppression for older Anthropic models), the affected model set, and the management-API merge delivery path.
-- Document the sensitive rollback artifact lifecycle and the Go/No-Go/rollback checks in `apps/cliproxy/AGENTS.md`; never include example key values or raw config output.
+- Update `apps/cliproxy/AGENTS.md` with the `payload.override` purpose (clear_thinking 400 suppression for older Anthropic models), the affected model set, and its bootstrap/template-only status.
+- Document the failed PR #1042 raw-config approach and the field-scoped-only rule in `apps/cliproxy/AGENTS.md`; never include example key values or raw config output.
 - Changeset: only if `packages/cli` user-facing behavior changes; a droplet-config + deploy-internal change does not warrant one. `deploy.ts`/shared-helper changes are internal, but if the shared helper is user-observable via the CLI, add a patch changeset.
 - After live verification, coordinate the `FRO_BOT_MODEL` stopgap revert in `fro-bot/agent`.
 
 ## Sources & References
 
 - Issue: #1036; downstream impact fro-bot/agent#1314; failing runs 30842478774, 30860153753 vs 30860341225.
+- Failed production approach: PR #1042, run 30931128408; raw `/v0/management/config.yaml` PUT followed by failed opaque readback and violation of the field-scoped management learning.
 - Regression correlation: PR #1031 (cliproxy → `v7.2.116`).
 - Live probe: 2026-08-04 three-way test against `cliproxy.fro.bot` (baseline 400 / `context_management:{edits:[]}` 200 / sonnet-5 200).
 - Code: `apps/cliproxy/config/config.yaml`, `apps/cliproxy/src/deploy.ts`, `packages/shared/cliproxy/management.ts`, `apps/cliproxy/src/deploy.test.ts`, `apps/cliproxy/AGENTS.md`.
 - Learnings: `docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md`, `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md`, `docs/solutions/integration-issues/cliproxy-claude-oauth-refresh-expiry-2026-06-20.md`.
-- Upstream: `router-for-me/CLIProxyAPI` `config.example.yaml` @ `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1` (`payload.override` schema); Anthropic `clear_thinking_20251015` context-editing docs.
-- Source-authority contract: CLIProxyAPI `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`; `internal/api/server.go` route registration; `internal/api/handlers/management/config_basic.go` raw-YAML GET/PUT whole-document replacement + reload; `internal/api/handlers/management/config.go` incomplete JSON config response. GitHub compare from `v7.2.116` (`a88197f...`) shows the relevant executor, cloaking, payload-helper, and config-basic files unchanged.
+- Historical upstream evidence: `router-for-me/CLIProxyAPI` `config.example.yaml` @ `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1` (`payload.override` schema); Anthropic `clear_thinking_20251015` context-editing docs. No v7.2.118 schema/source equivalence is asserted.
+- Historical source-authority contract: CLIProxyAPI `v7.2.117` tag SHA `82d6242098a707fcca8eaefa43aaf3a10ea760f1`; `internal/api/server.go` route registration; `internal/api/handlers/management/config_basic.go` raw-YAML GET/PUT whole-document replacement + reload; `internal/api/handlers/management/config.go` incomplete JSON config response. GitHub compare from `v7.2.116` (`a88197f...`) shows the relevant executor, cloaking, payload-helper, and config-basic files unchanged.

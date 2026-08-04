@@ -5,15 +5,17 @@ import {resolve} from 'node:path'
 
 import {
   applyOAuthModelAlias,
+  applyPayloadOverride,
   readBackOAuthModelAlias,
   readOAuthModelAliasFromConfig,
+  readPayloadOverrideFromConfig,
   setEqualOAuthModelAlias,
 } from '@marcusrbrown/infra-shared/cliproxy/management'
 
 const DEFAULT_REMOTE_USER = process.env.REMOTE_USER ?? 'root'
 const REMOTE_DIR = '/opt/cliproxy'
 
-interface DeployEnv {
+export interface DeployEnv {
   readonly [key: string]: string
   PATH: string
   HOME: string
@@ -22,7 +24,20 @@ interface DeployEnv {
   CLIPROXY_MANAGEMENT_KEY: string
 }
 
-function resolveDeployFiles(): {compose: string; config: string; caddy: string} {
+export interface DeployFiles {
+  compose: string
+  config: string
+  caddy: string
+}
+
+export interface DeployOptions {
+  fetch?: typeof globalThis.fetch
+  spawn?: typeof Bun.spawn
+  files?: DeployFiles
+  env?: DeployEnv
+}
+
+function resolveDeployFiles(): DeployFiles {
   const appRoot = resolve(import.meta.dir, '..')
 
   return {
@@ -63,9 +78,7 @@ function getDeployEnv(): DeployEnv {
   }
 }
 
-function validatePreconditions(): {compose: string; config: string; caddy: string} {
-  const files = resolveDeployFiles()
-
+function validatePreconditions(files = resolveDeployFiles(), env?: DeployEnv): DeployFiles {
   if (!existsSync(files.compose)) {
     throw new Error(`Missing deploy file: ${files.compose}`)
   }
@@ -78,15 +91,20 @@ function validatePreconditions(): {compose: string; config: string; caddy: strin
     throw new Error(`Missing deploy file: ${files.caddy}`)
   }
 
-  getDeployEnv()
+  if (!env) getDeployEnv()
 
   return files
 }
 
-async function runCommand(label: string, command: string[], env: DeployEnv): Promise<void> {
+async function runCommand(
+  label: string,
+  command: string[],
+  env: DeployEnv,
+  spawnFn: typeof Bun.spawn = Bun.spawn,
+): Promise<void> {
   console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
 
-  const proc = Bun.spawn(command, {
+  const proc = spawnFn(command, {
     env,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -125,13 +143,18 @@ function scpCommand(host: string, source: string, destination: string): string[]
   ]
 }
 
-async function remoteFileExists(host: string, path: string, env: DeployEnv): Promise<boolean> {
-  const proc = Bun.spawn(sshCommand(host, `test -f '${path}'`), {env, stdout: 'pipe', stderr: 'pipe'})
+async function remoteFileExists(
+  host: string,
+  path: string,
+  env: DeployEnv,
+  spawnFn: typeof Bun.spawn = Bun.spawn,
+): Promise<boolean> {
+  const proc = spawnFn(sshCommand(host, `test -f '${path}'`), {env, stdout: 'pipe', stderr: 'pipe'})
   const exitCode = await proc.exited
   return exitCode === 0
 }
 
-async function healthCheck(env: DeployEnv): Promise<void> {
+async function healthCheck(env: DeployEnv, fetchImpl: typeof globalThis.fetch = globalThis.fetch): Promise<void> {
   const host = env.CLIPROXY_DOMAIN
   const url = `https://${host}/v0/management/config`
 
@@ -142,17 +165,21 @@ async function healthCheck(env: DeployEnv): Promise<void> {
 
   // healthCheck runs after compose-up (irreversible),
   // give slow startup 30s room while still bounding the wait.
-  const response = await fetch(url, {headers, signal: AbortSignal.timeout(30_000)})
+  const response = await fetchImpl(url, {headers, signal: AbortSignal.timeout(30_000)})
 
   if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`Health check failed (${response.status} ${response.statusText}) at ${url}: ${body}`)
+    await response.text()
+    throw new Error(`Health check failed (${response.status} ${response.statusText}) at ${url}`)
   }
 
   console.warn(`\u001B[1;32m✓\u001B[0m Health check passed: ${url}`)
 }
 
-export async function preflightManagementKeyCheck(env: DeployEnv, files: {config: string}): Promise<void> {
+export async function preflightManagementKeyCheck(
+  env: DeployEnv,
+  files: {config: string},
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<void> {
   const key = env.CLIPROXY_MANAGEMENT_KEY
   const host = env.CLIPROXY_DOMAIN
 
@@ -165,6 +192,12 @@ export async function preflightManagementKeyCheck(env: DeployEnv, files: {config
         'oauth-model-alias block present in config.yaml but CLIPROXY_MANAGEMENT_KEY is not set — aliases cannot be applied. Set CLIPROXY_MANAGEMENT_KEY or remove the block.',
       )
     }
+    const desiredPayloadOverride = readPayloadOverrideFromConfig(files.config)
+    if (desiredPayloadOverride) {
+      throw new Error(
+        'payload.override block present in config.yaml but CLIPROXY_MANAGEMENT_KEY is not set — the managed override cannot be applied. Set CLIPROXY_MANAGEMENT_KEY or remove the block.',
+      )
+    }
     console.warn('\u001B[1;33m⚠\u001B[0m  CLIPROXY_MANAGEMENT_KEY not set — skipping pre-deploy validation')
     return
   }
@@ -174,7 +207,7 @@ export async function preflightManagementKeyCheck(env: DeployEnv, files: {config
   headers.set('x-management-key', key)
 
   try {
-    const response = await fetch(url, {headers, signal: AbortSignal.timeout(10_000)})
+    const response = await fetchImpl(url, {headers, signal: AbortSignal.timeout(10_000)})
 
     if (response.ok) {
       console.warn('\u001B[1;32m✓\u001B[0m Pre-deploy validation passed: management key accepted')
@@ -328,32 +361,73 @@ export async function applyOAuthModelAliasStep(
   console.warn(`\u001B[1;32m✓\u001B[0m Applied ${desired.claude.length} oauth-model-alias entries successfully`)
 }
 
-async function deploy(opts: {fetch?: typeof globalThis.fetch} = {}): Promise<void> {
-  const files = validatePreconditions()
-  const env = getDeployEnv()
+/** Apply the tracked clear-thinking payload override after oauth-model-alias. */
+export async function applyPayloadOverrideStep(
+  env: DeployEnv,
+  files: {config: string},
+  fetchImpl: typeof globalThis.fetch,
+): Promise<void> {
+  const desired = readPayloadOverrideFromConfig(files.config)
+
+  if (!desired) {
+    console.warn('\u001B[1;34m==>\u001B[0m Skipping payload.override (no managed rule in config)')
+    return
+  }
+
+  const key = env.CLIPROXY_MANAGEMENT_KEY
+  if (!key) {
+    throw new Error(
+      'payload.override block is present in config.yaml but CLIPROXY_MANAGEMENT_KEY is not set — cannot apply the managed override. Set CLIPROXY_MANAGEMENT_KEY to proceed.',
+    )
+  }
+
+  const result = await applyPayloadOverride({
+    baseUrl: `https://${env.CLIPROXY_DOMAIN}`,
+    key,
+    desired,
+    fetch: fetchImpl,
+  })
+
+  if (result.changed) {
+    console.warn('\u001B[1;32m✓\u001B[0m Applied payload.override clear-thinking rule successfully')
+  } else {
+    console.warn('\u001B[1;34m==>\u001B[0m payload.override clear-thinking rule already converged; no PUT issued')
+  }
+}
+
+export async function deploy(opts: DeployOptions = {}): Promise<void> {
+  const env = opts.env ?? getDeployEnv()
+  const files = validatePreconditions(opts.files, env)
   const host = env.CLIPROXY_DOMAIN
   const forceConfig = process.argv.includes('--force-config')
   const fetchImpl = opts.fetch ?? globalThis.fetch
+  const spawnFn = opts.spawn ?? Bun.spawn
 
-  await runCommand('Creating remote directories', sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`), env)
+  // Validate management key before any SSH, upload, or container operation.
+  await preflightManagementKeyCheck(env, files, fetchImpl)
 
-  // Validate management key before uploading files or restarting containers.
-  // Also reads alias block and throws early if key missing + block non-empty.
-  await preflightManagementKeyCheck(env, files)
+  await runCommand('Creating remote directories', sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`), env, spawnFn)
 
   await runCommand(
     'Uploading docker-compose.yaml',
     scpCommand(host, files.compose, `${REMOTE_DIR}/docker-compose.yaml`),
     env,
+    spawnFn,
   )
-  await runCommand('Uploading config/Caddyfile', scpCommand(host, files.caddy, `${REMOTE_DIR}/config/Caddyfile`), env)
+  await runCommand(
+    'Uploading config/Caddyfile',
+    scpCommand(host, files.caddy, `${REMOTE_DIR}/config/Caddyfile`),
+    env,
+    spawnFn,
+  )
 
   // config.yaml contains runtime state (API keys, settings) managed via the management API.
   // Only upload on first deploy or when explicitly forced. Overwriting would wipe API keys.
-  const configExists = await remoteFileExists(host, `${REMOTE_DIR}/config/config.yaml`, env)
-  if (!configExists || forceConfig) {
+  const configExists = await remoteFileExists(host, `${REMOTE_DIR}/config/config.yaml`, env, spawnFn)
+  const trackedConfigUploaded = !configExists || forceConfig
+  if (trackedConfigUploaded) {
     const label = forceConfig ? 'Uploading config/config.yaml (forced)' : 'Uploading config/config.yaml (first deploy)'
-    await runCommand(label, scpCommand(host, files.config, `${REMOTE_DIR}/config/config.yaml`), env)
+    await runCommand(label, scpCommand(host, files.config, `${REMOTE_DIR}/config/config.yaml`), env, spawnFn)
   } else {
     console.warn(
       '\u001B[1;34m==>\u001B[0m Skipping config/config.yaml (exists on server, use --force-config to overwrite)',
@@ -367,13 +441,19 @@ async function deploy(opts: {fetch?: typeof globalThis.fetch} = {}): Promise<voi
     // the proxy is serving. --wait-timeout caps the block at 90s.
     sshCommand(host, `cd ${REMOTE_DIR} && docker compose pull && docker compose up -d --wait --wait-timeout 90`),
     env,
+    spawnFn,
   )
 
   // Apply oauth-model-alias after the stack is healthy (management API reachable)
   // and before healthCheck so a failed alias apply fails the deploy.
   await applyOAuthModelAliasStep(env, files, fetchImpl)
+  if (trackedConfigUploaded) {
+    console.warn('\u001B[1;34m==>\u001B[0m Skipping payload.override apply after tracked config upload')
+  } else {
+    await applyPayloadOverrideStep(env, files, fetchImpl)
+  }
 
-  await healthCheck(env)
+  await healthCheck(env, fetchImpl)
 }
 
 if (import.meta.main) {

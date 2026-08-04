@@ -15,12 +15,13 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 ## DEPLOY FLOW
 
 1. **Preflight** (`preflightManagementKeyCheck`): GET `/v0/management/config` with the local `CLIPROXY_MANAGEMENT_KEY`. Aborts on 401 (key drift), skips on missing key, fails on server errors. 10s fetch timeout.
-2. **Upload**: `Caddyfile`, `docker-compose.yaml`, and `config.yaml` (only if it does not exist on the server). `--force-config` overrides the skip.
+2. **Upload**: `Caddyfile`, `docker-compose.yaml`, and `config.yaml` (only if it does not exist on the server). `--force-config` overrides the skip. A first/forced tracked-config upload skips the raw payload apply because the uploaded template already contains the managed rule and may intentionally have empty template `api-keys`.
 3. **Restart**: `docker compose pull && docker compose up -d` from `/opt/cliproxy/`.
 4. **Model aliases** (`applyOAuthModelAliasStep`): read the `oauth-model-alias` block from the tracked `config.yaml` and PUT it to `/v0/management/oauth-model-alias` (bare object), then read back and fail-closed on mismatch. Skips when the block is empty; throws when the block is present but `CLIPROXY_MANAGEMENT_KEY` is unset. Fork verification via `/v1/models` is best-effort (only when `CLIPROXY_API_KEY` is set) and never fails the deploy. This never touches the runtime `api-keys`, so `--force-config` is not required.
-5. **Health gate**: GET `/v0/management/config` again to confirm the proxy is up and the key still works.
+5. **Payload override** (`applyPayloadOverrideStep`): on a normal deploy that preserved the server file, perform the secret-safe raw `GET /v0/management/config.yaml` → preservation-verified Document/CST merge → stale-hash-guarded `PUT` → exact readback flow. If the deploy just uploaded tracked `config.yaml` (`!configExists` or `--force-config`), skip this raw apply because the tracked file already contains the rule and may have empty template `api-keys`.
+6. **Health gate**: GET `/v0/management/config` again to confirm the proxy is up and the key still works.
 
-**Critical**: `config.yaml` on the server holds runtime API keys added via the management API. The deploy must not overwrite it. The compound learning doc at `docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md` captures the original incident.
+**Critical**: `config.yaml` on the server holds runtime API keys added via the management API. Unsafe template/SCP overwrite remains banned unless `--force-config` is explicit. The only normal-deploy exception is the preservation-verified raw management `GET /config.yaml` → Document/CST merge → `PUT /config.yaml` path, and only when real non-empty `api-keys`, opaque state, runtime invariants, exact stale-read hash, and exact owned-rule readback all pass. The operator snapshot/rollback gate belongs to the first mutation workflow. The compound learning doc at `docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md` captures the original incident.
 
 **Model aliasing**: the `oauth-model-alias` block in the tracked `config.yaml` maps client-facing short Anthropic model ids to their dated upstream models with `fork: true` (both ids stay available). It is applied via the management API (step 4), not by uploading `config.yaml` — the block does **not** make `--force-config` safe.
 
@@ -79,6 +80,8 @@ Anthropic-only repos use the single-provider subset of these shapes (unchanged f
 ## ANTI-PATTERNS
 
 - **Never overwrite `config.yaml` on the server** without `--force-config` — it wipes runtime API keys (incident: 2026-04-06).
+- **Never use an unsafe template/SCP overwrite as the normal payload path** — the only allowed normal-deploy exception is the preservation-verified raw management GET/merge/PUT path with non-empty real `api-keys`, opaque/invariant checks, exact stale-read guard, readback, and an operator snapshot/rollback gate before the first mutation.
+- **Residual race and rollback contract**: the management API has no ETag, so a tiny GET→PUT race remains; a PUT timeout may be commit-ambiguous but the apply is idempotent/self-healing. Do not add automatic retry/rebase. The Unit 2 snapshot is the sole disk copy, retained through verification and consumed only by the three-state hash-gated restore path.
 - **Never re-run `provision-droplet.ts` against an existing droplet** without `--force` — it overwrites the management key.
 - **Never use `Authorization: Bearer` for management endpoints** — use `x-management-key`.
 - **Never assume management API body shapes** — empirically verified, not guessed (incident: 2026-04-07).

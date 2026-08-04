@@ -43,3 +43,16 @@ oauth-model-alias:
     - name: claude-sonnet-4-5-20250929
       alias: claude-sonnet-4-5
       fork: true
+
+# CLIProxyAPI v7.2.117 still injects the clear_thinking strategy for some older Claude models.
+# This managed override neutralizes that strategy while thinking remains off.
+payload:
+  override:
+    - # managed-by: infra/cliproxy-clear-thinking
+      models:
+        - name: claude-opus-4-8
+          protocol: claude
+        - name: claude-sonnet-4-6
+          protocol: claude
+      params:
+        context_management: {edits: []}

@@ -5,10 +5,8 @@ import {resolve} from 'node:path'
 
 import {
   applyOAuthModelAlias,
-  applyPayloadOverride,
   readBackOAuthModelAlias,
   readOAuthModelAliasFromConfig,
-  readPayloadOverrideFromConfig,
   setEqualOAuthModelAlias,
 } from '@marcusrbrown/infra-shared/cliproxy/management'
 
@@ -192,12 +190,6 @@ export async function preflightManagementKeyCheck(
         'oauth-model-alias block present in config.yaml but CLIPROXY_MANAGEMENT_KEY is not set — aliases cannot be applied. Set CLIPROXY_MANAGEMENT_KEY or remove the block.',
       )
     }
-    const desiredPayloadOverride = readPayloadOverrideFromConfig(files.config)
-    if (desiredPayloadOverride) {
-      throw new Error(
-        'payload.override block present in config.yaml but CLIPROXY_MANAGEMENT_KEY is not set — the managed override cannot be applied. Set CLIPROXY_MANAGEMENT_KEY or remove the block.',
-      )
-    }
     console.warn('\u001B[1;33m⚠\u001B[0m  CLIPROXY_MANAGEMENT_KEY not set — skipping pre-deploy validation')
     return
   }
@@ -361,40 +353,6 @@ export async function applyOAuthModelAliasStep(
   console.warn(`\u001B[1;32m✓\u001B[0m Applied ${desired.claude.length} oauth-model-alias entries successfully`)
 }
 
-/** Apply the tracked clear-thinking payload override after oauth-model-alias. */
-export async function applyPayloadOverrideStep(
-  env: DeployEnv,
-  files: {config: string},
-  fetchImpl: typeof globalThis.fetch,
-): Promise<void> {
-  const desired = readPayloadOverrideFromConfig(files.config)
-
-  if (!desired) {
-    console.warn('\u001B[1;34m==>\u001B[0m Skipping payload.override (no managed rule in config)')
-    return
-  }
-
-  const key = env.CLIPROXY_MANAGEMENT_KEY
-  if (!key) {
-    throw new Error(
-      'payload.override block is present in config.yaml but CLIPROXY_MANAGEMENT_KEY is not set — cannot apply the managed override. Set CLIPROXY_MANAGEMENT_KEY to proceed.',
-    )
-  }
-
-  const result = await applyPayloadOverride({
-    baseUrl: `https://${env.CLIPROXY_DOMAIN}`,
-    key,
-    desired,
-    fetch: fetchImpl,
-  })
-
-  if (result.changed) {
-    console.warn('\u001B[1;32m✓\u001B[0m Applied payload.override clear-thinking rule successfully')
-  } else {
-    console.warn('\u001B[1;34m==>\u001B[0m payload.override clear-thinking rule already converged; no PUT issued')
-  }
-}
-
 export async function deploy(opts: DeployOptions = {}): Promise<void> {
   const env = opts.env ?? getDeployEnv()
   const files = validatePreconditions(opts.files, env)
@@ -447,11 +405,6 @@ export async function deploy(opts: DeployOptions = {}): Promise<void> {
   // Apply oauth-model-alias after the stack is healthy (management API reachable)
   // and before healthCheck so a failed alias apply fails the deploy.
   await applyOAuthModelAliasStep(env, files, fetchImpl)
-  if (trackedConfigUploaded) {
-    console.warn('\u001B[1;34m==>\u001B[0m Skipping payload.override apply after tracked config upload')
-  } else {
-    await applyPayloadOverrideStep(env, files, fetchImpl)
-  }
 
   await healthCheck(env, fetchImpl)
 }

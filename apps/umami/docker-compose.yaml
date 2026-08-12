@@ -16,7 +16,7 @@ services:
       - umami
 
   umami:
-    image: umamisoftware/umami:3.2.0@sha256:d8111e1d6d94be54a54514cd4e1264fbfe905e5ea0d0691804b1d71e627a6fca
+    image: umamisoftware/umami:3.3.0@sha256:62ac5cff2e48beea540653fdfacf8e4477c0182226a4aebdc19813e773f8985a
     restart: unless-stopped
     env_file:
       - path: .env

@@ -838,7 +838,7 @@ jobs:
         run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Run Fro Bot
-        uses: fro-bot/agent@d8ede83f32463d563cee08da754150e7136aaba3 # v0.98.4
+        uses: fro-bot/agent@cc7d5ea16a96ed55459537d66de1748519a9d29a # v0.98.5
         env:
           OPENCODE_PROMPT_ARTIFACT: 'true'
           PROMPT: >-
@@ -903,7 +903,7 @@ jobs:
           role-session-name: fro-bot-${{ github.run_id }}
 
       - name: Run Fro Bot
-        uses: fro-bot/agent@d8ede83f32463d563cee08da754150e7136aaba3 # v0.98.4
+        uses: fro-bot/agent@cc7d5ea16a96ed55459537d66de1748519a9d29a # v0.98.5
         env:
           OPENCODE_PROMPT_ARTIFACT: 'true'
           PROMPT: >-

@@ -1,5 +1,68 @@
 # @marcusrbrown/infra
 
+## 0.15.4
+### Patch Changes
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.120` to `7.2.121` ([#1053](https://github.com/marcusrbrown/infra/pull/1053))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.119` to `7.2.120` ([#1050](https://github.com/marcusrbrown/infra/pull/1050))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.130` to `7.2.131` ([#1086](https://github.com/marcusrbrown/infra/pull/1086))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.124` to `7.2.125` ([#1068](https://github.com/marcusrbrown/infra/pull/1068))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1062](https://github.com/marcusrbrown/infra/pull/1062))
+
+
+- 📦 Update 7 GitHub Actions workflow dependencies ([#1074](https://github.com/marcusrbrown/infra/pull/1074))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.128` to `7.2.129` ([#1082](https://github.com/marcusrbrown/infra/pull/1082))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.129` to `7.2.130` ([#1083](https://github.com/marcusrbrown/infra/pull/1083))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.118` to `7.2.119` ([#1046](https://github.com/marcusrbrown/infra/pull/1046))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.121` to `7.2.122` ([#1060](https://github.com/marcusrbrown/infra/pull/1060))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1054](https://github.com/marcusrbrown/infra/pull/1054))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1067](https://github.com/marcusrbrown/infra/pull/1067))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.127` to `7.2.128` ([#1075](https://github.com/marcusrbrown/infra/pull/1075))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.122` to `7.2.123` ([#1061](https://github.com/marcusrbrown/infra/pull/1061))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.123` to `7.2.124` ([#1066](https://github.com/marcusrbrown/infra/pull/1066))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.125` to `7.2.126` ([#1070](https://github.com/marcusrbrown/infra/pull/1070))
+
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.126` to `7.2.127` ([#1071](https://github.com/marcusrbrown/infra/pull/1071))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1088](https://github.com/marcusrbrown/infra/pull/1088))
+
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3`, `eslint` ([#1076](https://github.com/marcusrbrown/infra/pull/1076))
+
+
+- 🐳 Update Docker image `umamisoftware/umami` from `3.2.0` to `3.3.0` ([#1079](https://github.com/marcusrbrown/infra/pull/1079))
+
 ## 0.15.3
 ### Patch Changes
 

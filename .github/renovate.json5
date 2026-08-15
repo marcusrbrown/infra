@@ -104,6 +104,23 @@
       datasourceTemplate: 'github-releases',
       versioningTemplate: 'semver-coerced',
     },
+    {
+      customType: 'regex',
+      // bfra-me/.github tags the same commits twice: `v4.16.x` for the repo and
+      // `renovate-changesets@x.y.z` for the action. The built-in github-actions manager resolves
+      // only the repo tags, so this pin sat at 0.2.31 for four months while 0.2.32 shipped.
+      // extractVersionTemplate restricts candidates to the action tag family, and capturing
+      // currentDigest + currentValue together moves the SHA and its comment in one update.
+      // The digest rule above is scoped to matchManagers: ['github-actions'] and does not apply.
+      managerFilePatterns: ['/^\\.github/workflows/renovate-changesets\\.yaml$/'],
+      matchStrings: [
+        'uses:\\s*bfra-me/\\.github/\\.github/actions/renovate-changesets@(?<currentDigest>[a-f0-9]{40})\\s*#\\s*renovate-changesets@(?<currentValue>\\d+\\.\\d+\\.\\d+)',
+      ],
+      depNameTemplate: 'bfra-me/.github',
+      datasourceTemplate: 'github-tags',
+      extractVersionTemplate: '^renovate-changesets@(?<version>.+)$',
+      versioningTemplate: 'semver',
+    },
   ],
   // postUpgradeTasks run after Renovate applies file changes but before the commit.
   // For github-actions manager updates (workflow SHA pins), Renovate does NOT run

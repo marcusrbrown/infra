@@ -68,8 +68,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.get-app-token.outputs.token }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         with:
-          setupGitUser: false
-          commit: 'chore(changesets): version packages'
-          title: 'chore(🦋📦): version packages'
-          version: bun run version-changesets
-          publish: bunx changeset publish
+          commit-message: 'chore(changesets): version packages'
+          pr-title: 'chore(🦋📦): version packages'
+          version-script: bun run version-changesets
+          publish-script: bunx changeset publish

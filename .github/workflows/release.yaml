@@ -65,9 +65,9 @@ jobs:
         name: Create Release Pull Request or Publish
         uses: changesets/action@198f833dd7d863100ea6e28967bc9a9fdefadb0a # v2.1.0
         env:
-          GITHUB_TOKEN: ${{ steps.get-app-token.outputs.token }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         with:
+          github-token: ${{ steps.get-app-token.outputs.token }}
           commit-message: 'chore(changesets): version packages'
           pr-title: 'chore(🦋📦): version packages'
           version-script: bun run version-changesets

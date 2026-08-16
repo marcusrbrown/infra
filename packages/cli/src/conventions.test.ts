@@ -296,6 +296,20 @@ describe('repo conventions', () => {
     expect(workflows.length).toBeGreaterThan(0)
   })
 
+  it('release workflow passes the app token only through changesets/action input', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/release.yaml')).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {release?: {steps?: {id?: string; env?: Record<string, string>; with?: Record<string, string>}[]}}
+    }
+    const steps = parsed.jobs?.release?.steps ?? []
+    const changesetsStep = steps.find(step => step.id === 'changesets')
+
+    expect(changesetsStep).toBeDefined()
+    expect(changesetsStep?.with?.['github-token']).toBe('$' + '{{ steps.get-app-token.outputs.token }}')
+    expect(changesetsStep?.env).not.toHaveProperty('GITHUB_TOKEN')
+    expect(changesetsStep?.env?.NPM_TOKEN).toBe('$' + '{{ secrets.NPM_TOKEN }}')
+  })
+
   it('no `bundledDependencies` in any package.json', async () => {
     const files = listPackageJsonFiles()
     const offenders: string[] = []

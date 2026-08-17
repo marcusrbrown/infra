@@ -8,7 +8,10 @@ on:
   pull_request:
     types: [edited]
   push:
-    branches-ignore: [main]
+    # changesets/action pushes through a short-lived changesets-ghcommit-temp/* branch and
+    # deletes it immediately, so a run triggered on one fails checkout with
+    # "couldn't find remote ref" before Renovate ever starts.
+    branches-ignore: [main, changesets-ghcommit-temp/**]
   workflow_dispatch:
     inputs:
       log-level:

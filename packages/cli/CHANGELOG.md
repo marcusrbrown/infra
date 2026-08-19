@@ -1,5 +1,34 @@
 # @marcusrbrown/infra
 
+## 0.16.0
+
+### Minor Changes
+
+- Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1128](https://github.com/marcusrbrown/infra/pull/1128))
+
+- Group update across managers: npm dependency: `@goke/mcp`; dependency: `bfra-me/.github`; GitHub Actions workflow dependency: `bfra-me/.github` ([#1132](https://github.com/marcusrbrown/infra/pull/1132))
+  
+  **Multi-package update** for packages: `@marcusrbrown/infra`.
+- Update dependencies ([#1119](https://github.com/marcusrbrown/infra/pull/1119))
+  
+  **Dependencies updated**: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3`
+
+### Patch Changes
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1094](https://github.com/marcusrbrown/infra/pull/1094))
+
+- Update Docker image `eceasy/cli-proxy-api` from `7.2.134` to `7.2.135` ([#1124](https://github.com/marcusrbrown/infra/pull/1124))
+
+- 📦 Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1094](https://github.com/marcusrbrown/infra/pull/1094))
+
+- Update Docker image `postgres` ([#1103](https://github.com/marcusrbrown/infra/pull/1103))
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.132` to `7.2.133` ([#1099](https://github.com/marcusrbrown/infra/pull/1099))
+
+- 🐳 Update Docker image `eceasy/cli-proxy-api` from `7.2.131` to `7.2.132` ([#1092](https://github.com/marcusrbrown/infra/pull/1092))
+
+- Update Docker image `eceasy/cli-proxy-api` from `7.2.135` to `7.2.136` ([#1133](https://github.com/marcusrbrown/infra/pull/1133))
+
 ## 0.15.4
 ### Patch Changes
 

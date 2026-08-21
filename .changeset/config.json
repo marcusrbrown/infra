@@ -5,7 +5,7 @@
   "changelog": ["@svitejs/changesets-changelog-github-compact", {"repo": "marcusrbrown/infra"}],
   "commit": false,
   "fixed": [],
-  "ignore": ["@marcusrbrown/infra-vpn"],
+  "ignore": ["@marcusrbrown/infra-gateway", "@marcusrbrown/infra-vpn"],
   "linked": [],
   "privatePackages": {"tag": true, "version": true},
   "updateInternalDependencies": "patch"

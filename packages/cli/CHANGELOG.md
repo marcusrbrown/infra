@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.18.0
+
+### Minor Changes
+
+- Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1160](https://github.com/marcusrbrown/infra/pull/1160))
+
 ## 0.17.0
 
 ### Minor Changes

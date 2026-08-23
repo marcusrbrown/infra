@@ -3,6 +3,8 @@ name: Renovate Changesets
 
 on:
   pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -11,7 +13,10 @@ jobs:
   renovate-changesets:
     name: Create Renovate Changeset
     runs-on: ubuntu-latest
-    if: github.actor == 'renovate[bot]' || github.actor == 'mrbro-bot[bot]'
+    if: >-
+      github.event.pull_request.head.repo.fork == false &&
+      github.event.pull_request.user.login == github.actor &&
+      (github.actor == 'renovate[bot]' || github.actor == 'mrbro-bot[bot]')
     steps:
       - id: get-app-token
         name: Get Workflow Access Token
@@ -19,6 +24,8 @@ jobs:
         with:
           app-id: ${{ secrets.APPLICATION_ID }}
           private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: read
 
       - name: Setup Git user
         env:
@@ -34,7 +41,9 @@ jobs:
         with:
           fetch-depth: 2
           ref: ${{ github.head_ref }}
+          repository: ${{ github.repository }}
           token: ${{ steps.get-app-token.outputs.token }}
+          persist-credentials: false
 
       - name: Generate Renovate changesets
         uses: bfra-me/.github/.github/actions/renovate-changesets@8aba87302817a5b675c08d32e32443bfab7fc224 # renovate-changesets@0.2.44

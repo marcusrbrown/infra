@@ -41,11 +41,11 @@
   },
   "devDependencies": {
     "@bfra.me/eslint-config": "0.51.2",
-    "@bfra.me/prettier-config": "0.16.10",
+    "@bfra.me/prettier-config": "0.16.11",
     "@bfra.me/tsconfig": "0.13.1",
     "@changesets/cli": "3.0.1",
     "@svitejs/changesets-changelog-github-compact": "1.2.0",
-    "@types/bun": "1.3.14",
+    "@types/bun": "1.4.0",
     "eslint": "10.8.1",
     "eslint-config-prettier": "10.1.8",
     "eslint-plugin-prettier": "5.5.6",

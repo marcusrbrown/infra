@@ -40,8 +40,8 @@
     "goke": "^6.8.0"
   },
   "devDependencies": {
-    "@bfra.me/eslint-config": "0.51.1",
-    "@bfra.me/prettier-config": "0.16.9",
+    "@bfra.me/eslint-config": "0.51.2",
+    "@bfra.me/prettier-config": "0.16.10",
     "@bfra.me/tsconfig": "0.13.1",
     "@changesets/cli": "3.0.1",
     "@svitejs/changesets-changelog-github-compact": "1.2.0",

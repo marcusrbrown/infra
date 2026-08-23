@@ -19,7 +19,7 @@ const healthyCliproxy: StatusSummary = {
   app: 'cliproxy',
   http: 'OK',
   lastDeploy: '—',
-  version: 'v1.2.3',
+  version: 'v1.2.3 (latest v1.2.4)',
   contentHash: '—',
   usageStats: '12 req / 0 fail',
 }
@@ -92,7 +92,9 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
       expectCapturedToInclude(captured, '| App | HTTP | Last Deploy | Version | Content Hash | Usage Stats |'),
     ).toBe(true)
     expect(expectCapturedToInclude(captured, '| keeweb | OK | 2026-04-12 10:00 | — | match | — |')).toBe(true)
-    expect(expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 | — | 12 req / 0 fail |')).toBe(true)
+    expect(
+      expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 (latest v1.2.4) | — | 12 req / 0 fail |'),
+    ).toBe(true)
     expect(expectCapturedToInclude(captured, '| gateway | OK: gateway:running/healthy | — | — | — | — |')).toBe(true)
     expect(expectCapturedToInclude(captured, '| umami | OK: umami:running/healthy | — | — | — | — |')).toBe(true)
     expect(expectCapturedToInclude(captured, '| dashboard | OK: dashboard:running/healthy | — | — | — | — |')).toBe(
@@ -176,7 +178,9 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
         '| keeweb | ❌ Keeweb exploded | ❌ Keeweb exploded | ❌ Keeweb exploded | ❌ Keeweb exploded | ❌ Keeweb exploded |',
       ),
     ).toBe(true)
-    expect(expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 | — | 12 req / 0 fail |')).toBe(true)
+    expect(
+      expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 (latest v1.2.4) | — | 12 req / 0 fail |'),
+    ).toBe(true)
     // Rejection reason must also appear in stderr so MCP consumers can see it
     expect(captured.stderr.join('')).toContain('keeweb status check failed: Keeweb exploded')
   })
@@ -202,7 +206,7 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     }
 
     expect(parsed.keeweb.http).toBe('OK')
-    expect(parsed.cliproxy.version).toBe('v1.2.3')
+    expect(parsed.cliproxy.version).toBe('v1.2.3 (latest v1.2.4)')
     expect(parsed.gateway.http).toBe('OK: gateway:running/healthy')
     expect(parsed.umami.http).toBe('OK: umami:running/healthy')
     expect(parsed.dashboard.http).toBe('OK: dashboard:running/healthy')
@@ -218,6 +222,44 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     // Verify output went to ctx capture, not global console
     expect(captured.stdout.length).toBeGreaterThan(0)
     expect(expectCapturedToInclude(captured, '| App |')).toBe(true)
+  })
+
+  it('renders an equal cliproxy version as the latest marker', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await unifiedStatusAction(
+      {},
+      ctx,
+      makeDeps({
+        getCliproxyStatusSummary: async () => ({...healthyCliproxy, version: 'v1.2.3 (latest)'}),
+      }),
+    )
+
+    expect(expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 (latest) | — | 12 req / 0 fail |')).toBe(
+      true,
+    )
+  })
+
+  it('keeps every compact version branch scannable in the unified table', async () => {
+    const branches = [
+      ['v1.2.3 (latest)', 'v1.2.3 (latest)'],
+      ['v1.2.3 (latest v1.2.4)', 'v1.2.3 (latest v1.2.4)'],
+      ['unknown (latest v1.2.4)', 'unknown (latest v1.2.4)'],
+      ['v1.2.3 (latest unknown)', 'v1.2.3 (latest unknown)'],
+      ['v1.2.3 (latest: no key)', 'v1.2.3 (latest: no key)'],
+      ['unknown', 'unknown'],
+    ] as const
+
+    for (const [version, expected] of branches) {
+      const {ctx, captured} = createCapturedCtx()
+      await unifiedStatusAction(
+        {},
+        ctx,
+        makeDeps({getCliproxyStatusSummary: async () => ({...healthyCliproxy, version})}),
+      )
+
+      expect(expectCapturedToInclude(captured, `| cliproxy | OK | — | ${expected} | — | 12 req / 0 fail |`)).toBe(true)
+    }
   })
 })
 

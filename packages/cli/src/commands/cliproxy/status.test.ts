@@ -5,15 +5,18 @@ import {
   checkHttpReachability,
   checkProviderAuth,
   checkProviderAuthState,
+  checkRunningVersion,
   checkUsageStats,
   checkVersion,
   cliproxyStatusAction,
   formatDurationMs,
   formatUsageSummaryLine,
+  formatVersionSummary,
   getCliproxyStatusSummary,
   levelLabel,
   stripTrailingSlash,
   toNumber,
+  type SpawnFn,
 } from './status'
 
 const originalFetch = globalThis.fetch
@@ -31,6 +34,25 @@ function createFetchImplementation(handler: FetchReplacement): typeof fetch {
     },
     {preconnect: originalFetch.preconnect},
   )
+}
+
+function makeSpawnResult(stdoutText: string, stderrText = '', exitCode = 0): SpawnFn {
+  const encoder = new TextEncoder()
+  return (_cmd, _opts) => ({
+    stdout: new ReadableStream({
+      start(controller) {
+        if (stdoutText.length > 0) controller.enqueue(encoder.encode(stdoutText))
+        controller.close()
+      },
+    }),
+    stderr: new ReadableStream({
+      start(controller) {
+        if (stderrText.length > 0) controller.enqueue(encoder.encode(stderrText))
+        controller.close()
+      },
+    }),
+    exited: Promise.resolve(exitCode),
+  })
 }
 
 describe('cliproxy status helpers', () => {
@@ -264,6 +286,75 @@ describe('cliproxy status helpers', () => {
     })
   })
 
+  describe('checkRunningVersion', () => {
+    it('parses the deployed CLIProxyAPI image version from SSH output', async () => {
+      const spawn = makeSpawnResult('cli-proxy-api\teceasy/cli-proxy-api:v7.2.138@sha256:deadbeef\n')
+
+      const result = await checkRunningVersion('cliproxy.example.com', spawn)
+
+      expect(result).toEqual({title: 'Running version', level: 'ok', summary: 'v7.2.138'})
+    })
+
+    it('degrades to a warning when SSH is unavailable', async () => {
+      const result = await checkRunningVersion('cliproxy.example.com', makeSpawnResult('', 'Permission denied\n', 255))
+
+      expect(result.title).toBe('Running version')
+      expect(result.level).toBe('warning')
+      expect(result.summary).toContain('SSH command failed')
+    })
+
+    it('rejects an invalid host before invoking SSH', async () => {
+      const neverSpawn: SpawnFn = () => {
+        throw new Error('spawn must not be called for an invalid host')
+      }
+
+      await expect(checkRunningVersion('-oProxyCommand=evil', neverSpawn)).rejects.toThrow('Invalid CLIPROXY_DOMAIN')
+    })
+  })
+
+  describe('formatVersionSummary', () => {
+    const check = (level: 'ok' | 'warning' | 'error', summary: string) => ({
+      title: 'version',
+      level,
+      summary,
+    })
+
+    it('formats differing healthy versions as running with latest context', () => {
+      expect(formatVersionSummary(check('ok', 'v7.2.139'), check('ok', 'v7.2.140'))).toBe('v7.2.139 (latest v7.2.140)')
+    })
+
+    it('collapses equal healthy versions to a latest marker', () => {
+      expect(formatVersionSummary(check('ok', 'v7.2.139'), check('ok', 'v7.2.139'))).toBe('v7.2.139 (latest)')
+    })
+
+    it('compacts an unavailable running version', () => {
+      expect(
+        formatVersionSummary(
+          check('warning', 'SSH command failed (exit 255): Permission denied'),
+          check('ok', 'v7.2.140'),
+        ),
+      ).toBe('unknown (latest v7.2.140)')
+    })
+
+    it('compacts an unavailable latest version', () => {
+      expect(
+        formatVersionSummary(check('ok', 'v7.2.139'), check('error', 'GET latest-version failed with HTTP 500')),
+      ).toBe('v7.2.139 (latest unknown)')
+    })
+
+    it('labels a missing management key without leaking the diagnostic into the cell', () => {
+      expect(formatVersionSummary(check('ok', 'v7.2.139'), check('warning', 'Not checked (no management key).'))).toBe(
+        'v7.2.139 (latest: no key)',
+      )
+    })
+
+    it('collapses both unavailable versions to unknown', () => {
+      expect(formatVersionSummary(check('warning', 'SSH unavailable'), check('error', 'management API failed'))).toBe(
+        'unknown',
+      )
+    })
+  })
+
   describe('formatUsageSummaryLine', () => {
     it('formats a recent-activity summary with no errors', () => {
       const result = formatUsageSummaryLine({
@@ -392,6 +483,26 @@ describe('cliproxyStatusAction (Tier-2 ctx capture)', () => {
     } finally {
       if (savedKey !== undefined) process.env.CLIPROXY_MANAGEMENT_KEY = savedKey
     }
+  })
+
+  it('keeps HTTP checks healthy when the running-version SSH check fails', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.endsWith('/healthz')) return new Response('ok', {status: 200})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com'},
+      ctx,
+      makeSpawnResult('', 'ssh: connect failed\n', 255),
+    )
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output).toContain('[OK] HTTP reachability')
+    expect(output).toContain('[WARN] Running version')
+    expect(output).toContain('ssh: connect failed')
+    expect(captured.exit).toBeNull()
   })
 })
 

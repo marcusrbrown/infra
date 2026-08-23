@@ -5,6 +5,11 @@ import type {StatusSummary} from '../status'
 import {HTTP_TIMEOUT_MS, managementHeaders} from '@marcusrbrown/infra-shared/cliproxy/management'
 import {z} from 'zod'
 
+import {buildKnownHostsArgs} from '../../lib/known-hosts'
+import {redactHost} from '../../lib/redact'
+import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {validateCliproxyHost} from './host'
+
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
@@ -22,6 +27,22 @@ interface CheckResult {
   level: CheckLevel
   summary: string
   details?: string[]
+}
+
+export type SpawnFn = (
+  cmd: string[],
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+) => {
+  stdout: ReadableStream<Uint8Array>
+  stderr: ReadableStream<Uint8Array>
+  exited: Promise<number>
+}
+
+function defaultSpawn(
+  cmd: string[],
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+): ReturnType<SpawnFn> {
+  return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
 
 export function levelLabel(level: CheckLevel): string {
@@ -191,7 +212,7 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
 
     if (response.status === 429) {
       return {
-        title: 'Latest version',
+        title: 'Latest available version',
         level: 'warning',
         summary: 'Rate limited by management API (HTTP 429). Retry in a few moments.',
       }
@@ -199,7 +220,7 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
 
     if (!response.ok) {
       return {
-        title: 'Latest version',
+        title: 'Latest available version',
         level: 'error',
         summary: `GET /v0/management/latest-version failed with HTTP ${response.status}`,
       }
@@ -210,18 +231,81 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
     if (payload && typeof payload === 'object') {
       const version = (payload as Record<string, unknown>)['latest-version']
       if (typeof version === 'string' && version.length > 0) {
-        return {title: 'Latest version', level: 'ok', summary: version}
+        return {title: 'Latest available version', level: 'ok', summary: version}
       }
     }
 
     return {
-      title: 'Latest version',
+      title: 'Latest available version',
       level: 'warning',
       summary: 'Response did not include a latest-version string.',
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return {title: 'Latest version', level: 'error', summary: `Unable to check latest version: ${message}`}
+    return {title: 'Latest available version', level: 'error', summary: `Unable to check latest version: ${message}`}
+  }
+}
+
+export async function checkRunningVersion(host: string, spawn: SpawnFn = defaultSpawn): Promise<CheckResult> {
+  validateCliproxyHost(host)
+
+  let cleanup: () => void = () => undefined
+
+  try {
+    const knownHostsArgs = buildKnownHostsArgs()
+    const identity = buildIdentityArgs(process.env.CLIPROXY_SSH_KEY)
+    cleanup = identity.cleanup
+
+    const sshCmd = [
+      'ssh',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'ConnectTimeout=10',
+      '-o',
+      'StrictHostKeyChecking=yes',
+      ...knownHostsArgs,
+      ...identity.args,
+      `root@${host}`,
+      `docker ps --format '{{.Image}}'`,
+    ]
+
+    const env: Record<string, string> = {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: process.env.HOME ?? '/tmp',
+      ...(process.env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK} : {}),
+    }
+
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const [stdoutText, stderrText, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+
+    if (exitCode !== 0) {
+      return {
+        title: 'Running version',
+        level: 'warning',
+        summary: `SSH command failed (exit ${exitCode}): ${redactHost(stderrText.trim(), host) || 'unknown error'}`,
+      }
+    }
+
+    const imageMatch = /(?:^|\s)eceasy\/cli-proxy-api:([^\s@]+)/m.exec(stdoutText)
+    if (!imageMatch) {
+      return {
+        title: 'Running version',
+        level: 'warning',
+        summary: 'No running eceasy/cli-proxy-api container found.',
+      }
+    }
+
+    return {title: 'Running version', level: 'ok', summary: imageMatch[1] ?? 'unknown'}
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {title: 'Running version', level: 'warning', summary: `Unable to check running version via SSH: ${message}`}
+  } finally {
+    cleanup()
   }
 }
 
@@ -485,6 +569,28 @@ function formatCheckSummary(result: CheckResult): string {
   return `${levelLabel(result.level)}: ${result.summary}`
 }
 
+export function formatVersionSummary(running: CheckResult, available: CheckResult): string {
+  const latestFailure = /auth|\b40[13]\b|ip banned/i.test(available.summary) ? 'auth' : 'unknown'
+
+  if (running.level === 'ok' && available.level === 'ok') {
+    return running.summary === available.summary
+      ? `${running.summary} (latest)`
+      : `${running.summary} (latest ${available.summary})`
+  }
+
+  if (running.level === 'ok') {
+    return available.summary === 'Not checked (no management key).'
+      ? `${running.summary} (latest: no key)`
+      : `${running.summary} (latest ${latestFailure})`
+  }
+
+  if (available.level === 'ok') {
+    return `unknown (latest ${available.summary})`
+  }
+
+  return latestFailure === 'auth' ? 'unknown (auth)' : 'unknown'
+}
+
 export function formatUsageSummaryLine(result: CheckResult): string | null {
   // v7 recent-window format: "recent: N" or "recent: N, errors: M"
   const recentMatch = /recent:\s*(\d+)/.exec(result.summary)
@@ -497,25 +603,31 @@ export function formatUsageSummaryLine(result: CheckResult): string | null {
   return `Recent requests: ${total}${errors > 0 ? `, ${errors} errors` : ''}`
 }
 
-export async function getCliproxyStatusSummary(baseUrl: string, key: string, verbose: boolean): Promise<StatusSummary> {
+export async function getCliproxyStatusSummary(
+  baseUrl: string,
+  key: string,
+  verbose: boolean,
+  spawn: SpawnFn = defaultSpawn,
+): Promise<StatusSummary> {
   const normalizedBaseUrl = stripTrailingSlash(baseUrl)
-  const [httpResult, mgmt] = await Promise.all([
+  const host = new URL(normalizedBaseUrl).hostname
+  const [httpResult, mgmt, running] = await Promise.all([
     checkHttpReachability(`${normalizedBaseUrl}/healthz`, verbose),
     runManagementChecks(normalizedBaseUrl, key || undefined),
+    checkRunningVersion(host, spawn),
   ])
 
-  let version: string
+  let available: CheckResult
   let usageStats: string
 
   if (mgmt.kind === 'no-key') {
-    version = '— (no key)'
+    available = {title: 'Latest available version', level: 'warning', summary: 'Not checked (no management key).'}
     usageStats = '— (no key)'
   } else if (mgmt.kind === 'auth-failure') {
-    const authSummary = formatCheckSummary(mgmt.result)
-    version = authSummary
-    usageStats = authSummary
+    available = mgmt.result
+    usageStats = formatCheckSummary(mgmt.result)
   } else {
-    version = formatCheckSummary(mgmt.version)
+    available = mgmt.version
     usageStats = formatCheckSummary(mgmt.usage)
   }
 
@@ -523,7 +635,7 @@ export async function getCliproxyStatusSummary(baseUrl: string, key: string, ver
     app: 'cliproxy',
     http: formatCheckSummary(httpResult),
     lastDeploy: '—',
-    version,
+    version: formatVersionSummary(running, available),
     contentHash: '—',
     usageStats,
   }
@@ -537,7 +649,11 @@ export interface StatusOptions {
   verbose?: boolean
 }
 
-export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCtx): Promise<void> {
+export async function cliproxyStatusAction(
+  options: StatusOptions,
+  ctx: ActionCtx,
+  spawn: SpawnFn = defaultSpawn,
+): Promise<void> {
   let errorCount = 0
   try {
     const verbose = options.verbose === true
@@ -560,7 +676,12 @@ export async function cliproxyStatusAction(options: StatusOptions, ctx: ActionCt
     ctx.console.log('CLIProxyAPI status')
     ctx.console.log('')
 
-    const results: CheckResult[] = [await checkHttpReachability(`${baseUrl}/healthz`, verbose)]
+    const host = new URL(baseUrl).hostname
+    const [httpResult, runningResult] = await Promise.all([
+      checkHttpReachability(`${baseUrl}/healthz`, verbose),
+      checkRunningVersion(host, spawn),
+    ])
+    const results: CheckResult[] = [httpResult, runningResult]
 
     let capturedUsageResult: CheckResult | undefined
 

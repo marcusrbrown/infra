@@ -64,8 +64,6 @@ jobs:
       - id: changesets
         name: Create Release Pull Request or Publish
         uses: changesets/action@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         with:
           github-token: ${{ steps.get-app-token.outputs.token }}
           commit-message: 'chore(changesets): version packages'

@@ -247,11 +247,11 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
 }
 
 export async function checkRunningVersion(host: string, spawn: SpawnFn = defaultSpawn): Promise<CheckResult> {
-  validateCliproxyHost(host)
-
   let cleanup: () => void = () => undefined
 
   try {
+    validateCliproxyHost(host)
+
     const knownHostsArgs = buildKnownHostsArgs()
     const identity = buildIdentityArgs(process.env.CLIPROXY_SSH_KEY)
     cleanup = identity.cleanup
@@ -569,8 +569,26 @@ function formatCheckSummary(result: CheckResult): string {
   return `${levelLabel(result.level)}: ${result.summary}`
 }
 
+const RUNNING_VERSION_NOT_CHECKED_SUMMARY = 'Not checked for explicit URL override.'
+
 export function formatVersionSummary(running: CheckResult, available: CheckResult): string {
-  const latestFailure = /auth|\b40[13]\b|ip banned/i.test(available.summary) ? 'auth' : 'unknown'
+  const latestFailure = /429|rate limit/i.test(available.summary)
+    ? 'rate-limited'
+    : /auth|\b40[13]\b|ip banned/i.test(available.summary)
+      ? 'auth'
+      : 'unknown'
+
+  if (running.summary === RUNNING_VERSION_NOT_CHECKED_SUMMARY) {
+    if (available.level === 'ok') {
+      return `not checked (latest ${available.summary})`
+    }
+
+    if (available.summary === 'Not checked (no management key).') {
+      return 'not checked (latest: no key)'
+    }
+
+    return `not checked (latest ${latestFailure})`
+  }
 
   if (running.level === 'ok' && available.level === 'ok') {
     return running.summary === available.summary
@@ -589,6 +607,16 @@ export function formatVersionSummary(running: CheckResult, available: CheckResul
   }
 
   return latestFailure === 'auth' ? 'unknown (auth)' : 'unknown'
+}
+
+function getRunningVersionNotChecked(host: string): CheckResult {
+  try {
+    validateCliproxyHost(host)
+    return {title: 'Running version', level: 'warning', summary: RUNNING_VERSION_NOT_CHECKED_SUMMARY}
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {title: 'Running version', level: 'warning', summary: `Unable to validate running-version host: ${message}`}
+  }
 }
 
 export function formatUsageSummaryLine(result: CheckResult): string | null {
@@ -677,9 +705,12 @@ export async function cliproxyStatusAction(
     ctx.console.log('')
 
     const host = new URL(baseUrl).hostname
+    const runningCheck = urlIsExplicitlyOverridden
+      ? Promise.resolve(getRunningVersionNotChecked(host))
+      : checkRunningVersion(host, spawn)
     const [httpResult, runningResult] = await Promise.all([
       checkHttpReachability(`${baseUrl}/healthz`, verbose),
-      checkRunningVersion(host, spawn),
+      runningCheck,
     ])
     const results: CheckResult[] = [httpResult, runningResult]
 

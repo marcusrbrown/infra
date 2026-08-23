@@ -296,8 +296,9 @@ describe('repo conventions', () => {
     expect(workflows.length).toBeGreaterThan(0)
   })
 
-  it('release workflow passes the app token only through changesets/action input', async () => {
+  it('release workflow passes auth through changesets/action with NODE_AUTH_TOKEN', async () => {
     const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/release.yaml')).text()
+    const npmrc = await Bun.file(resolve(REPO_ROOT, '.npmrc')).text()
     const parsed = parseYaml(text) as {
       jobs?: {release?: {steps?: {id?: string; env?: Record<string, string>; with?: Record<string, string>}[]}}
     }
@@ -307,7 +308,10 @@ describe('repo conventions', () => {
     expect(changesetsStep).toBeDefined()
     expect(changesetsStep?.with?.['github-token']).toBe('$' + '{{ steps.get-app-token.outputs.token }}')
     expect(changesetsStep?.env).not.toHaveProperty('GITHUB_TOKEN')
-    expect(changesetsStep?.env?.NPM_TOKEN).toBe('$' + '{{ secrets.NPM_TOKEN }}')
+    expect(changesetsStep?.env?.NODE_AUTH_TOKEN).toBe('$' + '{{ secrets.NPM_TOKEN }}')
+    expect(changesetsStep?.env).not.toHaveProperty('NPM_TOKEN')
+    expect(npmrc).toContain('//registry.npmjs.org/:_authToken=$' + '{NODE_AUTH_TOKEN}')
+    expect(npmrc).not.toContain('$' + '{NPM_TOKEN}')
   })
 
   it('no `bundledDependencies` in any package.json', async () => {

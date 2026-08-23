@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.19.0
+
+### Minor Changes
+
+- Report running and latest CLIProxyAPI versions separately in status output. ([#1165](https://github.com/marcusrbrown/infra/pull/1165))
+
 ## 0.18.0
 
 ### Minor Changes

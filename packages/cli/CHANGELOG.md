@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.20.0
+
+### Minor Changes
+
+- Group update across managers: npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3`, `@bfra.me/prettier-config`, `@types/bun`; GitHub Actions workflow dependencies: `bfra-me/.github`, `fro-bot/agent` ([#1172](https://github.com/marcusrbrown/infra/pull/1172))
+
 ## 0.19.0
 
 ### Minor Changes

@@ -39,6 +39,13 @@
       groupName: null,
     },
     {
+      matchDatasources: ['npm'],
+      matchPackageNames: ['typescript'],
+      // @typescript-eslint/* peers require typescript >=4.8.4 <6.1.0; lift this ceiling when
+      // TypeScript 7 support lands upstream in typescript-eslint#10940.
+      allowedVersions: '<7',
+    },
+    {
       // ghcr.io/fro-bot/dashboard is the upstream-published, smoke-tested image consumed by
       // apps/dashboard via docker-compose.yaml (tag@digest pin). The implicit docker-compose
       // manager tracks digest bumps; this rule adds PR context and requires operator approval

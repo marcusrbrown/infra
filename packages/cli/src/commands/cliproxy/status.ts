@@ -606,7 +606,11 @@ export function formatVersionSummary(running: CheckResult, available: CheckResul
     return `unknown (latest ${available.summary})`
   }
 
-  return latestFailure === 'auth' ? 'unknown (auth)' : 'unknown'
+  if (latestFailure === 'auth') {
+    return 'unknown (auth)'
+  }
+
+  return latestFailure === 'rate-limited' ? 'unknown (latest rate-limited)' : 'unknown'
 }
 
 function getRunningVersionNotChecked(host: string): CheckResult {

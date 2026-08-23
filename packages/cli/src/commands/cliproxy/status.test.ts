@@ -362,6 +362,15 @@ describe('cliproxy status helpers', () => {
         'unknown',
       )
     })
+
+    it('keeps a rate-limit label when both version checks are degraded', () => {
+      expect(
+        formatVersionSummary(
+          check('warning', 'SSH unavailable'),
+          check('warning', 'Rate limited by management API (HTTP 429).'),
+        ),
+      ).toBe('unknown (latest rate-limited)')
+    })
   })
 
   describe('formatUsageSummaryLine', () => {

@@ -296,22 +296,46 @@ describe('repo conventions', () => {
     expect(workflows.length).toBeGreaterThan(0)
   })
 
-  it('release workflow passes auth through changesets/action with NODE_AUTH_TOKEN', async () => {
+  it('release workflow uses tokenless npm trusted publishing', async () => {
     const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/release.yaml')).text()
-    const npmrc = await Bun.file(resolve(REPO_ROOT, '.npmrc')).text()
     const parsed = parseYaml(text) as {
-      jobs?: {release?: {steps?: {id?: string; env?: Record<string, string>; with?: Record<string, string>}[]}}
+      jobs?: {
+        release?: {
+          permissions?: Record<string, string>
+          steps?: {
+            id?: string
+            uses?: string
+            env?: Record<string, string>
+            with?: Record<string, string>
+          }[]
+        }
+      }
     }
     const steps = parsed.jobs?.release?.steps ?? []
     const changesetsStep = steps.find(step => step.id === 'changesets')
+    const setupNodeStep = steps.find(step => step.uses?.startsWith('actions/setup-node@'))
 
     expect(changesetsStep).toBeDefined()
     expect(changesetsStep?.with?.['github-token']).toBe('$' + '{{ steps.get-app-token.outputs.token }}')
     expect(changesetsStep?.env).not.toHaveProperty('GITHUB_TOKEN')
-    expect(changesetsStep?.env?.NODE_AUTH_TOKEN).toBe('$' + '{{ secrets.NPM_TOKEN }}')
+    expect(changesetsStep?.env).not.toHaveProperty('NODE_AUTH_TOKEN')
     expect(changesetsStep?.env).not.toHaveProperty('NPM_TOKEN')
-    expect(npmrc).toContain('//registry.npmjs.org/:_authToken=$' + '{NODE_AUTH_TOKEN}')
-    expect(npmrc).not.toContain('$' + '{NPM_TOKEN}')
+    expect(parsed.jobs?.release?.permissions?.['id-token']).toBe('write')
+    expect(setupNodeStep?.with?.['registry-url']).toBe('https://registry.npmjs.org')
+
+    const npmrcFiles = [...new Bun.Glob('**/.npmrc').scanSync({cwd: REPO_ROOT, absolute: true, dot: true})].filter(
+      file => !file.includes('/node_modules/'),
+    )
+    const authTokenFiles: string[] = []
+    for (const file of npmrcFiles) {
+      const hasAuthTokenLine = (await Bun.file(file).text())
+        .split(/\r?\n/)
+        .some(line => line.includes('_authToken') && line.includes('='))
+      if (hasAuthTokenLine) {
+        authTokenFiles.push(relative(REPO_ROOT, file))
+      }
+    }
+    expect(authTokenFiles).toEqual([])
   })
 
   it('no `bundledDependencies` in any package.json', async () => {

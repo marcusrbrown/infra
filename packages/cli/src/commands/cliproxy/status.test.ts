@@ -5,15 +5,18 @@ import {
   checkHttpReachability,
   checkProviderAuth,
   checkProviderAuthState,
+  checkRunningVersion,
   checkUsageStats,
   checkVersion,
   cliproxyStatusAction,
   formatDurationMs,
   formatUsageSummaryLine,
+  formatVersionSummary,
   getCliproxyStatusSummary,
   levelLabel,
   stripTrailingSlash,
   toNumber,
+  type SpawnFn,
 } from './status'
 
 const originalFetch = globalThis.fetch
@@ -31,6 +34,25 @@ function createFetchImplementation(handler: FetchReplacement): typeof fetch {
     },
     {preconnect: originalFetch.preconnect},
   )
+}
+
+function makeSpawnResult(stdoutText: string, stderrText = '', exitCode = 0): SpawnFn {
+  const encoder = new TextEncoder()
+  return (_cmd, _opts) => ({
+    stdout: new ReadableStream({
+      start(controller) {
+        if (stdoutText.length > 0) controller.enqueue(encoder.encode(stdoutText))
+        controller.close()
+      },
+    }),
+    stderr: new ReadableStream({
+      start(controller) {
+        if (stderrText.length > 0) controller.enqueue(encoder.encode(stderrText))
+        controller.close()
+      },
+    }),
+    exited: Promise.resolve(exitCode),
+  })
 }
 
 describe('cliproxy status helpers', () => {
@@ -264,6 +286,93 @@ describe('cliproxy status helpers', () => {
     })
   })
 
+  describe('checkRunningVersion', () => {
+    it('parses the deployed CLIProxyAPI image version from SSH output', async () => {
+      const spawn = makeSpawnResult('cli-proxy-api\teceasy/cli-proxy-api:v7.2.138@sha256:deadbeef\n')
+
+      const result = await checkRunningVersion('cliproxy-example-com', spawn)
+
+      expect(result).toEqual({title: 'Running version', level: 'ok', summary: 'v7.2.138'})
+    })
+
+    it('degrades to a warning when SSH is unavailable', async () => {
+      const result = await checkRunningVersion('cliproxy-example-com', makeSpawnResult('', 'Permission denied\n', 255))
+
+      expect(result.title).toBe('Running version')
+      expect(result.level).toBe('warning')
+      expect(result.summary).toContain('SSH command failed')
+    })
+
+    it('degrades for an invalid host before invoking SSH', async () => {
+      const neverSpawn: SpawnFn = () => {
+        throw new Error('spawn must not be called for an invalid host')
+      }
+
+      const result = await checkRunningVersion('-oProxyCommand=evil', neverSpawn)
+
+      expect(result.level).toBe('warning')
+      expect(result.summary).toContain('Invalid CLIPROXY_DOMAIN')
+    })
+  })
+
+  describe('formatVersionSummary', () => {
+    const check = (level: 'ok' | 'warning' | 'error', summary: string) => ({
+      title: 'version',
+      level,
+      summary,
+    })
+
+    it('formats differing healthy versions as running with latest context', () => {
+      expect(formatVersionSummary(check('ok', 'v7.2.139'), check('ok', 'v7.2.140'))).toBe('v7.2.139 (latest v7.2.140)')
+    })
+
+    it('collapses equal healthy versions to a latest marker', () => {
+      expect(formatVersionSummary(check('ok', 'v7.2.139'), check('ok', 'v7.2.139'))).toBe('v7.2.139 (latest)')
+    })
+
+    it('compacts an unavailable running version', () => {
+      expect(
+        formatVersionSummary(
+          check('warning', 'SSH command failed (exit 255): Permission denied'),
+          check('ok', 'v7.2.140'),
+        ),
+      ).toBe('unknown (latest v7.2.140)')
+    })
+
+    it('compacts an unavailable latest version', () => {
+      expect(
+        formatVersionSummary(check('ok', 'v7.2.139'), check('error', 'GET latest-version failed with HTTP 500')),
+      ).toBe('v7.2.139 (latest unknown)')
+    })
+
+    it('labels a rate-limited latest version distinctly', () => {
+      expect(
+        formatVersionSummary(check('ok', 'v7.2.139'), check('warning', 'Rate limited by management API (HTTP 429).')),
+      ).toBe('v7.2.139 (latest rate-limited)')
+    })
+
+    it('labels a missing management key without leaking the diagnostic into the cell', () => {
+      expect(formatVersionSummary(check('ok', 'v7.2.139'), check('warning', 'Not checked (no management key).'))).toBe(
+        'v7.2.139 (latest: no key)',
+      )
+    })
+
+    it('collapses both unavailable versions to unknown', () => {
+      expect(formatVersionSummary(check('warning', 'SSH unavailable'), check('error', 'management API failed'))).toBe(
+        'unknown',
+      )
+    })
+
+    it('keeps a rate-limit label when both version checks are degraded', () => {
+      expect(
+        formatVersionSummary(
+          check('warning', 'SSH unavailable'),
+          check('warning', 'Rate limited by management API (HTTP 429).'),
+        ),
+      ).toBe('unknown (latest rate-limited)')
+    })
+  })
+
   describe('formatUsageSummaryLine', () => {
     it('formats a recent-activity summary with no errors', () => {
       const result = formatUsageSummaryLine({
@@ -338,7 +447,13 @@ describe('cliproxyStatusAction (Tier-2 ctx capture, failure-path parity)', () =>
 
     globalThis.fetch = createFetchImplementation(async () => new Response('ok', {status: 200}))
 
-    await expect(cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)).rejects.toMatchObject({
+    await expect(
+      cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      ),
+    ).rejects.toMatchObject({
       name: 'MockProcessExit',
       code: 1,
     })
@@ -356,7 +471,11 @@ describe('cliproxyStatusAction (Tier-2 ctx capture)', () => {
     globalThis.fetch = createFetchImplementation(async () => new Response('ok', {status: 200}))
 
     const {ctx, captured} = createCapturedCtx()
-    await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     expect(expectCapturedToInclude(captured, 'CLIProxyAPI status')).toBe(true)
     expect(expectCapturedToInclude(captured, 'HTTP reachability')).toBe(true)
@@ -369,7 +488,11 @@ describe('cliproxyStatusAction (Tier-2 ctx capture)', () => {
     const {ctx, captured} = createCapturedCtx()
     let threw: unknown
     try {
-      await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+      await cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      )
     } catch (error) {
       threw = error
     }
@@ -386,12 +509,77 @@ describe('cliproxyStatusAction (Tier-2 ctx capture)', () => {
     delete process.env.CLIPROXY_MANAGEMENT_KEY
     try {
       const {ctx, captured} = createCapturedCtx()
-      await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+      await cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      )
 
       expect(expectCapturedToInclude(captured, 'CLIPROXY_MANAGEMENT_KEY')).toBe(true)
     } finally {
       if (savedKey !== undefined) process.env.CLIPROXY_MANAGEMENT_KEY = savedKey
     }
+  })
+
+  it('keeps HTTP checks healthy when the running-version SSH check fails', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.endsWith('/healthz')) return new Response('ok', {status: 200})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.fro.bot'},
+      ctx,
+      makeSpawnResult('', 'ssh: connect failed\n', 255),
+    )
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output).toContain('[OK] HTTP reachability')
+    expect(output).toContain('[WARN] Running version')
+    expect(output).toContain('ssh: connect failed')
+    expect(captured.exit).toBeNull()
+  })
+
+  it('skips SSH for an explicit URL override without failing status', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.endsWith('/healthz')) return new Response('ok', {status: 200})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    let spawnCalls = 0
+    const neverSpawn: SpawnFn = () => {
+      spawnCalls++
+      throw new Error('SSH must not run for an explicit URL override')
+    }
+    const {ctx, captured} = createCapturedCtx()
+
+    await cliproxyStatusAction({url: 'https://other-cliproxy.example.com'}, ctx, neverSpawn)
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output).toContain('[WARN] Running version')
+    expect(output).toContain('Not checked for explicit URL override')
+    expect(captured.exit).toBeNull()
+    expect(spawnCalls).toBe(0)
+  })
+
+  it('keeps HTTP healthy when the URL hostname fails validation', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.endsWith('/healthz')) return new Response('ok', {status: 200})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const neverSpawn: SpawnFn = () => {
+      throw new Error('SSH must not run for an invalid host')
+    }
+    const {ctx, captured} = createCapturedCtx()
+
+    await cliproxyStatusAction({url: 'https://[::1]'}, ctx, neverSpawn)
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    expect(output).toContain('[OK] HTTP reachability')
+    expect(output).toContain('Invalid CLIPROXY_DOMAIN')
+    expect(captured.exit).toBeNull()
   })
 })
 
@@ -481,7 +669,12 @@ describe('management auth failure surfaces in unified summary (FIX 4)', () => {
       return new Response('ok', {status: 200})
     })
 
-    const summary = await getCliproxyStatusSummary('https://cliproxy.example.com', 'bad-key', false)
+    const summary = await getCliproxyStatusSummary(
+      'https://cliproxy.example.com',
+      'bad-key',
+      false,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     // Must NOT show the no-key sentinel — a bad key is distinct from no key
     expect(summary.version).not.toBe('— (no key)')
@@ -511,7 +704,11 @@ describe('ban body word-boundary detection (FIX 5)', () => {
 
     const {ctx, captured} = createCapturedCtx()
     try {
-      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'any-key'}, ctx)
+      await cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com', key: 'any-key'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      )
     } catch (error) {
       if (!(error instanceof MockProcessExit)) throw error
     }
@@ -534,7 +731,11 @@ describe('ban body word-boundary detection (FIX 5)', () => {
 
     const {ctx, captured} = createCapturedCtx()
     try {
-      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'any-key'}, ctx)
+      await cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com', key: 'any-key'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      )
     } catch (error) {
       if (!(error instanceof MockProcessExit)) throw error
     }
@@ -558,7 +759,7 @@ describe('reachability probe targets /healthz liveness endpoint', () => {
     })
 
     const {ctx, captured} = createCapturedCtx()
-    await cliproxyStatusAction({url: BASE}, ctx)
+    await cliproxyStatusAction({url: BASE}, ctx, makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'))
 
     const output = [...captured.stdout, ...captured.stderr].join('\n')
     expect(output).toContain('OK')
@@ -573,7 +774,7 @@ describe('reachability probe targets /healthz liveness endpoint', () => {
       return new Response('ok', {status: 200})
     })
 
-    const summary = await getCliproxyStatusSummary(BASE, '', false)
+    const summary = await getCliproxyStatusSummary(BASE, '', false, makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'))
 
     expect(summary.http).toMatch(/^OK/)
   })
@@ -608,7 +809,11 @@ describe('management auth probe (ban-awareness)', () => {
     const {ctx} = createCapturedCtx()
     // Auth failure yields error-level result → exit(1) → MockProcessExit thrown
     try {
-      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'bad-key'}, ctx)
+      await cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com', key: 'bad-key'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      )
     } catch (error) {
       if (!(error instanceof MockProcessExit)) throw error
     }
@@ -632,7 +837,11 @@ describe('management auth probe (ban-awareness)', () => {
     const {ctx, captured} = createCapturedCtx()
     // 403+ban → error level → exit(1)
     try {
-      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'any-key'}, ctx)
+      await cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com', key: 'any-key'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      )
     } catch (error) {
       if (!(error instanceof MockProcessExit)) throw error
     }
@@ -655,7 +864,11 @@ describe('management auth probe (ban-awareness)', () => {
     const {ctx, captured} = createCapturedCtx()
     // 401 → error level → exit(1)
     try {
-      await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: secretKey}, ctx)
+      await cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com', key: secretKey},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      )
     } catch (error) {
       if (!(error instanceof MockProcessExit)) throw error
     }
@@ -691,7 +904,11 @@ describe('management auth probe (ban-awareness)', () => {
     })
 
     const {ctx} = createCapturedCtx()
-    await cliproxyStatusAction({url: 'https://cliproxy.example.com', key: 'valid-key'}, ctx)
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com', key: 'valid-key'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     expect(fetchedUrls.some(u => u.includes('/v0/management/latest-version'))).toBe(true)
     expect(fetchedUrls.some(u => u.includes('/v0/management/usage-queue'))).toBe(true)
@@ -714,7 +931,12 @@ describe('management auth probe (ban-awareness)', () => {
       return new Response('ok', {status: 200})
     })
 
-    await getCliproxyStatusSummary('https://cliproxy.example.com', 'bad-key', false)
+    await getCliproxyStatusSummary(
+      'https://cliproxy.example.com',
+      'bad-key',
+      false,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     expect(managementFetchUrls.length).toBe(1)
   })
@@ -764,7 +986,11 @@ describe('cliproxyStatusAction — ambient key does not follow agent-supplied UR
 
     const {ctx} = createCapturedCtx()
     try {
-      await cliproxyStatusAction({url: 'https://evil.example.com'}, ctx)
+      await cliproxyStatusAction(
+        {url: 'https://evil.example.com'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      )
     } catch {
       // exit(1) expected or not — either way, we just care about key leakage
     }
@@ -796,7 +1022,11 @@ describe('cliproxyStatusAction — ambient key does not follow agent-supplied UR
 
     const {ctx} = createCapturedCtx()
     // Default URL is https://cliproxy.fro.bot — pass it explicitly
-    await cliproxyStatusAction({url: 'https://cliproxy.fro.bot'}, ctx)
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.fro.bot'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     expect(capturedManagementKeys).toContain('secret-ambient-key')
   })
@@ -823,7 +1053,11 @@ describe('cliproxyStatusAction — ambient key does not follow agent-supplied UR
     })
 
     const {ctx} = createCapturedCtx()
-    await cliproxyStatusAction({url: 'https://other-cliproxy.example.com', key: 'explicit-key'}, ctx)
+    await cliproxyStatusAction(
+      {url: 'https://other-cliproxy.example.com', key: 'explicit-key'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     expect(capturedManagementKeys).toContain('explicit-key')
   })
@@ -835,7 +1069,11 @@ describe('cliproxyStatusAction — ambient key does not follow agent-supplied UR
     })
 
     const {ctx, captured} = createCapturedCtx()
-    await cliproxyStatusAction({url: 'https://other-cliproxy.example.com'}, ctx)
+    await cliproxyStatusAction(
+      {url: 'https://other-cliproxy.example.com'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     const output = [...captured.stdout, ...captured.stderr].join('\n')
     expect(output).toMatch(/CLIPROXY_MANAGEMENT_KEY|no key|skipping/i)
@@ -1095,7 +1333,11 @@ describe('cliproxyStatusAction — provider auth probe wiring', () => {
     })
 
     const {ctx, captured} = createCapturedCtx()
-    await cliproxyStatusAction({url: 'https://cliproxy.example.com'}, ctx)
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     const output = [...captured.stdout, ...captured.stderr].join('\n')
     expect(output).toMatch(/CLIPROXY_API_KEY|skipping upstream provider probe/i)
@@ -1118,7 +1360,11 @@ describe('cliproxyStatusAction — provider auth probe wiring', () => {
     })
 
     const {ctx, captured} = createCapturedCtx()
-    await cliproxyStatusAction({url: 'https://cliproxy.example.com', apiKey: 'my-api-key'}, ctx)
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com', apiKey: 'my-api-key'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     expect(fetchedUrls.some(u => u.includes('/v1/chat/completions'))).toBe(true)
     const output = [...captured.stdout, ...captured.stderr].join('\n')
@@ -1148,7 +1394,11 @@ describe('cliproxyStatusAction — provider auth probe wiring', () => {
 
     const {ctx} = createCapturedCtx()
     // Explicit --url override to a non-trusted host — ambient key must NOT follow
-    await cliproxyStatusAction({url: 'https://evil.example.com'}, ctx)
+    await cliproxyStatusAction(
+      {url: 'https://evil.example.com'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     // The ambient API key must not appear in any Authorization header sent to evil host
     expect(capturedAuthHeaders.some(h => h.includes('ambient-api-key-secret'))).toBe(false)
@@ -1191,7 +1441,11 @@ describe('cliproxyStatusAction — provider auth probe wiring', () => {
 
     const {ctx} = createCapturedCtx()
     // Default trusted URL — ambient key SHOULD be used
-    await cliproxyStatusAction({url: 'https://cliproxy.fro.bot'}, ctx)
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.fro.bot'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
     expect(capturedAuthHeaders.some(h => h.includes('ambient-api-key-trusted'))).toBe(true)
   })
@@ -1206,7 +1460,11 @@ describe('cliproxyStatusAction — provider auth probe wiring', () => {
     const {ctx, captured} = createCapturedCtx()
     let threw: unknown
     try {
-      await cliproxyStatusAction({url: 'https://cliproxy.example.com', apiKey: 'my-api-key'}, ctx)
+      await cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com', apiKey: 'my-api-key'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      )
     } catch (error) {
       threw = error
     }

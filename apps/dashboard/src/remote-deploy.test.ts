@@ -50,6 +50,52 @@ const localEnv = {
   DASHBOARD_DOMAIN: 'dashboard.example',
 }
 
+const extractFailureDetails = (program: string): {code: string; detail: string}[] =>
+  [...program.matchAll(/\bfail[ \t]+"([^"]+)"[ \t]+"([^"]*)"/g)].flatMap(match => {
+    const [, code, detail] = match
+    return code === undefined || detail === undefined ? [] : [{code, detail}]
+  })
+
+const extractFailureDetailAllowlist = (program: string): string[] => {
+  const functionStart = program.indexOf('failure_detail_is_allowlisted() {')
+  const caseHeader = 'case "$1" in'
+  const caseStart = program.indexOf(caseHeader, functionStart)
+  const caseEnd = program.indexOf('*) return 1 ;;', caseStart)
+  if (functionStart === -1 || caseStart === -1 || caseEnd === -1) {
+    throw new Error('Could not find failure detail allowlist case statement')
+  }
+  return [...program.slice(caseStart + caseHeader.length, caseEnd).matchAll(/"([^"]*)"/g)].flatMap(match => {
+    const [, detail] = match
+    return detail === undefined ? [] : [detail]
+  })
+}
+
+const assertFailureDetailAllowlistHasNoDrift = (): void => {
+  const failureDetails = extractFailureDetails(REMOTE_TRANSACTION_PROGRAM)
+  const literalDetails = new Set(failureDetails.filter(({detail}) => !detail.includes('$')).map(({detail}) => detail))
+  const interpolatedDetails = new Set(
+    failureDetails.filter(({detail}) => detail.includes('$')).map(({detail}) => detail),
+  )
+  const allowlistEntries = new Set(extractFailureDetailAllowlist(REMOTE_TRANSACTION_PROGRAM))
+  const missing = [...literalDetails].filter(detail => !allowlistEntries.has(detail)).sort()
+  const stale = [...allowlistEntries].filter(detail => !literalDetails.has(detail)).sort()
+  const interpolated = [...allowlistEntries].filter(detail => interpolatedDetails.has(detail)).sort()
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Failure-detail allowlist is missing literal details:\n${missing.map(detail => `- ${detail}`).join('\n')}`,
+    )
+  }
+  if (stale.length > 0) {
+    throw new Error(`Failure-detail allowlist has stale entries:\n${stale.map(detail => `- ${detail}`).join('\n')}`)
+  }
+  if (interpolated.length > 0) {
+    throw new Error(
+      `Failure-detail allowlist contains interpolated details:\n${interpolated.map(detail => `- ${detail}`).join('\n')}`,
+    )
+  }
+}
+
 class ManualTimers {
   private nextHandle = 1
   private readonly callbacks = new Map<number, () => void>()
@@ -99,6 +145,12 @@ const concatBytes = (...parts: readonly Uint8Array[]): Uint8Array => {
   }
   return result
 }
+
+describe('remote failure detail allowlist', () => {
+  it('keeps literal failure details and allowlist entries in sync', () => {
+    assertFailureDetailAllowlistHasNoDrift()
+  })
+})
 
 const runShellProgram = async (program: string, payload: Uint8Array) => {
   const process = Bun.spawn(['bash', '-c', program], {stdin: 'pipe', stdout: 'pipe', stderr: 'pipe'})

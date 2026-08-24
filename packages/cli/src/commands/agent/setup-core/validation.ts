@@ -158,7 +158,7 @@ export async function verifyModelsAvailable(
   // Model presence check: strip provider prefix to get bare id
   const slashIndex = model.indexOf('/')
   const bareId = slashIndex === -1 ? model : model.slice(slashIndex + 1)
-  const providerPrefix = slashIndex >= 0 ? model.slice(0, slashIndex) : undefined
+  const providerPrefix = slashIndex === -1 ? undefined : model.slice(0, slashIndex)
 
   const modelPresent = entries.some(e => e.id === bareId || e.id === model)
   if (!modelPresent) {

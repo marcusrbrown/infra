@@ -1053,7 +1053,7 @@ export function buildGatewayEnvFileContents(opts: {
   // docker-compose converts $$ → $ when passing the value to the container.
   // Note: String.replaceAll('$', '$$') does NOT work — '$$' in a string replacement
   // is a special pattern meaning "insert a literal $", so it's a no-op. Use split/join.
-  const escapedConfig = serializedConfig.split('$').join('$$')
+  const escapedConfig = serializedConfig.replaceAll('$', '$$$$')
 
   // Validate readyTimeoutMs if provided — must be a safe positive integer within bounds.
   // validateReadyTimeout handles string input; here we guard the numeric form directly.

@@ -73,7 +73,7 @@ const remotePreLockLines = [
 ]
 
 const remoteLockedBodyLines = [
-  String.raw`mark_stage lock-acquired`,
+  'mark_stage lock-acquired',
   'stage="$(mktemp -d -- "$RUNTIME_ROOT/attempt.XXXXXX" 2>/dev/null)" || fail "unsafe-path" "staging directory creation failed"',
   'chown 0:0 "$stage" >/dev/null 2>&1 || fail "unsafe-path" "staging directory ownership failed"',
   'chmod 0700 "$stage" >/dev/null 2>&1 || fail "unsafe-path" "staging directory mode failed"',
@@ -110,7 +110,7 @@ const remoteLockedBodyLines = [
   '[ "$seen_env" -eq 1 ] && [ "$seen_compose" -eq 1 ] && [ "$seen_caddyfile" -eq 1 ] && [ "$seen_github_app_key" -eq 1 ] && [ "$seen_expected_dashboard_digest" -eq 1 ] || fail "payload-malformed" "missing payload field"',
   'remaining_bytes="$(dd bs=1 count=1 status=none 2>/dev/null | wc -c)"',
   '[ "$remaining_bytes" -eq 0 ] || fail "payload-malformed" "trailing payload data"',
-  String.raw`mark_stage payload-decoded`,
+  'mark_stage payload-decoded',
   'expected_dashboard_digest="$(cat -- "$stage/expected-dashboard-digest" 2>/dev/null)" || fail "payload-malformed" "expected dashboard digest read failed"',
   '[[ "$expected_dashboard_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "payload-malformed" "malformed expected dashboard digest"',
   'validate_dashboard_path() {',
@@ -514,7 +514,7 @@ printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
   'publish_active_file "$stage/github-app.pem" "$DASHBOARD_APP_KEY_PATH" pem',
   'publish_active_file "$stage/compose" "$DASHBOARD_COMPOSE_PATH" compose',
   'rm -f -- "$DASHBOARD_LEGACY_OVERRIDE_PATH" >/dev/null 2>&1 || fail "unsafe-path" "legacy override removal failed"',
-  String.raw`mark_stage active-state-written`,
+  'mark_stage active-state-written',
   'cd "$DASHBOARD_ROOT" || fail "convergence-failed" "dashboard directory change failed"',
   'docker compose up -d --no-build --wait --wait-timeout 120 dashboard >/dev/null 2>&1 || fail "convergence-failed" "dashboard convergence failed"',
   'dashboard_container_id="$(docker compose ps --no-trunc -q dashboard 2>/dev/null)" || fail "convergence-failed" "dashboard container lookup failed"',
@@ -528,8 +528,8 @@ printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
   '[ "$running_health" = healthy ] || fail "convergence-failed" "dashboard health verification failed"',
   'printf "%s\n" "evidence=health:$running_health"',
   'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy >/dev/null 2>&1 || fail "convergence-failed" "Caddy convergence failed"',
-  String.raw`mark_stage runtime-converged`,
-  String.raw`mark_stage post-convergence-evidence`,
+  'mark_stage runtime-converged',
+  'mark_stage post-convergence-evidence',
   'capture_storage_records post-convergence',
   'printf "%s\n" "evidence=capacity:post-convergence:free-bytes=$storage_min_free"',
   '[ "$storage_min_free" -ge "$MIN_FREE_BYTES" ] || fail "low-headroom" "post-convergence free space is below the minimum"',
@@ -542,7 +542,7 @@ printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
   '[ "$running_health" = healthy ] || fail "convergence-failed" "running dashboard health verification failed"',
   'verify_persistent_state "$dashboard_container_id"',
   String.raw`if [ -n "$prior_dashboard_digest" ]; then verify_image_exact ghcr.io/fro-bot/dashboard "$prior_dashboard_digest" || fail "convergence-failed" "prior dashboard image is not locally inspectable"; printf "%s\n" "evidence=prior-dashboard:post-convergence:digest=$prior_dashboard_digest;local-inspectable=true"; else printf "%s\n" 'evidence=prior-dashboard:post-convergence:absent'; fi`,
-  String.raw`mark_stage complete`,
+  'mark_stage complete',
 ]
 
 const remoteLockedChildProgram = [...remoteCommonSetupLines, ...remoteLockedBodyLines].join('\n')

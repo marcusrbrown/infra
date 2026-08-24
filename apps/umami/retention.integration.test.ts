@@ -22,7 +22,7 @@ const dockerReason = dockerAvailable
   : dockerProbe.stderr.toString().trim() || 'docker info exited non-zero'
 const integrationTest = dockerAvailable && postgresImageAvailable ? it : it.skip
 
-const schemaSql = String.raw`
+const schemaSql = `
 CREATE SCHEMA retention_test;
 SET search_path = retention_test, public;
 
@@ -188,7 +188,7 @@ describe('Umami retention PostgreSQL 15 integration', () => {
         await waitForPostgres(container)
 
         await resetDatabase(container)
-        const ordinaryFixture = String.raw`
+        const ordinaryFixture = `
 INSERT INTO session VALUES
   ('00000000-0000-0000-0000-000000000001', CURRENT_TIMESTAMP - INTERVAL '14 months'),
   ('00000000-0000-0000-0000-000000000002', CURRENT_TIMESTAMP - INTERVAL '12 months');
@@ -257,7 +257,7 @@ ORDER BY 1;`,
         await resetDatabase(container)
         const savedMarkerWithExpiredChunk = await psql(
           container,
-          String.raw`INSERT INTO session VALUES
+          `INSERT INTO session VALUES
   ('00000000-0000-0000-0000-000000000100', CURRENT_TIMESTAMP - INTERVAL '1 month'),
   ('00000000-0000-0000-0000-000000000101', CURRENT_TIMESTAMP - INTERVAL '1 month');
 INSERT INTO session_replay VALUES
@@ -301,7 +301,7 @@ SELECT count(*) FROM session_replay_saved WHERE website_id = '80000000-0000-0000
         await resetDatabase(container)
         const concurrentSavedMarkerFixture = await psql(
           container,
-          String.raw`INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000102', CURRENT_TIMESTAMP - INTERVAL '1 month');
+          `INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000102', CURRENT_TIMESTAMP - INTERVAL '1 month');
 INSERT INTO session_replay VALUES
   ('50000000-0000-0000-0000-000000000102', '80000000-0000-0000-0000-000000000102', '00000000-0000-0000-0000-000000000102', '90000000-0000-0000-0000-000000000102', 0, CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO session_replay_saved VALUES
@@ -342,7 +342,7 @@ SELECT count(*) FROM session_replay_saved WHERE website_id = '80000000-0000-0000
         await resetDatabase(container)
         const transitiveFixture = await psql(
           container,
-          String.raw`INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000012', CURRENT_TIMESTAMP - INTERVAL '14 months');
+          `INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000012', CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO website_event VALUES ('10000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-000000000012', CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO event_data VALUES ('20000000-0000-0000-0000-000000000012', '10000000-0000-0000-0000-000000000012', CURRENT_TIMESTAMP - INTERVAL '12 months');`,
         )
@@ -375,7 +375,7 @@ INSERT INTO event_data VALUES ('20000000-0000-0000-0000-000000000012', '10000000
         await resetDatabase(container)
         const survivingChild = await psql(
           container,
-          String.raw`SET search_path = retention_test, public;
+          `SET search_path = retention_test, public;
 INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO website_event VALUES ('10000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO event_data VALUES ('20000000-0000-0000-0000-000000000010', '10000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP - INTERVAL '12 months');
@@ -417,7 +417,7 @@ INSERT INTO heatmap_event VALUES
         await resetDatabase(container)
         const baselineOrphan = await psql(
           container,
-          String.raw`INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000020', CURRENT_TIMESTAMP - INTERVAL '14 months');
+          `INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000020', CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO event_data VALUES ('20000000-0000-0000-0000-000000000020', '10000000-0000-0000-0000-000000000020', CURRENT_TIMESTAMP - INTERVAL '12 months');`,
         )
         expect(baselineOrphan.exitCode).toBe(0)
@@ -431,7 +431,7 @@ INSERT INTO event_data VALUES ('20000000-0000-0000-0000-000000000020', '10000000
         await resetDatabase(container)
         const triggerFixture = await psql(
           container,
-          String.raw`INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000030', CURRENT_TIMESTAMP - INTERVAL '14 months');
+          `INSERT INTO session VALUES ('00000000-0000-0000-0000-000000000030', CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO website_event VALUES ('10000000-0000-0000-0000-000000000030', '00000000-0000-0000-0000-000000000030', CURRENT_TIMESTAMP - INTERVAL '14 months');
 INSERT INTO event_data VALUES ('20000000-0000-0000-0000-000000000030', '10000000-0000-0000-0000-000000000030', CURRENT_TIMESTAMP - INTERVAL '14 months');
 CREATE FUNCTION create_retention_orphan() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -458,7 +458,7 @@ CREATE TRIGGER retention_orphan_trigger AFTER DELETE ON website_event FOR EACH R
         await resetDatabase(container)
         const nullFixture = await psql(
           container,
-          String.raw`INSERT INTO session VALUES
+          `INSERT INTO session VALUES
   ('00000000-0000-0000-0000-000000000040', NULL),
   ('00000000-0000-0000-0000-000000000041', CURRENT_TIMESTAMP - INTERVAL '14 months');`,
         )

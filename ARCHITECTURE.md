@@ -43,6 +43,7 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 | Agent workflow verifier | `packages/cli/src/commands/agent/workflow-verify.ts` (`verifyWorkflow` — validates `fro-bot.yaml` job-split, `fro-bot-storage` environment gate, and reachability before wiring storage vars) |
 | Per-app host validators | `apps/<name>/src/host.ts` and `packages/cli/src/commands/<app>/host.ts` |
 | Deploy pipeline | `.github/workflows/deploy.yaml` (router) + `deploy-<app>.yaml` |
+| Release pipeline | `.github/workflows/release.yaml` (Changesets version/publish + npm-registry publish verification), `.github/workflows/release-alert.yaml` (files/updates a GitHub issue when Release fails) |
 | Pinned SSH host keys | `.github/known_hosts` |
 
 ## Data Flow
@@ -84,7 +85,7 @@ Enforceable rules. Many are gated by `packages/cli/src/conventions.test.ts`, ESL
 - **Host-key pinning.** `.github/known_hosts` pins both domain (unhashed) and IP (hashed) entries; CI connects with strict host-key checking against only that file.
 - **Upstream pinning + verify-at-tag.** The gateway daemon source is pinned in `apps/gateway/upstream.json`; bumping it requires diffing the daemon's required-secret contract against the compose wiring at the new tag before deploy. This is independent of the Fro Bot review Action SHA pinned in `.github/workflows/fro-bot.yaml` (see `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md`). The dashboard image is pinned by tag and digest directly in `apps/dashboard/docker-compose.yaml`; Renovate tracks `ghcr.io/fro-bot/dashboard` and opens PRs to bump the pin when a new release is published. The deploy pulls the compose-pinned digest — no CI image build step. The former `ghcr.io/marcusrbrown/infra-dashboard` image is retired and can be deleted manually from the GitHub Container Registry once no references remain.
 - **Executable conventions.** `packages/cli/src/conventions.test.ts` enforces several invariants above (SHA-pinned actions, `.yaml` extension, no stray Bash scripts, no `ssh-keyscan` in workflows, no `bundledDependencies`) as part of the test suite.
-- **Releases.** Changesets version `@marcusrbrown/infra`; only `packages/cli/src/` user-facing changes warrant a changeset.
+- **Releases.** Changesets version `@marcusrbrown/infra`; only `packages/cli/src/` user-facing changes warrant a changeset. `release.yaml` verifies every published package resolves on the npm registry (retrying up to 5 times) before the run completes, and fails closed if it does not; `release-alert.yaml` triggers on `workflow_run` completion of the Release workflow and opens or updates a single `release-publish-failure`-labeled issue when it fails, so a broken publish can't go unnoticed (see `docs/solutions/integration-issues/npm-publish-stacked-auth-failures-2026-08-23.md`).
 
 ## Where to Add New Code
 

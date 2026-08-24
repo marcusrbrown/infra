@@ -73,6 +73,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Copilot instructions | `.github/copilot-instructions.md` | References this file |
 | OpenCode commands | `.opencode/commands/` | Markdown slash commands |
 | Document solved problem | `docs/solutions/` | Compound learning with YAML frontmatter |
+| Search past solutions | `docs/solutions/` | Categorized by problem type; frontmatter `module`, `tags`, `problem_type`. Relevant when implementing or debugging in a documented area |
 | Find operational runbook | `docs/runbooks/` | Operator-facing day-2 procedures (rotation, revocation, restore) |
 
 ## CONVENTIONS
@@ -181,7 +182,7 @@ bun run provision:agent                         # Provision agent OIDC/S3/IAM re
 - `FRO_BOT_S3_ROLE_TO_ASSUME`, `FRO_BOT_S3_BUCKET`, `FRO_BOT_S3_REGION`, `FRO_BOT_S3_PREFIX`, and `FRO_BOT_S3_EXPECTED_BUCKET_OWNER` are non-secret repository variables written by `agent storage` from the provisioner handoff manifest. The consumer repository must pre-create the `fro-bot-storage` GitHub Environment with a required reviewer and an exact main-only deployment-branch policy before the workflow references it. The storage preflight requires the local `aws` CLI; the storage workflow uses GitHub OIDC → AWS STS and never static AWS keys.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.
-- `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets.
+- `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets. npm publishing uses tokenless OIDC trusted publishing (no `NODE_AUTH_TOKEN`, no `.npmrc`); `NPM_TOKEN` is retained only as a rollback path and is not referenced by any workflow.
 - Deploy target: `box.heatvision.co` (Mail-In-A-Box server). Site path: `/home/user-data/www/kw.igg.ms/`.
 - Activation script on server (`/usr/local/bin/kw-deploy-activate`) sets permissions to 775 with setgid to preserve group-write for deploy user.
 - `dorny/paths-filter` used for change detection because native `paths:` breaks `workflow_dispatch`. Deploy condition: `workflow_dispatch || keeweb-changed`.

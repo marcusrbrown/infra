@@ -5,14 +5,15 @@ Where things live and where to put new code. For system shape, data flow, and in
 ## Directory Layout
 
 ```text
-├── apps/                       Deployable units (one self-contained deploy each)
+├── apps/                       Deployable units (one self-contained deploy each; apps/agent is provisioning-only, no deploy)
 │   ├── keeweb/                 KeeWeb static-site deploy (SSH/rsync to Mail-in-a-Box)
 │   ├── cliproxy/               CLIProxyAPI Claude proxy (DigitalOcean + Docker Compose)
 │   ├── gateway/                Fro Bot Discord gateway (DigitalOcean + Docker Compose)
 │   ├── umami/                  Umami analytics (DigitalOcean + Docker Compose)
 │   ├── dashboard/              Fro Bot monitoring dashboard (DigitalOcean + Docker Compose)
 │   ├── vpn/                    WireGuard egress box (AWS Lightsail eu-west-1, native wg-quick@wg0)
-│   └── broker/                 OIDC credential broker (DigitalOcean + Docker Compose)
+│   ├── broker/                 OIDC credential broker (DigitalOcean + Docker Compose)
+│   └── agent/                  Operator-run AWS provisioner for fro-bot/agent S3 durable storage (no deploy step)
 ├── packages/                   Reusable libraries (never import from apps/)
 │   ├── cli/                    @marcusrbrown/infra goke CLI + MCP bridge + VPN peer model
 │   └── shared/                 Cross-app SSH/SCP/provisioning helpers
@@ -26,7 +27,7 @@ Where things live and where to put new code. For system shape, data flow, and in
 
 ### `apps/`
 
-One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (except keeweb — `server/provision-droplet.ts` for the DigitalOcean Docker apps including dashboard and broker, `server/provision.ts` for the `@aws-sdk/client-lightsail` VPN box), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`, and the VPN peer model is published from `packages/cli`.
+One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (except keeweb — `server/provision-droplet.ts` for the DigitalOcean Docker apps including dashboard and broker, `server/provision.ts` for the `@aws-sdk/client-lightsail` VPN box), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`, and the VPN peer model is published from `packages/cli`. `apps/agent` is the non-deployable exception: a `private: true` operator-run AWS provisioner with no `src/deploy.ts`, no `src/host.ts`, and no deploy workflow — just `server/provision.ts` (IAM + S3 convergence) and `src/key-layout.ts` (pinned S3 key layout).
 
 ### `packages/`
 
@@ -65,6 +66,8 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | --- | --- |
 | `apps/<name>/server/provision-droplet.ts` | DigitalOcean droplet provisioning (cliproxy, gateway, umami, dashboard, broker) |
 | `apps/vpn/server/provision.ts` | Lightsail provisioning (`@aws-sdk/client-lightsail`) |
+| `apps/agent/server/provision.ts` | Operator-run AWS IAM + S3 convergence for `fro-bot/agent` durable storage; no deploy step |
+| `apps/agent/src/key-layout.ts` | Version-pinned S3 session/coordination-lock key layout; unknown layouts fail closed |
 | `apps/<name>/src/host.ts` | Deploy-side host validator (rejects `-`-prefixed / invalid hosts) |
 | `apps/gateway/upstream.json` | Pinned `fro-bot/agent` daemon ref |
 | `apps/dashboard/docker-compose.yaml` | Digest-pinned `ghcr.io/fro-bot/dashboard` image (tag@sha256 in the `image:` line; Renovate tracks bumps) |
@@ -113,6 +116,7 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 Mechanical layout; for the integration rationale see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 - **New app** → `apps/<name>/` mirroring `apps/cliproxy/` (Docker Compose on DigitalOcean) or `apps/vpn/` (native systemd on AWS Lightsail): Compose config or deploy script, `src/deploy.ts`, `server/provision.ts` (new apps use `provision.ts`; existing DigitalOcean apps keep `provision-droplet.ts`), `src/host.ts`, `AGENTS.md`. Add to `package.json` `workspaces` + `provision:<name>`/`deploy:<name>` scripts; run `bun install` to refresh `bun.lock`.
+- **New operator-only tool (no deploy)** → mirror `apps/agent/`: `private: true`, `server/provision.ts` only — no `src/deploy.ts`, `src/host.ts`, deploy workflow, or GitHub Environment. Add `provision:<name>` to root `package.json` scripts.
 - **New CLI command** → `packages/cli/src/commands/<app>/<action>.ts` + colocated test; export it from the group's `index.ts` barrel.
 - **New shared helper** → `packages/shared/server/droplet-helpers.ts` + colocated test.
 - **New test** → colocate `*.test.ts` beside the source; fixtures/snapshots in `__fixtures__/`/`__snapshots__/`.

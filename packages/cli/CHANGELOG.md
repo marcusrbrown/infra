@@ -1,5 +1,18 @@
 # @marcusrbrown/infra
 
+## 0.21.0
+
+### Minor Changes
+
+- Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1188](https://github.com/marcusrbrown/infra/pull/1188))
+
+### Patch Changes
+
+- Group update for npm dependencies: `@bfra.me/eslint-config`, `@bfra.me/tsconfig` ([#1178](https://github.com/marcusrbrown/infra/pull/1178))
+  
+  **Multi-package update** for packages: `@marcusrbrown/infra`.
+- Update Docker image `eceasy/cli-proxy-api` from `7.2.140` to `7.2.141` ([#1184](https://github.com/marcusrbrown/infra/pull/1184))
+
 ## 0.20.0
 
 ### Minor Changes

@@ -1942,7 +1942,9 @@ describe('remote transaction process boundary', () => {
       )
 
       expect(result.exitCode).not.toBe(0)
-      expect(result.stdout).toBe('stage=remote-transaction-started\nfailure=unsafe-path\n')
+      expect(result.stdout).toBe(
+        'stage=remote-transaction-started\nfailure=unsafe-path\ndetail=runtime root ownership or mode is unsafe\n',
+      )
       expect(result.stderr).toContain('runtime root ownership or mode is unsafe')
       expect(readdirSync(runtimeRoot)).toEqual([])
     } finally {
@@ -2096,6 +2098,86 @@ describe('remote transaction process boundary', () => {
         }),
       }),
     ).rejects.toMatchObject({stage: 'payload-decoded', exitCode: 1})
+  })
+
+  it('surfaces structured remote failure detail while preserving stage and failure code', async () => {
+    const detail = 'Docker root evidence unavailable'
+    const remoteStderr = 'unfiltered remote stderr must stay private'
+    const text = new TextEncoder()
+
+    const outcome = await runRemoteTransaction({
+      host: 'dashboard.example',
+      payload: fixture,
+      env: localEnv,
+      spawn: () => ({
+        stdout: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              text.encode(`stage=post-acquisition-capacity\nfailure=storage-evidence-malformed\ndetail=${detail}\n`),
+            )
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(text.encode(remoteStderr))
+            controller.close()
+          },
+        }),
+        stdin: {write: (_data: Uint8Array) => {}, end: () => {}},
+        exited: Promise.resolve(1),
+        kill: (_signal: 'SIGTERM' | 'SIGKILL') => {},
+      }),
+    }).then(
+      () => 'resolved' as const,
+      error => error,
+    )
+
+    expect(outcome).toBeInstanceOf(RemoteTransactionError)
+    expect(outcome).toMatchObject({
+      stage: 'post-acquisition-capacity',
+      failureCode: 'storage-evidence-malformed',
+      reason: `storage-evidence-malformed: ${detail}`,
+    })
+    expect(outcome).toHaveProperty(
+      'message',
+      `Remote dashboard deploy failed at post-acquisition-capacity (exit code 1) [storage-evidence-malformed]: ${detail}`,
+    )
+    expect(JSON.stringify(outcome)).not.toContain(remoteStderr)
+  })
+
+  it('uses the generic remote exit reason when failure detail is absent', async () => {
+    const text = new TextEncoder()
+
+    await expect(
+      runRemoteTransaction({
+        host: 'dashboard.example',
+        payload: fixture,
+        env: localEnv,
+        spawn: () => ({
+          stdout: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(text.encode('stage=post-acquisition-capacity\nfailure=storage-evidence-malformed\n'))
+              controller.close()
+            },
+          }),
+          stderr: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.close()
+            },
+          }),
+          stdin: {write: (_data: Uint8Array) => {}, end: () => {}},
+          exited: Promise.resolve(1),
+          kill: (_signal: 'SIGTERM' | 'SIGKILL') => {},
+        }),
+      }),
+    ).rejects.toMatchObject({
+      stage: 'post-acquisition-capacity',
+      failureCode: 'storage-evidence-malformed',
+      reason: 'storage-evidence-malformed: remote process exited unsuccessfully',
+      message:
+        'Remote dashboard deploy failed at post-acquisition-capacity (exit code 1) [storage-evidence-malformed]: remote process exited unsuccessfully',
+    })
   })
 
   it('preserves the bounded lock-contention stage', async () => {

@@ -595,20 +595,21 @@ describe('remote deploy payload negative cases', () => {
 })
 
 describe('remote transaction process boundary', () => {
-  it('normalizes both GNU timeout expiry statuses without leaking timeout stderr', async () => {
-    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-timeout-wrapper-'))
-    const fakeTimeout = join(parent, 'timeout')
-    writeFileSync(fakeTimeout, '#!/bin/sh\nexit "$FAKE_TIMEOUT_EXIT"\n')
-    chmodSync(fakeTimeout, 0o755)
+  for (const status of [124, 137]) {
+    it(`normalizes GNU timeout expiry status ${status} without leaking timeout stderr`, async () => {
+      const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-timeout-wrapper-'))
+      const fakeTimeout = join(parent, 'timeout')
+      writeFileSync(fakeTimeout, '#!/bin/sh\nexit "$FAKE_TIMEOUT_EXIT"\n')
+      chmodSync(fakeTimeout, 0o755)
 
-    try {
-      for (const status of [124, 137]) {
+      try {
         const command =
           buildRemoteSshCommand({host: 'dashboard.example'}).at(-1) ??
           (() => {
             throw new Error('missing remote command')
           })()
         const wrapper = replaceRequired(command, '/usr/bin/timeout', fakeTimeout)
+
         const child = Bun.spawn(['bash', '-c', wrapper], {
           env: {...globalThis.process.env, FAKE_TIMEOUT_EXIT: String(status)},
           stdout: 'pipe',
@@ -623,11 +624,11 @@ describe('remote transaction process boundary', () => {
         expect(exitCode).toBe(124)
         expect(stdout).toBe('failure=transaction-timeout\n')
         expect(stderr).toBe('')
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
       }
-    } finally {
-      rmSync(parent, {recursive: true, force: true})
-    }
-  })
+    })
+  }
 
   it('writes the framed payload only to stdin and closes it before success', async () => {
     const chunks: Uint8Array[] = []
@@ -1203,50 +1204,50 @@ describe('remote transaction process boundary', () => {
     }
   })
 
-  it('fails closed on missing, malformed, or contradictory storage evidence', async () => {
-    const cases: readonly [string, (root: string, runtimeRoot: string) => ShellHarnessOptions][] = [
-      ['missing Docker root', () => ({dockerInfoOutput: ''})],
-      ['malformed Docker root', () => ({dockerInfoOutput: 'relative/docker-root'})],
-      ['unresolved mount', () => ({mounts: []})],
-      [
-        'missing containerd mount evidence',
-        (root, _runtimeRoot) => ({
-          dockerRoot: join(root, 'docker'),
-          containerdRoot: join(root, 'containerd'),
-          mounts: [
-            {
-              path: join(root, 'docker'),
-              target: '/',
-              source: '/dev/test-root',
-              fstype: 'ext4',
-              freeBytes: 8 * 1024 ** 3,
-            },
-          ],
-        }),
-      ],
-      [
-        'malformed free bytes',
-        (_root, runtimeRoot) => ({
-          mounts: [
-            {path: `${runtimeRoot}-docker`, target: '/', source: '/dev/test-root', fstype: 'ext4', freeBytes: -1},
-          ],
-        }),
-      ],
-      ['malformed Docker disk summary', (_root, _runtimeRoot) => ({dockerDf: ['Images|2|1|not-bytes|0B']})],
-      [
-        'contradictory shared mount identity',
-        (root, _runtimeRoot) => ({
-          dockerRoot: join(root, 'docker'),
-          containerdRoot: join(root, 'containerd'),
-          mounts: [
-            {path: join(root, 'docker'), target: '/', source: '/dev/one', fstype: 'ext4', freeBytes: 8 * 1024 ** 3},
-            {path: join(root, 'containerd'), target: '/', source: '/dev/two', fstype: 'ext4', freeBytes: 8 * 1024 ** 3},
-          ],
-        }),
-      ],
-    ]
-
-    for (const [name, makeOptions] of cases) {
+  it.each([
+    ['missing Docker root', () => ({dockerInfoOutput: ''})],
+    ['malformed Docker root', () => ({dockerInfoOutput: 'relative/docker-root'})],
+    ['unresolved mount', () => ({mounts: []})],
+    [
+      'missing containerd mount evidence',
+      (root: string, _runtimeRoot: string) => ({
+        dockerRoot: join(root, 'docker'),
+        containerdRoot: join(root, 'containerd'),
+        mounts: [
+          {
+            path: join(root, 'docker'),
+            target: '/',
+            source: '/dev/test-root',
+            fstype: 'ext4',
+            freeBytes: 8 * 1024 ** 3,
+          },
+        ],
+      }),
+    ],
+    [
+      'malformed free bytes',
+      (_root: string, runtimeRoot: string) => ({
+        mounts: [{path: `${runtimeRoot}-docker`, target: '/', source: '/dev/test-root', fstype: 'ext4', freeBytes: -1}],
+      }),
+    ],
+    [
+      'malformed Docker disk summary',
+      (_root: string, _runtimeRoot: string) => ({dockerDf: ['Images|2|1|not-bytes|0B']}),
+    ],
+    [
+      'contradictory shared mount identity',
+      (root: string, _runtimeRoot: string) => ({
+        dockerRoot: join(root, 'docker'),
+        containerdRoot: join(root, 'containerd'),
+        mounts: [
+          {path: join(root, 'docker'), target: '/', source: '/dev/one', fstype: 'ext4', freeBytes: 8 * 1024 ** 3},
+          {path: join(root, 'containerd'), target: '/', source: '/dev/two', fstype: 'ext4', freeBytes: 8 * 1024 ** 3},
+        ],
+      }),
+    ],
+  ] as const)(
+    'fails closed on missing, malformed, or contradictory storage evidence: %s',
+    async (name, makeOptions) => {
       const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-evidence-error-'))
       const root = realpathSync(parent)
       const runtimeRoot = join(root, 'dashboard-deploy')
@@ -1262,8 +1263,8 @@ describe('remote transaction process boundary', () => {
       } finally {
         rmSync(parent, {recursive: true, force: true})
       }
-    }
-  })
+    },
+  )
 
   it('records active Compose and running dashboard state when present', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-active-state-'))
@@ -1386,50 +1387,51 @@ describe('remote transaction process boundary', () => {
     }
   })
 
-  it('fails closed when persistent dashboard or Caddy mounts are missing, wrong, or read-only', async () => {
-    const cases: readonly [string, (root: string, runtimeRoot: string) => ShellHarnessOptions][] = [
-      ['missing dashboard data mount', () => ({dashboardMounts: []})],
-      [
-        'wrong dashboard data mount',
-        (root, _runtimeRoot) => ({
-          dashboardMounts: [{type: 'bind', source: join(root, 'wrong-data'), destination: '/data', rw: true}],
-        }),
-      ],
-      [
-        'read-only dashboard data mount',
-        (_root, runtimeRoot) => ({
-          dashboardMounts: [{type: 'bind', source: `${runtimeRoot}-dashboard/data`, destination: '/data', rw: false}],
-        }),
-      ],
-      [
-        'missing Caddy data mount',
-        () => ({caddyMounts: [{type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: true}]}),
-      ],
-      [
-        'missing Caddy config mount',
-        () => ({caddyMounts: [{type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: true}]}),
-      ],
-      [
-        'read-only Caddy data mount',
-        () => ({
-          caddyMounts: [
-            {type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: false},
-            {type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: true},
-          ],
-        }),
-      ],
-      [
-        'read-only Caddy config mount',
-        () => ({
-          caddyMounts: [
-            {type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: true},
-            {type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: false},
-          ],
-        }),
-      ],
-    ]
+  const persistentMountCases: readonly [string, (root: string, runtimeRoot: string) => ShellHarnessOptions][] = [
+    ['missing dashboard data mount', () => ({dashboardMounts: []})],
+    [
+      'wrong dashboard data mount',
+      (root, _runtimeRoot) => ({
+        dashboardMounts: [{type: 'bind', source: join(root, 'wrong-data'), destination: '/data', rw: true}],
+      }),
+    ],
+    [
+      'read-only dashboard data mount',
+      (_root, runtimeRoot) => ({
+        dashboardMounts: [{type: 'bind', source: `${runtimeRoot}-dashboard/data`, destination: '/data', rw: false}],
+      }),
+    ],
+    [
+      'missing Caddy data mount',
+      () => ({caddyMounts: [{type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: true}]}),
+    ],
+    [
+      'missing Caddy config mount',
+      () => ({caddyMounts: [{type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: true}]}),
+    ],
+    [
+      'read-only Caddy data mount',
+      () => ({
+        caddyMounts: [
+          {type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: false},
+          {type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: true},
+        ],
+      }),
+    ],
+    [
+      'read-only Caddy config mount',
+      () => ({
+        caddyMounts: [
+          {type: 'volume', name: 'dashboard_caddy_data', destination: '/data', rw: true},
+          {type: 'volume', name: 'dashboard_caddy_config', destination: '/config', rw: false},
+        ],
+      }),
+    ],
+  ]
 
-    for (const [name, makeOptions] of cases) {
+  it.each(persistentMountCases)(
+    'fails closed when persistent dashboard or Caddy mounts are missing, wrong, or read-only: %s',
+    async (name, makeOptions) => {
       const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-persistent-state-${name.replaceAll(' ', '-')}-`))
       const root = realpathSync(parent)
       const runtimeRoot = join(root, 'dashboard-deploy')
@@ -1445,53 +1447,47 @@ describe('remote transaction process boundary', () => {
       } finally {
         rmSync(parent, {recursive: true, force: true})
       }
-    }
-  })
+    },
+  )
 
-  it('fails closed when Caddy volume project or Compose volume labels are wrong', async () => {
-    const cases = [
+  it.each([
+    [
+      'wrong project label',
       {
-        name: 'wrong project label',
-        labels: {
-          dashboard_caddy_data: {project: 'other', composeVolume: 'caddy_data'},
-          dashboard_caddy_config: {project: 'dashboard', composeVolume: 'caddy_config'},
-        },
+        dashboard_caddy_data: {project: 'other', composeVolume: 'caddy_data'},
+        dashboard_caddy_config: {project: 'dashboard', composeVolume: 'caddy_config'},
       },
+    ],
+    [
+      'wrong data volume label',
       {
-        name: 'wrong data volume label',
-        labels: {
-          dashboard_caddy_data: {project: 'dashboard', composeVolume: 'other_data'},
-          dashboard_caddy_config: {project: 'dashboard', composeVolume: 'caddy_config'},
-        },
+        dashboard_caddy_data: {project: 'dashboard', composeVolume: 'other_data'},
+        dashboard_caddy_config: {project: 'dashboard', composeVolume: 'caddy_config'},
       },
+    ],
+    [
+      'wrong config volume label',
       {
-        name: 'wrong config volume label',
-        labels: {
-          dashboard_caddy_data: {project: 'dashboard', composeVolume: 'caddy_data'},
-          dashboard_caddy_config: {project: 'dashboard', composeVolume: 'other_config'},
-        },
+        dashboard_caddy_data: {project: 'dashboard', composeVolume: 'caddy_data'},
+        dashboard_caddy_config: {project: 'dashboard', composeVolume: 'other_config'},
       },
-    ] as const
-
-    for (const testCase of cases) {
-      const parent = mkdtempSync(
-        join(tmpdir(), `dashboard-deploy-volume-labels-${testCase.name.replaceAll(' ', '-')}-`),
+    ],
+  ] as const)('fails closed when Caddy volume project or Compose volume labels are wrong: %s', async (name, labels) => {
+    const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-volume-labels-${name.replaceAll(' ', '-')}-`))
+    const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          caddyVolumeLabels: labels,
+        }),
+        encodeRemotePayload(fixture),
       )
-      const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
-      try {
-        const result = await runShellProgram(
-          adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
-            caddyVolumeLabels: testCase.labels,
-          }),
-          encodeRemotePayload(fixture),
-        )
 
-        expect(result.exitCode, testCase.name).not.toBe(0)
-        expect(result.stdout, testCase.name).toContain('stage=post-convergence-evidence')
-        expect(result.stdout, testCase.name).not.toContain('stage=complete')
-      } finally {
-        rmSync(parent, {recursive: true, force: true})
-      }
+      expect(result.exitCode, name).not.toBe(0)
+      expect(result.stdout, name).toContain('stage=post-convergence-evidence')
+      expect(result.stdout, name).not.toContain('stage=complete')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
     }
   })
 
@@ -1690,24 +1686,24 @@ describe('remote transaction process boundary', () => {
     }
   })
 
-  it('requires exactly one expected dashboard RepoDigest while allowing valid aliases', async () => {
-    const otherDigest = `sha256:${'e'.repeat(64)}`
-    const cases = [
-      {
-        name: 'expected plus alias',
-        expectedExitCode: 0,
-        repoDigests: [DASHBOARD_REPO_DIGEST, `dashboard@${otherDigest}`],
-      },
-      {name: 'zero expected', expectedExitCode: 1, repoDigests: [`dashboard@${otherDigest}`]},
-      {
-        name: 'duplicate expected',
-        expectedExitCode: 1,
-        repoDigests: [DASHBOARD_REPO_DIGEST, DASHBOARD_REPO_DIGEST],
-      },
-      {name: 'malformed entry', expectedExitCode: 1, repoDigests: [DASHBOARD_REPO_DIGEST, 'not-a-repo-digest']},
-    ] as const
+  const otherDigest = `sha256:${'e'.repeat(64)}`
+  const repoDigestCases = [
+    {
+      name: 'expected plus alias',
+      expectedExitCode: 0,
+      repoDigests: [DASHBOARD_REPO_DIGEST, `dashboard@${otherDigest}`],
+    },
+    {name: 'zero expected', expectedExitCode: 1, repoDigests: [`dashboard@${otherDigest}`]},
+    {
+      name: 'duplicate expected',
+      expectedExitCode: 1,
+      repoDigests: [DASHBOARD_REPO_DIGEST, DASHBOARD_REPO_DIGEST],
+    },
+    {name: 'malformed entry', expectedExitCode: 1, repoDigests: [DASHBOARD_REPO_DIGEST, 'not-a-repo-digest']},
+  ] as const
 
-    for (const testCase of cases) {
+  for (const testCase of repoDigestCases) {
+    it(`requires exactly one expected dashboard RepoDigest while allowing valid aliases: ${testCase.name}`, async () => {
       const parent = mkdtempSync(
         join(tmpdir(), `dashboard-deploy-baseline-repodigests-${testCase.name.replaceAll(' ', '-')}-`),
       )
@@ -1735,8 +1731,8 @@ describe('remote transaction process boundary', () => {
       } finally {
         rmSync(parent, {recursive: true, force: true})
       }
-    }
-  })
+    })
+  }
 
   it('ignores a dashboard service from another Compose project', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-project-labels-'))
@@ -1780,17 +1776,15 @@ describe('remote transaction process boundary', () => {
     }
   })
 
-  it('fails closed on multiple or malformed running dashboard matches', async () => {
-    const cases = [
-      ['multiple matches', {runningDashboardIds: ['abcdef123456', 'abcdef654321']}],
-      ['malformed container identity', {runningDashboardIds: ['not-a-container-id']}],
-      [
-        'malformed image digest',
-        {runningDashboardIds: ['abcdef123456'], runningDashboardImageDigest: 'sha256:not-a-digest'},
-      ],
-    ] as const
-
-    for (const [name, options] of cases) {
+  for (const [name, options] of [
+    ['multiple matches', {runningDashboardIds: ['abcdef123456', 'abcdef654321']}],
+    ['malformed container identity', {runningDashboardIds: ['not-a-container-id']}],
+    [
+      'malformed image digest',
+      {runningDashboardIds: ['abcdef123456'], runningDashboardImageDigest: 'sha256:not-a-digest'},
+    ],
+  ] as const) {
+    it(`fails closed on multiple or malformed running dashboard matches: ${name}`, async () => {
       const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-ambiguous-runtime-'))
       const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
       const dashboardRoot = `${runtimeRoot}-dashboard`
@@ -1808,8 +1802,8 @@ describe('remote transaction process boundary', () => {
       } finally {
         rmSync(parent, {recursive: true, force: true})
       }
-    }
-  })
+    })
+  }
 
   it('reports an interrupted stubbed transaction without stale-lock cleanup', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-interrupted-'))
@@ -1960,14 +1954,12 @@ describe('remote transaction process boundary', () => {
     }
   })
 
-  it('rejects malformed shell payloads before decode, baseline, or mutation and cleans staging', async () => {
-    const cases: readonly [string, Uint8Array][] = [
-      ['malformed header', new TextEncoder().encode('not-dashboard-payload\n')],
-      ['truncated field body', new TextEncoder().encode(`dashboard-deploy-payload v2\nfield env 10\nshort\nend\n`)],
-      ['trailing bytes', concatBytes(encodeRemotePayload(fixture), new TextEncoder().encode('trailing'))],
-    ]
-
-    for (const [name, payload] of cases) {
+  for (const [name, payload] of [
+    ['malformed header', new TextEncoder().encode('not-dashboard-payload\n')],
+    ['truncated field body', new TextEncoder().encode(`dashboard-deploy-payload v2\nfield env 10\nshort\nend\n`)],
+    ['trailing bytes', concatBytes(encodeRemotePayload(fixture), new TextEncoder().encode('trailing'))],
+  ] as const) {
+    it(`rejects malformed shell payloads before decode, baseline, or mutation and cleans staging: ${name}`, async () => {
       const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-malformed-${name.replaceAll(' ', '-')}-`))
       const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
       const dashboardRoot = `${runtimeRoot}-dashboard`
@@ -1987,8 +1979,8 @@ describe('remote transaction process boundary', () => {
       } finally {
         rmSync(parent, {recursive: true, force: true})
       }
-    }
-  })
+    })
+  }
 
   it('keeps secret-like output out of returned evidence', async () => {
     const secret = 'oauth-secret\n-----BEGIN PRIVATE KEY-----'
@@ -2464,23 +2456,21 @@ describe('staged image acquisition and publication ordering', () => {
     }
   })
 
-  it('rejects duplicate and unexpected staged image identities before acquisition', async () => {
-    const cases = [
-      {
-        name: 'duplicate-canonical-identity',
-        composeImages: [
-          DASHBOARD_IMAGE,
-          `ghcr.io/fro-bot/dashboard:stable@${fixture.expectedDashboardDigest}`,
-          CADDY_IMAGE,
-        ],
-      },
-      {
-        name: 'unexpected-dashboard-digest',
-        composeImages: [`ghcr.io/fro-bot/dashboard:2026.08.01@sha256:${'b'.repeat(64)}`, CADDY_IMAGE],
-      },
-    ] as const
-
-    for (const testCase of cases) {
+  for (const testCase of [
+    {
+      name: 'duplicate-canonical-identity',
+      composeImages: [
+        DASHBOARD_IMAGE,
+        `ghcr.io/fro-bot/dashboard:stable@${fixture.expectedDashboardDigest}`,
+        CADDY_IMAGE,
+      ],
+    },
+    {
+      name: 'unexpected-dashboard-digest',
+      composeImages: [`ghcr.io/fro-bot/dashboard:2026.08.01@sha256:${'b'.repeat(64)}`, CADDY_IMAGE],
+    },
+  ] as const) {
+    it(`rejects duplicate and unexpected staged image identities before acquisition: ${testCase.name}`, async () => {
       const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-image-case-${testCase.name}-`))
       const root = realpathSync(parent)
       const runtimeRoot = join(root, 'dashboard-deploy')
@@ -2502,8 +2492,8 @@ describe('staged image acquisition and publication ordering', () => {
       } finally {
         rmSync(parent, {recursive: true, force: true})
       }
-    }
-  })
+    })
+  }
 
   it('uses the exact cached image set when registry pull fails', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-cache-fallback-'))
@@ -2542,36 +2532,36 @@ describe('staged image acquisition and publication ordering', () => {
     }
   })
 
-  it('accepts only one exact match among valid RepoDigests aliases', async () => {
-    const otherCaddyDigest = `sha256:${'d'.repeat(64)}`
-    const cases = [
-      {
-        name: 'expected-and-other-alias',
-        expectedExitCode: 0,
-        caddyRepoDigests: [CADDY_REPO_DIGEST, `caddy@${otherCaddyDigest}`],
-        dashboardRepoDigests: [DASHBOARD_REPO_DIGEST, `ghcr.io/fro-bot/dashboard@${otherCaddyDigest}`],
-      },
-      {
-        name: 'no-expected-alias',
-        expectedExitCode: 1,
-        caddyRepoDigests: [`caddy@${otherCaddyDigest}`],
-        dashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
-      },
-      {
-        name: 'duplicate-expected-alias',
-        expectedExitCode: 1,
-        caddyRepoDigests: [CADDY_REPO_DIGEST, CADDY_REPO_DIGEST],
-        dashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
-      },
-      {
-        name: 'malformed-alias',
-        expectedExitCode: 1,
-        caddyRepoDigests: [CADDY_REPO_DIGEST, 'not-a-repo-digest'],
-        dashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
-      },
-    ] as const
+  const otherCaddyDigest = `sha256:${'d'.repeat(64)}`
+  const repoDigestAliasCases = [
+    {
+      name: 'expected-and-other-alias',
+      expectedExitCode: 0,
+      caddyRepoDigests: [CADDY_REPO_DIGEST, `caddy@${otherCaddyDigest}`],
+      dashboardRepoDigests: [DASHBOARD_REPO_DIGEST, `ghcr.io/fro-bot/dashboard@${otherCaddyDigest}`],
+    },
+    {
+      name: 'no-expected-alias',
+      expectedExitCode: 1,
+      caddyRepoDigests: [`caddy@${otherCaddyDigest}`],
+      dashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
+    },
+    {
+      name: 'duplicate-expected-alias',
+      expectedExitCode: 1,
+      caddyRepoDigests: [CADDY_REPO_DIGEST, CADDY_REPO_DIGEST],
+      dashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
+    },
+    {
+      name: 'malformed-alias',
+      expectedExitCode: 1,
+      caddyRepoDigests: [CADDY_REPO_DIGEST, 'not-a-repo-digest'],
+      dashboardRepoDigests: [DASHBOARD_REPO_DIGEST],
+    },
+  ] as const
 
-    for (const testCase of cases) {
+  for (const testCase of repoDigestAliasCases) {
+    it(`accepts only one exact match among valid RepoDigests aliases: ${testCase.name}`, async () => {
       const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-u4-repodigests-${testCase.name}-`))
       const root = realpathSync(parent)
       const runtimeRoot = join(root, 'dashboard-deploy')
@@ -2604,8 +2594,8 @@ describe('staged image acquisition and publication ordering', () => {
       } finally {
         rmSync(parent, {recursive: true, force: true})
       }
-    }
-  })
+    })
+  }
 
   it('stops on a missing or mismatched cached image without changing old Compose', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-cache-miss-'))

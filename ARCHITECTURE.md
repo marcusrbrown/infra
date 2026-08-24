@@ -4,7 +4,7 @@ System shape and invariants for this monorepo. For where things live, see [`STRU
 
 ## Bird's Eye Overview
 
-This is a Bun-workspace monorepo that deploys and manages personal infrastructure: KeeWeb (`box.heatvision.co`), a CLIProxyAPI Claude proxy (`cliproxy.fro.bot`), the Fro Bot Discord gateway (`gateway.fro.bot`), Umami analytics (`metrics.fro.bot`), a Fro Bot monitoring dashboard (`dashboard.fro.bot`), an OIDC credential broker (`broker.fro.bot`), and a WireGuard VPN egress box on AWS Lightsail (`eu-west-1`). Each deployable lives under `apps/`; each is self-contained (its own Docker Compose stack or build, a TypeScript deploy script, and a provisioning script). DigitalOcean droplets host the Docker apps; KeeWeb deploys to a Mail-in-a-Box server over SSH/rsync; the VPN box runs native `wg-quick@wg0` + systemd on AWS Lightsail, provisioned via `@aws-sdk/client-lightsail`.
+This is a Bun-workspace monorepo that deploys and manages personal infrastructure: KeeWeb (`box.heatvision.co`), a CLIProxyAPI Claude proxy (`cliproxy.fro.bot`), the Fro Bot Discord gateway (`gateway.fro.bot`), Umami analytics (`metrics.fro.bot`), a Fro Bot monitoring dashboard (`dashboard.fro.bot`), an OIDC credential broker (`broker.fro.bot`), and a WireGuard VPN egress box on AWS Lightsail (`eu-west-1`). Each deployable lives under `apps/`; each is self-contained (its own Docker Compose stack or build, a TypeScript deploy script, and a provisioning script). DigitalOcean droplets host the Docker apps; KeeWeb deploys to a Mail-in-a-Box server over SSH/rsync; the VPN box runs native `wg-quick@wg0` + systemd on AWS Lightsail, provisioned via `@aws-sdk/client-lightsail`. `apps/agent` is the one non-deployable: a private, operator-run AWS provisioner for `fro-bot/agent` durable S3 session storage (account-level OIDC provider, dedicated bucket, per-repo IAM role/policy) — it has no deploy script, Docker Compose stack, or deploy workflow; `bun run provision:agent` is its only entry point.
 
 `packages/cli` is the unified operator surface — a goke CLI (`@marcusrbrown/infra`) with one command group per app plus a unified `status` dashboard. `packages/shared` holds cross-app provisioning helpers. The same CLI exposes a read-only subset of its commands over an MCP bridge so coding agents can query deployment state. GitHub Actions runs the deploy pipeline (one gated workflow per app behind a per-app GitHub Environment) and automation (Fro Bot review, Renovate, releases via Changesets).
 
@@ -37,6 +37,10 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 | Broker mint/revoke client | `apps/broker/src/mint.ts` (`mintKey`, `revokeKey`, `listApiKeys`, single-flight lock) |
 | Broker sweeper | `apps/broker/src/sweeper.ts` (`sweepExpired`, `reconcile`, `startupReconcile`, `startSweeper`) |
 | Broker CLI command group | `packages/cli/src/commands/broker/` (`status.ts`, `deploy.ts`, `logs.ts`, `index.ts` → `registerBrokerCommands`) |
+| Agent AWS provisioner (operator-run, no deploy) | `apps/agent/server/provision.ts` (IAM + S3 convergence, readback verification, handoff manifest, `--teardown`) |
+| Agent action key layout | `apps/agent/src/key-layout.ts` (version-pinned S3 session/coordination-lock paths; unknown layouts fail closed) |
+| Agent CLI command group | `packages/cli/src/commands/agent/` (`index.ts` → `registerAgentCommands` → `registerAgentSetup` (`agent setup`, wraps shared `setup-core`) + `registerAgentStorageCommand` (`agent storage`, `agent storage teardown`)) |
+| Agent workflow verifier | `packages/cli/src/commands/agent/workflow-verify.ts` (`verifyWorkflow` — validates `fro-bot.yaml` job-split, `fro-bot-storage` environment gate, and reachability before wiring storage vars) |
 | Per-app host validators | `apps/<name>/src/host.ts` and `packages/cli/src/commands/<app>/host.ts` |
 | Deploy pipeline | `.github/workflows/deploy.yaml` (router) + `deploy-<app>.yaml` |
 | Pinned SSH host keys | `.github/known_hosts` |
@@ -62,7 +66,7 @@ operator (CLI) or agent (MCP)
 
 Enforceable rules. Many are gated by `packages/cli/src/conventions.test.ts`, ESLint, or review; mirror the `(enforced)` anti-patterns in the root `AGENTS.md`.
 
-1. **`apps/` are deployable units; `packages/` are reusable libraries.** `packages/` never imports from `apps/`.
+1. **`apps/` are deployable units; `packages/` are reusable libraries.** `packages/` never imports from `apps/`. `apps/agent` is the sole non-deployable exception — a private operator-run provisioner with no deploy script or deploy workflow.
 2. **Only `apps/keeweb/deploy.sh` is Bash.** Every other script is TypeScript run via `bun run`.
 3. **Never pass secret bytes via argv.** Secret material is piped through SSH stdin (`writeRemoteFile` pattern); `--body <value>` patterns are banned.
 4. **Host validation before SSH.** Every SSH-spawning command validates the host (`host.ts`, rejecting `-`-prefixed and invalid values) before constructing the SSH command.
@@ -87,6 +91,7 @@ Enforceable rules. Many are gated by `packages/cli/src/conventions.test.ts`, ESL
 Integration-level patterns; for the mechanical file layout see [`STRUCTURE.md`](STRUCTURE.md).
 
 - **New deployable app** → create `apps/<name>/` mirroring the closest existing app (`apps/cliproxy/` for a Docker-Compose droplet app, `apps/vpn/` for a native-systemd AWS Lightsail app): Compose config or deploy script, `src/deploy.ts`, `server/provision.ts` (using `packages/shared/server/droplet-helpers.ts` for SSH helpers, or `@aws-sdk/client-lightsail` for Lightsail), `src/host.ts`. New provisioners use `provision.ts`; the existing DigitalOcean apps keep their `provision-droplet.ts` filenames. Add it to `package.json` `workspaces`, add `provision:<name>` / `deploy:<name>` root scripts, add a CLI command group under `packages/cli/src/commands/<name>/`, add a gated `deploy-<name>.yaml` workflow wired into `deploy.yaml`'s paths-filter, create the `<name>` GitHub Environment, and add `apps/<name>/AGENTS.md`.
+- **New operator-only provisioning tool (no deploy step)** → mirror `apps/agent/`: `private: true` package, `server/provision.ts` entry point, no `src/deploy.ts`, no `src/host.ts`, no deploy workflow, no GitHub Environment. Add only `provision:<name>` to root `package.json` scripts and, if operator interaction is needed, a CLI command group under `packages/cli/src/commands/<name>/`.
 - **New CLI command group** → add `register<Name>Commands` and a `commands/<name>/` directory with per-action files and a barrel `index.ts`; register it in `packages/cli/src/cli.ts`. Expose a command over MCP only by adding it to `MCP_ALLOWLIST`, and only if it is read-only.
 - **New shared provisioning helper** → add it to `packages/shared/server/droplet-helpers.ts` with a colocated test; consume it from each app's provisioning script (`provision-droplet.ts` for cliproxy/gateway/umami, `provision.ts` for vpn).
 - **New deploy workflow** → copy an existing `deploy-<app>.yaml`, keep the per-app Environment gate and `paths-filter` negations, and wire it into `deploy.yaml`.

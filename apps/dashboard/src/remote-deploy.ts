@@ -48,7 +48,15 @@ const remoteCommonSetupLines = [
   'dashboard_container_id=""',
   'transaction_stage="remote-transaction-started"',
   String.raw`mark_stage() { transaction_stage="$1"; printf "%s\n" "stage=$1"; }`,
-  String.raw`fail() { code="$1"; message="$2"; printf "%s\n" "failure=$code"; printf "%s\n" "$message" >&2; exit 1; }`,
+  `
+failure_detail_is_allowlisted() {
+  case "$1" in
+    "runtime root is unsafe"|"runtime root creation failed"|"runtime root is not a directory"|"runtime root is not canonical"|"runtime root stat failed"|"runtime root ownership or mode is unsafe"|"lock path is not a regular file"|"lock path creation failed"|"lock path stat failed"|"lock path ownership or mode is unsafe"|"staging directory creation failed"|"staging directory ownership failed"|"staging directory mode failed"|"staging directory is not canonical"|"malformed payload"|"unsupported payload protocol"|"missing payload field"|"malformed payload field header"|"malformed payload field length"|"duplicate payload field"|"unknown payload field"|"payload field exceeds size limit"|"empty payload field"|"payload exceeds total size limit"|"payload field read failed"|"payload field stat failed"|"truncated payload field"|"malformed payload terminator"|"trailing payload data"|"expected dashboard digest read failed"|"malformed expected dashboard digest"|"Docker root evidence unavailable"|"Docker root evidence malformed"|"Docker root path unavailable"|"containerd root path is unsafe"|"storage probe canonicalization failed"|"storage probe is not a directory"|"storage mount evidence unavailable"|"storage mount evidence malformed"|"storage mount identity malformed"|"storage free-byte evidence unavailable"|"storage free-byte evidence malformed"|"contradictory storage mount evidence"|"contradictory storage free-byte evidence"|"storage evidence is empty"|"Docker disk summary unavailable"|"Docker disk summary malformed"|"Docker disk summary size malformed"|"Docker disk summary reclaimable size malformed"|"Docker disk summary is empty"|"container image inventory unavailable"|"container image reference malformed"|"active Compose path is unsafe"|"active Compose image evidence unavailable"|"active Compose image evidence malformed"|"running dashboard inventory unavailable"|"running dashboard container identity malformed"|"running dashboard image identity unavailable"|"running dashboard image identity malformed"|"running dashboard digest evidence unavailable"|"running dashboard digest evidence malformed"|"running dashboard digest evidence is missing or ambiguous"|"running dashboard health evidence unavailable"|"running dashboard health evidence malformed"|"running dashboard identity is ambiguous"|"dashboard container identity is malformed"|"dashboard Compose labels unavailable"|"dashboard Compose labels are unexpected"|"dashboard data directory stat unavailable"|"dashboard data directory is unexpected"|"dashboard data directory is not canonical"|"dashboard mount evidence unavailable"|"dashboard mount evidence malformed"|"dashboard data mount is unexpected"|"running Caddy inventory unavailable"|"running Caddy container identity is malformed"|"running Caddy identity is ambiguous"|"Caddy Compose labels unavailable"|"Caddy Compose labels are unexpected"|"Caddy mount evidence unavailable"|"Caddy mount evidence malformed"|"Caddy volume mount is unexpected"|"Caddy volume identity is malformed"|"Caddy volume labels unavailable"|"Caddy volume labels are unexpected"|"Caddy volume mount is missing or ambiguous"|"unused-image prune failed"|"unused-image prune result malformed"|"staged image record creation failed"|"staged Compose image enumeration failed"|"staged Compose image identity is empty"|"staged Compose image identity is malformed"|"duplicate staged image identity"|"staged image record write failed"|"staged dashboard digest is unexpected"|"staged Compose image set is empty"|"staged dashboard image identity is missing or ambiguous"|"staged image record is malformed"|"staged image digest verification failed"|"post-prune free space is below the minimum"|"post-acquisition free space is below the minimum"|"post-convergence free space is below the minimum"|"dashboard root is unsafe"|"dashboard config is unsafe"|"dashboard root creation failed"|"dashboard config creation failed"|"dashboard root ownership failed"|"dashboard root is not canonical"|"dashboard config is not canonical"|"dashboard data is unsafe"|"dashboard data creation failed"|"dashboard data ownership failed"|"dashboard data mode failed"|"dashboard data is not canonical"|"legacy override removal failed"|"environment publication failed"|"Caddyfile publication failed"|"GitHub App key publication failed"|"compose publication failed"|"unknown active file"|"dashboard directory change failed"|"dashboard convergence failed"|"dashboard container lookup failed"|"dashboard image lookup failed"|"dashboard image identity is missing"|"dashboard digest lookup failed"|"dashboard digest verification failed"|"dashboard health lookup failed"|"dashboard health verification failed"|"Caddy convergence failed"|"active Compose dashboard digest verification failed"|"running dashboard container differs from Compose readback"|"running dashboard digest verification failed"|"running dashboard health verification failed"|"prior dashboard image is not locally inspectable") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+`,
+  String.raw`fail() { code="$1"; message="$2"; printf "%s\n" "failure=$code"; if failure_detail_is_allowlisted "$message"; then printf "%s\n" "detail=$message"; fi; printf "%s\n" "$message" >&2; exit 1; }`,
   'cleanup() { if [ -n "$publication_tmp" ] && [ -e "$publication_tmp" ] && [ ! -L "$publication_tmp" ]; then rm -f -- "$publication_tmp" >/dev/null 2>&1 || :; fi; if [ -n "$stage" ] && [ -d "$stage" ] && [ ! -L "$stage" ]; then rm -rf -- "$stage" >/dev/null 2>&1 || :; fi; }',
   'trap cleanup EXIT',
   'trap "exit 129" HUP',
@@ -855,6 +863,15 @@ const failureCodeFromOutput = (stdout: string): RemoteFailureCode | undefined =>
   return failureCode
 }
 
+const failureDetailFromOutput = (stdout: string): string | undefined => {
+  let failureDetail: string | undefined
+  for (const line of stdout.split('\n')) {
+    if (!line.startsWith('detail=') || line.length === 'detail='.length) continue
+    failureDetail = line.slice('detail='.length)
+  }
+  return failureDetail
+}
+
 const isAllowedEvidenceLine = (line: string): boolean => {
   const candidate = line.startsWith('stage=') ? line.slice('stage='.length) : ''
   if (ALLOWED_STAGES.has(candidate)) return true
@@ -1062,12 +1079,18 @@ export async function runRemoteTransaction(options: RemoteTransactionOptions): P
     const stdout = stdoutResult.value ?? ''
     const stage = stageFromOutput(stdout)
     const failureCode = failureCodeFromOutput(stdout)
+    const failureDetail = failureDetailFromOutput(stdout)
     const exitCode = exitResult.value
     if (exitCode === 124) {
       throw new RemoteTransactionError(stage, 'transaction timeout', exitCode, 'transaction-timeout')
     }
     if (exitCode !== undefined && exitCode !== 0) {
-      throw new RemoteTransactionError(stage, 'remote process exited unsuccessfully', exitCode, failureCode)
+      throw new RemoteTransactionError(
+        stage,
+        failureDetail ?? 'remote process exited unsuccessfully',
+        exitCode,
+        failureCode,
+      )
     }
     if (inputFailure) throw new RemoteTransactionError(stage, inputFailure, exitCode, failureCode)
     if (stdoutResult.error || stderrResult.error)

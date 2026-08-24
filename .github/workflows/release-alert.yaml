@@ -1,0 +1,61 @@
+---
+name: Release Alert
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: release-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+    steps:
+      - name: Report failed release
+        run: |
+          set -euo pipefail
+
+          label='release-publish-failure'
+          marker='<!-- release-publish-failure:v1 -->'
+          title='Release workflow failure'
+          body=$(printf '%s\n' \
+            "$marker" \
+            'The Release workflow failed.' \
+            '' \
+            "- Run: $RUN_URL" \
+            "- Head SHA: $HEAD_SHA" \
+            "- Conclusion: $CONCLUSION")
+
+          if ! gh label view "$label" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh label create "$label" --repo "$REPOSITORY" --color b60205 --description 'Release workflow failures'
+          fi
+
+          issues=$(gh issue list \
+            --repo "$REPOSITORY" \
+            --state open \
+            --label "$label" \
+            --search "$title in:title" \
+            --limit 100 \
+            --json number,body)
+          issue_number=$(jq -r --arg marker "$marker" \
+            '[.[] | select(.body != null and (.body | contains($marker)))] | sort_by(.number) | .[0].number // empty' \
+            <<<"$issues")
+
+          if [[ -n "$issue_number" ]]; then
+            gh issue comment "$issue_number" --repo "$REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$REPOSITORY" --title "$title" --label "$label" --body "$body"
+          fi

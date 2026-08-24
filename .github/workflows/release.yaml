@@ -70,3 +70,42 @@ jobs:
           pr-title: 'chore(🦋📦): version packages'
           version-script: bun run version-changesets
           publish-script: bunx changeset publish
+
+      - name: Verify published packages
+        if: ${{ steps.changesets.outputs.published == 'true' }}
+        env:
+          PUBLISHED_PACKAGES: ${{ steps.changesets.outputs['published-packages'] }}
+        run: |
+          set -euo pipefail
+
+          max_attempts=5
+          retry_delay_seconds=3
+          summary_file="$GITHUB_STEP_SUMMARY"
+
+          if ! jq -e 'type == "array" and length > 0' <<<"$PUBLISHED_PACKAGES" >/dev/null; then
+            printf '%s\n' '::error::changesets reported published=true without any published packages' >&2
+            exit 1
+          fi
+          printf '%s\n' '## Verified npm publishes' >>"$summary_file"
+
+          while IFS=$'\t' read -r name version; do
+            verified=false
+            for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+              actual_version="$(npm view "${name}@${version}" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+              if [[ "$actual_version" == "$version" ]]; then
+                verified=true
+                break
+              fi
+              if ((attempt < max_attempts)); then
+                sleep "$retry_delay_seconds"
+              fi
+            done
+
+            if [[ "$verified" != true ]]; then
+              printf '::error::npm registry did not resolve %s@%s after %d attempts\n' "$name" "$version" "$max_attempts" >&2
+              exit 1
+            fi
+
+            printf -- '- `%s@%s` — verified\n' "$name" "$version" >>"$summary_file"
+            printf 'Verified %s@%s\n' "$name" "$version"
+          done < <(jq -r '.[] | [.name, .version] | @tsv' <<<"$PUBLISHED_PACKAGES")

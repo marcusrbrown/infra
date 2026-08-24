@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
+import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../lib/mcp-ctx-fixture'
 import {gatewayStatusAction, parseComposePs, parseComposePsOutput, type ComposePsEntry, type ServiceRow} from './status'
 
 // ─── parseComposePs ──────────────────────────────────────────────────────────

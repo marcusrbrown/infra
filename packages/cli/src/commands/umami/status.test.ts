@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {createCapturedCtx, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
+import {createCapturedCtx, MockProcessExit} from '../../lib/mcp-ctx-fixture'
 import {
   getUmamiComposeStatus,
   getUmamiStatusSummary,

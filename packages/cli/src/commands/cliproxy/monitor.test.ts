@@ -4,7 +4,7 @@ import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 
-import {createCapturedCtx, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
+import {createCapturedCtx, MockProcessExit} from '../../lib/mcp-ctx-fixture'
 import {
   cliproxyMonitorAction,
   createGhEnvironment,

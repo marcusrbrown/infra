@@ -1,6 +1,6 @@
 import {format} from 'node:util'
 
-export type {ActionCtx} from '../lib/action-ctx'
+export type {ActionCtx} from './action-ctx'
 
 /**
  * Captured output from a `createCapturedCtx()` invocation.

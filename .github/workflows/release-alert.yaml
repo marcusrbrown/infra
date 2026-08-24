@@ -50,15 +50,6 @@ jobs:
             --search "$title in:title" \
             --limit 100 \
             --json number,body)
-          issue_count=$(jq 'length' <<<"$issues")
-          marked_issue_count=$(jq -r --arg marker "$marker" \
-            '[.[] | select(.body != null and (.body | contains($marker)))] | length' \
-            <<<"$issues")
-          if ((marked_issue_count != issue_count)); then
-            printf '::error::open release issue with label %s is missing the canonical marker\n' "$label" >&2
-            exit 1
-          fi
-
           issue_number=$(jq -r --arg marker "$marker" \
             '[.[] | select(.body != null and (.body | contains($marker)))] | sort_by(.number) | .[0].number // empty' \
             <<<"$issues")

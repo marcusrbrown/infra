@@ -1,7 +1,7 @@
 import type {StatusSummary} from './status'
 import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
-import {createCapturedCtx, expectCapturedToInclude} from '../__test__/mcp-ctx-fixture'
+import {createCapturedCtx, expectCapturedToInclude} from '../lib/mcp-ctx-fixture'
 import {registerStatus, unifiedStatusAction} from './status'
 
 // NOTE: dashboard is included in the unified status table alongside the other apps.

@@ -1,7 +1,7 @@
 import {existsSync, statSync} from 'node:fs'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {createCapturedCtx, expectCapturedToInclude} from '../../__test__/mcp-ctx-fixture'
+import {createCapturedCtx, expectCapturedToInclude} from '../../lib/mcp-ctx-fixture'
 import {
   buildSetRequest,
   cliproxyConfigGetAction,

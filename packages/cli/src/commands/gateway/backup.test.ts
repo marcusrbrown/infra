@@ -2,7 +2,7 @@ import {statSync, writeFileSync} from 'node:fs'
 
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../__test__/mcp-ctx-fixture'
+import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../lib/mcp-ctx-fixture'
 import {backupGatewayCa, gatewayBackupAction, type BackupSpawnFn} from './backup'
 
 // ─── SpawnFn helpers ──────────────────────────────────────────────────────────

@@ -173,12 +173,8 @@ const adaptProgramForUnprivilegedHarness = (
   const darwinStat = process.platform === 'darwin'
   const expectedDirectoryType = darwinStat ? 'Directory' : 'directory'
   const expectedRegularFileType = darwinStat ? 'Regular File' : 'regular file'
-  const hostFileStat = darwinStat
-    ? '/usr/bin/stat -f "%u:%g:%Lp:%HT" "$1"'
-    : String.raw`command stat -c "%u:%g:%a:%F" "$1"`
-  const hostFileNumericStat = darwinStat
-    ? '/usr/bin/stat -f "%u:%g:%Lp" "$1"'
-    : String.raw`command stat -c "%u:%g:%a" "$1"`
+  const hostFileStat = darwinStat ? '/usr/bin/stat -f "%u:%g:%Lp:%HT" "$1"' : 'command stat -c "%u:%g:%a:%F" "$1"'
+  const hostFileNumericStat = darwinStat ? '/usr/bin/stat -f "%u:%g:%Lp" "$1"' : 'command stat -c "%u:%g:%a" "$1"'
   const hostFileSizeStat = darwinStat ? '/usr/bin/stat -f "%z" "$1"' : 'command stat -c "%s" "$1"'
   const dataPath = join(dashboardRoot, 'data')
   const legacyOverridePath = join(dashboardRoot, 'docker-compose.override.yaml')
@@ -223,7 +219,7 @@ const adaptProgramForUnprivilegedHarness = (
     Object.entries(repoDigestMap)
       .map(([image, repoDigests]) => {
         const output = repoDigests.map(repoDigest => String.raw`printf '%s\n' ${shellQuote(repoDigest)}`).join(newline)
-        return String.raw`if [ "$5" = ${shellQuote(image)} ]; then ${output || ':'}; return 0; fi`
+        return `if [ "$5" = ${shellQuote(image)} ]; then ${output || ':'}; return 0; fi`
       })
       .join(newline)
   const imageInspectScript = imageInspectScriptFor(imageRepoDigests)

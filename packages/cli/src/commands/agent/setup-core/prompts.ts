@@ -48,7 +48,7 @@ export function buildApiKeyValue(keyName: string): string {
   )
     .join('-')
     .slice(0, 24)
-  const random = crypto.randomUUID().split('-').join('')
+  const random = crypto.randomUUID().replaceAll('-', '')
   return `sk-${slug || 'cliproxy'}-${random}`
 }
 

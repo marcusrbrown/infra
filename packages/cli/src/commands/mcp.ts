@@ -4,16 +4,18 @@ import {createMcpAction} from '@goke/mcp'
 /**
  * Commands intentionally excluded from MCP exposure (not in MCP_ALLOWLIST):
  *
- * Infrastructure / streaming (deferred or not MCP-suitable):
- * - `gateway deploy`   — subprocess streaming (Bun.spawn with stdout: 'inherit'), deferred to MCP v2 (#291)
- * - `cliproxy deploy`  — subprocess streaming, deferred to MCP v2 (#291)
- * - `keeweb deploy`    — subprocess streaming, deferred to MCP v2 (#291)
- * - `gateway logs`     — subprocess streaming, deferred to MCP v2 (#291)
+ * Infrastructure / deferred deploy-trigger work or not MCP-suitable:
+ * - `gateway deploy`   — remote workflow dispatch only (deploy-trigger capability), deferred to MCP v2 (#291)
+ * - `cliproxy deploy`  — remote workflow dispatch only (deploy-trigger capability), deferred to MCP v2 (#291)
+ * - `keeweb deploy`    — remote workflow dispatch only (deploy-trigger capability); blocked until the nginx step is gated, deferred to MCP v2 (#291)
  * - `cliproxy login`   — interactive (OAuth callback URL paste, requires TTY)
  * - `cliproxy open`    — interactive (SSH TUI session, requires TTY)
  * - `cliproxy setup`   — interactive (@clack/prompts wizard, requires TTY)
- * - `gateway restore`  — destructive policy (replaces mitmproxy CA on live gateway, deferred to MCP v2 #292)
+ * - `gateway restore`  — destructive policy (replaces mitmproxy CA on live gateway, requires approval-gating prerequisite before re-exposure #292)
  * - `keeweb open`      — host-machine side effect (spawns local browser, requires user intent)
+ *
+ * Intentionally CLI-only (mutating or sensitive):
+ * - `gateway logs`     — sensitive: streams logs that may emit secrets or user data; CLI-only
  * - `umami deploy`     — intentionally CLI-only: mutates live deployment and requires environment approval
  * - `umami logs`       — intentionally CLI-only: streams logs that may emit sensitive data (DB passwords, app secrets)
  * - `dashboard deploy` — intentionally CLI-only: mutates live deployment and requires environment approval

@@ -41,11 +41,11 @@ jobs:
             keeweb_nginx:
               - 'apps/keeweb/config/kw.igg.ms.conf'
             cliproxy:
-              - 'apps/cliproxy/**'
-              - '!apps/cliproxy/**/*.md'
-              - '!apps/cliproxy/**/*.test.ts'
-              - '!apps/cliproxy/**/__fixtures__/**'
-              - '!apps/cliproxy/**/__snapshots__/**'
+              - '{apps/cliproxy,packages/shared/cliproxy}/**'
+              - '!**/*.md'
+              - '!**/*.test.ts'
+              - '!**/__fixtures__/**'
+              - '!**/__snapshots__/**'
             gateway:
               - 'apps/gateway/**'
               - '!apps/gateway/**/*.md'
@@ -59,7 +59,7 @@ jobs:
               - '!apps/umami/**/__fixtures__/**'
               - '!apps/umami/**/__snapshots__/**'
             vpn:
-              - '{apps/vpn,packages/cli/src/commands/vpn,packages/shared/vpn}/**'
+              - '{apps/vpn,packages/cli/src/commands/vpn}/**'
               - '!**/*.md'
               - '!**/*.test.ts'
               - '!**/__fixtures__/**'
@@ -71,11 +71,11 @@ jobs:
               - '!apps/dashboard/**/__fixtures__/**'
               - '!apps/dashboard/**/__snapshots__/**'
             broker:
-              - 'apps/broker/**'
-              - '!apps/broker/**/*.md'
-              - '!apps/broker/**/*.test.ts'
-              - '!apps/broker/**/__fixtures__/**'
-              - '!apps/broker/**/__snapshots__/**'
+              - '{apps/broker,packages/shared/cliproxy}/**'
+              - '!**/*.md'
+              - '!**/*.test.ts'
+              - '!**/__fixtures__/**'
+              - '!**/__snapshots__/**'
 
   # Keep deploys independent by design: one app failing should not block the other.
   deploy-keeweb:

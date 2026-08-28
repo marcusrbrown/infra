@@ -63,6 +63,7 @@
     "infra_broker_deploy": "deny",
     "infra_broker_logs": "deny",
     "infra_cliproxy_monitor": "deny",
+    "infra_cliproxy_reset-quota": "deny",
     // Discord MCP (saseq/discord-mcp) exposes 65 guild tools. opencode resolves
     // the LAST matching permission rule, so the wildcard baseline comes first and
     // the explicit denies below it win for destructive tools. Tool ids use the

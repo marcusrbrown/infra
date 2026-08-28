@@ -7,6 +7,7 @@ import {registerCliproxyLogin} from './login'
 import {registerCliproxyModels} from './models'
 import {registerCliproxyMonitor} from './monitor'
 import {registerCliproxyOpen} from './open'
+import {registerCliproxyResetQuota} from './reset-quota'
 import {registerCliproxySetup} from './setup'
 import {registerCliproxyStatus} from './status'
 
@@ -19,5 +20,6 @@ export function registerCliproxyCommands(cli: ReturnType<typeof goke>): void {
   registerCliproxyModels(cli)
   registerCliproxyMonitor(cli)
   registerCliproxyOpen(cli)
+  registerCliproxyResetQuota(cli)
   registerCliproxySetup(cli)
 }

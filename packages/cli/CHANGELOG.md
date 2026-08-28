@@ -1,5 +1,21 @@
 # @marcusrbrown/infra
 
+## 0.22.0
+
+### Minor Changes
+
+- Add `cliproxy reset-quota` for resetting one auth record's quota and listing valid auth indexes. ([#1208](https://github.com/marcusrbrown/infra/pull/1208))
+
+- Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3`, `eslint` ([#1205](https://github.com/marcusrbrown/infra/pull/1205))
+
+### Patch Changes
+
+- Update Docker image `eceasy/cli-proxy-api` from `7.2.143` to `7.2.144` ([#1206](https://github.com/marcusrbrown/infra/pull/1206))
+
+- Update Docker image `eceasy/cli-proxy-api` from `7.2.141` to `7.2.142` ([#1196](https://github.com/marcusrbrown/infra/pull/1196))
+
+- Update Docker image `eceasy/cli-proxy-api` from `7.2.142` to `7.2.143` ([#1200](https://github.com/marcusrbrown/infra/pull/1200))
+
 ## 0.21.0
 
 ### Minor Changes

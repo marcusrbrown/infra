@@ -82,15 +82,6 @@ jobs:
           initial_retry_delay_seconds=3
           max_retry_delay_seconds=30
           # 12 waits: 3 + 6 + 12 + 24 + (30 * 8) = 285s (~4m45s).
-          retry_budget_seconds=0
-          retry_delay_seconds="$initial_retry_delay_seconds"
-          for ((retry = 1; retry < max_attempts; retry++)); do
-            retry_budget_seconds=$((retry_budget_seconds + retry_delay_seconds))
-            retry_delay_seconds=$((retry_delay_seconds * 2))
-            if ((retry_delay_seconds > max_retry_delay_seconds)); then
-              retry_delay_seconds="$max_retry_delay_seconds"
-            fi
-          done
           summary_file="$GITHUB_STEP_SUMMARY"
 
           if ! jq -e 'type == "array" and length > 0' <<<"$PUBLISHED_PACKAGES" >/dev/null; then
@@ -101,6 +92,7 @@ jobs:
 
           while IFS=$'\t' read -r name version; do
             verified=false
+            elapsed_seconds=0
             retry_delay_seconds="$initial_retry_delay_seconds"
             for ((attempt = 1; attempt <= max_attempts; attempt++)); do
               actual_version="$(npm view "${name}@${version}" version --prefer-online --registry=https://registry.npmjs.org 2>/dev/null || true)"
@@ -110,6 +102,7 @@ jobs:
               fi
               if ((attempt < max_attempts)); then
                 sleep "$retry_delay_seconds"
+                elapsed_seconds=$((elapsed_seconds + retry_delay_seconds))
                 retry_delay_seconds=$((retry_delay_seconds * 2))
                 if ((retry_delay_seconds > max_retry_delay_seconds)); then
                   retry_delay_seconds="$max_retry_delay_seconds"
@@ -118,7 +111,7 @@ jobs:
             done
 
             if [[ "$verified" != true ]]; then
-              printf '::error::npm registry did not resolve %s@%s after %d attempts over ~%ds\n' "$name" "$version" "$max_attempts" "$retry_budget_seconds" >&2
+              printf '::error::npm registry did not resolve %s@%s after %d attempts over ~%ds elapsed\n' "$name" "$version" "$max_attempts" "$elapsed_seconds" >&2
               exit 1
             fi
 

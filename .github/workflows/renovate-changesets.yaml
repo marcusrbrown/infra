@@ -52,8 +52,7 @@ jobs:
           commit-back: 'true'
           max-retries: '3'
           target-package: '@marcusrbrown/infra'
-          # Exclude repo-level tooling from triggering changesets (workflow SHA pins,
-          # root dev deps). Everything else — including apps/**/docker-compose.yaml
-          # (Docker image bumps) and apps/**/package.json (runtime dep bumps) — flows
-          # through so deployment updates show up in @marcusrbrown/infra release notes.
-          exclude-patterns: '.github/**,bun.lock,package.json'
+          # Exclude repo-level tooling and deployed apps from triggering changesets.
+          # Release notes track the published CLI package; app dependency bumps are
+          # deployment changes tracked in git history and deploy workflows, not npm release notes.
+          exclude-patterns: '.github/**,bun.lock,package.json,apps/**'

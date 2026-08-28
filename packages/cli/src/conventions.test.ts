@@ -55,6 +55,7 @@ const SENSITIVE_MCP_COMMANDS: readonly string[] = [
   'broker deploy',
   'broker logs',
   'cliproxy monitor',
+  'cliproxy reset-quota',
 ]
 
 // Accepted version-comment forms on SHA-pinned `uses:` lines:

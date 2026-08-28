@@ -85,6 +85,7 @@ const CLI_ONLY_TOOLS = [
   'cliproxy_keys_remove',
   'cliproxy_config_get',
   'cliproxy_config_set',
+  'cliproxy_reset-quota',
   // VPN: mutating / sensitive / log-streaming — CLI-only
   'vpn_deploy',
   'vpn_logs',

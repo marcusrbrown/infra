@@ -28,6 +28,7 @@ import {createMcpAction} from '@goke/mcp'
  * - `cliproxy keys remove` — mutating: revokes live bearer tokens on the proxy; CLI-only
  * - `cliproxy config get`  — secret-disclosing: dumps management config incl. management key; CLI-only
  * - `cliproxy config set`  — mutating: overwrites CLIProxyAPI runtime config; CLI-only
+ * - `cliproxy reset-quota` — mutating: resets quota for a live auth record; CLI-only
  * - `vpn deploy`           — mutating: deploys WireGuard config to live VPN box; CLI-only
  * - `vpn logs`             — sensitive: streams journalctl logs that may reveal peer IPs/traffic; CLI-only
  * - `vpn client add`       — mutating: generates keypair + appends peer + triggers redeploy; CLI-only

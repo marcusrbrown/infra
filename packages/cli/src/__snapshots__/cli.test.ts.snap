@@ -123,6 +123,14 @@ Commands:
     --host [host]                      SSH host for CLIProxyAPI server. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
 
 
+  cliproxy reset-quota [auth-index]    Reset the quota for one CLIProxyAPI auth record, or list valid auth indexes.
+
+    --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
+    --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
+    --list                             List auth records and their auth indexes without resetting quota.
+    --json                             Output auth records as JSON when used with --list.
+
+
   cliproxy setup                       Interactively onboard a GitHub repository to CLIProxyAPI by creating or reusing a key and wiring the required GitHub secrets and variables.
 
     --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.

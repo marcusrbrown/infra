@@ -810,6 +810,7 @@ jobs:
       )
     permissions:
       contents: read
+      pull-requests: read
     steps:
       # Always check out the default ref. Resolving a PR head here is unsafe:
       # an issue_comment on a fork PR is exposed only at github.event.issue.pull_request,
@@ -821,6 +822,38 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           token: ${{ secrets.FRO_BOT_PAT }}
+
+      - name: Resolve same-repo PR-head ref
+        id: prehead
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          ref=""
+          pr_number=""
+          if [ "${EVENT_NAME}" = "issue_comment" ] && [ "${IS_PR_COMMENT}" = "true" ]; then
+            pr_number="${ISSUE_NUMBER}"
+          elif [ "${EVENT_NAME}" = "pull_request_review_comment" ]; then
+            pr_number="${PR_NUMBER}"
+          fi
+          if [ -n "${pr_number}" ]; then
+            if pr_json="$(gh api "repos/${REPO}/pulls/${pr_number}" 2>/dev/null)"; then
+              head_repo="$(printf '%s' "${pr_json}" | jq -r '.head.repo.full_name // empty')"
+              if [ "${head_repo}" = "${REPO}" ]; then
+                ref="$(printf '%s' "${pr_json}" | jq -r '.head.sha // empty')"
+              else
+                echo "PR ${pr_number} head repo '${head_repo:-unknown}' is not this repository — using default branch." >&2
+              fi
+            else
+              echo "Could not resolve PR ${pr_number} head (API error) — using default branch." >&2
+            fi
+          fi
+          echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
 
       # Pin Node.js because Fro Bot runs `bun run lint` / `bunx tsc` which
       # spawn eslint/tsc via #!/usr/bin/env node shebang. ubuntu-latest
@@ -851,6 +884,7 @@ jobs:
           model: ${{ vars.FRO_BOT_MODEL }}
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
           prompt: ${{ env.PROMPT }}
+          trusted-head-sha: ${{ steps.prehead.outputs.ref }}
           timeout: 0
   fro-bot-storage:
     name: Fro Bot (storage)

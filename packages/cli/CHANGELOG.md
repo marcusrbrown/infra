@@ -1,5 +1,15 @@
 # @marcusrbrown/infra
 
+## 0.23.0
+
+### Minor Changes
+
+- Group update for npm dependencies: `@aws-sdk/client-iam`, `@aws-sdk/client-lightsail`, `@aws-sdk/client-s3` ([#1219](https://github.com/marcusrbrown/infra/pull/1219))
+
+### Patch Changes
+
+- Update Docker image `eceasy/cli-proxy-api` from `7.2.144` to `7.2.145` ([#1216](https://github.com/marcusrbrown/infra/pull/1216))
+
 ## 0.22.0
 
 ### Minor Changes

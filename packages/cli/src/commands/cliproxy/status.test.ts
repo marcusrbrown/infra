@@ -21,6 +21,39 @@ import {
 
 const originalFetch = globalThis.fetch
 
+const managedEnvKeys = ['CLIPROXY_URL', 'CLIPROXY_MANAGEMENT_KEY', 'CLIPROXY_API_KEY', 'CLIPROXY_SSH_KEY'] as const
+type ManagedEnvKey = (typeof managedEnvKeys)[number]
+
+let savedEnv: Partial<Record<ManagedEnvKey, string | undefined>>
+
+function saveEnv(): void {
+  savedEnv = Object.fromEntries(managedEnvKeys.map(key => [key, process.env[key]]))
+}
+
+function clearEnv(): void {
+  for (const key of managedEnvKeys) {
+    delete process.env[key]
+  }
+}
+
+function restoreEnv(): void {
+  for (const key of managedEnvKeys) {
+    const value = savedEnv[key]
+    if (value === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = value
+    }
+  }
+}
+
+beforeEach(() => {
+  saveEnv()
+  clearEnv()
+})
+
+afterEach(restoreEnv)
+
 type FetchReplacement = (url: string, init?: RequestInit) => Promise<Response>
 
 function createFetchImplementation(handler: FetchReplacement): typeof fetch {
@@ -505,20 +538,14 @@ describe('cliproxyStatusAction (Tier-2 ctx capture)', () => {
   it('Mode A: shows management key warning when no key provided', async () => {
     globalThis.fetch = createFetchImplementation(async () => new Response('ok', {status: 200}))
 
-    const savedKey = process.env.CLIPROXY_MANAGEMENT_KEY
-    delete process.env.CLIPROXY_MANAGEMENT_KEY
-    try {
-      const {ctx, captured} = createCapturedCtx()
-      await cliproxyStatusAction(
-        {url: 'https://cliproxy.example.com'},
-        ctx,
-        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
-      )
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
 
-      expect(expectCapturedToInclude(captured, 'CLIPROXY_MANAGEMENT_KEY')).toBe(true)
-    } finally {
-      if (savedKey !== undefined) process.env.CLIPROXY_MANAGEMENT_KEY = savedKey
-    }
+    expect(expectCapturedToInclude(captured, 'CLIPROXY_MANAGEMENT_KEY')).toBe(true)
   })
 
   it('keeps HTTP checks healthy when the running-version SSH check fails', async () => {

@@ -181,15 +181,20 @@ function makeAliasFetch(
 // ─── Test setup ───────────────────────────────────────────────────────────────
 
 let tmpDir: string
+let originalApiKey: string | undefined
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'cliproxy-deploy-test-'))
+  originalApiKey = process.env.CLIPROXY_API_KEY
 })
 
 afterEach(() => {
   rmSync(tmpDir, {recursive: true, force: true})
-  // Clean up any CLIPROXY_API_KEY set during tests
-  delete process.env.CLIPROXY_API_KEY
+  if (originalApiKey === undefined) {
+    delete process.env.CLIPROXY_API_KEY
+  } else {
+    process.env.CLIPROXY_API_KEY = originalApiKey
+  }
 })
 
 // ─── preflightManagementKeyCheck ──────────────────────────────────────────────

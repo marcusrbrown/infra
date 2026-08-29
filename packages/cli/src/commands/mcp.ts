@@ -5,13 +5,13 @@ import {createMcpAction} from '@goke/mcp'
  * Commands intentionally excluded from MCP exposure (not in MCP_ALLOWLIST):
  *
  * Infrastructure / deferred deploy-trigger work or not MCP-suitable:
- * - `gateway deploy`   — remote workflow dispatch only (deploy-trigger capability), deferred to MCP v2 (#291)
- * - `cliproxy deploy`  — remote workflow dispatch only (deploy-trigger capability), deferred to MCP v2 (#291)
- * - `keeweb deploy`    — remote workflow dispatch only (deploy-trigger capability); blocked until the nginx step is gated, deferred to MCP v2 (#291)
+ * - `gateway deploy`   — remote workflow dispatch only (deploy-trigger capability); permanently CLI-only — #292 decision record
+ * - `cliproxy deploy`  — remote workflow dispatch only (deploy-trigger capability); permanently CLI-only — #292 decision record
+ * - `keeweb deploy`    — remote workflow dispatch only (deploy-trigger capability); permanently CLI-only — #292 decision record (nginx step remains approval-gated)
  * - `cliproxy login`   — interactive (OAuth callback URL paste, requires TTY)
  * - `cliproxy open`    — interactive (SSH TUI session, requires TTY)
  * - `cliproxy setup`   — interactive (@clack/prompts wizard, requires TTY)
- * - `gateway restore`  — destructive policy (replaces mitmproxy CA on live gateway, requires approval-gating prerequisite before re-exposure #292)
+ * - `gateway restore`  — destructive policy (replaces mitmproxy CA on live gateway; permanently excluded — #292 decision record, docs/brainstorms/2026-08-29-mcp-approval-gating-v2-requirements.md)
  * - `keeweb open`      — host-machine side effect (spawns local browser, requires user intent)
  *
  * Intentionally CLI-only (mutating or sensitive):

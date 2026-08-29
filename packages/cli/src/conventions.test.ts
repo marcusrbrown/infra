@@ -1653,6 +1653,23 @@ describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => 
     const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {permissions?: unknown}}}
     expect(parsed.jobs?.['deploy-dashboard']?.permissions).toBeUndefined()
   })
+
+  it('supersede job has scoped write permissions and deploy depends on it', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        supersede?: {permissions?: Record<string, string>; if?: string}
+        'deploy-dashboard'?: {needs?: string | string[]}
+      }
+    }
+    const supersede = parsed.jobs?.supersede
+    const needs = parsed.jobs?.['deploy-dashboard']?.needs ?? []
+    const needsArr = Array.isArray(needs) ? needs : [needs]
+
+    expect(supersede?.permissions).toEqual({actions: 'write'})
+    expect(supersede?.if).toContain('workflow_dispatch')
+    expect(needsArr).toEqual(expect.arrayContaining(['supersede', 'validate-inputs']))
+  })
 })
 
 describe('deploy.yaml: dashboard job skips audit pin commits on push', () => {

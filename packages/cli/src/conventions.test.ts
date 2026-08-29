@@ -1298,7 +1298,8 @@ describe('deploy-gateway.yaml: optional operator secret declarations (issue 1)',
 // own concurrency group, so the aggregate group is redundant and harmful.
 //
 // Each per-app deploy workflow MUST have its own concurrency block with
-// group `deploy-<app>-` and cancel-in-progress: false.
+// group `deploy-<app>-` and cancel-in-progress: false. Dashboard keeps its
+// block at deploy-job scope so its pre-gate supersede job can start unblocked.
 
 describe('deploy.yaml: no aggregate-level concurrency (regression guard)', () => {
   const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
@@ -1323,10 +1324,15 @@ describe('per-app deploy workflows: each has its own concurrency block', () => {
     it(`deploy-${app}.yaml has concurrency group deploy-${app}- with cancel-in-progress: false`, async () => {
       const workflowPath = resolve(REPO_ROOT, `.github/workflows/deploy-${app}.yaml`)
       const text = await Bun.file(workflowPath).text()
-      const parsed = parseYaml(text) as {concurrency?: {group?: string; 'cancel-in-progress'?: boolean}}
-      expect(parsed.concurrency).toBeDefined()
-      expect(parsed.concurrency?.group).toContain(`deploy-${app}-`)
-      expect(parsed.concurrency?.['cancel-in-progress']).toBe(false)
+      const parsed = parseYaml(text) as {
+        concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
+        jobs?: Record<string, {concurrency?: {group?: string; 'cancel-in-progress'?: boolean}}>
+      }
+      const concurrency = app === 'dashboard' ? parsed.jobs?.['deploy-dashboard']?.concurrency : parsed.concurrency
+      expect(concurrency).toBeDefined()
+      expect(concurrency?.group).toContain(`deploy-${app}-`)
+      expect(concurrency?.['cancel-in-progress']).toBe(false)
+      if (app === 'dashboard') expect(parsed.concurrency).toBeUndefined()
     })
   }
 })
@@ -1646,6 +1652,23 @@ describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => 
     const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
     const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {permissions?: unknown}}}
     expect(parsed.jobs?.['deploy-dashboard']?.permissions).toBeUndefined()
+  })
+
+  it('supersede job has scoped write permissions and deploy depends on it', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        supersede?: {permissions?: Record<string, string>; if?: string}
+        'deploy-dashboard'?: {needs?: string | string[]}
+      }
+    }
+    const supersede = parsed.jobs?.supersede
+    const needs = parsed.jobs?.['deploy-dashboard']?.needs ?? []
+    const needsArr = Array.isArray(needs) ? needs : [needs]
+
+    expect(supersede?.permissions).toEqual({actions: 'write'})
+    expect(supersede?.if).toContain('workflow_dispatch')
+    expect(needsArr).toEqual(expect.arrayContaining(['supersede', 'validate-inputs']))
   })
 })
 

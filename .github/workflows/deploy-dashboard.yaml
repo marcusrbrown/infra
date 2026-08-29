@@ -70,11 +70,48 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: deploy-dashboard-${{ github.ref_name }}
-  cancel-in-progress: false
-
 jobs:
+  supersede:
+    needs: validate-inputs
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel stale waiting runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! waiting_runs="$(gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow deploy-dashboard.yaml \
+            --status waiting \
+            --limit 1000 \
+            --json databaseId \
+            --jq ".[] | select(.databaseId < ${CURRENT_RUN_ID}) | .databaseId")"; then
+            echo "Unable to list stale dashboard runs." >&2
+            exit 1
+          fi
+
+          failed=0
+          while IFS= read -r run_id; do
+            [[ -n "${run_id}" ]] || continue
+            echo "Cancelling stale waiting dashboard run ${run_id}."
+            if ! gh run cancel "${run_id}"; then
+              echo "Failed to cancel dashboard run ${run_id}." >&2
+              failed=1
+            fi
+          done <<< "${waiting_runs}"
+
+          if (( failed != 0 )); then
+            echo "One or more stale dashboard runs could not be cancelled." >&2
+            exit 1
+          fi
+
   # Pre-gate: no-secret validation. Runs before the environment gate so the
   # approver sees the version and any input errors before spending an approval.
   validate-inputs:
@@ -121,10 +158,19 @@ jobs:
           exit 1
 
   deploy-dashboard:
-    needs: validate-inputs
+    needs: [supersede, validate-inputs]
+    if: >-
+      ${{
+        always() &&
+        needs.validate-inputs.result == 'success' &&
+        (needs.supersede.result == 'success' || needs.supersede.result == 'skipped')
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: dashboard
+    concurrency:
+      group: deploy-dashboard-${{ github.ref_name }}
+      cancel-in-progress: false
     steps:
       - name: Get app token
         id: get-app-token

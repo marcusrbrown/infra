@@ -172,7 +172,8 @@ function permissionForScope(permissions: Record<string, PermissionLevel>, scope:
 }
 
 // Merge conservatively: a job override that omits a workflow scope can only make
-// the demand over-strict, never miss a required grant. See the parity plan for why.
+// the demand over-strict, never miss a required grant. See
+// docs/plans/2026-09-01-001-fix-deploy-router-permission-parity-plan.md for why.
 function mergePermissionDemand(target: Record<string, PermissionLevel>, raw: unknown): void {
   for (const [scope, level] of Object.entries(normalizePermissions(raw))) {
     target[scope] = maxPermission(target[scope] ?? 'none', level)

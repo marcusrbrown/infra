@@ -123,6 +123,99 @@ export function findCrossOrgSecretsInherit(parsed: unknown): {jobId: string; use
   return violations
 }
 
+type PermissionLevel = 'none' | 'read' | 'write'
+
+const PERMISSION_RANK: Record<PermissionLevel, number> = {none: 0, read: 1, write: 2}
+
+interface PermissionParityMismatch {
+  callerJob: string
+  calleeFile: string
+  scope: string
+  demanded: PermissionLevel
+  granted: PermissionLevel
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parsePermissionLevel(value: unknown): PermissionLevel | undefined {
+  if (value === 'none' || value === 'read' || value === 'write') return value
+  return undefined
+}
+
+function normalizePermissions(raw: unknown): Record<string, PermissionLevel> {
+  const permissions: Record<string, PermissionLevel> = {}
+  if (raw === 'read-all' || raw === 'write-all') {
+    permissions['*'] = raw === 'read-all' ? 'read' : 'write'
+    return permissions
+  }
+  if (!isRecord(raw)) return permissions
+
+  for (const [scope, value] of Object.entries(raw)) {
+    const level = parsePermissionLevel(value)
+    if (level !== undefined) permissions[scope] = level
+  }
+  return permissions
+}
+
+function maxPermission(left: PermissionLevel, right: PermissionLevel): PermissionLevel {
+  return PERMISSION_RANK[left] >= PERMISSION_RANK[right] ? left : right
+}
+
+function permissionCovers(granted: PermissionLevel, demanded: PermissionLevel): boolean {
+  return PERMISSION_RANK[granted] >= PERMISSION_RANK[demanded]
+}
+
+function permissionForScope(permissions: Record<string, PermissionLevel>, scope: string): PermissionLevel {
+  return permissions[scope] ?? permissions['*'] ?? 'none'
+}
+
+// Merge conservatively: a job override that omits a workflow scope can only make
+// the demand over-strict, never miss a required grant. See
+// docs/plans/2026-09-01-001-fix-deploy-router-permission-parity-plan.md for why.
+function mergePermissionDemand(target: Record<string, PermissionLevel>, raw: unknown): void {
+  for (const [scope, level] of Object.entries(normalizePermissions(raw))) {
+    target[scope] = maxPermission(target[scope] ?? 'none', level)
+  }
+}
+
+export function findPermissionParityMismatches(
+  callerJobId: string,
+  callerJobRaw: unknown,
+  routerPermissions: unknown,
+  calleeFile: string,
+  calleeRaw: unknown,
+): PermissionParityMismatch[] {
+  const callerJob = isRecord(callerJobRaw) ? callerJobRaw : {}
+  const callerPermissions = Object.prototype.hasOwnProperty.call(callerJob, 'permissions')
+    ? normalizePermissions(callerJob.permissions)
+    : normalizePermissions(routerPermissions)
+  const callee = isRecord(calleeRaw) ? calleeRaw : {}
+  const demands: Record<string, PermissionLevel> = {}
+
+  mergePermissionDemand(demands, callee.permissions)
+  const calleeJobs = isRecord(callee.jobs) ? callee.jobs : {}
+  for (const jobRaw of Object.values(calleeJobs)) {
+    if (!isRecord(jobRaw)) continue
+    mergePermissionDemand(demands, jobRaw.permissions)
+  }
+
+  return Object.entries(demands)
+    .map(([scope, demanded]) => ({
+      callerJob: callerJobId,
+      calleeFile,
+      scope,
+      demanded,
+      granted: permissionForScope(callerPermissions, scope),
+    }))
+    .filter(mismatch => !permissionCovers(mismatch.granted, mismatch.demanded))
+}
+
+function formatPermissionParityMismatch(mismatch: PermissionParityMismatch): string {
+  return `caller job '${mismatch.callerJob}' -> callee '${mismatch.calleeFile}': scope '${mismatch.scope}' demands '${mismatch.demanded}' but caller grants '${mismatch.granted}'`
+}
+
 /**
  * Detect dorny/paths-filter steps that use negation patterns without declaring
  * `predicate-quantifier: every`. The default quantifier (`some`) applies OR-logic
@@ -1711,6 +1804,108 @@ describe('deploy.yaml: dashboard job skips audit pin commits on push', () => {
       contents: 'read',
       actions: 'write',
     })
+  })
+})
+
+describe('deploy.yaml: reusable workflow permission parity', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  it('every local reusable workflow caller grants the callee permissions it demands', async () => {
+    const routerText = await Bun.file(DEPLOY_WORKFLOW).text()
+    const router = parseYaml(routerText) as {
+      permissions?: unknown
+      jobs?: Record<string, unknown>
+    }
+    const mismatches: PermissionParityMismatch[] = []
+
+    for (const [callerJobId, callerJobRaw] of Object.entries(router.jobs ?? {})) {
+      if (!isRecord(callerJobRaw) || typeof callerJobRaw.uses !== 'string') continue
+      if (!callerJobRaw.uses.startsWith('./.github/workflows/') || !callerJobRaw.uses.endsWith('.yaml')) continue
+
+      const calleeFile = callerJobRaw.uses
+      const calleeText = await Bun.file(resolve(REPO_ROOT, calleeFile)).text()
+      const callee = parseYaml(calleeText) as unknown
+      mismatches.push(
+        ...findPermissionParityMismatches(callerJobId, callerJobRaw, router.permissions, calleeFile, callee),
+      )
+    }
+
+    expect(mismatches.map(formatPermissionParityMismatch)).toEqual([])
+  })
+
+  it('orders permissions as none < read < write', () => {
+    expect(permissionCovers('write', 'read')).toBe(true)
+    expect(permissionCovers('read', 'write')).toBe(false)
+    expect(permissionCovers('none', 'read')).toBe(false)
+  })
+
+  it('detects a callee workflow-level demand that the caller does not grant', () => {
+    const mismatches = findPermissionParityMismatches(
+      'deploy-example',
+      {permissions: {contents: 'read'}},
+      {contents: 'read'},
+      './.github/workflows/deploy-example.yaml',
+      {permissions: {actions: 'write'}, jobs: {}},
+    )
+
+    expect(mismatches.map(formatPermissionParityMismatch)).toEqual([
+      "caller job 'deploy-example' -> callee './.github/workflows/deploy-example.yaml': scope 'actions' demands 'write' but caller grants 'none'",
+    ])
+  })
+
+  it('counts a callee workflow-level demand even when a job narrows it (conservative by design)', () => {
+    const mismatches = findPermissionParityMismatches(
+      'deploy-example',
+      {permissions: {contents: 'read'}},
+      {contents: 'read'},
+      './.github/workflows/deploy-example.yaml',
+      {
+        permissions: {actions: 'write'},
+        jobs: {deploy: {permissions: {contents: 'read'}}},
+      },
+    )
+
+    expect(mismatches.map(formatPermissionParityMismatch)).toEqual([
+      "caller job 'deploy-example' -> callee './.github/workflows/deploy-example.yaml': scope 'actions' demands 'write' but caller grants 'none'",
+    ])
+  })
+
+  it('uses an explicit caller permissions block instead of the router default', () => {
+    const mismatches = findPermissionParityMismatches(
+      'deploy-example',
+      {permissions: {contents: 'read'}},
+      {actions: 'write'},
+      './.github/workflows/deploy-example.yaml',
+      {jobs: {deploy: {permissions: {actions: 'write'}}}},
+    )
+
+    expect(mismatches.map(formatPermissionParityMismatch)).toEqual([
+      "caller job 'deploy-example' -> callee './.github/workflows/deploy-example.yaml': scope 'actions' demands 'write' but caller grants 'none'",
+    ])
+  })
+
+  it('falls back to the router workflow permissions when the caller has no block', () => {
+    const mismatches = findPermissionParityMismatches(
+      'deploy-example',
+      {},
+      {contents: 'read'},
+      './.github/workflows/deploy-example.yaml',
+      {jobs: {deploy: {permissions: {contents: 'read'}}}},
+    )
+
+    expect(mismatches).toEqual([])
+  })
+
+  it('does not report a callee with no permission demands', () => {
+    const mismatches = findPermissionParityMismatches(
+      'deploy-example',
+      {},
+      {contents: 'read'},
+      './.github/workflows/deploy-example.yaml',
+      {jobs: {deploy: {steps: []}}},
+    )
+
+    expect(mismatches).toEqual([])
   })
 })
 

@@ -886,6 +886,16 @@ jobs:
           prompt: ${{ env.PROMPT }}
           trusted-head-sha: ${{ steps.prehead.outputs.ref }}
           timeout: 0
+          # Mirror upstream's `packages/*/src` convention; deploy-critical files under `apps/` remain intentionally excluded.
+          brokered-push-extra-paths: >-
+            apps/agent/src, apps/agent/AGENTS.md,
+            apps/broker/src, apps/broker/AGENTS.md,
+            apps/cliproxy/src, apps/cliproxy/AGENTS.md,
+            apps/dashboard/src, apps/dashboard/AGENTS.md,
+            apps/gateway/src, apps/gateway/AGENTS.md,
+            apps/keeweb/src, apps/keeweb/AGENTS.md,
+            apps/umami/src, apps/umami/AGENTS.md,
+            apps/vpn/src, apps/vpn/AGENTS.md
   fro-bot-storage:
     name: Fro Bot (storage)
     runs-on: ubuntu-latest

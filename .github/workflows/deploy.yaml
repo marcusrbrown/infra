@@ -177,6 +177,9 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (needs.detect-changes.outputs.dashboard == 'true' &&
        !startsWith(github.event.head_commit.message, 'chore(dashboard): pin image to '))
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/deploy-dashboard.yaml
     secrets:
       DASHBOARD_SSH_KEY: ${{ secrets.DASHBOARD_SSH_KEY }}

@@ -1702,10 +1702,15 @@ describe('deploy.yaml: dashboard job skips audit pin commits on push', () => {
     expect(secrets.APPLICATION_PRIVATE_KEY).toContain('APPLICATION_PRIVATE_KEY')
   })
 
-  it('deploy-dashboard job in deploy.yaml has no permissions: block (no GITHUB_TOKEN used)', async () => {
+  it('deploy-dashboard caller grants supersede permissions because reusable workflows cannot exceed caller grants', async () => {
     const text = await Bun.file(DEPLOY_WORKFLOW).text()
-    const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {permissions?: unknown}}}
-    expect(parsed.jobs?.['deploy-dashboard']?.permissions).toBeUndefined()
+    const parsed = parseYaml(text) as {
+      jobs?: {'deploy-dashboard'?: {permissions?: Record<string, string>}}
+    }
+    expect(parsed.jobs?.['deploy-dashboard']?.permissions).toEqual({
+      contents: 'read',
+      actions: 'write',
+    })
   })
 })
 

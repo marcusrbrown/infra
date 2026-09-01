@@ -98,6 +98,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **Never PUT `/v0/management/config.yaml` from unattended cliproxy deploys** — whole-document replacement is forbidden, including preservation-verified GET/merge/PUT exceptions. Managed config changes must use a field-scoped endpoint; if none exists, automation stops and escalates. Follow `docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md`.
 - **Never use `ssh-keyscan` in CI workflows** — host keys are pinned in `.github/known_hosts`. Provisioning scripts may use `ssh-keyscan` locally via the shared `pinHostKeys` helper in `packages/shared/server/droplet-helpers.ts`. (enforced)
 - **Never `secrets: inherit`** with cross-org reusable workflows. (enforced)
+- **Reusable-workflow permissions must match caller grants** — a callee job cannot request a `GITHUB_TOKEN` scope its caller job does not grant; job-level `permissions:` replaces the workflow-level block, so callers must restate `contents: read` alongside added scopes or GitHub rejects the run at startup with zero jobs created. (enforced)
 - **Never use `bundledDependencies`** — Bun's `.bun/` symlink layout creates `../../` paths that npm rejects with E415. (enforced)
 - **Never pass gateway secret bytes via argv** — `writeRemoteFile` pipes bytes through SSH stdin only; `--body <value>` patterns are banned.
 - **Never skip `validateGatewayHost`** — it rejects `-`-prefixed values and characters outside the allowed alphabet. SSH treats `-`-prefixed hostnames as flags (including `-oProxyCommand=`).

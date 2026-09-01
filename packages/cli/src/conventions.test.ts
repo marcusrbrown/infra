@@ -619,6 +619,7 @@ const ENFORCED_MANIFEST: Record<string, string> = {
   'No secret values in tracked files': 'conventions.test.ts: settings.dropboxSecret === empty string',
   'ssh-keyscan': 'conventions.test.ts: no ssh-keyscan under .github/workflows/**',
   'Never `secrets: inherit`': 'conventions.test.ts: no secrets: inherit on cross-org jobs',
+  'Reusable-workflow permissions': 'conventions.test.ts: deploy.yaml caller grants cover callee permission demands',
   bundledDependencies: 'conventions.test.ts: no bundledDependencies in any package.json',
 }
 

@@ -1,3 +1,4 @@
+import {existsSync, readdirSync, statSync} from 'node:fs'
 import {relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
@@ -770,6 +771,53 @@ jobs:
       - run: echo hi
 `)
     expect(findCrossOrgSecretsInherit(parsed)).toEqual([])
+  })
+})
+
+describe('fro-bot.yaml: brokered-push app paths', () => {
+  const FRO_BOT_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/fro-bot.yaml')
+
+  it('includes exactly each app src and AGENTS.md path', async () => {
+    const text = await Bun.file(FRO_BOT_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'fro-bot-content'?: {
+          steps?: {name?: string; with?: Record<string, unknown>}[]
+        }
+      }
+    }
+    const runStep = parsed.jobs?.['fro-bot-content']?.steps?.find(step => step.name === 'Run Fro Bot')
+    const rawPaths = runStep?.with?.['brokered-push-extra-paths']
+    expect(typeof rawPaths, 'fro-bot-content Run Fro Bot must define brokered-push-extra-paths').toBe('string')
+    if (typeof rawPaths !== 'string') return
+
+    const appsDirectory = resolve(REPO_ROOT, 'apps')
+    const appNames = readdirSync(appsDirectory, {withFileTypes: true})
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+    const missingAppArtifacts = appNames.flatMap(appName => {
+      const missing: string[] = []
+      const srcPath = resolve(appsDirectory, appName, 'src')
+      const agentsPath = resolve(appsDirectory, appName, 'AGENTS.md')
+      if (!existsSync(srcPath) || !statSync(srcPath).isDirectory()) missing.push(`${appName}/src`)
+      if (!existsSync(agentsPath) || !statSync(agentsPath).isFile()) missing.push(`${appName}/AGENTS.md`)
+      return missing
+    })
+    expect(missingAppArtifacts, `Apps missing required paths: ${missingAppArtifacts.join(', ')}`).toEqual([])
+
+    const expectedPaths = appNames.flatMap(appName => [`apps/${appName}/src`, `apps/${appName}/AGENTS.md`])
+    const actualPaths = rawPaths
+      .split(',')
+      .map(path => path.trim())
+      .filter(Boolean)
+    const missingPaths = expectedPaths.filter(path => !actualPaths.includes(path))
+    const stalePaths = actualPaths.filter(path => !expectedPaths.includes(path))
+    const duplicatePaths = actualPaths.filter((path, index) => actualPaths.indexOf(path) !== index)
+
+    expect(missingPaths, `Missing brokered-push paths: ${missingPaths.join(', ') || '(none)'}`).toEqual([])
+    expect(stalePaths, `Stale brokered-push paths: ${stalePaths.join(', ') || '(none)'}`).toEqual([])
+    expect(duplicatePaths, `Duplicate brokered-push paths: ${duplicatePaths.join(', ') || '(none)'}`).toEqual([])
+    expect([...actualPaths].sort()).toEqual([...expectedPaths].sort())
   })
 })
 

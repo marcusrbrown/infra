@@ -171,6 +171,8 @@ function permissionForScope(permissions: Record<string, PermissionLevel>, scope:
   return permissions[scope] ?? permissions['*'] ?? 'none'
 }
 
+// Merge conservatively: a job override that omits a workflow scope can only make
+// the demand over-strict, never miss a required grant. See the parity plan for why.
 function mergePermissionDemand(target: Record<string, PermissionLevel>, raw: unknown): void {
   for (const [scope, level] of Object.entries(normalizePermissions(raw))) {
     target[scope] = maxPermission(target[scope] ?? 'none', level)
@@ -1843,6 +1845,23 @@ describe('deploy.yaml: reusable workflow permission parity', () => {
       {contents: 'read'},
       './.github/workflows/deploy-example.yaml',
       {permissions: {actions: 'write'}, jobs: {}},
+    )
+
+    expect(mismatches.map(formatPermissionParityMismatch)).toEqual([
+      "caller job 'deploy-example' -> callee './.github/workflows/deploy-example.yaml': scope 'actions' demands 'write' but caller grants 'none'",
+    ])
+  })
+
+  it('counts a callee workflow-level demand even when a job narrows it (conservative by design)', () => {
+    const mismatches = findPermissionParityMismatches(
+      'deploy-example',
+      {permissions: {contents: 'read'}},
+      {contents: 'read'},
+      './.github/workflows/deploy-example.yaml',
+      {
+        permissions: {actions: 'write'},
+        jobs: {deploy: {permissions: {contents: 'read'}}},
+      },
     )
 
     expect(mismatches.map(formatPermissionParityMismatch)).toEqual([

@@ -43,6 +43,12 @@ top-level block.
 YAML. Add a repository convention test that resolves local reusable-workflow calls and verifies
 that each caller's effective grant covers the maximum permission demand of its callee.
 
+### Scope boundary
+
+The guard resolves one level of `uses:`: the router and its direct callee. If a callee later gains
+its own local `uses: ./.github/workflows/...` call, that second-level demand is not walked. No
+nested calls exist today.
+
 ## Pre-merge verification
 
 Dispatch the router on a branch:

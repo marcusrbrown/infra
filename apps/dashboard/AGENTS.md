@@ -60,6 +60,18 @@ release is published. Caddy depends on the `dashboard` service being healthy bef
 In CI the SSH key is materialized from `DASHBOARD_SSH_KEY` to a temp file with a trailing newline
 (GitHub strips trailing whitespace from secrets) and `chmod 600`; locally it uses the ssh-agent.
 
+### Supersede (stale-run cancellation)
+
+- The `supersede` job in `deploy-dashboard.yaml` cancels older `waiting` runs of the same workflow
+  when a new `workflow_dispatch` fires, so a stale unapproved run can't hold the queue slot ahead of
+  a newer release. It only cancels runs older than the current one, scoped to `deploy-dashboard.yaml`.
+- It runs on `workflow_dispatch` only and is skipped when the workflow is invoked via `workflow_call`
+  from the deploy router (`deploy.yaml`).
+- `supersede` needs `actions: write`, so the router's `deploy-dashboard` caller job grants both
+  `contents: read` and `actions: write` — a job inside a reusable workflow can't request a scope its
+  caller lacks, and omitting it fails the entire router run at startup validation with zero jobs
+  created. `packages/cli/src/conventions.test.ts` enforces this parity.
+
 ### Retention and failure handling
 
 Pruning is pre-deploy only. The replaced image is left locally as one temporary rollback generation

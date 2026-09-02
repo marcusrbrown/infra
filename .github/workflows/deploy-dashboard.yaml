@@ -101,7 +101,7 @@ jobs:
           while IFS= read -r run_id; do
             [[ -n "${run_id}" ]] || continue
             echo "Cancelling stale waiting dashboard run ${run_id}."
-            if ! gh run cancel "${run_id}"; then
+            if ! gh run cancel --repo "${GITHUB_REPOSITORY}" "${run_id}"; then
               echo "Failed to cancel dashboard run ${run_id}." >&2
               failed=1
             fi

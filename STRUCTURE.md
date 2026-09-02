@@ -31,7 +31,7 @@ One subdirectory per deployable. Each app owns its Compose/build config (or nati
 
 ### `packages/`
 
-Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge) and also owns the VPN peer model (`packages/cli/src/commands/vpn/peers.ts`, published as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn`). `packages/shared` is the provisioning helper library consumed by every app's provision script. `packages/` never imports from `apps/`; the published `@marcusrbrown/infra` (cli) stays self-contained and must not depend on the private `packages/shared`.
+Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge) and also owns the VPN peer model (`packages/cli/src/commands/vpn/peers.ts`, published as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn`). `packages/shared` is the provisioning helper library consumed by every app's provision script, plus `packages/shared/cliproxy/management.ts` — CLIProxyAPI management-API primitives (`managementHeaders`, `requestJson`, `parseManagementKeyList`, OAuth model-alias helpers) consumed directly by `apps/cliproxy/src/deploy.ts`, `apps/broker/src/mint.ts`, and `packages/cli/src/commands/cliproxy/*.ts`. `packages/` never imports from `apps/`; the published `@marcusrbrown/infra` (cli) stays self-contained and must not depend on the private `packages/shared`.
 
 ### `.github/`
 
@@ -72,6 +72,7 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | `apps/gateway/upstream.json` | Pinned `fro-bot/agent` daemon ref |
 | `apps/dashboard/docker-compose.yaml` | Digest-pinned `ghcr.io/fro-bot/dashboard` image (tag@sha256 in the `image:` line; Renovate tracks bumps) |
 | `packages/cli/src/commands/vpn/peers.ts` | VPN peer model: `readPeers`, `writePeers`, `parsePeersJson`, `renderServerConfig`, `Peer` (exported as `@marcusrbrown/infra/vpn/peers`) |
+| `packages/shared/cliproxy/management.ts` | CLIProxyAPI management-API helpers (`managementHeaders`, `requestJson`, `HTTP_TIMEOUT_MS`, `parseManagementKeyList`, OAuth model-alias helpers); shared by `apps/cliproxy`, `apps/broker`, and `packages/cli` cliproxy commands |
 
 **CLI Commands**
 
@@ -118,7 +119,7 @@ Mechanical layout; for the integration rationale see [`ARCHITECTURE.md`](ARCHITE
 - **New app** → `apps/<name>/` mirroring `apps/cliproxy/` (Docker Compose on DigitalOcean) or `apps/vpn/` (native systemd on AWS Lightsail): Compose config or deploy script, `src/deploy.ts`, `server/provision.ts` (new apps use `provision.ts`; existing DigitalOcean apps keep `provision-droplet.ts`), `src/host.ts`, `AGENTS.md`. Add to `package.json` `workspaces` + `provision:<name>`/`deploy:<name>` scripts; run `bun install` to refresh `bun.lock`.
 - **New operator-only tool (no deploy)** → mirror `apps/agent/`: `private: true`, `server/provision.ts` only — no `src/deploy.ts`, `src/host.ts`, deploy workflow, or GitHub Environment. Add `provision:<name>` to root `package.json` scripts.
 - **New CLI command** → `packages/cli/src/commands/<app>/<action>.ts` + colocated test; export it from the group's `index.ts` barrel.
-- **New shared helper** → `packages/shared/server/droplet-helpers.ts` + colocated test.
+- **New shared helper** → `packages/shared/server/droplet-helpers.ts` + colocated test (or `packages/shared/cliproxy/management.ts` for CLIProxyAPI management-API helpers).
 - **New test** → colocate `*.test.ts` beside the source; fixtures/snapshots in `__fixtures__/`/`__snapshots__/`.
 - **New workflow** → `.github/workflows/<name>.yaml`, SHA-pinned actions with `# vX.Y.Z`; for a deploy, copy a `deploy-<app>.yaml` and wire it into `deploy.yaml`'s paths-filter.
 - **New docs page** → `docs/<brainstorms|plans|solutions>/`; solutions carry YAML frontmatter.

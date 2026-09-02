@@ -778,7 +778,7 @@ jobs:
 describe('fro-bot.yaml: brokered-push app paths', () => {
   const FRO_BOT_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/fro-bot.yaml')
 
-  it('includes exactly each app src and AGENTS.md path', async () => {
+  it('includes the root AGENTS.md plus exactly each app src and AGENTS.md path', async () => {
     const text = await Bun.file(FRO_BOT_WORKFLOW).text()
     const parsed = parseYaml(text) as {
       jobs?: {
@@ -806,7 +806,12 @@ describe('fro-bot.yaml: brokered-push app paths', () => {
     })
     expect(missingAppArtifacts, `Apps missing required paths: ${missingAppArtifacts.join(', ')}`).toEqual([])
 
-    const expectedPaths = appNames.flatMap(appName => [`apps/${appName}/src`, `apps/${appName}/AGENTS.md`])
+    // Root AGENTS.md carries repo-wide conventions; upstream's default allowlist covers
+    // README/ARCHITECTURE/STRUCTURE but not it.
+    const expectedPaths = [
+      'AGENTS.md',
+      ...appNames.flatMap(appName => [`apps/${appName}/src`, `apps/${appName}/AGENTS.md`]),
+    ]
     const actualPaths = rawPaths
       .split(',')
       .map(path => path.trim())

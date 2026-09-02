@@ -60,17 +60,24 @@ release is published. Caddy depends on the `dashboard` service being healthy bef
 In CI the SSH key is materialized from `DASHBOARD_SSH_KEY` to a temp file with a trailing newline
 (GitHub strips trailing whitespace from secrets) and `chmod 600`; locally it uses the ssh-agent.
 
-### Supersede (stale-run cancellation)
+### Staleness guard
 
-- The `supersede` job in `deploy-dashboard.yaml` cancels older `waiting` runs of the same workflow
-  when a new `workflow_dispatch` fires, so a stale unapproved run can't hold the queue slot ahead of
-  a newer release. It only cancels runs older than the current one, scoped to `deploy-dashboard.yaml`.
-- It runs on `workflow_dispatch` only and is skipped when the workflow is invoked via `workflow_call`
-  from the deploy router (`deploy.yaml`).
-- `supersede` needs `actions: write`, so the router's `deploy-dashboard` caller job grants both
-  `contents: read` and `actions: write` — a job inside a reusable workflow can't request a scope its
-  caller lacks, and omitting it fails the entire router run at startup validation with zero jobs
-  created. `packages/cli/src/conventions.test.ts` enforces this parity.
+- The first `deploy-dashboard` step, `Reject stale dashboard dispatch`, runs before app-token minting
+  and checkout. On `workflow_dispatch`, it lists `deploy-dashboard.yaml` runs with a `databaseId`
+  greater than the current run's and fails if any exist.
+- It is scoped to `workflow_dispatch` only. Under `workflow_call` from the deploy router, the callee
+  has no run of its own and `github.run_id` belongs to the router, so the comparison is meaningless.
+- The job declares `contents: read` and `actions: read`; a job-level `permissions:` block replaces the
+  workflow-level block rather than merging. The router caller grants the same pair, and
+  `packages/cli/src/conventions.test.ts` enforces the parity.
+- An environment-gated run cannot be cancelled through the Actions cancel API: the request is accepted
+  but does nothing. Only rejecting the pending deployment clears it, which requires a required-reviewer
+  identity unavailable to the workflow token. Stale runs therefore cannot be prevented; approval is
+  made harmless instead. The stale run fails quickly, freeing the concurrency slot for the newer run.
+- Any newer run takes precedence regardless of its outcome. If it was rejected or failed, the older run still
+  refuses to deploy; dispatch a fresh run rather than approving the original. A transient `gh run list`
+  API failure hard-fails before deployment secrets are touched — deliberate fail-closed behavior that
+  costs one approval click.
 
 ### Retention and failure handling
 

@@ -179,7 +179,7 @@ jobs:
        !startsWith(github.event.head_commit.message, 'chore(dashboard): pin image to '))
     permissions:
       contents: read
-      actions: write
+      actions: read
     uses: ./.github/workflows/deploy-dashboard.yaml
     secrets:
       DASHBOARD_SSH_KEY: ${{ secrets.DASHBOARD_SSH_KEY }}

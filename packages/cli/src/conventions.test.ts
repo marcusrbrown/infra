@@ -1446,7 +1446,7 @@ describe('deploy-gateway.yaml: optional operator secret declarations (issue 1)',
 //
 // Each per-app deploy workflow MUST have its own concurrency block with
 // group `deploy-<app>-` and cancel-in-progress: false. Dashboard keeps its
-// block at deploy-job scope so its pre-gate supersede job can start unblocked.
+// block at deploy-job scope so its pre-gate staleness guard runs before token minting.
 
 describe('deploy.yaml: no aggregate-level concurrency (regression guard)', () => {
   const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
@@ -1695,10 +1695,9 @@ describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => 
 
   it('deploy-dashboard job needs validate-inputs', async () => {
     const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
-    const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {needs?: string | string[]}}}
-    const needs = parsed.jobs?.['deploy-dashboard']?.needs ?? []
-    const needsArr = Array.isArray(needs) ? needs : [needs]
-    expect(needsArr).toContain('validate-inputs')
+    const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {needs?: string | string[]; if?: unknown}}}
+    expect(parsed.jobs?.['deploy-dashboard']?.needs).toBe('validate-inputs')
+    expect(parsed.jobs?.['deploy-dashboard']?.if).toBeUndefined()
   })
 
   it('Deploy step env forwards DEPLOY_VERSION from inputs', async () => {
@@ -1795,43 +1794,47 @@ describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => 
     expect(parsed.permissions?.contents).toBe('read')
   })
 
-  it('deploy-dashboard job has no job-level permissions: block (no GITHUB_TOKEN write needed)', async () => {
+  it('deploy-dashboard job grants read-only permissions for the staleness guard', async () => {
     const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
     const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {permissions?: unknown}}}
-    expect(parsed.jobs?.['deploy-dashboard']?.permissions).toBeUndefined()
+    expect(parsed.jobs?.['deploy-dashboard']?.permissions).toEqual({
+      contents: 'read',
+      actions: 'read',
+    })
   })
 
-  it('supersede job has scoped write permissions and deploy depends on it', async () => {
+  it('deploy-dashboard has a pre-token workflow_dispatch staleness guard', async () => {
     const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
     const parsed = parseYaml(text) as {
       jobs?: {
-        supersede?: {permissions?: Record<string, string>; if?: string}
-        'deploy-dashboard'?: {needs?: string | string[]}
+        supersede?: unknown
+        'deploy-dashboard'?: {
+          needs?: string | string[]
+          steps?: {name?: string; if?: string; env?: Record<string, string>; run?: string}[]
+        }
       }
     }
-    const supersede = parsed.jobs?.supersede
-    const needs = parsed.jobs?.['deploy-dashboard']?.needs ?? []
-    const needsArr = Array.isArray(needs) ? needs : [needs]
+    const steps = parsed.jobs?.['deploy-dashboard']?.steps ?? []
+    const guard = steps.find(step => step.name === 'Reject stale dashboard dispatch')
+    const guardIndex = steps.indexOf(guard ?? {})
+    const getTokenIndex = steps.findIndex(step => step.name === 'Get app token')
+    const normalizedRun = (guard?.run ?? '').replaceAll(/\\\n\s*/g, ' ')
 
-    expect(supersede?.permissions).toEqual({actions: 'write'})
-    expect(supersede?.if).toContain('workflow_dispatch')
-    expect(needsArr).toEqual(expect.arrayContaining(['supersede', 'validate-inputs']))
-  })
-
-  it('supersede gh run commands pass an explicit repository in the checkout-free job', async () => {
-    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
-    const parsed = parseYaml(text) as {
-      jobs?: {supersede?: {steps?: {name?: string; run?: string}[]}}
-    }
-    const cancelStep = parsed.jobs?.supersede?.steps?.find(step => step.name === 'Cancel stale waiting runs')
-    const normalizedRun = (cancelStep?.run ?? '').replaceAll(/\\\n\s*/g, ' ')
-
-    expect(normalizedRun, 'gh run list is missing an explicit --repo flag').toMatch(
-      /gh run list\s+--repo "\$\{GITHUB_REPOSITORY\}"/,
-    )
-    expect(normalizedRun, 'gh run cancel is missing an explicit --repo flag').toMatch(
-      /gh run cancel\s+--repo "\$\{GITHUB_REPOSITORY\}"\s+"\$\{run_id\}"/,
-    )
+    expect(parsed.jobs?.supersede).toBeUndefined()
+    expect(guard).toBeDefined()
+    expect(guard?.if).toBe("github.event_name == 'workflow_dispatch'")
+    expect(guard?.env).toEqual({
+      GH_TOKEN: '${' + '{ secrets.GITHUB_TOKEN }}',
+      CURRENT_RUN_ID: '${' + '{ github.run_id }}',
+    })
+    expect(normalizedRun).toContain('gh run list')
+    expect(normalizedRun).toMatch(/gh run list\s+--repo "\$\{GITHUB_REPOSITORY\}"/)
+    expect(normalizedRun).toMatch(/databaseId > \$\{CURRENT_RUN_ID\}/)
+    expect(guardIndex, 'staleness guard step not found in the deploy-dashboard job').toBeGreaterThanOrEqual(0)
+    expect(
+      getTokenIndex,
+      'staleness guard must run before "Get app token" — a guard that runs after secrets are minted defeats its purpose',
+    ).toBeGreaterThan(guardIndex)
   })
 })
 
@@ -1865,14 +1868,14 @@ describe('deploy.yaml: dashboard job skips audit pin commits on push', () => {
     expect(secrets.APPLICATION_PRIVATE_KEY).toContain('APPLICATION_PRIVATE_KEY')
   })
 
-  it('deploy-dashboard caller grants supersede permissions because reusable workflows cannot exceed caller grants', async () => {
+  it('deploy-dashboard caller grants read actions permission because reusable workflows cannot exceed caller grants', async () => {
     const text = await Bun.file(DEPLOY_WORKFLOW).text()
     const parsed = parseYaml(text) as {
       jobs?: {'deploy-dashboard'?: {permissions?: Record<string, string>}}
     }
     expect(parsed.jobs?.['deploy-dashboard']?.permissions).toEqual({
       contents: 'read',
-      actions: 'write',
+      actions: 'read',
     })
   })
 })

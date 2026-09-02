@@ -887,7 +887,9 @@ jobs:
           trusted-head-sha: ${{ steps.prehead.outputs.ref }}
           timeout: 0
           # Mirror upstream's `packages/*/src` convention; deploy-critical files under `apps/` remain intentionally excluded.
+          # Root AGENTS.md joins the per-app ones — upstream's default covers README/ARCHITECTURE/STRUCTURE only.
           brokered-push-extra-paths: >-
+            AGENTS.md,
             apps/agent/src, apps/agent/AGENTS.md,
             apps/broker/src, apps/broker/AGENTS.md,
             apps/cliproxy/src, apps/cliproxy/AGENTS.md,

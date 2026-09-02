@@ -1817,6 +1817,22 @@ describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => 
     expect(supersede?.if).toContain('workflow_dispatch')
     expect(needsArr).toEqual(expect.arrayContaining(['supersede', 'validate-inputs']))
   })
+
+  it('supersede gh run commands pass an explicit repository in the checkout-free job', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {supersede?: {steps?: {name?: string; run?: string}[]}}
+    }
+    const cancelStep = parsed.jobs?.supersede?.steps?.find(step => step.name === 'Cancel stale waiting runs')
+    const normalizedRun = (cancelStep?.run ?? '').replaceAll(/\\\n\s*/g, ' ')
+
+    expect(normalizedRun, 'gh run list is missing an explicit --repo flag').toMatch(
+      /gh run list\s+--repo "\$\{GITHUB_REPOSITORY\}"/,
+    )
+    expect(normalizedRun, 'gh run cancel is missing an explicit --repo flag').toMatch(
+      /gh run cancel\s+--repo "\$\{GITHUB_REPOSITORY\}"\s+"\$\{run_id\}"/,
+    )
+  })
 })
 
 describe('deploy.yaml: dashboard job skips audit pin commits on push', () => {

@@ -50,7 +50,7 @@
     "eslint-config-prettier": "10.1.8",
     "eslint-plugin-prettier": "5.5.6",
     "jiti": "2.7.0",
-    "lint-staged": "17.4.1",
+    "lint-staged": "17.5.0",
     "prettier": "3.9.6",
     "simple-git-hooks": "2.14.0",
     "typescript": "6.0.3"

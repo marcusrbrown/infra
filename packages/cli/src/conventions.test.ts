@@ -646,6 +646,124 @@ describe('repo conventions', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Release Alert synthetic validation contract
+// ---------------------------------------------------------------------------
+//
+// These parsed-YAML invariants describe the mandatory shape of the synthetic
+// `workflow_dispatch` path before its runtime logic exists. They are RED until
+// U2 extends `.github/workflows/release-alert.yaml`.
+
+describe('release-alert.yaml: synthetic validation contract', () => {
+  const RELEASE_ALERT_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/release-alert.yaml')
+
+  interface ReleaseAlertStep {
+    name?: string
+    uses?: string
+    run?: string
+    env?: Record<string, string>
+  }
+
+  interface ReleaseAlertJob {
+    if?: string
+    permissions?: Record<string, string>
+    env?: Record<string, string>
+    steps?: ReleaseAlertStep[]
+  }
+
+  interface ReleaseAlertWorkflow {
+    on?: Record<string, unknown>
+    permissions?: Record<string, string>
+    concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
+    jobs?: Record<string, ReleaseAlertJob>
+  }
+
+  async function loadReleaseAlert(): Promise<{text: string; parsed: ReleaseAlertWorkflow}> {
+    const text = await Bun.file(RELEASE_ALERT_WORKFLOW).text()
+    return {text, parsed: parseYaml(text) as ReleaseAlertWorkflow}
+  }
+
+  function alertRunBlock(parsed: ReleaseAlertWorkflow): string {
+    const steps = parsed.jobs?.alert?.steps ?? []
+    const step =
+      steps.find(candidate => candidate.name === 'Report failed release' && typeof candidate.run === 'string') ??
+      steps.find(candidate => typeof candidate.run === 'string')
+    return step?.run ?? ''
+  }
+
+  it('exposes a no-input workflow_dispatch alongside the failed-Release workflow_run trigger', async () => {
+    const {parsed} = await loadReleaseAlert()
+
+    expect(parsed.on?.workflow_run).toEqual({workflows: ['Release'], types: ['completed']})
+    expect(parsed.on).toHaveProperty('workflow_dispatch')
+
+    const dispatch = parsed.on?.workflow_dispatch
+    const inputKeys =
+      dispatch && typeof dispatch === 'object' && !Array.isArray(dispatch)
+        ? Object.keys(dispatch as Record<string, unknown>)
+        : []
+    expect(inputKeys).toEqual([])
+  })
+
+  it('keeps issues:write as the only workflow and job GITHUB_TOKEN permission', async () => {
+    const {parsed} = await loadReleaseAlert()
+
+    expect(parsed.permissions).toEqual({issues: 'write'})
+    expect(Object.keys(parsed.permissions ?? {})).toEqual(['issues'])
+    expect(parsed.jobs?.alert?.permissions ?? {}).toEqual({})
+  })
+
+  it('remains checkout-free with no action, install, or bun setup step', async () => {
+    const {text, parsed} = await loadReleaseAlert()
+    const steps = parsed.jobs?.alert?.steps ?? []
+
+    expect(steps.some(step => typeof step.uses === 'string')).toBe(false)
+    expect(text).not.toContain('actions/checkout')
+    expect(text).not.toContain('setup-bun')
+    expect(text).not.toContain('bun install')
+  })
+
+  it('guards the alert job to failed Release runs or manual synthetic dispatch only', async () => {
+    const {parsed} = await loadReleaseAlert()
+    const guard = parsed.jobs?.alert?.if ?? ''
+
+    expect(guard).toContain("github.event_name == 'workflow_dispatch'")
+    expect(guard).toMatch(/github\.event\.workflow_run\.conclusion\s*==\s*'failure'/)
+    expect(guard).not.toMatch(/'success'/)
+  })
+
+  it('reserves the synthetic identity and exact readback contract in the run block', async () => {
+    const {parsed} = await loadReleaseAlert()
+    const run = alertRunBlock(parsed)
+
+    expect(run).toContain('Release workflow failure (synthetic validation)')
+    expect(run).toContain('release-publish-failure-test')
+    expect(run).toContain('<!-- release-publish-failure-test:v1 -->')
+    expect(run).toMatch(/gh api/)
+    expect(run).toContain('GITHUB_STEP_SUMMARY')
+  })
+
+  it('authorizes the manual path before the first gh invocation', async () => {
+    const {parsed} = await loadReleaseAlert()
+    const run = alertRunBlock(parsed)
+
+    const firstGh = run.search(/(?:^|\s)gh\s/)
+    const actorIndex = run.search(/GITHUB_ACTOR|github\.actor/)
+    const ownerIndex = run.search(/GITHUB_REPOSITORY_OWNER|github\.repository_owner/)
+
+    expect(firstGh).toBeGreaterThan(-1)
+    expect(actorIndex).toBeGreaterThan(-1)
+    expect(ownerIndex).toBeGreaterThan(-1)
+    expect(Math.min(actorIndex, ownerIndex)).toBeLessThan(firstGh)
+  })
+
+  it('preserves the release-alert concurrency contract', async () => {
+    const {parsed} = await loadReleaseAlert()
+
+    expect(parsed.concurrency).toEqual({group: 'release-alert', 'cancel-in-progress': false})
+  })
+})
+
+// ---------------------------------------------------------------------------
 // (enforced) marker drift detection
 // ---------------------------------------------------------------------------
 //

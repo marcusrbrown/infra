@@ -5,6 +5,7 @@ on:
   workflow_run:
     workflows: [Release]
     types: [completed]
+  workflow_dispatch:
 
 permissions:
   issues: write
@@ -15,7 +16,7 @@ concurrency:
 
 jobs:
   alert:
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'failure' }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -23,39 +24,181 @@ jobs:
       RUN_URL: ${{ github.event.workflow_run.html_url }}
       HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
       CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      ACTIVE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      ACTIVE_SHA: ${{ github.sha }}
     steps:
       - name: Report failed release
         run: |
           set -euo pipefail
 
-          label='release-publish-failure'
-          marker='<!-- release-publish-failure:v1 -->'
-          title='Release workflow failure'
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
+            if [ "$GITHUB_ACTOR" != "$GITHUB_REPOSITORY_OWNER" ]; then
+              echo "error: synthetic validation is owner-only (actor=$GITHUB_ACTOR owner=$GITHUB_REPOSITORY_OWNER)" >&2
+              exit 1
+            fi
+            label='release-publish-failure-test'
+            marker='<!-- release-publish-failure-test:v1 -->'
+            title='Release workflow failure (synthetic validation)'
+            description='Synthetic Release Alert validation.'
+            RUN_URL="$ACTIVE_RUN_URL"
+            HEAD_SHA="$ACTIVE_SHA"
+            CONCLUSION='synthetic-validation'
+          else
+            label='release-publish-failure'
+            marker='<!-- release-publish-failure:v1 -->'
+            title='Release workflow failure'
+            description='The Release workflow failed.'
+          fi
+
           body=$(printf '%s\n' \
             "$marker" \
-            'The Release workflow failed.' \
+            "$description" \
             '' \
             "- Run: $RUN_URL" \
             "- Head SHA: $HEAD_SHA" \
             "- Conclusion: $CONCLUSION")
 
+          create_issue() {
+            local issue_title="$1" issue_label="$2" issue_body="$3"
+            local payload number id url
+            payload=$(gh api --method POST "repos/$REPOSITORY/issues" \
+              -f title="$issue_title" \
+              -f body="$issue_body" \
+              -f "labels[]=$issue_label")
+            if ! printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
+              echo 'error: create-issue returned malformed JSON' >&2
+              exit 1
+            fi
+            number=$(printf '%s' "$payload" | jq -r 'if (.number | type) == "number" then .number else empty end')
+            id=$(printf '%s' "$payload" | jq -r 'if (.id | type) == "number" then .id else empty end')
+            url=$(printf '%s' "$payload" | jq -r 'if (.html_url | type) == "string" and (.html_url | length) > 0 then .html_url else empty end')
+            if [ -z "$number" ] || [ -z "$id" ] || [ -z "$url" ]; then
+              echo 'error: create-issue response failed canonical shape validation' >&2
+              exit 1
+            fi
+            CREATE_ISSUE_NUMBER="$number"
+            CREATE_ISSUE_URL="$url"
+          }
+
+          create_comment() {
+            local issue_number="$1" comment_body="$2"
+            local payload comment_id comment_url
+            payload=$(gh api --method POST "repos/$REPOSITORY/issues/$issue_number/comments" \
+              -f body="$comment_body")
+            if ! printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
+              echo 'error: create-comment returned malformed JSON' >&2
+              exit 1
+            fi
+            comment_id=$(printf '%s' "$payload" | jq -r 'if (.id | type) == "number" then .id else empty end')
+            comment_url=$(printf '%s' "$payload" | jq -r 'if (.html_url | type) == "string" and (.html_url | length) > 0 then .html_url else empty end')
+            if [ -z "$comment_id" ] || [ -z "$comment_url" ]; then
+              echo 'error: create-comment response failed canonical shape validation' >&2
+              exit 1
+            fi
+            CREATE_COMMENT_ID="$comment_id"
+          }
+
+          verify_issue_exact() {
+            local issue_number="$1" expected_title="$2" expected_label="$3" expected_marker="$4"
+            local attempt=1 payload
+            while [ "$attempt" -le 3 ]; do
+              if payload=$(gh api "repos/$REPOSITORY/issues/$issue_number") &&
+                printf '%s' "$payload" | jq -e . >/dev/null 2>&1 &&
+                printf '%s' "$payload" | jq -e \
+                  --argjson number "$issue_number" \
+                  --arg title "$expected_title" \
+                  --arg label "$expected_label" \
+                  --arg marker "$expected_marker" \
+                  '.number == $number
+                   and .title == $title
+                   and ((.body // "") | contains($marker))
+                   and (([.labels[]?.name] | index($label)) != null)' >/dev/null 2>&1; then
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                sleep 1
+              fi
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
+
+          verify_comment_exact() {
+            local comment_id="$1" expected_marker="$2" expected_url="$3"
+            local attempt=1 payload
+            while [ "$attempt" -le 3 ]; do
+              if payload=$(gh api "repos/$REPOSITORY/issues/comments/$comment_id") &&
+                printf '%s' "$payload" | jq -e . >/dev/null 2>&1 &&
+                printf '%s' "$payload" | jq -e \
+                  --argjson id "$comment_id" \
+                  --arg marker "$expected_marker" \
+                  --arg url "$expected_url" \
+                  '.id == $id
+                   and ((.body // "") | contains($marker))
+                   and ((.body // "") | contains($url))' >/dev/null 2>&1; then
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                sleep 1
+              fi
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
+
           if ! gh label view "$label" --repo "$REPOSITORY" >/dev/null 2>&1; then
             gh label create "$label" --repo "$REPOSITORY" --color b60205 --description 'Release workflow failures'
           fi
 
-          issues=$(gh issue list \
-            --repo "$REPOSITORY" \
-            --state open \
-            --label "$label" \
-            --search "$title in:title" \
-            --limit 100 \
-            --json number,body)
-          issue_number=$(jq -r --arg marker "$marker" \
-            '[.[] | select(.body != null and (.body | contains($marker)))] | sort_by(.number) | .[0].number // empty' \
-            <<<"$issues")
-
-          if [[ -n "$issue_number" ]]; then
-            gh issue comment "$issue_number" --repo "$REPOSITORY" --body "$body"
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
+            pages=$(gh api --paginate --slurp "repos/$REPOSITORY/issues?state=open&labels=$label")
+            issues=$(printf '%s' "$pages" | jq -c 'add // []')
+            matches=$(printf '%s' "$issues" | jq -c \
+              --arg title "$title" \
+              --arg label "$label" \
+              --arg marker "$marker" \
+              '[ .[]
+                 | select(.pull_request == null)
+                 | select(.title == $title)
+                 | select(.body != null and (.body | contains($marker)))
+                 | select(([.labels[]?.name] | index($label)) != null) ]')
+            match_count=$(printf '%s' "$matches" | jq -r 'length')
+            if [ "$match_count" -eq 0 ]; then
+              create_issue "$title" "$label" "$body"
+              if ! verify_issue_exact "$CREATE_ISSUE_NUMBER" "$title" "$label" "$marker"; then
+                echo 'error: synthetic issue readback failed' >&2
+                exit 1
+              fi
+              printf 'Release Alert synthetic validation: created %s\n' "$CREATE_ISSUE_URL" >> "$GITHUB_STEP_SUMMARY"
+            elif [ "$match_count" -eq 1 ]; then
+              matched_number=$(printf '%s' "$matches" | jq -r '.[0].number')
+              matched_url=$(printf '%s' "$matches" | jq -r '.[0].html_url // empty')
+              create_comment "$matched_number" "$body"
+              if ! verify_comment_exact "$CREATE_COMMENT_ID" "$marker" "$RUN_URL"; then
+                echo 'error: synthetic comment readback failed' >&2
+                exit 1
+              fi
+              if [ -z "$matched_url" ]; then
+                matched_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/issues/$matched_number"
+              fi
+              printf 'Release Alert synthetic validation: commented %s\n' "$matched_url" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "error: $match_count issues match the synthetic identity; refusing to mutate" >&2
+              exit 1
+            fi
           else
-            gh issue create --repo "$REPOSITORY" --title "$title" --label "$label" --body "$body"
+            issues=$(gh issue list \
+              --repo "$REPOSITORY" \
+              --state open \
+              --label "$label" \
+              --search "$title in:title" \
+              --limit 100 \
+              --json number,body)
+            issue_number=$(printf '%s' "$issues" | jq -r --arg marker "$marker" \
+              '[.[] | select(.body != null and (.body | contains($marker)))] | sort_by(.number) | .[0].number // empty')
+            if [ -n "$issue_number" ]; then
+              create_comment "$issue_number" "$body"
+            else
+              create_issue "$title" "$label" "$body"
+            fi
           fi

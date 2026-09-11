@@ -525,31 +525,40 @@ function productionFixture(overrides: GhFixture = {}): GhFixture {
   return {labelExists: true, listIssues: [], ...overrides}
 }
 
+// GitHub's REST issue object exposes two distinct URLs: `url` is the API
+// endpoint and `html_url` is the browser-facing issue URL. Fixtures must keep
+// them distinct so a workflow that reads the wrong field is caught.
+function issueBrowserUrl(number: number): string {
+  return `https://github.com/owner/repo/issues/${number}`
+}
+
+function issueApiUrl(number: number): string {
+  return `https://api.github.com/repos/owner/repo/issues/${number}`
+}
+
 function productionIssue(number = 1209): Record<string, unknown> {
-  const url = `https://github.com/owner/repo/issues/${number}`
   return {
     number,
     state: 'open',
     title: PRODUCTION_TITLE,
     body: `${PRODUCTION_MARKER}\n\nProduction incident`,
     labels: [{name: PRODUCTION_LABEL}],
-    html_url: url,
-    url,
+    html_url: issueBrowserUrl(number),
+    url: issueApiUrl(number),
   }
 }
 
 function syntheticIssue(overrides: {number?: number; title?: string; body?: string; labels?: string[]} = {}) {
   const number = overrides.number ?? 40
   const labels = overrides.labels ?? [SYNTHETIC_LABEL]
-  const url = `https://github.com/owner/repo/issues/${number}`
   return {
     number,
     state: 'open',
     title: overrides.title ?? SYNTHETIC_TITLE,
     body: overrides.body ?? `${SYNTHETIC_MARKER}\n\nSynthetic validation`,
     labels: labels.map(name => ({name})),
-    html_url: url,
-    url,
+    html_url: issueBrowserUrl(number),
+    url: issueApiUrl(number),
   }
 }
 
@@ -565,7 +574,7 @@ interface SyntheticExchange {
 // carries the full identity (number/id/html_url/title/body/labels) the planned
 // exact-object verification is expected to check.
 function syntheticExchange(number: number, id: number): SyntheticExchange {
-  const htmlUrl = `https://github.com/owner/repo/issues/${number}`
+  const htmlUrl = issueBrowserUrl(number)
   const record = {
     number,
     id,
@@ -574,13 +583,13 @@ function syntheticExchange(number: number, id: number): SyntheticExchange {
     body: SYNTHETIC_MARKER,
     labels: [{name: SYNTHETIC_LABEL}],
     html_url: htmlUrl,
-    url: htmlUrl,
+    url: issueApiUrl(number),
   }
   return {
     number,
     id,
     htmlUrl,
-    createResponse: jsonResponse({number, id, html_url: htmlUrl, url: htmlUrl}),
+    createResponse: jsonResponse({number, id, html_url: htmlUrl, url: issueApiUrl(number)}),
     readbackResponse: jsonResponse(record),
   }
 }
@@ -714,7 +723,10 @@ describe('release-alert: synthetic dispatch contract', () => {
     const commentReads = result.calls.filter(isCommentRead)
     expect(commentReads.length).toBeGreaterThanOrEqual(1)
     expect(commentReads[0]?.endpoint).toContain('/issues/comments/')
-    expect(result.summary).toContain(`/issues/${matchNumber}`)
+    // The comment-path step summary must use the browser-facing `html_url`
+    // returned by the list response, never the REST API `url`.
+    expect(result.summary).toContain(issueBrowserUrl(matchNumber))
+    expect(result.summary).not.toContain(issueApiUrl(matchNumber))
   })
 
   it('fails closed without mutation when multiple issues match the full synthetic identity', async () => {

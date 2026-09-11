@@ -172,7 +172,7 @@ jobs:
               printf 'Release Alert synthetic validation: created %s\n' "$CREATE_ISSUE_URL" >> "$GITHUB_STEP_SUMMARY"
             elif [ "$match_count" -eq 1 ]; then
               matched_number=$(printf '%s' "$matches" | jq -r '.[0].number')
-              matched_url=$(printf '%s' "$matches" | jq -r '.[0].url // empty')
+              matched_url=$(printf '%s' "$matches" | jq -r '.[0].html_url // empty')
               create_comment "$matched_number" "$body"
               if ! verify_comment_exact "$CREATE_COMMENT_ID" "$marker" "$RUN_URL"; then
                 echo 'error: synthetic comment readback failed' >&2

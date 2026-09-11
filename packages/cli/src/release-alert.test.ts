@@ -159,6 +159,7 @@ type GhResponse =
 interface GhFixture {
   labelExists?: boolean
   labelName?: string
+  labelProbe?: {status: number; body?: string}
   listIssues?: Record<string, unknown>[]
   issuePages?: Record<string, unknown>[][]
   createIssue?: GhResponse
@@ -294,10 +295,7 @@ appendFileSync(
   JSON.stringify({argv: args, command: args.join(' '), method: method, endpoint: endpoint, fields: fields, body: stdinText}) + '\n',
 )
 
-if (args[0] === 'label' && args[1] === 'view') {
-  if (config.labelExists === false) emit({stderr: 'could not resolve to a Label', exitCode: 1})
-  else emit({json: {name: config.labelName || 'label'}})
-} else if (args[0] === 'label' && args[1] === 'create') {
+if (args[0] === 'label' && args[1] === 'create') {
   emit({json: {name: config.labelName || 'label'}})
 } else if (args[0] === 'issue' && args[1] === 'list') {
   const fields = requestedJsonFields(args)
@@ -320,6 +318,21 @@ if (args[0] === 'label' && args[1] === 'view') {
     emit(config.createIssue || defaultCreateIssueResponse())
   } else if (method === 'POST' && /\/issues\/\d+\/comments(\?|$)/.test(path)) {
     emit(config.createComment || defaultCreateCommentResponse())
+  } else if (method === 'GET' && /\/labels\/[^/?]+(?:\?|$)/.test(path)) {
+    const probe = config.labelProbe || {status: config.labelExists === false ? 404 : 200}
+    const status = Number(probe.status)
+    const reason =
+      status === 200 ? 'OK' : status === 404 ? 'Not Found' : status === 403 ? 'Forbidden' : 'Unexpected Status'
+    const payload =
+      typeof probe.body === 'string'
+        ? probe.body
+        : status === 200
+          ? '{"name":"' + (config.labelName || 'label') + '"}'
+          : '{"message":"' + reason + '"}'
+    emit({
+      body: 'HTTP/2.0 ' + status + ' ' + reason + '\r\ncontent-type: application/json\r\n\r\n' + payload,
+      exitCode: status === 200 ? 0 : 1,
+    })
   } else {
     emit({stderr: 'unhandled gh api call: ' + args.join(' '), exitCode: 1})
   }
@@ -449,6 +462,14 @@ function isIssueRead(call: GhCall): boolean {
 
 function isCommentRead(call: GhCall): boolean {
   return call.argv[0] === 'api' && call.method === 'GET' && /\/issues\/comments\/\d+(?:\?|$)/.test(call.endpoint ?? '')
+}
+
+function isLabelProbe(call: GhCall): boolean {
+  return call.argv[0] === 'api' && call.method === 'GET' && /\/labels\/[^/?]+(?:\?|$)/.test(call.endpoint ?? '')
+}
+
+function isLabelCreate(call: GhCall): boolean {
+  return call.argv[0] === 'label' && call.argv[1] === 'create'
 }
 
 function commentIssueNumber(call: GhCall): number | undefined {
@@ -602,7 +623,9 @@ describe('release-alert: harness and production characterization', () => {
 
     expect(result.exitCode).toBe(0)
     expect(result.calls.length).toBeGreaterThan(0)
-    expect(result.calls[0]?.argv[0]).toBe('label')
+    const firstCall = result.calls[0]
+    expect(firstCall?.argv[0]).toBe('api')
+    expect(firstCall === undefined ? false : isLabelProbe(firstCall)).toBe(true)
   })
 
   it('creates the production issue with the current title, label, marker, and body when none is open', async () => {
@@ -929,4 +952,72 @@ describe('release-alert: synthetic dispatch contract', () => {
     expect(result.calls.filter(isComment)).toHaveLength(1)
     expect(result.calls.filter(isCommentRead)).toHaveLength(3)
   }, 30_000)
+})
+
+// Exact label probe: `gh label view` is invalid, and the prior code misread its
+// failure as absence and attempted a duplicate create. Exact REST semantics:
+// 200 present, 404 create, any other error fails closed.
+
+describe('release-alert: exact label lookup probe', () => {
+  const SYNTHETIC_EXCHANGE = syntheticExchange(510, 9510)
+
+  it('treats an exact label GET 200 as present and never creates the label', async () => {
+    const result = await runReleaseAlert({
+      scenario: 'synthetic',
+      fixture: {
+        labelProbe: {status: 200},
+        listIssues: [],
+        createIssue: SYNTHETIC_EXCHANGE.createResponse,
+        issueReadback: [SYNTHETIC_EXCHANGE.readbackResponse],
+      },
+    })
+
+    expect(result.exitCode).toBe(0)
+    const probe = result.calls.find(isLabelProbe)
+    expect(probe).toBeDefined()
+    expect(probe?.endpoint).toContain(`/labels/${SYNTHETIC_LABEL}`)
+    expect(probe?.argv).toContain('--include')
+    expect(probe?.argv).toContain('--silent')
+    expect(result.calls.filter(isLabelCreate)).toHaveLength(0)
+    expect(result.calls.filter(isCreateIssue)).toHaveLength(1)
+  })
+
+  it('creates the label exactly once when the exact label GET confirms 404', async () => {
+    const result = await runReleaseAlert({
+      scenario: 'synthetic',
+      fixture: {
+        labelProbe: {status: 404},
+        listIssues: [],
+        createIssue: SYNTHETIC_EXCHANGE.createResponse,
+        issueReadback: [SYNTHETIC_EXCHANGE.readbackResponse],
+      },
+    })
+
+    expect(result.exitCode).toBe(0)
+    const probe = result.calls.find(isLabelProbe)
+    expect(probe).toBeDefined()
+    expect(probe?.argv).toContain('--include')
+    const labelCreates = result.calls.filter(isLabelCreate)
+    expect(labelCreates).toHaveLength(1)
+    expect(labelCreates[0]?.argv).toContain(SYNTHETIC_LABEL)
+    expect(result.calls.filter(isCreateIssue)).toHaveLength(1)
+  })
+
+  it('fails closed before mutation when the exact label GET is a non-404 error', async () => {
+    const result = await runReleaseAlert({
+      scenario: 'synthetic',
+      fixture: {
+        labelProbe: {status: 403},
+        listIssues: [],
+      },
+    })
+
+    expect(result.exitCode).not.toBe(0)
+    const probe = result.calls.find(isLabelProbe)
+    expect(probe).toBeDefined()
+    expect(result.calls.filter(isLabelCreate)).toHaveLength(0)
+    expect(result.calls.filter(isCreateIssue)).toHaveLength(0)
+    expect(result.calls.filter(isComment)).toHaveLength(0)
+    expect(result.stderr).toContain('HTTP/2.0 403')
+  })
 })

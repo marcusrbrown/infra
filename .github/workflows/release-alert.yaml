@@ -146,8 +146,16 @@ jobs:
             return 1
           }
 
-          if ! gh label view "$label" --repo "$REPOSITORY" >/dev/null 2>&1; then
+          probe_output=''
+          probe_status=0
+          probe_output=$(gh api --include --silent "repos/$REPOSITORY/labels/$label" 2>&1) || probe_status=$?
+          if [ "$probe_status" -eq 0 ]; then
+            :
+          elif printf '%s' "$probe_output" | grep -Eq '^HTTP/[0-9.]+ 404 '; then
             gh label create "$label" --repo "$REPOSITORY" --color b60205 --description 'Release workflow failures'
+          else
+            printf '%s\n' "$probe_output" >&2
+            exit "$probe_status"
           fi
 
           if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then

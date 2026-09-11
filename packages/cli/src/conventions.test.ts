@@ -1,4 +1,4 @@
-import {existsSync, readdirSync, statSync} from 'node:fs'
+import {existsSync, readdirSync, readFileSync, statSync} from 'node:fs'
 import {relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
@@ -80,6 +80,46 @@ interface Violation {
 function listWorkflowFiles(extension: '.yaml' | '.yml'): string[] {
   const glob = new Bun.Glob(`.github/workflows/*${extension}`)
   return [...glob.scanSync({cwd: REPO_ROOT, absolute: true, dot: true})]
+}
+
+function hasWorkflowInputReference(value: unknown, inputName: string): boolean {
+  if (typeof value === 'string') {
+    const escapedName = inputName.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
+    return (
+      new RegExp(String.raw`(?:^|[^\w])(?:github\.event\.)?inputs\.${escapedName}(?=$|[^\w])`).test(value) ||
+      new RegExp(String.raw`(?:^|[^\w])(?:github\.event\.)?inputs\[["']${escapedName}["']\]`).test(value)
+    )
+  }
+  if (Array.isArray(value)) return value.some(item => hasWorkflowInputReference(item, inputName))
+  if (typeof value !== 'object' || value === null) return false
+  return Object.values(value).some(item => hasWorkflowInputReference(item, inputName))
+}
+
+function findUnusedWorkflowDispatchInputs(): string[] {
+  const unused: string[] = []
+  for (const workflowPath of listWorkflowFiles('.yaml')) {
+    const parsed = parseYaml(readFileSync(workflowPath, 'utf8')) as Record<string, unknown>
+    const on = parsed.on
+    if (typeof on !== 'object' || on === null) continue
+    const workflowDispatch = (on as Record<string, unknown>).workflow_dispatch
+    if (typeof workflowDispatch !== 'object' || workflowDispatch === null) continue
+    const inputs = (workflowDispatch as Record<string, unknown>).inputs
+    if (typeof inputs !== 'object' || inputs === null || Array.isArray(inputs)) continue
+
+    const executableData = {
+      ...parsed,
+      on: {
+        ...on,
+        workflow_dispatch: {...workflowDispatch, inputs: undefined},
+      },
+    }
+    for (const inputName of Object.keys(inputs)) {
+      if (!hasWorkflowInputReference(executableData, inputName)) {
+        unused.push(`${relative(REPO_ROOT, workflowPath)}:${inputName}`)
+      }
+    }
+  }
+  return unused
 }
 
 function listPackageJsonFiles(): string[] {
@@ -341,6 +381,11 @@ describe('repo conventions', () => {
     })
     expect(text).not.toMatch(/pull_request(?:_target)?\s*:/)
     expect(text).toContain('VALIDATION=live')
+  })
+
+  it('references every declared workflow_dispatch input in executable workflow data', () => {
+    const unused = findUnusedWorkflowDispatchInputs()
+    expect(unused, `Unused workflow_dispatch inputs: ${unused.join(', ') || '(none)'}`).toEqual([])
   })
 
   it('keeps monitor workflow permissions, concurrency, and checkout hardened', async () => {

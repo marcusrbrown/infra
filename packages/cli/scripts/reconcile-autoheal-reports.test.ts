@@ -1010,8 +1010,8 @@ describe('reconcile-autoheal-reports: bounded reads', () => {
     server.override = request => {
       if (request.method === 'GET' && request.path === `/repos/${REPO}/issues`) {
         listCalls += 1
-        if (listCalls === 3) {
-          // Final proof sees the noncanonical report still open.
+        if (listCalls === 3 || listCalls === 4) {
+          // Both complete final-proof attempts see the noncanonical report still open.
           return {
             json: [
               server.issueRecord(managedReport(1317, DATE, RUN_ID)),
@@ -1027,6 +1027,46 @@ describe('reconcile-autoheal-reports: bounded reads', () => {
 
     expect(summary.status).toBe('aborted')
     expect(summary.failure_code).toBe('final_proof_failed')
+    expect(summary.final_open_managed).toBe(2)
+    expect(summary.failure_reason).toBe('2 open managed reports remain')
+    expect(summary.closed).toBe(1)
+    expect(server.mutations).toHaveLength(2)
+  })
+
+  it('retries the complete final proof after a stale closed report appears in the open list', async () => {
+    const server = new FakeGitHub()
+    server.issues = [managedReport(1317, DATE, RUN_ID), managedReport(1300, '2026-09-10', OTHER_RUN_ID)]
+    const staleClosed = managedReport(1300, '2026-09-10', OTHER_RUN_ID, {state: 'closed'})
+    let listCalls = 0
+    const sleeps: number[] = []
+    server.override = request => {
+      if (request.method === 'GET' && request.path === `/repos/${REPO}/issues`) {
+        listCalls += 1
+        if (listCalls === 3) {
+          return {
+            json: [server.issueRecord(managedReport(1317, DATE, RUN_ID)), server.issueRecord(staleClosed)],
+          }
+        }
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(
+      options(server, {
+        sleep: async milliseconds => {
+          sleeps.push(milliseconds)
+        },
+      }),
+    )
+
+    expect(summary.status).toBe('succeeded')
+    expect(summary.failure_code).toBeNull()
+    expect(summary.final_open_managed).toBe(1)
+    expect(summary.closed).toBe(1)
+    expect(listCalls).toBe(4)
+    expect(sleeps).toContain(1_000)
+    expect(sleeps.at(-1)).toBe(10_000)
+    expect(server.mutations).toHaveLength(2)
   })
 })
 
@@ -1248,6 +1288,40 @@ describe('reconcile-autoheal-reports: pagination origin safety', () => {
     expect(summary.failure_code).toBe('pagination_origin_mismatch')
     expect(server.requests.some(request => request.host === 'evil.example')).toBe(false)
   })
+
+  it('propagates a final-proof pagination-origin failure without retrying or sleeping', async () => {
+    const server = new FakeGitHub()
+    server.issues = [managedReport(1317, DATE, RUN_ID)]
+    let listCalls = 0
+    const sleeps: number[] = []
+    server.override = request => {
+      if (request.method === 'GET' && request.path === `/repos/${REPO}/issues`) {
+        listCalls += 1
+        if (listCalls === 3) {
+          return {
+            json: [server.issueRecord(managedReport(1317, DATE, RUN_ID))],
+            headers: {link: '<https://evil.example/repos/owner/repo/issues?page=2>; rel="next"'},
+          }
+        }
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(
+      options(server, {
+        sleep: async milliseconds => {
+          sleeps.push(milliseconds)
+        },
+      }),
+    )
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('pagination_origin_mismatch')
+    expect(listCalls).toBe(3)
+    expect(sleeps).not.toContain(10_000)
+    expect(server.mutations).toEqual([])
+    expect(server.requests.some(request => request.host === 'evil.example')).toBe(false)
+  })
 })
 
 describe('reconcile-autoheal-reports: ambiguous write recovery', () => {
@@ -1386,7 +1460,7 @@ describe('reconcile-autoheal-reports: final proof heading contract', () => {
     server.override = request => {
       if (request.method === 'GET' && request.path === `/repos/${REPO}/issues`) {
         listCalls += 1
-        if (listCalls === 3) {
+        if (listCalls === 3 || listCalls === 4) {
           return {
             json: [{...server.issueRecord(canonical), body: canonical.body.replace('### Security', '### security')}],
           }
@@ -1399,6 +1473,9 @@ describe('reconcile-autoheal-reports: final proof heading contract', () => {
 
     expect(summary.status).toBe('aborted')
     expect(summary.failure_code).toBe('final_proof_failed')
+    expect(summary.final_open_managed).toBe(1)
+    expect(summary.failure_reason).toBe('final heading contract mismatch')
+    expect(listCalls).toBe(4)
   })
 })
 

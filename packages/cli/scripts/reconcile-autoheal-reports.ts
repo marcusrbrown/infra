@@ -45,7 +45,9 @@ export const REQUIRED_HEADINGS = [
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
 const READ_ATTEMPTS = 2
+const FINAL_PROOF_ATTEMPTS = 2
 const PROPAGATION_DELAY_MS = 1_000
+const FINAL_PROOF_PROPAGATION_DELAY_MS = 10_000
 const MAX_RATE_LIMIT_WAIT_MS = 60_000
 
 // ─── Pure marker helpers ─────────────────────────────────────────────────────
@@ -507,6 +509,36 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
     return records.map(record => classifyIssue(record, botId, runId))
   }
 
+  function finalProofMismatch(
+    finalClassified: ClassifiedIssue[],
+    canonical: ClassifiedIssue,
+    snapshot: DiscoverySnapshot,
+  ): {finalOpenManaged: number; reason: string | null} {
+    const finalEligible = finalClassified.filter(candidate => candidate.managed || candidate.adoptable)
+    const finalOpenManaged = finalEligible.length
+    if (finalEligible.length !== 1) return {finalOpenManaged, reason: `${finalOpenManaged} open managed reports remain`}
+
+    const finalCanonical = finalEligible.at(0)
+    if (
+      finalCanonical === undefined ||
+      finalCanonical.id !== canonical.id ||
+      finalCanonical.number !== canonical.number ||
+      finalCanonical.date !== date ||
+      !finalCanonical.runMarked ||
+      !finalCanonical.managed
+    ) {
+      return {finalOpenManaged, reason: 'final canonical identity mismatch'}
+    }
+    if (findMissingHeadings(finalCanonical.record.body ?? '').length > 0) {
+      return {finalOpenManaged, reason: 'final heading contract mismatch'}
+    }
+    const finalUntrusted = buildSnapshot(finalClassified).untrusted
+    if (JSON.stringify(finalUntrusted) !== JSON.stringify(snapshot.untrusted)) {
+      return {finalOpenManaged, reason: 'untrusted collisions changed'}
+    }
+    return {finalOpenManaged, reason: null}
+  }
+
   async function readTarget(expected: {number: number; id: number}): Promise<IssueRecord> {
     const record = await readWithRetry(issueRecordSchema, `/repos/${repository}/issues/${expected.number}`)
     assertTarget(record, expected)
@@ -798,29 +830,16 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
     }
 
     phase = 'final-proof'
-    const finalClassified = classifyAll(await discoverIssues(), botId)
-    const finalEligible = finalClassified.filter(candidate => candidate.managed || candidate.adoptable)
-    finalOpenManaged = finalEligible.length
-    if (finalEligible.length !== 1) {
-      throw new ReconcilerAbort('final_proof_failed', `${finalEligible.length} open managed reports remain`)
-    }
-    const finalCanonical = finalEligible.at(0)
-    if (
-      finalCanonical === undefined ||
-      finalCanonical.id !== canonical.id ||
-      finalCanonical.number !== canonical.number ||
-      finalCanonical.date !== date ||
-      !finalCanonical.runMarked ||
-      !finalCanonical.managed
-    ) {
-      throw new ReconcilerAbort('final_proof_failed', 'final canonical identity mismatch')
-    }
-    if (findMissingHeadings(finalCanonical.record.body ?? '').length > 0) {
-      throw new ReconcilerAbort('final_proof_failed', 'final heading contract mismatch')
-    }
-    const finalUntrusted = buildSnapshot(finalClassified).untrusted
-    if (JSON.stringify(finalUntrusted) !== JSON.stringify(snapshot.untrusted)) {
-      throw new ReconcilerAbort('final_proof_failed', 'untrusted collisions changed')
+    for (let attempt = 0; attempt < FINAL_PROOF_ATTEMPTS; attempt++) {
+      const finalClassified = classifyAll(await discoverIssues(), botId)
+      const proof = finalProofMismatch(finalClassified, canonical, snapshot)
+      finalOpenManaged = proof.finalOpenManaged
+      if (proof.reason === null) break
+      if (attempt + 1 < FINAL_PROOF_ATTEMPTS) {
+        await sleep(FINAL_PROOF_PROPAGATION_DELAY_MS)
+        continue
+      }
+      throw new ReconcilerAbort('final_proof_failed', proof.reason)
     }
     phase = 'complete'
   }

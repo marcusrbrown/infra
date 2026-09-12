@@ -15,7 +15,7 @@ Where things live and where to put new code. For system shape, data flow, and in
 │   ├── broker/                 OIDC credential broker (DigitalOcean + Docker Compose)
 │   └── agent/                  Operator-run AWS provisioner for fro-bot/agent S3 durable storage (no deploy step)
 ├── packages/                   Reusable libraries (never import from apps/)
-│   ├── cli/                    @marcusrbrown/infra goke CLI + MCP bridge + VPN peer model
+│   ├── cli/                    @marcusrbrown/infra goke CLI + MCP bridge + VPN peer model + repo-local workflow scripts
 │   └── shared/                 Cross-app SSH/SCP/provisioning helpers
 ├── docs/                       Brainstorms → plans → solutions (compound learning)
 ├── .agents/skills/             Agent skill context packets (load before working in a domain)
@@ -31,7 +31,7 @@ One subdirectory per deployable. Each app owns its Compose/build config (or nati
 
 ### `packages/`
 
-Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge) and also owns the VPN peer model (`packages/cli/src/commands/vpn/peers.ts`, published as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn`). `packages/shared` is the provisioning helper library consumed by every app's provision script, plus `packages/shared/cliproxy/management.ts` — CLIProxyAPI management-API primitives (`managementHeaders`, `requestJson`, `parseManagementKeyList`, OAuth model-alias helpers) consumed directly by `apps/cliproxy/src/deploy.ts`, `apps/broker/src/mint.ts`, and `packages/cli/src/commands/cliproxy/*.ts`. `packages/` never imports from `apps/`; the published `@marcusrbrown/infra` (cli) stays self-contained and must not depend on the private `packages/shared`.
+Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge) and also owns the VPN peer model (`packages/cli/src/commands/vpn/peers.ts`, published as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn`). `packages/shared` is the provisioning helper library consumed by every app's provision script, plus `packages/shared/cliproxy/management.ts` — CLIProxyAPI management-API primitives (`managementHeaders`, `requestJson`, `parseManagementKeyList`, OAuth model-alias helpers) consumed directly by `apps/cliproxy/src/deploy.ts`, `apps/broker/src/mint.ts`, and `packages/cli/src/commands/cliproxy/*.ts`. `packages/` never imports from `apps/`; the published `@marcusrbrown/infra` (cli) stays self-contained and must not depend on the private `packages/shared`. `packages/cli/scripts/` holds repo-local operational workflow scripts that are never part of the published package — currently `reconcile-autoheal-reports.ts`, invoked only by the daily-equivalent branch of `.github/workflows/fro-bot.yaml`.
 
 ### `.github/`
 
@@ -94,6 +94,13 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | `tsconfig.json`          | TypeScript via `@bfra.me/tsconfig`                                    |
 | `.github/renovate.json5` | Renovate config (incl. `apps/*/upstream.json` custom manager)         |
 
+**Workflow Scripts**
+
+| File | Role |
+| --- | --- |
+| `packages/cli/scripts/reconcile-autoheal-reports.ts` | Repo-local daily report reconciler; invoked only by the `fro-bot-storage` job, never published |
+| `packages/cli/scripts/reconcile-autoheal-reports.test.ts` | Colocated behavior tests (fake `fetch` boundary, pagination, readback, fail-closed paths) |
+
 **Tests / CI**
 
 | File                                   | Role                                                       |
@@ -111,6 +118,7 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 - **Host validators**: `host.ts` (deploy-side under `apps/<name>/src/`, CLI-side under `packages/cli/src/commands/<app>/`).
 - **Workflows**: `.yaml` extension (not `.yml`); deploy workflows `deploy-<app>.yaml`.
 - **Bun script guards**: scripts exporting functions for tests gate top-level execution with `if (import.meta.main)`.
+- **Repo-local workflow scripts**: live under `packages/cli/scripts/` beside a colocated `*.test.ts` (e.g. `reconcile-autoheal-reports.ts`); they are excluded from `packages/cli/package.json` `files` and `exports` and from the build entrypoint, and are invoked only by their owning workflow.
 
 ## Where to Add New Code
 
@@ -118,6 +126,7 @@ Mechanical layout; for the integration rationale see [`ARCHITECTURE.md`](ARCHITE
 
 - **New app** → `apps/<name>/` mirroring `apps/cliproxy/` (Docker Compose on DigitalOcean) or `apps/vpn/` (native systemd on AWS Lightsail): Compose config or deploy script, `src/deploy.ts`, `server/provision.ts` (new apps use `provision.ts`; existing DigitalOcean apps keep `provision-droplet.ts`), `src/host.ts`, `AGENTS.md`. Add to `package.json` `workspaces` + `provision:<name>`/`deploy:<name>` scripts; run `bun install` to refresh `bun.lock`.
 - **New operator-only tool (no deploy)** → mirror `apps/agent/`: `private: true`, `server/provision.ts` only — no `src/deploy.ts`, `src/host.ts`, deploy workflow, or GitHub Environment. Add `provision:<name>` to root `package.json` scripts.
+- **New repo-local workflow script** → `packages/cli/scripts/<name>.ts` + colocated test; keep it out of `packages/cli/package.json` `files`/`exports` and the CLI registration, and invoke it only from its owning workflow.
 - **New CLI command** → `packages/cli/src/commands/<app>/<action>.ts` + colocated test; export it from the group's `index.ts` barrel.
 - **New shared helper** → `packages/shared/server/droplet-helpers.ts` + colocated test (or `packages/shared/cliproxy/management.ts` for CLIProxyAPI management-API helpers).
 - **New test** → colocate `*.test.ts` beside the source; fixtures/snapshots in `__fixtures__/`/`__snapshots__/`.

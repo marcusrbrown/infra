@@ -16,6 +16,7 @@ Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcu
 | Monitor Anthropic auth | `bunx @marcusrbrown/infra cliproxy monitor` | Live provider probe with GitHub issue and Discord transition alerts; CLI-only |
 | CLI tests | `src/cli.test.ts` | Snapshots in `src/__snapshots__/` |
 | Command tests | `src/commands/<app>/<name>.test.ts` | Colocated alongside each command |
+| Modify daily autoheal reconciler | `scripts/reconcile-autoheal-reports.ts` | Repo-local workflow code invoked by `.github/workflows/fro-bot.yaml`; test in `scripts/reconcile-autoheal-reports.test.ts` |
 
 ## COMMAND PATTERN
 
@@ -74,6 +75,7 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - **Fire-and-forget opens**: `keeweb open` and `cliproxy open` spawn the child process without awaiting `child.exited` — prevents blocking on Linux `xdg-open` or long-lived SSH sessions. Close stdin immediately after spawn.
 - **Stdin piping for secrets**: When `cliproxy setup` passes an API key to `gh secret set`, use `Bun.spawn` stdin pipe instead of `--body` CLI arg. The key never appears in `ps` output.
 - **Compensating delete**: `cliproxy setup` wraps key creation in try/catch. On failure after a key was created, best-effort `DELETE /v0/management/api-keys?value=<key>` to avoid phantom keys. Error messages scrub key material.
+- **Repo-local workflow scripts**: `scripts/` holds Bun scripts invoked only by repository workflows — currently the daily autoheal reconciler (`scripts/reconcile-autoheal-reports.ts`). They are not CLI commands, MCP tools, package exports, or published files (`package.json` `files` ships `dist` and `src/commands/vpn/peers.ts` only). Gate top-level execution with `import.meta.main`, parse GitHub responses with Zod behind an injectable `fetch` boundary, and never log tokens, report/comment bodies, secrets, or private cross-project text; emit one body-free machine-readable summary per terminal path and fail closed on ambiguity instead of guessing.
 - **Tests**: colocated `*.test.ts`. Snapshots in `src/__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic output. Mock `fetch` and `Bun.spawn` at the boundary. Never spawn the real CLI for commands that launch browser (`keeweb open`) or SSH (`cliproxy open`) — test exported helpers and `--help` output only.
 
 ## MCP FIDELITY
@@ -155,6 +157,17 @@ The workflow verifier is diff-only: it does not edit a consumer's `.github/workf
 - **Not concurrency-safe.** Don't run `cliproxy setup` against the same repo from two places at once. GitHub secrets are write-only with no lock or compare-and-swap, so concurrent runs resolve last-write-wins. The `--force` overwrite warning carries a concurrency note, but it only fires on the _detected-collision_ path: two fresh concurrent runs that both see an empty secret list detect no collision, so neither prints a warning. That fresh-run race has no runtime signal and is mitigated solely by operator coordination — the warning does not protect against it.
 - **Transient-empty gate bypass.** A `gh secret list` that returns empty on a successful (zero-exit) call — scope-limited token, replication lag — looks identical to a genuinely fresh repo and silently disables both gates. After writing, setup re-lists secret and variable names and warns if a just-written name is not visible (the token's list view is unreliable, so the pre-write gates may have been bypassed). This readback catches token-scope blindness; it cannot detect whether a _different_ value was overwritten, since the written name is present on readback either way.
 - **`/v1/models` validation: `owned_by` is optional.** When verifying provider/model availability, setup accepts entries with or without `owned_by`. When absent or blank, the provider is inferred from the model id prefix (`anthropic/…`, `openai/…`) or known bare-id patterns (e.g. `claude-*`, `gpt-*`). Entries that cannot be mapped to a known provider are skipped harmlessly.
+
+### Daily autoheal reconciliation
+
+`scripts/reconcile-autoheal-reports.ts` is repo-local operational workflow code invoked only by the `fro-bot-storage` job of `.github/workflows/fro-bot.yaml`; it is not a CLI command, MCP tool, package export, or published file. One pre-agent classification selects the run mode:
+
+- **daily-equivalent** — a `schedule` run, or a `workflow_dispatch` with an omitted or exactly empty prompt. Freezes the UTC date and run ID into the trusted daily prompt, skips session-cache restore while retaining the S3 backup, and runs the reconciler after a successful agent step.
+- **custom** — every non-empty prompt, including whitespace-only. Retains normal cache restore and never reconciles.
+
+The agent owns report prose, create/update, and untrusted-collision visibility. The reconciler owns identity and state: it authenticates `fro-bot` by numeric actor ID, acts only on exact title/date plus first-line managed-marker candidates, adopts the `autoheal-report` label, dedupes on a stable supersession-comment marker, closes superseded trusted reports, and proves final state by fresh exhaustive discovery. It reads and writes by numeric issue ID/number, excludes pull-request-shaped records, fully paginates, re-reads each mutation target immediately before writing, caps managed/adoptable candidates, and aborts rather than guessing on any ambiguity. Every terminal path emits one body-free machine-readable summary (counts, IDs, status, stable failure code); tokens, report/comment bodies, secrets, and private cross-project text are never emitted.
+
+The reconciler receives the existing `FRO_BOT_PAT` only through its step-local `env`; the step blanks the temporary AWS credentials the preceding OIDC step exports, so it cannot inherit them. `scripts/reconcile-autoheal-reports.test.ts` covers the behavior contract, and `src/conventions.test.ts` locks the workflow classification/concurrency parity, step ordering, package/topology boundaries, and step-local PAT/credential scrubbing.
 
 ## SSH IDENTITY
 

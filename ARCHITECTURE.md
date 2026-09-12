@@ -20,6 +20,7 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 | MCP bridge + allowlist | `packages/cli/src/commands/mcp.ts` (`MCP_ALLOWLIST`, `registerMcp`) |
 | MCP-capturable action context | `packages/cli/src/lib/action-ctx.ts` (`ActionCtx`) |
 | Executable conventions enforcement | `packages/cli/src/conventions.test.ts` |
+| Fro Bot daily report reconciler | `packages/cli/scripts/reconcile-autoheal-reports.ts` (`reconcileAutohealReports`, `readReconcilerEnv`, `summaryLine`) + colocated `packages/cli/scripts/reconcile-autoheal-reports.test.ts` — repo-local workflow code, not a CLI command, MCP tool, package export, or published file |
 | App deploy scripts | `apps/<name>/src/deploy.ts` (`main`/`deploy`) — except keeweb |
 | KeeWeb build + deploy | `apps/keeweb/src/build.ts`, `apps/keeweb/deploy.sh` |
 | Droplet provisioning | `apps/<name>/server/provision-droplet.ts` (cliproxy, gateway, umami, dashboard, broker) |
@@ -64,6 +65,10 @@ operator (CLI) or agent (MCP)
 
 **Deploy pipeline:** a push to `main` triggers `.github/workflows/deploy.yaml`, which runs `dorny/paths-filter` (`predicate-quantifier: every`) and routes to the matching `deploy-<app>.yaml`. Each app deploy waits at its per-app GitHub Environment approval gate before touching the droplet.
 
+**Fro Bot daily reconciliation:** the `fro-bot-storage` job of `.github/workflows/fro-bot.yaml` owns `schedule` and main-branch `workflow_dispatch` runs. One pre-agent classification drives prompt selection, `skip-cache`, and the reconciler guard: a `schedule` run, or a `workflow_dispatch` with an omitted or exactly empty prompt, is `daily-equivalent`; every non-empty prompt (including whitespace-only) is `custom`. Daily-equivalent runs freeze the UTC date and run ID into the trusted daily prompt before the agent, skip session-cache restore while retaining the S3 backup, and run the reconciler only after a successful agent step. Custom dispatches keep normal cache restore and never reconcile. Workflow-level concurrency runs before steps, so it carries an equivalent pre-run `github`/`inputs` predicate; conventions tests in `packages/cli/src/conventions.test.ts` lock the step-level classifier and that predicate to the same fixture matrix.
+
+The agent owns report prose, create/update, and untrusted-collision visibility; the post-agent reconciler owns issue identity and state. It authenticates `fro-bot` by numeric actor ID, classifies managed/adoptable candidates from exact title/date plus the first-line managed marker, adopts the `autoheal-report` label, dedupes on a stable supersession-comment marker, closes superseded trusted reports, and proves final state by fresh exhaustive discovery. It reads and writes by numeric issue ID/number, excludes pull-request-shaped records, fully paginates, requires a bounded readback per postcondition, caps managed/adoptable candidates, and fails closed on ambiguity instead of guessing. Every terminal path emits one body-free machine-readable summary; tokens, report/comment bodies, secrets, and private cross-project text are never emitted. The reconciler receives the existing `FRO_BOT_PAT` only through its step-local environment, and its step blanks the temporary AWS credentials the preceding OIDC step exports.
+
 ## Invariants
 
 Enforceable rules. Many are gated by `packages/cli/src/conventions.test.ts`, ESLint, or review; mirror the `(enforced)` anti-patterns in the root `AGENTS.md`.
@@ -79,6 +84,8 @@ Enforceable rules. Many are gated by `packages/cli/src/conventions.test.ts`, ESL
 9. **Never use `ssh-keyscan` in CI** — host keys are pinned in `.github/known_hosts`; provisioning scripts may use it locally via `pinHostKeys`.
 10. **MCP exposes read commands only** (`MCP_ALLOWLIST`); mutating commands are source-gated out.
 11. **Reusable-workflow permissions must match caller grants.** A callee job cannot request a `GITHUB_TOKEN` scope its caller job does not grant; job-level `permissions:` replaces the workflow-level block, so callers must restate `contents: read` alongside added scopes or GitHub rejects the run at startup with zero jobs created.
+12. **Workflow-internal scripts stay outside the published surface.** `packages/cli/scripts/reconcile-autoheal-reports.ts` is repo-local operational workflow code — not a CLI command, MCP tool, package export, or published package file (the published `files` list is `dist` and `src/commands/vpn/peers.ts`). It is invoked only by the daily-equivalent branch of `.github/workflows/fro-bot.yaml`.
+13. **Autoheal reconciliation is identity-anchored and fail-closed.** The reconciler mutates only a report matching the exact title/date, numeric `fro-bot` actor, and first-line managed marker, and only when exactly one current-date report carries the exact current run marker. It excludes pull-request-shaped records, fully paginates, re-reads every mutation target by numeric ID immediately before writing, and aborts rather than mutating on any ambiguity, candidate-cap overflow, incomplete pagination, or failed readback. It never creates or rewrites report prose.
 
 ## Cross-Cutting Concerns
 

@@ -226,7 +226,7 @@ flowchart LR
 
 ## Implementation Units
 
-- [ ] **U1: Deterministic report reconciler and behavioral contract**
+- [x] **U1: Deterministic report reconciler and behavioral contract**
 
 **Goal:** Add a repo-local, non-published runtime reconciler that deterministically converges eligible daily reports while failing closed on trust, API, pagination, race, rate-limit, mutation, or readback uncertainty.
 

@@ -303,7 +303,7 @@ flowchart LR
 
 **Verification:** The workflow remains structurally one combined workflow with one cron, the single pre-agent classification has tests for schedule, omitted, exact empty, whitespace-only, and ordinary custom input, all downstream daily/custom decisions reuse it, the reconciler is ordered and guarded correctly, and all existing security and storage invariants remain represented in convention tests.
 
-- [ ] **U3: Architecture and operator documentation alignment**
+- [x] **U3: Architecture and operator documentation alignment**
 
 **Goal:** Update durable project guidance for the new repo-local script and workflow data-flow, which are material system-shape and placement changes. `ARCHITECTURE.md`, `STRUCTURE.md`, and `packages/cli/AGENTS.md` are required updates; use the repository's generated-document workflow for generated guidance.
 

@@ -1,7 +1,7 @@
 ---
 title: Release Alert Synthetic Validation Plan
 type: test
-status: active
+status: completed
 date: 2026-09-11
 origin: docs/brainstorms/2026-09-11-release-alert-validation-requirements.md
 ---

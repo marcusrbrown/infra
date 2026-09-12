@@ -412,6 +412,7 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
   }
 
   interface MutationPlan {
+    readonly preflight?: () => Promise<void>
     readonly send: () => Promise<RawResponse | null>
     readonly prove: () => Promise<boolean>
     readonly networkRetry: boolean
@@ -439,14 +440,20 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
    */
   async function performMutation(plan: MutationPlan): Promise<RawResponse | 'recovered'> {
     let resends = 0
-    let response = await plan.send()
+    // Reassert trust immediately before every write attempt, including retries.
+    // A preflight abort propagates and prevents the guarded send.
+    const guardedSend = async (): Promise<RawResponse | null> => {
+      if (plan.preflight !== undefined) await plan.preflight()
+      return plan.send()
+    }
+    let response = await guardedSend()
     if (response === null) {
       if (await proveSafely(plan.prove)) return 'recovered'
       if (!plan.networkRetry) {
         throw new ReconcilerAbort(plan.ambiguousCode, 'mutation not proven after ambiguous write')
       }
       resends += 1
-      response = await plan.send()
+      response = await guardedSend()
       if (response === null) {
         if (await proveSafely(plan.prove)) return 'recovered'
         throw new ReconcilerAbort(plan.ambiguousCode, 'mutation not proven after retry')
@@ -465,7 +472,7 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
       throw new ReconcilerAbort(plan.rateLimitedCode, `status ${response.status} not proven after bounded wait`)
     }
     resends += 1
-    const retry = await plan.send()
+    const retry = await guardedSend()
     if (retry === null) {
       if (await proveSafely(plan.prove)) return 'recovered'
       throw new ReconcilerAbort(plan.ambiguousCode, 'mutation not proven after rate-limit retry')
@@ -503,6 +510,30 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
   async function readTarget(expected: {number: number; id: number}): Promise<IssueRecord> {
     const record = await readWithRetry(issueRecordSchema, `/repos/${repository}/issues/${expected.number}`)
     assertTarget(record, expected)
+    return record
+  }
+
+  /**
+   * Reclassifies a fresh exact-resource read immediately before a write attempt
+   * and aborts unless the target still carries the expected trust
+   * classification. Reasserts numeric identity/number, non-PR shape, exact
+   * title/date, bot actor ID, first-line managed marker, expected run-marker
+   * state, and the required managed/adoptable state; a lost classification
+   * aborts before any write.
+   */
+  async function readTrustedTarget(
+    candidate: ClassifiedIssue,
+    botId: number,
+    require: 'managed' | 'adoptable',
+  ): Promise<IssueRecord> {
+    const record = await readTarget(candidate)
+    const fresh = classifyIssue(record, botId, runId)
+    const trusted = !fresh.untrusted && fresh.date !== null && fresh.date === candidate.date
+    const stateMatches = require === 'managed' ? fresh.managed : fresh.adoptable
+    const runMarkerMatches = fresh.runMarked === candidate.runMarked
+    if (!trusted || !stateMatches || !runMarkerMatches) {
+      throw new ReconcilerAbort('target_untrusted', `issue ${candidate.number} lost ${require} trust before write`)
+    }
     return record
   }
 
@@ -554,10 +585,11 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
     }
   }
 
-  async function adoptCanonicalLabel(candidate: ClassifiedIssue): Promise<void> {
-    const current = await readTarget(candidate)
-    if (labelNames(current).includes(LABEL_NAME)) return
+  async function adoptLabel(candidate: ClassifiedIssue, botId: number): Promise<void> {
     const outcome = await performMutation({
+      preflight: async () => {
+        await readTrustedTarget(candidate, botId, 'adoptable')
+      },
       send: async () => {
         try {
           return await request('POST', `/repos/${repository}/issues/${candidate.number}/labels`, {
@@ -607,13 +639,17 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
   }
 
   async function createSupersessionComment(
-    issueNumber: number,
+    candidate: ClassifiedIssue,
     canonicalNumber: number,
     marker: string,
     botId: number,
   ): Promise<CommentRecord | null> {
+    const issueNumber = candidate.number
     const body = `Superseded by #${canonicalNumber} — current daily report.\n\n${marker}`
     const outcome = await performMutation({
+      preflight: async () => {
+        await readTrustedTarget(candidate, botId, 'managed')
+      },
       send: async () => {
         try {
           return await request('POST', `/repos/${repository}/issues/${issueNumber}/comments`, {body})
@@ -700,7 +736,7 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
 
     phase = 'mutation'
     if (!freshCanonical.managed) {
-      await adoptCanonicalLabel(freshCanonical)
+      await adoptLabel(freshCanonical, botId)
       adopted += 1
     }
 
@@ -710,9 +746,13 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
     for (const target of noncanonical) {
       const record = await readTarget(target)
       if (record.state === 'closed') continue
+      if (target.adoptable) {
+        await adoptLabel(target, botId)
+        adopted += 1
+      }
       const marker = supersessionMarker(canonical.number)
       if (!(await findSupersessionMarker(target.number, marker, botId))) {
-        const created = await createSupersessionComment(target.number, canonical.number, marker, botId)
+        const created = await createSupersessionComment(target, canonical.number, marker, botId)
         if (created !== null) {
           const readback = await readComment(created.id)
           if (readback.user.id !== botId || !bodyLines(readback.body ?? '').includes(marker)) {
@@ -721,9 +761,12 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
         }
         commented += 1
       }
-      // Re-read immediately before the close and reassert numeric identity + absence of pull_request.
-      await readTarget(target)
+      // Trust is reasserted inside performMutation immediately before the close
+      // write (and before any retry), requiring the target to remain managed.
       const closeOutcome = await performMutation({
+        preflight: async () => {
+          await readTrustedTarget(target, botId, 'managed')
+        },
         send: async () => {
           try {
             return await request('PATCH', `/repos/${repository}/issues/${target.number}`, {

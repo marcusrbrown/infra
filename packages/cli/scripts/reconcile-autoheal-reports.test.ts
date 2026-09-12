@@ -518,6 +518,228 @@ describe('reconcile-autoheal-reports: happy paths', () => {
   })
 })
 
+// ─── Noncanonical adoption + pre-write trust reassertion ──────────────────────
+
+describe('reconcile-autoheal-reports: noncanonical adoption and trust reassertion', () => {
+  it('labels and reads back an adoptable noncanonical report before commenting and closing', async () => {
+    const server = new FakeGitHub()
+    server.issues = [managedReport(1317, DATE, RUN_ID), adoptableReport(1300, '2026-09-10', OTHER_RUN_ID)]
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(summary.adopted).toBe(1)
+    expect(summary.commented).toBe(1)
+    expect(summary.closed).toBe(1)
+
+    const labelPost = server.requests.findIndex(
+      request => request.method === 'POST' && request.path === `/repos/${REPO}/issues/1300/labels`,
+    )
+    const commentPost = server.requests.findIndex(
+      request => request.method === 'POST' && request.path === `/repos/${REPO}/issues/1300/comments`,
+    )
+    const closePatch = server.requests.findIndex(
+      request => request.method === 'PATCH' && request.path === `/repos/${REPO}/issues/1300`,
+    )
+    expect(labelPost).toBeGreaterThan(-1)
+    expect(labelPost).toBeLessThan(commentPost)
+    expect(commentPost).toBeLessThan(closePatch)
+
+    // The adopted label is read back on a GET that lands between the label write
+    // and the supersession comment write.
+    const labelReadback = server.requests.findIndex(
+      (request, index) =>
+        index > labelPost &&
+        index < commentPost &&
+        request.method === 'GET' &&
+        request.path === `/repos/${REPO}/issues/1300`,
+    )
+    expect(labelReadback).toBeGreaterThan(-1)
+
+    expect(server.issues.find(issue => issue.number === 1300)?.labels).toContain(LABEL_NAME)
+    expect(server.issues.find(issue => issue.number === 1300)?.state).toBe('closed')
+    expect(server.comments.filter(comment => comment.issueNumber === 1300)).toHaveLength(1)
+  })
+
+  it('aborts before labeling when a noncanonical target title changes after the snapshot', async () => {
+    const server = new FakeGitHub()
+    const target = adoptableReport(1300, '2026-09-10', OTHER_RUN_ID)
+    server.issues = [managedReport(1317, DATE, RUN_ID), target]
+    let targetReads = 0
+    server.override = request => {
+      if (request.method === 'GET' && request.path === `/repos/${REPO}/issues/1300`) {
+        targetReads += 1
+        if (targetReads === 2) {
+          return {json: server.issueRecord({...target, title: dailyReportTitle('2026-09-11')})}
+        }
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('target_untrusted')
+    expect(summary.adopted).toBe(0)
+    expect(summary.commented).toBe(0)
+    expect(summary.closed).toBe(0)
+    expect(server.mutations.filter(request => request.path.startsWith(`/repos/${REPO}/issues/1300`))).toEqual([])
+  })
+
+  it('aborts before commenting when a noncanonical target loses its managed marker after the snapshot', async () => {
+    const server = new FakeGitHub()
+    const target = managedReport(1300, '2026-09-10', OTHER_RUN_ID)
+    server.issues = [managedReport(1317, DATE, RUN_ID), target]
+    let targetReads = 0
+    server.override = request => {
+      if (request.method === 'GET' && request.path === `/repos/${REPO}/issues/1300`) {
+        targetReads += 1
+        if (targetReads === 2) {
+          return {json: server.issueRecord({...target, body: `unstamped prose\n${target.body}`})}
+        }
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('target_untrusted')
+    expect(summary.commented).toBe(0)
+    expect(summary.closed).toBe(0)
+    expect(server.comments.filter(comment => comment.issueNumber === 1300)).toHaveLength(0)
+    expect(server.mutations.filter(request => request.path.startsWith(`/repos/${REPO}/issues/1300`))).toEqual([])
+  })
+
+  it('aborts before closing when a noncanonical target loses its label after the snapshot', async () => {
+    const server = new FakeGitHub()
+    const target = managedReport(1300, '2026-09-10', OTHER_RUN_ID)
+    server.issues = [managedReport(1317, DATE, RUN_ID), target]
+    server.comments = [
+      {
+        id: 2,
+        issueNumber: 1300,
+        body: `Superseded by #1317.\n\n${supersessionMarker(1317)}`,
+        login: BOT_LOGIN,
+        userId: BOT_ID,
+      },
+    ]
+    let targetReads = 0
+    server.override = request => {
+      if (request.method === 'GET' && request.path === `/repos/${REPO}/issues/1300`) {
+        targetReads += 1
+        if (targetReads === 2) {
+          return {json: server.issueRecord({...target, labels: []})}
+        }
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('target_untrusted')
+    expect(summary.commented).toBe(0)
+    expect(summary.closed).toBe(0)
+    expect(server.issues.find(issue => issue.number === 1300)?.state).toBe('open')
+  })
+
+  it('reasserts trust before a retried close and aborts without a second write', async () => {
+    const server = new FakeGitHub()
+    const target = managedReport(1300, '2026-09-10', OTHER_RUN_ID)
+    server.issues = [managedReport(1317, DATE, RUN_ID), target]
+    server.comments = [
+      {
+        id: 2,
+        issueNumber: 1300,
+        body: `Superseded by #1317.\n\n${supersessionMarker(1317)}`,
+        login: BOT_LOGIN,
+        userId: BOT_ID,
+      },
+    ]
+    let targetReads = 0
+    let patches = 0
+    server.override = request => {
+      if (request.method === 'PATCH' && request.path === `/repos/${REPO}/issues/1300`) {
+        patches += 1
+        return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      if (request.method === 'GET' && request.path === `/repos/${REPO}/issues/1300`) {
+        targetReads += 1
+        if (targetReads === 4) {
+          return {json: server.issueRecord({...target, labels: []})}
+        }
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('target_untrusted')
+    expect(patches).toBe(1)
+    expect(summary.closed).toBe(0)
+  })
+
+  it('aborts when the canonical target loses its current run marker before adoption', async () => {
+    const server = new FakeGitHub()
+    const canonical = adoptableReport(1317, DATE, RUN_ID)
+    server.issues = [canonical]
+    let targetReads = 0
+    server.override = request => {
+      if (request.method === 'GET' && request.path === `/repos/${REPO}/issues/1317`) {
+        targetReads += 1
+        if (targetReads === 1) {
+          return {
+            json: server.issueRecord({
+              ...canonical,
+              body: canonical.body.replace(runMarker(RUN_ID), runMarker(OTHER_RUN_ID)),
+            }),
+          }
+        }
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('target_untrusted')
+    expect(summary.adopted).toBe(0)
+    expect(server.mutations).toEqual([])
+  })
+
+  it('aborts when a noncanonical target acquires the current run marker before a write', async () => {
+    const server = new FakeGitHub()
+    const target = managedReport(1300, '2026-09-10', OTHER_RUN_ID)
+    server.issues = [managedReport(1317, DATE, RUN_ID), target]
+    let targetReads = 0
+    server.override = request => {
+      if (request.method === 'GET' && request.path === `/repos/${REPO}/issues/1300`) {
+        targetReads += 1
+        if (targetReads === 2) {
+          return {
+            json: server.issueRecord({
+              ...target,
+              body: target.body.replace(runMarker(OTHER_RUN_ID), runMarker(RUN_ID)),
+            }),
+          }
+        }
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('target_untrusted')
+    expect(summary.commented).toBe(0)
+    expect(summary.closed).toBe(0)
+    expect(server.comments.filter(comment => comment.issueNumber === 1300)).toHaveLength(0)
+    expect(server.mutations.filter(request => request.path.startsWith(`/repos/${REPO}/issues/1300`))).toEqual([])
+  })
+})
+
 // ─── Label contract ──────────────────────────────────────────────────────────
 
 describe('reconcile-autoheal-reports: label contract', () => {

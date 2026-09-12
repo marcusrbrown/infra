@@ -411,6 +411,72 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
     throw new ReconcilerAbort(failureCode, last)
   }
 
+  interface MutationPlan {
+    readonly send: () => Promise<RawResponse | null>
+    readonly prove: () => Promise<boolean>
+    readonly networkRetry: boolean
+    readonly rateLimitRetry: boolean
+    readonly rateLimitedCode: string
+    readonly ambiguousCode: string
+  }
+
+  async function proveSafely(prove: () => Promise<boolean>): Promise<boolean> {
+    try {
+      return await prove()
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Applies a single non-GET mutation with bounded 403/429 recovery.
+   *
+   * A rate-limit response is never retried blindly: it is only ever settled
+   * after a postcondition readback. A proven side effect continues without a
+   * resend; a proven-absent, retry-safe write may resend exactly once across
+   * all paths; and persisting rate limits or ambiguous retries fail closed
+   * without a second resend. Network ambiguity keeps its per-class policy.
+   */
+  async function performMutation(plan: MutationPlan): Promise<RawResponse | 'recovered'> {
+    let resends = 0
+    let response = await plan.send()
+    if (response === null) {
+      if (await proveSafely(plan.prove)) return 'recovered'
+      if (!plan.networkRetry) {
+        throw new ReconcilerAbort(plan.ambiguousCode, 'mutation not proven after ambiguous write')
+      }
+      resends += 1
+      response = await plan.send()
+      if (response === null) {
+        if (await proveSafely(plan.prove)) return 'recovered'
+        throw new ReconcilerAbort(plan.ambiguousCode, 'mutation not proven after retry')
+      }
+    }
+
+    if (response.status !== 403 && response.status !== 429) return response
+
+    const delay = rateLimitDelayMs(response.headers, Date.now())
+    if (delay === null || delay > MAX_RATE_LIMIT_WAIT_MS) {
+      throw new ReconcilerAbort(plan.rateLimitedCode, `status ${response.status} without usable retry guidance`)
+    }
+    await sleep(delay)
+    if (await proveSafely(plan.prove)) return 'recovered'
+    if (!plan.rateLimitRetry || resends >= 1) {
+      throw new ReconcilerAbort(plan.rateLimitedCode, `status ${response.status} not proven after bounded wait`)
+    }
+    resends += 1
+    const retry = await plan.send()
+    if (retry === null) {
+      if (await proveSafely(plan.prove)) return 'recovered'
+      throw new ReconcilerAbort(plan.ambiguousCode, 'mutation not proven after rate-limit retry')
+    }
+    if (retry.status === 403 || retry.status === 429) {
+      if (await proveSafely(plan.prove)) return 'recovered'
+      throw new ReconcilerAbort(plan.rateLimitedCode, `status ${retry.status} persisted after bounded wait`)
+    }
+    return retry
+  }
+
   async function discoverIssues(): Promise<IssueRecord[]> {
     const collected: IssueRecord[] = []
     let next: string | null = `/repos/${repository}/issues?state=open&per_page=${PER_PAGE}`
@@ -458,38 +524,30 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
       return
     }
     if (probe.status !== 404) throw new ReconcilerAbort('label_probe_failed', `status ${probe.status}`)
-    let createStatus: number | null = null
-    let createJson: unknown
-    try {
-      const create = await request('POST', `/repos/${repository}/labels`, {
-        name: LABEL_NAME,
-        color: '0e8a16',
-        description: 'Trusted daily autohealing report',
-      })
-      createStatus = create.status
-      createJson = create.json
-    } catch (error) {
-      if (!(error instanceof NetworkError)) throw error
-      createStatus = null
+    const outcome = await performMutation({
+      send: async () => {
+        try {
+          return await request('POST', `/repos/${repository}/labels`, {
+            name: LABEL_NAME,
+            color: '0e8a16',
+            description: 'Trusted daily autohealing report',
+          })
+        } catch (error) {
+          if (!(error instanceof NetworkError)) throw error
+          return null
+        }
+      },
+      prove: async () => (await readLabel()).name === LABEL_NAME,
+      networkRetry: false,
+      rateLimitRetry: true,
+      rateLimitedCode: 'label_create_rate_limited',
+      ambiguousCode: 'label_create_ambiguous',
+    })
+    if (outcome === 'recovered') return
+    if (outcome.status < 200 || outcome.status >= 300) {
+      throw new ReconcilerAbort('label_create_failed', `unexpected status ${outcome.status}`)
     }
-    if (createStatus === null) {
-      // Ambiguous non-idempotent write: never resend. Continue only on an exact bounded readback.
-      let proven: LabelRecord | null = null
-      try {
-        proven = await readLabel()
-      } catch (error) {
-        if (!(error instanceof ReconcilerAbort)) throw error
-        proven = null
-      }
-      if (proven === null || proven.name !== LABEL_NAME) {
-        throw new ReconcilerAbort('label_create_ambiguous', 'label creation not proven after ambiguous write')
-      }
-      return
-    }
-    if (createStatus < 200 || createStatus >= 300) {
-      throw new ReconcilerAbort('label_create_failed', `unexpected status ${createStatus}`)
-    }
-    parseLabelPayload(createJson, 'label_create_failed')
+    parseLabelPayload(outcome.json, 'label_create_failed')
     const readback = await readLabel()
     if (readback.name !== LABEL_NAME) {
       throw new ReconcilerAbort('label_readback_failed', 'label name mismatch after create')
@@ -499,27 +557,28 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
   async function adoptCanonicalLabel(candidate: ClassifiedIssue): Promise<void> {
     const current = await readTarget(candidate)
     if (labelNames(current).includes(LABEL_NAME)) return
-    let status: number | null = null
-    try {
-      const response = await request('POST', `/repos/${repository}/issues/${candidate.number}/labels`, {
-        labels: [LABEL_NAME],
-      })
-      status = response.status
-    } catch (error) {
-      if (!(error instanceof NetworkError)) throw error
-      status = null
-    }
-    if (status !== null && (status < 200 || status >= 300)) {
-      throw new ReconcilerAbort('label_apply_failed', `unexpected status ${status}`)
+    const outcome = await performMutation({
+      send: async () => {
+        try {
+          return await request('POST', `/repos/${repository}/issues/${candidate.number}/labels`, {
+            labels: [LABEL_NAME],
+          })
+        } catch (error) {
+          if (!(error instanceof NetworkError)) throw error
+          return null
+        }
+      },
+      prove: async () => labelNames(await readTarget(candidate)).includes(LABEL_NAME),
+      networkRetry: true,
+      rateLimitRetry: true,
+      rateLimitedCode: 'label_apply_rate_limited',
+      ambiguousCode: 'label_apply_readback_failed',
+    })
+    if (outcome !== 'recovered' && (outcome.status < 200 || outcome.status >= 300)) {
+      throw new ReconcilerAbort('label_apply_failed', `unexpected status ${outcome.status}`)
     }
     const readback = await readTarget(candidate)
     if (labelNames(readback).includes(LABEL_NAME)) return
-    if (status === null) {
-      // Ambiguous write with no proven side effect: label-add is idempotent, so retry once.
-      await request('POST', `/repos/${repository}/issues/${candidate.number}/labels`, {labels: [LABEL_NAME]})
-      const retryReadback = await readTarget(candidate)
-      if (labelNames(retryReadback).includes(LABEL_NAME)) return
-    }
     throw new ReconcilerAbort('label_apply_readback_failed', `label not visible on issue ${candidate.number}`)
   }
 
@@ -551,13 +610,29 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
     issueNumber: number,
     canonicalNumber: number,
     marker: string,
-  ): Promise<CommentRecord> {
+    botId: number,
+  ): Promise<CommentRecord | null> {
     const body = `Superseded by #${canonicalNumber} — current daily report.\n\n${marker}`
-    const response = await request('POST', `/repos/${repository}/issues/${issueNumber}/comments`, {body})
-    if (response.status !== 200 && response.status !== 201) {
-      throw new ReconcilerAbort('comment_create_failed', `unexpected status ${response.status}`)
+    const outcome = await performMutation({
+      send: async () => {
+        try {
+          return await request('POST', `/repos/${repository}/issues/${issueNumber}/comments`, {body})
+        } catch (error) {
+          if (!(error instanceof NetworkError)) throw error
+          return null
+        }
+      },
+      prove: () => findSupersessionMarker(issueNumber, marker, botId),
+      networkRetry: false,
+      rateLimitRetry: true,
+      rateLimitedCode: 'comment_create_rate_limited',
+      ambiguousCode: 'comment_create_ambiguous',
+    })
+    if (outcome === 'recovered') return null
+    if (outcome.status !== 200 && outcome.status !== 201) {
+      throw new ReconcilerAbort('comment_create_failed', `unexpected status ${outcome.status}`)
     }
-    const parsed = commentSchema.safeParse(response.json)
+    const parsed = commentSchema.safeParse(outcome.json)
     if (!parsed.success) throw new ReconcilerAbort('comment_create_failed', 'invalid comment response')
     return parsed.data
   }
@@ -637,16 +712,7 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
       if (record.state === 'closed') continue
       const marker = supersessionMarker(canonical.number)
       if (!(await findSupersessionMarker(target.number, marker, botId))) {
-        let created: CommentRecord | null = null
-        try {
-          created = await createSupersessionComment(target.number, canonical.number, marker)
-        } catch (error) {
-          if (!(error instanceof NetworkError)) throw error
-          // Ambiguous non-idempotent write: never resend. Prove the marker via fully paginated readback.
-          if (!(await findSupersessionMarker(target.number, marker, botId))) {
-            throw new ReconcilerAbort('comment_create_ambiguous', `comment not proven on issue ${target.number}`)
-          }
-        }
+        const created = await createSupersessionComment(target.number, canonical.number, marker, botId)
         if (created !== null) {
           const readback = await readComment(created.id)
           if (readback.user.id !== botId || !bodyLines(readback.body ?? '').includes(marker)) {
@@ -657,27 +723,32 @@ export async function reconcileAutohealReports(options: ReconcilerOptions): Prom
       }
       // Re-read immediately before the close and reassert numeric identity + absence of pull_request.
       await readTarget(target)
-      let closeStatus: number | null = null
-      try {
-        const closeResponse = await request('PATCH', `/repos/${repository}/issues/${target.number}`, {
-          state: 'closed',
-          state_reason: 'not_planned',
-        })
-        closeStatus = closeResponse.status
-      } catch (error) {
-        if (!(error instanceof NetworkError)) throw error
-        closeStatus = null
-      }
-      if (closeStatus !== null && closeStatus !== 200) {
-        throw new ReconcilerAbort('close_failed', `unexpected status ${closeStatus}`)
+      const closeOutcome = await performMutation({
+        send: async () => {
+          try {
+            return await request('PATCH', `/repos/${repository}/issues/${target.number}`, {
+              state: 'closed',
+              state_reason: 'not_planned',
+            })
+          } catch (error) {
+            if (!(error instanceof NetworkError)) throw error
+            return null
+          }
+        },
+        prove: async () => (await readTarget(target)).state === 'closed',
+        networkRetry: true,
+        rateLimitRetry: true,
+        rateLimitedCode: 'close_rate_limited',
+        ambiguousCode: 'close_ambiguous',
+      })
+      if (closeOutcome !== 'recovered' && closeOutcome.status !== 200) {
+        throw new ReconcilerAbort('close_failed', `unexpected status ${closeOutcome.status}`)
       }
       const closeReadback = await readTarget(target)
       if (closeReadback.state !== 'closed') {
         throw new ReconcilerAbort(
-          closeStatus === null ? 'close_ambiguous' : 'close_readback_failed',
-          closeStatus === null
-            ? `close not proven on issue ${target.number}`
-            : `issue ${target.number} still ${closeReadback.state}`,
+          closeOutcome === 'recovered' ? 'close_ambiguous' : 'close_readback_failed',
+          `issue ${target.number} still ${closeReadback.state}`,
         )
       }
       closed += 1

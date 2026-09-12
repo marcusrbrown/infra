@@ -254,6 +254,27 @@ function adoptableReport(number: number, date: string, runId: string, overrides:
   return managedReport(number, date, runId, {labels: [], ...overrides})
 }
 
+function supersessionFixture(): FakeGitHub {
+  const server = new FakeGitHub()
+  server.issues = [managedReport(1317, DATE, RUN_ID), managedReport(1300, '2026-09-10', OTHER_RUN_ID)]
+  return server
+}
+
+function closureFixture(): FakeGitHub {
+  const server = new FakeGitHub()
+  server.issues = [managedReport(1317, DATE, RUN_ID), managedReport(1300, '2026-09-10', OTHER_RUN_ID)]
+  server.comments = [
+    {
+      id: 2,
+      issueNumber: 1300,
+      body: `Superseded by #1317.\n\n${supersessionMarker(1317)}`,
+      login: BOT_LOGIN,
+      userId: BOT_ID,
+    },
+  ]
+  return server
+}
+
 function options(
   server: FakeGitHub,
   overrides: Partial<Parameters<typeof reconcileAutohealReports>[0]> = {},
@@ -1156,5 +1177,404 @@ describe('reconcile-autoheal-reports: final proof heading contract', () => {
 
     expect(summary.status).toBe('aborted')
     expect(summary.failure_code).toBe('final_proof_failed')
+  })
+})
+
+// ─── Mutation rate-limit recovery (403/429) ──────────────────────────────────
+
+describe('reconcile-autoheal-reports: label creation rate-limit recovery', () => {
+  it('recovers a guided 403/429 by proving absence and retrying exactly once', async () => {
+    const server = new FakeGitHub()
+    server.labelExists = false
+    server.issues = [managedReport(1317, DATE, RUN_ID)]
+    let creates = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/labels`) {
+        creates += 1
+        if (creates === 1) return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(creates).toBe(2)
+    expect(server.labelExists).toBe(true)
+  })
+
+  it('continues without retry when the readback already proves the created label', async () => {
+    const server = new FakeGitHub()
+    server.labelExists = false
+    server.issues = [managedReport(1317, DATE, RUN_ID)]
+    let creates = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/labels`) {
+        creates += 1
+        server.labelExists = true
+        return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(creates).toBe(1)
+  })
+
+  it('fails closed without a duplicate write when the 403 carries no usable guidance', async () => {
+    const server = new FakeGitHub()
+    server.labelExists = false
+    server.issues = [managedReport(1317, DATE, RUN_ID)]
+    let creates = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/labels`) {
+        creates += 1
+        return {status: 403, json: {message: 'forbidden'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('label_create_rate_limited')
+    expect(creates).toBe(1)
+  })
+
+  it('fails closed when the guided retry is still rate limited', async () => {
+    const server = new FakeGitHub()
+    server.labelExists = false
+    server.issues = [managedReport(1317, DATE, RUN_ID)]
+    let creates = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/labels`) {
+        creates += 1
+        return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('label_create_rate_limited')
+    expect(creates).toBe(2)
+  })
+})
+
+describe('reconcile-autoheal-reports: canonical label adoption rate-limit recovery', () => {
+  it('recovers a guided 429 by proving absence and retrying exactly once', async () => {
+    const server = new FakeGitHub()
+    server.issues = [adoptableReport(1317, DATE, RUN_ID)]
+    let applies = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/issues/1317/labels`) {
+        applies += 1
+        if (applies === 1) return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(summary.adopted).toBe(1)
+    expect(applies).toBe(2)
+    expect(server.issues.find(issue => issue.number === 1317)?.labels).toContain(LABEL_NAME)
+  })
+
+  it('continues without retry when the readback already proves the adopted label', async () => {
+    const server = new FakeGitHub()
+    server.issues = [adoptableReport(1317, DATE, RUN_ID)]
+    let applies = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/issues/1317/labels`) {
+        applies += 1
+        const issue = server.issues.find(candidate => candidate.number === 1317)
+        if (issue !== undefined && !issue.labels.includes(LABEL_NAME)) issue.labels.push(LABEL_NAME)
+        return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(applies).toBe(1)
+  })
+
+  it('fails closed without a duplicate write when guidance is absent', async () => {
+    const server = new FakeGitHub()
+    server.issues = [adoptableReport(1317, DATE, RUN_ID)]
+    let applies = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/issues/1317/labels`) {
+        applies += 1
+        return {status: 403, json: {message: 'forbidden'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('label_apply_rate_limited')
+    expect(applies).toBe(1)
+  })
+})
+
+describe('reconcile-autoheal-reports: supersession comment rate-limit recovery', () => {
+  it('continues without resending when the marker readback proves the guided 429 write', async () => {
+    const server = supersessionFixture()
+    let commentPosts = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/issues/1300/comments`) {
+        commentPosts += 1
+        server.comments.push({
+          id: 70001,
+          issueNumber: 1300,
+          body: supersessionMarker(1317),
+          login: BOT_LOGIN,
+          userId: BOT_ID,
+        })
+        return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(summary.commented).toBe(1)
+    expect(summary.closed).toBe(1)
+    expect(commentPosts).toBe(1)
+  })
+
+  it('fails closed without resending the non-idempotent write when guidance is absent', async () => {
+    const server = supersessionFixture()
+    let commentPosts = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/issues/1300/comments`) {
+        commentPosts += 1
+        return {status: 403, json: {message: 'forbidden'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('comment_create_rate_limited')
+    expect(commentPosts).toBe(1)
+    expect(server.comments.filter(comment => comment.issueNumber === 1300)).toHaveLength(0)
+    expect(summary.closed).toBe(0)
+  })
+
+  it('retries the comment POST exactly once when guided and unproven, then succeeds', async () => {
+    const server = supersessionFixture()
+    let commentPosts = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/issues/1300/comments`) {
+        commentPosts += 1
+        if (commentPosts === 1) return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(summary.commented).toBe(1)
+    expect(summary.closed).toBe(1)
+    expect(commentPosts).toBe(2)
+  })
+
+  it('fails closed after exactly one resend when the guided 429 persists', async () => {
+    const server = supersessionFixture()
+    let commentPosts = 0
+    server.override = request => {
+      if (request.method === 'POST' && request.path === `/repos/${REPO}/issues/1300/comments`) {
+        commentPosts += 1
+        return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('comment_create_rate_limited')
+    expect(commentPosts).toBe(2)
+    expect(server.comments.filter(comment => comment.issueNumber === 1300)).toHaveLength(0)
+    expect(summary.commented).toBe(0)
+    expect(summary.closed).toBe(0)
+  })
+})
+
+describe('reconcile-autoheal-reports: issue closure rate-limit recovery', () => {
+  it('continues without resending when the issue readback proves the guided 429 close', async () => {
+    const server = closureFixture()
+    let patches = 0
+    server.override = request => {
+      if (request.method === 'PATCH' && request.path === `/repos/${REPO}/issues/1300`) {
+        patches += 1
+        const issue = server.issues.find(candidate => candidate.number === 1300)
+        if (issue !== undefined) issue.state = 'closed'
+        return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(summary.closed).toBe(1)
+    expect(patches).toBe(1)
+  })
+
+  it('fails closed without resending the close when guidance is absent', async () => {
+    const server = closureFixture()
+    let patches = 0
+    server.override = request => {
+      if (request.method === 'PATCH' && request.path === `/repos/${REPO}/issues/1300`) {
+        patches += 1
+        return {status: 403, json: {message: 'forbidden'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('close_rate_limited')
+    expect(patches).toBe(1)
+    expect(summary.closed).toBe(0)
+  })
+
+  it('retries the close PATCH exactly once after network ambiguity and succeeds', async () => {
+    const server = closureFixture()
+    let patches = 0
+    server.override = request => {
+      if (request.method === 'PATCH' && request.path === `/repos/${REPO}/issues/1300`) {
+        patches += 1
+        if (patches === 1) return {networkError: 'connection reset'}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(summary.closed).toBe(1)
+    expect(patches).toBe(2)
+  })
+
+  it('retries the close PATCH exactly once after a guided 429 and succeeds', async () => {
+    const server = closureFixture()
+    let patches = 0
+    server.override = request => {
+      if (request.method === 'PATCH' && request.path === `/repos/${REPO}/issues/1300`) {
+        patches += 1
+        if (patches === 1) return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('succeeded')
+    expect(summary.closed).toBe(1)
+    expect(patches).toBe(2)
+  })
+
+  it('fails closed after exactly one resend when the guided 429 persists', async () => {
+    const server = closureFixture()
+    let patches = 0
+    server.override = request => {
+      if (request.method === 'PATCH' && request.path === `/repos/${REPO}/issues/1300`) {
+        patches += 1
+        return {status: 429, headers: {'retry-after': '0'}, json: {message: 'rate limited'}}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('close_rate_limited')
+    expect(patches).toBe(2)
+    expect(summary.closed).toBe(0)
+  })
+
+  it('fails closed after exactly one resend when the retried close is ambiguous', async () => {
+    const server = closureFixture()
+    let patches = 0
+    server.override = request => {
+      if (request.method === 'PATCH' && request.path === `/repos/${REPO}/issues/1300`) {
+        patches += 1
+        return {networkError: 'connection reset'}
+      }
+      return undefined
+    }
+
+    const summary = await reconcileAutohealReports(options(server))
+
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('close_ambiguous')
+    expect(patches).toBe(2)
+    expect(summary.closed).toBe(0)
+  })
+})
+
+// ─── Entrypoint regression (hermetic, no inherited secrets) ───────────────────
+
+describe('reconcile-autoheal-reports: entrypoint regression', () => {
+  it('emits exactly one body-free aborted missing_env summary with a nonzero exit', async () => {
+    const scriptPath = new URL('./reconcile-autoheal-reports.ts', import.meta.url).pathname
+    const env: Record<string, string | undefined> = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      TMPDIR: process.env.TMPDIR,
+      GH_TOKEN: undefined,
+      GITHUB_REPOSITORY: undefined,
+      AUTOHEAL_DATE: undefined,
+      AUTOHEAL_RUN_ID: undefined,
+    }
+    const proc = Bun.spawn({
+      cmd: [process.execPath, scriptPath],
+      env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const stdout = await new Response(proc.stdout).text()
+    const exitCode = await proc.exited
+
+    const lines = stdout.split('\n').filter(line => line.length > 0)
+    expect(lines).toHaveLength(1)
+    const summary = JSON.parse(lines[0] as string) as Record<string, unknown>
+    expect(summary.status).toBe('aborted')
+    expect(summary.failure_code).toBe('missing_env')
+    expect(summary.phase).toBe('init')
+    expect(Object.keys(summary).sort()).toEqual(
+      [
+        'adopted',
+        'canonical_issue_id',
+        'canonical_issue_number',
+        'closed',
+        'commented',
+        'eligible',
+        'failure_code',
+        'failure_reason',
+        'final_open_managed',
+        'phase',
+        'status',
+        'untrusted_collisions',
+        'workflow_run_id',
+      ].sort(),
+    )
+    expect(stdout).not.toContain('Bearer')
+    expect(exitCode).not.toBe(0)
   })
 })

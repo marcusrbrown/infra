@@ -235,10 +235,12 @@ flowchart LR
 **Dependencies:** Existing `FRO_BOT_PAT` access, `GITHUB_REPOSITORY`, frozen `AUTOHEAL_DATE`, and `AUTOHEAL_RUN_ID` workflow inputs; no new dependency or permission.
 
 **Files:**
+
 - Create: `packages/cli/scripts/reconcile-autoheal-reports.ts`
 - Test: `packages/cli/scripts/reconcile-autoheal-reports.test.ts`
 
 **Approach:**
+
 - Expose the reconciler and an injectable native `fetch` boundary for direct tests; parse every response with Zod and keep the `import.meta.main` entrypoint environment-driven.
 - Authenticate with `GET /user`, require authenticated login `fro-bot`, and use numeric actor IDs for issue and comment comparisons. Send the required media and API-version headers on every request.
 - Ensure `autoheal-report` by canonical label GET, POST only after confirmed 404, and canonical readback. Treat other failures as errors rather than assuming an undocumented `422 already_exists` outcome.
@@ -253,6 +255,7 @@ flowchart LR
 **Patterns to follow:** `packages/cli/src/release-alert.test.ts` for fake API boundaries, exact readback, pagination, malformed responses, and label semantics; `packages/cli/src/conventions.test.ts` for strict repo-local contracts; root and CLI guidance prohibiting `any`, shell mutation logic, secret logging, and published-surface expansion.
 
 **Test scenarios:**
+
 - Happy path — `GET /user` returns `fro-bot` and a numeric ID, label GET returns 200, one exact current report has the current run marker and headings, and final discovery proves one open canonical report with no unnecessary mutation.
 - Happy path — a bot-authored exact-title marker-bearing unlabeled issue is adopted, the lowest valid same-day report remains canonical, and older managed issues receive at most one exact supersession comment before close/readback.
 - Happy path — fully paginated comment visibility finds an existing exact stable supersession key authored by the authenticated bot on a later page or after one allowed propagation retry, so creation is skipped and no duplicate comment is added; the key is unchanged across run IDs.
@@ -277,10 +280,12 @@ flowchart LR
 **Dependencies:** U1; current `.github/workflows/fro-bot.yaml` job permissions, egress, storage, trusted-head, action pin, and concurrency contracts.
 
 **Files:**
+
 - Modify: `.github/workflows/fro-bot.yaml`
 - Test: `packages/cli/src/conventions.test.ts`
 
 **Approach:**
+
 - Compute one pre-agent classification output from the raw trigger and raw dispatch prompt: `daily-equivalent` for `schedule`, or `workflow_dispatch` with an omitted prompt or prompt exactly `''`; `custom` for every non-empty string, including whitespace-only input. Reuse that output for prompt selection, `skip-cache`, and the reconciler condition. Keep workflow-level concurrency on an equivalent pre-run `github`/`inputs` predicate and lock its semantics to the classifier fixture matrix. Resolve the UTC date once before the storage-job agent step and inject it with `github.run_id` into the daily prompt. Require the exact managed marker on line one, the current-run marker on line two, exact title/date semantics, all existing report categories, and the two bounded new sections.
 - State that the agent owns report create/update/content and untrusted-collision visibility; remove prompt ownership of closing old reports and defer identity, labels, comments, closure, and final proof to U1.
 - Make the `daily-equivalent` classification select the same daily prompt and `skip-cache: true`, and make the `custom` classification select the custom prompt with normal cache behavior. Use the same classification to guard reconciliation; the only duplicate predicate is the unavoidable workflow-level concurrency expression, which conventions tests must prove semantically equivalent.
@@ -292,6 +297,7 @@ flowchart LR
 **Patterns to follow:** Existing parsed-YAML contracts in `packages/cli/src/conventions.test.ts`; the schedule `skip-cache` lesson in `docs/solutions/workflow-issues/fro-bot-schedule-session-bloat-no-op-2026-06-14.md`; the current storage job's explicit environment and hardened egress pattern.
 
 **Test scenarios:**
+
 - Happy path — parsed workflow has one daily cron, one Fro Bot workflow, the existing storage job handles schedule and main-branch dispatch, and the one pre-agent classification maps `schedule`, omitted dispatch prompt, and exactly empty dispatch prompt to the same `daily-equivalent` mode and identical daily prompt.
 - Edge case — the same classification maps whitespace-only and ordinary non-empty custom input to `custom`; both retain normal cache behavior and skip reconciliation, with no trimming or alternate classifier.
 - Happy path — the date-freeze step precedes the agent, the prompt contains the exact first-line managed marker and second-line run marker contract, and the reconciler follows successful daily-equivalent execution.
@@ -312,12 +318,14 @@ flowchart LR
 **Dependencies:** U1 and U2 behavior are settled; documentation changes must reflect the implemented contracts rather than speculate about helper names.
 
 **Files:**
+
 - Modify: `ARCHITECTURE.md`
 - Modify: `STRUCTURE.md`
 - Modify: `packages/cli/AGENTS.md`
 - Test expectation: none — documentation-only unit; workflow and runtime contracts are covered by U1 and U2.
 
 **Approach:**
+
 - Document that `packages/cli/scripts/reconcile-autoheal-reports.ts` is repo-local and not published, uses native fetch plus Zod at an injectable boundary, and must fail closed without logging secrets or report prose.
 - Record the operator contract: daily schedule and truly empty main dispatch are the only reconciled modes; custom dispatch is not reconciled; exact markers, headings, labels, numeric actor identity, pagination, rate limits, and readbacks are correctness boundaries.
 - Describe count-agnostic live proof and failure handling without hardcoding the September 12 baseline. Update `ARCHITECTURE.md` and `STRUCTURE.md` through the repository's `generating-project-docs` workflow, and update `packages/cli/AGENTS.md` with the nearest-context script and operator guidance. Keep the root README excluded because there is no public CLI surface change, and do not add commands, new task stores, or production mutation procedures.

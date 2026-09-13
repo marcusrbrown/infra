@@ -990,6 +990,67 @@ describe('rotation fails closed on connection/transport failure', () => {
     ).rejects.toThrow(/cannot reach umami|admin credentials/)
   })
 
+  it('throws as a transport failure when step-4 (new-password verification) exits with a transport code despite parseable 200/token stdout', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
+    // idx 8: write curl config file
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify new password login — stdout LOOKS like a clean HTTP 200
+    // success with a valid token, but curl itself reports a transport failure
+    // (e.g. the connection was reset after buffering a stale response). The
+    // exit code must be checked first and win over the parseable-looking body.
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, 'curl: (7) Failed to connect', 7)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/cannot reach umami|transport|connection/i)
+  })
+
+  it('throws as a transport failure when step-5 (default-password rejection check) exits with a transport code despite parseable 401 stdout', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
+    // idx 8: write curl config file
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify new password login succeeds
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
+    // idx 11: default-password rejection check — stdout LOOKS like a clean 401
+    // rejection, but curl itself reports an ssh transport failure. Must not be
+    // accepted as proof rotation stuck.
+    responses[11] = makeSpawnResult(
+      '{"message":"Incorrect username or password"}\n401',
+      'ssh: connect to host metrics.fro.bot port 22: Connection refused',
+      255,
+    )
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/cannot reach umami|transport|connection/i)
+  })
+
   it('skips rotation (idempotent) when login is cleanly rejected with HTTP 401 (exit 22)', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
     const responses = Array.from<SpawnResult | undefined>({length: 20})

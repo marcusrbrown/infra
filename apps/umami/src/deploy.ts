@@ -498,13 +498,18 @@ async function runLoginProbe(
  * with HTTP 401, the password is already rotated — skip.
  *
  * G1 — fails CLOSED on any ambiguity, not just transport failure:
- *   - Transport/connection failure (curl exit not in {0, 22}) → THROW.
+ *   - Every login probe (initial default login, new-password verification,
+ *     default-password rejection verification) checks its curl exit code
+ *     BEFORE interpreting the HTTP status: exit not in {0, 22} → THROW as a
+ *     transport/connection failure. An unreachable container must never be
+ *     misread as an HTTP status (an empty/garbled stdout could otherwise
+ *     coincidentally parse as a plausible-looking status line).
  *   - HTTP 401 on the default login → skip (already rotated).
  *   - HTTP 200 with a token on the default login → proceed to update + verify.
  *   - HTTP 200 without a token (including 2FA partial-auth responses), or any
  *     other status (400/403/404/405/5xx/unparseable) → THROW. The coarse
  *     curl exit code alone cannot distinguish "wrong endpoint" from "already
- *     rotated", so every login probe checks the actual HTTP status.
+ *     rotated", so every login probe checks the actual HTTP status too.
  *
  * G2 — called BEFORE Caddy starts (no public default-credential window).
  *
@@ -645,14 +650,23 @@ async function rotateAdminPassword(
     keyPath,
     controlPath,
   )
-  const {status: verifyNewStatus, body: verifyNewResponseBody} = await runLoginProbe(
-    spawnFn,
-    verifyNewCmd,
-    deployEnv,
-    verifyNewRequestBody,
-  )
+  const {
+    exitCode: verifyNewExit,
+    status: verifyNewStatus,
+    body: verifyNewResponseBody,
+  } = await runLoginProbe(spawnFn, verifyNewCmd, deployEnv, verifyNewRequestBody)
 
-  if (verifyNewStatus !== 200) {
+  // Transport/connection failure must be diagnosed as such, first — an empty
+  // stdout from a dropped connection would otherwise parse as an unparseable
+  // status and get misreported as an HTTP problem.
+  if (verifyNewExit !== 0 && verifyNewExit !== 22) {
+    throw new Error(
+      `Cannot reach umami to verify admin credential rotation (exit ${verifyNewExit}). ` +
+        'Ensure the umami container is healthy before deploying.',
+    )
+  }
+
+  if (verifyNewExit !== 0 || verifyNewStatus !== 200) {
     throw new Error(
       `Admin password rotation verification failed: new password login returned HTTP ${verifyNewStatus ?? 'unknown'} ` +
         '(expected 200). The password may not have been updated correctly. Investigate manually.',
@@ -677,14 +691,23 @@ async function rotateAdminPassword(
     keyPath,
     controlPath,
   )
-  const {status: verifyDefaultStatus} = await runLoginProbe(
+  const {exitCode: verifyDefaultExit, status: verifyDefaultStatus} = await runLoginProbe(
     spawnFn,
     verifyDefaultCmd,
     deployEnv,
     verifyDefaultRequestBody,
   )
 
-  if (verifyDefaultStatus === 200) {
+  // Transport/connection failure must be diagnosed as such, first — same
+  // reasoning as step 4: an unreachable container is not proof of anything.
+  if (verifyDefaultExit !== 0 && verifyDefaultExit !== 22) {
+    throw new Error(
+      `Cannot reach umami to verify admin credential rotation (exit ${verifyDefaultExit}). ` +
+        'Ensure the umami container is healthy before deploying.',
+    )
+  }
+
+  if (verifyDefaultExit === 0 && verifyDefaultStatus === 200) {
     // Default password still works — rotation did not stick.
     throw new Error(
       'Admin password rotation verification failed: default password still accepted after rotation. ' +
@@ -692,7 +715,7 @@ async function rotateAdminPassword(
     )
   }
 
-  if (verifyDefaultStatus !== 401) {
+  if (verifyDefaultExit !== 22 || verifyDefaultStatus !== 401) {
     throw new Error(
       `Admin password rotation could not be verified: default-password rejection check returned HTTP ${verifyDefaultStatus ?? 'unknown'} ` +
         '(expected 401). Investigate manually.',

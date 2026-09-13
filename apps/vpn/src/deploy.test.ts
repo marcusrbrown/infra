@@ -1225,6 +1225,78 @@ describe('deploy', () => {
     }
   })
 
+  it('wipe guard: probe SSH failure (exit 255, empty stdout) aborts — undetermined peer count, no config applied', async () => {
+    const calls: SpawnCall[] = []
+    // SSH connection dropped: wg show wg0 dump exits 255 with no stdout.
+    const results = [{stdout: '', stderr: 'ssh: connect to host 1.2.3.4 port 22: Connection refused\n', exitCode: 255}]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    const nonExistentPath = '/tmp/vpn-deploy-test-wipe-guard-probe-ssh-fail-nonexistent.json'
+
+    let caughtError: unknown
+    try {
+      await deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: nonExistentPath})
+    } catch (error) {
+      caughtError = error
+    }
+
+    expect(caughtError).toBeInstanceOf(Error)
+    expect((caughtError as Error).message).toMatch(/could not determine the live peer count/i)
+    // Must not report a wipe-guard trip (that implies a known, positive live peer count)
+    expect((caughtError as Error).message).not.toMatch(/the live box has \d+ peer/i)
+
+    // Must abort before writing any config
+    const configWrites = calls.filter(c => c.stdin !== undefined && c.stdin.includes('[Interface]'))
+    expect(configWrites).toHaveLength(0)
+  })
+
+  it('wipe guard: probe `wg` failure (exit 1, empty stdout) aborts — undetermined peer count, no config applied', async () => {
+    const calls: SpawnCall[] = []
+    // wg not installed / interface missing: wg show wg0 dump exits 1 with no stdout.
+    const results = [{stdout: '', stderr: 'wg: command not found\n', exitCode: 1}]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    const nonExistentPath = '/tmp/vpn-deploy-test-wipe-guard-probe-wg-fail-nonexistent.json'
+
+    await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: nonExistentPath})).rejects.toThrow(
+      /could not determine the live peer count/i,
+    )
+
+    const configWrites = calls.filter(c => c.stdin !== undefined && c.stdin.includes('[Interface]'))
+    expect(configWrites).toHaveLength(0)
+  })
+
+  it('wipe guard: probe exits 0 with completely empty stdout aborts with the distinct no-output message', async () => {
+    const calls: SpawnCall[] = []
+    // Probe "succeeds" (exit 0) but produced no output at all — not even the server line.
+    const results = [{stdout: '', exitCode: 0}]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    const nonExistentPath = '/tmp/vpn-deploy-test-wipe-guard-probe-no-output-nonexistent.json'
+
+    await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: nonExistentPath})).rejects.toThrow(
+      /produced no output/i,
+    )
+
+    const configWrites = calls.filter(c => c.stdin !== undefined && c.stdin.includes('[Interface]'))
+    expect(configWrites).toHaveLength(0)
+  })
+
+  it('wipe guard: live box has 2 peers — aborts naming the exact count', async () => {
+    const calls: SpawnCall[] = []
+    const results = [{stdout: 'server-line\npeer-line-1\npeer-line-2\n', exitCode: 0}]
+
+    const mockSpawn = makeMockSpawn(calls, results)
+    const nonExistentPath = '/tmp/vpn-deploy-test-wipe-guard-two-peers-nonexistent.json'
+
+    await expect(deploy({env: BASE_ENV, spawn: mockSpawn, peersJsonPath: nonExistentPath})).rejects.toThrow(
+      /the live box has 2 peer\(s\)/,
+    )
+
+    const configWrites = calls.filter(c => c.stdin !== undefined && c.stdin.includes('[Interface]'))
+    expect(configWrites).toHaveLength(0)
+  })
+
   // ─── WAN interface detection ──────────────────────────────────────────────
 
   it('detects WAN interface from ip route show default output and uses it in wg0.conf', async () => {

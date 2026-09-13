@@ -579,6 +579,8 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     // Wipe guard: if the incoming roster has 0 peers, query the live box peer count before
     // applying config. If the live box has peers and we're about to deploy 0, abort — this
     // would silently disconnect every client and the health gate would pass (expected 0 == actual 0).
+    // The probe IS the safety mechanism, so it fails closed: a non-zero exit or empty/no-output
+    // probe result aborts the deploy rather than being treated as proof of zero live peers.
     //
     // Override: VPN_ALLOW_EMPTY_ROSTER=1 (or opts.allowEmptyRoster) skips the guard.
     // First-boot bootstrap (live=0, incoming=0) proceeds normally.
@@ -590,14 +592,32 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
         stderr: 'pipe',
       })
       const dumpStdout = await new Response(dumpResult.stdout).text()
-      await new Response(dumpResult.stderr).text() // drain stderr
-      await dumpResult.exited
+      const dumpStderr = await new Response(dumpResult.stderr).text()
+      const dumpExit = await dumpResult.exited
+
+      if (dumpExit !== 0) {
+        const trimmedStderr = dumpStderr.trim()
+        const stderrSuffix = trimmedStderr === '' ? '' : ` stderr: ${trimmedStderr}`
+        throw new Error(
+          `Wipe guard: could not determine the live peer count — 'sudo wg show wg0 dump' exited ${dumpExit}. ` +
+            `Refusing to apply an empty roster without proof the live box has zero peers.${stderrSuffix}`,
+        )
+      }
 
       // Count peer lines: all lines after the first (server) line
       const dumpLines = dumpStdout
         .trim()
         .split('\n')
         .filter(l => l.trim() !== '')
+
+      if (dumpLines.length === 0) {
+        throw new Error(
+          "Wipe guard: 'sudo wg show wg0 dump' exited 0 but produced no output. " +
+            'A configured interface always emits at least the server line, so this means the probe ' +
+            'did not actually observe wg0 — not that there are zero peers. Refusing to apply an empty roster.',
+        )
+      }
+
       const livePeerCount = dumpLines.length > 1 ? dumpLines.length - 1 : 0
 
       if (livePeerCount > 0) {

@@ -61,7 +61,7 @@ interface SpawnCall {
  * results so a response stream is never consumed twice.
  */
 function makeFakeSpawn(
-  responses: SpawnResult[],
+  responses: (SpawnResult | undefined)[],
   override?: (cmd: string[], callIndex: number) => SpawnResult | undefined,
 ): {spawnFn: SpawnFn; calls: SpawnCall[]} {
   const calls: SpawnCall[] = []
@@ -78,7 +78,13 @@ function makeFakeSpawn(
         ? makeSpawnResult('inactive\n', '', 3)
         : command.includes('systemctl is-enabled')
           ? makeSpawnResult('disabled\n', '', 1)
-          : (responses[callIndex] ?? makeSpawnResult()))
+          : (responses[callIndex] ??
+            // Default for an admin-login probe with no explicit fixture: a clean
+            // HTTP 401 (already rotated) — the idempotent-skip path. Tests that
+            // care about rotation behavior override this via `responses[]`.
+            (command.includes('/api/auth/login')
+              ? makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
+              : makeSpawnResult())))
 
     if (opts.stdin === 'pipe') {
       // Intercept stdin writes
@@ -364,7 +370,7 @@ describe('db-password fingerprint guard', () => {
       makeSpawnResult(), // scp Caddyfile
       makeSpawnResult(), // docker compose pull
       makeSpawnResult(), // docker compose up
-      makeSpawnResult(), // write fingerprint sentinel
+      makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22), // rotation login (already rotated)
       makeSpawnResult(), // admin rotation: ssh curl login
       makeSpawnResult(), // admin rotation: ssh curl password update (if needed)
     ]
@@ -392,7 +398,7 @@ describe('db-password fingerprint guard', () => {
       makeSpawnResult(), // scp Caddyfile
       makeSpawnResult(), // compose pull
       makeSpawnResult(), // compose up
-      makeSpawnResult(), // write sentinel
+      makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22), // rotation login (already rotated)
       makeSpawnResult(), // admin rotation
       makeSpawnResult(),
     ]
@@ -430,7 +436,7 @@ describe('db-password fingerprint guard', () => {
       makeSpawnResult(), // scp Caddyfile
       makeSpawnResult(), // compose pull
       makeSpawnResult(), // compose up
-      makeSpawnResult(), // write sentinel
+      makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22), // rotation login (already rotated)
       makeSpawnResult(), // admin rotation
       makeSpawnResult(),
     ]
@@ -452,7 +458,7 @@ describe('db-password fingerprint guard', () => {
 describe('secrets never in argv', () => {
   it('does not place any secret value in any constructed argv', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 15}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 15})
     responses[1] = makeSpawnResult(matchingFingerprint) // sentinel matches
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
@@ -476,7 +482,7 @@ describe('secrets never in argv', () => {
 
   it('places .env contents in stdin, not argv', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 15}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 15})
     responses[1] = makeSpawnResult(matchingFingerprint)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
@@ -516,7 +522,7 @@ describe('DNS preflight', () => {
 describe('public HTTPS probe', () => {
   it('succeeds with a warning when containers are healthy but public probe never returns ok', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 15}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 15})
     responses[1] = makeSpawnResult(matchingFingerprint)
 
     const {spawnFn} = makeFakeSpawn(responses)
@@ -536,7 +542,7 @@ describe('public HTTPS probe', () => {
 
   it('succeeds without warning when public probe returns ok', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 15}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 15})
     responses[1] = makeSpawnResult(matchingFingerprint)
 
     const {spawnFn} = makeFakeSpawn(responses)
@@ -557,16 +563,53 @@ describe('public HTTPS probe', () => {
 // ─── admin password rotation ──────────────────────────────────────────────────
 
 describe('admin password rotation', () => {
-  it('skips rotation when default login returns no token (already rotated)', async () => {
+  it('throws when default login returns HTTP 404 (wrong endpoint) instead of skipping rotation', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    // idx 7: login returns exit 0 with no token → treated as already rotated (skip)
-    const responses = Array.from({length: 15}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 15})
     responses[1] = makeSpawnResult(matchingFingerprint)
-    responses[7] = makeSpawnResult('{"token":null}', '', 0)
+    // idx 7: HTTP 404 (wrong path) — --fail-with-body maps this to exit 22, same
+    // as a clean 401 rejection, but it must NOT be treated as "already rotated".
+    responses[7] = makeSpawnResult('{"message":"Not Found"}\n404', '', 22)
 
     const {spawnFn} = makeFakeSpawn(responses)
 
-    // Should not throw — idempotent
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/HTTP 404|credential state/)
+  })
+
+  it('throws when default login returns HTTP 500', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 15})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: HTTP 500 — --fail-with-body maps this to exit 22 as well.
+    responses[7] = makeSpawnResult('{"message":"Internal Server Error"}\n500', '', 22)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/HTTP 500|credential state/)
+  })
+
+  it('skips rotation (resolves) when default login returns exactly HTTP 401', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 15})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
     await expect(
       deploy({
         env: VALID_ENV,
@@ -577,20 +620,194 @@ describe('admin password rotation', () => {
     ).resolves.toBeUndefined()
   })
 
-  it('does not place admin password in any argv', async () => {
+  it('throws when default login returns HTTP 200 without a token (e.g. 2FA partial auth)', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    // idx 7: HTTP 200 but no `token` — a 2FA partial-auth response carries
+    // {requiresTwoFactor, partialToken} instead. This must not be treated as
+    // proof the default credential has already been rotated.
+    const responses = Array.from<SpawnResult | undefined>({length: 15})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    responses[7] = makeSpawnResult(`${JSON.stringify({requiresTwoFactor: true, partialToken: 'ptok-abc'})}\n200`, '', 0)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/HTTP 200 without a token|credential state/)
+  })
+
+  it('proceeds through the full rotation path when default login returns HTTP 200 with a valid token', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login succeeds with token
-    responses[7] = makeSpawnResult(JSON.stringify({token: 'test-jwt-token'}), '', 0)
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
+    // idx 8: write curl config (token via stdin)
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: password update succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify new password login succeeds
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
+    // idx 11: verify default login now rejected (HTTP 401)
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
+
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).resolves.toBeUndefined()
+
+    expect(calls.some(c => c.cmd.join(' ').includes('/api/me/password'))).toBe(true)
+  })
+
+  it(
+    String.raw`sends -w with curl's literal two-character \n escape, not a raw newline, on every login probe`,
+    async () => {
+      const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+      const responses = Array.from<SpawnResult | undefined>({length: 20})
+      responses[1] = makeSpawnResult(matchingFingerprint)
+      // idx 7: login succeeds with token
+      responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
+      // idx 8: write curl config (token via stdin)
+      responses[8] = makeSpawnResult('', '', 0)
+      // idx 9: password update succeeds
+      responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+      // idx 10: verify new password login succeeds
+      responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
+      // idx 11: verify default login now rejected (HTTP 401)
+      responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
+
+      const {spawnFn, calls} = makeFakeSpawn(responses)
+
+      await expect(
+        deploy({
+          env: VALID_ENV,
+          spawn: spawnFn,
+          resolve: resolvesOk,
+          fetch: fetchHeartbeatOk,
+        }),
+      ).resolves.toBeUndefined()
+
+      const loginProbeCalls = calls.filter(c => c.cmd.join(' ').includes('/api/auth/login'))
+      expect(loginProbeCalls).toHaveLength(3)
+
+      for (const call of loginProbeCalls) {
+        const cmdStr = call.cmd.join(' ')
+        // curl's own two-character escape: a literal backslash followed by 'n'.
+        expect(cmdStr).toContain(String.raw`-w '\n%{http_code}'`)
+        // Must NOT contain an actual embedded newline character.
+        expect(cmdStr.includes(String.fromCharCode(10))).toBe(false)
+      }
+    },
+  )
+
+  it('throws when step-5 rejection check returns HTTP 404 instead of 401 (verification broken, not proof of rotation)', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds with token
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
+    // idx 8: write curl config
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: password update succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify new password login succeeds
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
+    // idx 11: default-password rejection check returns 404, not 401 — the
+    // verification itself is broken and must not be accepted as proof rotation stuck.
+    responses[11] = makeSpawnResult('{"message":"Not Found"}\n404', '', 22)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/could not be verified|HTTP 404/)
+  })
+
+  it('resolves when step-5 rejection check returns exactly HTTP 401', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
+    responses[8] = makeSpawnResult('', '', 0)
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('never includes the bearer token or admin password in a thrown error message', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const fakeToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ERROR-MESSAGE-CHECK-TOKEN'
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds with token, but step 5 verification is broken (404)
+    // so the deploy throws — the token must never leak into the error message.
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: fakeToken})}\n200`, '', 0)
+    responses[8] = makeSpawnResult('', '', 0)
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
+    responses[11] = makeSpawnResult('{"message":"Not Found"}\n404', '', 22)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    let caught: unknown
+    try {
+      await deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      })
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(Error)
+    const message = (caught as Error).message
+    expect(message).not.toContain(fakeToken)
+    expect(message).not.toContain(VALID_ENV.UMAMI_ADMIN_PASSWORD)
+  })
+
+  it('does not place admin password in any argv', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds with token
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'test-jwt-token'})}\n200`, '', 0)
     // idx 8: write curl config (token via stdin)
     responses[8] = makeSpawnResult('', '', 0)
     // idx 9: update succeeds
     responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
     // idx 10: verify new password login succeeds
-    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
     // idx 11: verify default login fails
-    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -618,7 +835,7 @@ describe('CI mode with UMAMI_SSH_KEY', () => {
   it('does not place the SSH key content in any argv', async () => {
     const ciEnv = {...VALID_ENV, SSH_AUTH_SOCK: '', UMAMI_SSH_KEY: 'ssh-ed25519 AAAA-UNIQUE-KEY-CONTENT'}
     const matchingFingerprint = computeDbPasswordFingerprint(ciEnv.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 15}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 15})
     responses[1] = makeSpawnResult(matchingFingerprint)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
@@ -662,10 +879,10 @@ describe('CI mode with UMAMI_SSH_KEY', () => {
 describe('rotation runs inside the umami container via docker compose exec', () => {
   it('login curl runs inside the umami container, not on the droplet host', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login already rotated (exit 22)
-    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -687,18 +904,18 @@ describe('rotation runs inside the umami container via docker compose exec', () 
 
   it('password-update curl runs inside the umami container, not on the droplet host', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login succeeds with token
-    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
     // idx 8: write curl config file (token via stdin)
     responses[8] = makeSpawnResult('', '', 0)
     // idx 9: update curl succeeds
     responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
     // idx 10: verify: re-login with new password succeeds
-    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
     // idx 11: verify: re-login with default umami fails (exit 22)
-    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -719,18 +936,18 @@ describe('rotation runs inside the umami container via docker compose exec', () 
 
   it('sends currentPassword and newPassword in the password-update request body', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login succeeds with token
-    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
     // idx 8: write curl config file (token via stdin)
     responses[8] = makeSpawnResult('', '', 0)
     // idx 9: update curl succeeds
     responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
     // idx 10: verify new password login succeeds
-    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
     // idx 11: verify default login fails (exit 22)
-    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -756,7 +973,7 @@ describe('rotation runs inside the umami container via docker compose exec', () 
 describe('rotation fails closed on connection/transport failure', () => {
   it('throws when login curl cannot reach umami (connection refused, exit 7)', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login curl: connection refused (exit 7)
     responses[7] = makeSpawnResult('', 'curl: (7) Failed to connect', 7)
@@ -773,12 +990,73 @@ describe('rotation fails closed on connection/transport failure', () => {
     ).rejects.toThrow(/cannot reach umami|admin credentials/)
   })
 
+  it('throws as a transport failure when step-4 (new-password verification) exits with a transport code despite parseable 200/token stdout', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
+    // idx 8: write curl config file
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify new password login — stdout LOOKS like a clean HTTP 200
+    // success with a valid token, but curl itself reports a transport failure
+    // (e.g. the connection was reset after buffering a stale response). The
+    // exit code must be checked first and win over the parseable-looking body.
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, 'curl: (7) Failed to connect', 7)
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/cannot reach umami|transport|connection/i)
+  })
+
+  it('throws as a transport failure when step-5 (default-password rejection check) exits with a transport code despite parseable 401 stdout', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    // idx 7: login succeeds
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
+    // idx 8: write curl config file
+    responses[8] = makeSpawnResult('', '', 0)
+    // idx 9: update succeeds
+    responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
+    // idx 10: verify new password login succeeds
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
+    // idx 11: default-password rejection check — stdout LOOKS like a clean 401
+    // rejection, but curl itself reports an ssh transport failure. Must not be
+    // accepted as proof rotation stuck.
+    responses[11] = makeSpawnResult(
+      '{"message":"Incorrect username or password"}\n401',
+      'ssh: connect to host metrics.fro.bot port 22: Connection refused',
+      255,
+    )
+
+    const {spawnFn} = makeFakeSpawn(responses)
+
+    await expect(
+      deploy({
+        env: VALID_ENV,
+        spawn: spawnFn,
+        resolve: resolvesOk,
+        fetch: fetchHeartbeatOk,
+      }),
+    ).rejects.toThrow(/cannot reach umami|transport|connection/i)
+  })
+
   it('skips rotation (idempotent) when login is cleanly rejected with HTTP 401 (exit 22)', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login curl: HTTP 401 → --fail-with-body exits 22
-    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn} = makeFakeSpawn(responses)
 
@@ -794,10 +1072,10 @@ describe('rotation fails closed on connection/transport failure', () => {
 
   it('throws when password-update curl fails (non-zero exit)', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login succeeds
-    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
     // idx 8: write curl config file
     responses[8] = makeSpawnResult('', '', 0)
     // idx 9: update curl fails
@@ -817,16 +1095,16 @@ describe('rotation fails closed on connection/transport failure', () => {
 
   it('throws when post-rotation verification fails (new password login rejected)', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login with default succeeds
-    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
     // idx 8: write curl config file
     responses[8] = makeSpawnResult('', '', 0)
     // idx 9: update succeeds
     responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
     // idx 10: verify: re-login with new password FAILS (exit 22 — bad creds)
-    responses[10] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[10] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn} = makeFakeSpawn(responses)
 
@@ -842,18 +1120,18 @@ describe('rotation fails closed on connection/transport failure', () => {
 
   it('throws when post-rotation verification finds default password still works', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login with default succeeds
-    responses[7] = makeSpawnResult(JSON.stringify({token: 'tok-abc'}), '', 0)
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: 'tok-abc'})}\n200`, '', 0)
     // idx 8: write curl config file
     responses[8] = makeSpawnResult('', '', 0)
     // idx 9: update succeeds
     responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
     // idx 10: verify: re-login with new password succeeds
-    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
     // idx 11: verify: re-login with default umami STILL succeeds (rotation didn't stick)
-    responses[11] = makeSpawnResult(JSON.stringify({token: 'tok-default-still-works'}), '', 0)
+    responses[11] = makeSpawnResult(`${JSON.stringify({token: 'tok-default-still-works'})}\n200`, '', 0)
 
     const {spawnFn} = makeFakeSpawn(responses)
 
@@ -873,10 +1151,10 @@ describe('rotation fails closed on connection/transport failure', () => {
 describe('Caddy starts after admin rotation completes', () => {
   it('caddy up spawn happens after the rotation login curl spawn', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login already rotated (exit 22)
-    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -901,10 +1179,10 @@ describe('Caddy starts after admin rotation completes', () => {
 
   it('db and umami start before caddy (internal-only phase)', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     // idx 7: login already rotated
-    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -946,7 +1224,7 @@ describe('fingerprint guard does not bypass on SSH/read error', () => {
       makeSpawnResult(), // 4: scp Caddyfile
       makeSpawnResult(), // 5: compose pull
       makeSpawnResult(), // 6: compose up db umami
-      makeSpawnResult('{"message":"Incorrect username or password"}', '', 22), // 7: rotation login (already rotated)
+      makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22), // 7: rotation login (already rotated)
       makeSpawnResult(), // 8: compose up caddy
       makeSpawnResult(), // 9: write sentinel
     ]
@@ -982,10 +1260,10 @@ describe('fingerprint guard does not bypass on SSH/read error', () => {
 
   it('proceeds when sentinel is present and fingerprint matches', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint, '', 0)
     // idx 7: login already rotated
-    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[7] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn} = makeFakeSpawn(responses)
 
@@ -1068,19 +1346,19 @@ describe('DATABASE_URL percent-encodes URL-reserved characters in the password',
 describe('bearer token never appears in any spawned argv', () => {
   it('does not place the JWT bearer token in any argv during rotation', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     const fakeToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.UNIQUE-TOKEN-VALUE'
     // idx 7: login succeeds with token
-    responses[7] = makeSpawnResult(JSON.stringify({token: fakeToken}), '', 0)
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: fakeToken})}\n200`, '', 0)
     // idx 8: write curl config file (token via stdin)
     responses[8] = makeSpawnResult('', '', 0)
     // idx 9: update curl succeeds
     responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
     // idx 10: verify: new password login succeeds
-    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
     // idx 11: verify: default umami login fails
-    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -1099,19 +1377,19 @@ describe('bearer token never appears in any spawned argv', () => {
 
   it('passes the bearer token via stdin (curl config file), not argv', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 20}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
     responses[1] = makeSpawnResult(matchingFingerprint)
     const fakeToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.UNIQUE-TOKEN-VALUE'
     // idx 7: login succeeds with token
-    responses[7] = makeSpawnResult(JSON.stringify({token: fakeToken}), '', 0)
+    responses[7] = makeSpawnResult(`${JSON.stringify({token: fakeToken})}\n200`, '', 0)
     // idx 8: write curl config file
     responses[8] = makeSpawnResult('', '', 0)
     // idx 9: update curl succeeds
     responses[9] = makeSpawnResult(JSON.stringify({ok: true}), '', 0)
     // idx 10: verify: new password login succeeds
-    responses[10] = makeSpawnResult(JSON.stringify({token: 'tok-new'}), '', 0)
+    responses[10] = makeSpawnResult(`${JSON.stringify({token: 'tok-new'})}\n200`, '', 0)
     // idx 11: verify: default umami login fails
-    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}', '', 22)
+    responses[11] = makeSpawnResult('{"message":"Incorrect username or password"}\n401', '', 22)
 
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -1154,7 +1432,7 @@ describe('retention deployment integration', () => {
 
   it('uploads exact retention artifacts and systemd units before host verification and reload', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 30}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 30})
     responses[1] = makeSpawnResult(matchingFingerprint)
     const {spawnFn, calls} = makeFakeSpawn(responses)
 
@@ -1228,7 +1506,7 @@ describe('retention deployment integration', () => {
 
   it('does not touch current when a runtime upload is interrupted', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 40}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 40})
     responses[1] = makeSpawnResult(matchingFingerprint)
     responses[11] = makeSpawnResult('', 'interrupted upload', 1)
     const {spawnFn, calls} = makeFakeSpawn(responses)
@@ -1250,7 +1528,7 @@ describe('retention deployment integration', () => {
 
   it('does not touch current when staged runtime validation fails', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 40}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 40})
     responses[1] = makeSpawnResult(matchingFingerprint)
     responses[17] = makeSpawnResult('', 'invalid staged runtime', 1)
     const {spawnFn, calls} = makeFakeSpawn(responses)
@@ -1272,7 +1550,7 @@ describe('retention deployment integration', () => {
 
   it('rolls current back when staged unit verification fails before unit installation', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 40}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 40})
     responses[1] = makeSpawnResult(matchingFingerprint)
     responses[18] = makeSpawnResult('', 'systemd-analyze failed', 1)
     const {spawnFn, calls} = makeFakeSpawn(responses)
@@ -1300,7 +1578,7 @@ describe('retention deployment integration', () => {
 
   it('propagates a systemd timeout without mutating timer state', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 40}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 40})
     responses[1] = makeSpawnResult(matchingFingerprint)
     const {spawnFn, calls} = makeFakeSpawn(responses, command => {
       if (command.join(' ').includes('systemctl is-active')) {
@@ -1327,7 +1605,7 @@ describe('retention deployment integration', () => {
 
   it('refreshes an active timer with bounded restart and no start', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
-    const responses = Array.from({length: 30}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 30})
     responses[1] = makeSpawnResult(matchingFingerprint)
     const {spawnFn, calls} = makeFakeSpawn(responses, command => {
       const commandText = command.join(' ')
@@ -1357,7 +1635,7 @@ describe('retention deployment integration', () => {
   })
 
   it('starts an enabled but inactive timer after daemon-reload', async () => {
-    const responses = Array.from({length: 30}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 30})
     responses[1] = makeSpawnResult(computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD))
     const {spawnFn, calls} = makeFakeSpawn(responses, command => {
       const commandText = command.join(' ')
@@ -1381,7 +1659,7 @@ describe('retention deployment integration', () => {
   })
 
   it('leaves a disabled inactive timer untouched and never runs retention during deploy', async () => {
-    const responses = Array.from({length: 30}, () => makeSpawnResult())
+    const responses = Array.from<SpawnResult | undefined>({length: 30})
     responses[1] = makeSpawnResult('')
     const {spawnFn, calls} = makeFakeSpawn(responses, command => {
       const commandText = command.join(' ')

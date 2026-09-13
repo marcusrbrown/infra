@@ -178,6 +178,33 @@ function makeAliasFetch(
   return {fetchFn, requests}
 }
 
+function makeSimpleFetch(): typeof globalThis.fetch {
+  return mock(async () => new Response('', {status: 200})) as unknown as typeof globalThis.fetch
+}
+
+function makeConfigProbeSpawn(probeResult: {stdout: string; exitCode: number}): {
+  spawnFn: typeof Bun.spawn
+  calls: string[][]
+} {
+  const calls: string[][] = []
+  const spawnFn = mock((command: string[]) => {
+    calls.push(command)
+    const isRemoteFileCheck = command.at(-1)?.includes('test -f')
+    return {
+      stdout: new Response(isRemoteFileCheck ? probeResult.stdout : '').body,
+      stderr: new Response('').body,
+      exited: Promise.resolve(isRemoteFileCheck ? probeResult.exitCode : 0),
+    }
+  }) as unknown as typeof Bun.spawn
+  return {spawnFn, calls}
+}
+
+function scpConfigCalls(calls: string[][]): string[][] {
+  return calls.filter(
+    command => command[0] === 'scp' && command.some(argument => argument.includes('config/config.yaml')),
+  )
+}
+
 // ─── Test setup ───────────────────────────────────────────────────────────────
 
 let tmpDir: string
@@ -734,8 +761,8 @@ describe('deploy', () => {
       }
       return new Response('', {status: 200})
     }) as unknown as typeof globalThis.fetch
-    const spawnFn = mock((_command: string[]) => ({
-      stdout: new Response('').body,
+    const spawnFn = mock((command: string[]) => ({
+      stdout: new Response(command.at(-1)?.includes('test -f') ? 'EXISTS\n' : '').body,
       stderr: new Response('').body,
       exited: Promise.resolve(0),
     })) as unknown as typeof Bun.spawn
@@ -783,9 +810,9 @@ describe('deploy', () => {
     const spawnFn = mock((command: string[]) => {
       const isRemoteFileCheck = command.at(-1)?.includes('test -f')
       return {
-        stdout: new Response('').body,
+        stdout: new Response(isRemoteFileCheck ? 'MISSING\n' : '').body,
         stderr: new Response('').body,
-        exited: Promise.resolve(isRemoteFileCheck ? 1 : 0),
+        exited: Promise.resolve(0),
       }
     }) as unknown as typeof Bun.spawn
 
@@ -816,9 +843,9 @@ describe('deploy', () => {
       return new Response('', {status: 200})
     }) as unknown as typeof globalThis.fetch
     const spawnFn = mock((command: string[]) => ({
-      stdout: new Response('').body,
+      stdout: new Response(command.at(-1)?.includes('test -f') ? 'EXISTS\n' : '').body,
       stderr: new Response('').body,
-      exited: Promise.resolve(command.at(-1)?.includes('test -f') ? 0 : 0),
+      exited: Promise.resolve(0),
     })) as unknown as typeof Bun.spawn
     process.argv.push('--force-config')
 
@@ -833,6 +860,134 @@ describe('deploy', () => {
       ).resolves.toBeUndefined()
       expect(requests.some(request => request.url.includes('/v0/management/config.yaml'))).toBe(false)
       expect(requests.some(request => request.method === 'PUT')).toBe(false)
+    } finally {
+      process.argv = process.argv.filter(argument => argument !== '--force-config')
+    }
+  })
+
+  // ── remoteFileExists probe hardening ──────────────────────────────────────────
+  // A failed SSH probe must never be mistaken for "config.yaml does not exist" —
+  // that misreading would overwrite the live config.yaml and wipe its runtime API keys.
+
+  test('probe exits 0 with EXISTS: config.yaml is not uploaded and the skip message is emitted', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    const composePath = join(tmpDir, 'docker-compose.yaml')
+    const caddyPath = join(tmpDir, 'Caddyfile')
+    writeFileSync(configPath, EMPTY_ALIAS_YAML)
+    writeFileSync(composePath, '')
+    writeFileSync(caddyPath, '')
+
+    const {spawnFn, calls} = makeConfigProbeSpawn({stdout: 'EXISTS\n', exitCode: 0})
+    const warnSpy = spyOn(console, 'warn')
+
+    try {
+      await expect(
+        deploy({
+          files: {compose: composePath, config: configPath, caddy: caddyPath},
+          env: makeDeployEnv(),
+          fetch: makeSimpleFetch(),
+          spawn: spawnFn,
+        }),
+      ).resolves.toBeUndefined()
+
+      expect(scpConfigCalls(calls)).toHaveLength(0)
+      const warnArgs = warnSpy.mock.calls.map(call => call.join(' ')).join('\n')
+      expect(warnArgs).toMatch(/Skipping config\/config\.yaml \(exists on server, use --force-config to overwrite\)/)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  test('probe exits 0 with MISSING: config.yaml is uploaded (first-deploy path)', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    const composePath = join(tmpDir, 'docker-compose.yaml')
+    const caddyPath = join(tmpDir, 'Caddyfile')
+    writeFileSync(configPath, EMPTY_ALIAS_YAML)
+    writeFileSync(composePath, '')
+    writeFileSync(caddyPath, '')
+
+    const {spawnFn, calls} = makeConfigProbeSpawn({stdout: 'MISSING\n', exitCode: 0})
+
+    await expect(
+      deploy({
+        files: {compose: composePath, config: configPath, caddy: caddyPath},
+        env: makeDeployEnv(),
+        fetch: makeSimpleFetch(),
+        spawn: spawnFn,
+      }),
+    ).resolves.toBeUndefined()
+
+    expect(scpConfigCalls(calls)).toHaveLength(1)
+  })
+
+  test('probe fails with a non-zero exit code (SSH transport failure): deploy aborts and never uploads config.yaml', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    const composePath = join(tmpDir, 'docker-compose.yaml')
+    const caddyPath = join(tmpDir, 'Caddyfile')
+    writeFileSync(configPath, EMPTY_ALIAS_YAML)
+    writeFileSync(composePath, '')
+    writeFileSync(caddyPath, '')
+
+    const {spawnFn, calls} = makeConfigProbeSpawn({stdout: '', exitCode: 255})
+
+    await expect(
+      deploy({
+        files: {compose: composePath, config: configPath, caddy: caddyPath},
+        env: makeDeployEnv(),
+        fetch: makeSimpleFetch(),
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/Could not determine whether remote file/)
+
+    // The whole point of the fix: a failed probe must never be read as "absent",
+    // which would otherwise trigger an scp that wipes the live config.yaml.
+    expect(scpConfigCalls(calls)).toHaveLength(0)
+  })
+
+  test('probe exits 0 with unrecognized output: deploy aborts and never uploads config.yaml', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    const composePath = join(tmpDir, 'docker-compose.yaml')
+    const caddyPath = join(tmpDir, 'Caddyfile')
+    writeFileSync(configPath, EMPTY_ALIAS_YAML)
+    writeFileSync(composePath, '')
+    writeFileSync(caddyPath, '')
+
+    const {spawnFn, calls} = makeConfigProbeSpawn({stdout: 'bash: warning: setlocale\n', exitCode: 0})
+
+    await expect(
+      deploy({
+        files: {compose: composePath, config: configPath, caddy: caddyPath},
+        env: makeDeployEnv(),
+        fetch: makeSimpleFetch(),
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/Could not determine whether remote file/)
+
+    expect(scpConfigCalls(calls)).toHaveLength(0)
+  })
+
+  test('forceConfig true with probe returning EXISTS: config.yaml is still uploaded (explicit override)', async () => {
+    const configPath = join(tmpDir, 'config.yaml')
+    const composePath = join(tmpDir, 'docker-compose.yaml')
+    const caddyPath = join(tmpDir, 'Caddyfile')
+    writeFileSync(configPath, EMPTY_ALIAS_YAML)
+    writeFileSync(composePath, '')
+    writeFileSync(caddyPath, '')
+
+    const {spawnFn, calls} = makeConfigProbeSpawn({stdout: 'EXISTS\n', exitCode: 0})
+    process.argv.push('--force-config')
+
+    try {
+      await expect(
+        deploy({
+          files: {compose: composePath, config: configPath, caddy: caddyPath},
+          env: makeDeployEnv(),
+          fetch: makeSimpleFetch(),
+          spawn: spawnFn,
+        }),
+      ).resolves.toBeUndefined()
+
+      expect(scpConfigCalls(calls)).toHaveLength(1)
     } finally {
       process.argv = process.argv.filter(argument => argument !== '--force-config')
     }

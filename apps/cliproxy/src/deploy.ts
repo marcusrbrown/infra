@@ -141,15 +141,45 @@ function scpCommand(host: string, source: string, destination: string): string[]
   ]
 }
 
+/**
+ * Probes whether a file exists on the remote host, distinguishing a confirmed answer from a
+ * failed probe. A bare SSH exit code cannot tell a genuine absence apart from a transport
+ * failure (connection refused, auth failure, host unreachable, `test` unavailable) — the
+ * remote command therefore emits an explicit `EXISTS`/`MISSING` sentinel that is checked
+ * alongside the exit code.
+ *
+ * @throws {Error} if the exit code or output cannot be confidently mapped to EXISTS/MISSING.
+ * The caller (config.yaml upload gating) must never treat an inconclusive probe as "file
+ * absent": doing so would silently overwrite the live config.yaml and wipe its runtime API
+ * keys, so callers must let this throw abort the deploy rather than fall back to a guess.
+ */
 async function remoteFileExists(
   host: string,
   path: string,
   env: DeployEnv,
   spawnFn: typeof Bun.spawn = Bun.spawn,
 ): Promise<boolean> {
-  const proc = spawnFn(sshCommand(host, `test -f '${path}'`), {env, stdout: 'pipe', stderr: 'pipe'})
+  const proc = spawnFn(sshCommand(host, `test -f '${path}' && echo EXISTS || echo MISSING`), {
+    env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const stdout = (await new Response(proc.stdout).text()).trim()
+  const stderr = (await new Response(proc.stderr).text()).trim()
   const exitCode = await proc.exited
-  return exitCode === 0
+
+  if (exitCode === 0 && stdout === 'EXISTS') {
+    return true
+  }
+  if (exitCode === 0 && stdout === 'MISSING') {
+    return false
+  }
+
+  throw new Error(
+    `Could not determine whether remote file '${path}' exists (exit code: ${exitCode}${
+      stderr ? `, stderr: ${stderr}` : ''
+    }). Aborting deploy: treating an inconclusive probe as "file absent" would risk overwriting config.yaml and wiping its runtime API keys.`,
+  )
 }
 
 async function healthCheck(env: DeployEnv, fetchImpl: typeof globalThis.fetch = globalThis.fetch): Promise<void> {

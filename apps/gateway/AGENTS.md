@@ -24,11 +24,15 @@ Runs on `ubuntu-latest` with `packages: write` permission (job-scoped only; the 
 1. Reads the pinned `ref` from `apps/gateway/upstream.json`.
 2. Checks out `fro-bot/agent` at that ref.
 3. Logs in to `ghcr.io` with `GITHUB_TOKEN`.
-4. Builds `deploy/gateway.Dockerfile` (context: upstream root) and pushes to `ghcr.io/marcusrbrown/infra-gateway:<ref>`. Captures the pushed digest from `build-push-action` outputs.
-5. Builds `deploy/workspace.Dockerfile` (context: upstream root) and pushes to `ghcr.io/marcusrbrown/infra-workspace:<ref>`. Captures the pushed digest.
+4. Builds `deploy/gateway.Dockerfile` (context: upstream root) and pushes to `ghcr.io/marcusrbrown/infra-gateway:<ref>-<github.sha>`. Captures the pushed digest from `build-push-action` outputs. The tag is keyed on the infra commit as well as the upstream ref so repeated builds at the same upstream ref no longer overwrite each other's tag.
+5. Builds `deploy/workspace.Dockerfile` (context: upstream root) and pushes to `ghcr.io/marcusrbrown/infra-workspace:<ref>-<github.sha>`. Captures the pushed digest.
 6. Exposes both digests as job outputs (`gateway_digest`, `workspace_digest`).
 
-The `deploy-gateway` job declares `needs: build-images`. A build or push failure blocks the deploy entirely — the old stack stays live.
+### CI: scan-images job
+
+Runs between `build-images` and the `gateway` environment approval gate, so results are visible on the run page when the operator decides whether to approve. Scans both images by the exact digest from `build-images` outputs, never by tag. Uses the official Trivy container pinned by digest (`ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e...`) rather than `aquasecurity/trivy-action`, because that action had all but one of its version tags force-pushed to credential-stealing malware in March 2026 (GHSA-69fq-xp46-6x23) and is kept out of the trust path. Report-only — `--exit-code 0` and job-level `continue-on-error: true` — so scan findings or a scanner outage never block a deploy. Output goes to the job step summary. Permissions are `contents: read` + `packages: read`.
+
+The `deploy-gateway` job declares `needs: [build-images, scan-images]`. A build or push failure in `build-images` blocks the deploy entirely — the old stack stays live. `scan-images` is `continue-on-error: true`, so neither findings nor a scanner outage block the deploy.
 
 ### Droplet: deploy-gateway job
 

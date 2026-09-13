@@ -1344,6 +1344,117 @@ describe('deploy-gateway.yaml: operator push VAPID workflow contract', () => {
   })
 })
 
+// ─── scan-images: report-only invariants ──────────────────────────────────
+//
+// scan-images runs between build-images and the gateway approval gate so a
+// human sees Trivy findings before approving. It must never become a deploy
+// gate itself: --exit-code 0 plus job-level continue-on-error: true keep a
+// scanner outage or a CVE finding from blocking a deploy. These tests lock
+// that contract so a well-intentioned "make the scan actually fail on
+// findings" edit can't silently turn scan-images into a blocking dependency.
+
+describe('deploy-gateway.yaml: scan-images report-only invariants', () => {
+  const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
+
+  interface ScanImagesStep {
+    name?: string
+    run?: string
+    env?: Record<string, string>
+  }
+
+  interface ScanImagesJob {
+    needs?: string | string[]
+    environment?: unknown
+    'continue-on-error'?: boolean
+    permissions?: Record<string, string>
+    steps?: ScanImagesStep[]
+  }
+
+  interface DeployGatewayJob {
+    needs?: string | string[]
+    environment?: unknown
+  }
+
+  async function readScanImages() {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'scan-images'?: ScanImagesJob
+        'deploy-gateway'?: DeployGatewayJob
+      }
+    }
+    const scanImages = parsed?.jobs?.['scan-images']
+    const deployGateway = parsed?.jobs?.['deploy-gateway']
+    const scanSteps = (scanImages?.steps ?? []).filter(
+      (step: ScanImagesStep) => typeof step.run === 'string' && /trivy/i.test(step.run),
+    )
+    return {text, scanImages, deployGateway, scanSteps}
+  }
+
+  it('runs after build-images and has no environment: key (must run before the approval gate)', async () => {
+    const {scanImages} = await readScanImages()
+    expect(scanImages).toBeDefined()
+    expect(scanImages?.needs).toBe('build-images')
+    expect(scanImages).not.toHaveProperty('environment')
+  })
+
+  it('sets continue-on-error: true at the job level so a scanner outage cannot block a deploy', async () => {
+    const {scanImages} = await readScanImages()
+    expect(scanImages?.['continue-on-error']).toBe(true)
+  })
+
+  it('requests only contents: read and packages: read, never security-events', async () => {
+    const {scanImages} = await readScanImages()
+    expect(scanImages?.permissions).toEqual({contents: 'read', packages: 'read'})
+    expect(scanImages?.permissions).not.toHaveProperty('security-events')
+  })
+
+  it('every Trivy invocation passes --exit-code 0 so findings never fail the step', async () => {
+    const {scanSteps} = await readScanImages()
+    expect(scanSteps.length).toBeGreaterThan(0)
+    for (const step of scanSteps) {
+      expect(step.run).toMatch(/--exit-code[ =]0\b/)
+    }
+  })
+
+  it('scans images by digest from build-images outputs, never by tag', async () => {
+    const {scanSteps} = await readScanImages()
+    expect(scanSteps.length).toBeGreaterThan(0)
+
+    for (const step of scanSteps) {
+      const env = step.env ?? {}
+      const digestEnvVars = Object.entries(env).filter(([, value]) =>
+        /^\$\{\{\s*needs\.build-images\.outputs\.\w*_digest\s*\}\}$/.test(value),
+      )
+      expect(digestEnvVars.length).toBeGreaterThan(0)
+      for (const [name] of digestEnvVars) {
+        expect(step.run).toContain(name)
+      }
+    }
+
+    const combinedRun = scanSteps.map((step: ScanImagesStep) => step.run ?? '').join('\n')
+    expect(combinedRun).toContain('infra-gateway@')
+    expect(combinedRun).toContain('infra-workspace@')
+    expect(combinedRun).not.toContain('infra-gateway:')
+    expect(combinedRun).not.toContain('infra-workspace:')
+  })
+
+  it('uses a digest-pinned Trivy scanner container, never the aquasecurity/trivy-action GitHub Action', async () => {
+    const {text, scanSteps} = await readScanImages()
+    expect(text).not.toContain('aquasecurity/trivy-action')
+    expect(scanSteps.length).toBeGreaterThan(0)
+    for (const step of scanSteps) {
+      expect(step.run).toMatch(/ghcr\.io\/aquasecurity\/trivy:[^\s@]+@sha256:[\da-f]{64}/)
+    }
+  })
+
+  it('deploy-gateway still gates on [build-images, scan-images] and keeps the gateway approval environment', async () => {
+    const {deployGateway} = await readScanImages()
+    expect(deployGateway?.needs).toEqual(['build-images', 'scan-images'])
+    expect(deployGateway?.environment).toBe('gateway')
+  })
+})
+
 describe('deploy.yaml: aggregate router forwards the optional operator push private key', () => {
   const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
 

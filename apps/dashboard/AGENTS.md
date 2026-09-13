@@ -10,7 +10,7 @@ is the upstream released image from `ghcr.io/fro-bot/dashboard`, pinned by diges
 | Service     | Image                                                    | Role                                                    |
 | ----------- | -------------------------------------------------------- | ------------------------------------------------------- |
 | `dashboard` | `ghcr.io/fro-bot/dashboard:<tag>@sha256:<digest>` (digest-pinned in compose) | Hono app on `:3000`; GitHub App + OAuth; healthcheck at `/api/healthz` |
-| `caddy`     | `caddy:2.11.3-alpine` (digest-pinned)                    | Auto-TLS reverse proxy `:443 → dashboard:3000`          |
+| `caddy`     | `caddy:2.11.4-alpine` (digest-pinned)                    | Auto-TLS reverse proxy `:443 → dashboard:3000`          |
 
 The dashboard image tag and digest are pinned directly in `apps/dashboard/docker-compose.yaml`.
 Renovate tracks the `ghcr.io/fro-bot/dashboard` image and opens PRs to bump the pin when a new

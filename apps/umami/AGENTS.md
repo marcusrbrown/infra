@@ -6,8 +6,8 @@ Privacy-respecting, self-hosted [Umami](https://umami.is) web analytics for `met
 
 | Service | Image | Role |
 | --- | --- | --- |
-| `umami` | `umamisoftware/umami:3.2.0@sha256:d8111e1d6d94be54a54514cd4e1264fbfe905e5ea0d0691804b1d71e627a6fca` | App + tracker API on `:3000` |
-| `db` | `postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e` | Postgres; named volume `umami-db-data` |
+| `umami` | `umamisoftware/umami:3.3.1@sha256:4f7d2b788f4ee84432f3119203656ed2083074f3656c63b3b5905be06b3b8462` | App + tracker API on `:3000` |
+| `db` | `postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b` | Postgres; named volume `umami-db-data` |
 | `caddy` | `caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648` | Auto-TLS reverse proxy `:443 → umami:3000` |
 
 Images are pinned to numbered tags by digest and tracked by Renovate (changelog-linked, standalone PRs). Postgres port `5432` is never published to the host.
@@ -43,7 +43,7 @@ In CI the SSH key is materialized from `UMAMI_SSH_KEY` to a temp file with a tra
 
 Umami first-boot creates a default `admin` / `umami` account. After the stack is healthy, the deploy logs in to `http://localhost:3000` **on the droplet** (never the public host) with the defaults; if that succeeds it sets the admin password to `UMAMI_ADMIN_PASSWORD` via the authenticated password-update endpoint. If the default login fails, the password is already rotated and the step is skipped (idempotent). After the first deploy, log in at `https://metrics.fro.bot` with `admin` / `UMAMI_ADMIN_PASSWORD`. The admin password travels via SSH stdin / request body, never argv.
 
-> The exact v3.2.0 auth endpoints (`/api/auth/login`, `/api/me/password`) are pinned as constants in `src/deploy.ts`; the password-change endpoint uses body `{currentPassword, newPassword}` (Bearer auth). Re-verify them against the running image on a major Umami bump.
+> The exact v3.3.1 auth endpoints (`/api/auth/login`, `/api/me/password`) are pinned as constants in `src/deploy.ts`; the password-change endpoint uses body `{currentPassword, newPassword}` (Bearer auth). Re-verify them against the running image on a major Umami bump.
 
 ## Privacy baseline
 
@@ -92,7 +92,7 @@ set -Eeuo pipefail
 HOST="${UMAMI_DOMAIN:?Set UMAMI_DOMAIN to the exact deployed host}"
 REMOTE="root@${HOST}"
 BACKUP="umami-$(date -u +%Y%m%dT%H%M%SZ).dump"
-POSTGRES_IMAGE='postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e'
+POSTGRES_IMAGE='postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b'
 ssh "$REMOTE" \
   "docker compose -f /opt/umami/docker-compose.yaml exec -T db pg_dump -Fc --create -U umami -d umami" \
   > "$BACKUP"
@@ -175,8 +175,8 @@ Run this before taking the recovery backup and again before enabling the timer. 
 
 ```bash
 ssh "$REMOTE" 'set -Eeuo pipefail
-docker compose -f /opt/umami/docker-compose.yaml config --images | grep -Fx "umamisoftware/umami:3.2.0@sha256:d8111e1d6d94be54a54514cd4e1264fbfe905e5ea0d0691804b1d71e627a6fca"
-docker compose -f /opt/umami/docker-compose.yaml config --images | grep -Fx "postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e"
+docker compose -f /opt/umami/docker-compose.yaml config --images | grep -Fx "umamisoftware/umami:3.3.1@sha256:4f7d2b788f4ee84432f3119203656ed2083074f3656c63b3b5905be06b3b8462"
+docker compose -f /opt/umami/docker-compose.yaml config --images | grep -Fx "postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b"
 docker compose -f /opt/umami/docker-compose.yaml ps --all
 current_target="$(readlink -e /opt/umami/retention/current)"
 case "$current_target" in
@@ -225,7 +225,7 @@ BACKUP="$RECOVERY_DIR/umami.dump"
 SOURCE_MANIFEST="$RECOVERY_DIR/source.manifest"
 RESTORED_MANIFEST="$RECOVERY_DIR/restored.manifest"
 BACKUP_LIST="$RECOVERY_DIR/umami.dump.list"
-POSTGRES_IMAGE='postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e'
+POSTGRES_IMAGE='postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b'
 RESTORE_CONTAINER="umami-retention-restore-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 CONTAINER_CREATED=0
 

@@ -808,7 +808,8 @@ jobs:
         (
           github.event_name == 'issues' &&
           !endsWith(github.event.issue.user.login || '', '[bot]') &&
-          (github.event.issue.user.login || '') != 'fro-bot'
+          (github.event.issue.user.login || '') != 'fro-bot' &&
+          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association || '')
         ) ||
         (
           github.event_name == 'pull_request' &&

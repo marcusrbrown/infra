@@ -2818,6 +2818,38 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     expect(String(agent.env?.PROMPT)).toContain('env.PR_REVIEW_PROMPT')
   })
 
+  it('gates the fro-bot-content issues branch with the same author-association allowlist as comments (issue #1315)', async () => {
+    const {parsed} = await loadFroBotWorkflow()
+    const content = parsed.jobs?.['fro-bot-content']
+    expect(content?.permissions).toEqual({contents: 'read', 'pull-requests': 'read'})
+
+    const normalize = (expr: string): string => expr.replaceAll(/\s+/g, ' ').trim()
+    const normalized = normalize(content?.if ?? '')
+
+    const associationList = `fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]')`
+
+    const expectedIssuesBranch = normalize(`
+      github.event_name == 'issues' &&
+      !endsWith(github.event.issue.user.login || '', '[bot]') &&
+      (github.event.issue.user.login || '') != 'fro-bot' &&
+      contains(${associationList}, github.event.issue.author_association || '')
+    `)
+    expect(normalized).toContain(expectedIssuesBranch)
+
+    const expectedCommentBranch = normalize(`
+      contains(github.event.comment.body || '', '@fro-bot') &&
+      (github.event.comment.user.login || '') != 'fro-bot' &&
+      contains(${associationList}, github.event.comment.author_association || '')
+    `)
+    expect(normalized).toContain(expectedCommentBranch)
+
+    const expectedForkGuard = normalize(`
+      !github.event.pull_request.head.repo.fork &&
+      !endsWith(github.event.pull_request.user.login || '', '[bot]')
+    `)
+    expect(normalized).toContain(expectedForkGuard)
+  })
+
   it('keeps the reconciler outside the published package, CLI registration, and MCP allowlist', async () => {
     const pkg = (await Bun.file(resolve(REPO_ROOT, 'packages/cli/package.json')).json()) as {
       files?: string[]

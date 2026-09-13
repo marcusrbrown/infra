@@ -179,15 +179,30 @@ export async function sweepExpired(now: number, deps: SweeperDeps): Promise<void
  * SAFETY INVARIANT: only keys starting with `ghact-` are ever revoked.
  * Non-broker keys (durable key, other consumers' keys) are NEVER touched.
  * This guard is explicit and tested.
+ *
+ * `listApiKeys` failure handling depends on the caller:
+ *   - Periodic tick (`startSweeper`, default `throwOnListFailure: false`) — logs and
+ *     returns so the recurring timer is unaffected; the TTL sweeper is the backstop.
+ *   - Startup (`startupReconcile`, `throwOnListFailure: true`) — rethrows so the
+ *     bounded retry loop there can actually retry instead of silently succeeding
+ *     on a failed list.
  */
-export async function reconcile(now: number, deps: SweeperDeps): Promise<void> {
+export async function reconcile(
+  now: number,
+  deps: SweeperDeps,
+  options: {throwOnListFailure?: boolean} = {},
+): Promise<void> {
   const {revokeKey, listApiKeys, mintDeps, logger = console} = deps
+  const {throwOnListFailure = false} = options
 
   let allKeys: string[]
   try {
     allKeys = await listApiKeys(mintDeps)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
+    if (throwOnListFailure) {
+      throw error instanceof Error ? error : new Error(message)
+    }
     logger.error(`[sweeper] reconcile: listApiKeys failed — skipping this tick: ${message}`)
     return
   }
@@ -247,7 +262,7 @@ export async function startupReconcile(deps: SweeperDeps): Promise<void> {
 
   for (let attempt = 0; attempt < STARTUP_RECONCILE_MAX_ATTEMPTS; attempt++) {
     try {
-      await reconcile(clock(), deps)
+      await reconcile(clock(), deps, {throwOnListFailure: true})
       deps.markReady()
       return
     } catch (error) {

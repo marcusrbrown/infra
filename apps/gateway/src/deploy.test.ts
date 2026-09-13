@@ -148,6 +148,12 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
     if (last.includes('ip route get')) {
       return makeSpawnResult({stdout: '10.116.0.5 via 10.116.0.1 dev eth1 src 10.116.0.3 uid 0\n    cache'})
     }
+    // Default git-checkout-exists sentinel probe: report EXISTS so the default happy-path
+    // flow takes the fetch/reset/clean branch. Tests exercising the clone or throw paths
+    // override via handler.
+    if (cmdStr.includes('test -d') && cmdStr.includes('.git')) {
+      return makeSpawnResult({stdout: 'EXISTS'})
+    }
     // Default DOCKER-USER readback: return a valid chain with ALLOW before DROP.
     // Tests that need different behavior override via handler.
     if (last.includes('iptables') && last.includes('-nvL') && last.includes('DOCKER-USER')) {
@@ -706,9 +712,9 @@ describe('main', () => {
   test('edge case (first deploy): .git absent → clone step invoked', async () => {
     const {main} = await import('./deploy')
     const {spawnFn, calls} = makeSpawnMock(cmd => {
-      // test -d .git → exit 1 (not found)
+      // test -d .git sentinel probe → MISSING (not found)
       if (cmd.some(s => s.includes('test -d'))) {
-        return makeSpawnResult({exitCode: 1})
+        return makeSpawnResult({stdout: 'MISSING', exitCode: 0})
       }
       return undefined
     })
@@ -725,9 +731,9 @@ describe('main', () => {
   test('edge case (ref bump): .git present → fetch+reset+clean invoked', async () => {
     const {main} = await import('./deploy')
     const {spawnFn, calls} = makeSpawnMock(cmd => {
-      // test -d .git → exit 0 (exists)
+      // test -d .git sentinel probe → EXISTS (present)
       if (cmd.some(s => s.includes('test -d'))) {
-        return makeSpawnResult({exitCode: 0})
+        return makeSpawnResult({stdout: 'EXISTS', exitCode: 0})
       }
       return undefined
     })
@@ -741,6 +747,31 @@ describe('main', () => {
     expect(resetCall).toBeDefined()
     const cleanCall = calls.find(cmd => cmd.some(s => s.includes('git clean -xfd')))
     expect(cleanCall).toBeDefined()
+    const cloneCall = calls.find(cmd => cmd.some(s => s.includes('git clone')))
+    expect(cloneCall).toBeUndefined()
+  })
+
+  // RED: a non-zero exit from the git-checkout-exists probe (SSH/transport failure) must
+  // not be read as "checkout absent" — that would trigger an unnecessary fresh clone attempt
+  // on top of a broken connection. Mirrors readRemoteChecksum's fail-closed non-zero handling.
+  test('RED: git-checkout probe non-zero exit throws naming the exit code, does not fall back to clone', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
+      if (cmd.some(s => s.includes('test -d')) && cmd.some(s => s.includes('.git'))) {
+        return makeSpawnResult({
+          exitCode: 255,
+          stderr: 'ssh: connect to host gateway.fro.bot port 22: Connection refused',
+        })
+      }
+      return undefined
+    })
+    const mockFetch = makeDiscordFetch([{name: 'ping'}])
+
+    await expect(
+      main({env: makeEnv(), args: [], fetch: mockFetch, sleep: async () => {}, spawn: spawnFn}),
+    ).rejects.toThrow(/exit code: 255.*Connection refused/)
+
+    // Must not silently fall back to treating the inconclusive probe as "absent".
     const cloneCall = calls.find(cmd => cmd.some(s => s.includes('git clone')))
     expect(cloneCall).toBeUndefined()
   })
@@ -8346,7 +8377,64 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     expect(networkNameArg).toBeDefined()
   })
 
-  // ── active-endpoint recovery (run 27737556059 regression) ──────────────────
+  // ── fail-closed network-inspect probe (companion to remoteGitExists fix) ─────
+  //
+  // `docker network inspect` exits non-zero both when the network genuinely does not
+  // exist and when the inspect itself fails (daemon unreachable, permission denied, SSH
+  // failure). Only the former is a legitimate "nothing to clean up" outcome.
+
+  test('network genuinely absent (stderr: No such network) → returns cleanly, no removal attempted', async () => {
+    const {removeStaleGatewayNet} = await import('./deploy')
+    const rmCmds: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          exitCode: 1,
+          stderr: 'Error: No such network: fro-bot_gateway-net',
+        })
+      }
+      if (cmdStr.includes('docker network rm')) {
+        rmCmds.push(cmdStr)
+      }
+      return undefined
+    })
+
+    const deployEnv = {PATH: '/usr/bin:/bin', HOME: '/root', GATEWAY_HOST: 'gateway.fro.bot'}
+    await expect(removeStaleGatewayNet('gateway.fro.bot', deployEnv, spawnFn)).resolves.toBeUndefined()
+    expect(rmCmds).toHaveLength(0)
+  })
+
+  // RED: a non-zero inspect exit that is NOT "No such network" (daemon unreachable,
+  // permission denied, SSH failure) must not be read as "network absent" — that would
+  // silently skip stale-network cleanup instead of failing the deploy.
+  test('RED: network-inspect failure other than "No such network" throws naming the exit code and stderr, does not skip cleanup silently', async () => {
+    const {removeStaleGatewayNet} = await import('./deploy')
+    const rmCmds: string[] = []
+
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('docker network inspect') && cmdStr.includes('fro-bot_gateway-net')) {
+        return makeSpawnResult({
+          exitCode: 1,
+          stderr: 'Error response from daemon: permission denied while trying to connect to the Docker daemon socket',
+        })
+      }
+      if (cmdStr.includes('docker network rm')) {
+        rmCmds.push(cmdStr)
+      }
+      return undefined
+    })
+
+    const deployEnv = {PATH: '/usr/bin:/bin', HOME: '/root', GATEWAY_HOST: 'gateway.fro.bot'}
+    await expect(removeStaleGatewayNet('gateway.fro.bot', deployEnv, spawnFn)).rejects.toThrow(
+      /exit 1.*permission denied/,
+    )
+    expect(rmCmds).toHaveLength(0)
+  })
+
+  // ── active-endpoint recovery (run 27737556059 regression) ─────────────────────────────────
   //
   // When `docker network rm fro-bot_gateway-net` fails because gateway/caddy
   // containers are still attached (active endpoints), removeStaleGatewayNet must:

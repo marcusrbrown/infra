@@ -122,7 +122,7 @@ jobs:
           context: upstream-agent
           file: upstream-agent/deploy/gateway.Dockerfile
           push: true
-          tags: ghcr.io/marcusrbrown/infra-gateway:${{ steps.upstream.outputs.ref }}
+          tags: ghcr.io/marcusrbrown/infra-gateway:${{ steps.upstream.outputs.ref }}-${{ github.sha }}
 
       - name: Build and push workspace image
         id: build-workspace
@@ -131,10 +131,56 @@ jobs:
           context: upstream-agent
           file: upstream-agent/deploy/workspace.Dockerfile
           push: true
-          tags: ghcr.io/marcusrbrown/infra-workspace:${{ steps.upstream.outputs.ref }}
+          tags: ghcr.io/marcusrbrown/infra-workspace:${{ steps.upstream.outputs.ref }}-${{ github.sha }}
+
+  scan-images:
+    needs: build-images
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Scan gateway image
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+          GATEWAY_DIGEST: ${{ needs.build-images.outputs.gateway_digest }}
+        run: |
+          {
+            echo '### Trivy scan: infra-gateway@'"$GATEWAY_DIGEST"
+            echo '```'
+            docker run --rm \
+              -e TRIVY_USERNAME \
+              -e TRIVY_PASSWORD \
+              ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+              image --format table --exit-code 0 \
+              'ghcr.io/marcusrbrown/infra-gateway@'"$GATEWAY_DIGEST" \
+              || echo '(no scan output produced)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scan workspace image
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+          WORKSPACE_DIGEST: ${{ needs.build-images.outputs.workspace_digest }}
+        run: |
+          {
+            echo '### Trivy scan: infra-workspace@'"$WORKSPACE_DIGEST"
+            echo '```'
+            docker run --rm \
+              -e TRIVY_USERNAME \
+              -e TRIVY_PASSWORD \
+              ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+              image --format table --exit-code 0 \
+              'ghcr.io/marcusrbrown/infra-workspace@'"$WORKSPACE_DIGEST" \
+              || echo '(no scan output produced)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   deploy-gateway:
-    needs: build-images
+    needs: [build-images, scan-images]
     runs-on: ubuntu-latest
     environment: gateway
     steps:

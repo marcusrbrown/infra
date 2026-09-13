@@ -1970,6 +1970,17 @@ async function writeRemoteFile(
   }
 }
 
+/**
+ * Probes whether a git checkout already exists at REMOTE_DIR, distinguishing a confirmed
+ * answer from a failed probe. A bare SSH exit code cannot tell a genuine absence apart from
+ * a transport failure (connection refused, auth failure, host unreachable) — the remote
+ * command therefore emits an explicit `EXISTS`/`MISSING` sentinel that is checked alongside
+ * the exit code, mirroring `remoteFileExists` in apps/cliproxy/src/deploy.ts.
+ *
+ * @throws {Error} if the exit code or output cannot be confidently mapped to EXISTS/MISSING.
+ * Treating an inconclusive probe as "checkout absent" would trigger an unnecessary fresh
+ * `git clone` when the real problem is an SSH/transport failure.
+ */
 async function remoteGitExists(
   host: string,
   deployEnv: DeployEnv,
@@ -1977,13 +1988,26 @@ async function remoteGitExists(
   keyPath?: string,
   controlPath?: string,
 ): Promise<boolean> {
-  const proc = spawnFn(sshCommand(host, `test -d '${REMOTE_DIR}/.git'`, keyPath, controlPath), {
-    env: deployEnv,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
+  const proc = spawnFn(
+    sshCommand(host, `test -d '${REMOTE_DIR}/.git' && echo EXISTS || echo MISSING`, keyPath, controlPath),
+    {env: deployEnv, stdout: 'pipe', stderr: 'pipe'},
+  )
+  const stdout = (await new Response(proc.stdout).text()).trim()
+  const stderr = (await new Response(proc.stderr).text()).trim()
   const exitCode = await proc.exited
-  return exitCode === 0
+
+  if (exitCode === 0 && stdout === 'EXISTS') {
+    return true
+  }
+  if (exitCode === 0 && stdout === 'MISSING') {
+    return false
+  }
+
+  throw new Error(
+    `Could not determine whether a remote git checkout exists at ${REMOTE_DIR}/.git (exit code: ${exitCode}${
+      stderr ? `, stderr: ${stderr}` : ''
+    }). Aborting deploy: treating an inconclusive probe as "checkout absent" would trigger an unnecessary fresh clone.`,
+  )
 }
 
 async function readRemoteChecksum(
@@ -2052,18 +2076,28 @@ export async function removeStaleGatewayNet(
   controlPath?: string,
 ): Promise<void> {
   // Step 1: Inspect the network to check if it exists and what subnet it has.
-  // `docker network inspect` exits non-zero when the network does not exist.
+  // `docker network inspect` exits non-zero both when the network genuinely does not exist
+  // and when the inspect itself fails (daemon unreachable, permission denied, SSH failure).
+  // Only the former is a legitimate "nothing to clean up" outcome, so the stderr is checked
+  // for Docker's "No such network" marker before treating a non-zero exit as absence —
+  // mirroring the `docker rm -f` / "No such container" handling below.
   const inspectProc = spawnFn(
     sshCommand(host, `docker network inspect ${GATEWAY_NET_FULL_NAME}`, keyPath, controlPath),
     {env: deployEnv, stdout: 'pipe', stderr: 'pipe'},
   )
   const inspectStdout = await new Response(inspectProc.stdout).text()
+  const inspectStderr = await new Response(inspectProc.stderr).text()
   const inspectExitCode = await inspectProc.exited
 
   if (inspectExitCode !== 0) {
-    // Network does not exist — nothing to clean up
-    console.warn(`\u001B[1;34m==>\u001B[0m ${GATEWAY_NET_FULL_NAME} not found — no stale network cleanup needed`)
-    return
+    if (inspectStderr.includes('No such network')) {
+      // Network genuinely does not exist — nothing to clean up
+      console.warn(`\u001B[1;34m==>\u001B[0m ${GATEWAY_NET_FULL_NAME} not found — no stale network cleanup needed`)
+      return
+    }
+    // Any other failure (daemon unreachable, permission denied, SSH failure) is fail-closed:
+    // an inconclusive probe must not be read as "network absent".
+    throw new Error(`Failed to inspect ${GATEWAY_NET_FULL_NAME} (exit ${inspectExitCode}): ${inspectStderr.trim()}`)
   }
 
   // Step 2: Parse the subnet from the inspect output.

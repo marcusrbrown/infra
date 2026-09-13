@@ -743,6 +743,77 @@ describe('startupReconcile — bounded retry on listApiKeys failure', () => {
     expect(markReady).toHaveBeenCalledTimes(1)
     expect(revokeKey).toHaveBeenCalledTimes(1)
   })
+
+  // RED: reconcile must propagate a listApiKeys failure to startupReconcile's retry loop
+  // instead of swallowing it and returning normally. Before the fix, `reconcile` caught the
+  // error, logged "skipping this tick", and returned — so startupReconcile saw a successful
+  // first attempt and called markReady() immediately, and the retry loop below never fired.
+  test('retries when listApiKeys fails on the first attempt and succeeds on the second', async () => {
+    const now = 1_000_000
+    const markReady = mock(() => {})
+    const revokeKey = mock(async () => {})
+    let listApiKeysCallCount = 0
+    const listApiKeys = mock(async () => {
+      listApiKeysCallCount++
+      if (listApiKeysCallCount === 1) {
+        throw new Error('transient cliproxy failure')
+      }
+      return [ghactKey('run-stale', now - 1)]
+    })
+    const loggerError = mock((_msg: string) => {})
+
+    const deps: SweeperDeps = {
+      revokeKey,
+      removeKey: mock(() => {}),
+      listLive: mock(() => [] as LiveEntry[]),
+      listApiKeys,
+      markReady,
+      mintDeps: makeMintDeps(),
+      logger: {error: loggerError},
+      clock: () => now,
+    }
+
+    await startupReconcile(deps)
+
+    // The retry must actually have happened: listApiKeys called twice (fail, then succeed).
+    expect(listApiKeysCallCount).toBe(2)
+    // The key found on the successful retry must have been processed.
+    expect(revokeKey).toHaveBeenCalledTimes(1)
+    // markReady is called exactly once, after the retry succeeded.
+    expect(markReady).toHaveBeenCalledTimes(1)
+    // The failed first attempt must have been logged as a retry, not a silent skip.
+    const messages = loggerError.mock.calls.map(call => call[0])
+    expect(messages.some(m => m.includes('retrying'))).toBe(true)
+  })
+
+  // RED (companion): confirms the existing "all attempts fail" fallback still logs each
+  // attempt — proving the retry loop actually iterates rather than exiting after one
+  // swallowed failure.
+  test('all attempts fail: listApiKeys is called STARTUP_RECONCILE_MAX_ATTEMPTS times before falling back to markReady', async () => {
+    let listApiKeysCallCount = 0
+    const markReady = mock(() => {})
+    const loggerError = mock((_msg: string) => {})
+
+    const deps: SweeperDeps = {
+      revokeKey: mock(async () => {}),
+      removeKey: mock(() => {}),
+      listLive: mock(() => [] as LiveEntry[]),
+      listApiKeys: mock(async () => {
+        listApiKeysCallCount++
+        throw new Error('persistent cliproxy failure')
+      }),
+      markReady,
+      mintDeps: makeMintDeps(),
+      logger: {error: loggerError},
+    }
+
+    await expect(startupReconcile(deps)).resolves.toBeUndefined()
+
+    // Deliberate fallback preserved: markReady still called after all attempts fail.
+    expect(markReady).toHaveBeenCalledTimes(1)
+    // The retry loop must have actually attempted listApiKeys multiple times, not just once.
+    expect(listApiKeysCallCount).toBe(3)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -883,5 +954,50 @@ describe('startSweeper — periodic ticks', () => {
 
     expect(revokeKey).toHaveBeenCalledTimes(1)
     expect(revokeKey.mock.calls[0]?.[0]).toBe(staleKey)
+  })
+
+  // Companion to the startupReconcile retry fix: the periodic tick must keep its existing
+  // resilient behavior — a failed listApiKeys logs and returns, it must NOT throw out of the
+  // timer callback (which would otherwise surface as an unhandled rejection on every tick).
+  test('reconcile tick with listApiKeys failing logs the error and does not throw out of the timer callback', async () => {
+    let reconcileTickFn: (() => void) | undefined
+    let callCount = 0
+
+    const setIntervalMock = mock((fn: () => void, _ms: number) => {
+      callCount++
+      if (callCount === 2) reconcileTickFn = fn
+      return callCount
+    })
+    const clearIntervalMock = mock((_id: number) => {})
+
+    const loggerError = mock((_msg: string) => {})
+    const deps: SweeperDeps = {
+      revokeKey: mock(async () => {}),
+      removeKey: mock(() => {}),
+      listLive: mock(() => [] as LiveEntry[]),
+      listApiKeys: mock(async () => {
+        throw new Error('cliproxy unreachable')
+      }),
+      markReady: mock(() => {}),
+      mintDeps: makeMintDeps(),
+      logger: {error: loggerError},
+    }
+
+    const opts: SweeperOpts = {
+      sweepIntervalMs: 60_000,
+      reconcileIntervalMs: 300_000,
+      setInterval: setIntervalMock as unknown as typeof setInterval,
+      clearInterval: clearIntervalMock as unknown as typeof clearInterval,
+      clock: () => Date.now(),
+    }
+
+    startSweeper(deps, opts)
+
+    expect(reconcileTickFn).toBeDefined()
+    if (!reconcileTickFn) throw new Error('reconcileTickFn not captured')
+
+    // Must resolve, not reject — a throw here would be an unhandled rejection on every tick.
+    await expect(Promise.resolve(reconcileTickFn())).resolves.toBeUndefined()
+    expect(loggerError.mock.calls.some(call => call[0].includes('listApiKeys failed'))).toBe(true)
   })
 })

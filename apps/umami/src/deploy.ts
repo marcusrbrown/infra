@@ -7,7 +7,10 @@ import {join} from 'node:path'
 import {validateUmamiHost} from './host'
 
 // ─── Umami API endpoint constants ─────────────────────────────────────────────
-// TODO: verify exact v3.2.0 endpoint against running image on first deploy
+// Verified against umami-software/umami v3.3.1 source (matches the pinned deploy
+// image): POST /api/auth/login {username,password} → 200 {token} on success,
+// 401 on bad credentials. POST /api/me/password {currentPassword,newPassword} →
+// 200 on success, 400 on bad current password, 401 unauthenticated.
 const UMAMI_LOGIN_PATH = '/api/auth/login'
 const UMAMI_PASSWORD_PATH = '/api/me/password'
 
@@ -429,16 +432,79 @@ async function readRemoteFingerprint(
   )
 }
 
+/** Parsed result of a login-probe curl call: HTTP status and response body. */
+interface LoginProbeResult {
+  /** Parsed HTTP status code, or null if the trailing status line was missing/unparseable. */
+  status: number | null
+  /** Response body (everything before the trailing status line). */
+  body: string
+}
+
+/**
+ * Splits curl's stdout into the response body and the trailing HTTP status
+ * code appended by `-w '\n%{http_code}'`. Returns a null status when the
+ * trailer is missing or unparseable (e.g. the connection never reached an
+ * HTTP response).
+ */
+function parseLoginProbeOutput(stdout: string): LoginProbeResult {
+  const trimmed = stdout.endsWith('\n') ? stdout.slice(0, -1) : stdout
+  const lastNewlineIdx = trimmed.lastIndexOf('\n')
+  const statusLine = (lastNewlineIdx === -1 ? trimmed : trimmed.slice(lastNewlineIdx + 1)).trim()
+  const body = lastNewlineIdx === -1 ? '' : trimmed.slice(0, lastNewlineIdx)
+  const status = /^\d{3}$/.test(statusLine) ? Number(statusLine) : null
+  return {status, body}
+}
+
+/** Extracts a non-empty `token` field from a JSON login response body, or null. */
+function extractToken(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as {token?: string | null}
+    return parsed.token ? parsed.token : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Issues a single login-probe curl call: writes `requestBody` to stdin, reads
+ * stdout to completion, and returns the curl exit code alongside the parsed
+ * HTTP status/body from the `-w '\n%{http_code}'` trailer. Shared by every
+ * login probe in `rotateAdminPassword` so status/body parsing is defined once.
+ */
+async function runLoginProbe(
+  spawnFn: SpawnFn,
+  cmd: string[],
+  deployEnv: DeployEnv,
+  requestBody: string,
+): Promise<{exitCode: number} & LoginProbeResult> {
+  const proc = spawnFn(cmd, {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'})
+
+  if (!proc.stdin) {
+    throw new Error('Spawn did not provide stdin pipe for admin login probe')
+  }
+
+  proc.stdin.write(new TextEncoder().encode(requestBody))
+  proc.stdin.end()
+
+  const stdout = await new Response(proc.stdout).text()
+  const exitCode = await proc.exited
+
+  return {exitCode, ...parseLoginProbeOutput(stdout)}
+}
+
 /**
  * Attempts to rotate the Umami admin password from the default 'umami' to
  * UMAMI_ADMIN_PASSWORD. Idempotent: if the default login is cleanly rejected
- * (HTTP 401/403 → curl exit 22), the password is already rotated — skip.
+ * with HTTP 401, the password is already rotated — skip.
  *
- * G1 — fails CLOSED:
- *   - Connection/transport failure (curl exit 7, or docker exec failure) → THROW.
- *     We cannot determine cred state; deploy must fail.
- *   - HTTP auth rejection (curl exit 22 with auth body) → skip (already rotated).
- *   - Login succeeds (exit 0 + token) → proceed to update + verify.
+ * G1 — fails CLOSED on any ambiguity, not just transport failure:
+ *   - Transport/connection failure (curl exit not in {0, 22}) → THROW.
+ *   - HTTP 401 on the default login → skip (already rotated).
+ *   - HTTP 200 with a token on the default login → proceed to update + verify.
+ *   - HTTP 200 without a token (including 2FA partial-auth responses), or any
+ *     other status (400/403/404/405/5xx/unparseable) → THROW. The coarse
+ *     curl exit code alone cannot distinguish "wrong endpoint" from "already
+ *     rotated", so every login probe checks the actual HTTP status.
  *
  * G2 — called BEFORE Caddy starts (no public default-credential window).
  *
@@ -458,30 +524,26 @@ async function rotateAdminPassword(
 ): Promise<void> {
   console.warn('\u001B[1;34m==>\u001B[0m Attempting admin password rotation (idempotent)')
 
-  // Step 1: Try default login with --fail-with-body so HTTP >=400 → non-zero exit.
-  // Body travels via stdin; curl runs inside the umami container.
-  const loginBody = JSON.stringify({username: 'admin', password: 'umami'})
+  // Step 1: Try default login. Append `-w '\n%{http_code}'` so the actual HTTP
+  // status is the trailing line of stdout — curl's exit code alone (--fail-with-body
+  // maps every HTTP >=400 to exit 22) cannot distinguish a clean 401 rejection
+  // from a 404/500 that means the endpoint or server is broken. Body travels via
+  // stdin; curl runs inside the umami container.
+  const loginRequestBody = JSON.stringify({username: 'admin', password: 'umami'})
   const loginCmd = sshCommand(
     host,
-    `cd ${REMOTE_DIR} && docker compose exec -T umami curl -s --fail-with-body -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
+    String.raw`cd ${REMOTE_DIR} && docker compose exec -T umami curl -s --fail-with-body -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
     keyPath,
     controlPath,
   )
-  const loginProc = spawnFn(loginCmd, {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'})
+  const {
+    exitCode: loginExit,
+    status: loginStatus,
+    body: loginResponseBody,
+  } = await runLoginProbe(spawnFn, loginCmd, deployEnv, loginRequestBody)
 
-  if (!loginProc.stdin) {
-    throw new Error('Spawn did not provide stdin pipe for admin login')
-  }
-
-  loginProc.stdin.write(new TextEncoder().encode(loginBody))
-  loginProc.stdin.end()
-
-  const loginStdout = await new Response(loginProc.stdout).text()
-  const loginExit = await loginProc.exited
-
-  // Exit 22 = HTTP error (--fail-with-body) → clean auth rejection → already rotated.
-  // Exit 0 = HTTP 200 → check for token.
-  // Any other non-zero (7 = connection refused, 255 = ssh failure, etc.) → throw.
+  // Non-zero exit outside {0, 22} means curl itself failed (connection refused,
+  // ssh failure, etc.) before any HTTP response — credential state is unknown.
   if (loginExit !== 0 && loginExit !== 22) {
     throw new Error(
       `Cannot reach umami to verify/rotate admin credentials (exit ${loginExit}). ` +
@@ -489,27 +551,32 @@ async function rotateAdminPassword(
     )
   }
 
-  if (loginExit === 22) {
+  if (loginStatus === 401) {
     // Clean HTTP auth rejection — password already rotated.
-    console.warn('\u001B[1;33m[info]\u001B[0m Default admin login rejected — password already rotated, skipping.')
-    return
-  }
-
-  // Exit 0 — parse token from response.
-  let token: string | null = null
-  try {
-    const parsed = JSON.parse(loginStdout) as {token?: string | null}
-    token = parsed.token ?? null
-  } catch {
-    token = null
-  }
-
-  if (!token) {
-    // Exit 0 but no token — treat as already rotated (unexpected but safe to skip).
     console.warn(
-      '\u001B[1;33m[info]\u001B[0m Default admin login returned no token — password already rotated, skipping.',
+      '\u001B[1;33m[info]\u001B[0m Default admin login rejected (HTTP 401) — password already rotated, skipping.',
     )
     return
+  }
+
+  if (loginStatus !== 200) {
+    // Any other status (400/403/404/405/5xx) or an unparseable/missing status
+    // line means we cannot tell whether the endpoint is even correct — fail closed.
+    throw new Error(
+      `Cannot determine admin credential state: default admin login returned HTTP ${loginStatus ?? 'unknown'}. ` +
+        'Deploy failed closed rather than assume the password is already rotated.',
+    )
+  }
+
+  const token = extractToken(loginResponseBody)
+
+  if (!token) {
+    // HTTP 200 without a token — e.g. a 2FA partial-auth response
+    // ({requiresTwoFactor, partialToken}) — is ambiguous, not proof of rotation.
+    throw new Error(
+      'Cannot determine admin credential state: default admin login returned HTTP 200 without a token ' +
+        '(possibly incomplete two-factor authentication). Deploy failed closed.',
+    )
   }
 
   // Step 2: Write a curl config file inside the container via stdin so the
@@ -568,72 +635,67 @@ async function rotateAdminPassword(
     throw new Error(`Admin password update failed (exit ${updateExit}). Deploy aborted.`)
   }
 
-  // Step 4: Verify — re-login with the NEW password must succeed.
-  const verifyNewBody = JSON.stringify({username: 'admin', password: adminPassword})
+  // Step 4: Verify — re-login with the NEW password must succeed with HTTP 200
+  // and a non-empty token. Any other status means rotation didn't take effect
+  // as expected.
+  const verifyNewRequestBody = JSON.stringify({username: 'admin', password: adminPassword})
   const verifyNewCmd = sshCommand(
     host,
-    `cd ${REMOTE_DIR} && docker compose exec -T umami curl -s --fail-with-body -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
+    String.raw`cd ${REMOTE_DIR} && docker compose exec -T umami curl -s --fail-with-body -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
     keyPath,
     controlPath,
   )
-  const verifyNewProc = spawnFn(verifyNewCmd, {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'})
+  const {status: verifyNewStatus, body: verifyNewResponseBody} = await runLoginProbe(
+    spawnFn,
+    verifyNewCmd,
+    deployEnv,
+    verifyNewRequestBody,
+  )
 
-  if (!verifyNewProc.stdin) {
-    throw new Error('Spawn did not provide stdin pipe for rotation verification (new password)')
-  }
-
-  verifyNewProc.stdin.write(new TextEncoder().encode(verifyNewBody))
-  verifyNewProc.stdin.end()
-
-  const verifyNewStdout = await new Response(verifyNewProc.stdout).text()
-  const verifyNewExit = await verifyNewProc.exited
-
-  if (verifyNewExit !== 0) {
+  if (verifyNewStatus !== 200) {
     throw new Error(
-      'Admin password rotation verification failed: new password login was rejected. ' +
-        'The password may not have been updated correctly. Investigate manually.',
+      `Admin password rotation verification failed: new password login returned HTTP ${verifyNewStatus ?? 'unknown'} ` +
+        '(expected 200). The password may not have been updated correctly. Investigate manually.',
     )
   }
 
-  let verifyNewToken: string | null = null
-  try {
-    const parsed = JSON.parse(verifyNewStdout) as {token?: string | null}
-    verifyNewToken = parsed.token ?? null
-  } catch {
-    verifyNewToken = null
-  }
+  const verifyNewToken = extractToken(verifyNewResponseBody)
 
   if (!verifyNewToken) {
     throw new Error(
-      'Admin password rotation verification failed: new password login returned no token. ' + 'Investigate manually.',
+      'Admin password rotation verification failed: new password login returned no token. Investigate manually.',
     )
   }
 
-  // Step 5: Verify — re-login with the DEFAULT password must now FAIL (exit 22).
-  const verifyDefaultBody = JSON.stringify({username: 'admin', password: 'umami'})
+  // Step 5: Verify — re-login with the DEFAULT password must now return exactly
+  // HTTP 401. An arbitrary non-zero curl exit is not proof of rejection: a 404
+  // or 5xx means verification itself is broken, not that rotation succeeded.
+  const verifyDefaultRequestBody = JSON.stringify({username: 'admin', password: 'umami'})
   const verifyDefaultCmd = sshCommand(
     host,
-    `cd ${REMOTE_DIR} && docker compose exec -T umami curl -s --fail-with-body -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
+    String.raw`cd ${REMOTE_DIR} && docker compose exec -T umami curl -s --fail-with-body -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' --data @- http://localhost:3000${UMAMI_LOGIN_PATH}`,
     keyPath,
     controlPath,
   )
-  const verifyDefaultProc = spawnFn(verifyDefaultCmd, {env: deployEnv, stdout: 'pipe', stderr: 'pipe', stdin: 'pipe'})
+  const {status: verifyDefaultStatus} = await runLoginProbe(
+    spawnFn,
+    verifyDefaultCmd,
+    deployEnv,
+    verifyDefaultRequestBody,
+  )
 
-  if (!verifyDefaultProc.stdin) {
-    throw new Error('Spawn did not provide stdin pipe for rotation verification (default password)')
-  }
-
-  verifyDefaultProc.stdin.write(new TextEncoder().encode(verifyDefaultBody))
-  verifyDefaultProc.stdin.end()
-
-  await new Response(verifyDefaultProc.stdout).text()
-  const verifyDefaultExit = await verifyDefaultProc.exited
-
-  if (verifyDefaultExit === 0) {
+  if (verifyDefaultStatus === 200) {
     // Default password still works — rotation did not stick.
     throw new Error(
       'Admin password rotation verification failed: default password still accepted after rotation. ' +
         'The password update may not have persisted. Investigate manually.',
+    )
+  }
+
+  if (verifyDefaultStatus !== 401) {
+    throw new Error(
+      `Admin password rotation could not be verified: default-password rejection check returned HTTP ${verifyDefaultStatus ?? 'unknown'} ` +
+        '(expected 401). Investigate manually.',
     )
   }
 

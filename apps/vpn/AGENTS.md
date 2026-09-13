@@ -8,7 +8,7 @@ The VPN box is a single-user WireGuard egress box on AWS Lightsail (`eu-west-1`,
 | --- | --- | --- |
 | Deploy script | `apps/vpn/src/deploy.ts` | Server-key preservation, wg0.conf render, health gate |
 | Provision script | `apps/vpn/server/provision.ts` | Lightsail SDK; one-time. Refuses re-run without `--force` |
-| Peer model | `apps/vpn/src/peers.ts` (shared: `packages/shared/vpn/peers.ts`) | peers.json read/write, next-IP allocation, config rendering |
+| Peer model | `packages/cli/src/commands/vpn/peers.ts` (published as `@marcusrbrown/infra/vpn/peers`, imported by `apps/vpn/src/deploy.ts`) | peers.json read/write, next-IP allocation, config rendering |
 | CLI commands | `packages/cli/src/commands/vpn/` | status, deploy, logs, client add\|list\|remove |
 | Peer config | `apps/vpn/config/peers.json` | Local-only working state (gitignored). Roster is stored in the `VPN_PEERS` GitHub Environment secret. |
 | Client output | `apps/vpn/clients/` | Gitignored — client `.conf` files with private keys |

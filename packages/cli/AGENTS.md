@@ -37,7 +37,9 @@ src/commands/
 │   ├── config.ts     → registerCliproxyConfig(cli)
 │   ├── keys.ts       → registerCliproxyKeys(cli)
 │   ├── login.ts      → registerCliproxyLogin(cli)
+│   ├── monitor.ts    → registerCliproxyMonitor(cli)
 │   ├── open.ts       → registerCliproxyOpen(cli)
+│   ├── reset-quota.ts → registerCliproxyResetQuota(cli)
 │   └── setup.ts      → registerCliproxySetup(cli)  (uses @clack/prompts)
 ├── agent/
 │   ├── index.ts      → registerAgentCommands(cli)
@@ -45,6 +47,34 @@ src/commands/
 │   ├── storage.ts    → registerAgentStorageCommand(cli) (S3 variable wiring + teardown)
 │   ├── workflow-verify.ts → effective workflow/environment contract verifier
 │   └── setup-core/   → shared setup implementation used by agent and cliproxy
+├── broker/
+│   ├── index.ts      → registerBrokerCommands(cli)
+│   ├── status.ts     → registerBrokerStatus(cli)
+│   ├── deploy.ts     → registerBrokerDeploy(cli)
+│   └── logs.ts       → registerBrokerLogs(cli)
+├── gateway/
+│   ├── index.ts      → registerGatewayCommands(cli)
+│   ├── status.ts     → registerGatewayStatus(cli)
+│   ├── deploy.ts     → registerGatewayDeploy(cli)
+│   ├── logs.ts       → registerGatewayLogs(cli)
+│   ├── backup.ts     → registerGatewayBackup(cli)
+│   └── restore.ts    → registerGatewayRestore(cli)
+├── dashboard/
+│   ├── index.ts      → registerDashboardCommands(cli)
+│   ├── status.ts     → registerDashboardStatus(cli)
+│   ├── deploy.ts     → registerDashboardDeploy(cli)
+│   └── logs.ts       → registerDashboardLogs(cli)
+├── umami/
+│   ├── index.ts      → registerUmamiCommands(cli)
+│   ├── status.ts     → registerUmamiStatus(cli)
+│   ├── deploy.ts     → registerUmamiDeploy(cli)
+│   └── logs.ts       → registerUmamiLogs(cli)
+├── vpn/
+│   ├── index.ts      → registerVpnCommands(cli)
+│   ├── status.ts     → registerVpnStatus(cli)
+│   ├── deploy.ts     → registerVpnDeploy(cli)
+│   ├── logs.ts       → registerVpnLogs(cli)
+│   └── client.ts     → registerVpnClient(cli)  (add|list|remove)
 ├── status.ts         → registerStatus(cli)  (top-level unified dashboard)
 └── mcp.ts            → registerMcp(cli)
 ```

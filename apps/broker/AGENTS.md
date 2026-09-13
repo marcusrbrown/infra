@@ -35,7 +35,7 @@ All SSH calls in a single deploy share one ControlPath socket (avoids UFW rate-l
 
 ## STARTUP GATE
 
-On boot, the broker runs a reconcile sweep (list cliproxy `api-keys`, delete any `ghact-`-prefixed key not in the in-memory live set) **before** accepting `/v1/mint` requests. `/healthz` serves during startup; `/v1/mint` returns 503 until the startup reconcile completes. This bounds the stale-key window after a restart to the startup reconcile rather than the first periodic tick.
+On boot, the broker runs a reconcile sweep **before** accepting `/v1/mint` requests: it lists cliproxy `api-keys` and, for each `ghact-`-prefixed key, parses its embedded expiry from the key name and revokes it only if that expiry has passed. Unexpired `ghact-` keys are preserved regardless of in-memory live-set membership — this is what lets an in-flight run's key survive a restart. `/healthz` serves during startup; `/v1/mint` returns 503 until the startup reconcile completes. This bounds the stale-key window after a restart to the startup reconcile rather than the first periodic tick.
 
 ## DOCKER STACK
 
@@ -112,7 +112,7 @@ Secrets and the `BROKER_AUD` variable are scoped to the `broker` GitHub Environm
 Each `POST /v1/mint` request:
 1. Verifies the OIDC JWT (RS256, GitHub issuer, broker-minted audience, `exp`/`nbf`/`jti` replay check).
 2. Evaluates claims against `BROKER_TRUST_POLICY` (`repository_id`, `repository_owner_id`, `job_workflow_ref`, `ref`, `ref_type`, `ref_protected`, `event_name`, `runner_environment`, `repository_visibility`).
-3. Mints a `ghact-<run_id>-<random>` key via cliproxy management API (GET-modify-write + read-back, single-flight lock).
+3. Mints a `ghact-<runId>-<expiresAtEpochMs>-<hexrand>` key via cliproxy management API (GET-modify-write + read-back, single-flight lock).
 4. Records the entry in the in-memory live set with a 30-minute TTL.
 5. Returns the OpenCode `auth.json` payload (same shape as `apps/cliproxy/AGENTS.md`).
 
@@ -121,7 +121,7 @@ At run end (success/fail/cancel), revocation is handled exclusively by the TTL s
 ### TTL sweeper and reconcile
 
 - **Sweep tick** (every 60s): for each live entry past `expiresAt`, revokes the key via cliproxy DELETE and removes it from the live set. A single revoke failure is logged and does not block the rest of the sweep.
-- **Reconcile tick** (every 5 min): lists cliproxy `api-keys`, deletes any `ghact-`-prefixed key not in the live set. Recovers from a broker restart where the live set is empty but stale keys remain. **Safety invariant**: reconcile never deletes a non-`ghact-` key.
+- **Reconcile tick** (every 5 min): lists cliproxy `api-keys` and makes a time-based decision per `ghact-`-prefixed key by parsing its embedded expiry from the key name — expired keys are revoked, unexpired keys are kept regardless of live-set membership, and unparseable legacy keys are kept and logged. Recovers from a broker restart where the live set is empty but an in-flight key's expiry proves it is still valid. **Safety invariant**: reconcile never deletes a non-`ghact-` key.
 - **Startup reconcile**: runs once on boot before `/v1/mint` is unblocked (see Startup Gate above).
 
 ### Reading audit events

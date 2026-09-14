@@ -79,7 +79,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ## CONVENTIONS
 
 - **Approved shell scripts**: exactly `apps/keeweb/deploy.sh` and `apps/umami/retention.sh`; the retention runner is the narrow host-native systemd/Docker exception. All other scripts are TypeScript run via `bun run`. (enforced)
-- **GitHub Actions**: `.yaml` extension (not `.yml`). SHA-pin all actions with `# vX.Y.Z` version comment. (enforced)
+- **GitHub Actions**: `.yaml` extension (not `.yml`). SHA-pin all actions with a trailing version comment — either `# vX.Y.Z` or, for a scoped release tag, `# name@X.Y.Z` (e.g. `# renovate-changesets@0.2.48`). (enforced)
 - **Shared configs**: `@bfra.me/eslint-config`, `@bfra.me/prettier-config/120-proof`, `@bfra.me/tsconfig`.
 - **Git hooks**: `simple-git-hooks` + `lint-staged` → `eslint --fix` on commit.
 - **CI install**: `bun install --frozen-lockfile --ignore-scripts` (skip simple-git-hooks postinstall).

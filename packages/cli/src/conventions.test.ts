@@ -2582,6 +2582,28 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     return step as FroBotStep
   }
 
+  // Matches a full 40-character hex commit SHA (as opposed to a floating tag
+  // or a short/abbreviated SHA). Renovate always pins to the full SHA.
+  const FULL_COMMIT_SHA_RE = /^[a-f0-9]{40}$/
+
+  // Asserts a step's `uses:` value is pinned to `expectedRepo` at a full
+  // 40-character hex commit SHA, without freezing which SHA. Action identity
+  // is still proven; the exact version is intentionally not (Renovate bumps
+  // this routinely and a raw SHA freeze provides no real review signal).
+  function assertPinnedToRepo(
+    uses: string | undefined,
+    expectedRepo: string,
+    label: string,
+  ): {ref: string; sha: string} {
+    const match = /^([^@]+)@([a-f0-9]+)$/.exec(uses ?? '')
+    expect(match, `${label}: uses is not in owner/repo@sha form (got ${String(uses)})`).not.toBeNull()
+    const ref = match?.[1] ?? ''
+    const sha = match?.[2] ?? ''
+    expect(ref, `${label}: expected to be pinned to ${expectedRepo}, got ${ref}`).toBe(expectedRepo)
+    expect(FULL_COMMIT_SHA_RE.test(sha), `${label}: expected a full 40-character hex commit SHA, got ${sha}`).toBe(true)
+    return {ref, sha}
+  }
+
   function stepIndex(steps: FroBotStep[], name: string): number {
     return steps.findIndex(candidate => candidate.name === name)
   }
@@ -2880,7 +2902,7 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     expect(parsed.permissions).toEqual({contents: 'read'})
 
     const harden = requireStep(storageSteps(parsed), 'Harden runner')
-    expect(harden.uses).toBe('step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1')
+    assertPinnedToRepo(harden.uses, 'step-security/harden-runner', 'Harden runner')
     expect(harden.with?.['egress-policy']).toBe('block')
     expect(harden.with?.['disable-telemetry']).toBe(true)
     const allowed = String(harden.with?.['allowed-endpoints'] ?? '')
@@ -2897,24 +2919,53 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     }
 
     const checkout = requireStep(storageSteps(parsed), 'Checkout repository')
-    expect(checkout.uses).toBe('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1')
+    assertPinnedToRepo(checkout.uses, 'actions/checkout', 'Checkout repository')
     expect(checkout.with?.['persist-credentials']).toBe(false)
     expect(checkout.with?.['fetch-depth']).toBe(0)
     expect(checkout.with?.token).toBe('$' + '{{ secrets.FRO_BOT_PAT }}')
 
     const agent = requireStep(storageSteps(parsed), 'Run Fro Bot')
-    expect(agent.uses).toBe('fro-bot/agent@620a314e241ec2f4a72167eb1ad2c5a3a909cc86')
+    assertPinnedToRepo(agent.uses, 'fro-bot/agent', 'Run Fro Bot (storage job)')
 
-    for (const pinned of [
-      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
-      'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0',
-      'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0',
-      'fro-bot/agent@620a314e241ec2f4a72167eb1ad2c5a3a909cc86 # v0.111.0',
-      'step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1',
-      'aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4',
+    // Every action used by the storage job must be pinned to a full SHA with a
+    // valid version comment. Action identity and pin discipline are proven,
+    // not the exact version, so a routine Renovate bump of any of these does
+    // not require touching this test. `fro-bot/agent` also appears in the
+    // `fro-bot-content` job, so the search below is scoped to the storage
+    // job's own text — from its job key to the next job key at the same indent
+    // (or end of file) — to prove the pin specifically in this job. The bound
+    // is computed rather than assuming `fro-bot-storage` is last, so appending
+    // a job later cannot silently widen this scope.
+    const storageJobStart = text.indexOf('\n  fro-bot-storage:')
+    expect(storageJobStart, 'could not locate the fro-bot-storage job in the workflow text').toBeGreaterThan(-1)
+    const afterStorageKey = storageJobStart + '\n  fro-bot-storage:'.length
+    const nextJobOffset = text.slice(afterStorageKey).search(/\n {2}[A-Z][\w-]*:/i)
+    const storageJobText =
+      nextJobOffset === -1 ? text.slice(storageJobStart) : text.slice(storageJobStart, afterStorageKey + nextJobOffset)
+    const storageUsesLines = [...storageJobText.matchAll(new RegExp(USES_SHA_LINE_RE.source, 'gm'))]
+
+    for (const repo of [
+      'actions/checkout',
+      'actions/setup-node',
+      'oven-sh/setup-bun',
+      'fro-bot/agent',
+      'step-security/harden-runner',
+      'aws-actions/configure-aws-credentials',
     ]) {
-      expect(text).toContain(pinned)
+      const step = storageSteps(parsed).find(candidate => candidate.uses?.startsWith(`${repo}@`))
+      expect(step, `${repo} step missing from the fro-bot-storage job`).toBeDefined()
+      const {sha} = assertPinnedToRepo(step?.uses, repo, `${repo} (storage job)`)
+
+      const line = storageUsesLines.find(match => match[1] === repo && match[2] === sha)
+      expect(line, `${repo}@${sha} not found as a uses: line inside the fro-bot-storage job`).toBeDefined()
+      const comment = line?.[3]
+      expect(comment, `${repo}@${sha} in the fro-bot-storage job has no trailing version comment`).toBeDefined()
+      expect(
+        comment === undefined ? false : VERSION_COMMENT_RE.test(comment),
+        `${repo}@${sha} in the fro-bot-storage job has an invalid version comment: ${String(comment)}`,
+      ).toBe(true)
     }
+
     expect(findCrossOrgSecretsInherit(parsed)).toEqual([])
   })
 

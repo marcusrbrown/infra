@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-Please use GitHub's private vulnerability reporting to disclose security issues in this repo. You can open a report from the **Security** tab → **"Report a vulnerability"**. This is the preferred channel because it keeps the disclosure private until a fix is shipped.
+Please use GitHub's private vulnerability reporting to disclose security issues in this repo: <https://github.com/marcusrbrown/infra/security/advisories/new>. You can also reach the same form from the **Security** tab → **"Report a vulnerability"**. This is the preferred channel because it keeps the disclosure private until a fix is shipped.
 
 Do not open a public issue for security vulnerabilities.
 

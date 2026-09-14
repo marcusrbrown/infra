@@ -44,7 +44,7 @@
   "devDependencies": {
     "@marcusrbrown/infra-shared": "workspace:*",
     "@modelcontextprotocol/sdk": "1.30.0",
-    "yaml": "2.9.0"
+    "yaml": "2.9.1"
   },
   "engines": {
     "bun": ">=1.0.0"

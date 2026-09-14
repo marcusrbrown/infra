@@ -75,6 +75,124 @@ interface Violation {
   detail: string
 }
 
+// ---------------------------------------------------------------------------
+// Guard: forbid frozen exact-SHA/digest assertions against real repo files
+// ---------------------------------------------------------------------------
+//
+// PR #1337 (Renovate bump of fro-bot/agent v0.111.0 -> v0.112.0) failed CI
+// because a test hardcoded the previous commit SHA. PR #1339 fixed that one
+// test by converting the exact-SHA assertion into a shape assertion (see
+// `assertPinnedToRepo` / `FULL_COMMIT_SHA_RE` further down). An audit then
+// found two more instances of the same defect (fixed above, in the monitor
+// workflow test) and four more assertions that are deliberate, not
+// incidental (the Caddy image pin — see FROZEN_PIN_ALLOWLIST).
+//
+// This guard makes the defect structurally hard to reintroduce: it scans
+// every *.test.ts file in the repo for a string literal that is a *direct
+// argument* to `.toContain(`, `.toBe(`, or `.toEqual(` and contains either a
+// full 40-hex git commit SHA pin (`@<40 hex>`) or a Docker image digest
+// (`@sha256:<64 hex>`). Requiring the literal to be a direct matcher argument
+// is what keeps synthetic YAML/compose fixture blocks assigned to a `const`
+// — inputs to a function under test, not assertions about the repo — out of
+// scope: those fixtures are referenced by variable, never embedded as the
+// matcher's own literal argument.
+
+interface FrozenPinAllowlistEntry {
+  file: string
+  reason: string
+}
+
+// Deliberate, audited exceptions. Every entry here asserts the exact Caddy
+// image pin in the 'uses the last known linux/amd64-compatible Caddy image'
+// test. The pin is deliberate, not incidental: .github/renovate.json5 gates
+// `caddy` with `allowedVersions: '<2.12.0'`, `automerge: false`, and
+// `dependencyDashboardApproval: true` because this exact digest was manually
+// verified to have a linux/amd64 manifest on 2026-07-13. Renovate cannot
+// auto-bump it, and this test breaking when someone moves off 2.11.4-alpine
+// is the intended forcing function to re-verify the manifest before bumping.
+const CADDY_PIN_REASON =
+  "Deliberate Caddy digest pin, manually verified linux/amd64-compatible on 2026-07-13; gated in .github/renovate.json5 (allowedVersions '<2.12.0', automerge: false, dependencyDashboardApproval: true) so Renovate cannot silently move off it — the test breaking on an upgrade attempt is the intended forcing function to re-verify the manifest."
+
+const FROZEN_PIN_ALLOWLIST: readonly FrozenPinAllowlistEntry[] = [
+  {file: 'apps/cliproxy/docker-compose.test.ts', reason: CADDY_PIN_REASON},
+  {file: 'apps/dashboard/docker-compose.test.ts', reason: CADDY_PIN_REASON},
+  {file: 'apps/broker/docker-compose.test.ts', reason: CADDY_PIN_REASON},
+  {file: 'apps/umami/docker-compose.test.ts', reason: CADDY_PIN_REASON},
+]
+
+// A run of a single repeated hex character (e.g. `aaaa…`, `bbbb…`, `cccc…`,
+// `dddd…`) is a synthetic fixture placeholder, never a real pin.
+function isSyntheticPlaceholderHex(hex: string): boolean {
+  return /^(.)\1+$/.test(hex)
+}
+
+// `@<40-hex>` — a GitHub Actions commit-SHA pin embedded in a matcher literal.
+const FROZEN_SHA_PIN_RE = /@([a-f0-9]{40})(?![a-f0-9])/g
+// `@sha256:<64-hex>` — a Docker/OCI image-digest pin embedded in a matcher
+// literal. The leading `@` is required (mirroring the real `image@sha256:…`
+// reference form used throughout this repo's compose files and workflows) so
+// a bare `sha256:<64-hex>` value produced entirely inside a unit test (e.g. a
+// parser test's own fixture-derived expected value, never copied from a real
+// repository file) is not mistaken for a repo pin.
+const FROZEN_IMAGE_DIGEST_RE = /@(sha256:[a-f0-9]{64})(?![a-f0-9])/g
+
+// Matches `.toContain(`, `.toBe(`, or `.toEqual(` whose argument is a string
+// literal — same line or spanning multiple lines. The literal must be the
+// first token after the opening paren (only whitespace/newlines allowed in
+// between), so a matcher argument that is an identifier, array, or function
+// call (e.g. the paths-filter YAML fixtures below) is never matched.
+const FROZEN_PIN_MATCHER_ARG_RE = /\.(toContain|toBe|toEqual)\(\s*(['"`])((?:\\.|(?!\2)[\s\S])*?)\2/g
+
+function listTestFiles(): string[] {
+  const glob = new Bun.Glob('**/*.test.ts')
+  return [...glob.scanSync({cwd: REPO_ROOT, absolute: true})].filter(f => !f.includes('/node_modules/'))
+}
+
+// This file is deliberately NOT excluded from its own scan. Both instances of
+// the defect found so far lived here, so skipping it would blind the guard to
+// its likeliest target. Self-flagging is prevented by construction instead: the
+// allowlist entries and the pattern regexes below are not matcher arguments, so
+// FROZEN_PIN_MATCHER_ARG_RE never sees them.
+function findFrozenPinViolations(): Violation[] {
+  const violations: Violation[] = []
+
+  for (const filePath of listTestFiles()) {
+    const relPath = relative(REPO_ROOT, filePath)
+    const allowlisted = FROZEN_PIN_ALLOWLIST.some(entry => entry.file === relPath)
+    const text = readFileSync(filePath, 'utf8')
+
+    for (const matcherMatch of text.matchAll(FROZEN_PIN_MATCHER_ARG_RE)) {
+      const matcherName = matcherMatch[1] ?? ''
+      const quote = matcherMatch[2] ?? "'"
+      const literal = matcherMatch[3] ?? ''
+      const literalStart = (matcherMatch.index ?? 0) + matcherMatch[0].indexOf(quote) + 1
+
+      const offenders = [...literal.matchAll(FROZEN_SHA_PIN_RE), ...literal.matchAll(FROZEN_IMAGE_DIGEST_RE)]
+      for (const offender of offenders) {
+        const raw = offender[1] ?? ''
+        const isDigest = raw.startsWith('sha256:')
+        const hex = isDigest ? raw.slice('sha256:'.length) : raw
+        if (isSyntheticPlaceholderHex(hex)) continue
+        if (allowlisted) continue
+
+        const absoluteOffset = literalStart + (offender.index ?? 0)
+        const line = text.slice(0, absoluteOffset).split('\n').length
+        const truncated = isDigest ? `sha256:${hex.slice(0, 12)}…` : `@${hex.slice(0, 12)}…`
+
+        violations.push({
+          file: relPath,
+          detail:
+            `line ${line}: .${matcherName}(...) asserts exact-pin literal "${truncated}" — Renovate manages ` +
+            `this value and rewrites it routinely. Assert pin *shape* (a full 40-hex commit SHA, or a ` +
+            `sha256:64-hex digest, with a valid version comment where applicable) instead of the exact ` +
+            `value, or add this file to FROZEN_PIN_ALLOWLIST with a reason.`,
+        })
+      }
+    }
+  }
+  return violations
+}
+
 // `.github/` is a dot-directory; Bun.Glob skips dot-dirs by default, so every
 // glob that traverses `.github/` must pass `{ dot: true }`. Without it, the
 // workflow rules silently pass on an empty file set. The tripwire test at the
@@ -400,8 +518,25 @@ describe('repo conventions', () => {
     expect(text).not.toContain('environment:')
     expect(text).not.toContain('secrets: inherit')
     expect(text).toContain('persist-credentials: false')
-    expect(text).toContain('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1')
-    expect(text).toContain('oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0')
+
+    // Neither action is gated in .github/renovate.json5, so both are routine
+    // auto-bumps. `actions/checkout`'s SHA alone appears in 16 workflow files,
+    // so a single Renovate bump rewrites all of them at once; freezing the
+    // exact SHA here provides no real review signal and just breaks this test
+    // on every such bump. Pin *shape* is proven instead: a full 40-character
+    // hex commit SHA with a valid trailing version comment.
+    for (const action of ['actions/checkout', 'oven-sh/setup-bun'] as const) {
+      const line = [...text.matchAll(new RegExp(USES_SHA_LINE_RE.source, 'gm'))].find(match => match[1] === action)
+      expect(line, `${action}: uses: line not found in cliproxy-auth-monitor.yaml`).toBeDefined()
+      const sha = line?.[2] ?? ''
+      expect(sha, `${action}: expected a full 40-character hex commit SHA, got ${sha}`).toMatch(/^[a-f0-9]{40}$/)
+      const comment = line?.[3] ?? ''
+      expect(
+        VERSION_COMMENT_RE.test(comment),
+        `${action}: expected a valid trailing version comment, got ${JSON.stringify(comment)}`,
+      ).toBe(true)
+    }
+
     expect(text).toContain('bun install --frozen-lockfile --ignore-scripts')
   })
 
@@ -644,6 +779,13 @@ describe('repo conventions', () => {
       violations,
       `Sensitive infra MCP tools must be source-gated (not in MCP_ALLOWLIST) and denied in opencode.jsonc:\n${violations.join('\n')}`,
     ).toEqual([])
+  })
+})
+
+describe('frozen exact-pin assertion guard', () => {
+  it('forbids test files from asserting an exact Renovate-managed SHA/digest pin as a matcher literal', () => {
+    const violations = findFrozenPinViolations()
+    expect(violations).toEqual([])
   })
 })
 

@@ -1,5 +1,17 @@
 # @marcusrbrown/infra
 
+## 0.23.0
+
+### Minor Changes
+
+- Update dependencies across 2 packages ([#1347](https://github.com/marcusrbrown/infra/pull/1347))
+  
+  **Dependencies updated**: `yaml`
+  
+  **Merged changeset** combining 2 related updates across affected packages.
+  
+  **Affected packages**: `@marcusrbrown/infra`, `@marcusrbrown/infra-shared`
+
 ## 0.22.0
 
 ### Minor Changes

@@ -615,6 +615,24 @@ describe('repo conventions', () => {
     expect(authTokenFiles).toEqual([])
   })
 
+  it('changesets only versions the published CLI package', async () => {
+    const config = (await Bun.file(resolve(REPO_ROOT, '.changeset/config.json')).json()) as {
+      privatePackages?: {tag?: unknown; version?: unknown}
+    }
+    expect(config.privatePackages).toEqual({tag: false, version: false})
+
+    const releasablePackages: string[] = []
+    for (const file of listPackageJsonFiles()) {
+      const pkg = (await Bun.file(file).json()) as {name?: unknown; private?: unknown}
+      if (typeof pkg.name !== 'string') continue
+      if (pkg.private !== true) {
+        releasablePackages.push(pkg.name)
+      }
+    }
+
+    expect(releasablePackages).toEqual(['@marcusrbrown/infra'])
+  })
+
   it('no `bundledDependencies` in any package.json', async () => {
     const files = listPackageJsonFiles()
     const offenders: string[] = []

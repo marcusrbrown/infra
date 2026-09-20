@@ -128,10 +128,11 @@ describe('prune-untagged-packages: pure contracts', () => {
     ).toBe('https://api.github.com/x?page=2')
   })
 
-  it('resolves the pruner env and rejects a missing token', () => {
-    expect(readPrunerEnv({}, [])).toBeNull()
-    expect(readPrunerEnv({GITHUB_TOKEN: 't'}, [])).toEqual({token: 't', apply: false})
-    expect(readPrunerEnv({GITHUB_TOKEN: 't'}, ['--apply'])).toEqual({token: 't', apply: true})
+  it('distinguishes a missing token from an empty one, and resolves a present token', () => {
+    expect(readPrunerEnv({}, [])).toEqual({ok: false, error: 'missing'})
+    expect(readPrunerEnv({GITHUB_TOKEN: ''}, [])).toEqual({ok: false, error: 'empty'})
+    expect(readPrunerEnv({GITHUB_TOKEN: 't'}, [])).toEqual({ok: true, env: {token: 't', apply: false}})
+    expect(readPrunerEnv({GITHUB_TOKEN: 't'}, ['--apply'])).toEqual({ok: true, env: {token: 't', apply: true}})
   })
 })
 
@@ -258,7 +259,10 @@ describe('prune-untagged-packages: safety gates', () => {
     expect(gateway?.status).toBe('aborted')
     expect(gateway?.abort_code).toBe('candidate_cap_exceeded')
     expect(registry.deletedIds['infra-gateway']).toEqual([])
-    const manifestCalls = registry.requests.filter(request => request.url.includes('/infra-gateway/manifests/'))
+    const manifestCalls = registry.requests.filter(request => {
+      const parsed = new URL(request.url)
+      return parsed.host === 'ghcr.io' && parsed.pathname.startsWith(`/v2/${OWNER}/infra-gateway/manifests/`)
+    })
     expect(manifestCalls).toHaveLength(0)
   })
 
@@ -358,6 +362,167 @@ describe('prune-untagged-packages: safety gates', () => {
     expect(gateway?.untagged).toBe(0)
     expect(gateway?.deleted).toBe(0)
     expect(gateway?.skipped).toBe(0)
+  })
+
+  it('deletes untagged versions in ascending id order given a shuffled API response', async () => {
+    const registry = new FakeRegistry()
+    fixtureRealisticPackage(registry, 'infra-gateway', 2, 5)
+    fixtureRealisticPackage(registry, 'infra-workspace', 2, 0)
+    // Shuffle the untagged versions so API return order cannot be relied on.
+    const gatewayVersions = registry.versions['infra-gateway'] ?? []
+    registry.versions['infra-gateway'] = [
+      gatewayVersions[4]!,
+      gatewayVersions[0]!,
+      gatewayVersions[3]!,
+      gatewayVersions[1]!,
+      gatewayVersions[2]!,
+      gatewayVersions[5]!,
+      gatewayVersions[6]!,
+    ]
+
+    await pruneUntaggedPackages(options(registry, true))
+
+    const deleteOrder = registry.requests
+      .filter(request => request.method === 'DELETE')
+      .map(request => Number(new URL(request.url).pathname.split('/').pop()))
+    expect(deleteOrder).toEqual([5000, 5001, 5002, 5003, 5004])
+  })
+
+  it('aborts with pagination_invalid when a versions page returns a malformed body', async () => {
+    const registry = new FakeRegistry()
+    fixtureRealisticPackage(registry, 'infra-gateway', 2, 3)
+    fixtureRealisticPackage(registry, 'infra-workspace', 2, 3)
+    registry.override = (method, url) => {
+      if (
+        method === 'GET' &&
+        url.host === 'api.github.com' &&
+        url.pathname === `/users/${OWNER}/packages/container/infra-gateway/versions`
+      ) {
+        return new Response(JSON.stringify({not: 'an array'}), {status: 200})
+      }
+      return undefined
+    }
+
+    const summaries = await pruneUntaggedPackages(options(registry, true))
+
+    const gateway = summaries.find(summary => summary.package === 'infra-gateway')
+    expect(gateway?.status).toBe('aborted')
+    expect(gateway?.abort_code).toBe('pagination_invalid')
+    expect(registry.deletedIds['infra-gateway']).toEqual([])
+  })
+
+  it('aborts with pagination_incomplete when the next Link URL is unparseable', async () => {
+    const registry = new FakeRegistry()
+    fixtureRealisticPackage(registry, 'infra-gateway', 2, 3)
+    fixtureRealisticPackage(registry, 'infra-workspace', 2, 3)
+    registry.override = (method, url) => {
+      if (
+        method === 'GET' &&
+        url.host === 'api.github.com' &&
+        url.pathname === `/users/${OWNER}/packages/container/infra-gateway/versions`
+      ) {
+        const headers = new Headers({link: '<http://exa mple.com/next>; rel="next"'})
+        return new Response(JSON.stringify([]), {status: 200, headers})
+      }
+      return undefined
+    }
+
+    const summaries = await pruneUntaggedPackages(options(registry, true))
+
+    const gateway = summaries.find(summary => summary.package === 'infra-gateway')
+    expect(gateway?.status).toBe('aborted')
+    expect(gateway?.abort_code).toBe('pagination_incomplete')
+    expect(registry.deletedIds['infra-gateway']).toEqual([])
+  })
+
+  it('aborts with pagination_incomplete when the next Link URL is a different origin', async () => {
+    const registry = new FakeRegistry()
+    fixtureRealisticPackage(registry, 'infra-gateway', 2, 3)
+    fixtureRealisticPackage(registry, 'infra-workspace', 2, 3)
+    registry.override = (method, url) => {
+      if (
+        method === 'GET' &&
+        url.host === 'api.github.com' &&
+        url.pathname === `/users/${OWNER}/packages/container/infra-gateway/versions`
+      ) {
+        const headers = new Headers({link: '<https://evil.example.com/next>; rel="next"'})
+        return new Response(JSON.stringify([]), {status: 200, headers})
+      }
+      return undefined
+    }
+
+    const summaries = await pruneUntaggedPackages(options(registry, true))
+
+    const gateway = summaries.find(summary => summary.package === 'infra-gateway')
+    expect(gateway?.status).toBe('aborted')
+    expect(gateway?.abort_code).toBe('pagination_incomplete')
+    expect(registry.deletedIds['infra-gateway']).toEqual([])
+  })
+
+  it('aborts with registry_token_failed when the GHCR token endpoint returns non-200', async () => {
+    const registry = new FakeRegistry()
+    fixtureRealisticPackage(registry, 'infra-gateway', 2, 3)
+    fixtureRealisticPackage(registry, 'infra-workspace', 2, 3)
+    registry.override = (method, url) => {
+      if (method === 'GET' && url.host === 'ghcr.io' && url.pathname === '/token') {
+        return new Response(JSON.stringify({message: 'forbidden'}), {status: 403})
+      }
+      return undefined
+    }
+
+    const summaries = await pruneUntaggedPackages(options(registry, true))
+
+    const gateway = summaries.find(summary => summary.package === 'infra-gateway')
+    expect(gateway?.status).toBe('aborted')
+    expect(gateway?.abort_code).toBe('registry_token_failed')
+    expect(registry.deletedIds['infra-gateway']).toEqual([])
+  })
+
+  it('aborts with registry_token_failed when the GHCR token response is missing the token field', async () => {
+    const registry = new FakeRegistry()
+    fixtureRealisticPackage(registry, 'infra-gateway', 2, 3)
+    fixtureRealisticPackage(registry, 'infra-workspace', 2, 3)
+    registry.override = (method, url) => {
+      if (method === 'GET' && url.host === 'ghcr.io' && url.pathname === '/token') {
+        return new Response(JSON.stringify({token: ''}), {status: 200})
+      }
+      return undefined
+    }
+
+    const summaries = await pruneUntaggedPackages(options(registry, true))
+
+    const gateway = summaries.find(summary => summary.package === 'infra-gateway')
+    expect(gateway?.status).toBe('aborted')
+    expect(gateway?.abort_code).toBe('registry_token_failed')
+    expect(registry.deletedIds['infra-gateway']).toEqual([])
+  })
+
+  it('aborts with manifest_fetch_failed when a tagged manifest body fails schema validation', async () => {
+    const registry = new FakeRegistry()
+    fixtureRealisticPackage(registry, 'infra-gateway', 2, 3)
+    fixtureRealisticPackage(registry, 'infra-workspace', 2, 3)
+    const firstDigest = registry.versions['infra-gateway']?.[0]?.digest ?? ''
+    registry.override = (method, url) => {
+      if (
+        method === 'GET' &&
+        url.host === 'ghcr.io' &&
+        url.pathname === `/v2/${OWNER}/infra-gateway/manifests/${firstDigest}`
+      ) {
+        // manifests must be an array of {digest: string}; this schema-fails.
+        return new Response(JSON.stringify({manifests: 'not-an-array'}), {status: 200})
+      }
+      return undefined
+    }
+
+    const summaries = await pruneUntaggedPackages(options(registry, true))
+
+    const gateway = summaries.find(summary => summary.package === 'infra-gateway')
+    expect(gateway?.status).toBe('aborted')
+    expect(gateway?.abort_code).toBe('manifest_fetch_failed')
+    expect(registry.deletedIds['infra-gateway']).toEqual([])
+
+    const workspace = summaries.find(summary => summary.package === 'infra-workspace')
+    expect(workspace?.status).toBe('completed')
   })
 
   it('uses the specified-user endpoint form for every list and delete call', async () => {

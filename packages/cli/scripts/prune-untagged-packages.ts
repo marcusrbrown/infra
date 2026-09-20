@@ -323,7 +323,9 @@ export async function pruneUntaggedPackages(options: PrunerOptions): Promise<Pac
         }
       }
 
-      for (const version of untagged) {
+      // Ascending-id order keeps the delete sequence auditable against the run log.
+      const deletionOrder = [...untagged].sort((a, b) => a.id - b.id)
+      for (const version of deletionOrder) {
         await deleteVersion(pkg, version.id)
         progress.deleted += 1
       }
@@ -364,19 +366,24 @@ export interface PrunerEnv {
   apply: boolean
 }
 
-export function readPrunerEnv(environment: Record<string, string | undefined>, args: string[]): PrunerEnv | null {
+export type PrunerEnvResult = {ok: true; env: PrunerEnv} | {ok: false; error: 'missing' | 'empty'}
+
+export function readPrunerEnv(environment: Record<string, string | undefined>, args: string[]): PrunerEnvResult {
   const token = environment.GITHUB_TOKEN
-  if (token === undefined || token === '') return null
-  return {token, apply: args.includes('--apply')}
+  if (token === undefined) return {ok: false, error: 'missing'}
+  if (token === '') return {ok: false, error: 'empty'}
+  return {ok: true, env: {token, apply: args.includes('--apply')}}
 }
 
 async function main(): Promise<void> {
-  const env = readPrunerEnv(process.env, process.argv.slice(2))
-  if (env === null) {
-    process.stderr.write('GITHUB_TOKEN is required\n')
+  const result = readPrunerEnv(process.env, process.argv.slice(2))
+  if (!result.ok) {
+    const message = result.error === 'missing' ? 'GITHUB_TOKEN is not set' : 'GITHUB_TOKEN is set but empty'
+    process.stderr.write(`${message}\n`)
     process.exitCode = 1
     return
   }
+  const env = result.env
   const summaries = await pruneUntaggedPackages({
     token: env.token,
     apply: env.apply,

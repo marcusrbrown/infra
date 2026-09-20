@@ -59,7 +59,9 @@ function parseCaddyfile(text: string): {namedMatchers: Map<string, NamedMatcher>
   }
 
   const blocks: HandleBlock[] = []
-  const handleRe = /handle(?:[^\S\n]+(\S+))?[^\S\n]*\{/g
+  // Left boundary only: a trailing \b is redundant here because `handle` is
+  // always followed by whitespace or `{`.
+  const handleRe = /\bhandle(?:[^\S\n]+(\S+))?[^\S\n]*\{/g
   for (const match of site.matchAll(handleRe)) {
     const openIdx = (match.index ?? 0) + match[0].length - 1
     const closeIdx = findMatchingBrace(site, openIdx)
@@ -92,7 +94,15 @@ function resolve(
     if (token.startsWith('@')) {
       const named = parsed.namedMatchers.get(token.slice(1))
       if (!named) throw new Error(`undefined named matcher ${token}`)
-      const matched = named.type === 'exact' ? named.paths.includes(bare) : named.pattern.test(bare)
+      // Caddy `path` matchers honor a trailing `*` as a prefix match. Modelling
+      // that is what lets the anti-widening tests below fail on the mutation
+      // they are named for: with plain string equality, `path /privacy*` would
+      // match nothing at all, so `/privacy-policy-internal` would fall to the
+      // catch-all and look correctly excluded while production widened.
+      const matched =
+        named.type === 'exact'
+          ? named.paths.some(p => (p.endsWith('*') ? bare.startsWith(p.slice(0, -1)) : p === bare))
+          : named.pattern.test(bare)
       if (matched) return {upstream: block.upstream, rewritten: block.rewritten}
       continue
     }

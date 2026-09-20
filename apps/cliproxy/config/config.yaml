@@ -15,6 +15,15 @@ debug: false
 request-retry: 3
 usage-statistics-enabled: true
 
+# Scopes a quota cooldown to the model that returned 429 instead of cooling the
+# whole OAuth credential across its aliased siblings (CLIProxyAPI v7.3.7+).
+# Matters here because oauth-model-alias forks seven Claude models onto one
+# credential. Bootstrap/template only: no field-scoped management endpoint
+# exists for the `claude` section, so a normal deploy never applies this to an
+# existing runtime config.
+claude:
+  model-level-cooling: true
+
 # Client-facing model aliases applied at deploy time via the management API
 # (PUT /v0/management/oauth-model-alias), not by uploading this file. Setting
 # fork: true keeps both the short alias and the dated upstream id available.

@@ -55,4 +55,4 @@ jobs:
           # Exclude repo-level tooling and deployed apps from triggering changesets.
           # Release notes track the published CLI package; app dependency bumps are
           # deployment changes tracked in git history and deploy workflows, not npm release notes.
-          exclude-patterns: '.github/**,bun.lock,package.json,apps/**'
+          exclude-patterns: '.github/**,bun.lock,package.json,apps/**,packages/shared/**'

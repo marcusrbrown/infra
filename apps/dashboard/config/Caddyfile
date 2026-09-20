@@ -17,6 +17,10 @@
 	handle @assets {
 		reverse_proxy dashboard:3000
 	}
+	@privacy path /privacy /privacy/
+	handle @privacy {
+		reverse_proxy dashboard:3000
+	}
 	handle {
 		rewrite * /
 		reverse_proxy dashboard:3000

@@ -1100,6 +1100,20 @@ describe('committed Caddyfile structure', () => {
     expect(caddyfile).not.toMatch(/\/assets\/\*|\/manifest\.webmanifest|\/icon-\*/)
   })
 
+  it('routes /privacy through a dedicated exact-path handle before the catch-all', () => {
+    const matcherIdx = caddyfile.indexOf('@privacy path')
+    const privacyHandleIdx = caddyfile.indexOf('handle @privacy')
+    const catchAllIdx = caddyfile.lastIndexOf('handle {')
+    const privacySection = handleSection('handle @privacy', 'handle {')
+
+    expect(caddyfile).toContain('@privacy path /privacy /privacy/')
+    expect(matcherIdx).toBeGreaterThan(-1)
+    expect(matcherIdx).toBeLessThan(privacyHandleIdx)
+    expect(privacyHandleIdx).toBeLessThan(catchAllIdx)
+    expect(privacySection).toMatch(/reverse_proxy\s+dashboard:3000/)
+    expect(privacySection).not.toContain('rewrite * /')
+  })
+
   it('keeps the SPA rewrite only in the final catch-all handle', () => {
     const operatorIdx = caddyfile.indexOf('handle /operator/*')
     const catchAllIdx = caddyfile.lastIndexOf('handle {')

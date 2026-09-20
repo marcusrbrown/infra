@@ -615,6 +615,79 @@ describe('repo conventions', () => {
     expect(authTokenFiles).toEqual([])
   })
 
+  it('changesets only versions the published CLI package', async () => {
+    const config = (await Bun.file(resolve(REPO_ROOT, '.changeset/config.json')).json()) as {
+      ignore?: unknown
+      privatePackages?: {tag?: unknown; version?: unknown}
+    }
+    expect(config.ignore).toEqual([])
+    expect(config.privatePackages).toEqual({tag: false, version: false})
+
+    const releasablePackages: string[] = []
+    for (const file of listPackageJsonFiles()) {
+      const pkg = (await Bun.file(file).json()) as {name?: unknown; private?: unknown}
+      if (typeof pkg.name !== 'string') continue
+      if (pkg.private !== true) {
+        releasablePackages.push(pkg.name)
+      }
+    }
+
+    expect(releasablePackages).toEqual(['@marcusrbrown/infra'])
+  })
+
+  it('no changeset mixes private and publishable packages', async () => {
+    const glob = new Bun.Glob('*.md')
+    const changesetFiles = [...glob.scanSync({cwd: resolve(REPO_ROOT, '.changeset'), absolute: true})].filter(
+      f => !f.endsWith('README.md'),
+    )
+
+    const privateByName = new Map<string, boolean>()
+    for (const file of listPackageJsonFiles()) {
+      const pkg = (await Bun.file(file).json()) as {name?: unknown; private?: unknown}
+      if (typeof pkg.name === 'string') privateByName.set(pkg.name, pkg.private === true)
+    }
+
+    const violations: Violation[] = []
+    for (const file of changesetFiles) {
+      const text = await Bun.file(file).text()
+      const frontmatterMatch = text.match(/^---\n([\s\S]*?)\n---/)
+      if (!frontmatterMatch) continue
+      const names = [...(frontmatterMatch[1] ?? '').matchAll(/^'([^']+)':\s*\S+$/gm)].map(m => m[1] ?? '')
+
+      const known = names.filter(name => privateByName.has(name))
+      const isPrivate = known.filter(name => privateByName.get(name) === true)
+      const isPublic = known.filter(name => privateByName.get(name) === false)
+      if (isPrivate.length > 0 && isPublic.length > 0) {
+        violations.push({
+          file: relative(REPO_ROOT, file),
+          detail: `mixes private (${isPrivate.join(', ')}) and publishable (${isPublic.join(', ')}) packages`,
+        })
+      }
+    }
+    expect(violations).toEqual([])
+  })
+
+  it('renovate-changesets excludes every private workspace package path', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/renovate-changesets.yaml')).text()
+    const excludeMatch = text.match(/exclude-patterns:\s*'([^']*)'/)
+    expect(excludeMatch, 'exclude-patterns not found in renovate-changesets.yaml').not.toBeNull()
+    const patterns = (excludeMatch?.[1] ?? '').split(',').map(p => p.trim())
+
+    const privateDirs: string[] = []
+    for (const file of listPackageJsonFiles()) {
+      if (file === resolve(REPO_ROOT, 'package.json')) continue
+      const pkg = (await Bun.file(file).json()) as {name?: unknown; private?: unknown}
+      if (pkg.private === true) {
+        privateDirs.push(relative(REPO_ROOT, resolve(file, '..')))
+      }
+    }
+
+    const uncovered = privateDirs.filter(
+      dir => !patterns.some(pattern => new Bun.Glob(pattern).match(`${dir}/package.json`)),
+    )
+    expect(uncovered, `Private package dirs not covered by exclude-patterns: ${uncovered.join(', ')}`).toEqual([])
+  })
+
   it('no `bundledDependencies` in any package.json', async () => {
     const files = listPackageJsonFiles()
     const offenders: string[] = []

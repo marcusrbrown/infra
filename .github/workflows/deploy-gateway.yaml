@@ -86,6 +86,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # Fixed constant (not commit-derived) so build-arg value never changes and
+      # cache hits are preserved. Rewrites config/history/index timestamps; layer
+      # tar-entry timestamps need rewrite-timestamp=true on the exporter (below).
+      SOURCE_DATE_EPOCH: '0'
     outputs:
       gateway_digest: ${{ steps.build-gateway.outputs.digest }}
       workspace_digest: ${{ steps.build-workspace.outputs.digest }}
@@ -104,6 +109,14 @@ jobs:
           ref: ${{ steps.upstream.outputs.ref }}
           path: upstream-agent
 
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Pin the BuildKit image itself — the preinstalled buildx on ubuntu-latest
+          # is an uncontrolled input otherwise. >= v0.13 required for rewrite-timestamp.
+          driver-opts: |
+            image=moby/buildkit:v0.33.0
+
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -119,6 +132,11 @@ jobs:
           file: upstream-agent/deploy/gateway.Dockerfile
           push: true
           tags: ghcr.io/marcusrbrown/infra-gateway:${{ steps.upstream.outputs.ref }}-${{ github.sha }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          # type=registry is shorthand for type=image,push=true — the export declares
+          # the push itself rather than relying on the push: flag merging into it.
+          outputs: type=registry,rewrite-timestamp=true
 
       - name: Build and push workspace image
         id: build-workspace
@@ -128,6 +146,9 @@ jobs:
           file: upstream-agent/deploy/workspace.Dockerfile
           push: true
           tags: ghcr.io/marcusrbrown/infra-workspace:${{ steps.upstream.outputs.ref }}-${{ github.sha }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          outputs: type=registry,rewrite-timestamp=true
 
   scan-images:
     needs: build-images

@@ -1,5 +1,13 @@
 # @marcusrbrown/infra
 
+## 0.23.0
+
+### Minor Changes
+
+- Update dependencies ([#1347](https://github.com/marcusrbrown/infra/pull/1347))
+  
+  **Dependencies updated**: `yaml`
+
 ## 0.22.0
 
 ### Minor Changes

@@ -609,6 +609,10 @@ env:
       it onto the current report, posts supersession comments, closes superseded
       trustworthy reports, and proves final state. Do not create labels, post
       supersession comments, close or reopen issues, or post a final proof.
+    - When a run makes file changes, put each independent concern on its own
+      branch and PR with a conventional-commit title scoped to that concern.
+      Never combine unrelated changes into one PR. Where a category sets its
+      own batching rule for same-kind changes, that narrower rule wins.
 
     Project conventions (MUST follow for code changes):
     - TypeScript strict mode: no `any`, no `@ts-ignore`, no `@ts-expect-error`
@@ -946,6 +950,20 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.FRO_BOT_PAT }}
 
+      # fro-bot/agent scrubs GH_TOKEN/GITHUB_TOKEN from its child env, so the
+      # push credential must be on disk. Safe here because this job's runs are
+      # always classified `provision` (schedule/workflow_dispatch), and the
+      # action's fail-closed on-disk-credential check only fires for
+      # `withhold`-classified (mention) runs — do not add this to fro-bot-content.
+      - name: Enable authenticated git push
+        env:
+          FRO_BOT_PAT: ${{ secrets.FRO_BOT_PAT }}
+        run: |
+          set -euo pipefail
+          auth="$(printf '%s' "x-access-token:${FRO_BOT_PAT}" | base64 | tr -d '\n')"
+          echo "::add-mask::${auth}"
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic ${auth}"
+
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1029,6 +1047,7 @@ jobs:
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
           prompt: ${{ env.PROMPT }}
           timeout: 0
+          output-mode: branch-pr
           skip-cache: ${{ steps.classify.outputs.mode == 'daily-equivalent' }}
           s3-backup: true
           s3-bucket: ${{ vars.FRO_BOT_S3_BUCKET }}

@@ -75,6 +75,9 @@ jobs:
   # approver sees the version and any input errors before spending an approval.
   validate-inputs:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     timeout-minutes: 5
     steps:
       - name: Log version
@@ -115,6 +118,33 @@ jobs:
           echo "Invalid deploy input mode: version is required when digest is set."
           echo "Either omit all inputs (no-version fallback) or provide version (+ optional digest)."
           exit 1
+
+      - name: Reject stale dashboard dispatch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! newer_runs="$(gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow deploy-dashboard.yaml \
+            --limit 1000 \
+            --json databaseId \
+            --jq ".[] | select(.databaseId > ${CURRENT_RUN_ID}) | .databaseId")"; then
+            echo "Unable to list newer dashboard runs." >&2
+            exit 1
+          fi
+
+          if [[ -n "${newer_runs}" ]]; then
+            printf 'Newer dashboard run(s) supersede this run: %s\n' "${newer_runs//$'\n'/, }."
+            echo "Approve the newer run instead."
+            exit 1
+          fi
+
+          echo "No newer dashboard run found; continuing."
 
   deploy-dashboard:
     needs: validate-inputs

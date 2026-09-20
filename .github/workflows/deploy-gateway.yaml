@@ -80,10 +80,6 @@ on:
       DASHBOARD_VPC_IP:
         required: false
 
-concurrency:
-  group: deploy-gateway-${{ github.ref_name }}
-  cancel-in-progress: false
-
 jobs:
   build-images:
     runs-on: ubuntu-latest
@@ -183,6 +179,9 @@ jobs:
     needs: [build-images, scan-images]
     runs-on: ubuntu-latest
     environment: gateway
+    concurrency:
+      group: deploy-gateway-${{ github.ref_name }}
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

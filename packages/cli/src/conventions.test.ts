@@ -1936,8 +1936,10 @@ describe('deploy-gateway.yaml: optional operator secret declarations (issue 1)',
 // own concurrency group, so the aggregate group is redundant and harmful.
 //
 // Each per-app deploy workflow MUST have its own concurrency block with
-// group `deploy-<app>-` and cancel-in-progress: false. Dashboard keeps its
-// block at deploy-job scope so its pre-gate staleness guard runs before token minting.
+// group `deploy-<app>-` and cancel-in-progress: false. Dashboard and gateway
+// both keep their block at deploy-job scope: dashboard's post-gate staleness
+// guard (and its pre-gate precheck copy) runs before token minting, and
+// gateway's job-scoped lock serializes deployment without blocking builds.
 
 describe('deploy.yaml: no aggregate-level concurrency (regression guard)', () => {
   const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
@@ -1966,13 +1968,45 @@ describe('per-app deploy workflows: each has its own concurrency block', () => {
         concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
         jobs?: Record<string, {concurrency?: {group?: string; 'cancel-in-progress'?: boolean}}>
       }
-      const concurrency = app === 'dashboard' ? parsed.jobs?.['deploy-dashboard']?.concurrency : parsed.concurrency
+      const jobScoped = app === 'dashboard' || app === 'gateway'
+      const concurrency = jobScoped ? parsed.jobs?.[`deploy-${app}`]?.concurrency : parsed.concurrency
       expect(concurrency).toBeDefined()
       expect(concurrency?.group).toContain(`deploy-${app}-`)
       expect(concurrency?.['cancel-in-progress']).toBe(false)
-      if (app === 'dashboard') expect(parsed.concurrency).toBeUndefined()
+      if (jobScoped) expect(parsed.concurrency).toBeUndefined()
     })
   }
+})
+
+describe('deploy-gateway.yaml: concurrency is job-scoped to deploy-gateway only', () => {
+  const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
+
+  it('build-images and scan-images have no concurrency block', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: Record<string, {concurrency?: unknown}>
+    }
+    expect(parsed.jobs?.['build-images']?.concurrency).toBeUndefined()
+    expect(parsed.jobs?.['scan-images']?.concurrency).toBeUndefined()
+  })
+
+  it('deploy-gateway retains the exact concurrency group, cancel-in-progress, environment, and needs', async () => {
+    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'deploy-gateway'?: {
+          concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
+          environment?: string
+          needs?: string | string[]
+        }
+      }
+    }
+    const deployGateway = parsed.jobs?.['deploy-gateway']
+    expect(deployGateway?.concurrency?.group).toBe('deploy-gateway-' + '${' + '{ github.ref_name }}')
+    expect(deployGateway?.concurrency?.['cancel-in-progress']).toBe(false)
+    expect(deployGateway?.environment).toBe('gateway')
+    expect(deployGateway?.needs).toEqual(['build-images', 'scan-images'])
+  })
 })
 
 // ─── VPC bridge secrets: CI-vs-local parity ──────────────────────────────────
@@ -2326,6 +2360,51 @@ describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => 
       getTokenIndex,
       'staleness guard must run before "Get app token" — a guard that runs after secrets are minted defeats its purpose',
     ).toBeGreaterThan(guardIndex)
+  })
+})
+
+describe('deploy-dashboard.yaml: pre-gate staleness precheck in validate-inputs', () => {
+  const DEPLOY_DASHBOARD_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')
+
+  it('validate-inputs job has no environment (ungated)', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: {'validate-inputs'?: {environment?: unknown}}}
+    expect(parsed.jobs?.['validate-inputs']?.environment).toBeUndefined()
+  })
+
+  it('validate-inputs job grants exactly contents: read, actions: read', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: {'validate-inputs'?: {permissions?: unknown}}}
+    expect(parsed.jobs?.['validate-inputs']?.permissions).toEqual({
+      contents: 'read',
+      actions: 'read',
+    })
+  })
+
+  it('validate-inputs staleness guard body is byte-identical to the deploy-dashboard guard', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {
+      jobs?: {
+        'validate-inputs'?: {steps?: {name?: string; if?: string; env?: Record<string, string>; run?: string}[]}
+        'deploy-dashboard'?: {steps?: {name?: string; if?: string; env?: Record<string, string>; run?: string}[]}
+      }
+    }
+    const precheckSteps = parsed.jobs?.['validate-inputs']?.steps ?? []
+    const recheckSteps = parsed.jobs?.['deploy-dashboard']?.steps ?? []
+    const precheck = precheckSteps.find(s => s.name === 'Reject stale dashboard dispatch')
+    const recheck = recheckSteps.find(s => s.name === 'Reject stale dashboard dispatch')
+    expect(precheck).toBeDefined()
+    expect(recheck).toBeDefined()
+    expect(precheck?.if).toBe(recheck?.if)
+    expect(precheck?.env).toEqual(recheck?.env)
+    expect(precheck?.run).toBe(recheck?.run)
+  })
+
+  it('validate-inputs staleness precheck is the last step in the job', async () => {
+    const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
+    const parsed = parseYaml(text) as {jobs?: {'validate-inputs'?: {steps?: {name?: string}[]}}}
+    const steps = parsed.jobs?.['validate-inputs']?.steps ?? []
+    expect(steps.at(-1)?.name).toBe('Reject stale dashboard dispatch')
   })
 })
 

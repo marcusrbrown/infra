@@ -367,7 +367,7 @@ describe('prune-untagged-packages: safety gates', () => {
 
     await pruneUntaggedPackages(options(registry, true))
 
-    const githubCalls = registry.requests.filter(request => request.url.includes('api.github.com'))
+    const githubCalls = registry.requests.filter(request => new URL(request.url).host === 'api.github.com')
     expect(githubCalls.length).toBeGreaterThan(0)
     for (const call of githubCalls) {
       expect(new URL(call.url).pathname).toMatch(/^\/users\/marcusrbrown\/packages\/container\//)

@@ -617,8 +617,10 @@ describe('repo conventions', () => {
 
   it('changesets only versions the published CLI package', async () => {
     const config = (await Bun.file(resolve(REPO_ROOT, '.changeset/config.json')).json()) as {
+      ignore?: unknown
       privatePackages?: {tag?: unknown; version?: unknown}
     }
+    expect(config.ignore).toEqual([])
     expect(config.privatePackages).toEqual({tag: false, version: false})
 
     const releasablePackages: string[] = []

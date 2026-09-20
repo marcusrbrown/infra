@@ -7,6 +7,6 @@
   "fixed": [],
   "ignore": ["@marcusrbrown/infra-gateway", "@marcusrbrown/infra-vpn"],
   "linked": [],
-  "privatePackages": {"tag": true, "version": true},
+  "privatePackages": {"tag": false, "version": false},
   "updateInternalDependencies": "patch"
 }

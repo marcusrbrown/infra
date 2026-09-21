@@ -31,11 +31,11 @@ One subdirectory per deployable. Each app owns its Compose/build config (or nati
 
 ### `packages/`
 
-Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge) and also owns the VPN peer model (`packages/cli/src/commands/vpn/peers.ts`, published as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn`). `packages/shared` is the provisioning helper library consumed by every app's provision script, plus `packages/shared/cliproxy/management.ts` — CLIProxyAPI management-API primitives (`managementHeaders`, `requestJson`, `parseManagementKeyList`, OAuth model-alias helpers) consumed directly by `apps/cliproxy/src/deploy.ts`, `apps/broker/src/mint.ts`, and `packages/cli/src/commands/cliproxy/*.ts`. `packages/` never imports from `apps/`; the published `@marcusrbrown/infra` (cli) stays self-contained and must not depend on the private `packages/shared`. `packages/cli/scripts/` holds repo-local operational workflow scripts that are never part of the published package — currently `reconcile-autoheal-reports.ts`, invoked only by the daily-equivalent branch of `.github/workflows/fro-bot.yaml`.
+Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge) and also owns the VPN peer model (`packages/cli/src/commands/vpn/peers.ts`, published as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn`). `packages/shared` is the provisioning helper library consumed by every app's provision script, plus `packages/shared/cliproxy/management.ts` — CLIProxyAPI management-API primitives (`managementHeaders`, `requestJson`, `parseManagementKeyList`, OAuth model-alias helpers) consumed directly by `apps/cliproxy/src/deploy.ts`, `apps/broker/src/mint.ts`, and `packages/cli/src/commands/cliproxy/*.ts`. `packages/` never imports from `apps/`; the published `@marcusrbrown/infra` (cli) stays self-contained and must not depend on the private `packages/shared`. `packages/cli/scripts/` holds the package build entry (`build.ts`, run by `bun run build` / `prepack`) plus repo-local operational workflow scripts that are never part of the published package — `reconcile-autoheal-reports.ts`, invoked only by the daily-equivalent branch of `.github/workflows/fro-bot.yaml`, and `prune-untagged-packages.ts`, invoked only by the manual dispatch of `.github/workflows/prune-packages.yaml`.
 
 ### `.github/`
 
-CI/CD and automation: `workflows/*.yaml` (deploy router + per-app deploys, CI, release, Fro Bot, Renovate, Scorecard, settings sync), `known_hosts` (pinned SSH host keys), `renovate.json5`, `settings.yml`, `copilot-instructions.md`.
+CI/CD and automation: `workflows/*.yaml` (deploy router + per-app deploys, CI, release + release-alert, Fro Bot, Renovate + renovate-changesets, CodeQL, Scorecard, settings sync, manual GHCR pruning), `known_hosts` (pinned SSH host keys), `renovate.json5`, `settings.yml`, `copilot-instructions.md`.
 
 ### `docs/`
 
@@ -101,6 +101,9 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | --- | --- |
 | `packages/cli/scripts/reconcile-autoheal-reports.ts` | Repo-local daily report reconciler; invoked only by the `fro-bot-storage` job, never published |
 | `packages/cli/scripts/reconcile-autoheal-reports.test.ts` | Colocated behavior tests (fake `fetch` boundary, pagination, readback, fail-closed paths) |
+| `packages/cli/scripts/prune-untagged-packages.ts` | Repo-local GHCR untagged-version pruner; dry-run unless `--apply`, invoked only by `prune-packages.yaml`, never published |
+| `packages/cli/scripts/prune-untagged-packages.test.ts` | Colocated behavior tests (fake `fetch` boundary, pagination, manifest-child gates, abort codes) |
+| `packages/cli/scripts/build.ts` | CLI bundle build (public deps external, `@marcusrbrown/infra-shared` inlined, `known_hosts` asset) |
 
 **Tests / CI**
 

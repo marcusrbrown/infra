@@ -1,8 +1,11 @@
+import type {DeleteObjectCommandInput, PutObjectCommandInput} from '@aws-sdk/client-s3'
 import type {SpawnFn, SpawnResult} from './deploy'
 import {Buffer} from 'node:buffer'
 import {existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
+
+import {DeleteObjectCommand, PutObjectCommand} from '@aws-sdk/client-s3'
 import {afterEach, beforeEach, describe, expect, mock, test} from 'bun:test'
 
 // ─── Test digest fixtures ─────────────────────────────────────────────────────
@@ -11767,5 +11770,200 @@ describe('operator push VAPID enabled-to-absent cleanup', () => {
       operatorPushEnabled: false,
     })
     expect(disabledOverride).not.toContain('GATEWAY_OPERATOR_PUSH_VAPID')
+  })
+})
+
+// ─── S3 tagged-write capability preflight ─────────────────────────────────────────
+
+function makeS3ProbeClient(
+  handlers: {
+    put?: (input: PutObjectCommandInput) => unknown
+    del?: (input: DeleteObjectCommandInput) => unknown
+  } = {},
+) {
+  const putCalls: PutObjectCommandInput[] = []
+  const delCalls: DeleteObjectCommandInput[] = []
+  const client = {
+    send: async (command: PutObjectCommand | DeleteObjectCommand) => {
+      if (command instanceof PutObjectCommand) {
+        putCalls.push(command.input)
+        if (handlers.put) {
+          const result = handlers.put(command.input)
+          if (result instanceof Error) throw result
+          return result
+        }
+        return {}
+      }
+      if (command instanceof DeleteObjectCommand) {
+        delCalls.push(command.input)
+        if (handlers.del) {
+          const result = handlers.del(command.input)
+          if (result instanceof Error) throw result
+          return result
+        }
+        return {}
+      }
+      throw new Error('unexpected command: expected PutObjectCommand or DeleteObjectCommand')
+    },
+  }
+  return {client, putCalls, delCalls}
+}
+
+function makeS3AccessDeniedError(message: string): Error {
+  const error = new Error(message)
+  error.name = 'AccessDenied'
+  return Object.assign(error, {$metadata: {httpStatusCode: 403}})
+}
+
+describe('assertS3TaggedWriteCapability', () => {
+  const baseEnv = {
+    AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
+    AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    S3_BUCKET: 'my-bucket',
+    S3_REGION: 'us-east-1',
+  }
+
+  test('tagged write succeeds → precheck passes and the probe is deleted', async () => {
+    const {assertS3TaggedWriteCapability} = await import('./deploy')
+    const {client, putCalls, delCalls} = makeS3ProbeClient()
+
+    await expect(assertS3TaggedWriteCapability(baseEnv, client, () => {})).resolves.toBeUndefined()
+
+    expect(putCalls).toHaveLength(1)
+    expect(delCalls).toHaveLength(1)
+    expect(delCalls[0]?.Key).toBe(putCalls[0]?.Key)
+    expect(delCalls[0]?.Bucket).toBe('my-bucket')
+  })
+
+  test('PutObject rejected with AccessDenied → throws naming s3:PutObjectTagging', async () => {
+    const {assertS3TaggedWriteCapability} = await import('./deploy')
+    const {client, delCalls} = makeS3ProbeClient({
+      put: () =>
+        makeS3AccessDeniedError(
+          'User: arn:aws:iam::123456789012:user/fro-bot-gateway is not authorized to perform: s3:PutObjectTagging',
+        ),
+    })
+
+    await expect(assertS3TaggedWriteCapability(baseEnv, client, () => {})).rejects.toThrow(/s3:PutObjectTagging/)
+    // No object was ever written, so no cleanup delete should have been attempted.
+    expect(delCalls).toHaveLength(0)
+  })
+
+  test('cleanup delete failure throws and names the residual probe key', async () => {
+    const {assertS3TaggedWriteCapability} = await import('./deploy')
+    const {client, putCalls} = makeS3ProbeClient({
+      del: () => new Error('delete failed: access denied'),
+    })
+
+    let thrown: unknown
+    try {
+      await assertS3TaggedWriteCapability(baseEnv, client, () => {})
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(Error)
+    const key = putCalls[0]?.Key
+    expect(key).toBeTruthy()
+    expect((thrown as Error).message).toContain(key ?? '')
+  })
+
+  test.each([
+    ['AWS_ACCESS_KEY_ID', {...baseEnv, AWS_ACCESS_KEY_ID: ''}],
+    ['AWS_SECRET_ACCESS_KEY', {...baseEnv, AWS_SECRET_ACCESS_KEY: ''}],
+    ['S3_BUCKET', {...baseEnv, S3_BUCKET: ''}],
+    ['S3_REGION', {...baseEnv, S3_REGION: ''}],
+  ])('missing %s throws and does not silently pass', async (missingKey, env) => {
+    const {assertS3TaggedWriteCapability} = await import('./deploy')
+    const {client, putCalls} = makeS3ProbeClient()
+
+    await expect(assertS3TaggedWriteCapability(env, client, () => {})).rejects.toThrow(new RegExp(missingKey as string))
+    expect(putCalls).toHaveLength(0)
+  })
+
+  test('probe key matches the real run-state shape under the configured prefix; default prefix is fro-bot-state', async () => {
+    const {assertS3TaggedWriteCapability} = await import('./deploy')
+
+    const {client: defaultClient, putCalls: defaultPutCalls} = makeS3ProbeClient()
+    await assertS3TaggedWriteCapability(baseEnv, defaultClient, () => {})
+    expect(defaultPutCalls[0]?.Key).toMatch(
+      /^fro-bot-state\/discord-gateway\/_deploy-probe\/_deploy-probe\/runs\/[0-9a-f-]{36}\.json$/,
+    )
+
+    const {client: customClient, putCalls: customPutCalls} = makeS3ProbeClient()
+    await assertS3TaggedWriteCapability({...baseEnv, S3_PREFIX: 'custom-prefix'}, customClient, () => {})
+    expect(customPutCalls[0]?.Key).toMatch(
+      /^custom-prefix\/discord-gateway\/_deploy-probe\/_deploy-probe\/runs\/[0-9a-f-]{36}\.json$/,
+    )
+  })
+
+  test('the PutObjectCommand carries Tagging: object-type=run-state', async () => {
+    const {assertS3TaggedWriteCapability} = await import('./deploy')
+    const {client, putCalls} = makeS3ProbeClient()
+
+    await assertS3TaggedWriteCapability(baseEnv, client, () => {})
+
+    expect(putCalls[0]?.Tagging).toBe('object-type=run-state')
+  })
+
+  test('custom S3_ENDPOINT explicitly skips the tagged probe with a logged reason (upstream suppresses Tagging for non-AWS endpoints)', async () => {
+    const {assertS3TaggedWriteCapability} = await import('./deploy')
+    const {client, putCalls} = makeS3ProbeClient()
+    const logs: string[] = []
+
+    await assertS3TaggedWriteCapability(
+      {...baseEnv, S3_ENDPOINT: 'https://abc123.r2.cloudflarestorage.com'},
+      client,
+      message => logs.push(message),
+    )
+
+    expect(putCalls).toHaveLength(0)
+    expect(logs.some(line => /skipped/i.test(line) && /S3_ENDPOINT|custom/i.test(line))).toBe(true)
+  })
+
+  test('probe keys differ across two invocations (no collision between concurrent deploys)', async () => {
+    const {assertS3TaggedWriteCapability} = await import('./deploy')
+    const {client: clientA, putCalls: putCallsA} = makeS3ProbeClient()
+    const {client: clientB, putCalls: putCallsB} = makeS3ProbeClient()
+
+    await Promise.all([
+      assertS3TaggedWriteCapability(baseEnv, clientA, () => {}),
+      assertS3TaggedWriteCapability(baseEnv, clientB, () => {}),
+    ])
+
+    expect(putCallsA[0]?.Key).not.toBe(putCallsB[0]?.Key)
+  })
+})
+
+describe('main() — S3 tagged-write capability preflight wiring', () => {
+  test('dry-run performs no S3 call at all', async () => {
+    const {main} = await import('./deploy')
+    let sendCalled = false
+    const s3Client = {
+      send: async () => {
+        sendCalled = true
+        return {}
+      },
+    }
+
+    await main({env: makeEnv({S3_ENDPOINT: ''}), args: ['--dry-run'], s3Client})
+
+    expect(sendCalled).toBe(false)
+  })
+
+  test('dry-run plan lists the S3 tagged-write capability check as a planned step', async () => {
+    const {main} = await import('./deploy')
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '))
+    }
+    try {
+      await main({env: makeEnv(), args: ['--dry-run']})
+    } finally {
+      console.warn = originalWarn
+    }
+
+    expect(warnings.some(line => /S3 tagged-write capability/i.test(line))).toBe(true)
   })
 })

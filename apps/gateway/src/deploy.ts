@@ -1,9 +1,12 @@
 #!/usr/bin/env bun
 
 import {Buffer} from 'node:buffer'
+import {randomUUID} from 'node:crypto'
 import {chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
+
+import {DeleteObjectCommand, PutObjectCommand, S3Client, type S3ClientConfig} from '@aws-sdk/client-s3'
 
 import {validateGatewayHost} from './host'
 
@@ -77,6 +80,11 @@ export interface MainOpts {
    * Defaults to a Bun.connect-based implementation with a 10s timeout.
    */
   tcpConnect?: (host: string, port: number) => Promise<void>
+  /**
+   * Injectable S3 client for the tagged-write capability preflight (Phase 3i).
+   * Defaults to a real S3Client built from AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/S3_REGION.
+   */
+  s3Client?: S3TaggedWriteProbeClient
 }
 
 export interface DeployArgs {
@@ -193,6 +201,14 @@ const DEFAULT_REMOTE_USER = 'root'
 const CLIPROXY_EGRESS_HOST = 'cliproxy.fro.bot'
 // OpenCode fetches its model catalog from models.dev at startup; the sandboxed workspace reaches it through the mitmproxy egress allowlist.
 const OPENCODE_CATALOG_HOST = 'models.dev'
+// Mirrors upstream's default (packages/gateway/src/bindings/backfill-runner.ts, v0.113.2:
+// `process.env.S3_PREFIX ?? 'fro-bot-state'`). The deploy does not otherwise reference
+// S3_PREFIX; this default keeps the tagged-write probe key under the real run-state scope.
+const S3_STATE_PREFIX_DEFAULT = 'fro-bot-state'
+// Mirrors upstream's default GATEWAY_IDENTITY (packages/gateway/src/config.ts, v0.113.2).
+const S3_STATE_IDENTITY = 'discord-gateway'
+// Fixed, obviously-synthetic owner/repo segment for the probe key — never a real repo.
+const S3_PROBE_OWNER_REPO = '_deploy-probe'
 
 /**
  * RFC1123 label: lowercase letters, digits, hyphens; 1-63 chars; no leading/trailing hyphen.
@@ -2254,6 +2270,156 @@ async function defaultTcpConnect(host: string, port: number): Promise<void> {
   })
 }
 
+/** Injectable S3 client surface for the tagged-write capability probe — tests never touch the network. */
+export type S3TaggedWriteProbeClient = Pick<S3Client, 'send'>
+
+/**
+ * Builds the S3 key for the tagged-write capability probe. Matches the real run-state key
+ * shape (`<prefix>/discord-gateway/<owner>/<repo>/runs/<uuid>.json`, see
+ * packages/runtime/src/object-store/key-builder.ts buildObjectStoreKey, v0.113.2) so a
+ * narrowly-scoped IAM grant is probed at the correct resource scope — a probe under some
+ * special top-level path would pass under a broad grant and false-negative under a narrow
+ * one. A fresh randomUUID() per call keeps concurrent deploys from colliding.
+ */
+function buildS3TaggedWriteProbeKey(prefix: string): string {
+  return `${prefix}/${S3_STATE_IDENTITY}/${S3_PROBE_OWNER_REPO}/${S3_PROBE_OWNER_REPO}/runs/${randomUUID()}.json`
+}
+
+/**
+ * Fail-closed preflight: performs a REAL tagged PutObject (Tagging: 'object-type=run-state')
+ * against the runtime S3 identity, then deletes the probe object. Catches the exact outage
+ * class where s3:PutObject is granted but s3:PutObjectTagging is not — an UNTAGGED write
+ * succeeds while a TAGGED write is denied, so every existing health signal (coordination
+ * self-test, push CAS self-test, this deploy's own untagged writes) passes straight through
+ * that outage. See apps/gateway/AGENTS.md "S3 State-Bucket IAM Actions".
+ *
+ * Fails closed on missing credentials/bucket/region — there is no "skip and let the deploy
+ * proceed" path for absent inputs. The only legitimate skip is a custom S3_ENDPOINT (R2/MinIO),
+ * where upstream deliberately suppresses Tagging on every write (see
+ * packages/runtime/src/object-store/s3-adapter.ts createS3Adapter conditionalPut, v0.113.2:
+ * `config.endpoint == null && options.tagging != null ? {Tagging: ...} : {}`) — tagging that
+ * endpoint class would test a capability the runtime never exercises.
+ *
+ * Cleanup runs in a finally after a successful write; a cleanup failure is itself a deploy
+ * failure and the thrown error names the residual key so an operator can remove it.
+ *
+ * Versioning caveat: on a versioning-enabled bucket, DeleteObject writes a delete marker and
+ * retains the probe as a noncurrent version, so one small object accumulates per deploy. The
+ * runtime identity cannot read bucket versioning state (no s3:GetBucketVersioning), so this
+ * check cannot detect that condition itself. If the state bucket is versioned, cover the probe
+ * prefix with a NoncurrentVersionExpiration lifecycle rule; do not grant this identity
+ * s3:DeleteObjectVersion to work around it.
+ */
+export async function assertS3TaggedWriteCapability(
+  env: Record<string, string>,
+  client?: S3TaggedWriteProbeClient,
+  log: (message: string) => void = message => console.warn(message),
+): Promise<void> {
+  const rawAccessKeyId = env.AWS_ACCESS_KEY_ID?.trim()
+  const rawSecretAccessKey = env.AWS_SECRET_ACCESS_KEY?.trim()
+  const rawBucket = env.S3_BUCKET?.trim()
+  const rawRegion = env.S3_REGION?.trim()
+
+  const missing = [
+    !rawAccessKeyId && 'AWS_ACCESS_KEY_ID',
+    !rawSecretAccessKey && 'AWS_SECRET_ACCESS_KEY',
+    !rawBucket && 'S3_BUCKET',
+    !rawRegion && 'S3_REGION',
+  ].filter((name): name is string => Boolean(name))
+  if (missing.length > 0) {
+    throw new Error(
+      `S3 tagged-write capability preflight cannot run: missing ${missing.join(', ')}. ` +
+        'This check is fail-closed — it never skips-and-proceeds when required inputs are absent.',
+    )
+  }
+  // Non-empty per the check above — narrowed to `string` for the S3Client/PutObjectCommand calls below.
+  const accessKeyId: string = rawAccessKeyId ?? ''
+  const secretAccessKey: string = rawSecretAccessKey ?? ''
+  const bucket: string = rawBucket ?? ''
+  const region: string = rawRegion ?? ''
+
+  const endpoint = env.S3_ENDPOINT?.trim() || undefined
+  const prefix = env.S3_PREFIX?.trim() || S3_STATE_PREFIX_DEFAULT
+
+  if (endpoint) {
+    log(
+      `[preflight] S3 tagged-write capability check skipped: custom S3_ENDPOINT (${endpoint}) — ` +
+        'upstream suppresses object Tagging for non-AWS endpoints (R2/MinIO), so a tagged probe ' +
+        'would test a capability the runtime never exercises against this endpoint.',
+    )
+    return
+  }
+
+  const s3: S3TaggedWriteProbeClient =
+    client ??
+    new S3Client({
+      region,
+      maxAttempts: 2,
+      credentials: {
+        accessKeyId,
+        secretAccessKey,
+        ...(env.AWS_SESSION_TOKEN?.trim() ? {sessionToken: env.AWS_SESSION_TOKEN.trim()} : {}),
+      },
+    } satisfies S3ClientConfig)
+
+  const key = buildS3TaggedWriteProbeKey(prefix)
+  let wroteProbeObject = false
+  // Assigned (never thrown) inside the finally block below, then thrown after it —
+  // throwing directly inside a finally would silently swallow the try block's own
+  // exception (no-unsafe-finally), which must never mask a genuine AccessDenied.
+  let cleanupError: Error | undefined
+
+  try {
+    try {
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: JSON.stringify({probe: 'gateway-deploy-s3-tagged-write-capability'}),
+          Tagging: 'object-type=run-state',
+        }),
+      )
+      wroteProbeObject = true
+    } catch (error) {
+      const errorName = error instanceof Error ? error.name : undefined
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      const isAccessDenied = errorName === 'AccessDenied' || /AccessDenied/.test(errorMessage)
+      if (isAccessDenied) {
+        throw new Error(
+          'S3 tagged-write capability preflight FAILED: a tagged PutObject was denied. ' +
+            'This is the exact class of outage this check exists to catch: s3:PutObject alone is ' +
+            'not sufficient for a PutObject carrying an x-amz-tagging header — the runtime identity ' +
+            `also needs s3:PutObjectTagging. Bucket: ${bucket}. Probe key: ${key}. ` +
+            'See the "S3 State-Bucket IAM Actions" section of apps/gateway/AGENTS.md. ' +
+            `Original error: ${errorMessage}`,
+        )
+      }
+      throw new Error(
+        `S3 tagged-write capability preflight FAILED: tagged PutObject errored. Bucket: ${bucket}. ` +
+          `Probe key: ${key}. Original error: ${errorMessage}`,
+      )
+    }
+    log(`[preflight] S3 tagged-write capability verified (bucket=${bucket}, key=${key})`)
+  } finally {
+    if (wroteProbeObject) {
+      try {
+        await s3.send(new DeleteObjectCommand({Bucket: bucket, Key: key}))
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        cleanupError = new Error(
+          'S3 tagged-write capability preflight cleanup FAILED: could not delete the probe object. ' +
+            `A residual probe object was left in bucket ${bucket} at key: ${key} — remove it manually. ` +
+            `Original error: ${errorMessage}`,
+        )
+      }
+    }
+  }
+
+  if (cleanupError) {
+    throw cleanupError
+  }
+}
+
 export async function main(opts: MainOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
   const args = opts.args ?? process.argv.slice(2)
@@ -2470,6 +2636,16 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       ? ` && rm -f ${OPERATOR_PUSH_VAPID_SECRET_SPECS.map(spec => `'${SECRETS_DIR}/${spec.hostFile}'`).join(' ')}`
       : ''
 
+  // Phase 3i: S3 tagged-write capability preflight — before any remote mutation (SSH, secret
+  // materialization, docker compose up). A probe write is itself a side effect, so it is
+  // skipped under --dry-run (which promises none) but still listed as a planned step below.
+  // See assertS3TaggedWriteCapability for the outage this catches: s3:PutObject without
+  // s3:PutObjectTagging silently rejects every tagged run-state write while every existing
+  // health signal (which writes untagged) keeps passing.
+  if (!isDryRun) {
+    await assertS3TaggedWriteCapability(env, opts.s3Client)
+  }
+
   if (isDryRun) {
     const announceEnabled = announceState === 'enabled'
     const operatorEnabledDry = operatorState === 'enabled'
@@ -2494,6 +2670,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       console.warn(`  [preflight] Verify this URL is registered in the GitHub OAuth App settings before enablement.`)
     }
     console.warn(`  3d. Run upstream stack validation: cd ${REMOTE_DIR} && bash deploy/validate-stack.sh`)
+    console.warn(`  3e. Verify S3 tagged-write capability (real tagged PutObject+Delete probe using runtime identity)`)
     console.warn(`  4. Write .env to ${ENV_PATH}`)
     console.warn(`  5. Run init-certs.sh (idempotent)`)
     console.warn(`  6. docker compose pull (pull prebuilt GHCR images — before any container disruption)`)

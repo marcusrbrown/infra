@@ -79,7 +79,7 @@ The `deploy-gateway` job declares `needs: [build-images, scan-images]`. A build 
 
 - `DIGITALOCEAN_ACCESS_TOKEN` and `GATEWAY_HOST` in `.env`; `doctl auth init` run locally. `GATEWAY_HOST` is the FQDN used for host-key pinning (e.g. `gateway.fro.bot`) — DNS does not need to point at the new droplet yet.
 - Discord application created at <https://discord.com/developers/applications> with bot scope; token + application ID + guild ID captured
-- S3 or R2 bucket created; `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION` captured (add `S3_ENDPOINT` for R2/MinIO)
+- S3 or R2 bucket created; `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION` captured (add `S3_ENDPOINT` for R2/MinIO); IAM identity granted the actions in [S3 State-Bucket IAM Actions](#s3-state-bucket-iam-actions)
 - `gateway` GitHub Environment created with required reviewer set
 - All required secrets seeded in the `gateway` GitHub Environment (see [Required Secrets](#required-secrets) below)
 
@@ -104,6 +104,43 @@ temp key file and pins it with `-i` + `IdentitiesOnly=yes` (no ssh-agent needed;
 When unset, it falls back to ssh-agent.
 
 After provisioning: commit the updated `.github/known_hosts`.
+
+## S3 STATE-BUCKET IAM ACTIONS
+
+The `fro-bot-gateway` identity (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) needs this exact S3 action set on the state bucket. Grant it before seeding the secrets in [Required Secrets](#required-secrets).
+
+**Object-level** (resource `arn:aws:s3:::<bucket>/<prefix>/*`):
+
+| Action | Why |
+| --- | --- |
+| `s3:GetObject` | Read run-state objects |
+| `s3:PutObject` | Write run-state objects |
+| `s3:PutObjectTagging` | Required alongside `s3:PutObject` — run-state writes send an `x-amz-tagging` header (`object-type=run-state`), and AWS requires both actions to accept a tagged `PutObject`. A missing grant rejects every `createRun` with `AccessDenied` on **both** the Discord `@fro-bot` mention path and the dashboard launch path — this is not a dashboard-only dependency. Call sites in upstream `fro-bot/agent`: `packages/runtime/src/coordination/run-state.ts` (create, transition) and `packages/runtime/src/coordination/heartbeat.ts`. |
+| `s3:DeleteObject` | Remove run-state objects |
+
+**Bucket-level** (resource `arn:aws:s3:::<bucket>`):
+
+| Action | Why |
+| --- | --- |
+| `s3:ListBucket` | List run-state keys under the prefix |
+
+**Do not grant** `s3:GetObjectTagging` or `s3:DeleteObjectTagging` — upstream has zero call sites for either at the pinned ref; granting them widens the identity beyond what it uses.
+
+**Known gap — lifecycle configuration:** `apps/gateway/server/provision-droplet.ts` reads and writes the bucket lifecycle configuration using these same `AWS_*` credentials, which needs bucket-level `s3:GetLifecycleConfiguration` and `s3:PutLifecycleConfiguration`. The `fro-bot-gateway` identity does not currently have these — the lifecycle provisioning step fails closed with `AccessDenied`. Granting lifecycle admin to the runtime identity is a trade-off, not a fix: it widens a deliberately object-only identity to cover a provisioning-only concern. Prefer a separate provisioning-scoped identity or manual lifecycle configuration over widening `fro-bot-gateway`.
+
+**This repo does not verify these grants.** No code here manages or checks the `fro-bot-gateway` identity's IAM policy — it is maintained out-of-band in AWS. A redeploy against a new bucket or a new identity can silently reproduce a missing-tagging outage. Verify with a tagged write, since an untagged write succeeds while tagging fails silently:
+
+```bash
+aws s3api put-object --bucket <bucket> --key <prefix>/_iam-probe/<uuid>.json \
+  --body /dev/null --tagging 'object-type=run-state'
+aws s3api delete-object --bucket <bucket> --key <prefix>/_iam-probe/<uuid>.json
+```
+
+The probe key must sit inside the same resource scope (`<bucket>/<prefix>/*`) the real run-state objects use — a probe outside a narrowly scoped grant's prefix produces a false negative. Cleanup needs `s3:DeleteObject`.
+
+The gateway deploy runs this same probe automatically as a fail-closed preflight (`assertS3TaggedWriteCapability` in `apps/gateway/src/deploy.ts`), before any remote mutation and before containers are replaced. It is skipped under `--dry-run`, and skipped with an explicit logged reason when `S3_ENDPOINT` is set, because upstream suppresses object tagging entirely for non-AWS endpoints.
+
+**Versioning caveat:** on a versioning-enabled bucket, deleting the probe writes a delete marker and retains a noncurrent version, so one small object accumulates per deploy. The runtime identity cannot read bucket versioning state (no `s3:GetBucketVersioning`), so neither the probe nor the deploy can detect this. If the state bucket is versioned, cover the probe prefix with a `NoncurrentVersionExpiration` lifecycle rule rather than granting `s3:DeleteObjectVersion` to the runtime identity.
 
 ## REQUIRED SECRETS
 
@@ -548,6 +585,7 @@ For the full operator-facing rotation and emergency revocation procedure (includ
 - **Never publish the operator port on `0.0.0.0` or without a VPC-IP bind** — the operator listener must be published only on `${GATEWAY_VPC_IP}:9300`, never on `0.0.0.0:9300`, `[::]:9300`, or as a bare `9300:9300` mapping. A public-internet-reachable operator port is a security defect; the DOCKER-USER rule and DO Cloud Firewall are the access controls, but they are only effective when the publish is VPC-scoped.
 - **Never apply the DOCKER-USER rule before `docker compose up`** — Docker recreates DOCKER-USER-adjacent chains on daemon restart and `compose up`, wiping any rule applied before the stack comes up. The rule must be reapplied after `compose up` completes.
 - **Never create a fresh DO Cloud Firewall for the operator port outside of provisioning** — DO Cloud Firewalls are default-deny/allowlist; attaching a new firewall that only allows `:9300` would lock out `:22`/`:80`/`:443`/announce. Provisioning (`setupOperatorFirewall()`) creates `gateway-operator-fw` with all required base rules (22, 80, 443) plus the 9300 source restriction, idempotently. The deploy does not touch the DO firewall.
+- **Never grant the `fro-bot-gateway` runtime identity IAM self-management** — its credentials write run-state objects; they must not carry `iam:*` permissions to manage their own policy. If a permission is missing (e.g. `s3:PutObjectTagging`, see [S3 State-Bucket IAM Actions](#s3-state-bucket-iam-actions)), fix the grant in AWS out-of-band — never widen the identity to route around a mismatched permission.
 
 ## DECOMMISSIONING
 

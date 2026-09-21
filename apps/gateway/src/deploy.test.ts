@@ -11495,6 +11495,40 @@ describe('operator push VAPID structural validation', () => {
     }
   })
 
+  test('mailto: subjects without a non-empty address are rejected', async () => {
+    const {main, validatePushVapidConfig} = await import('./deploy')
+    for (const subject of ['mailto:', 'mailto:   ']) {
+      expect(() =>
+        validatePushVapidConfig({
+          publicKey: TEST_VAPID_PUBLIC_KEY,
+          privateKey: TEST_VAPID_PRIVATE_KEY,
+          subject,
+          keyVersion: TEST_VAPID_KEY_VERSION,
+        }),
+      ).toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT/)
+
+      const {spawnFn, calls} = makeSpawnMock()
+      await expect(
+        main({env: makePushEnv({GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT: subject}), args: [], spawn: spawnFn}),
+      ).rejects.toThrow(/GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT/)
+      expect(calls).toHaveLength(0)
+    }
+  })
+
+  test('mailto: with a non-empty address and https: subjects are accepted', async () => {
+    const {validatePushVapidConfig} = await import('./deploy')
+    for (const subject of ['mailto:ops@example.invalid', 'https://dashboard.fro.bot']) {
+      expect(() =>
+        validatePushVapidConfig({
+          publicKey: TEST_VAPID_PUBLIC_KEY,
+          privateKey: TEST_VAPID_PRIVATE_KEY,
+          subject,
+          keyVersion: TEST_VAPID_KEY_VERSION,
+        }),
+      ).not.toThrow()
+    }
+  })
+
   test('zero, negative, float, and nonnumeric key versions are rejected', async () => {
     const {main, validatePushVapidConfig} = await import('./deploy')
     for (const keyVersion of ['0', '-1', '1.5', 'abc', '+1', '01', '1.0']) {

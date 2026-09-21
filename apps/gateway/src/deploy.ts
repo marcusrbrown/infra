@@ -647,6 +647,11 @@ export function validatePushVapidConfig(opts: {
       `GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT must use mailto: or https: (got ${parsedSubject.protocol || 'no scheme'}).`,
     )
   }
+  // Mirrors the daemon's assertValidVapidSubject: a preflight weaker than the
+  // consumer turns a mailto: typo into a gateway crash-loop after compose up.
+  if (parsedSubject.protocol === 'mailto:' && parsedSubject.pathname.trim() === '') {
+    throw new Error('GATEWAY_OPERATOR_PUSH_VAPID_SUBJECT mailto: URL must include a non-empty address.')
+  }
 
   if (!/^[1-9]\d*$/.test(keyVersion)) {
     throw new Error('GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION must be a positive integer string.')

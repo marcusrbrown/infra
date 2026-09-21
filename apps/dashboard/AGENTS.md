@@ -286,9 +286,11 @@ record.
 
 ## OPERATOR PUSH
 
-`DASHBOARD_OPERATOR_PUSH_ENABLED` is an independent, server-side dashboard flag. Only the exact
-string `true` is rendered as `DASHBOARD_OPERATOR_PUSH_ENABLED=true`; absent, false, whitespace-variant,
-or malformed input is omitted and remains default-off.
+`DASHBOARD_OPERATOR_PUSH_ENABLED` is an independent, server-side dashboard flag, currently set to
+`true` in the `dashboard` Environment. Only the exact string `true` is rendered as
+`DASHBOARD_OPERATOR_PUSH_ENABLED=true`; absent, false, whitespace-variant, or malformed input is
+omitted and disables push — silently, with no deploy error, unlike the gateway quartet which hard-fails
+on a partial set.
 
 The dashboard deploy accepts no VAPID material and no endpoint pointer. At runtime, the existing
 consent flow and a trusted user gesture own subscription; the flag alone never auto-prompts or

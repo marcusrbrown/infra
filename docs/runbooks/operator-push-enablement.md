@@ -1,6 +1,6 @@
 # Operator Push Enablement
 
-Web Push notifications for the Fro Bot operator dashboard at `https://dashboard.fro.bot`. Currently default-off on both the gateway and dashboard sides. This runbook covers enabling it, verifying it actually took effect, rotation limits, and rollback. Enabling push is **config-only** — no code change, no image rebuild.
+Web Push notifications for the Fro Bot operator dashboard at `https://dashboard.fro.bot`. Enabled on both the gateway and dashboard sides. This runbook covers enabling it, verifying it actually took effect, rotation limits, and rollback — it stays current because the same steps apply to a re-enable, a key rotation, or a rebuild. Enabling push is **config-only** — no code change, no image rebuild.
 
 ---
 

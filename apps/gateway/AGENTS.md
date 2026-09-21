@@ -368,8 +368,8 @@ For the full operator auth lifecycle runbook (OAuth App setup, CSRF secret gener
 
 ## OPERATOR PUSH
 
-Gateway operator push is ready but off. The deploy accepts this VAPID quartet only as an all-or-none
-configuration:
+Gateway operator push is **enabled in production**. The deploy accepts this VAPID quartet only as an
+all-or-none configuration:
 
 | Environment key | Host file | Container `_FILE` path |
 | --- | --- | --- |
@@ -390,6 +390,12 @@ four files are materialized through the existing SSH-stdin path only; the privat
 argv, logs, or dashboard-bound artifacts. The compose override uses the four read-only `_FILE` paths
 above. Push is additive to the announce, operator-listener, and VPC gates; absent push configuration
 does not change those gates.
+
+Verify enablement with an unauthenticated `GET https://dashboard.fro.bot/operator/push/vapid-key`: 401
+means the route is mounted, 404 means it is not. The routes mount only after the object-store CAS
+self-test passes at startup, so a 401 proves the self-test passed **at boot** — mount state is never
+re-evaluated, so it is a post-deploy check, not a liveness probe. Enablement, format gates, rotation
+limits, and rollback: [`docs/runbooks/operator-push-enablement.md`](../../docs/runbooks/operator-push-enablement.md).
 
 The four VAPID files and rendered compose override participate in the existing secrets checksum, so
 content or wiring changes select the existing recreate path. When a previously enabled deploy is

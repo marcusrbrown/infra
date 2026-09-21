@@ -169,18 +169,20 @@ describe('ensureRunStateLifecycleRule', () => {
     await ensureRunStateLifecycleRule({...env, S3_ENDPOINT: 'http://minio:9000'}, client, message => logs.push(message))
 
     expect(inputs).toEqual([])
-    expect(logs).toContain('skipped: custom S3 endpoint, run-state tagging not applied by daemon')
+    expect(logs).toContain(
+      'no-op: custom S3 endpoint, run-state tagging not applied by daemon (deliberate, not an error)',
+    )
   })
 
-  it('skips gracefully when required S3 lifecycle environment is absent', async () => {
+  it('throws when required S3 lifecycle environment is absent', async () => {
     const {ensureRunStateLifecycleRule} = await import('./provision-droplet')
     const {client, inputs} = makeS3Client([])
-    const logs: string[] = []
 
-    await expect(ensureRunStateLifecycleRule({}, client, message => logs.push(message))).resolves.toBeUndefined()
+    await expect(ensureRunStateLifecycleRule({}, client)).rejects.toThrow(
+      /missing required environment variables.*S3_BUCKET.*S3_REGION.*AWS_ACCESS_KEY_ID.*AWS_SECRET_ACCESS_KEY/i,
+    )
 
     expect(inputs).toEqual([])
-    expect(logs[0]).toMatch(/skipped: missing S3 lifecycle environment variables/i)
   })
 
   it('throws when readback does not confirm the canonical rule', async () => {

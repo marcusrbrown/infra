@@ -122,22 +122,28 @@ function redactLifecycleError(error: unknown, secrets: LifecycleSecret[]): Error
   return new Error(sanitized)
 }
 
-/** Ensures AWS-native S3 expires tagged run-state objects after 30 days. */
+/**
+ * Ensures AWS-native S3 expires tagged run-state objects after 30 days.
+ *
+ * This is an operator-invoked, privileged-credential operation — it is NOT called from
+ * provisioning. The gateway's runtime `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` are
+ * deliberately object-only and lack `s3:GetLifecycleConfiguration`/`s3:PutLifecycleConfiguration`.
+ * See `apps/gateway/AGENTS.md` (S3 STATE-BUCKET IAM ACTIONS) for the operator procedure.
+ */
 export async function ensureRunStateLifecycleRule(
   env: LifecycleEnv,
   client?: LifecycleS3Client,
   log: (message: string) => void = message => console.warn(message),
 ): Promise<void> {
   if (env.S3_ENDPOINT?.trim()) {
-    log('skipped: custom S3 endpoint, run-state tagging not applied by daemon')
+    log('no-op: custom S3 endpoint, run-state tagging not applied by daemon (deliberate, not an error)')
     return
   }
 
   const required = ['S3_BUCKET', 'S3_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] as const
   const missing = required.filter(key => !env[key]?.trim())
   if (missing.length > 0) {
-    log(`skipped: missing S3 lifecycle environment variables (${missing.join(', ')})`)
-    return
+    throw new Error(`ensureRunStateLifecycleRule: missing required environment variables (${missing.join(', ')})`)
   }
 
   const bucket = env.S3_BUCKET
@@ -588,8 +594,6 @@ export async function main(): Promise<void> {
     '--no-header',
   ])
   await setupOperatorFirewall(gatewayDropletId, process.env as Record<string, string>)
-
-  await ensureRunStateLifecycleRule(process.env)
 
   printOperatorSetupMessage(dropletIp, gatewayHost)
 }

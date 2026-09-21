@@ -126,7 +126,34 @@ The `fro-bot-gateway` identity (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) n
 
 **Do not grant** `s3:GetObjectTagging` or `s3:DeleteObjectTagging` — upstream has zero call sites for either at the pinned ref; granting them widens the identity beyond what it uses.
 
-**Known gap — lifecycle configuration:** `apps/gateway/server/provision-droplet.ts` reads and writes the bucket lifecycle configuration using these same `AWS_*` credentials, which needs bucket-level `s3:GetLifecycleConfiguration` and `s3:PutLifecycleConfiguration`. The `fro-bot-gateway` identity does not currently have these — the lifecycle provisioning step fails closed with `AccessDenied`. Granting lifecycle admin to the runtime identity is a trade-off, not a fix: it widens a deliberately object-only identity to cover a provisioning-only concern. Prefer a separate provisioning-scoped identity or manual lifecycle configuration over widening `fro-bot-gateway`.
+**Lifecycle configuration is operator-owned, not provisioning-owned.** A bucket lifecycle rule is bucket-level AWS state, independent of the droplet — destroying and rebuilding the droplet never touches it, and it is set-once configuration rather than per-provision or per-deploy state. `apps/gateway/server/provision-droplet.ts` does **not** apply it. The `fro-bot-gateway` runtime identity intentionally does not hold `s3:GetLifecycleConfiguration` / `s3:PutLifecycleConfiguration`, and should not be granted them — the only candidate for holding that bucket-administration power permanently is a credential that lives on the droplet and is used by the running daemon, which is a bad trade for automating a change that happens approximately once.
+
+`ensureRunStateLifecycleRule` (exported from `apps/gateway/server/provision-droplet.ts`) remains available as a correct, idempotent helper for an operator to run by hand with a privileged, provisioning-scoped credential — never the runtime `fro-bot-gateway` identity.
+
+The rule's canonical shape — `RUN_STATE_LIFECYCLE_RULE` in `apps/gateway/server/provision-droplet.ts` is the source of truth, referenced here rather than duplicated:
+
+- ID: `run-state-30d-expiration`
+- Filter: `Tag {Key: object-type, Value: run-state}`
+- Status: `Enabled`
+- Expiration: `Days: 30`
+
+**Why the filter must stay tag-scoped, not prefix-scoped:** the same `<prefix>` also holds durable Discord channel/repo bindings (`bindings/repo.json` and `bindings/by-channel/<id>.json`) that must never expire. A prefix-wide rule would delete them and silently unbind every repository. The tag filter — matching only objects the daemon explicitly tags `object-type=run-state` — is what makes a retention rule safe to have at all.
+
+**Operator procedure — read first, merge, then put.** `PutBucketLifecycleConfiguration` REPLACES the bucket's entire lifecycle configuration. A blind PUT silently destroys any other rules present (e.g. a `NoncurrentVersionExpiration` rule covering the IAM probe prefix, see the versioning caveat below). Never PUT without reading first:
+
+```bash
+# 1. Read the current configuration. NoSuchLifecycleConfiguration means there is
+#    nothing to merge — proceed straight to writing just the run-state rule.
+aws s3api get-bucket-lifecycle-configuration --bucket <bucket>
+
+# 2. Merge: keep every existing rule whose ID is not run-state-30d-expiration,
+#    then add/replace the run-state-30d-expiration rule with the canonical shape above.
+
+# 3. Put the merged document (never a bare/blind PUT of just the new rule).
+aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration file://merged.json
+```
+
+Or invoke `ensureRunStateLifecycleRule(env)` directly with a privileged credential — it already performs this read-check-write-readback sequence correctly and merges rather than replaces.
 
 **This repo does not verify these grants.** No code here manages or checks the `fro-bot-gateway` identity's IAM policy — it is maintained out-of-band in AWS. A redeploy against a new bucket or a new identity can silently reproduce a missing-tagging outage. Verify with a tagged write, since an untagged write succeeds while tagging fails silently:
 

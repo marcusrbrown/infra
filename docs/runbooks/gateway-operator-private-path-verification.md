@@ -209,11 +209,15 @@ and the full auth path is live end-to-end.
 - `GET /operator/auth/github/start` — login entry; returns `302` to GitHub OAuth
 - `GET /operator/auth/github/callback` — OAuth callback; returns operator identity JSON on success
 
-**Any other `/operator/*` path** — including bare `/operator/` and `/operator` — returns
-`{"error":"not-found"}` (HTTP 404) by design. This is correct behavior, not a failure. There is no
-browsable operator UI yet; the operator dashboard UI client is deferred to
-`docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md`. Use `/operator/health` (not
-`/operator/`) as the health surface, and `/operator/auth/github/start` as the login surface.
+The live surface is larger than the three probes above — `/operator/session`, `/operator/session/csrf`,
+`/operator/repos`, the `/operator/runs` family, `POST /operator/dispatch`, and the conditionally
+registered `/operator/push/*` routes all exist. Root `AGENTS.md` carries the current list; treat it as
+the source of truth rather than duplicating it here.
+
+Bare `/operator/` returns `{"error":"not-found"}` (HTTP 404) by design. Bare `/operator` (no trailing
+slash) never reaches the gateway at all — it does not match Caddy's `/operator/*` prefix, falls through
+to the dashboard SPA catch-all, and returns `302`. Use `/operator/health` as the health surface and
+`/operator/auth/github/start` as the login surface.
 
 ---
 

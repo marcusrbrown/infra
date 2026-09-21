@@ -105,29 +105,61 @@ Approve the environment gate.
 
 ### Step 3: Verify the gateway side (mandatory — see [Critical Operational Caveats](#critical-operational-caveats))
 
-The authenticated route probe is the primary check, because it is a positive signal rather than the absence of a failure:
-
-```
-GET /operator/push/vapid-key     → 200 {"publicKey":"<unpadded-base64url>","keyVersion":"1"}
-GET /operator/push/subscriptions → 200
-```
-
-A 200 here proves the object-store CAS self-test passed. The routes mount only when the daemon threads through a push store and VAPID key info, and it only does that after the self-test succeeds — so the routes cannot exist on a process where push silently failed.
-
-Must be authenticated. Unauthenticated requests return the same 404-style denial whether push is on or off, so a logged-out 404 proves nothing either way.
-
-If the routes still 404 while authenticated, read the startup logs:
+An **unauthenticated** probe is sufficient, and it is a positive signal rather than the absence of a failure:
 
 ```bash
-bunx @marcusrbrown/infra gateway logs gateway --tail 200
+for p in /operator/push/vapid-key /operator/push/subscriptions; do
+  printf '%s %s\n' "$p" "$(curl -s -o /dev/null -w '%{http_code}' "https://dashboard.fro.bot$p")"
+done
 ```
 
-The healthy path logs **nothing** — there is no success marker to look for. A failure emits an audit event whose message is `audit: push.disabled`, carrying a structured `reason` field:
+- **401** — the route is mounted and demanding auth. The push subsystem initialized.
+- **404** — the route did not mount. Push is off.
+
+A 401 proves the object-store CAS self-test passed **at boot**. The routes mount only when the daemon threads through a push store and VAPID key info, and it only does that after the self-test succeeds — so a mounted route cannot exist on a process that failed the self-test at startup. It says nothing about the store's health since.
+
+That is initialization, not delivery. A mounted route says the quartet was present and the self-test passed; it says nothing about whether a notification reaches a browser. Keys can be well-formed and still be the wrong keys. Confirm delivery by subscribing and triggering an approval-pending or failed run.
+
+Probe with the right verb. `/operator/push/subscriptions/unsubscribe` is POST-only, so a plain `curl` returns 404 on a route that is mounted and working — a false "push is off". The loop above deliberately uses only the two GET-safe routes. Extending it, use `-X POST` for the POST routes:
+
+```
+/operator/push/subscriptions              GET 401   POST 401
+/operator/push/subscriptions/unsubscribe  GET 404   POST 401
+```
+
+Sanity-check the discriminator against two controls, since the whole conclusion rests on 401 and 404 meaning different things here:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://dashboard.fro.bot/operator/session              # 401 — known-mounted
+curl -s -o /dev/null -w '%{http_code}\n' https://dashboard.fro.bot/operator/push/nonexistent-xyz  # 404 — known-absent
+```
+
+Authenticated, `GET /operator/push/vapid-key` additionally returns the payload, which is worth checking when confirming a rotation took effect:
+
+```
+200 {"publicKey":"<unpadded-base64url>","keyVersion":"1"}
+```
+
+If the routes 404, read the startup logs:
+
+```bash
+bunx @marcusrbrown/infra gateway logs gateway --tail 300
+```
+
+A failure emits an audit event whose message is `audit: push.disabled`, carrying a structured `reason` field — the reason is a field, not part of the message string, so grep for `audit: push.disabled` and read `reason`:
 
 - `reason: "config_absent"` — the quartet was not present at container start. Check the deploy env, not just GitHub.
 - `reason: "self_test_failed"` — the quartet validated, but the object-store CAS self-test failed. This case also logs `operator push disabled — object store failed CAS self-test`.
 
-Grep for `audit: push.disabled` and read `reason`; the reason is a field, not part of the message string.
+There is no success marker, but a healthy start is not silent: the CAS self-test leaves its probe-object lifecycle in the logs, writing, reading, and deleting a key under `operator-push/_self-test/`.
+
+```
+{"level":"info","key":"operator-push/_self-test/<uuid>.json","msg":"Conditionally uploaded object store data"}
+{"level":"info","key":"operator-push/_self-test/<uuid>.json","msg":"Read object store data"}
+{"level":"info","key":"operator-push/_self-test/<uuid>.json","msg":"Conditionally deleted object store data"}
+```
+
+All three lines with no `push.disabled` event is corroboration, not proof — the route probe is the check that settles it.
 
 ### Step 4: Seed and deploy the dashboard
 
@@ -146,7 +178,9 @@ Requirements: HTTPS (satisfied), a registered service worker (already shipped �
 
 ## Critical Operational Caveats
 
-**A green deploy does not prove push is live.** If the object-store CAS self-test fails at gateway startup, push is disabled for that process and the gateway continues serving every other route normally — nothing fails, nothing restarts, no alert fires. Verifying with the authenticated `/operator/push/vapid-key` probe after every push-affecting deploy is mandatory, not a nice-to-have. Do not substitute a log check for it: the healthy path is silent, so "no error in the logs" is consistent with both a working deploy and one you have not looked at closely enough.
+**A green deploy does not prove push is live.** If the object-store CAS self-test fails at gateway startup, push is disabled for that process and the gateway continues serving every other route normally — nothing fails, nothing restarts, no alert fires. Probing `/operator/push/vapid-key` for 401 after every push-affecting deploy is mandatory, not a nice-to-have. It costs one unauthenticated curl.
+
+**The 401 is a latch, not a liveness probe.** Mount state is decided once during startup and never re-evaluated. If the object store degrades an hour or a month later, the routes stay mounted and the probe keeps returning 401 — it went 404 to 401 exactly once and cannot go back on its own. Use it as a post-deploy check, which is the moment it is actually answering a question, and do not wire it into monitoring. There is no runtime signal today for a push surface that initialized cleanly and then broke.
 
 **Subscriptions are durable, not in-memory.** They live in the object store at `operator-push/subscriptions/by-endpoint/{sha256(endpoint)}.json`, with privacy tombstones at `operator-push/tombstones/{sha256(endpoint)}.json`. They survive container recreation. This is the opposite of operator browser sessions, which are in-memory and die on any restart.
 

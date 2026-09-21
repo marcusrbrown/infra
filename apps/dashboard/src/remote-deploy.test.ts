@@ -1101,6 +1101,49 @@ describe('remote transaction process boundary', () => {
     }
   })
 
+  it('tolerates divergent free-byte readings across probes that share one mount (single-sample fix)', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-shared-mount-race-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dockerRoot = join(root, 'docker')
+    const containerdRoot = join(root, 'containerd')
+    mkdirSync(dockerRoot, {recursive: true})
+    mkdirSync(containerdRoot, {recursive: true})
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, `${runtimeRoot}-dashboard`, {
+          dockerRoot,
+          containerdRoot,
+          mounts: [
+            {path: dockerRoot, target: '/', source: '/dev/test-root', fstype: 'ext4', freeBytes: 8 * 1024 ** 3},
+            {
+              path: containerdRoot,
+              target: '/',
+              source: '/dev/test-root',
+              fstype: 'ext4',
+              freeBytes: 8 * 1024 ** 3 - 4096,
+            },
+          ],
+        }),
+        encodeRemotePayload(fixture),
+      )
+
+      // Previously this diverging pair of stat(2) readings for the same mount key
+      // failed closed with "contradictory storage free-byte evidence" even though
+      // it is an ordinary race, not corrupted evidence. Only the first probe on a
+      // given mount is sampled now, so divergent second readings no longer matter.
+      expect(result.exitCode, result.stderr).toBe(0)
+      const baselineStorage = result.stdout.split('\n').filter(line => line.startsWith('evidence=storage:baseline:'))
+      expect(baselineStorage).toHaveLength(1)
+      expect(baselineStorage[0]).toContain(`probe=${dockerRoot},${containerdRoot}`)
+      expect(baselineStorage[0]).toContain(`free-bytes=${8 * 1024 ** 3}`)
+      expect(result.stdout).toContain('stage=active-state-written')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
   it('gates on the minimum free bytes across distinct Docker and containerd mounts', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-multi-mount-'))
     const root = realpathSync(parent)

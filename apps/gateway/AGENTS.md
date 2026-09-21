@@ -138,6 +138,10 @@ aws s3api delete-object --bucket <bucket> --key <prefix>/_iam-probe/<uuid>.json
 
 The probe key must sit inside the same resource scope (`<bucket>/<prefix>/*`) the real run-state objects use — a probe outside a narrowly scoped grant's prefix produces a false negative. Cleanup needs `s3:DeleteObject`.
 
+The gateway deploy runs this same probe automatically as a fail-closed preflight (`assertS3TaggedWriteCapability` in `apps/gateway/src/deploy.ts`), before any remote mutation and before containers are replaced. It is skipped under `--dry-run`, and skipped with an explicit logged reason when `S3_ENDPOINT` is set, because upstream suppresses object tagging entirely for non-AWS endpoints.
+
+**Versioning caveat:** on a versioning-enabled bucket, deleting the probe writes a delete marker and retains a noncurrent version, so one small object accumulates per deploy. The runtime identity cannot read bucket versioning state (no `s3:GetBucketVersioning`), so neither the probe nor the deploy can detect this. If the state bucket is versioned, cover the probe prefix with a `NoncurrentVersionExpiration` lifecycle rule rather than granting `s3:DeleteObjectVersion` to the runtime identity.
+
 ## REQUIRED SECRETS
 
 | Secret | Required | Description |

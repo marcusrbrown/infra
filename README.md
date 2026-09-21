@@ -12,7 +12,7 @@ Personal infrastructure management — deploy automation, operational CLI, and t
 
 ## Overview
 
-Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, a Fro Bot monitoring dashboard, a WireGuard VPN egress box on AWS Lightsail, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
+Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, a Fro Bot monitoring dashboard, self-hosted Umami analytics, an OIDC credential broker for CI runs, a WireGuard VPN egress box on AWS Lightsail, an operator-run AWS provisioner for `fro-bot/agent` durable storage, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
 
 | Package | Description |
 | --- | --- |
@@ -22,6 +22,8 @@ Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy
 | `apps/umami` | Self-hosted Umami analytics Docker Compose stack (`metrics.fro.bot`) |
 | `apps/dashboard` | Fro Bot monitoring dashboard Docker Compose stack (`dashboard.fro.bot`) |
 | `apps/vpn` | WireGuard egress box on AWS Lightsail `eu-west-1` — native `wg-quick@wg0`, no Docker |
+| `apps/broker` | OIDC credential broker Docker Compose stack (`broker.fro.bot`) |
+| `apps/agent` | Operator-run AWS provisioner for `fro-bot/agent` S3 durable storage — not deployable |
 | `packages/cli` | [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI — health checks, deploy triggers, onboarding wizard, MCP bridge |
 
 ## Prerequisites
@@ -40,14 +42,16 @@ bun test --recursive
 
 ## Apps
 
-Each app is a self-contained deploy unit. See its README for build, deploy, provisioning, and configuration detail; see its `AGENTS.md` for operational runbooks.
+Each app is a self-contained deploy unit, except `apps/agent` — an operator-run provisioner with no deploy step. See its README for build, deploy, provisioning, and configuration detail; see its `AGENTS.md` for operational runbooks.
 
 - **[KeeWeb](apps/keeweb/README.md)** (`apps/keeweb`) — self-hosted [KeeWeb](https://keeweb.info) password manager at [kw.igg.ms](https://kw.igg.ms); static site deployed over SSH/rsync to a Mail-in-a-Box server.
 - **[CLIProxyAPI](apps/cliproxy/README.md)** (`apps/cliproxy`) — [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) Claude proxy at [cliproxy.fro.bot](https://cliproxy.fro.bot); Docker Compose + Caddy on DigitalOcean, issuing per-repo API keys backed by one Claude subscription.
 - **[Gateway](apps/gateway/README.md)** (`apps/gateway`) — Fro Bot Discord client and workspace runner at [gateway.fro.bot](https://gateway.fro.bot); a 3-service Docker Compose stack on DigitalOcean, pinned to `fro-bot/agent` via `apps/gateway/upstream.json`.
 - **[Umami](apps/umami/README.md)** (`apps/umami`) — self-hosted [Umami](https://umami.is) privacy-respecting analytics at [metrics.fro.bot](https://metrics.fro.bot); Docker Compose (Umami + Postgres + Caddy) on DigitalOcean.
-- **[Dashboard](apps/dashboard/README.md)** (`apps/dashboard`) — Fro Bot monitoring dashboard at [dashboard.fro.bot](https://dashboard.fro.bot); Docker Compose (dashboard + Caddy) on DigitalOcean; image built from `fro-bot/dashboard` (pinned in `apps/dashboard/upstream.json`) and pushed to GHCR by CI before deploy. See [`apps/dashboard/AGENTS.md`](apps/dashboard/AGENTS.md) for the operator runbook.
+- **[Dashboard](apps/dashboard/README.md)** (`apps/dashboard`) — Fro Bot monitoring dashboard at [dashboard.fro.bot](https://dashboard.fro.bot); Docker Compose (dashboard + Caddy) on DigitalOcean; image built from `fro-bot/dashboard` (digest-pinned in `apps/dashboard/docker-compose.yaml`) and pushed to GHCR by CI before deploy. See [`apps/dashboard/AGENTS.md`](apps/dashboard/AGENTS.md) for the operator runbook.
 - **[VPN](apps/vpn/README.md)** (`apps/vpn`) — WireGuard egress box on AWS Lightsail (`eu-west-1`, Ireland); native `wg-quick@wg0` + systemd, no Docker; provisioned via `@aws-sdk/client-lightsail`, deployed over SSH.
+- **[Broker](apps/broker/README.md)** (`apps/broker`) — OIDC-authenticated credential broker at [broker.fro.bot](https://broker.fro.bot); exchanges a GitHub Actions OIDC token for a short-lived cliproxy API key so the durable provider key never lands on a CI runner; Docker Compose (Caddy + Bun) on DigitalOcean.
+- **[Agent](apps/agent/README.md)** (`apps/agent`) — operator-run AWS provisioner for `fro-bot/agent` S3 durable session storage: an account-level GitHub OIDC provider, a dedicated S3 bucket, and one least-privilege IAM role per consumer repository. Not deployable — no `src/deploy.ts`, `src/host.ts`, Docker Compose stack, deploy workflow, or GitHub Environment. Entry point: `bun run provision:agent`. See [`docs/runbooks/agent-s3-durable-storage.md`](docs/runbooks/agent-s3-durable-storage.md).
 
 ## CLI
 
@@ -69,16 +73,20 @@ bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
 | **CI** | PRs to `main` | Lint, type check, and test |
+| **CodeQL** | Push to `main`, PRs, weekly schedule | Static security analysis |
 | **Deploy KeeWeb** | Push to `main`, `workflow_dispatch` | Build and deploy KeeWeb (path-filtered) |
 | **Deploy CLIProxy** | Push to `main`, `workflow_dispatch` | Deploy CLIProxyAPI (path-filtered) |
 | **Deploy Gateway** | Push to `main`, `workflow_dispatch` | Deploy gateway stack (path-filtered) |
 | **Deploy Umami** | Push to `main`, `workflow_dispatch` | Deploy Umami analytics stack (path-filtered) |
 | **Deploy Dashboard** | Push to `main`, `workflow_dispatch` | Build dashboard image to GHCR and deploy (path-filtered) |
 | **Deploy VPN** | Push to `main`, `workflow_dispatch` | Deploy WireGuard VPN box (path-filtered) |
+| **Deploy Broker** | Push to `main`, `workflow_dispatch` | Deploy the credential broker stack (path-filtered) |
 | **Deploy** | Push to `main`, `workflow_dispatch` | Router that path-filters changes and dispatches the per-app deploy workflows |
 | **Release** | Push to `main` | Version and publish `@marcusrbrown/infra` via Changesets |
+| **Release Alert** | `Release` workflow completion, `workflow_dispatch` | Open a GitHub issue when `Release` fails |
 | **Renovate** | Schedule, issue/PR edits, post-deploy | Automated dependency updates |
 | **Renovate Changesets** | Renovate PRs | Auto-create changeset files for dependency updates |
+| **Prune Packages** | `workflow_dispatch` | Delete untagged GHCR package versions (dry-run unless `apply: true`) |
 | **Fro Bot** | PRs, @mentions, daily schedule, `workflow_dispatch` | AI code review and autohealing |
 | **CLIProxy Anthropic auth monitor** | Nominal 15-minute schedule, `workflow_dispatch` | Probe Anthropic auth and reconcile GitHub issue/Discord transition alerts |
 | **Copilot Setup Steps** | `workflow_dispatch`, changes to workflow file | Prepare environment for Copilot coding agent |
@@ -95,6 +103,9 @@ The `Deploy` router uses `dorny/paths-filter` (`predicate-quantifier: every`) to
 - **Deploy Umami** runs in the `umami` environment.
 - **Deploy Dashboard** runs in the `dashboard` environment.
 - **Deploy VPN** runs in the `vpn` environment.
+- **Deploy Broker** runs in the `broker` environment.
+
+`apps/agent` has no deploy workflow and no GitHub Environment — it is an operator-run provisioner triggered locally via `bun run provision:agent`.
 
 Manual deploys are available either per-app (`workflow_dispatch` on each dedicated workflow) or together via the umbrella `Deploy` workflow.
 
@@ -179,6 +190,19 @@ See [`apps/dashboard/AGENTS.md`](apps/dashboard/AGENTS.md) for the operator runb
 
 AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status. See [`apps/vpn/README.md`](apps/vpn/README.md) and [`apps/vpn/AGENTS.md`](apps/vpn/AGENTS.md).
 
+**`broker` environment:**
+
+| Name | Kind | Required | Description |
+| --- | --- | --- | --- |
+| `BROKER_SSH_KEY` | secret | ✓ | Ed25519 private key for the `broker.fro.bot` droplet |
+| `BROKER_HOST` | secret | ✓ | FQDN of the broker droplet |
+| `CLIPROXY_MANAGEMENT_KEY` | secret | ✓ | cliproxy management key; broker uses it to mint/revoke keys via the cliproxy management API |
+| `BROKER_AUD` | variable | ✓ | OIDC audience value for the broker. Not a secret — a cross-context replay defense. Also required in the local `.env` for provisioning. |
+
+See [`apps/broker/README.md`](apps/broker/README.md) and [`apps/broker/AGENTS.md`](apps/broker/AGENTS.md).
+
+**`apps/agent` has no GitHub Environment or deploy secrets.** It is a local-only provisioner; its `AGENT_AWS_*`, `AGENT_S3_*`, `AGENT_REPOSITORY_*`, and `AGENT_ACTION_REF` inputs live in the operator's root `.env` only and are never written to GitHub. See [`apps/agent/AGENTS.md`](apps/agent/AGENTS.md).
+
 **Repository secrets:**
 
 | Secret                                  | Description                                                                |
@@ -207,7 +231,7 @@ The KeeWeb deploy target uses a dedicated `deploy-kw` user with scoped sudo for 
 bun run apps/keeweb/server/setup-deploy-user.ts
 ```
 
-Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, `gateway.fro.bot`, `dashboard.fro.bot`, and the VPN static IP are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`.
+Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, `gateway.fro.bot`, `dashboard.fro.bot`, `metrics.fro.bot`, `broker.fro.bot`, and the VPN static IP are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`.
 
 ## Repository Structure
 

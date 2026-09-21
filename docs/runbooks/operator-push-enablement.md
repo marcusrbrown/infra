@@ -113,10 +113,19 @@ for p in /operator/push/vapid-key /operator/push/subscriptions; do
 done
 ```
 
-- **401** — the route is mounted and demanding auth. Push is live.
+- **401** — the route is mounted and demanding auth. The push subsystem initialized.
 - **404** — the route did not mount. Push is off.
 
 A 401 proves the object-store CAS self-test passed. The routes mount only when the daemon threads through a push store and VAPID key info, and it only does that after the self-test succeeds — so a mounted route cannot exist on a process where push silently failed.
+
+That is initialization, not delivery. A mounted route says the quartet was present and the self-test passed; it says nothing about whether a notification reaches a browser. Keys can be well-formed and still be the wrong keys. Confirm delivery by subscribing and triggering an approval-pending or failed run.
+
+Probe with the right verb. `/operator/push/subscriptions/unsubscribe` is POST-only, so a plain `curl` returns 404 on a route that is mounted and working — a false "push is off". The loop above deliberately uses only the two GET-safe routes. Extending it, use `-X POST` for the POST routes:
+
+```
+/operator/push/subscriptions              GET 401   POST 401
+/operator/push/subscriptions/unsubscribe  GET 404   POST 401
+```
 
 Sanity-check the discriminator against two controls, since the whole conclusion rests on 401 and 404 meaning different things here:
 

@@ -58,7 +58,8 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | `packages/cli/src/cli.ts`   | goke CLI entry; registers all command groups             |
 | `apps/<name>/src/deploy.ts` | App deploy script (`main`/`deploy`)                      |
 | `apps/keeweb/src/build.ts`  | KeeWeb build (download + SHA-256 verify + config inject) |
-| `apps/keeweb/deploy.sh`     | Only Bash script in the repo (SSH/rsync deploy)          |
+| `apps/keeweb/deploy.sh`     | SSH/rsync deploy (Bash)                                  |
+| `apps/umami/retention.sh`   | Host-native systemd retention runner (Bash)              |
 
 **Per-App Deploy / Provision**
 
@@ -112,7 +113,7 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 
 ## Naming Conventions
 
-- **Scripts**: TypeScript run via `bun run`. Only `apps/keeweb/deploy.sh` is Bash.
+- **Scripts**: TypeScript run via `bun run`. Exactly two approved Bash scripts: `apps/keeweb/deploy.sh` and `apps/umami/retention.sh` (allowlisted in `packages/cli/src/conventions.test.ts`).
 - **Tests**: colocated `*.test.ts` beside source. Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Use `NO_COLOR=1` for deterministic subprocess snapshots.
 - **CLI command modules**: `packages/cli/src/commands/<app>/<action>.ts` (e.g. `status.ts`, `deploy.ts`) + a barrel `index.ts` exporting `register<App>Commands`.
 - **Host validators**: `host.ts` (deploy-side under `apps/<name>/src/`, CLI-side under `packages/cli/src/commands/<app>/`).

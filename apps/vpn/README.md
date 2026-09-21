@@ -28,8 +28,8 @@ One-time: creates the Lightsail instance, allocates a static IP, sets the exact 
 
 **Prerequisites:**
 
-- Dedicated least-privilege Lightsail IAM user created; `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` in the repo-root `.env`
-- `wg-egress` Ed25519 keypair generated; `VPN_SSH_KEY` (private key) in `.env`
+- Dedicated least-privilege Lightsail IAM user created; `VPN_AWS_ACCESS_KEY_ID` + `VPN_AWS_SECRET_ACCESS_KEY` in the repo-root `.env` (distinct from the gateway's `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, which are S3-scoped and lack Lightsail permissions)
+- `wg-egress` Ed25519 keypair generated; `VPN_SSH_KEY` (private key) in `.env`, `VPN_PUBLIC_KEY` (public key) in `.env`
 - `vpn` GitHub Environment created with required reviewer + main-only branch policy
 
 Use the root wrapper (loads the repo-root `.env`):
@@ -52,7 +52,7 @@ GitHub Environment: **`vpn`**
 | `VPN_HOST`    | ✓        | Static IP of the Lightsail instance (printed by provisioning)                    |
 | `VPN_PEERS`   | —        | Peer roster JSON. Auto-synced by `vpn client add/remove`. Empty roster is valid. |
 
-AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are operator-local only — not in the `vpn` Environment and not used by deploy or status.
+AWS provisioning credentials (`VPN_AWS_ACCESS_KEY_ID`, `VPN_AWS_SECRET_ACCESS_KEY`, `VPN_PUBLIC_KEY`, optional `VPN_AWS_REGION`) are operator-local only — not in the `vpn` Environment and not used by deploy or status.
 
 ## Operations
 

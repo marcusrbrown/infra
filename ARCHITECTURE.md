@@ -14,7 +14,7 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 
 | Role | Path |
 | --- | --- |
-| CLI entry point (goke) | `packages/cli/src/cli.ts` (`registerKeewebCommands`, `registerCliproxyCommands`, `registerGatewayCommands`, `registerUmamiCommands`, `registerVpnCommands`, `registerDashboardCommands`, `registerBrokerCommands`, `registerStatus`, `registerMcp`) |
+| CLI entry point (goke) | `packages/cli/src/cli.ts` (`registerKeewebCommands`, `registerAgentCommands`, `registerCliproxyCommands`, `registerBrokerCommands`, `registerGatewayCommands`, `registerUmamiCommands`, `registerDashboardCommands`, `registerVpnCommands`, `registerStatus`, `registerMcp`) |
 | Per-app CLI command groups | `packages/cli/src/commands/<app>/` (each `<action>.ts` + barrel `index.ts`) |
 | Unified status dashboard | `packages/cli/src/commands/status.ts` |
 | MCP bridge + allowlist | `packages/cli/src/commands/mcp.ts` (`MCP_ALLOWLIST`, `registerMcp`) |
@@ -74,7 +74,7 @@ The agent owns report prose, create/update, and untrusted-collision visibility; 
 Enforceable rules. Many are gated by `packages/cli/src/conventions.test.ts`, ESLint, or review; mirror the `(enforced)` anti-patterns in the root `AGENTS.md`.
 
 1. **`apps/` are deployable units; `packages/` are reusable libraries.** `packages/` never imports from `apps/`. `apps/agent` is the sole non-deployable exception — a private operator-run provisioner with no deploy script or deploy workflow.
-2. **Only `apps/keeweb/deploy.sh` is Bash.** Every other script is TypeScript run via `bun run`.
+2. **Exactly two approved Bash scripts: `apps/keeweb/deploy.sh` and `apps/umami/retention.sh`.** `apps/umami/retention.sh` is the narrow host-native systemd/Docker exception; `packages/cli/src/conventions.test.ts` enforces the allowlist. Every other script is TypeScript run via `bun run`.
 3. **Never pass secret bytes via argv.** Secret material is piped through SSH stdin (`writeRemoteFile` pattern); `--body <value>` patterns are banned.
 4. **Host validation before SSH.** Every SSH-spawning command validates the host (`host.ts`, rejecting `-`-prefixed and invalid values) before constructing the SSH command.
 5. **GitHub Actions are SHA-pinned** with a `# vX.Y.Z` comment; workflow files use `.yaml` (not `.yml`).

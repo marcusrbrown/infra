@@ -116,7 +116,7 @@ done
 - **401** — the route is mounted and demanding auth. The push subsystem initialized.
 - **404** — the route did not mount. Push is off.
 
-A 401 proves the object-store CAS self-test passed. The routes mount only when the daemon threads through a push store and VAPID key info, and it only does that after the self-test succeeds — so a mounted route cannot exist on a process where push silently failed.
+A 401 proves the object-store CAS self-test passed **at boot**. The routes mount only when the daemon threads through a push store and VAPID key info, and it only does that after the self-test succeeds — so a mounted route cannot exist on a process that failed the self-test at startup. It says nothing about the store's health since.
 
 That is initialization, not delivery. A mounted route says the quartet was present and the self-test passed; it says nothing about whether a notification reaches a browser. Keys can be well-formed and still be the wrong keys. Confirm delivery by subscribing and triggering an approval-pending or failed run.
 
@@ -179,6 +179,8 @@ Requirements: HTTPS (satisfied), a registered service worker (already shipped �
 ## Critical Operational Caveats
 
 **A green deploy does not prove push is live.** If the object-store CAS self-test fails at gateway startup, push is disabled for that process and the gateway continues serving every other route normally — nothing fails, nothing restarts, no alert fires. Probing `/operator/push/vapid-key` for 401 after every push-affecting deploy is mandatory, not a nice-to-have. It costs one unauthenticated curl.
+
+**The 401 is a latch, not a liveness probe.** Mount state is decided once during startup and never re-evaluated. If the object store degrades an hour or a month later, the routes stay mounted and the probe keeps returning 401 — it went 404 to 401 exactly once and cannot go back on its own. Use it as a post-deploy check, which is the moment it is actually answering a question, and do not wire it into monitoring. There is no runtime signal today for a push surface that initialized cleanly and then broke.
 
 **Subscriptions are durable, not in-memory.** They live in the object store at `operator-push/subscriptions/by-endpoint/{sha256(endpoint)}.json`, with privacy tombstones at `operator-push/tombstones/{sha256(endpoint)}.json`. They survive container recreation. This is the opposite of operator browser sessions, which are in-memory and die on any restart.
 

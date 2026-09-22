@@ -9,7 +9,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1133.0",
+    "@aws-sdk/client-s3": "3.1136.0",
     "@marcusrbrown/infra-shared": "workspace:*"
   }
 }

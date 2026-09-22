@@ -23,7 +23,7 @@ services:
       start_period: 10s
 
   cli-proxy-api:
-    image: eceasy/cli-proxy-api:v7.3.13@sha256:4f01bc184cfc2b5ad4d906afcf078f09837627ee5af54765a642fccbd39a90d0
+    image: eceasy/cli-proxy-api:v7.3.14@sha256:d8a9ef3aa53a7045778654aa6f26e236945cd7d979e95d7b13522581ba9e3d04
     restart: unless-stopped
     env_file:
       - path: .env

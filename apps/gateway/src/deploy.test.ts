@@ -246,22 +246,20 @@ function semverGte(ref: string, min: string): boolean {
 }
 
 describe('upstream.json pin', () => {
-  test('upstream.json ref is v0.69.0 or later (operator auth/config contract requires fro-bot/agent v0.69.0)', async () => {
+  test('upstream.json ref is v0.114.1 or later (operator listener requires GATEWAY_OPERATOR_TRUSTED_PROXIES, enforced by the daemon since fro-bot/agent v0.114.1)', async () => {
     const {resolveUpstreamPin} = await import('./deploy')
     const upstreamPath = join(import.meta.dir, '..', 'upstream.json')
     const pin = resolveUpstreamPin(upstreamPath)
     expect(pin.repo).toBe('fro-bot/agent')
     expect(
-      semverGte(pin.ref, 'v0.69.0'),
-      `upstream.json ref "${pin.ref}" is below v0.69.0. The operator auth/config contract ` +
-        `(GATEWAY_OPERATOR_GITHUB_CLIENT_ID, GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET, ` +
-        `GATEWAY_OPERATOR_CSRF_SECRET, GATEWAY_OPERATOR_ALLOWLIST) requires fro-bot/agent v0.69.0 ` +
-        `(PR #944 + PR #939). Bump upstream.json ref to v0.69.0 or later.`,
+      semverGte(pin.ref, 'v0.114.1'),
+      `upstream.json ref "${pin.ref}" is below v0.114.1. The deploy derives GATEWAY_OPERATOR_TRUSTED_PROXIES ` +
+        `from DASHBOARD_VPC_IP and the operator auth/config contract (GATEWAY_OPERATOR_GITHUB_CLIENT_ID, ` +
+        `GATEWAY_OPERATOR_GITHUB_CLIENT_SECRET, GATEWAY_OPERATOR_CSRF_SECRET, GATEWAY_OPERATOR_ALLOWLIST) ` +
+        `is validated against fro-bot/agent v0.114.1 or later. Bump upstream.json ref to v0.114.1 or later.`,
     ).toBe(true)
   })
 })
-
-// ─── validateRequiredEnv ──────────────────────────────────────────────────────
 
 describe('validateRequiredEnv', () => {
   test('returns empty array when all required vars are present', async () => {
@@ -4496,7 +4494,7 @@ describe('main() — compose command sequence: pull-then-up-without-build', () =
     expect(upCall?.join(' ')).toContain('--no-build')
   })
 
-  test('compose up command retains --wait, --wait-timeout 120, --remove-orphans', async () => {
+  test('compose up command retains --wait, --wait-timeout 600, --remove-orphans', async () => {
     const {main} = await import('./deploy')
     const {spawnFn, calls} = makeSpawnMock()
     const mockFetch = makeDiscordFetch([{name: 'ping'}])
@@ -4507,8 +4505,8 @@ describe('main() — compose command sequence: pull-then-up-without-build', () =
     expect(upCall).toBeDefined()
     const upStr = upCall?.join(' ') ?? ''
     expect(upStr).toContain('--wait')
-    expect(upStr).toContain('--wait-timeout')
-    expect(upStr).toContain('120')
+    expect(upStr).toContain('--wait-timeout 600')
+    expect(upStr).not.toContain('--wait-timeout 120')
     expect(upStr).toContain('--remove-orphans')
   })
 
@@ -5599,6 +5597,7 @@ describe('buildComposeOverride — operator topology', () => {
     workspaceDigest: WORKSPACE_DIGEST,
     announceEnabled: true,
     operatorEnabled: true,
+    operatorTrustedProxies: '10.116.0.5',
     operatorBindHost: '172.21.0.2',
     operatorBindPort: '9300',
     operatorPublicOrigin: 'https://gateway.fro.bot',
@@ -5689,6 +5688,7 @@ describe('buildComposeOverride — operator topology', () => {
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://gateway.fro.bot',
@@ -5953,6 +5953,7 @@ describe('main() — operator config validation before SSH', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       spawn: spawnFn,
       fetch: makeDiscordFetch([{name: 'ping'}]),
@@ -6026,6 +6027,7 @@ describe('main() — operator health probe', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       spawn: spawnFn,
       fetch: fetchMock,
@@ -6081,6 +6083,7 @@ describe('main() — operator health probe', () => {
     await expect(
       main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         spawn: spawnFn,
         fetch: fetchMock,
@@ -6101,6 +6104,7 @@ describe('buildComposeOverride — GATEWAY_OPERATOR_PUBLIC_ORIGIN in gateway env
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
@@ -6127,6 +6131,7 @@ describe('buildComposeOverride — GATEWAY_OPERATOR_PUBLIC_ORIGIN in gateway env
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: true,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
@@ -6146,6 +6151,7 @@ describe('buildComposeOverride — Caddy gated by caddyEnabled = announceEnabled
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
@@ -6162,6 +6168,7 @@ describe('buildComposeOverride — Caddy gated by caddyEnabled = announceEnabled
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
@@ -6201,6 +6208,7 @@ describe('buildComposeOverride — Caddy gated by caddyEnabled = announceEnabled
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: true,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
@@ -6283,6 +6291,7 @@ describe('buildComposeOverride — deterministic network/IPAM for static operato
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
@@ -6327,6 +6336,7 @@ describe('buildComposeOverride — deterministic network/IPAM for static operato
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
@@ -6343,6 +6353,7 @@ describe('buildComposeOverride — deterministic network/IPAM for static operato
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
@@ -6394,6 +6405,7 @@ describe('main() — Caddyfile written when operator enabled (announce disabled)
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       spawn: spawnFn,
       fetch: makeDiscordFetch([{name: 'ping'}]),
@@ -6424,6 +6436,7 @@ describe('main() — Caddyfile written when operator enabled (announce disabled)
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       spawn: spawnFn,
       fetch: makeDiscordFetch([{name: 'ping'}]),
@@ -6454,6 +6467,7 @@ describe('main() — Caddyfile written when operator enabled (announce disabled)
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       spawn: spawnFn,
       fetch: makeDiscordFetch([{name: 'ping'}]),
@@ -6554,6 +6568,7 @@ describe('computeSecretsChecksum — Caddyfile included when operator enabled (b
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://operator.example.com',
@@ -6748,6 +6763,7 @@ describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
     try {
       await main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         spawn: makeSpawnMock().spawnFn,
         fetch: fetchMock as unknown as typeof fetch,
@@ -6776,6 +6792,7 @@ describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
     try {
       await main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         spawn: makeSpawnMock().spawnFn,
         fetch: fetchMock as unknown as typeof fetch,
@@ -6808,6 +6825,7 @@ describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
     try {
       await main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         spawn: makeSpawnMock().spawnFn,
         fetch: fetchMock as unknown as typeof fetch,
@@ -6865,6 +6883,7 @@ describe('infra rendered-config validation gate (issue 4)', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -6902,6 +6921,7 @@ describe('infra rendered-config validation gate (issue 4)', () => {
     await expect(
       main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -6931,6 +6951,7 @@ describe('infra rendered-config validation gate (issue 4)', () => {
     await expect(
       main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -6959,6 +6980,7 @@ describe('infra rendered-config validation gate (issue 4)', () => {
     await expect(
       main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -7033,6 +7055,7 @@ describe('Phase 5d rendered-config validation — safe shell quoting (CE review 
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7063,6 +7086,7 @@ describe('Phase 5d rendered-config validation — safe shell quoting (CE review 
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7107,6 +7131,7 @@ describe('Phase 5d rendered-config validation — safe shell quoting (CE review 
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7134,6 +7159,7 @@ describe('buildComposeOverride — operator env guard requires operatorPublicOri
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://gateway.fro.bot',
@@ -7149,6 +7175,7 @@ describe('buildComposeOverride — operator env guard requires operatorPublicOri
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: undefined,
@@ -7166,6 +7193,7 @@ describe('buildComposeOverride — operator env guard requires operatorPublicOri
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: undefined,
@@ -7182,6 +7210,7 @@ describe('buildComposeOverride — operator env guard requires operatorPublicOri
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -7418,6 +7447,7 @@ describe('buildComposeOverride — shared operator fixture includes operatorPubl
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: true,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -7486,6 +7516,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7509,6 +7540,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7534,6 +7566,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7558,6 +7591,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7583,6 +7617,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7609,6 +7644,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7633,6 +7669,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7656,6 +7693,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7680,6 +7718,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -7715,6 +7754,7 @@ describe('Phase 5d rendered-config validation — full invariant coverage', () =
     await expect(
       main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -7778,6 +7818,7 @@ describe('operator health URL — trailing-slash origin normalization', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: mockFetch,
       sleep: async () => {},
@@ -7824,6 +7865,7 @@ describe('operator health URL — trailing-slash origin normalization', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: mockFetch,
       sleep: async () => {},
@@ -7888,6 +7930,7 @@ describe('operator health probe — initial log does not expose URL', () => {
     try {
       await main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         fetch: mockFetch,
         sleep: async () => {},
@@ -7981,6 +8024,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -8048,6 +8092,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -8094,6 +8139,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -8122,6 +8168,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -8167,6 +8214,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     await expect(
       main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -8217,6 +8265,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     await expect(
       main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: [],
         fetch: makeDiscordFetch([{name: 'ping'}]),
         sleep: async () => {},
@@ -8248,6 +8297,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -8362,6 +8412,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       fetch: makeDiscordFetch([{name: 'ping'}]),
       sleep: async () => {},
@@ -9563,6 +9614,9 @@ function makeOperatorAuthEnv(overrides: Record<string, string> = {}): Record<str
     GATEWAY_OPERATOR_BIND_PORT: '9300',
     GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot',
     ...VALID_OPERATOR_AUTH_ENV,
+    // The operator listener requires the VPC IP pair; DASHBOARD_VPC_IP is the derived trusted proxy.
+    GATEWAY_VPC_IP: '10.116.0.3',
+    DASHBOARD_VPC_IP: '10.116.0.5',
     ...overrides,
   })
 }
@@ -9756,6 +9810,7 @@ describe('main() — operator auth/config fail-fast gate', () => {
 
     await main({
       env: makeOperatorAuthEnv(),
+      tcpConnect: tcpConnectRefused,
       args: [],
       spawn: spawnFn,
       fetch: makeDiscordFetch([{name: 'ping'}]),
@@ -9841,6 +9896,7 @@ describe('buildComposeOverride — operator auth _FILE env vars and bind mounts'
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -9896,6 +9952,7 @@ describe('buildComposeOverride — operator auth _FILE env vars and bind mounts'
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -9922,6 +9979,7 @@ describe('buildComposeOverride — operator auth _FILE env vars and bind mounts'
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -9952,6 +10010,7 @@ describe('buildComposeOverride — operator auth _FILE env vars and bind mounts'
         workspaceDigest: WORKSPACE_DIGEST,
         announceEnabled: false,
         operatorEnabled: true,
+        operatorTrustedProxies: '10.116.0.5',
         operatorBindHost: '172.21.0.2',
         operatorBindPort: '9300',
         operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -9970,6 +10029,7 @@ describe('buildComposeOverride — operator auth _FILE env vars and bind mounts'
         workspaceDigest: WORKSPACE_DIGEST,
         announceEnabled: false,
         operatorEnabled: true,
+        operatorTrustedProxies: '10.116.0.5',
         operatorBindHost: '172.21.0.2',
         operatorBindPort: '9300',
         operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -9990,6 +10050,7 @@ describe('buildComposeOverride — operator auth _FILE env vars and bind mounts'
         workspaceDigest: WORKSPACE_DIGEST,
         announceEnabled: false,
         operatorEnabled: true,
+        operatorTrustedProxies: '10.116.0.5',
         operatorBindHost: '172.21.0.2',
         operatorBindPort: '9300',
         operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -10009,6 +10070,7 @@ describe('buildComposeOverride — operator auth _FILE env vars and bind mounts'
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -10066,6 +10128,7 @@ describe('main() — dry-run with operator auth enabled → callback URL preflig
     try {
       await main({
         env: makeOperatorAuthEnv(),
+        tcpConnect: tcpConnectRefused,
         args: ['--dry-run'],
         spawn: spawnFn,
       })
@@ -10198,6 +10261,7 @@ describe('buildComposeOverride — VPC port publish', () => {
     workspaceDigest: WORKSPACE_DIGEST,
     announceEnabled: false,
     operatorEnabled: true,
+    operatorTrustedProxies: '10.116.0.5',
     operatorBindHost: '172.21.0.2',
     operatorBindPort: '9300',
     operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -10246,6 +10310,7 @@ describe('buildComposeOverride — VPC port publish', () => {
       workspaceDigest: WORKSPACE_DIGEST,
       announceEnabled: false,
       operatorEnabled: true,
+      operatorTrustedProxies: '10.116.0.5',
       operatorBindHost: '172.21.0.2',
       operatorBindPort: '9300',
       operatorPublicOrigin: 'https://dashboard.fro.bot',
@@ -10518,7 +10583,7 @@ describe('main() — GATEWAY_VPC_IP validation before SSH', () => {
       main({
         env: makeOperatorAuthEnv({
           GATEWAY_VPC_IP: '10.116.0.3',
-          // DASHBOARD_VPC_IP intentionally absent
+          DASHBOARD_VPC_IP: '', // intentionally absent
         }),
         args: [],
         spawn: spawnFn,
@@ -10718,11 +10783,11 @@ describe('DOCKER-USER source restriction — main() integration', () => {
     expect(iptablesCmds).toHaveLength(0)
   })
 
-  test('edge: VPC disabled (operator enabled but no VPC IPs) → no iptables command spawned', async () => {
+  test('edge: operator enabled but no VPC IPs → fails closed before any SSH (no iptables command spawned)', async () => {
     const {main} = await import('./deploy')
     const iptablesCmds: string[][] = []
 
-    const {spawnFn} = makeSpawnMock(cmd => {
+    const {spawnFn, calls} = makeSpawnMock(cmd => {
       const last = cmd.at(-1) ?? ''
       if (last.includes('iptables')) {
         iptablesCmds.push(cmd)
@@ -10730,15 +10795,19 @@ describe('DOCKER-USER source restriction — main() integration', () => {
       return undefined
     })
 
-    // Operator enabled but no VPC IPs
-    await main({
-      env: makeOperatorAuthEnv(),
-      args: [],
-      fetch: makeDiscordFetch([{name: 'ping'}]),
-      sleep: async () => {},
-      spawn: spawnFn,
-    })
+    // Operator enabled but no VPC IPs: DASHBOARD_VPC_IP is the derived trusted proxy, so this is rejected.
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({GATEWAY_VPC_IP: '', DASHBOARD_VPC_IP: ''}),
+        tcpConnect: tcpConnectRefused,
+        args: [],
+        fetch: makeDiscordFetch([{name: 'ping'}]),
+        sleep: async () => {},
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/DASHBOARD_VPC_IP/)
 
+    expect(calls).toHaveLength(0)
     expect(iptablesCmds).toHaveLength(0)
   })
 
@@ -11965,5 +12034,399 @@ describe('main() — S3 tagged-write capability preflight wiring', () => {
     }
 
     expect(warnings.some(line => /S3 tagged-write capability/i.test(line))).toBe(true)
+  })
+})
+
+// ─── Operator trusted proxy (GATEWAY_OPERATOR_TRUSTED_PROXIES derived from DASHBOARD_VPC_IP) ────────
+
+describe('deriveOperatorTrustedProxies', () => {
+  test('valid DASHBOARD_VPC_IP → returned trimmed', async () => {
+    const {deriveOperatorTrustedProxies} = await import('./deploy')
+    expect(deriveOperatorTrustedProxies({DASHBOARD_VPC_IP: ' 10.116.0.5 '})).toBe('10.116.0.5')
+  })
+
+  test('absent / empty / whitespace-only → throws naming DASHBOARD_VPC_IP and the trusted-proxy reason', async () => {
+    const {deriveOperatorTrustedProxies} = await import('./deploy')
+    const envs: Record<string, string>[] = [{}, {DASHBOARD_VPC_IP: ''}, {DASHBOARD_VPC_IP: '   '}]
+    for (const env of envs) {
+      expect(() => deriveOperatorTrustedProxies(env)).toThrow(/DASHBOARD_VPC_IP.*required/s)
+      expect(() => deriveOperatorTrustedProxies(env)).toThrow(/GATEWAY_OPERATOR_TRUSTED_PROXIES/)
+    }
+  })
+
+  test.each([
+    ['unspecified address', '0.0.0.0'],
+    ['multicast low bound', '224.0.0.1'],
+    ['multicast high bound', '239.255.255.255'],
+    ['CIDR', '10.116.0.0/24'],
+    ['hostname', 'dashboard.fro.bot'],
+    ['IPv6', '2001:db8::1'],
+    ['IP:port', '10.116.0.5:9300'],
+    ['comma list', '10.116.0.5,10.116.0.6'],
+    ['leading-zero octet', '10.116.0.05'],
+    ['octet out of range', '10.116.0.256'],
+    ['dash-prefixed (SSH flag injection)', '-oProxyCommand=evil'],
+  ])('rejects %s (%s)', async (_label, value) => {
+    const {deriveOperatorTrustedProxies} = await import('./deploy')
+    expect(() => deriveOperatorTrustedProxies({DASHBOARD_VPC_IP: value})).toThrow(/DASHBOARD_VPC_IP/)
+  })
+
+  test('addresses just outside the multicast range are accepted', async () => {
+    const {deriveOperatorTrustedProxies} = await import('./deploy')
+    expect(deriveOperatorTrustedProxies({DASHBOARD_VPC_IP: '223.255.255.255'})).toBe('223.255.255.255')
+    expect(deriveOperatorTrustedProxies({DASHBOARD_VPC_IP: '240.0.0.1'})).toBe('240.0.0.1')
+  })
+})
+
+describe('buildComposeOverride — GATEWAY_OPERATOR_TRUSTED_PROXIES', () => {
+  const TRUSTED_PROXY_OPTS = {
+    gatewayDigest: GATEWAY_DIGEST,
+    workspaceDigest: WORKSPACE_DIGEST,
+    announceEnabled: false,
+    operatorEnabled: true,
+    operatorBindHost: '172.21.0.2',
+    operatorBindPort: '9300',
+    operatorPublicOrigin: 'https://dashboard.fro.bot',
+    operatorVpcIp: '10.116.0.3',
+    operatorTrustedProxies: '10.116.0.5',
+  }
+
+  test('operator enabled: emits GATEWAY_OPERATOR_TRUSTED_PROXIES as a plain env entry with the exact value', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(TRUSTED_PROXY_OPTS)
+    expect(yaml).toContain('      GATEWAY_OPERATOR_TRUSTED_PROXIES: 10.116.0.5\n')
+    // Plain value, never a file-backed secret.
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES_FILE')
+  })
+
+  test('operator enabled: trusted proxy is the dashboard VPC IP, not the gateway VPC IP or the bind host', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(TRUSTED_PROXY_OPTS)
+    const line = yaml.split('\n').find(l => l.includes('GATEWAY_OPERATOR_TRUSTED_PROXIES:'))
+    expect(line?.trim()).toBe('GATEWAY_OPERATOR_TRUSTED_PROXIES: 10.116.0.5')
+  })
+
+  test('operator disabled: no GATEWAY_OPERATOR_TRUSTED_PROXIES entry even when a value is supplied', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride({...TRUSTED_PROXY_OPTS, operatorEnabled: false})
+    expect(yaml).not.toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES')
+  })
+
+  test('operator enabled but operatorTrustedProxies missing / empty / whitespace → throws (daemon would refuse to start)', async () => {
+    const {buildComposeOverride} = await import('./deploy')
+    for (const operatorTrustedProxies of [undefined, '', '   ']) {
+      expect(() => buildComposeOverride({...TRUSTED_PROXY_OPTS, operatorTrustedProxies})).toThrow(
+        /operatorTrustedProxies/,
+      )
+    }
+  })
+})
+
+describe('main() — operator listener requires DASHBOARD_VPC_IP (trusted proxy)', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  test('operator enabled + DASHBOARD_VPC_IP missing (GATEWAY_VPC_IP set) → fails before any SSH, naming DASHBOARD_VPC_IP and the trusted-proxy reason', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    const attempt = main({
+      env: makeOperatorAuthEnv({DASHBOARD_VPC_IP: ''}),
+      args: [],
+      spawn: spawnFn,
+    })
+    await expect(attempt).rejects.toThrow(/DASHBOARD_VPC_IP is required/)
+    await expect(main({env: makeOperatorAuthEnv({DASHBOARD_VPC_IP: ''}), args: [], spawn: spawnFn})).rejects.toThrow(
+      /GATEWAY_OPERATOR_TRUSTED_PROXIES/,
+    )
+    expect(calls).toHaveLength(0)
+  })
+
+  test('operator enabled + no VPC IPs at all → fails before any SSH naming DASHBOARD_VPC_IP', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({GATEWAY_VPC_IP: '', DASHBOARD_VPC_IP: ''}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/DASHBOARD_VPC_IP/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('operator enabled + DASHBOARD_VPC_IP set but GATEWAY_VPC_IP missing → fails before any SSH naming GATEWAY_VPC_IP', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({GATEWAY_VPC_IP: ''}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_VPC_IP/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test.each([
+    ['unspecified', '0.0.0.0'],
+    ['multicast', '224.0.0.5'],
+    ['IPv6', '2001:db8::1'],
+    ['CIDR', '10.116.0.0/24'],
+    ['hostname', 'dashboard.fro.bot'],
+    ['dash-prefixed', '-oProxyCommand=evil'],
+  ])('operator enabled + DASHBOARD_VPC_IP %s (%s) → fails before any SSH', async (_label, value) => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({
+        env: makeOperatorAuthEnv({DASHBOARD_VPC_IP: value}),
+        args: [],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/DASHBOARD_VPC_IP/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('dry-run with operator enabled + DASHBOARD_VPC_IP missing → also fails closed (preflight precedes dry-run)', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await expect(
+      main({env: makeOperatorAuthEnv({DASHBOARD_VPC_IP: ''}), args: ['--dry-run'], spawn: spawnFn}),
+    ).rejects.toThrow(/DASHBOARD_VPC_IP/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('operator disabled → DASHBOARD_VPC_IP is not required and an invalid value is ignored', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+
+    await main({
+      env: makeEnv({DASHBOARD_VPC_IP: '0.0.0.0'}),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+    expect(calls.length).toBeGreaterThan(0)
+  })
+
+  test('operator enabled: written compose.override.yaml carries GATEWAY_OPERATOR_TRUSTED_PROXIES = DASHBOARD_VPC_IP', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeOperatorAuthEnv({DASHBOARD_VPC_IP: '10.116.0.5'}),
+      tcpConnect: tcpConnectRefused,
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    const overrideKey = Object.keys(stdinCaptures).find(k => k.endsWith('compose.override.yaml'))
+    expect(overrideKey).toBeDefined()
+    const override = stdinCaptures[overrideKey ?? ''] ?? ''
+    expect(override).toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES: 10.116.0.5')
+    expect(override).not.toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES: 10.116.0.3')
+    expect(override).not.toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES_FILE')
+    // The Caddy / gateway-net address must never be trusted.
+    expect(override).not.toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES: 172.')
+  })
+
+  test('operator disabled: written compose.override.yaml has no GATEWAY_OPERATOR_TRUSTED_PROXIES', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({DASHBOARD_VPC_IP: '10.116.0.77'}),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+      sleep: async () => {},
+    })
+
+    const overrideKey = Object.keys(stdinCaptures).find(k => k.endsWith('compose.override.yaml'))
+    expect(overrideKey).toBeDefined()
+    expect(stdinCaptures[overrideKey ?? ''] ?? '').not.toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES')
+  })
+
+  test('dry-run plan reports --wait-timeout 600', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn} = makeSpawnMock()
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.join(' '))
+    }
+    try {
+      await main({env: makeEnv(), args: ['--dry-run'], spawn: spawnFn})
+    } finally {
+      console.warn = origWarn
+    }
+    const plan = warnMessages.join('\n')
+    expect(plan).toContain('--wait-timeout 600')
+    expect(plan).not.toContain('--wait-timeout 120')
+  })
+})
+
+/** Run main() with VPC operator env and return the Phase 5d rendered-config gate script. */
+async function captureGateScript(): Promise<string> {
+  const {main} = await import('./deploy')
+  const capturedCmds: string[][] = []
+  const {spawnFn} = makeSpawnMock(cmd => {
+    capturedCmds.push(cmd)
+    return undefined
+  })
+  await main({
+    env: makeVpcOperatorEnv(),
+    args: [],
+    fetch: makeDiscordFetch([{name: 'ping'}]),
+    sleep: async () => {},
+    spawn: spawnFn,
+    tcpConnect: tcpConnectRefused,
+  })
+  const script = captureValidateScript(capturedCmds)
+  expect(script, 'Phase 5d script must be present for operator deploys').toBeDefined()
+  return script ?? ''
+}
+
+describe('Phase 5d rendered-config gate — GATEWAY_OPERATOR_TRUSTED_PROXIES', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+  let shimDir: string
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.66.0'}))
+    shimDir = mkdtempSync(join(tmpdir(), 'gateway-gate-shim-'))
+  })
+
+  afterEach(() => {
+    rmSync(shimDir, {recursive: true, force: true})
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  /** Execute the real gate script with a `docker` shim that prints the given merged-config JSON. */
+  function runGate(script: string, trustedProxies: string | undefined): {exitCode: number; output: string} {
+    const gatewayEnvironment: Record<string, string> = {}
+    if (trustedProxies !== undefined) gatewayEnvironment.GATEWAY_OPERATOR_TRUSTED_PROXIES = trustedProxies
+    const config = {
+      services: {
+        gateway: {
+          networks: {'gateway-net': {ipv4_address: '172.21.0.2'}, 'sandbox-net': {}},
+          ports: [{target: 9300, host_ip: '10.116.0.3', published: '9300'}],
+          environment: gatewayEnvironment,
+        },
+        workspace: {networks: {'sandbox-net': {}}},
+        caddy: {networks: {'gateway-net': {}}, ports: [{published: '80'}, {published: '443'}]},
+      },
+      networks: {'gateway-net': {ipam: {config: [{subnet: '172.21.0.0/16'}]}}},
+    }
+    const configPath = join(shimDir, 'config.json')
+    writeFileSync(configPath, JSON.stringify(config))
+    writeFileSync(join(shimDir, 'docker'), `#!/bin/sh\ncat '${configPath}'\n`, {mode: 0o755})
+    const result = Bun.spawnSync(['bash', '-c', script], {
+      env: {PATH: `${shimDir}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin`},
+    })
+    return {exitCode: result.exitCode, output: `${result.stdout.toString()}${result.stderr.toString()}`}
+  }
+
+  test('script asserts the trusted proxy equals DASHBOARD_VPC_IP', async () => {
+    const script = await captureGateScript()
+    expect(script).toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES')
+    expect(script).toContain("expected exactly '10.116.0.5'")
+  })
+
+  test('accepts merged config whose gateway env trusted proxy is exactly DASHBOARD_VPC_IP', async () => {
+    const script = await captureGateScript()
+    const {exitCode, output} = runGate(script, '10.116.0.5')
+    expect(output).toContain('OK: infra rendered-config validation passed')
+    expect(exitCode).toBe(0)
+  })
+
+  test('rejects merged config with no GATEWAY_OPERATOR_TRUSTED_PROXIES', async () => {
+    const script = await captureGateScript()
+    const {exitCode, output} = runGate(script, undefined)
+    expect(exitCode).not.toBe(0)
+    expect(output).toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES')
+  })
+
+  test('rejects merged config with an empty GATEWAY_OPERATOR_TRUSTED_PROXIES', async () => {
+    const script = await captureGateScript()
+    const {exitCode} = runGate(script, '')
+    expect(exitCode).not.toBe(0)
+  })
+
+  test('rejects merged config trusting a different address (e.g. the gateway-net Caddy address)', async () => {
+    const script = await captureGateScript()
+    const {exitCode, output} = runGate(script, '172.21.0.3')
+    expect(exitCode).not.toBe(0)
+    expect(output).toContain('GATEWAY_OPERATOR_TRUSTED_PROXIES')
+  })
+
+  test('rejects merged config trusting DASHBOARD_VPC_IP plus extra peers', async () => {
+    const script = await captureGateScript()
+    const {exitCode} = runGate(script, '10.116.0.5,172.21.0.3')
+    expect(exitCode).not.toBe(0)
   })
 })

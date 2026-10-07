@@ -13,7 +13,9 @@ that all four controls are in place and the path is healthy.
 - The gateway operator listener is enabled: `GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`,
   and `GATEWAY_OPERATOR_PUBLIC_ORIGIN` are set in the `gateway` GitHub Environment.
 - The VPC bridge is enabled: `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` are set in the `gateway`
-  GitHub Environment; `GATEWAY_VPC_IP` is set in the `dashboard` GitHub Environment.
+  GitHub Environment (both are required whenever the listener is enabled; `DASHBOARD_VPC_IP` is
+  also the derived `GATEWAY_OPERATOR_TRUSTED_PROXIES` value); `GATEWAY_VPC_IP` is set in the
+  `dashboard` GitHub Environment.
 - The `gateway-operator-fw` Cloud Firewall was created by provisioning (`bun run provision:gateway`
   with `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` set). `DIGITALOCEAN_ACCESS_TOKEN` is a
   provisioning-time concern (local `.env` only) — it is not required in the `gateway` GitHub

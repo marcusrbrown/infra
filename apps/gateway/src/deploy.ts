@@ -118,6 +118,13 @@ export const GATEWAY_NET_EXPECTED_SUBNET = '172.21.0.0/16'
 export const GATEWAY_NET_FULL_NAME = `${COMPOSE_PROJECT_NAME}_gateway-net`
 
 /**
+ * `docker compose up --wait` budget in seconds. The workspace healthcheck `start_period` is
+ * 360s, sized to cover the one-time workspace checkout ownership migration on first boot
+ * (default deadline 300s) plus boot overhead, so the wait must outlast it.
+ */
+export const COMPOSE_WAIT_TIMEOUT_SECONDS = '600'
+
+/**
  * Static container names for the gateway and caddy services in this compose project.
  * Docker Compose names containers as `<project>-<service>-<replica>` (default replica = 1).
  * These are used for direct `docker rm -f` endpoint release because `docker compose rm`
@@ -783,7 +790,8 @@ export function validateOperatorAuthConfig(opts: {
  * - 'disabled': both are absent (unset or whitespace-only).
  * - 'invalid':  exactly one is present — the all-or-none gate is violated.
  *
- * These vars are only meaningful when the operator listener is enabled.
+ * These vars are only meaningful when the operator listener is enabled, and main() rejects
+ * every state except 'enabled' in that case (DASHBOARD_VPC_IP feeds the trusted-proxy setting).
  * Mirrors the empty/whitespace-only = absent semantics used by validateRequiredEnv.
  */
 export function getOperatorVpcState(env: Record<string, string>): 'enabled' | 'disabled' | 'invalid' {
@@ -868,6 +876,53 @@ export function validateVpcIp(value: string, varName: string): void {
       )
     }
   }
+}
+
+/**
+ * Derives GATEWAY_OPERATOR_TRUSTED_PROXIES from DASHBOARD_VPC_IP.
+ *
+ * The daemon (fro-bot/agent >= v0.114.1) refuses to start with the operator surface enabled
+ * unless GATEWAY_OPERATOR_TRUSTED_PROXIES lists the exact peer address(es) of the reverse proxy
+ * in front of the listener. For the dashboard path the daemon's socket peer on :9300 is exactly
+ * DASHBOARD_VPC_IP (Docker DNAT preserves the source), so that is the single trusted proxy.
+ * The gateway-net Caddy address is deliberately NOT trusted: the gateway.fro.bot/operator/*
+ * scaffold must keep failing the forwarded-header guard.
+ *
+ * Mirrors the daemon's parser: exact dotted-decimal IPv4 (no CIDR/hostnames), and rejects the
+ * unspecified and multicast (224.0.0.0/4) addresses. Leading-zero octets are also rejected —
+ * they are ambiguous (octal) and the daemon's parser may refuse them.
+ *
+ * Throws when DASHBOARD_VPC_IP is absent or invalid; returns the trimmed value otherwise.
+ */
+export function deriveOperatorTrustedProxies(env: Record<string, string>): string {
+  const value = env.DASHBOARD_VPC_IP?.trim() ?? ''
+  if (!value) {
+    throw new Error(
+      'DASHBOARD_VPC_IP is required when the operator listener is enabled. ' +
+        'It is the trusted proxy (GATEWAY_OPERATOR_TRUSTED_PROXIES) for the operator listener: the daemon refuses to ' +
+        "start without one, and the dashboard droplet's VPC IP is the daemon's socket peer on the dashboard path. " +
+        'Set DASHBOARD_VPC_IP (together with GATEWAY_VPC_IP), or clear the operator listener inputs to disable it.',
+    )
+  }
+
+  validateVpcIp(value, 'DASHBOARD_VPC_IP')
+
+  const octets = value.split('.')
+  if (octets.some(octet => octet.length > 1 && octet.startsWith('0'))) {
+    throw new Error(
+      `DASHBOARD_VPC_IP "${value}" has a leading-zero octet. ` +
+        'Provide a canonical dotted-decimal IPv4 address (e.g. 10.116.0.5).',
+    )
+  }
+  const firstOctet = Number(octets[0])
+  if (firstOctet >= 224 && firstOctet <= 239) {
+    throw new Error(
+      `DASHBOARD_VPC_IP "${value}" is a multicast address (224.0.0.0/4), which cannot identify a real ` +
+        'trusted proxy peer for GATEWAY_OPERATOR_TRUSTED_PROXIES.',
+    )
+  }
+
+  return value
 }
 
 /**
@@ -1358,6 +1413,13 @@ export interface ComposeOverrideOpts {
    * host-side Docker port publish, not a daemon rebind.
    */
   operatorVpcIp?: string
+  /**
+   * Value for GATEWAY_OPERATOR_TRUSTED_PROXIES (derived from DASHBOARD_VPC_IP by
+   * deriveOperatorTrustedProxies). Emitted as a plain environment entry alongside the operator
+   * listener env. Required whenever the operator env block is emitted — the daemon refuses to
+   * start without it, so buildComposeOverride throws rather than render an unbootable override.
+   */
+  operatorTrustedProxies?: string
 }
 
 const GATEWAY_IMAGE_NAME = 'ghcr.io/marcusrbrown/infra-gateway'
@@ -1404,6 +1466,7 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
     operatorOauthMaxOutstandingAttempts,
     operatorPushEnabled,
     operatorVpcIp,
+    operatorTrustedProxies,
   } = opts
 
   // Caddy is needed when either announce or operator is enabled.
@@ -1415,12 +1478,19 @@ export function buildComposeOverride(opts: ComposeOverrideOpts): string {
       GATEWAY_PRESENCE_CHANNEL_ID_FILE: /run/secrets/gateway_presence_channel_id`
     : ''
 
-  const operatorEnvLines =
-    operatorEnabled && operatorBindHost && operatorBindPort && operatorPublicOrigin
-      ? `      GATEWAY_OPERATOR_BIND_HOST: ${operatorBindHost}
+  const operatorEnvEmitted = Boolean(operatorEnabled && operatorBindHost && operatorBindPort && operatorPublicOrigin)
+  if (operatorEnvEmitted && !operatorTrustedProxies?.trim()) {
+    throw new Error(
+      'buildComposeOverride: the operator listener env is being emitted but operatorTrustedProxies is missing or empty. ' +
+        'The daemon refuses to start without GATEWAY_OPERATOR_TRUSTED_PROXIES.',
+    )
+  }
+  const operatorEnvLines = operatorEnvEmitted
+    ? `      GATEWAY_OPERATOR_BIND_HOST: ${operatorBindHost}
       GATEWAY_OPERATOR_BIND_PORT: ${operatorBindPort}
-      GATEWAY_OPERATOR_PUBLIC_ORIGIN: ${operatorPublicOrigin}`
-      : ''
+      GATEWAY_OPERATOR_PUBLIC_ORIGIN: ${operatorPublicOrigin}
+      GATEWAY_OPERATOR_TRUSTED_PROXIES: ${operatorTrustedProxies?.trim()}`
+    : ''
 
   // Operator auth _FILE env vars: only emitted when operatorAuthEnabled is true.
   // All four file-name opts are required — missing/empty/whitespace-only is a programming bug; throw fast.
@@ -2587,27 +2657,24 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     })
   }
 
-  // Phase 3g: Validate VPC IP all-or-none gate before any SSH.
+  // Phase 3g: Validate VPC IPs before any SSH.
   // GATEWAY_VPC_IP and DASHBOARD_VPC_IP are only meaningful when the operator listener is enabled.
-  // When the operator is enabled, both must be present together (all-or-none).
+  // When the operator is enabled, DASHBOARD_VPC_IP is mandatory — it is the derived
+  // GATEWAY_OPERATOR_TRUSTED_PROXIES value, and the daemon refuses to start without one — and
+  // GATEWAY_VPC_IP must accompany it (all-or-none VPC bridge). Operator enabled with no VPC IPs
+  // is therefore rejected rather than treated as "bridge disabled".
   // When the operator is disabled, VPC vars are ignored (no gate).
   if (operatorState === 'enabled') {
+    // Throws (naming DASHBOARD_VPC_IP and the trusted-proxy reason) when absent or invalid.
+    deriveOperatorTrustedProxies(env)
     const operatorVpcState = getOperatorVpcState(env)
-    if (operatorVpcState === 'invalid') {
-      const hasGatewayVpcIp = Boolean(env.GATEWAY_VPC_IP?.trim())
-      const hasDashboardVpcIp = Boolean(env.DASHBOARD_VPC_IP?.trim())
-      const missing = [!hasGatewayVpcIp && 'GATEWAY_VPC_IP', !hasDashboardVpcIp && 'DASHBOARD_VPC_IP']
-        .filter(Boolean)
-        .join(', ')
+    if (operatorVpcState !== 'enabled') {
       throw new Error(
-        `VPC IP inputs must be set together (all-or-none) when the operator listener is enabled. Missing: ${missing}. ` +
-          'Set both GATEWAY_VPC_IP and DASHBOARD_VPC_IP, or leave both unset to disable the VPC port publish.',
+        'VPC IP inputs must be set together (all-or-none) when the operator listener is enabled. Missing: GATEWAY_VPC_IP. ' +
+          'Set both GATEWAY_VPC_IP and DASHBOARD_VPC_IP.',
       )
     }
-    if (operatorVpcState === 'enabled') {
-      validateVpcIp(env.GATEWAY_VPC_IP ?? '', 'GATEWAY_VPC_IP')
-      validateVpcIp(env.DASHBOARD_VPC_IP ?? '', 'DASHBOARD_VPC_IP')
-    }
+    validateVpcIp(env.GATEWAY_VPC_IP ?? '', 'GATEWAY_VPC_IP')
   }
 
   // Phase 3h: Validate the operator push VAPID quartet before any SSH, spawn,
@@ -2678,7 +2745,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       `  6b. Remove stale ${GATEWAY_NET_FULL_NAME} network if subnet differs from ${GATEWAY_NET_EXPECTED_SUBNET} (after pull, before up)`,
     )
     console.warn(
-      `  7. docker compose up -d --no-build --wait --wait-timeout 120 --remove-orphans${forceRecreate ? ' --force-recreate' : ''}`,
+      `  7. docker compose up -d --no-build --wait --wait-timeout ${COMPOSE_WAIT_TIMEOUT_SECONDS} --remove-orphans${forceRecreate ? ' --force-recreate' : ''}`,
     )
     console.warn(
       `  8. Poll Discord slash command registration (app=${env.DISCORD_APPLICATION_ID} guild=${env.DISCORD_GUILD_ID})`,
@@ -2809,9 +2876,10 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     const operatorBindPort = operatorEnabled ? (env.GATEWAY_OPERATOR_BIND_PORT ?? '') : undefined
     const operatorPublicOrigin = operatorEnabled ? (env.GATEWAY_OPERATOR_PUBLIC_ORIGIN ?? '') : undefined
     const operatorAuthEnabled = operatorEnabled && getOperatorAuthState(env) === 'enabled'
-    // VPC port publish: only when operator is enabled AND both VPC IPs are configured.
-    const operatorVpcIp =
-      operatorEnabled && getOperatorVpcState(env) === 'enabled' ? (env.GATEWAY_VPC_IP ?? '') : undefined
+    // VPC port publish + trusted proxy: when the operator is enabled, preflight (Phase 3g)
+    // guarantees both VPC IPs are present and valid.
+    const operatorVpcIp = operatorEnabled ? (env.GATEWAY_VPC_IP ?? '') : undefined
+    const operatorTrustedProxies = operatorEnabled ? deriveOperatorTrustedProxies(env) : undefined
     const overrideContent = buildComposeOverride({
       gatewayDigest,
       workspaceDigest,
@@ -2822,6 +2890,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       operatorPublicOrigin,
       operatorAuthEnabled,
       operatorVpcIp,
+      operatorTrustedProxies,
       // Derive file names from OPERATOR_AUTH_SECRET_SPECS — single source of truth.
       operatorGithubClientIdFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[0].hostFile : undefined,
       operatorGithubClientSecretFile: operatorAuthEnabled ? OPERATOR_AUTH_SECRET_SPECS[1].hostFile : undefined,
@@ -2874,9 +2943,11 @@ export async function main(opts: MainOpts = {}): Promise<void> {
 
     // Phase 5c: Run upstream stack validation.
     // deploy/validate-stack.sh performs static network-topology and persistence invariant
-    // checks on the upstream base compose stack. It runs AFTER compose.override.yaml (and
-    // Caddyfile when Caddy is enabled) are materialized so the validator sees the final
-    // merged stack — including the image pins and network wiring written in Phase 5b.
+    // checks on the upstream BASE compose stack only: it defaults COMPOSE_FILE to
+    // deploy/compose.yaml and this deploy does not set it, so it never sees
+    // compose.override.yaml or the Caddyfile. (It also rejects infra's Caddy service, so it
+    // must not be pointed at the merged stack.) The merged stack is validated by the
+    // infra-owned rendered-config gate in Phase 5d.
     //
     // The script lives in the upstream repo at deploy/validate-stack.sh and is run from
     // REMOTE_DIR (the repo root) so the relative path deploy/validate-stack.sh resolves
@@ -2904,8 +2975,10 @@ export async function main(opts: MainOpts = {}): Promise<void> {
     //     (0.0.0.0, [::], bare 9300:9300, any non-VPC host) is rejected. When VPC publish is
     //     disabled, no 9300 host port is accepted at all. Fail-closed on anything unexpected.
     //   - top-level gateway-net IPAM includes the expected subnet (172.21.0.0/16)
+    //   - gateway env GATEWAY_OPERATOR_TRUSTED_PROXIES equals DASHBOARD_VPC_IP (the daemon
+    //     refuses to start without it; exactly one trusted proxy, never the Caddy address)
     //
-    // This gate runs AFTER upstream validate-stack.sh (which validates the base stack) and
+    // This gate runs AFTER upstream validate-stack.sh (which validates only the base stack) and
     // BEFORE docker compose pull/up and checksum persistence. Non-zero exit aborts the deploy.
     // Non-operator deploys skip this gate entirely — no needless complexity.
     //
@@ -2921,6 +2994,9 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       // operatorVpcIp is validated before reaching here (validateVpcIp) when set.
       // It is a safe dotted-decimal IPv4 address — safe to embed in the heredoc body.
       const expectedVpcIp = operatorVpcIp ?? ''
+      // operatorTrustedProxies is derived from the validated DASHBOARD_VPC_IP (deriveOperatorTrustedProxies).
+      // It is a safe dotted-decimal IPv4 address — safe to embed in the heredoc body.
+      const expectedTrustedProxies = operatorTrustedProxies ?? ''
       const validateScript = `bash <<'SCRIPT'
 set -euo pipefail
 CONFIG=$(docker compose --project-directory ${DEPLOY_DIR} config --format json)
@@ -2957,6 +3033,8 @@ CADDY_NETS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin
 if [ "$CADDY_NETS" != "gateway-net" ]; then echo "FAIL: caddy must be gateway-net only, but has: $CADDY_NETS"; exit 1; fi
 CADDY_PORTS=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); ports=c.get('services',{}).get('caddy',{}).get('ports',[]); published=[str(p.get('published','')) for p in ports if isinstance(p,dict)]; print(','.join(published))")
 if [ "$CADDY_PORTS" != "80,443" ] && [ "$CADDY_PORTS" != "443,80" ]; then echo "FAIL: caddy must publish only ports 80 and 443, but has: $CADDY_PORTS"; exit 1; fi
+GW_TRUSTED_PROXIES=$(echo "$CONFIG" | python3 -c "import json,sys; c=json.load(sys.stdin); e=c.get('services',{}).get('gateway',{}).get('environment',{}); print(e.get('GATEWAY_OPERATOR_TRUSTED_PROXIES','') if isinstance(e,dict) else '')")
+if [ "$GW_TRUSTED_PROXIES" != "${expectedTrustedProxies}" ]; then echo "FAIL: gateway GATEWAY_OPERATOR_TRUSTED_PROXIES is '$GW_TRUSTED_PROXIES', expected exactly '${expectedTrustedProxies}' (the dashboard VPC IP)"; exit 1; fi
 echo "OK: infra rendered-config validation passed"
 SCRIPT`
       await runCommand(
@@ -3087,7 +3165,7 @@ SCRIPT`
       '--no-build',
       '--wait',
       '--wait-timeout',
-      '120',
+      COMPOSE_WAIT_TIMEOUT_SECONDS,
       '--remove-orphans',
     ]
     if (forceRecreate || checksumChanged) {
@@ -3101,7 +3179,7 @@ SCRIPT`
       spawnFn,
     )
 
-    // Phase 8c: DOCKER-USER source restriction (operator + VPC enabled only).
+    // Phase 8c: DOCKER-USER source restriction (operator enabled; VPC IPs are mandatory then).
     //
     // The DOCKER-USER iptables chain sees traffic AFTER Docker DNAT, so we match on
     // the post-DNAT destination (the container IP + port) rather than conntrack

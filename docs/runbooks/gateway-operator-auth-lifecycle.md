@@ -7,6 +7,7 @@ The gateway operator auth gate uses GitHub OAuth to authenticate operators acces
 ## Prerequisites
 
 - The operator listener trio (`GATEWAY_OPERATOR_BIND_HOST`, `GATEWAY_OPERATOR_BIND_PORT`, `GATEWAY_OPERATOR_PUBLIC_ORIGIN`) is set in the `gateway` GitHub Environment.
+- `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` are set in the `gateway` GitHub Environment (required whenever the listener is enabled; `DASHBOARD_VPC_IP` is the derived `GATEWAY_OPERATOR_TRUSTED_PROXIES` value).
 - The `gateway` GitHub Environment exists with a required reviewer set.
 - You have admin access to the GitHub account that owns the OAuth App.
 

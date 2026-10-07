@@ -34,7 +34,7 @@ const manifest: StorageManifest = {
   policy_name: 'fro-bot-agent-storage-owner-repo',
   action_ref_verified: true,
   // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
-  key_layout_version: 'fro-bot/agent@v0.96.0',
+  key_layout_version: 'fro-bot/agent@v0.118.2',
 }
 
 function makeGhResult(stdout: string, exitCode = 0, stderr = '') {
@@ -481,11 +481,23 @@ describe('agent S3 durable storage wiring', () => {
     expect(writes).toEqual([])
   })
 
+  it('rejects the retired v0.96.0 key layout before writing storage variables', async () => {
+    const writes: {kind: string; name: string; value: string}[] = []
+    const deps = makeDeps(writes, {
+      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot/agent@v0.96.0'})),
+    })
+
+    await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).rejects.toThrow(
+      /key_layout_version|known layout/i,
+    )
+    expect(writes).toEqual([])
+  })
+
   it('accepts the literal key layout version emitted by the provisioner', async () => {
     const writes: {kind: string; name: string; value: string}[] = []
     const deps = makeDeps(writes, {
       // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
-      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot/agent@v0.96.0'})),
+      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot/agent@v0.118.2'})),
     })
 
     await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).resolves.toBeUndefined()
@@ -544,7 +556,7 @@ jobs:
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
           aws-region: \${{ vars.FRO_BOT_S3_REGION }}
-      - uses: fro-bot/agent@c29ac295b8da06768b140c32e5bd0ae3aff45dc6
+      - uses: fro-bot/agent@77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb
         with:
           s3-backup: true
           s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}

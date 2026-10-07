@@ -5,9 +5,9 @@ import {describe, expect, it, mock} from 'bun:test'
 import {inspectWorkflow, verifyWorkflow, type EnvironmentReadback, type WorkflowVerifyDeps} from './workflow-verify'
 
 // Must match apps/agent/src/key-layout.ts PINNED_ACTION_SHA.
-const SHA = 'c29ac295b8da06768b140c32e5bd0ae3aff45dc6'
+const SHA = '77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb'
 // Must match apps/agent/src/key-layout.ts PINNED_ACTION_REF.
-const ACTION_TAG = 'v0.96.0'
+const ACTION_TAG = 'v0.118.2'
 const CREDENTIALS_STEP = `      - uses: aws-actions/configure-aws-credentials@${SHA}
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
@@ -36,7 +36,7 @@ const manifest = {
   policy_name: 'fro-bot-agent-storage-owner-repo',
   action_ref_verified: true as const,
   // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
-  key_layout_version: 'fro-bot/agent@v0.96.0',
+  key_layout_version: 'fro-bot/agent@v0.118.2',
 }
 
 const environment: EnvironmentReadback = {
@@ -158,6 +158,14 @@ describe('workflow storage verifier', () => {
     const unknownManifest = {...manifest, key_layout_version: 'fro-bot/agent@v0.95.0'}
 
     await expect(verifyWorkflow('owner/repo', unknownManifest, makeDeps(workflowJob()))).rejects.toThrow(
+      /unknown.*key_layout_version|unknown.*layout/i,
+    )
+  })
+
+  it('fails closed for the retired v0.96.0 layout, which lacks the Action lock grant', async () => {
+    const retiredManifest = {...manifest, key_layout_version: 'fro-bot/agent@v0.96.0'}
+
+    await expect(verifyWorkflow('owner/repo', retiredManifest, makeDeps(workflowJob()))).rejects.toThrow(
       /unknown.*key_layout_version|unknown.*layout/i,
     )
   })

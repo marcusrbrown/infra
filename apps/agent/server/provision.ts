@@ -1571,7 +1571,9 @@ interface BuiltAgentStoragePolicy {
  * Builds the exact S3 action set used by fro-bot/agent's pinned adapter.
  *
  * Required: ListBucket (only for the session and lock prefixes), GetObject and
- * PutObject (session + lock), and DeleteObject (the exact coordination lock).
+ * PutObject (session + locks), and DeleteObject (the exact coordination lock
+ * objects: the Action lock the Action acquires and releases, and the
+ * shared-checkout lock).
  * HeadObject rides on GetObject in the pinned adapter. GetObjectAttributes,
  * GetObjectVersion, GetObjectVersionAttributes, ListBucketVersions, and
  * GetBucketLocation are not used by the pinned adapter and are explicitly
@@ -1584,6 +1586,7 @@ export function buildAgentStoragePolicy(config: AgentStoragePolicyConfig): Built
   const bucketArn = `arn:aws:s3:::${config.bucket}`
   const sessionObjectArn = `${bucketArn}/${layout.sessionPrefix}*`
   const lockObjectArn = `${bucketArn}/${layout.lockKey}`
+  const actionLockObjectArn = `${bucketArn}/${layout.actionLockKey}`
 
   return {
     policyName: config.roleName,
@@ -1614,6 +1617,12 @@ export function buildAgentStoragePolicy(config: AgentStoragePolicyConfig): Built
           Effect: 'Allow',
           Action: ['s3:DeleteObject', 's3:GetObject', 's3:PutObject'],
           Resource: [lockObjectArn],
+        },
+        {
+          Sid: 'AllowActionCoordinationLock',
+          Effect: 'Allow',
+          Action: ['s3:DeleteObject', 's3:GetObject', 's3:PutObject'],
+          Resource: [actionLockObjectArn],
         },
         {
           Sid: 'DenySessionDeletes',
@@ -2022,6 +2031,7 @@ async function verifyTeardownSharedResources(
 async function deleteTeardownState(
   s3Client: S3ClientLike,
   manifest: AgentHandoffManifest,
+  lockKeys: readonly string[],
   sessionPrefix: string,
   purgeState: boolean,
   secrets: RedactionSecret[],
@@ -2031,18 +2041,21 @@ async function deleteTeardownState(
   let statePurgeImpossible = false
   const errors: string[] = []
 
-  try {
-    await s3Client.send(
-      new DeleteObjectCommand({
-        Bucket: manifest.bucket,
-        Key: manifest.lock_key,
-        ExpectedBucketOwner: manifest.expected_bucket_owner,
-      }),
-    )
-    lockDeleted = true
-  } catch (error: unknown) {
-    statePurgeImpossible = true
-    errors.push(`lock deletion failed: ${redactAwsError(error, secrets).message}`)
+  lockDeleted = true
+  for (const lockKey of lockKeys) {
+    try {
+      await s3Client.send(
+        new DeleteObjectCommand({
+          Bucket: manifest.bucket,
+          Key: lockKey,
+          ExpectedBucketOwner: manifest.expected_bucket_owner,
+        }),
+      )
+    } catch (error: unknown) {
+      lockDeleted = false
+      statePurgeImpossible = true
+      errors.push(`lock deletion failed: ${redactAwsError(error, secrets).message}`)
+    }
   }
 
   if (!purgeState) return {lockDeleted, sessionObjectsPurged, statePurgeImpossible, errors}
@@ -2125,7 +2138,10 @@ export async function performTeardown(options: AgentTeardownDeps): Promise<Agent
   const policy = await readAgentStoragePolicy(client, identity.roleName, identity.policyName, secrets)
 
   if (options.plan) {
-    teardownLog(options, `Plan: would delete ${manifest.lock_key} from ${manifest.bucket}.`)
+    teardownLog(
+      options,
+      `Plan: would delete ${identity.layout.lockKey} and ${identity.layout.actionLockKey} from ${manifest.bucket}.`,
+    )
     if (options.purgeState) {
       teardownLog(options, `Plan: would purge session objects under ${manifest.session_prefix}.`)
     } else {
@@ -2151,6 +2167,7 @@ export async function performTeardown(options: AgentTeardownDeps): Promise<Agent
   const state = await deleteTeardownState(
     s3Client,
     manifest,
+    [identity.layout.lockKey, identity.layout.actionLockKey],
     identity.layout.sessionPrefix,
     options.purgeState ?? false,
     secrets,

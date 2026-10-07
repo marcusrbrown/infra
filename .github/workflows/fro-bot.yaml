@@ -937,7 +937,7 @@ jobs:
           allowed-endpoints: >-
             api.github.com:443 github.com:443 *.githubusercontent.com:443
             *.actions.githubusercontent.com:443 nodejs.org:443 registry.npmjs.org:443
-            cliproxy.fro.bot:443 sts.amazonaws.com:443
+            cliproxy.fro.bot:443 models.opencode.ai:443 sts.amazonaws.com:443
             sts.${{ vars.FRO_BOT_S3_REGION }}.amazonaws.com:443 s3.amazonaws.com:443
             s3.${{ vars.FRO_BOT_S3_REGION }}.amazonaws.com:443
             ${{ vars.FRO_BOT_S3_BUCKET }}.s3.${{ vars.FRO_BOT_S3_REGION }}.amazonaws.com:443

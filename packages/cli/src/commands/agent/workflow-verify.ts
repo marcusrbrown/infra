@@ -20,9 +20,9 @@ const CONTENT_EVENTS = new Set([
   'discussion_comment',
 ])
 // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION and PINNED_ACTION_SHA.
-// PINNED_ACTION_REF (v0.96.0) remains documentation only; privileged consumers require the SHA.
+// PINNED_ACTION_REF (v0.118.2) remains documentation only; privileged consumers require the SHA.
 const VERIFIED_ACTION_SHA_BY_LAYOUT: Readonly<Record<string, string>> = {
-  'fro-bot/agent@v0.96.0': 'c29ac295b8da06768b140c32e5bd0ae3aff45dc6',
+  'fro-bot/agent@v0.118.2': '77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb',
 }
 const REQUIRED_S3_INPUTS = {
   's3-backup': undefined,
@@ -674,7 +674,7 @@ function formatStorageWorkflowSnippet(): string {
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
           aws-region: \${{ vars.FRO_BOT_S3_REGION }}
-      - uses: fro-bot/agent@c29ac295b8da06768b140c32e5bd0ae3aff45dc6
+      - uses: fro-bot/agent@77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb
         with:
           s3-backup: true
           s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}

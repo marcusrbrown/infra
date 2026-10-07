@@ -20,7 +20,7 @@ export const STORAGE_VARIABLE_NAMES = {
 } as const
 
 /** Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION. Unknown layouts fail closed. */
-export const KNOWN_KEY_LAYOUT_VERSION = 'fro-bot/agent@v0.96.0'
+export const KNOWN_KEY_LAYOUT_VERSION = 'fro-bot/agent@v0.118.2'
 
 export interface StorageManifest {
   owner: string

@@ -35,12 +35,12 @@ Before provisioning:
    AGENT_REPOSITORY_ID=<live-repository-id>
    AGENT_REPOSITORY_OWNER_ID=<live-owner-id>
    AGENT_WORKFLOW_NAME=<workflow-name>
-   AGENT_ACTION_REF=fro-bot/agent@v0.96.0
+   AGENT_ACTION_REF=fro-bot/agent@v0.118.2
    ```
 
    `AGENT_AWS_SESSION_TOKEN`, `AGENT_AWS_REGION`, `AGENT_S3_SESSION_PREFIX`, and `AGENT_S3_METADATA_ARTIFACTS_PREFIX` are optional. The provisioner defaults the region to `us-east-1` and derives the verified action key layout from the root prefix unless explicit prefixes are supplied.
 
-4. Confirm that the action ref is the verified key-layout version. The current admitted layout is `fro-bot/agent@v0.96.0`; an unknown ref fails closed.
+4. Confirm that the action ref is the verified key-layout version. The current admitted layout is `fro-bot/agent@v0.118.2` (SHA `77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb`); an unknown ref fails closed, and the workflow's `fro-bot/agent` pin must be that SHA.
 
 The `AGENT_*` values are operator-local. They are not GitHub Environment values, workflow secrets, or repository variables.
 
@@ -141,7 +141,7 @@ The storage job's harden-runner (or equivalent) egress policy stays in `block` m
 
 - GitHub's OIDC endpoint, AWS STS, and the regional S3 endpoint for the provisioned bucket (durable storage);
 - `github.com`, `*.githubusercontent.com`, `registry.npmjs.org`, `nodejs.org` (checkout, `bun install`, `npx agent-browser` binary download);
-- `cliproxy.fro.bot` (model calls); and
+- `cliproxy.fro.bot` (model calls) and `models.opencode.ai` (OpenCode's model catalog, fetched to resolve `FRO_BOT_MODEL`); and
 - the deployment health hosts the autoheal prompt probes and reviews (`kw.igg.ms`, `metrics.fro.bot`, `dashboard.fro.bot`, `broker.fro.bot`).
 
 Because it is fail-closed, a missing host silently breaks the corresponding report-only check (see the `#1026` regression: the four health hosts were absent, so deploy-health curls and the live-site review failed and filed a false outage). Add hosts the autoheal legitimately needs; do not switch to unrestricted egress. Action references in workflow files use `.yaml` files and immutable SHA pins with version comments.
@@ -180,7 +180,7 @@ role_name, role_arn, policy_name,
 action_ref_verified, key_layout_version, oidc_provider_arn
 ```
 
-The CLI consumes the manifest for identity/resource checks and variable wiring. Teardown uses the same manifest and refuses to act if the role identity or shared resource readback does not match.
+`lock_key` is the `locks/repo.json` object; the Action lock (`locks/action.json`) is derived from the same verified key layout and is never listed separately. The CLI consumes the manifest for identity/resource checks and variable wiring. Teardown uses the same manifest and refuses to act if the role identity or shared resource readback does not match.
 
 ---
 
@@ -207,7 +207,7 @@ Proceed only if every item is verified:
 - [ ] The STS role duration is at least 7200 seconds.
 - [ ] The storage job has no artifact/cache/output handoff from a content-reachable job.
 - [ ] A forced cache miss restores session state from S3.
-- [ ] Session writes land only under `<prefix>/github/<owner>/<repo>/...` and the coordination lock under `<prefix>/coordination/<owner>/<repo>/locks/repo.json` (for this rollout, `fro-bot-state/github/marcusrbrown/infra/...` and `fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json`).
+- [ ] Session writes land only under `<prefix>/github/<owner>/<repo>/...` and the Action coordination lock at `<prefix>/coordination/<owner>/<repo>/locks/action.json` (for this rollout, `fro-bot-state/github/marcusrbrown/infra/...` and `fro-bot-state/coordination/marcusrbrown/infra/locks/action.json`). The role also holds an exact grant on the sibling `locks/repo.json` (the gateway's shared-checkout lock), which the Action does not write.
 - [ ] Lock acquire and release complete, leaving no stale lock.
 - [ ] Content-triggered execution has no `id-token`, no AWS environment, no available OIDC token, and no durable storage; its behavior matches the pre-storage path.
 

@@ -31,7 +31,7 @@ that all four controls are in place and the path is healthy.
 
 ```sh
 curl -sf https://dashboard.fro.bot/operator/health
-# expect: 200 {"ok":true}
+# expect: 200 {"ok":true,"contractVersion":"<semver>"}
 ```
 
 A 200 response confirms the full path is live: dashboard Caddy → VPC → gateway daemon. This is the
@@ -44,7 +44,7 @@ SSH to the gateway droplet and probe the daemon directly on the gateway-net addr
 ```sh
 ssh root@gateway.fro.bot \
   'curl -sf http://172.21.0.2:9300/operator/health'
-# expect: 200 {"ok":true}
+# expect: 200 {"ok":true,"contractVersion":"<semver>"}
 ```
 
 A 200 here confirms the operator listener is up on `gateway-net`, independent of the VPC bridge.
@@ -205,9 +205,9 @@ A full browser round-trip — completing GitHub OAuth at the start URL, callback
 This confirms the allowlist check passed (`GATEWAY_OPERATOR_ALLOWLIST` contains the GitHub user ID)
 and the full auth path is live end-to-end.
 
-**Route surface:** The gateway operator listener serves only three routes:
+**Route surface:** The verification probes use three routes:
 
-- `GET /operator/health` — health probe; returns `200 {"ok":true}`
+- `GET /operator/health` — health probe; returns `200 {"ok":true,"contractVersion":"<semver>"}`
 - `GET /operator/auth/github/start` — login entry; returns `302` to GitHub OAuth
 - `GET /operator/auth/github/callback` — OAuth callback; returns operator identity JSON on success
 

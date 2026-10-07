@@ -105,9 +105,9 @@ Leave these unset to use upstream defaults (`/operator`, `600000`, `5`).
    ```bash
    curl -sf http://172.21.0.2:9300/operator/health
    ```
-   This should return `200 {"ok":true}`.
+   This should return `200 {"ok":true,"contractVersion":"<semver>"}`.
 
-   **⚠ Liveness probe warning:** Do **not** use `https://gateway.fro.bot/operator/health` as a liveness probe — through Caddy, the v0.69.0 operator endpoint validates forwarded headers and requires `X-Forwarded-Host` to equal the `PUBLIC_ORIGIN` host (`dashboard.fro.bot`); because Caddy forwards `Host: gateway.fro.bot`, the forwarded-host mismatches and the endpoint returns `400 {"error":"bad request"}` by design. There is no trusted-proxy config knob in v0.69.0. The gateway-side liveness probe is the droplet-local direct probe: `curl -sf http://172.21.0.2:9300/operator/health` → `200 {"ok":true}`. The dashboard same-origin path is **live**: `https://dashboard.fro.bot/operator/health` → `200 {"ok":true}` is a valid external probe (dashboard Caddy → VPC `10.116.0.3:9300` → gateway operator listener). The OAuth callback URL registration uses the dashboard origin — this is a GitHub OAuth App setting, not a live HTTP probe target.
+   **⚠ Liveness probe warning:** Do **not** use `https://gateway.fro.bot/operator/health` as a liveness probe — through Caddy, the operator endpoint validates forwarded headers and requires `X-Forwarded-Host` to equal the `PUBLIC_ORIGIN` host (`dashboard.fro.bot`); because Caddy forwards `Host: gateway.fro.bot`, the forwarded-host mismatches and the endpoint returns `400 {"error":"bad request"}` by design; the gateway-net Caddy address is deliberately not a trusted proxy. The gateway-side liveness probe is the droplet-local direct probe: `curl -sf http://172.21.0.2:9300/operator/health` → `200 {"ok":true,"contractVersion":"<semver>"}`. The dashboard same-origin path is **live**: `https://dashboard.fro.bot/operator/health` → `200 {"ok":true,"contractVersion":"<semver>"}` is a valid external probe (dashboard Caddy → VPC `10.116.0.3:9300` → gateway operator listener). The OAuth callback URL registration uses the dashboard origin — this is a GitHub OAuth App setting, not a live HTTP probe target.
 
 4. **Callback URL preflight:** The deploy dry-run output prints the expected callback URL:
    ```
@@ -137,7 +137,7 @@ Leave these unset to use upstream defaults (`/operator`, `600000`, `5`).
    ```
 4. Trigger a deploy: `bunx @marcusrbrown/infra gateway deploy`.
 5. Approve the environment gate.
-6. Verify: `curl -sf http://172.21.0.2:9300/operator/health` (run on the droplet or via SSH) returns `200 {"ok":true}`.
+6. Verify: `curl -sf http://172.21.0.2:9300/operator/health` (run on the droplet or via SSH) returns `200 {"ok":true,"contractVersion":"<semver>"}`.
 7. Delete the old client secret in the GitHub OAuth App settings.
 
 Sessions are in-memory — the restart triggered by the checksum change invalidates all active operator sessions. Operators must re-authenticate after the deploy.
@@ -151,7 +151,7 @@ Sessions are in-memory — the restart triggered by the checksum change invalida
    ```
 3. Trigger a deploy: `bunx @marcusrbrown/infra gateway deploy`.
 4. Approve the environment gate.
-5. Verify: `curl -sf http://172.21.0.2:9300/operator/health` (run on the droplet or via SSH) returns `200 {"ok":true}`.
+5. Verify: `curl -sf http://172.21.0.2:9300/operator/health` (run on the droplet or via SSH) returns `200 {"ok":true,"contractVersion":"<semver>"}`.
 
 ### Updating the allowlist
 

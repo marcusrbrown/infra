@@ -7,7 +7,7 @@ The agent package is a private, operator-run AWS provisioner for `fro-bot/agent`
 | Task | Location | Notes |
 | --- | --- | --- |
 | Provision / teardown entrypoint | `server/provision.ts` | IAM + S3 convergence, readback verification, handoff manifest, teardown flags |
-| Action key layout | `src/key-layout.ts` | Version-pinned S3 session and coordination-lock paths; unknown layouts fail closed |
+| Action key layout | `src/key-layout.ts` | Version-pinned S3 session and coordination-lock paths (Action lock `locks/action.json`, shared-checkout lock `locks/repo.json`); unknown layouts fail closed |
 | Provisioner tests | `server/provision.test.ts` | Mocked IAM/S3 boundary tests, drift handling, teardown safety |
 | Key-layout tests | `src/key-layout.test.ts` | Canonical prefix and fail-closed layout contract |
 | CLI wiring | `../../packages/cli/src/commands/agent/` | GitHub variable wiring, OIDC/resource prechecks, workflow verification |
@@ -16,7 +16,7 @@ The agent package is a private, operator-run AWS provisioner for `fro-bot/agent`
 
 - Provisioning credentials are dedicated operator-local credentials. The provisioner accepts `AGENT_AWS_ACCESS_KEY_ID` and `AGENT_AWS_SECRET_ACCESS_KEY` (plus the optional `AGENT_AWS_SESSION_TOKEN`) and deliberately ignores ambient `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` values.
 - The provisioner uses native GitHub OIDC → AWS STS. No static AWS credential is written to a consumer repository.
-- The bucket is separate from the gateway bucket. Each repository receives its own role and prefix-scoped policy; the session prefix has an explicit delete deny and the coordination lock is a separate exact object ARN.
+- The bucket is separate from the gateway bucket. Each repository receives its own role and prefix-scoped policy; the session prefix has an explicit delete deny and each coordination lock (`locks/action.json` for the Action, `locks/repo.json` for the gateway's shared checkout) is a separate exact object ARN.
 - Content-triggered jobs must not reach the storage job. Only the protected `fro-bot-storage` environment on scheduled or main-branch dispatched runs may receive `id-token: write`.
 
 ## PROVISIONER INPUTS
@@ -39,7 +39,7 @@ Run the provisioner from the repository root so Bun loads the root `.env`. The f
 | `AGENT_REPOSITORY_ID` | ✓ | Live GitHub repository ID |
 | `AGENT_REPOSITORY_OWNER_ID` | ✓ | Live GitHub owner ID |
 | `AGENT_WORKFLOW_NAME` | ✓ | Workflow name pinned in the IAM trust policy |
-| `AGENT_ACTION_REF` | ✓ | Verified `fro-bot/agent` ref; the current admitted layout is `fro-bot/agent@v0.96.0` |
+| `AGENT_ACTION_REF` | ✓ | Verified `fro-bot/agent` ref; the current admitted layout is `fro-bot/agent@v0.118.2` |
 
 The `AGENT_S3_SESSION_PREFIX` and `AGENT_S3_METADATA_ARTIFACTS_PREFIX` values are optional inputs. The provisioner otherwise derives the action layout from `AGENT_S3_PREFIX` and the verified action ref. It refuses unknown or unverified layouts rather than widening IAM access.
 
@@ -85,12 +85,12 @@ The emitted JSON object has this shape:
   "role_arn": "arn:aws:iam::ACCOUNT_ID:role/ROLE",
   "policy_name": "POLICY",
   "action_ref_verified": true,
-  "key_layout_version": "fro-bot/agent@v0.96.0",
+  "key_layout_version": "fro-bot/agent@v0.118.2",
   "oidc_provider_arn": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
 }
 ```
 
-The exact owner/repository IDs, bucket region, role ARN, and key paths must come from the emitted manifest and live readback; operators must not hand-edit them.
+`lock_key` is the `locks/repo.json` object; the Action lock `locks/action.json` is derived from the verified key layout. The exact owner/repository IDs, bucket region, role ARN, and key paths must come from the emitted manifest and live readback; operators must not hand-edit them.
 
 ## CLI COMMAND FLOW
 
@@ -126,13 +126,13 @@ The provisioner owns these controls:
 - Owned lifecycle rules `fro-bot-agent-session-90d`, `fro-bot-agent-metadata-30d`, `fro-bot-agent-noncurrent-30d`, and `fro-bot-agent-abort-mpu-7d`. Unrelated lifecycle rules are preserved.
 - An IAM role with a maximum session duration of at least 7200 seconds.
 - Trust conditions for the `fro-bot-storage` environment, repository ID, owner ID, `refs/heads/main`, audience, and workflow. Both approved legacy and immutable-subject forms are represented by the provisioned trust policy.
-- A least-privilege policy allowing session-prefix reads/writes and exact lock coordination operations. Session-object deletes and version deletes are explicitly denied.
+- A least-privilege policy allowing session-prefix reads/writes and exact Get/Put/Delete on each coordination lock object (`AllowActionCoordinationLock` for `locks/action.json`, `AllowCoordinationLock` for `locks/repo.json`). Session-object deletes and version deletes are explicitly denied.
 
 S3 lifecycle expiry is based on object last-modified time. The documented “inactivity” behavior is therefore write-through-based: a run that writes the session refreshes its age. It is not read-inactivity tracking and does not cap state that an active writer continually touches.
 
 ## TEARDOWN
 
-The provisioner teardown path is scoped to the repository in the manifest. It deletes the inline policy and role, removes the coordination lock, and preserves the shared bucket and GitHub OIDC provider. Session objects are retained by default. Use `--purge-state` only when the repository's session history should also be removed. Use `--plan` for a readback-only preview:
+The provisioner teardown path is scoped to the repository in the manifest. It deletes the inline policy and role, removes both coordination locks, and preserves the shared bucket and GitHub OIDC provider. Session objects are retained by default. Use `--purge-state` only when the repository's session history should also be removed. Use `--plan` for a readback-only preview:
 
 ```bash
 bun run provision:agent -- --teardown --manifest handoff.json --plan

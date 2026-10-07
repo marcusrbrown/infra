@@ -3207,6 +3207,7 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       'dashboard.fro.bot:443',
       'broker.fro.bot:443',
       'cliproxy.fro.bot:443',
+      'models.opencode.ai:443',
       'sts.amazonaws.com:443',
     ]) {
       expect(allowed, `egress allowlist missing ${host}`).toContain(host)

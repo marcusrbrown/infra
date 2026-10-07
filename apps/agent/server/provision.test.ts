@@ -203,6 +203,8 @@ const storagePolicyConfig = {
   actionVersion: AGENT_ACTION_LAYOUT_VERSION,
 }
 
+const ACTION_LOCK_KEY = 'fro-bot-state/coordination/marcusrbrown/infra/locks/action.json'
+
 const teardownManifest = {
   owner: roleRepository.owner,
   repo: roleRepository.repo,
@@ -1024,6 +1026,47 @@ describe('per-repo IAM storage policy', () => {
     })
   })
 
+  it('grants the Action lock the same exact-object access as the repo lock, with no wildcard', () => {
+    const built = buildAgentStoragePolicy(storagePolicyConfig)
+    const statements = built.document.Statement as Record<string, unknown>[]
+    const actionLockAllow = statements.find(statement => statement.Sid === 'AllowActionCoordinationLock')
+    const repoLockAllow = statements.find(statement => statement.Sid === 'AllowCoordinationLock')
+
+    expect(actionLockAllow).toEqual({
+      Sid: 'AllowActionCoordinationLock',
+      Effect: 'Allow',
+      Action: ['s3:DeleteObject', 's3:GetObject', 's3:PutObject'],
+      Resource: [`arn:aws:s3:::fro-bot-agent-state-fixture/${ACTION_LOCK_KEY}`],
+    })
+    expect(actionLockAllow?.Action).toEqual(repoLockAllow?.Action)
+
+    const allowedResources = statements
+      .filter(statement => statement.Effect === 'Allow' && statement.Sid !== 'AllowListRepoPrefixes')
+      .flatMap(statement => statement.Resource as string[])
+    const lockResources = allowedResources.filter(resource => resource.includes('/locks/'))
+    expect(lockResources).toEqual([
+      'arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json',
+      `arn:aws:s3:::fro-bot-agent-state-fixture/${ACTION_LOCK_KEY}`,
+    ])
+    expect(lockResources.some(resource => resource.includes('*'))).toBe(false)
+  })
+
+  it('does not widen the Action lock grant to sibling repositories or other lock objects', () => {
+    const built = buildAgentStoragePolicy(storagePolicyConfig)
+    const statements = built.document.Statement as Record<string, unknown>[]
+    const actionLockArn = `arn:aws:s3:::fro-bot-agent-state-fixture/${ACTION_LOCK_KEY}`
+    const grantedLockArns = statements
+      .filter(statement => statement.Effect === 'Allow' && statement.Sid !== 'AllowListRepoPrefixes')
+      .flatMap(statement => statement.Resource as string[])
+      .filter(resource => resource.includes('/locks/'))
+
+    expect(grantedLockArns).toContain(actionLockArn)
+    expect(grantedLockArns).not.toContain(
+      'arn:aws:s3:::fro-bot-agent-state-fixture/fro-bot-state/coordination/marcusrbrown/other/locks/action.json',
+    )
+    expect(grantedLockArns.every(arn => arn.endsWith('/repo.json') || arn.endsWith('/action.json'))).toBe(true)
+  })
+
   it('contains an explicit session-prefix delete deny for current and versioned objects', () => {
     const built = buildAgentStoragePolicy(storagePolicyConfig)
     const statements = built.document.Statement as Record<string, unknown>[]
@@ -1407,6 +1450,11 @@ describe('agent storage teardown', () => {
         Key: teardownManifest.lock_key,
         ExpectedBucketOwner: bucketConfig.expectedBucketOwner,
       },
+      {
+        Bucket: bucketConfig.bucket,
+        Key: ACTION_LOCK_KEY,
+        ExpectedBucketOwner: bucketConfig.expectedBucketOwner,
+      },
     ])
     expect(iam.calls.some(call => call.name === 'DeleteOpenIDConnectProviderCommand')).toBe(false)
     expect(s3.calls.some(call => call.name === 'DeleteBucketCommand')).toBe(false)
@@ -1430,6 +1478,11 @@ describe('agent storage teardown', () => {
       {
         Bucket: bucketConfig.bucket,
         Key: teardownManifest.lock_key,
+        ExpectedBucketOwner: bucketConfig.expectedBucketOwner,
+      },
+      {
+        Bucket: bucketConfig.bucket,
+        Key: ACTION_LOCK_KEY,
         ExpectedBucketOwner: bucketConfig.expectedBucketOwner,
       },
       {
@@ -1626,6 +1679,7 @@ describe('agent storage teardown', () => {
 
     expect(result.planned).toBe(true)
     expect(report.join('\n')).toMatch(/would delete.*lock|would purge.*session/i)
+    expect(report.join('\n')).toContain(`${teardownManifest.lock_key} and ${ACTION_LOCK_KEY}`)
     expect(iam.calls.some(call => call.name.startsWith('Delete'))).toBe(false)
     expect(s3.calls.some(call => call.name.startsWith('Delete'))).toBe(false)
   })

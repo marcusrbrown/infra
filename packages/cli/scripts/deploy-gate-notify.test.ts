@@ -23,6 +23,7 @@ import {
   runDeployGateNotify,
   sendDiscordMessage,
   summaryLine,
+  SUPPRESS_EMBEDS_FLAG,
 } from './deploy-gate-notify'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -103,8 +104,14 @@ function recordingSleep(): {sleep: (ms: number) => Promise<void>; delays: number
   }
 }
 
-function bodyOf(call: RecordedCall): {content: string; allowed_mentions: {parse: string[]}} {
-  return JSON.parse(String(call.init.body)) as {content: string; allowed_mentions: {parse: string[]}}
+interface PostedBody {
+  content: string
+  allowed_mentions: {parse: string[]}
+  flags: number
+}
+
+function bodyOf(call: RecordedCall): PostedBody {
+  return JSON.parse(String(call.init.body)) as PostedBody
 }
 
 // ─── Message content ─────────────────────────────────────────────────────────
@@ -320,6 +327,9 @@ describe('sendDiscordMessage', () => {
     const body = bodyOf(calls[0] as RecordedCall)
     expect(body.content).toBe('hello')
     expect(body.allowed_mentions).toEqual({parse: []})
+    expect(body.flags).toBe(4)
+    expect(SUPPRESS_EMBEDS_FLAG).toBe(4)
+    expect(Object.keys(body).sort()).toEqual(['allowed_mentions', 'content', 'flags'])
   })
 
   it('retries 429 once, honoring Retry-After, then succeeds', async () => {
@@ -475,6 +485,7 @@ describe('runDeployGateNotify', () => {
     expect(calls).toHaveLength(1)
     const body = bodyOf(calls[0] as RecordedCall)
     expect(body.allowed_mentions.parse).toEqual([])
+    expect(body.flags).toBe(4)
     expect(body.content).toContain('umami')
     expect(body.content).toContain('a1b2c3d')
     expect(cap.warnings).toEqual([])

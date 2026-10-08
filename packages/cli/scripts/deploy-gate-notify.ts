@@ -24,6 +24,9 @@
  * - Commit text is untrusted: mentions are disabled (`allowed_mentions`),
  *   mention syntax and Discord markdown / masked links are neutralized, and
  *   the total content is bounded below Discord's 2000-character limit.
+ * - Link previews are suppressed with the SUPPRESS_EMBEDS message flag, so the
+ *   run link (and any URL in the commit subject) is not unfurled.
+ *   Payload: `{content, allowed_mentions: {parse: []}, flags: 4}`.
  *
  * Environment inputs (all strings; names are this script's contract):
  * - `DEPLOY_GATE_DISCORD_WEBHOOK`      Discord webhook URL (https). Missing/empty => `skipped`.
@@ -58,6 +61,8 @@ export const MAX_ATTEMPTS = 3
 export const REQUEST_TIMEOUT_MS = 10_000
 export const MAX_RETRY_AFTER_MS = 2000
 export const NETWORK_RETRY_DELAY_MS = 500
+/** Discord message flag SUPPRESS_EMBEDS (1 << 2): no link-preview embeds. */
+export const SUPPRESS_EMBEDS_FLAG = 1 << 2
 
 /** Total content budget; deliberately below Discord's hard limit. */
 const CONTENT_BUDGET = 1900
@@ -290,7 +295,11 @@ export async function sendDiscordMessage(options: SendOptions): Promise<SendResu
     return {outcome: 'failed', attempts: 0, status: null, reason: 'invalid-webhook'}
   }
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS
-  const body = JSON.stringify({content: options.content, allowed_mentions: {parse: []}})
+  const body = JSON.stringify({
+    content: options.content,
+    allowed_mentions: {parse: []},
+    flags: SUPPRESS_EMBEDS_FLAG,
+  })
   let status: number | null = null
   let reason = 'network'
 

@@ -221,7 +221,7 @@ describe('buildGateMessage', () => {
     expect(content).not.toContain('](')
     expect(content).not.toMatch(/(?<!\\)`/)
     expect(content).toContain(`@${ZWSP}everyone`)
-    expect(content).toContain(`<${ZWSP}@${ZWSP}&1234>`.replace('>', String.raw`\>`))
+    expect(content).toContain(String.raw`<${ZWSP}@${ZWSP}&1234\>`)
   })
 
   it('bounds a 3000-character subject under the Discord limit and ellipsizes it', () => {

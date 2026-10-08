@@ -219,27 +219,41 @@ env:
 
        STRANDED-DEPLOY CHECK (applies to every app below): a deploy run
        can be CANCELLED — not failed — and silently strand an app on an
-       old version. This happened once: a umami image bump landed on main
-       but the deploy run was cancelled at its approval gate, so the app
-       ran the old version for ~3 weeks. A cancelled run is NOT a failed
-       run, so "if it failed" misses it. For each app, treat the most
-       recent deploy run as a finding when its conclusion is `cancelled`
-       or otherwise incomplete (not `success`), NOT only when it is
+       old version. A cancelled run is NOT a failed run, so "if it
+       failed" misses it. For each app, treat the most recent deploy run
+       as a candidate finding when its conclusion is `cancelled` or
+       otherwise incomplete (not `success`), NOT only when it is
        `failure`. Apply supersede-awareness: a cancelled/incomplete run
        that is followed by a LATER SUCCESSFUL deploy for the SAME app has
        self-healed and is NOT a finding — flag only when the
        cancelled/incomplete run remains the latest deploy for that app
        (i.e. main has a committed change for the app that never reached a
        successful deploy). Use `gh run list --workflow=deploy.yaml` (and
-       the per-app deploy job conclusions) to evaluate this; report a
-       stranded app as a finding with the app, the run, and the committed
-       change that was not deployed. Reporting only — do not redeploy.
+       the per-app deploy job conclusions) to evaluate this.
+
+       AT-GATE vs RAN: classify the candidate by whether the app's deploy
+       job ever ran a step. Read `gh run view <run-id> --json jobs` and
+       look at the deploy job (deploy-<app>). It is AT-GATE when the run
+       is still waiting for environment approval, or when the job was
+       cancelled and its `steps` list is empty / no step has a started
+       status. The operator is notified in Discord when a deploy reaches
+       its gate, so an at-gate deploy without a later successful deploy
+       for the same app is a Deploy Pipeline Health table row only
+       (status `⏸ At gate`): NEVER open, update, or comment on an issue
+       for it. A deploy job that ran at least one step and then failed,
+       or was cancelled partway through its steps, is NOT at-gate and
+       still gets an issue with the app, the run, and the committed
+       change that was not deployed. Down-app checks (curl failures,
+       missing environment secrets, stale host keys) always keep their
+       issues. Reporting only — do not redeploy.
 
        KeeWeb:
        - Check the most recent Deploy workflow run (deploy-keeweb job)
-         on main. If it failed OR was cancelled/incomplete without a later
-         successful deploy (see STRANDED-DEPLOY CHECK), diagnose from logs
-         and open an issue.
+         on main. If it failed OR was cancelled/incomplete after its
+         deploy job ran steps, without a later successful deploy (see
+         STRANDED-DEPLOY CHECK), diagnose from logs and open an issue. If
+         the deploy job never ran a step (at gate), report a table row
+         only — no issue.
        - Verify kw.igg.ms is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://kw.igg.ms` should return 200.
        - Verify the keeweb environment exists with DEPLOY_SSH_KEY and
@@ -249,9 +263,11 @@ env:
 
        CLIProxy:
        - Check the most recent Deploy workflow run (deploy-cliproxy job)
-         on main. If it failed OR was cancelled/incomplete without a later
-         successful deploy (see STRANDED-DEPLOY CHECK), diagnose from logs
-         and open an issue.
+         on main. If it failed OR was cancelled/incomplete after its
+         deploy job ran steps, without a later successful deploy (see
+         STRANDED-DEPLOY CHECK), diagnose from logs and open an issue. If
+         the deploy job never ran a step (at gate), report a table row
+         only — no issue.
          Note: if the last cliproxy deploy succeeded, the post-deploy
          management-key health gate (PUT /v0/management/config) passed,
          which means the management API and the OAuth token were both
@@ -307,8 +323,10 @@ env:
          is NOT evidence the pipeline is broken when later router runs
          deployed the gateway successfully. If the latest router deploy
          that touched the gateway failed OR was cancelled/incomplete
-         without a later successful deploy (see STRANDED-DEPLOY CHECK),
-         diagnose from logs and open an issue.
+         after its deploy job ran steps, without a later successful
+         deploy (see STRANDED-DEPLOY CHECK), diagnose from logs and open
+         an issue. If the deploy-gateway job never ran a step (at gate),
+         report a table row only — no issue.
          Note: gateway has NO public HTTP surface — it connects outbound
          to Discord and S3 only. The deploy waits on docker compose
          service health, so a successful deploy run IS the health signal;
@@ -322,9 +340,11 @@ env:
 
        Umami:
        - Check the most recent Deploy Umami workflow run (deploy-umami
-         job) on main. If it failed OR was cancelled/incomplete without a
-         later successful deploy (see STRANDED-DEPLOY CHECK), diagnose from
-         logs and open an issue.
+         job) on main. If it failed OR was cancelled/incomplete after its
+         deploy job ran steps, without a later successful deploy (see
+         STRANDED-DEPLOY CHECK), diagnose from logs and open an issue. If
+         the deploy job never ran a step (at gate), report a table row
+         only — no issue.
        - Verify metrics.fro.bot is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://metrics.fro.bot/api/heartbeat` should
          return 200. A 5xx, connection error, or timeout means the
@@ -338,8 +358,10 @@ env:
        Dashboard:
        - Check the most recent Deploy Dashboard workflow run
          (deploy-dashboard job) on main. If it failed OR was
-         cancelled/incomplete without a later successful deploy (see
-         STRANDED-DEPLOY CHECK), diagnose from logs and open an issue.
+         cancelled/incomplete after its deploy job ran steps, without a
+         later successful deploy (see STRANDED-DEPLOY CHECK), diagnose
+         from logs and open an issue. If the deploy job never ran a step
+         (at gate), report a table row only — no issue.
        - Verify dashboard.fro.bot is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://dashboard.fro.bot/api/healthz` should
          return 200. A 5xx, connection error, or timeout means the
@@ -355,9 +377,11 @@ env:
 
        VPN:
        - Check the most recent Deploy VPN workflow run (deploy-vpn job) on
-         main. If it failed OR was cancelled/incomplete without a later
-         successful deploy (see STRANDED-DEPLOY CHECK), diagnose from logs
-         and open an issue.
+         main. If it failed OR was cancelled/incomplete after its deploy
+         job ran steps, without a later successful deploy (see
+         STRANDED-DEPLOY CHECK), diagnose from logs and open an issue. If
+         the deploy job never ran a step (at gate), report a table row
+         only — no issue.
          Note: the VPN egress box has NO public HTTP surface — it serves
          WireGuard over UDP 51820 only. The deploy verifies wg-quick@wg0 is
          active, so a successful deploy run IS the health signal; there is
@@ -374,8 +398,10 @@ env:
          Apply the same STRANDED-DEPLOY CHECK and supersede-awareness logic
          as every other app above: treat a `cancelled` or otherwise
          incomplete conclusion as a finding unless a LATER SUCCESSFUL
-         deploy-broker run exists for main. If it failed OR is stranded,
-         diagnose from logs and open an issue.
+         deploy-broker run exists for main. If it failed OR is stranded
+         after its deploy job ran steps, diagnose from logs and open an
+         issue. If the deploy-broker job never ran a step (at gate),
+         report a table row only — no issue.
        - Verify broker.fro.bot is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://broker.fro.bot/healthz` should return 200.
          A 5xx, connection error, or timeout means the broker is down.
@@ -386,8 +412,10 @@ env:
        - Check .github/known_hosts contains host keys for broker.fro.bot
          (both domain and droplet IP entries).
 
-       Report findings as issues only for this category. Do NOT modify
-       deploy scripts, workflow files, or the deployed servers.
+       Report findings as issues only for this category, except deploys
+       at their approval gate (deploy job never ran a step), which are
+       table rows only. Do NOT modify deploy scripts, workflow files, or
+       the deployed servers.
     8. LIVE SITE REVIEW
        Use `npx agent-browser` to verify the live KeeWeb deployment at
        https://kw.igg.ms.
@@ -717,30 +745,30 @@ env:
     ### Deploy Pipeline Health
     | App | Check | Status | Details |
     | --- | --- | --- | --- |
-    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) | [run link] |
+    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) | [run link] |
     | keeweb | kw.igg.ms reachable | ✅ 200 / ❌ Error | [HTTP status] |
     | keeweb | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | keeweb | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | cliproxy | cliproxy.fro.bot reachable | ✅ 401/200 / ❌ 5xx/timeout | [HTTP status] |
     | cliproxy | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | cliproxy | Host keys | ✅ Current / ⚠️ Stale | [details] |
     | cliproxy | Auth monitor scheduled run | ✅ Healthy / ❌ Auth dead / ⚠️ Unknown / ⚠️ Monitor failing / — Missing | [run link + summary] |
-    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | gateway | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | gateway | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | umami | metrics.fro.bot reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | umami | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | umami | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | dashboard | Last deploy-dashboard run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | dashboard | Last deploy-dashboard run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | dashboard | dashboard.fro.bot/api/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | dashboard | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | dashboard | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | vpn | Last deploy-vpn run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | vpn | Last deploy-vpn run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | vpn | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | vpn | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | broker | Last deploy-broker run | ✅ Pass / ❌ Fail / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | broker | Last deploy-broker run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | broker | broker.fro.bot/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | broker | Env secrets/variable | ✅ Set / ⚠️ Missing | [details] |
     | broker | Host keys | ✅ Current / ⚠️ Stale | [details] |

@@ -1,6 +1,6 @@
 # Agent S3 Durable Storage
 
-This runbook covers provisioning, protected-environment setup, repository wiring, workflow rollout, live verification, monitoring, rollback, and teardown for `fro-bot/agent` durable S3 storage. The provisioner is operator-run and creates AWS resources; the `agent` CLI configures GitHub and verifies the consumer workflow. It does not edit the consumer workflow automatically, and no deploy pipeline is part of this operation.
+This runbook covers provisioning, main-only environment setup, repository wiring, workflow rollout, live verification, monitoring, rollback, and teardown for `fro-bot/agent` durable S3 storage. The provisioner is operator-run and creates AWS resources; the `agent` CLI configures GitHub and verifies the consumer workflow. It does not edit the consumer workflow automatically, and no deploy pipeline is part of this operation.
 
 For package-level details, see [`apps/agent/AGENTS.md`](../../apps/agent/AGENTS.md).
 
@@ -8,7 +8,7 @@ For package-level details, see [`apps/agent/AGENTS.md`](../../apps/agent/AGENTS.
 
 ## Security model
 
-Durable storage is intentionally available only to trusted scheduled or manually dispatched runs on `main`. The storage job is protected by the `fro-bot-storage` GitHub Environment and receives `id-token: write` at job level. Pull-request, comment, issue, discussion, `pull_request_target`, and `workflow_run` paths remain content-triggered paths with no OIDC token and no AWS storage access.
+Durable storage is intentionally available only to trusted scheduled or manually dispatched runs on `main`. The storage job is bound to the `fro-bot-storage` GitHub Environment (main-only deployment; no required reviewer, so the scheduled run is unattended) and receives `id-token: write` at job level. Pull-request, comment, issue, discussion, `pull_request_target`, and `workflow_run` paths remain content-triggered paths with no OIDC token and no AWS storage access.
 
 The workflow uses native GitHub OIDC → AWS STS. No static AWS credentials are written to the repository. Each consumer repository has its own IAM role and delimiter-bounded S3 prefix. The dedicated bucket is separate from the gateway bucket. The session prefix cannot be deleted by the storage role, and object version deletion is denied. This limits cross-repository access and reduces the impact of prompt-injected content, but it does not make untrusted content safe to run with AWS credentials; the content job must remain outside the storage path.
 
@@ -48,7 +48,7 @@ The `AGENT_*` values are operator-local. They are not GitHub Environment values,
 
 ## Corrected rollout sequence
 
-The order is significant. GitHub auto-creates an environment without protection when a workflow first references it, so the environment must exist and be protected before the workflow change is applied.
+The order is significant. GitHub auto-creates an environment without protection when a workflow first references it, so the environment must exist with its main-only deployment-branch policy before the workflow change is applied.
 
 ### 1. Provision AWS
 
@@ -79,14 +79,15 @@ bun run provision:agent -- --force
 
 Foreign or shared-resource drift is never overridden by `--force`.
 
-### 2. Pre-create the protected GitHub Environment
+### 2. Pre-create the main-only GitHub Environment
 
 Before any workflow references the environment, create `fro-bot-storage` in the consumer repository with:
 
-- at least one required reviewer; and
-- a custom deployment-branch policy containing exactly `main`.
+- a custom deployment-branch policy (`protected_branches: false`, `custom_branch_policies: true`) containing exactly one rule: the branch `main`. Wildcards, additional branches, and tag policies are rejected.
 
-Verify both the environment protection rule and the deployment-branch policy. Do not rely on the workflow's first reference to create the environment.
+The environment deliberately has no required reviewer: the scheduled daily run is unattended and a reviewer gate would stall it. The boundary is main-only deployment, a protected `main`, and the IAM role's OIDC trust pinned to `environment:fro-bot-storage`. A reviewer rule, if present, is accepted but not required.
+
+Verify the deployment-branch policy. Do not rely on the workflow's first reference to create the environment.
 
 ### 3. Wire the repository variables
 
@@ -104,7 +105,7 @@ The command performs fail-closed checks before writing any S3 variable:
 - the IAM role and S3 bucket exist, have the expected owner, and have the manifest's region;
 - the repository uses the approved default OIDC subject configuration;
 - static AWS credential options are absent; and
-- the workflow and protected environment satisfy the storage contract.
+- the workflow and the main-only environment satisfy the storage contract.
 
 The AWS readback requires `AGENT_AWS_ACCESS_KEY_ID` and `AGENT_AWS_SECRET_ACCESS_KEY`; `AGENT_AWS_SESSION_TOKEN` and `AGENT_AWS_REGION` are optional. Credential bytes are never placed in AWS argv, error text, logs, or repository values. If any precheck or workflow verification fails, no repository variables are written.
 
@@ -202,7 +203,7 @@ Proceed only if every item is verified:
 
 ### Workflow and storage behavior
 
-- [ ] `fro-bot-storage` has a required reviewer and an exact main-only branch policy.
+- [ ] `fro-bot-storage` has an exact main-only deployment-branch policy (custom policies enabled, `protected_branches: false`, one `branch` rule named `main`). It has no required reviewer by design.
 - [ ] The storage job has job-level `id-token: write`, an explicit positive `timeout-minutes`, and no content-trigger reachability.
 - [ ] The STS role duration is at least 7200 seconds.
 - [ ] The storage job has no artifact/cache/output handoff from a content-reachable job.

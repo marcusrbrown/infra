@@ -614,9 +614,26 @@ function hasHandoff(job: Mapping): boolean {
   )
 }
 
+const STATIC_AWS_CREDENTIAL_PATTERN = /AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|aws-access-key-id|aws-secret-access-key/
+
+/**
+ * Drops mapping entries that blank a static-credential key with the exact empty string
+ * (e.g. `AWS_ACCESS_KEY_ID: ''` in a step `env:`). Blanking keeps a step from inheriting the
+ * temporary credentials exported by the OIDC step, so it is the opposite of exposure. Any other
+ * value, including whitespace-only, is kept and still matches the credential pattern.
+ */
+function withoutBlankedCredentialKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutBlankedCredentialKeys)
+  if (!isMapping(value)) return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, entry]) => !(entry === '' && STATIC_AWS_CREDENTIAL_PATTERN.test(key)))
+      .map(([key, entry]) => [key, withoutBlankedCredentialKeys(entry)]),
+  )
+}
+
 function hasStaticAwsCredentials(job: Mapping): boolean {
-  const serialized = stringifyUnknown(job)
-  return /AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|aws-access-key-id|aws-secret-access-key/.test(serialized)
+  return STATIC_AWS_CREDENTIAL_PATTERN.test(stringifyUnknown(withoutBlankedCredentialKeys(job)))
 }
 
 function ancestors(jobId: string, analyses: ReadonlyMap<string, JobAnalysis>): Set<string> {
@@ -713,16 +730,9 @@ function environmentResult(
     return {verified: false, violations}
   }
 
-  const protectionRules = Array.isArray(environmentValue.protection_rules) ? environmentValue.protection_rules : []
-  const hasReviewer = protectionRules.some(
-    rule =>
-      isMapping(rule) &&
-      rule.type === 'required_reviewers' &&
-      Array.isArray(rule.reviewers) &&
-      rule.reviewers.length > 0,
-  )
-  if (!hasReviewer) violations.push('GitHub Environment fro-bot-storage has no required reviewer protection rule.')
-
+  // No required reviewer is demanded: the scheduled storage run is unattended. The boundary is the
+  // exact main-only deployment-branch policy below plus the environment-pinned OIDC trust. A reviewer
+  // rule, when present, is accepted but never required.
   const branchPolicy = environmentValue.deployment_branch_policy
   if (
     !isMapping(branchPolicy) ||

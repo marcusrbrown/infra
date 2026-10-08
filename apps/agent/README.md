@@ -52,7 +52,7 @@ No GitHub Environment. Provisioning inputs are operator-local values in the repo
 
 The provisioner deliberately ignores ambient `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` values — only the `AGENT_AWS_*` names are read. No static AWS credential is ever written to GitHub.
 
-Provisioning emits a single compact JSON handoff manifest (identifiers and resource names, never credential bytes). Wiring that manifest into a consumer repository writes exactly five non-secret repository variables: `FRO_BOT_S3_ROLE_TO_ASSUME`, `FRO_BOT_S3_BUCKET`, `FRO_BOT_S3_REGION`, `FRO_BOT_S3_PREFIX`, `FRO_BOT_S3_EXPECTED_BUCKET_OWNER`. The consuming repository must pre-create a `fro-bot-storage` GitHub Environment (required reviewer, main-only deployment-branch policy) before its workflow references it; that environment belongs to the consumer repository, not to this one.
+Provisioning emits a single compact JSON handoff manifest (identifiers and resource names, never credential bytes). Wiring that manifest into a consumer repository writes exactly five non-secret repository variables: `FRO_BOT_S3_ROLE_TO_ASSUME`, `FRO_BOT_S3_BUCKET`, `FRO_BOT_S3_REGION`, `FRO_BOT_S3_PREFIX`, `FRO_BOT_S3_EXPECTED_BUCKET_OWNER`. The consuming repository must pre-create a `fro-bot-storage` GitHub Environment (exact main-only deployment-branch policy; no required reviewer, since the scheduled run is unattended) before its workflow references it; that environment belongs to the consumer repository, not to this one.
 
 ## Operations
 

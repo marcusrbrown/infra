@@ -6,6 +6,11 @@ repository:
   description: Personal infrastructure management
   topics: infra, keeweb, deploy, bun, github-actions
 
+labels:
+  - name: autoheal-report
+    color: '#0e8a16'
+    description: Trusted daily autohealing report
+
 branches:
   - name: main
     protection:

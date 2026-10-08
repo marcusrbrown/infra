@@ -133,6 +133,7 @@ To disable notifications without removing the feature, delete the webhook and th
 - **Deployment records.** Each notify run records a deployment in the `deploy-notify` environment.
 - **No coverage for `fro-bot-storage`.** That environment has no reviewer gate.
 - **Daily report.** A deploy whose job never ran a step (waiting at its gate, or cancelled before its first step) appears as a Deploy Pipeline Health table row only. A deploy that ran and then failed, and any down-app check, still opens an issue.
+- **Un-notified gates.** For each at-gate deploy the daily report reads the run's `notify` job summary line. If the outcome is not `sent`, the summary is missing, or the notify job did not succeed, the row reads `⏸ At gate — not notified (<outcome>)` (`no summary` when there is no outcome). It is still a table row only, never an issue.
 
 ---
 

@@ -2801,6 +2801,47 @@ describe('deploy-dashboard.yaml: job timeout-minutes', () => {
 // classifier/freeze fixtures lock the shell behavior and prove parity with the
 // pre-run concurrency predicate that cannot consume step outputs.
 
+const DEPLOY_HEALTH_APP_SECTIONS = [
+  ['keeweb', 'KeeWeb:'],
+  ['cliproxy', 'CLIProxy:'],
+  ['gateway', 'Gateway:'],
+  ['umami', 'Umami:'],
+  ['dashboard', 'Dashboard:'],
+  ['vpn', 'VPN:'],
+  ['broker', 'Broker:'],
+] as const
+
+/** Splits the daily prompt's Deploy Pipeline Health category into its stranded-deploy block and per-app sections. */
+function extractDeployHealthCategory(schedulePrompt: string): {
+  category: string
+  strandedCheck: string
+  sections: Record<string, string>
+} {
+  const prompt = schedulePrompt.replaceAll(/\s+/g, ' ')
+  const start = prompt.indexOf('7. DEPLOY PIPELINE HEALTH')
+  const end = prompt.indexOf('8. LIVE SITE REVIEW')
+  expect(start, 'Deploy Pipeline Health category not found').toBeGreaterThan(-1)
+  expect(end, 'Live Site Review category not found').toBeGreaterThan(start)
+  const category = prompt.slice(start, end)
+  const checkStart = category.indexOf('STRANDED-DEPLOY CHECK (applies')
+  expect(checkStart, 'STRANDED-DEPLOY CHECK block not found').toBeGreaterThan(-1)
+  const firstApp = category.indexOf(DEPLOY_HEALTH_APP_SECTIONS[0][1])
+  expect(firstApp).toBeGreaterThan(checkStart)
+
+  const sections: Record<string, string> = {}
+  const starts = DEPLOY_HEALTH_APP_SECTIONS.map(([app, heading]) => {
+    const index = category.indexOf(` ${heading} - `)
+    expect(index, `${app} section (${heading}) not found`).toBeGreaterThan(-1)
+    return {app, index}
+  })
+  const closing = category.indexOf('Report findings as issues only for this category')
+  expect(closing, 'closing category line not found').toBeGreaterThan(-1)
+  for (const [position, {app, index}] of starts.entries()) {
+    sections[app] = category.slice(index, starts[position + 1]?.index ?? closing)
+  }
+  return {category, strandedCheck: category.slice(checkStart, firstApp), sections}
+}
+
 describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
   const FRO_BOT_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/fro-bot.yaml')
   const DAILY = 'daily-equivalent'
@@ -2859,6 +2900,11 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
   async function loadFroBotWorkflow(): Promise<{text: string; parsed: FroBotWorkflow}> {
     const text = await Bun.file(FRO_BOT_WORKFLOW).text()
     return {text, parsed: parseYaml(text) as FroBotWorkflow}
+  }
+
+  async function loadHealthCategory(): Promise<ReturnType<typeof extractDeployHealthCategory>> {
+    const {parsed} = await loadFroBotWorkflow()
+    return extractDeployHealthCategory(parsed.env?.SCHEDULE_PROMPT ?? '')
   }
 
   function storageSteps(parsed: FroBotWorkflow): FroBotStep[] {
@@ -3103,6 +3149,103 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     expect(schedulePrompt).not.toContain('canonical=#')
     expect(schedulePrompt).not.toContain('gh label create autoheal-report')
     expect(schedulePrompt.toLowerCase()).toContain('reconciler')
+  })
+
+  describe('Deploy Pipeline Health: at-gate deploys are table rows only', () => {
+    const DEPLOY_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker'] as const
+
+    it('classifies AT-GATE vs RAN by whether the deploy job ever ran a step', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('AT-GATE vs RAN')
+      expect(strandedCheck).toMatch(/whether the app's deploy job ever ran a step/i)
+      expect(strandedCheck).toMatch(/AT-GATE when the run is still waiting for environment approval/i)
+      expect(strandedCheck).toMatch(/no step has a started status/i)
+    })
+
+    it('never opens, updates, or comments on an issue for an at-gate deploy', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('table row only')
+      expect(strandedCheck).toContain('`⏸ At gate`')
+      expect(strandedCheck).toContain('NEVER open, update, or comment on an issue')
+    })
+
+    it('still opens an issue when the deploy job ran steps and then failed or was cancelled partway', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toMatch(
+        /ran at least one step and then failed, or was cancelled partway through its steps, is NOT at-gate and still gets an issue/i,
+      )
+    })
+
+    it('keeps issues for down-app checks', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toMatch(/Down-app checks \([^)]*\) always keep their issues/i)
+    })
+
+    it('reads the notify job log of every at-gate deploy for the one-line JSON summary', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('NOTIFY CHECK (every at-gate deploy)')
+      expect(strandedCheck).toContain('gh run view <run-id> --json jobs')
+      expect(strandedCheck).toMatch(/the job whose name ends in `notify`/)
+      expect(strandedCheck).toContain('gh run view <run-id> --log --job <job-id>')
+      expect(strandedCheck).toMatch(/one-line JSON summary/i)
+      // Field names and outcome values must match the notify script's NotifySummary.
+      for (const field of ['"app"', '"event"', '"outcome"', '"attempts"', '"status"', '"reason"']) {
+        expect(strandedCheck, `summary field ${field}`).toContain(field)
+      }
+      expect(strandedCheck).toMatch(/If `outcome` is `sent`, the row status is `⏸ At gate`/)
+    })
+
+    it('marks an at-gate deploy as not notified when the post did not send, still as a table row only', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('`⏸ At gate — not notified (<outcome>)`')
+      expect(strandedCheck).toMatch(/`skipped` or `failed`/)
+      expect(strandedCheck).toMatch(/summary line is missing/i)
+      expect(strandedCheck).toMatch(/notify job did not succeed/i)
+      expect(strandedCheck).toContain('`no summary`')
+      expect(strandedCheck).toMatch(/Either way it stays a table row only — never an issue/)
+    })
+
+    it('allows the not-notified suffix on all seven Last deploy-<app> template rows', async () => {
+      const {parsed} = await loadFroBotWorkflow()
+      const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
+      const rows = prompt.split('\n').filter(line => /\|\s*Last deploy-[\w-]+ run\s*\|/.test(line))
+      expect(rows).toHaveLength(7)
+      for (const row of rows) {
+        expect(row, `missing not-notified status: ${row.trim()}`).toContain('⏸ At gate — not notified (<outcome>)')
+      }
+    })
+
+    it('offers the At gate status on all seven Last deploy-<app> template rows', async () => {
+      const {parsed} = await loadFroBotWorkflow()
+      const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
+      const rows = prompt.split('\n').filter(line => /\|\s*Last deploy-[\w-]+ run\s*\|/.test(line))
+      expect(rows.map(row => /Last (deploy-[\w-]+) run/.exec(row)?.[1]).toSorted()).toEqual(
+        DEPLOY_APPS.map(app => `deploy-${app}`).toSorted(),
+      )
+      for (const row of rows) {
+        expect(row, `missing At gate status: ${row.trim()}`).toContain('⏸ At gate')
+      }
+    })
+
+    it('carries the at-gate table-row-only clause on each of the seven per-app deploy bullets', async () => {
+      const {sections} = await loadHealthCategory()
+      expect(Object.keys(sections).toSorted()).toEqual([...DEPLOY_APPS].toSorted())
+      for (const app of DEPLOY_APPS) {
+        const section = sections[app] ?? ''
+        expect(section, `${app} section`).toMatch(/never ran a step \(at gate\), report a table row only — no issue/)
+        expect(section, `${app} section`).toContain('after its deploy job ran steps')
+      }
+    })
+
+    it('limits the closing category line to issues, with the at-gate exception', async () => {
+      const {category} = await loadHealthCategory()
+      const closing = category.slice(category.indexOf('Report findings as issues only for this category'))
+      expect(closing).toContain(
+        'Report findings as issues only for this category, except deploys at their approval gate',
+      )
+      expect(closing).toMatch(/deploy job never ran a step/i)
+      expect(closing).toMatch(/table rows only/i)
+    })
   })
 
   it('documents the safe adoptable-report path and pins the fixed GitHub-output delimiter', async () => {

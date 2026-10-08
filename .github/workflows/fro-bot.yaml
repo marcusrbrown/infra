@@ -240,7 +240,22 @@ env:
        its gate, so an at-gate deploy without a later successful deploy
        for the same app is a Deploy Pipeline Health table row only
        (status `⏸ At gate`): NEVER open, update, or comment on an issue
-       for it. A deploy job that ran at least one step and then failed,
+       for it.
+
+       NOTIFY CHECK (every at-gate deploy): find the run's notify job
+       with `gh run view <run-id> --json jobs` (the job whose name ends
+       in `notify`), then read its log with `gh run view <run-id> --log
+       --job <job-id>` and find the notify script's one-line JSON
+       summary (`{"app":…,"event":…,"outcome":…,"attempts":…,
+       "status":…,"reason":…}`; it never contains the webhook or the
+       message). If `outcome` is `sent`, the row status is `⏸ At gate`.
+       If `outcome` is anything else (`skipped` or `failed`), the
+       summary line is missing, or the notify job did not succeed, the
+       row status is `⏸ At gate — not notified (<outcome>)`, using
+       `no summary` in place of the outcome when there is none. Either
+       way it stays a table row only — never an issue.
+
+       A deploy job that ran at least one step and then failed,
        or was cancelled partway through its steps, is NOT at-gate and
        still gets an issue with the app, the run, and the committed
        change that was not deployed. Down-app checks (curl failures,
@@ -745,30 +760,30 @@ env:
     ### Deploy Pipeline Health
     | App | Check | Status | Details |
     | --- | --- | --- | --- |
-    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) | [run link] |
+    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) | [run link] |
     | keeweb | kw.igg.ms reachable | ✅ 200 / ❌ Error | [HTTP status] |
     | keeweb | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | keeweb | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | cliproxy | cliproxy.fro.bot reachable | ✅ 401/200 / ❌ 5xx/timeout | [HTTP status] |
     | cliproxy | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | cliproxy | Host keys | ✅ Current / ⚠️ Stale | [details] |
     | cliproxy | Auth monitor scheduled run | ✅ Healthy / ❌ Auth dead / ⚠️ Unknown / ⚠️ Monitor failing / — Missing | [run link + summary] |
-    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | gateway | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | gateway | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | umami | metrics.fro.bot reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | umami | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | umami | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | dashboard | Last deploy-dashboard run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | dashboard | Last deploy-dashboard run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | dashboard | dashboard.fro.bot/api/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | dashboard | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | dashboard | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | vpn | Last deploy-vpn run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | vpn | Last deploy-vpn run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | vpn | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | vpn | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | broker | Last deploy-broker run | ✅ Pass / ❌ Fail / ⏸ At gate / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | broker | Last deploy-broker run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
     | broker | broker.fro.bot/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | broker | Env secrets/variable | ✅ Set / ⚠️ Missing | [details] |
     | broker | Host keys | ✅ Current / ⚠️ Stale | [details] |

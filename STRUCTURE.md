@@ -31,7 +31,7 @@ One subdirectory per deployable. Each app owns its Compose/build config (or nati
 
 ### `packages/`
 
-Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge) and also owns the VPN peer model (`packages/cli/src/commands/vpn/peers.ts`, published as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn`). `packages/shared` is the provisioning helper library consumed by every app's provision script, plus `packages/shared/cliproxy/management.ts` — CLIProxyAPI management-API primitives (`managementHeaders`, `requestJson`, `parseManagementKeyList`, OAuth model-alias helpers) consumed directly by `apps/cliproxy/src/deploy.ts`, `apps/broker/src/mint.ts`, and `packages/cli/src/commands/cliproxy/*.ts`. `packages/` never imports from `apps/`; the published `@marcusrbrown/infra` (cli) stays self-contained and must not depend on the private `packages/shared`. `packages/cli/scripts/` holds the package build entry (`build.ts`, run by `bun run build` / `prepack`) plus repo-local operational workflow scripts that are never part of the published package — `reconcile-autoheal-reports.ts`, invoked only by the daily-equivalent branch of `.github/workflows/fro-bot.yaml`, and `prune-untagged-packages.ts`, invoked only by the manual dispatch of `.github/workflows/prune-packages.yaml`.
+Reusable libraries. `packages/cli` is the operator surface (goke command groups, unified status, MCP bridge) and also owns the VPN peer model (`packages/cli/src/commands/vpn/peers.ts`, published as `@marcusrbrown/infra/vpn/peers` and imported by `apps/vpn`). `packages/shared` is the provisioning helper library consumed by every app's provision script, plus `packages/shared/cliproxy/management.ts` — CLIProxyAPI management-API primitives (`managementHeaders`, `requestJson`, `parseManagementKeyList`, OAuth model-alias helpers) consumed directly by `apps/cliproxy/src/deploy.ts`, `apps/broker/src/mint.ts`, and `packages/cli/src/commands/cliproxy/*.ts`. `packages/` never imports from `apps/`; the published `@marcusrbrown/infra` (cli) stays self-contained and must not depend on the private `packages/shared`. `packages/cli/scripts/` holds the package build entry (`build.ts`, run by `bun run build` / `prepack`) plus repo-local operational workflow scripts that are never part of the published package — `reconcile-autoheal-reports.ts`, invoked only by the daily-equivalent branch of `.github/workflows/fro-bot.yaml`, `prune-untagged-packages.ts`, invoked only by the manual dispatch of `.github/workflows/prune-packages.yaml`, and `deploy-gate-notify.ts`, invoked only by the `notify` jobs of `.github/workflows/deploy-<app>.yaml`.
 
 ### `.github/`
 
@@ -103,6 +103,8 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | `packages/cli/scripts/reconcile-autoheal-reports.test.ts` | Colocated behavior tests (fake `fetch` boundary, pagination, readback, fail-closed paths) |
 | `packages/cli/scripts/prune-untagged-packages.ts` | Repo-local GHCR untagged-version pruner; dry-run unless `--apply`, invoked only by `prune-packages.yaml`, never published |
 | `packages/cli/scripts/prune-untagged-packages.test.ts` | Colocated behavior tests (fake `fetch` boundary, pagination, manifest-child gates, abort codes) |
+| `packages/cli/scripts/deploy-gate-notify.ts` | Repo-local deploy-gate Discord notifier; zero-dependency, always exits 0, invoked only by the `notify` job of each `deploy-<app>.yaml`, never published |
+| `packages/cli/scripts/deploy-gate-notify.test.ts` | Colocated behavior tests (fake `fetch` boundary, message rendering, retry and failure paths) |
 | `packages/cli/scripts/build.ts` | CLI bundle build (public deps external, `@marcusrbrown/infra-shared` inlined, `known_hosts` asset) |
 
 **Tests / CI**
@@ -122,7 +124,7 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 - **Host validators**: `host.ts` (deploy-side under `apps/<name>/src/`, CLI-side under `packages/cli/src/commands/<app>/`).
 - **Workflows**: `.yaml` extension (not `.yml`); deploy workflows `deploy-<app>.yaml`.
 - **Bun script guards**: scripts exporting functions for tests gate top-level execution with `if (import.meta.main)`.
-- **Repo-local workflow scripts**: live under `packages/cli/scripts/` beside a colocated `*.test.ts` (e.g. `reconcile-autoheal-reports.ts`); they are excluded from `packages/cli/package.json` `files` and `exports` and from the build entrypoint, and are invoked only by their owning workflow.
+- **Repo-local workflow scripts**: live under `packages/cli/scripts/` beside a colocated `*.test.ts` (e.g. `reconcile-autoheal-reports.ts`, `deploy-gate-notify.ts`); they are excluded from `packages/cli/package.json` `files` and `exports` and from the build entrypoint, and are invoked only by their owning workflow.
 
 ## Where to Add New Code
 

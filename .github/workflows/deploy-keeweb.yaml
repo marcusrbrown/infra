@@ -23,7 +23,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  notify:
+    runs-on: ubuntu-latest
+    environment: deploy-notify
+    permissions:
+      contents: read
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Post deploy gate notification
+        env:
+          DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
+          DEPLOY_GATE_APP: keeweb
+          DEPLOY_GATE_COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+        run: bun run packages/cli/scripts/deploy-gate-notify.ts
+
   deploy-keeweb:
+    needs: notify
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     environment: keeweb
     steps:

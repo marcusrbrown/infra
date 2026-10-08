@@ -70,6 +70,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-dashboard-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   # Pre-gate: no-secret validation. Runs before the environment gate so the
   # approver sees the version and any input errors before spending an approval.
@@ -146,17 +150,40 @@ jobs:
 
           echo "No newer dashboard run found; continuing."
 
-  deploy-dashboard:
+  notify:
     needs: validate-inputs
+    runs-on: ubuntu-latest
+    environment: deploy-notify
+    permissions:
+      contents: read
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Post deploy gate notification
+        env:
+          DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
+          DEPLOY_GATE_APP: dashboard
+          DEPLOY_GATE_COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+          DEPLOY_GATE_DASHBOARD_VERSION: ${{ inputs.version }}
+          DEPLOY_GATE_DASHBOARD_DIGEST: ${{ inputs.digest }}
+        run: bun run packages/cli/scripts/deploy-gate-notify.ts
+
+  deploy-dashboard:
+    needs: [validate-inputs, notify]
+    if: ${{ !cancelled() && needs.validate-inputs.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
     timeout-minutes: 30
     environment: dashboard
-    concurrency:
-      group: deploy-dashboard-${{ github.ref_name }}
-      cancel-in-progress: false
     steps:
       - name: Reject stale dashboard dispatch
         if: github.event_name == 'workflow_dispatch'

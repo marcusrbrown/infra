@@ -1,5 +1,19 @@
 # @marcusrbrown/infra
 
+## 0.25.0
+
+### Minor Changes
+
+- Update npm dependency `@modelcontextprotocol/sdk` from `1.31.0` to `1.32.0` ([#1475](https://github.com/marcusrbrown/infra/pull/1475))
+  
+  **Multi-package update** for packages: `@marcusrbrown/infra`.
+
+### Patch Changes
+
+- Update npm dependency `@modelcontextprotocol/sdk` from `1.32.0` to `1.32.1` ([#1498](https://github.com/marcusrbrown/infra/pull/1498))
+  
+  **Multi-package update** for packages: `@marcusrbrown/infra`.
+
 ## 0.24.0
 
 ### Minor Changes

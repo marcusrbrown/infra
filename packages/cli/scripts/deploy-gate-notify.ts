@@ -43,7 +43,8 @@
  * Delivery mirrors the cliproxy monitor's `sendDiscord` semantics (but shares
  * no code with it): 3 attempts, 10s per-attempt timeout, retry only on 429 /
  * >=500 / network error / timeout, `Retry-After` honored but capped at
- * `MAX_RETRY_AFTER_MS` (2s) so a hostile or broken response can't hold the gate
+ * `MAX_RETRY_AFTER_MS` (2s) (a missing, malformed, or non-positive one falls back to
+ * `NETWORK_RETRY_DELAY_MS`) so a hostile or broken response can't hold the gate
  * open beyond the notify job's own timeout. A retry may rarely duplicate a
  * message; that is accepted.
  */
@@ -272,9 +273,15 @@ function isHttpsUrl(value: string): boolean {
   }
 }
 
+/**
+ * Delay before retrying a 429/5xx. A valid positive `Retry-After` is honored up to the cap; a
+ * missing, malformed, or non-positive one falls back to the network retry delay so a retry never
+ * hammers the webhook back-to-back.
+ */
 function retryAfterMs(response: Response): number {
-  const seconds = Number(response.headers.get('retry-after') ?? '0')
-  if (!Number.isFinite(seconds) || seconds < 0) return 0
+  const header = response.headers.get('retry-after')
+  const seconds = header === null ? Number.NaN : Number(header)
+  if (!Number.isFinite(seconds) || seconds <= 0) return NETWORK_RETRY_DELAY_MS
   return Math.min(MAX_RETRY_AFTER_MS, seconds * 1000)
 }
 

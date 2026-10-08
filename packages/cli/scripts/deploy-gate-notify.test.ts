@@ -18,6 +18,7 @@ import {
   DISCORD_CONTENT_LIMIT,
   escapeDiscordText,
   MAX_RETRY_AFTER_MS,
+  NETWORK_RETRY_DELAY_MS,
   readNotifyEnv,
   runDeployGateNotify,
   sendDiscordMessage,
@@ -345,18 +346,33 @@ describe('sendDiscordMessage', () => {
     expect(delays).toEqual([MAX_RETRY_AFTER_MS])
   })
 
-  it('tolerates a missing or malformed Retry-After', async () => {
+  it.each([
+    ['missing', undefined],
+    ['malformed', 'soon'],
+    ['empty', ''],
+    ['zero', '0'],
+    ['negative', '-5'],
+    ['non-finite', 'Infinity'],
+  ] as const)('falls back to the positive network retry delay when Retry-After is %s', async (_label, value) => {
     const {fetch} = recordingFetch(call =>
       call === 1
-        ? new Response('rate limited', {status: 429, headers: {'retry-after': 'soon'}})
+        ? new Response('rate limited', {status: 429, headers: value === undefined ? {} : {'retry-after': value}})
         : new Response(null, {status: 204}),
     )
     const {sleep, delays} = recordingSleep()
     const result = await sendDiscordMessage({webhook: WEBHOOK, content: 'hi', fetch, sleep})
     expect(result.outcome).toBe('sent')
-    expect(delays).toHaveLength(1)
-    expect(delays[0]).toBeGreaterThanOrEqual(0)
-    expect(delays[0]).toBeLessThanOrEqual(MAX_RETRY_AFTER_MS)
+    expect(delays).toEqual([NETWORK_RETRY_DELAY_MS])
+    expect(NETWORK_RETRY_DELAY_MS).toBeGreaterThan(0)
+  })
+
+  it('also falls back to the positive delay for a 5xx without a usable Retry-After', async () => {
+    const {fetch} = recordingFetch(call =>
+      call === 1 ? new Response('boom', {status: 503}) : new Response(null, {status: 204}),
+    )
+    const {sleep, delays} = recordingSleep()
+    await sendDiscordMessage({webhook: WEBHOOK, content: 'hi', fetch, sleep})
+    expect(delays).toEqual([NETWORK_RETRY_DELAY_MS])
   })
 
   it('gives up after three attempts on repeated 500s', async () => {

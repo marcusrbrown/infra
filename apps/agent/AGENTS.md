@@ -17,7 +17,7 @@ The agent package is a private, operator-run AWS provisioner for `fro-bot/agent`
 - Provisioning credentials are dedicated operator-local credentials. The provisioner accepts `AGENT_AWS_ACCESS_KEY_ID` and `AGENT_AWS_SECRET_ACCESS_KEY` (plus the optional `AGENT_AWS_SESSION_TOKEN`) and deliberately ignores ambient `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` values.
 - The provisioner uses native GitHub OIDC → AWS STS. No static AWS credential is written to a consumer repository.
 - The bucket is separate from the gateway bucket. Each repository receives its own role and prefix-scoped policy; the session prefix has an explicit delete deny and each coordination lock (`locks/action.json` for the Action, `locks/repo.json` for the gateway's shared checkout) is a separate exact object ARN.
-- Content-triggered jobs must not reach the storage job. Only the protected `fro-bot-storage` environment on scheduled or main-branch dispatched runs may receive `id-token: write`.
+- Content-triggered jobs must not reach the storage job. Only the `fro-bot-storage` environment on scheduled or main-branch dispatched runs may receive `id-token: write`. That environment requires the exact main-only deployment-branch policy and deliberately has no required reviewer, because the scheduled daily run must run unattended; the boundary is main-only deployment plus the environment-pinned OIDC trust.
 
 ## PROVISIONER INPUTS
 
@@ -148,7 +148,7 @@ Teardown validates the manifest identity and role tags before mutating. A partia
 - Confirm the handoff manifest belongs to the intended live GitHub repository.
 - Review every managed-drift diff before using `--force`.
 - Never use the gateway bucket, wildcard repository prefixes, or static AWS credentials in a consumer workflow.
-- Preserve the `fro-bot-storage` environment's required reviewer and main-only branch policy before the workflow references it.
+- Preserve the `fro-bot-storage` environment's exact main-only deployment-branch policy before the workflow references it. Do not add a required reviewer; it would stall the unattended scheduled run.
 - Use `.yaml` workflow files and SHA-pin all GitHub Actions with version comments.
 
 ## ANTI-PATTERNS

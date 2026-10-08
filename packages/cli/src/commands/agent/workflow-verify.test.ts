@@ -1,5 +1,8 @@
 /// <reference types="bun" />
 
+import {readFileSync} from 'node:fs'
+import {join} from 'node:path'
+
 import {describe, expect, it, mock} from 'bun:test'
 
 import {inspectWorkflow, verifyWorkflow, type EnvironmentReadback, type WorkflowVerifyDeps} from './workflow-verify'
@@ -19,6 +22,9 @@ const AGENT_STEP = `      - uses: fro-bot/agent@${SHA}
           aws-region: \${{ vars.FRO_BOT_S3_REGION }}
           s3-prefix: \${{ vars.FRO_BOT_S3_PREFIX }}
           s3-expected-bucket-owner: \${{ vars.FRO_BOT_S3_EXPECTED_BUCKET_OWNER }}`
+
+/** Renders a GitHub Actions expression without tripping no-template-curly-in-string. */
+const EXPR = (body: string): string => `$` + `{{ ${body} }}`
 
 const manifest = {
   owner: 'owner',
@@ -112,6 +118,16 @@ function makeDeps(
   })
 
   return {runGh, calls, ...overrides}
+}
+
+/** Appends a reconciler-style step with the given `env:` lines to the storage-split workflow. */
+function withStep(stepEnvLines: string): string {
+  return `${workflowJob().trimEnd()}
+      - name: Reconcile
+        env:
+${stepEnvLines}
+        run: bun run reconcile.ts
+`
 }
 
 describe('workflow storage verifier', () => {
@@ -322,10 +338,163 @@ describe('workflow storage verifier', () => {
     await expect(verifyWorkflow('owner/repo', manifest, makeDeps(staticCredentials))).rejects.toThrow(/static AWS/i)
   })
 
+  describe('static AWS credential check vs. blanked credential keys', () => {
+    const BLANKED_RECONCILER_STEP = `      - name: Reconcile
+        env:
+          AWS_ACCESS_KEY_ID: ''
+          AWS_SECRET_ACCESS_KEY: ''
+          AWS_SESSION_TOKEN: ''
+          AWS_REGION: ""
+          AWS_DEFAULT_REGION: ''
+        run: bun run reconcile.ts`
+
+    it('accepts a step that blanks all five AWS_* credential variables with empty strings', async () => {
+      const blanked = `${workflowJob().trimEnd()}\n${BLANKED_RECONCILER_STEP}\n`
+
+      await expect(verifyWorkflow('owner/repo', manifest, makeDeps(blanked))).resolves.toBeUndefined()
+    })
+
+    it.each([
+      ['a secrets expression', `          AWS_ACCESS_KEY_ID: ${EXPR('secrets.AWS_KEY')}`],
+      ['a vars expression', `          AWS_SECRET_ACCESS_KEY: ${EXPR('vars.AWS_SECRET')}`],
+      ['an env expression', `          AWS_ACCESS_KEY_ID: ${EXPR('env.AWS_ACCESS_KEY_ID')}`],
+      ['a non-empty literal', '          AWS_ACCESS_KEY_ID: hard-coded'],
+      ['a whitespace-only value', "          AWS_ACCESS_KEY_ID: ' '"],
+      ['a tab-only value', String.raw`          AWS_SECRET_ACCESS_KEY: "\t"`],
+      ['a null value', '          AWS_ACCESS_KEY_ID:'],
+    ])('still rejects a step env with %s', async (_label, line) => {
+      const blankedOthers = `          AWS_SESSION_TOKEN: ''\n          AWS_REGION: ''\n${line}`
+
+      await expect(verifyWorkflow('owner/repo', manifest, makeDeps(withStep(blankedOthers)))).rejects.toThrow(
+        /static AWS/i,
+      )
+    })
+
+    it('still rejects a non-empty credential in a step with: input even when other keys are blanked', async () => {
+      const unsafe = `${workflowJob().trimEnd()}
+      - uses: some/action@${'a'.repeat(40)}
+        with:
+          aws-access-key-id: ${EXPR('secrets.AWS_KEY')}
+        env:
+          AWS_ACCESS_KEY_ID: ''
+`
+
+      await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(/static AWS/i)
+    })
+
+    it('still rejects a non-empty job-level env credential even when a step blanks it', async () => {
+      const unsafe = `${workflowJob().replace(
+        '    timeout-minutes: 30',
+        '    timeout-minutes: 30\n    env:\n      AWS_ACCESS_KEY_ID: hard-coded',
+      )}`
+      const withBlankedStep = `${unsafe.trimEnd()}\n${BLANKED_RECONCILER_STEP}\n`
+
+      await expect(verifyWorkflow('owner/repo', manifest, makeDeps(withBlankedStep))).rejects.toThrow(/static AWS/i)
+    })
+
+    it('still rejects a job-level env that blanks nothing but sets a secrets expression', async () => {
+      const unsafe = workflowJob().replace(
+        '    timeout-minutes: 30',
+        `    timeout-minutes: 30\n    env:\n      AWS_SECRET_ACCESS_KEY: ${EXPR('secrets.X')}\n      AWS_ACCESS_KEY_ID: ''`,
+      )
+
+      await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(/static AWS/i)
+    })
+
+    it("accepts the repository's real .github/workflows/fro-bot.yaml (action pin normalized to the verified SHA)", async () => {
+      const workflowPath = join(import.meta.dir, '..', '..', '..', '..', '..', '.github', 'workflows', 'fro-bot.yaml')
+      // The verifier ties the action SHA to the manifest layout; normalize it so a routine
+      // Renovate bump of fro-bot/agent does not require touching this test.
+      const real = readFileSync(workflowPath, 'utf-8').replaceAll(
+        /fro-bot\/agent@[0-9a-f]{40}/g,
+        `fro-bot/agent@${SHA}`,
+      )
+
+      await expect(verifyWorkflow('owner/repo', manifest, makeDeps(real))).resolves.toBeUndefined()
+    })
+  })
+
+  // The live environment: unattended scheduled runs, so no reviewer rule; main-only custom branch policy.
+  const mainOnlyNoReviewer: EnvironmentReadback = {
+    ...environment,
+    protection_rules: [{type: 'branch_policy'}],
+  }
+
+  it.each([
+    ['a branch_policy-only rule set (no reviewer)', mainOnlyNoReviewer],
+    ['an empty protection_rules list (no reviewer)', {...environment, protection_rules: []}],
+    ['no protection_rules field at all', {...environment, protection_rules: undefined}],
+    ['a required reviewer plus the main-only policy', environment],
+  ] as const)('accepts the main-only environment with %s', async (_label, value) => {
+    const report = await inspectWorkflow('owner/repo', manifest, makeDeps(workflowJob(), value))
+
+    expect(report.environmentPolicyVerified, JSON.stringify(report.environmentViolations)).toBe(true)
+    expect(report.environmentViolations).toEqual([])
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(workflowJob(), value))).resolves.toBeUndefined()
+  })
+
+  it('never reports a missing required reviewer as a violation', async () => {
+    const report = await inspectWorkflow('owner/repo', manifest, makeDeps(workflowJob(), mainOnlyNoReviewer))
+
+    expect(report.environmentViolations.join('\n')).not.toMatch(/reviewer/i)
+  })
+
   it.each([
     ['missing', null],
-    ['without a required reviewer', {...environment, protection_rules: []}],
     ['without a main-only branch policy', {...environment, branch_policies: [{name: 'develop', type: 'branch'}]}],
+    [
+      'protected_branches without the custom main rule',
+      {
+        ...mainOnlyNoReviewer,
+        deployment_branch_policy: {protected_branches: true, custom_branch_policies: false},
+        branch_policies: [],
+      },
+    ],
+    [
+      'protected_branches alongside custom policies',
+      {
+        ...mainOnlyNoReviewer,
+        deployment_branch_policy: {protected_branches: true, custom_branch_policies: true},
+      },
+    ],
+    [
+      'custom branch policies disabled',
+      {
+        ...mainOnlyNoReviewer,
+        deployment_branch_policy: {protected_branches: false, custom_branch_policies: false},
+      },
+    ],
+    [
+      'no deployment_branch_policy (any branch may deploy)',
+      {...mainOnlyNoReviewer, deployment_branch_policy: undefined},
+    ],
+    ['no branch policies', {...mainOnlyNoReviewer, branch_policies: []}],
+    ['a wildcard policy "*"', {...mainOnlyNoReviewer, branch_policies: [{name: '*', type: 'branch'}]}],
+    ['a pattern policy "ma*"', {...mainOnlyNoReviewer, branch_policies: [{name: 'ma*', type: 'branch'}]}],
+    ['a pattern policy "main*"', {...mainOnlyNoReviewer, branch_policies: [{name: 'main*', type: 'branch'}]}],
+    ['a ref-qualified policy', {...mainOnlyNoReviewer, branch_policies: [{name: 'refs/heads/main', type: 'branch'}]}],
+    [
+      'an extra branch alongside main',
+      {
+        ...mainOnlyNoReviewer,
+        branch_policies: [
+          {name: 'main', type: 'branch'},
+          {name: 'develop', type: 'branch'},
+        ],
+      },
+    ],
+    [
+      'an extra tag policy alongside main',
+      {
+        ...mainOnlyNoReviewer,
+        branch_policies: [
+          {name: 'main', type: 'branch'},
+          {name: 'v*', type: 'tag'},
+        ],
+      },
+    ],
+    ['a tag policy named main', {...mainOnlyNoReviewer, branch_policies: [{name: 'main', type: 'tag'}]}],
+    ['a branch policy with no type', {...mainOnlyNoReviewer, branch_policies: [{name: 'main'}]}],
   ] as const)('fails closed when environment policy is %s', async (_label, value) => {
     const report = await inspectWorkflow('owner/repo', manifest, makeDeps(workflowJob(), value))
 

@@ -180,7 +180,7 @@ GitHub's secrets API is write-only, so the CLI cannot verify `--key` matches the
 - `agent storage teardown --repo OWNER/REPO --manifest FILE` removes those five variables and the repository-scoped AWS resources. It retains session state by default; `--purge-state` is explicit, and `--plan` previews the operation.
 - The storage command shells out to the local `aws` CLI for provision-first resource readback. It never accepts or writes static AWS credentials.
 
-The workflow verifier is diff-only: it does not edit a consumer's `.github/workflows/fro-bot.yaml`. Storage remains limited to the protected `fro-bot-storage` environment on schedule or main-branch dispatch runs; content jobs must not receive `id-token: write`.
+The workflow verifier is diff-only: it does not edit a consumer's `.github/workflows/fro-bot.yaml`. Storage remains limited to the `fro-bot-storage` environment (exact main-only deployment-branch policy, no required reviewer) on schedule or main-branch dispatch runs; content jobs must not receive `id-token: write`.
 
 `cliproxy setup` drives its ack-key-reuse and collision gates off a pre-write list of the repo's existing GitHub secret/variable names. Two limitations follow from how GitHub exposes that data:
 

@@ -1663,9 +1663,9 @@ describe('deploy-gateway.yaml: scan-images report-only invariants', () => {
     }
   })
 
-  it('deploy-gateway still gates on [build-images, scan-images] and keeps the gateway approval environment', async () => {
+  it('deploy-gateway still gates on build-images and scan-images (plus the pre-gate notify) and keeps the gateway approval environment', async () => {
     const {deployGateway} = await readScanImages()
-    expect(deployGateway?.needs).toEqual(['build-images', 'scan-images'])
+    expect(deployGateway?.needs).toEqual(['build-images', 'scan-images', 'notify'])
     expect(deployGateway?.environment).toBe('gateway')
   })
 })
@@ -1935,11 +1935,10 @@ describe('deploy-gateway.yaml: optional operator secret declarations (issue 1)',
 // all pending app deploys. Each per-app reusable workflow already has its
 // own concurrency group, so the aggregate group is redundant and harmful.
 //
-// Each per-app deploy workflow MUST have its own concurrency block with
-// group `deploy-<app>-` and cancel-in-progress: false. Dashboard and gateway
-// both keep their block at deploy-job scope: dashboard's post-gate staleness
-// guard (and its pre-gate precheck copy) runs before token minting, and
-// gateway's job-scoped lock serializes deployment without blocking builds.
+// Each per-app deploy workflow MUST have its own workflow-level concurrency
+// block with group `deploy-<app>-` and cancel-in-progress: false, and no job
+// may carry its own. A queued run starts no jobs, so its pre-gate notify job
+// fires only when the run is next in line for its own approval gate.
 
 describe('deploy.yaml: no aggregate-level concurrency (regression guard)', () => {
   const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
@@ -1957,55 +1956,49 @@ describe('deploy.yaml: no aggregate-level concurrency (regression guard)', () =>
   })
 })
 
-describe('per-app deploy workflows: each has its own concurrency block', () => {
-  const APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard'] as const
+describe('per-app deploy workflows: each has its own workflow-level concurrency block', () => {
+  const APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard', 'broker'] as const
 
   for (const app of APPS) {
-    it(`deploy-${app}.yaml has concurrency group deploy-${app}- with cancel-in-progress: false`, async () => {
+    it(`deploy-${app}.yaml has workflow-level concurrency group deploy-${app}- with cancel-in-progress: false and no job-level concurrency`, async () => {
       const workflowPath = resolve(REPO_ROOT, `.github/workflows/deploy-${app}.yaml`)
       const text = await Bun.file(workflowPath).text()
       const parsed = parseYaml(text) as {
         concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
-        jobs?: Record<string, {concurrency?: {group?: string; 'cancel-in-progress'?: boolean}}>
+        jobs?: Record<string, {concurrency?: unknown}>
       }
-      const jobScoped = app === 'dashboard' || app === 'gateway'
-      const concurrency = jobScoped ? parsed.jobs?.[`deploy-${app}`]?.concurrency : parsed.concurrency
-      expect(concurrency).toBeDefined()
-      expect(concurrency?.group).toContain(`deploy-${app}-`)
-      expect(concurrency?.['cancel-in-progress']).toBe(false)
-      if (jobScoped) expect(parsed.concurrency).toBeUndefined()
+      expect(parsed.concurrency).toBeDefined()
+      expect(parsed.concurrency?.group).toBe(`deploy-${app}-` + '${' + '{ github.ref_name }}')
+      expect(parsed.concurrency?.['cancel-in-progress']).toBe(false)
+      const jobScoped = Object.entries(parsed.jobs ?? {})
+        .filter(([, job]) => job.concurrency !== undefined)
+        .map(([jobId]) => jobId)
+      expect(jobScoped, 'concurrency must live at workflow level only').toEqual([])
     })
   }
 })
 
-describe('deploy-gateway.yaml: concurrency is job-scoped to deploy-gateway only', () => {
+describe('deploy-gateway.yaml: concurrency is workflow-scoped, with unchanged gateway gating', () => {
   const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
 
-  it('build-images and scan-images have no concurrency block', async () => {
+  it('deploy-gateway retains the gateway environment and gates on build-images, scan-images, and notify', async () => {
     const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
     const parsed = parseYaml(text) as {
-      jobs?: Record<string, {concurrency?: unknown}>
-    }
-    expect(parsed.jobs?.['build-images']?.concurrency).toBeUndefined()
-    expect(parsed.jobs?.['scan-images']?.concurrency).toBeUndefined()
-  })
-
-  it('deploy-gateway retains the exact concurrency group, cancel-in-progress, environment, and needs', async () => {
-    const text = await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()
-    const parsed = parseYaml(text) as {
+      concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
       jobs?: {
         'deploy-gateway'?: {
-          concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
+          concurrency?: unknown
           environment?: string
           needs?: string | string[]
         }
       }
     }
     const deployGateway = parsed.jobs?.['deploy-gateway']
-    expect(deployGateway?.concurrency?.group).toBe('deploy-gateway-' + '${' + '{ github.ref_name }}')
-    expect(deployGateway?.concurrency?.['cancel-in-progress']).toBe(false)
+    expect(parsed.concurrency?.group).toBe('deploy-gateway-' + '${' + '{ github.ref_name }}')
+    expect(parsed.concurrency?.['cancel-in-progress']).toBe(false)
+    expect(deployGateway?.concurrency).toBeUndefined()
     expect(deployGateway?.environment).toBe('gateway')
-    expect(deployGateway?.needs).toEqual(['build-images', 'scan-images'])
+    expect(deployGateway?.needs).toEqual(['build-images', 'scan-images', 'notify'])
   })
 })
 
@@ -2218,11 +2211,13 @@ describe('deploy-dashboard.yaml: dispatch/call inputs and job structure', () => 
     expect(parsed.jobs).toHaveProperty('validate-inputs')
   })
 
-  it('deploy-dashboard job needs validate-inputs', async () => {
+  it('deploy-dashboard job needs validate-inputs and the pre-gate notify, and still requires validate-inputs success', async () => {
     const text = await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()
     const parsed = parseYaml(text) as {jobs?: {'deploy-dashboard'?: {needs?: string | string[]; if?: unknown}}}
-    expect(parsed.jobs?.['deploy-dashboard']?.needs).toBe('validate-inputs')
-    expect(parsed.jobs?.['deploy-dashboard']?.if).toBeUndefined()
+    expect(parsed.jobs?.['deploy-dashboard']?.needs).toEqual(['validate-inputs', 'notify'])
+    expect(normalizeExpression(parsed.jobs?.['deploy-dashboard']?.if)).toBe(
+      "!cancelled() && needs.validate-inputs.result == 'success'",
+    )
   })
 
   it('Deploy step env forwards DEPLOY_VERSION from inputs', async () => {
@@ -2806,6 +2801,47 @@ describe('deploy-dashboard.yaml: job timeout-minutes', () => {
 // classifier/freeze fixtures lock the shell behavior and prove parity with the
 // pre-run concurrency predicate that cannot consume step outputs.
 
+const DEPLOY_HEALTH_APP_SECTIONS = [
+  ['keeweb', 'KeeWeb:'],
+  ['cliproxy', 'CLIProxy:'],
+  ['gateway', 'Gateway:'],
+  ['umami', 'Umami:'],
+  ['dashboard', 'Dashboard:'],
+  ['vpn', 'VPN:'],
+  ['broker', 'Broker:'],
+] as const
+
+/** Splits the daily prompt's Deploy Pipeline Health category into its stranded-deploy block and per-app sections. */
+function extractDeployHealthCategory(schedulePrompt: string): {
+  category: string
+  strandedCheck: string
+  sections: Record<string, string>
+} {
+  const prompt = schedulePrompt.replaceAll(/\s+/g, ' ')
+  const start = prompt.indexOf('7. DEPLOY PIPELINE HEALTH')
+  const end = prompt.indexOf('8. LIVE SITE REVIEW')
+  expect(start, 'Deploy Pipeline Health category not found').toBeGreaterThan(-1)
+  expect(end, 'Live Site Review category not found').toBeGreaterThan(start)
+  const category = prompt.slice(start, end)
+  const checkStart = category.indexOf('STRANDED-DEPLOY CHECK (applies')
+  expect(checkStart, 'STRANDED-DEPLOY CHECK block not found').toBeGreaterThan(-1)
+  const firstApp = category.indexOf(DEPLOY_HEALTH_APP_SECTIONS[0][1])
+  expect(firstApp).toBeGreaterThan(checkStart)
+
+  const sections: Record<string, string> = {}
+  const starts = DEPLOY_HEALTH_APP_SECTIONS.map(([app, heading]) => {
+    const index = category.indexOf(` ${heading} - `)
+    expect(index, `${app} section (${heading}) not found`).toBeGreaterThan(-1)
+    return {app, index}
+  })
+  const closing = category.indexOf('Report findings as issues only for this category')
+  expect(closing, 'closing category line not found').toBeGreaterThan(-1)
+  for (const [position, {app, index}] of starts.entries()) {
+    sections[app] = category.slice(index, starts[position + 1]?.index ?? closing)
+  }
+  return {category, strandedCheck: category.slice(checkStart, firstApp), sections}
+}
+
 describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
   const FRO_BOT_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/fro-bot.yaml')
   const DAILY = 'daily-equivalent'
@@ -2864,6 +2900,11 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
   async function loadFroBotWorkflow(): Promise<{text: string; parsed: FroBotWorkflow}> {
     const text = await Bun.file(FRO_BOT_WORKFLOW).text()
     return {text, parsed: parseYaml(text) as FroBotWorkflow}
+  }
+
+  async function loadHealthCategory(): Promise<ReturnType<typeof extractDeployHealthCategory>> {
+    const {parsed} = await loadFroBotWorkflow()
+    return extractDeployHealthCategory(parsed.env?.SCHEDULE_PROMPT ?? '')
   }
 
   function storageSteps(parsed: FroBotWorkflow): FroBotStep[] {
@@ -3110,6 +3151,103 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     expect(schedulePrompt.toLowerCase()).toContain('reconciler')
   })
 
+  describe('Deploy Pipeline Health: at-gate deploys are table rows only', () => {
+    const DEPLOY_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker'] as const
+
+    it('classifies AT-GATE vs RAN by whether the deploy job ever ran a step', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('AT-GATE vs RAN')
+      expect(strandedCheck).toMatch(/whether the app's deploy job ever ran a step/i)
+      expect(strandedCheck).toMatch(/AT-GATE when the run is still waiting for environment approval/i)
+      expect(strandedCheck).toMatch(/no step has a started status/i)
+    })
+
+    it('never opens, updates, or comments on an issue for an at-gate deploy', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('table row only')
+      expect(strandedCheck).toContain('`⏸ At gate`')
+      expect(strandedCheck).toContain('NEVER open, update, or comment on an issue')
+    })
+
+    it('still opens an issue when the deploy job ran steps and then failed or was cancelled partway', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toMatch(
+        /ran at least one step and then failed, or was cancelled partway through its steps, is NOT at-gate and still gets an issue/i,
+      )
+    })
+
+    it('keeps issues for down-app checks', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toMatch(/Down-app checks \([^)]*\) always keep their issues/i)
+    })
+
+    it('reads the notify job log of every at-gate deploy for the one-line JSON summary', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('NOTIFY CHECK (every at-gate deploy)')
+      expect(strandedCheck).toContain('gh run view <run-id> --json jobs')
+      expect(strandedCheck).toMatch(/the job whose name ends in `notify`/)
+      expect(strandedCheck).toContain('gh run view <run-id> --log --job <job-id>')
+      expect(strandedCheck).toMatch(/one-line JSON summary/i)
+      // Field names and outcome values must match the notify script's NotifySummary.
+      for (const field of ['"app"', '"event"', '"outcome"', '"attempts"', '"status"', '"reason"']) {
+        expect(strandedCheck, `summary field ${field}`).toContain(field)
+      }
+      expect(strandedCheck).toMatch(/If `outcome` is `sent`, the row status is `⏸ At gate`/)
+    })
+
+    it('marks an at-gate deploy as not notified when the post did not send, still as a table row only', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('`⏸ At gate — not notified (<outcome>)`')
+      expect(strandedCheck).toMatch(/`skipped` or `failed`/)
+      expect(strandedCheck).toMatch(/summary line is missing/i)
+      expect(strandedCheck).toMatch(/notify job did not succeed/i)
+      expect(strandedCheck).toContain('`no summary`')
+      expect(strandedCheck).toMatch(/Either way it stays a table row only — never an issue/)
+    })
+
+    it('allows the not-notified suffix on all seven Last deploy-<app> template rows', async () => {
+      const {parsed} = await loadFroBotWorkflow()
+      const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
+      const rows = prompt.split('\n').filter(line => /\|\s*Last deploy-[\w-]+ run\s*\|/.test(line))
+      expect(rows).toHaveLength(7)
+      for (const row of rows) {
+        expect(row, `missing not-notified status: ${row.trim()}`).toContain('⏸ At gate — not notified (<outcome>)')
+      }
+    })
+
+    it('offers the At gate status on all seven Last deploy-<app> template rows', async () => {
+      const {parsed} = await loadFroBotWorkflow()
+      const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
+      const rows = prompt.split('\n').filter(line => /\|\s*Last deploy-[\w-]+ run\s*\|/.test(line))
+      expect(rows.map(row => /Last (deploy-[\w-]+) run/.exec(row)?.[1]).toSorted()).toEqual(
+        DEPLOY_APPS.map(app => `deploy-${app}`).toSorted(),
+      )
+      for (const row of rows) {
+        expect(row, `missing At gate status: ${row.trim()}`).toContain('⏸ At gate')
+      }
+    })
+
+    it('carries the at-gate table-row-only clause on each of the seven per-app deploy bullets', async () => {
+      const {sections} = await loadHealthCategory()
+      expect(Object.keys(sections).toSorted()).toEqual([...DEPLOY_APPS].toSorted())
+      for (const app of DEPLOY_APPS) {
+        const section = sections[app] ?? ''
+        expect(section, `${app} section`).toMatch(/never ran a step \(at gate\), report a table row only — no issue/)
+        expect(section, `${app} section`).toContain('after its deploy job ran steps')
+      }
+    })
+
+    it('limits the closing category line to issues, with the at-gate exception', async () => {
+      const {category} = await loadHealthCategory()
+      const closing = category.slice(category.indexOf('Report findings as issues only for this category'))
+      expect(closing).toContain(
+        'Report findings as issues only for this category, except deploys at their approval gate',
+      )
+      expect(closing).toMatch(/deploy job never ran a step/i)
+      expect(closing).toMatch(/table rows only/i)
+    })
+  })
+
   it('documents the safe adoptable-report path and pins the fixed GitHub-output delimiter', async () => {
     const {parsed} = await loadFroBotWorkflow()
     const schedulePrompt = parsed.env?.SCHEDULE_PROMPT ?? ''
@@ -3331,5 +3469,539 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     const {text} = await loadFroBotWorkflow()
     expect(text.match(/reconcile-autoheal-reports\.ts/g) ?? []).toHaveLength(1)
     expect(text.indexOf(RECONCILER_PATH)).toBeGreaterThan(text.indexOf('fro-bot-storage:'))
+  })
+})
+
+// ─── deploy gate notification: pre-gate `notify` job contract ─────────────────
+//
+// Every app deploy workflow carries an ungated `notify` job that posts one Discord
+// message before the approval-gated deploy job pauses. The contract is checked by
+// pure functions over a parsed workflow so the error-path scenarios (a deploy job
+// that requires notify's success, a notify job outside the main-only environment,
+// `bun install` in notify, the webhook in a `run:` body or on the router, a
+// concurrency group back at job level) are exercised against mutated fixtures as
+// well as the live files.
+// See docs/plans/2026-10-07-001-feat-deploy-gate-discord-notification-plan.md.
+
+const DEPLOY_NOTIFY_WEBHOOK = 'DEPLOY_GATE_DISCORD_WEBHOOK'
+const DEPLOY_NOTIFY_SCRIPT = 'packages/cli/scripts/deploy-gate-notify.ts'
+const DEPLOY_NOTIFY_ENVIRONMENT = 'deploy-notify'
+const DEPLOY_NOTIFY_MAX_TIMEOUT_MINUTES = 3
+const FULL_SHA_PIN = /@[\da-f]{40}$/i
+
+function ghaExpression(body: string): string {
+  return `$` + `{{ ${body} }}`
+}
+
+/** Strips the `${{ }}` wrapper and collapses whitespace so `if:` expressions compare structurally. */
+function normalizeExpression(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  const wrapped = /^\$\{\{([\s\S]*)\}\}$/.exec(trimmed)
+  return (wrapped?.[1] ?? trimmed).replaceAll(/\s+/g, ' ').trim()
+}
+
+function asArray(value: unknown): unknown[] {
+  if (value === undefined) return []
+  return Array.isArray(value) ? value : [value]
+}
+
+interface DeployNotifyAppSpec {
+  readonly app: string
+  readonly gatedJob: string
+  /** Exact `needs` of the notify job. */
+  readonly notifyNeeds: readonly string[]
+  /** Exact normalized `if:` of the notify job; undefined means the default success() gating. */
+  readonly notifyIf: string | undefined
+  /** Exact `needs` of the gated job. */
+  readonly gatedNeeds: readonly string[]
+  /** Exact normalized `if:` of the gated job: today's upstream success requirements, never notify's result. */
+  readonly gatedIf: string
+  readonly extraEnv: Readonly<Record<string, string>>
+}
+
+const SIMPLE_NOTIFY_APPS = ['keeweb', 'cliproxy', 'umami', 'vpn', 'broker'] as const
+
+const DEPLOY_NOTIFY_APPS: readonly DeployNotifyAppSpec[] = [
+  ...SIMPLE_NOTIFY_APPS.map((app): DeployNotifyAppSpec => ({
+    app,
+    gatedJob: `deploy-${app}`,
+    notifyNeeds: [],
+    notifyIf: undefined,
+    gatedNeeds: ['notify'],
+    gatedIf: '!cancelled()',
+    extraEnv: {},
+  })),
+  {
+    app: 'gateway',
+    gatedJob: 'deploy-gateway',
+    notifyNeeds: ['build-images', 'scan-images'],
+    notifyIf: "!cancelled() && needs.build-images.result == 'success'",
+    gatedNeeds: ['build-images', 'scan-images', 'notify'],
+    gatedIf: "!cancelled() && needs.build-images.result == 'success' && needs.scan-images.result == 'success'",
+    extraEnv: {},
+  },
+  {
+    app: 'dashboard',
+    gatedJob: 'deploy-dashboard',
+    notifyNeeds: ['validate-inputs'],
+    notifyIf: undefined,
+    gatedNeeds: ['validate-inputs', 'notify'],
+    gatedIf: "!cancelled() && needs.validate-inputs.result == 'success'",
+    extraEnv: {
+      DEPLOY_GATE_DASHBOARD_VERSION: ghaExpression('inputs.version'),
+      DEPLOY_GATE_DASHBOARD_DIGEST: ghaExpression('inputs.digest'),
+    },
+  },
+]
+
+function expectedNotifyEnv(spec: DeployNotifyAppSpec): Record<string, string> {
+  return {
+    [DEPLOY_NOTIFY_WEBHOOK]: ghaExpression(`secrets.${DEPLOY_NOTIFY_WEBHOOK}`),
+    DEPLOY_GATE_APP: spec.app,
+    DEPLOY_GATE_COMMIT_SUBJECT: ghaExpression('github.event.head_commit.message'),
+    ...spec.extraEnv,
+  }
+}
+
+function stepsOf(job: unknown): Record<string, unknown>[] {
+  if (!isRecord(job) || !Array.isArray(job.steps)) return []
+  return job.steps.filter((step): step is Record<string, unknown> => isRecord(step))
+}
+
+async function loadDeployWorkflow(app: string): Promise<Record<string, unknown>> {
+  const text = await Bun.file(resolve(REPO_ROOT, `.github/workflows/deploy-${app}.yaml`)).text()
+  const parsed: unknown = parseYaml(text)
+  if (!isRecord(parsed)) throw new Error(`deploy-${app}.yaml did not parse to a mapping`)
+  return parsed
+}
+
+/** Violations of the notify contract: shape, secret scope, zero-dependency, gated-job tolerance, concurrency. */
+function findDeployNotifyViolations(spec: DeployNotifyAppSpec, workflow: Record<string, unknown>): string[] {
+  const violations: string[] = []
+  const jobs = isRecord(workflow.jobs) ? workflow.jobs : {}
+  const notify = jobs.notify
+  const gated = jobs[spec.gatedJob]
+  const label = `deploy-${spec.app}.yaml`
+
+  if (isRecord(notify)) {
+    if (notify.environment !== DEPLOY_NOTIFY_ENVIRONMENT) {
+      violations.push(`${label}: notify must run in the main-only '${DEPLOY_NOTIFY_ENVIRONMENT}' environment`)
+    }
+    const timeout = notify['timeout-minutes']
+    if (typeof timeout !== 'number' || timeout > DEPLOY_NOTIFY_MAX_TIMEOUT_MINUTES) {
+      violations.push(`${label}: notify timeout-minutes must be a number <= ${DEPLOY_NOTIFY_MAX_TIMEOUT_MINUTES}`)
+    }
+    if (JSON.stringify(notify.permissions) !== JSON.stringify({contents: 'read'})) {
+      violations.push(`${label}: notify permissions must be exactly contents: read`)
+    }
+    if (notify['runs-on'] !== 'ubuntu-latest') violations.push(`${label}: notify must run on ubuntu-latest`)
+    if (JSON.stringify(asArray(notify.needs)) !== JSON.stringify(spec.notifyNeeds)) {
+      violations.push(`${label}: notify needs must be exactly [${spec.notifyNeeds.join(', ')}]`)
+    }
+    if (normalizeExpression(notify.if) !== (spec.notifyIf ?? '')) {
+      violations.push(`${label}: notify if must be ${spec.notifyIf === undefined ? 'absent' : `'${spec.notifyIf}'`}`)
+    }
+    if (notify.concurrency !== undefined) violations.push(`${label}: notify must not carry job-level concurrency`)
+
+    const steps = stepsOf(notify)
+    const [checkout, setupBun, script] = steps
+    if (steps.length !== 3) violations.push(`${label}: notify must have exactly checkout, setup-bun, and script steps`)
+    if (typeof checkout?.uses !== 'string' || !checkout.uses.startsWith('actions/checkout@')) {
+      violations.push(`${label}: notify first step must be actions/checkout`)
+    } else {
+      if (!FULL_SHA_PIN.test(checkout.uses)) violations.push(`${label}: notify checkout must be SHA-pinned`)
+      const withBlock = isRecord(checkout.with) ? checkout.with : {}
+      if (withBlock['persist-credentials'] !== false) {
+        violations.push(`${label}: notify checkout must set persist-credentials: false`)
+      }
+    }
+    if (typeof setupBun?.uses !== 'string' || !setupBun.uses.startsWith('oven-sh/setup-bun@')) {
+      violations.push(`${label}: notify second step must be oven-sh/setup-bun`)
+    } else if (!FULL_SHA_PIN.test(setupBun.uses)) {
+      violations.push(`${label}: notify setup-bun must be SHA-pinned`)
+    }
+    if (script?.run !== `bun run ${DEPLOY_NOTIFY_SCRIPT}`) {
+      violations.push(`${label}: notify final step must run exactly 'bun run ${DEPLOY_NOTIFY_SCRIPT}'`)
+    }
+
+    for (const step of steps) {
+      if (typeof step.run === 'string') {
+        if (/\bbun\s+(?:install|i|add)\b/.test(step.run)) {
+          violations.push(`${label}: notify must not install dependencies`)
+        }
+        if (step.run.includes('${{')) violations.push(`${label}: notify run body must not interpolate expressions`)
+      }
+    }
+    for (const step of steps.slice(0, 2)) {
+      if (JSON.stringify(step).includes(DEPLOY_NOTIFY_WEBHOOK)) {
+        violations.push(`${label}: the webhook may be bound only on the notify script step`)
+      }
+    }
+
+    const expectedEnv = expectedNotifyEnv(spec)
+    const actualEnv = isRecord(script?.env) ? script.env : {}
+    for (const [name, value] of Object.entries(expectedEnv)) {
+      if (actualEnv[name] !== value) violations.push(`${label}: notify env ${name} must be exactly '${value}'`)
+    }
+    for (const name of Object.keys(actualEnv)) {
+      if (!(name in expectedEnv)) violations.push(`${label}: notify env has unexpected ${name}`)
+    }
+  } else {
+    violations.push(`${label}: missing notify job`)
+  }
+
+  if (isRecord(gated)) {
+    const needs = asArray(gated.needs)
+    if (!needs.includes('notify')) violations.push(`${label}: ${spec.gatedJob} must list notify in needs`)
+    if (JSON.stringify(needs) !== JSON.stringify(spec.gatedNeeds)) {
+      violations.push(`${label}: ${spec.gatedJob} needs must be exactly [${spec.gatedNeeds.join(', ')}]`)
+    }
+    const condition = normalizeExpression(gated.if)
+    if (!condition.includes('!cancelled()')) violations.push(`${label}: ${spec.gatedJob} if must use !cancelled()`)
+    if (condition.includes('always()')) violations.push(`${label}: ${spec.gatedJob} if must not use always()`)
+    if (condition.includes('needs.notify')) {
+      violations.push(`${label}: ${spec.gatedJob} if must not depend on notify's result`)
+    }
+    if (condition !== spec.gatedIf) {
+      violations.push(`${label}: ${spec.gatedJob} if must be exactly '${spec.gatedIf}'`)
+    }
+  } else {
+    violations.push(`${label}: missing ${spec.gatedJob} job`)
+  }
+
+  const concurrency = isRecord(workflow.concurrency) ? workflow.concurrency : undefined
+  if (
+    concurrency?.group !== `deploy-${spec.app}-` + '${' + '{ github.ref_name }}' ||
+    concurrency['cancel-in-progress'] !== false
+  ) {
+    violations.push(
+      `${label}: concurrency group deploy-${spec.app}-<ref> (cancel-in-progress: false) must be workflow-level`,
+    )
+  }
+  for (const [jobId, job] of Object.entries(jobs)) {
+    if (isRecord(job) && job.concurrency !== undefined) {
+      violations.push(`${label}: job ${jobId} must not carry its own concurrency block`)
+    }
+  }
+
+  return violations
+}
+
+/** Violations of the webhook-secret handling rules for one callee workflow. */
+function findDeployNotifyWebhookViolations(app: string, workflow: Record<string, unknown>): string[] {
+  const violations: string[] = []
+  const label = `deploy-${app}.yaml`
+  const jobs = isRecord(workflow.jobs) ? workflow.jobs : {}
+
+  for (const [jobId, job] of Object.entries(jobs)) {
+    if (jobId !== 'notify' && JSON.stringify(job).includes(DEPLOY_NOTIFY_WEBHOOK)) {
+      violations.push(`${label}: ${DEPLOY_NOTIFY_WEBHOOK} referenced outside the notify job (${jobId})`)
+    }
+    for (const step of stepsOf(job)) {
+      if (typeof step.run === 'string' && step.run.includes(DEPLOY_NOTIFY_WEBHOOK)) {
+        violations.push(`${label}: ${DEPLOY_NOTIFY_WEBHOOK} appears in a run body (${jobId})`)
+      }
+    }
+  }
+
+  const {jobs: _jobs, ...rest} = workflow
+  if (JSON.stringify(rest).includes(DEPLOY_NOTIFY_WEBHOOK)) {
+    violations.push(`${label}: ${DEPLOY_NOTIFY_WEBHOOK} referenced at workflow level (secrets declaration or env)`)
+  }
+
+  return violations
+}
+
+function findRouterWebhookViolations(routerText: string): string[] {
+  return /DEPLOY_GATE/.test(routerText)
+    ? ['deploy.yaml must not reference DEPLOY_GATE_* (the router passes no notify secret)']
+    : []
+}
+
+describe('deploy gate notify: live workflow contract', () => {
+  for (const spec of DEPLOY_NOTIFY_APPS) {
+    it(`deploy-${spec.app}.yaml satisfies the notify job, gated-job tolerance, and concurrency contract`, async () => {
+      expect(findDeployNotifyViolations(spec, await loadDeployWorkflow(spec.app))).toEqual([])
+    })
+
+    it(`deploy-${spec.app}.yaml references the webhook only as the notify script step env binding`, async () => {
+      const workflow = await loadDeployWorkflow(spec.app)
+      expect(findDeployNotifyWebhookViolations(spec.app, workflow)).toEqual([])
+      const notifyText = JSON.stringify(workflow.jobs && isRecord(workflow.jobs) ? workflow.jobs.notify : undefined)
+      // Exactly the env key and its secrets-expression value.
+      expect(notifyText.split(DEPLOY_NOTIFY_WEBHOOK)).toHaveLength(3)
+    })
+  }
+
+  it('covers all seven apps the router fans out to', async () => {
+    const routerText = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
+    const router = parseYaml(routerText) as {jobs?: Record<string, {uses?: string}>}
+    const calleeApps = Object.values(router.jobs ?? {})
+      .map(job => /^\.\/\.github\/workflows\/deploy-([\w-]+)\.yaml$/.exec(job.uses ?? '')?.[1])
+      .filter((app): app is string => app !== undefined)
+      .toSorted()
+    expect(DEPLOY_NOTIFY_APPS.map(spec => spec.app).toSorted()).toEqual(calleeApps)
+    expect(calleeApps).toHaveLength(7)
+  })
+
+  it('gateway notify depends on build-images and dashboard notify on validate-inputs', () => {
+    const byApp = new Map(DEPLOY_NOTIFY_APPS.map(spec => [spec.app, spec]))
+    expect(byApp.get('gateway')?.notifyNeeds).toContain('build-images')
+    expect(byApp.get('dashboard')?.notifyNeeds).toEqual(['validate-inputs'])
+  })
+
+  it('deploy.yaml (the router) passes no notify secret and its callers grant the notify job contents: read', async () => {
+    const routerText = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
+    expect(findRouterWebhookViolations(routerText)).toEqual([])
+  })
+
+  it('no callee declares the webhook under workflow_call.secrets', async () => {
+    for (const spec of DEPLOY_NOTIFY_APPS) {
+      const workflow = await loadDeployWorkflow(spec.app)
+      const on = isRecord(workflow.on) ? workflow.on : {}
+      const callSecrets =
+        isRecord(on.workflow_call) && isRecord(on.workflow_call.secrets) ? on.workflow_call.secrets : {}
+      expect(Object.keys(callSecrets), `deploy-${spec.app}.yaml`).not.toContain(DEPLOY_NOTIFY_WEBHOOK)
+    }
+  })
+
+  it('keeps the notify script path out of every non-callee workflow and referenced exactly once per callee', async () => {
+    for (const spec of DEPLOY_NOTIFY_APPS) {
+      const text = await Bun.file(resolve(REPO_ROOT, `.github/workflows/deploy-${spec.app}.yaml`)).text()
+      expect(text.match(/deploy-gate-notify\.ts/g) ?? [], `deploy-${spec.app}.yaml`).toHaveLength(1)
+    }
+  })
+})
+
+function jobOf(workflow: Record<string, unknown>, jobId: string): Record<string, unknown> {
+  const jobs = isRecord(workflow.jobs) ? workflow.jobs : {}
+  const job = jobs[jobId]
+  if (!isRecord(job)) throw new Error(`fixture is missing job ${jobId}`)
+  return job
+}
+
+async function fixture(app: string): Promise<Record<string, unknown>> {
+  return structuredClone(await loadDeployWorkflow(app))
+}
+
+describe('deploy gate notify: error-path scenarios against mutated fixtures', () => {
+  const GATEWAY = DEPLOY_NOTIFY_APPS.find(spec => spec.app === 'gateway')
+  const DASHBOARD = DEPLOY_NOTIFY_APPS.find(spec => spec.app === 'dashboard')
+  const KEEWEB = DEPLOY_NOTIFY_APPS.find(spec => spec.app === 'keeweb')
+
+  it('fails a gated job whose if requires notify success', async () => {
+    if (!KEEWEB) throw new Error('keeweb spec missing')
+    const workflow = await fixture('keeweb')
+    jobOf(workflow, 'deploy-keeweb').if = ghaExpression("!cancelled() && needs.notify.result == 'success'")
+    expect(findDeployNotifyViolations(KEEWEB, workflow).join('\n')).toMatch(/must not depend on notify's result/)
+  })
+
+  it('fails a gated job that uses always() or drops !cancelled()', async () => {
+    if (!KEEWEB) throw new Error('keeweb spec missing')
+    const always = await fixture('keeweb')
+    jobOf(always, 'deploy-keeweb').if = ghaExpression('always()')
+    expect(findDeployNotifyViolations(KEEWEB, always).join('\n')).toMatch(/!cancelled\(\)/)
+
+    const absent = await fixture('keeweb')
+    delete jobOf(absent, 'deploy-keeweb').if
+    expect(findDeployNotifyViolations(KEEWEB, absent).join('\n')).toMatch(/must use !cancelled\(\)/)
+  })
+
+  it('fails a gated job that no longer lists notify in needs', async () => {
+    if (!KEEWEB) throw new Error('keeweb spec missing')
+    const workflow = await fixture('keeweb')
+    delete jobOf(workflow, 'deploy-keeweb').needs
+    expect(findDeployNotifyViolations(KEEWEB, workflow).join('\n')).toMatch(/must list notify in needs/)
+  })
+
+  it('fails a gateway or dashboard gated job that drops its existing upstream success requirement', async () => {
+    if (!GATEWAY || !DASHBOARD) throw new Error('specs missing')
+    const gateway = await fixture('gateway')
+    jobOf(gateway, 'deploy-gateway').if = ghaExpression('!cancelled()')
+    expect(findDeployNotifyViolations(GATEWAY, gateway).join('\n')).toMatch(/if must be exactly/)
+
+    const dashboard = await fixture('dashboard')
+    jobOf(dashboard, 'deploy-dashboard').if = ghaExpression('!cancelled()')
+    expect(findDeployNotifyViolations(DASHBOARD, dashboard).join('\n')).toMatch(/if must be exactly/)
+  })
+
+  it('fails a notify job outside the deploy-notify environment', async () => {
+    if (!KEEWEB) throw new Error('keeweb spec missing')
+    const workflow = await fixture('keeweb')
+    jobOf(workflow, 'notify').environment = 'keeweb'
+    expect(findDeployNotifyViolations(KEEWEB, workflow).join('\n')).toMatch(/main-only 'deploy-notify' environment/)
+
+    const missing = await fixture('keeweb')
+    delete jobOf(missing, 'notify').environment
+    expect(findDeployNotifyViolations(KEEWEB, missing).join('\n')).toMatch(/main-only 'deploy-notify' environment/)
+  })
+
+  it('fails a notify job with a timeout above three minutes or no timeout', async () => {
+    if (!KEEWEB) throw new Error('keeweb spec missing')
+    const slow = await fixture('keeweb')
+    jobOf(slow, 'notify')['timeout-minutes'] = 10
+    expect(findDeployNotifyViolations(KEEWEB, slow).join('\n')).toMatch(/timeout-minutes/)
+
+    const unbounded = await fixture('keeweb')
+    delete jobOf(unbounded, 'notify')['timeout-minutes']
+    expect(findDeployNotifyViolations(KEEWEB, unbounded).join('\n')).toMatch(/timeout-minutes/)
+  })
+
+  it('fails a notify job that installs dependencies', async () => {
+    if (!KEEWEB) throw new Error('keeweb spec missing')
+    const workflow = await fixture('keeweb')
+    const steps = stepsOf(jobOf(workflow, 'notify'))
+    steps.splice(2, 0, {name: 'Install dependencies', run: 'bun install --frozen-lockfile --ignore-scripts'})
+    jobOf(workflow, 'notify').steps = steps
+    expect(findDeployNotifyViolations(KEEWEB, workflow).join('\n')).toMatch(/must not install dependencies/)
+  })
+
+  it('fails a notify job whose checkout persists credentials or is not SHA-pinned', async () => {
+    if (!KEEWEB) throw new Error('keeweb spec missing')
+    const persisted = await fixture('keeweb')
+    const [checkout] = stepsOf(jobOf(persisted, 'notify'))
+    if (checkout) checkout.with = {'persist-credentials': true}
+    expect(findDeployNotifyViolations(KEEWEB, persisted).join('\n')).toMatch(/persist-credentials: false/)
+
+    const floating = await fixture('keeweb')
+    const [floatingCheckout] = stepsOf(jobOf(floating, 'notify'))
+    if (floatingCheckout) floatingCheckout.uses = 'actions/checkout@v7'
+    expect(findDeployNotifyViolations(KEEWEB, floating).join('\n')).toMatch(/checkout must be SHA-pinned/)
+  })
+
+  it('fails the webhook interpolated into a run body, argv, or a non-notify job', async () => {
+    const interpolated = await fixture('keeweb')
+    const scriptStep = stepsOf(jobOf(interpolated, 'notify')).at(-1)
+    if (scriptStep)
+      scriptStep.run = `bun run ${DEPLOY_NOTIFY_SCRIPT} --webhook ${ghaExpression(`secrets.${DEPLOY_NOTIFY_WEBHOOK}`)}`
+    if (!KEEWEB) throw new Error('keeweb spec missing')
+    expect(findDeployNotifyViolations(KEEWEB, interpolated).join('\n')).toMatch(
+      /final step must run exactly|interpolate/,
+    )
+    expect(findDeployNotifyWebhookViolations('keeweb', interpolated).join('\n')).toMatch(/appears in a run body/)
+
+    const leaked = await fixture('keeweb')
+    const deploySteps = stepsOf(jobOf(leaked, 'deploy-keeweb'))
+    deploySteps.push({
+      name: 'Leak',
+      env: {[DEPLOY_NOTIFY_WEBHOOK]: ghaExpression(`secrets.${DEPLOY_NOTIFY_WEBHOOK}`)},
+      run: 'true',
+    })
+    jobOf(leaked, 'deploy-keeweb').steps = deploySteps
+    expect(findDeployNotifyWebhookViolations('keeweb', leaked).join('\n')).toMatch(/outside the notify job/)
+  })
+
+  it('fails the webhook declared under workflow_call.secrets or workflow-level env', async () => {
+    const declared = await fixture('keeweb')
+    const on = isRecord(declared.on) ? declared.on : {}
+    const call = isRecord(on.workflow_call) ? on.workflow_call : {}
+    call.secrets = {...(isRecord(call.secrets) ? call.secrets : {}), [DEPLOY_NOTIFY_WEBHOOK]: {required: false}}
+    expect(findDeployNotifyWebhookViolations('keeweb', declared).join('\n')).toMatch(/workflow level/)
+
+    const topLevelEnv = await fixture('keeweb')
+    topLevelEnv.env = {[DEPLOY_NOTIFY_WEBHOOK]: ghaExpression(`secrets.${DEPLOY_NOTIFY_WEBHOOK}`)}
+    expect(findDeployNotifyWebhookViolations('keeweb', topLevelEnv).join('\n')).toMatch(/workflow level/)
+  })
+
+  it('fails the router passing the webhook', async () => {
+    const routerText = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
+    const mutated = routerText.replace(
+      'secrets:',
+      `secrets:\n      ${DEPLOY_NOTIFY_WEBHOOK}: ${ghaExpression(`secrets.${DEPLOY_NOTIFY_WEBHOOK}`)}`,
+    )
+    expect(mutated).not.toBe(routerText)
+    expect(findRouterWebhookViolations(mutated)).toHaveLength(1)
+  })
+
+  it('fails a concurrency group moved back to job level, and one that is missing or cancelling', async () => {
+    if (!GATEWAY || !KEEWEB) throw new Error('specs missing')
+    const moved = await fixture('gateway')
+    const group = moved.concurrency
+    delete moved.concurrency
+    jobOf(moved, 'deploy-gateway').concurrency = group
+    const movedViolations = findDeployNotifyViolations(GATEWAY, moved).join('\n')
+    expect(movedViolations).toMatch(/must be workflow-level/)
+    expect(movedViolations).toMatch(/must not carry its own concurrency block/)
+
+    const cancelling = await fixture('keeweb')
+    cancelling.concurrency = {group: `deploy-keeweb-${ghaExpression('github.ref_name')}`, 'cancel-in-progress': true}
+    expect(findDeployNotifyViolations(KEEWEB, cancelling).join('\n')).toMatch(/must be workflow-level/)
+  })
+
+  it('fails a notify env that drops a required binding or adds an unexpected one', async () => {
+    if (!KEEWEB) throw new Error('keeweb spec missing')
+    const dropped = await fixture('keeweb')
+    const script = stepsOf(jobOf(dropped, 'notify')).at(-1)
+    if (script && isRecord(script.env)) delete script.env.DEPLOY_GATE_COMMIT_SUBJECT
+    expect(findDeployNotifyViolations(KEEWEB, dropped).join('\n')).toMatch(/DEPLOY_GATE_COMMIT_SUBJECT/)
+
+    const extra = await fixture('keeweb')
+    const extraScript = stepsOf(jobOf(extra, 'notify')).at(-1)
+    if (extraScript && isRecord(extraScript.env)) extraScript.env.GITHUB_TOKEN = ghaExpression('github.token')
+    expect(findDeployNotifyViolations(KEEWEB, extra).join('\n')).toMatch(/unexpected GITHUB_TOKEN/)
+
+    // Runner-provided GITHUB_* values are read by the script directly and must not be re-bound.
+    const rebound = await fixture('keeweb')
+    const reboundScript = stepsOf(jobOf(rebound, 'notify')).at(-1)
+    if (reboundScript && isRecord(reboundScript.env)) {
+      reboundScript.env.GITHUB_RUN_ID = ghaExpression('github.run_id')
+      reboundScript.env.DEPLOY_GATE_RUN_ID = ghaExpression('github.run_id')
+    }
+    const reboundViolations = findDeployNotifyViolations(KEEWEB, rebound).join('\n')
+    expect(reboundViolations).toMatch(/unexpected GITHUB_RUN_ID/)
+    expect(reboundViolations).toMatch(/unexpected DEPLOY_GATE_RUN_ID/)
+  })
+
+  it('fails a gateway or dashboard notify that stops depending on its pre-gate job', async () => {
+    if (!GATEWAY || !DASHBOARD) throw new Error('specs missing')
+    const gateway = await fixture('gateway')
+    jobOf(gateway, 'notify').needs = ['scan-images']
+    expect(findDeployNotifyViolations(GATEWAY, gateway).join('\n')).toMatch(/notify needs must be exactly/)
+
+    const dashboard = await fixture('dashboard')
+    delete jobOf(dashboard, 'notify').needs
+    expect(findDeployNotifyViolations(DASHBOARD, dashboard).join('\n')).toMatch(/notify needs must be exactly/)
+  })
+})
+
+describe('deploy gate notify: script stays off the published surface', () => {
+  const NOTIFY_SCRIPT_FILE = resolve(REPO_ROOT, DEPLOY_NOTIFY_SCRIPT)
+
+  it('exists, so a workflow never references a missing script', () => {
+    expect(existsSync(NOTIFY_SCRIPT_FILE)).toBe(true)
+  })
+
+  it('imports only Bun/Node built-ins or sibling files, never an npm package (it runs without bun install)', async () => {
+    const source = await Bun.file(NOTIFY_SCRIPT_FILE).text()
+    const specifiers = [
+      ...source.matchAll(
+        /(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]|import\s*['"]([^'"]+)['"]|(?:import|require)\(\s*['"]([^'"]+)['"]\s*\)/g,
+      ),
+    ].map(match => match[1] ?? match[2] ?? match[3] ?? '')
+    const packages = specifiers.filter(
+      specifier => !specifier.startsWith('node:') && !specifier.startsWith('bun') && !specifier.startsWith('.'),
+    )
+    expect(packages).toEqual([])
+  })
+
+  it('is not in the published package files/exports, build entry, CLI registration, or MCP allowlist', async () => {
+    const pkg = (await Bun.file(resolve(REPO_ROOT, 'packages/cli/package.json')).json()) as {
+      files?: string[]
+      exports?: Record<string, string>
+    }
+    expect((pkg.files ?? []).some(entry => /deploy-gate|notify/.test(entry))).toBe(false)
+    expect((pkg.files ?? []).some(entry => entry.includes('scripts'))).toBe(false)
+    expect(JSON.stringify(pkg.exports ?? {})).not.toMatch(/deploy-gate|notify/)
+
+    const buildText = await Bun.file(resolve(REPO_ROOT, 'packages/cli/scripts/build.ts')).text()
+    expect(buildText).not.toMatch(/deploy-gate/)
+
+    const cliText = await Bun.file(resolve(REPO_ROOT, 'packages/cli/src/cli.ts')).text()
+    expect(cliText).not.toMatch(/deploy-gate/)
+
+    for (const command of MCP_ALLOWLIST) {
+      expect(command).not.toMatch(/deploy-gate|notify/)
+    }
   })
 })

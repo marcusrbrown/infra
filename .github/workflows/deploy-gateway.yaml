@@ -80,6 +80,10 @@ on:
       DASHBOARD_VPC_IP:
         required: false
 
+concurrency:
+  group: deploy-gateway-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   build-images:
     runs-on: ubuntu-latest
@@ -196,13 +200,35 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  deploy-gateway:
+  notify:
     needs: [build-images, scan-images]
+    if: ${{ !cancelled() && needs.build-images.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: deploy-notify
+    permissions:
+      contents: read
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Post deploy gate notification
+        env:
+          DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
+          DEPLOY_GATE_APP: gateway
+          DEPLOY_GATE_COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+        run: bun run packages/cli/scripts/deploy-gate-notify.ts
+
+  deploy-gateway:
+    needs: [build-images, scan-images, notify]
+    if: ${{ !cancelled() && needs.build-images.result == 'success' && needs.scan-images.result == 'success' }}
     runs-on: ubuntu-latest
     environment: gateway
-    concurrency:
-      group: deploy-gateway-${{ github.ref_name }}
-      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

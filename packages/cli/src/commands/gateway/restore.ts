@@ -4,13 +4,13 @@ import {z} from 'zod'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {validateGatewayHost} from './host'
+import {checkVolumeProbeResult, MITMPROXY_CERTS_VOLUME, volumeProbeCommand} from './volume'
 
 declare const process: {
   env: Record<string, string | undefined>
   exitCode?: number
 }
 
-const MITMPROXY_CERTS_VOLUME = 'mitmproxy-certs'
 const CA_CERT_FILE = 'mitmproxy-ca-cert.pem'
 const CA_KEY_FILE = 'mitmproxy-ca.pem'
 const COMPOSE_PROJECT_DIR = '/opt/gateway/deploy'
@@ -136,6 +136,14 @@ export async function restoreGatewayCa(
     return {ok: false, error: archiveError}
   }
 
+  // Fail closed: `docker run -v <missing>` would create a stray empty volume and the real CA
+  // would never be restored. Probe before anything is copied to the host.
+  const probeResult = await spawnText(spawn, sshCommand(opts.host, volumeProbeCommand(MITMPROXY_CERTS_VOLUME)), env)
+  const probeError = checkVolumeProbeResult(MITMPROXY_CERTS_VOLUME, probeResult)
+  if (probeError !== undefined) {
+    return {ok: false, error: probeError}
+  }
+
   // SEC2: Generate an unguessable remote tmp path via mktemp on the droplet
   const mktempResult = await spawnText(spawn, sshCommand(opts.host, 'mktemp -t gateway-ca-restore-XXXXXX.tar'), env)
   if (mktempResult.exitCode !== 0) {
@@ -180,7 +188,7 @@ export async function restoreGatewayCa(
       return primaryError
     }
 
-    // Extract the tarball into the mitmproxy-certs volume
+    // Extract the tarball into the existing mitmproxy-certs volume (fro-bot_mitmproxy-certs)
     const extractResult = await spawnText(
       spawn,
       sshCommand(

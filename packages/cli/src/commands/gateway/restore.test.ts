@@ -34,6 +34,43 @@ function makeSpawnSequence(responses: {stdout: string; stderr: string; exitCode:
   }
 }
 
+const VOLUME = 'fro-bot_mitmproxy-certs'
+const PROBE_CMD = `docker volume inspect ${VOLUME} >/dev/null 2>&1 && echo EXISTS || echo MISSING`
+
+const isProbe = (cmd: string[]): boolean => cmd.at(-1)?.startsWith('docker volume inspect') === true
+
+/**
+ * Wraps a spawn mock so the volume existence probe answers `probe` (default EXISTS),
+ * while every other command is delegated to `inner`. All argv arrays, including the
+ * probe, are appended to `calls` when provided.
+ */
+function withVolumeProbe(
+  inner: RestoreSpawnFn,
+  probe: {stdout: string; stderr?: string; exitCode?: number} = {stdout: 'EXISTS\n'},
+  calls?: string[][],
+): RestoreSpawnFn {
+  const encoder = new TextEncoder()
+  return (cmd, opts) => {
+    calls?.push([...cmd])
+    if (!isProbe(cmd)) return inner(cmd, opts)
+    return {
+      stdout: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(probe.stdout))
+          controller.close()
+        },
+      }),
+      stderr: new ReadableStream({
+        start(controller) {
+          if (probe.stderr) controller.enqueue(encoder.encode(probe.stderr))
+          controller.close()
+        },
+      }),
+      exited: Promise.resolve(probe.exitCode ?? 0),
+    }
+  }
+}
+
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
 /**
@@ -86,7 +123,10 @@ describe('restoreGatewayCa — happy path', () => {
         {stdout: '', stderr: '', exitCode: 0}, // rm cleanup
       ])
 
-      const result = await restoreGatewayCa({host: 'gateway.example.com', input: realTar, includeCa: true}, spawn)
+      const result = await restoreGatewayCa(
+        {host: 'gateway.example.com', input: realTar, includeCa: true},
+        withVolumeProbe(spawn),
+      )
 
       expect(result.ok).toBe(true)
       if (result.ok) {
@@ -131,7 +171,10 @@ describe('restoreGatewayCa — happy path', () => {
       }
     }
 
-    await restoreGatewayCa({host: 'gateway.example.com', input: tmpInput, includeCa: true}, spawnCapture)
+    await restoreGatewayCa(
+      {host: 'gateway.example.com', input: tmpInput, includeCa: true},
+      withVolumeProbe(spawnCapture),
+    )
 
     // At least one rm -f was issued for the tmp file
     expect(deletedPaths.length).toBeGreaterThan(0)
@@ -184,7 +227,10 @@ describe('restoreGatewayCa — tmp cleanup on failure', () => {
       }
     }
 
-    const result = await restoreGatewayCa({host: 'gateway.example.com', input: tmpInput, includeCa: true}, spawnCapture)
+    const result = await restoreGatewayCa(
+      {host: 'gateway.example.com', input: tmpInput, includeCa: true},
+      withVolumeProbe(spawnCapture),
+    )
 
     expect(result.ok).toBe(false)
     expect(deletedPaths.length).toBeGreaterThan(0)
@@ -251,7 +297,10 @@ describe('restoreGatewayCa — error paths', () => {
         {stdout: '', stderr: '', exitCode: 0}, // rm cleanup
       ])
 
-      const result = await restoreGatewayCa({host: 'gateway.example.com', input: tmpInput3, includeCa: true}, spawn)
+      const result = await restoreGatewayCa(
+        {host: 'gateway.example.com', input: tmpInput3, includeCa: true},
+        withVolumeProbe(spawn),
+      )
 
       expect(result.ok).toBe(false)
       if (!result.ok) {
@@ -321,7 +370,7 @@ describe('restoreGatewayCa — cleanup failure preserves primary error (COR3)', 
 
       const result = await restoreGatewayCa(
         {host: 'gateway.example.com', input: tmpInput5, includeCa: true},
-        spawnBothFail,
+        withVolumeProbe(spawnBothFail),
       )
 
       // Must reflect the docker failure, not the rm failure
@@ -382,7 +431,10 @@ describe('restoreGatewayCa — SEC2: unguessable remote tmp path via mktemp', ()
       }
     }
 
-    await restoreGatewayCa({host: 'gateway.example.com', input: realTar, includeCa: true}, spawnCapture)
+    await restoreGatewayCa(
+      {host: 'gateway.example.com', input: realTar, includeCa: true},
+      withVolumeProbe(spawnCapture),
+    )
 
     // SCP destination must use the unguessable path
     const scpCmd = capturedCmds.find(c => c[0] === 'scp')
@@ -443,7 +495,10 @@ describe('restoreGatewayCa — SSH and SCP commands include UserKnownHostsFile',
       }
     }
 
-    await restoreGatewayCa({host: 'gateway.example.com', input: realTar, includeCa: true}, spawnCapture)
+    await restoreGatewayCa(
+      {host: 'gateway.example.com', input: realTar, includeCa: true},
+      withVolumeProbe(spawnCapture),
+    )
 
     // Every ssh invocation must include UserKnownHostsFile
     const sshCmds = capturedCmds.filter(c => c[0] === 'ssh')
@@ -495,7 +550,10 @@ describe('restoreGatewayCa — SSH and SCP commands include UserKnownHostsFile',
       }
     }
 
-    await restoreGatewayCa({host: 'gateway.example.com', input: realTar, includeCa: true}, spawnCapture)
+    await restoreGatewayCa(
+      {host: 'gateway.example.com', input: realTar, includeCa: true},
+      withVolumeProbe(spawnCapture),
+    )
 
     const scpCmd = capturedCmds.find(c => c[0] === 'scp')
     expect(scpCmd).toBeDefined()
@@ -544,7 +602,10 @@ describe('restoreGatewayCa — SSH and SCP commands include UserKnownHostsFile',
       }
     }
 
-    await restoreGatewayCa({host: 'gateway.example.com', input: realTar, includeCa: true}, spawnCapture)
+    await restoreGatewayCa(
+      {host: 'gateway.example.com', input: realTar, includeCa: true},
+      withVolumeProbe(spawnCapture),
+    )
 
     // All ssh and scp commands must have StrictHostKeyChecking=yes
     const sshAndScpCmds = capturedCmds.filter(c => c[0] === 'ssh' || c[0] === 'scp')
@@ -635,7 +696,7 @@ describe('validateBackupArchive — COR1', () => {
 
       const result = await restoreGatewayCa(
         {host: 'gateway.example.com', input: tmpInput, includeCa: true},
-        spawnCapture,
+        withVolumeProbe(spawnCapture),
       )
 
       expect(result.ok).toBe(false)
@@ -646,5 +707,136 @@ describe('validateBackupArchive — COR1', () => {
     } finally {
       Bun.spawnSync(['rm', '-f', tmpInput])
     }
+  })
+})
+
+// ─── Volume name + fail-closed existence probe ───────────────────────────────
+
+describe('restoreGatewayCa — volume name and existence probe (fail closed)', () => {
+  const certContent = 'CERT'
+  const keyContent = 'KEY'
+  let tarDir: string
+  let realTar: string
+
+  /** Inner mock for everything except the probe: archive listing, mktemp, scp, chmod, docker, cat, rm. */
+  const innerSpawn: RestoreSpawnFn = cmd => {
+    const cmdStr = cmd.join(' ')
+    const encoder = new TextEncoder()
+    let stdout = ''
+    if (cmd[0] === 'tar' && cmd.includes('-tf')) stdout = 'mitmproxy-ca-cert.pem\nmitmproxy-ca.pem\n'
+    else if (cmdStr.includes('mktemp')) stdout = '/tmp/gateway-ca-restore-vol-test.tar\n'
+    else if (cmdStr.endsWith('/src/mitmproxy-ca-cert.pem')) stdout = certContent
+    else if (cmdStr.endsWith('/src/mitmproxy-ca.pem')) stdout = keyContent
+    return {
+      stdout: new ReadableStream({
+        start(controller) {
+          if (stdout) controller.enqueue(encoder.encode(stdout))
+          controller.close()
+        },
+      }),
+      stderr: new ReadableStream({
+        start(controller) {
+          controller.close()
+        },
+      }),
+      exited: Promise.resolve(0),
+    }
+  }
+
+  beforeEach(async () => {
+    tarDir = `/tmp/test-vol-tar-dir-${Date.now()}`
+    realTar = `/tmp/test-vol-tar-${Date.now()}.tar`
+    Bun.spawnSync(['mkdir', '-p', tarDir])
+    await Bun.write(`${tarDir}/mitmproxy-ca-cert.pem`, certContent)
+    await Bun.write(`${tarDir}/mitmproxy-ca.pem`, keyContent)
+    Bun.spawnSync(['tar', '-cf', realTar, '-C', tarDir, 'mitmproxy-ca-cert.pem', 'mitmproxy-ca.pem'])
+  })
+
+  afterEach(() => {
+    Bun.spawnSync(['rm', '-rf', tarDir, realTar])
+  })
+
+  const remoteCommands = (calls: string[][]): string[] =>
+    calls.filter(c => c[0] === 'ssh' || c[0] === 'scp').map(c => c.at(-1) ?? '')
+
+  it('probes first, then targets fro-bot_mitmproxy-certs in every docker command', async () => {
+    const calls: string[][] = []
+
+    const result = await restoreGatewayCa(
+      {host: 'gateway.example.com', input: realTar, includeCa: true},
+      withVolumeProbe(innerSpawn, undefined, calls),
+    )
+
+    expect(result.ok).toBe(true)
+
+    const remote = remoteCommands(calls)
+    const probeIdx = remote.indexOf(PROBE_CMD)
+    const mktempIdx = remote.findIndex(c => c.includes('mktemp'))
+    expect(probeIdx).toBeGreaterThan(-1)
+    expect(probeIdx).toBeLessThan(mktempIdx)
+
+    expect(remote).toContain(
+      `docker run --rm -v ${VOLUME}:/dst -v /tmp/gateway-ca-restore-vol-test.tar:/src.tar:ro alpine sh -c 'tar -xf /src.tar -C /dst'`,
+    )
+    expect(remote).toContain(`docker run --rm -v ${VOLUME}:/src:ro alpine cat /src/mitmproxy-ca-cert.pem`)
+    expect(remote).toContain(`docker run --rm -v ${VOLUME}:/src:ro alpine cat /src/mitmproxy-ca.pem`)
+
+    // The bare compose key must never be used as a volume name
+    for (const cmd of remote.filter(c => c.includes('docker run'))) {
+      expect(cmd).not.toMatch(/-v mitmproxy-certs/)
+    }
+  })
+
+  it('aborts naming the volume when the probe reports MISSING, before any write', async () => {
+    const calls: string[][] = []
+
+    const result = await restoreGatewayCa(
+      {host: 'gateway.example.com', input: realTar, includeCa: true},
+      withVolumeProbe(innerSpawn, {stdout: 'MISSING\n'}, calls),
+    )
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain(VOLUME)
+      expect(result.error).toContain('does not exist')
+    }
+    const remote = remoteCommands(calls)
+    expect(remote).toEqual([PROBE_CMD])
+    expect(calls.some(c => c[0] === 'scp')).toBe(false)
+    expect(remote.some(c => c.includes('docker run') || c.includes('docker compose'))).toBe(false)
+  })
+
+  it('aborts naming the volume when the probe output is unrecognized, before any write', async () => {
+    const calls: string[][] = []
+
+    const result = await restoreGatewayCa(
+      {host: 'gateway.example.com', input: realTar, includeCa: true},
+      withVolumeProbe(innerSpawn, {stdout: 'unexpected\n'}, calls),
+    )
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain(VOLUME)
+      expect(result.error).toContain('unrecognized')
+    }
+    expect(remoteCommands(calls)).toEqual([PROBE_CMD])
+    expect(calls.some(c => c[0] === 'scp')).toBe(false)
+  })
+
+  it('aborts when the probe exits non-zero even if it printed EXISTS', async () => {
+    const calls: string[][] = []
+
+    const result = await restoreGatewayCa(
+      {host: 'gateway.example.com', input: realTar, includeCa: true},
+      withVolumeProbe(innerSpawn, {stdout: 'EXISTS\n', stderr: 'ssh: connection refused', exitCode: 255}, calls),
+    )
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain(VOLUME)
+      expect(result.error).toContain('connection refused')
+    }
+    expect(remoteCommands(calls)).toEqual([PROBE_CMD])
+    expect(calls.some(c => c[0] === 'scp')).toBe(false)
   })
 })

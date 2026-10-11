@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.25.1
+
+### Patch Changes
+
+- Fix `gateway backup --include-ca` and `gateway restore --include-ca` targeting the wrong Docker volume: they now use the live `fro-bot_mitmproxy-certs` volume and fail instead of creating an empty one when it is missing. ([#1515](https://github.com/marcusrbrown/infra/pull/1515))
+
 ## 0.25.0
 
 ### Minor Changes

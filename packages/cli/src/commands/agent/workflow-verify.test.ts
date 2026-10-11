@@ -8,9 +8,9 @@ import {describe, expect, it, mock} from 'bun:test'
 import {inspectWorkflow, verifyWorkflow, type EnvironmentReadback, type WorkflowVerifyDeps} from './workflow-verify'
 
 // Must match apps/agent/src/key-layout.ts PINNED_ACTION_SHA.
-const SHA = '77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb'
+const SHA = '83ed683da24111bd1474eb4bda39715ed5799bc2'
 // Must match apps/agent/src/key-layout.ts PINNED_ACTION_REF.
-const ACTION_TAG = 'v0.118.2'
+const ACTION_TAG = 'v0.119.2'
 const CREDENTIALS_STEP = `      - uses: aws-actions/configure-aws-credentials@${SHA}
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
@@ -42,7 +42,7 @@ const manifest = {
   policy_name: 'fro-bot-agent-storage-owner-repo',
   action_ref_verified: true as const,
   // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
-  key_layout_version: 'fro-bot/agent@v0.118.2',
+  key_layout_version: 'fro-bot/agent@v0.119.2',
 }
 
 const environment: EnvironmentReadback = {

@@ -34,7 +34,7 @@ const manifest: StorageManifest = {
   policy_name: 'fro-bot-agent-storage-owner-repo',
   action_ref_verified: true,
   // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
-  key_layout_version: 'fro-bot/agent@v0.118.2',
+  key_layout_version: 'fro-bot/agent@v0.119.2',
 }
 
 function makeGhResult(stdout: string, exitCode = 0, stderr = '') {
@@ -497,7 +497,7 @@ describe('agent S3 durable storage wiring', () => {
     const writes: {kind: string; name: string; value: string}[] = []
     const deps = makeDeps(writes, {
       // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
-      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot/agent@v0.118.2'})),
+      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot/agent@v0.119.2'})),
     })
 
     await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).resolves.toBeUndefined()
@@ -556,7 +556,7 @@ jobs:
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
           aws-region: \${{ vars.FRO_BOT_S3_REGION }}
-      - uses: fro-bot/agent@77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb
+      - uses: fro-bot/agent@83ed683da24111bd1474eb4bda39715ed5799bc2
         with:
           s3-backup: true
           s3-bucket: \${{ vars.FRO_BOT_S3_BUCKET }}

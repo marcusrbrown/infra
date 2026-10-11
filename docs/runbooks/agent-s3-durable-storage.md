@@ -35,12 +35,12 @@ Before provisioning:
    AGENT_REPOSITORY_ID=<live-repository-id>
    AGENT_REPOSITORY_OWNER_ID=<live-owner-id>
    AGENT_WORKFLOW_NAME=<workflow-name>
-   AGENT_ACTION_REF=fro-bot/agent@v0.118.2
+   AGENT_ACTION_REF=fro-bot/agent@v0.119.2
    ```
 
    `AGENT_AWS_SESSION_TOKEN`, `AGENT_AWS_REGION`, `AGENT_S3_SESSION_PREFIX`, and `AGENT_S3_METADATA_ARTIFACTS_PREFIX` are optional. The provisioner defaults the region to `us-east-1` and derives the verified action key layout from the root prefix unless explicit prefixes are supplied.
 
-4. Confirm that the action ref is the verified key-layout version. The current admitted layout is `fro-bot/agent@v0.118.2` (SHA `77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb`); an unknown ref fails closed, and the workflow's `fro-bot/agent` pin must be that SHA.
+4. Confirm that the action ref is the verified key-layout version. The current admitted layout is `fro-bot/agent@v0.119.2` (SHA `83ed683da24111bd1474eb4bda39715ed5799bc2`); an unknown ref fails closed, and the workflow's `fro-bot/agent` pin must be that SHA.
 
 The `AGENT_*` values are operator-local. They are not GitHub Environment values, workflow secrets, or repository variables.
 

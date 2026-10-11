@@ -2,7 +2,7 @@
  * The key layout is intentionally versioned with the consuming action. Do not
  * widen this table to make an unverified action ref provision successfully.
  *
- * v0.118.2 is the only currently admitted action ref. Its session tree is
+ * v0.119.2 is the only currently admitted action ref. Its session tree is
  * `${prefix}/github/<owner>/<repo>/` (sessions, artifacts, and metadata,
  * including review-delivery receipts). The Action coordinates through the exact
  * `${prefix}/coordination/<owner>/<repo>/locks/action.json` object
@@ -12,11 +12,11 @@
  * paths are the pinned contract and must be re-verified before adding another
  * action version here.
  */
-export const KEY_LAYOUT_VERSION = 'fro-bot/agent@v0.118.2' as const
+export const KEY_LAYOUT_VERSION = 'fro-bot/agent@v0.119.2' as const
 export const AGENT_ACTION_LAYOUT_VERSION = KEY_LAYOUT_VERSION
 
-const PINNED_ACTION_REF = 'v0.118.2'
-const PINNED_ACTION_SHA = '77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb'
+const PINNED_ACTION_REF = 'v0.119.2'
+const PINNED_ACTION_SHA = '83ed683da24111bd1474eb4bda39715ed5799bc2'
 
 export interface AgentKeyLayout {
   actionVersion: typeof KEY_LAYOUT_VERSION

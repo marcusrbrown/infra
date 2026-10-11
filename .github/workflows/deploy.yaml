@@ -89,6 +89,7 @@ jobs:
     secrets:
       DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
       DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
 
   deploy-cliproxy:
     needs: detect-changes
@@ -100,6 +101,7 @@ jobs:
       CLIPROXY_SSH_KEY: ${{ secrets.CLIPROXY_SSH_KEY }}
       CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
       CLIPROXY_DOMAIN: ${{ secrets.CLIPROXY_DOMAIN }}
+      DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
 
   deploy-gateway:
     needs: detect-changes
@@ -146,6 +148,7 @@ jobs:
       GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY: ${{ secrets.GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY }}
       GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
       DASHBOARD_VPC_IP: ${{ secrets.DASHBOARD_VPC_IP }}
+      DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
 
   deploy-umami:
     needs: detect-changes
@@ -159,6 +162,7 @@ jobs:
       UMAMI_APP_SECRET: ${{ secrets.UMAMI_APP_SECRET }}
       UMAMI_DB_PASSWORD: ${{ secrets.UMAMI_DB_PASSWORD }}
       UMAMI_ADMIN_PASSWORD: ${{ secrets.UMAMI_ADMIN_PASSWORD }}
+      DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
 
   deploy-vpn:
     needs: detect-changes
@@ -170,6 +174,7 @@ jobs:
       VPN_SSH_KEY: ${{ secrets.VPN_SSH_KEY }}
       VPN_HOST: ${{ secrets.VPN_HOST }}
       VPN_PEERS: ${{ secrets.VPN_PEERS }}
+      DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
 
   deploy-dashboard:
     needs: detect-changes
@@ -193,6 +198,7 @@ jobs:
       GATEWAY_VPC_IP: ${{ secrets.GATEWAY_VPC_IP }}
       APPLICATION_ID: ${{ secrets.APPLICATION_ID }}
       APPLICATION_PRIVATE_KEY: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+      DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
 
   deploy-broker:
     needs: detect-changes
@@ -206,3 +212,4 @@ jobs:
       BROKER_SSH_KEY: ${{ secrets.BROKER_SSH_KEY }}
       BROKER_HOST: ${{ secrets.BROKER_HOST }}
       CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
+      DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}

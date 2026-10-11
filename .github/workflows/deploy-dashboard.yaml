@@ -66,6 +66,8 @@ on:
         required: true
       APPLICATION_PRIVATE_KEY:
         required: true
+      DEPLOY_GATE_DISCORD_WEBHOOK:
+        required: false
 
 permissions:
   contents: read
@@ -152,8 +154,8 @@ jobs:
 
   notify:
     needs: validate-inputs
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    environment: deploy-notify
     permissions:
       contents: read
     timeout-minutes: 3

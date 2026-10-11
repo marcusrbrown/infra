@@ -3477,15 +3477,17 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
 // Every app deploy workflow carries an ungated `notify` job that posts one Discord
 // message before the approval-gated deploy job pauses. The contract is checked by
 // pure functions over a parsed workflow so the error-path scenarios (a deploy job
-// that requires notify's success, a notify job outside the main-only environment,
-// `bun install` in notify, the webhook in a `run:` body or on the router, a
-// concurrency group back at job level) are exercised against mutated fixtures as
-// well as the live files.
+// that requires notify's success, a notify job without the main-only ref guard,
+// `bun install` in notify, the webhook in a `run:` body or omitted by the router,
+// a concurrency group back at job level) are exercised against mutated fixtures
+// as well as the live files. The webhook is a repository secret the router passes
+// to each callee explicitly: an environment secret is not readable by a job in a
+// workflow called through `uses:` (actions/runner#4453).
 // See docs/plans/2026-10-07-001-feat-deploy-gate-discord-notification-plan.md.
 
 const DEPLOY_NOTIFY_WEBHOOK = 'DEPLOY_GATE_DISCORD_WEBHOOK'
 const DEPLOY_NOTIFY_SCRIPT = 'packages/cli/scripts/deploy-gate-notify.ts'
-const DEPLOY_NOTIFY_ENVIRONMENT = 'deploy-notify'
+const DEPLOY_NOTIFY_MAIN_GUARD = "github.ref == 'refs/heads/main'"
 const DEPLOY_NOTIFY_MAX_TIMEOUT_MINUTES = 3
 const FULL_SHA_PIN = /@[\da-f]{40}$/i
 
@@ -3511,8 +3513,8 @@ interface DeployNotifyAppSpec {
   readonly gatedJob: string
   /** Exact `needs` of the notify job. */
   readonly notifyNeeds: readonly string[]
-  /** Exact normalized `if:` of the notify job; undefined means the default success() gating. */
-  readonly notifyIf: string | undefined
+  /** Exact normalized `if:` of the notify job: always carries the main-only ref guard. */
+  readonly notifyIf: string
   /** Exact `needs` of the gated job. */
   readonly gatedNeeds: readonly string[]
   /** Exact normalized `if:` of the gated job: today's upstream success requirements, never notify's result. */
@@ -3527,7 +3529,7 @@ const DEPLOY_NOTIFY_APPS: readonly DeployNotifyAppSpec[] = [
     app,
     gatedJob: `deploy-${app}`,
     notifyNeeds: [],
-    notifyIf: undefined,
+    notifyIf: DEPLOY_NOTIFY_MAIN_GUARD,
     gatedNeeds: ['notify'],
     gatedIf: '!cancelled()',
     extraEnv: {},
@@ -3536,7 +3538,7 @@ const DEPLOY_NOTIFY_APPS: readonly DeployNotifyAppSpec[] = [
     app: 'gateway',
     gatedJob: 'deploy-gateway',
     notifyNeeds: ['build-images', 'scan-images'],
-    notifyIf: "!cancelled() && needs.build-images.result == 'success'",
+    notifyIf: `!cancelled() && needs.build-images.result == 'success' && ${DEPLOY_NOTIFY_MAIN_GUARD}`,
     gatedNeeds: ['build-images', 'scan-images', 'notify'],
     gatedIf: "!cancelled() && needs.build-images.result == 'success' && needs.scan-images.result == 'success'",
     extraEnv: {},
@@ -3545,7 +3547,7 @@ const DEPLOY_NOTIFY_APPS: readonly DeployNotifyAppSpec[] = [
     app: 'dashboard',
     gatedJob: 'deploy-dashboard',
     notifyNeeds: ['validate-inputs'],
-    notifyIf: undefined,
+    notifyIf: DEPLOY_NOTIFY_MAIN_GUARD,
     gatedNeeds: ['validate-inputs', 'notify'],
     gatedIf: "!cancelled() && needs.validate-inputs.result == 'success'",
     extraEnv: {
@@ -3585,8 +3587,11 @@ function findDeployNotifyViolations(spec: DeployNotifyAppSpec, workflow: Record<
   const label = `deploy-${spec.app}.yaml`
 
   if (isRecord(notify)) {
-    if (notify.environment !== DEPLOY_NOTIFY_ENVIRONMENT) {
-      violations.push(`${label}: notify must run in the main-only '${DEPLOY_NOTIFY_ENVIRONMENT}' environment`)
+    if (notify.environment !== undefined) {
+      violations.push(`${label}: notify must not use a GitHub Environment (its secrets are unreadable through uses:)`)
+    }
+    if (!normalizeExpression(notify.if).includes(DEPLOY_NOTIFY_MAIN_GUARD)) {
+      violations.push(`${label}: notify if must carry the main-only guard '${DEPLOY_NOTIFY_MAIN_GUARD}'`)
     }
     const timeout = notify['timeout-minutes']
     if (typeof timeout !== 'number' || timeout > DEPLOY_NOTIFY_MAX_TIMEOUT_MINUTES) {
@@ -3599,8 +3604,8 @@ function findDeployNotifyViolations(spec: DeployNotifyAppSpec, workflow: Record<
     if (JSON.stringify(asArray(notify.needs)) !== JSON.stringify(spec.notifyNeeds)) {
       violations.push(`${label}: notify needs must be exactly [${spec.notifyNeeds.join(', ')}]`)
     }
-    if (normalizeExpression(notify.if) !== (spec.notifyIf ?? '')) {
-      violations.push(`${label}: notify if must be ${spec.notifyIf === undefined ? 'absent' : `'${spec.notifyIf}'`}`)
+    if (normalizeExpression(notify.if) !== spec.notifyIf) {
+      violations.push(`${label}: notify if must be exactly '${spec.notifyIf}'`)
     }
     if (notify.concurrency !== undefined) violations.push(`${label}: notify must not carry job-level concurrency`)
 
@@ -3705,18 +3710,57 @@ function findDeployNotifyWebhookViolations(app: string, workflow: Record<string,
     }
   }
 
-  const {jobs: _jobs, ...rest} = workflow
-  if (JSON.stringify(rest).includes(DEPLOY_NOTIFY_WEBHOOK)) {
-    violations.push(`${label}: ${DEPLOY_NOTIFY_WEBHOOK} referenced at workflow level (secrets declaration or env)`)
+  // The only workflow-level reference allowed is the optional workflow_call secret declaration.
+  const on = isRecord(workflow.on) ? workflow.on : {}
+  const call = isRecord(on.workflow_call) ? on.workflow_call : {}
+  const callSecrets = isRecord(call.secrets) ? call.secrets : {}
+  const declaration = callSecrets[DEPLOY_NOTIFY_WEBHOOK]
+  if (!isRecord(declaration) || declaration.required !== false) {
+    violations.push(`${label}: workflow_call.secrets must declare ${DEPLOY_NOTIFY_WEBHOOK} with required: false`)
+  }
+  const {jobs: _jobs, on: _on, ...rest} = workflow
+  const {secrets: _secrets, ...restOfCall} = call
+  const otherSecrets = Object.fromEntries(
+    Object.entries(callSecrets).filter(([name]) => name !== DEPLOY_NOTIFY_WEBHOOK),
+  )
+  if (
+    JSON.stringify({
+      rest,
+      restOfCall,
+      otherSecrets,
+      others: Object.entries(on).filter(([key]) => key !== 'workflow_call'),
+    }).includes(DEPLOY_NOTIFY_WEBHOOK)
+  ) {
+    violations.push(`${label}: ${DEPLOY_NOTIFY_WEBHOOK} referenced at workflow level (env or inputs)`)
   }
 
   return violations
 }
 
+/** Violations of the router's explicit webhook pass-through to each callee job. */
 function findRouterWebhookViolations(routerText: string): string[] {
-  return /DEPLOY_GATE/.test(routerText)
-    ? ['deploy.yaml must not reference DEPLOY_GATE_* (the router passes no notify secret)']
-    : []
+  const violations: string[] = []
+  const router: unknown = parseYaml(routerText)
+  const jobs = isRecord(router) && isRecord(router.jobs) ? router.jobs : {}
+  const expected = ghaExpression(`secrets.${DEPLOY_NOTIFY_WEBHOOK}`)
+  const callerApps: string[] = []
+
+  for (const [jobId, job] of Object.entries(jobs)) {
+    if (!isRecord(job) || typeof job.uses !== 'string') continue
+    const app = /^\.\/\.github\/workflows\/deploy-([\w-]+)\.yaml$/.exec(job.uses)?.[1]
+    if (app === undefined) continue
+    callerApps.push(app)
+    if (job.secrets === 'inherit') {
+      violations.push(`deploy.yaml job ${jobId}: secrets: inherit is forbidden`)
+    } else if (!isRecord(job.secrets) || job.secrets[DEPLOY_NOTIFY_WEBHOOK] !== expected) {
+      violations.push(`deploy.yaml job ${jobId}: must pass ${DEPLOY_NOTIFY_WEBHOOK}: ${expected}`)
+    }
+  }
+  if (callerApps.length !== DEPLOY_NOTIFY_APPS.length) {
+    violations.push(`deploy.yaml must call all ${DEPLOY_NOTIFY_APPS.length} app workflows (found ${callerApps.length})`)
+  }
+
+  return violations
 }
 
 describe('deploy gate notify: live workflow contract', () => {
@@ -3751,18 +3795,27 @@ describe('deploy gate notify: live workflow contract', () => {
     expect(byApp.get('dashboard')?.notifyNeeds).toEqual(['validate-inputs'])
   })
 
-  it('deploy.yaml (the router) passes no notify secret and its callers grant the notify job contents: read', async () => {
+  it('deploy.yaml (the router) passes the webhook explicitly to every app caller job, never via secrets: inherit', async () => {
     const routerText = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
     expect(findRouterWebhookViolations(routerText)).toEqual([])
   })
 
-  it('no callee declares the webhook under workflow_call.secrets', async () => {
+  it('every callee declares the webhook under workflow_call.secrets with required: false', async () => {
     for (const spec of DEPLOY_NOTIFY_APPS) {
       const workflow = await loadDeployWorkflow(spec.app)
       const on = isRecord(workflow.on) ? workflow.on : {}
       const callSecrets =
         isRecord(on.workflow_call) && isRecord(on.workflow_call.secrets) ? on.workflow_call.secrets : {}
-      expect(Object.keys(callSecrets), `deploy-${spec.app}.yaml`).not.toContain(DEPLOY_NOTIFY_WEBHOOK)
+      const declaration = callSecrets[DEPLOY_NOTIFY_WEBHOOK]
+      expect(isRecord(declaration) ? declaration.required : undefined, `deploy-${spec.app}.yaml`).toBe(false)
+    }
+  })
+
+  it('no notify job uses a GitHub Environment and every one is guarded to the main ref', async () => {
+    for (const spec of DEPLOY_NOTIFY_APPS) {
+      const notify = jobOf(await loadDeployWorkflow(spec.app), 'notify')
+      expect(notify.environment, `deploy-${spec.app}.yaml`).toBeUndefined()
+      expect(normalizeExpression(notify.if), `deploy-${spec.app}.yaml`).toContain(DEPLOY_NOTIFY_MAIN_GUARD)
     }
   })
 
@@ -3826,15 +3879,34 @@ describe('deploy gate notify: error-path scenarios against mutated fixtures', ()
     expect(findDeployNotifyViolations(DASHBOARD, dashboard).join('\n')).toMatch(/if must be exactly/)
   })
 
-  it('fails a notify job outside the deploy-notify environment', async () => {
+  it('fails a notify job missing the main-only ref guard', async () => {
+    if (!KEEWEB || !GATEWAY || !DASHBOARD) throw new Error('specs missing')
+    const unguarded = await fixture('keeweb')
+    delete jobOf(unguarded, 'notify').if
+    expect(findDeployNotifyViolations(KEEWEB, unguarded).join('\n')).toMatch(/main-only guard/)
+
+    const wrongRef = await fixture('keeweb')
+    jobOf(wrongRef, 'notify').if = ghaExpression("github.ref == 'refs/heads/develop'")
+    expect(findDeployNotifyViolations(KEEWEB, wrongRef).join('\n')).toMatch(/main-only guard/)
+
+    const gateway = await fixture('gateway')
+    jobOf(gateway, 'notify').if = ghaExpression("!cancelled() && needs.build-images.result == 'success'")
+    expect(findDeployNotifyViolations(GATEWAY, gateway).join('\n')).toMatch(/main-only guard/)
+
+    const gatewayNoBuild = await fixture('gateway')
+    jobOf(gatewayNoBuild, 'notify').if = ghaExpression(DEPLOY_NOTIFY_MAIN_GUARD)
+    expect(findDeployNotifyViolations(GATEWAY, gatewayNoBuild).join('\n')).toMatch(/notify if must be exactly/)
+
+    const dashboard = await fixture('dashboard')
+    delete jobOf(dashboard, 'notify').if
+    expect(findDeployNotifyViolations(DASHBOARD, dashboard).join('\n')).toMatch(/main-only guard/)
+  })
+
+  it('fails a notify job that uses a GitHub Environment', async () => {
     if (!KEEWEB) throw new Error('keeweb spec missing')
     const workflow = await fixture('keeweb')
-    jobOf(workflow, 'notify').environment = 'keeweb'
-    expect(findDeployNotifyViolations(KEEWEB, workflow).join('\n')).toMatch(/main-only 'deploy-notify' environment/)
-
-    const missing = await fixture('keeweb')
-    delete jobOf(missing, 'notify').environment
-    expect(findDeployNotifyViolations(KEEWEB, missing).join('\n')).toMatch(/main-only 'deploy-notify' environment/)
+    jobOf(workflow, 'notify').environment = 'deploy-notify'
+    expect(findDeployNotifyViolations(KEEWEB, workflow).join('\n')).toMatch(/must not use a GitHub Environment/)
   })
 
   it('fails a notify job with a timeout above three minutes or no timeout', async () => {
@@ -3892,26 +3964,46 @@ describe('deploy gate notify: error-path scenarios against mutated fixtures', ()
     expect(findDeployNotifyWebhookViolations('keeweb', leaked).join('\n')).toMatch(/outside the notify job/)
   })
 
-  it('fails the webhook declared under workflow_call.secrets or workflow-level env', async () => {
-    const declared = await fixture('keeweb')
-    const on = isRecord(declared.on) ? declared.on : {}
-    const call = isRecord(on.workflow_call) ? on.workflow_call : {}
-    call.secrets = {...(isRecord(call.secrets) ? call.secrets : {}), [DEPLOY_NOTIFY_WEBHOOK]: {required: false}}
-    expect(findDeployNotifyWebhookViolations('keeweb', declared).join('\n')).toMatch(/workflow level/)
+  it('fails a workflow_call secret declaration that is missing or required, and the webhook in workflow-level env', async () => {
+    const undeclared = await fixture('keeweb')
+    const undeclaredCall = (
+      isRecord(undeclared.on) && isRecord(undeclared.on.workflow_call) ? undeclared.on.workflow_call : {}
+    ) as Record<string, unknown>
+    const undeclaredSecrets = isRecord(undeclaredCall.secrets) ? undeclaredCall.secrets : {}
+    delete undeclaredSecrets[DEPLOY_NOTIFY_WEBHOOK]
+    expect(findDeployNotifyWebhookViolations('keeweb', undeclared).join('\n')).toMatch(/must declare.*required: false/)
+
+    const required = await fixture('keeweb')
+    const requiredCall = (
+      isRecord(required.on) && isRecord(required.on.workflow_call) ? required.on.workflow_call : {}
+    ) as Record<string, unknown>
+    const requiredSecrets = isRecord(requiredCall.secrets) ? requiredCall.secrets : {}
+    requiredSecrets[DEPLOY_NOTIFY_WEBHOOK] = {required: true}
+    expect(findDeployNotifyWebhookViolations('keeweb', required).join('\n')).toMatch(/must declare.*required: false/)
 
     const topLevelEnv = await fixture('keeweb')
     topLevelEnv.env = {[DEPLOY_NOTIFY_WEBHOOK]: ghaExpression(`secrets.${DEPLOY_NOTIFY_WEBHOOK}`)}
     expect(findDeployNotifyWebhookViolations('keeweb', topLevelEnv).join('\n')).toMatch(/workflow level/)
   })
 
-  it('fails the router passing the webhook', async () => {
+  it('fails the router omitting the webhook for an app, passing a different value, or using secrets: inherit', async () => {
     const routerText = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
-    const mutated = routerText.replace(
-      'secrets:',
-      `secrets:\n      ${DEPLOY_NOTIFY_WEBHOOK}: ${ghaExpression(`secrets.${DEPLOY_NOTIFY_WEBHOOK}`)}`,
+    const line = `      ${DEPLOY_NOTIFY_WEBHOOK}: ${ghaExpression(`secrets.${DEPLOY_NOTIFY_WEBHOOK}`)}\n`
+
+    const omitted = routerText.replace(line, '')
+    expect(omitted).not.toBe(routerText)
+    expect(findRouterWebhookViolations(omitted)).toHaveLength(1)
+
+    const wrongValue = routerText.replace(line, `      ${DEPLOY_NOTIFY_WEBHOOK}: $` + `{{ secrets.OTHER }}\n`)
+    expect(wrongValue).not.toBe(routerText)
+    expect(findRouterWebhookViolations(wrongValue).join('\n')).toMatch(/must pass DEPLOY_GATE_DISCORD_WEBHOOK/)
+
+    const inherited = routerText.replace(
+      /(\n {2}deploy-vpn:[\s\S]*?)\n {4}secrets:\n(?: {6}.*\n)+/,
+      '$1\n    secrets: inherit\n',
     )
-    expect(mutated).not.toBe(routerText)
-    expect(findRouterWebhookViolations(mutated)).toHaveLength(1)
+    expect(inherited).not.toBe(routerText)
+    expect(findRouterWebhookViolations(inherited).join('\n')).toMatch(/secrets: inherit is forbidden/)
   })
 
   it('fails a concurrency group moved back to job level, and one that is missing or cancelling', async () => {

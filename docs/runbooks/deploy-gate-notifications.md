@@ -1,6 +1,6 @@
 # Deploy-Gate Notifications
 
-Each app deploy waits at a required-reviewer GitHub Environment gate. Every `deploy-<app>.yaml` workflow runs an ungated `notify` job just before that gate; it posts one message to a dedicated Discord channel so a waiting deploy is seen within minutes. This runbook covers one-time setup, reading the notify job's output, rotation and revocation, and known behaviors. For the daily report's handling of waiting deploys, see the Deploy Pipeline Health category in `.github/workflows/fro-bot.yaml`.
+Each app deploy waits at a required-reviewer GitHub Environment gate. Every `deploy-<app>.yaml` workflow runs an ungated, main-only `notify` job just before that gate; it posts one message to a dedicated Discord channel so a waiting deploy is seen within minutes. This runbook covers one-time setup, reading the notify job's output, rotation and revocation, and known behaviors. For the daily report's handling of waiting deploys, see the Deploy Pipeline Health category in `.github/workflows/fro-bot.yaml`.
 
 ---
 
@@ -22,60 +22,35 @@ There are no reminders, outcome edits, or follow-up messages.
 
 ## Security model
 
-The webhook URL is a bearer credential: anyone holding it can post to the channel. `DEPLOY_GATE_DISCORD_WEBHOOK` is the only secret in the `deploy-notify` GitHub Environment. The environment is limited to `main` by deployment-branch policy and has no required reviewer, so the notify job runs unattended. Code on other branches cannot read the secret, and the router (`deploy.yaml`) passes no secret to the callees. The workflow binds the webhook through `env:` only — never into a `run:` body or argv.
+The webhook URL is a bearer credential: anyone holding it can post to the channel. `DEPLOY_GATE_DISCORD_WEBHOOK` is a repository secret. The router (`deploy.yaml`) passes it explicitly to each callee, and every callee declares it under `workflow_call.secrets` with `required: false`. A GitHub Environment secret is not readable by a job in a workflow called through `uses:` (actions/runner#4453), so the webhook is not an environment secret. The `notify` job runs only when `github.ref == 'refs/heads/main'`, so branch runs never post. The workflow binds the webhook through `env:` on the notify script step only — never into a `run:` body or argv. The main-only condition limits what the shipped workflows do; any collaborator who can push a workflow to a branch of this repository can still read repository secrets, so treat the webhook as exposed to repository writers and rotate it if write access changes.
 
 ---
 
 ## One-time setup
-
-The order is significant. GitHub auto-creates an environment **without** a branch policy when a workflow first references it, so `deploy-notify` must exist with its policy before any workflow that uses it runs.
 
 ### 1. Create the Discord channel and webhook
 
 1. Create a dedicated text channel for deploy notifications.
 2. Channel settings → Integrations → Webhooks → New Webhook. Copy the URL to the clipboard only; do not paste it into a file, chat, or issue.
 
-### 2. Create the `deploy-notify` environment first
-
-Create it with a custom deployment-branch policy of exactly `main` and no reviewers:
-
-```bash
-gh api -X PUT repos/marcusrbrown/infra/environments/deploy-notify \
-  --input - <<'JSON'
-{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
-JSON
-
-gh api -X POST repos/marcusrbrown/infra/environments/deploy-notify/deployment-branch-policies \
-  -f name=main -f type=branch
-```
-
-Verify before continuing:
-
-```bash
-gh api repos/marcusrbrown/infra/environments/deploy-notify
-gh api repos/marcusrbrown/infra/environments/deploy-notify/deployment-branch-policies
-```
-
-Expect `custom_branch_policies: true`, `protected_branches: false`, exactly one `branch` policy named `main`, and no `required_reviewers` protection rule.
-
-### 3. Store the webhook as an environment secret
+### 2. Store the webhook as a repository secret
 
 Read the value from stdin. Never pass it as an argument or via `--body "$(…)"`:
 
 ```bash
-pbpaste | tr -d '\n' | gh secret set --env deploy-notify DEPLOY_GATE_DISCORD_WEBHOOK
+pbpaste | tr -d '\n' | gh secret set DEPLOY_GATE_DISCORD_WEBHOOK --repo marcusrbrown/infra
 ```
 
 On Linux, substitute `xclip -o -selection clipboard` for `pbpaste`. Clear the clipboard afterwards and scrub shell history if the value was ever typed.
 
-### 4. Enable notifications
+### 3. Enable notifications
 
 - **Phone push:** enable push for the Discord channel (Discord mobile → channel → notification settings → all messages) and confirm a test webhook post arrives within minutes.
 - **Fallback:** enable GitHub pending-deployment notifications (GitHub Mobile and/or email, Settings → Notifications → Actions). If Discord is down or the channel is muted, GitHub's own review request is the backup signal.
 
-### 5. Verify
+### 4. Verify
 
-Dispatch `deploy.yaml` on a branch. Expect every app's jobs to be created (no startup failure), each `notify` job rejected by the `deploy-notify` branch policy with nothing posted, and each gated job still attempted. After the next merge to `main` that triggers a deploy, confirm the message content, the run link, a phone push, and GitHub's pending-deployment notification.
+Dispatch `deploy.yaml` on a branch. Expect every app's jobs to be created (no startup failure), each `notify` job skipped by its main-only condition with nothing posted, and each gated job still attempted. After the next merge to `main` that triggers a deploy, confirm the message content, the run link, a phone push, and GitHub's pending-deployment notification.
 
 ---
 
@@ -90,16 +65,16 @@ The script always exits 0. It reports through:
 | Outcome | Meaning | Action |
 | --- | --- | --- |
 | `sent` | Message accepted by Discord | None |
-| `skipped` | Webhook secret unset or empty | Check that `DEPLOY_GATE_DISCORD_WEBHOOK` exists in `deploy-notify` |
+| `skipped` | Webhook secret unset or empty | Check that the `DEPLOY_GATE_DISCORD_WEBHOOK` repository secret exists and that `deploy.yaml` passes it to the callee |
 | `failed` | Discord rejected or never answered after 3 attempts | A 404 means the webhook was deleted or revoked — [rotate](#rotation). 429/5xx/timeouts are transient; the gate is still reachable in GitHub |
 
-If the `notify` job itself fails or is rejected before its first step (runner failure, environment policy), there is no script output. The deploy job still runs; look at the job's status and reason in the run view.
+If the `notify` job itself fails before its first step (runner failure) or is skipped, there is no script output. The deploy job still runs; look at the job's status and reason in the run view.
 
 ---
 
 ## Branch dispatches
 
-The `deploy-notify` environment accepts only `main`. A `workflow_dispatch` of a deploy workflow (or the router) from any other branch has its `notify` job rejected by the branch policy: nothing posts and no secret is exposed. The deploy job is still attempted and waits at its own environment gate as usual. This is expected, and it is how the branch verification in setup step 5 exercises notify-failure tolerance.
+The `notify` job runs only on the `main` ref (under `workflow_call`, `github.ref` is the caller's ref). A `workflow_dispatch` of a deploy workflow (or the router) from any other branch skips `notify`: nothing posts and the secret is never bound to a branch run. The deploy job is still attempted and waits at its own environment gate as usual. This is expected, and it is how the branch verification in setup step 4 exercises notify-skip tolerance.
 
 ---
 
@@ -112,7 +87,7 @@ Rotate on a schedule you choose, and immediately on suspected exposure.
 3. Replace the secret:
 
    ```bash
-   pbpaste | tr -d '\n' | gh secret set --env deploy-notify DEPLOY_GATE_DISCORD_WEBHOOK
+   pbpaste | tr -d '\n' | gh secret set DEPLOY_GATE_DISCORD_WEBHOOK --repo marcusrbrown/infra
    ```
 
 4. Verify with the next gated run, or by dispatching a deploy from `main` and confirming the message arrives.
@@ -130,7 +105,6 @@ To disable notifications without removing the feature, delete the webhook and th
 - **Manual router dispatch posts seven messages.** `deploy.yaml` with `workflow_dispatch` fans out to every app, and each run reaches a real gate.
 - **Rare duplicate message.** The sender retries up to 3 times on 429, 5xx, network errors, and timeouts. An ambiguous failure (Discord accepted the post but the response was lost) can produce two messages for one run.
 - **Queued runs post when next in line.** All seven deploy workflows hold their concurrency group at workflow level with `cancel-in-progress: false`. A run queued behind a deploy waiting for approval starts no jobs, so its message posts only once the earlier run clears. For gateway, a queued run builds its images only after the previous gateway deploy clears.
-- **Deployment records.** Each notify run records a deployment in the `deploy-notify` environment.
 - **No coverage for `fro-bot-storage`.** That environment has no reviewer gate.
 - **Daily report.** A deploy whose job never ran a step (waiting at its gate, or cancelled before its first step) appears as a Deploy Pipeline Health table row only. A deploy that ran and then failed, and any down-app check, still opens an issue.
 - **Un-notified gates.** For each at-gate deploy the daily report reads the run's `notify` job summary line. If the outcome is not `sent`, the summary is missing, or the notify job did not succeed, the row reads `⏸ At gate — not notified (<outcome>)` (`no summary` when there is no outcome). It is still a table row only, never an issue.

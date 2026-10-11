@@ -79,6 +79,8 @@ on:
         required: false
       DASHBOARD_VPC_IP:
         required: false
+      DEPLOY_GATE_DISCORD_WEBHOOK:
+        required: false
 
 concurrency:
   group: deploy-gateway-${{ github.ref_name }}
@@ -202,9 +204,8 @@ jobs:
 
   notify:
     needs: [build-images, scan-images]
-    if: ${{ !cancelled() && needs.build-images.result == 'success' }}
+    if: ${{ !cancelled() && needs.build-images.result == 'success' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    environment: deploy-notify
     permissions:
       contents: read
     timeout-minutes: 3

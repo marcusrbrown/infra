@@ -17,6 +17,8 @@ on:
         required: true
       DROPBOX_APP_SECRET:
         required: true
+      DEPLOY_GATE_DISCORD_WEBHOOK:
+        required: false
 
 concurrency:
   group: deploy-keeweb-${{ github.ref_name }}
@@ -24,8 +26,8 @@ concurrency:
 
 jobs:
   notify:
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    environment: deploy-notify
     permissions:
       contents: read
     timeout-minutes: 3

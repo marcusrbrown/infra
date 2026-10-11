@@ -13,6 +13,8 @@ on:
         required: true
       VPN_PEERS:
         required: false
+      DEPLOY_GATE_DISCORD_WEBHOOK:
+        required: false
 
 concurrency:
   group: deploy-vpn-${{ github.ref_name }}
@@ -20,8 +22,8 @@ concurrency:
 
 jobs:
   notify:
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    environment: deploy-notify
     permissions:
       contents: read
     timeout-minutes: 3

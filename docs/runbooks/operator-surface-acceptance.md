@@ -68,8 +68,8 @@ Skip if no second GitHub account is available; record it as skipped.
 ### 6. Single Cancel after completion
 
 1. Trigger: let the run from check 5 finish, then look at the card.
-2. Expect: exactly one Cancel control state, and no live Cancel action on the finished run.
-3. Failure: two Cancel controls, or an enabled Cancel action on a terminal run.
+2. Expect: a single Cancel control on the card, disabled or absent, with no duplicate. Pressing it does nothing.
+3. Failure: two Cancel controls on one card, or a Cancel control that is still enabled on a finished run.
 
 ### 7. Cancel a running run
 
@@ -148,12 +148,17 @@ Do this last. All snippets run in the DevTools Console on `https://dashboard.fro
    res.status
    ```
 
-   Record the status code. Step 4 is the proof that logout worked. Failure: a 403 with a freshly fetched token, or a 5xx.
+   Record the status code. Step 3 is the proof that logout worked. Failure: a 403 with a freshly fetched token, or a 5xx.
 
-3. Trigger: `(await fetch('/operator/session', { credentials: 'same-origin' })).status`
-4. Expect: `401`. Failure: any 2xx — the session survived logout.
-5. Scope: logout deletes only that session. A separate browser signed in earlier stays signed in. A gateway restart clears every session.
-6. Push subscriptions: see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats) for what logout does to them.
+3. Trigger: check the old session.
+
+   ```js
+   ;(await fetch("/operator/session", {credentials: "same-origin"})).status
+   ```
+
+   Expect: `401`. Failure: any 2xx, which means the session survived logout.
+
+Logout deletes only that session: a separate browser signed in earlier stays signed in, and a gateway restart clears every session. For what logout does to push subscriptions, see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats).
 
 ---
 

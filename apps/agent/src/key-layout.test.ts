@@ -32,13 +32,15 @@ describe('pinned agent action S3 key layout', () => {
     expect(() => assertKnownKeyLayout('fro-bot/agent@v0.0.0')).toThrow(/unknown|verified|layout/i)
   })
 
-  it('admits only the pinned layout, tag, and SHA forms; the retired v0.96.0 layout fails closed', () => {
-    expect(assertKnownKeyLayout('v0.118.2')).toBe(AGENT_ACTION_LAYOUT_VERSION)
-    expect(assertKnownKeyLayout('77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb')).toBe(AGENT_ACTION_LAYOUT_VERSION)
-    expect(assertKnownKeyLayout('fro-bot/agent@77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb')).toBe(
+  it('admits only the pinned layout, tag, and SHA forms; the retired v0.96.0 and v0.118.2 layouts fail closed', () => {
+    expect(assertKnownKeyLayout('v0.119.2')).toBe(AGENT_ACTION_LAYOUT_VERSION)
+    expect(assertKnownKeyLayout('83ed683da24111bd1474eb4bda39715ed5799bc2')).toBe(AGENT_ACTION_LAYOUT_VERSION)
+    expect(assertKnownKeyLayout('fro-bot/agent@83ed683da24111bd1474eb4bda39715ed5799bc2')).toBe(
       AGENT_ACTION_LAYOUT_VERSION,
     )
     expect(() => assertKnownKeyLayout('fro-bot/agent@v0.96.0')).toThrow(/unknown|verified|layout/i)
+    expect(() => assertKnownKeyLayout('fro-bot/agent@v0.118.2')).toThrow(/unknown|verified|layout/i)
+    expect(() => assertKnownKeyLayout('77f2bad7d68ac38279cd0fa28f38b26a0cd15dfb')).toThrow(/unknown|verified|layout/i)
     expect(() => assertKnownKeyLayout('c29ac295b8da06768b140c32e5bd0ae3aff45dc6')).toThrow(/unknown|verified|layout/i)
   })
 })

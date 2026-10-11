@@ -39,7 +39,7 @@ Run the provisioner from the repository root so Bun loads the root `.env`. The f
 | `AGENT_REPOSITORY_ID` | ✓ | Live GitHub repository ID |
 | `AGENT_REPOSITORY_OWNER_ID` | ✓ | Live GitHub owner ID |
 | `AGENT_WORKFLOW_NAME` | ✓ | Workflow name pinned in the IAM trust policy |
-| `AGENT_ACTION_REF` | ✓ | Verified `fro-bot/agent` ref; the current admitted layout is `fro-bot/agent@v0.118.2` |
+| `AGENT_ACTION_REF` | ✓ | Verified `fro-bot/agent` ref; the current admitted layout is `fro-bot/agent@v0.119.2` |
 
 The `AGENT_S3_SESSION_PREFIX` and `AGENT_S3_METADATA_ARTIFACTS_PREFIX` values are optional inputs. The provisioner otherwise derives the action layout from `AGENT_S3_PREFIX` and the verified action ref. It refuses unknown or unverified layouts rather than widening IAM access.
 
@@ -85,7 +85,7 @@ The emitted JSON object has this shape:
   "role_arn": "arn:aws:iam::ACCOUNT_ID:role/ROLE",
   "policy_name": "POLICY",
   "action_ref_verified": true,
-  "key_layout_version": "fro-bot/agent@v0.118.2",
+  "key_layout_version": "fro-bot/agent@v0.119.2",
   "oidc_provider_arn": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
 }
 ```

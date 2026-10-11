@@ -7,43 +7,54 @@ import {backupGatewayCa, gatewayBackupAction, type BackupSpawnFn} from './backup
 
 // ─── SpawnFn helpers ──────────────────────────────────────────────────────────
 
-function makeSpawnOk(tarBytes: Uint8Array = new Uint8Array([1, 2, 3])): BackupSpawnFn {
-  return (_cmd, _opts) => {
+const VOLUME = 'fro-bot_mitmproxy-certs'
+const PROBE_CMD = `docker volume inspect ${VOLUME} >/dev/null 2>&1 && echo EXISTS || echo MISSING`
+
+const isProbe = (cmd: string[]): boolean => cmd.at(-1)?.startsWith('docker volume inspect') === true
+
+function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      if (bytes.byteLength > 0) controller.enqueue(bytes)
+      controller.close()
+    },
+  })
+}
+
+/**
+ * Spawn mock that answers the volume existence probe with `probe` and every other
+ * command with the tar bytes. All spawned argv arrays are recorded in `calls`.
+ */
+function makeSpawnOk(
+  tarBytes: Uint8Array = new Uint8Array([1, 2, 3]),
+  calls: string[][] = [],
+  probe: {stdout: string; stderr?: string; exitCode?: number} = {stdout: 'EXISTS\n'},
+): BackupSpawnFn {
+  const encoder = new TextEncoder()
+  return (cmd, _opts) => {
+    calls.push([...cmd])
+    if (isProbe(cmd)) {
+      return {
+        stdout: streamOf(encoder.encode(probe.stdout)),
+        stderr: streamOf(encoder.encode(probe.stderr ?? '')),
+        exited: Promise.resolve(probe.exitCode ?? 0),
+      }
+    }
     return {
-      stdout: new ReadableStream({
-        start(controller) {
-          controller.enqueue(tarBytes)
-          controller.close()
-        },
-      }),
-      stderr: new ReadableStream({
-        start(controller) {
-          controller.close()
-        },
-      }),
+      stdout: streamOf(tarBytes),
+      stderr: streamOf(new Uint8Array(0)),
       exited: Promise.resolve(0),
     }
   }
 }
 
 function makeSpawnError(message: string): BackupSpawnFn {
-  return (_cmd, _opts) => {
-    const encoder = new TextEncoder()
-    return {
-      stdout: new ReadableStream({
-        start(controller) {
-          controller.close()
-        },
-      }),
-      stderr: new ReadableStream({
-        start(controller) {
-          controller.enqueue(encoder.encode(message))
-          controller.close()
-        },
-      }),
-      exited: Promise.resolve(255),
-    }
-  }
+  const encoder = new TextEncoder()
+  return (_cmd, _opts) => ({
+    stdout: streamOf(new Uint8Array(0)),
+    stderr: streamOf(encoder.encode(message)),
+    exited: Promise.resolve(255),
+  })
 }
 
 // ─── backupGatewayCa ─────────────────────────────────────────────────────────
@@ -126,31 +137,36 @@ describe('backupGatewayCa — happy path', () => {
   })
 
   it('performs CA backup when includeCa is true (default behavior)', async () => {
-    let capturedCmd: string[] = []
-    const spawnCapture: BackupSpawnFn = (cmd, _opts) => {
-      capturedCmd = cmd
-      return {
-        stdout: new ReadableStream({
-          start(controller) {
-            controller.enqueue(new Uint8Array([1, 2, 3]))
-            controller.close()
-          },
-        }),
-        stderr: new ReadableStream({
-          start(controller) {
-            controller.close()
-          },
-        }),
-        exited: Promise.resolve(0),
-      }
-    }
+    const calls: string[][] = []
 
-    await backupGatewayCa({host: 'gateway.example.com', output: tmpOutput, includeCa: true}, spawnCapture)
+    await backupGatewayCa(
+      {host: 'gateway.example.com', output: tmpOutput, includeCa: true},
+      makeSpawnOk(new Uint8Array([1, 2, 3]), calls),
+    )
 
-    const cmdStr = capturedCmd.join(' ')
+    const cmdStr = (calls.at(-1) ?? []).join(' ')
     expect(cmdStr).toContain('mitmproxy-ca-cert.pem')
     expect(cmdStr).toContain('mitmproxy-ca.pem')
-    expect(cmdStr).toContain('mitmproxy-certs')
+  })
+
+  it('probes then reads the compose-prefixed fro-bot_mitmproxy-certs volume', async () => {
+    const calls: string[][] = []
+
+    const result = await backupGatewayCa(
+      {host: 'gateway.example.com', output: tmpOutput, includeCa: true},
+      makeSpawnOk(new Uint8Array([1, 2, 3]), calls),
+    )
+
+    expect(result.ok).toBe(true)
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.at(-1)).toBe(PROBE_CMD)
+    expect(calls[1]?.at(-1)).toBe(
+      `docker run --rm -v ${VOLUME}:/src:ro alpine tar -cf - -C /src mitmproxy-ca-cert.pem mitmproxy-ca.pem`,
+    )
+    // The bare compose key must never be used as a volume name
+    for (const call of calls) {
+      expect(call.at(-1)).not.toMatch(/(?<![\w-])mitmproxy-certs/)
+    }
   })
 })
 
@@ -282,59 +298,98 @@ describe('backupGatewayCa — SSH command includes UserKnownHostsFile', () => {
     }
   })
 
-  it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to ssh', async () => {
-    let capturedCmd: string[] = []
-    const spawnCapture: BackupSpawnFn = (cmd, _opts) => {
-      capturedCmd = cmd
-      return {
-        stdout: new ReadableStream({
-          start(controller) {
-            controller.enqueue(new Uint8Array([1, 2, 3]))
-            controller.close()
-          },
-        }),
-        stderr: new ReadableStream({
-          start(controller) {
-            controller.close()
-          },
-        }),
-        exited: Promise.resolve(0),
-      }
+  it('passes -o UserKnownHostsFile=<repo>/.github/known_hosts to every ssh invocation', async () => {
+    const calls: string[][] = []
+
+    await backupGatewayCa(
+      {host: 'gateway.example.com', output: tmpOutput, includeCa: true},
+      makeSpawnOk(new Uint8Array([1, 2, 3]), calls),
+    )
+
+    expect(calls.length).toBeGreaterThan(0)
+    for (const capturedCmd of calls) {
+      const knownHostsIdx = capturedCmd.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
+      expect(knownHostsIdx).toBeGreaterThan(-1)
+      expect(capturedCmd[knownHostsIdx - 1]).toBe('-o')
+      expect(capturedCmd[knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
     }
-
-    await backupGatewayCa({host: 'gateway.example.com', output: tmpOutput, includeCa: true}, spawnCapture)
-
-    const knownHostsIdx = capturedCmd.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
-    expect(knownHostsIdx).toBeGreaterThan(-1)
-    expect(capturedCmd[knownHostsIdx - 1]).toBe('-o')
-    expect(capturedCmd[knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
   })
 
   it('does not weaken StrictHostKeyChecking when UserKnownHostsFile is added', async () => {
-    let capturedCmd: string[] = []
-    const spawnCapture: BackupSpawnFn = (cmd, _opts) => {
-      capturedCmd = cmd
-      return {
-        stdout: new ReadableStream({
-          start(controller) {
-            controller.enqueue(new Uint8Array([1, 2, 3]))
-            controller.close()
-          },
-        }),
-        stderr: new ReadableStream({
-          start(controller) {
-            controller.close()
-          },
-        }),
-        exited: Promise.resolve(0),
-      }
+    const calls: string[][] = []
+
+    await backupGatewayCa(
+      {host: 'gateway.example.com', output: tmpOutput, includeCa: true},
+      makeSpawnOk(new Uint8Array([1, 2, 3]), calls),
+    )
+
+    expect(calls.length).toBeGreaterThan(0)
+    for (const capturedCmd of calls) {
+      const strictIdx = capturedCmd.findIndex(arg => arg.startsWith('StrictHostKeyChecking='))
+      expect(strictIdx).toBeGreaterThan(-1)
+      expect(capturedCmd[strictIdx]).toBe('StrictHostKeyChecking=yes')
     }
+  })
+})
 
-    await backupGatewayCa({host: 'gateway.example.com', output: tmpOutput, includeCa: true}, spawnCapture)
+// ─── Fail-closed volume existence probe ────────────────────────────────────────────
 
-    const strictIdx = capturedCmd.findIndex(arg => arg.startsWith('StrictHostKeyChecking='))
-    expect(strictIdx).toBeGreaterThan(-1)
-    expect(capturedCmd[strictIdx]).toBe('StrictHostKeyChecking=yes')
+describe('backupGatewayCa — volume existence probe (fail closed)', () => {
+  const output = '/tmp/test-backup-probe-should-not-exist.tar'
+
+  afterEach(() => {
+    Bun.spawnSync(['rm', '-f', output])
+  })
+
+  it('aborts naming the volume when the probe reports MISSING, without reading or writing', async () => {
+    const calls: string[][] = []
+
+    const result = await backupGatewayCa(
+      {host: 'gateway.example.com', output, includeCa: true},
+      makeSpawnOk(new Uint8Array([1, 2, 3]), calls, {stdout: 'MISSING\n'}),
+    )
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain(VOLUME)
+      expect(result.error).toContain('does not exist')
+    }
+    expect(calls).toHaveLength(1)
+    expect(calls.some(c => c.join(' ').includes('docker run'))).toBe(false)
+    expect(await Bun.file(output).exists()).toBe(false)
+  })
+
+  it('aborts naming the volume when the probe output is unrecognized', async () => {
+    const calls: string[][] = []
+
+    const result = await backupGatewayCa(
+      {host: 'gateway.example.com', output, includeCa: true},
+      makeSpawnOk(new Uint8Array([1, 2, 3]), calls, {stdout: 'maybe\n'}),
+    )
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain(VOLUME)
+      expect(result.error).toContain('unrecognized')
+    }
+    expect(calls.some(c => c.join(' ').includes('docker run'))).toBe(false)
+    expect(await Bun.file(output).exists()).toBe(false)
+  })
+
+  it('aborts when the probe exits non-zero even if it printed EXISTS', async () => {
+    const calls: string[][] = []
+
+    const result = await backupGatewayCa(
+      {host: 'gateway.example.com', output, includeCa: true},
+      makeSpawnOk(new Uint8Array([1, 2, 3]), calls, {stdout: 'EXISTS\n', stderr: 'docker: daemon down', exitCode: 1}),
+    )
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toContain(VOLUME)
+      expect(result.error).toContain('daemon down')
+    }
+    expect(calls.some(c => c.join(' ').includes('docker run'))).toBe(false)
   })
 })
 

@@ -7,6 +7,7 @@ import {closeSync, constants as fsConstants, openSync, renameSync, unlinkSync, w
 import {z} from 'zod'
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {validateGatewayHost} from './host'
+import {checkVolumeProbeResult, MITMPROXY_CERTS_VOLUME, volumeProbeCommand} from './volume'
 
 declare const process: {
   env: Record<string, string | undefined>
@@ -18,7 +19,6 @@ declare const process: {
 
 // ActionCtx imported from lib/action-ctx — single source of truth for action ctx shape
 
-const MITMPROXY_CERTS_VOLUME = 'mitmproxy-certs'
 const CA_CERT_FILE = 'mitmproxy-ca-cert.pem'
 const CA_KEY_FILE = 'mitmproxy-ca.pem'
 const DEFAULT_OUTPUT = 'apps/gateway/.local/mitmproxy-ca.tar'
@@ -64,7 +64,7 @@ export async function backupGatewayCa(
   // Validate host before any SSH invocation
   validateGatewayHost(opts.host)
 
-  const sshCmd = [
+  const sshCommand = (remote: string): string[] => [
     'ssh',
     '-o',
     'BatchMode=yes',
@@ -72,7 +72,7 @@ export async function backupGatewayCa(
     'StrictHostKeyChecking=yes',
     ...buildKnownHostsArgs(),
     `root@${opts.host}`,
-    `docker run --rm -v ${MITMPROXY_CERTS_VOLUME}:/src:ro alpine tar -cf - -C /src ${CA_CERT_FILE} ${CA_KEY_FILE}`,
+    remote,
   ]
 
   const env: Record<string, string> = {
@@ -80,6 +80,26 @@ export async function backupGatewayCa(
     HOME: process.env.HOME ?? '/tmp',
     ...(process.env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK} : {}),
   }
+
+  // Fail closed: `docker run -v <missing>` would create an empty volume and yield an empty tarball.
+  const probe = spawn(sshCommand(volumeProbeCommand(MITMPROXY_CERTS_VOLUME)), {env, stdout: 'pipe', stderr: 'pipe'})
+  const [probeStdout, probeStderr, probeExit] = await Promise.all([
+    new Response(probe.stdout).text(),
+    new Response(probe.stderr).text(),
+    probe.exited,
+  ])
+  const probeError = checkVolumeProbeResult(MITMPROXY_CERTS_VOLUME, {
+    stdout: probeStdout,
+    stderr: probeStderr,
+    exitCode: probeExit,
+  })
+  if (probeError !== undefined) {
+    return {ok: false, error: probeError}
+  }
+
+  const sshCmd = sshCommand(
+    `docker run --rm -v ${MITMPROXY_CERTS_VOLUME}:/src:ro alpine tar -cf - -C /src ${CA_CERT_FILE} ${CA_KEY_FILE}`,
+  )
 
   const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
 

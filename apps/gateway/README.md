@@ -95,7 +95,7 @@ Key operational notes:
 - Never skip `validateGatewayHost` — it rejects `-`-prefixed values that SSH treats as flags.
 - Never restart the gateway in-place to rotate the CA — restore from backup instead.
 - Never run `docker compose up --build` on the droplet — build from a workstation and push to GHCR.
-- Never run `docker compose down -v` — destroys `caddy_data`, `mitmproxy-certs`, and `workspace-repos` volumes.
+- Never run `docker compose down -v` — destroys `caddy_data`, `mitmproxy-certs` (live name `fro-bot_mitmproxy-certs`), and `workspace-repos` volumes.
 - Post-deploy verification ritual is in `apps/gateway/AGENTS.md` (status → logs → clone smoke → mention round-trip).
 
 ## CLI

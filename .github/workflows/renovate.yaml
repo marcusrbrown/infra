@@ -34,8 +34,6 @@ permissions:
 
 jobs:
   renovate:
-    # Dashboard and PR edits are gated by the called workflow, which runs only when the body has a
-    # ticked checkbox; Renovate's own dashboard edits untick them, so they skip there.
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     name: Renovate
     secrets:

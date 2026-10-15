@@ -1356,7 +1356,7 @@ export function computeSecretsChecksum(secrets: SecretFile[]): string {
 
 // Pinned Caddy image digest — same as apps/cliproxy/docker-compose.yaml and apps/umami/docker-compose.yaml.
 // Renovate tracks the digest in those files; keep in sync when Renovate bumps them.
-const CADDY_IMAGE = 'caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648'
+const CADDY_IMAGE = 'caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f'
 
 export interface ComposeOverrideOpts {
   /** Digest of the gateway image pushed to GHCR (e.g. "sha256:abc..."). */

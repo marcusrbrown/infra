@@ -1,0 +1,63 @@
+# A dashboard run waiting at its approval gate holds the deploy-dashboard concurrency slot, and
+# newer runs queue behind it without starting a job. This cancels the older dispatched runs
+# when a newer one is requested. Fails open; router-dispatched runs are not covered.
+
+name: Cancel Superseded Dashboard Deploys
+
+on:
+  workflow_run:
+    workflows: [Deploy Dashboard]
+    types: [requested]
+
+permissions:
+  contents: read
+
+jobs:
+  cancel-superseded:
+    if: ${{ github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    timeout-minutes: 5
+    steps:
+      - name: Cancel older waiting dashboard deploy runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          for status in waiting queued pending; do
+            if ! runs="$(gh run list \
+              --workflow deploy-dashboard.yaml \
+              --branch main \
+              --event workflow_dispatch \
+              --status "${status}" \
+              --limit 100 \
+              --json databaseId,createdAt \
+              --jq '.[] | [.databaseId, .createdAt] | @tsv' 2>&1)"; then
+              echo "::warning::Unable to list ${status} dashboard runs: ${runs}"
+              continue
+            fi
+
+            while IFS=$'\t' read -r run_id created_at; do
+              [[ -n "${run_id}" && "${run_id}" != "${TRIGGER_RUN_ID}" ]] || continue
+
+              if (( run_id >= TRIGGER_RUN_ID )); then
+                echo "left ${run_id} (${status}, ${created_at})"
+                continue
+              fi
+
+              if err="$(gh api --method POST "repos/${GH_REPO}/actions/runs/${run_id}/cancel" --silent 2>&1)"; then
+                echo "cancelled ${run_id} (${status}, ${created_at})"
+              else
+                http_status="$(grep -oE 'HTTP [0-9]{3}' <<<"${err}" | head -n 1 || true)"
+                echo "::warning::Could not cancel dashboard run ${run_id}: ${http_status:-HTTP status unknown}"
+                echo "left ${run_id} (${status}, ${created_at})"
+              fi
+            done <<<"${runs}"
+          done
+
+          exit 0

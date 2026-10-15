@@ -70,14 +70,15 @@ In CI the SSH key is materialized from `DASHBOARD_SSH_KEY` to a temp file with a
 - The job declares `contents: read` and `actions: read`; a job-level `permissions:` block replaces the
   workflow-level block rather than merging. The router caller grants the same pair, and
   `packages/cli/src/conventions.test.ts` enforces the parity.
-- An environment-gated run cannot be cancelled through the Actions cancel API: the request is accepted
-  but does nothing. Only rejecting the pending deployment clears it, which requires a required-reviewer
-  identity unavailable to the workflow token. Stale runs therefore cannot be prevented; approval is
-  made harmless instead. The stale run fails quickly, freeing the concurrency slot for the newer run.
+- Cancelling an environment-gated run through the Actions cancel API is inconsistent: it has both
+  no-opped and succeeded with the owner's token. Always read back the run status. Rejecting the
+  pending deployment always works but requires a required-reviewer identity. If a stale run is
+  approved anyway, it fails quickly, freeing the concurrency slot for the newer run.
 - Any newer run takes precedence regardless of its outcome. If it was rejected or failed, the older run still
   refuses to deploy; dispatch a fresh run rather than approving the original. A transient `gh run list`
   API failure hard-fails before deployment secrets are touched — deliberate fail-closed behavior that
   costs one approval click.
+- `cancel-superseded-dashboard-deploys.yaml` cancels older waiting `workflow_dispatch` runs on `main` when a newer `Deploy Dashboard` run is requested (best-effort: it fails open, and whether the workflow token can cancel a gated run is unverified); router-dispatched runs (`Deploy` via `workflow_call`) are not cancelled.
 
 ### Retention and failure handling
 

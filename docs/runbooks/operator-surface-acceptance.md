@@ -1,8 +1,8 @@
 # Operator Surface Acceptance
 
-Browser acceptance checklist for the operator surface at `https://dashboard.fro.bot`. Run it after every paired gateway + dashboard operator-contract upgrade. Current pair: gateway `fro-bot/agent` v0.119.2 + dashboard 2026.10.20, operator contract 1.9.0. Elsewhere in this runbook, `<expected>` means the contract version of the pair under test.
+Browser acceptance checklist for the operator surface at `https://dashboard.fro.bot`. Run it after every paired gateway + dashboard operator-contract upgrade. Current pair: gateway `fro-bot/agent` v0.122.1 + dashboard 2026.10.27, operator contract 1.11.0. Elsewhere in this runbook, `<expected>` means the contract version of the pair under test.
 
-Each check lists how to trigger it, what you should see, and what failure looks like. Run the checks in order; [logout](#13-logout-and-csrf) is last because it ends your session.
+Each check lists how to trigger it, what you should see, and what failure looks like. Run the checks in order; [logout](#14-logout-and-csrf) is last because it ends your session.
 
 This runbook does not repeat setup or rotation procedures:
 
@@ -94,11 +94,10 @@ Run each of the following on a separate run:
 1. Trigger a permission request (see TODO). Expect: the card shows a waiting-for-approval status with buttons "Once", "Always", and "Reject".
 2. **Once:** press "Once". Expect: the request clears from the card and the run proceeds. Failure: the request stays pending or the run stalls.
 3. **Reject:** on a new run, press "Reject". Expect: the request clears from the card. Failure: the request stays pending or the tool still executes.
-4. **Always:** on a new run, press "Always". Expect: a second control, "Confirm always", appears and nothing is applied until you press it. After confirming, matching requests for the rest of that run no longer prompt; a new run prompts again. Failure: "Always" applies without confirmation, or applies beyond that run.
+4. **Collapsed status.** While a request is pending, collapse the card and let the run list refresh. Expect: the card's status badge reads "Waiting for approval". Failure: the collapsed card still reads "Running".
+5. **Always:** on a new run, press "Always". Expect: a second control, "Confirm always", appears and nothing is applied until you press it. After confirming, matching requests for the rest of that run no longer prompt; a new run prompts again. Failure: "Always" applies without confirmation, or applies beyond that run.
 
 ### 10. Agent question
-
-Contract 1.9.0.
 
 Trigger prompt (practical, not guaranteed): "Before doing anything, use the question tool to ask me whether to choose A or B."
 
@@ -108,6 +107,7 @@ Trigger prompt (practical, not guaranteed): "Before doing anything, use the ques
 4. **Discord settlement.** On a separate run, answer the same question in Discord. Expect: the question clears from the web card without any action there. Failure: the card keeps showing an answered question.
 5. **Run ends with question open.** Launch a run that raises a question, then cancel it or let it end without answering. Expect: the question clears from the card. Failure: a stale question remains on a finished run.
 6. **Push.** With push subscribed, raise a question while the dashboard tab is in the background. Expect: a notification titled "Answer needed" with body "A run is waiting for your answer." and no question content. Failure: no notification, a different title/body, or any question text in the notification.
+7. **Collapsed status.** While a question is open, collapse the card and let the run list refresh. Expect: the card's status badge reads "Waiting for answer". Failure: the collapsed card still reads "Running".
 
 ### 11. Expired output
 
@@ -121,11 +121,21 @@ The gateway keeps terminal replay snapshots in memory for 10 minutes (at most 50
 
 Subscribe first if needed; see [`operator-push-enablement.md`](operator-push-enablement.md#step-5-verify-end-to-end-in-the-browser).
 
-1. Question delivery: covered by [check 10, step 6](#10-agent-question). This is the check specific to contract 1.9.0.
+1. Question delivery: covered by [check 10, step 6](#10-agent-question); tapping the notification is covered by [check 13](#13-question-notification-deep-link).
 2. Approval-pending and run-failed delivery: trigger one of each and expect a notification to arrive in the browser. These are regression spot checks.
-3. Failure: no notification arrives. A `401` from the push routes proves only that they are mounted, not that delivery works; see the caveats in [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats).
+3. Push health: while signed in, run `(await fetch('/operator/session', { credentials: 'same-origin' }).then(r => r.json())).push` in the DevTools Console. Expect: `{status: "ready"}` after the deliveries above. `degraded` or `unknown` is a failure to investigate; see [`operator-push-enablement.md`](operator-push-enablement.md#post-boot-push-health). An absent field means push is not configured.
+4. Failure: no notification arrives. A `401` from the push routes proves only that they are mounted, not that delivery works; see the caveats in [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats).
 
-### 13. Logout and CSRF
+### 13. Question notification deep link
+
+Push subscribed; raise a question with the trigger prompt from [check 10](#10-agent-question).
+
+1. **Dashboard open.** Leave the dashboard open in a tab and tap or click the "Answer needed" notification. Expect: the browser focuses the dashboard window and the run that raised the question opens, with the run ID as the URL fragment. If the tab was loaded before the current service worker took control, a new window opens instead; reload the tab and repeat.
+2. **Dashboard closed.** Close every dashboard tab or window, raise a question, and tap the notification. Expect: a new window opens at `/#<runId>` with that run open. Failure: the window opens at `/` with no run open.
+3. **iOS/iPadOS.** Repeat steps 1 and 2 with the installed PWA, once with it backgrounded and once with it closed.
+4. Failure for any step: the dashboard is not focused or opened, the wrong run opens, or the notice "That run isn't in your recent runs." appears for a run that is in the list.
+
+### 14. Logout and CSRF
 
 Do this last. All snippets run in the DevTools Console on `https://dashboard.fro.bot`; the token stays in a page variable and is never printed.
 
@@ -185,7 +195,7 @@ Comment on [fro-bot/.github#3512](https://github.com/fro-bot/.github/issues/3512
 - The health JSON from check 1.
 - The `contractVersion` from the `ready` frame in check 4.
 - Pass, fail, or skipped for each numbered check.
-- Run IDs for every failure, and for checks 7–11.
+- Run IDs for every failure, and for checks 7–11 and 13.
 - The working approval prompt, once found (check 9).
 
 Do not include cookies, tokens, CSRF values, or notification endpoints.

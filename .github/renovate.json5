@@ -86,6 +86,11 @@
       matchDatasources: ['github-releases'],
       matchPackageNames: ['fro-bot/agent'],
       groupName: null,
+      // The fro-bot/agent GitHub Action pin (github-tags datasource) shares this depName and
+      // would otherwise land on the same branch, so the approval gate below would hold it too.
+      // A distinct branch (renovate/gateway-fro-bot-agent-0.x) and commit topic keep them apart.
+      additionalBranchPrefix: 'gateway-',
+      commitMessageTopic: 'Fro Bot gateway daemon (fro-bot/agent)',
       // Each fro-bot/agent bump rebuilds and redeploys the executable gateway daemon, so it must
       // not inherit the fro-bot/** minor+patch automerge from the shared preset. Require explicit
       // operator approval (dashboard checkbox to create the PR, manual merge) so every daemon bump
@@ -126,6 +131,18 @@
       datasourceTemplate: 'github-tags',
       extractVersionTemplate: '^renovate-changesets@(?<version>.+)$',
       versioningTemplate: 'semver',
+    },
+    {
+      customType: 'regex',
+      // The gateway renders its Caddy service from the CADDY_IMAGE constant in deploy.ts, which
+      // the docker-compose manager cannot see. Extracting it as the same docker dep (`caddy`)
+      // applies the Caddy packageRule above and puts it on the same renovate/caddy-2.x branch as
+      // the compose pins, so one PR moves every Caddy pin together.
+      managerFilePatterns: ['/^apps/gateway/src/deploy\\.ts$/'],
+      matchStrings: [
+        "const CADDY_IMAGE = '(?<depName>caddy):(?<currentValue>[^@']+)@(?<currentDigest>sha256:[a-f0-9]{64})'",
+      ],
+      datasourceTemplate: 'docker',
     },
   ],
   // postUpgradeTasks run after Renovate applies file changes but before the commit.

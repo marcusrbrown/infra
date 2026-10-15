@@ -31,6 +31,41 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 - **Healthcheck**: lives on the `caddy` service, not `cli-proxy-api`. Caddy (alpine, has wget) runs `wget --spider -q http://cli-proxy-api:8317/healthz` across the compose network. `docker compose up -d --wait` gates on Caddy-healthy, which transitively proves the proxy is serving.
 - **Volumes**: `caddy_data`, `caddy_config`, `cliproxy_auth` (OAuth tokens persist here across container recreates).
 - **Env file**: `MANAGEMENT_PASSWORD` injected from host `.env` into the container.
+- **Network**: both services join the named bridge network `cliproxy` (`172.28.0.0/24`); Caddy's address is pinned to `172.28.0.2` in `docker-compose.yaml`.
+
+### Trusted proxy
+
+CLIProxyAPI bans by `c.ClientIP()` (gin). With the default `trusted-proxies: []` that is Caddy's address, so one client sending bad management keys bans every caller, including the deploy preflight. `config/config.yaml` therefore sets `trusted-proxies: [172.28.0.2]` — exactly Caddy's pinned address, enforced by `docker-compose.test.ts`. The setting is read at startup only and has no management endpoint, so it applies with a `cli-proxy-api` restart. Deploy never uploads `config.yaml` over an existing server, so an existing server needs this one-off operator edit, run only after the deploy that pins Caddy to `172.28.0.2` has finished. Confirm that first:
+
+```bash
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(docker compose ps -q caddy)"   # expect 172.28.0.2
+```
+
+1. `cd /opt/cliproxy`
+2. `cp config/config.yaml config/config.yaml.bak-$(date -u +%Y%m%dT%H%M%SZ)`
+3. Add the key if it is absent. `yq` is not on the stock `docker-20-04` droplet image, so append; this runs only when no top-level `trusted-proxies:` exists and otherwise stops for a manual edit. It appends in place (`>>`), which keeps the file's inode, comments and every other key, so the single-file bind mount stays valid:
+
+   ```bash
+   if grep -q '^trusted-proxies:' config/config.yaml; then
+     echo 'trusted-proxies already present — edit it by hand, then continue at step 4' >&2
+   else
+     [ -z "$(tail -c1 config/config.yaml)" ] || echo >> config/config.yaml
+     printf "trusted-proxies: [172.28.0.2]\n" >> config/config.yaml
+   fi
+   ```
+
+   Do not use `sed -i` or `mv`; they replace the inode and detach the bind mount. Never `PUT /v0/management/config.yaml`.
+
+4. `docker compose restart cli-proxy-api`
+5. Verify. Health must return 200, then one request through Caddy must log your real address:
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' https://cliproxy.fro.bot/healthz        # expect 200
+   curl -s -o /dev/null https://cliproxy.fro.bot/v1/models                         # from your workstation
+   docker compose logs --since 2m --no-log-prefix cli-proxy-api | grep '"/v1/models"'
+   ```
+
+   The log line's third `|`-separated field is the client IP. It must be your workstation's public address, not `172.28.0.2` (or the old `172.18.0.3`). A request that still shows a `172.x` address means the setting did not apply: check the key is top-level and the container restarted. To roll back, `cp` the `.bak-*` file over `config/config.yaml` and restart again.
 
 ## MANAGEMENT API
 
@@ -86,6 +121,7 @@ Anthropic-only repos use the single-provider subset of these shapes (unchanged f
 - **Never use `Authorization: Bearer` for management endpoints** — use `x-management-key`.
 - **Never assume management API body shapes** — empirically verified, not guessed (incident: 2026-04-07).
 - **v7 IP-bans the caller after 5 consecutive bad management-key attempts (~30 min).** Management flows probe `/v0/management/config` once before issuing parallel calls so a wrong key costs a single failed attempt, never an escalating burst.
+- **Never trust the whole subnet or the default network in `trusted-proxies`** — list only Caddy's pinned address (`172.28.0.2`). Trusting a range lets any container on it spoof the client IP and dodge or redirect management bans.
 - **Never commit `MANAGEMENT_PASSWORD`** — it lives in the droplet's `.env` and the local `CLIPROXY_MANAGEMENT_KEY` secret.
 - **Never use `curl` in healthchecks** — only `wget` is in the Alpine base (Caddy image). The cli-proxy-api image (Debian bookworm, v7.1.54+) has no probe tools; healthcheck belongs on the caddy service.
 

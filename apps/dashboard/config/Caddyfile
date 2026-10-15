@@ -7,22 +7,7 @@
 			header_up X-Forwarded-Proto https
 		}
 	}
-	handle /api/* {
-		reverse_proxy dashboard:3000
-	}
-	handle /auth/* {
-		reverse_proxy dashboard:3000
-	}
-	@assets path_regexp \.[A-Za-z0-9]+$
-	handle @assets {
-		reverse_proxy dashboard:3000
-	}
-	@privacy path /privacy /privacy/
-	handle @privacy {
-		reverse_proxy dashboard:3000
-	}
 	handle {
-		rewrite * /
 		reverse_proxy dashboard:3000
 	}
 }

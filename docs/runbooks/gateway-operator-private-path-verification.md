@@ -217,8 +217,8 @@ registered `/operator/push/*` routes all exist. Root `AGENTS.md` carries the cur
 the source of truth rather than duplicating it here.
 
 Bare `/operator/` returns `{"error":"not-found"}` (HTTP 404) by design. Bare `/operator` (no trailing
-slash) never reaches the gateway at all — it does not match Caddy's `/operator/*` prefix, falls through
-to the dashboard SPA catch-all, and returns `302`. Use `/operator/health` as the health surface and
+slash) never reaches the gateway at all — it does not match Caddy's `/operator/*` prefix and goes to
+the dashboard app, which returns `302` to login without a session and `404` with one. Use `/operator/health` as the health surface and
 `/operator/auth/github/start` as the login surface.
 
 ---

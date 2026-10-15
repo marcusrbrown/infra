@@ -270,6 +270,10 @@ handle /operator/* {
 - The `handle` block must appear **before** the `reverse_proxy dashboard:3000` catch-all — Caddy
   compiles directives in fixed order, not source order; a bare catch-all sorts ahead and self-404s
   a matched route.
+- The dashboard app owns all other routing. The Caddyfile has two handles: `/operator/*` → gateway,
+  everything else → `dashboard:3000` with no rewrite. A new public page needs only the app's
+  `isPublicPath` allowlist in `fro-bot/dashboard`; client path routes, if ever added, need an
+  app-side fallback, not a Caddy `rewrite`.
 
 **Required env var:**
 

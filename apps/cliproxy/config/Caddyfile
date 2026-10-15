@@ -1,4 +1,33 @@
 # Caddy automatically provisions and renews HTTPS certificates via Let's Encrypt.
+{
+  # Default logger (runtime and proxy-error logs): proxy errors log the full request, including
+  # credential headers Caddy does not redact on its own (X-Management-Key, X-Api-Key). Delete them.
+  log {
+    format filter {
+      wrap json
+      request>headers>X-Management-Key delete
+      request>headers>Authorization delete
+      request>headers>Cookie delete
+      request>headers>X-Api-Key delete
+    }
+  }
+}
+
 {$CLIPROXY_DOMAIN} {
+  # Management-only access log: CLIProxyAPI bans the proxy's source IP (Caddy) after 5 bad
+  # management keys, so this identifies which client is sending them. Key headers are deleted.
+  @not_management not path /v0/management/*
+  log_skip @not_management
+  log {
+    output stdout
+    format filter {
+      wrap json
+      request>headers>X-Management-Key delete
+      request>headers>Authorization delete
+      request>headers>Cookie delete
+      request>headers>X-Api-Key delete
+    }
+  }
+
   reverse_proxy cli-proxy-api:8317
 }

@@ -2791,6 +2791,84 @@ describe('deploy-dashboard.yaml: job timeout-minutes', () => {
   })
 })
 
+// ─── cancel-superseded-dashboard-deploys.yaml ────────────────────────────────
+//
+// Issue #1487: an older dashboard dispatch parked at the environment approval gate holds the
+// concurrency slot. This workflow cancels older waiting runs when a newer one is requested.
+// It must stay least-privilege, ungrouped (a group would queue it behind the very runs it
+// exists to cancel), and fail open.
+
+describe('cancel-superseded-dashboard-deploys.yaml: contract', () => {
+  const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/cancel-superseded-dashboard-deploys.yaml')
+
+  interface CancelWorkflow {
+    on?: {workflow_run?: {workflows?: string[]; types?: string[]}}
+    permissions?: Record<string, string>
+    concurrency?: unknown
+    jobs?: Record<
+      string,
+      {
+        if?: string
+        permissions?: Record<string, string>
+        concurrency?: unknown
+        'timeout-minutes'?: number
+        steps?: {run?: string; env?: Record<string, string>}[]
+      }
+    >
+  }
+
+  async function load(): Promise<{text: string; parsed: CancelWorkflow}> {
+    const text = await Bun.file(WORKFLOW).text()
+    return {text, parsed: parseYaml(text) as CancelWorkflow}
+  }
+
+  it('triggers only on requested runs of the exact Deploy Dashboard workflow name', async () => {
+    const {parsed} = await load()
+    const workflowName = 'Deploy Dashboard'
+    const dashboard = parseYaml(
+      await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')).text(),
+    ) as {name?: string}
+    expect(dashboard.name).toBe(workflowName)
+    expect(parsed.on).toEqual({workflow_run: {workflows: [workflowName], types: ['requested']}})
+  })
+
+  it('gates on dispatched runs from main', async () => {
+    const {parsed} = await load()
+    const condition = parsed.jobs?.['cancel-superseded']?.if ?? ''
+    expect(condition).toContain("github.event.workflow_run.event == 'workflow_dispatch'")
+    expect(condition).toContain("github.event.workflow_run.head_branch == 'main'")
+  })
+
+  it('has least-privilege permissions, no concurrency group, no secrets, and a timeout', async () => {
+    const {text, parsed} = await load()
+    expect(parsed.permissions).toEqual({contents: 'read'})
+    expect(Object.keys(parsed.jobs ?? {})).toEqual(['cancel-superseded'])
+    const job = parsed.jobs?.['cancel-superseded']
+    expect(job?.permissions).toEqual({actions: 'write'})
+    expect(job?.['timeout-minutes']).toBe(5)
+    expect(parsed.concurrency).toBeUndefined()
+    expect(job?.concurrency).toBeUndefined()
+    expect(text).not.toMatch(/secrets\./)
+    expect(text).not.toContain('secrets: inherit')
+  })
+
+  it('fails open: cancel failures warn with the run ID and HTTP status, readback is bounded, and the step exits 0', async () => {
+    const {parsed} = await load()
+    const step = parsed.jobs?.['cancel-superseded']?.steps?.[0]
+    const run = step?.run ?? ''
+    expect(run).toContain('::warning::Could not cancel dashboard run $' + '{run_id}: $' + '{http_status')
+    expect(run).toContain('HTTP [0-9]{3}')
+    expect(run).toContain('cancel requested $' + '{run_id}')
+    expect(run).toContain('gh run view "$' + '{run_id}" --json status,conclusion')
+    expect(run).toContain('for attempt in 1 2 3 4 5 6; do')
+    expect(run).toContain('sleep 5')
+    expect(run).toContain('after a cancel request; cancel it by hand')
+    expect(run).not.toMatch(/^\s*set -[a-z]*e/m)
+    expect(run.trimEnd().endsWith('exit 0')).toBe(true)
+    expect(step?.env?.GH_TOKEN).toBe('$' + '{{ github.token }}')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // fro-bot.yaml: progressive autoheal U2 contract
 // ---------------------------------------------------------------------------

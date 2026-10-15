@@ -1,0 +1,102 @@
+# A dashboard run waiting at its approval gate holds the deploy-dashboard concurrency slot, and
+# newer runs queue behind it without starting a job. This cancels the older dispatched runs
+# when a newer one is requested. Fails open; router-dispatched runs are not covered.
+
+name: Cancel Superseded Dashboard Deploys
+
+on:
+  workflow_run:
+    workflows: [Deploy Dashboard]
+    types: [requested]
+
+permissions:
+  contents: read
+
+jobs:
+  cancel-superseded:
+    if: ${{ github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    timeout-minutes: 5
+    steps:
+      - name: Cancel older waiting dashboard deploy runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          requested_ids=()
+
+          for status in waiting queued pending; do
+            if ! runs="$(gh run list \
+              --workflow deploy-dashboard.yaml \
+              --branch main \
+              --event workflow_dispatch \
+              --status "${status}" \
+              --limit 100 \
+              --json databaseId,createdAt \
+              --jq '.[] | [.databaseId, .createdAt] | @tsv' 2>&1)"; then
+              echo "::warning::Unable to list ${status} dashboard runs: ${runs}"
+              continue
+            fi
+
+            while IFS=$'\t' read -r run_id created_at; do
+              [[ -n "${run_id}" && "${run_id}" != "${TRIGGER_RUN_ID}" ]] || continue
+
+              if (( run_id >= TRIGGER_RUN_ID )); then
+                echo "left ${run_id} (${status}, ${created_at})"
+                continue
+              fi
+
+              if err="$(gh api --method POST "repos/${GH_REPO}/actions/runs/${run_id}/cancel" --silent 2>&1)"; then
+                echo "cancel requested ${run_id} (${status}, ${created_at})"
+                requested_ids+=("${run_id}")
+              else
+                http_status="$(grep -oE 'HTTP [0-9]{3}' <<<"${err}" | head -n 1 || true)"
+                echo "::warning::Could not cancel dashboard run ${run_id}: ${http_status:-HTTP status unknown}"
+                echo "left ${run_id} (${status}, ${created_at})"
+              fi
+            done <<<"${runs}"
+          done
+
+          # An accepted cancel request is not a cancelled run: approval-gated runs may ignore it.
+          # Read back up to 6 times, 5s apart, across all requested runs at once.
+          declare -A last_status=()
+          pending_ids=("${requested_ids[@]}")
+          for attempt in 1 2 3 4 5 6; do
+            [[ ${#pending_ids[@]} -gt 0 ]] || break
+            (( attempt == 1 )) || sleep 5
+
+            still_pending=()
+            for run_id in "${pending_ids[@]}"; do
+              if view="$(gh run view "${run_id}" --json status,conclusion --jq '[.status, .conclusion] | @tsv' 2>&1)"; then
+                IFS=$'\t' read -r run_status conclusion <<<"${view}"
+                if [[ "${run_status}" == "completed" ]]; then
+                  if [[ "${conclusion}" == "cancelled" ]]; then
+                    echo "cancelled ${run_id}"
+                  else
+                    echo "finished ${run_id} (conclusion: ${conclusion:-unknown})"
+                  fi
+                  continue
+                fi
+                last_status["${run_id}"]="${run_status}"
+              else
+                echo "::warning::Could not read back dashboard run ${run_id}: ${view}"
+              fi
+              still_pending+=("${run_id}")
+            done
+            pending_ids=("${still_pending[@]}")
+          done
+
+          if [[ ${#pending_ids[@]} -gt 0 ]]; then
+            for run_id in "${pending_ids[@]}"; do
+              final_status="${last_status[${run_id}]:-unknown}"
+              echo "::warning::Run ${run_id} is still ${final_status} after a cancel request; cancel it by hand"
+            done
+          fi
+
+          exit 0

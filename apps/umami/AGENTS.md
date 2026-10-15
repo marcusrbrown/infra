@@ -174,10 +174,12 @@ REMOTE="root@${HOST}"
 Run this before taking the recovery backup and again before enabling the timer. Run it from the repo root. It checks that the deployed compose file pins the same Umami/Postgres images as `apps/umami/docker-compose.yaml`, then container state, content-addressed `current` target, the five file hashes, and the deploy hash algorithm:
 
 ```bash
-DEPLOYED_IMAGES="$(ssh "$REMOTE" 'docker compose -f /opt/umami/docker-compose.yaml config --images')"
-awk '$1 == "image:" && $2 ~ /^(umamisoftware\/umami|postgres):/ { print $2 }' apps/umami/docker-compose.yaml |
-  while read -r ref; do grep -Fx "$ref" <<<"$DEPLOYED_IMAGES" || printf 'deployed compose does not pin %s\n' "$ref" >&2; done
-ssh "$REMOTE" 'set -Eeuo pipefail
+EXPECTED_IMAGES="$(awk '$1 == "image:" && $2 ~ /^(umamisoftware\/umami|postgres):/ { print $2 }' apps/umami/docker-compose.yaml)"
+ssh "$REMOTE" "EXPECTED_IMAGES='$EXPECTED_IMAGES'"'
+set -Eeuo pipefail
+[ "$(printf "%s\n" "$EXPECTED_IMAGES" | wc -l)" -eq 2 ]
+deployed_images="$(docker compose -f /opt/umami/docker-compose.yaml config --images)"
+while read -r ref; do grep -Fx "$ref" <<<"$deployed_images"; done <<<"$EXPECTED_IMAGES"
 docker compose -f /opt/umami/docker-compose.yaml ps --all
 current_target="$(readlink -e /opt/umami/retention/current)"
 case "$current_target" in

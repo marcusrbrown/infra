@@ -8,7 +8,7 @@ Privacy-respecting, self-hosted [Umami](https://umami.is) web analytics for `met
 | --- | --- | --- |
 | `umami` | `umamisoftware/umami:3.3.1@sha256:4f7d2b788f4ee84432f3119203656ed2083074f3656c63b3b5905be06b3b8462` | App + tracker API on `:3000` |
 | `db` | `postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b` | Postgres; named volume `umami-db-data` |
-| `caddy` | `caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648` | Auto-TLS reverse proxy `:443 → umami:3000` |
+| `caddy` | `caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f` | Auto-TLS reverse proxy `:443 → umami:3000` |
 
 Images are pinned to numbered tags by digest and tracked by Renovate (changelog-linked, standalone PRs). Postgres port `5432` is never published to the host.
 

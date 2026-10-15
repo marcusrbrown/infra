@@ -19,10 +19,12 @@ const config = asRecord(Bun.YAML.parse(configText), 'config.yaml')
 
 const caddyNetworks = asRecord(caddy.networks, 'caddy.networks')
 const caddyAddress = asRecord(caddyNetworks.cliproxy, 'caddy.networks.cliproxy').ipv4_address
-const declaredSubnets = (
-  (asRecord(asRecord(asRecord(compose.networks, 'networks').cliproxy, 'networks.cliproxy').ipam, 'ipam')
-    .config as unknown[]) ?? []
-).map(entry => asRecord(entry, 'ipam.config entry').subnet)
+const ipamEntries = (
+  asRecord(asRecord(asRecord(compose.networks, 'networks').cliproxy, 'networks.cliproxy').ipam, 'ipam')
+    .config as unknown[]
+).map(entry => asRecord(entry, 'ipam.config entry'))
+const declaredSubnets = ipamEntries.map(entry => entry.subnet)
+const declaredRanges = ipamEntries.map(entry => entry.ip_range)
 
 /** IPv4 dotted quad → unsigned 32-bit integer. */
 function ipv4ToInt(address: string): number {
@@ -33,13 +35,25 @@ function ipv4ToInt(address: string): number {
   return octets.reduce((acc, octet) => acc * 256 + octet, 0)
 }
 
-function inSubnet(address: string, cidr: string): boolean {
+/** First and last address of an IPv4 CIDR, as integers. */
+function cidrBounds(cidr: string): {first: number; last: number} {
   const [base, prefix] = cidr.split('/')
   if (base === undefined || prefix === undefined) throw new Error(`not a CIDR: ${cidr}`)
   const size = 2 ** (32 - Number(prefix))
-  const network = Math.floor(ipv4ToInt(base) / size) * size
+  const first = Math.floor(ipv4ToInt(base) / size) * size
+  return {first, last: first + size - 1}
+}
+
+function inSubnet(address: string, cidr: string): boolean {
+  const {first, last} = cidrBounds(cidr)
   const target = ipv4ToInt(address)
-  return target >= network && target < network + size
+  return target >= first && target <= last
+}
+
+function cidrWithin(inner: string, outer: string): boolean {
+  const a = cidrBounds(inner)
+  const b = cidrBounds(outer)
+  return a.first >= b.first && a.last <= b.last
 }
 
 describe('cliproxy docker compose', () => {
@@ -66,6 +80,16 @@ describe('cliproxy trusted proxy network', () => {
     expect(declaredSubnets).toHaveLength(1)
     expect(typeof caddyAddress).toBe('string')
     expect(inSubnet(String(caddyAddress), String(declaredSubnets[0]))).toBe(true)
+  })
+
+  // Docker hands the first free subnet address to the first container started. cli-proxy-api starts
+  // before Caddy (depends_on), so without a dynamic range it would take Caddy's pinned address.
+  it("keeps dynamic allocation out of Caddy's pinned address with an ip_range inside the subnet", () => {
+    expect(declaredRanges).toHaveLength(1)
+    const range = declaredRanges[0]
+    expect(typeof range).toBe('string')
+    expect(cidrWithin(String(range), String(declaredSubnets[0]))).toBe(true)
+    expect(inSubnet(String(caddyAddress), String(range))).toBe(false)
   })
 
   it("trusts exactly Caddy's pinned address in the config template", () => {

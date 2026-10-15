@@ -11,6 +11,11 @@ const config = caddyfile
 
 const CREDENTIAL_HEADERS = ['X-Management-Key', 'Authorization', 'Cookie', 'X-Api-Key']
 
+// Query parameters that carry credentials on the management surface: `value` (api-keys DELETE, used by
+// `cliproxy keys remove` and the broker revoke), `api-key` (provider-key deletes), `code` and `state`
+// (OAuth callback). `replace` keeps the parameter visible so a redacted call is still recognizable.
+const CREDENTIAL_QUERY_PARAMS = ['value', 'api-key', 'code', 'state']
+
 /** Body of the brace-balanced block opened by the final `{` of `opener`'s match. */
 function blockAfter(text: string, opener: RegExp): string {
   const match = opener.exec(text)
@@ -28,6 +33,10 @@ function blockAfter(text: string, opener: RegExp): string {
 const siteBlock = blockAfter(config, /^\{\$CLIPROXY_DOMAIN\} \{/m)
 const siteLogBlock = blockAfter(siteBlock, /^\s*log \{/m)
 const globalLogBlock = blockAfter(blockAfter(config, /^\{(?=\n)/m), /^\s*log \{/m)
+const queryFilterLines = (logBlock: string): string[] =>
+  blockAfter(logBlock, /^\s*request>uri query \{/m)
+    .split('\n')
+    .map(line => line.trim())
 
 describe('cliproxy Caddyfile logging', () => {
   it('logs only management API requests', () => {
@@ -49,6 +58,15 @@ describe('cliproxy Caddyfile logging', () => {
   // Proxy errors log the full request through the default logger, outside the site `log` block.
   it.each(CREDENTIAL_HEADERS)('deletes the %s request header from the default (error) logger', header => {
     expect(globalLogBlock).toContain(`request>headers>${header} delete`)
+  })
+
+  it.each(CREDENTIAL_QUERY_PARAMS)('redacts the %s query parameter in the access log', param => {
+    expect(queryFilterLines(siteLogBlock)).toContain(`replace ${param} REDACTED`)
+  })
+
+  // Proxy errors in the default logger also carry `request>uri`.
+  it.each(CREDENTIAL_QUERY_PARAMS)('redacts the %s query parameter in the default (error) logger', param => {
+    expect(queryFilterLines(globalLogBlock)).toContain(`replace ${param} REDACTED`)
   })
 
   it('keeps reverse_proxy pointed at cli-proxy-api', () => {

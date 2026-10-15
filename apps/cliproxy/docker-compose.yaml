@@ -53,6 +53,8 @@ networks:
     ipam:
       config:
         - subnet: 172.28.0.0/24
+          # Dynamic addresses come from here, so cli-proxy-api never takes Caddy's pinned .2.
+          ip_range: 172.28.0.128/25
 
 volumes:
   caddy_data:

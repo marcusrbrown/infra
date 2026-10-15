@@ -26,12 +26,12 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 
 ## DOCKER STACK
 
-- **Caddy**: HTTPS termination, auto Let's Encrypt. `restart: unless-stopped`. Logs only `/v0/management/*` requests (JSON on stdout, credential headers deleted) so a client sending bad management keys can be identified; `json-file` logs are capped at 3 × 10 MB. Read it on the droplet: `cd /opt/cliproxy && docker compose logs --no-log-prefix caddy | jq -Rr 'fromjson? | select(.logger == "http.log.access.log0") | [(.ts | todate), .request.client_ip, .request.method, .request.uri, .status, (.request.headers["User-Agent"][0] // "-")] | @tsv'` — add `and .status == 401` to the `select` for bad-key callers.
+- **Caddy**: HTTPS termination, auto Let's Encrypt. `restart: unless-stopped`. Logs only `/v0/management/*` requests (JSON on stdout, credential headers deleted, credential query parameters `value`, `api-key`, `code` and `state` redacted in both this log and the default error logger) so a client sending bad management keys can be identified; `json-file` logs are capped at 3 × 10 MB. Read it on the droplet: `cd /opt/cliproxy && docker compose logs --no-log-prefix caddy | jq -Rr 'fromjson? | select(.logger == "http.log.access.log0") | [(.ts | todate), .request.client_ip, .request.method, .request.uri, .status, (.request.headers["User-Agent"][0] // "-")] | @tsv'` — add `and .status == 401` to the `select` for bad-key callers.
 - **cli-proxy-api**: `eceasy/cli-proxy-api`, pinned by tag and digest in `docker-compose.yaml` and bumped by Renovate — read the `image:` line for the current version rather than trusting a copy here. Debian bookworm base (v7.1.54+, no wget/curl). `restart: unless-stopped`. No container healthcheck — the upstream Debian image ships no probe tools; Caddy probes the backend instead (see below).
 - **Healthcheck**: lives on the `caddy` service, not `cli-proxy-api`. Caddy (alpine, has wget) runs `wget --spider -q http://cli-proxy-api:8317/healthz` across the compose network. `docker compose up -d --wait` gates on Caddy-healthy, which transitively proves the proxy is serving.
 - **Volumes**: `caddy_data`, `caddy_config`, `cliproxy_auth` (OAuth tokens persist here across container recreates).
 - **Env file**: `MANAGEMENT_PASSWORD` injected from host `.env` into the container.
-- **Network**: both services join the named bridge network `cliproxy` (`172.28.0.0/24`); Caddy's address is pinned to `172.28.0.2` in `docker-compose.yaml`.
+- **Network**: both services join the named bridge network `cliproxy` (`172.28.0.0/24`). Caddy's address is pinned to `172.28.0.2` in `docker-compose.yaml`; the network's `ip_range` (`172.28.0.128/25`) keeps dynamic allocation off that address, because Docker gives the first free subnet address to the first container started and `cli-proxy-api` starts before Caddy.
 
 ### Trusted proxy
 

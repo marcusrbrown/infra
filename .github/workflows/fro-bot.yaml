@@ -231,6 +231,22 @@ env:
        successful deploy). Use `gh run list --workflow=deploy.yaml` (and
        the per-app deploy job conclusions) to evaluate this.
 
+       LAST DEPLOY EVIDENCE (applies to every app below): the deploy
+       JOB conclusion is the evidence, never the run conclusion. An
+       app's last deploy is the newest run with a job named
+       `deploy-<app>` (inside a Deploy router run the job is named
+       `deploy-<app> / deploy-<app>`) whose conclusion is `success`.
+       Check both sources and take whichever is newer: `gh run list
+       --workflow deploy.yaml -L 20 --json
+       databaseId,createdAt,conclusion` and `gh run list --workflow
+       deploy-<app>.yaml -L 20 --json databaseId,createdAt,conclusion`,
+       then `gh run view <run-id> --json jobs` on each candidate to read
+       the deploy job conclusion. A deploy job that is `skipped` or
+       `cancelled` is NOT a deploy, even when the run concluded
+       `success` — this includes router runs where `detect-changes`
+       skipped the app. The AT-GATE rules below still apply to a
+       waiting job or one cancelled before any step ran.
+
        AT-GATE vs RAN: classify the candidate by whether the app's deploy
        job ever ran a step. Read `gh run view <run-id> --json jobs` and
        look at the deploy job (deploy-<app>). It is AT-GATE when the run

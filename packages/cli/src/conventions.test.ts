@@ -3248,6 +3248,37 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     })
   })
 
+  describe('Deploy Pipeline Health: deploy job conclusion is the last-deploy evidence', () => {
+    it('treats the deploy job conclusion, not the run conclusion, as the evidence', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('LAST DEPLOY EVIDENCE (applies to every app below)')
+      expect(strandedCheck).toMatch(/the deploy JOB conclusion is the evidence, never the run conclusion/i)
+      expect(strandedCheck).toMatch(/job named `deploy-<app>`[^.]*whose conclusion is `success`/i)
+    })
+
+    it('does not count skipped or cancelled deploy jobs, even inside a successful run', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toMatch(
+        /deploy job that is `skipped` or `cancelled` is NOT a deploy, even when the run concluded `success`/i,
+      )
+      expect(strandedCheck).toMatch(/router runs where `detect-changes` skipped the app/i)
+      expect(strandedCheck).toMatch(
+        /AT-GATE rules below still apply to a waiting job or one cancelled before any step ran/i,
+      )
+    })
+
+    it('includes router deploy-<app> / deploy-<app> jobs alongside standalone runs, newest wins', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('`deploy-<app> / deploy-<app>`')
+      expect(strandedCheck).toMatch(/Check both sources and take whichever is newer/i)
+      expect(strandedCheck).toContain('gh run list --workflow deploy.yaml -L 20 --json databaseId,createdAt,conclusion')
+      expect(strandedCheck).toContain(
+        'gh run list --workflow deploy-<app>.yaml -L 20 --json databaseId,createdAt,conclusion',
+      )
+      expect(strandedCheck).toContain('gh run view <run-id> --json jobs')
+    })
+  })
+
   it('documents the safe adoptable-report path and pins the fixed GitHub-output delimiter', async () => {
     const {parsed} = await loadFroBotWorkflow()
     const schedulePrompt = parsed.env?.SCHEDULE_PROMPT ?? ''

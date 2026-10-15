@@ -2490,6 +2490,22 @@ export async function assertS3TaggedWriteCapability(
   }
 }
 
+/**
+ * Extracts the non-empty string `contractVersion` from an operator health response body.
+ * Returns undefined for non-JSON bodies, non-object JSON, or a missing/empty/non-string field.
+ */
+function parseOperatorContractVersion(body: string): string | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const version = (parsed as Record<string, unknown>).contractVersion
+  return typeof version === 'string' && version.trim().length > 0 ? version : undefined
+}
+
 export async function main(opts: MainOpts = {}): Promise<void> {
   const env = opts.env ?? (process.env as Record<string, string>)
   const args = opts.args ?? process.argv.slice(2)
@@ -3451,44 +3467,43 @@ SCRIPT`
     }
 
     // Phase 9b2: Post-deploy operator health probe — warning-only, only when operator is enabled.
-    // Probes GET /operator/health through the gateway-side Caddy route (https://<GATEWAY_HOST>/operator/health).
-    // The dashboard→gateway private path is not yet active; the gateway Caddy /operator/* route is the
-    // correct liveness origin for this topology stage. GATEWAY_OPERATOR_PUBLIC_ORIGIN (dashboard origin)
-    // is NOT used here — it is only used for the OAuth callback preflight in dry-run output.
-    // See docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md and AGENTS.md.
-    // Requires HTTP 200 — the /operator/health route contract is a health check that returns 200 on success.
-    // 3xx/4xx/5xx are not treated as success (unlike the announce probe which accepts any 2xx/4xx).
-    // Connection/TLS errors are treated as transient (cert may still be issuing); we warn and continue.
+    // Probes GET ${GATEWAY_OPERATOR_PUBLIC_ORIGIN}/operator/health: that origin's Caddy is the daemon's
+    // trusted proxy (the gateway-side Caddy peer is untrusted and gets 400). Success is HTTP 200 plus a
+    // non-empty string `contractVersion` in the JSON body; the version is logged, never compared.
+    // Connection/TLS errors and other statuses are retried, then warned about; the deploy continues.
     if (operatorEnabled) {
-      const operatorHealthUrl = `https://${host}/operator/health`
+      const operatorHealthUrl = new URL('/operator/health', env.GATEWAY_OPERATOR_PUBLIC_ORIGIN ?? '').toString()
       console.warn(`\u001B[1;34m==>\u001B[0m Probing operator health endpoint`)
-      let operatorProbeOk = false
+      let operatorContractVersion: string | undefined
       for (let attempt = 1; attempt <= probeAttempts; attempt++) {
         const ac = new AbortController()
         const timer = setTimeout(() => ac.abort(), probePerAttemptTimeoutMs)
         try {
           const response = await fetchFn(operatorHealthUrl, {signal: ac.signal})
-          clearTimeout(timer)
-          const status = response.status
-          // Require exactly HTTP 200 — the health route contract says 200 = healthy.
-          // 3xx/4xx/5xx are routing failures or service errors, not success.
-          if (status === 200) {
-            operatorProbeOk = true
-            break
+          // Require exactly HTTP 200; 3xx/4xx/5xx are routing failures or service errors.
+          if (response.status === 200) {
+            operatorContractVersion = parseOperatorContractVersion(await response.text())
+            if (operatorContractVersion !== undefined) {
+              clearTimeout(timer)
+              break
+            }
           }
         } catch {
-          clearTimeout(timer)
+          // Transient (connection/TLS/timeout/body read): retry.
         }
+        clearTimeout(timer)
         if (attempt < probeAttempts) {
           await sleepFn(probeIntervalMs)
         }
       }
-      if (operatorProbeOk) {
-        console.warn(`\u001B[1;32m✓\u001B[0m Operator health probe succeeded: ${operatorHealthUrl}`)
-      } else {
+      if (operatorContractVersion === undefined) {
         console.warn(
           `\u001B[1;33m[warn]\u001B[0m Operator health probe did not succeed — service may still be starting. ` +
-            `Verify with: curl -sI ${operatorHealthUrl}`,
+            `Verify with: curl -s ${operatorHealthUrl}`,
+        )
+      } else {
+        console.warn(
+          `\u001B[1;32m✓\u001B[0m Operator health probe succeeded: ${operatorHealthUrl} (contractVersion ${operatorContractVersion})`,
         )
       }
     }

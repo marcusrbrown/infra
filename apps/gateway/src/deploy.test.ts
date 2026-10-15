@@ -6007,11 +6007,9 @@ describe('main() — operator health probe', () => {
     }
   })
 
-  test('operator enabled: fetch called with /operator/health URL using GATEWAY_HOST (not dashboard origin)', async () => {
-    // The operator health probe must use the gateway-side Caddy route (https://<GATEWAY_HOST>/operator/health),
-    // NOT the dashboard origin (GATEWAY_OPERATOR_PUBLIC_ORIGIN). The dashboard→gateway private path is not
-    // yet active; the gateway Caddy /operator/* route is the correct liveness origin for this topology stage.
-    // See docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md and AGENTS.md.
+  test('operator enabled: fetch called with the public-origin /operator/health URL (not the gateway host)', async () => {
+    // The daemon rejects forwarded headers from the gateway-side Caddy (its peer is untrusted), so the
+    // probe goes through GATEWAY_OPERATOR_PUBLIC_ORIGIN, whose Caddy is the trusted proxy.
     const {main} = await import('./deploy')
     const {spawnFn} = makeSpawnMock()
     const fetchedUrls: string[] = []
@@ -6019,7 +6017,7 @@ describe('main() — operator health probe', () => {
     const fetchMock = mock(async (url: string) => {
       fetchedUrls.push(url)
       if (url.includes('/operator/health')) {
-        return new Response(JSON.stringify({status: 'ok'}), {status: 200})
+        return new Response(JSON.stringify({ok: true, contractVersion: '1.11.0'}), {status: 200})
       }
       // Discord commands response
       return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
@@ -6036,9 +6034,9 @@ describe('main() — operator health probe', () => {
 
     const operatorHealthUrl = fetchedUrls.find(u => u.includes('/operator/health'))
     expect(operatorHealthUrl).toBeDefined()
-    // Must probe gateway host (gateway.fro.bot), NOT the dashboard origin (dashboard.fro.bot)
-    expect(operatorHealthUrl).toContain('https://gateway.fro.bot/operator/health')
-    expect(operatorHealthUrl).not.toContain('dashboard.fro.bot')
+    // Must probe the public origin (dashboard.fro.bot), NOT the gateway host (gateway.fro.bot)
+    expect(operatorHealthUrl).toBe('https://dashboard.fro.bot/operator/health')
+    expect(operatorHealthUrl).not.toContain('gateway.fro.bot')
   })
 
   test('operator disabled: fetch NOT called with /operator/health URL', async () => {
@@ -6747,7 +6745,7 @@ describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
     }
   })
 
-  test('operator health probe: HTTP 200 → probeOk (success logged)', async () => {
+  test('operator health probe: HTTP 200 with a contractVersion → success logged with the version', async () => {
     const {main} = await import('./deploy')
     const warnMessages: string[] = []
     const origWarn = console.warn
@@ -6755,7 +6753,7 @@ describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
 
     const fetchMock = mock(async (url: string) => {
       if (url.includes('/operator/health')) {
-        return new Response('OK', {status: 200})
+        return new Response(JSON.stringify({ok: true, contractVersion: '1.11.0'}), {status: 200})
       }
       return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
     })
@@ -6773,6 +6771,101 @@ describe('main() — operator health probe requires HTTP 200 (issue 3)', () => {
       console.warn = origWarn
     }
 
+    const success = warnMessages.find(m => m.includes('Operator health probe succeeded'))
+    expect(success).toBeDefined()
+    expect(success).toContain('https://dashboard.fro.bot/operator/health')
+    expect(success).toContain('1.11.0')
+  })
+
+  /** Runs main() with the operator enabled and returns the warn log plus the health requests made. */
+  async function runOperatorHealthProbe(
+    respond: (url: string) => Response | Promise<Response>,
+    overrides: Record<string, string> = {},
+    probeAttempts = 3,
+  ): Promise<{warnMessages: string[]; healthUrls: string[]}> {
+    const {main} = await import('./deploy')
+    const warnMessages: string[] = []
+    const healthUrls: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => warnMessages.push(args.join(' '))
+    const fetchMock = mock(async (url: string) => {
+      if (url.includes('/operator/health')) {
+        healthUrls.push(url)
+        return respond(url)
+      }
+      return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
+    })
+    try {
+      await main({
+        env: makeOperatorAuthEnv(overrides),
+        tcpConnect: tcpConnectRefused,
+        args: [],
+        spawn: makeSpawnMock().spawnFn,
+        fetch: fetchMock as unknown as typeof fetch,
+        sleep: async () => {},
+        probeAttempts,
+        probeIntervalMs: 0,
+      })
+    } finally {
+      console.warn = origWarn
+    }
+    return {warnMessages, healthUrls}
+  }
+
+  test.each([
+    ['without a contractVersion', JSON.stringify({ok: true})],
+    ['with an empty contractVersion', JSON.stringify({ok: true, contractVersion: ''})],
+    ['with a non-string contractVersion', JSON.stringify({ok: true, contractVersion: 1.11})],
+    ['with a non-JSON body', 'OK'],
+    ['with a JSON array body', '[]'],
+    ['with a JSON null body', 'null'],
+  ])('operator health probe: HTTP 200 %s → warns, never success', async (_label, body) => {
+    const {warnMessages, healthUrls} = await runOperatorHealthProbe(() => new Response(body, {status: 200}))
+    expect(healthUrls).toHaveLength(3)
+    expect(warnMessages.some(m => m.includes('Operator health probe succeeded'))).toBe(false)
+    expect(warnMessages.some(m => m.includes('Operator health probe did not succeed'))).toBe(true)
+  })
+
+  test('operator health probe: HTTP 400 on every attempt → warns after all attempts with the public-origin hint', async () => {
+    const {warnMessages, healthUrls} = await runOperatorHealthProbe(
+      () => new Response('{"error":"bad request"}', {status: 400}),
+    )
+    expect(healthUrls).toEqual(Array.from({length: 3}, () => 'https://dashboard.fro.bot/operator/health'))
+    expect(warnMessages.some(m => m.includes('Operator health probe succeeded'))).toBe(false)
+    const warning = warnMessages.find(m => m.includes('Operator health probe did not succeed'))
+    expect(warning).toBeDefined()
+    expect(warning).toContain('Verify with: curl -s https://dashboard.fro.bot/operator/health')
+    expect(warning).not.toContain('gateway.fro.bot')
+  })
+
+  test('operator health probe: fetch throws on every attempt → warns, deploy continues', async () => {
+    const {warnMessages, healthUrls} = await runOperatorHealthProbe(() => {
+      throw new Error('socket hang up')
+    })
+    expect(healthUrls).toHaveLength(3)
+    expect(warnMessages.some(m => m.includes('Operator health probe succeeded'))).toBe(false)
+    expect(warnMessages.some(m => m.includes('Operator health probe did not succeed'))).toBe(true)
+  })
+
+  test('operator health probe: transient failure then valid 200 → succeeds on the retry', async () => {
+    let calls = 0
+    const {warnMessages, healthUrls} = await runOperatorHealthProbe(() => {
+      calls++
+      return calls === 1
+        ? new Response('bad gateway', {status: 502})
+        : new Response(JSON.stringify({ok: true, contractVersion: '1.11.0'}), {status: 200})
+    })
+    expect(healthUrls).toHaveLength(2)
+    expect(warnMessages.some(m => m.includes('Operator health probe succeeded') && m.includes('1.11.0'))).toBe(true)
+  })
+
+  test('operator health probe: trailing-slash public origin is normalized without a double slash', async () => {
+    const {warnMessages, healthUrls} = await runOperatorHealthProbe(
+      () => new Response(JSON.stringify({ok: true, contractVersion: '1.11.0'}), {status: 200}),
+      {GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://dashboard.fro.bot/'},
+      1,
+    )
+    expect(healthUrls).toEqual(['https://dashboard.fro.bot/operator/health'])
     expect(warnMessages.some(m => m.includes('Operator health probe succeeded'))).toBe(true)
   })
 
@@ -7794,15 +7887,9 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     }
   })
 
-  test('trailing-slash origin probes /operator/health with no double slash', async () => {
-    // validateOperatorConfig rejects trailing-slash origins (pathname !== '/'),
-    // so we test the URL construction directly via the new URL() helper behavior.
-    // The regression: string concat `${origin}/operator/health` where origin ends in '/'
-    // produces 'https://gateway.fro.bot//operator/health' (double slash in path).
-    // The fix: new URL('/operator/health', origin).toString() normalizes correctly.
-    //
-    // We verify the fix by checking the probed URL from a valid (no trailing slash) origin
-    // does NOT contain '//operator' (the double-slash path pattern).
+  test('bare origin probes /operator/health with no double slash', async () => {
+    // The probe URL is built with new URL('/operator/health', origin), so neither a bare origin nor
+    // one with a trailing slash can produce a '//operator' path.
     const {main} = await import('./deploy')
     const {spawnFn} = makeSpawnMock()
     const probedUrls: string[] = []
@@ -7810,7 +7897,7 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     const mockFetch = mock(async (url: string) => {
       if (url.includes('/operator/health')) {
         probedUrls.push(url)
-        return new Response('OK', {status: 200})
+        return new Response(JSON.stringify({ok: true, contractVersion: '1.11.0'}), {status: 200})
       }
       // Discord registration
       return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
@@ -7830,27 +7917,12 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     expect(probedUrls).toHaveLength(1)
     // Must NOT have double slash in the path (the regression pattern)
     expect(probedUrls[0]).not.toMatch(/\/\/operator/)
-    // Must probe gateway host (gateway.fro.bot), NOT the dashboard origin (dashboard.fro.bot)
-    expect(probedUrls[0]).toBe('https://gateway.fro.bot/operator/health')
-    expect(probedUrls[0]).not.toContain('dashboard.fro.bot')
+    expect(probedUrls[0]).toBe('https://dashboard.fro.bot/operator/health')
   })
 
-  test('URL construction: template literal with GATEWAY_HOST produces correct operator health URL', () => {
-    // Unit test for the URL construction approach used in the operator health probe.
-    // The probe uses a template literal: `https://${host}/operator/health` where host = GATEWAY_HOST.
-    // This is simpler than new URL() since GATEWAY_HOST is already validated as a
-    // safe RFC1123 hostname (no trailing slash, no path component).
-    const host = 'gateway.fro.bot'
-    const probeUrl = `https://${host}/operator/health`
-
-    expect(probeUrl).toBe('https://gateway.fro.bot/operator/health')
-    expect(probeUrl).not.toContain('//operator')
-  })
-
-  test('operator health probe URL uses GATEWAY_HOST, not GATEWAY_OPERATOR_PUBLIC_ORIGIN', async () => {
-    // The probe must use the gateway-side Caddy route (https://<GATEWAY_HOST>/operator/health),
-    // NOT the dashboard origin (GATEWAY_OPERATOR_PUBLIC_ORIGIN). The dashboard→gateway private
-    // path is not yet active; the gateway Caddy /operator/* route is the correct liveness origin.
+  test('operator health probe URL uses GATEWAY_OPERATOR_PUBLIC_ORIGIN, not GATEWAY_HOST', async () => {
+    // The daemon rejects forwarded headers from the gateway-side Caddy (untrusted peer), so the probe
+    // goes through the public origin whose Caddy is the trusted proxy.
     const {main} = await import('./deploy')
     const {spawnFn} = makeSpawnMock()
     const probedUrls: string[] = []
@@ -7858,13 +7930,13 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     const mockFetch = mock(async (url: string) => {
       if (url.includes('/operator/health')) {
         probedUrls.push(url)
-        return new Response('OK', {status: 200})
+        return new Response(JSON.stringify({ok: true, contractVersion: '1.11.0'}), {status: 200})
       }
       return new Response(JSON.stringify([{name: 'ping'}]), {status: 200})
     }) as unknown as typeof fetch
 
     await main({
-      env: makeOperatorAuthEnv(),
+      env: makeOperatorAuthEnv({GATEWAY_OPERATOR_PUBLIC_ORIGIN: 'https://ops.example.com'}),
       tcpConnect: tcpConnectRefused,
       args: [],
       fetch: mockFetch,
@@ -7875,9 +7947,9 @@ describe('operator health URL — trailing-slash origin normalization', () => {
     })
 
     expect(probedUrls).toHaveLength(1)
-    // Must probe gateway host (gateway.fro.bot), NOT the dashboard origin (dashboard.fro.bot)
-    expect(probedUrls[0]).toBe('https://gateway.fro.bot/operator/health')
-    expect(probedUrls[0]).not.toContain('dashboard.fro.bot')
+    // Must probe the configured public origin, NOT the gateway host (gateway.fro.bot)
+    expect(probedUrls[0]).toBe('https://ops.example.com/operator/health')
+    expect(probedUrls[0]).not.toContain('gateway.fro.bot')
     // Verify no double slash in the path
     expect(probedUrls[0]).not.toMatch(/\/\/operator/)
   })

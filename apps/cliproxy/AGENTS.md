@@ -84,6 +84,12 @@ Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/s
 | `/v0/management/latest-version` | GET | — | Returns `{"latest-version": "vX.Y.Z"}` |
 | `/healthz` | GET | — | Liveness endpoint, no auth; returns `{"status":"ok"}` |
 
+v8 keeps every `/v0/management` path above and adds a separate `/v8/management` API. Stay on `/v0`: a v0 write re-saves `config.yaml` in the legacy layout. A v8-layout write migrates the file (nested `server.*`, `access.api-keys`, `config-version: 8`), and v7 cannot read the result.
+
+### v7 rollback
+
+Before a major bump, take a `cp -p` backup of `config/config.yaml`. To roll back, revert the image pin, deploy, then confirm the live file has no `config-version: 8`. If it does, stop `cli-proxy-api`, `cp` the backup over `config/config.yaml`, and start it again. Leave the `cliproxy_auth` volume alone.
+
 ## OPENCODE_CONFIG AND OPENCODE_AUTH_JSON SHAPES
 
 The proxy uses a **single bearer key per consumer repo**. The same key authenticates both `anthropic` and `openai` provider routes for that repo — there are no per-provider keys.

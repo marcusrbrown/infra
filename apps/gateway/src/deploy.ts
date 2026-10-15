@@ -208,11 +208,11 @@ const DEFAULT_REMOTE_USER = 'root'
 const CLIPROXY_EGRESS_HOST = 'cliproxy.fro.bot'
 // OpenCode fetches its model catalog from models.dev at startup; the sandboxed workspace reaches it through the mitmproxy egress allowlist.
 const OPENCODE_CATALOG_HOST = 'models.dev'
-// Mirrors upstream's default (packages/gateway/src/bindings/backfill-runner.ts, v0.113.2:
+// Mirrors upstream's default (packages/gateway/src/bindings/backfill-runner.ts:
 // `process.env.S3_PREFIX ?? 'fro-bot-state'`). The deploy does not otherwise reference
 // S3_PREFIX; this default keeps the tagged-write probe key under the real run-state scope.
 const S3_STATE_PREFIX_DEFAULT = 'fro-bot-state'
-// Mirrors upstream's default GATEWAY_IDENTITY (packages/gateway/src/config.ts, v0.113.2).
+// Mirrors upstream's default GATEWAY_IDENTITY (packages/gateway/src/config.ts).
 const S3_STATE_IDENTITY = 'discord-gateway'
 // Fixed, obviously-synthetic owner/repo segment for the probe key — never a real repo.
 const S3_PROBE_OWNER_REPO = '_deploy-probe'
@@ -710,7 +710,7 @@ export function getOperatorAuthState(env: Record<string, string>): 'enabled' | '
  * - csrfSecret: strict base64url (no padding, no whitespace/newlines), decoded byte length ≥ 32.
  * - allowlist: non-empty; blank/whitespace-only lines and full-line `#` comments (after optional
  *   leading whitespace) are ignored; at least one numeric GitHub user ID must remain after
- *   filtering; non-numeric non-comment lines are rejected. Mirrors upstream fro-bot/agent v0.69.0
+ *   filtering; non-numeric non-comment lines are rejected. Mirrors upstream fro-bot/agent
  *   allowlist parser semantics.
  */
 export function validateOperatorAuthConfig(opts: {
@@ -756,7 +756,7 @@ export function validateOperatorAuthConfig(opts: {
     throw new Error('GATEWAY_OPERATOR_ALLOWLIST is required and must be non-empty.')
   }
 
-  // Upstream fro-bot/agent v0.69.0 allowlist parser semantics:
+  // Upstream fro-bot/agent allowlist parser semantics:
   //   - blank/whitespace-only lines are ignored
   //   - full-line comments beginning with # (after optional whitespace) are ignored
   //   - at least one numeric GitHub user ID must remain after filtering
@@ -2346,7 +2346,7 @@ export type S3TaggedWriteProbeClient = Pick<S3Client, 'send'>
 /**
  * Builds the S3 key for the tagged-write capability probe. Matches the real run-state key
  * shape (`<prefix>/discord-gateway/<owner>/<repo>/runs/<uuid>.json`, see
- * packages/runtime/src/object-store/key-builder.ts buildObjectStoreKey, v0.113.2) so a
+ * packages/runtime/src/object-store/key-builder.ts buildObjectStoreKey) so a
  * narrowly-scoped IAM grant is probed at the correct resource scope — a probe under some
  * special top-level path would pass under a broad grant and false-negative under a narrow
  * one. A fresh randomUUID() per call keeps concurrent deploys from colliding.
@@ -2366,7 +2366,7 @@ function buildS3TaggedWriteProbeKey(prefix: string): string {
  * Fails closed on missing credentials/bucket/region — there is no "skip and let the deploy
  * proceed" path for absent inputs. The only legitimate skip is a custom S3_ENDPOINT (R2/MinIO),
  * where upstream deliberately suppresses Tagging on every write (see
- * packages/runtime/src/object-store/s3-adapter.ts createS3Adapter conditionalPut, v0.113.2:
+ * packages/runtime/src/object-store/s3-adapter.ts createS3Adapter conditionalPut:
  * `config.endpoint == null && options.tagging != null ? {Tagging: ...} : {}`) — tagging that
  * endpoint class would test a capability the runtime never exercises.
  *
@@ -2638,7 +2638,7 @@ export async function main(opts: MainOpts = {}): Promise<void> {
   }
 
   // Phase 3f: Validate operator auth/config gate before any SSH.
-  // When operator listener is enabled, all four auth/config vars are required (v0.69.0 contract).
+  // When operator listener is enabled, all four auth/config vars are required (operator auth contract).
   // 'disabled' (0 of 4) is not valid when listener is enabled — fail-closed.
   // 'invalid' (1–3 of 4) is a partial set — fail-closed.
   // Rollback: clear both listener trio AND auth vars together; listener trio present + auth absent is not valid.

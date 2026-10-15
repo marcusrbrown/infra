@@ -10,6 +10,9 @@ labels:
   - name: autoheal-report
     color: '#0e8a16'
     description: Trusted daily autohealing report
+  - name: cliproxy-auth-monitor
+    color: '#b60205'
+    description: CLIProxy auth monitor state
 
 branches:
   - name: main

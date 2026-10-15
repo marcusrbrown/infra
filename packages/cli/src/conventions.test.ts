@@ -2824,11 +2824,12 @@ describe('cancel-superseded-dashboard-deploys.yaml: contract', () => {
 
   it('triggers only on requested runs of the exact Deploy Dashboard workflow name', async () => {
     const {parsed} = await load()
+    const workflowName = 'Deploy Dashboard'
     const dashboard = parseYaml(
       await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')).text(),
     ) as {name?: string}
-    expect(dashboard.name).toBe('Deploy Dashboard')
-    expect(parsed.on).toEqual({workflow_run: {workflows: [dashboard.name], types: ['requested']}})
+    expect(dashboard.name).toBe(workflowName)
+    expect(parsed.on).toEqual({workflow_run: {workflows: [workflowName], types: ['requested']}})
   })
 
   it('gates on dispatched runs from main', async () => {
@@ -2851,12 +2852,17 @@ describe('cancel-superseded-dashboard-deploys.yaml: contract', () => {
     expect(text).not.toContain('secrets: inherit')
   })
 
-  it('fails open: cancel failures warn with the run ID and HTTP status, and the step exits 0', async () => {
+  it('fails open: cancel failures warn with the run ID and HTTP status, readback is bounded, and the step exits 0', async () => {
     const {parsed} = await load()
     const step = parsed.jobs?.['cancel-superseded']?.steps?.[0]
     const run = step?.run ?? ''
     expect(run).toContain('::warning::Could not cancel dashboard run $' + '{run_id}: $' + '{http_status')
     expect(run).toContain('HTTP [0-9]{3}')
+    expect(run).toContain('cancel requested $' + '{run_id}')
+    expect(run).toContain('gh run view "$' + '{run_id}" --json status,conclusion')
+    expect(run).toContain('for attempt in 1 2 3 4 5 6; do')
+    expect(run).toContain('sleep 5')
+    expect(run).toContain('after a cancel request; cancel it by hand')
     expect(run).not.toMatch(/^\s*set -[a-z]*e/m)
     expect(run.trimEnd().endsWith('exit 0')).toBe(true)
     expect(step?.env?.GH_TOKEN).toBe('$' + '{{ github.token }}')

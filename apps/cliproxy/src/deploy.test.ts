@@ -272,6 +272,68 @@ describe('preflightManagementKeyCheck', () => {
     }
   })
 
+  describe('management 401/403 mapping', () => {
+    const KEY = 'super-secret-key'
+    const BAN_BODY = '{"error":"IP banned due to too many failed attempts. Try again in 29m12s"}'
+
+    async function runPreflight(response: Response): Promise<{error: unknown; warnings: string}> {
+      const configPath = join(tmpDir, 'config.yaml')
+      writeFileSync(configPath, EMPTY_ALIAS_YAML)
+      const env = makeDeployEnv({CLIPROXY_MANAGEMENT_KEY: KEY})
+      const fetchFn = mock(async () => response) as unknown as typeof globalThis.fetch
+      const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const error = await preflightManagementKeyCheck(env, {config: configPath}, fetchFn).then(
+          () => undefined,
+          (error_: unknown) => error_,
+        )
+        return {error, warnings: warnSpy.mock.calls.map(call => call.join(' ')).join('\n')}
+      } finally {
+        warnSpy.mockRestore()
+      }
+    }
+
+    test('reports a source-IP ban distinctly from an invalid key (403 with ban body), never as a skip', async () => {
+      const {error, warnings} = await runPreflight(new Response(BAN_BODY, {status: 403}))
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('temporarily banning this source IP')
+      expect(message).toContain('#1544')
+      expect(message).not.toMatch(/invalid/i)
+      expect(message).not.toContain(KEY)
+      expect(message).not.toContain('Try again in')
+      expect(warnings).not.toMatch(/skipping pre-deploy validation/)
+    })
+
+    test('matches the ban text case-insensitively', async () => {
+      const {error} = await runPreflight(new Response('ip BANNED due to too many failed attempts', {status: 403}))
+      expect((error as Error).message).toContain('temporarily banning this source IP')
+    })
+
+    test('keeps a 403 without ban text on the invalid-key path', async () => {
+      const {error} = await runPreflight(new Response('{"error":"invalid management key"}', {status: 403}))
+      expect((error as Error).message).toMatch(/^Management key is invalid/)
+    })
+
+    test('keeps a 401 (even with ban-like text) on the invalid-key path', async () => {
+      const {error} = await runPreflight(new Response(BAN_BODY, {status: 401}))
+      expect((error as Error).message).toMatch(/^Management key is invalid/)
+    })
+
+    test('treats an unreadable 403 body as an invalid key, not a ban', async () => {
+      const brokenBody = new Response(
+        new ReadableStream({
+          pull(controller) {
+            controller.error(new Error('stream broke'))
+          },
+        }),
+        {status: 403},
+      )
+      const {error} = await runPreflight(brokenBody)
+      expect((error as Error).message).toMatch(/^Management key is invalid/)
+    })
+  })
+
   test.each([
     ['no payload key', 'auth-dir: /root/.cli-proxy-api\napi-keys: []\n'],
     ['payload without override', 'auth-dir: /root/.cli-proxy-api\napi-keys: []\npayload: {unknown: true}\n'],

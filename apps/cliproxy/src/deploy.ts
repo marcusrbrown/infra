@@ -203,6 +203,20 @@ async function healthCheck(env: DeployEnv, fetchImpl: typeof globalThis.fetch = 
   console.warn(`\u001B[1;32m✓\u001B[0m Health check passed: ${url}`)
 }
 
+/** CLIProxyAPI answers 403 `{"error":"IP banned due to too many failed attempts. …"}` while a source IP is banned. */
+const MANAGEMENT_IP_BAN_MESSAGE =
+  'CLIProxyAPI management API is temporarily banning this source IP after repeated bad keys (about 30 min). ' +
+  'The key may be fine — wait, then retry; see #1544.'
+
+/** True when a management 403 body carries the IP-ban text. An unreadable body is not a ban. Body is never echoed. */
+async function isManagementIpBanResponse(response: Response): Promise<boolean> {
+  try {
+    return /ip banned/i.test((await response.text()).slice(0, 512))
+  } catch {
+    return false
+  }
+}
+
 export async function preflightManagementKeyCheck(
   env: DeployEnv,
   files: {config: string},
@@ -237,6 +251,9 @@ export async function preflightManagementKeyCheck(
     }
 
     if (response.status === 401 || response.status === 403) {
+      if (response.status === 403 && (await isManagementIpBanResponse(response))) {
+        throw new Error(MANAGEMENT_IP_BAN_MESSAGE)
+      }
       throw new Error(
         "Management key is invalid. Verify CLIPROXY_MANAGEMENT_KEY matches MANAGEMENT_PASSWORD in the server's /opt/cliproxy/.env",
       )
@@ -248,6 +265,9 @@ export async function preflightManagementKeyCheck(
       throw error
     }
     if (error instanceof Error && error.message.includes('Proxy is unhealthy')) {
+      throw error
+    }
+    if (error instanceof Error && error.message === MANAGEMENT_IP_BAN_MESSAGE) {
       throw error
     }
     // Network errors (ECONNREFUSED, DNS failure, timeout) — server not yet running

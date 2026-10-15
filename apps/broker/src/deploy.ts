@@ -209,13 +209,27 @@ async function runCommand(label: string, command: string[], env: DeployEnv, deps
 // Preflight checks
 // ---------------------------------------------------------------------------
 
+/** CLIProxyAPI answers 403 `{"error":"IP banned due to too many failed attempts. …"}` while a source IP is banned. */
+const MANAGEMENT_IP_BAN_MESSAGE =
+  'CLIProxyAPI management API is temporarily banning this source IP after repeated bad keys (about 30 min). ' +
+  'The key may be fine — wait, then retry; see #1544.'
+
+/** True when a management 403 body carries the IP-ban text. An unreadable body is not a ban. Body is never echoed. */
+async function isManagementIpBanResponse(response: Response): Promise<boolean> {
+  try {
+    return /ip banned/i.test((await response.text()).slice(0, 512))
+  } catch {
+    return false
+  }
+}
+
 /**
  * Preflight: verify the cliproxy management key is present and the cliproxy
  * management API is reachable and can list api-keys.
  *
  * Aborts BEFORE any compose change if:
  *   - CLIPROXY_MANAGEMENT_KEY is not set
- *   - cliproxy management API is unreachable or returns 401/403
+ *   - cliproxy management API is unreachable or returns 401/403 (a 403 ban body is reported as an IP ban, not a bad key)
  *   - api-keys list is not readable
  *
  * This is the fail-closed preflight: no compose change happens until we know
@@ -242,6 +256,9 @@ export async function preflightChecks(env: DeployEnv, deps: DeployDeps = {}): Pr
     })
 
     if (response.status === 401 || response.status === 403) {
+      if (response.status === 403 && (await isManagementIpBanResponse(response))) {
+        throw new Error(MANAGEMENT_IP_BAN_MESSAGE)
+      }
       throw new Error('CLIPROXY_MANAGEMENT_KEY is invalid — verify it matches the cliproxy server config.')
     }
 
@@ -256,6 +273,7 @@ export async function preflightChecks(env: DeployEnv, deps: DeployDeps = {}): Pr
     if (
       error instanceof Error &&
       (error.message.includes('CLIPROXY_MANAGEMENT_KEY is invalid') ||
+        error.message === MANAGEMENT_IP_BAN_MESSAGE ||
         error.message.includes('cliproxy management API returned HTTP'))
     ) {
       throw error

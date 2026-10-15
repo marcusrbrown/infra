@@ -198,6 +198,55 @@ describe('deploy (broker)', () => {
       await expect(preflightChecks(env, {fetch: mockFetch})).rejects.toThrow(/invalid/)
     })
 
+    it('reports a source-IP ban distinctly from an invalid key (403 with ban body)', async () => {
+      const env = makeValidEnv()
+      const mockFetch: FetchFn = async () =>
+        new Response('{"error":"IP banned due to too many failed attempts. Try again in 29m12s"}', {status: 403})
+      const error = await preflightChecks(env, {fetch: mockFetch}).then(
+        () => undefined,
+        (error_: unknown) => error_,
+      )
+      expect(error).toBeInstanceOf(Error)
+      const message = (error as Error).message
+      expect(message).toContain('temporarily banning this source IP')
+      expect(message).toContain('#1544')
+      expect(message).not.toMatch(/is invalid/)
+      expect(message).not.toContain(env.CLIPROXY_MANAGEMENT_KEY)
+      expect(message).not.toContain('Try again in')
+    })
+
+    it('matches the ban text case-insensitively', async () => {
+      const env = makeValidEnv()
+      const mockFetch: FetchFn = async () => new Response('ip BANNED due to too many failed attempts', {status: 403})
+      await expect(preflightChecks(env, {fetch: mockFetch})).rejects.toThrow(/temporarily banning this source IP/)
+    })
+
+    it('keeps a 403 without ban text on the invalid-key path', async () => {
+      const env = makeValidEnv()
+      const mockFetch: FetchFn = async () => new Response('{"error":"invalid management key"}', {status: 403})
+      await expect(preflightChecks(env, {fetch: mockFetch})).rejects.toThrow(/CLIPROXY_MANAGEMENT_KEY is invalid/)
+    })
+
+    it('keeps a 401 that carries ban-like text on the invalid-key path', async () => {
+      const env = makeValidEnv()
+      const mockFetch: FetchFn = async () => new Response('IP banned', {status: 401})
+      await expect(preflightChecks(env, {fetch: mockFetch})).rejects.toThrow(/CLIPROXY_MANAGEMENT_KEY is invalid/)
+    })
+
+    it('treats an unreadable 403 body as an invalid key, not a ban', async () => {
+      const env = makeValidEnv()
+      const brokenBody = new Response(
+        new ReadableStream({
+          pull(controller) {
+            controller.error(new Error('stream broke'))
+          },
+        }),
+        {status: 403},
+      )
+      const mockFetch: FetchFn = async () => brokenBody
+      await expect(preflightChecks(env, {fetch: mockFetch})).rejects.toThrow(/CLIPROXY_MANAGEMENT_KEY is invalid/)
+    })
+
     it('throws when cliproxy returns a non-2xx error', async () => {
       const env = makeValidEnv()
       const mockFetch: FetchFn = async () => new Response('Server Error', {status: 500})

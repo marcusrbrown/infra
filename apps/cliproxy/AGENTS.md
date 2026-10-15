@@ -14,7 +14,7 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 
 ## DEPLOY FLOW
 
-1. **Preflight** (`preflightManagementKeyCheck`): GET `/v0/management/config` with the local `CLIPROXY_MANAGEMENT_KEY`. Aborts on 401 (key drift), skips on missing key, fails on server errors. 10s fetch timeout.
+1. **Preflight** (`preflightManagementKeyCheck`): GET `/v0/management/config` with the local `CLIPROXY_MANAGEMENT_KEY`. Aborts on 401/403 (key drift; a 403 whose body says "IP banned" aborts with a distinct source-IP-ban message, about 30 min, key may be fine), skips on missing key, fails on server errors. 10s fetch timeout.
 2. **Upload**: `Caddyfile`, `docker-compose.yaml`, and `config.yaml` (only if it does not exist on the server). `--force-config` overrides the skip. The tracked `payload.override` and `claude` blocks are first-deploy/bootstrap template fragments only; normal deploy never applies them to an existing runtime config.
 3. **Restart**: `docker compose pull && docker compose up -d` from `/opt/cliproxy/`.
 4. **Model aliases** (`applyOAuthModelAliasStep`): read the `oauth-model-alias` block from the tracked `config.yaml` and PUT it to `/v0/management/oauth-model-alias` (bare object), then read back and fail-closed on mismatch. Skips when the block is empty; throws when the block is present but `CLIPROXY_MANAGEMENT_KEY` is unset. Fork verification via `/v1/models` is best-effort (only when `CLIPROXY_API_KEY` is set) and never fails the deploy. This never touches the runtime `api-keys`, so `--force-config` is not required.

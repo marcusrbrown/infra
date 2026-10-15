@@ -95,20 +95,6 @@
       dependencyDashboardApproval: true,
       allowedVersions: '<0.123.0',
     },
-    {
-      // The fro-bot/agent GitHub Action pin in .github/workflows/fro-bot.yaml (github-actions
-      // manager) is the consumer of the S3 key layout admitted in apps/agent/src/key-layout.ts.
-      // Every bump (tag or digest) must be checked against that file — the session/artifact/
-      // metadata key layout and the `locks/` objects — before it lands, and the admitted
-      // version/SHA updated in the same change. Scoped to the github-actions manager so it never
-      // touches the github-releases rule above (apps/gateway/upstream.json) or other packages.
-      description: ['Require key-layout verification before fro-bot/agent GitHub Action bumps'],
-      matchManagers: ['github-actions'],
-      matchPackageNames: ['fro-bot/agent'],
-      groupName: null,
-      automerge: false,
-      dependencyDashboardApproval: true,
-    },
   ],
   // Track the upstream daemon source pin (`ref`) in apps/gateway/upstream.json so new
   // releases of the named `repo` surface as PRs. This is independent of the fro-bot/agent

@@ -7,6 +7,8 @@ triggers the Deploy Dashboard workflow, which pulls the new digest and ships it 
 This runbook covers rolling back to a prior image digest when a release is bad. For the deploy flow
 and anti-patterns, see [`apps/dashboard/AGENTS.md`](../../apps/dashboard/AGENTS.md).
 
+**Contract changes roll back paired.** If the release being rolled back changed the operator contract, roll back together with the gateway: see [Rollback](operator-surface-acceptance.md#rollback) and [Rollback is not pin reversal](../../apps/gateway/AGENTS.md#rollback-is-not-pin-reversal). Never roll back only the dashboard across a contract change.
+
 ---
 
 ## Why This Exists

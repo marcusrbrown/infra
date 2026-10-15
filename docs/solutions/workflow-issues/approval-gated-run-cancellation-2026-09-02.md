@@ -2,6 +2,7 @@
 title: Approval-gated GitHub Actions runs ignore cancellation requests
 date: 2026-09-02
 category: docs/solutions/workflow-issues
+last_updated: 2026-10-15
 module: infra
 problem_type: workflow_issue
 component: development_workflow
@@ -80,6 +81,11 @@ A `waiting` run holds its concurrency slot. With `cancel-in-progress: false`, la
 `pending` until the waiting run reaches a terminal state. In the observed sequence, the second
 dispatch moved from `pending` to `waiting` within seconds of the first being rejected. This queue
 behavior is the mechanism behind #1203.
+
+Also seen on dashboard release dispatches: a waiting run for one release held the group while a later
+release's run was pending, and a still-later release's dispatch cancelled that pending run (`cancelled`,
+0 jobs). The release a handoff named was therefore never deployable. The fix was rejecting the waiting
+run and deploying the run actually at the gate.
 
 ## Earlier masked defect
 

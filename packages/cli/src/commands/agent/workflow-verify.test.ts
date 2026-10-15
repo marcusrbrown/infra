@@ -7,10 +7,10 @@ import {describe, expect, it, mock} from 'bun:test'
 
 import {inspectWorkflow, verifyWorkflow, type EnvironmentReadback, type WorkflowVerifyDeps} from './workflow-verify'
 
-// Must match apps/agent/src/key-layout.ts PINNED_ACTION_SHA.
+// Any full commit SHA is a valid fro-bot/agent pin; the S3 key layout does not depend on the Action version.
 const SHA = '83ed683da24111bd1474eb4bda39715ed5799bc2'
-// Must match apps/agent/src/key-layout.ts PINNED_ACTION_REF.
-const ACTION_TAG = 'v0.119.2'
+const NEXT_SHA = '7d273ac643c8f9c0dc8615222677693dc337adef'
+const ACTION_TAG = 'v0.122.3'
 const CREDENTIALS_STEP = `      - uses: aws-actions/configure-aws-credentials@${SHA}
         with:
           role-to-assume: \${{ vars.FRO_BOT_S3_ROLE_TO_ASSUME }}
@@ -42,7 +42,7 @@ const manifest = {
   policy_name: 'fro-bot-agent-storage-owner-repo',
   action_ref_verified: true as const,
   // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
-  key_layout_version: 'fro-bot/agent@v0.119.2',
+  key_layout_version: 'fro-bot-agent-s3-layout/1',
 }
 
 const environment: EnvironmentReadback = {
@@ -141,33 +141,52 @@ describe('workflow storage verifier', () => {
     await expect(verifyWorkflow('owner/repo', manifest, deps)).resolves.toBeUndefined()
   })
 
-  it('accepts the exact verified action SHA for the manifest layout', async () => {
+  it('accepts a full-SHA fro-bot/agent pin', async () => {
     await expect(verifyWorkflow('owner/repo', manifest, makeDeps(workflowJob()))).resolves.toBeUndefined()
   })
 
-  it('rejects the moveable verified tag for the storage job', async () => {
+  it('accepts any other full-SHA fro-bot/agent pin (an Action bump needs no infra edit)', async () => {
+    const bumped = workflowJob().replaceAll(`fro-bot/agent@${SHA}`, `fro-bot/agent@${NEXT_SHA}`)
+
+    expect(bumped).toContain(`fro-bot/agent@${NEXT_SHA}`)
+    const report = await inspectWorkflow('owner/repo', manifest, makeDeps(bumped))
+    expect(report.violations).toEqual([])
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(bumped))).resolves.toBeUndefined()
+  })
+
+  it('rejects a moveable tag pin for the storage job', async () => {
     const tagged = workflowJob().replace(`fro-bot/agent@${SHA}`, `fro-bot/agent@${ACTION_TAG}`)
 
     await expect(verifyWorkflow('owner/repo', manifest, makeDeps(tagged))).rejects.toThrow(
-      /must pin fro-bot\/agent to the verified SHA.*not a moveable tag/i,
+      /ref 'v0\.122\.3' is not a full commit SHA.*not a moveable tag or branch/i,
     )
   })
 
-  it('rejects an unverified action SHA for the manifest layout', async () => {
-    const otherSha = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
-    const unsafe = workflowJob().replace(`fro-bot/agent@${SHA}`, `fro-bot/agent@${otherSha}`)
+  it.each([
+    ['a branch', 'main'],
+    ['a short SHA', '83ed683'],
+    ['a 41-hex ref', `${SHA}0`],
+    ['a non-hex 40-char ref', 'z'.repeat(40)],
+  ])('rejects %s as the fro-bot/agent pin', async (_label, ref) => {
+    const unsafe = workflowJob().replace(`fro-bot/agent@${SHA}`, `fro-bot/agent@${ref}`)
 
-    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(
-      /action ref .* is not the verified layout/i,
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(/is not a full commit SHA/i)
+  })
+
+  it('rejects the moveable tag on any one of several fro-bot/agent steps', async () => {
+    const twoSteps = workflowJob().replace(AGENT_STEP, `${AGENT_STEP}\n${AGENT_STEP.replace(SHA, ACTION_TAG)}`)
+
+    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(twoSteps))).rejects.toThrow(
+      /step 2 ref 'v0\.122\.3' is not a full commit SHA/i,
     )
   })
 
-  it('rejects a wrong action tag for the manifest layout', async () => {
-    const unsafe = workflowJob().replace(`fro-bot/agent@${SHA}`, 'fro-bot/agent@v0.95.0')
-
-    await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(
-      /action ref .* is not the verified layout/i,
-    )
+  it('accepts a legacy manifest label for the same layout', async () => {
+    for (const label of ['fro-bot/agent@v0.119.2', 'fro-bot/agent@v0.118.2']) {
+      await expect(
+        verifyWorkflow('owner/repo', {...manifest, key_layout_version: label}, makeDeps(workflowJob())),
+      ).resolves.toBeUndefined()
+    }
   })
 
   it('fails closed when the manifest layout is unknown', async () => {
@@ -401,14 +420,10 @@ describe('workflow storage verifier', () => {
       await expect(verifyWorkflow('owner/repo', manifest, makeDeps(unsafe))).rejects.toThrow(/static AWS/i)
     })
 
-    it("accepts the repository's real .github/workflows/fro-bot.yaml (action pin normalized to the verified SHA)", async () => {
+    it("accepts the repository's real .github/workflows/fro-bot.yaml with whatever full-SHA pin it carries", async () => {
       const workflowPath = join(import.meta.dir, '..', '..', '..', '..', '..', '.github', 'workflows', 'fro-bot.yaml')
-      // The verifier ties the action SHA to the manifest layout; normalize it so a routine
-      // Renovate bump of fro-bot/agent does not require touching this test.
-      const real = readFileSync(workflowPath, 'utf-8').replaceAll(
-        /fro-bot\/agent@[0-9a-f]{40}/g,
-        `fro-bot/agent@${SHA}`,
-      )
+      // Read unmodified: any full-SHA fro-bot/agent pin passes, so a Renovate bump needs no test or code edit.
+      const real = readFileSync(workflowPath, 'utf-8')
 
       await expect(verifyWorkflow('owner/repo', manifest, makeDeps(real))).resolves.toBeUndefined()
     })

@@ -2,6 +2,7 @@ import type {CommandResult} from './setup-core/gh'
 import type {StorageManifest} from './storage'
 
 import {parse as parseYaml} from 'yaml'
+import {isKnownKeyLayoutVersion} from './key-layout'
 import {runGh} from './setup-core/gh'
 import {interpretGhContentResult} from './setup-core/workflow-analyzer'
 
@@ -19,11 +20,6 @@ const CONTENT_EVENTS = new Set([
   'discussion',
   'discussion_comment',
 ])
-// Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION and PINNED_ACTION_SHA.
-// PINNED_ACTION_REF (v0.119.2) remains documentation only; privileged consumers require the SHA.
-const VERIFIED_ACTION_SHA_BY_LAYOUT: Readonly<Record<string, string>> = {
-  'fro-bot/agent@v0.119.2': '83ed683da24111bd1474eb4bda39715ed5799bc2',
-}
 const REQUIRED_S3_INPUTS = {
   's3-backup': undefined,
   's3-bucket': 'FRO_BOT_S3_BUCKET',
@@ -513,8 +509,7 @@ function checkStorageAction(jobId: string, job: Mapping, manifest: StorageManife
     return
   }
 
-  const verifiedSha = VERIFIED_ACTION_SHA_BY_LAYOUT[manifest.key_layout_version]
-  if (!verifiedSha) {
+  if (!isKnownKeyLayoutVersion(manifest.key_layout_version)) {
     violations.push(`Unknown key_layout_version '${manifest.key_layout_version}'; refusing to verify fro-bot/agent.`)
   }
 
@@ -554,10 +549,10 @@ function checkStorageAction(jobId: string, job: Mapping, manifest: StorageManife
   for (const [index, step] of agentSteps.entries()) {
     const uses = String(step.uses)
     const ref = uses.split('@').at(-1) ?? ''
-    if (verifiedSha && ref !== verifiedSha) {
+    if (!/^[0-9a-f]{40}$/i.test(ref)) {
       violations.push(
-        `Storage job '${jobId}' action ref '${ref}' is not the verified layout for '${manifest.key_layout_version}'; ` +
-          `storage job must pin fro-bot/agent to the verified SHA for '${manifest.key_layout_version}', not a moveable tag.`,
+        `Storage job '${jobId}' fro-bot/agent step ${index + 1} ref '${ref}' is not a full commit SHA; ` +
+          'storage job must pin fro-bot/agent to a full 40-hex commit SHA, not a moveable tag or branch.',
       )
     }
 

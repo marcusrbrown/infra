@@ -1,7 +1,7 @@
 import {unlink} from 'node:fs/promises'
 import {describe, expect, it} from 'bun:test'
 
-import {AGENT_ACTION_LAYOUT_VERSION, buildAgentKeyLayout} from '../src/key-layout'
+import {buildAgentKeyLayout, KEY_LAYOUT_VERSION} from '../src/key-layout'
 import {
   AGENT_REPOSITORY_ID,
   AGENT_REPOSITORY_NAME,
@@ -200,7 +200,6 @@ const storagePolicyConfig = {
   owner: roleRepository.owner,
   repo: roleRepository.repo,
   s3Prefix: 'fro-bot-state',
-  actionVersion: AGENT_ACTION_LAYOUT_VERSION,
 }
 
 const ACTION_LOCK_KEY = 'fro-bot-state/coordination/marcusrbrown/infra/locks/action.json'
@@ -220,7 +219,7 @@ const teardownManifest = {
   role_arn: 'arn:aws:iam::111122223333:role/fro-bot-agent-storage-marcusrbrown-infra',
   policy_name: 'fro-bot-agent-storage-marcusrbrown-infra',
   action_ref_verified: true as const,
-  key_layout_version: AGENT_ACTION_LAYOUT_VERSION,
+  key_layout_version: KEY_LAYOUT_VERSION,
   oidc_provider_arn: roleProviderArn,
 }
 
@@ -699,7 +698,6 @@ describe('GitHub OIDC provider provisioning', () => {
       s3Client,
       bucket: bucketConfig,
       repository: roleRepository,
-      actionRef: AGENT_ACTION_LAYOUT_VERSION,
       printLine: (line: string) => lines.push(line),
     })
 
@@ -715,7 +713,7 @@ describe('GitHub OIDC provider provisioning', () => {
     expect(manifest.lock_key).toBe('fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json')
     expect(manifest.policy_name).toBe('fro-bot-agent-storage-marcusrbrown-infra')
     expect(manifest.action_ref_verified).toBe(true)
-    expect(manifest.key_layout_version).toBe(AGENT_ACTION_LAYOUT_VERSION)
+    expect(manifest.key_layout_version).toBe(KEY_LAYOUT_VERSION)
     expect(Object.keys(manifest)).toEqual(
       expect.arrayContaining([
         'owner',
@@ -756,22 +754,6 @@ describe('GitHub OIDC provider provisioning', () => {
     expect(s3.calls).toEqual([])
   })
 
-  it('fails closed on an unknown action layout before applying any AWS policy', async () => {
-    const {client, calls} = makeClient(async command => {
-      throw new Error(`Unexpected AWS call: ${command.constructor.name}`)
-    })
-
-    await expect(
-      performProvisioning({
-        client,
-        bucket: bucketConfig,
-        repository: roleRepository,
-        actionRef: 'fro-bot/agent@v0.0.0',
-      }),
-    ).rejects.toThrow(/unknown|unverified|widen/i)
-    expect(calls).toEqual([])
-  })
-
   it('populates bucket handoff fields from the verified S3 configuration', async () => {
     const providerArn = 'arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com'
     let role: Record<string, unknown> | undefined
@@ -805,7 +787,6 @@ describe('GitHub OIDC provider provisioning', () => {
       s3Client,
       bucket: bucketConfig,
       repository: roleRepository,
-      actionRef: AGENT_ACTION_LAYOUT_VERSION,
       printLine: (line: string) => lines.push(line),
     })
 
@@ -816,12 +797,7 @@ describe('GitHub OIDC provider provisioning', () => {
     expect(manifest.s3_prefix).toBe('fro-bot-state')
     expect(manifest.session_prefix).toBe('fro-bot-state/github/marcusrbrown/infra/')
     expect(String(manifest.s3_prefix).endsWith('/')).toBe(false)
-    const rebuiltLayout = buildAgentKeyLayout(
-      String(manifest.owner),
-      String(manifest.repo),
-      String(manifest.s3_prefix),
-      String(manifest.key_layout_version),
-    )
+    const rebuiltLayout = buildAgentKeyLayout(String(manifest.owner), String(manifest.repo), String(manifest.s3_prefix))
     expect(rebuiltLayout.sessionPrefix).toBe(String(manifest.session_prefix))
     expect(rebuiltLayout.lockKey).toBe(String(manifest.lock_key))
   })
@@ -854,7 +830,6 @@ describe('GitHub OIDC provider provisioning', () => {
       s3Client: s3.client,
       bucket: bucketConfig,
       repository: roleRepository,
-      actionRef: AGENT_ACTION_LAYOUT_VERSION,
       plan: true,
       printLine: line => report.push(line),
     })
@@ -887,7 +862,6 @@ describe('GitHub OIDC provider provisioning', () => {
       s3Client: s3.client,
       bucket: bucketConfig,
       repository: roleRepository,
-      actionRef: AGENT_ACTION_LAYOUT_VERSION,
       plan: true,
       printLine: line => report.push(line),
     })
@@ -1004,6 +978,23 @@ describe('per-repo IAM role provisioning', () => {
 })
 
 describe('per-repo IAM storage policy', () => {
+  it('renders the same policy document the v0.119.2 layout produced (an Action bump never changes IAM)', () => {
+    const built = buildAgentStoragePolicy({
+      roleName: 'fro-bot-agent-storage-marcusrbrown-infra',
+      bucket: 'fro-bot-agent-storage-286556883534-us-east-1',
+      owner: 'marcusrbrown',
+      repo: 'infra',
+      s3Prefix: 'fro-bot-state',
+    })
+    const digest = new Bun.CryptoHasher('sha256').update(JSON.stringify(built.document)).digest('hex')
+
+    // Pinned digest of the document as rendered before the layout was decoupled from the Action version.
+    // The layout label never appears in the document, so relabeling it cannot show up as IAM drift.
+    expect(digest).toBe('b8c1138a4c6d0d0614a4bf771b2f1b3127ae8a397d939227c8d790e0fe85aa24')
+    expect(JSON.stringify(built.document)).not.toContain(KEY_LAYOUT_VERSION)
+    expect(built.keyLayoutVersion).toBe(KEY_LAYOUT_VERSION)
+  })
+
   it('grants session access and lock access only at their canonical boundaries', () => {
     const built = buildAgentStoragePolicy(storagePolicyConfig)
     const statements = built.document.Statement as Record<string, unknown>[]
@@ -1147,7 +1138,7 @@ describe('per-repo IAM storage policy', () => {
       classification: 'current',
       changed: false,
       policyName: storagePolicyConfig.roleName,
-      keyLayoutVersion: AGENT_ACTION_LAYOUT_VERSION,
+      keyLayoutVersion: KEY_LAYOUT_VERSION,
       sessionPrefix: 'fro-bot-state/github/marcusrbrown/infra/',
       lockKey: 'fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json',
     })
@@ -1165,7 +1156,7 @@ describe('per-repo IAM storage policy', () => {
       classification: 'managed-drift',
       changed: true,
       policyName: storagePolicyConfig.roleName,
-      keyLayoutVersion: AGENT_ACTION_LAYOUT_VERSION,
+      keyLayoutVersion: KEY_LAYOUT_VERSION,
       sessionPrefix: 'fro-bot-state/github/marcusrbrown/infra/',
       lockKey: 'fro-bot-state/coordination/marcusrbrown/infra/locks/repo.json',
     })
@@ -1431,6 +1422,38 @@ describe('agent action-state S3 bucket provisioning', () => {
 })
 
 describe('agent storage teardown', () => {
+  it.each([
+    ['the current layout label', KEY_LAYOUT_VERSION],
+    ['a legacy manifest label (v0.119.2)', 'fro-bot/agent@v0.119.2'],
+    ['a legacy manifest label (v0.118.2)', 'fro-bot/agent@v0.118.2'],
+  ])('accepts a manifest carrying %s', async (_label, key_layout_version) => {
+    const {iam, s3} = makeTeardownClients()
+    const result = await performTeardown({
+      client: iam.client,
+      s3Client: s3.client,
+      manifest: {...teardownManifest, key_layout_version},
+      repository: teardownRepository(),
+    })
+    expect(result.stateRetained).toBe(true)
+  })
+
+  it.each(['fro-bot/agent@v0.96.0', 'fro-bot/agent@v0.0.0', 'fro-bot-agent-s3-layout/2', ''])(
+    'fails closed on an unknown manifest layout label %p before any AWS call',
+    async key_layout_version => {
+      const {iam, s3} = makeTeardownClients()
+      await expect(
+        performTeardown({
+          client: iam.client,
+          s3Client: s3.client,
+          manifest: {...teardownManifest, key_layout_version},
+          repository: teardownRepository(),
+        }),
+      ).rejects.toThrow(/unknown key layout|missing or invalid/i)
+      expect(iam.calls).toEqual([])
+      expect(s3.calls).toEqual([])
+    },
+  )
+
   it('deletes the repo policy, role, and lock while retaining session objects and shared resources by default', async () => {
     const {iam, s3, deletedObjects} = makeTeardownClients()
     const result = await performTeardown({

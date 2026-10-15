@@ -34,7 +34,7 @@ const manifest: StorageManifest = {
   policy_name: 'fro-bot-agent-storage-owner-repo',
   action_ref_verified: true,
   // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
-  key_layout_version: 'fro-bot/agent@v0.119.2',
+  key_layout_version: 'fro-bot-agent-s3-layout/1',
 }
 
 function makeGhResult(stdout: string, exitCode = 0, stderr = '') {
@@ -497,10 +497,35 @@ describe('agent S3 durable storage wiring', () => {
     const writes: {kind: string; name: string; value: string}[] = []
     const deps = makeDeps(writes, {
       // Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION.
-      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot/agent@v0.119.2'})),
+      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot-agent-s3-layout/1'})),
     })
 
     await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).resolves.toBeUndefined()
+  })
+
+  it.each(['fro-bot/agent@v0.119.2', 'fro-bot/agent@v0.118.2'])(
+    'accepts the legacy manifest label %s as the same layout, so existing manifests need no re-provision',
+    async label => {
+      const writes: {kind: string; name: string; value: string}[] = []
+      const deps = makeDeps(writes, {
+        readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: label})),
+      })
+
+      await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).resolves.toBeUndefined()
+      expect(writes.length).toBeGreaterThan(0)
+    },
+  )
+
+  it('rejects an unknown layout label before writing storage variables', async () => {
+    const writes: {kind: string; name: string; value: string}[] = []
+    const deps = makeDeps(writes, {
+      readManifest: mock(async () => JSON.stringify({...manifest, key_layout_version: 'fro-bot-agent-s3-layout/2'})),
+    })
+
+    await expect(runStorageSetup('owner/repo', {manifest: '-'}, deps)).rejects.toThrow(
+      /Unknown handoff manifest key_layout_version 'fro-bot-agent-s3-layout\/2'; expected fro-bot-agent-s3-layout\/1/,
+    )
+    expect(writes).toEqual([])
   })
 
   it('reports partial wiring when a later storage variable write fails', async () => {

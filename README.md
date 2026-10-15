@@ -201,7 +201,7 @@ AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are 
 
 See [`apps/broker/README.md`](apps/broker/README.md) and [`apps/broker/AGENTS.md`](apps/broker/AGENTS.md).
 
-**`apps/agent` has no GitHub Environment or deploy secrets.** It is a local-only provisioner; its `AGENT_AWS_*`, `AGENT_S3_*`, `AGENT_REPOSITORY_*`, and `AGENT_ACTION_REF` inputs live in the operator's root `.env` only and are never written to GitHub. See [`apps/agent/AGENTS.md`](apps/agent/AGENTS.md).
+**`apps/agent` has no GitHub Environment or deploy secrets.** It is a local-only provisioner; its `AGENT_AWS_*`, `AGENT_S3_*` and `AGENT_REPOSITORY_*` inputs live in the operator's root `.env` only and are never written to GitHub. See [`apps/agent/AGENTS.md`](apps/agent/AGENTS.md).
 
 **Repository secrets:**
 

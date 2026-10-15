@@ -7,7 +7,7 @@ The agent package is a private, operator-run AWS provisioner for `fro-bot/agent`
 | Task | Location | Notes |
 | --- | --- | --- |
 | Provision / teardown entrypoint | `server/provision.ts` | IAM + S3 convergence, readback verification, handoff manifest, teardown flags |
-| Action key layout | `src/key-layout.ts` | Version-pinned S3 session and coordination-lock paths (Action lock `locks/action.json`, shared-checkout lock `locks/repo.json`); unknown layouts fail closed |
+| Action key layout | `src/key-layout.ts` | S3 session and coordination-lock paths the Action uses (Action lock `locks/action.json`, shared-checkout lock `locks/repo.json`), labeled `fro-bot-agent-s3-layout/1`; independent of the Action version |
 | Provisioner tests | `server/provision.test.ts` | Mocked IAM/S3 boundary tests, drift handling, teardown safety |
 | Key-layout tests | `src/key-layout.test.ts` | Canonical prefix and fail-closed layout contract |
 | CLI wiring | `../../packages/cli/src/commands/agent/` | GitHub variable wiring, OIDC/resource prechecks, workflow verification |
@@ -23,25 +23,24 @@ The agent package is a private, operator-run AWS provisioner for `fro-bot/agent`
 
 Run the provisioner from the repository root so Bun loads the root `.env`. The following values are operator-local and must never be copied into a GitHub Environment or committed:
 
-| Variable | Required | Description |
-| --- | --- | --- |
-| `AGENT_AWS_ACCESS_KEY_ID` | ✓ | Dedicated AWS provisioning access key |
-| `AGENT_AWS_SECRET_ACCESS_KEY` | ✓ | Dedicated AWS provisioning secret |
-| `AGENT_AWS_SESSION_TOKEN` | — | Optional session token for the dedicated credentials |
-| `AGENT_AWS_REGION` | — | AWS SDK region; defaults to `us-east-1` |
-| `AGENT_S3_BUCKET` | ✓ | Dedicated action-state bucket name |
-| `AGENT_S3_EXPECTED_BUCKET_OWNER` | ✓ | Twelve-digit AWS account owner ID |
-| `AGENT_S3_PREFIX` | ✓ | Canonical root prefix, without wildcard characters |
-| `AGENT_S3_SESSION_PREFIX` | — | Optional explicit session prefix override |
-| `AGENT_S3_METADATA_ARTIFACTS_PREFIX` | — | Optional metadata/artifacts prefix override |
-| `AGENT_REPOSITORY_OWNER` | ✓ | GitHub repository owner |
-| `AGENT_REPOSITORY_NAME` | ✓ | GitHub repository name |
-| `AGENT_REPOSITORY_ID` | ✓ | Live GitHub repository ID |
-| `AGENT_REPOSITORY_OWNER_ID` | ✓ | Live GitHub owner ID |
-| `AGENT_WORKFLOW_NAME` | ✓ | Workflow name pinned in the IAM trust policy |
-| `AGENT_ACTION_REF` | ✓ | Verified `fro-bot/agent` ref; the current admitted layout is `fro-bot/agent@v0.119.2` |
+| Variable                             | Required | Description                                          |
+| ------------------------------------ | -------- | ---------------------------------------------------- |
+| `AGENT_AWS_ACCESS_KEY_ID`            | ✓        | Dedicated AWS provisioning access key                |
+| `AGENT_AWS_SECRET_ACCESS_KEY`        | ✓        | Dedicated AWS provisioning secret                    |
+| `AGENT_AWS_SESSION_TOKEN`            | —        | Optional session token for the dedicated credentials |
+| `AGENT_AWS_REGION`                   | —        | AWS SDK region; defaults to `us-east-1`              |
+| `AGENT_S3_BUCKET`                    | ✓        | Dedicated action-state bucket name                   |
+| `AGENT_S3_EXPECTED_BUCKET_OWNER`     | ✓        | Twelve-digit AWS account owner ID                    |
+| `AGENT_S3_PREFIX`                    | ✓        | Canonical root prefix, without wildcard characters   |
+| `AGENT_S3_SESSION_PREFIX`            | —        | Optional explicit session prefix override            |
+| `AGENT_S3_METADATA_ARTIFACTS_PREFIX` | —        | Optional metadata/artifacts prefix override          |
+| `AGENT_REPOSITORY_OWNER`             | ✓        | GitHub repository owner                              |
+| `AGENT_REPOSITORY_NAME`              | ✓        | GitHub repository name                               |
+| `AGENT_REPOSITORY_ID`                | ✓        | Live GitHub repository ID                            |
+| `AGENT_REPOSITORY_OWNER_ID`          | ✓        | Live GitHub owner ID                                 |
+| `AGENT_WORKFLOW_NAME`                | ✓        | Workflow name pinned in the IAM trust policy         |
 
-The `AGENT_S3_SESSION_PREFIX` and `AGENT_S3_METADATA_ARTIFACTS_PREFIX` values are optional inputs. The provisioner otherwise derives the action layout from `AGENT_S3_PREFIX` and the verified action ref. It refuses unknown or unverified layouts rather than widening IAM access.
+The `AGENT_S3_SESSION_PREFIX` and `AGENT_S3_METADATA_ARTIFACTS_PREFIX` values are optional inputs. The provisioner otherwise derives the layout from `AGENT_S3_PREFIX`. The layout is the Action's S3 key contract and does not depend on the Action version, so an Action bump needs no code change or re-provision; if upstream changes the contract, the daily storage run fails with AccessDenied, which is the signal to update `src/key-layout.ts`, bump the label, and re-provision. The policy is never widened to wildcards.
 
 ## PROVISIONING FLOW
 
@@ -85,7 +84,7 @@ The emitted JSON object has this shape:
   "role_arn": "arn:aws:iam::ACCOUNT_ID:role/ROLE",
   "policy_name": "POLICY",
   "action_ref_verified": true,
-  "key_layout_version": "fro-bot/agent@v0.119.2",
+  "key_layout_version": "fro-bot-agent-s3-layout/1",
   "oidc_provider_arn": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
 }
 ```
@@ -154,7 +153,7 @@ Teardown validates the manifest identity and role tags before mutating. A partia
 ## ANTI-PATTERNS
 
 - Never let the AWS SDK fall back to ambient credentials for provisioning.
-- Never widen an unknown action key layout to make a run work.
+- Never widen the key layout to wildcards to make a run work.
 - Never delete the shared bucket or account-level OIDC provider during per-repo teardown.
 - Never grant `id-token: write` at workflow level or to content-triggered jobs.
 - Never pass secret values in command arguments or commit them to the repository.

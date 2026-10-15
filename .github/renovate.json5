@@ -26,7 +26,8 @@
       groupName: null,
       // caddy:2.11.4-alpine@sha256:5f5c864... was manually verified to have a linux/amd64
       // manifest on 2026-07-13. Next minor stays gated pending the same verification.
-      allowedVersions: '<2.12.0',
+      // 2.11.6 cuts idle streaming responses (operator SSE) after 60s; fixed in 2.11.7.
+      allowedVersions: '/^2\\.11\\.(?!6(?:-|$))\\d+(?:-|$)/',
       automerge: false,
       dependencyDashboardApproval: true,
     },

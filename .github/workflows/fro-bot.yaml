@@ -496,7 +496,6 @@ env:
        - `marcusrbrown/containers` — Docker patterns, base images
        - `marcusrbrown/sparkle` — @bfra.me config versions, monorepo patterns
        - `marcusrbrown/gpt` — Vitest/Playwright testing, AI patterns
-       - `marcusrbrown/copiloting` — @bfra.me config versions, AI patterns
        - `marcusrbrown/renovate-config` — Renovate preset evolution
        - `marcusrbrown/.github` — Shared workflows, templates
 

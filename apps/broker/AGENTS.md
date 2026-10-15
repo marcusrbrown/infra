@@ -20,7 +20,7 @@ OIDC-authenticated credential broker at `broker.fro.bot`. Docker Compose stack (
 
 ## DEPLOY FLOW
 
-1. **Preflight** (`preflightChecks`): verifies `CLIPROXY_MANAGEMENT_KEY` is set, then GETs cliproxy `/v0/management/api-keys` with the cliproxy management key. Aborts on 401/403 (key drift) or network failure. No compose change happens until this passes.
+1. **Preflight** (`preflightChecks`): verifies `CLIPROXY_MANAGEMENT_KEY` is set, then GETs cliproxy `/v0/management/api-keys` with the cliproxy management key. Aborts on 401/403 (key drift) or network failure; a 403 whose body says "IP banned" aborts with a distinct source-IP-ban message (about 30 min, key may be fine) instead of the invalid-key one. No compose change happens until this passes.
 2. **Build** (`buildBundle`): runs `bun build src/main.ts --target bun --outfile dist/main.js` (cwd `apps/broker/`). Produces a self-contained ~300KB bundle with `jose` inlined via Web Crypto. Aborts on non-zero exit — no remote mutation happens if the build fails.
 3. **Upload**: `docker-compose.yaml`, `config/Caddyfile`, and `dist/main.js` are SCP'd to `/opt/broker/` on the droplet (`dist/main.js` → `/opt/broker/dist/main.js`).
 4. **Secrets**: the broker `.env` file (`BROKER_HOST`, `CLIPROXY_MANAGEMENT_URL`, `CLIPROXY_MANAGEMENT_KEY`, `BROKER_AUD`) is written via SSH stdin — never in argv.

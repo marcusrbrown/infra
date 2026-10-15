@@ -2,7 +2,7 @@
 
 Operator-run AWS provisioner for `fro-bot/agent` durable S3 session storage. No deploy target, no Docker Compose, no deploy workflow, and no GitHub Environment — this package is not deployable.
 
-It provisions an account-level GitHub Actions OIDC provider, a dedicated S3 bucket, and one least-privilege IAM role and inline policy per consumer repository. It does not deploy an application, publish a package, or write any AWS credential to a GitHub repository. `apps/agent/src/key-layout.ts` pins a versioned S3 key layout and fails closed on unknown or unverified layouts rather than widening IAM access.
+It provisions an account-level GitHub Actions OIDC provider, a dedicated S3 bucket, and one least-privilege IAM role and inline policy per consumer repository. It does not deploy an application, publish a package, or write any AWS credential to a GitHub repository. `apps/agent/src/key-layout.ts` defines the S3 key layout the Fro Bot Action uses, independent of the Action version, and the policy never widens beyond it.
 
 ## Provisioning
 
@@ -48,7 +48,6 @@ No GitHub Environment. Provisioning inputs are operator-local values in the repo
 | `AGENT_REPOSITORY_ID`                | ✓        | Live GitHub repository ID                            |
 | `AGENT_REPOSITORY_OWNER_ID`          | ✓        | Live GitHub owner ID                                 |
 | `AGENT_WORKFLOW_NAME`                | ✓        | Workflow name pinned in the IAM trust policy         |
-| `AGENT_ACTION_REF`                   | ✓        | Verified `fro-bot/agent` ref                         |
 
 The provisioner deliberately ignores ambient `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` values — only the `AGENT_AWS_*` names are read. No static AWS credential is ever written to GitHub.
 
@@ -63,7 +62,7 @@ Rollout, Go/No-Go, and monitoring: [`docs/runbooks/agent-s3-durable-storage.md`]
 Key operational notes:
 
 - Never let the AWS SDK fall back to ambient credentials for provisioning.
-- Never widen an unknown action key layout to make a run work.
+- Never widen the key layout to wildcards to make a run work.
 - Never delete the shared bucket or account-level OIDC provider during per-repo teardown.
 - Never grant `id-token: write` at workflow level or to content-triggered jobs.
 - Never pass secret values in command arguments or commit them to the repository.

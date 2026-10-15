@@ -5,6 +5,7 @@ import type {goke} from 'goke'
 import {log} from '@clack/prompts'
 import {z} from 'zod'
 
+import {isKnownKeyLayoutVersion, KEY_LAYOUT_VERSION} from './key-layout'
 import {applyGhValue, runCommand, runGh, type CommandResult} from './setup-core/gh'
 import {verifyWorkflow} from './workflow-verify'
 
@@ -18,9 +19,6 @@ export const STORAGE_VARIABLE_NAMES = {
   prefix: 'FRO_BOT_S3_PREFIX',
   expectedBucketOwner: 'FRO_BOT_S3_EXPECTED_BUCKET_OWNER',
 } as const
-
-/** Must match apps/agent/src/key-layout.ts KEY_LAYOUT_VERSION. Unknown layouts fail closed. */
-export const KNOWN_KEY_LAYOUT_VERSION = 'fro-bot/agent@v0.119.2'
 
 export interface StorageManifest {
   owner: string
@@ -145,9 +143,9 @@ function assertCanonicalPath(field: string, value: string, mustEndWithSlash: boo
 }
 
 function validateManifest(manifest: StorageManifest): void {
-  if (manifest.key_layout_version !== KNOWN_KEY_LAYOUT_VERSION) {
+  if (!isKnownKeyLayoutVersion(manifest.key_layout_version)) {
     throw new Error(
-      `Unknown handoff manifest key_layout_version '${manifest.key_layout_version}'; expected ${KNOWN_KEY_LAYOUT_VERSION}.`,
+      `Unknown handoff manifest key_layout_version '${manifest.key_layout_version}'; expected ${KEY_LAYOUT_VERSION}.`,
     )
   }
   assertRepoFormat(`${manifest.owner}/${manifest.repo}`)

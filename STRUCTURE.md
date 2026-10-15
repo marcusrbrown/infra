@@ -27,7 +27,7 @@ Where things live and where to put new code. For system shape, data flow, and in
 
 ### `apps/`
 
-One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (except keeweb — `server/provision-droplet.ts` for the DigitalOcean Docker apps including dashboard and broker, `server/provision.ts` for the `@aws-sdk/client-lightsail` VPN box), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`, and the VPN peer model is published from `packages/cli`. `apps/agent` is the non-deployable exception: a `private: true` operator-run AWS provisioner with no `src/deploy.ts`, no `src/host.ts`, and no deploy workflow — just `server/provision.ts` (IAM + S3 convergence) and `src/key-layout.ts` (pinned S3 key layout).
+One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (except keeweb — `server/provision-droplet.ts` for the DigitalOcean Docker apps including dashboard and broker, `server/provision.ts` for the `@aws-sdk/client-lightsail` VPN box), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`, and the VPN peer model is published from `packages/cli`. `apps/agent` is the non-deployable exception: a `private: true` operator-run AWS provisioner with no `src/deploy.ts`, no `src/host.ts`, and no deploy workflow — just `server/provision.ts` (IAM + S3 convergence) and `src/key-layout.ts` (S3 key layout the Action uses).
 
 ### `packages/`
 
@@ -68,7 +68,7 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | `apps/<name>/server/provision-droplet.ts` | DigitalOcean droplet provisioning (cliproxy, gateway, umami, dashboard, broker) |
 | `apps/vpn/server/provision.ts` | Lightsail provisioning (`@aws-sdk/client-lightsail`) |
 | `apps/agent/server/provision.ts` | Operator-run AWS IAM + S3 convergence for `fro-bot/agent` durable storage; no deploy step |
-| `apps/agent/src/key-layout.ts` | Version-pinned S3 session/coordination-lock key layout; unknown layouts fail closed |
+| `apps/agent/src/key-layout.ts` | S3 session/coordination-lock key layout the Action uses, independent of the Action version |
 | `apps/<name>/src/host.ts` | Deploy-side host validator (rejects `-`-prefixed / invalid hosts) |
 | `apps/gateway/upstream.json` | Pinned `fro-bot/agent` daemon ref |
 | `apps/dashboard/docker-compose.yaml` | Digest-pinned `ghcr.io/fro-bot/dashboard` image (tag@sha256 in the `image:` line; Renovate tracks bumps) |

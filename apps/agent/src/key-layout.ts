@@ -1,25 +1,24 @@
 /**
- * The key layout is intentionally versioned with the consuming action. Do not
- * widen this table to make an unverified action ref provision successfully.
+ * The S3 key contract the Fro Bot Action uses for durable storage; it is not tied
+ * to an Action version. The session tree is `${prefix}github/<owner>/<repo>/`.
+ * The Action coordinates through the exact `${prefix}coordination/<owner>/<repo>/locks/action.json`
+ * object; `locks/repo.json` is the gateway's shared-checkout lock.
  *
- * v0.119.2 is the only currently admitted action ref. Its session tree is
- * `${prefix}/github/<owner>/<repo>/` (sessions, artifacts, and metadata,
- * including review-delivery receipts). The Action coordinates through the exact
- * `${prefix}/coordination/<owner>/<repo>/locks/action.json` object
- * (`ACTION_LOCK_SCOPE` in `src/harness/phases/acquire-lock.ts`); the sibling
- * `locks/repo.json` is the gateway's shared-checkout lock
- * (`LOCK_OBJECT_NAMES` in `packages/runtime/src/coordination/lock.ts`). These
- * paths are the pinned contract and must be re-verified before adding another
- * action version here.
+ * When upstream changes this contract, the daily storage run fails with AccessDenied.
+ * That is the signal to update this layout, bump the label, and re-provision.
+ * Never widen it to wildcards.
  */
-export const KEY_LAYOUT_VERSION = 'fro-bot/agent@v0.119.2' as const
-export const AGENT_ACTION_LAYOUT_VERSION = KEY_LAYOUT_VERSION
+export const KEY_LAYOUT_VERSION = 'fro-bot-agent-s3-layout/1' as const
 
-const PINNED_ACTION_REF = 'v0.119.2'
-const PINNED_ACTION_SHA = '83ed683da24111bd1474eb4bda39715ed5799bc2'
+/**
+ * Handoff manifests written before the layout had its own label carry the Action ref
+ * they were verified against. These refs describe the same layout, so teardown still
+ * accepts them. Keep in sync with packages/cli/src/commands/agent/key-layout.ts.
+ */
+const LEGACY_KEY_LAYOUT_LABELS: ReadonlySet<string> = new Set(['fro-bot/agent@v0.118.2', 'fro-bot/agent@v0.119.2'])
 
 export interface AgentKeyLayout {
-  actionVersion: typeof KEY_LAYOUT_VERSION
+  layoutVersion: typeof KEY_LAYOUT_VERSION
   sessionPrefix: string
   /** Exact shared-checkout lock object (`locks/repo.json`). */
   lockKey: string
@@ -59,32 +58,19 @@ function canonicalizePrefix(prefix: string): string {
 }
 
 /**
- * Returns the only action ref whose object-key contract has been verified.
- * Unknown refs throw before the provisioner creates or mutates any resource.
+ * Validates a handoff manifest's `key_layout_version`. Unknown labels throw before the
+ * provisioner mutates any resource.
  */
-export function assertKnownKeyLayout(actionVersion: string): typeof KEY_LAYOUT_VERSION {
-  const normalized = actionVersion.trim()
-  if (
-    normalized !== KEY_LAYOUT_VERSION &&
-    normalized !== PINNED_ACTION_REF &&
-    normalized !== PINNED_ACTION_SHA &&
-    normalized !== `fro-bot/agent@${PINNED_ACTION_SHA}`
-  ) {
-    throw new Error(
-      `Unknown or unverified fro-bot/agent key layout ${normalized || '<empty>'}; refusing to widen S3 access`,
-    )
+export function assertKnownKeyLayout(label: string): typeof KEY_LAYOUT_VERSION {
+  const normalized = label.trim()
+  if (normalized !== KEY_LAYOUT_VERSION && !LEGACY_KEY_LAYOUT_LABELS.has(normalized)) {
+    throw new Error(`Unknown key layout ${normalized || '<empty>'}; refusing to widen S3 access`)
   }
   return KEY_LAYOUT_VERSION
 }
 
 /** Builds the canonical, delimiter-bounded key layout for one repository. */
-export function buildAgentKeyLayout(
-  owner: string,
-  repo: string,
-  prefix: string,
-  actionVersion: string = KEY_LAYOUT_VERSION,
-): AgentKeyLayout {
-  const verifiedVersion = assertKnownKeyLayout(actionVersion)
+export function buildAgentKeyLayout(owner: string, repo: string, prefix: string): AgentKeyLayout {
   const ownerSegment = assertPathSegment(owner, 'Agent repository owner')
   const repoSegment = assertPathSegment(repo, 'Agent repository name')
   const normalizedPrefix = canonicalizePrefix(prefix)
@@ -94,7 +80,7 @@ export function buildAgentKeyLayout(
   const actionLockKey = `${lockPrefix}action.json`
 
   return {
-    actionVersion: verifiedVersion,
+    layoutVersion: KEY_LAYOUT_VERSION,
     sessionPrefix,
     lockKey,
     actionLockKey,

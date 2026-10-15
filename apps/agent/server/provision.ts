@@ -39,7 +39,7 @@ import {
   type BucketLocationConstraint,
   type LifecycleRule,
 } from '@aws-sdk/client-s3'
-import {assertKnownKeyLayout, buildAgentKeyLayout, type AgentKeyLayout} from '../src/key-layout'
+import {assertKnownKeyLayout, buildAgentKeyLayout, KEY_LAYOUT_VERSION, type AgentKeyLayout} from '../src/key-layout'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -62,7 +62,6 @@ export const AGENT_REPOSITORY_NAME = 'AGENT_REPOSITORY_NAME'
 export const AGENT_REPOSITORY_ID = 'AGENT_REPOSITORY_ID'
 export const AGENT_REPOSITORY_OWNER_ID = 'AGENT_REPOSITORY_OWNER_ID'
 export const AGENT_WORKFLOW_NAME = 'AGENT_WORKFLOW_NAME'
-export const AGENT_ACTION_REF = 'AGENT_ACTION_REF'
 
 export const AGENT_STORAGE_ENVIRONMENT = 'fro-bot-storage'
 export const AGENT_ROLE_MANAGED_BY = 'fro-bot-agent-storage'
@@ -148,7 +147,6 @@ export interface AgentStoragePolicyConfig {
   owner: string
   repo: string
   s3Prefix: string
-  actionVersion: string
 }
 
 export interface AgentStoragePolicyProvisionOptions {
@@ -182,8 +180,6 @@ export interface ProvisionDeps {
   bucket?: AgentBucketConfig
   /** Explicit consumer repository identity; otherwise read from AGENT_REPOSITORY_* env vars. */
   repository?: AgentRepositoryConfig
-  /** Exact fro-bot/agent ref used by the consumer workflow. */
-  actionRef?: string
   /** Apply managed drift instead of warning and halting. */
   force?: boolean
   /** Read current state and report intended changes without mutating AWS. */
@@ -1581,8 +1577,7 @@ interface BuiltAgentStoragePolicy {
  * session prefix.
  */
 export function buildAgentStoragePolicy(config: AgentStoragePolicyConfig): BuiltAgentStoragePolicy {
-  const keyLayoutVersion = assertKnownKeyLayout(config.actionVersion)
-  const layout = buildAgentKeyLayout(config.owner, config.repo, config.s3Prefix, keyLayoutVersion)
+  const layout = buildAgentKeyLayout(config.owner, config.repo, config.s3Prefix)
   const bucketArn = `arn:aws:s3:::${config.bucket}`
   const sessionObjectArn = `${bucketArn}/${layout.sessionPrefix}*`
   const lockObjectArn = `${bucketArn}/${layout.lockKey}`
@@ -1590,7 +1585,7 @@ export function buildAgentStoragePolicy(config: AgentStoragePolicyConfig): Built
 
   return {
     policyName: config.roleName,
-    keyLayoutVersion,
+    keyLayoutVersion: KEY_LAYOUT_VERSION,
     layout,
     document: {
       Version: '2012-10-17',
@@ -1805,11 +1800,10 @@ async function planProvisioning(options: {
   s3Client: S3ClientLike
   repository: AgentRepositoryConfig
   bucketConfig: AgentBucketConfig
-  keyLayoutVersion: string
   secrets: RedactionSecret[]
   log: (message: string) => void
 }): Promise<AgentHandoffManifest> {
-  const {client, s3Client, repository, bucketConfig, keyLayoutVersion, secrets, log} = options
+  const {client, s3Client, repository, bucketConfig, secrets, log} = options
   const provider = await discoverCanonicalProvider(client, secrets)
   if (!provider) {
     log('Plan: would create the shared GitHub OIDC provider.')
@@ -1847,7 +1841,6 @@ async function planProvisioning(options: {
     owner: repository.owner,
     repo: repository.repo,
     s3Prefix: bucketConfig.s3Prefix,
-    actionVersion: keyLayoutVersion,
   }
   const builtPolicy = buildAgentStoragePolicy(policyConfig)
   const currentPolicy = await readAgentStoragePolicy(client, roleName, builtPolicy.policyName, secrets)
@@ -1967,8 +1960,8 @@ function validateTeardownManifest(manifest: unknown, repository: AgentRepository
     throw new Error('Teardown manifest role ARN does not match the target repository; refusing to mutate.')
   }
 
-  const keyLayoutVersion = assertKnownKeyLayout(typedManifest.key_layout_version)
-  const layout = buildAgentKeyLayout(repository.owner, repository.repo, typedManifest.s3_prefix, keyLayoutVersion)
+  assertKnownKeyLayout(typedManifest.key_layout_version)
+  const layout = buildAgentKeyLayout(repository.owner, repository.repo, typedManifest.s3_prefix)
   if (layout.sessionPrefix !== typedManifest.session_prefix || layout.lockKey !== typedManifest.lock_key) {
     throw new Error('Teardown manifest S3 key layout does not match the target repository; refusing to mutate.')
   }
@@ -2438,16 +2431,6 @@ function readRepositoryConfigFromEnv(env: Partial<Record<string, string | undefi
   return {owner, repo, repositoryId, repositoryOwnerId, workflow}
 }
 
-function readActionRefFromEnv(env: Partial<Record<string, string | undefined>>): string {
-  const actionRef = env[AGENT_ACTION_REF]?.trim()
-  if (!actionRef) {
-    throw new Error(
-      `Missing dedicated agent action ref configuration. Set ${AGENT_ACTION_REF} to the pinned fro-bot/agent ref.`,
-    )
-  }
-  return actionRef
-}
-
 function readArgumentValue(args: string[], name: string): string | undefined {
   const index = args.indexOf(name)
   if (index === -1) return undefined
@@ -2486,11 +2469,7 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
     )
   }
 
-  // Validate the action layout before constructing clients or touching shared
-  // AWS resources. An unknown layout is never made to work by widening IAM.
-  const actionRef = deps.actionRef ?? readActionRefFromEnv(env)
-  const keyLayoutVersion = assertKnownKeyLayout(actionRef)
-  const keyLayout = buildAgentKeyLayout(repository.owner, repository.repo, bucketConfig.s3Prefix, keyLayoutVersion)
+  const keyLayout = buildAgentKeyLayout(repository.owner, repository.repo, bucketConfig.s3Prefix)
 
   const client = deps.client ?? createIamClientFromEnv(env)
   const log = deps.printLine ?? (line => console.log(line))
@@ -2501,7 +2480,6 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
       s3Client,
       repository,
       bucketConfig,
-      keyLayoutVersion,
       secrets,
       log,
     })
@@ -2527,7 +2505,6 @@ export async function performProvisioning(deps: ProvisionDeps = {}): Promise<Age
       owner: repository.owner,
       repo: repository.repo,
       s3Prefix: bucket.s3Prefix,
-      actionVersion: keyLayoutVersion,
     },
     {
       force: deps.force,
@@ -2562,7 +2539,7 @@ Required environment:
   AGENT_AWS_ACCESS_KEY_ID, AGENT_AWS_SECRET_ACCESS_KEY
   AGENT_AWS_REGION, AGENT_S3_BUCKET, AGENT_S3_EXPECTED_BUCKET_OWNER, AGENT_S3_PREFIX
   AGENT_REPOSITORY_OWNER, AGENT_REPOSITORY_NAME, AGENT_REPOSITORY_ID
-  AGENT_REPOSITORY_OWNER_ID, AGENT_WORKFLOW_NAME, AGENT_ACTION_REF
+  AGENT_REPOSITORY_OWNER_ID, AGENT_WORKFLOW_NAME
   Optional: AGENT_AWS_SESSION_TOKEN, AGENT_S3_SESSION_PREFIX,
   AGENT_S3_METADATA_ARTIFACTS_PREFIX
 

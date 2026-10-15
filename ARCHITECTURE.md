@@ -43,7 +43,7 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 | Broker sweeper | `apps/broker/src/sweeper.ts` (`sweepExpired`, `reconcile`, `startupReconcile`, `startSweeper`) |
 | Broker CLI command group | `packages/cli/src/commands/broker/` (`status.ts`, `deploy.ts`, `logs.ts`, `index.ts` → `registerBrokerCommands`) |
 | Agent AWS provisioner (operator-run, no deploy) | `apps/agent/server/provision.ts` (IAM + S3 convergence, readback verification, handoff manifest, `--teardown`) |
-| Agent action key layout | `apps/agent/src/key-layout.ts` (version-pinned S3 session/coordination-lock paths; unknown layouts fail closed) |
+| Agent action key layout | `apps/agent/src/key-layout.ts` (S3 session/coordination-lock paths the Action uses, independent of the Action version) |
 | Agent CLI command group | `packages/cli/src/commands/agent/` (`index.ts` → `registerAgentCommands` → `registerAgentSetup` (`agent setup`, wraps shared `setup-core`) + `registerAgentStorageCommand` (`agent storage`, `agent storage teardown`)) |
 | Agent workflow verifier | `packages/cli/src/commands/agent/workflow-verify.ts` (`verifyWorkflow` — validates `fro-bot.yaml` job-split, `fro-bot-storage` environment gate, and reachability before wiring storage vars) |
 | Per-app host validators | `apps/<name>/src/host.ts` and `packages/cli/src/commands/<app>/host.ts` |

@@ -116,9 +116,24 @@ done
 - **401** — the route is mounted and demanding auth. The push subsystem initialized.
 - **404** — the route did not mount. Push is off.
 
-A 401 proves the object-store CAS self-test passed **at boot**. The routes mount only when the daemon threads through a push store and VAPID key info, and it only does that after the self-test succeeds — so a mounted route cannot exist on a process that failed the self-test at startup. It says nothing about the store's health since.
+A 401 proves the object-store CAS self-test passed **at boot**. The routes mount only when the daemon threads through a push store and VAPID key info, and it only does that after the self-test succeeds — so a mounted route cannot exist on a process that failed the self-test at startup. It says nothing about the store's health since; for that, use the [post-boot check](#post-boot-push-health).
 
 That is initialization, not delivery. A mounted route says the quartet was present and the self-test passed; it says nothing about whether a notification reaches a browser. Keys can be well-formed and still be the wrong keys. Confirm delivery by subscribing and triggering an approval-pending or failed run.
+
+#### Post-boot push health
+
+Signed in at `https://dashboard.fro.bot`, run this in the DevTools Console. It prints only the push field:
+
+```js
+;(await fetch("/operator/session", {credentials: "same-origin"}).then(r => r.json())).push
+```
+
+- `{status: "ready"}` — healthy.
+- `{status: "degraded"}` — push is configured but not fully healthy.
+- `{status: "unknown"}` — push is configured but there is not enough recent evidence to call it healthy.
+- `undefined` (field absent) — push is not configured on the gateway.
+
+The status is derived in memory from the startup self-test and the outcomes of object-store reads, object-store writes, and push relay deliveries within the last hour: `degraded` after a failed startup self-test (until restart) or a failure in the last hour; `ready` when there is a recent success and no failure; `unknown` otherwise (for example, no push activity in the last hour). It resets on gateway restart. Like the mount check, it is not proof that a notification reaches a browser.
 
 Probe with the right verb. `/operator/push/subscriptions/unsubscribe` is POST-only, so a plain `curl` returns 404 on a route that is mounted and working — a false "push is off". The loop above deliberately uses only the two GET-safe routes. Extending it, use `-X POST` for the POST routes:
 
@@ -180,7 +195,7 @@ Requirements: HTTPS (satisfied), a registered service worker (already shipped �
 
 **A green deploy does not prove push is live.** If the object-store CAS self-test fails at gateway startup, push is disabled for that process and the gateway continues serving every other route normally — nothing fails, nothing restarts, no alert fires. Probing `/operator/push/vapid-key` for 401 after every push-affecting deploy is mandatory, not a nice-to-have. It costs one unauthenticated curl.
 
-**The 401 is a latch, not a liveness probe.** Mount state is decided once during startup and never re-evaluated. If the object store degrades an hour or a month later, the routes stay mounted and the probe keeps returning 401 — it went 404 to 401 exactly once and cannot go back on its own. Use it as a post-deploy check, which is the moment it is actually answering a question, and do not wire it into monitoring. There is no runtime signal today for a push surface that initialized cleanly and then broke.
+**The 401 is a latch, not a liveness probe.** Mount state is decided once during startup and never re-evaluated. If the object store degrades an hour or a month later, the routes stay mounted and the probe keeps returning 401 — it went 404 to 401 exactly once and cannot go back on its own. Use it as a post-deploy mount check, which is the moment it is actually answering a question, and do not wire it into monitoring. For a push surface that initialized cleanly and may have broken since, read `push.status` from the authenticated `GET /operator/session` response (see [Post-boot push health](#post-boot-push-health)).
 
 **Subscriptions are durable, not in-memory.** They live in the object store at `operator-push/subscriptions/by-endpoint/{sha256(endpoint)}.json`, with privacy tombstones at `operator-push/tombstones/{sha256(endpoint)}.json`. They survive container recreation. This is the opposite of operator browser sessions, which are in-memory and die on any restart.
 

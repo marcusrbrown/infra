@@ -2,6 +2,12 @@ services:
   caddy:
     image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
+    # Bound the json-file logs now that Caddy writes a management access log to stdout.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
     ports:
       - '80:80'
       - '443:443'
@@ -12,6 +18,10 @@ services:
       - caddy_data:/data
       - caddy_config:/config
       - ./config/Caddyfile:/etc/caddy/Caddyfile
+    networks:
+      cliproxy:
+        # Pinned because CLIProxyAPI's trusted-proxies (config.yaml) lists this address.
+        ipv4_address: 172.28.0.2
     depends_on:
       cli-proxy-api:
         condition: service_started
@@ -34,6 +44,17 @@ services:
       - cliproxy_auth:/root/.cli-proxy-api
       - ./config/config.yaml:/CLIProxyAPI/config.yaml
       # - cliproxy_logs:/var/log/cliproxy
+    networks:
+      - cliproxy
+
+networks:
+  cliproxy:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+          # Dynamic addresses come from here, so cli-proxy-api never takes Caddy's pinned .2.
+          ip_range: 172.28.0.128/25
 
 volumes:
   caddy_data:

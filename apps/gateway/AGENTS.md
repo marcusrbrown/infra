@@ -70,6 +70,8 @@ Workspace checkout ownership migrates one-way: on first boot the workspace entry
 
 Rollback means restoring a pre-upgrade snapshot of the `workspace-repos` volume **and** redeploying the old gateway and workspace images together (they share the workspace bearer contract; a mismatch yields HTTP 401 / `workspace-unavailable`). Take the snapshot before any pin bump that crosses the uid migration. Upstream's alternative is chowning the checkout trees back to root — see `deploy/README.md` in `fro-bot/agent`, "Workspace uid isolation" → Rollback. Never revert only the pin.
 
+The ownership migration ran at the v0.118.2 cutover. Rolling back between releases at or after v0.118.2 (for example v0.122.1 → v0.119.2) is a paired pin reversal with the dashboard and needs no volume restore; the snapshot requirement applies only when a rollback crosses the migration.
+
 ## CLI COMMANDS
 
 | Command | Purpose |

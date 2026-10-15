@@ -29,6 +29,16 @@ This runbook does not repeat setup or rotation procedures:
 
 ---
 
+## Paired rollout
+
+1. Confirm the live pair first. `curl -s https://dashboard.fro.bot/operator/health` gives the live contract; the pins on main are the `ref` in `apps/gateway/upstream.json` and the `image:` line in `apps/dashboard/docker-compose.yaml`. If production runs a dashboard tag main does not pin, merge the open "pin image to" audit PR first so the rollback pair matches what runs. See [`dashboard-deploy-proof-replacement-audit-same-target-2026-08-03.md`](../solutions/workflow-issues/dashboard-deploy-proof-replacement-audit-same-target-2026-08-03.md).
+2. Merge the gateway pin PR. The Deploy router detects the `apps/gateway/**` change, builds the images, and holds the gateway deploy at the `gateway` environment gate. Do not dispatch Deploy Gateway separately.
+3. Each dashboard release dispatches its own Deploy Dashboard run. A waiting run holds the workflow's concurrency group, and a newer dispatch cancels any older pending run (it ends `cancelled` with no jobs). Reject superseded waiting runs through the pending-deployments API and use the run actually waiting at the `dashboard` gate whose release declares the target contract. See [`aggregate-deploy-concurrency-cancels-gated-deploys-2026-06-25.md`](../solutions/workflow-issues/aggregate-deploy-concurrency-cancels-gated-deploys-2026-06-25.md) and [`approval-gated-run-cancellation-2026-09-02.md`](../solutions/workflow-issues/approval-gated-run-cancellation-2026-09-02.md).
+4. With both runs waiting at their gates, approve the gateway, wait until `/operator/health` reports the new `contractVersion`, then approve the dashboard immediately. Expanded run streams fail closed between the two approvals.
+5. Run the checks below.
+
+---
+
 ## Checks
 
 ### 1. Health

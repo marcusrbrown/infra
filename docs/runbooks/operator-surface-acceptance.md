@@ -1,6 +1,6 @@
 # Operator Surface Acceptance
 
-Browser acceptance checklist for the operator surface at `https://dashboard.fro.bot`. Run it after every paired gateway + dashboard operator-contract upgrade. Current pair: gateway `fro-bot/agent` v0.122.1 + dashboard 2026.10.27, operator contract 1.11.0. Elsewhere in this runbook, `<expected>` means the contract version of the pair under test.
+Browser acceptance checklist for the operator surface at `https://dashboard.fro.bot`. Run it after every paired gateway + dashboard operator-contract upgrade. The pair is `apps/gateway/upstream.json` plus the `image:` line in `apps/dashboard/docker-compose.yaml`; the contract version comes from `/operator/health`. Elsewhere in this runbook, `<expected>` means the contract version of the pair under test.
 
 Each check lists how to trigger it, what you should see, and what failure looks like. Run the checks in order; [logout](#14-logout-and-csrf) is last because it ends your session.
 

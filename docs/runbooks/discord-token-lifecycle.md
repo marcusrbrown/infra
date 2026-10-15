@@ -24,7 +24,7 @@ Secret files live on the droplet under `/opt/gateway/deploy/secrets/`. Each file
 
 **Kebab-case ↔ snake_case ↔ env var mapping:**
 
-The upstream compose contract maps kebab-case host files to snake_case container paths and exposes them via `${NAME}_FILE` env vars. The upstream `readOptionalSecret` helper (in `fro-bot/agent@v0.44.2/packages/gateway/src/config.ts`) reads `${NAME}_FILE` first (file path), falls back to the bare env var, and treats an empty file as absent.
+The upstream compose contract maps kebab-case host files to snake_case container paths and exposes them via `${NAME}_FILE` env vars. The upstream `readOptionalSecret` helper (in `fro-bot/agent` `packages/gateway/src/config.ts`) reads `${NAME}_FILE` first (file path), falls back to the bare env var, and treats an empty file as absent.
 
 | Host file (kebab) | Compose mount (snake) | Container env var (`_FILE`) | Bare env var fallback | Required? |
 |---|---|---|---|---|
@@ -208,4 +208,4 @@ The Discord bot token is the only credential the gateway holds today. If upstrea
 
 ---
 
-_Last verified against: `fro-bot/agent@v0.44.2` (the current `apps/gateway/upstream.json` pin) on 2026-05-20_
+_Last verified against: `fro-bot/agent@v0.44.2` on 2026-05-20_

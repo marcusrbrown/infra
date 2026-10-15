@@ -4,13 +4,13 @@ Privacy-respecting, self-hosted [Umami](https://umami.is) web analytics for `met
 
 ## Stack
 
-| Service | Image | Role |
-| --- | --- | --- |
-| `umami` | `umamisoftware/umami:3.3.1@sha256:4f7d2b788f4ee84432f3119203656ed2083074f3656c63b3b5905be06b3b8462` | App + tracker API on `:3000` |
-| `db` | `postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b` | Postgres; named volume `umami-db-data` |
-| `caddy` | `caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f` | Auto-TLS reverse proxy `:443 → umami:3000` |
+| Service | Image                   | Role                                       |
+| ------- | ----------------------- | ------------------------------------------ |
+| `umami` | `umamisoftware/umami`   | App + tracker API on `:3000`               |
+| `db`    | `postgres` Alpine image | Postgres; named volume `umami-db-data`     |
+| `caddy` | `caddy` Alpine image    | Auto-TLS reverse proxy `:443 → umami:3000` |
 
-Images are pinned to numbered tags by digest and tracked by Renovate (changelog-linked, standalone PRs). Postgres port `5432` is never published to the host.
+Images are pinned to numbered tags by digest in `docker-compose.yaml` (the source of truth for versions) and tracked by Renovate (changelog-linked, standalone PRs). Postgres port `5432` is never published to the host.
 
 ## Deploy flow
 
@@ -43,7 +43,7 @@ In CI the SSH key is materialized from `UMAMI_SSH_KEY` to a temp file with a tra
 
 Umami first-boot creates a default `admin` / `umami` account. After the stack is healthy, the deploy logs in to `http://localhost:3000` **on the droplet** (never the public host) with the defaults; if that succeeds it sets the admin password to `UMAMI_ADMIN_PASSWORD` via the authenticated password-update endpoint. If the default login fails, the password is already rotated and the step is skipped (idempotent). After the first deploy, log in at `https://metrics.fro.bot` with `admin` / `UMAMI_ADMIN_PASSWORD`. The admin password travels via SSH stdin / request body, never argv.
 
-> The exact v3.3.1 auth endpoints (`/api/auth/login`, `/api/me/password`) are pinned as constants in `src/deploy.ts`; the password-change endpoint uses body `{currentPassword, newPassword}` (Bearer auth). Re-verify them against the running image on a major Umami bump.
+> The auth endpoints (`/api/auth/login`, `/api/me/password`) are pinned as constants in `src/deploy.ts`; the password-change endpoint uses body `{currentPassword, newPassword}` (Bearer auth). Re-verify them against the running image on a major Umami bump.
 
 ## Privacy baseline
 
@@ -92,7 +92,7 @@ set -Eeuo pipefail
 HOST="${UMAMI_DOMAIN:?Set UMAMI_DOMAIN to the exact deployed host}"
 REMOTE="root@${HOST}"
 BACKUP="umami-$(date -u +%Y%m%dT%H%M%SZ).dump"
-POSTGRES_IMAGE='postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b'
+POSTGRES_IMAGE="$(ssh "$REMOTE" 'docker compose -f /opt/umami/docker-compose.yaml config --images' | grep '^postgres:')"
 ssh "$REMOTE" \
   "docker compose -f /opt/umami/docker-compose.yaml exec -T db pg_dump -Fc --create -U umami -d umami" \
   > "$BACKUP"
@@ -171,12 +171,13 @@ REMOTE="root@${HOST}"
 
 ### 1. Verify the deployed stack and retention release
 
-Run this before taking the recovery backup and again before enabling the timer. It checks the exact current Umami/Postgres image references, container state, content-addressed `current` target, the five file hashes, and the deploy hash algorithm:
+Run this before taking the recovery backup and again before enabling the timer. Run it from the repo root. It checks that the deployed compose file pins the same Umami/Postgres images as `apps/umami/docker-compose.yaml`, then container state, content-addressed `current` target, the five file hashes, and the deploy hash algorithm:
 
 ```bash
+DEPLOYED_IMAGES="$(ssh "$REMOTE" 'docker compose -f /opt/umami/docker-compose.yaml config --images')"
+awk '$1 == "image:" && $2 ~ /^(umamisoftware\/umami|postgres):/ { print $2 }' apps/umami/docker-compose.yaml |
+  while read -r ref; do grep -Fx "$ref" <<<"$DEPLOYED_IMAGES" || printf 'deployed compose does not pin %s\n' "$ref" >&2; done
 ssh "$REMOTE" 'set -Eeuo pipefail
-docker compose -f /opt/umami/docker-compose.yaml config --images | grep -Fx "umamisoftware/umami:3.3.1@sha256:4f7d2b788f4ee84432f3119203656ed2083074f3656c63b3b5905be06b3b8462"
-docker compose -f /opt/umami/docker-compose.yaml config --images | grep -Fx "postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b"
 docker compose -f /opt/umami/docker-compose.yaml ps --all
 current_target="$(readlink -e /opt/umami/retention/current)"
 case "$current_target" in
@@ -225,7 +226,7 @@ BACKUP="$RECOVERY_DIR/umami.dump"
 SOURCE_MANIFEST="$RECOVERY_DIR/source.manifest"
 RESTORED_MANIFEST="$RECOVERY_DIR/restored.manifest"
 BACKUP_LIST="$RECOVERY_DIR/umami.dump.list"
-POSTGRES_IMAGE='postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b'
+POSTGRES_IMAGE="$(ssh "$REMOTE" 'docker compose -f /opt/umami/docker-compose.yaml config --images' | grep '^postgres:')"
 RESTORE_CONTAINER="umami-retention-restore-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 CONTAINER_CREATED=0
 

@@ -7,8 +7,8 @@ import {join} from 'node:path'
 import {validateUmamiHost} from './host'
 
 // ─── Umami API endpoint constants ─────────────────────────────────────────────
-// Verified against umami-software/umami v3.3.1 source (matches the pinned deploy
-// image): POST /api/auth/login {username,password} → 200 {token} on success,
+// Verified against the umami-software/umami source for the pinned deploy
+// image: POST /api/auth/login {username,password} → 200 {token} on success,
 // 401 on bad credentials. POST /api/me/password {currentPassword,newPassword} →
 // 200 on success, 400 on bad current password, 401 unauthenticated.
 const UMAMI_LOGIN_PATH = '/api/auth/login'

@@ -42,7 +42,7 @@ The dashboard side is **not** a quartet and does **not** fail closed: `DASHBOARD
 npx web-push generate-vapid-keys
 ```
 
-If `fro-bot/agent` is checked out locally, the same tool is already a dependency there (`web-push@3.6.7`) and can be run from that checkout instead of `npx`. Either path produces output that satisfies every format gate below with no reformatting.
+If `fro-bot/agent` is checked out locally, the same tool is already a dependency there (`web-push`) and can be run from that checkout instead of `npx`. Either path produces output that satisfies every format gate below with no reformatting.
 
 **Verify locally before seeding anything** — catching a bad value here is free; catching it in a deploy means a thrown error after you've already started the rollout:
 

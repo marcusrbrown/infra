@@ -547,7 +547,7 @@ After the first enabling deploy:
 2. `curl -sf http://172.21.0.2:9300/operator/health` — confirm a `200 {"ok":true,"contractVersion":"<semver>"}` response (droplet-local direct probe). Note: `https://gateway.fro.bot/operator/health` returns 400 by design (forwarded-header guard); use the direct probe for liveness confirmation.
 3. Confirm the operator port publish is VPC-scoped: `docker compose --project-directory /opt/gateway/deploy ps` — the `gateway` service must show a `<GATEWAY_VPC_IP>:9300->9300` mapping (e.g. `10.116.0.3:9300->9300`). A `0.0.0.0:9300`, `[::]:9300`, or bare `9300:9300` mapping is a defect.
 4. Confirm workspace is not on `gateway-net`: `docker network inspect gateway-net` — the `workspace` container must not appear.
-5. Confirm the DOCKER-USER source restriction is in place: `iptables -nvL DOCKER-USER --line-numbers` — an ACCEPT rule for `--dport 9300 -s <DASHBOARD_VPC_IP>` must appear before a DROP rule for `--dport 9300`. See [`docs/runbooks/gateway-operator-private-path-verification.md`](../../docs/runbooks/gateway-operator-private-path-verification.md) for the full verification procedure.
+5. Confirm the DOCKER-USER source restriction is in place: `iptables -nvL DOCKER-USER --line-numbers` — a RETURN rule scoped to the VPC ingress interface, source `<DASHBOARD_VPC_IP>`, destination `<GATEWAY_OPERATOR_BIND_HOST>`, and `--dport 9300` must appear before a DROP rule for the same destination and port. See [`docs/runbooks/gateway-operator-private-path-verification.md`](../../docs/runbooks/gateway-operator-private-path-verification.md) for the full verification procedure.
 
 ## OPERATOR PRIVATE PATH (DASHBOARD SAME-ORIGIN)
 

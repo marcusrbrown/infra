@@ -85,7 +85,7 @@
       },
       "dependencies": {
         "@clack/prompts": "^1.2.0",
-        "@goke/mcp": "^0.0.13",
+        "@goke/mcp": "^0.1.0",
         "goke": "^6.3.2",
         "string-dedent": "^3.0.2",
         "zod": "^4.3.6",
@@ -229,7 +229,7 @@
 
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.7.3", "", { "dependencies": { "@eslint/core": "^1.2.1", "levn": "^0.4.1" } }, "sha512-IkO+/KEUvwbVpiURZg+P7zF74z5Jxe0UgJxVni+RtoHQ6IZieXaO02kmadomap/q+l6bc/jdPGGqTjhuZnuz1Q=="],
 
-    "@goke/mcp": ["@goke/mcp@0.0.13", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.0.0", "js-yaml": "^4.1.1" }, "peerDependencies": { "goke": "*" } }, "sha512-kn48iJYU4Td8zbaib6Dzx62dV+h3Y6vL+uVMXuCDaMVa4NlIcoiwN5q6l4ePufiuUYBdGaincWIk71BzwLfAew=="],
+    "@goke/mcp": ["@goke/mcp@0.1.2", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.30.0", "js-yaml": "^4.1.1" }, "peerDependencies": { "goke": "*" } }, "sha512-zJMCGsIaMuHVTZ1L5yzsMP2bBrV+UbcvEquH1wY2nL5sBBpsFENFCjBzq2P7bs4TUt+HYPl2wSrwV2S3yyx5kg=="],
 
     "@hono/node-server": ["@hono/node-server@2.0.12", "", { "peerDependencies": { "hono": "^4" } }, "sha512-eWpQYr67tqJLeaSUl0Q+TquuYfUdTibpOJlUMV2FfUP7+KqCC5TufnwnlXL6mobZBJbGAYRd7ZvEBDCbLInjhg=="],
 

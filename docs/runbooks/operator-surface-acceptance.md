@@ -95,13 +95,13 @@ Skip if no second GitHub account is available; record it as skipped.
 
 ### 9. Tool approval
 
-> **TODO:** the trigger is not established. The managed workspace OpenCode config sets no permissions, so which tool prompts for approval is not known. Trigger: a prompt that causes a permission request — not yet established; record the prompt that works here once found.
+Trigger prompt: "Create the file /tmp/approval-test.txt, then delete it with `rm /tmp/approval-test.txt`." The deploy sets the workspace bash permission policy (`WORKSPACE_PERMISSION_POLICY` in `apps/gateway/src/deploy.ts`) to `ask` for `rm *` and a few other destructive commands, so the `rm` pauses for approval.
 
 The button labels below come from the dashboard source. The outcomes after each press are expected behavior that has not been observed live yet; correct them here after the first run.
 
 Run each of the following on a separate run:
 
-1. Trigger a permission request (see TODO). Expect: the card shows a waiting-for-approval status with buttons "Once", "Always", and "Reject".
+1. Send the trigger prompt. Expect: the card shows a waiting-for-approval status with buttons "Once", "Always", and "Reject".
 2. **Once:** press "Once". Expect: the request clears from the card and the run proceeds. Failure: the request stays pending or the run stalls.
 3. **Reject:** on a new run, press "Reject". Expect: the request clears from the card. Failure: the request stays pending or the tool still executes.
 4. **Collapsed status.** While a request is pending, collapse the card and let the run list refresh. Expect: the card's status badge reads "Waiting for approval". Failure: the collapsed card still reads "Running".

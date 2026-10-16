@@ -1,5 +1,13 @@
 # @marcusrbrown/infra
 
+## 0.26.0
+
+### Minor Changes
+
+- Update npm dependency `@goke/mcp` from `0.0.13` to `0.1.0` ([#1577](https://github.com/marcusrbrown/infra/pull/1577))
+  
+  **Multi-package update** for packages: `@marcusrbrown/infra`.
+
 ## 0.25.2
 
 ### Patch Changes

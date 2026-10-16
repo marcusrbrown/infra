@@ -82,24 +82,28 @@ ssh root@gateway.fro.bot \
   'iptables -nvL DOCKER-USER --line-numbers'
 ```
 
-Expected output (example IPs; substitute actual `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP`):
+Expected output (example IPs and VPC ingress interface `eth1`; substitute actual
+`DASHBOARD_VPC_IP`, `GATEWAY_OPERATOR_BIND_HOST`, and the interface used to reach the dashboard
+VPC IP, as reported by `ip route get <DASHBOARD_VPC_IP>`):
 
 ```
 Chain DOCKER-USER (1 references)
 num   pkts bytes target     prot opt in     out     source               destination
-1        0     0 ACCEPT     tcp  --  *      *       10.116.0.5           172.21.0.2           tcp dpt:9300
+1        0     0 RETURN     tcp  --  eth1   *       10.116.0.5           172.21.0.2           tcp dpt:9300
 2        0     0 DROP       tcp  --  *      *       0.0.0.0/0            172.21.0.2           tcp dpt:9300
 3        0     0 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0
 ```
 
 Verify:
-- Rule 1: ACCEPT, source = dashboard VPC IP (`10.116.0.5`), destination = gateway-net IP
-  (`172.21.0.2`), dport = 9300.
+- Rule 1: RETURN, ingress interface = VPC interface (`eth1`), source = dashboard VPC IP
+  (`10.116.0.5`), destination = gateway-net listener IP (`172.21.0.2`), dport = 9300.
 - Rule 2: DROP, source = any, destination = gateway-net IP, dport = 9300.
 - Rule 1 appears **before** Rule 2 (ordering is load-bearing).
 
-A wrong-but-present rule (wrong source IP, wrong dport, or wrong ordering) is a defect — presence
-alone is not sufficient.
+RETURN allows the matching traffic to continue through Docker's remaining forwarding rules;
+it is the target installed and verified by the deploy, rather than an unconditional ACCEPT.
+A wrong-but-present rule (wrong ingress interface, source IP, destination IP, dport, target, or
+ordering) is a defect — presence alone is not sufficient.
 
 **Note:** The DOCKER-USER rule is reapplied every deploy and is lost on reboot until the next
 deploy. The DigitalOcean Cloud Firewall (below) is the reboot-durable provider-level control that

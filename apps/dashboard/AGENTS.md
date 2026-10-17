@@ -13,12 +13,14 @@ is the upstream released image from `ghcr.io/fro-bot/dashboard`, pinned by diges
 | `caddy`     | `caddy` Alpine image (tag and digest pinned in compose)  | Auto-TLS reverse proxy `:443 → dashboard:3000`          |
 
 The dashboard image tag and digest are pinned directly in `apps/dashboard/docker-compose.yaml`.
-Renovate tracks the `ghcr.io/fro-bot/dashboard` image and opens PRs to bump the pin when a new
-release is published. Caddy depends on the `dashboard` service being healthy before starting.
+Versioned dispatches deploy the requested release, then open or update the `dashboard-pin` audit PR
+to record the deployed pin. The deploy router skips commits whose subject starts with
+`chore(dashboard): pin image to `, so merging that audit PR does not deploy the image again.
+Caddy depends on the `dashboard` service being healthy before starting.
 
 ## Deploy flow
 
-`bun run --cwd apps/dashboard deploy` (or the **Deploy Dashboard** GitHub workflow). Both entry paths use the same deploy engine. The deploy:
+`bun run deploy:dashboard` from the repository root (loads the root `.env`), or the **Deploy Dashboard** GitHub workflow. Both entry paths use the same deploy engine. The deploy:
 
 1. Validates env (`DASHBOARD_DOMAIN`, `DASHBOARD_GITHUB_APP_ID`, `DASHBOARD_GITHUB_APP_KEY`,
    `DASHBOARD_OAUTH_CLIENT_ID`, `DASHBOARD_OAUTH_CLIENT_SECRET`, `DASHBOARD_OPERATOR_LOGIN`,
@@ -110,9 +112,9 @@ Deterministic failure classes are:
 ## Image source
 
 The dashboard image is the upstream released image from `ghcr.io/fro-bot/dashboard`, pinned by tag
-and digest in `apps/dashboard/docker-compose.yaml`. Renovate tracks this image and opens PRs to bump
-the pin when a new release is published. Merging a Renovate PR triggers the Deploy Dashboard workflow,
-which pulls the new digest and ships it to the droplet automatically.
+and digest in `apps/dashboard/docker-compose.yaml`. A versioned **Deploy Dashboard** dispatch resolves
+the release digest and deploys it before recording the pin through the `dashboard-pin` audit PR.
+The audit PR records an already completed deployment; its merge intentionally skips router redeployment.
 
 The former `ghcr.io/marcusrbrown/infra-dashboard` image (built by this repo's CI) is retired. It can
 be deleted manually from the GitHub Container Registry once no references remain.
@@ -193,8 +195,14 @@ path, never via an env-string fallback.
 
 ## Upgrade flow
 
-Renovate opens PRs when a new `ghcr.io/fro-bot/dashboard` release is published. Merge the PR → the
-Deploy Dashboard workflow pulls the new digest-pinned image and ships it to the droplet automatically.
+Dispatch **Deploy Dashboard** on `main` with the release's CalVer `version` and, optionally, its
+expected `digest`, or use `infra dashboard deploy --image-version <calver> [--digest <sha256>]`.
+The pre-gate job validates the inputs; approve the `dashboard` environment gate to deploy. After a
+successful versioned deploy, review and merge the `dashboard-pin` audit PR to record the deployed
+image in `main`. Merging that audit PR does not trigger another dashboard deployment.
+
+Omit both inputs to deploy the committed Compose pin without opening an audit PR. Other dashboard
+runtime changes selected by the router still deploy the committed pin through the environment gate.
 
 For rollback procedures, see [`docs/runbooks/dashboard-released-image-rollback.md`](../../docs/runbooks/dashboard-released-image-rollback.md).
 

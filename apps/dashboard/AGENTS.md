@@ -115,6 +115,8 @@ The dashboard image is the upstream released image from `ghcr.io/fro-bot/dashboa
 and digest in `apps/dashboard/docker-compose.yaml`. A versioned **Deploy Dashboard** dispatch resolves
 the release digest and deploys it before recording the pin through the `dashboard-pin` audit PR.
 The audit PR records an already completed deployment; its merge intentionally skips router redeployment.
+Renovate also tracks the image, but only opens a bump PR once it is approved on the Dependency
+Dashboard; merging that PR deploys the new pin through the router and the `dashboard` gate.
 
 The former `ghcr.io/marcusrbrown/infra-dashboard` image (built by this repo's CI) is retired. It can
 be deleted manually from the GitHub Container Registry once no references remain.

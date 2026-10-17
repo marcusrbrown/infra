@@ -41,6 +41,8 @@ This runbook does not repeat setup or rotation procedures:
 
 ## Checks
 
+The run card does not show a run ID. To find one, open the browser devtools Network tab and read the `/operator/runs` response, or check the gateway log (`bunx @marcusrbrown/infra gateway logs gateway`), which records each launch with its run ID, owner, and repo. Gateway logs are lost when the container is recreated, so collect them before the next gateway deploy.
+
 ### 1. Health
 
 1. Trigger: `curl -sf https://dashboard.fro.bot/operator/health`
@@ -97,15 +99,15 @@ Skip if no second GitHub account is available; record it as skipped.
 
 Trigger prompt: "Create the file /tmp/approval-test.txt, then delete it with `rm /tmp/approval-test.txt`." The deploy sets the workspace bash permission policy (`WORKSPACE_PERMISSION_POLICY` in `apps/gateway/src/deploy.ts`) to `ask` for `rm *` and a few other destructive commands, so the `rm` pauses for approval.
 
-The button labels below come from the dashboard source. The outcomes after each press are expected behavior that has not been observed live yet; correct them here after the first run.
+Steps 1–4 and the confirmation part of step 5 have been observed live. The gateway log records one `approval.decision` per request (`once`, `reject`, or `always`) but not the command pattern, so neither the card nor the log shows whether the command ran.
 
 Run each of the following on a separate run:
 
 1. Send the trigger prompt. Expect: the card shows a waiting-for-approval status with buttons "Once", "Always", and "Reject".
 2. **Once:** press "Once". Expect: the request clears from the card and the run proceeds. Failure: the request stays pending or the run stalls.
-3. **Reject:** on a new run, press "Reject". Expect: the request clears from the card. Failure: the request stays pending or the tool still executes.
+3. **Reject:** on a new run, press "Reject". Expect: the request clears from the card and the run ends within about a second. Failure: the request stays pending or the run keeps going. Whether the rejected `rm` was skipped is not visible here.
 4. **Collapsed status.** While a request is pending, collapse the card and let the run list refresh. Expect: the card's status badge reads "Waiting for approval". Failure: the collapsed card still reads "Running".
-5. **Always:** on a new run, press "Always". Expect: a second control, "Confirm always", appears and nothing is applied until you press it. After confirming, matching requests for the rest of that run no longer prompt; a new run prompts again. Failure: "Always" applies without confirmation, or applies beyond that run.
+5. **Always:** on a new run, press "Always". Expect: a second control, "Confirm always", appears and nothing is applied until you press it. After confirming, matching requests for the rest of that run no longer prompt (not yet observed: the trigger raises only one request per run); a new run prompts again. Failure: "Always" applies without confirmation, or applies beyond that run.
 
 ### 10. Agent question
 

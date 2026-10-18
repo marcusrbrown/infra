@@ -1252,6 +1252,43 @@ export function normalizePemPrivateKey(value: string): string {
   return normalized
 }
 
+// Discord snowflake IDs are 17–20 decimal digits.
+const DISCORD_SNOWFLAKE_RE = /^\d{17,20}$/
+
+/**
+ * Parses GATEWAY_BINDER_ALLOWLIST: Discord user IDs allowed to run `/add-project`.
+ *
+ * Entries may be separated by newlines, commas, or whitespace (a single-line local `.env` value
+ * works). Blank lines and full-line `#` comments (after optional leading whitespace) are ignored,
+ * matching the GATEWAY_OPERATOR_ALLOWLIST parser. Each entry must be a Discord snowflake.
+ * Duplicates collapse (first occurrence wins). Empty input returns [] — the daemon then refuses
+ * `/add-project` for everyone. Throws naming the offending line on a malformed entry.
+ */
+export function parseBinderAllowlist(raw: string): string[] {
+  const ids: string[] = []
+  for (const [i, line] of raw.split(/\r?\n/).entries()) {
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    for (const token of trimmed.split(/[\s,]+/)) {
+      if (token === '') continue
+      if (!DISCORD_SNOWFLAKE_RE.test(token)) {
+        throw new Error(
+          `GATEWAY_BINDER_ALLOWLIST line ${i + 1} "${line}" contains "${token}", which is not a Discord user ID. ` +
+            'Each entry must be 17–20 digits; separate entries with newlines, commas, or spaces.',
+        )
+      }
+      if (!ids.includes(token)) ids.push(token)
+    }
+  }
+  return ids
+}
+
+/** Normalizes GATEWAY_BINDER_ALLOWLIST to one ID per line; empty when no IDs remain. */
+export function normalizeBinderAllowlist(raw: string): string {
+  const ids = parseBinderAllowlist(raw)
+  return ids.length === 0 ? '' : `${ids.join('\n')}\n`
+}
+
 /**
  * Builds the list of secret files to materialize on the droplet.
  * Required secrets get the actual value; optional secrets that are
@@ -1285,6 +1322,9 @@ export function buildSecretFileList(env: Record<string, string>): SecretFile[] {
     // but the file-list entry is optional-shaped so an empty value writes an empty file
     // (upstream compose treats it as optional; we enforce non-empty via REQUIRED_ENV_VARS).
     {name: 'gateway-trigger-role-id', envKey: 'GATEWAY_TRIGGER_ROLE_ID'},
+    // gateway-binder-allowlist: upstream compose bind-mounts this file with create_host_path: false,
+    // so it must exist on every deploy. Empty means /add-project refuses everyone.
+    {name: 'gateway-binder-allowlist', envKey: 'GATEWAY_BINDER_ALLOWLIST', transform: normalizeBinderAllowlist},
   ]
 
   const secrets: SecretFile[] = []
@@ -2714,6 +2754,10 @@ export async function main(opts: MainOpts = {}): Promise<void> {
       keyVersion: env.GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION ?? '',
     })
   }
+  // Phase 3h2: Validate the binder allowlist before any SSH (--dry-run included). Unset/empty is
+  // valid; a malformed entry fails here with the offending line named.
+  parseBinderAllowlist(env.GATEWAY_BINDER_ALLOWLIST ?? '')
+
   const stalePushCleanup =
     pushState === 'disabled'
       ? ` && rm -f ${OPERATOR_PUSH_VAPID_SECRET_SPECS.map(spec => `'${SECRETS_DIR}/${spec.hostFile}'`).join(' ')}`

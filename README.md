@@ -150,6 +150,7 @@ Manual deploys are available either per-app (`workflow_dispatch` on each dedicat
 | `OBJECT_STORE_HOSTS` |  | Comma-separated hostnames allowed through mitmproxy egress filter |
 | `GATEWAY_WEBHOOK_SECRET` |  | HMAC key for the announce webhook (set with `GATEWAY_PRESENCE_CHANNEL_ID`) |
 | `GATEWAY_PRESENCE_CHANNEL_ID` |  | Discord channel ID for presence embeds (set with `GATEWAY_WEBHOOK_SECRET`) |
+| `GATEWAY_BINDER_ALLOWLIST` |  | Discord user IDs allowed to run `/add-project` (an Environment variable, not a secret; unset keeps it disabled) |
 
 See [`apps/gateway/README.md`](apps/gateway/README.md) for the complete contract including CI-injected image digests and OpenCode supervisor tuning.
 

@@ -12,6 +12,7 @@ const envKeys = [
   'DISCORD_APPLICATION_ID',
   'DISCORD_GUILD_ID',
   'DISCORD_TOKEN',
+  'GATEWAY_BINDER_ALLOWLIST',
   'GATEWAY_HOST',
   'GATEWAY_OPERATOR_PUSH_VAPID_KEY_VERSION',
   'GATEWAY_OPERATOR_PUSH_VAPID_PRIVATE_KEY',
@@ -366,6 +367,25 @@ describe('gateway deploy', () => {
       })
       const env = getGatewayDeployEnv()
       expect(env.GATEWAY_TRIGGER_ROLE_ID).toBe('987654321098765432')
+    })
+
+    it('forwards GATEWAY_BINDER_ALLOWLIST when set and defaults it to empty', () => {
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+        GATEWAY_BINDER_ALLOWLIST: '123456789012345678,223456789012345678',
+      })
+      expect(getGatewayDeployEnv().GATEWAY_BINDER_ALLOWLIST).toBe('123456789012345678,223456789012345678')
+
+      setManagedEnv({
+        GATEWAY_HOST: 'gateway.example.com',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+      expect(getGatewayDeployEnv().GATEWAY_BINDER_ALLOWLIST).toBe('')
     })
 
     // ── announce opt-in vars parity ───────────────────────────────────────────

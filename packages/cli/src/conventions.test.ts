@@ -1559,6 +1559,89 @@ describe('deploy-gateway.yaml: operator push VAPID workflow contract', () => {
   })
 })
 
+// ─── GATEWAY_BINDER_ALLOWLIST: non-secret Environment variable ────────────
+//
+// Discord user IDs allowed to run /add-project. Operator decision: an optional `gateway`
+// Environment *variable* (vars context), not a secret — it must reach the deploy step via
+// `vars.`, must not be declared as a workflow_call secret, and must not be fanned out by
+// deploy.yaml (the callee job reads the Environment variable itself).
+
+describe('GATEWAY_BINDER_ALLOWLIST wiring', () => {
+  const VARIABLE = 'GATEWAY_BINDER_ALLOWLIST'
+  const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  it('deploy-gateway.yaml forwards it to the deploy step from the vars context', async () => {
+    const parsed = parseYaml(await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()) as {
+      jobs?: {'deploy-gateway'?: {steps?: {name?: string; env?: Record<string, string>}[]}}
+    }
+    const deployStep = (parsed?.jobs?.['deploy-gateway']?.steps ?? []).find(s => s.name === 'Deploy gateway')
+    expect(deployStep).toBeDefined()
+    expect(deployStep?.env?.[VARIABLE]).toBe(`\${{ vars.${VARIABLE} }}`)
+  })
+
+  it('deploy-gateway.yaml does not declare it as a workflow_call secret or input', async () => {
+    const parsed = parseYaml(await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()) as {
+      on?: {workflow_call?: {secrets?: Record<string, unknown>; inputs?: Record<string, unknown>}}
+    }
+    expect(parsed?.on?.workflow_call?.secrets ?? {}).not.toHaveProperty(VARIABLE)
+    expect(parsed?.on?.workflow_call?.inputs ?? {}).not.toHaveProperty(VARIABLE)
+  })
+
+  it('deploy-gateway.yaml keeps it out of required-secret validation', async () => {
+    const parsed = parseYaml(await Bun.file(DEPLOY_GATEWAY_WORKFLOW).text()) as {
+      jobs?: {'deploy-gateway'?: {steps?: {name?: string}[]}}
+    }
+    const validationStep = (parsed?.jobs?.['deploy-gateway']?.steps ?? []).find(
+      s => s.name === 'Validate required secrets',
+    )
+    expect(validationStep).toBeDefined()
+    expect(JSON.stringify(validationStep)).not.toContain(VARIABLE)
+  })
+
+  it('deploy.yaml does not fan it out through the aggregate router', async () => {
+    const parsed = parseYaml(await Bun.file(DEPLOY_WORKFLOW).text()) as {
+      jobs?: {'deploy-gateway'?: {secrets?: Record<string, string>; with?: Record<string, unknown>}}
+    }
+    const job = parsed?.jobs?.['deploy-gateway']
+    expect(job?.secrets ?? {}).not.toHaveProperty(VARIABLE)
+    expect(job?.with ?? {}).not.toHaveProperty(VARIABLE)
+  })
+
+  it('getGatewayDeployEnv passes it through (and still excludes DIGITALOCEAN_ACCESS_TOKEN)', async () => {
+    const {getGatewayDeployEnv} = await import('./commands/gateway/deploy')
+    const origEnv = {...process.env}
+    process.env.PATH = '/usr/bin'
+    process.env.HOME = '/home/test'
+    process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'
+    process.env.GATEWAY_BINDER_ALLOWLIST = '123456789012345678,223456789012345678'
+    process.env.DIGITALOCEAN_ACCESS_TOKEN = 'do-token-must-not-leak'
+    try {
+      const env = getGatewayDeployEnv()
+      expect(env[VARIABLE]).toBe('123456789012345678,223456789012345678')
+      expect(env).not.toHaveProperty('DIGITALOCEAN_ACCESS_TOKEN')
+    } finally {
+      delete process.env.GATEWAY_BINDER_ALLOWLIST
+      delete process.env.DIGITALOCEAN_ACCESS_TOKEN
+      Object.assign(process.env, origEnv)
+    }
+  })
+
+  it('getGatewayDeployEnv defaults it to an empty string when unset', async () => {
+    const {getGatewayDeployEnv} = await import('./commands/gateway/deploy')
+    const origEnv = {...process.env}
+    process.env.PATH = '/usr/bin'
+    process.env.HOME = '/home/test'
+    process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'
+    delete process.env.GATEWAY_BINDER_ALLOWLIST
+    try {
+      expect(getGatewayDeployEnv()[VARIABLE]).toBe('')
+    } finally {
+      Object.assign(process.env, origEnv)
+    }
+  })
+})
+
 // ─── scan-images: report-only invariants ──────────────────────────────────
 //
 // scan-images runs between build-images and the gateway approval gate so a

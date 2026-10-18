@@ -126,7 +126,7 @@ After provisioning: commit the updated `.github/known_hosts`.
 
 ## S3 STATE-BUCKET IAM ACTIONS
 
-The `fro-bot-gateway` identity (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) owns the state bucket: it is the only principal with access, and the bucket has no bucket policy. The grant is the managed policy `fro-bot-gateway-s3-access`, scoped to the whole bucket rather than a prefix, so it covers the run-state prefix and the operator session keys under `operator-web/` alike. Grant it before seeding the secrets in [Required Secrets](#required-secrets).
+The `fro-bot-gateway` identity (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) owns the state bucket: it is the only principal with access, and the bucket has no bucket policy. The grant is the managed policy `fro-bot-gateway-s3-access`, which is the source of truth for the action set below. It is scoped to the whole bucket rather than a prefix, so it covers the run-state prefix and the operator session keys under `operator-web/` alike. Grant it before seeding the secrets in [Required Secrets](#required-secrets).
 
 **Object-level** (resource `arn:aws:s3:::<bucket>/*`):
 
@@ -136,16 +136,17 @@ The `fro-bot-gateway` identity (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) o
 | `s3:PutObject` | Write run-state objects |
 | `s3:PutObjectTagging` | Required alongside `s3:PutObject` — run-state writes send an `x-amz-tagging` header (`object-type=run-state`), and AWS requires both actions to accept a tagged `PutObject`. A missing grant rejects every `createRun` with `AccessDenied` on **both** the Discord `@fro-bot` mention path and the dashboard launch path — this is not a dashboard-only dependency. Call sites in upstream `fro-bot/agent`: `packages/runtime/src/coordination/run-state.ts` (create, transition) and `packages/runtime/src/coordination/heartbeat.ts`. |
 | `s3:DeleteObject` | Remove run-state objects |
+| `s3:GetObjectTagging` | Read an object's tags, so an operator can confirm the `object-type=run-state` tag landed with the same credential |
+| `s3:GetObjectVersion` | Read a specific object version; harmless while the bucket is unversioned |
 
 **Bucket-level** (resource `arn:aws:s3:::<bucket>`):
 
 | Action | Why |
 | --- | --- |
 | `s3:ListBucket` | List run-state and operator session keys |
+| `s3:GetBucketLocation` | Resolve the bucket's region |
 
 Durable operator sessions keep one signed record per session under `operator-web/sessions/` at the bucket root, and the startup self-test writes under `operator-web/_self-test/`. These writes are untagged. If a narrower grant ever leaves these keys out, the gateway still starts but operator logins return `503` until the grant is fixed and the gateway is restarted. Keep the Action's S3 principal on its own bucket so nothing else can write session records.
-
-**Do not grant** `s3:GetObjectTagging` or `s3:DeleteObjectTagging` — upstream has zero call sites for either at the pinned ref; granting them widens the identity beyond what it uses.
 
 **Lifecycle configuration is operator-owned, not provisioning-owned.** A bucket lifecycle rule is bucket-level AWS state, independent of the droplet — destroying and rebuilding the droplet never touches it, and it is set-once configuration rather than per-provision or per-deploy state. `apps/gateway/server/provision-droplet.ts` does **not** apply it. The `fro-bot-gateway` runtime identity intentionally does not hold `s3:GetLifecycleConfiguration` / `s3:PutLifecycleConfiguration`, and should not be granted them — the only candidate for holding that bucket-administration power permanently is a credential that lives on the droplet and is used by the running daemon, which is a bad trade for automating a change that happens approximately once.
 

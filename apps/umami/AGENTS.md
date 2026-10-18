@@ -14,7 +14,7 @@ Images are pinned to numbered tags by digest in `docker-compose.yaml` (the sourc
 
 ## Deploy flow
 
-`bun run --cwd apps/umami deploy` (or the **Deploy Umami** GitHub workflow, default path-filtered on `apps/umami/**`). The deploy:
+`bun run deploy:umami` from the repository root (loads the root `.env`), or the **Deploy Umami** GitHub workflow via the path-filtered deploy router. The deploy:
 
 1. Validates env (`UMAMI_DOMAIN`, `UMAMI_APP_SECRET`, `UMAMI_DB_PASSWORD`, `UMAMI_ADMIN_PASSWORD`, plus SSH context) and the host string before any SSH argv is built.
 2. DNS preflight — resolves `UMAMI_DOMAIN` and fails fast if it does not resolve.

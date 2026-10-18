@@ -78,6 +78,7 @@ Upstream pin: `apps/gateway/upstream.json` — update the `ref` field to upgrade
 | `DISCORD_PRIVILEGED_INTENTS` | — | Opt-in privileged intents (e.g. `MessageContent`) |
 | `GATEWAY_WEBHOOK_SECRET` | opt-in† | HMAC key for the announce webhook — set with `GATEWAY_PRESENCE_CHANNEL_ID` |
 | `GATEWAY_PRESENCE_CHANNEL_ID` | opt-in† | Discord channel ID for presence embeds — set with `GATEWAY_WEBHOOK_SECRET` |
+| `GATEWAY_BINDER_ALLOWLIST` | — | Discord user IDs allowed to run `/add-project` (`gateway` Environment **variable**, not a secret); one per line, commas/spaces also accepted; unset keeps `/add-project` refusing everyone |
 | `GATEWAY_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the gateway image from `build-images` job |
 | `WORKSPACE_IMAGE_DIGEST` | CI-injected | `sha256:<digest>` of the workspace image from `build-images` job |
 

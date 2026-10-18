@@ -388,10 +388,10 @@ describe('computeObjectStoreHosts', () => {
 // ─── buildSecretFileList ──────────────────────────────────────────────────────
 
 describe('buildSecretFileList', () => {
-  test('returns exactly 16 secret entries', async () => {
+  test('returns exactly 17 secret entries', async () => {
     const {buildSecretFileList} = await import('./deploy')
     const secrets = buildSecretFileList(makeEnv())
-    expect(secrets).toHaveLength(16)
+    expect(secrets).toHaveLength(17)
   })
 
   test('uses kebab-case file names matching upstream compose contract', async () => {
@@ -414,6 +414,7 @@ describe('buildSecretFileList', () => {
     expect(names).toContain('workspace-opencode-auth')
     expect(names).toContain('workspace-opencode-url')
     expect(names).toContain('gateway-trigger-role-id')
+    expect(names).toContain('gateway-binder-allowlist')
   })
 
   test('does not use snake_case file names', async () => {
@@ -3382,21 +3383,21 @@ describe('buildSecretFileList — announce secret files', () => {
     expect(names).not.toContain(ANNOUNCE_PRESENCE_CHANNEL_FILE)
   })
 
-  test('neither announce input set → output length equals baseline (16)', async () => {
+  test('neither announce input set → output length equals baseline (17)', async () => {
     const {buildSecretFileList} = await import('./deploy')
     const env = makeEnv()
     delete (env as Record<string, string>).GATEWAY_WEBHOOK_SECRET
     delete (env as Record<string, string>).GATEWAY_PRESENCE_CHANNEL_ID
     const secrets = buildSecretFileList(env)
-    expect(secrets).toHaveLength(16)
+    expect(secrets).toHaveLength(17)
   })
 
-  test('both announce inputs set → output has 18 entries (16 baseline + 2 announce)', async () => {
+  test('both announce inputs set → output has 19 entries (17 baseline + 2 announce)', async () => {
     const {buildSecretFileList} = await import('./deploy')
     const secrets = buildSecretFileList(
       makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
     )
-    expect(secrets).toHaveLength(18)
+    expect(secrets).toHaveLength(19)
   })
 
   test('both announce inputs set → checksum differs from no-announce baseline', async () => {
@@ -3409,6 +3410,223 @@ describe('buildSecretFileList — announce secret files', () => {
       makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
     )
     expect(computeSecretsChecksum(announceSecrets)).not.toBe(computeSecretsChecksum(baseSecrets))
+  })
+})
+
+// ─── GATEWAY_BINDER_ALLOWLIST ─────────────────────────────────────────────────
+
+const BINDER_ID_A = '123456789012345678'
+const BINDER_ID_B = '223456789012345678'
+const BINDER_ID_C = '12345678901234567'
+
+describe('parseBinderAllowlist', () => {
+  test('unset or empty → no IDs', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    expect(parseBinderAllowlist('')).toEqual([])
+    expect(parseBinderAllowlist('  \n\t\n ')).toEqual([])
+  })
+
+  test('newline-separated IDs', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    expect(parseBinderAllowlist(`${BINDER_ID_A}\n${BINDER_ID_B}\n`)).toEqual([BINDER_ID_A, BINDER_ID_B])
+  })
+
+  test('comma-separated IDs (single-line .env style)', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    expect(parseBinderAllowlist(`${BINDER_ID_A},${BINDER_ID_B}`)).toEqual([BINDER_ID_A, BINDER_ID_B])
+    expect(parseBinderAllowlist(`${BINDER_ID_A}, ${BINDER_ID_B},`)).toEqual([BINDER_ID_A, BINDER_ID_B])
+  })
+
+  test('space-separated IDs', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    expect(parseBinderAllowlist(`${BINDER_ID_A} ${BINDER_ID_B}\t${BINDER_ID_C}`)).toEqual([
+      BINDER_ID_A,
+      BINDER_ID_B,
+      BINDER_ID_C,
+    ])
+  })
+
+  test('mixed separators, CRLF, comments, and blank lines', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    const raw = `# binders\r\n\r\n${BINDER_ID_A}, ${BINDER_ID_B}\r\n   # indented comment\r\n${BINDER_ID_C}\r\n`
+    expect(parseBinderAllowlist(raw)).toEqual([BINDER_ID_A, BINDER_ID_B, BINDER_ID_C])
+  })
+
+  test('duplicates collapse, first occurrence wins', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    expect(parseBinderAllowlist(`${BINDER_ID_A}\n${BINDER_ID_B}\n${BINDER_ID_A}`)).toEqual([BINDER_ID_A, BINDER_ID_B])
+  })
+
+  test('accepts the 17- and 20-digit snowflake bounds', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    const twenty = '12345678901234567890'
+    expect(parseBinderAllowlist(`${BINDER_ID_C}\n${twenty}`)).toEqual([BINDER_ID_C, twenty])
+  })
+
+  test('rejects non-numeric entries and names the offending line', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    expect(() => parseBinderAllowlist(`${BINDER_ID_A}\nnot-an-id\n${BINDER_ID_B}`)).toThrow(
+      /GATEWAY_BINDER_ALLOWLIST line 2.*not-an-id/,
+    )
+  })
+
+  test('rejects IDs that are too short or too long', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    expect(() => parseBinderAllowlist('1234567890123456')).toThrow(/GATEWAY_BINDER_ALLOWLIST line 1.*1234567890123456/)
+    expect(() => parseBinderAllowlist(`${BINDER_ID_A}\n123456789012345678901`)).toThrow(
+      /GATEWAY_BINDER_ALLOWLIST line 2.*123456789012345678901/,
+    )
+  })
+
+  test('reports the bad token and line even when it shares a line with valid IDs', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    expect(() => parseBinderAllowlist(`# header\n${BINDER_ID_A},12ab`)).toThrow(/line 2.*12ab/)
+  })
+
+  test('a # that is not at the start of a line is not a comment', async () => {
+    const {parseBinderAllowlist} = await import('./deploy')
+    expect(() => parseBinderAllowlist(`${BINDER_ID_A} # me`)).toThrow(/line 1.*#/)
+  })
+})
+
+describe('buildSecretFileList — binder allowlist', () => {
+  test('file is always present, required false, and empty when the variable is unset', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const env = makeEnv()
+    delete (env as Record<string, string>).GATEWAY_BINDER_ALLOWLIST
+    const file = buildSecretFileList(env).find(s => s.name === 'gateway-binder-allowlist')
+    expect(file).toBeDefined()
+    expect(file?.content).toBe('')
+    expect(file?.required).toBe(false)
+  })
+
+  test('empty and whitespace-only values still produce an empty file', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    for (const value of ['', '   ', '\n\n', '# nobody yet\n']) {
+      const file = buildSecretFileList(makeEnv({GATEWAY_BINDER_ALLOWLIST: value})).find(
+        s => s.name === 'gateway-binder-allowlist',
+      )
+      expect(file?.content).toBe('')
+    }
+  })
+
+  test('content is normalized to one ID per line from any separator style', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const expected = `${BINDER_ID_A}\n${BINDER_ID_B}\n`
+    for (const value of [
+      `${BINDER_ID_A}\n${BINDER_ID_B}`,
+      `${BINDER_ID_A},${BINDER_ID_B}`,
+      `${BINDER_ID_A} ${BINDER_ID_B}`,
+      `# binders\n${BINDER_ID_A}, ${BINDER_ID_B}\n\n`,
+    ]) {
+      const file = buildSecretFileList(makeEnv({GATEWAY_BINDER_ALLOWLIST: value})).find(
+        s => s.name === 'gateway-binder-allowlist',
+      )
+      expect(file?.content).toBe(expected)
+    }
+  })
+
+  test('file is present whether or not announce/operator/push files are enabled', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    const withAnnounce = buildSecretFileList(
+      makeEnv({GATEWAY_WEBHOOK_SECRET: 'hmac-secret-value', GATEWAY_PRESENCE_CHANNEL_ID: '111222333444555666'}),
+    )
+    expect(withAnnounce.map(s => s.name)).toContain('gateway-binder-allowlist')
+    expect(buildSecretFileList(makePushEnv()).map(s => s.name)).toContain('gateway-binder-allowlist')
+  })
+
+  test('malformed entry throws, naming the variable and line', async () => {
+    const {buildSecretFileList} = await import('./deploy')
+    expect(() => buildSecretFileList(makeEnv({GATEWAY_BINDER_ALLOWLIST: `${BINDER_ID_A}\nbogus`}))).toThrow(
+      /GATEWAY_BINDER_ALLOWLIST line 2/,
+    )
+  })
+
+  test('checksum changes when GATEWAY_BINDER_ALLOWLIST changes, so the stack is recreated', async () => {
+    const {buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const unset = computeSecretsChecksum(buildSecretFileList(makeEnv()))
+    const one = computeSecretsChecksum(buildSecretFileList(makeEnv({GATEWAY_BINDER_ALLOWLIST: BINDER_ID_A})))
+    const two = computeSecretsChecksum(
+      buildSecretFileList(makeEnv({GATEWAY_BINDER_ALLOWLIST: `${BINDER_ID_A}\n${BINDER_ID_B}`})),
+    )
+    expect(new Set([unset, one, two]).size).toBe(3)
+  })
+
+  test('equivalent separator styles produce the same checksum (no spurious restart)', async () => {
+    const {buildSecretFileList, computeSecretsChecksum} = await import('./deploy')
+    const newline = computeSecretsChecksum(
+      buildSecretFileList(makeEnv({GATEWAY_BINDER_ALLOWLIST: `${BINDER_ID_A}\n${BINDER_ID_B}`})),
+    )
+    const comma = computeSecretsChecksum(
+      buildSecretFileList(makeEnv({GATEWAY_BINDER_ALLOWLIST: `${BINDER_ID_A},${BINDER_ID_B}`})),
+    )
+    expect(comma).toBe(newline)
+  })
+})
+
+describe('main() — GATEWAY_BINDER_ALLOWLIST validation before any SSH', () => {
+  test('malformed entry fails --dry-run before any spawn, naming the bad line', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    await expect(
+      main({
+        env: makeEnv({GATEWAY_BINDER_ALLOWLIST: `${BINDER_ID_A}\nnot-a-snowflake`}),
+        args: ['--dry-run'],
+        spawn: spawnFn,
+      }),
+    ).rejects.toThrow(/GATEWAY_BINDER_ALLOWLIST line 2.*not-a-snowflake/)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('malformed entry fails a real deploy before any spawn', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    await expect(main({env: makeEnv({GATEWAY_BINDER_ALLOWLIST: '42'}), args: [], spawn: spawnFn})).rejects.toThrow(
+      /GATEWAY_BINDER_ALLOWLIST line 1/,
+    )
+    expect(calls).toHaveLength(0)
+  })
+
+  test('valid and unset values pass --dry-run', async () => {
+    const {main} = await import('./deploy')
+    const {spawnFn, calls} = makeSpawnMock()
+    await main({
+      env: makeEnv({GATEWAY_BINDER_ALLOWLIST: `${BINDER_ID_A}, ${BINDER_ID_B}`}),
+      args: ['--dry-run'],
+      spawn: spawnFn,
+    })
+    await main({env: makeEnv(), args: ['--dry-run'], spawn: spawnFn})
+    expect(calls).toHaveLength(0)
+  })
+
+  test('real deploy writes gateway-binder-allowlist under the secrets dir with normalized content', async () => {
+    const {main} = await import('./deploy')
+    const stdinCaptures: Record<string, string> = {}
+    const {spawnFn} = makeSpawnMock(cmd => {
+      if (cmd.join(' ').includes('cat >')) {
+        const remotePath = cmd.join(' ').match(/cat > '([^']+)'/)?.[1] ?? ''
+        const result = makeSpawnResult()
+        result.stdin = {
+          write(data: Uint8Array) {
+            stdinCaptures[remotePath] = (stdinCaptures[remotePath] ?? '') + new TextDecoder().decode(data)
+          },
+          end() {},
+        }
+        return result
+      }
+      return undefined
+    })
+
+    await main({
+      env: makeEnv({GATEWAY_BINDER_ALLOWLIST: `${BINDER_ID_A},${BINDER_ID_B}`}),
+      args: [],
+      spawn: spawnFn,
+      fetch: makeDiscordFetch([{name: 'ping'}]),
+    })
+
+    expect(stdinCaptures['/opt/gateway/deploy/secrets/gateway-binder-allowlist']).toBe(
+      `${BINDER_ID_A}\n${BINDER_ID_B}\n`,
+    )
   })
 })
 

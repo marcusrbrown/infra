@@ -2,7 +2,7 @@
 
 Browser acceptance checklist for the operator surface at `https://dashboard.fro.bot`. Run it after every paired gateway + dashboard operator-contract upgrade. The pair is `apps/gateway/upstream.json` plus the `image:` line in `apps/dashboard/docker-compose.yaml`; the contract version comes from `/operator/health`. Elsewhere in this runbook, `<expected>` means the contract version of the pair under test.
 
-Each check lists how to trigger it, what you should see, and what failure looks like. Run the checks in order; [logout](#14-logout-and-csrf) is last because it ends your session.
+Each check lists how to trigger it, what you should see, and what failure looks like. Run the checks in order; [logout](#15-logout-and-csrf) is last because it ends your session.
 
 This runbook does not repeat setup or rotation procedures:
 
@@ -147,7 +147,29 @@ Push subscribed; raise a question with the trigger prompt from [check 10](#10-ag
 3. **iOS/iPadOS.** Repeat steps 1 and 2 with the installed PWA, once with it backgrounded and once with it closed.
 4. Failure for any step: the dashboard is not focused or opened, the wrong run opens, or the notice "That run isn't in your recent runs." appears for a run that is in the list.
 
-### 14. Logout and CSRF
+### 14. Session durability
+
+Operator sessions live in the gateway's object store and survive restarts. Run this after the first deploy that carries durable sessions, and again if the session-store grant changes. Steps 1 and 2 need shell access to the gateway droplet.
+
+1. Trigger: read the gateway log right after the deploy (`bunx @marcusrbrown/infra gateway logs gateway`).
+
+   - Expect: a `session restore finished` line, and an `auth.session.restore` audit event with `outcome: "ready"`.
+   - Failure: no such line, or an outcome other than `ready`. Logins then return `503`. Fix the `operator-web/sessions/*` and `operator-web/_self-test/*` grants ([S3 State-Bucket IAM Actions](../../apps/gateway/AGENTS.md#s3-state-bucket-iam-actions)), then restart the gateway.
+
+2. Trigger: while signed in, confirm the session works, restart the gateway on the droplet (`docker compose --project-directory /opt/gateway/deploy restart gateway`), wait for it to be healthy, then repeat the request in the same tab without signing in again.
+
+   ```js
+   ;(await fetch("/operator/session", {credentials: "same-origin"})).status
+   ```
+
+   Expect: `200` before and after the restart, with the same cookie. Failure: `401` after the restart, which means the session did not survive.
+
+3. Trigger: in a tab that stayed open across the upgrade, perform a state-changing action (for example, launch a run). Each operator signs in once after the upgrade, and a CSRF token issued before the upgrade fails once.
+
+   - Expect: the first request fails with `400` (`browser guard: CSRF token invalid` in the gateway log), the dashboard fetches a new token from `/operator/session/csrf`, and the retry succeeds.
+   - Failure: the request keeps failing after a fresh token, or the dashboard never fetches a new one. This step applies only to the first deploy that carries durable sessions.
+
+### 15. Logout and CSRF
 
 Do this last. All snippets run in the DevTools Console on `https://dashboard.fro.bot`; the token stays in a page variable and is never printed.
 
@@ -180,7 +202,7 @@ Do this last. All snippets run in the DevTools Console on `https://dashboard.fro
 
    Expect: `401`. Failure: any 2xx, which means the session survived logout.
 
-Logout deletes only that session: a separate browser signed in earlier stays signed in, and a gateway restart clears every session. For what logout does to push subscriptions, see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats).
+Logout deletes only that session: a separate browser signed in earlier stays signed in, and a gateway restart ends none of them: sessions are durable and last a fixed seven days from sign-in. For what logout does to push subscriptions, see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats).
 
 ---
 

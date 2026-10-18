@@ -119,7 +119,7 @@ Leave these unset to use upstream defaults (`/operator`, `600000`, `5`).
 
 6. **Allowlist enforcement check:** Attempt to complete the OAuth flow with a GitHub account that is NOT in the allowlist. Confirm the response is a coarse auth-failure (non-5xx, no route or allowlist detail leaked).
 
-7. **Session invalidation on restart:** After a successful auth, trigger a gateway restart (`docker compose restart gateway` on the droplet). Confirm the session is invalidated and re-authentication is required. Sessions are in-memory — a restart always invalidates all active sessions.
+7. **Session survives restart:** After a successful auth, trigger a gateway restart (`docker compose restart gateway` on the droplet). Confirm the gateway log shows `session restore finished` and the same cookie still returns `200` from `/operator/session`. Sessions are durable (object store, fixed seven days from sign-in) — a restart does not end them.
 
 8. **VPC-scoped operator port:** `docker compose ps` on the gateway droplet shows the operator port published only on the VPC IP (`10.116.0.3:9300->9300`), never on `0.0.0.0`/all interfaces. The port is further restricted to the dashboard droplet by a `DOCKER-USER` iptables rule (per-deploy) and a DigitalOcean Cloud Firewall (provisioning). Confirm public `gateway.fro.bot:9300` is unreachable.
 
@@ -140,7 +140,7 @@ Leave these unset to use upstream defaults (`/operator`, `600000`, `5`).
 6. Verify: `curl -sf http://172.21.0.2:9300/operator/health` (run on the droplet or via SSH) returns `200 {"ok":true,"contractVersion":"<semver>"}`.
 7. Delete the old client secret in the GitHub OAuth App settings.
 
-Sessions are in-memory — the restart triggered by the checksum change invalidates all active operator sessions. Operators must re-authenticate after the deploy.
+Sessions are durable — the restart triggered by the checksum change does not end operator sessions, so operators stay signed in.
 
 ### Rotating the CSRF secret
 
@@ -152,6 +152,8 @@ Sessions are in-memory — the restart triggered by the checksum change invalida
 3. Trigger a deploy: `bunx @marcusrbrown/infra gateway deploy`.
 4. Approve the environment gate.
 5. Verify: `curl -sf http://172.21.0.2:9300/operator/health` (run on the droplet or via SSH) returns `200 {"ok":true,"contractVersion":"<semver>"}`.
+
+Rotating this secret is also how to invalidate every stored operator session; operators sign in again afterwards.
 
 ### Updating the allowlist
 
@@ -176,7 +178,7 @@ To disable operator auth/config wiring entirely:
 2. Trigger a deploy: `bunx @marcusrbrown/infra gateway deploy`.
 3. Approve the environment gate.
 4. The deploy detects the operator listener is disabled, skips all operator auth/config wiring, and runs `docker compose up --remove-orphans`.
-5. The gateway restarts with the operator listener disabled. All active operator sessions are invalidated (in-memory — no data rollback needed).
+5. The gateway restarts with the operator listener disabled and serves no operator sessions. Session records stay in the object store; to invalidate them, rotate `GATEWAY_OPERATOR_CSRF_SECRET` or delete `operator-web/sessions/*`.
 6. Verify: `bunx @marcusrbrown/infra gateway status` shows all services healthy.
 
 **Note:** Listener trio present + auth/config secrets absent is not a valid state — the deploy fails before any SSH. The only supported rollback is to clear **both** the listener trio and the four auth/config secrets together. This disables the operator listener entirely; the gateway continues to serve all other routes normally.

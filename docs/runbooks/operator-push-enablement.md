@@ -197,7 +197,7 @@ Requirements: HTTPS (satisfied), a registered service worker (already shipped â€
 
 **The 401 is a latch, not a liveness probe.** Mount state is decided once during startup and never re-evaluated. If the object store degrades an hour or a month later, the routes stay mounted and the probe keeps returning 401 â€” it went 404 to 401 exactly once and cannot go back on its own. Use it as a post-deploy mount check, which is the moment it is actually answering a question, and do not wire it into monitoring. For a push surface that initialized cleanly and may have broken since, read `push.status` from the authenticated `GET /operator/session` response (see [Post-boot push health](#post-boot-push-health)).
 
-**Subscriptions are durable, not in-memory.** They live in the object store at `operator-push/subscriptions/by-endpoint/{sha256(endpoint)}.json`, with privacy tombstones at `operator-push/tombstones/{sha256(endpoint)}.json`. They survive container recreation. This is the opposite of operator browser sessions, which are in-memory and die on any restart.
+**Subscriptions are durable, not in-memory.** They live in the object store at `operator-push/subscriptions/by-endpoint/{sha256(endpoint)}.json`, with privacy tombstones at `operator-push/tombstones/{sha256(endpoint)}.json`. They survive container recreation. Operator browser sessions are durable too (object store, `operator-web/sessions/*`, fixed seven days from sign-in), so a gateway restart ends neither.
 
 **Logout is global.** Logging out of one session deactivates every push subscription for that GitHub operator, across every browser and device they've enabled push on. This is intentional but easy to be surprised by.
 

@@ -53,7 +53,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Umami operator docs | `apps/umami/AGENTS.md` | Deploy flow, admin rotation, DB-password runbook, privacy baseline |
 | Check VPN health | `bunx @marcusrbrown/infra vpn status` | SSH, wg show wg0, interface state + server pubkey + peer count |
 | Trigger VPN deploy | `bunx @marcusrbrown/infra vpn deploy` | Remote (default) or `--local`. `--force-server-key` rotates server key (invalidates all client configs). |
-| Manage VPN peers | `bunx @marcusrbrown/infra vpn client add\|list\|remove` | CLI-only (mutating/sensitive) |
+| Manage VPN peers | `bunx @marcusrbrown/infra vpn client add\|list\|remove` | CLI-only; add/remove sync the roster, then run `vpn deploy` to apply |
 | VPN operator docs | `apps/vpn/AGENTS.md` | Deploy flow, provisioning, server-key invariants, anti-patterns |
 | VPN runbook | `docs/runbooks/vpn-egress-box.md` | Bootstrap ordering, reprovision recovery, client onboarding, old-EC2 teardown |
 | Check broker health | `bunx @marcusrbrown/infra broker status` | HTTP reachability via /healthz |
@@ -151,9 +151,9 @@ bunx @marcusrbrown/infra umami logs               # Stream umami service logs (-
 bunx @marcusrbrown/infra vpn status               # SSH, wg show wg0, interface state + server pubkey + peer count
 bunx @marcusrbrown/infra vpn deploy               # Trigger VPN deploy (GitHub Actions)
 bunx @marcusrbrown/infra vpn logs                 # Stream journalctl -u wg-quick@wg0 (--tail N)
-bunx @marcusrbrown/infra vpn client add <name>    # Generate keypair, assign tunnel IP, write client .conf, redeploy
+bunx @marcusrbrown/infra vpn client add <name>    # Generate keypair, assign tunnel IP, write client .conf, sync roster; then run vpn deploy
 bunx @marcusrbrown/infra vpn client list          # List peers (name, tunnel IP, public key)
-bunx @marcusrbrown/infra vpn client remove <name> # Remove peer, trigger redeploy
+bunx @marcusrbrown/infra vpn client remove <name> # Remove peer and sync roster; then run vpn deploy to revoke access
 bunx @marcusrbrown/infra broker status            # HTTP reachability via /healthz
 bunx @marcusrbrown/infra broker deploy            # Trigger broker deploy (GitHub Actions)
 bunx @marcusrbrown/infra broker logs              # Stream broker service logs (--tail N)

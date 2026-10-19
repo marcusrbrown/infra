@@ -76,6 +76,7 @@ Skip if no second GitHub account is available; record it as skipped.
 1. Trigger: from the dashboard run form, launch a run against the test repo with a short harmless prompt.
 2. Expect: the run card appears, output renders live as it streams, and the run reaches a terminal status.
 3. Failure: the card stays on "Connecting…", output never renders, or the run never reaches a terminal status.
+4. Failure: Launch lists no bound repos and Recent Runs is empty although repos are bound. The gateway's redaction policy did not load, and it denies every repo while the policy is missing. Look for `denylist: refresh failed — no valid last-known-good … denying all` in the gateway log, and check that fro-bot/.github still has its `data` branch. If the branch is missing, dispatch `update-metadata.yaml` on fro-bot/.github to reseed it. The next denylist refresh, within 5 minutes, logs `denylist: refresh succeeded`.
 
 ### 6. Single Cancel after completion
 
@@ -145,7 +146,8 @@ Push subscribed; raise a question with the trigger prompt from [check 10](#10-ag
 1. **Dashboard open.** Leave the dashboard open in a tab and tap or click the "Answer needed" notification. Expect: the browser focuses the dashboard window and the run that raised the question opens, with the run ID as the URL fragment. If the tab was loaded before the current service worker took control, a new window opens instead; reload the tab and repeat.
 2. **Dashboard closed.** Close every dashboard tab or window, raise a question, and tap the notification. Expect: a new window opens at `/#<runId>` with that run open. Failure: the window opens at `/` with no run open.
 3. **iOS/iPadOS.** Repeat steps 1 and 2 with the installed PWA, once with it backgrounded and once with it closed.
-4. Failure for any step: the dashboard is not focused or opened, the wrong run opens, or the notice "That run isn't in your recent runs." appears for a run that is in the list.
+4. **Approval notification.** Raise an approval with the trigger prompt from [check 9](#9-tool-approval) and tap the approval notification. Expect: the run that is waiting opens with "Once", "Always", and "Reject" showing. Observed live with the dashboard open.
+5. Failure for any step: the dashboard is not focused or opened, the wrong run opens, or the notice "That run isn't in your recent runs." appears for a run that is in the list.
 
 ### 14. Session durability
 
@@ -204,6 +206,15 @@ Do this last. All snippets run in the DevTools Console on `https://dashboard.fro
 
 Logout deletes only that session: a separate browser signed in earlier stays signed in, and a gateway restart ends none of them: sessions are durable and last a fixed seven days from sign-in. For what logout does to push subscriptions, see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats).
 
+### 16. Launch prompt
+
+The gateway accepts a launch prompt of up to 8,000 UTF-16 units, so an emoji counts as 2, and stores it exactly as typed. Generate test prompts that end in an emoji right at the limit, for example: `bun -e 'const s = "Reply with only the word OK. "; await Bun.write("/tmp/prompt-8000.txt", s + "x".repeat(8000 - s.length - 2) + "\u{1F680}")'`, and the same with `8001`. Copy one with `pbcopy < /tmp/prompt-8000.txt`.
+
+1. **Rendering.** Launch with `Reply with only the word OK. <img src=x onerror=alert(1)> <b>bold tag</b> **markdown bold** [link](https://example.com)`. Expect: the collapsed card shows a one-line plain-text preview. The expanded card renders the prompt as Markdown: the `<img>` and `<b>` tags stay literal, nothing runs, and the link shows its host next to it. Failure: an image renders, an alert fires, or HTML is interpreted.
+2. **At the limit.** Launch with an 8,000-unit prompt. Expect: the run starts, and its prompt ends in the emoji.
+3. **Over the limit.** Paste an 8,001-unit prompt. Expect: the launch is refused, an inline status says the prompt is too long, and no run is created. The Launch button is meant to be disabled; on 2026.10.49 it stays enabled ([fro-bot/dashboard#676](https://github.com/fro-bot/dashboard/issues/676)), though the launch is still refused.
+4. **Provider failure reason.** A run that fails with `session-error` because of the model provider shows a label such as "Model provider unavailable", "Model not available", or "Model provider rejected the request", both live and after a run-list reload. No safe trigger exists, so record this only when such a failure occurs. Not yet observed.
+
 ---
 
 ## Outstanding acceptance
@@ -230,7 +241,6 @@ Comment on [fro-bot/.github#3512](https://github.com/fro-bot/.github/issues/3512
 - The `contractVersion` from the `ready` frame in check 4.
 - Pass, fail, or skipped for each numbered check.
 - Run IDs for every failure, and for checks 7–11 and 13.
-- The working approval prompt, once found (check 9).
 
 Do not include cookies, tokens, CSRF values, or notification endpoints.
 

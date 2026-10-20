@@ -16,6 +16,9 @@ Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcu
 | Monitor Anthropic auth | `bunx @marcusrbrown/infra cliproxy monitor` | Live provider probe with GitHub issue and Discord transition alerts; CLI-only |
 | CLI tests | `src/cli.test.ts` | Snapshots in `src/__snapshots__/` |
 | Command tests | `src/commands/<app>/<name>.test.ts` | Colocated alongside each command |
+| Build the published CLI | `scripts/build.ts` | Local/CI bundle build; test in `scripts/build.test.ts` |
+| Modify deploy-gate notifications | `scripts/deploy-gate-notify.ts` | Repo-local Discord notifier used by each deploy workflow; test in `scripts/deploy-gate-notify.test.ts` |
+| Prune orphaned GHCR versions | `scripts/prune-untagged-packages.ts` | Manual `prune-packages.yaml` workflow; dry-run by default, explicit `--apply` for deletion |
 | Modify daily autoheal reconciler | `scripts/reconcile-autoheal-reports.ts` | Repo-local workflow code invoked by `.github/workflows/fro-bot.yaml`; test in `scripts/reconcile-autoheal-reports.test.ts` |
 
 ## COMMAND PATTERN
@@ -105,7 +108,7 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - **Fire-and-forget opens**: `keeweb open` and `cliproxy open` spawn the child process without awaiting `child.exited` — prevents blocking on Linux `xdg-open` or long-lived SSH sessions. Close stdin immediately after spawn.
 - **Stdin piping for secrets**: When `cliproxy setup` passes an API key to `gh secret set`, use `Bun.spawn` stdin pipe instead of `--body` CLI arg. The key never appears in `ps` output.
 - **Compensating delete**: `cliproxy setup` wraps key creation in try/catch. On failure after a key was created, best-effort `DELETE /v0/management/api-keys?value=<key>` to avoid phantom keys. Error messages scrub key material.
-- **Repo-local workflow scripts**: `scripts/` holds Bun scripts invoked only by repository workflows — currently the daily autoheal reconciler (`scripts/reconcile-autoheal-reports.ts`). They are not CLI commands, MCP tools, package exports, or published files (`package.json` `files` ships `dist` and `src/commands/vpn/peers.ts` only). Gate top-level execution with `import.meta.main`, parse GitHub responses with Zod behind an injectable `fetch` boundary, and never log tokens, report/comment bodies, secrets, or private cross-project text; emit one body-free machine-readable summary per terminal path and fail closed on ambiguity instead of guessing.
+- **Repo-local scripts**: `scripts/build.ts` builds the CLI locally and in CI. The operational workflow helpers are `scripts/deploy-gate-notify.ts`, `scripts/prune-untagged-packages.ts`, and `scripts/reconcile-autoheal-reports.ts`. These helpers are not CLI commands, MCP tools, package exports, or published files (`package.json` `files` ships `dist` and `src/commands/vpn/peers.ts` only). Gate top-level execution with `import.meta.main`, parse GitHub responses with Zod behind an injectable `fetch` boundary, and never log tokens, report/comment bodies, secrets, or private cross-project text; emit one body-free machine-readable summary per terminal path. The pruner and reconciler fail closed on ambiguity. The deploy-gate notifier deliberately always exits 0, reporting skips/failures as warnings and summary data so notification delivery never blocks a deploy; it has no package imports and runs without `bun install`.
 - **Tests**: colocated `*.test.ts`. Snapshots in `src/__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic output. Mock `fetch` and `Bun.spawn` at the boundary. Never spawn the real CLI for commands that launch browser (`keeweb open`) or SSH (`cliproxy open`) — test exported helpers and `--help` output only.
 
 ## MCP FIDELITY

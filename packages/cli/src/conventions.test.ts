@@ -3072,6 +3072,11 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     return parsed.jobs?.['fro-bot-storage']?.steps ?? []
   }
 
+  async function contentSteps(): Promise<FroBotStep[]> {
+    const {parsed} = await loadFroBotWorkflow()
+    return parsed.jobs?.['fro-bot-content']?.steps ?? []
+  }
+
   function requireStep(steps: FroBotStep[], name: string): FroBotStep {
     const step = steps.find(candidate => candidate.name === name)
     expect(step, `missing workflow step: ${name}`).toBeDefined()
@@ -3603,6 +3608,60 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     expect(steps.some(step => step.name === 'Resolve same-repo PR-head ref')).toBe(true)
     const agent = requireStep(steps, 'Run Fro Bot')
     expect(String(agent.env?.PROMPT)).toContain('env.PR_REVIEW_PROMPT')
+  })
+
+  describe('fro-bot-content checkout matches the brokered-push anchor', () => {
+    const PREHEAD_REF = `\${{ steps.prehead.outputs.ref }}`
+
+    it('resolves the PR head before checking out the repository', async () => {
+      const steps = await contentSteps()
+      const preheadIndex = steps.findIndex(step => step.id === 'prehead')
+      const checkoutIndex = steps.findIndex(step => step.name === 'Checkout repository')
+      expect(preheadIndex, 'missing prehead step').toBeGreaterThanOrEqual(0)
+      expect(checkoutIndex, 'missing Checkout repository step').toBeGreaterThanOrEqual(0)
+      expect(preheadIndex).toBeLessThan(checkoutIndex)
+    })
+
+    it('checks out the resolved prehead ref (empty falls back to the default ref)', async () => {
+      const checkout = requireStep(await contentSteps(), 'Checkout repository')
+      expect(checkout.with?.ref).toBe(PREHEAD_REF)
+    })
+
+    it('passes the same prehead ref to the agent as trusted-head-sha so checkout and anchor agree', async () => {
+      const steps = await contentSteps()
+      const checkout = requireStep(steps, 'Checkout repository')
+      const agent = requireStep(steps, 'Run Fro Bot')
+      expect(agent.with?.['trusted-head-sha']).toBe(PREHEAD_REF)
+      expect(agent.with?.['trusted-head-sha']).toBe(checkout.with?.ref)
+    })
+
+    it('keeps full history and credential-less checkout with the PAT token', async () => {
+      const checkout = requireStep(await contentSteps(), 'Checkout repository')
+      expect(checkout.with?.['persist-credentials']).toBe(false)
+      expect(checkout.with?.['fetch-depth']).toBe(0)
+      expect(checkout.with?.token).toBe(`\${{ secrets.FRO_BOT_PAT }}`)
+    })
+
+    it('writes a non-empty ref only for same-repo PR heads and an empty ref otherwise', async () => {
+      const prehead = requireStep(await contentSteps(), 'Resolve same-repo PR-head ref')
+      expect(prehead.id).toBe('prehead')
+      const script = prehead.run ?? ''
+      // Initialized empty, so every non-same-repo path writes `ref=`.
+      expect(script).toContain('ref=""')
+      // The head SHA is only assigned inside the same-repo comparison.
+      const guard = `if [ "\${head_repo}" = "\${REPO}" ]; then`
+      const guardStart = script.indexOf(guard)
+      expect(guardStart, 'missing head_repo == REPO guard').toBeGreaterThanOrEqual(0)
+      const elseStart = script.indexOf('else', guardStart)
+      expect(elseStart).toBeGreaterThan(guardStart)
+      const sameRepoBlock = script.slice(guardStart, elseStart)
+      expect(sameRepoBlock).toContain('ref="$(printf')
+      expect(sameRepoBlock).toContain('.head.sha')
+      // Exactly two assignments: the empty initializer and the one in the guarded block.
+      const assignments = script.match(/^\s*ref=/gm) ?? []
+      expect(assignments).toHaveLength(2)
+      expect(script).toContain(`echo "ref=\${ref}" >> "\${GITHUB_OUTPUT}"`)
+    })
   })
 
   it('gates the fro-bot-content issues branch with the same author-association allowlist as comments (issue #1315)', async () => {

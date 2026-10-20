@@ -891,17 +891,6 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      # Always check out the default ref. Resolving a PR head here is unsafe:
-      # an issue_comment on a fork PR is exposed only at github.event.issue.pull_request,
-      # so the job-level fork guard (which reads github.event.pull_request) does not apply,
-      # and a PR-head ref would pull fork-controlled code into a secret-bearing run.
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          token: ${{ secrets.FRO_BOT_PAT }}
-
       - name: Resolve same-repo PR-head ref
         id: prehead
         env:
@@ -933,6 +922,18 @@ jobs:
             fi
           fi
           echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
+
+      # Same-repo PR comments check out the PR head that is also passed as `trusted-head-sha`,
+      # because brokered push diffs the working tree against that SHA. Forks and every other
+      # event get an empty ref and check out the default branch, so fork code never enters
+      # this secret-bearing job.
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.prehead.outputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.FRO_BOT_PAT }}
 
       # Pin Node.js because Fro Bot runs `bun run lint` / `bunx tsc` which
       # spawn eslint/tsc via #!/usr/bin/env node shebang. ubuntu-latest

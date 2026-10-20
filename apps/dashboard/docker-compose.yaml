@@ -28,7 +28,7 @@ services:
           - dashboard.fro.bot
 
   dashboard:
-    image: ghcr.io/fro-bot/dashboard:2026.10.56@sha256:a6ecd1d25085987147f878869af1214c1ba04d95ac71c010e1aad0afbf17726d
+    image: ghcr.io/fro-bot/dashboard:2026.10.59@sha256:2f99a287f6cf96da38f968a95ca19949dd3a4bdd24c117acb8f8df91b06a699b
     restart: unless-stopped
     env_file:
       - path: .env

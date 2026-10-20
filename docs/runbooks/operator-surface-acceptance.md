@@ -2,6 +2,8 @@
 
 Browser acceptance checklist for the operator surface at `https://dashboard.fro.bot`. Run it after every paired gateway + dashboard operator-contract upgrade. The pair is `apps/gateway/upstream.json` plus the `image:` line in `apps/dashboard/docker-compose.yaml`; the contract version comes from `/operator/health`. Elsewhere in this runbook, `<expected>` means the contract version of the pair under test.
 
+This runbook lists the complete steps for a full acceptance pass. Routine post-deploy acceptance is run by an agent with [`operator-surface-acceptance-automated.md`](operator-surface-acceptance-automated.md).
+
 Each check lists how to trigger it, what you should see, and what failure looks like. Run the checks in order; [logout](#15-logout-and-csrf) is last because it ends your session.
 
 This runbook does not repeat setup or rotation procedures:
@@ -86,7 +88,7 @@ Skip if no second GitHub account is available; record it as skipped.
 
 ### 7. Cancel a running run
 
-1. Trigger: launch a longer harmless task, such as "Summarize each file in the repo, one by one." While it is running, press Cancel.
+1. Trigger: launch the question trigger prompt from [check 10](#10-agent-question). While it waits for an answer, press Cancel, then press "Confirm cancel" ("Dismiss" keeps the run going). Never cancel a run whose prompt creates or edits files: the session can keep writing to the shared checkout after the cancel, and the leftovers make every later launch on that repo fail with "Checkout refused: uncommitted changes".
 2. Expect: the run's wire status becomes `cancelled`, the card shows the label "Cancelled", and the Cancel control copy reads "Run stopped."
 3. Failure: the run keeps streaming after Cancel, the status never becomes `cancelled`, or the label/copy differs.
 
@@ -212,7 +214,7 @@ The gateway accepts a launch prompt of up to 8,000 UTF-16 units, so an emoji cou
 
 1. **Rendering.** Launch with `Reply with only the word OK. <img src=x onerror=alert(1)> <b>bold tag</b> **markdown bold** [link](https://example.com)`. Expect: the collapsed card shows a one-line plain-text preview. The expanded card renders the prompt as Markdown: the `<img>` and `<b>` tags stay literal, nothing runs, and the link shows its host next to it. Failure: an image renders, an alert fires, or HTML is interpreted.
 2. **At the limit.** Launch with an 8,000-unit prompt. Expect: the run starts, and its prompt ends in the emoji.
-3. **Over the limit.** Paste an 8,001-unit prompt. Expect: the launch is refused, an inline status says the prompt is too long, and no run is created. The Launch button is meant to be disabled; on 2026.10.49 it stays enabled ([fro-bot/dashboard#676](https://github.com/fro-bot/dashboard/issues/676)), though the launch is still refused.
+3. **Over the limit.** Paste an 8,001-unit prompt. Expect: the launch is refused, an inline status says the prompt is too long, and no run is created. The Launch button is disabled while the prompt is over the limit; an enabled button is a regression ([fro-bot/dashboard#676](https://github.com/fro-bot/dashboard/issues/676), closed).
 4. **Provider failure reason.** A run that fails with `session-error` because of the model provider shows a label such as "Model provider unavailable", "Model not available", or "Model provider rejected the request", both live and after a run-list reload. No safe trigger exists, so record this only when such a failure occurs. Not yet observed.
 
 ---

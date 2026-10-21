@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, Fro Bot gateway deployment, Umami analytics, WireGuard VPN egress box, OIDC credential broker, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), `metrics.fro.bot` (Umami analytics on DigitalOcean), `broker.fro.bot` (credential broker on DigitalOcean), and a static IP on AWS Lightsail `eu-west-1` (WireGuard VPN).
+Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude proxy) management, Fro Bot gateway and operator dashboard deployment, Umami analytics, WireGuard VPN egress box, OIDC credential broker, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), `dashboard.fro.bot` (operator dashboard on DigitalOcean), `metrics.fro.bot` (Umami analytics on DigitalOcean), `broker.fro.bot` (credential broker on DigitalOcean), and a static IP on AWS Lightsail `eu-west-1` (WireGuard VPN).
 
 ## STRUCTURE
 

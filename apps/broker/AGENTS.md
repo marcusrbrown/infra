@@ -35,7 +35,11 @@ All SSH calls in a single deploy share one ControlPath socket (avoids UFW rate-l
 
 ## STARTUP GATE
 
-On boot, the broker runs a reconcile sweep **before** accepting `/v1/mint` requests: it lists cliproxy `api-keys` and, for each `ghact-`-prefixed key, parses its embedded expiry from the key name and revokes it only if that expiry has passed. Unexpired `ghact-` keys are preserved regardless of in-memory live-set membership — this is what lets an in-flight run's key survive a restart. `/healthz` serves during startup; `/v1/mint` returns 503 until the startup reconcile completes. This bounds the stale-key window after a restart to the startup reconcile rather than the first periodic tick.
+On boot, the broker attempts a reconcile sweep **before** accepting `/v1/mint` requests: it lists cliproxy `api-keys` and, for each `ghact-`-prefixed key, parses its embedded expiry from the key name and revokes it only if that expiry has passed. Unexpired `ghact-` keys are preserved regardless of in-memory live-set membership — this is what lets an in-flight run's key survive a restart.
+
+List failures are retried up to three attempts, with 500ms and 1s backoffs; after exhaustion, the broker logs the failure and marks itself ready anyway to preserve availability. Individual revoke failures are logged without aborting the sweep. The production entrypoint (`src/main.ts`) waits for this attempt sequence before starting the periodic sweeper and binding the HTTP listener. The handler itself leaves `/healthz` ungated and returns 503 for `/v1/mint` when not ready; production does not bind the listener during startup reconciliation.
+
+Readiness therefore does not prove expired-key cleanup succeeded: failed cleanup relies on subsequent sweeper/reconcile ticks, including the five-minute reconcile for keys absent from the post-restart live set.
 
 ## DOCKER STACK
 
@@ -122,7 +126,7 @@ At run end (success/fail/cancel), revocation is handled exclusively by the TTL s
 
 - **Sweep tick** (every 60s): for each live entry past `expiresAt`, revokes the key via cliproxy DELETE and removes it from the live set. A single revoke failure is logged and does not block the rest of the sweep.
 - **Reconcile tick** (every 5 min): lists cliproxy `api-keys` and makes a time-based decision per `ghact-`-prefixed key by parsing its embedded expiry from the key name — expired keys are revoked, unexpired keys are kept regardless of live-set membership, and unparseable legacy keys are kept and logged. Recovers from a broker restart where the live set is empty but an in-flight key's expiry proves it is still valid. **Safety invariant**: reconcile never deletes a non-`ghact-` key.
-- **Startup reconcile**: runs once on boot before `/v1/mint` is unblocked (see Startup Gate above).
+- **Startup reconcile**: attempts cleanup on boot before `/v1/mint` is unblocked; readiness proceeds after exhausted list retries even if cleanup failed (see Startup Gate above).
 
 ### Reading audit events
 
@@ -148,7 +152,7 @@ Decision values:
 - `mint` — key successfully minted
 - `deny` — OIDC verification or policy check failed
 - `deny-ratelimit` — per-repo or global rate limit exceeded
-- `revoke` — key revoked (sweeper or run-end)
+- `revoke` — key revoked by the TTL sweeper (`reason: ttl-expired`); there is no run-end revoke callback
 - `error` — unexpected error during mint (cliproxy unreachable, etc.)
 
 ### Management key rotation

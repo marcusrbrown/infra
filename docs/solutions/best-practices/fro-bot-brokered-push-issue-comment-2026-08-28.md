@@ -1,10 +1,11 @@
 ---
 title: Brokered push on issue_comment mention runs — auth model and the silent trusted-head-sha bypass
 date: 2026-08-28
+last_updated: 2026-10-22
 category: best-practices
 module: .github/workflows/fro-bot.yaml
 problem_type: architecture_pattern
-component: ci_cd
+component: development_workflow
 severity: medium
 applies_when:
   - "Diagnosing why fro-bot did not push a commit on an issue_comment mention run"
@@ -25,9 +26,11 @@ Issue #1194 set out to "evaluate" adding brokered push support for `@fro-bot` me
 
 **A missing `trusted-head-sha` is a silent no-push, not an error.** The `Resolve same-repo PR-head ref` step (`id: prehead`) only resolves a ref when the triggering PR's head repo matches the workflow's own repo (guards against pulling fork-controlled code into a secret-bearing run). If that resolution fails or the PR head is a fork, `steps.prehead.outputs.ref` is empty, `trusted-head-sha` is passed as `""`, and the action quietly skips the push. There's no failure surfaced — the run looks identical to "push isn't supported," which is the trap that made this look like a missing feature during triage.
 
+**The checkout must start at the same SHA.** Brokered push rebuilds the agent's changes by diffing the working tree against `trusted-head-sha`, so the job checks out `steps.prehead.outputs.ref` too, and `prehead` runs before checkout. When the job checked out `main` instead, every difference between `main` and the PR looked like an agent edit, and a PR touching a path outside the allowlist failed delivery. See [fro-bot-brokered-push-checkout-ref-2026-10-20.md](../integration-issues/fro-bot-brokered-push-checkout-ref-2026-10-20.md).
+
 ## Why This Matters
 
-Conflating "no push happened" with "push isn't wired" leads to redundant feature-evaluation work (as #1194 shows) instead of checking the actual gate: is `trusted-head-sha` resolving to a non-empty value for this trigger. The fix is always in the `prehead` step's same-repo check, never in the action's `github-token` auth path.
+Conflating "no push happened" with "push isn't wired" leads to redundant feature-evaluation work (as #1194 shows) instead of checking the actual gate: is `trusted-head-sha` resolving to a non-empty value for this trigger. The fix is in the `prehead` step's same-repo check and in the checkout ref that reuses its output, never in the action's `github-token` auth path.
 
 ## When to Apply
 
@@ -36,5 +39,6 @@ Conflating "no push happened" with "push isn't wired" leads to redundant feature
 
 ## Related
 
-- `.github/workflows/fro-bot.yaml` — `prehead` step and `trusted-head-sha` wiring on `fro-bot-content`.
+- `.github/workflows/fro-bot.yaml` — `prehead` step, checkout `ref`, and `trusted-head-sha` wiring on `fro-bot-content`.
+- [fro-bot-brokered-push-checkout-ref-2026-10-20.md](../integration-issues/fro-bot-brokered-push-checkout-ref-2026-10-20.md) — the checkout/anchor mismatch fixed in #1622.
 - Shipped in PR #1213 (`ci(fro-bot): enable brokered pushes for mention runs`), following the evaluation in #1194.

@@ -2806,8 +2806,8 @@ describe('public probe: final warning includes last error or status', () => {
 
 // ─── compose up safety flags ─────────────────────────────────────────────────
 //
-// The dashboard app must remain digest-gated without forced recreation. Caddy
-// must force recreation so bind-mounted Caddyfile content changes are loaded.
+// The dashboard app and Caddy are both force-recreated on every deploy: the app
+// reads single-file PEM bind mounts and Caddy reads its bind-mounted Caddyfile.
 
 describe('docker compose up: --wait-timeout 120', () => {
   it('dashboard compose up includes --force-recreate, --wait-timeout 120, and --no-build', async () => {

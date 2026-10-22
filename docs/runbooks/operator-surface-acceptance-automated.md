@@ -13,7 +13,7 @@ agent-browser --session infra-operator-acceptance --restore --restore-save auto 
 ```
 
 - Session state lives in `~/.agent-browser/sessions/`, outside the repo. Put no credentials in `.env` or in tracked files.
-- `--allowed-domains` cannot be combined with `--restore`. Do not pass it.
+- `--allowed-domains` cannot be combined with `--restore`. Do not pass it. If the error keeps appearing after you drop the flag, the session daemon has cached it: run `agent-browser --session infra-operator-acceptance close`, then delete `~/.agent-browser/infra-operator-acceptance.config` and `.target`. The saved sign-in state in `sessions/` is kept.
 - Never type credentials. Never print cookies, CSRF tokens, session IDs, or push endpoints. Keep them inside `eval` and report only non-secret fields.
 - If the session lands on a GitHub login page, stop and ask the operator to sign in once in a headed window (see setup below).
 
@@ -34,6 +34,8 @@ The dashboard session lasts seven days. When it lapses, or after logout, opening
 - Refs (`@eN`) change after a reload. Re-run `snapshot -i` before using one.
 - A run card expands and collapses on click, and a list refresh can reset it. Re-snapshot to confirm the card state before acting.
 - Select the repository in the Launch panel before filling the prompt.
+- Every command opens the browser if it is closed. Never poll or retry with `eval` in a loop; each iteration relaunches Chrome.
+- Close the session when the pass ends.
 
 ---
 
@@ -41,7 +43,7 @@ The dashboard session lasts seven days. When it lapses, or after logout, opening
 
 The gateway allows 3 launches per minute and 10 per hour per operator, in fixed windows. A refused launch shows "Too many launch requests" in the Launch panel (`429 rate limited`) and creates no run. A refusal can last until the hourly window ends, so retries do not help.
 
-Run the [checks that launch nothing](#checks-that-launch-nothing) first, then spend the eight launches below, at least 20 seconds apart. Launch against `fro-bot/agent`. Two launches stay in reserve; do not retry a launch that created a run.
+Run the [checks that launch nothing](#checks-that-launch-nothing) first, then spend the eight launches below, at least 20 seconds apart. The limit is keyed to the operator, so manual launches and earlier passes in the same hour count too. Launch against `fro-bot/agent`. Two launches stay in reserve; do not retry a launch that created a run.
 
 | Launch | Prompt | Covers |
 | --- | --- | --- |
@@ -141,7 +143,10 @@ Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved se
    git -c safe.directory='*' -C <checkout> status --porcelain
    ```
 
-   Empty output means clean. Any output means the next launch on that repo fails with "Checkout refused: uncommitted changes"; report it to the operator instead of cleaning it up.
+   Empty output means clean. Any output means the next launch on that repo fails with "Checkout refused: uncommitted changes"; report it to the operator. The gateway log may not show the refusal, so the checkout status is the reliable signal.
+
+   Clean up only with the operator's approval, one path at a time. Before removing a file, confirm three things: it is the only dirty path, nothing holds it open (`fuser`/`lsof`), and its size and mtime are stable. Remove it as root, because the workspace UID 10001 has no host account and `sudo -u '#10001'` fails. Then read back `git status --porcelain` and run one `Reply with only the word OK.` launch on that repo. That launch uses one of the two reserve launches.
 
 3. Save evidence under `/tmp/operator-acceptance-<expected>/`: a screenshot per check named `NN-name.png`, and secret-free JSON for health, the `ready` frame, `/operator/runs`, and `/operator/session` (`login`, `expiresAt`, and `push` only).
-4. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, or `simulated`, and cite the run ID for checks 5–11 and 13.
+4. Before recording a result, read the saved JSON back from disk. A subagent's summary is not evidence.
+5. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, or `simulated`, and cite the run ID for checks 5–11 and 13.

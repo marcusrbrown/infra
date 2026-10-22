@@ -699,7 +699,9 @@ describe('happy path deploy', () => {
 
     const transaction = calls.find(c => c.cmd[0] === 'ssh')
     const command = transaction?.cmd.join(' ') ?? ''
-    const dashboardUpIdx = command.indexOf('docker compose up -d --no-build --wait --wait-timeout 120 dashboard')
+    const dashboardUpIdx = command.indexOf(
+      'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 dashboard',
+    )
     const caddyUpIdx = command.indexOf(
       'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy',
     )
@@ -724,7 +726,7 @@ describe('happy path deploy', () => {
 
     const transaction = calls.find(c => c.cmd[0] === 'ssh')
     const command = transaction?.cmd.join(' ') ?? ''
-    expect(command).toContain('docker compose up -d --no-build --wait --wait-timeout 120 dashboard')
+    expect(command).toContain('docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 dashboard')
     expect(command).toContain('docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy')
   })
 
@@ -2808,7 +2810,7 @@ describe('public probe: final warning includes last error or status', () => {
 // must force recreation so bind-mounted Caddyfile content changes are loaded.
 
 describe('docker compose up: --wait-timeout 120', () => {
-  it('dashboard compose up includes --wait-timeout 120', async () => {
+  it('dashboard compose up includes --force-recreate, --wait-timeout 120, and --no-build', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
     await deploy({
@@ -2822,11 +2824,8 @@ describe('docker compose up: --wait-timeout 120', () => {
     })
 
     const command = calls.find(c => c.cmd[0] === 'ssh')?.cmd.join(' ') ?? ''
-    const dashboardUp = 'docker compose up -d --no-build --wait --wait-timeout 120 dashboard'
-    expect(command).toContain(dashboardUp)
-    expect(
-      command.slice(command.indexOf(dashboardUp), command.indexOf(dashboardUp) + dashboardUp.length),
-    ).not.toContain('--force-recreate')
+    expect(command).toContain('docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 dashboard')
+    expect(command).not.toContain('docker compose up -d --no-build --wait --wait-timeout 120 dashboard')
   })
 
   it('caddy compose up includes --force-recreate, --wait-timeout 120, and --no-build', async () => {

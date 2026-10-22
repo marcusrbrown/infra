@@ -52,9 +52,11 @@ Caddy depends on the `dashboard` service being healthy before starting.
    publishes `.env`, `Caddyfile`, the GitHub App PEM, and Compose one file at a time, with Compose
    last. The PEM is a regular file owned by `1000:1000`, mode `0600`; `.env` is root-owned mode
    `0600`; Caddyfile and Compose are root-owned mode `0644`.
-9. Runs `docker compose up -d --no-build --wait dashboard`, verifies the running dashboard digest
-   against the expected digest and its health, then force-recreates and waits for Caddy. The lock
-   remains held through this convergence and releases when the SSH transaction exits.
+9. Runs `docker compose up -d --no-build --force-recreate --wait dashboard`, so the container is
+   recreated on every deploy and picks up the newly published PEMs (single-file bind mounts keep the
+   old inode), verifies the running dashboard digest against the expected digest and its health, then
+   force-recreates and waits for Caddy. The lock remains held through this convergence and releases
+   when the SSH transaction exits.
 10. After unlock, runs the same-origin operator-health and public HTTPS probes as advisory checks.
     Versioned deploys write the local Compose pin for the audit PR only after the remote transaction
     succeeds and both advisory probe attempts finish; probe warnings or failures do not block the

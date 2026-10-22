@@ -3221,94 +3221,22 @@ describe('staged image acquisition and publication ordering', () => {
   })
 })
 
-describe('key material change detection forces a dashboard recreate', () => {
-  const githubCmp = 'cmp -s "$stage/github-app.pem" "$DASHBOARD_APP_KEY_PATH"'
-  const froBotCmp = 'cmp -s "$stage/fro-bot-app.pem" "$DASHBOARD_FRO_BOT_APP_KEY_PATH"'
-  const plainUp = 'docker compose up -d --no-build --wait --wait-timeout 120 dashboard'
+describe('dashboard is always force-recreated after the keys are published', () => {
   const recreateUp = 'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 dashboard'
 
-  it('compares both staged keys with the active files before publishing either', () => {
+  it('runs one dashboard up with --force-recreate after both PEM publishes, with no plain variant', () => {
     const program = REMOTE_TRANSACTION_PROGRAM
-    const publishGithub = program.indexOf('publish_active_file "$stage/github-app.pem"')
-    const publishFroBot = program.indexOf('publish_active_file "$stage/fro-bot-app.pem"')
+    const upIndex = program.indexOf(recreateUp)
 
-    expect(program).toContain(githubCmp)
-    expect(program).toContain(froBotCmp)
-    expect(program.indexOf(githubCmp)).toBeLessThan(publishGithub)
-    expect(program.indexOf(froBotCmp)).toBeLessThan(publishGithub)
-    expect(program.indexOf(froBotCmp)).toBeLessThan(publishFroBot)
-  })
-
-  it('treats any non-zero cmp exit as changed, never as unchanged', () => {
-    const program = REMOTE_TRANSACTION_PROGRAM
-
-    expect(program).toContain(`${githubCmp} >/dev/null 2>&1 || key_material_changed=1`)
-    expect(program).toContain(`${froBotCmp} >/dev/null 2>&1 || key_material_changed=1`)
-    expect(program).toContain('key_material_changed=0')
-    expect(program).not.toMatch(/cmp -s [^\n]*&& key_material_changed=0/)
-  })
-
-  it('recreates the dashboard only when key material changed and leaves the plain up command intact', () => {
-    const program = REMOTE_TRANSACTION_PROGRAM
-    const guard = 'if [ "$key_material_changed" -eq 1 ]; then'
-    const guardIndex = program.indexOf(guard)
-
-    expect(guardIndex).toBeGreaterThan(-1)
-    expect(program.indexOf(recreateUp)).toBeGreaterThan(guardIndex)
-    expect(program.indexOf(plainUp)).toBeGreaterThan(program.indexOf(recreateUp))
+    expect(upIndex).toBeGreaterThan(-1)
     expect(program.split(recreateUp)).toHaveLength(2)
-    expect(program.split(plainUp)).toHaveLength(2)
-    expect(program.indexOf('publish_active_file "$stage/fro-bot-app.pem"')).toBeLessThan(guardIndex)
+    expect(program).not.toContain('docker compose up -d --no-build --wait --wait-timeout 120 dashboard')
+    expect(upIndex).toBeGreaterThan(program.indexOf('publish_active_file "$stage/github-app.pem"'))
+    expect(upIndex).toBeGreaterThan(program.indexOf('publish_active_file "$stage/fro-bot-app.pem"'))
   })
 
-  it('allows the key-material evidence line and nothing else shaped like it', async () => {
-    const text = new TextEncoder()
-    const process = {
-      stdout: new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(
-            text.encode(
-              [
-                'evidence=key-material:changed=1',
-                'evidence=key-material:changed=0',
-                'evidence=key-material:changed=2',
-                'evidence=key-material:changed=1:-----BEGIN PRIVATE KEY-----',
-                'stage=complete',
-                '',
-              ].join('\n'),
-            ),
-          )
-          controller.close()
-        },
-      }),
-      stderr: new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.close()
-        },
-      }),
-      stdin: {write: (_data: Uint8Array) => {}, end: () => {}},
-      exited: Promise.resolve(0),
-      kill: (_signal: 'SIGTERM' | 'SIGKILL') => {},
-    }
-
-    const result = await runRemoteTransaction({
-      host: 'dashboard.example',
-      payload: fixture,
-      env: localEnv,
-      spawn: () => process,
-    })
-
-    expect(result.evidence).toContain('evidence=key-material:changed=1')
-    expect(result.evidence).toContain('evidence=key-material:changed=0')
-    expect(result.evidence).not.toContain('evidence=key-material:changed=2')
-    expect(JSON.stringify(result.evidence)).not.toContain('PRIVATE KEY')
-  })
-
-  const runScenario = async (
-    active: {github?: string; froBot?: string},
-    options: {prelude?: string; activeMode?: number} = {},
-  ) => {
-    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-key-material-'))
+  it('passes --force-recreate to the logged dashboard up even when both keys are unchanged', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-force-recreate-'))
     const root = realpathSync(parent)
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
@@ -3319,77 +3247,23 @@ describe('key material change detection forces a dashboard recreate', () => {
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
     )
-    if (active.github !== undefined) writeFileSync(join(dashboardRoot, 'config', 'github-app.pem'), active.github)
-    if (active.froBot !== undefined) writeFileSync(join(dashboardRoot, 'config', 'fro-bot-app.pem'), active.froBot)
+    writeFileSync(join(dashboardRoot, 'config', 'github-app.pem'), fixture.githubAppKey)
+    writeFileSync(join(dashboardRoot, 'config', 'fro-bot-app.pem'), fixture.froBotAppKey)
 
     try {
-      const harness = adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
-        composeCommandLogPath: composeLogPath,
-      })
       const result = await runShellProgram(
-        options.prelude ? `${options.prelude}\n${harness}` : harness,
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {composeCommandLogPath: composeLogPath}),
         encodeRemotePayload(fixture),
       )
       const dashboardUps = readFileSync(composeLogPath, 'utf8')
         .split('\n')
         .filter(line => line.startsWith('compose ') && line.includes(' up ') && line.endsWith(' dashboard'))
-      return {result, dashboardUps}
+
+      expect(result.exitCode, result.stderr).toBe(0)
+      expect(dashboardUps).toHaveLength(1)
+      expect(dashboardUps[0]).toContain('--force-recreate')
     } finally {
       rmSync(parent, {recursive: true, force: true})
     }
-  }
-
-  const keyMaterialEvidence = (stdout: string): string[] =>
-    stdout.split('\n').filter(line => line.startsWith('evidence=key-material:'))
-
-  it('does not force-recreate the dashboard when both active keys match the staged keys', async () => {
-    const {result, dashboardUps} = await runScenario({github: fixture.githubAppKey, froBot: fixture.froBotAppKey})
-
-    expect(result.exitCode, result.stderr).toBe(0)
-    expect(keyMaterialEvidence(result.stdout)).toEqual(['evidence=key-material:changed=0'])
-    expect(dashboardUps).toHaveLength(1)
-    expect(dashboardUps[0]).not.toContain('--force-recreate')
-  })
-
-  for (const [name, active] of [
-    ['key B staged over active key A for the GitHub App key', {github: 'old-A\n', froBot: fixture.froBotAppKey}],
-    ['key B staged over active key A for the Fro Bot App key', {github: fixture.githubAppKey, froBot: 'old-A\n'}],
-    ['both keys changed', {github: 'old-A\n', froBot: 'old-B\n'}],
-    ['the GitHub App key file missing', {froBot: fixture.froBotAppKey}],
-    ['the Fro Bot App key file missing', {github: fixture.githubAppKey}],
-    ['both active key files missing', {}],
-  ] as const) {
-    it(`force-recreates the dashboard when ${name}`, async () => {
-      const {result, dashboardUps} = await runScenario(active)
-
-      expect(result.exitCode, result.stderr).toBe(0)
-      expect(keyMaterialEvidence(result.stdout)).toEqual(['evidence=key-material:changed=1'])
-      expect(dashboardUps).toHaveLength(1)
-      expect(dashboardUps[0]).toContain('--force-recreate')
-    })
-  }
-
-  it('counts a cmp error as changed even when the key bytes are identical', async () => {
-    const {result, dashboardUps} = await runScenario(
-      {github: fixture.githubAppKey, froBot: fixture.froBotAppKey},
-      {prelude: 'cmp() { return 2; }\nexport -f cmp'},
-    )
-
-    expect(result.exitCode, result.stderr).toBe(0)
-    expect(keyMaterialEvidence(result.stdout)).toEqual(['evidence=key-material:changed=1'])
-    expect(dashboardUps[0]).toContain('--force-recreate')
-  })
-
-  it('emits the evidence line without any key material and publishes the keys afterwards', async () => {
-    const {result} = await runScenario({github: 'old-A\n', froBot: fixture.froBotAppKey})
-    const lines = result.stdout.split('\n')
-
-    expect(result.stdout).not.toContain('not-a-real')
-    expect(result.stdout).not.toContain('old-A')
-    expect(result.stdout).not.toContain('PRIVATE KEY')
-    expect(lines.indexOf('evidence=key-material:changed=1')).toBeGreaterThanOrEqual(0)
-    expect(lines.indexOf('evidence=key-material:changed=1')).toBeLessThan(
-      lines.indexOf('evidence=active-state:published=pem'),
-    )
   })
 })

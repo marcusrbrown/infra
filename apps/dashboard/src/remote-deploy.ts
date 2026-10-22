@@ -523,23 +523,14 @@ printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
   '[ -d "$DASHBOARD_DATA_DIR" ] && [ ! -L "$DASHBOARD_DATA_DIR" ] && [ "$(realpath -e "$DASHBOARD_DATA_DIR" 2>/dev/null)" = "$DASHBOARD_DATA_DIR" ] || fail "unsafe-path" "dashboard data is not canonical"',
   'publish_active_file "$stage/env" "$DASHBOARD_ENV_PATH" env',
   'publish_active_file "$stage/caddyfile" "$DASHBOARD_CADDYFILE_PATH" caddyfile',
-  // A single-file bind mount keeps pointing at the replaced inode, so `up` alone would leave the container on the old key.
-  // cmp exits 0 only for identical files; a difference, a missing active file, or any cmp error all count as changed.
-  'key_material_changed=0',
-  'cmp -s "$stage/github-app.pem" "$DASHBOARD_APP_KEY_PATH" >/dev/null 2>&1 || key_material_changed=1',
-  'cmp -s "$stage/fro-bot-app.pem" "$DASHBOARD_FRO_BOT_APP_KEY_PATH" >/dev/null 2>&1 || key_material_changed=1',
-  'printf "%s\n" "evidence=key-material:changed=$key_material_changed"',
   'publish_active_file "$stage/github-app.pem" "$DASHBOARD_APP_KEY_PATH" pem',
   'publish_active_file "$stage/fro-bot-app.pem" "$DASHBOARD_FRO_BOT_APP_KEY_PATH" fro-bot-pem',
   'publish_active_file "$stage/compose" "$DASHBOARD_COMPOSE_PATH" compose',
   'rm -f -- "$DASHBOARD_LEGACY_OVERRIDE_PATH" >/dev/null 2>&1 || fail "unsafe-path" "legacy override removal failed"',
   'mark_stage active-state-written',
   'cd "$DASHBOARD_ROOT" || fail "convergence-failed" "dashboard directory change failed"',
-  'if [ "$key_material_changed" -eq 1 ]; then',
-  '  docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 dashboard >/dev/null 2>&1 || fail "convergence-failed" "dashboard convergence failed"',
-  'else',
-  '  docker compose up -d --no-build --wait --wait-timeout 120 dashboard >/dev/null 2>&1 || fail "convergence-failed" "dashboard convergence failed"',
-  'fi',
+  // Each PEM is replaced atomically and a single-file bind mount keeps the old inode, so the container is always recreated to pick up the published keys.
+  'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 dashboard >/dev/null 2>&1 || fail "convergence-failed" "dashboard convergence failed"',
   'dashboard_container_id="$(docker compose ps --no-trunc -q dashboard 2>/dev/null)" || fail "convergence-failed" "dashboard container lookup failed"',
   '[[ "$dashboard_container_id" =~ ^[a-f0-9]{12,64}$ ]] || fail "convergence-failed" "dashboard container identity is malformed"',
   'dashboard_image_sha="$(docker inspect --format \'{{.Image}}\' "$dashboard_container_id" 2>/dev/null)" || fail "convergence-failed" "dashboard image lookup failed"',
@@ -931,7 +922,6 @@ const isAllowedEvidenceLine = (line: string): boolean => {
   if (/^evidence=capacity:(?:post-prune|post-acquisition|post-convergence):free-bytes=\d+$/.test(line)) return true
   if (/^evidence=acquisition:mode=(?:cache|pull|cache-fallback)$/.test(line)) return true
   if (/^evidence=image-verified:[a-z0-9][a-z0-9._/:+-]*@sha256:[a-f0-9]{64}$/.test(line)) return true
-  if (/^evidence=key-material:changed=[01]$/.test(line)) return true
   if (/^evidence=active-state:published=(?:env|caddyfile|pem|fro-bot-pem|compose)$/.test(line)) return true
   if (/^evidence=runtime-digest:sha256:[a-f0-9]{64}$/.test(line)) return true
   if (

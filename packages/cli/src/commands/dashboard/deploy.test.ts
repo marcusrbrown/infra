@@ -13,6 +13,8 @@ const envKeys = [
   'DASHBOARD_SSH_KEY',
   'DASHBOARD_GITHUB_APP_ID',
   'DASHBOARD_GITHUB_APP_KEY',
+  'DASHBOARD_FRO_BOT_APP_ID',
+  'DASHBOARD_FRO_BOT_APP_KEY',
   'DASHBOARD_OAUTH_CLIENT_ID',
   'DASHBOARD_OAUTH_CLIENT_SECRET',
   'DASHBOARD_OPERATOR_LOGIN',
@@ -134,6 +136,8 @@ describe('getDashboardDeployEnv', () => {
       DASHBOARD_DOMAIN: 'dashboard.fro.bot',
       DASHBOARD_GITHUB_APP_ID: '123456',
       DASHBOARD_GITHUB_APP_KEY: '-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----',
+      DASHBOARD_FRO_BOT_APP_ID: '654321',
+      DASHBOARD_FRO_BOT_APP_KEY: '-----BEGIN RSA PRIVATE KEY-----\nfrobot\n-----END RSA PRIVATE KEY-----',
       DASHBOARD_OAUTH_CLIENT_ID: 'Iv1.abc123',
       DASHBOARD_OAUTH_CLIENT_SECRET: 'oauthsecret',
       DASHBOARD_OPERATOR_LOGIN: 'marcusrbrown',
@@ -145,6 +149,8 @@ describe('getDashboardDeployEnv', () => {
     // All DASHBOARD_* vars must be present in the returned env
     expect(env.DASHBOARD_DOMAIN).toBe('dashboard.fro.bot')
     expect(env.DASHBOARD_GITHUB_APP_ID).toBe('123456')
+    expect(env.DASHBOARD_FRO_BOT_APP_ID).toBe('654321')
+    expect(env.DASHBOARD_FRO_BOT_APP_KEY).toContain('frobot')
     expect(env.DASHBOARD_OAUTH_CLIENT_ID).toBe('Iv1.abc123')
     expect(env.DASHBOARD_OAUTH_CLIENT_SECRET).toBe('oauthsecret')
     expect(env.DASHBOARD_OPERATOR_LOGIN).toBe('marcusrbrown')

@@ -35,12 +35,14 @@ const remoteCommonSetupLines = [
   'readonly DASHBOARD_COMPOSE_PATH="/opt/dashboard/docker-compose.yaml"',
   'readonly DASHBOARD_CADDYFILE_PATH="/opt/dashboard/config/Caddyfile"',
   'readonly DASHBOARD_APP_KEY_PATH="/opt/dashboard/config/github-app.pem"',
+  'readonly DASHBOARD_FRO_BOT_APP_KEY_PATH="/opt/dashboard/config/fro-bot-app.pem"',
   'readonly DASHBOARD_LEGACY_OVERRIDE_PATH="/opt/dashboard/docker-compose.override.yaml"',
-  'readonly MAX_TOTAL_BYTES=786432',
+  'readonly MAX_TOTAL_BYTES=917504',
   'readonly MAX_ENV_BYTES=65536',
   'readonly MAX_COMPOSE_BYTES=524288',
   'readonly MAX_CADDYFILE_BYTES=65536',
   'readonly MAX_GITHUB_APP_KEY_BYTES=131072',
+  'readonly MAX_FRO_BOT_APP_KEY_BYTES=131072',
   'readonly MAX_EXPECTED_DASHBOARD_DIGEST_BYTES=71',
   'stage=""',
   'publication_tmp=""',
@@ -51,7 +53,7 @@ const remoteCommonSetupLines = [
   `
 failure_detail_is_allowlisted() {
   case "$1" in
-    "runtime root is unsafe"|"runtime root creation failed"|"runtime root is not a directory"|"runtime root is not canonical"|"runtime root stat failed"|"runtime root ownership or mode is unsafe"|"lock path is not a regular file"|"lock path creation failed"|"lock path stat failed"|"lock path ownership or mode is unsafe"|"staging directory creation failed"|"staging directory ownership failed"|"staging directory mode failed"|"staging directory is not canonical"|"malformed payload"|"unsupported payload protocol"|"missing payload field"|"malformed payload field header"|"malformed payload field length"|"duplicate payload field"|"unknown payload field"|"payload field exceeds size limit"|"empty payload field"|"payload exceeds total size limit"|"payload field read failed"|"payload field stat failed"|"truncated payload field"|"malformed payload terminator"|"trailing payload data"|"expected dashboard digest read failed"|"malformed expected dashboard digest"|"Docker root evidence unavailable"|"Docker root evidence malformed"|"Docker root path unavailable"|"containerd root path is unsafe"|"storage probe canonicalization failed"|"storage probe is not a directory"|"storage mount evidence unavailable"|"storage mount evidence malformed"|"storage mount identity malformed"|"storage free-byte evidence unavailable"|"storage free-byte evidence malformed"|"contradictory storage mount evidence"|"storage evidence is empty"|"Docker disk summary unavailable"|"Docker disk summary malformed"|"Docker disk summary size malformed"|"Docker disk summary reclaimable size malformed"|"Docker disk summary is empty"|"container image inventory unavailable"|"container image reference malformed"|"active Compose path is unsafe"|"active Compose image evidence unavailable"|"active Compose image evidence malformed"|"running dashboard inventory unavailable"|"running dashboard container identity malformed"|"running dashboard image identity unavailable"|"running dashboard image identity malformed"|"running dashboard digest evidence unavailable"|"running dashboard digest evidence malformed"|"running dashboard digest evidence is missing or ambiguous"|"running dashboard health evidence unavailable"|"running dashboard health evidence malformed"|"running dashboard identity is ambiguous"|"dashboard container identity is malformed"|"dashboard Compose labels unavailable"|"dashboard Compose labels are unexpected"|"dashboard data directory stat unavailable"|"dashboard data directory is unexpected"|"dashboard data directory is not canonical"|"dashboard mount evidence unavailable"|"dashboard mount evidence malformed"|"dashboard data mount is unexpected"|"running Caddy inventory unavailable"|"running Caddy container identity is malformed"|"running Caddy identity is ambiguous"|"Caddy Compose labels unavailable"|"Caddy Compose labels are unexpected"|"Caddy mount evidence unavailable"|"Caddy mount evidence malformed"|"Caddy volume mount is unexpected"|"Caddy volume identity is malformed"|"Caddy volume labels unavailable"|"Caddy volume labels are unexpected"|"Caddy volume mount is missing or ambiguous"|"unused-image prune failed"|"unused-image prune result malformed"|"staged image record creation failed"|"staged Compose image enumeration failed"|"staged Compose image identity is empty"|"staged Compose image identity is malformed"|"duplicate staged image identity"|"staged image record write failed"|"staged dashboard digest is unexpected"|"staged Compose image set is empty"|"staged dashboard image identity is missing or ambiguous"|"staged image record is malformed"|"staged image digest verification failed"|"post-prune free space is below the minimum"|"post-acquisition free space is below the minimum"|"post-convergence free space is below the minimum"|"dashboard root is unsafe"|"dashboard config is unsafe"|"dashboard root creation failed"|"dashboard config creation failed"|"dashboard root ownership failed"|"dashboard root is not canonical"|"dashboard config is not canonical"|"dashboard data is unsafe"|"dashboard data creation failed"|"dashboard data ownership failed"|"dashboard data mode failed"|"dashboard data is not canonical"|"legacy override removal failed"|"environment publication failed"|"Caddyfile publication failed"|"GitHub App key publication failed"|"compose publication failed"|"unknown active file"|"dashboard directory change failed"|"dashboard convergence failed"|"dashboard container lookup failed"|"dashboard image lookup failed"|"dashboard image identity is missing"|"dashboard digest lookup failed"|"dashboard digest verification failed"|"dashboard health lookup failed"|"dashboard health verification failed"|"Caddy convergence failed"|"active Compose dashboard digest verification failed"|"running dashboard container differs from Compose readback"|"running dashboard digest verification failed"|"running dashboard health verification failed"|"prior dashboard image is not locally inspectable") return 0 ;;
+    "runtime root is unsafe"|"runtime root creation failed"|"runtime root is not a directory"|"runtime root is not canonical"|"runtime root stat failed"|"runtime root ownership or mode is unsafe"|"lock path is not a regular file"|"lock path creation failed"|"lock path stat failed"|"lock path ownership or mode is unsafe"|"staging directory creation failed"|"staging directory ownership failed"|"staging directory mode failed"|"staging directory is not canonical"|"malformed payload"|"unsupported payload protocol"|"missing payload field"|"malformed payload field header"|"malformed payload field length"|"duplicate payload field"|"unknown payload field"|"payload field exceeds size limit"|"empty payload field"|"payload exceeds total size limit"|"payload field read failed"|"payload field stat failed"|"truncated payload field"|"malformed payload terminator"|"trailing payload data"|"expected dashboard digest read failed"|"malformed expected dashboard digest"|"Docker root evidence unavailable"|"Docker root evidence malformed"|"Docker root path unavailable"|"containerd root path is unsafe"|"storage probe canonicalization failed"|"storage probe is not a directory"|"storage mount evidence unavailable"|"storage mount evidence malformed"|"storage mount identity malformed"|"storage free-byte evidence unavailable"|"storage free-byte evidence malformed"|"contradictory storage mount evidence"|"storage evidence is empty"|"Docker disk summary unavailable"|"Docker disk summary malformed"|"Docker disk summary size malformed"|"Docker disk summary reclaimable size malformed"|"Docker disk summary is empty"|"container image inventory unavailable"|"container image reference malformed"|"active Compose path is unsafe"|"active Compose image evidence unavailable"|"active Compose image evidence malformed"|"running dashboard inventory unavailable"|"running dashboard container identity malformed"|"running dashboard image identity unavailable"|"running dashboard image identity malformed"|"running dashboard digest evidence unavailable"|"running dashboard digest evidence malformed"|"running dashboard digest evidence is missing or ambiguous"|"running dashboard health evidence unavailable"|"running dashboard health evidence malformed"|"running dashboard identity is ambiguous"|"dashboard container identity is malformed"|"dashboard Compose labels unavailable"|"dashboard Compose labels are unexpected"|"dashboard data directory stat unavailable"|"dashboard data directory is unexpected"|"dashboard data directory is not canonical"|"dashboard mount evidence unavailable"|"dashboard mount evidence malformed"|"dashboard data mount is unexpected"|"running Caddy inventory unavailable"|"running Caddy container identity is malformed"|"running Caddy identity is ambiguous"|"Caddy Compose labels unavailable"|"Caddy Compose labels are unexpected"|"Caddy mount evidence unavailable"|"Caddy mount evidence malformed"|"Caddy volume mount is unexpected"|"Caddy volume identity is malformed"|"Caddy volume labels unavailable"|"Caddy volume labels are unexpected"|"Caddy volume mount is missing or ambiguous"|"unused-image prune failed"|"unused-image prune result malformed"|"staged image record creation failed"|"staged Compose image enumeration failed"|"staged Compose image identity is empty"|"staged Compose image identity is malformed"|"duplicate staged image identity"|"staged image record write failed"|"staged dashboard digest is unexpected"|"staged Compose image set is empty"|"staged dashboard image identity is missing or ambiguous"|"staged image record is malformed"|"staged image digest verification failed"|"post-prune free space is below the minimum"|"post-acquisition free space is below the minimum"|"post-convergence free space is below the minimum"|"dashboard root is unsafe"|"dashboard config is unsafe"|"dashboard root creation failed"|"dashboard config creation failed"|"dashboard root ownership failed"|"dashboard root is not canonical"|"dashboard config is not canonical"|"dashboard data is unsafe"|"dashboard data creation failed"|"dashboard data ownership failed"|"dashboard data mode failed"|"dashboard data is not canonical"|"legacy override removal failed"|"environment publication failed"|"Caddyfile publication failed"|"GitHub App key publication failed"|"Fro Bot App key publication failed"|"compose publication failed"|"unknown active file"|"dashboard directory change failed"|"dashboard convergence failed"|"dashboard container lookup failed"|"dashboard image lookup failed"|"dashboard image identity is missing"|"dashboard digest lookup failed"|"dashboard digest verification failed"|"dashboard health lookup failed"|"dashboard health verification failed"|"Caddy convergence failed"|"active Compose dashboard digest verification failed"|"running dashboard container differs from Compose readback"|"running dashboard digest verification failed"|"running dashboard health verification failed"|"prior dashboard image is not locally inspectable") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -90,8 +92,8 @@ const remoteLockedBodyLines = [
   'read_line',
   '[ "$line" = "dashboard-deploy-payload v2" ] || fail "payload-malformed" "unsupported payload protocol"',
   'payload_bytes=0',
-  'seen_env=0; seen_compose=0; seen_caddyfile=0; seen_github_app_key=0; seen_expected_dashboard_digest=0',
-  'for field_number in 1 2 3 4 5; do',
+  'seen_env=0; seen_compose=0; seen_caddyfile=0; seen_github_app_key=0; seen_fro_bot_app_key=0; seen_expected_dashboard_digest=0',
+  'for field_number in 1 2 3 4 5 6; do',
   '  read_line',
   '  [ "$line" != "end" ] || fail "payload-malformed" "missing payload field"',
   '  [[ "$line" =~ ^field[[:space:]]([a-z_]+)[[:space:]]([0-9]+)$ ]] || fail "payload-malformed" "malformed payload field header"',
@@ -102,6 +104,7 @@ const remoteLockedBodyLines = [
   '    compose) [ "$seen_compose" -eq 0 ] || fail "payload-malformed" "duplicate payload field"; seen_compose=1; target="$stage/compose"; field_limit="$MAX_COMPOSE_BYTES" ;;',
   '    caddyfile) [ "$seen_caddyfile" -eq 0 ] || fail "payload-malformed" "duplicate payload field"; seen_caddyfile=1; target="$stage/caddyfile"; field_limit="$MAX_CADDYFILE_BYTES" ;;',
   '    github_app_key) [ "$seen_github_app_key" -eq 0 ] || fail "payload-malformed" "duplicate payload field"; seen_github_app_key=1; target="$stage/github-app.pem"; field_limit="$MAX_GITHUB_APP_KEY_BYTES" ;;',
+  '    fro_bot_app_key) [ "$seen_fro_bot_app_key" -eq 0 ] || fail "payload-malformed" "duplicate payload field"; seen_fro_bot_app_key=1; target="$stage/fro-bot-app.pem"; field_limit="$MAX_FRO_BOT_APP_KEY_BYTES" ;;',
   '    expected_dashboard_digest) [ "$seen_expected_dashboard_digest" -eq 0 ] || fail "payload-malformed" "duplicate payload field"; seen_expected_dashboard_digest=1; target="$stage/expected-dashboard-digest"; field_limit="$MAX_EXPECTED_DASHBOARD_DIGEST_BYTES" ;;',
   '    *) fail "payload-malformed" "unknown payload field" ;;',
   '  esac',
@@ -115,7 +118,7 @@ const remoteLockedBodyLines = [
   'done',
   'read_line',
   '[ "$line" = "end" ] || fail "payload-malformed" "malformed payload terminator"',
-  '[ "$seen_env" -eq 1 ] && [ "$seen_compose" -eq 1 ] && [ "$seen_caddyfile" -eq 1 ] && [ "$seen_github_app_key" -eq 1 ] && [ "$seen_expected_dashboard_digest" -eq 1 ] || fail "payload-malformed" "missing payload field"',
+  '[ "$seen_env" -eq 1 ] && [ "$seen_compose" -eq 1 ] && [ "$seen_caddyfile" -eq 1 ] && [ "$seen_github_app_key" -eq 1 ] && [ "$seen_fro_bot_app_key" -eq 1 ] && [ "$seen_expected_dashboard_digest" -eq 1 ] || fail "payload-malformed" "missing payload field"',
   'remaining_bytes="$(dd bs=1 count=1 status=none 2>/dev/null | wc -c)"',
   '[ "$remaining_bytes" -eq 0 ] || fail "payload-malformed" "trailing payload data"',
   'mark_stage payload-decoded',
@@ -413,6 +416,7 @@ publish_active_file() {
     env) install -m 0600 -o 0 -g 0 "$source_path" "$publication_tmp" >/dev/null 2>&1 || fail "unsafe-path" "environment publication failed" ;;
     caddyfile) install -m 0644 -o 0 -g 0 "$source_path" "$publication_tmp" >/dev/null 2>&1 || fail "unsafe-path" "Caddyfile publication failed" ;;
     pem) install -m 0600 -o 1000 -g 1000 "$source_path" "$publication_tmp" >/dev/null 2>&1 || fail "unsafe-path" "GitHub App key publication failed" ;;
+    fro-bot-pem) install -m 0600 -o 1000 -g 1000 "$source_path" "$publication_tmp" >/dev/null 2>&1 || fail "unsafe-path" "Fro Bot App key publication failed" ;;
     compose) install -m 0644 -o 0 -g 0 "$source_path" "$publication_tmp" >/dev/null 2>&1 || fail "unsafe-path" "compose publication failed" ;;
     *) fail "unsafe-path" "unknown active file" ;;
   esac
@@ -423,7 +427,7 @@ publish_active_file() {
   case "$label" in
     env) expected_stat="0:0:600:regular file" ;;
     caddyfile|compose) expected_stat="0:0:644:regular file" ;;
-    pem) expected_stat="1000:1000:600:regular file" ;;
+    pem|fro-bot-pem) expected_stat="1000:1000:600:regular file" ;;
     *) fail "unsafe-path" "unknown active file" ;;
   esac
   actual_stat="$(stat -c "%u:%g:%a:%F" -- "$destination_path" 2>/dev/null)" || fail "unsafe-path" "$label readback failed"
@@ -498,6 +502,7 @@ printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
   'validate_final_file_path "$DASHBOARD_ENV_PATH" env',
   'validate_final_file_path "$DASHBOARD_CADDYFILE_PATH" caddyfile',
   'validate_final_file_path "$DASHBOARD_APP_KEY_PATH" pem',
+  'validate_final_file_path "$DASHBOARD_FRO_BOT_APP_KEY_PATH" fro-bot-pem',
   'validate_final_file_path "$DASHBOARD_COMPOSE_PATH" compose',
   'validate_final_file_path "$DASHBOARD_LEGACY_OVERRIDE_PATH" legacy-override',
   'validate_parent_directory "$(dirname "$DASHBOARD_ROOT")" dashboard-parent',
@@ -519,6 +524,7 @@ printf '%s\n' "evidence=capacity:post-acquisition:free-bytes=$storage_min_free"
   'publish_active_file "$stage/env" "$DASHBOARD_ENV_PATH" env',
   'publish_active_file "$stage/caddyfile" "$DASHBOARD_CADDYFILE_PATH" caddyfile',
   'publish_active_file "$stage/github-app.pem" "$DASHBOARD_APP_KEY_PATH" pem',
+  'publish_active_file "$stage/fro-bot-app.pem" "$DASHBOARD_FRO_BOT_APP_KEY_PATH" fro-bot-pem',
   'publish_active_file "$stage/compose" "$DASHBOARD_COMPOSE_PATH" compose',
   'rm -f -- "$DASHBOARD_LEGACY_OVERRIDE_PATH" >/dev/null 2>&1 || fail "unsafe-path" "legacy override removal failed"',
   'mark_stage active-state-written',
@@ -577,10 +583,11 @@ export const REMOTE_PAYLOAD_FIELD_LIMITS = {
   compose: 512 * 1024,
   caddyfile: 64 * 1024,
   github_app_key: 128 * 1024,
+  fro_bot_app_key: 128 * 1024,
   expected_dashboard_digest: 71,
 } as const
 
-export const REMOTE_PAYLOAD_MAX_BYTES = 786432
+export const REMOTE_PAYLOAD_MAX_BYTES = 917504
 
 export interface RemoteSshCommandOptions {
   host: string
@@ -914,7 +921,7 @@ const isAllowedEvidenceLine = (line: string): boolean => {
   if (/^evidence=capacity:(?:post-prune|post-acquisition|post-convergence):free-bytes=\d+$/.test(line)) return true
   if (/^evidence=acquisition:mode=(?:cache|pull|cache-fallback)$/.test(line)) return true
   if (/^evidence=image-verified:[a-z0-9][a-z0-9._/:+-]*@sha256:[a-f0-9]{64}$/.test(line)) return true
-  if (/^evidence=active-state:published=(?:env|caddyfile|pem|compose)$/.test(line)) return true
+  if (/^evidence=active-state:published=(?:env|caddyfile|pem|fro-bot-pem|compose)$/.test(line)) return true
   if (/^evidence=runtime-digest:sha256:[a-f0-9]{64}$/.test(line)) return true
   if (
     /^evidence=persistent-state:dashboard-data=\/data,bind,writable,canonical,uidgid=1000:1000,mode=0700;caddy-data=\/data,volume,writable,labels=dashboard\/caddy_data;caddy-config=\/config,volume,writable,labels=dashboard\/caddy_config$/.test(
@@ -1110,6 +1117,7 @@ export interface RemoteDeployPayload {
   compose: string
   caddyfile: string
   githubAppKey: string
+  froBotAppKey: string
   expectedDashboardDigest: string
 }
 
@@ -1120,6 +1128,7 @@ const PAYLOAD_FIELDS: readonly [PayloadField, keyof RemoteDeployPayload][] = [
   ['compose', 'compose'],
   ['caddyfile', 'caddyfile'],
   ['github_app_key', 'githubAppKey'],
+  ['fro_bot_app_key', 'froBotAppKey'],
   ['expected_dashboard_digest', 'expectedDashboardDigest'],
 ]
 
@@ -1291,6 +1300,7 @@ export function decodeRemotePayload(encoded: Uint8Array): RemoteDeployPayload {
     compose: values.compose as string,
     caddyfile: values.caddyfile as string,
     githubAppKey: values.githubAppKey as string,
+    froBotAppKey: values.froBotAppKey as string,
     expectedDashboardDigest,
   }
 }

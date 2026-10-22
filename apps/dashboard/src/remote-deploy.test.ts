@@ -22,6 +22,7 @@ import {
   encodeRemotePayload,
   REMOTE_CALLER_WATCHDOG_SECONDS,
   REMOTE_PAYLOAD_FIELD_LIMITS,
+  REMOTE_PAYLOAD_MAX_BYTES,
   REMOTE_TRANSACTION_PROGRAM,
   REMOTE_TRANSACTION_TEST_PROGRAM,
   RemoteTransactionError,
@@ -40,6 +41,7 @@ const fixture: RemoteDeployPayload = {
   compose: `services:\n  caddy:\n    image: ${CADDY_IMAGE}\n  dashboard:\n    image: ${DASHBOARD_IMAGE}\n`,
   caddyfile: 'dashboard.example {\n  reverse_proxy dashboard:3000\n}\n',
   githubAppKey: '-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n',
+  froBotAppKey: '-----BEGIN PRIVATE KEY-----\nnot-a-real-fro-bot-key\n-----END PRIVATE KEY-----\n',
   expectedDashboardDigest: `sha256:${'a'.repeat(64)}`,
 }
 
@@ -127,6 +129,7 @@ const requiredWireFields = (): readonly [string, string][] => [
   ['compose', fixture.compose],
   ['caddyfile', fixture.caddyfile],
   ['github_app_key', fixture.githubAppKey],
+  ['fro_bot_app_key', fixture.froBotAppKey],
   ['expected_dashboard_digest', fixture.expectedDashboardDigest],
 ]
 
@@ -183,7 +186,7 @@ interface ShellHarnessOptions {
   composePullExitCode?: number
   imageRepoDigests?: Readonly<Record<string, readonly string[]>>
   postAcquisitionFreeBytes?: number
-  publicationFailureSource?: 'env' | 'caddyfile' | 'github-app.pem' | 'compose'
+  publicationFailureSource?: 'env' | 'caddyfile' | 'github-app.pem' | 'fro-bot-app.pem' | 'compose'
   composeCommandLogPath?: string
   dockerCommandLogPath?: string
   composeDashboardIdsOutput?: string
@@ -392,6 +395,11 @@ const adaptProgramForUnprivilegedHarness = (
   )
   program = replaceRequired(
     program,
+    '"/opt/dashboard/config/fro-bot-app.pem"',
+    JSON.stringify(`${dashboardRoot}/config/fro-bot-app.pem`),
+  )
+  program = replaceRequired(
+    program,
     '"/opt/dashboard/docker-compose.override.yaml"',
     JSON.stringify(`${dashboardRoot}/docker-compose.override.yaml`),
   )
@@ -425,7 +433,7 @@ const adaptProgramForUnprivilegedHarness = (
   return String.raw`
 install() {
   if [ "${options.publicationFailureSource ?? ''}" != "" ] && [ "$7" = "$stage/${options.publicationFailureSource ?? ''}" ]; then return 1; fi
-  if [ "${options.requireDataBeforeActivePublication ? '1' : '0'}" -eq 1 ] && { [ "$7" = "\$stage/env" ] || [ "$7" = "\$stage/caddyfile" ] || [ "$7" = "\$stage/github-app.pem" ] || [ "$7" = "\$stage/compose" ]; }; then
+  if [ "${options.requireDataBeforeActivePublication ? '1' : '0'}" -eq 1 ] && { [ "$7" = "\$stage/env" ] || [ "$7" = "\$stage/caddyfile" ] || [ "$7" = "\$stage/github-app.pem" ] || [ "$7" = "\$stage/fro-bot-app.pem" ] || [ "$7" = "\$stage/compose" ]; }; then
     data_stat="$(stat -c "%u:%g:%a:%F" -- ${shellQuote(dataPath)} 2>/dev/null)" || return 1
     [ "$data_stat" = ${shellQuote(`${uid}:${gid}:700:${expectedDirectoryType}`)} ] || return 1
   fi
@@ -559,6 +567,21 @@ describe('remote deploy payload protocol', () => {
     expect(decodeRemotePayload(encoded)).toEqual(fixture)
   })
 
+  it('frames exactly six named fields with the Fro Bot App key after the GitHub App key', () => {
+    const text = new TextDecoder().decode(encodeRemotePayload(fixture))
+    const wireFields = [...text.matchAll(/^field ([a-z_]+) \d+$/gm)].map(match => match[1])
+
+    expect(wireFields).toEqual([
+      'env',
+      'compose',
+      'caddyfile',
+      'github_app_key',
+      'fro_bot_app_key',
+      'expected_dashboard_digest',
+    ])
+    expect(text.startsWith('dashboard-deploy-payload v2\n')).toBe(true)
+  })
+
   it('keeps metacharacter payload values out of the fixed SSH command', () => {
     const secretFixture = {
       ...fixture,
@@ -605,12 +628,60 @@ describe('remote deploy payload protocol', () => {
   })
 })
 
+describe('remote deploy payload fro_bot_app_key field', () => {
+  it('rejects a duplicate fro_bot_app_key field', () => {
+    expect(() =>
+      decodeRemotePayload(makeFramedPayload([...requiredWireFields(), ['fro_bot_app_key', fixture.froBotAppKey]])),
+    ).toThrow('duplicate field')
+  })
+
+  it('rejects a payload that omits fro_bot_app_key', () => {
+    expect(() =>
+      decodeRemotePayload(makeFramedPayload(requiredWireFields().filter(([name]) => name !== 'fro_bot_app_key'))),
+    ).toThrow('missing field')
+  })
+
+  it('rejects an empty fro_bot_app_key on encode', () => {
+    expect(() => encodeRemotePayload({...fixture, froBotAppKey: ''})).toThrow('empty fro_bot_app_key field')
+  })
+
+  it('rejects an oversized fro_bot_app_key on encode and decode', () => {
+    const limit = REMOTE_PAYLOAD_FIELD_LIMITS.fro_bot_app_key
+
+    expect(() => encodeRemotePayload({...fixture, froBotAppKey: 'k'.repeat(limit + 1)})).toThrow(
+      'fro_bot_app_key field exceeds its size limit',
+    )
+    const header = new TextEncoder().encode(`dashboard-deploy-payload v2\nfield fro_bot_app_key ${limit + 1}\n`)
+    expect(() => decodeRemotePayload(header)).toThrow('fro_bot_app_key field exceeds its size limit')
+  })
+
+  it('rejects a NUL byte in fro_bot_app_key', () => {
+    expect(() => encodeRemotePayload({...fixture, froBotAppKey: 'safe\0unsafe'})).toThrow('NUL byte')
+  })
+
+  it('counts the Fro Bot App key limit inside the total payload limit', () => {
+    expect(REMOTE_PAYLOAD_FIELD_LIMITS.fro_bot_app_key).toBe(128 * 1024)
+    expect(REMOTE_PAYLOAD_MAX_BYTES).toBe(
+      REMOTE_PAYLOAD_FIELD_LIMITS.env +
+        REMOTE_PAYLOAD_FIELD_LIMITS.compose +
+        REMOTE_PAYLOAD_FIELD_LIMITS.caddyfile +
+        REMOTE_PAYLOAD_FIELD_LIMITS.github_app_key +
+        REMOTE_PAYLOAD_FIELD_LIMITS.fro_bot_app_key,
+    )
+    expect(REMOTE_TRANSACTION_PROGRAM).toContain(`readonly MAX_TOTAL_BYTES=${REMOTE_PAYLOAD_MAX_BYTES}`)
+    expect(REMOTE_TRANSACTION_PROGRAM).toContain(
+      `readonly MAX_FRO_BOT_APP_KEY_BYTES=${REMOTE_PAYLOAD_FIELD_LIMITS.fro_bot_app_key}`,
+    )
+  })
+})
+
 describe('remote deploy payload negative cases', () => {
   const oversizedPayload: RemoteDeployPayload = {
     env: 'e'.repeat(REMOTE_PAYLOAD_FIELD_LIMITS.env),
     compose: 'c'.repeat(REMOTE_PAYLOAD_FIELD_LIMITS.compose),
     caddyfile: 'c'.repeat(REMOTE_PAYLOAD_FIELD_LIMITS.caddyfile),
     githubAppKey: 'k'.repeat(REMOTE_PAYLOAD_FIELD_LIMITS.github_app_key),
+    froBotAppKey: 'f'.repeat(REMOTE_PAYLOAD_FIELD_LIMITS.fro_bot_app_key),
     expectedDashboardDigest: fixture.expectedDashboardDigest,
   }
 
@@ -2075,6 +2146,97 @@ describe('remote transaction process boundary', () => {
     })
   }
 
+  const withoutFroBotKey = requiredWireFields().filter(([name]) => name !== 'fro_bot_app_key')
+  const oversizedFroBotHeader = new TextEncoder().encode(
+    `dashboard-deploy-payload v2\nfield fro_bot_app_key ${REMOTE_PAYLOAD_FIELD_LIMITS.fro_bot_app_key + 1}\n`,
+  )
+  for (const [name, payload, detail] of [
+    ['missing fro_bot_app_key', makeFramedPayload(withoutFroBotKey), 'missing payload field'],
+    [
+      'duplicate fro_bot_app_key',
+      makeFramedPayload([
+        ...requiredWireFields().slice(0, 5),
+        ['fro_bot_app_key', fixture.froBotAppKey],
+        ...requiredWireFields().slice(5),
+      ]),
+      'duplicate payload field',
+    ],
+    ['oversized fro_bot_app_key', oversizedFroBotHeader, 'payload field exceeds size limit'],
+    [
+      'unknown sixth field',
+      makeFramedPayload([...withoutFroBotKey.slice(0, 4), ['fro_bot_app_keys', fixture.froBotAppKey]]),
+      'unknown payload field',
+    ],
+  ] as const) {
+    it(`rejects shell payload before decode with an allowlisted detail: ${name}`, async () => {
+      const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-fro-bot-key-${name.replaceAll(' ', '-')}-`))
+      const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
+      const dashboardRoot = `${runtimeRoot}-dashboard`
+
+      try {
+        const result = await runShellProgram(adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot), payload)
+        expect(result.exitCode, name).not.toBe(0)
+        expect(result.stdout, name).toContain('failure=payload-malformed')
+        expect(result.stdout, name).toContain(`detail=${detail}`)
+        expect(result.stdout, name).not.toContain('stage=payload-decoded')
+        expect(existsSync(dashboardRoot), name).toBe(false)
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    })
+  }
+
+  it('parses as valid bash', async () => {
+    const child = Bun.spawn(['bash', '-n', '-c', REMOTE_TRANSACTION_PROGRAM], {stdout: 'pipe', stderr: 'pipe'})
+    const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited])
+
+    expect(exitCode, stderr).toBe(0)
+  })
+
+  it('returns both key publication evidence lines and drops unknown publication labels', async () => {
+    const text = new TextEncoder()
+    const process = {
+      stdout: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            text.encode(
+              [
+                'evidence=active-state:published=pem',
+                'evidence=active-state:published=fro-bot-pem',
+                'evidence=active-state:published=other-pem',
+                'stage=complete',
+                '',
+              ].join('\n'),
+            ),
+          )
+          controller.close()
+        },
+      }),
+      stderr: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close()
+        },
+      }),
+      stdin: {
+        write: (_data: Uint8Array) => {},
+        end: () => {},
+      },
+      exited: Promise.resolve(0),
+      kill: (_signal: 'SIGTERM' | 'SIGKILL') => {},
+    }
+
+    const result = await runRemoteTransaction({
+      host: 'dashboard.example',
+      payload: fixture,
+      env: localEnv,
+      spawn: () => process,
+    })
+
+    expect(result.evidence).toContain('evidence=active-state:published=pem')
+    expect(result.evidence).toContain('evidence=active-state:published=fro-bot-pem')
+    expect(result.evidence).not.toContain('evidence=active-state:published=other-pem')
+  })
+
   it('keeps secret-like output out of returned evidence', async () => {
     const secret = 'oauth-secret\n-----BEGIN PRIVATE KEY-----'
     const text = new TextEncoder()
@@ -2567,6 +2729,7 @@ describe('staged image acquisition and publication ordering', () => {
         'evidence=active-state:published=env',
         'evidence=active-state:published=caddyfile',
         'evidence=active-state:published=pem',
+        'evidence=active-state:published=fro-bot-pem',
         'evidence=active-state:published=compose',
       ])
     } finally {
@@ -2864,6 +3027,8 @@ describe('staged image acquisition and publication ordering', () => {
       ['env-symlink', 'env', 'symlink'],
       ['caddyfile-directory', 'caddyfile', 'directory'],
       ['pem-symlink', 'pem', 'symlink'],
+      ['fro-bot-pem-symlink', 'froBotPem', 'symlink'],
+      ['fro-bot-pem-directory', 'froBotPem', 'directory'],
       ['compose-directory', 'compose', 'directory'],
     ] as const
 
@@ -2880,6 +3045,7 @@ describe('staged image acquisition and publication ordering', () => {
         env: join(dashboardRoot, '.env'),
         caddyfile: join(dashboardRoot, 'config', 'Caddyfile'),
         pem: join(dashboardRoot, 'config', 'github-app.pem'),
+        froBotPem: join(dashboardRoot, 'config', 'fro-bot-app.pem'),
         compose: join(dashboardRoot, 'docker-compose.yaml'),
       }[target]
 
@@ -2923,6 +3089,63 @@ describe('staged image acquisition and publication ordering', () => {
       expect(result.stdout).toContain('evidence=active-state:published=pem')
       expect(result.stdout).not.toContain('evidence=active-state:published=compose')
       expect(result.stdout).not.toContain('stage=active-state-written')
+      expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8')).toBe(oldCompose)
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('publishes the Fro Bot App key to its own 0600 path with its own bytes', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-fro-bot-key-publish-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const froBotKeyPath = join(dashboardRoot, 'config', 'fro-bot-app.pem')
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(
+      join(dashboardRoot, 'docker-compose.yaml'),
+      `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
+    )
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode, result.stderr).toBe(0)
+      expect(readFileSync(froBotKeyPath, 'utf8')).toBe(fixture.froBotAppKey)
+      expect(readFileSync(join(dashboardRoot, 'config', 'github-app.pem'), 'utf8')).toBe(fixture.githubAppKey)
+      expect(statSync(froBotKeyPath).mode & 0o7777).toBe(0o600)
+      expect(result.stdout).toContain('evidence=active-state:published=fro-bot-pem')
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  })
+
+  it('reports an allowlisted detail when the Fro Bot App key publication fails', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-fro-bot-key-failure-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
+    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {publicationFailureSource: 'fro-bot-app.pem'}),
+        encodeRemotePayload(fixture),
+      )
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).toContain('failure=unsafe-path')
+      expect(result.stdout).toContain('detail=Fro Bot App key publication failed')
+      expect(result.stdout).toContain('evidence=active-state:published=pem')
+      expect(result.stdout).not.toContain('evidence=active-state:published=fro-bot-pem')
+      expect(result.stdout).not.toContain('evidence=active-state:published=compose')
       expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8')).toBe(oldCompose)
     } finally {
       rmSync(parent, {recursive: true, force: true})

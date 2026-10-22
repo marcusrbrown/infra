@@ -55,6 +55,8 @@ services:
           create_host_path: false
       # Host path (uploaded by deploy.ts, 0600) : container path : read-only
       - /opt/dashboard/config/github-app.pem:/run/secrets/github-app.pem:ro
+      # Second App credential (Fro Bot App), same upload and mode as above.
+      - /opt/dashboard/config/fro-bot-app.pem:/run/secrets/fro-bot-app.pem:ro
     healthcheck:
       test:
         - CMD-SHELL

@@ -401,6 +401,7 @@ env:
          failure — only /api/healthz is the public health surface.)
        - Verify the dashboard environment exists with DASHBOARD_SSH_KEY,
          DASHBOARD_DOMAIN, DASHBOARD_GITHUB_APP_ID, DASHBOARD_GITHUB_APP_KEY,
+         DASHBOARD_FRO_BOT_APP_ID, DASHBOARD_FRO_BOT_APP_KEY,
          DASHBOARD_OAUTH_CLIENT_ID, DASHBOARD_OAUTH_CLIENT_SECRET,
          DASHBOARD_OPERATOR_LOGIN, and DASHBOARD_COOKIE_KEY configured.
        - Check .github/known_hosts contains host keys for dashboard.fro.bot

@@ -52,6 +52,10 @@ on:
         required: true
       DASHBOARD_GITHUB_APP_KEY:
         required: true
+      DASHBOARD_FRO_BOT_APP_ID:
+        required: true
+      DASHBOARD_FRO_BOT_APP_KEY:
+        required: true
       DASHBOARD_OAUTH_CLIENT_ID:
         required: true
       DASHBOARD_OAUTH_CLIENT_SECRET:
@@ -238,6 +242,8 @@ jobs:
           DASHBOARD_DOMAIN: ${{ secrets.DASHBOARD_DOMAIN }}
           DASHBOARD_GITHUB_APP_ID: ${{ secrets.DASHBOARD_GITHUB_APP_ID }}
           DASHBOARD_GITHUB_APP_KEY: ${{ secrets.DASHBOARD_GITHUB_APP_KEY }}
+          DASHBOARD_FRO_BOT_APP_ID: ${{ secrets.DASHBOARD_FRO_BOT_APP_ID }}
+          DASHBOARD_FRO_BOT_APP_KEY: ${{ secrets.DASHBOARD_FRO_BOT_APP_KEY }}
           DASHBOARD_OAUTH_CLIENT_ID: ${{ secrets.DASHBOARD_OAUTH_CLIENT_ID }}
           DASHBOARD_OAUTH_CLIENT_SECRET: ${{ secrets.DASHBOARD_OAUTH_CLIENT_SECRET }}
           DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}
@@ -250,6 +256,8 @@ jobs:
           [[ -n "${DASHBOARD_DOMAIN}" ]] || missing+=("DASHBOARD_DOMAIN")
           [[ -n "${DASHBOARD_GITHUB_APP_ID}" ]] || missing+=("DASHBOARD_GITHUB_APP_ID")
           [[ -n "${DASHBOARD_GITHUB_APP_KEY}" ]] || missing+=("DASHBOARD_GITHUB_APP_KEY")
+          [[ -n "${DASHBOARD_FRO_BOT_APP_ID}" ]] || missing+=("DASHBOARD_FRO_BOT_APP_ID")
+          [[ -n "${DASHBOARD_FRO_BOT_APP_KEY}" ]] || missing+=("DASHBOARD_FRO_BOT_APP_KEY")
           [[ -n "${DASHBOARD_OAUTH_CLIENT_ID}" ]] || missing+=("DASHBOARD_OAUTH_CLIENT_ID")
           [[ -n "${DASHBOARD_OAUTH_CLIENT_SECRET}" ]] || missing+=("DASHBOARD_OAUTH_CLIENT_SECRET")
           [[ -n "${DASHBOARD_OPERATOR_LOGIN}" ]] || missing+=("DASHBOARD_OPERATOR_LOGIN")
@@ -270,6 +278,8 @@ jobs:
           DASHBOARD_DOMAIN: ${{ secrets.DASHBOARD_DOMAIN }}
           DASHBOARD_GITHUB_APP_ID: ${{ secrets.DASHBOARD_GITHUB_APP_ID }}
           DASHBOARD_GITHUB_APP_KEY: ${{ secrets.DASHBOARD_GITHUB_APP_KEY }}
+          DASHBOARD_FRO_BOT_APP_ID: ${{ secrets.DASHBOARD_FRO_BOT_APP_ID }}
+          DASHBOARD_FRO_BOT_APP_KEY: ${{ secrets.DASHBOARD_FRO_BOT_APP_KEY }}
           DASHBOARD_OAUTH_CLIENT_ID: ${{ secrets.DASHBOARD_OAUTH_CLIENT_ID }}
           DASHBOARD_OAUTH_CLIENT_SECRET: ${{ secrets.DASHBOARD_OAUTH_CLIENT_SECRET }}
           DASHBOARD_OPERATOR_LOGIN: ${{ secrets.DASHBOARD_OPERATOR_LOGIN }}

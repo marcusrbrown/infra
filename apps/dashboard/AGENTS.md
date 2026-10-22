@@ -265,10 +265,11 @@ because the deploy removes any `docker-compose.override.yaml` on every run.
 
 ```
 handle /operator/* {
-    flush_interval -1
-    header_up Host dashboard.fro.bot
-    header_up X-Forwarded-Proto https
-    reverse_proxy {$GATEWAY_VPC_IP}:9300
+    reverse_proxy {$GATEWAY_VPC_IP}:9300 {
+        flush_interval -1
+        header_up Host dashboard.fro.bot
+        header_up X-Forwarded-Proto https
+    }
 }
 ```
 

@@ -23,6 +23,7 @@ Caddy depends on the `dashboard` service being healthy before starting.
 `bun run deploy:dashboard` from the repository root (loads the root `.env`), or the **Deploy Dashboard** GitHub workflow. Both entry paths use the same deploy engine. The deploy:
 
 1. Validates env (`DASHBOARD_DOMAIN`, `DASHBOARD_GITHUB_APP_ID`, `DASHBOARD_GITHUB_APP_KEY`,
+   `DASHBOARD_FRO_BOT_APP_ID` (positive integer), `DASHBOARD_FRO_BOT_APP_KEY` (PEM private key),
    `DASHBOARD_OAUTH_CLIENT_ID`, `DASHBOARD_OAUTH_CLIENT_SECRET`, `DASHBOARD_OPERATOR_LOGIN`,
    `DASHBOARD_COOKIE_KEY`, plus SSH context) and the host string before any SSH argv is built.
 2. DNS preflight — resolves `DASHBOARD_DOMAIN` and fails fast if it does not resolve.
@@ -51,9 +52,11 @@ Caddy depends on the `dashboard` service being healthy before starting.
    publishes `.env`, `Caddyfile`, the GitHub App PEM, and Compose one file at a time, with Compose
    last. The PEM is a regular file owned by `1000:1000`, mode `0600`; `.env` is root-owned mode
    `0600`; Caddyfile and Compose are root-owned mode `0644`.
-9. Runs `docker compose up -d --no-build --wait dashboard`, verifies the running dashboard digest
-   against the expected digest and its health, then force-recreates and waits for Caddy. The lock
-   remains held through this convergence and releases when the SSH transaction exits.
+9. Runs `docker compose up -d --no-build --force-recreate --wait dashboard`, so the container is
+   recreated on every deploy and picks up the newly published PEMs (single-file bind mounts keep the
+   old inode), verifies the running dashboard digest against the expected digest and its health, then
+   force-recreates and waits for Caddy. The lock remains held through this convergence and releases
+   when the SSH transaction exits.
 10. After unlock, runs the same-origin operator-health and public HTTPS probes as advisory checks.
     Versioned deploys write the local Compose pin for the audit PR only after the remote transaction
     succeeds and both advisory probe attempts finish; probe warnings or failures do not block the
@@ -170,6 +173,25 @@ The key is bind-mounted read-only into the container at `/run/secrets/github-app
 sets `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem` so the app reads the key via file
 path, never via an env-string fallback.
 
+**Fro Bot App private key mount:**
+
+```yaml
+volumes:
+  - /opt/dashboard/config/fro-bot-app.pem:/run/secrets/fro-bot-app.pem:ro
+```
+
+The wiki editor writes wiki pages as the Fro Bot App. The `dashboard` Environment secrets
+`DASHBOARD_FRO_BOT_APP_ID` and `DASHBOARD_FRO_BOT_APP_KEY` are required; the deploy fails before any
+SSH when either is missing or malformed. The key travels in the remote-deploy payload over SSH stdin
+(field `fro_bot_app_key`) and is published as `/opt/dashboard/config/fro-bot-app.pem` (0600,
+`1000:1000`). The `.env` sets `DASHBOARD_FRO_BOT_APP_ID`,
+`DASHBOARD_FRO_BOT_APP_KEY_FILE=/run/secrets/fro-bot-app.pem`, and the constant
+`DASHBOARD_OPERATOR_ID=831617` (the operator's public numeric GitHub user ID; no input exists for it).
+`DASHBOARD_GATEWAY_OPERATOR_ORIGIN` stays unset.
+
+The Fro Bot App is not the mrbro-bot App behind the repo secrets `APPLICATION_ID` /
+`APPLICATION_PRIVATE_KEY`; never reuse those here.
+
 **Why a file mount instead of an env var for the App private key:**
 
 - `docker inspect` exposes all env vars in plaintext to any process with Docker socket access.
@@ -189,6 +211,10 @@ path, never via an env-string fallback.
   `DASHBOARD_GITHUB_APP_KEY` secret, and redeploy. The deploy uploads the new PEM to
   `/opt/dashboard/config/github-app.pem` (0600) via SSH stdin. After confirming the new key works,
   revoke the old key in the GitHub App settings.
+- **`DASHBOARD_FRO_BOT_APP_ID`.** Update the secret and redeploy.
+- **`DASHBOARD_FRO_BOT_APP_KEY`.** Generate a new private key in the Fro Bot App settings, update the
+  secret, and redeploy. The deploy uploads the new PEM to `/opt/dashboard/config/fro-bot-app.pem`
+  (0600) via SSH stdin. After confirming the new key works, revoke the old key in the App settings.
 - **`DASHBOARD_OAUTH_CLIENT_ID` / `DASHBOARD_OAUTH_CLIENT_SECRET`.** Rotate in the GitHub OAuth App
   settings, update the secrets, and redeploy. Existing sessions are invalidated.
 - **`DASHBOARD_OPERATOR_LOGIN`.** Update the secret and redeploy.

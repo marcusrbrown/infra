@@ -174,6 +174,8 @@ See [`apps/umami/README.md`](apps/umami/README.md) and [`apps/umami/AGENTS.md`](
 | `DASHBOARD_DOMAIN` | ✓ | FQDN of the dashboard instance |
 | `DASHBOARD_GITHUB_APP_ID` | ✓ | GitHub App ID for dashboard repo access |
 | `DASHBOARD_GITHUB_APP_KEY` | ✓ | GitHub App private key PEM (uploaded via SSH stdin; bind-mounted into container at `/run/secrets/github-app.pem`) |
+| `DASHBOARD_FRO_BOT_APP_ID` | ✓ | Fro Bot App ID (positive integer) for wiki writes |
+| `DASHBOARD_FRO_BOT_APP_KEY` | ✓ | Fro Bot App private key PEM (uploaded via SSH stdin; bind-mounted into container at `/run/secrets/fro-bot-app.pem`) |
 | `DASHBOARD_OAUTH_CLIENT_ID` | ✓ | OAuth client ID for dashboard authentication |
 | `DASHBOARD_OAUTH_CLIENT_SECRET` | ✓ | OAuth client secret for dashboard authentication |
 | `DASHBOARD_OPERATOR_LOGIN` | ✓ | GitHub login of the operator allowed to access the dashboard |

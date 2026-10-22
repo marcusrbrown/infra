@@ -45,6 +45,18 @@ describe('dashboard docker compose', () => {
     expect(compose).toContain('/run/secrets/github-app.pem')
   })
 
+  it('bind-mounts the Fro Bot App key read-only on the dashboard service only', () => {
+    const dashboardStart = compose.indexOf('  dashboard:')
+    const caddySection = compose.slice(0, dashboardStart)
+    const dashboardSection = compose.slice(dashboardStart)
+    const mount = '/opt/dashboard/config/fro-bot-app.pem:/run/secrets/fro-bot-app.pem:ro'
+
+    expect(dashboardSection).toContain(`- ${mount}`)
+    expect(dashboardSection).toContain('- /opt/dashboard/config/github-app.pem:/run/secrets/github-app.pem:ro')
+    expect(caddySection).not.toContain('fro-bot-app.pem')
+    expect(compose.match(/fro-bot-app\.pem/g)).toHaveLength(2)
+  })
+
   it('healthcheck references /api/healthz', () => {
     expect(compose).toContain('/api/healthz')
   })

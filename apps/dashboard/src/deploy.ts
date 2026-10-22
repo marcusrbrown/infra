@@ -87,6 +87,8 @@ export interface ValidatedEnv {
   DASHBOARD_DOMAIN: string
   DASHBOARD_GITHUB_APP_ID: string
   DASHBOARD_GITHUB_APP_KEY: string
+  DASHBOARD_FRO_BOT_APP_ID: string
+  DASHBOARD_FRO_BOT_APP_KEY: string
   DASHBOARD_OAUTH_CLIENT_ID: string
   DASHBOARD_OAUTH_CLIENT_SECRET: string
   DASHBOARD_OPERATOR_LOGIN: string
@@ -299,6 +301,15 @@ export function validateGatewayVpcIp(ip: string): string {
   return ip
 }
 
+// Numeric GitHub user ID of the operator (marcusrbrown). User IDs are public, so this is a constant, not a secret.
+const DASHBOARD_OPERATOR_ID = '831617'
+
+// A positive integer without leading zeros, as GitHub App IDs are issued.
+const POSITIVE_INTEGER_RE = /^[1-9]\d*$/
+
+// PKCS#1 ("RSA PRIVATE KEY") or PKCS#8 ("PRIVATE KEY") PEM block.
+const PEM_PRIVATE_KEY_RE = /^-----BEGIN (?:RSA )?PRIVATE KEY-----\r?\n[\s\S]+\n-----END (?:RSA )?PRIVATE KEY-----\s*$/
+
 /**
  * Validates all required environment variables are present and well-formed.
  * Calls validateDashboardHost on DASHBOARD_DOMAIN before any SSH argv is constructed.
@@ -338,6 +349,23 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
     throw new Error('DASHBOARD_GITHUB_APP_KEY is required for deploy')
   }
 
+  const froBotAppId = env.DASHBOARD_FRO_BOT_APP_ID
+  if (!froBotAppId) {
+    throw new Error('DASHBOARD_FRO_BOT_APP_ID is required for deploy')
+  }
+  if (!POSITIVE_INTEGER_RE.test(froBotAppId)) {
+    throw new Error('DASHBOARD_FRO_BOT_APP_ID must be a positive integer')
+  }
+
+  const froBotAppKey = env.DASHBOARD_FRO_BOT_APP_KEY
+  if (!froBotAppKey) {
+    throw new Error('DASHBOARD_FRO_BOT_APP_KEY is required for deploy')
+  }
+  // The error never echoes the value: it is a private key.
+  if (!PEM_PRIVATE_KEY_RE.test(froBotAppKey)) {
+    throw new Error('DASHBOARD_FRO_BOT_APP_KEY must be a PEM private key')
+  }
+
   const oauthClientId = env.DASHBOARD_OAUTH_CLIENT_ID
   if (!oauthClientId) {
     throw new Error('DASHBOARD_OAUTH_CLIENT_ID is required for deploy')
@@ -375,6 +403,8 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
     DASHBOARD_DOMAIN: domain,
     DASHBOARD_GITHUB_APP_ID: githubAppId,
     DASHBOARD_GITHUB_APP_KEY: githubAppKey,
+    DASHBOARD_FRO_BOT_APP_ID: froBotAppId,
+    DASHBOARD_FRO_BOT_APP_KEY: froBotAppKey,
     DASHBOARD_OAUTH_CLIENT_ID: oauthClientId,
     DASHBOARD_OAUTH_CLIENT_SECRET: oauthClientSecret,
     DASHBOARD_OPERATOR_LOGIN: operatorLogin,
@@ -389,9 +419,9 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
  * Builds the contents of the remote .env file.
  * Secrets travel via SSH stdin — this function only assembles the string.
  *
- * NOTE: The GitHub App private key is NOT included here. It is published as a
- * separate file (0600) by the lock-owning remote transaction. The .env references
- * the file path only.
+ * NOTE: The GitHub App and Fro Bot App private keys are NOT included here. Each is
+ * published as a separate file (0600) by the lock-owning remote transaction. The .env
+ * references the file paths only.
  *
  * NOTE: Image pinning is done via the committed docker-compose.yaml digest pin,
  * not via an override file or env var.
@@ -403,6 +433,7 @@ export function validateEnv(env: Record<string, string>): ValidatedEnv {
 export function buildEnvFileContents(opts: {
   domain: string
   githubAppId: string
+  froBotAppId: string
   oauthClientId: string
   oauthClientSecret: string
   operatorLogin: string
@@ -421,6 +452,7 @@ export function buildEnvFileContents(opts: {
   const {
     domain,
     githubAppId,
+    froBotAppId,
     oauthClientId,
     oauthClientSecret,
     operatorLogin,
@@ -432,6 +464,9 @@ export function buildEnvFileContents(opts: {
     `DASHBOARD_DOMAIN=${domain}`,
     `DASHBOARD_GITHUB_APP_ID=${githubAppId}`,
     `DASHBOARD_GITHUB_APP_KEY_FILE=/run/secrets/github-app.pem`,
+    `DASHBOARD_FRO_BOT_APP_ID=${froBotAppId}`,
+    `DASHBOARD_FRO_BOT_APP_KEY_FILE=/run/secrets/fro-bot-app.pem`,
+    `DASHBOARD_OPERATOR_ID=${DASHBOARD_OPERATOR_ID}`,
     `DASHBOARD_OAUTH_CLIENT_ID=${oauthClientId}`,
     `DASHBOARD_OAUTH_CLIENT_SECRET=${oauthClientSecret}`,
     `DASHBOARD_OAUTH_REDIRECT_URI=https://${domain}/auth/callback`,
@@ -618,8 +653,8 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
   // Boundary-validate secret values before any SSH
   validateSecretValue(validated.DASHBOARD_OAUTH_CLIENT_SECRET, 'DASHBOARD_OAUTH_CLIENT_SECRET')
   validateSecretValue(validated.DASHBOARD_COOKIE_KEY, 'DASHBOARD_COOKIE_KEY')
-  // NOTE: DASHBOARD_GITHUB_APP_KEY is a PEM — it contains newlines which would fail
-  // validateSecretValue. That's intentional: the PEM goes via stdin only, never shell-interpolated.
+  // NOTE: DASHBOARD_GITHUB_APP_KEY and DASHBOARD_FRO_BOT_APP_KEY are PEMs — they contain newlines which
+  // would fail validateSecretValue. That's intentional: the PEMs go via stdin only, never shell-interpolated.
 
   // Phase 2: DNS preflight
   try {
@@ -684,6 +719,7 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     const envContents = buildEnvFileContents({
       domain: host,
       githubAppId: validated.DASHBOARD_GITHUB_APP_ID,
+      froBotAppId: validated.DASHBOARD_FRO_BOT_APP_ID,
       oauthClientId: validated.DASHBOARD_OAUTH_CLIENT_ID,
       oauthClientSecret: validated.DASHBOARD_OAUTH_CLIENT_SECRET,
       operatorLogin: validated.DASHBOARD_OPERATOR_LOGIN,
@@ -701,12 +737,16 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
     const normalizedPem = validated.DASHBOARD_GITHUB_APP_KEY.endsWith('\n')
       ? validated.DASHBOARD_GITHUB_APP_KEY
       : `${validated.DASHBOARD_GITHUB_APP_KEY}\n`
+    const normalizedFroBotPem = validated.DASHBOARD_FRO_BOT_APP_KEY.endsWith('\n')
+      ? validated.DASHBOARD_FRO_BOT_APP_KEY
+      : `${validated.DASHBOARD_FRO_BOT_APP_KEY}\n`
 
     const payload: RemoteDeployPayload = {
       env: envContents,
       compose: composeContentForRemote,
       caddyfile: caddyfileContents,
       githubAppKey: normalizedPem,
+      froBotAppKey: normalizedFroBotPem,
       expectedDashboardDigest: imageDigest,
     }
 

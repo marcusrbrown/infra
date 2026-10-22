@@ -2201,6 +2201,73 @@ describe('deploy.yaml: aggregate router forwards VPC bridge secrets', () => {
   }
 })
 
+// ─── Dashboard App credentials: required secrets wired through every hop ─────
+//
+// The Fro Bot App credential (DASHBOARD_FRO_BOT_APP_*) is wired exactly like the
+// dashboard GitHub App credential (DASHBOARD_GITHUB_APP_*): router -> workflow_call
+// (required) -> pre-deploy validation step -> Deploy step env. Asserting both pairs
+// together keeps the two from drifting apart.
+
+const DASHBOARD_APP_SECRETS = [
+  'DASHBOARD_GITHUB_APP_ID',
+  'DASHBOARD_GITHUB_APP_KEY',
+  'DASHBOARD_FRO_BOT_APP_ID',
+  'DASHBOARD_FRO_BOT_APP_KEY',
+] as const
+
+describe('dashboard App credentials: wired end-to-end as required secrets', () => {
+  const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+  const DEPLOY_DASHBOARD_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-dashboard.yaml')
+
+  interface DashboardJob {
+    steps?: {name?: string; env?: Record<string, string>; run?: string}[]
+  }
+
+  for (const secret of DASHBOARD_APP_SECRETS) {
+    it(`deploy.yaml deploy-dashboard job passes ${secret} from the secrets context`, async () => {
+      const parsed = parseYaml(await Bun.file(DEPLOY_WORKFLOW).text()) as {
+        jobs?: {'deploy-dashboard'?: {secrets?: Record<string, string>}}
+      }
+      const secrets = parsed.jobs?.['deploy-dashboard']?.secrets ?? {}
+      expect(secrets[secret]).toBe(`\${{ secrets.${secret} }}`)
+    })
+
+    it(`deploy-dashboard.yaml workflow_call.secrets declares ${secret} as required`, async () => {
+      const parsed = parseYaml(await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()) as {
+        on?: {workflow_call?: {secrets?: Record<string, {required?: boolean}>}}
+      }
+      expect(parsed.on?.workflow_call?.secrets?.[secret]?.required).toBe(true)
+    })
+
+    it(`deploy-dashboard.yaml Validate required secrets step checks ${secret}`, async () => {
+      const parsed = parseYaml(await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()) as {
+        jobs?: {'deploy-dashboard'?: DashboardJob}
+      }
+      const step = parsed.jobs?.['deploy-dashboard']?.steps?.find(s => s.name === 'Validate required secrets')
+      expect(step?.env?.[secret]).toBe(`\${{ secrets.${secret} }}`)
+      expect(step?.run).toContain(`[[ -n "\${${secret}}" ]] || missing+=("${secret}")`)
+    })
+
+    it(`deploy-dashboard.yaml Deploy step env forwards ${secret}`, async () => {
+      const parsed = parseYaml(await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()) as {
+        jobs?: {'deploy-dashboard'?: DashboardJob}
+      }
+      const step = parsed.jobs?.['deploy-dashboard']?.steps?.find(s => s.name === 'Deploy')
+      expect(step?.env?.[secret]).toBe(`\${{ secrets.${secret} }}`)
+    })
+  }
+
+  it('the Fro Bot App credential does not reuse the mrbro-bot App secrets', async () => {
+    const parsed = parseYaml(await Bun.file(DEPLOY_DASHBOARD_WORKFLOW).text()) as {
+      jobs?: {'deploy-dashboard'?: DashboardJob}
+    }
+    const deployStep = parsed.jobs?.['deploy-dashboard']?.steps?.find(s => s.name === 'Deploy')
+    expect(deployStep?.env?.DASHBOARD_FRO_BOT_APP_ID).not.toContain('APPLICATION_ID')
+    expect(deployStep?.env?.DASHBOARD_FRO_BOT_APP_KEY).not.toContain('APPLICATION_PRIVATE_KEY')
+    expect(deployStep?.env ?? {}).not.toHaveProperty('APPLICATION_ID')
+  })
+})
+
 // ─── deploy.yaml: deploy-dashboard is decoupled from deploy-gateway ──────────
 //
 // The dashboard is a standalone deployment. A gateway failure or slowness must

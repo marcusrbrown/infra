@@ -37,6 +37,8 @@ const VALID_ENV = {
   DASHBOARD_DOMAIN: 'dashboard.fro.bot',
   DASHBOARD_GITHUB_APP_ID: '123456',
   DASHBOARD_GITHUB_APP_KEY: '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----',
+  DASHBOARD_FRO_BOT_APP_ID: '654321',
+  DASHBOARD_FRO_BOT_APP_KEY: '-----BEGIN RSA PRIVATE KEY-----\nFROBOTKEYBODYZZZ\n-----END RSA PRIVATE KEY-----',
   DASHBOARD_OAUTH_CLIENT_ID: 'Iv1.abc123',
   DASHBOARD_OAUTH_CLIENT_SECRET: 'oauthsecretvalue',
   DASHBOARD_OPERATOR_LOGIN: 'marcusrbrown',
@@ -236,6 +238,54 @@ describe('env validation', () => {
     expect(() => validateEnv(env)).toThrow('DASHBOARD_GITHUB_APP_KEY')
   })
 
+  it('throws a specific message when DASHBOARD_FRO_BOT_APP_ID is missing', () => {
+    const env = {...VALID_ENV, DASHBOARD_FRO_BOT_APP_ID: ''}
+    expect(() => validateEnv(env)).toThrow('DASHBOARD_FRO_BOT_APP_ID is required')
+  })
+
+  it('throws a specific message when DASHBOARD_FRO_BOT_APP_KEY is missing', () => {
+    const env = {...VALID_ENV, DASHBOARD_FRO_BOT_APP_KEY: ''}
+    expect(() => validateEnv(env)).toThrow('DASHBOARD_FRO_BOT_APP_KEY is required')
+  })
+
+  for (const badId of ['abc', '0', '-5', '12.5', '012', '1e3', ' 654321', '654321\n', '654321 --foo']) {
+    it(`rejects DASHBOARD_FRO_BOT_APP_ID that is not a positive integer: ${JSON.stringify(badId)}`, () => {
+      const env = {...VALID_ENV, DASHBOARD_FRO_BOT_APP_ID: badId}
+      expect(() => validateEnv(env)).toThrow('DASHBOARD_FRO_BOT_APP_ID must be a positive integer')
+    })
+  }
+
+  for (const badKey of [
+    'not a pem',
+    'ssh-ed25519 AAAA',
+    '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----',
+    '-----BEGIN RSA PRIVATE KEY-----\nno end marker',
+  ]) {
+    it(`rejects DASHBOARD_FRO_BOT_APP_KEY that is not a PEM private key: ${JSON.stringify(badKey.slice(0, 24))}`, () => {
+      const env = {...VALID_ENV, DASHBOARD_FRO_BOT_APP_KEY: badKey}
+      expect(() => validateEnv(env)).toThrow('DASHBOARD_FRO_BOT_APP_KEY must be a PEM private key')
+    })
+  }
+
+  it('does not echo the Fro Bot App key in its validation error', () => {
+    const env = {...VALID_ENV, DASHBOARD_FRO_BOT_APP_KEY: 'super-secret-not-pem'}
+    expect(() => validateEnv(env)).toThrow(/must be a PEM private key$/)
+    try {
+      validateEnv(env)
+    } catch (error) {
+      expect(String(error)).not.toContain('super-secret-not-pem')
+    }
+  })
+
+  it('accepts PKCS#1 and PKCS#8 PEM private keys for the Fro Bot App key', () => {
+    for (const key of [
+      '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n',
+      '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----',
+    ]) {
+      expect(() => validateEnv({...VALID_ENV, DASHBOARD_FRO_BOT_APP_KEY: key})).not.toThrow()
+    }
+  })
+
   it('throws a specific message when DASHBOARD_OAUTH_CLIENT_ID is missing', () => {
     const env = {...VALID_ENV, DASHBOARD_OAUTH_CLIENT_ID: ''}
     expect(() => validateEnv(env)).toThrow('DASHBOARD_OAUTH_CLIENT_ID')
@@ -326,6 +376,7 @@ describe('.env file contents', () => {
     const contents = buildEnvFileContents({
       domain: 'dashboard.fro.bot',
       githubAppId: '123456',
+      froBotAppId: '654321',
       oauthClientId: 'Iv1.abc123',
       oauthClientSecret: 'oauthsecret',
       operatorLogin: 'marcusrbrown',
@@ -348,11 +399,30 @@ describe('.env file contents', () => {
     expect(contents).toContain('DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true\n')
   })
 
+  it('writes the Fro Bot App ID, key file path, and constant operator ID', () => {
+    const contents = buildEnvFileContents({
+      domain: 'dashboard.fro.bot',
+      githubAppId: '123456',
+      froBotAppId: '654321',
+      oauthClientId: 'Iv1.abc123',
+      oauthClientSecret: 'oauthsecret',
+      operatorLogin: 'marcusrbrown',
+      cookieKey: 'cookiekey',
+    })
+    expect(contents.split('\n')).toContain('DASHBOARD_FRO_BOT_APP_ID=654321')
+    expect(contents.split('\n')).toContain('DASHBOARD_FRO_BOT_APP_KEY_FILE=/run/secrets/fro-bot-app.pem')
+    expect(contents.split('\n')).toContain('DASHBOARD_OPERATOR_ID=831617')
+    // DASHBOARD_GATEWAY_OPERATOR_ORIGIN stays unset
+    expect(contents).not.toContain('DASHBOARD_GATEWAY_OPERATOR_ORIGIN')
+    expect(contents).not.toContain('BEGIN')
+  })
+
   it('does NOT put the raw PEM in .env', () => {
     const pemContent = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'
     const contents = buildEnvFileContents({
       domain: 'dashboard.fro.bot',
       githubAppId: '123456',
+      froBotAppId: '654321',
       oauthClientId: 'Iv1.abc123',
       oauthClientSecret: 'oauthsecret',
       operatorLogin: 'marcusrbrown',
@@ -629,7 +699,9 @@ describe('happy path deploy', () => {
 
     const transaction = calls.find(c => c.cmd[0] === 'ssh')
     const command = transaction?.cmd.join(' ') ?? ''
-    const dashboardUpIdx = command.indexOf('docker compose up -d --no-build --wait --wait-timeout 120 dashboard')
+    const dashboardUpIdx = command.indexOf(
+      'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 dashboard',
+    )
     const caddyUpIdx = command.indexOf(
       'docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy',
     )
@@ -654,7 +726,7 @@ describe('happy path deploy', () => {
 
     const transaction = calls.find(c => c.cmd[0] === 'ssh')
     const command = transaction?.cmd.join(' ') ?? ''
-    expect(command).toContain('docker compose up -d --no-build --wait --wait-timeout 120 dashboard')
+    expect(command).toContain('docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 dashboard')
     expect(command).toContain('docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 caddy')
   })
 
@@ -785,6 +857,32 @@ describe('SECURITY: App key PEM never in spawn argv', () => {
     expect(pemWrite?.cmd.join(' ')).toContain('github-app.pem')
   })
 
+  it('carries the Fro Bot App key as its own payload field over stdin, never in argv', async () => {
+    const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHealthzOk,
+      probeAttempts: 1,
+      probeIntervalMs: 0,
+      sleep: async () => {},
+    })
+
+    const payload = getRemoteTransactionPayload(calls)
+    expect(payload.froBotAppKey).toBe(`${VALID_ENV.DASHBOARD_FRO_BOT_APP_KEY}\n`)
+    expect(payload.githubAppKey).toBe(`${VALID_ENV.DASHBOARD_GITHUB_APP_KEY}\n`)
+    expect(payload.froBotAppKey).not.toBe(payload.githubAppKey)
+    expect(payload.env).toContain('DASHBOARD_FRO_BOT_APP_ID=654321')
+    expect(payload.env).toContain('DASHBOARD_FRO_BOT_APP_KEY_FILE=/run/secrets/fro-bot-app.pem')
+    expect(payload.env).toContain('DASHBOARD_OPERATOR_ID=831617')
+    expect(payload.env).not.toContain('FROBOTKEYBODYZZZ')
+    for (const call of calls) {
+      expect(call.cmd.join(' ')).not.toContain('FROBOTKEYBODYZZZ')
+    }
+  })
+
   it('does not place any secret value in any spawn argv', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
@@ -800,6 +898,7 @@ describe('SECURITY: App key PEM never in spawn argv', () => {
 
     const secrets = [
       VALID_ENV.DASHBOARD_GITHUB_APP_KEY,
+      VALID_ENV.DASHBOARD_FRO_BOT_APP_KEY,
       VALID_ENV.DASHBOARD_OAUTH_CLIENT_SECRET,
       VALID_ENV.DASHBOARD_COOKIE_KEY,
     ]
@@ -832,6 +931,40 @@ describe('edge cases', () => {
     // No SSH calls should have been made
     expect(calls).toHaveLength(0)
   })
+
+  for (const [name, overrides, message] of [
+    ['DASHBOARD_FRO_BOT_APP_ID missing', {DASHBOARD_FRO_BOT_APP_ID: ''}, 'DASHBOARD_FRO_BOT_APP_ID is required'],
+    ['DASHBOARD_FRO_BOT_APP_KEY missing', {DASHBOARD_FRO_BOT_APP_KEY: ''}, 'DASHBOARD_FRO_BOT_APP_KEY is required'],
+    [
+      'DASHBOARD_FRO_BOT_APP_ID invalid',
+      {DASHBOARD_FRO_BOT_APP_ID: 'not-a-number'},
+      'DASHBOARD_FRO_BOT_APP_ID must be a positive integer',
+    ],
+    [
+      'DASHBOARD_FRO_BOT_APP_KEY invalid',
+      {DASHBOARD_FRO_BOT_APP_KEY: 'not a pem'},
+      'DASHBOARD_FRO_BOT_APP_KEY must be a PEM private key',
+    ],
+  ] as const) {
+    it(`throws before DNS and any SSH call when ${name}`, async () => {
+      const {spawnFn, calls} = makeFakeSpawn([makeSpawnResult()])
+      let resolveCalls = 0
+
+      await expect(
+        deploy({
+          env: {...VALID_ENV, ...overrides},
+          spawn: spawnFn,
+          resolve: async () => {
+            resolveCalls += 1
+          },
+          fetch: fetchHealthzOk,
+        }),
+      ).rejects.toThrow(message)
+
+      expect(calls).toHaveLength(0)
+      expect(resolveCalls).toBe(0)
+    })
+  }
 
   it('rejects -oProxyCommand= host before any SSH argv', async () => {
     const env = {...VALID_ENV, DASHBOARD_DOMAIN: '-oProxyCommand=evil'}
@@ -909,6 +1042,7 @@ describe('.env does not contain image ref', () => {
     const contents = buildEnvFileContents({
       domain: 'dashboard.fro.bot',
       githubAppId: '123456',
+      froBotAppId: '654321',
       oauthClientId: 'Iv1.abc123',
       oauthClientSecret: 'oauthsecret',
       operatorLogin: 'marcusrbrown',
@@ -1083,6 +1217,7 @@ describe('buildEnvFileContents with GATEWAY_VPC_IP', () => {
     const contents = buildEnvFileContents({
       domain: 'dashboard.fro.bot',
       githubAppId: '123456',
+      froBotAppId: '654321',
       oauthClientId: 'Iv1.abc123',
       oauthClientSecret: 'oauthsecret',
       operatorLogin: 'marcusrbrown',
@@ -1096,6 +1231,7 @@ describe('buildEnvFileContents with GATEWAY_VPC_IP', () => {
     const contents = buildEnvFileContents({
       domain: 'dashboard.fro.bot',
       githubAppId: '123456',
+      froBotAppId: '654321',
       oauthClientId: 'Iv1.abc123',
       oauthClientSecret: 'oauthsecret',
       operatorLogin: 'marcusrbrown',
@@ -1196,6 +1332,7 @@ describe('buildEnvFileContents: DASHBOARD_OPERATOR_PUSH_ENABLED', () => {
   const baseOpts = {
     domain: 'dashboard.fro.bot',
     githubAppId: '123456',
+    froBotAppId: '654321',
     oauthClientId: 'Iv1.abc123',
     oauthClientSecret: 'oauthsecret',
     operatorLogin: 'marcusrbrown',
@@ -2673,7 +2810,7 @@ describe('public probe: final warning includes last error or status', () => {
 // must force recreation so bind-mounted Caddyfile content changes are loaded.
 
 describe('docker compose up: --wait-timeout 120', () => {
-  it('dashboard compose up includes --wait-timeout 120', async () => {
+  it('dashboard compose up includes --force-recreate, --wait-timeout 120, and --no-build', async () => {
     const {spawnFn, calls} = makeFakeSpawn(makeHappyPathResponses())
 
     await deploy({
@@ -2687,11 +2824,8 @@ describe('docker compose up: --wait-timeout 120', () => {
     })
 
     const command = calls.find(c => c.cmd[0] === 'ssh')?.cmd.join(' ') ?? ''
-    const dashboardUp = 'docker compose up -d --no-build --wait --wait-timeout 120 dashboard'
-    expect(command).toContain(dashboardUp)
-    expect(
-      command.slice(command.indexOf(dashboardUp), command.indexOf(dashboardUp) + dashboardUp.length),
-    ).not.toContain('--force-recreate')
+    expect(command).toContain('docker compose up -d --no-build --force-recreate --wait --wait-timeout 120 dashboard')
+    expect(command).not.toContain('docker compose up -d --no-build --wait --wait-timeout 120 dashboard')
   })
 
   it('caddy compose up includes --force-recreate, --wait-timeout 120, and --no-build', async () => {

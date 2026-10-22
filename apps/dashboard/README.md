@@ -45,6 +45,8 @@ GitHub Environment: **`dashboard`**
 | `DASHBOARD_DOMAIN` | FQDN of the dashboard instance |
 | `DASHBOARD_GITHUB_APP_ID` | GitHub App ID used by the dashboard for API authentication |
 | `DASHBOARD_GITHUB_APP_KEY` | GitHub App RSA private key (PEM); uploaded to the droplet as a file, never set as an env var |
+| `DASHBOARD_FRO_BOT_APP_ID` | Fro Bot App ID (positive integer) used by the wiki editor to write wiki pages |
+| `DASHBOARD_FRO_BOT_APP_KEY` | Fro Bot App RSA private key (PEM); uploaded to the droplet as a file, never set as an env var |
 | `DASHBOARD_OAUTH_CLIENT_ID` | GitHub OAuth App client ID for user login |
 | `DASHBOARD_OAUTH_CLIENT_SECRET` | GitHub OAuth App client secret |
 | `DASHBOARD_OPERATOR_LOGIN` | GitHub login of the operator account granted dashboard access |

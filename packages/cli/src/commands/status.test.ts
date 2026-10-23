@@ -383,7 +383,9 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
         () => proc(composeJsonGatewayExited),
       )
 
-      expect(gateway.http.startsWith('ERROR: No services reported; workspace mem=412/896MiB')).toBe(true)
+      expect(
+        gateway.http.startsWith('DEGRADED: gateway:exited/n-a, workspace:running/n-a; workspace mem=412/896MiB'),
+      ).toBe(true)
       expect(gateway.workspace).toMatchObject({status: 'ok', opencode: 'ready'})
     })
 

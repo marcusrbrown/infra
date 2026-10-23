@@ -1291,9 +1291,34 @@ describe('getGatewayStatusSummary — workspace suffix', () => {
     const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
 
     expect(calls).toHaveLength(2)
-    expect(summary.http).toBe('ERROR: No services reported; workspace mem=412/896MiB oom_kills=0 opencode=ready')
+    expect(summary.http).toBe(
+      'DEGRADED: gateway:exited/n-a, workspace:running/n-a, mitmproxy:running/healthy; workspace mem=412/896MiB oom_kills=0 opencode=ready',
+    )
     expect(summary.http).not.toContain('|')
     expect(summary.workspace).toMatchObject({status: 'ok', opencode: 'ready', limitBytes: LIMIT_BYTES})
+  })
+
+  it('lists every service row with its state in the DEGRADED summary', async () => {
+    const {spawn} = makeRouter(
+      () =>
+        proc(
+          JSON.stringify([
+            {Name: 'gateway', State: 'exited', Health: ''},
+            {Name: 'workspace', State: 'running', Health: ''},
+            {Name: 'caddy', State: 'restarting', Health: 'unhealthy'},
+            {Name: 'mitmproxy', State: 'running', Health: 'healthy'},
+          ]),
+        ),
+      () => proc(workspaceStdout()),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).toBe(
+      'DEGRADED: gateway:exited/n-a, workspace:running/n-a, caddy:restarting/unhealthy, mitmproxy:running/healthy; workspace mem=412/896MiB oom_kills=0 opencode=ready',
+    )
+    expect(summary.http.startsWith('DEGRADED:')).toBe(true)
+    expect(summary.http).not.toContain('No services reported')
   })
 
   it('reports workspace=unknown, not a missing field, when a service is down and the probe fails', async () => {
@@ -1304,7 +1329,9 @@ describe('getGatewayStatusSummary — workspace suffix', () => {
 
     const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
 
-    expect(summary.http).toBe('ERROR: No services reported; workspace=unknown')
+    expect(summary.http).toBe(
+      'DEGRADED: gateway:exited/n-a, workspace:running/n-a, mitmproxy:running/healthy; workspace=unknown',
+    )
     expect(summary.workspace?.status).toBe('unknown')
   })
 

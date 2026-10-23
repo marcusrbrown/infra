@@ -77,12 +77,12 @@ A deploy that adds or changes the workspace limit changes the override, and so t
 
 ### Workspace memory
 
-The `Workspace memory` block of `gateway status` shows the limit, current usage, `max` events (times usage hit the limit), OOM kills, restarts with the container start time, `OOMKilled`, and the OpenCode supervisor state (`starting`, `ready`, `down`, `degraded`, or `unknown`). The OOM kill count is since the container last started: it resets whenever the container is recreated or restarted. The block is display-only; the status line and exit code follow compose state, and a failed or timed-out probe reports `unknown`.
+The `Workspace memory` block of `gateway status` shows the limit, current usage, `max` events (times usage hit the limit), OOM kills, restarts with the container start time, `OOMKilled`, and the OpenCode supervisor state (`starting`, `ready`, `down`, `degraded`, `skipped`, or `unknown`). The OOM kill count is since the container last started: it resets whenever the container is recreated or restarted. The block is display-only; the status line and exit code follow compose state, and a failed or timed-out probe reports the whole block as `unknown`. `gateway status --json` prints one line, `{ok, services, workspace}`, with the same data; `status --json` carries it as `gateway.workspace`.
 
-- **`opencode: unknown`** — can mean the workspace is within 64 MiB of its limit, where the supervisor probe is skipped so the probe cannot cause a kill.
+- **`opencode: skipped`** — the supervisor probe was deliberately not run, because the workspace has no limit or is within 64 MiB of it, so the probe cannot cause a kill. The display says which. `unknown` means the probe ran (or its outcome could not be established) and gave no usable answer.
 - **`degraded` workspace** — recover with `cd /opt/gateway/deploy && docker compose restart workspace`.
 - **Run interrupted by an OOM kill** — the run stays `running` and must be cancelled from its card.
-- **Checkout left dirty by a kill** — check it read-only with `git -c safe.directory='*' -C <checkout> status --porcelain` on the `fro-bot_workspace-repos` volume. Remove files only with operator approval. The workspace UID `10001` has no host account, so removal runs as root.
+- **Checkout left dirty by a kill** — check it read-only with `cd /opt/gateway/deploy && docker compose exec -u 10001 workspace git -c core.fsmonitor=false -C /workspace/repos/<owner>/<repo> status --porcelain`. Remove files only with operator approval, also as UID `10001` inside the container.
 
 ### Rollback is not pin reversal
 
@@ -98,7 +98,7 @@ Rolling back to a release without durable operator sessions leaves the session r
 
 | Command | Purpose |
 | --- | --- |
-| `bunx @marcusrbrown/infra gateway status` | SSH to droplet, run `docker compose ps`, show service states + ages + healthchecks, then a workspace memory block (limit, usage, OOM kills, restarts, OpenCode state) |
+| `bunx @marcusrbrown/infra gateway status` | SSH to droplet, run `docker compose ps`, show service states + ages + healthchecks, then a workspace memory block (limit, usage, OOM kills, restarts, OpenCode state). `--json` prints one `{ok, services, workspace}` line instead. |
 | `bunx @marcusrbrown/infra gateway deploy` | Trigger the deploy workflow via `gh workflow run` (remote, default). `--local` runs the deploy script directly (requires `SSH_AUTH_SOCK`). `--dry-run` prints the plan without side effects. |
 | `bunx @marcusrbrown/infra gateway logs <service> [--tail N]` | Stream `docker compose logs` from the droplet. Services: `gateway`, `workspace`, `mitmproxy`. `--tail` defaults to 50. Logs surface unredacted; operator-only via SSH boundary. CI/headless contexts require explicit `--allow-ci` to discourage scripted log capture. |
 | `bunx @marcusrbrown/infra gateway backup [--output FILE] [--include-ca]` | Pull the mitmproxy CA cert + key from the `fro-bot_mitmproxy-certs` named volume as a tarball (errors if the volume does not exist). Local file created with mode 0600 via `O_EXCL\|O_CREAT` (no chmod race). `--include-ca` is required (only CA backup is currently implemented). |

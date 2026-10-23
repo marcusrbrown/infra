@@ -1,5 +1,13 @@
 # @marcusrbrown/infra
 
+## 0.26.1
+
+### Patch Changes
+
+- `status` now reports a gateway with a stopped service as `DEGRADED` with its service states, matching the other apps, instead of `ERROR: No services reported`. ([#1663](https://github.com/marcusrbrown/infra/pull/1663))
+
+- `gateway status` shows the workspace memory limit and usage, its out-of-memory kill count, restart count, and the OpenCode supervisor state. `gateway status --json` prints `{ok, services, workspace}`, and `status --json` adds a structured `gateway.workspace` field. ([#1659](https://github.com/marcusrbrown/infra/pull/1659))
+
 ## 0.26.0
 
 ### Minor Changes

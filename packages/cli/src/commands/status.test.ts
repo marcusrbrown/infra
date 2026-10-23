@@ -325,9 +325,17 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
       {Name: 'workspace', State: 'running', Health: ''},
     ])
 
-    async function runWithGateway(workspaceOutput: () => ReturnType<SpawnFn>) {
+    const composeJsonGatewayExited = JSON.stringify([
+      {Name: 'gateway', State: 'exited', Health: ''},
+      {Name: 'workspace', State: 'running', Health: ''},
+    ])
+
+    async function runWithGateway(
+      workspaceOutput: () => ReturnType<SpawnFn>,
+      composeOutput: () => ReturnType<SpawnFn>,
+    ) {
       const spawn: SpawnFn = cmd =>
-        cmd.at(-1)?.includes('ps --format json') === true ? proc(composeJson) : workspaceOutput()
+        cmd.at(-1)?.includes('ps --format json') === true ? composeOutput() : workspaceOutput()
       const originalHost = process.env.GATEWAY_HOST
       process.env.GATEWAY_HOST = 'gateway.example.com'
       try {
@@ -348,19 +356,45 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     }
 
     it('reports workspace=unknown in the string and the structured field when the extra call fails', async () => {
-      const gateway = await runWithGateway(() => proc('', 255))
+      const gateway = await runWithGateway(
+        () => proc('', 255),
+        () => proc(composeJson),
+      )
 
       expect(gateway.http).toBe('OK: gateway:running/healthy, workspace:running/n-a; workspace=unknown')
       expect(gateway.workspace?.status).toBe('unknown')
     })
 
     it('reports limit=none in the string and a zero limit in the structured field', async () => {
-      const gateway = await runWithGateway(() => proc(workspaceStdout({memory: 0, readyzSkipped: true})))
+      const gateway = await runWithGateway(
+        () => proc(workspaceStdout({memory: 0, readyzSkipped: true})),
+        () => proc(composeJson),
+      )
 
       expect(gateway.http).toBe(
         'OK: gateway:running/healthy, workspace:running/n-a; workspace mem=412MiB limit=none oom_kills=0 opencode=skipped',
       )
       expect(gateway.workspace).toMatchObject({status: 'ok', limitBytes: 0, opencode: 'skipped'})
+    })
+
+    it('keeps gateway.workspace in --json when a service is down but the workspace is running', async () => {
+      const gateway = await runWithGateway(
+        () => proc(workspaceStdout()),
+        () => proc(composeJsonGatewayExited),
+      )
+
+      expect(gateway.http.startsWith('ERROR: No services reported; workspace mem=412/896MiB')).toBe(true)
+      expect(gateway.workspace).toMatchObject({status: 'ok', opencode: 'ready'})
+    })
+
+    it('omits gateway.workspace when compose returns no services', async () => {
+      const gateway = await runWithGateway(
+        () => proc(workspaceStdout()),
+        () => proc('', 1),
+      )
+
+      expect(gateway.http.startsWith('ERROR:')).toBe(true)
+      expect('workspace' in gateway).toBe(false)
     })
   })
 

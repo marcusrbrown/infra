@@ -244,7 +244,8 @@ export async function getGatewayWorkspaceStatus(
 export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Promise<StatusSummary> {
   const result = await getGatewayComposeStatus(host, spawn)
 
-  if (!result.ok || result.services.length === 0) {
+  // No services means an SSH or compose failure: there is nothing to probe.
+  if (result.services.length === 0) {
     const errorMsg = result.error ?? 'No services reported'
     return {
       app: 'gateway',
@@ -256,12 +257,14 @@ export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Pr
     }
   }
 
+  // Probe even when a service is down: the workspace itself may still be running.
   const rows = result.services.map(s => `${s.service}:${s.state}/${s.health}`).join(', ')
   const workspace = await getGatewayWorkspaceStatus(host, spawn)
+  const prefix = result.ok ? `OK: ${rows}` : `ERROR: ${result.error ?? 'No services reported'}`
 
   return {
     app: 'gateway',
-    http: `OK: ${rows}; ${formatWorkspaceSummary(workspace)}`,
+    http: `${prefix}; ${formatWorkspaceSummary(workspace)}`,
     lastDeploy: '—',
     version: '—',
     contentHash: '—',

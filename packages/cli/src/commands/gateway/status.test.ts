@@ -1282,6 +1282,32 @@ describe('getGatewayStatusSummary — workspace suffix', () => {
     expect(summary.http).not.toContain('|')
   })
 
+  it('still probes and appends the suffix when a service is down, keeping the non-OK prefix', async () => {
+    const {spawn, calls} = makeRouter(
+      () => proc(composeJsonDegraded),
+      () => proc(workspaceStdout()),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(calls).toHaveLength(2)
+    expect(summary.http).toBe('ERROR: No services reported; workspace mem=412/896MiB oom_kills=0 opencode=ready')
+    expect(summary.http).not.toContain('|')
+    expect(summary.workspace).toMatchObject({status: 'ok', opencode: 'ready', limitBytes: LIMIT_BYTES})
+  })
+
+  it('reports workspace=unknown, not a missing field, when a service is down and the probe fails', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJsonDegraded),
+      () => proc('', 255, 'Connection reset'),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).toBe('ERROR: No services reported; workspace=unknown')
+    expect(summary.workspace?.status).toBe('unknown')
+  })
+
   it('does not add the suffix or run the probe when compose itself errors', async () => {
     const {spawn, calls} = makeRouter(
       () => proc('', 1, 'Connection refused'),
@@ -1292,6 +1318,7 @@ describe('getGatewayStatusSummary — workspace suffix', () => {
 
     expect(summary.http.startsWith('ERROR:')).toBe(true)
     expect(summary.http).not.toContain('workspace')
+    expect(summary.workspace).toBeUndefined()
     expect(calls).toHaveLength(1)
   })
 })

@@ -93,8 +93,8 @@ jobs:
 
       - name: Deploy nginx config
         if: >-
-          github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'workflow_call' && inputs.deploy_nginx)
+          inputs.deploy_nginx ||
+          github.event_name == 'workflow_dispatch'
         run: bash apps/keeweb/deploy.sh --nginx
 
       - name: Post-deploy health check

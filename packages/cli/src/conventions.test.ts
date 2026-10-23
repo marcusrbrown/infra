@@ -2061,6 +2061,67 @@ describe('per-app deploy workflows: each has its own workflow-level concurrency 
   }
 })
 
+// Inside a reusable workflow `github.event_name` is the caller's event, never `workflow_call`, so the
+// nginx step must key off `inputs.deploy_nginx` (issue #1651).
+describe('deploy-keeweb.yaml: nginx step condition', () => {
+  const NGINX_STEP_IF = "inputs.deploy_nginx || github.event_name == 'workflow_dispatch'"
+
+  type IfContext = Record<'github.event_name' | 'inputs.deploy_nginx', string | boolean | undefined>
+
+  // Minimal GitHub expression interpreter scoped to `||`, `==`, string literals and the context values in
+  // `ctx`. Anything else (`&&`, `!`, parentheses, unknown names) throws, so a drifting expression cannot
+  // pass silently.
+  function evaluateIf(expression: string, ctx: IfContext): boolean {
+    const value = (token: string): string | boolean | undefined => {
+      if (/^'[^']*'$/.test(token)) return token.slice(1, -1)
+      if (token in ctx) return ctx[token as keyof IfContext]
+      throw new Error(`unsupported token in expression: ${token}`)
+    }
+    return expression.split('||').some(operand => {
+      const sides = operand.split('==').map(side => side.trim())
+      if (sides.length > 2) throw new Error(`unsupported chained comparison: ${operand}`)
+      const [left = '', right] = sides
+      return Boolean(right === undefined ? value(left) : value(left) === value(right))
+    })
+  }
+
+  async function nginxStepIf(): Promise<string> {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy-keeweb.yaml')).text()
+    const parsed: unknown = parseYaml(text)
+    const job = isRecord(parsed) && isRecord(parsed.jobs) ? parsed.jobs['deploy-keeweb'] : undefined
+    const step = stepsOf(job).find(candidate => candidate.name === 'Deploy nginx config')
+    if (typeof step?.if !== 'string') throw new Error('Deploy nginx config step has no string `if`')
+    return step.if.replaceAll(/\s+/g, ' ').trim()
+  }
+
+  it('gates the Deploy nginx config step on inputs.deploy_nginx or a direct workflow_dispatch', async () => {
+    expect(await nginxStepIf()).toBe(NGINX_STEP_IF)
+  })
+
+  const CASES: readonly {name: string; event: string; deployNginx: boolean | undefined; expected: boolean}[] = [
+    {name: 'router push with nginx config changed', event: 'push', deployNginx: true, expected: true},
+    {name: 'router push with nginx config unchanged', event: 'push', deployNginx: false, expected: false},
+    {name: 'direct workflow_dispatch (no inputs)', event: 'workflow_dispatch', deployNginx: undefined, expected: true},
+    {name: 'router workflow_dispatch', event: 'workflow_dispatch', deployNginx: true, expected: true},
+  ]
+
+  for (const {name, event, deployNginx, expected} of CASES) {
+    it(`evaluates the workflow's actual condition to ${expected} for ${name}`, async () => {
+      const condition = await nginxStepIf()
+      expect(evaluateIf(condition, {'github.event_name': event, 'inputs.deploy_nginx': deployNginx})).toBe(expected)
+    })
+  }
+
+  it('deploy.yaml deploy-keeweb passes deploy_nginx derived from keeweb_nginx', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
+    const parsed: unknown = parseYaml(text)
+    const job = isRecord(parsed) && isRecord(parsed.jobs) ? parsed.jobs['deploy-keeweb'] : undefined
+    const withInputs = isRecord(job) && isRecord(job.with) ? job.with : {}
+    expect(job).toMatchObject({uses: './.github/workflows/deploy-keeweb.yaml'})
+    expect(String(withInputs.deploy_nginx)).toContain('needs.detect-changes.outputs.keeweb_nginx')
+  })
+})
+
 describe('deploy-gateway.yaml: concurrency is workflow-scoped, with unchanged gateway gating', () => {
   const DEPLOY_GATEWAY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')
 

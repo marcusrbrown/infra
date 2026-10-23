@@ -1,7 +1,11 @@
+import type {SpawnFn} from './gateway/status'
+import type {WorkspaceMemoryStatus} from './gateway/workspace-memory'
 import type {StatusSummary} from './status'
 import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 import {createCapturedCtx, expectCapturedToInclude} from '../lib/mcp-ctx-fixture'
+import {LIMIT_BYTES, MIB, STARTED_AT, workspaceStdout} from './gateway/__fixtures__/workspace-probe'
+import {getGatewayStatusSummary} from './gateway/status'
 import {registerStatus, unifiedStatusAction} from './status'
 
 // NOTE: dashboard is included in the unified status table alongside the other apps.
@@ -24,6 +28,18 @@ const healthyCliproxy: StatusSummary = {
   usageStats: '12 req / 0 fail',
 }
 
+const okWorkspace: WorkspaceMemoryStatus = {
+  status: 'ok',
+  limitBytes: LIMIT_BYTES,
+  currentBytes: 412 * MIB,
+  maxEvents: 0,
+  oomKills: 0,
+  oomKilled: false,
+  restartCount: 0,
+  startedAt: STARTED_AT,
+  opencode: 'ready',
+}
+
 const healthyGateway: StatusSummary = {
   app: 'gateway',
   http: 'OK: gateway:running/healthy; workspace mem=412/896MiB oom_kills=0 opencode=ready',
@@ -31,6 +47,7 @@ const healthyGateway: StatusSummary = {
   version: '—',
   contentHash: '—',
   usageStats: '—',
+  workspace: okWorkspace,
 }
 
 const healthyUmami: StatusSummary = {
@@ -67,6 +84,24 @@ const healthyBroker: StatusSummary = {
   version: '—',
   contentHash: '—',
   usageStats: '—',
+}
+
+function proc(stdout: string, exitCode = 0): ReturnType<SpawnFn> {
+  const encoder = new TextEncoder()
+  return {
+    stdout: new ReadableStream({
+      start(c) {
+        c.enqueue(encoder.encode(stdout))
+        c.close()
+      },
+    }),
+    stderr: new ReadableStream({
+      start(c) {
+        c.close()
+      },
+    }),
+    exited: Promise.resolve(exitCode),
+  }
 }
 
 function makeDeps(overrides?: Partial<Parameters<typeof registerStatus>[1]>): Parameters<typeof registerStatus>[1] {
@@ -222,6 +257,111 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     expect(parsed.dashboard.http).toBe('OK: dashboard:running/healthy')
     expect(parsed.vpn.http).toBe('OK: wg0 up, pubkey:TESTKEY== 1 peer(s)')
     expect(parsed.broker.http).toContain('OK')
+  })
+
+  it('serializes the structured workspace status for gateway in --json output', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await unifiedStatusAction({json: true}, ctx, makeDeps())
+
+    const parsed = JSON.parse(captured.stdout[0] ?? '{}') as {gateway: {workspace?: WorkspaceMemoryStatus}}
+
+    expect(parsed.gateway.workspace).toEqual(okWorkspace)
+  })
+
+  it('serializes an unknown workspace status with its reason', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const unknownWorkspace: WorkspaceMemoryStatus = {status: 'unknown', reason: 'timed out after 10s'}
+
+    await unifiedStatusAction(
+      {json: true},
+      ctx,
+      makeDeps({
+        getGatewayStatusSummary: async () => ({
+          ...healthyGateway,
+          http: 'OK: gateway:running/healthy; workspace=unknown',
+          workspace: unknownWorkspace,
+        }),
+      }),
+    )
+
+    const parsed = JSON.parse(captured.stdout[0] ?? '{}') as {
+      gateway: {http: string; workspace?: WorkspaceMemoryStatus}
+    }
+
+    expect(parsed.gateway.workspace).toEqual(unknownWorkspace)
+    expect(parsed.gateway.http).toBe('OK: gateway:running/healthy; workspace=unknown')
+  })
+
+  it('omits the workspace key for every app except gateway', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await unifiedStatusAction({json: true}, ctx, makeDeps())
+
+    const parsed = JSON.parse(captured.stdout[0] ?? '{}') as Record<string, object>
+
+    for (const app of ['keeweb', 'cliproxy', 'umami', 'dashboard', 'vpn', 'broker']) {
+      expect(parsed[app]).toBeDefined()
+      expect('workspace' in (parsed[app] ?? {})).toBe(false)
+    }
+    expect('workspace' in (parsed.gateway ?? {})).toBe(true)
+  })
+
+  it('keeps the table to the six existing columns and never prints the structured workspace', async () => {
+    const {ctx, captured} = createCapturedCtx()
+
+    await unifiedStatusAction({}, ctx, makeDeps())
+
+    expect(captured.stdout).toHaveLength(8)
+    expect(captured.stdout.every(line => line.startsWith('| ') && line.endsWith(' |'))).toBe(true)
+    expect(captured.stdout.every(line => line.split(' | ').length === 6)).toBe(true)
+    expect(captured.stdout.join('\n')).not.toContain('limitBytes')
+    expect(captured.stdout.join('\n')).not.toContain('"workspace"')
+  })
+
+  describe('with the real gateway summary', () => {
+    const composeJson = JSON.stringify([
+      {Name: 'gateway', State: 'running', Health: 'healthy'},
+      {Name: 'workspace', State: 'running', Health: ''},
+    ])
+
+    async function runWithGateway(workspaceOutput: () => ReturnType<SpawnFn>) {
+      const spawn: SpawnFn = cmd =>
+        cmd.at(-1)?.includes('ps --format json') === true ? proc(composeJson) : workspaceOutput()
+      const originalHost = process.env.GATEWAY_HOST
+      process.env.GATEWAY_HOST = 'gateway.example.com'
+      try {
+        const {ctx, captured} = createCapturedCtx()
+        await unifiedStatusAction(
+          {json: true},
+          ctx,
+          makeDeps({getGatewayStatusSummary: host => getGatewayStatusSummary(host, spawn)}),
+        )
+        const parsed = JSON.parse(captured.stdout[0] ?? '{}') as {
+          gateway: {http: string; workspace?: WorkspaceMemoryStatus}
+        }
+        return parsed.gateway
+      } finally {
+        if (originalHost === undefined) delete process.env.GATEWAY_HOST
+        else process.env.GATEWAY_HOST = originalHost
+      }
+    }
+
+    it('reports workspace=unknown in the string and the structured field when the extra call fails', async () => {
+      const gateway = await runWithGateway(() => proc('', 255))
+
+      expect(gateway.http).toBe('OK: gateway:running/healthy, workspace:running/n-a; workspace=unknown')
+      expect(gateway.workspace?.status).toBe('unknown')
+    })
+
+    it('reports limit=none in the string and a zero limit in the structured field', async () => {
+      const gateway = await runWithGateway(() => proc(workspaceStdout({memory: 0, readyzSkipped: true})))
+
+      expect(gateway.http).toBe(
+        'OK: gateway:running/healthy, workspace:running/n-a; workspace mem=412MiB limit=none oom_kills=0 opencode=skipped',
+      )
+      expect(gateway.workspace).toMatchObject({status: 'ok', limitBytes: 0, opencode: 'skipped'})
+    })
   })
 
   it('does not write to global console (output is captured via ctx)', async () => {

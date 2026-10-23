@@ -1,9 +1,9 @@
 import type {goke} from 'goke'
 
 import type {ActionCtx} from '../lib/action-ctx'
+import type {WorkspaceMemoryStatus} from './gateway/workspace-memory'
 
 import {z} from 'zod'
-
 import {getBrokerStatusSummary} from './broker/status'
 import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getDashboardStatusSummary} from './dashboard'
@@ -23,6 +23,8 @@ export interface StatusSummary {
   version: string
   contentHash: string
   usageStats: string
+  /** Structured workspace memory status; only the gateway summary sets it. */
+  workspace?: WorkspaceMemoryStatus
 }
 
 type AppName = StatusSummary['app']
@@ -157,7 +159,7 @@ export function registerStatus(
       z
         .boolean()
         .describe(
-          'Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, vpn, and broker summary objects.',
+          'Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, vpn, and broker summary objects. The gateway object also carries a structured workspace field.',
         ),
     )
     .option(

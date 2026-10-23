@@ -9,8 +9,10 @@
  * Startup order is mandatory:
  *   startupReconcile → markReady → serve /v1/mint
  *
- * /healthz serves immediately (before reconcile completes).
- * /v1/mint returns 503 until startupReconcile calls markReady().
+ * The production listener binds only after startupReconcile finishes its attempts
+ * and calls markReady(), including when its bounded list retries are exhausted.
+ * The handler's /healthz exemption and /v1/mint 503 readiness gate apply only
+ * once the listener is bound; neither endpoint is reachable during reconciliation.
  */
 
 import {defaultAuditLogger} from './audit'

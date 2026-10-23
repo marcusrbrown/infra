@@ -26,7 +26,7 @@ const healthyCliproxy: StatusSummary = {
 
 const healthyGateway: StatusSummary = {
   app: 'gateway',
-  http: 'OK: gateway:running/healthy',
+  http: 'OK: gateway:running/healthy; workspace mem=412/896MiB oom_kills=0 opencode=ready',
   lastDeploy: '—',
   version: '—',
   contentHash: '—',
@@ -95,7 +95,12 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
     expect(
       expectCapturedToInclude(captured, '| cliproxy | OK | — | v1.2.3 (latest v1.2.4) | — | 12 req / 0 fail |'),
     ).toBe(true)
-    expect(expectCapturedToInclude(captured, '| gateway | OK: gateway:running/healthy | — | — | — | — |')).toBe(true)
+    expect(
+      expectCapturedToInclude(
+        captured,
+        '| gateway | OK: gateway:running/healthy; workspace mem=412/896MiB oom_kills=0 opencode=ready | — | — | — | — |',
+      ),
+    ).toBe(true)
     expect(expectCapturedToInclude(captured, '| umami | OK: umami:running/healthy | — | — | — | — |')).toBe(true)
     expect(expectCapturedToInclude(captured, '| dashboard | OK: dashboard:running/healthy | — | — | — | — |')).toBe(
       true,
@@ -155,7 +160,12 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
         '| umami | ❌ UMAMI_DOMAIN not set | ❌ UMAMI_DOMAIN not set | ❌ UMAMI_DOMAIN not set | ❌ UMAMI_DOMAIN not set | ❌ UMAMI_DOMAIN not set |',
       ),
     ).toBe(true)
-    expect(expectCapturedToInclude(captured, '| gateway | OK: gateway:running/healthy | — | — | — | — |')).toBe(true)
+    expect(
+      expectCapturedToInclude(
+        captured,
+        '| gateway | OK: gateway:running/healthy; workspace mem=412/896MiB oom_kills=0 opencode=ready | — | — | — | — |',
+      ),
+    ).toBe(true)
     expect(captured.stderr.join('')).toContain('umami status check failed: UMAMI_DOMAIN not set')
   })
 
@@ -207,7 +217,7 @@ describe('top-level status command (Tier-2 ctx capture)', () => {
 
     expect(parsed.keeweb.http).toBe('OK')
     expect(parsed.cliproxy.version).toBe('v1.2.3 (latest v1.2.4)')
-    expect(parsed.gateway.http).toBe('OK: gateway:running/healthy')
+    expect(parsed.gateway.http).toBe('OK: gateway:running/healthy; workspace mem=412/896MiB oom_kills=0 opencode=ready')
     expect(parsed.umami.http).toBe('OK: umami:running/healthy')
     expect(parsed.dashboard.http).toBe('OK: dashboard:running/healthy')
     expect(parsed.vpn.http).toBe('OK: wg0 up, pubkey:TESTKEY== 1 peer(s)')

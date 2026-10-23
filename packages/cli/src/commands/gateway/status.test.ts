@@ -1,7 +1,21 @@
+import {chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../lib/mcp-ctx-fixture'
-import {gatewayStatusAction, parseComposePs, parseComposePsOutput, type ComposePsEntry, type ServiceRow} from './status'
+import {
+  buildReadyzProbeSnippet,
+  buildWorkspaceProbeScript,
+  gatewayStatusAction,
+  getGatewayStatusSummary,
+  getGatewayWorkspaceStatus,
+  parseComposePs,
+  parseComposePsOutput,
+  parseWorkspaceProbeOutput,
+  type ComposePsEntry,
+  type ServiceRow,
+} from './status'
 
 // ─── parseComposePs ──────────────────────────────────────────────────────────
 
@@ -97,6 +111,7 @@ type SpawnFn = (
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
   exited: Promise<number>
+  kill?: () => void
 }
 
 function makeSpawnOk(jsonOutput: string): SpawnFn {
@@ -751,5 +766,702 @@ describe('getGatewayComposeStatus — SSH identity injection', () => {
     if (capturedKeyPath) {
       expect(() => statSync(capturedKeyPath as string)).toThrow()
     }
+  })
+})
+
+// ─── Workspace memory probe ──────────────────────────────────────────────────
+
+const MIB = 1024 * 1024
+const LIMIT_BYTES = 896 * MIB
+const CONTAINER_ID = '3f2a9c1d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7'
+const STARTED_AT = '2026-10-23T08:20:18.123456789Z'
+
+const READY_BODY = '{"ready":true,"opencode":"ready"}'
+const DEGRADED_BODY = '{"ready":false,"opencode":"degraded"}'
+
+const composeJson = JSON.stringify([
+  {Name: 'gateway', State: 'running', Health: 'healthy'},
+  {Name: 'workspace', State: 'running', Health: ''},
+  {Name: 'mitmproxy', State: 'running', Health: 'healthy'},
+])
+
+const composeJsonDegraded = JSON.stringify([
+  {Name: 'gateway', State: 'exited', Health: ''},
+  {Name: 'workspace', State: 'running', Health: ''},
+  {Name: 'mitmproxy', State: 'running', Health: 'healthy'},
+])
+
+interface WorkspaceStdoutOptions {
+  id?: string
+  memory?: number
+  oomKilled?: boolean
+  restartCount?: number
+  currentBytes?: number
+  maxEvents?: number
+  oomKill?: number
+  readyz?: string
+  omit?: 'id' | 'inspect' | 'cgroup' | 'readyz'
+}
+
+// Mirrors what buildWorkspaceProbeScript prints on a live host.
+function workspaceStdout(options: WorkspaceStdoutOptions = {}): string {
+  const {
+    id = CONTAINER_ID,
+    memory = LIMIT_BYTES,
+    oomKilled = false,
+    restartCount = 0,
+    currentBytes = 412 * MIB,
+    maxEvents = 0,
+    oomKill = 0,
+    readyz = READY_BODY,
+    omit,
+  } = options
+
+  const sections = {
+    id: `@@ws-id@@\n${id}\n`,
+    inspect: `@@ws-inspect@@\n${memory} ${oomKilled} ${restartCount} ${STARTED_AT}\n`,
+    cgroup: `@@ws-cgroup@@\n${currentBytes}\nlow 0\nhigh 0\nmax ${maxEvents}\noom ${oomKill}\noom_kill ${oomKill}\n`,
+    readyz: `@@ws-readyz@@\n${readyz}`,
+  }
+
+  return Object.entries(sections)
+    .filter(([name]) => name !== omit)
+    .map(([, text]) => text)
+    .join('')
+}
+
+type Proc = ReturnType<SpawnFn>
+
+function proc(stdout: string, exitCode = 0, stderr = ''): Proc {
+  const encoder = new TextEncoder()
+  return {
+    stdout: new ReadableStream({
+      start(c) {
+        c.enqueue(encoder.encode(stdout))
+        c.close()
+      },
+    }),
+    stderr: new ReadableStream({
+      start(c) {
+        c.enqueue(encoder.encode(stderr))
+        c.close()
+      },
+    }),
+    exited: Promise.resolve(exitCode),
+  }
+}
+
+function hangingProc(onKill: () => void): Proc {
+  return {
+    stdout: new ReadableStream({}),
+    stderr: new ReadableStream({}),
+    exited: new Promise<number>(() => undefined),
+    kill: onKill,
+  }
+}
+
+// Routes by command: the compose call and the workspace probe get independent responders.
+function makeRouter(compose: () => Proc, workspace: () => Proc): {spawn: SpawnFn; calls: string[][]} {
+  const calls: string[][] = []
+  const spawn: SpawnFn = cmd => {
+    calls.push(cmd)
+    return cmd.at(-1)?.includes('ps --format json') === true ? compose() : workspace()
+  }
+  return {spawn, calls}
+}
+
+describe('buildWorkspaceProbeScript', () => {
+  const script = buildWorkspaceProbeScript()
+
+  it('addresses the container by the ID compose resolves, never a literal name', () => {
+    expect(script).toContain('docker compose --project-directory /opt/gateway/deploy ps -q workspace')
+    expect(script).toContain('docker inspect --format')
+    expect(script).toContain('docker exec "$id" cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.events')
+    expect(script).toContain('docker exec "$id" node -e')
+    expect(script).not.toMatch(/docker exec workspace/)
+    expect(script).not.toMatch(/docker exec fro-bot/)
+  })
+
+  it('guards the readyz probe on a non-zero limit and 64 MiB of headroom', () => {
+    expect(script).toContain('-gt 67108864')
+    expect(script).toMatch(/\[ "\$\{limit:-0\}" -gt 0 \]/)
+  })
+
+  it('keeps the read-only probe free of write operations', () => {
+    expect(script).not.toMatch(/docker (update|restart|stop|kill|rm|compose (up|down|restart))/)
+  })
+})
+
+async function runSnippet(status: number, body: string): Promise<string> {
+  const server = Bun.serve({port: 0, fetch: () => new Response(body, {status})})
+  try {
+    const child = Bun.spawn(
+      [process.execPath, '-e', buildReadyzProbeSnippet(`http://127.0.0.1:${server.port}/readyz`)],
+      {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+    return await new Response(child.stdout).text()
+  } finally {
+    await server.stop(true)
+  }
+}
+
+describe('buildReadyzProbeSnippet — body is read whatever the HTTP status', () => {
+  it('prints the JSON body of a 503 response', async () => {
+    expect(await runSnippet(503, DEGRADED_BODY)).toBe(DEGRADED_BODY)
+  })
+
+  it('prints the JSON body of a 200 response', async () => {
+    expect(await runSnippet(200, READY_BODY)).toBe(READY_BODY)
+  })
+
+  it('prints nothing when the endpoint is unreachable', async () => {
+    const child = Bun.spawn([process.execPath, '-e', buildReadyzProbeSnippet('http://127.0.0.1:1/readyz')], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(await new Response(child.stdout).text()).toBe('')
+  })
+})
+
+describe('parseWorkspaceProbeOutput', () => {
+  it('parses realistic delimited stdout', () => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout())
+
+    expect(status).toEqual({
+      status: 'ok',
+      limitBytes: LIMIT_BYTES,
+      currentBytes: 412 * MIB,
+      maxEvents: 0,
+      oomKills: 0,
+      oomKilled: false,
+      restartCount: 0,
+      startedAt: STARTED_AT,
+      opencode: 'ready',
+    })
+  })
+
+  it('reads max and oom_kill from memory.events, not oom', () => {
+    const output = workspaceStdout().replace('max 0\noom 0\noom_kill 0', 'max 3\noom 7\noom_kill 1')
+    const status = parseWorkspaceProbeOutput(output)
+
+    expect(status.status === 'ok' && [status.maxEvents, status.oomKills]).toEqual([3, 1])
+  })
+
+  it.each(['starting', 'degraded', 'down'] as const)('shows %s from a 503-style body', state => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout({readyz: `{"ready":false,"opencode":"${state}"}`}))
+
+    expect(status.status === 'ok' && status.opencode).toBe(state)
+  })
+
+  it('maps an unrecognised opencode value to unknown without losing the memory figures', () => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout({readyz: '{"ready":false,"opencode":"exploding"}'}))
+
+    expect(status.status).toBe('ok')
+    expect(status.status === 'ok' && status.opencode).toBe('unknown')
+  })
+
+  it('maps a JSON body without an opencode field to unknown', () => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout({readyz: '{"ready":true}'}))
+
+    expect(status.status === 'ok' && status.opencode).toBe('unknown')
+  })
+
+  it('maps an empty body (probe skipped or failed) to unknown while keeping memory figures', () => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout({readyz: ''}))
+
+    expect(status.status).toBe('ok')
+    expect(status.status === 'ok' && status.opencode).toBe('unknown')
+  })
+
+  it('does not trust a ready body when usage is within 64 MiB of the limit', () => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout({currentBytes: LIMIT_BYTES - 16 * MIB}))
+
+    expect(status.status).toBe('ok')
+    expect(status.status === 'ok' && status.opencode).toBe('unknown')
+  })
+
+  it('trusts the probe body just outside the 64 MiB headroom', () => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout({currentBytes: LIMIT_BYTES - 65 * MIB}))
+
+    expect(status.status === 'ok' && status.opencode).toBe('ready')
+  })
+
+  it('reports a zero Memory as no limit and does not trust a probe body', () => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout({memory: 0}))
+
+    expect(status.status === 'ok' && [status.limitBytes, status.opencode]).toEqual([0, 'unknown'])
+  })
+
+  it('carries OOMKilled and restart evidence from docker inspect', () => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout({oomKilled: true, restartCount: 4}))
+
+    expect(status.status === 'ok' && [status.oomKilled, status.restartCount]).toEqual([true, 4])
+  })
+
+  it.each([
+    ['empty output', ''],
+    ['id section missing', workspaceStdout({omit: 'id'})],
+    ['inspect section missing', workspaceStdout({omit: 'inspect'})],
+    ['cgroup section missing', workspaceStdout({omit: 'cgroup'})],
+    ['readyz section missing', workspaceStdout({omit: 'readyz'})],
+    ['no container ID', workspaceStdout({id: ''})],
+    ['two container IDs', workspaceStdout({id: `${CONTAINER_ID}\n${CONTAINER_ID}`})],
+    ['non-hex container ID', workspaceStdout({id: 'Error response from daemon'})],
+    ['garbage readyz body', workspaceStdout({readyz: '<html>502 Bad Gateway</html>'})],
+    ['truncated readyz JSON', workspaceStdout({readyz: '{"ready":fal'})],
+    ['inspect with a non-numeric Memory', workspaceStdout().replace(String(LIMIT_BYTES), '<no value>')],
+    ['inspect with a bad OOMKilled', workspaceStdout().replace(/ false /, ' maybe ')],
+    ['cgroup without oom_kill', workspaceStdout().replace('oom_kill 0\n', '')],
+    ['cgroup without max', workspaceStdout().replace('max 0\n', '')],
+    ['non-numeric memory.current', workspaceStdout().replace(String(412 * MIB), 'max')],
+    ['duplicated section', `${workspaceStdout()}${workspaceStdout()}`],
+  ])('reports the whole block unknown: %s', (_label, output) => {
+    expect(parseWorkspaceProbeOutput(output).status).toBe('unknown')
+  })
+})
+
+describe('getGatewayWorkspaceStatus — spawn behavior', () => {
+  let originalHost: string | undefined
+
+  beforeEach(() => {
+    originalHost = process.env.GATEWAY_HOST
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.GATEWAY_HOST
+    else process.env.GATEWAY_HOST = originalHost
+  })
+
+  it('uses the same hardened ssh options as the compose call and sends the probe script as the remote command', async () => {
+    let captured: string[] = []
+    const spawn: SpawnFn = cmd => {
+      captured = cmd
+      return proc(workspaceStdout())
+    }
+
+    await getGatewayWorkspaceStatus('gateway.example.com', spawn)
+
+    expect(captured[0]).toBe('ssh')
+    expect(captured).toContain('BatchMode=yes')
+    expect(captured).toContain('StrictHostKeyChecking=yes')
+    expect(captured.some(arg => arg.startsWith('UserKnownHostsFile='))).toBe(true)
+    expect(captured.at(-2)).toBe('root@gateway.example.com')
+    expect(captured.at(-1)).toBe(buildWorkspaceProbeScript())
+  })
+
+  it('passes the explicit identity with IdentitiesOnly when GATEWAY_SSH_KEY is set and cleans the key up', async () => {
+    const originalKey = process.env.GATEWAY_SSH_KEY
+    process.env.GATEWAY_SSH_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n'
+    try {
+      let captured: string[] = []
+      const spawn: SpawnFn = cmd => {
+        captured = cmd
+        return proc(workspaceStdout())
+      }
+
+      await getGatewayWorkspaceStatus('gateway.example.com', spawn)
+
+      const iIdx = captured.indexOf('-i')
+      expect(iIdx).toBeGreaterThan(-1)
+      expect(captured).toContain('IdentitiesOnly=yes')
+      const keyPath = captured[iIdx + 1]
+      expect(keyPath).toBeTruthy()
+      const {statSync} = await import('node:fs')
+      expect(() => statSync(keyPath as string)).toThrow()
+    } finally {
+      if (originalKey === undefined) delete process.env.GATEWAY_SSH_KEY
+      else process.env.GATEWAY_SSH_KEY = originalKey
+    }
+  })
+
+  it('rejects an invalid host before spawning', async () => {
+    const neverSpawn: SpawnFn = () => {
+      throw new Error('spawn must not be called for an invalid host')
+    }
+
+    await expect(getGatewayWorkspaceStatus('-oProxyCommand=evil', neverSpawn)).rejects.toThrow('Invalid GATEWAY_HOST')
+  })
+
+  it('returns unknown and kills the child when the call exceeds the timeout', async () => {
+    let killed = false
+    const spawn: SpawnFn = () =>
+      hangingProc(() => {
+        killed = true
+      })
+
+    const status = await getGatewayWorkspaceStatus('gateway.example.com', spawn, 50)
+
+    expect(status.status).toBe('unknown')
+    expect(status.status === 'unknown' && status.reason).toContain('timed out')
+    expect(killed).toBe(true)
+  })
+
+  it('returns unknown when ssh exits non-zero without leaking stderr or the host', async () => {
+    const spawn: SpawnFn = () => proc(workspaceStdout(), 255, 'ssh: Could not resolve hostname gateway.example.com')
+
+    const status = await getGatewayWorkspaceStatus('gateway.example.com', spawn)
+
+    expect(status.status).toBe('unknown')
+    expect(JSON.stringify(status)).not.toContain('gateway.example.com')
+  })
+
+  it('returns unknown when spawn throws synchronously', async () => {
+    const spawn: SpawnFn = () => {
+      throw new Error('spawn failed')
+    }
+
+    expect((await getGatewayWorkspaceStatus('gateway.example.com', spawn)).status).toBe('unknown')
+  })
+})
+
+describe('probe script end to end against a fake docker', () => {
+  let dir: string
+  let logPath: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'fake-docker-'))
+    logPath = join(dir, 'docker.log')
+    writeFileSync(logPath, '')
+    const fakeDocker = String.raw`#!/bin/sh
+echo "$*" >> "$FAKE_DOCKER_LOG"
+case "$1" in
+  compose) echo "$FAKE_ID" ;;
+  inspect)
+    case "$*" in
+      *OOMKilled*) echo "$FAKE_LIMIT false 0 2026-10-23T08:20:18.123456789Z" ;;
+      *) echo "$FAKE_LIMIT" ;;
+    esac ;;
+  exec)
+    case "$*" in
+      *memory.events*) echo "$FAKE_CURRENT"; printf 'low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n' ;;
+      *"cat /sys/fs/cgroup/memory.current"*) echo "$FAKE_CURRENT" ;;
+      *node*) printf '%s' "$FAKE_READYZ" ;;
+    esac ;;
+esac
+`
+    writeFileSync(join(dir, 'docker'), fakeDocker)
+    chmodSync(join(dir, 'docker'), 0o755)
+  })
+
+  afterEach(() => {
+    rmSync(dir, {recursive: true, force: true})
+  })
+
+  async function runScript(fake: {limit: number; current: number; readyz?: string}): Promise<string> {
+    const child = Bun.spawn(['sh', '-c', buildWorkspaceProbeScript()], {
+      env: {
+        PATH: `${dir}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+        FAKE_DOCKER_LOG: logPath,
+        FAKE_ID: CONTAINER_ID,
+        FAKE_LIMIT: String(fake.limit),
+        FAKE_CURRENT: String(fake.current),
+        FAKE_READYZ: fake.readyz ?? DEGRADED_BODY,
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const stdout = await new Response(child.stdout).text()
+    await child.exited
+    return stdout
+  }
+
+  const dockerCalls = () =>
+    readFileSync(logPath, 'utf8')
+      .split('\n')
+      .filter(line => line.length > 0)
+
+  it('resolves the container ID once and addresses every later command by it', async () => {
+    const stdout = await runScript({limit: LIMIT_BYTES, current: 412 * MIB})
+
+    const status = parseWorkspaceProbeOutput(stdout)
+    expect(status).toMatchObject({
+      status: 'ok',
+      maxEvents: 3,
+      oomKills: 1,
+      opencode: 'degraded',
+      currentBytes: 412 * MIB,
+    })
+
+    const calls = dockerCalls()
+    expect(calls.filter(call => call.startsWith('exec ')).every(call => call.startsWith(`exec ${CONTAINER_ID} `))).toBe(
+      true,
+    )
+    expect(calls.filter(call => call.startsWith('inspect ')).every(call => call.endsWith(` ${CONTAINER_ID}`))).toBe(
+      true,
+    )
+    expect(calls.some(call => call.includes('node -e'))).toBe(true)
+  })
+
+  it('does not run the node exec when usage is within 64 MiB of the limit', async () => {
+    const stdout = await runScript({limit: LIMIT_BYTES, current: LIMIT_BYTES - 16 * MIB, readyz: READY_BODY})
+
+    expect(dockerCalls().some(call => call.includes('node -e'))).toBe(false)
+    const status = parseWorkspaceProbeOutput(stdout)
+    expect(status.status === 'ok' && status.opencode).toBe('unknown')
+  })
+
+  it('does not run the node exec when no limit is set', async () => {
+    const stdout = await runScript({limit: 0, current: 412 * MIB, readyz: READY_BODY})
+
+    expect(dockerCalls().some(call => call.includes('node -e'))).toBe(false)
+    const status = parseWorkspaceProbeOutput(stdout)
+    expect(status.status === 'ok' && [status.limitBytes, status.opencode]).toEqual([0, 'unknown'])
+  })
+})
+
+describe('gatewayStatusAction — workspace memory', () => {
+  let originalHost: string | undefined
+
+  beforeEach(() => {
+    originalHost = process.env.GATEWAY_HOST
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.GATEWAY_HOST
+    else process.env.GATEWAY_HOST = originalHost
+  })
+
+  it('renders the happy path exactly and exits 0', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn, calls} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout()),
+    )
+
+    await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+    expect(calls).toHaveLength(2)
+    expect(captured.exit).toBeNull()
+    expect(captured.stdout.join('\n')).toBe(
+      [
+        'Gateway status',
+        '',
+        'Service          State      Health',
+        '─────────────────────────────────────',
+        'gateway          running    healthy',
+        'workspace        running    n-a',
+        'mitmproxy        running    healthy',
+        '',
+        'Workspace memory',
+        '  Limit:       896 MiB',
+        '  Usage:       412 MiB',
+        '  Max events:  0',
+        '  OOM kills:   0 (counted since the container last started)',
+        `  Restarts:    0 (started ${STARTED_AT})`,
+        '  OOMKilled:   false',
+        '  OpenCode:    ready',
+        '',
+        'Status: OK',
+      ].join('\n'),
+    )
+  })
+
+  it('shows a non-zero kill count and stays OK', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({oomKill: 2, maxEvents: 5, oomKilled: true, restartCount: 2})),
+    )
+
+    await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+    expect(expectCapturedToInclude(captured, 'OOM kills:   2 (counted since the container last started)')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'Max events:  5')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'OOMKilled:   true')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'Status: OK')).toBe(true)
+    expect(captured.exit).toBeNull()
+  })
+
+  it.each(['starting', 'degraded', 'down'] as const)(
+    'shows opencode %s and leaves the exit code unchanged',
+    async state => {
+      const {ctx, captured} = createCapturedCtx()
+      const {spawn} = makeRouter(
+        () => proc(composeJson),
+        () => proc(workspaceStdout({readyz: `{"ready":false,"opencode":"${state}"}`})),
+      )
+
+      await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+      expect(expectCapturedToInclude(captured, `OpenCode:    ${state}`)).toBe(true)
+      expect(expectCapturedToInclude(captured, 'Status: OK')).toBe(true)
+      expect(captured.exit).toBeNull()
+    },
+  )
+
+  it('shows opencode unknown near the limit', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({currentBytes: LIMIT_BYTES - 16 * MIB, readyz: READY_BODY})),
+    )
+
+    await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+    expect(expectCapturedToInclude(captured, 'Usage:       880 MiB')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'OpenCode:    unknown')).toBe(true)
+  })
+
+  it('shows limit none when the container has no memory limit', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({memory: 0})),
+    )
+
+    await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+    expect(expectCapturedToInclude(captured, 'Limit:       none')).toBe(true)
+  })
+
+  it('keeps exit code 1 and DEGRADED when compose is degraded and the probe succeeds', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJsonDegraded),
+      () => proc(workspaceStdout()),
+    )
+
+    await expect(gatewayStatusAction({key: undefined}, ctx, spawn)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(expectCapturedToInclude(captured, 'DEGRADED')).toBe(true)
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  describe.each([
+    ['the extra call fails over SSH', () => proc('', 255, 'Connection reset')],
+    ['the extra call times out', () => hangingProc(() => undefined)],
+    ['a section is missing', () => proc(workspaceStdout({omit: 'cgroup'}))],
+    ['the readyz body is garbage', () => proc(workspaceStdout({readyz: 'not json at all'}))],
+    ['the extra call cannot be spawned', () => proc(workspaceStdout(), 0)],
+  ] as const)('when %s', (label, workspace) => {
+    const timeoutMs = 50
+
+    function routerFor(composeOutput: string) {
+      if (label === 'the extra call cannot be spawned') {
+        const calls: string[][] = []
+        const spawn: SpawnFn = cmd => {
+          calls.push(cmd)
+          if (cmd.at(-1)?.includes('ps --format json') === true) return proc(composeOutput)
+          throw new Error('spawn failed')
+        }
+        return {spawn, calls}
+      }
+      return makeRouter(() => proc(composeOutput), workspace)
+    }
+
+    it('reports the workspace block unknown while compose rows still render and the exit stays clean', async () => {
+      const {ctx, captured} = createCapturedCtx()
+      const {spawn} = routerFor(composeJson)
+
+      await gatewayStatusAction({key: undefined}, ctx, spawn, timeoutMs)
+
+      expect(expectCapturedToInclude(captured, 'Workspace memory: unknown')).toBe(true)
+      expect(expectCapturedToInclude(captured, 'gateway          running    healthy')).toBe(true)
+      expect(expectCapturedToInclude(captured, 'Status: OK')).toBe(true)
+      expect(captured.exit).toBeNull()
+    })
+
+    it('does not change the DEGRADED exit code of a degraded compose state', async () => {
+      const {ctx, captured} = createCapturedCtx()
+      const {spawn} = routerFor(composeJsonDegraded)
+
+      await expect(gatewayStatusAction({key: undefined}, ctx, spawn, timeoutMs)).rejects.toBeInstanceOf(MockProcessExit)
+
+      expect(expectCapturedToInclude(captured, 'Workspace memory: unknown')).toBe(true)
+      expect(expectCapturedToInclude(captured, 'DEGRADED')).toBe(true)
+      expect(captured.exit?.code).toBe(1)
+    })
+  })
+
+  it('does not run the workspace probe when the compose call fails', async () => {
+    const {ctx} = createCapturedCtx()
+    const {spawn, calls} = makeRouter(
+      () => proc('', 1, 'Connection refused'),
+      () => proc(workspaceStdout()),
+    )
+
+    await expect(gatewayStatusAction({key: undefined}, ctx, spawn)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(calls).toHaveLength(1)
+  })
+})
+
+describe('getGatewayStatusSummary — workspace suffix', () => {
+  let originalHost: string | undefined
+
+  beforeEach(() => {
+    originalHost = process.env.GATEWAY_HOST
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.GATEWAY_HOST
+    else process.env.GATEWAY_HOST = originalHost
+  })
+
+  const prefix = 'OK: gateway:running/healthy, workspace:running/n-a, mitmproxy:running/healthy'
+
+  it('appends the tagged suffix after the unchanged compose prefix', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout()),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).toBe(`${prefix}; workspace mem=412/896MiB oom_kills=0 opencode=ready`)
+  })
+
+  it('contains no table delimiter', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({oomKill: 1, readyz: DEGRADED_BODY})),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).not.toContain('|')
+    expect(summary.http).toBe(`${prefix}; workspace mem=412/896MiB oom_kills=1 opencode=degraded`)
+  })
+
+  it('uses limit=none when no limit is set', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({memory: 0})),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).toBe(`${prefix}; workspace mem=412MiB limit=none oom_kills=0 opencode=unknown`)
+  })
+
+  it('reports workspace=unknown and keeps the compose prefix when the extra call fails', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc('', 255, 'Connection reset'),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).toBe(`${prefix}; workspace=unknown`)
+    expect(summary.http).not.toContain('|')
+  })
+
+  it('does not add the suffix or run the probe when compose itself errors', async () => {
+    const {spawn, calls} = makeRouter(
+      () => proc('', 1, 'Connection refused'),
+      () => proc(workspaceStdout()),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http.startsWith('ERROR:')).toBe(true)
+    expect(summary.http).not.toContain('workspace')
+    expect(calls).toHaveLength(1)
   })
 })

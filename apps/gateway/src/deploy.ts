@@ -128,13 +128,13 @@ export const COMPOSE_WAIT_TIMEOUT_SECONDS = '600'
  * Hard memory limit for the `workspace` service, in MiB. The compose `mem_limit` and
  * `memswap_limit` strings and the byte count checked after `up` all derive from this value.
  *
- * Sizing, in MiB as `free -m` reports them: the host has 1963, the other services take about
- * 770 (about 220 for gateway, mitmproxy and Caddy, about 550 for the OS and Docker), and the
- * host available-memory floor is 256. That leaves about 937 for the workspace, rounded down to 896.
+ * Sizing, in MiB as `free -m` reports them, from a measured run: with the workspace using 848
+ * the host had 490 available. A limit of 1024 leaves about 314 available on the host with the
+ * workspace at its limit, above the 256 floor.
  */
-export const WORKSPACE_MEMORY_LIMIT_MIB = 896
+export const WORKSPACE_MEMORY_LIMIT_MIB = 1024
 
-/** Compose `mem_limit` / `memswap_limit` value for the workspace service (e.g. `896m`). */
+/** Compose `mem_limit` / `memswap_limit` value for the workspace service (e.g. `1024m`). */
 export const WORKSPACE_MEMORY_LIMIT_COMPOSE = `${WORKSPACE_MEMORY_LIMIT_MIB}m`
 
 /** Byte count Docker reports in `HostConfig.Memory` / `HostConfig.MemorySwap` for the workspace limit. */

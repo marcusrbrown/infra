@@ -1,7 +1,7 @@
 ---
 title: "fix: Cap gateway workspace memory and surface OOM kills"
 type: fix
-status: active
+status: completed
 date: 2026-10-23
 origin: docs/brainstorms/2026-10-23-gateway-workspace-memory-cap-requirements.md
 ---
@@ -106,7 +106,7 @@ On 2026-10-23 the workspace's long-lived `opencode serve` reached about 1.1 GiB 
 
 ## Key Technical Decisions
 
-- **One exported limit constant, starting at 896 MiB.** All figures are in MiB, as `free -m` reports them. The host has 1963 MiB. The other services take about 770 MiB: about 220 MiB for gateway, mitmproxy and Caddy, and about 550 MiB for the OS and Docker. With a 256 MiB floor, that leaves about 937 MiB, rounded down to 896 MiB. The override, the readback, the status display and the tests all read this constant (see origin: R3, R4).
+- **One exported limit constant, 1024 MiB.** All figures are in MiB, as `free -m` reports them. The limit was chosen from the sampled host floor: with the workspace using 848 MiB under the live 896 MiB limit, host available memory bottomed at 490 MiB, so a 1024 MiB limit leaves about 314 MiB available, above the 256 MiB floor. Across three launches on three different repos, `opencode serve` anonymous memory grew from about 360 to about 618 MiB and stayed there, so the limit acts as a recycling point rather than a per-run ceiling. The override, the readback, the status display and the tests all read this constant (see origin: R3, R4).
 - **Use the compose keys `mem_limit` and `memswap_limit`, not `deploy.resources`.** Non-swarm compose maps them to `HostConfig.Memory` and `HostConfig.MemorySwap`. `deploy.resources` has no swap field.
 - **The post-`up` readback is the only runtime check.** It compares the running container with the constant, so it also catches an upstream compose that sets its own limit. No separate merged-config gate runs before `up`.
 - **The readback is strict, fail-closed, and makes a single read.**
@@ -285,7 +285,7 @@ On 2026-10-23 the workspace's long-lived `opencode serve` reached about 1.1 GiB 
 
 | Risk | Mitigation |
 | --- | --- |
-| 896 MiB kills a legitimate heavy run | Pre-merge sampling under the live limit with a numeric pass rule. The kill count shows recurrences, and the 2026-05-17 resize triggers apply |
+| The limit kills a legitimate heavy run | Pre-merge sampling under the live limit with a numeric pass rule. The kill count shows recurrences, and the 2026-05-17 resize triggers apply |
 | The 770 MiB figure for the other services is an estimate | Sampling records host available memory with the workspace near its limit |
 | A status probe hangs or pushes the workspace into OOM | One bounded timeout, and the `/readyz` probe is skipped near the limit |
 | A kill mid-git-operation leaves a dirty checkout | The documented read-only check and operator-approved cleanup |

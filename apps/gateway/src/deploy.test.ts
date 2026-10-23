@@ -3896,7 +3896,7 @@ describe('buildComposeOverride — workspace memory limit', () => {
   test('workspace limit constants derive from one MiB value', async () => {
     const {WORKSPACE_MEMORY_LIMIT_MIB, WORKSPACE_MEMORY_LIMIT_COMPOSE, WORKSPACE_MEMORY_LIMIT_BYTES} =
       await import('./deploy')
-    expect(WORKSPACE_MEMORY_LIMIT_MIB).toBe(896)
+    expect(WORKSPACE_MEMORY_LIMIT_MIB).toBe(1024)
     expect(WORKSPACE_MEMORY_LIMIT_COMPOSE).toBe(`${WORKSPACE_MEMORY_LIMIT_MIB}m`)
     expect(WORKSPACE_MEMORY_LIMIT_BYTES).toBe(WORKSPACE_MEMORY_LIMIT_MIB * 1024 * 1024)
   })
@@ -5246,7 +5246,17 @@ describe('Phase 9d — running workspace memory limit readback', () => {
 
   // Docker reports 0 for no limit and -1 for unlimited swap; anything that is not the exact
   // byte count of the configured limit must fail.
-  const BAD_VALUES = ['', '0', '-1', 'abc', '1.5', '0x38000000', ' ', '939524095', '1879048192']
+  const BAD_VALUES = [
+    '',
+    '0',
+    '-1',
+    'abc',
+    '1.5',
+    `0x${WORKSPACE_MEMORY_LIMIT_BYTES.toString(16)}`,
+    ' ',
+    String(WORKSPACE_MEMORY_LIMIT_BYTES - 1),
+    String(WORKSPACE_MEMORY_LIMIT_BYTES * 2),
+  ]
 
   test.each(BAD_VALUES)('Memory %p fails the deploy with expected and actual values', async bad => {
     const {WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')

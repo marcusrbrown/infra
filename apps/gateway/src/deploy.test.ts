@@ -8,6 +8,8 @@ import {join} from 'node:path'
 import {DeleteObjectCommand, PutObjectCommand} from '@aws-sdk/client-s3'
 import {afterEach, beforeEach, describe, expect, mock, test} from 'bun:test'
 
+import {WORKSPACE_MEMORY_LIMIT_BYTES} from './deploy'
+
 // ─── Test digest fixtures ─────────────────────────────────────────────────────
 
 const GATEWAY_DIGEST = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -122,6 +124,8 @@ function writeUpstreamJson(content: object): string {
  * docker inspect commands return appropriate values so assertRunningImageDigest
  * passes in tests that don't override the handler.
  *
+ * The workspace memory readback receives one container ID and matching limits.
+ *
  * Two-step image inspect (P1 fix):
  *   1. `docker inspect --format '{{.Image}}' <container>` → returns a fake image SHA
  *   2. `docker inspect --format '{{json .RepoDigests}}' <imageSHA>` → returns valid RepoDigests JSON
@@ -145,6 +149,14 @@ function makeSpawnMock(handler?: (cmd: string[]) => SpawnResult | undefined): {s
         `ghcr.io/marcusrbrown/infra-workspace@${WORKSPACE_DIGEST}`,
       ]
       return makeSpawnResult({stdout: JSON.stringify(digests)})
+    }
+    // Step 3: workspace memory readback — resolve the single workspace container, then report
+    // limits that match the configured constant. Tests exercising mismatches override via handler.
+    if (cmdStr.includes('docker inspect') && cmdStr.includes('HostConfig')) {
+      return makeSpawnResult({stdout: `${WORKSPACE_MEMORY_LIMIT_BYTES}|${WORKSPACE_MEMORY_LIMIT_BYTES}`})
+    }
+    if (cmdStr.includes('ps -q workspace') && !cmdStr.includes('docker inspect')) {
+      return makeSpawnResult({stdout: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n'})
     }
     // Default VPC interface detection: return a valid route with dev eth1 for any VPC IP.
     // Tests that need different behavior (e.g. interface not found) override via handler.
@@ -3837,6 +3849,86 @@ describe('buildComposeOverride', () => {
   })
 })
 
+// ─── buildComposeOverride — workspace memory limit ───────────────────────────
+
+/**
+ * Returns the text of one service block from a compose override (the 2-space-indented
+ * key under `services:` through the line before the next 2-space or top-level key).
+ */
+function serviceBlock(yaml: string, service: string): string | undefined {
+  const lines = yaml.split('\n')
+  const start = lines.indexOf(`  ${service}:`)
+  if (start === -1) return undefined
+  let end = start + 1
+  while (end < lines.length && /^ {3,}\S|^\s*$/.test(lines[end] ?? '')) end++
+  return lines.slice(start, end).join('\n')
+}
+
+const OPERATOR_VPC_OVERRIDE_OPTS = {
+  gatewayDigest: GATEWAY_DIGEST,
+  workspaceDigest: WORKSPACE_DIGEST,
+  operatorEnabled: true,
+  operatorTrustedProxies: '10.116.0.5',
+  operatorBindHost: '172.21.0.2',
+  operatorBindPort: '9300',
+  operatorPublicOrigin: 'https://gateway.fro.bot',
+  operatorVpcIp: '10.116.0.3',
+  operatorAuthEnabled: true,
+  operatorGithubClientIdFile: 'client-id',
+  operatorGithubClientSecretFile: 'client-secret',
+  operatorCsrfSecretFile: 'csrf-secret',
+  operatorAllowlistFile: 'allowlist',
+  operatorPushEnabled: true,
+}
+
+const MEMORY_LIMIT_OVERRIDE_COMBOS: [string, Parameters<typeof import('./deploy').buildComposeOverride>[0]][] = [
+  ['plain', {gatewayDigest: GATEWAY_DIGEST, workspaceDigest: WORKSPACE_DIGEST, announceEnabled: false}],
+  ['announce', {gatewayDigest: GATEWAY_DIGEST, workspaceDigest: WORKSPACE_DIGEST, announceEnabled: true}],
+  ['operator', {...OPERATOR_VPC_OVERRIDE_OPTS, announceEnabled: false}],
+  ['operator + announce', {...OPERATOR_VPC_OVERRIDE_OPTS, announceEnabled: true}],
+  [
+    'operator without VPC',
+    {...OPERATOR_VPC_OVERRIDE_OPTS, announceEnabled: false, operatorVpcIp: undefined, operatorPushEnabled: false},
+  ],
+]
+
+describe('buildComposeOverride — workspace memory limit', () => {
+  test('workspace limit constants derive from one MiB value', async () => {
+    const {WORKSPACE_MEMORY_LIMIT_MIB, WORKSPACE_MEMORY_LIMIT_COMPOSE, WORKSPACE_MEMORY_LIMIT_BYTES} =
+      await import('./deploy')
+    expect(WORKSPACE_MEMORY_LIMIT_MIB).toBe(896)
+    expect(WORKSPACE_MEMORY_LIMIT_COMPOSE).toBe(`${WORKSPACE_MEMORY_LIMIT_MIB}m`)
+    expect(WORKSPACE_MEMORY_LIMIT_BYTES).toBe(WORKSPACE_MEMORY_LIMIT_MIB * 1024 * 1024)
+  })
+
+  test.each(MEMORY_LIMIT_OVERRIDE_COMBOS)(
+    'workspace block carries equal mem_limit and memswap_limit from the constant (%s)',
+    async (_name, opts) => {
+      const {buildComposeOverride, WORKSPACE_MEMORY_LIMIT_COMPOSE} = await import('./deploy')
+      const workspace = serviceBlock(buildComposeOverride(opts), 'workspace')
+      expect(workspace).toBeDefined()
+      expect(workspace).toContain(`    mem_limit: ${WORKSPACE_MEMORY_LIMIT_COMPOSE}\n`)
+      expect(workspace).toContain(`    memswap_limit: ${WORKSPACE_MEMORY_LIMIT_COMPOSE}\n`)
+    },
+  )
+
+  test.each(MEMORY_LIMIT_OVERRIDE_COMBOS)('no other service block carries a memory limit (%s)', async (_name, opts) => {
+    const {buildComposeOverride} = await import('./deploy')
+    const yaml = buildComposeOverride(opts)
+    for (const service of ['gateway', 'mitmproxy', 'caddy']) {
+      const block = serviceBlock(yaml, service)
+      if (block === undefined) continue
+      expect(block).not.toContain('mem_limit')
+      expect(block).not.toContain('memswap_limit')
+    }
+    // The gateway block is always present, so the scoping above is not vacuous.
+    expect(serviceBlock(yaml, 'gateway')).toBeDefined()
+    // Exactly one mem_limit and one memswap_limit exist in the whole override.
+    expect(yaml.match(/mem_limit:/g)).toHaveLength(1)
+    expect(yaml.match(/memswap_limit:/g)).toHaveLength(1)
+  })
+})
+
 // ─── buildCaddyfile ───────────────────────────────────────────────────────────
 
 describe('buildCaddyfile', () => {
@@ -4532,6 +4624,8 @@ describe('docker compose config merge — override appends mounts, does not repl
         source: ./secrets/aws-access-key-id
         target: /run/secrets/aws_access_key_id
         read_only: true
+  workspace:
+    image: alpine:latest
 networks:
   gateway-net:
     driver: bridge
@@ -4574,6 +4668,15 @@ networks:
       // Announce mounts must be added
       expect(merged).toContain('/run/secrets/gateway_webhook_secret')
       expect(merged).toContain('/run/secrets/gateway_presence_channel_id')
+
+      // Workspace memory and swap limits must survive the merge. Compose may render the
+      // limit as the original string or as a byte count.
+      const {WORKSPACE_MEMORY_LIMIT_COMPOSE, WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')
+      const limit = `(?:${WORKSPACE_MEMORY_LIMIT_COMPOSE}|${WORKSPACE_MEMORY_LIMIT_BYTES})`
+      const workspaceMerged = serviceBlock(merged, 'workspace')
+      expect(workspaceMerged).toBeDefined()
+      expect(workspaceMerged).toMatch(new RegExp(`^ {4}mem_limit: "?${limit}"?$`, 'm'))
+      expect(workspaceMerged).toMatch(new RegExp(`^ {4}memswap_limit: "?${limit}"?$`, 'm'))
     } finally {
       rm(testDir, {recursive: true, force: true})
     }
@@ -5016,6 +5119,241 @@ describe('Phase 9c — running image digest verification (P1)', () => {
         spawn: spawnFn,
       }),
     ).rejects.toThrow(/digest does not match/)
+  })
+})
+
+// ─── Phase 9d: running workspace memory limit readback ───────────────────────
+
+async function runDeploy(spawnFn: SpawnFn): Promise<void> {
+  const {main} = await import('./deploy')
+  await main({
+    env: makeEnv(),
+    args: [],
+    fetch: makeDiscordFetch([{name: 'ping'}]),
+    sleep: async () => {},
+    spawn: spawnFn,
+  })
+}
+
+describe('Phase 9d — running workspace memory limit readback', () => {
+  let upstreamPath: string
+  let originalUpstream: string | undefined
+
+  const CONTAINER_ID = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2'
+  const OTHER_CONTAINER_ID = '0f1e2d3c4b5a0f1e2d3c4b5a0f1e2d3c4b5a0f1e2d3c4b5a0f1e2d3c4b5a0f1e'
+
+  beforeEach(() => {
+    upstreamPath = join(import.meta.dir, '..', 'upstream.json')
+    originalUpstream = existsSync(upstreamPath) ? readFileSync(upstreamPath, 'utf-8') : undefined
+    writeFileSync(upstreamPath, JSON.stringify({repo: 'fro-bot/agent', ref: 'v0.44.0'}))
+  })
+
+  afterEach(() => {
+    if (originalUpstream === undefined) {
+      try {
+        rmSync(upstreamPath)
+      } catch {
+        // ignore
+      }
+    } else {
+      writeFileSync(upstreamPath, originalUpstream)
+    }
+  })
+
+  /**
+   * Spawn mock for the readback. `ids` is the stdout of `docker compose ps -q workspace`;
+   * `inspect` is the stdout of the `HostConfig` inspect. Records every readback command and
+   * every checksum write so tests can assert on ordering and on what never happened.
+   */
+  function makeReadbackMock(opts: {ids?: string; inspect: string}) {
+    const events: string[] = []
+    const psCalls: string[] = []
+    const inspectCalls: string[] = []
+    const checksumWrites: string[] = []
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes("cat > '/opt/gateway/.secrets-checksum'")) {
+        events.push('checksum-write')
+        checksumWrites.push(cmdStr)
+        return makeSpawnResult()
+      }
+      if (cmdStr.includes('docker inspect') && cmdStr.includes('HostConfig')) {
+        events.push('inspect')
+        inspectCalls.push(cmdStr)
+        return makeSpawnResult({stdout: opts.inspect})
+      }
+      if (cmdStr.includes('ps -q workspace') && !cmdStr.includes('docker inspect')) {
+        events.push('ps')
+        psCalls.push(cmdStr)
+        return makeSpawnResult({stdout: opts.ids ?? `${CONTAINER_ID}\n`})
+      }
+      return undefined
+    })
+    return {spawnFn, events, psCalls, inspectCalls, checksumWrites}
+  }
+
+  test('matching Memory and MemorySwap pass, resolve the container with ps -q, and log one success line', async () => {
+    const {WORKSPACE_MEMORY_LIMIT_BYTES, WORKSPACE_MEMORY_LIMIT_MIB} = await import('./deploy')
+    const {spawnFn, events, psCalls, inspectCalls} = makeReadbackMock({
+      inspect: `${WORKSPACE_MEMORY_LIMIT_BYTES}|${WORKSPACE_MEMORY_LIMIT_BYTES}\n`,
+    })
+
+    const warnMessages: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnMessages.push(args.map(String).join(' '))
+    }
+    try {
+      await runDeploy(spawnFn)
+    } finally {
+      console.warn = origWarn
+    }
+
+    expect(psCalls).toHaveLength(1)
+    expect(psCalls[0]).toContain('docker compose --project-directory /opt/gateway/deploy ps -q workspace')
+    expect(inspectCalls).toHaveLength(1)
+    expect(inspectCalls[0]).toContain(CONTAINER_ID)
+    expect(inspectCalls[0]).toContain('HostConfig.Memory')
+    expect(inspectCalls[0]).toContain('HostConfig.MemorySwap')
+
+    const successLines = warnMessages.filter(m => m.includes('workspace memory limit verified'))
+    expect(successLines).toHaveLength(1)
+    expect(successLines[0]).toContain(`${WORKSPACE_MEMORY_LIMIT_MIB} MiB`)
+
+    // The readback runs before the checksum is persisted.
+    expect(events.indexOf('inspect')).toBeGreaterThanOrEqual(0)
+    expect(events.indexOf('checksum-write')).toBeGreaterThan(events.indexOf('inspect'))
+  })
+
+  test('the readback runs after the Phase 9c digest checks', async () => {
+    const {WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')
+    const order: string[] = []
+    const {spawnFn} = makeSpawnMock(cmd => {
+      const cmdStr = cmd.join(' ')
+      if (cmdStr.includes('RepoDigests')) order.push('digest')
+      if (cmdStr.includes('HostConfig')) {
+        order.push('limits')
+        return makeSpawnResult({stdout: `${WORKSPACE_MEMORY_LIMIT_BYTES}|${WORKSPACE_MEMORY_LIMIT_BYTES}`})
+      }
+      return undefined
+    })
+
+    await runDeploy(spawnFn)
+
+    expect(order.at(-1)).toBe('limits')
+    expect(order.lastIndexOf('digest')).toBeLessThan(order.indexOf('limits'))
+  })
+
+  // Docker reports 0 for no limit and -1 for unlimited swap; anything that is not the exact
+  // byte count of the configured limit must fail.
+  const BAD_VALUES = ['', '0', '-1', 'abc', '1.5', '0x38000000', ' ', '939524095', '1879048192']
+
+  test.each(BAD_VALUES)('Memory %p fails the deploy with expected and actual values', async bad => {
+    const {WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')
+    const {spawnFn} = makeReadbackMock({inspect: `${bad}|${WORKSPACE_MEMORY_LIMIT_BYTES}`})
+
+    const error = await runDeploy(spawnFn).then(
+      () => undefined,
+      (error_: unknown) => error_ as Error,
+    )
+    expect(error).toBeInstanceOf(Error)
+    expect(error?.message).toContain('memory limit does not match')
+    expect(error?.message).toContain(`Expected: Memory=${WORKSPACE_MEMORY_LIMIT_BYTES}`)
+    expect(error?.message).toContain(`Actual: Memory=${JSON.stringify(bad)}`)
+  })
+
+  test.each(BAD_VALUES)('MemorySwap %p fails the deploy with expected and actual values', async bad => {
+    const {WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')
+    const {spawnFn} = makeReadbackMock({inspect: `${WORKSPACE_MEMORY_LIMIT_BYTES}|${bad}`})
+
+    const error = await runDeploy(spawnFn).then(
+      () => undefined,
+      (error_: unknown) => error_ as Error,
+    )
+    expect(error).toBeInstanceOf(Error)
+    expect(error?.message).toContain('memory limit does not match')
+    expect(error?.message).toContain(`MemorySwap=${WORKSPACE_MEMORY_LIMIT_BYTES}`)
+    expect(error?.message).toContain(`MemorySwap=${JSON.stringify(bad)}`)
+  })
+
+  test('Memory and MemorySwap that disagree with each other fail the deploy', async () => {
+    const {WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')
+    const {spawnFn} = makeReadbackMock({inspect: `${WORKSPACE_MEMORY_LIMIT_BYTES}|${WORKSPACE_MEMORY_LIMIT_BYTES * 2}`})
+
+    await expect(runDeploy(spawnFn)).rejects.toThrow(/memory limit does not match/)
+  })
+
+  test('inspect output without the two-field delimiter fails the deploy', async () => {
+    const {WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')
+    const {spawnFn} = makeReadbackMock({inspect: `${WORKSPACE_MEMORY_LIMIT_BYTES}`})
+
+    await expect(runDeploy(spawnFn)).rejects.toThrow(/memory limit does not match/)
+  })
+
+  test('the mismatch error does not name the deploy host', async () => {
+    const {spawnFn} = makeReadbackMock({inspect: '0|0'})
+
+    const error = await runDeploy(spawnFn).then(
+      () => undefined,
+      (error_: unknown) => error_ as Error,
+    )
+    expect(error).toBeInstanceOf(Error)
+    expect(error?.message).not.toContain('gateway.fro.bot')
+  })
+
+  test('zero workspace container IDs fail the deploy before any inspect', async () => {
+    const {WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')
+    const {spawnFn, inspectCalls} = makeReadbackMock({
+      ids: '\n',
+      inspect: `${WORKSPACE_MEMORY_LIMIT_BYTES}|${WORKSPACE_MEMORY_LIMIT_BYTES}`,
+    })
+
+    await expect(runDeploy(spawnFn)).rejects.toThrow(/exactly one running workspace container, found 0/)
+    expect(inspectCalls).toHaveLength(0)
+  })
+
+  test('two workspace container IDs fail the deploy before any inspect', async () => {
+    const {WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')
+    const {spawnFn, inspectCalls} = makeReadbackMock({
+      ids: `${CONTAINER_ID}\n${OTHER_CONTAINER_ID}\n`,
+      inspect: `${WORKSPACE_MEMORY_LIMIT_BYTES}|${WORKSPACE_MEMORY_LIMIT_BYTES}`,
+    })
+
+    await expect(runDeploy(spawnFn)).rejects.toThrow(/exactly one running workspace container, found 2/)
+    expect(inspectCalls).toHaveLength(0)
+  })
+
+  test('a container ID that is not hex fails the deploy rather than reaching the shell', async () => {
+    const {WORKSPACE_MEMORY_LIMIT_BYTES} = await import('./deploy')
+    const {spawnFn, inspectCalls} = makeReadbackMock({
+      ids: '$(touch /tmp/pwned)\n',
+      inspect: `${WORKSPACE_MEMORY_LIMIT_BYTES}|${WORKSPACE_MEMORY_LIMIT_BYTES}`,
+    })
+
+    await expect(runDeploy(spawnFn)).rejects.toThrow(/not a valid container ID/)
+    expect(inspectCalls).toHaveLength(0)
+  })
+
+  test('a failing readback leaves the secrets checksum unwritten', async () => {
+    const {spawnFn, checksumWrites} = makeReadbackMock({inspect: '0|0'})
+
+    await expect(runDeploy(spawnFn)).rejects.toThrow(/memory limit does not match/)
+    expect(checksumWrites).toHaveLength(0)
+  })
+
+  test('a container-count failure leaves the secrets checksum unwritten', async () => {
+    const {spawnFn, checksumWrites} = makeReadbackMock({ids: '', inspect: '0|0'})
+
+    await expect(runDeploy(spawnFn)).rejects.toThrow(/exactly one running workspace container/)
+    expect(checksumWrites).toHaveLength(0)
+  })
+
+  test('a mismatch is not retried: one ps and one inspect', async () => {
+    const {spawnFn, psCalls, inspectCalls} = makeReadbackMock({inspect: '0|0'})
+
+    await expect(runDeploy(spawnFn)).rejects.toThrow(/memory limit does not match/)
+    expect(psCalls).toHaveLength(1)
+    expect(inspectCalls).toHaveLength(1)
   })
 })
 

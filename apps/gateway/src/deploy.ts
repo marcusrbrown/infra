@@ -125,6 +125,22 @@ export const GATEWAY_NET_FULL_NAME = `${COMPOSE_PROJECT_NAME}_gateway-net`
 export const COMPOSE_WAIT_TIMEOUT_SECONDS = '600'
 
 /**
+ * Hard memory limit for the `workspace` service, in MiB. The compose `mem_limit` and
+ * `memswap_limit` strings and the byte count checked after `up` all derive from this value.
+ *
+ * Sizing, in MiB as `free -m` reports them: the host has 1963, the other services take about
+ * 770 (about 220 for gateway, mitmproxy and Caddy, about 550 for the OS and Docker), and the
+ * host available-memory floor is 256. That leaves about 937 for the workspace, rounded down to 896.
+ */
+export const WORKSPACE_MEMORY_LIMIT_MIB = 896
+
+/** Compose `mem_limit` / `memswap_limit` value for the workspace service (e.g. `896m`). */
+export const WORKSPACE_MEMORY_LIMIT_COMPOSE = `${WORKSPACE_MEMORY_LIMIT_MIB}m`
+
+/** Byte count Docker reports in `HostConfig.Memory` / `HostConfig.MemorySwap` for the workspace limit. */
+export const WORKSPACE_MEMORY_LIMIT_BYTES = WORKSPACE_MEMORY_LIMIT_MIB * 1024 * 1024
+
+/**
  * Static container names for the gateway and caddy services in this compose project.
  * Docker Compose names containers as `<project>-<service>-<replica>` (default replica = 1).
  * These are used for direct `docker rm -f` endpoint release because `docker compose rm`
@@ -1720,6 +1736,8 @@ ${envLines}`
     image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${environmentSection}${volumesSection2}${portsSection}${gatewayNetworksSection}
   workspace:
     image: ${WORKSPACE_IMAGE_NAME}@${workspaceDigest}
+    mem_limit: ${WORKSPACE_MEMORY_LIMIT_COMPOSE}
+    memswap_limit: ${WORKSPACE_MEMORY_LIMIT_COMPOSE}
     environment:
       WORKSPACE_OPENCODE_READY_TIMEOUT_MS: \${WORKSPACE_OPENCODE_READY_TIMEOUT_MS:-}
     volumes:
@@ -1858,6 +1876,58 @@ export function assertRunningImageDigest(
         `  Actual RepoDigests: ${actualRepoDigests.length > 0 ? actualRepoDigests.join(', ') : '(empty)'}\n` +
         `The droplet may be running a stale or locally-built image. ` +
         `Re-run the deploy to pull the correct GHCR artifact.`,
+    )
+  }
+}
+
+/**
+ * Resolves the single workspace container ID from `docker compose ps -q workspace` output.
+ *
+ * Pure helper — throws unless exactly one ID is present and it is a hex container ID, so the
+ * value is safe to interpolate into a remote shell command.
+ */
+export function parseWorkspaceContainerId(psOutput: string): string {
+  const ids = psOutput
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '')
+  if (ids.length !== 1) {
+    throw new Error(
+      `Expected exactly one running workspace container, found ${ids.length}. ` +
+        `Cannot verify the workspace memory limit.`,
+    )
+  }
+  const id = ids[0] as string
+  if (!/^[0-9a-f]{12,64}$/.test(id)) {
+    throw new Error(`Workspace container ID ${JSON.stringify(id)} is not a valid container ID.`)
+  }
+  return id
+}
+
+/**
+ * Asserts that the running workspace container carries the configured memory and swap limits.
+ *
+ * Pure helper — no SSH, no side effects. `inspectOutput` is the stdout of
+ * `docker inspect --format '{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}'`. Both fields must be
+ * the exact base-10 byte count of WORKSPACE_MEMORY_LIMIT_BYTES. An empty field, `0` (no limit),
+ * `-1` (unlimited swap), a non-integer, or any other value throws. The error names the expected
+ * and actual values and never the deploy host.
+ */
+export function assertRunningWorkspaceMemoryLimits(inspectOutput: string): void {
+  const expected = String(WORKSPACE_MEMORY_LIMIT_BYTES)
+  const fields = inspectOutput.replace(/\r?\n$/, '').split('|')
+  const [memory, memorySwap] = fields
+  if (fields.length !== 2 || memory !== expected || memorySwap !== expected) {
+    const actual =
+      fields.length === 2
+        ? `Memory=${JSON.stringify(memory)} MemorySwap=${JSON.stringify(memorySwap)}`
+        : JSON.stringify(inspectOutput)
+    throw new Error(
+      `Running workspace memory limit does not match the configured limit.\n` +
+        `  Expected: Memory=${expected} MemorySwap=${expected} (${WORKSPACE_MEMORY_LIMIT_MIB} MiB)\n` +
+        `  Actual: ${actual}\n` +
+        `The workspace container may predate the limit or carry a limit from another compose file. ` +
+        `Re-run the deploy with --force-recreate.`,
     )
   }
 }
@@ -3600,8 +3670,35 @@ SCRIPT`
       console.warn(`\u001B[1;32m✓\u001B[0m ${service} image digest verified`)
     }
 
-    // Phase 10: Persist checksum AFTER compose + registration + digest verification succeed
-    // If any of phase 8, 9, or 9c threw, we never reach here — prior checksum stays in place
+    // Phase 9d: Read the workspace memory and swap limits back from the running container.
+    // Compares the live HostConfig with WORKSPACE_MEMORY_LIMIT_BYTES, so it also catches a limit
+    // set by another compose file. Single read, no retry; a throw leaves the stack running and the
+    // prior checksum in place, so the next deploy recreates the containers.
+    const {stdout: workspacePsOutput} = await runCommand(
+      'Resolving running workspace container',
+      sshCommand(host, `docker compose --project-directory ${DEPLOY_DIR} ps -q workspace`, keyPath, controlPath),
+      deployEnv,
+      spawnFn,
+    )
+    const workspaceContainerId = parseWorkspaceContainerId(workspacePsOutput)
+    const {stdout: workspaceLimitsOutput} = await runCommand(
+      'Verifying running workspace memory limit',
+      sshCommand(
+        host,
+        `docker inspect --format '{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}' ${workspaceContainerId}`,
+        keyPath,
+        controlPath,
+      ),
+      deployEnv,
+      spawnFn,
+    )
+    assertRunningWorkspaceMemoryLimits(workspaceLimitsOutput)
+    console.warn(
+      `\u001B[1;32m✓\u001B[0m workspace memory limit verified: ${WORKSPACE_MEMORY_LIMIT_MIB} MiB (swap equal)`,
+    )
+
+    // Phase 10: Persist checksum AFTER compose + registration + digest + memory-limit verification succeed
+    // If any of phase 8, 9, 9c, or 9d threw, we never reach here — prior checksum stays in place
     // so the next deploy correctly detects secrets as changed and forces recreate.
     await writeRemoteFile(
       'Persisting secrets checksum',

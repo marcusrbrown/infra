@@ -260,7 +260,7 @@ export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Pr
   // Probe even when a service is down: the workspace itself may still be running.
   const rows = result.services.map(s => `${s.service}:${s.state}/${s.health}`).join(', ')
   const workspace = await getGatewayWorkspaceStatus(host, spawn)
-  const prefix = result.ok ? `OK: ${rows}` : `ERROR: ${result.error ?? 'No services reported'}`
+  const prefix = result.ok ? `OK: ${rows}` : `DEGRADED: ${rows}`
 
   return {
     app: 'gateway',

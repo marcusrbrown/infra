@@ -168,6 +168,7 @@ Commands:
   gateway status                       Show operational health of the gateway deployment via docker compose ps.
 
     --key [key]                        Environment variable name holding the SSH host. Falls back to GATEWAY_HOST when omitted.
+    --json                             Output a single JSON object with ok, services and the structured workspace memory status.
 
 
   gateway deploy                       Deploy the gateway. Default mode triggers the GitHub Deploy Gateway workflow, while --local runs apps/gateway deploy directly with Bun.
@@ -269,7 +270,7 @@ Commands:
 
   status                               Show status of all deployments
 
-    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, vpn, and broker summary objects.
+    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, vpn, and broker summary objects. The gateway object also carries a structured workspace field.
     --verbose                          Include verbose per-app health check details when building the summary rows.
 
 

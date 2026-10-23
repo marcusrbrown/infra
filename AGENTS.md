@@ -41,7 +41,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Trigger proxy deploy | `bunx @marcusrbrown/infra cliproxy deploy` | Remote (default) or `--local` |
 | Open proxy TUI | `bunx @marcusrbrown/infra cliproxy open` | SSH + interactive TUI |
 | Onboard repo | `bunx @marcusrbrown/infra cliproxy setup` | Interactive wizard with @clack/prompts |
-| Check gateway health | `bunx @marcusrbrown/infra gateway status` | SSH, docker compose ps, service states |
+| Check gateway health | `bunx @marcusrbrown/infra gateway status` | SSH, docker compose ps, service states, workspace memory; `--json` for machine output |
 | Trigger gateway deploy | `bunx @marcusrbrown/infra gateway deploy` | Remote (default) or `--local` |
 | Gateway operator docs | `apps/gateway/AGENTS.md` | Deploy flow, provisioning, CA restore, anti-patterns |
 | Check dashboard health | `bunx @marcusrbrown/infra dashboard status` | SSH, docker compose ps, service states |
@@ -137,7 +137,7 @@ bunx @marcusrbrown/infra cliproxy monitor         # Live provider probe with iss
 bunx @marcusrbrown/infra cliproxy reset-quota     # Reset quota for a CLIProxyAPI auth record
 bunx @marcusrbrown/infra cliproxy open            # Open proxy TUI via SSH
 bunx @marcusrbrown/infra cliproxy setup           # Onboard repo to CLIProxyAPI
-bunx @marcusrbrown/infra gateway status           # SSH, docker compose ps, service states
+bunx @marcusrbrown/infra gateway status           # SSH, docker compose ps, service states, workspace memory
 bunx @marcusrbrown/infra gateway deploy           # Trigger gateway deploy (GitHub Actions)
 bunx @marcusrbrown/infra gateway logs gateway     # Stream gateway service logs (--tail N)
 bunx @marcusrbrown/infra gateway backup --include-ca  # Pull mitmproxy CA cert + key as tarball

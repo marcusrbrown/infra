@@ -8,13 +8,23 @@ import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
 // ─── Minimal ctx interface (subset of GokeExecutionContext used by this action) ─
 import {validateGatewayHost} from './host'
+import {
+  buildWorkspaceProbeScript,
+  COMPOSE_PROJECT_DIR,
+  formatWorkspaceMemory,
+  formatWorkspaceSummary,
+  parseWorkspaceProbeOutput,
+  unknownWorkspace,
+  type WorkspaceMemoryStatus,
+} from './workspace-memory'
 
 declare const process: {
   env: Record<string, string | undefined>
   exitCode?: number
 }
 
-const COMPOSE_PROJECT_DIR = '/opt/gateway/deploy'
+/** One timeout bounds the whole extra workspace SSH call so a hung probe can't stall `gateway status`. */
+export const WORKSPACE_PROBE_TIMEOUT_MS = 10_000
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -45,6 +55,7 @@ export type SpawnFn = (
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
   exited: Promise<number>
+  kill?: () => void
 }
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
@@ -167,12 +178,74 @@ export async function getGatewayComposeStatus(
   return {ok, services}
 }
 
+/**
+ * Second SSH call: workspace memory, cgroup kill counters and supervisor state. Remote failures never throw;
+ * a failure, timeout or unparsable section yields an `unknown` block so compose output is unaffected.
+ */
+export async function getGatewayWorkspaceStatus(
+  host: string,
+  spawn: SpawnFn = defaultSpawn,
+  timeoutMs: number = WORKSPACE_PROBE_TIMEOUT_MS,
+): Promise<WorkspaceMemoryStatus> {
+  validateGatewayHost(host)
+
+  const knownHostsArgs = buildKnownHostsArgs()
+  const {args: identityArgs, cleanup} = buildIdentityArgs(process.env.GATEWAY_SSH_KEY)
+
+  const sshCmd = [
+    'ssh',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'StrictHostKeyChecking=yes',
+    ...knownHostsArgs,
+    ...identityArgs,
+    `root@${host}`,
+    buildWorkspaceProbeScript(),
+  ]
+
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    HOME: process.env.HOME ?? '/tmp',
+    ...(process.env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK} : {}),
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<'timeout'>(resolve => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs)
+  })
+
+  try {
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const collected = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    // A killed child may reject the pending reads after the race is already decided.
+    collected.catch(() => undefined)
+
+    const outcome = await Promise.race([collected, timedOut])
+    if (outcome === 'timeout') {
+      child.kill?.()
+      return unknownWorkspace(`timed out after ${Math.round(timeoutMs / 1000)}s`)
+    }
+
+    const [stdoutText, , exitCode] = outcome
+    if (exitCode !== 0) return unknownWorkspace(`SSH command failed (exit ${exitCode})`)
+
+    return parseWorkspaceProbeOutput(stdoutText)
+  } catch {
+    return unknownWorkspace('SSH command could not run')
+  } finally {
+    clearTimeout(timer)
+    cleanup()
+  }
+}
+
 // ─── Unified status aggregator export ────────────────────────────────────────
 
-export async function getGatewayStatusSummary(host: string): Promise<StatusSummary> {
-  const result = await getGatewayComposeStatus(host)
+export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Promise<StatusSummary> {
+  const result = await getGatewayComposeStatus(host, spawn)
 
-  if (!result.ok || result.services.length === 0) {
+  // No services means an SSH or compose failure: there is nothing to probe.
+  if (result.services.length === 0) {
     const errorMsg = result.error ?? 'No services reported'
     return {
       app: 'gateway',
@@ -184,24 +257,29 @@ export async function getGatewayStatusSummary(host: string): Promise<StatusSumma
     }
   }
 
+  // Probe even when a service is down: the workspace itself may still be running.
   const rows = result.services.map(s => `${s.service}:${s.state}/${s.health}`).join(', ')
+  const workspace = await getGatewayWorkspaceStatus(host, spawn)
+  const prefix = result.ok ? `OK: ${rows}` : `ERROR: ${result.error ?? 'No services reported'}`
 
   return {
     app: 'gateway',
-    http: `OK: ${rows}`,
+    http: `${prefix}; ${formatWorkspaceSummary(workspace)}`,
     lastDeploy: '—',
     version: '—',
     contentHash: '—',
     usageStats: '—',
+    workspace,
   }
 }
 
 // ─── Action (exported for direct testing) ────────────────────────────────────
 
 export async function gatewayStatusAction(
-  options: {key?: string | undefined},
+  options: {key?: string | undefined; json?: boolean | undefined},
   ctx: ActionCtx,
   spawn?: SpawnFn,
+  workspaceTimeoutMs?: number,
 ): Promise<void> {
   const hostEnvKey = options.key ?? 'GATEWAY_HOST'
   const host = process.env[hostEnvKey]
@@ -212,14 +290,26 @@ export async function gatewayStatusAction(
     return
   }
 
-  ctx.console.log('Gateway status')
-  ctx.console.log('')
+  const json = options.json === true
+
+  if (!json) {
+    ctx.console.log('Gateway status')
+    ctx.console.log('')
+  }
 
   const result = await getGatewayComposeStatus(host, spawn)
 
   if (!result.ok && result.services.length === 0) {
     ctx.console.error(`Error: ${result.error ?? 'Unknown error'}`)
     ctx.process.exit(1)
+    return
+  }
+
+  if (json) {
+    // Display-only: the workspace block never influences the exit code.
+    const workspace = await getGatewayWorkspaceStatus(host, spawn, workspaceTimeoutMs)
+    ctx.console.log(JSON.stringify({ok: result.ok, services: result.services, workspace}))
+    if (!result.ok) ctx.process.exit(1)
     return
   }
 
@@ -230,6 +320,14 @@ export async function gatewayStatusAction(
     const svc = row.service.padEnd(16)
     const state = row.state.padEnd(10)
     ctx.console.log(`${svc} ${state} ${row.health}`)
+  }
+
+  ctx.console.log('')
+
+  // Display-only: the workspace block never influences the status line or the exit code below.
+  const workspace = await getGatewayWorkspaceStatus(host, spawn, workspaceTimeoutMs)
+  for (const line of formatWorkspaceMemory(workspace)) {
+    ctx.console.log(line)
   }
 
   ctx.console.log('')
@@ -250,6 +348,10 @@ export function registerGatewayStatus(cli: ReturnType<typeof goke>): void {
     .option(
       '--key [key]',
       z.string().describe('Environment variable name holding the SSH host. Falls back to GATEWAY_HOST when omitted.'),
+    )
+    .option(
+      '--json',
+      z.boolean().describe('Output a single JSON object with ok, services and the structured workspace memory status.'),
     )
     .action((options, ctx) => gatewayStatusAction(options, ctx))
 }

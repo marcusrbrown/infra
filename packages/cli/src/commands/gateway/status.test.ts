@@ -1,7 +1,17 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../lib/mcp-ctx-fixture'
-import {gatewayStatusAction, parseComposePs, parseComposePsOutput, type ComposePsEntry, type ServiceRow} from './status'
+import {DEGRADED_BODY, LIMIT_BYTES, MIB, STARTED_AT, workspaceStdout} from './__fixtures__/workspace-probe'
+import {
+  gatewayStatusAction,
+  getGatewayStatusSummary,
+  getGatewayWorkspaceStatus,
+  parseComposePs,
+  parseComposePsOutput,
+  type ComposePsEntry,
+  type ServiceRow,
+} from './status'
+import {buildWorkspaceProbeScript} from './workspace-memory'
 
 // ─── parseComposePs ──────────────────────────────────────────────────────────
 
@@ -97,6 +107,7 @@ type SpawnFn = (
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
   exited: Promise<number>
+  kill?: () => void
 }
 
 function makeSpawnOk(jsonOutput: string): SpawnFn {
@@ -751,5 +762,563 @@ describe('getGatewayComposeStatus — SSH identity injection', () => {
     if (capturedKeyPath) {
       expect(() => statSync(capturedKeyPath as string)).toThrow()
     }
+  })
+})
+
+// ─── Workspace memory probe ──────────────────────────────────────────────────
+
+const composeJson = JSON.stringify([
+  {Name: 'gateway', State: 'running', Health: 'healthy'},
+  {Name: 'workspace', State: 'running', Health: ''},
+  {Name: 'mitmproxy', State: 'running', Health: 'healthy'},
+])
+
+const composeJsonDegraded = JSON.stringify([
+  {Name: 'gateway', State: 'exited', Health: ''},
+  {Name: 'workspace', State: 'running', Health: ''},
+  {Name: 'mitmproxy', State: 'running', Health: 'healthy'},
+])
+
+type Proc = ReturnType<SpawnFn>
+
+function proc(stdout: string, exitCode = 0, stderr = ''): Proc {
+  const encoder = new TextEncoder()
+  return {
+    stdout: new ReadableStream({
+      start(c) {
+        c.enqueue(encoder.encode(stdout))
+        c.close()
+      },
+    }),
+    stderr: new ReadableStream({
+      start(c) {
+        c.enqueue(encoder.encode(stderr))
+        c.close()
+      },
+    }),
+    exited: Promise.resolve(exitCode),
+  }
+}
+
+function hangingProc(onKill: () => void): Proc {
+  return {
+    stdout: new ReadableStream({}),
+    stderr: new ReadableStream({}),
+    exited: new Promise<number>(() => undefined),
+    kill: onKill,
+  }
+}
+
+// Routes by command: the compose call and the workspace probe get independent responders.
+function makeRouter(compose: () => Proc, workspace: () => Proc): {spawn: SpawnFn; calls: string[][]} {
+  const calls: string[][] = []
+  const spawn: SpawnFn = cmd => {
+    calls.push(cmd)
+    return cmd.at(-1)?.includes('ps --format json') === true ? compose() : workspace()
+  }
+  return {spawn, calls}
+}
+
+describe('getGatewayWorkspaceStatus — spawn behavior', () => {
+  let originalHost: string | undefined
+
+  beforeEach(() => {
+    originalHost = process.env.GATEWAY_HOST
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.GATEWAY_HOST
+    else process.env.GATEWAY_HOST = originalHost
+  })
+
+  it('uses the same hardened ssh options as the compose call and sends the probe script as the remote command', async () => {
+    let captured: string[] = []
+    const spawn: SpawnFn = cmd => {
+      captured = cmd
+      return proc(workspaceStdout())
+    }
+
+    await getGatewayWorkspaceStatus('gateway.example.com', spawn)
+
+    expect(captured[0]).toBe('ssh')
+    expect(captured).toContain('BatchMode=yes')
+    expect(captured).toContain('StrictHostKeyChecking=yes')
+    expect(captured.some(arg => arg.startsWith('UserKnownHostsFile='))).toBe(true)
+    expect(captured.at(-2)).toBe('root@gateway.example.com')
+    expect(captured.at(-1)).toBe(buildWorkspaceProbeScript())
+  })
+
+  it('passes the explicit identity with IdentitiesOnly when GATEWAY_SSH_KEY is set and cleans the key up', async () => {
+    const originalKey = process.env.GATEWAY_SSH_KEY
+    process.env.GATEWAY_SSH_KEY = '-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----\n'
+    try {
+      let captured: string[] = []
+      const spawn: SpawnFn = cmd => {
+        captured = cmd
+        return proc(workspaceStdout())
+      }
+
+      await getGatewayWorkspaceStatus('gateway.example.com', spawn)
+
+      const iIdx = captured.indexOf('-i')
+      expect(iIdx).toBeGreaterThan(-1)
+      expect(captured).toContain('IdentitiesOnly=yes')
+      const keyPath = captured[iIdx + 1]
+      expect(keyPath).toBeTruthy()
+      const {statSync} = await import('node:fs')
+      expect(() => statSync(keyPath as string)).toThrow()
+    } finally {
+      if (originalKey === undefined) delete process.env.GATEWAY_SSH_KEY
+      else process.env.GATEWAY_SSH_KEY = originalKey
+    }
+  })
+
+  it('rejects an invalid host before spawning', async () => {
+    const neverSpawn: SpawnFn = () => {
+      throw new Error('spawn must not be called for an invalid host')
+    }
+
+    await expect(getGatewayWorkspaceStatus('-oProxyCommand=evil', neverSpawn)).rejects.toThrow('Invalid GATEWAY_HOST')
+  })
+
+  it('returns unknown and kills the child when the call exceeds the timeout', async () => {
+    let killed = false
+    const spawn: SpawnFn = () =>
+      hangingProc(() => {
+        killed = true
+      })
+
+    const status = await getGatewayWorkspaceStatus('gateway.example.com', spawn, 50)
+
+    expect(status.status).toBe('unknown')
+    expect(status.status === 'unknown' && status.reason).toContain('timed out')
+    expect(killed).toBe(true)
+  })
+
+  it('returns unknown when ssh exits non-zero without leaking stderr or the host', async () => {
+    const spawn: SpawnFn = () => proc(workspaceStdout(), 255, 'ssh: Could not resolve hostname gateway.example.com')
+
+    const status = await getGatewayWorkspaceStatus('gateway.example.com', spawn)
+
+    expect(status.status).toBe('unknown')
+    expect(JSON.stringify(status)).not.toContain('gateway.example.com')
+  })
+
+  it('returns unknown when spawn throws synchronously', async () => {
+    const spawn: SpawnFn = () => {
+      throw new Error('spawn failed')
+    }
+
+    expect((await getGatewayWorkspaceStatus('gateway.example.com', spawn)).status).toBe('unknown')
+  })
+})
+
+describe('gatewayStatusAction — workspace memory', () => {
+  let originalHost: string | undefined
+
+  beforeEach(() => {
+    originalHost = process.env.GATEWAY_HOST
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.GATEWAY_HOST
+    else process.env.GATEWAY_HOST = originalHost
+  })
+
+  it('renders the happy path exactly and exits 0', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn, calls} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout()),
+    )
+
+    await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+    expect(calls).toHaveLength(2)
+    expect(captured.exit).toBeNull()
+    expect(captured.stdout.join('\n')).toBe(
+      [
+        'Gateway status',
+        '',
+        'Service          State      Health',
+        '─────────────────────────────────────',
+        'gateway          running    healthy',
+        'workspace        running    n-a',
+        'mitmproxy        running    healthy',
+        '',
+        'Workspace memory',
+        '  Limit:       896 MiB',
+        '  Usage:       412 MiB',
+        '  Max events:  0',
+        '  OOM kills:   0 (counted since the container last started)',
+        `  Restarts:    0 (started ${STARTED_AT})`,
+        '  OOMKilled:   false',
+        '  OpenCode:    ready',
+        '',
+        'Status: OK',
+      ].join('\n'),
+    )
+  })
+
+  it('shows a non-zero kill count and stays OK', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({oomKill: 2, maxEvents: 5, oomKilled: true, restartCount: 2})),
+    )
+
+    await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+    expect(expectCapturedToInclude(captured, 'OOM kills:   2 (counted since the container last started)')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'Max events:  5')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'OOMKilled:   true')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'Status: OK')).toBe(true)
+    expect(captured.exit).toBeNull()
+  })
+
+  it.each(['starting', 'degraded', 'down'] as const)(
+    'shows opencode %s and leaves the exit code unchanged',
+    async state => {
+      const {ctx, captured} = createCapturedCtx()
+      const {spawn} = makeRouter(
+        () => proc(composeJson),
+        () => proc(workspaceStdout({readyz: `{"ready":false,"opencode":"${state}"}`})),
+      )
+
+      await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+      expect(expectCapturedToInclude(captured, `OpenCode:    ${state}`)).toBe(true)
+      expect(expectCapturedToInclude(captured, 'Status: OK')).toBe(true)
+      expect(captured.exit).toBeNull()
+    },
+  )
+
+  it('shows opencode skipped near the limit', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({currentBytes: LIMIT_BYTES - 16 * MIB, readyzSkipped: true})),
+    )
+
+    await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+    expect(expectCapturedToInclude(captured, 'Usage:       880 MiB')).toBe(true)
+    expect(expectCapturedToInclude(captured, 'OpenCode:    skipped (within 64 MiB of the limit)')).toBe(true)
+  })
+
+  it('shows limit none when the container has no memory limit', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({memory: 0})),
+    )
+
+    await gatewayStatusAction({key: undefined}, ctx, spawn)
+
+    expect(expectCapturedToInclude(captured, 'Limit:       none')).toBe(true)
+  })
+
+  it('keeps exit code 1 and DEGRADED when compose is degraded and the probe succeeds', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJsonDegraded),
+      () => proc(workspaceStdout()),
+    )
+
+    await expect(gatewayStatusAction({key: undefined}, ctx, spawn)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(expectCapturedToInclude(captured, 'DEGRADED')).toBe(true)
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  describe.each([
+    ['the extra call fails over SSH', () => proc('', 255, 'Connection reset')],
+    ['the extra call times out', () => hangingProc(() => undefined)],
+    ['a section is missing', () => proc(workspaceStdout({omit: 'cgroup'}))],
+    ['the readyz body is garbage', () => proc(workspaceStdout({readyz: 'not json at all'}))],
+    ['the extra call cannot be spawned', () => proc(workspaceStdout(), 0)],
+  ] as const)('when %s', (label, workspace) => {
+    const timeoutMs = 50
+
+    function routerFor(composeOutput: string) {
+      if (label === 'the extra call cannot be spawned') {
+        const calls: string[][] = []
+        const spawn: SpawnFn = cmd => {
+          calls.push(cmd)
+          if (cmd.at(-1)?.includes('ps --format json') === true) return proc(composeOutput)
+          throw new Error('spawn failed')
+        }
+        return {spawn, calls}
+      }
+      return makeRouter(() => proc(composeOutput), workspace)
+    }
+
+    it('reports the workspace block unknown while compose rows still render and the exit stays clean', async () => {
+      const {ctx, captured} = createCapturedCtx()
+      const {spawn} = routerFor(composeJson)
+
+      await gatewayStatusAction({key: undefined}, ctx, spawn, timeoutMs)
+
+      expect(expectCapturedToInclude(captured, 'Workspace memory: unknown')).toBe(true)
+      expect(expectCapturedToInclude(captured, 'gateway          running    healthy')).toBe(true)
+      expect(expectCapturedToInclude(captured, 'Status: OK')).toBe(true)
+      expect(captured.exit).toBeNull()
+    })
+
+    it('does not change the DEGRADED exit code of a degraded compose state', async () => {
+      const {ctx, captured} = createCapturedCtx()
+      const {spawn} = routerFor(composeJsonDegraded)
+
+      await expect(gatewayStatusAction({key: undefined}, ctx, spawn, timeoutMs)).rejects.toBeInstanceOf(MockProcessExit)
+
+      expect(expectCapturedToInclude(captured, 'Workspace memory: unknown')).toBe(true)
+      expect(expectCapturedToInclude(captured, 'DEGRADED')).toBe(true)
+      expect(captured.exit?.code).toBe(1)
+    })
+  })
+
+  it('does not run the workspace probe when the compose call fails', async () => {
+    const {ctx} = createCapturedCtx()
+    const {spawn, calls} = makeRouter(
+      () => proc('', 1, 'Connection refused'),
+      () => proc(workspaceStdout()),
+    )
+
+    await expect(gatewayStatusAction({key: undefined}, ctx, spawn)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(calls).toHaveLength(1)
+  })
+})
+
+describe('gatewayStatusAction — --json', () => {
+  let originalHost: string | undefined
+
+  beforeEach(() => {
+    originalHost = process.env.GATEWAY_HOST
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.GATEWAY_HOST
+    else process.env.GATEWAY_HOST = originalHost
+  })
+
+  const services = [
+    {service: 'gateway', state: 'running', health: 'healthy'},
+    {service: 'workspace', state: 'running', health: 'n-a'},
+    {service: 'mitmproxy', state: 'running', health: 'healthy'},
+  ]
+
+  const okWorkspace = {
+    status: 'ok',
+    limitBytes: LIMIT_BYTES,
+    currentBytes: 412 * MIB,
+    maxEvents: 0,
+    oomKills: 0,
+    oomKilled: false,
+    restartCount: 0,
+    startedAt: STARTED_AT,
+    opencode: 'ready',
+  }
+
+  const proseMarkers = ['Gateway status', 'Service  ', '─────', 'Workspace memory', 'Status:']
+
+  it('prints exactly one JSON line with ok, services and workspace for the happy path, and exits 0', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout()),
+    )
+
+    await gatewayStatusAction({key: undefined, json: true}, ctx, spawn)
+
+    expect(captured.stdout).toHaveLength(1)
+    expect(captured.stdout[0]).toBe(JSON.stringify({ok: true, services, workspace: okWorkspace}))
+    expect(captured.exit).toBeNull()
+    expect(captured.stderr).toHaveLength(0)
+  })
+
+  it('prints no table or prose in JSON mode', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout()),
+    )
+
+    await gatewayStatusAction({key: undefined, json: true}, ctx, spawn)
+
+    for (const marker of proseMarkers) {
+      expect(captured.stdout.join('\n')).not.toContain(marker)
+    }
+  })
+
+  it('reports ok false and exits 1 when compose is degraded', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJsonDegraded),
+      () => proc(workspaceStdout()),
+    )
+
+    await expect(gatewayStatusAction({key: undefined, json: true}, ctx, spawn)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(captured.stdout).toHaveLength(1)
+    const parsed = JSON.parse(captured.stdout[0] ?? '{}') as {ok: boolean; services: {service: string; state: string}[]}
+    expect(parsed.ok).toBe(false)
+    expect(parsed.services[0]).toMatchObject({service: 'gateway', state: 'exited'})
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  it('reports the workspace block unknown with a reason and keeps exit 0 when the extra call fails', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc('', 255, 'Connection reset'),
+    )
+
+    await gatewayStatusAction({key: undefined, json: true}, ctx, spawn)
+
+    expect(captured.stdout).toHaveLength(1)
+    expect(JSON.parse(captured.stdout[0] ?? '{}')).toEqual({
+      ok: true,
+      services,
+      workspace: {status: 'unknown', reason: 'SSH command failed (exit 255)'},
+    })
+    expect(captured.exit).toBeNull()
+  })
+
+  it('reports an unknown workspace after a timeout without changing a degraded exit code', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn} = makeRouter(
+      () => proc(composeJsonDegraded),
+      () => hangingProc(() => undefined),
+    )
+
+    await expect(gatewayStatusAction({key: undefined, json: true}, ctx, spawn, 50)).rejects.toBeInstanceOf(
+      MockProcessExit,
+    )
+
+    const parsed = JSON.parse(captured.stdout[0] ?? '{}') as {ok: boolean; workspace: {status: string}}
+    expect(parsed.ok).toBe(false)
+    expect(parsed.workspace.status).toBe('unknown')
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  it('keeps the compose-failure error on stderr, prints nothing to stdout and exits 1', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    const {spawn, calls} = makeRouter(
+      () => proc('', 1, 'Connection refused'),
+      () => proc(workspaceStdout()),
+    )
+
+    await expect(gatewayStatusAction({key: undefined, json: true}, ctx, spawn)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(captured.stdout).toHaveLength(0)
+    expect(captured.stderr.join('')).toContain('Error')
+    expect(captured.exit?.code).toBe(1)
+    expect(calls).toHaveLength(1)
+  })
+})
+
+describe('getGatewayStatusSummary — workspace suffix', () => {
+  let originalHost: string | undefined
+
+  beforeEach(() => {
+    originalHost = process.env.GATEWAY_HOST
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.GATEWAY_HOST
+    else process.env.GATEWAY_HOST = originalHost
+  })
+
+  const prefix = 'OK: gateway:running/healthy, workspace:running/n-a, mitmproxy:running/healthy'
+
+  it('appends the tagged suffix after the unchanged compose prefix', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout()),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).toBe(`${prefix}; workspace mem=412/896MiB oom_kills=0 opencode=ready`)
+  })
+
+  it('contains no table delimiter', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({oomKill: 1, readyz: DEGRADED_BODY})),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).not.toContain('|')
+    expect(summary.http).toBe(`${prefix}; workspace mem=412/896MiB oom_kills=1 opencode=degraded`)
+  })
+
+  it('uses limit=none when no limit is set', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({memory: 0, readyzSkipped: true})),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).toBe(`${prefix}; workspace mem=412MiB limit=none oom_kills=0 opencode=skipped`)
+  })
+
+  it('reports workspace=unknown and keeps the compose prefix when the extra call fails', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc('', 255, 'Connection reset'),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).toBe(`${prefix}; workspace=unknown`)
+    expect(summary.http).not.toContain('|')
+  })
+
+  it('still probes and appends the suffix when a service is down, keeping the non-OK prefix', async () => {
+    const {spawn, calls} = makeRouter(
+      () => proc(composeJsonDegraded),
+      () => proc(workspaceStdout()),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(calls).toHaveLength(2)
+    expect(summary.http).toBe('ERROR: No services reported; workspace mem=412/896MiB oom_kills=0 opencode=ready')
+    expect(summary.http).not.toContain('|')
+    expect(summary.workspace).toMatchObject({status: 'ok', opencode: 'ready', limitBytes: LIMIT_BYTES})
+  })
+
+  it('reports workspace=unknown, not a missing field, when a service is down and the probe fails', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJsonDegraded),
+      () => proc('', 255, 'Connection reset'),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http).toBe('ERROR: No services reported; workspace=unknown')
+    expect(summary.workspace?.status).toBe('unknown')
+  })
+
+  it('does not add the suffix or run the probe when compose itself errors', async () => {
+    const {spawn, calls} = makeRouter(
+      () => proc('', 1, 'Connection refused'),
+      () => proc(workspaceStdout()),
+    )
+
+    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(summary.http.startsWith('ERROR:')).toBe(true)
+    expect(summary.http).not.toContain('workspace')
+    expect(summary.workspace).toBeUndefined()
+    expect(calls).toHaveLength(1)
   })
 })

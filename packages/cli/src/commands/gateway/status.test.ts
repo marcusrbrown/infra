@@ -882,9 +882,15 @@ describe('buildWorkspaceProbeScript', () => {
     expect(script).not.toMatch(/docker exec fro-bot/)
   })
 
-  it('guards the readyz probe on a non-zero limit and 64 MiB of headroom', () => {
+  it('guards the readyz probe on digit-only reads, a non-zero limit and strictly more than 64 MiB of headroom', () => {
     expect(script).toContain('-gt 67108864')
-    expect(script).toMatch(/\[ "\$\{limit:-0\}" -gt 0 \]/)
+    expect(script).toContain('[ "$limit" -gt 0 ]')
+    expect(script).toContain(`case "$limit" in ''|*[!0-9]*)`)
+    expect(script).toContain(`case "$cur" in ''|*[!0-9]*)`)
+  })
+
+  it('has no default that turns a missing read into zero', () => {
+    expect(script).not.toContain(':-0')
   })
 
   it('keeps the read-only probe free of write operations', () => {
@@ -980,6 +986,12 @@ describe('parseWorkspaceProbeOutput', () => {
     const status = parseWorkspaceProbeOutput(workspaceStdout({currentBytes: LIMIT_BYTES - 16 * MIB}))
 
     expect(status.status).toBe('ok')
+    expect(status.status === 'ok' && status.opencode).toBe('unknown')
+  })
+
+  it('does not trust a ready body at exactly 64 MiB of headroom', () => {
+    const status = parseWorkspaceProbeOutput(workspaceStdout({currentBytes: LIMIT_BYTES - 64 * MIB}))
+
     expect(status.status === 'ok' && status.opencode).toBe('unknown')
   })
 
@@ -1138,7 +1150,12 @@ case "$1" in
   exec)
     case "$*" in
       *memory.events*) echo "$FAKE_CURRENT"; printf 'low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n' ;;
-      *"cat /sys/fs/cgroup/memory.current"*) echo "$FAKE_CURRENT" ;;
+      *"cat /sys/fs/cgroup/memory.current"*)
+        case "$FAKE_CUR_MODE" in
+          fail) exit 1 ;;
+          empty) echo "" ;;
+          *) echo "$FAKE_CURRENT" ;;
+        esac ;;
       *node*) printf '%s' "$FAKE_READYZ" ;;
     esac ;;
 esac
@@ -1151,7 +1168,13 @@ esac
     rmSync(dir, {recursive: true, force: true})
   })
 
-  async function runScript(fake: {limit: number; current: number; readyz?: string}): Promise<string> {
+  async function runScript(fake: {
+    limit: number
+    current: number
+    readyz?: string
+    // How the stand-alone `cat memory.current` read behaves; the memory.events read is unaffected.
+    curMode?: 'fail' | 'empty'
+  }): Promise<string> {
     const child = Bun.spawn(['sh', '-c', buildWorkspaceProbeScript()], {
       env: {
         PATH: `${dir}:${process.env.PATH ?? '/usr/bin:/bin'}`,
@@ -1160,6 +1183,7 @@ esac
         FAKE_LIMIT: String(fake.limit),
         FAKE_CURRENT: String(fake.current),
         FAKE_READYZ: fake.readyz ?? DEGRADED_BODY,
+        FAKE_CUR_MODE: fake.curMode ?? '',
       },
       stdout: 'pipe',
       stderr: 'pipe',
@@ -1176,6 +1200,9 @@ esac
 
   it('resolves the container ID once and addresses every later command by it', async () => {
     const stdout = await runScript({limit: LIMIT_BYTES, current: 412 * MIB})
+    expect(dockerCalls().filter(call => call.startsWith('compose ') && call.includes(' ps '))).toEqual([
+      `compose --project-directory /opt/gateway/deploy ps -q workspace`,
+    ])
 
     const status = parseWorkspaceProbeOutput(stdout)
     expect(status).toMatchObject({
@@ -1198,6 +1225,36 @@ esac
 
   it('does not run the node exec when usage is within 64 MiB of the limit', async () => {
     const stdout = await runScript({limit: LIMIT_BYTES, current: LIMIT_BYTES - 16 * MIB, readyz: READY_BODY})
+
+    expect(dockerCalls().some(call => call.includes('node -e'))).toBe(false)
+    const status = parseWorkspaceProbeOutput(stdout)
+    expect(status.status === 'ok' && status.opencode).toBe('unknown')
+  })
+
+  it('does not run the node exec at exactly 64 MiB of headroom', async () => {
+    const stdout = await runScript({limit: LIMIT_BYTES, current: LIMIT_BYTES - 64 * MIB, readyz: READY_BODY})
+
+    expect(dockerCalls().some(call => call.includes('node -e'))).toBe(false)
+    const status = parseWorkspaceProbeOutput(stdout)
+    expect(status.status === 'ok' && status.opencode).toBe('unknown')
+  })
+
+  it('runs the node exec one byte beyond 64 MiB of headroom', async () => {
+    await runScript({limit: LIMIT_BYTES, current: LIMIT_BYTES - 64 * MIB - 1, readyz: READY_BODY})
+
+    expect(dockerCalls().some(call => call.includes('node -e'))).toBe(true)
+  })
+
+  it('does not run the node exec when the memory.current read fails and prints nothing', async () => {
+    const stdout = await runScript({limit: LIMIT_BYTES, current: 412 * MIB, readyz: READY_BODY, curMode: 'fail'})
+
+    expect(dockerCalls().some(call => call.includes('node -e'))).toBe(false)
+    const status = parseWorkspaceProbeOutput(stdout)
+    expect(status.status === 'ok' && status.opencode).toBe('unknown')
+  })
+
+  it('does not run the node exec when the memory.current read prints an empty line', async () => {
+    const stdout = await runScript({limit: LIMIT_BYTES, current: 412 * MIB, readyz: READY_BODY, curMode: 'empty'})
 
     expect(dockerCalls().some(call => call.includes('node -e'))).toBe(false)
     const status = parseWorkspaceProbeOutput(stdout)

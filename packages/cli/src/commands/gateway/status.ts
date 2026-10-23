@@ -59,7 +59,9 @@ export type SpawnFn = (
   kill?: () => void
 }
 
-export type OpencodeState = 'starting' | 'ready' | 'down' | 'degraded' | 'unknown'
+export const OPENCODE_STATES = ['starting', 'ready', 'down', 'degraded'] as const
+
+export type OpencodeState = (typeof OPENCODE_STATES)[number] | 'unknown'
 
 export interface WorkspaceMemoryReport {
   status: 'ok'
@@ -129,8 +131,6 @@ const SECTION_MARKERS = {
   readyz: '@@ws-readyz@@',
 } as const
 
-const OPENCODE_STATES = ['starting', 'ready', 'down', 'degraded'] as const
-
 const READYZ_URL = 'http://127.0.0.1:9100/readyz'
 
 /** Prints the body whatever the HTTP status: a 503 covers starting, degraded and down. */
@@ -154,7 +154,14 @@ export function buildWorkspaceProbeScript(): string {
     `echo ${SECTION_MARKERS.readyz}`,
     `limit=$(docker inspect --format '{{.HostConfig.Memory}}' "$id")`,
     'cur=$(docker exec "$id" cat /sys/fs/cgroup/memory.current)',
-    `if [ "\${limit:-0}" -gt 0 ] && [ $(( \${limit:-0} - \${cur:-0} )) -gt ${READYZ_PROBE_HEADROOM_BYTES} ]; then`,
+    // Fail closed: run the exec only when both reads are digit strings and headroom is strictly above the margin.
+    'run=no',
+    `case "$limit" in ''|*[!0-9]*) ;; *)`,
+    `  case "$cur" in ''|*[!0-9]*) ;; *)`,
+    `    if [ "$limit" -gt 0 ] && [ $(( limit - cur )) -gt ${READYZ_PROBE_HEADROOM_BYTES} ]; then run=yes; fi ;;`,
+    '  esac ;;',
+    'esac',
+    'if [ "$run" = yes ]; then',
     `  docker exec "$id" node -e '${buildReadyzProbeSnippet()}'`,
     'fi',
     'exit 0',

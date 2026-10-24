@@ -14,8 +14,8 @@ Fill every `[fill]` field. Use UTC. Record counts, categories, hashes, and statu
 - Infra commit: `[fill exact commit]`
 - Retention release hash: `[fill 64-hex hash]`
 - `/opt/umami/retention/current` readlink: `[fill exact target]`
-- Umami image/version: `umamisoftware/umami:3.2.0@sha256:d8111e1d6d94be54a54514cd4e1264fbfe905e5ea0d0691804b1d71e627a6fca` — `[fill confirmation]`
-- Postgres image/version: `postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e` — `[fill confirmation]`
+- Umami image/version: `[fill umamisoftware/umami reference from docker-compose.yaml]` — `[fill confirmation]`
+- Postgres image/version: `[fill postgres reference from docker-compose.yaml]` — `[fill confirmation]`
 - `/etc/systemd/system/umami-retention.service` SHA-256: `[fill]`
 - `/etc/systemd/system/umami-retention.timer` SHA-256: `[fill]`
 - `mrbro.dev` requirements/plan revision: `[fill path, revision, or approved reference]`
@@ -30,8 +30,8 @@ Fill every `[fill]` field. Use UTC. Record counts, categories, hashes, and statu
 - Source capture state: `caddy+umami stopped, db up; brief analytics downtime acknowledged` — `[fill]`
 - Source manifest path: `[fill local path]`
 - Source manifest SHA-256: `[fill]`
-- Disposable restore image: `postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e` — `[fill confirmation]`
-- Disposable restore isolation: `--network none; tmpfs /var/lib/postgresql/data; no published ports; trust auth only inside disposable container` — `[fill]`
+- Disposable restore image: `[fill postgres reference from docker-compose.yaml]` — `[fill confirmation]`
+- Disposable restore isolation: `--network none; tmpfs /var/lib/postgresql; no published ports; trust auth only inside disposable container` — `[fill]`
 - Restored DB manifest query: `PASS` / `FAIL` — `[fill]`
 - Restored manifest path: `[fill local path]`
 - Restored manifest SHA-256: `[fill]`

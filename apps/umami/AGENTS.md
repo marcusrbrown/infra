@@ -4,11 +4,11 @@ Privacy-respecting, self-hosted [Umami](https://umami.is) web analytics for `met
 
 ## Stack
 
-| Service | Image                   | Role                                       |
-| ------- | ----------------------- | ------------------------------------------ |
-| `umami` | `umamisoftware/umami`   | App + tracker API on `:3000`               |
-| `db`    | `postgres` Alpine image | Postgres; named volume `umami-db-data`     |
-| `caddy` | `caddy` Alpine image    | Auto-TLS reverse proxy `:443 → umami:3000` |
+| Service | Image                   | Role                                        |
+| ------- | ----------------------- | ------------------------------------------- |
+| `umami` | `umamisoftware/umami`   | App + tracker API on `:3000`                |
+| `db`    | `postgres` Alpine image | Postgres; named volume `umami-db-data-pg18` |
+| `caddy` | `caddy` Alpine image    | Auto-TLS reverse proxy `:443 → umami:3000`  |
 
 Images are pinned to numbered tags by digest in `docker-compose.yaml` (the source of truth for versions) and tracked by Renovate (changelog-linked, standalone PRs). Postgres port `5432` is never published to the host.
 
@@ -71,7 +71,7 @@ Umami is cookie-free and respects Do-Not-Track by default. The downstream tracke
 
 ## Data persistence & retention
 
-All analytics data lives in the `umami-db-data` Postgres volume. The deploy only ever runs `up -d` — **never `down -v`** — so the volume survives every deploy and image bump.
+All analytics data lives in the `umami-db-data-pg18` Postgres volume, mounted at `/var/lib/postgresql` with the image-default `PGDATA` (no override). The deploy only ever runs `up -d` — **never `down -v`** — so the volume survives every deploy and image bump. The Postgres major migration is complete; it ran via [`docs/runbooks/umami-postgres-major-upgrade.md`](../../docs/runbooks/umami-postgres-major-upgrade.md). The image, volume key, and mount destination change together or not at all.
 
 **Retention policy:** rows strictly older than `CURRENT_TIMESTAMP - INTERVAL '13 months'` are eligible. This is a calendar-month boundary, not a fixed day count. The policy covers pageview/custom-interaction rows and child/time-series rows in `event_data`, `website_event`, `session_data`, `revenue`, `session_replay`, `session_replay_saved`, and `heatmap_event`. Saved replay markers are unique by `(website_id, visit_id)` and expire when their own timestamp or any matching replay chunk crosses the cutoff; marker deletion precedes payload deletion, followed by a second marker sweep to prevent same-run stale metadata. Website-event parents and monthly session parents are deleted only after their supporting children are gone; dependency-protected website-event parents and monthly session parents remain only while they support retained children. Normal monthly session lifecycle data therefore keeps session parents below 14 months when no retained dependency requires them.
 
@@ -245,7 +245,7 @@ cleanup() {
   trap - EXIT
   if (( CONTAINER_CREATED == 1 )); then
     if docker container inspect "$RESTORE_CONTAINER" >/dev/null 2>&1; then
-      if ! docker rm -f "$RESTORE_CONTAINER" >/dev/null; then
+      if ! docker rm -f -v "$RESTORE_CONTAINER" >/dev/null; then
         status=1
       fi
     fi
@@ -316,14 +316,14 @@ shasum -a 256 "$BACKUP"
 
 docker run -d --name "$RESTORE_CONTAINER" \
   --network none \
-  --tmpfs /var/lib/postgresql/data \
+  --tmpfs /var/lib/postgresql \
   -e POSTGRES_USER=umami \
   -e POSTGRES_DB=umami \
   -e POSTGRES_HOST_AUTH_METHOD=trust \
   "$POSTGRES_IMAGE" >/dev/null
 CONTAINER_CREATED=1
 printf 'disposable_restore_image=%s\n' "$POSTGRES_IMAGE"
-printf 'disposable_restore_isolation=network-none,tmpfs,no-published-ports,trust-auth-only-in-container\n'
+printf 'disposable_restore_isolation=network-none,tmpfs=/var/lib/postgresql,no-published-ports,trust-auth-only-in-container\n'
 
 READY=0
 for ((attempt = 1; attempt <= 60; attempt++)); do
@@ -596,7 +596,7 @@ SSH auth during provisioning: when `UMAMI_SSH_KEY` is set, the script materializ
 
 ## Anti-patterns
 
-- **Never `docker compose down -v`** — destroys the `umami-db-data` Postgres volume (all analytics).
+- **Never `docker compose down -v`** — destroys the `umami-db-data-pg18` Postgres volume (all analytics).
 - **Never rotate `UMAMI_DB_PASSWORD` by just changing the secret** — use the `ALTER USER` runbook; the fingerprint guard will otherwise refuse the deploy.
 - **Never publish Postgres `5432`** to the host — it stays on the internal compose network.
 - **Never put secret values in SSH argv** — the deploy pipes them via stdin.

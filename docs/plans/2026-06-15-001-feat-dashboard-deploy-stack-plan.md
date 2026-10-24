@@ -683,5 +683,5 @@ section explicitly calls out the file-mounted-key requirement and the GHCR-only 
 - Related learnings: `docs/solutions/workflow-issues/umami-first-deploy-cascade-2026-05-29.md`,
   `gateway-first-deploy-cascade-2026-05-20.md`, `cliproxy-first-deploy-cascade-2026-04-06.md`,
   `bun-deploy-user-permissions-ci-2026-04-02.md`,
-  `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` (the `--build`/rebuild
+  `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md` (the `--build`/rebuild
   lesson — why `--no-build` + digest pinning is the correct pattern)

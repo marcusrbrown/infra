@@ -101,5 +101,5 @@ Bun.spawn(['aws', ...args], { env: buildAwsChildEnv(manifest) })
 - [`docs/runbooks/agent-s3-durable-storage.md`](../../runbooks/agent-s3-durable-storage.md) — canonical operator workflow; states `agent storage` uses `AGENT_AWS_*` and ignores ambient `AWS_*`.
 - [`integration-issues/discord-mcp-empty-env-jvm-timeout-2026-06-12.md`](../integration-issues/discord-mcp-empty-env-jvm-timeout-2026-06-12.md) — Bun `.env` / ambient-env behavior precedent.
 - [`workflow-issues/vpn-lightsail-first-provision-cascade-2026-06-10.md`](../workflow-issues/vpn-lightsail-first-provision-cascade-2026-06-10.md) — dedicated-vs-ambient AWS credential isolation precedent.
-- [`integration-issues/agent-s3-key-layout-diverged-from-pinned-action-2026-08-03.md`](../integration-issues/agent-s3-key-layout-diverged-from-pinned-action-2026-08-03.md) — the sibling key-layout fix from the same rollout.
+- [`integration-issues/agent-s3-iam-layout-drift-from-action-2026-08-03.md`](../integration-issues/agent-s3-iam-layout-drift-from-action-2026-08-03.md) — the sibling key-layout fix from the same rollout.
 - PR #1014.

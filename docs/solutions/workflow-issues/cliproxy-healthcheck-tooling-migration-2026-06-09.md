@@ -11,7 +11,7 @@ module: apps/cliproxy
 related_issues: []
 related_docs:
   - docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md
-  - docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md
+  - docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md
   - docs/solutions/workflow-issues/umami-first-deploy-cascade-2026-05-29.md
   - docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md
   - docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md
@@ -89,7 +89,7 @@ choices. Moving the probe to a sidecar you control makes health-gating version-a
 
 This also reinforces a recurring lesson across this repo's deploy docs: a
 `docker compose up --wait` result can lie about *why* it passed or failed — it can
-pass on a stale image (see `gateway-deploy-stale-image-2026-05-31.md`) or fail on a
+pass on a stale image (see `off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`) or fail on a
 healthy server with a broken probe (this doc). Always verify live state, and gate on
 a probe whose tooling you control.
 

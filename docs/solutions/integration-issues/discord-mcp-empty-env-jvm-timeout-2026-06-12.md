@@ -89,5 +89,4 @@ The decisive diagnostic was **`opencode debug config --pure`**: it prints the re
 ## Related Issues
 
 - PR #506 — `fix(mcp): wire Discord MCP env from .env and gate destructive tools` (merged `790812a`)
-- `docs/solutions/integration-issues/gateway-mention-loop-model-config-2026-06-04.md` — adjacent: OpenCode/`WORKSPACE_OPENCODE_CONFIG` env wiring in the gateway workspace (different layer, same `.env`-discipline family)
-- `docs/solutions/integration-issues/gateway-mention-loop-permission-and-empty-workspace-2026-06-05.md` — adjacent OpenCode-config failure mode, distinct from this MCP env-interpolation gap
+- `docs/solutions/integration-issues/gateway-mention-loop-stalls-2026-06-03.md` — adjacent: OpenCode/`WORKSPACE_OPENCODE_CONFIG` env wiring and OpenCode-config failure modes in the gateway workspace (different layer, same `.env`-discipline family; distinct from this MCP env-interpolation gap)

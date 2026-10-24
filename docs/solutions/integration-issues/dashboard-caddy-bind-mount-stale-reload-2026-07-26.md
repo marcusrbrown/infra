@@ -21,8 +21,8 @@ related_issues:
   - https://github.com/marcusrbrown/infra/pull/1638
 related_docs:
   - docs/solutions/integration-issues/broker-credential-lifecycle-restart-races-2026-07-02.md
-  - docs/solutions/integration-issues/dashboard-spa-caddy-catchall-deep-link-404-2026-06-25.md
-  - docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md
+  - docs/solutions/best-practices/dashboard-app-owns-routing-caddy-proxy-only-2026-10-24.md
+  - docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md
 ---
 
 # Bind-mounted Caddyfile and PEM key changes not loaded on dashboard deploy
@@ -100,5 +100,5 @@ The `dashboard is always force-recreated after the keys are published` suite in 
 - [#1638](https://github.com/marcusrbrown/infra/pull/1638) — Fro Bot App key mount and the unconditional dashboard recreate.
 - [#948](https://github.com/marcusrbrown/infra/pull/948) — dashboard listener-state persistence (same incident window, different root cause).
 - [broker-credential-lifecycle-restart-races-2026-07-02.md](./broker-credential-lifecycle-restart-races-2026-07-02.md) — strongest precedent: the same bind-mounted-content-vs-container-recreation trap for the broker's `dist/main.js`, fixed with `--force-recreate` in [#740](https://github.com/marcusrbrown/infra/pull/740).
-- [dashboard-spa-caddy-catchall-deep-link-404-2026-06-25.md](./dashboard-spa-caddy-catchall-deep-link-404-2026-06-25.md) — same `apps/dashboard/config/Caddyfile`; its `@owned` asset allowlist drifted and served operator assets as `text/html`, superseded by the extension matcher in [#953](https://github.com/marcusrbrown/infra/pull/953).
-- [gateway-deploy-stale-image-2026-05-31.md](../workflow-issues/gateway-deploy-stale-image-2026-05-31.md) — same "green deploy does not prove freshness" lesson for stale Docker images.
+- [dashboard-app-owns-routing-caddy-proxy-only-2026-10-24.md](../best-practices/dashboard-app-owns-routing-caddy-proxy-only-2026-10-24.md) — same `apps/dashboard/config/Caddyfile`; the earlier `@owned` asset allowlist drifted and served operator assets as `text/html`, superseded by the extension matcher in [#953](https://github.com/marcusrbrown/infra/pull/953), which was itself later removed: [#1564](https://github.com/marcusrbrown/infra/pull/1564) dropped the rewrite, and the app now owns routing (the Caddyfile just reverse-proxies to the dashboard).
+- [off-droplet-docker-image-build-gateway-deploy-2026-06-04.md](../best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md) — same "green deploy does not prove freshness" lesson for stale Docker images.

@@ -62,7 +62,7 @@ The `fro-bot/agent` v0.52.1 daemon ships an announce feature that turns an HMAC-
 ### Institutional Learnings
 
 - `gateway-v0500-undeployable-upstream-2026-06-02.md`: the daemon's config loader (not compose) is authoritative for required secrets. **Verify the daemon reads `GATEWAY_WEBHOOK_SECRET`/`GATEWAY_PRESENCE_CHANNEL_ID` via env `*_FILE` and that the override supplies exactly that shape.**
-- `gateway-deploy-stale-image-2026-05-31.md`: `docker compose up` needs `--build` to rebuild (already present); compose changes need `--force-recreate` to take effect — the checksum already triggers it, but adding the override to the checksum input ensures a Caddy change recreates.
+- `off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`: `docker compose up` needs `--build` to rebuild (already present); compose changes need `--force-recreate` to take effect — the checksum already triggers it, but adding the override to the checksum input ensures a Caddy change recreates.
 - `cliproxy-first-deploy-cascade-2026-04-06.md`: volume mounts do nothing unless config points at them — Caddy `caddy_data` must be a **named** volume so certs survive `git clean -xfd`.
 - `umami-first-deploy-cascade-2026-05-29.md`: rotate/seed credentials before exposing publicly; fail closed on credential/persistent state.
 - `gateway-first-deploy-cascade-2026-05-20.md`: `git clean -xfd` recovery is dangerous if it nukes untracked secrets — but here it is the *intended* rollback mechanism for the override (working-tree file, re-materialized only when inputs present).
@@ -249,5 +249,5 @@ The `fro-bot/agent` v0.52.1 daemon ships an announce feature that turns an HMAC-
 
 - **Origin document:** `docs/brainstorms/2026-06-03-gateway-announce-presence-ingress-requirements.md`
 - Related code: `apps/gateway/src/deploy.ts` (`buildSecretFileList`, `writeRemoteFile`, `computeSecretsChecksum`, `getMissingWorkspaceEnvVars`, `main`), `packages/cli/src/commands/gateway/deploy.ts` (`getGatewayDeployEnv`), `apps/cliproxy/config/Caddyfile`, `apps/umami/config/Caddyfile`
-- Related learnings: `docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md`, `gateway-deploy-stale-image-2026-05-31.md`, `cliproxy-first-deploy-cascade-2026-04-06.md`, `umami-first-deploy-cascade-2026-05-29.md`
+- Related learnings: `docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md`, `off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`, `cliproxy-first-deploy-cascade-2026-04-06.md`, `umami-first-deploy-cascade-2026-05-29.md`
 - Upstream: `fro-bot/agent` v0.52.1 announce feature (`packages/gateway/src/http/announce-handler.ts`, `discord/presence.ts`, config `:368-400`)

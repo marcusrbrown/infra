@@ -127,5 +127,5 @@ deploy-dashboard:
 - `docs/solutions/workflow-issues/vpn-lightsail-first-provision-cascade-2026-06-10.md` — strongest precedent: provider-specific setup belongs in provisioning, and the first real provision/deploy of a new cloud path is a live contract test.
 - `docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md` — same shape: a deploy fails because an assumption about the contract is wrong; verify the actual source of truth.
 - `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md` — the gateway first-deploy cascade family; first real deploy exposes hidden contract drift.
-- `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` — same gateway deploy path, different failure (image freshness).
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md` — same gateway deploy path, different failure (image freshness).
 - `docs/solutions/integration-issues/docker-network-stale-subnet-cleanup-2026-06-18.md` — adjacent operator VPC bridge topology and deploy-time network assumptions.

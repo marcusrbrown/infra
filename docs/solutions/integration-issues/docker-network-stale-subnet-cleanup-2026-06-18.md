@@ -57,7 +57,7 @@ The deploy now runs this shape:
    - `docker rm -f fro-bot-caddy-1`
 6. Treat `No such container` as already released; fail closed on any other container-removal error.
 7. Retry `docker network rm fro-bot_gateway-net`. A second failure here is fatal — the deploy fails closed rather than proceeding into a partly migrated topology.
-8. Only then run `docker compose up -d --no-build --wait --wait-timeout 120 --remove-orphans` so Compose recreates the network with the expected subnet.
+8. Only then run `docker compose up -d --no-build --wait --wait-timeout ${COMPOSE_WAIT_TIMEOUT_SECONDS} --remove-orphans` (the `COMPOSE_WAIT_TIMEOUT_SECONDS` constant in `apps/gateway/src/deploy.ts`) so Compose recreates the network with the expected subnet.
 
 The implementation lives in `apps/gateway/src/deploy.ts` as `removeStaleGatewayNet()`. It runs on every Gateway deploy, not only operator deploys, because stale network state can block any later compose reconciliation.
 
@@ -73,7 +73,7 @@ await removeStaleGatewayNet(host, deployEnv, spawnFn, keyPath, controlPath)
 
 await runCommand(
   'Starting Docker Compose stack',
-  sshCommand(host, `docker compose --project-directory ${DEPLOY_DIR} up -d --no-build --wait --wait-timeout 120 --remove-orphans`, keyPath, controlPath),
+  sshCommand(host, `docker compose --project-directory ${DEPLOY_DIR} up -d --no-build --wait --wait-timeout ${COMPOSE_WAIT_TIMEOUT_SECONDS} --remove-orphans`, keyPath, controlPath),
   deployEnv,
   spawnFn,
 )

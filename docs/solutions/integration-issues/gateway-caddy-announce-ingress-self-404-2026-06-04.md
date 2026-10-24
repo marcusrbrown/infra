@@ -85,7 +85,7 @@ gateway.fro.bot {
 }
 ```
 
-Adapting the corrected form (on the pinned `caddy:2.11.3-alpine`) compiles to:
+Adapting the corrected form (on the pinned Caddy image) compiles to:
 
 - `[0] match=path /v1/announce -> reverse_proxy`
 - `[1] match=None -> static_response(404)`
@@ -123,7 +123,7 @@ the first public deploy.
   Quick check against the pinned image:
 
   ```sh
-  docker run --rm caddy:2.11.3-alpine sh -c \
+  docker run --rm <pinned-caddy-image> sh -c \
     'printf "%s" "$CADDYFILE" > /tmp/Cf && caddy adapt --adapter caddyfile --config /tmp/Cf'
   ```
 
@@ -140,5 +140,5 @@ the first public deploy.
 - Issue #410 — announce ingress hardening follow-up (post-deploy HTTPS probe, test robustness).
 - `docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md` — sibling lesson: required runtime inputs must be wired through every layer, not just the preflight/local path.
 - `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md` — the first public deploy is an end-to-end contract test; verify the whole path, not assumptions.
-- `docs/solutions/integration-issues/gateway-mention-loop-supervisor-timeout-2026-06-03.md` — sibling meta-lesson: verify against ground-truth behavior, not inferred behavior.
+- `docs/solutions/integration-issues/gateway-mention-loop-stalls-2026-06-03.md` — sibling meta-lesson: verify against ground-truth behavior, not inferred behavior.
 - `./docker-network-stale-subnet-cleanup-2026-06-18.md` — sibling integration issue on the same gateway stack: stale Docker network IPAM state blocks compose up after an explicit-subnet topology change.

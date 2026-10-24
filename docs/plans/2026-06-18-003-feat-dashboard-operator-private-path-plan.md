@@ -107,7 +107,7 @@ docs/brainstorms/2026-06-18-dashboard-operator-private-path-requirements.md)
   hardcode interface names in iptables — detect at deploy (`ip route show default` / `ip -4 addr show`);
   fail closed if not found; verify the rule landed (`iptables -nvL DOCKER-USER`). Governs R1/R2 VPC
   interface/IP detection.
-- `docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md`: never SSH-hammer a
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`: never SSH-hammer a
   thrashing box; use external probes (`curl`, `doctl`, GitHub API); break-glass is
   `doctl compute droplet-action power-cycle <id>`. Governs R6 (external negative-control probe) +
   recovery notes.
@@ -488,5 +488,5 @@ exists and is cross-linked.
 - Related issues: #579 (listener topology, closed), #581 (same-origin decision)
 - Caddy self-404: docs/solutions/integration-issues/gateway-caddy-announce-ingress-self-404-2026-06-04.md
 - iptables interface detection: docs/solutions/integration-issues/vpn-lightsail-wan-interface-masquerade-2026-06-12.md
-- Break-glass / external probes: docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md
+- Break-glass / external probes: docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md
 - Code anchors: apps/gateway/src/deploy.ts (buildComposeOverride, buildCaddyfile, operator gating, SSH helpers), apps/dashboard/config/Caddyfile, packages/shared/server/droplet-helpers.ts

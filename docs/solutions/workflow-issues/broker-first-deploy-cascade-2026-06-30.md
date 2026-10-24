@@ -77,7 +77,7 @@ Resolve each hit with its documented fix, in order:
      "$(cat /tmp/domain-keys)" "$(cat /tmp/ip-keys)" >> .github/known_hosts
    cp .github/known_hosts packages/cli/src/resources/known_hosts   # byte-identical drift-guard
    ```
-   Then re-run `provision:broker --force` — it logs `Host keys already pinned` and skips the scans.
+   Then re-run `provision:broker --force` — it logs `Host keys already pinned` and skips the scans. (The scans themselves now live in the shared `pinHostKeys` helper in `packages/shared/server/droplet-helpers.ts`, called from `apps/broker/server/provision-droplet.ts`; the manual form above mirrors it.)
 
 5. **Run the local deploy the way CI does** ([ssh-agent MaxAuthTries doc](../integration-issues/ssh-agent-too-many-authentication-failures-2026-06-13.md)): a single-key ssh-agent plus a short `TMPDIR`:
    ```bash

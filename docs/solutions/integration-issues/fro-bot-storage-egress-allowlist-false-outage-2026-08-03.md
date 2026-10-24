@@ -85,8 +85,7 @@ The honest limit: `api.github.com` is allowlisted and the PAT posts issues, so G
 
 ## Related Issues
 
-- [`gateway-mention-loop-supervisor-timeout-2026-06-03.md`](gateway-mention-loop-supervisor-timeout-2026-06-03.md) — the fail-closed egress-allowlist precedent: one missing host silently breaks a downstream tool; verify against ground truth.
-- [`gateway-mention-loop-model-config-2026-06-04.md`](gateway-mention-loop-model-config-2026-06-04.md) — adjacent "looks like an egress block, verify actual output" lesson.
+- [`gateway-mention-loop-stalls-2026-06-03.md`](gateway-mention-loop-stalls-2026-06-03.md) — the fail-closed egress-allowlist precedent (one missing host silently breaks a downstream tool), plus the adjacent "looks like an egress block, verify actual output" lesson; verify against ground truth.
 - [`../best-practices/dedicated-hermetic-aws-child-env-for-cli-subprocess-2026-08-03.md`](../best-practices/dedicated-hermetic-aws-child-env-for-cli-subprocess-2026-08-03.md) — sibling credential-boundary lesson from the same rollout (env scrubbing is not process isolation).
-- [`agent-s3-key-layout-diverged-from-pinned-action-2026-08-03.md`](agent-s3-key-layout-diverged-from-pinned-action-2026-08-03.md) — same durable-storage rollout.
+- [`agent-s3-iam-layout-drift-from-action-2026-08-03.md`](agent-s3-iam-layout-drift-from-action-2026-08-03.md) — same durable-storage rollout.
 - Issues/PRs: #1026 (false outage), #1013 (the content/storage split), #1029 (fix).

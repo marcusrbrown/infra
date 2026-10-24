@@ -155,8 +155,8 @@ A repo-wide search concluded nothing depended on a changed image tag. It had che
 ## Related
 
 - [Major-version upstream upgrade playbook](../best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md) — probe the pinned artifact before trusting claims about it
-- [Agent S3 key layout diverged from the pinned action's contract](../integration-issues/agent-s3-key-layout-diverged-from-pinned-action-2026-08-03.md) — a version pin is not verification; read the pinned source
+- [Agent S3 IAM policy drifts from the Fro Bot Action's object-key contract](../integration-issues/agent-s3-iam-layout-drift-from-action-2026-08-03.md) — a version pin is not verification; read the pinned source
 - [Off-droplet Docker image build](../best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md) — digest-addressed identity over tags
-- [Gateway deploys never rebuilt the image](gateway-deploy-stale-image-2026-05-31.md) — a green deploy can still be stale
+- [Off-droplet Docker image build for gateway deploy](../best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md) — a green deploy can still be stale
 - [Reusable workflow permission parity](reusable-workflow-permission-parity-startup-failure-2026-09-01.md) — validate the caller/callee contract at the boundary
 - [Brokered push silent bypass](../best-practices/fro-bot-brokered-push-issue-comment-2026-08-28.md) — absence of action is not evidence of absent capability

@@ -4,7 +4,7 @@
 
 Privacy-respecting, self-hosted web analytics at [metrics.fro.bot](https://metrics.fro.bot).
 
-Three-service Docker Compose stack (Umami 3.2.0 + PostgreSQL 15 + Caddy) on a dedicated DigitalOcean droplet. Caddy handles automatic HTTPS. Postgres is reachable only on the internal compose network — port 5432 is never published to the host. Images are digest-pinned and tracked by Renovate. `DISABLE_TELEMETRY=1` and `PRIVATE_MODE=1` are set in the compose layer; Umami is cookie-free and respects Do-Not-Track by default.
+Three-service Docker Compose stack (Umami + PostgreSQL + Caddy, at the pinned images in `docker-compose.yaml`) on a dedicated DigitalOcean droplet. Caddy handles automatic HTTPS. Postgres is reachable only on the internal compose network — port 5432 is never published to the host. Images are digest-pinned and tracked by Renovate. `DISABLE_TELEMETRY=1` and `PRIVATE_MODE=1` are set in the compose layer; Umami is cookie-free and respects Do-Not-Track by default.
 
 ## Deploy
 
@@ -65,7 +65,7 @@ Full deploy flow, retention runbook, secret rotation runbooks, backup/restore pr
 
 Key operational notes:
 
-- Never run `docker compose down -v` — destroys the `umami-db-data` Postgres volume (all analytics data).
+- Never run `docker compose down -v` — destroys the `umami-db-data-pg18` Postgres volume (all analytics data).
 - Never rotate `UMAMI_DB_PASSWORD` by just changing the secret — use the `ALTER USER` runbook.
 - Never publish Postgres port 5432 to the host.
 - Never remove `DISABLE_TELEMETRY` or `PRIVATE_MODE` — they are the reason this is self-hosted.

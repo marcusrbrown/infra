@@ -12,7 +12,7 @@ interface CommandResult {
 const appDirectory = new URL('.', import.meta.url).pathname
 const applySqlPath = `${appDirectory}/retention.sql`
 const checkSqlPath = `${appDirectory}/retention-check.sql`
-const postgresImage = 'postgres:15-alpine'
+const postgresImage = 'postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5'
 const dockerProbe = Bun.spawnSync(['docker', 'info'])
 const dockerAvailable = dockerProbe.exitCode === 0
 const imageProbe = dockerAvailable ? Bun.spawnSync(['docker', 'image', 'inspect', postgresImage]) : undefined
@@ -159,10 +159,10 @@ function queryLines(result: CommandResult): string[] {
     .filter(line => line.length > 0 && line !== 'SET')
 }
 
-describe('Umami retention PostgreSQL 15 integration', () => {
+describe('Umami retention PostgreSQL 18 integration', () => {
   integrationTest(
     dockerAvailable
-      ? 'covers retention safety scenarios against PostgreSQL 15'
+      ? 'covers retention safety scenarios against PostgreSQL 18'
       : `requires Docker daemon (skipped: ${dockerReason})`,
     async () => {
       const container = `umami-retention-integration-${process.pid}-${Date.now()}`

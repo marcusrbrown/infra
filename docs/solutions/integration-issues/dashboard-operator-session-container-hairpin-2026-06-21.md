@@ -1,6 +1,7 @@
 ---
 title: Dashboard operator-session cutover redirect loop — container cannot hairpin to its own public hostname
 date: 2026-06-21
+last_updated: 2026-10-24
 category: integration-issues
 module: apps/dashboard
 problem_type: integration_issue
@@ -67,7 +68,7 @@ networks:
     name: dashboard_default
 ```
 
-**Critical placement constraint:** the alias must live in the base `docker-compose.yaml`, **not** a `docker-compose.override.yaml`. The dashboard deploy's Phase 7.5 runs `rm -f /opt/dashboard/docker-compose.override.yaml` on every deploy (legacy image-pin cleanup), so an override would be silently deleted on the next deploy and the loop would return.
+**Critical placement constraint:** the alias must live in the base `docker-compose.yaml`, **not** a `docker-compose.override.yaml`. The dashboard deploy's remote program removes `/opt/dashboard/docker-compose.override.yaml` on every deploy (`DASHBOARD_LEGACY_OVERRIDE_PATH` in `apps/dashboard/src/remote-deploy.ts`; legacy image-pin cleanup), so an override would be silently deleted on the next deploy and the loop would return.
 
 Verified after the alias (from inside the container): `fetch("https://dashboard.fro.bot/operator/session")` → real `401` instead of a timeout; `session validation failed` and `network error` counts dropped to `0`; the authenticated monitoring page loads.
 

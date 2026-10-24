@@ -62,7 +62,7 @@ Regression guard, all in the repo:
 - `apps/dashboard/config/Caddyfile.test.ts:124`, the test `has exactly two handles: /operator/* first, then a matcherless catch-all`, pins the handle list.
 - `apps/dashboard/config/Caddyfile.test.ts:139`, `proxies the catch-all to the app with no extra directives`, requires the catch-all body to be only `reverse_proxy dashboard:3000`.
 - `apps/dashboard/config/Caddyfile.test.ts:153`, `has no rewrite directive anywhere; the app owns path handling`, fails on any `rewrite`.
-- The routing table in the `dashboard Caddyfile routing` suite (`apps/dashboard/config/Caddyfile.test.ts:100`) sends `/operator` and `/operatorx` to the app, `/operator/*` to the gateway, and every other path to the app. The model throws on named matchers, so adding one fails loudly.
+- The routing table in the `dashboard Caddyfile routing` suite (`apps/dashboard/config/Caddyfile.test.ts`) sends `/operator` and `/operatorx` to the app, `/operator/*` to the gateway, and every other path to the app. The model throws on named matchers, so adding one fails loudly.
 - `committed Caddyfile structure` (`apps/dashboard/src/deploy.test.ts:1156`) pins the operator block's headers and `flush_interval -1`, the operator-before-catch-all order, and no site-level `reverse_proxy`.
 
 A Caddyfile-only change applies on the next dashboard deploy with no manual reload: the deploy force-recreates Caddy every time (`apps/dashboard/src/remote-deploy.ts:544`). See [dashboard-caddy-bind-mount-stale-reload-2026-07-26.md](../integration-issues/dashboard-caddy-bind-mount-stale-reload-2026-07-26.md).

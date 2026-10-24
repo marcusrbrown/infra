@@ -94,6 +94,7 @@ await reconcileDigitalOceanFirewall() // needs doctl, an existing firewall, the 
 await setupOperatorFirewall() // create-if-absent, base 22/80/443 + 9300-from-dashboard, idempotent
 
 // apps/gateway/src/deploy.ts — per-deploy, no doctl
+// (illustrative names; the real steps are the VPC-scoped publish, Phase 8c DOCKER-USER, and Phase 8e public-denied probe)
 await publishOperatorPortOnVpcIp()     // ${GATEWAY_VPC_IP}:9300:9300
 await applyAndVerifyDockerUserRule()   // Docker rewrites DOCKER-USER on every compose up
 await verifyPublicPortDenied()         // TCP probe: public :9300 must be unreachable

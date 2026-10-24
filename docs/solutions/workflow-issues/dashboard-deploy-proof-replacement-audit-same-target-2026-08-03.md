@@ -130,11 +130,11 @@ The audit PR commit was [`741524b`](https://github.com/marcusrbrown/infra/commit
 
 The pin write-back is **evidence-only**. It records what already deployed successfully; it is not a second authorization path and it must not be treated as proof that the post-merge committed pin has reconverged in production.
 
-The deploy router explicitly excludes a dashboard commit whose message starts with `chore(dashboard): pin image to ` from automatic deployment in [`deploy.yaml`](https://github.com/marcusrbrown/infra/blob/main/.github/workflows/deploy.yaml#L174-L180). That exclusion is intentional: without it, a successful versioned deployment would open an audit PR, merge the pin, trigger another deployment, and repeat the audit write-back indefinitely.
+The deploy router explicitly excludes a dashboard commit whose message starts with `chore(dashboard): pin image to ` from automatic deployment in [`deploy.yaml`](https://github.com/marcusrbrown/infra/blob/main/.github/workflows/deploy.yaml) (the dashboard job's `if`). That exclusion is intentional: without it, a successful versioned deployment would open an audit PR, merge the pin, trigger another deployment, and repeat the audit write-back indefinitely.
 
 ## Same-target proof: run 30786511189
 
-Because the audit-pin commit skips automatic deployment, the committed pin required a separate explicit dispatch. [Production run 30786511189](https://github.com/marcusrbrown/infra/actions/runs/30786511189) was manually dispatched against `main` at `bcf3d448c374faf4bf6f810101e69514f203eb81` on `2026-08-03`. It used the no-version/committed-pin mode behind the `dashboard` environment gate in [`deploy-dashboard.yaml`](https://github.com/marcusrbrown/infra/blob/main/.github/workflows/deploy-dashboard.yaml#L123-L127).
+Because the audit-pin commit skips automatic deployment, the committed pin required a separate explicit dispatch. [Production run 30786511189](https://github.com/marcusrbrown/infra/actions/runs/30786511189) was manually dispatched against `main` at `bcf3d448c374faf4bf6f810101e69514f203eb81` on `2026-08-03`. It used the no-version/committed-pin mode behind the `dashboard` environment gate in [`deploy-dashboard.yaml`](https://github.com/marcusrbrown/infra/blob/main/.github/workflows/deploy-dashboard.yaml) (`environment: dashboard`).
 
 This run is the required same-target proof, not a redundant rerun:
 

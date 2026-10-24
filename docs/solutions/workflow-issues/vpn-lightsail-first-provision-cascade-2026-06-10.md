@@ -104,6 +104,8 @@ vpn:
   - '!**/__snapshots__/**'
 ```
 
+(The live filter in `.github/workflows/deploy.yaml` is now `{apps/vpn,packages/cli/src/commands/vpn}/**`; `packages/shared/vpn` no longer exists.)
+
 Verify the glob with `picomatch` (dorny/paths-filter's matcher): real source matches; docs, tests, fixtures, snapshots, and other apps are excluded.
 
 ## Why This Works

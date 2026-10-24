@@ -109,7 +109,7 @@ the reusable workflow didn't expose:
     exclude-patterns: '.github/**,bun.lock,package.json,apps/**,packages/shared/**'
 ```
 
-The `exclude-patterns` input in `.github/workflows/renovate-changesets.yaml` is the live value (it has since gained `packages/shared/**`); the snippet above reflects it as of the last refresh.
+The `exclude-patterns` input in `.github/workflows/renovate-changesets.yaml` is the live value (it has since gained `packages/shared/**`). The action pin has also moved past the one shown; see that file for the pinned version. The snippet above reflects the original fix.
 
 - **`exclude-patterns`**: Removes non-CLI files from the action's file
   detection before package resolution runs. github-actions SHA pins,

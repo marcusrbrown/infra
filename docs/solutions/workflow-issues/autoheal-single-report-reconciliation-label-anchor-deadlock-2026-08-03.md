@@ -1,6 +1,7 @@
 ---
 title: Autoheal single-report reconciliation deadlocked on an unseeded trust-anchor label
 date: 2026-08-03
+last_updated: 2026-10-24
 category: workflow-issues
 module: fro-bot
 problem_type: workflow_issue
@@ -70,6 +71,8 @@ The forward mechanism self-healed once the 2026-08-03 run created the label and 
 gh issue comment "$n" --body "Superseded by #1028 — current daily autohealing report. ... <!-- fro-bot:autoheal-superseded:v1 canonical=#1028 -->"
 gh issue close "$n" --reason "not planned"
 ```
+
+_(Since superseded structurally: the prompt no longer ensures the label or closes reports. A deterministic post-run step, `packages/cli/scripts/reconcile-autoheal-reports.ts`, ensures the `autoheal-report` label, adopts it onto the current report, posts supersession comments and closes superseded reports. The `REPORT OWNERSHIP CONTRACT` in `.github/workflows/fro-bot.yaml` now limits the agent to creating or updating the report body, so the prompt quoted above is the 2026-08 contract, not the current one.)_
 
 ## Why This Works
 

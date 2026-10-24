@@ -34,7 +34,7 @@ Plan: [`docs/plans/2026-06-01-001-feat-umami-postgres-major-upgrade-plan.md`](..
 
 Prerequisites on the workstation: `bash`, `docker` with compose and buildx, a running Docker-compatible runtime with linux/amd64 emulation, `age`, `gh` (authenticated), `openssl`, `shasum`, `git`, `bun`, and the deploy key loaded in ssh-agent (`ssh-add -l`).
 
-Set the recipient once per shell. The identity (`AGE-SECRET-KEY-…`) lives only in the password manager and is read through process substitution, never written to disk:
+The migration uses a throwaway age key, generated once and destroyed at finalize. Its identity (`AGE-SECRET-KEY-…`) lives only in the macOS login keychain (service `umami-pg18-age`, account `umami-pg18-migration`), so it is never on disk, never on the droplet, and never in the repo. It is read through process substitution. To create it once, generate the key under `umask 077`, store the `AGE-SECRET-KEY-` line with `security add-generic-password` (feed the command through `security -i` on stdin, never argv), keep only the public recipient, and delete the key file. Set the recipient once per shell:
 
 ```bash
 export AGE_RECIPIENT='age1…your-public-recipient'
@@ -75,8 +75,8 @@ PG15_IMAGE="$(cat "$RUN_DIR/pg15.image" 2>/dev/null || true)"
 PG18_IMAGE="$(cat "$RUN_DIR/pg18.image" 2>/dev/null || true)"
 UMAMI_IMAGE="$(cat "$RUN_DIR/umami.image" 2>/dev/null || true)"
 
-# Prints the age identity on stdout. Replace the body with your password-manager read command.
-age_identity() { printf 'define age_identity for your password manager\n' >&2; return 1; }
+# Prints the age identity on stdout from the macOS login keychain.
+age_identity() { security find-generic-password -a umami-pg18-migration -s umami-pg18-age -w; }
 ```
 
 **Shared functions.** Run after the setup block, again in every new shell:
@@ -696,7 +696,7 @@ Preconditions (all must hold):
 
 - Staging evidence complete and reviewed (step 3), including S9.
 - The pin PR is review-approved and **unmerged**. `PR_COMPOSE` points to its `apps/umami/docker-compose.yaml` in a PR-branch checkout.
-- `AGE_RECIPIENT` and the identity (password manager) are available; the backup `.age` and `compose.pg15.yaml` exist.
+- `AGE_RECIPIENT` and the identity (keychain) are available; the backup `.age` and `compose.pg15.yaml` exist.
 - The window is outside 00:00–02:00 UTC.
 
 **No step that stops PG15 `db` or touches the PG15 volume runs until the cutover dump (4.3) is encrypted, checksum-recorded and decrypt-tested (4.4).** Never run both majors at once on this host (memory). Never `docker compose down` and never remove `umami_umami-db-data` before finalize.
@@ -1089,6 +1089,8 @@ destroy_by="$(date -u -v+7d +%F 2>/dev/null || date -u -d '+7 days' +%F)"
 printf 'destroy_by=%s\n' "$destroy_by" > "$RUN_DIR/DELETION_DEADLINE"
 cat "$RUN_DIR/DELETION_DEADLINE"
 ```
+
+At that date, after the dumps are destroyed, delete the migration identity: `security delete-generic-password -a umami-pg18-migration -s umami-pg18-age`.
 
 ## Related
 

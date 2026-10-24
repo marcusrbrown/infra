@@ -77,6 +77,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Search past solutions | `docs/solutions/` | Categorized by problem type; frontmatter `module`, `tags`, `problem_type`. Relevant when implementing or debugging in a documented area |
 | Find operational runbook | `docs/runbooks/` | Operator-facing day-2 procedures (rotation, revocation, restore) |
 | Deploy-gate Discord notification | `docs/runbooks/deploy-gate-notifications.md` | webhook secret setup and rotation, reading the notify warning |
+| Discord bot token lifecycle | `docs/runbooks/discord-token-lifecycle.md` | Gateway token storage, rotation, emergency revocation |
 
 ## CONVENTIONS
 

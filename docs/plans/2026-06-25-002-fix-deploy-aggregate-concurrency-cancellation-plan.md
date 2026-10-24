@@ -69,7 +69,7 @@ The per-app reusable workflows (`deploy-<app>.yaml`) already each declare `concu
 
 ## Implementation Units
 
-- [ ] **Unit 1: Remove aggregate-level concurrency from the deploy router**
+- [x] **Unit 1: Remove aggregate-level concurrency from the deploy router**
 
 **Goal:** Eliminate the cross-app cancellation by deleting the `concurrency` block from the aggregate `deploy.yaml`, so each app's existing per-app concurrency governs independently.
 
@@ -90,7 +90,7 @@ The per-app reusable workflows (`deploy-<app>.yaml`) already each declare `concu
 - `deploy.yaml` has no top-level `concurrency:` key.
 - The 6 per-app `deploy-<app>.yaml` concurrency blocks are untouched.
 
-- [ ] **Unit 2: Add conventions test pinning the concurrency invariant**
+- [x] **Unit 2: Add conventions test pinning the concurrency invariant**
 
 **Goal:** Lock the intended state so it can't silently regress: aggregate router has no concurrency, every callable per-app deploy workflow has its per-app concurrency with `cancel-in-progress: false`.
 

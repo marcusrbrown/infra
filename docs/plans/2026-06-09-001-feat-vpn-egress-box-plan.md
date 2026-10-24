@@ -179,7 +179,7 @@ deploy.ts
 
 ## Implementation Units
 
-- [ ] **Unit 1: Scaffold apps/vpn workspace + config**
+- [x] **Unit 1: Scaffold apps/vpn workspace + config**
 
 **Goal:** Create the `apps/vpn` workspace skeleton, config files, gitignore for client output, and register it in the Bun workspace.
 
@@ -201,7 +201,7 @@ deploy.ts
 
 **Verification:** `bun install` clean, `apps/vpn` resolves as a workspace member, `@aws-sdk/client-lightsail` present in lockfile, `apps/vpn/clients/` gitignored except `.gitkeep`.
 
-- [ ] **Unit 2: Lightsail provisioning script**
+- [x] **Unit 2: Lightsail provisioning script**
 
 **Goal:** TypeScript Lightsail provisioner: import key, resolve blueprint/bundle live, create instance, allocate+attach static IP, set the exact firewall ruleset (SSH 22 + UDP 51820, closing default 80/443), install WireGuard, wait for SSH, pin the IP host key, print the static IP. Idempotent + `--force` + partial-state repair.
 
@@ -244,7 +244,7 @@ deploy.ts
 
 **Verification:** Unit tests green; no live AWS calls during `bun test`; the firewall ruleset is asserted to contain SSH 22 + UDP 51820 exactly (no lockout, default ports closed).
 
-- [ ] **Unit 3: Peer model + wg0.conf rendering**
+- [x] **Unit 3: Peer model + wg0.conf rendering**
 
 **Goal:** `peers.ts` — read/write `peers.json`, allocate next tunnel IP, render full `wg0.conf` declaratively from peers + persisted server key, generate client `.conf`.
 
@@ -276,7 +276,7 @@ deploy.ts
 
 **Verification:** Rendering is deterministic and declarative; a removed peer does not appear in rendered config.
 
-- [ ] **Unit 4: Deploy script (native WireGuard)**
+- [x] **Unit 4: Deploy script (native WireGuard)**
 
 **Goal:** `deploy.ts` — validate env + host, materialize SSH key (CI), ensure persisted server key (atomic, preserved), render + write `wg0.conf` via SSH stdin, set ip_forward, control `wg-quick@wg0`, health-gate on `wg show`.
 
@@ -315,7 +315,7 @@ deploy.ts
 
 **Verification:** Deploy is idempotent on redeploy (server key preserved, peers reconciled); health gate proves the interface is actually up.
 
-- [ ] **Unit 5: CLI command group (status/deploy/logs/client) + host validator**
+- [x] **Unit 5: CLI command group (status/deploy/logs/client) + host validator**
 
 **Goal:** `packages/cli/src/commands/vpn/` command group with `status`, `deploy`, `logs`, `client add|list|remove`, a CLI-side host validator, and `getVpnStatusSummary()`; registered in `cli.ts`.
 
@@ -348,7 +348,7 @@ deploy.ts
 
 **Verification:** `vpn` group registered; help renders; client private keys only reach gitignored output.
 
-- [ ] **Unit 6: Unified status + MCP integration**
+- [x] **Unit 6: Unified status + MCP integration**
 
 **Goal:** Wire `vpn` into the unified `status` dashboard and expose `vpn status` over MCP (read-only); keep `deploy`/`logs`/`client` CLI-only.
 
@@ -380,7 +380,7 @@ deploy.ts
 
 **Verification:** `vpn status` is MCP-exposed; all mutating/log vpn commands are CLI-only by both source-gate and config-deny.
 
-- [ ] **Unit 7: Gated deploy workflow + router wiring**
+- [x] **Unit 7: Gated deploy workflow + router wiring**
 
 **Goal:** `deploy-vpn.yaml` gated workflow + wire into `deploy.yaml` router with paths-filter negations and `predicate-quantifier: every`.
 
@@ -407,7 +407,7 @@ deploy.ts
 
 **Verification:** Workflow YAML parses; conventions test green; router has a `vpn` branch.
 
-- [ ] **Unit 8: Docs, conventions, runbook, changeset**
+- [x] **Unit 8: Docs, conventions, runbook, changeset**
 
 **Goal:** `apps/vpn/AGENTS.md` + `README.md`, root `AGENTS.md`/`README.md`/`ARCHITECTURE.md`/`STRUCTURE.md` updates, old-EC2-teardown + reprovision-recovery runbook, conventions coverage check, changeset for the CLI surface.
 

@@ -124,7 +124,7 @@ pull-based apps. (see origin: docs/brainstorms/2026-06-15-dashboard-consume-rele
 
 ## Implementation Units
 
-- [ ] **Unit 1: Pin the released image in `docker-compose.yaml` + delete `upstream.json`**
+- [x] **Unit 1: Pin the released image in `docker-compose.yaml` + delete `upstream.json`**
 
 **Goal:** Pin `ghcr.io/fro-bot/dashboard:2026.06.15@sha256:d3dd5098...` and remove the now-unused
 upstream pin file.
@@ -156,7 +156,7 @@ upstream pin file.
 - `docker compose -f apps/dashboard/docker-compose.yaml config` resolves the dashboard service to
   the pinned digest; `apps/dashboard/upstream.json` no longer exists.
 
-- [ ] **Unit 2: Simplify `deploy.ts` to the pull model**
+- [x] **Unit 2: Simplify `deploy.ts` to the pull model**
 
 **Goal:** Remove the image-build-era machinery so the deploy just pulls + ups the compose-pinned
 image, like umami.
@@ -212,7 +212,7 @@ production code to match.
   remains in `deploy.ts`. `assertRunningImageDigest` remains and verifies against the
   compose-pinned digest.
 
-- [ ] **Unit 3: Remove the build job from the workflow + drop caller `packages: write`**
+- [x] **Unit 3: Remove the build job from the workflow + drop caller `packages: write`**
 
 **Goal:** Delete the CI image build; the deploy job no longer needs a digest handoff.
 
@@ -244,7 +244,7 @@ production code to match.
   `DASHBOARD_IMAGE_DIGEST`; YAML parses; `bun test packages/cli/src/conventions.test.ts` passes;
   the `dashboard` paths-filter in `deploy.yaml` still fires on `apps/dashboard/**`.
 
-- [ ] **Unit 4: Add the Renovate changelog packageRule for the dashboard image**
+- [x] **Unit 4: Add the Renovate changelog packageRule for the dashboard image**
 
 **Goal:** Give the implicit docker-compose manager's digest-bump PRs richer context + operator
 gating, matching the other upstream-image rules.
@@ -273,7 +273,7 @@ gating, matching the other upstream-image rules.
 - Renovate config parses (JSON5 intact); the new entry mirrors the existing docker rules; the
   generic `ref` custom manager is unchanged.
 
-- [ ] **Unit 5: Update docs to the pull model**
+- [x] **Unit 5: Update docs to the pull model**
 
 **Goal:** Docs describe consuming the released image by digest, not building it.
 
@@ -308,7 +308,7 @@ gating, matching the other upstream-image rules.
 - No doc references an infra-owned dashboard build or `apps/dashboard/upstream.json`; the
   `infra-dashboard` retirement note is present.
 
-- [ ] **Unit 6: Rollback runbook**
+- [x] **Unit 6: Rollback runbook**
 
 **Goal:** Document the operator rollback path for a bad pinned digest.
 

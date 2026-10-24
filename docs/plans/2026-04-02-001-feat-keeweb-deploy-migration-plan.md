@@ -133,7 +133,7 @@ KeeWeb deploy scripts and artifacts live in a separate checkout with no version 
 
 ## Implementation Units
 
-- [ ] **Unit 1: Repository Scaffolding**
+- [x] **Unit 1: Repository Scaffolding**
 
   **Goal:** Initialize git repo with Bun workspace config, pinned host key, gitignore, and license.
 
@@ -162,7 +162,7 @@ KeeWeb deploy scripts and artifacts live in a separate checkout with no version 
   - `bun install` exits 0
   - `.github/known_hosts` contains a valid host key entry
 
-- [ ] **Unit 2: KeeWeb App Package — Structure and Config**
+- [x] **Unit 2: KeeWeb App Package — Structure and Config**
 
   **Goal:** Create the `@marcusrbrown/infra-keeweb` workspace package with config template, nginx config, and deploy script with content/nginx split.
 
@@ -198,7 +198,7 @@ KeeWeb deploy scripts and artifacts live in a separate checkout with no version 
   - `bash -n apps/keeweb/deploy.sh` exits 0
   - Package recognized in workspace
 
-- [ ] **Unit 3: KeeWeb Build Script (Bun/TypeScript)**
+- [x] **Unit 3: KeeWeb Build Script (Bun/TypeScript)**
 
   **Goal:** Create a Bun/TypeScript script that downloads the KeeWeb v1.18.7 release, extracts it, and produces a deploy-ready `dist/` with injected config.
 
@@ -236,7 +236,7 @@ KeeWeb deploy scripts and artifacts live in a separate checkout with no version 
   - `cat config/config.json | jq .settings.dropboxSecret` returns `""`
   - After build with secret: `cat dist/config.json | jq .settings.dropboxSecret` returns the injected value
 
-- [ ] **Unit 4: CLI Package Scaffold**
+- [x] **Unit 4: CLI Package Scaffold**
 
   **Goal:** Create the `@marcusrbrown/infra` package with minimal CLI entry point and `bin` field.
 
@@ -261,7 +261,7 @@ KeeWeb deploy scripts and artifacts live in a separate checkout with no version 
   **Verification:**
   - CLI entry point executes without errors
 
-- [ ] **Unit 5: Server-Side Deploy Hardening**
+- [x] **Unit 5: Server-Side Deploy Hardening**
 
   **Goal:** ~~Create a dedicated deploy user on box.heatvision.co with scoped access, replacing root SSH for CI deploys.~~ **SERVER-SIDE COMPLETE.** Remaining: store private key as GitHub secret in `production` environment.
 
@@ -303,7 +303,7 @@ KeeWeb deploy scripts and artifacts live in a separate checkout with no version 
   - SSH as deploy-kw + attempt to read /etc/shadow fails
   - nginx activation script validates, reloads, and rolls back correctly
 
-- [ ] **Unit 6: GitHub Actions Deploy Workflow**
+- [x] **Unit 6: GitHub Actions Deploy Workflow**
 
   **Goal:** Create CI/CD pipeline with environment protection that builds and deploys KeeWeb on push to main, with manual dispatch support.
 
@@ -355,7 +355,7 @@ KeeWeb deploy scripts and artifacts live in a separate checkout with no version 
   - Environment protection configured in GitHub repo settings
   - Build and deploy steps in correct order
 
-- [ ] **Unit 7: Documentation**
+- [x] **Unit 7: Documentation**
 
   **Goal:** Write minimal README covering setup, build, deploy, and secrets.
 

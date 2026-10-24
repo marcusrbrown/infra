@@ -1,7 +1,7 @@
 ---
 title: Cancelled / incomplete deploy detection
 date: 2026-06-25
-status: ready-for-planning
+status: completed
 type: requirements
 ---
 

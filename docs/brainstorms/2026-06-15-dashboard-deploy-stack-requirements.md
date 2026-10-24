@@ -1,7 +1,7 @@
 ---
 title: dashboard deploy stack (apps/dashboard)
 date: 2026-06-15
-status: ready-for-planning
+status: completed
 scope: standard
 ---
 

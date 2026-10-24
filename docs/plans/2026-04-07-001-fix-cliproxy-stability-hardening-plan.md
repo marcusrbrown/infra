@@ -63,7 +63,7 @@ The cliproxy stack has several reliability gaps discovered through an E2E audit 
 
 ## Implementation Units
 
-- [ ] **Unit 1: Remove placeholder API key and harden Docker Compose**
+- [x] **Unit 1: Remove placeholder API key and harden Docker Compose**
 
   **Goal:** Eliminate predictable auth key from template and add restart/health policies.
 
@@ -92,7 +92,7 @@ The cliproxy stack has several reliability gaps discovered through an E2E audit 
   - `grep -c 'your-api-key-here' apps/cliproxy/config/config.yaml` returns 0
   - `docker compose -f apps/cliproxy/docker-compose.yaml config` exits 0
 
-- [ ] **Unit 2: Guard provision script against destructive reruns**
+- [x] **Unit 2: Guard provision script against destructive reruns**
 
   **Goal:** Prevent accidental overwrite of a live droplet's config and secrets.
 
@@ -121,7 +121,7 @@ The cliproxy stack has several reliability gaps discovered through an E2E audit 
   - Script exits 0 with informational message when droplet exists (no `--force`)
   - Script does not SSH, SCP, or write .env when droplet exists (no `--force`)
 
-- [ ] **Unit 3: Pre-deploy management key validation**
+- [x] **Unit 3: Pre-deploy management key validation**
 
   **Goal:** Fail fast before container restart if the management key is wrong or missing.
 
@@ -160,7 +160,7 @@ The cliproxy stack has several reliability gaps discovered through an E2E audit 
   - Deploy with wrong key aborts cleanly before `docker compose up`
   - Deploy with correct key proceeds normally
 
-- [ ] **Unit 4: Improve deploy health gate endpoint**
+- [x] **Unit 4: Improve deploy health gate endpoint**
 
   **Goal:** Use a self-contained health endpoint instead of one with external dependencies.
 
@@ -188,7 +188,7 @@ The cliproxy stack has several reliability gaps discovered through an E2E audit 
   **Verification:**
   - `curl -s -H "x-management-key: $KEY" https://cliproxy.fro.bot/v0/management/config | jq .debug` returns a value
 
-- [ ] **Unit 5: Add `cliproxy config backup` CLI command**
+- [x] **Unit 5: Add `cliproxy config backup` CLI command**
 
   **Goal:** Enable exporting the full live config before risky operations.
 
@@ -218,7 +218,7 @@ The cliproxy stack has several reliability gaps discovered through an E2E audit 
   - `bunx @marcusrbrown/infra cliproxy config get --key $KEY` outputs valid JSON
   - `bunx @marcusrbrown/infra cliproxy config get --key $KEY --output /tmp/backup.json` creates file with restricted permissions
 
-- [ ] **Unit 6: Fix AGENTS.md auth documentation**
+- [x] **Unit 6: Fix AGENTS.md auth documentation**
 
   **Goal:** Accurately document management API auth headers.
 
@@ -249,7 +249,7 @@ The cliproxy stack has several reliability gaps discovered through an E2E audit 
   - No mention of "Bearer token" as equivalent to management key auth in cliproxy docs
   - `grep -r 'authorization.*Bearer' packages/cli/src/commands/cliproxy-*.ts` returns no management-endpoint hits
 
-- [ ] **Unit 7: Changeset and snapshot updates**
+- [x] **Unit 7: Changeset and snapshot updates**
 
   **Goal:** Version bump and test snapshot regeneration.
 

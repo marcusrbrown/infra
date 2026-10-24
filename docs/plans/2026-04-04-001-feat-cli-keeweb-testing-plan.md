@@ -74,7 +74,7 @@ The monorepo has zero test coverage — CI only runs lint + typecheck. CLI comma
 
 ## Implementation Units
 
-- [ ] **Unit 1: Test infrastructure foundation**
+- [x] **Unit 1: Test infrastructure foundation**
 
 **Goal:** Add test runner configuration, scripts, and CI integration so `bun test` works across the workspace.
 
@@ -108,7 +108,7 @@ The monorepo has zero test coverage — CI only runs lint + typecheck. CLI comma
 
 ---
 
-- [ ] **Unit 2: Export testable functions from source modules**
+- [x] **Unit 2: Export testable functions from source modules**
 
 **Goal:** Add `export` to functions that need testing without changing any behavior.
 
@@ -141,7 +141,7 @@ The monorepo has zero test coverage — CI only runs lint + typecheck. CLI comma
 
 ---
 
-- [ ] **Unit 3: CLI snapshot and command discovery tests**
+- [x] **Unit 3: CLI snapshot and command discovery tests**
 
 **Goal:** Snapshot test all CLI help outputs and verify command registration completeness.
 
@@ -175,7 +175,7 @@ The monorepo has zero test coverage — CI only runs lint + typecheck. CLI comma
 
 ---
 
-- [ ] **Unit 4: KeeWeb build pipeline tests**
+- [x] **Unit 4: KeeWeb build pipeline tests**
 
 **Goal:** Test build.ts correctness — SHA-256 verification, secret injection, template integrity.
 
@@ -214,7 +214,7 @@ The monorepo has zero test coverage — CI only runs lint + typecheck. CLI comma
 
 ---
 
-- [ ] **Unit 5: Deploy command contract tests**
+- [x] **Unit 5: Deploy command contract tests**
 
 **Goal:** Unit test the deploy command's flag validation matrix and precondition checks.
 
@@ -249,7 +249,7 @@ The monorepo has zero test coverage — CI only runs lint + typecheck. CLI comma
 
 ---
 
-- [ ] **Unit 6: Status command tests**
+- [x] **Unit 6: Status command tests**
 
 **Goal:** Test the status command's check functions with mocked externals.
 
@@ -290,7 +290,7 @@ The monorepo has zero test coverage — CI only runs lint + typecheck. CLI comma
 
 ---
 
-- [ ] **Unit 7: Final integration and CI verification**
+- [x] **Unit 7: Final integration and CI verification**
 
 **Goal:** Run full test suite, verify CI config, ensure everything works end-to-end.
 

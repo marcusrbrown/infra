@@ -160,7 +160,7 @@ cli.command('cliproxy keys list', '...')
 
 ## Implementation Units
 
-- [ ] **Unit 1: Shared MCP test fixture**
+- [x] **Unit 1: Shared MCP test fixture**
 
 **Goal:** Build the shared `ctx` capture fixture that all Tier-2 tests will use. This unit blocks Units 4–6 (per-app refactors).
 
@@ -203,7 +203,7 @@ cli.command('cliproxy keys list', '...')
 
 ---
 
-- [ ] **Unit 2: Refactor `mcp.ts` to use `commandFilter` allowlist**
+- [x] **Unit 2: Refactor `mcp.ts` to use `commandFilter` allowlist**
 
 **Goal:** Replace the unconditional `createMcpAction({cli})` with an explicit `commandFilter` Set that admits only the 10 in-scope commands. Annotate every excluded command's reason in the same file so the allowlist self-documents.
 
@@ -240,7 +240,7 @@ Landing Units 2 and 7 together (allowlist + Tier-1 test) before Units 3-6 sharpe
 
 ---
 
-- [ ] **Unit 3: Refactor gateway commands (status, backup)**
+- [x] **Unit 3: Refactor gateway commands (status, backup)**
 
 **Goal:** Migrate `gateway/status.ts` and `gateway/backup.ts` actions to use `ctx.console`/`ctx.process` per R1 and R2. No helper signature changes.
 
@@ -279,7 +279,7 @@ Landing Units 2 and 7 together (allowlist + Tier-1 test) before Units 3-6 sharpe
 
 ---
 
-- [ ] **Unit 4: Refactor cliproxy commands (status, keys list/add/remove, config get/set) including Mode C exception**
+- [x] **Unit 4: Refactor cliproxy commands (status, keys list/add/remove, config get/set) including Mode C exception**
 
 **Positional-argument note:** Several actions in this unit take positional args, not options-only. Per `@goke/mcp@0.0.10` (`cli-to-mcp.ts:458`), `ctx` is ALWAYS the last argument regardless of how many positional args precede it. So the migration shapes are:
 - `(apiKeyToAdd, options) => ...` becomes `(apiKeyToAdd, options, ctx) => ...`
@@ -330,7 +330,7 @@ Landing Units 2 and 7 together (allowlist + Tier-1 test) before Units 3-6 sharpe
 
 ---
 
-- [ ] **Unit 5: Refactor keeweb command (status)**
+- [x] **Unit 5: Refactor keeweb command (status)**
 
 **Goal:** Migrate `keeweb/status.ts` per R1 + R2.
 
@@ -361,7 +361,7 @@ Landing Units 2 and 7 together (allowlist + Tier-1 test) before Units 3-6 sharpe
 
 ---
 
-- [ ] **Unit 6: Refactor unified top-level `status` command + migrate existing tests**
+- [x] **Unit 6: Refactor unified top-level `status` command + migrate existing tests**
 
 **Goal:** Migrate `packages/cli/src/commands/status.ts` (the unified aggregator) per R1 + R2, AND migrate the existing `status.test.ts` from `spyOn(console, 'log')` to the shared fixture per R7.
 
@@ -397,7 +397,7 @@ Landing Units 2 and 7 together (allowlist + Tier-1 test) before Units 3-6 sharpe
 
 ---
 
-- [ ] **Unit 7: Tier-1 integration test via `InMemoryTransport`**
+- [x] **Unit 7: Tier-1 integration test via `InMemoryTransport`**
 
 **Goal:** Write the Tier-1 integration test that exercises `@goke/mcp` end-to-end without spawning a subprocess. The test spawns the goke CLI in-process, connects an MCP client via `InMemoryTransport`, and asserts `tools/list` returns exactly the 10 expected names.
 
@@ -449,7 +449,7 @@ The subprocess path is more expensive but it's the canonical MCP transport behav
 
 ---
 
-- [ ] **Unit 8: Documentation**
+- [x] **Unit 8: Documentation**
 
 **Goal:** Update `packages/cli/AGENTS.md` to reflect the new MCP behavior, the allowlist as single-source-of-truth, the Mode C exception's stricter gate, and the manual-review policy for `@goke/mcp` bumps.
 

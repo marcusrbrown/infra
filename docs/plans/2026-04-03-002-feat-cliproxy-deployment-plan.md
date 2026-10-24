@@ -144,7 +144,7 @@ Fro Bot agent instances in GitHub Actions can't do Claude Code OAuth browser flo
 
 ## Implementation Units
 
-- [ ] **Unit 1: App scaffolding and Docker Compose stack**
+- [x] **Unit 1: App scaffolding and Docker Compose stack**
 
 **Goal:** Create `apps/cliproxy/` with package structure, config templates, and Docker Compose definition.
 
@@ -179,7 +179,7 @@ Fro Bot agent instances in GitHub Actions can't do Claude Code OAuth browser flo
 - `docker compose config` exits 0
 - All template files exist and parse correctly
 
-- [ ] **Unit 2: Server provisioning script**
+- [x] **Unit 2: Server provisioning script**
 
 **Goal:** Create a TypeScript provisioning script that sets up a DO Droplet for CLIProxyAPI.
 
@@ -213,7 +213,7 @@ Fro Bot agent instances in GitHub Actions can't do Claude Code OAuth browser flo
 - Droplet is created and accessible via SSH
 - Docker Compose stack is running
 
-- [ ] **Unit 3: Deploy script**
+- [x] **Unit 3: Deploy script**
 
 **Goal:** Create a deploy script for updating the CLIProxyAPI stack on the droplet.
 
@@ -248,7 +248,7 @@ Fro Bot agent instances in GitHub Actions can't do Claude Code OAuth browser flo
 - `bash -n deploy.sh` exits 0
 - Post-deploy health check returns 200
 
-- [ ] **Unit 4: CLI `cliproxy status` command**
+- [x] **Unit 4: CLI `cliproxy status` command**
 
 **Goal:** Add `infra cliproxy status` command that reports proxy health and usage stats.
 
@@ -279,7 +279,7 @@ Fro Bot agent instances in GitHub Actions can't do Claude Code OAuth browser flo
 - `infra cliproxy status --help` shows correct options
 - tsc + lint clean
 
-- [ ] **Unit 5: CLI `cliproxy deploy` command**
+- [x] **Unit 5: CLI `cliproxy deploy` command**
 
 **Goal:** Add `infra cliproxy deploy` command for updating the proxy stack.
 
@@ -310,7 +310,7 @@ Fro Bot agent instances in GitHub Actions can't do Claude Code OAuth browser flo
 - `infra cliproxy deploy --help` shows correct options
 - tsc + lint clean
 
-- [ ] **Unit 6: CLI management commands (config, keys, login)**
+- [x] **Unit 6: CLI management commands (config, keys, login)**
 
 **Goal:** Add `infra cliproxy config`, `infra cliproxy keys`, and `infra cliproxy login` commands.
 
@@ -344,7 +344,7 @@ Fro Bot agent instances in GitHub Actions can't do Claude Code OAuth browser flo
 - All commands show correct `--help` output
 - tsc + lint clean
 
-- [ ] **Unit 7: GitHub Actions deploy workflow**
+- [x] **Unit 7: GitHub Actions deploy workflow**
 
 **Goal:** Add cliproxy deployment to the GitHub Actions deploy workflow.
 
@@ -375,7 +375,7 @@ Fro Bot agent instances in GitHub Actions can't do Claude Code OAuth browser flo
 - YAML validates (`python -c "import yaml; yaml.safe_load(open(...))"`)
 - Workflow structure matches existing patterns
 
-- [ ] **Unit 8: Documentation and secrets distribution**
+- [x] **Unit 8: Documentation and secrets distribution**
 
 **Goal:** Update AGENTS.md, README, and document Fro Bot secret distribution.
 

@@ -1,6 +1,6 @@
 # MCP deploy-trigger tools — Requirements
 
-**Status:** Draft
+**Status:** superseded
 **Date:** 2026-06-02
 **Supersedes framing of:** issue #291 (originally "MCP v2: subprocess streaming for deploys and logs")
 

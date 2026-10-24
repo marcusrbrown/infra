@@ -119,7 +119,7 @@ The plan stays scoped to client-side wizard changes. No proxy-side or workflow-t
 
 ## Implementation Units
 
-- [ ] **Unit 1: Extend `SetupOptions` + CLI flag surface**
+- [x] **Unit 1: Extend `SetupOptions` + CLI flag surface**
 
 **Goal:** Add the five new CLI flags (`--providers`, `--model`, `--force`, `--dry-run`, `--verify-smoke`) and extend the `SetupOptions` type. Wire goke Zod schemas. No behavior change yet.
 
@@ -160,7 +160,7 @@ The plan stays scoped to client-side wizard changes. No proxy-side or workflow-t
 - `bun test packages/cli/src/commands/cliproxy/setup.test.ts` passes the new tests.
 - `bun run --cwd packages/cli build && bunx @marcusrbrown/infra cliproxy setup --help` shows the new flags (manual check).
 
-- [ ] **Unit 2: Interactive provider multiselect + multi-provider model prompt**
+- [x] **Unit 2: Interactive provider multiselect + multi-provider model prompt**
 
 **Goal:** Add the interactive UX flow for selecting providers (multiselect with anthropic pre-checked) and choosing a default model when >1 provider selected.
 
@@ -195,7 +195,7 @@ The plan stays scoped to client-side wizard changes. No proxy-side or workflow-t
 - New tests pass.
 - `setup.ts` lint clean (`bun run lint`) — multiselect import works under the scoped exception.
 
-- [ ] **Unit 3: Extend `getHarnessTemplate` for multi-provider opencode**
+- [x] **Unit 3: Extend `getHarnessTemplate` for multi-provider opencode**
 
 **Goal:** Make `getHarnessTemplate` accept the selected provider set + model and emit the correct `OPENCODE_CONFIG`, `OPENCODE_AUTH_JSON`, `OMO_PROVIDERS`, and `FRO_BOT_MODEL` values.
 
@@ -235,7 +235,7 @@ The plan stays scoped to client-side wizard changes. No proxy-side or workflow-t
 **Verification:**
 - New tests pass; existing `getHarnessTemplate` tests still pass unchanged.
 
-- [ ] **Unit 4: Setup-plan validator (`/v1/models` probe + cross-checks)**
+- [x] **Unit 4: Setup-plan validator (`/v1/models` probe + cross-checks)**
 
 **Goal:** Add a pre-mutation validator that, when `--providers` includes `openai` OR the resolved providers differ from anthropic-only, makes an authenticated GET to `/v1/models`, parses the response, and asserts the resolved model is present and the OpenAI provider has at least one `owned_by: "openai"` entry.
 
@@ -275,7 +275,7 @@ The plan stays scoped to client-side wizard changes. No proxy-side or workflow-t
 **Verification:**
 - New tests pass with mocked `fetch`.
 
-- [ ] **Unit 5: Non-interactive plan + validation matrix**
+- [x] **Unit 5: Non-interactive plan + validation matrix**
 
 **Goal:** Extend `validateSetupOptions` and `buildNonInteractivePlan` to handle the new flags. Anthropic-only flow (current default) is byte-identical (G7).
 
@@ -313,7 +313,7 @@ The plan stays scoped to client-side wizard changes. No proxy-side or workflow-t
 **Verification:**
 - New tests pass; existing `validateSetupOptions` and `buildNonInteractivePlan` tests still pass.
 
-- [ ] **Unit 6: Smoke test runner (`--verify-smoke`)**
+- [x] **Unit 6: Smoke test runner (`--verify-smoke`)**
 
 **Goal:** Add an optional post-mutation smoke test that triggers `gh workflow run fro-bot.yaml`, polls for completion with backoff, detects environment-approval gates, and reports as a non-blocking warning.
 
@@ -356,7 +356,7 @@ The plan stays scoped to client-side wizard changes. No proxy-side or workflow-t
 **Verification:**
 - All smoke tests pass with mocked spawn.
 
-- [ ] **Unit 7: Workflow analyzer extension (structural only)**
+- [x] **Unit 7: Workflow analyzer extension (structural only)**
 
 **Goal:** Update `analyzeFroBotWorkflow` to recognize that `openai/` model prefixes require the existing `opencode-config` input — but NOT emit any `enable-omo: true` warning (librarian-verified unneeded for proxy routing).
 
@@ -387,7 +387,7 @@ The plan stays scoped to client-side wizard changes. No proxy-side or workflow-t
 **Verification:**
 - All analyzer tests pass.
 
-- [ ] **Unit 8: Destructive overwrite UX (`--force`, `--dry-run`, confirm prompt)**
+- [x] **Unit 8: Destructive overwrite UX (`--force`, `--dry-run`, confirm prompt)**
 
 **Goal:** Add the confirm/force/dry-run protections around the secret-mutation block. Anthropic-only flow is unchanged (G7).
 
@@ -424,7 +424,7 @@ The plan stays scoped to client-side wizard changes. No proxy-side or workflow-t
 **Verification:**
 - All overwrite-UX tests pass.
 
-- [ ] **Unit 9: Docs (README, AGENTS.md, changeset)**
+- [x] **Unit 9: Docs (README, AGENTS.md, changeset)**
 
 **Goal:** Document the new flags, the destructive-overwrite caveat, and the `enable-omo` non-requirement. Add a changeset for the published CLI.
 

@@ -1,7 +1,7 @@
 ---
 title: "feat: Post a Discord notification when a deploy reaches its approval gate"
 type: feat
-status: active
+status: completed
 date: 2026-10-07
 origin: docs/brainstorms/2026-10-07-deploy-gate-discord-notification-requirements.md
 ---
@@ -183,7 +183,7 @@ flowchart LR
 
 ## Implementation Units
 
-- [ ] **Unit 1: Deploy-gate notify script**
+- [x] **Unit 1: Deploy-gate notify script**
 
 **Goal:** A repo-local script that builds the gate message from env and posts it once to Discord, never failing.
 
@@ -225,7 +225,7 @@ flowchart LR
 **Verification:**
 - Colocated tests pass; the script runs from a fresh checkout without `node_modules`.
 
-- [ ] **Unit 2: Wire notify into the seven deploy workflows**
+- [x] **Unit 2: Wire notify into the seven deploy workflows**
 
 **Goal:** Every gated deploy runs notify first, tolerates its failure, and holds its concurrency group at workflow level.
 
@@ -260,7 +260,7 @@ flowchart LR
 **Verification:**
 - Conventions tests pass; a branch dispatch of `deploy.yaml` creates jobs (no startup failure).
 
-- [ ] **Unit 3: Conventions tests for the notify contract**
+- [x] **Unit 3: Conventions tests for the notify contract**
 
 **Goal:** Lock the topology so a later edit can't silently drop coverage, expose the webhook, or make notify block a deploy.
 
@@ -296,7 +296,7 @@ flowchart LR
 **Verification:**
 - `bun test packages/cli` passes with the new suite.
 
-- [ ] **Unit 4: Daily report scope and docs**
+- [x] **Unit 4: Daily report scope and docs**
 
 **Goal:** The daily report stops opening issues for deploys whose job never ran; docs describe the notification, its environment, and its secret.
 
@@ -328,7 +328,7 @@ flowchart LR
 **Verification:**
 - `bun test packages/cli` and `bun run lint` pass; no prompt text tells the agent to open an issue for a deploy whose job never ran.
 
-- [ ] **Unit 5: Rollout and live verification**
+- [x] **Unit 5: Rollout and live verification**
 
 **Goal:** Prove the router still starts, branch runs neither post nor block, a real gate produces a phone notification, and close the stale issues.
 

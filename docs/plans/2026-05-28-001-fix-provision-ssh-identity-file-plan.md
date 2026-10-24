@@ -80,7 +80,7 @@ The `<APP>_SSH_KEY` env var (e.g. `UMAMI_SSH_KEY`, `GATEWAY_SSH_KEY`, `CLIPROXY_
 
 ## Implementation Units
 
-- [ ] **Unit 1: Optional identity-file support in `ssh`/`scp`/`waitForSsh`**
+- [x] **Unit 1: Optional identity-file support in `ssh`/`scp`/`waitForSsh`**
 
 **Goal:** The shared SSH arg builders and `waitForSsh` accept an optional identity file and, when provided, emit `-i <path>` + `-o IdentitiesOnly=yes`.
 
@@ -122,7 +122,7 @@ The `<APP>_SSH_KEY` env var (e.g. `UMAMI_SSH_KEY`, `GATEWAY_SSH_KEY`, `CLIPROXY_
 **Verification:**
 - Identity-set and identity-unset arg arrays both match expectations; existing helper tests still pass unchanged.
 
-- [ ] **Unit 2: Shared identity-file materialization helper**
+- [x] **Unit 2: Shared identity-file materialization helper**
 
 **Goal:** A shared helper writes a private key into a `0600` temp file with a trailing newline and provides cleanup, for reuse by all three provisioners.
 
@@ -151,7 +151,7 @@ The `<APP>_SSH_KEY` env var (e.g. `UMAMI_SSH_KEY`, `GATEWAY_SSH_KEY`, `CLIPROXY_
 **Verification:**
 - File mode is `0600`, content round-trips with a single trailing newline, cleanup is idempotent.
 
-- [ ] **Unit 3: Wire identity materialization into the three provisioners**
+- [x] **Unit 3: Wire identity materialization into the three provisioners**
 
 **Goal:** Each provisioner materializes `<APP>_SSH_KEY` when set, passes the identity file to `waitForSsh`/`ssh`/`scp`, and cleans up in `finally`; falls back to ssh-agent when unset.
 

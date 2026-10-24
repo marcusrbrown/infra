@@ -98,7 +98,7 @@ An operator paged at 2am during a token leak should be able to:
 
 ## Implementation Units
 
-- [ ] **Unit 1: Create `docs/runbooks/` directory with the token-lifecycle runbook**
+- [x] **Unit 1: Create `docs/runbooks/` directory with the token-lifecycle runbook**
 
 **Goal:** Write the canonical operator runbook covering all four ownership areas with concrete commands and paths.
 
@@ -142,7 +142,7 @@ An operator paged at 2am during a token leak should be able to:
 - Cross-links to dotfiles runbook, AGENTS.md, and compound learnings doc are present and resolve (file exists / URL valid)
 - A reader unfamiliar with the codebase could execute a rotation following only the runbook
 
-- [ ] **Unit 2: Fix `apps/gateway/AGENTS.md` drift + add root AGENTS.md cross-reference**
+- [x] **Unit 2: Fix `apps/gateway/AGENTS.md` drift + add root AGENTS.md cross-reference**
 
 **Goal:** Update three drift points in `apps/gateway/AGENTS.md` so it doesn't contradict the new runbook on merge, and add a one-line pointer to `docs/runbooks/` in the root `AGENTS.md` "Where to look" table so future agents and humans can find the runbook from the root navigation.
 

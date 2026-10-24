@@ -1,7 +1,7 @@
 ---
 title: cliproxy models subcommand
 date: 2026-06-13
-status: ready-for-planning
+status: completed
 scope: standard
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: Dashboard — consume fro-bot/dashboard released image by digest
 date: 2026-06-15
-status: requirements
+status: completed
 issue: 561
 related:
   - apps/dashboard/docker-compose.yaml

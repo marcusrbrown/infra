@@ -1,7 +1,7 @@
 ---
 title: feat: Add deterministic Fro Bot progressive autoheal reconciliation
 type: feat
-status: active
+status: completed
 date: 2026-09-11
 origin: docs/brainstorms/2026-09-11-fro-bot-progressive-autoheal-requirements.md
 deepened: 2026-09-12

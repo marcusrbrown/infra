@@ -1,7 +1,7 @@
 ---
 title: bun build publish step to remove the packages/cli → packages/shared boundary
 date: 2026-06-20
-status: draft
+status: completed
 owner: marcusrbrown
 related:
   - packages/cli/package.json

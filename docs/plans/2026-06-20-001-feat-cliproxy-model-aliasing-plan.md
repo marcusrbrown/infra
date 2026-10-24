@@ -107,7 +107,7 @@ deploy() in apps/cliproxy/src/deploy.ts
 
 ## Implementation Units
 
-- [ ] **Unit 1: Add the `oauth-model-alias` block to the tracked config template**
+- [x] **Unit 1: Add the `oauth-model-alias` block to the tracked config template**
 
 **Goal:** Make the 7 Anthropic short→dated mappings the version-controlled source of truth.
 
@@ -137,7 +137,7 @@ deploy() in apps/cliproxy/src/deploy.ts
 **Verification:**
 - `docker compose config` / YAML parse still valid; the block matches the brainstorm's 7-entry table.
 
-- [ ] **Unit 2: Shared cliproxy management module — consolidate HTTP helpers + add alias functions**
+- [x] **Unit 2: Shared cliproxy management module — consolidate HTTP helpers + add alias functions**
 
 **Goal:** A single shared module that both `apps/cliproxy` deploy and the `packages/cli` cliproxy commands import: the management HTTP primitives (moved from the cli) plus the new alias parse/PUT/read-back/compare functions.
 
@@ -178,7 +178,7 @@ deploy() in apps/cliproxy/src/deploy.ts
 **Verification:**
 - `bun test packages/shared/cliproxy/management.test.ts` passes; `bun test packages/cli/src/commands/cliproxy/` passes (re-export regression); `tsc` clean; no `as any`.
 
-- [ ] **Unit 3: Wire the apply step into deploy with fail-closed + fork verification**
+- [x] **Unit 3: Wire the apply step into deploy with fail-closed + fork verification**
 
 **Goal:** Run the alias apply after the stack is healthy, with hard-fail-on-missing-key, read-back fail-closed, and `/v1/models` fork verification.
 
@@ -213,7 +213,7 @@ deploy() in apps/cliproxy/src/deploy.ts
 **Verification:**
 - `bun test apps/cliproxy/` passes; `tsc` clean; `bunx eslint --max-warnings=0` on changed files clean.
 
-- [ ] **Unit 4: Docs + live verification + reconcile prototype**
+- [x] **Unit 4: Docs + live verification + reconcile prototype**
 
 **Goal:** Document the new deploy step and the bare-object gotcha; verify live; reconcile the live prototype to the full 7-entry set.
 

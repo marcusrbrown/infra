@@ -2,8 +2,8 @@
 title: Provider firewall management belongs in provisioning, not the deploy hot path
 date: 2026-06-19
 category: docs/solutions/workflow-issues/
-module: gateway
-problem_type: architecture_pattern
+module: apps/gateway
+problem_type: workflow_issue
 component: tooling
 severity: high
 related_components:

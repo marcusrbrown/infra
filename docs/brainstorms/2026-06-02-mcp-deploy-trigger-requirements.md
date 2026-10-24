@@ -1,3 +1,9 @@
+---
+date: 2026-06-02
+topic: MCP deploy-trigger tools — Requirements
+status: superseded
+---
+
 # MCP deploy-trigger tools — Requirements
 
 **Status:** superseded

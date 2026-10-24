@@ -2,7 +2,7 @@
 title: Claude OAuth refresh token expiry broke Anthropic-routed CLIProxyAPI requests
 date: 2026-06-20
 category: docs/solutions/integration-issues/
-module: cliproxy
+module: apps/cliproxy
 problem_type: integration_issue
 component: tooling
 symptoms:

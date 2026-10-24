@@ -1,5 +1,5 @@
 ---
-title: Dashboard operator same-origin — private VPC path to the gateway operator listener
+topic: Dashboard operator same-origin — private VPC path to the gateway operator listener
 date: 2026-06-18
 status: completed
 related:

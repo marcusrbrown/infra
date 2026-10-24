@@ -1,5 +1,5 @@
 ---
-title: dashboard deploy stack (apps/dashboard)
+topic: dashboard deploy stack (apps/dashboard)
 date: 2026-06-15
 status: completed
 scope: standard

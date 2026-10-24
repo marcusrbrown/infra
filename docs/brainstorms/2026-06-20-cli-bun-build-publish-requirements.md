@@ -1,5 +1,5 @@
 ---
-title: bun build publish step to remove the packages/cli → packages/shared boundary
+topic: bun build publish step to remove the packages/cli → packages/shared boundary
 date: 2026-06-20
 status: completed
 owner: marcusrbrown

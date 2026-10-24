@@ -1,5 +1,5 @@
 ---
-title: Dashboard — consume fro-bot/dashboard released image by digest
+topic: Dashboard — consume fro-bot/dashboard released image by digest
 date: 2026-06-15
 status: completed
 issue: 561

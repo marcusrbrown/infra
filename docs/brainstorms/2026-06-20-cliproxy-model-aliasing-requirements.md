@@ -1,5 +1,5 @@
 ---
-title: CLIProxyAPI model aliasing for short-ID routing parity
+topic: CLIProxyAPI model aliasing for short-ID routing parity
 date: 2026-06-20
 status: completed
 owner: marcusrbrown

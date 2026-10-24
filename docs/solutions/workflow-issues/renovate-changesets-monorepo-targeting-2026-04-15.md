@@ -2,6 +2,7 @@
 title: Renovate-Changesets Monorepo Targeting Saga
 category: workflow-issues
 date: 2026-04-15
+module: .github/workflows/renovate-changesets.yaml
 problem_type: workflow_issue
 component: development_workflow
 root_cause: config_error

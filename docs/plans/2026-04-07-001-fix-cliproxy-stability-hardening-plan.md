@@ -4,7 +4,7 @@ type: fix
 status: completed
 date: 2026-04-07
 deepened: 2026-04-07
-origin: Oracle E2E audit (session 2026-04-07) + incident: deploy wiped API keys
+origin: "Oracle E2E audit (session 2026-04-07) + incident: deploy wiped API keys"
 ---
 
 # fix: CLIProxyAPI Stability Hardening

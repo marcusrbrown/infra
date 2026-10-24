@@ -1,5 +1,5 @@
 ---
-title: refactor(cliproxy): Simplify pass on setup.ts after OpenAI opt-in lands
+title: "refactor(cliproxy): Simplify pass on setup.ts after OpenAI opt-in lands"
 type: refactor
 status: completed
 date: 2026-05-26

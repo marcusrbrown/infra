@@ -1,7 +1,7 @@
 ---
 title: Dashboard operator same-origin — private VPC path to the gateway operator listener
 date: 2026-06-18
-status: requirements
+status: completed
 related:
   - docs/plans/2026-06-18-001-feat-dashboard-operator-same-origin-plan.md
   - apps/gateway/src/deploy.ts

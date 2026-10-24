@@ -103,7 +103,7 @@ Not needed. `yaml` package (npm) and `@typescript-eslint/ban-ts-comment` options
 
 ## Implementation Units
 
-- [ ] **Unit 1: ESLint config tightening for R1-R2**
+- [x] **Unit 1: ESLint config tightening for R1-R2**
 
 **Goal:** Flip `@typescript-eslint/no-explicit-any` from off → error and override `ban-ts-comment` to ban all three directives without description carveouts.
 
@@ -129,7 +129,7 @@ Not needed. `yaml` package (npm) and `@typescript-eslint/ban-ts-comment` options
 - `bunx eslint --print-config packages/cli/src/cli.ts | jq '.rules["@typescript-eslint/no-explicit-any"]'` returns `[2]` (error severity, no options).
 - `bunx eslint --print-config packages/cli/src/cli.ts | jq '.rules["@typescript-eslint/ban-ts-comment"]'` returns `[2, { "ts-expect-error": true, "ts-ignore": true, "ts-nocheck": true, "ts-check": false }]`.
 
-- [ ] **Unit 2: Conventions test for R3-R9**
+- [x] **Unit 2: Conventions test for R3-R9**
 
 **Goal:** A single Bun test file that enforces R3-R9 by reading real repo files. Fails CI on any violation. All checks green on `main` at ship time.
 
@@ -197,7 +197,7 @@ describe('repo conventions', () => {
 - `bun test packages/cli/src/conventions.test.ts` also passes (tests are independent of CWD).
 - Manual validation before merge: temporarily introduce one violation per rule (e.g., add `"bundledDependencies": ["x"]` to a `package.json`; rename one workflow file to `.yml`; remove a version comment from a `uses:` line) and confirm the corresponding test fails with a useful error message. Revert all changes before committing.
 
-- [ ] **Unit 3: Annotate root AGENTS.md**
+- [x] **Unit 3: Annotate root AGENTS.md**
 
 **Goal:** Append `(enforced)` to each of the 9 rules in root `AGENTS.md` that are now mechanically gated, and narrow the `ssh-keyscan` anti-pattern prose to match the CI-workflow-only scope from R6.
 
@@ -224,7 +224,7 @@ describe('repo conventions', () => {
 - Visual diff review: the only changes are trailing `(enforced)` appends on the expected bullets and the ssh-keyscan prose narrowing.
 - Re-read root `AGENTS.md` end-to-end after edit to confirm the prose still reads naturally with markers appended.
 
-- [ ] **Unit 4: Trim Fro Bot autoheal category 3**
+- [x] **Unit 4: Trim Fro Bot autoheal category 3**
 
 **Goal:** Remove the specific convention-check bullets from `SCHEDULE_PROMPT` category 3 in `.github/workflows/fro-bot.yaml` that are now mechanically gated by Units 1-2, so the daily autoheal run doesn't double-report violations the pre-merge gate already prevented.
 

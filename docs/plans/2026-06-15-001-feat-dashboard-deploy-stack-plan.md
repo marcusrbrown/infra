@@ -283,7 +283,7 @@ provision-droplet.ts
 
 ## Implementation Units
 
-- [ ] **Unit 1: apps/dashboard Compose stack + Caddy + hardening + compose test**
+- [x] **Unit 1: apps/dashboard Compose stack + Caddy + hardening + compose test**
 
 **Goal:** Create the `apps/dashboard` workspace with `docker-compose.yaml`, `config/Caddyfile`,
 `docker-compose.test.ts`, `upstream.json`, and `package.json`. Establish the container hardening
@@ -337,7 +337,7 @@ resolves as a workspace member.
 
 ---
 
-- [ ] **Unit 2: src/deploy.ts + src/host.ts + tests (SSH secret materialization, App key file, deploy ordering, /api/healthz probe)**
+- [x] **Unit 2: src/deploy.ts + src/host.ts + tests (SSH secret materialization, App key file, deploy ordering, /api/healthz probe)**
 
 **Goal:** `deploy.ts` — validate env + host, materialize `.env` via SSH stdin, upload compose +
 Caddyfile, upload the GitHub App private key as a file (0600) via SSH stdin, pull the
@@ -414,7 +414,7 @@ RepoDigests verification present.
 
 ---
 
-- [ ] **Unit 3: server/provision-droplet.ts + test (droplet + host-key pinning)**
+- [x] **Unit 3: server/provision-droplet.ts + test (droplet + host-key pinning)**
 
 **Goal:** `provision-droplet.ts` — `doctl droplet create`, wait for SSH, pin domain + IP host
 keys into `.github/known_hosts` with marker `# dashboard droplet (...)`. Idempotent.
@@ -448,7 +448,7 @@ keys into `.github/known_hosts` with marker `# dashboard droplet (...)`. Idempot
 
 ---
 
-- [ ] **Unit 4: deploy-dashboard.yaml + umbrella deploy.yaml routing**
+- [x] **Unit 4: deploy-dashboard.yaml + umbrella deploy.yaml routing**
 
 **Goal:** `deploy-dashboard.yaml` gated workflow with a `build-images` job (builds fro-bot/dashboard
 to GHCR) + a `deploy` job that consumes the digest — wired into `deploy.yaml` router with
@@ -513,7 +513,7 @@ output, `packages: write`), `.github/workflows/deploy-umami.yaml` (deploy job sh
 
 ---
 
-- [ ] **Unit 5: goke CLI commands/dashboard/* + cli.ts registration**
+- [x] **Unit 5: goke CLI commands/dashboard/* + cli.ts registration**
 
 **Goal:** `packages/cli/src/commands/dashboard/` command group (`index.ts`, `deploy.ts`,
 `status.ts`, `logs.ts`) + registration in `cli.ts`. Wire `dashboard status` into MCP allowlist
@@ -569,7 +569,7 @@ CLI-only; `infra dashboard --help` renders.
 
 ---
 
-- [ ] **Unit 6: apps/dashboard/README.md + AGENTS.md runbook**
+- [x] **Unit 6: apps/dashboard/README.md + AGENTS.md runbook**
 
 **Goal:** `apps/dashboard/README.md` (deploy badge, stack summary, commands, configuration table)
 and `apps/dashboard/AGENTS.md` (full operator runbook: deploy flow, GHCR build + ref pinning,

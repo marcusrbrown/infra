@@ -81,7 +81,7 @@ Issue #341. The live gateway runs v0.44.2; the repo pin is held at v0.44.2 with 
 
 ## Implementation Units
 
-- [ ] **Unit 1: Materialize the GitHub App secret files in deploy.ts**
+- [x] **Unit 1: Materialize the GitHub App secret files in deploy.ts**
 
 **Goal:** `deploy.ts` writes `github-app-id` + `github-app-private-key` (required) and `discord-privileged-intents` (optional) to the droplet secrets dir.
 
@@ -110,7 +110,7 @@ Issue #341. The live gateway runs v0.44.2; the repo pin is held at v0.44.2 with 
 
 **Verification:** unit tests green; a dry-run/local materialization writes all three files with correct required flags.
 
-- [ ] **Unit 2: Forward the new env vars in CLI local deploy**
+- [x] **Unit 2: Forward the new env vars in CLI local deploy**
 
 **Goal:** `gateway deploy --local` carries `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, `DISCORD_PRIVILEGED_INTENTS` into the deploy subprocess env.
 
@@ -134,7 +134,7 @@ Issue #341. The live gateway runs v0.44.2; the repo pin is held at v0.44.2 with 
 
 **Verification:** unit tests green.
 
-- [ ] **Unit 3: Wire the new secrets through deploy-gateway.yaml**
+- [x] **Unit 3: Wire the new secrets through deploy-gateway.yaml**
 
 **Goal:** the deploy workflow passes the two required GitHub App secrets through the reusable-workflow contract, validation, and deploy env.
 
@@ -151,7 +151,7 @@ Issue #341. The live gateway runs v0.44.2; the repo pin is held at v0.44.2 with 
 
 **Verification:** conventions test green; `Validate required secrets` lists the two new vars.
 
-- [ ] **Unit 4: Bump the pin to v0.46.1 and raise the Renovate ceiling to `<0.47.0`**
+- [x] **Unit 4: Bump the pin to v0.46.1 and raise the Renovate ceiling to `<0.47.0`**
 
 **Goal:** move `upstream.json` to v0.46.1 (the latest tag whose secret contract matches what this plan materializes) and raise the `allowedVersions` hold from `<0.44.3` to `<0.47.0` so Renovate tracks v0.46.x but does not auto-bump to the breaking v0.47.0.
 
@@ -172,7 +172,7 @@ Issue #341. The live gateway runs v0.44.2; the repo pin is held at v0.44.2 with 
 
 **Verification:** renovate validator passes; the regex extracts the new ref; changeset present.
 
-- [ ] **Unit 5: Document the GitHub App consumption in AGENTS.md**
+- [x] **Unit 5: Document the GitHub App consumption in AGENTS.md**
 
 **Goal:** `apps/gateway/AGENTS.md` reflects the new required secrets, the optional privileged-intents file, and the App-ownership boundary.
 

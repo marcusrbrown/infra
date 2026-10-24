@@ -84,7 +84,7 @@ There is no first-class way to query the live CLIProxyAPI model catalog; today i
 
 ## Implementation Units
 
-- [ ] **Unit 1: models fetch + provider filter + formatting (core action)**
+- [x] **Unit 1: models fetch + provider filter + formatting (core action)**
 
 **Goal:** A `cliproxyModelsAction(options, ctx)` that fetches `/v1/models` with bearer auth, filters by optional provider, and prints plain or verbose output through `ctx`.
 
@@ -125,7 +125,7 @@ There is no first-class way to query the live CLIProxyAPI model catalog; today i
 
 **Verification:** The action lists live models against the configured proxy; filters, verbose, empty, and error paths behave as enumerated; the bearer key never appears in error output.
 
-- [ ] **Unit 2: register the command + barrel wiring**
+- [x] **Unit 2: register the command + barrel wiring**
 
 **Goal:** `registerCliproxyModels` defines the goke command (positional + `--url`/`--key`/`--verbose`) and is wired into the cliproxy barrel.
 
@@ -149,7 +149,7 @@ There is no first-class way to query the live CLIProxyAPI model catalog; today i
 
 **Verification:** `infra cliproxy models --help` shows the documented surface; the command runs end-to-end against the live proxy.
 
-- [ ] **Unit 3: MCP exposure + drift guard**
+- [x] **Unit 3: MCP exposure + drift guard**
 
 **Goal:** Expose `cliproxy models` as the read-only `cliproxy_models` MCP tool.
 
@@ -173,7 +173,7 @@ There is no first-class way to query the live CLIProxyAPI model catalog; today i
 
 **Verification:** The MCP server registers `cliproxy_models`; calling it returns the same formatted output as the CLI.
 
-- [ ] **Unit 4: docs**
+- [x] **Unit 4: docs**
 
 **Goal:** Document the new command where the other cliproxy commands are documented.
 

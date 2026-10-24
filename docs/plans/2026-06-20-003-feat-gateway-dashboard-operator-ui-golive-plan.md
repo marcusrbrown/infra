@@ -69,7 +69,7 @@ The operator listener topology (#579), operator auth/config secrets (#580), and 
 
 ## Implementation Units
 
-- [ ] **Unit 1: Bump gateway daemon to v0.72.0**
+- [x] **Unit 1: Bump gateway daemon to v0.72.0**
 
 **Goal:** Move the gateway daemon pin and Renovate ceiling to v0.72.0 (R1).
 
@@ -87,7 +87,7 @@ The operator listener topology (#579), operator auth/config secrets (#580), and 
 
 **Verification:** `upstream.json` valid; Renovate config validates; conventions + taxonomy gates pass; changeset present.
 
-- [ ] **Unit 2: Enable operator UI in the dashboard deploy + bump image**
+- [x] **Unit 2: Enable operator UI in the dashboard deploy + bump image**
 
 **Goal:** Wire the two enablement flags into the remote `.env` and bump the dashboard image pin to 2026.06.34 (R2, R3).
 

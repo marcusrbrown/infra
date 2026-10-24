@@ -120,7 +120,7 @@ packages/cli/
 
 ## Implementation Units
 
-- [ ] **Unit 1: Install dependencies and scaffold goke CLI skeleton**
+- [x] **Unit 1: Install dependencies and scaffold goke CLI skeleton**
 
   **Goal:** Replace the plain arg-parsing stub with a goke-based CLI that parses commands and shows help/version.
 
@@ -157,7 +157,7 @@ packages/cli/
   - `bunx tsc --noEmit` passes
   - `bun run lint` passes
 
-- [ ] **Unit 2: Implement `keeweb status` command**
+- [x] **Unit 2: Implement `keeweb status` command**
 
   **Goal:** Show operational health of the KeeWeb deployment with HTTP reachability, last deploy timestamp, and content version check.
 
@@ -192,7 +192,7 @@ packages/cli/
   - `bun run packages/cli/src/cli.ts keeweb status` runs all three checks and produces readable output
   - Lint and typecheck pass
 
-- [ ] **Unit 3: Implement `keeweb deploy` command**
+- [x] **Unit 3: Implement `keeweb deploy` command**
 
   **Goal:** Trigger KeeWeb deployment via GitHub Actions or locally via deploy.sh.
 
@@ -230,7 +230,7 @@ packages/cli/
   - `bun run packages/cli/src/cli.ts keeweb deploy --help` shows all options with descriptions
   - Lint and typecheck pass
 
-- [ ] **Unit 4: Implement `mcp` command and wire up**
+- [x] **Unit 4: Implement `mcp` command and wire up**
 
   **Goal:** Add MCP server command that exposes all CLI commands as MCP tools, and do final integration wiring.
 

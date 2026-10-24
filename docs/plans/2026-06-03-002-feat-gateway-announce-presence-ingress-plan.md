@@ -98,7 +98,7 @@ The `fro-bot/agent` v0.52.1 daemon ships an announce feature that turns an HMAC-
 
 ## Implementation Units
 
-- [ ] **Unit 1: Announce secret files + both-or-neither gate**
+- [x] **Unit 1: Announce secret files + both-or-neither gate**
 
 **Goal:** Materialize `GATEWAY_WEBHOOK_SECRET` + `GATEWAY_PRESENCE_CHANNEL_ID` as secret files when both are present; fail fast when exactly one is set; expose a single `announceEnabled` signal for Unit 2.
 
@@ -131,7 +131,7 @@ The `fro-bot/agent` v0.52.1 daemon ships an announce feature that turns an HMAC-
 
 **Verification:** All three announce states behave correctly; exactly-one-set fails before any SSH; tests green, tsc + lint clean.
 
-- [ ] **Unit 2: compose.override.yaml + Caddyfile materialization (gated)**
+- [x] **Unit 2: compose.override.yaml + Caddyfile materialization (gated)**
 
 **Goal:** When `announceEnabled`, materialize a `compose.override.yaml` (adding a path-scoped Caddy service publishing :80/:443 on `gateway-net` with named cert volumes, plus the daemon announce `*_FILE` env + secret mounts); when disabled, materialize nothing (so `git clean` leaves the gateway private). Wire `--remove-orphans` so a toggled-off Caddy container is removed.
 
@@ -197,7 +197,7 @@ The `fro-bot/agent` v0.52.1 daemon ships an announce feature that turns an HMAC-
 
 **Verification:** With both inputs, the override + Caddyfile materialize with correct shape; without, nothing materializes; checksum reflects the override; compose up carries `--remove-orphans`. Tests green, tsc + lint clean.
 
-- [ ] **Unit 3: Docs + operator wiring**
+- [x] **Unit 3: Docs + operator wiring**
 
 **Goal:** Document the announce inputs, the both-or-neither contract, the public-surface security posture, the rotation note, and the operator enable/rollback steps in `apps/gateway/AGENTS.md`; update the env/secret inventory.
 

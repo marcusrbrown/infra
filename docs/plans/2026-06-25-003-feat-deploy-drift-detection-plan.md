@@ -2,6 +2,7 @@
 title: "feat: Deploy drift detection (committed pin vs live version)"
 type: feat
 status: superseded
+superseded_by: docs/plans/2026-06-25-002-fix-deploy-aggregate-concurrency-cancellation-plan.md
 date: 2026-06-25
 deepened: 2026-06-25
 ---

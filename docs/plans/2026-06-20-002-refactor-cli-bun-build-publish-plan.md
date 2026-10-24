@@ -91,7 +91,7 @@ The published CLI must stay self-contained (no `workspace:*` runtime dep). Today
 
 ## Implementation Units
 
-- [ ] **Unit 1: Repo-root discovery helper for Category B paths**
+- [x] **Unit 1: Repo-root discovery helper for Category B paths**
 
 **Goal:** Replace brittle `import.meta.dir` depth-counting in source-only commands with one depth-independent repo-root resolver.
 
@@ -119,7 +119,7 @@ The published CLI must stay self-contained (no `workspace:*` runtime dep). Today
 **Verification:**
 - `bun test packages/cli/src/lib/repo-root.test.ts` + the touched command tests pass; `bun test apps/vpn` (peers path) still passes.
 
-- [ ] **Unit 2: Category A asset via Bun file-asset loader + fail-closed resolution**
+- [x] **Unit 2: Category A asset via Bun file-asset loader + fail-closed resolution**
 
 **Goal:** Ship + resolve `known_hosts` through the bundle via `with {type:'file'}`, keeping source-run + fail-closed behavior.
 
@@ -148,7 +148,7 @@ The published CLI must stay self-contained (no `workspace:*` runtime dep). Today
 **Verification:**
 - `bun test packages/cli/src/lib/known-hosts.test.ts` passes both layouts + negative + drift.
 
-- [ ] **Unit 3: Build script (entrypoints, externals, asset, shebang) + assertions**
+- [x] **Unit 3: Build script (entrypoints, externals, asset, shebang) + assertions**
 
 **Goal:** Produce a correct `dist/` bundle: shared inlined, deps external, asset present, bin executable.
 
@@ -175,7 +175,7 @@ The published CLI must stay self-contained (no `workspace:*` runtime dep). Today
 **Verification:**
 - `bun run --cwd packages/cli build` succeeds; `bun dist/cli.js --help` prints help; asset present.
 
-- [ ] **Unit 4: Publish wiring (dist/, prepack, gitignore) + de-dup ssh-identity + clean-room verification**
+- [x] **Unit 4: Publish wiring (dist/, prepack, gitignore) + de-dup ssh-identity + clean-room verification**
 
 **Goal:** Ship `dist/`, build at publish, prove the boundary is gone via the shared import and a clean-room install.
 

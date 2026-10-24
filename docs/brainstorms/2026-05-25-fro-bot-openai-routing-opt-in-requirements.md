@@ -1,6 +1,6 @@
 # Fro Bot OpenAI Routing — Per-Repo Opt-In
 
-**Status**: brainstorm
+**Status**: completed
 **Created**: 2026-05-25
 **Reviewed**: 2026-05-25 (oracle + librarian + document-review)
 **Related**: PR #303 (codex login), memory 3845 (observed model identifiers), `apps/cliproxy/` (proxy at `cliproxy.fro.bot/v1`)

@@ -88,7 +88,7 @@ Already settled during brainstorm research. The librarian confirmed:
 
 ## Implementation Units
 
-- [ ] **Unit 1: Extract `cliproxyLoginAction` and convert tests to dependency-injected spawn pattern**
+- [x] **Unit 1: Extract `cliproxyLoginAction` and convert tests to dependency-injected spawn pattern**
 
 **Goal:** Refactor `login.ts` to expose a directly-callable named-export action function with the SSH-spawn function as an injectable dependency, then convert `login.test.ts` from real-CLI-subprocess invocations to direct action calls with an injected mock spawn. This establishes the seam every new test in Unit 2 will use, matching the dependency-injection pattern used in `packages/cli/src/commands/gateway/status.test.ts`.
 
@@ -132,7 +132,7 @@ Already settled during brainstorm research. The librarian confirmed:
 
 ---
 
-- [ ] **Unit 2: Add codex provider mapping + anti-phishing notice + new tests**
+- [x] **Unit 2: Add codex provider mapping + anti-phishing notice + new tests**
 
 **Goal:** Extend the provider check from `claude`-only to `claude` and `codex`, emit the anti-phishing pre-flight notice when `codex` is selected, and add Tier-2 tests for the new behavior.
 

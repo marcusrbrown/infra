@@ -172,7 +172,7 @@ docs/brainstorms/2026-06-18-dashboard-operator-private-path-requirements.md)
 
 ## Implementation Units
 
-- [ ] **Unit 1: VPC-IP port publish in the gateway compose override (+ rewrite the no-port guard)**
+- [x] **Unit 1: VPC-IP port publish in the gateway compose override (+ rewrite the no-port guard)**
 
 **Goal:** The gateway service publishes the operator listener on the gateway VPC IP only, gated on the
 operator listener being enabled.
@@ -217,7 +217,7 @@ first (assert VPC-scoped publish present; assert 0.0.0.0/bare publish rejected),
 **Verification:** Override emits the VPC-scoped publish only when enabled; the no-public-port guard now
 enforces VPC-scoping rather than forbidding all publishes; `tsc`/lint/tests pass.
 
-- [ ] **Unit 2: DOCKER-USER source restriction (reapplied every deploy)**
+- [x] **Unit 2: DOCKER-USER source restriction (reapplied every deploy)**
 
 **Goal:** Only the dashboard VPC IP can reach the published operator port; all other sources dropped.
 
@@ -253,7 +253,7 @@ contains the correct iptables flags (mirror `captureValidateScript` ~7156-7165).
 **Verification:** The rule is applied idempotently and exact-readback-confirmed; rerun is a no-op;
 disabled state emits nothing; a wrong rule fails verification.
 
-- [ ] **Unit 3: DigitalOcean Cloud Firewall reconcile**
+- [x] **Unit 3: DigitalOcean Cloud Firewall reconcile**
 
 **Goal:** Provider-level rule allows TCP 9300 to the gateway droplet only from the dashboard droplet,
 reconciled every deploy.
@@ -313,7 +313,7 @@ preserved; token absence fails closed; disabled state emits nothing; `getDroplet
 > [deploy], (2) DOCKER-USER iptables restriction [deploy, reapplied each run], (3) DO Cloud Firewall
 > inbound 9300 from dashboard droplet-id [provisioning, reboot-durable].
 
-- [ ] **Unit 4: Dashboard Caddy `/operator/*` route**
+- [x] **Unit 4: Dashboard Caddy `/operator/*` route**
 
 **Goal:** `dashboard.fro.bot/operator/*` proxies to the gateway VPC IP, satisfying the daemon guard.
 
@@ -359,7 +359,7 @@ dashboard Caddyfile scp upload (~540, 549-554).
 
 **Verification:** `caddy adapt` passes; `/operator/*` sorts before catch-all; target is config-driven.
 
-- [ ] **Unit 5: Post-deploy verification incl. fail-closed negative-control gate**
+- [x] **Unit 5: Post-deploy verification incl. fail-closed negative-control gate**
 
 **Goal:** Prove the same-origin path is live and the access controls are correctly in place, using only
 checks the deploy runner can actually execute, failing closed otherwise.
@@ -405,7 +405,7 @@ missing/wrong-shaped.
 **Verification:** Deploy passes only when the same-origin path works, the public:9300 path is denied,
 AND both source-restriction controls read back exactly correct.
 
-- [ ] **Unit 6: Docs — rewrite invariants, document the bridge, update the ratification plan, runbook**
+- [x] **Unit 6: Docs — rewrite invariants, document the bridge, update the ratification plan, runbook**
 
 **Goal:** Docs reflect the live private-path bridge and no longer forbid it.
 

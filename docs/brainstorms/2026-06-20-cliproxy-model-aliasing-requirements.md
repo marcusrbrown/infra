@@ -1,7 +1,7 @@
 ---
 title: CLIProxyAPI model aliasing for short-ID routing parity
 date: 2026-06-20
-status: draft
+status: completed
 owner: marcusrbrown
 related:
   - apps/cliproxy/config/config.yaml

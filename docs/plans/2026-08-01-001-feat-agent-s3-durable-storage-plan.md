@@ -1,7 +1,7 @@
 ---
 title: "feat: Fro Bot Agent S3 durable storage + generalized agent config command"
 type: feat
-status: active
+status: completed
 date: 2026-08-01
 origin: docs/brainstorms/2026-08-01-fro-bot-agent-s3-durable-storage-requirements.md
 deepened: 2026-08-01
@@ -153,7 +153,7 @@ action_ref_verified, key_layout_version
 
 ## Implementation Units
 
-- [ ] **Unit 1: AWS OIDC provider provisioning (idempotent, non-destructive)**
+- [x] **Unit 1: AWS OIDC provider provisioning (idempotent, non-destructive)**
 
   **Goal:** Ensure the account-level GitHub OIDC provider exists with the `sts.amazonaws.com` audience, without disrupting a pre-existing provider.
 
@@ -184,7 +184,7 @@ action_ref_verified, key_layout_version
 
   **Verification:** Mocked-IAM tests cover all branches; a real provider is never recreated or re-thumbprinted.
 
-- [ ] **Unit 2: Dedicated S3 bucket provisioning (security controls + lifecycle)**
+- [x] **Unit 2: Dedicated S3 bucket provisioning (security controls + lifecycle)**
 
   **Goal:** Create/verify the dedicated action-state bucket with public-access block, versioning, SSE-S3, TLS-only policy, and lifecycle rules.
 
@@ -215,7 +215,7 @@ action_ref_verified, key_layout_version
 
   **Verification:** Mocked-S3 tests prove control set, region conditional, idempotency, drift-halt, and readback-fail-throws.
 
-- [ ] **Unit 3: Per-repo IAM role + trust policy**
+- [x] **Unit 3: Per-repo IAM role + trust policy**
 
   **Goal:** Create/verify one IAM role per consumer repo with the OIDC trust policy (environment sub + GitHub-claim conditions).
 
@@ -245,7 +245,7 @@ action_ref_verified, key_layout_version
 
   **Verification:** Trust JSON asserted field-by-field; no wildcard path exists.
 
-- [ ] **Unit 4: Per-repo IAM policy + action-version key-layout pin (fail-closed)**
+- [x] **Unit 4: Per-repo IAM policy + action-version key-layout pin (fail-closed)**
 
   **Goal:** Attach the least-privilege inline policy scoping S3 access to the repo's session prefix + separate coordination-lock ARN, pinned to the consumer action's verified key layout.
 
@@ -278,7 +278,7 @@ action_ref_verified, key_layout_version
 
   **Verification:** Policy JSON asserted including negative (no delete on session prefix); fail-closed on unrecognized layout.
 
-- [ ] **Unit 5: Scaffold `agent` command group; migrate shared setup helpers**
+- [x] **Unit 5: Scaffold `agent` command group; migrate shared setup helpers**
 
   **Goal:** Create the `agent` command group reusing the `cliproxy setup` helper modules, with `cliproxy setup` preserved as a compatibility wrapper — no behavior/test regression.
 
@@ -309,7 +309,7 @@ action_ref_verified, key_layout_version
 
   **Verification:** Full existing setup test suite green; new agent tests prove parity; conventions test still 0 fail.
 
-- [ ] **Unit 6: `agent` S3 wiring + provision-first + OIDC subject precheck**
+- [x] **Unit 6: `agent` S3 wiring + provision-first + OIDC subject precheck**
 
   **Goal:** Add S3 durable-storage configuration to the `agent` command: verify AWS resources exist, validate repo OIDC subject form, and wire non-secret S3 variables (refusing static creds).
 
@@ -340,7 +340,7 @@ action_ref_verified, key_layout_version
 
   **Verification:** Tests prove provision-first gate, OIDC precheck fail-closed, non-secret-only writes, and opt-in compatibility.
 
-- [ ] **Unit 7: Workflow storage job-split verifier (effective job graph)**
+- [x] **Unit 7: Workflow storage job-split verifier (effective job graph)**
 
   **Goal:** Verify the consumer `fro-bot.yaml` enforces the storage job-split by resolving the effective job graph, and emit a precise diff when non-compliant — never mutate.
 
@@ -380,7 +380,7 @@ action_ref_verified, key_layout_version
 
   **Verification:** Fixture matrix covers compliant + every violation; verifier never writes the workflow.
 
-- [ ] **Unit 8: Conventions test + operator docs**
+- [x] **Unit 8: Conventions test + operator docs**
 
   **Goal:** Add the workflow/provisioning contract assertions and document the provisioner, the `agent` command, and the operator runbook (job-split, timeouts, STS TTL).
 
@@ -404,7 +404,7 @@ action_ref_verified, key_layout_version
 
   **Verification:** Conventions suite green; docs match implemented contract; changeset present.
 
-- [ ] **Unit 9: Teardown / deprovision path**
+- [x] **Unit 9: Teardown / deprovision path**
 
   **Goal:** Provide a deprovision path that removes per-repo AWS resources and unwires the repo, letting the operator choose whether to retain or purge session objects — so disabling storage doesn't strand billable resources.
 

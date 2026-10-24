@@ -108,7 +108,7 @@ The `@marcusrbrown/infra` CLI grew to 8 commands across 2 apps but uses a flat f
 
 ### Phase 1: Structure (must complete before Phase 2)
 
-- [ ] **Unit 1: File restructure + shared cliproxy utilities**
+- [x] **Unit 1: File restructure + shared cliproxy utilities**
 
 **Goal:** Move flat `<app>-<action>.ts` layout to `<app>/<action>.ts` with barrels. Extract duplicated cliproxy helpers to a cliproxy-local leaf module. Audit and update all `import.meta.dir` relative paths that change depth after the move.
 
@@ -158,7 +158,7 @@ The `@marcusrbrown/infra` CLI grew to 8 commands across 2 apps but uses a flat f
 
 ### Phase 2: Features (mostly independent; Unit 6 depends on Unit 1 only)
 
-- [ ] **Unit 2: `keeweb open` command**
+- [x] **Unit 2: `keeweb open` command**
 
 **Goal:** Add `keeweb open` to launch `https://kw.igg.ms/` in the default browser.
 
@@ -191,7 +191,7 @@ The `@marcusrbrown/infra` CLI grew to 8 commands across 2 apps but uses a flat f
 
 ---
 
-- [ ] **Unit 3: `cliproxy open` TUI command**
+- [x] **Unit 3: `cliproxy open` TUI command**
 
 **Goal:** Launch CLIProxyAPI's built-in TUI dashboard via SSH.
 
@@ -225,7 +225,7 @@ The `@marcusrbrown/infra` CLI grew to 8 commands across 2 apps but uses a flat f
 
 ---
 
-- [ ] **Unit 4: Top-level `status` dashboard**
+- [x] **Unit 4: Top-level `status` dashboard**
 
 **Goal:** Unified health check across all apps with parallel execution.
 
@@ -266,7 +266,7 @@ The `@marcusrbrown/infra` CLI grew to 8 commands across 2 apps but uses a flat f
 
 ---
 
-- [ ] **Unit 5: Management output polish**
+- [x] **Unit 5: Management output polish**
 
 **Goal:** Human-readable default output for keys list, config get, and status usage stats.
 
@@ -301,7 +301,7 @@ The `@marcusrbrown/infra` CLI grew to 8 commands across 2 apps but uses a flat f
 
 ---
 
-- [ ] **Unit 6: Install `@clack/prompts` + `cliproxy setup` wizard**
+- [x] **Unit 6: Install `@clack/prompts` + `cliproxy setup` wizard**
 
 **Goal:** Interactive onboarding wizard that takes a new repo from zero to working CLIProxyAPI in one command.
 
@@ -361,7 +361,7 @@ The `@marcusrbrown/infra` CLI grew to 8 commands across 2 apps but uses a flat f
 
 ---
 
-- [ ] **Unit 7: Changeset + snapshot + AGENTS.md**
+- [x] **Unit 7: Changeset + snapshot + AGENTS.md**
 
 **Goal:** Ship the release with proper versioning and documentation.
 

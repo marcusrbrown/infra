@@ -305,7 +305,7 @@ reusable across any number of sites via per-site tracking IDs against one instan
 
 ## Implementation Units
 
-- [ ] **Unit 1: App scaffolding — package, compose stack, Caddy, Renovate pin**
+- [x] **Unit 1: App scaffolding — package, compose stack, Caddy, Renovate pin**
 
 **Goal:** Create the `apps/umami/` package with the Docker Compose stack (Umami + Postgres +
 Caddy), Caddy reverse-proxy config, and the Renovate image-pin entry. `docker compose config`
@@ -358,7 +358,7 @@ the `caddy`/`eceasy` packageRules in `.github/renovate.json5`.
 - `bun install` produces a clean `bun.lock` diff (new workspace member only).
 - No secret values in any tracked file (grep clean).
 
-- [ ] **Unit 2: Host validation**
+- [x] **Unit 2: Host validation**
 
 **Goal:** `validateUmamiHost` rejects `-`-prefixed hostnames and characters outside
 `[A-Za-z0-9.-]` before any value reaches SSH argv.
@@ -388,7 +388,7 @@ a security boundary with a known contract.
 
 **Verification:** All rejection cases throw; valid hosts pass; tests green.
 
-- [ ] **Unit 3: deploy.ts — env validation, `.env` materialization, compose, health-gate**
+- [x] **Unit 3: deploy.ts — env validation, `.env` materialization, compose, health-gate**
 
 **Goal:** `apps/umami/src/deploy.ts` validates env, materializes the droplet `.env` via SSH
 stdin (never argv), uploads compose + Caddyfile, runs `docker compose pull && up -d --wait`,
@@ -484,7 +484,7 @@ on cert lag and a follow-up `umami status` confirms); the default admin login no
 post-deploy; the Postgres volume persists across a second deploy (data not wiped); a deploy
 with a changed `UMAMI_DB_PASSWORD` is refused by the fingerprint guard.
 
-- [ ] **Unit 4: provision-droplet.ts**
+- [x] **Unit 4: provision-droplet.ts**
 
 **Goal:** One-time droplet provisioning for `metrics.fro.bot`: create the droplet, select the
 SSH key by name, wait for SSH, pin host keys into `.github/known_hosts`.
@@ -527,7 +527,7 @@ helpers / `Bun.spawn`).
 **Verification:** Tests green; live run creates the droplet and appends host keys; re-run
 without `--force` refuses.
 
-- [ ] **Unit 5: CLI command module (`umami status` / `deploy` / `logs` / host)**
+- [x] **Unit 5: CLI command module (`umami status` / `deploy` / `logs` / host)**
 
 **Goal:** `packages/cli/src/commands/umami/` with `status`, `deploy`, `logs`, a CLI-side
 `host.ts`, and the `index.ts` barrel; registered in `cli.ts`.
@@ -583,7 +583,7 @@ without `--force` refuses.
 **Verification:** All command help responds; tests green; `umami status` appears as an MCP
 tool when the allowlist is asserted.
 
-- [ ] **Unit 6: Unified status rollup wiring**
+- [x] **Unit 6: Unified status rollup wiring**
 
 **Goal:** `umami` appears in `bunx @marcusrbrown/infra status` (table + `--json`).
 
@@ -612,7 +612,7 @@ with the `umami` key. Use `UMAMI_HOST` from env (mirroring `GATEWAY_HOST`).
 
 **Verification:** `status` table + `--json` include `umami`; tests green.
 
-- [ ] **Unit 7: Deploy workflow**
+- [x] **Unit 7: Deploy workflow**
 
 **Goal:** `.github/workflows/deploy-umami.yaml` deploys on push (path-filtered) or
 `workflow_dispatch`, in the `umami` environment, with pinned host keys and explicit secrets.
@@ -644,7 +644,7 @@ No Node-24 pin (no lint/tsc step in a deploy workflow).
 paths-filter quantifier guard is satisfied; a workflow-only change does not trigger the deploy
 (quantifier correct).
 
-- [ ] **Unit 8: Operator docs (`apps/umami/AGENTS.md`) + root AGENTS.md cross-reference**
+- [x] **Unit 8: Operator docs (`apps/umami/AGENTS.md`) + root AGENTS.md cross-reference**
 
 **Goal:** Complete operator documentation for deploy, day-2 ops, privacy baseline, persistence,
 and lifecycle.

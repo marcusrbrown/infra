@@ -95,7 +95,7 @@ The code changes land in one PR (Units 1–4). The production rollout (Unit 5) i
 
 ## Implementation Units
 
-- [ ] **Unit 1: Defensive `owned_by` fix in setup validation**
+- [x] **Unit 1: Defensive `owned_by` fix in setup validation**
 
 **Goal:** `cliproxy setup` no longer hard-fails when `/v1/models` entries omit `owned_by`; provider is inferred from the model id/prefix.
 
@@ -125,7 +125,7 @@ The code changes land in one PR (Units 1–4). The production rollout (Unit 5) i
 
 **Verification:** `cliproxy setup` model validation passes against an `owned_by`-less payload; existing setup-validation tests still green.
 
-- [ ] **Unit 2: v7-compatible, ban-aware management checks in status.ts**
+- [x] **Unit 2: v7-compatible, ban-aware management checks in status.ts**
 
 **Goal:** `cliproxy status` works against v7 — usage check uses `/usage-queue`, management checks are single-probe-before-parallel (IP-ban-safe), unchanged endpoints still verified.
 
@@ -159,7 +159,7 @@ The code changes land in one PR (Units 1–4). The production rollout (Unit 5) i
 
 **Verification:** `infra cliproxy status` + `infra status --json` render correctly against a v7 container; bad-key run makes a single attempt; usage line honest about recent-window semantics.
 
-- [ ] **Unit 3: Image pin + compatibility verification**
+- [x] **Unit 3: Image pin + compatibility verification**
 
 **Goal:** the stack runs v7.1.31 by pinned digest; healthcheck, config preservation, and deploy single-attempt management property confirmed compatible.
 
@@ -185,7 +185,7 @@ The code changes land in one PR (Units 1–4). The production rollout (Unit 5) i
 
 **Verification:** `docker compose config` valid with the v7 image; deploy test suite green; manual confirmation deferred to Unit 5 (live healthcheck + smoke).
 
-- [ ] **Unit 4: Docs — AGENTS.md to v7 reality**
+- [x] **Unit 4: Docs — AGENTS.md to v7 reality**
 
 **Goal:** `apps/cliproxy/AGENTS.md` reflects v7: usage-queue replaces usage, the IP-ban behavior, the corrected deploy preflight/health endpoint, the v7 image pin, and the key-redaction rule.
 
@@ -216,7 +216,7 @@ Land Units 1-4 in one branch/PR. Verify: full test suite, tsc, lint, taxonomy ga
 
 ### Phase 2 — Production rollout (Unit 5, operator execution after merge)
 
-- [ ] **Unit 5: Staged production rollout**
+- [x] **Unit 5: Staged production rollout**
 
 **Goal:** `cliproxy.fro.bot` runs v7.1.31 with all OAuth tokens intact and no consumer-visible regression.
 

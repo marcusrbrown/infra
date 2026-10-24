@@ -147,7 +147,7 @@ On 2026-10-23 the workspace's long-lived `opencode serve` reached about 1.1 GiB 
 
 ## Implementation Units
 
-- [ ] **Unit 1: Limit constant and override**
+- [x] **Unit 1: Limit constant and override**
 
 **Goal:** Every deploy renders `mem_limit` and `memswap_limit` on `workspace` from one constant.
 
@@ -177,7 +177,7 @@ On 2026-10-23 the workspace's long-lived `opencode serve` reached about 1.1 GiB 
 
 **Verification:** Removing either key, or using a different value in the override, fails a test.
 
-- [ ] **Unit 2: Post-up running-limit readback**
+- [x] **Unit 2: Post-up running-limit readback**
 
 **Goal:** After `up`, the deploy proves the running workspace carries the configured limits, or fails.
 
@@ -206,7 +206,7 @@ On 2026-10-23 the workspace's long-lived `opencode serve` reached about 1.1 GiB 
 
 **Verification:** Every new branch has a test, and the full gateway suite passes.
 
-- [ ] **Unit 3: Workspace memory and supervisor state in `gateway status`**
+- [x] **Unit 3: Workspace memory and supervisor state in `gateway status`**
 
 **Goal:** `gateway status`, `status --json` and the MCP tools show the workspace limit, usage, kill evidence and supervisor state, and the probe can never hide compose output.
 
@@ -246,7 +246,7 @@ On 2026-10-23 the workspace's long-lived `opencode serve` reached about 1.1 GiB 
 
 **Verification:** The CLI tests pass, `conventions.test.ts` passes unchanged, and a changeset is present.
 
-- [ ] **Unit 4: Gateway docs**
+- [x] **Unit 4: Gateway docs**
 
 **Goal:** An operator can find the limit, see that it was hit, and recover.
 

@@ -1,7 +1,7 @@
 ---
 title: "feat: Add operator push infra readiness"
 type: feat
-status: active
+status: completed
 date: 2026-07-25
 origin: docs/brainstorms/2026-07-21-gateway-operator-push-infra-readiness-requirements.md
 deepened: 2026-07-25
@@ -236,7 +236,7 @@ under the existing run-secrets convention. The override also derives
 The units are dependency-ordered. Each behavior-bearing unit is test-first: add the failing
 behavioral assertions before changing implementation or workflow wiring.
 
-- [ ] **Unit 1: Gateway preflight validation + secret-file/compose wiring**
+- [x] **Unit 1: Gateway preflight validation + secret-file/compose wiring**
 
   **Goal:** Add the gateway VAPID quartet state machine, structural validation, four secret files,
   `_FILE` compose wiring, derived gateway enablement, and checksum/recreate sensitivity without
@@ -312,7 +312,7 @@ behavioral assertions before changing implementation or workflow wiring.
   **Verification:** Gateway tests cover every mode and boundary; checksum assertions prove recreate
   sensitivity; no implementation test uses production key material.
 
-- [ ] **Unit 2: Gateway workflow forwarding and contract synchronization**
+- [x] **Unit 2: Gateway workflow forwarding and contract synchronization**
 
   **Goal:** Forward the three non-secret gateway values from GitHub Environment `vars`, the private
   VAPID key from GitHub Environment `secrets`, and preserve safe all-absent behavior in the existing
@@ -378,7 +378,7 @@ behavioral assertions before changing implementation or workflow wiring.
   no-independent-enable assertions pass in `packages/cli/src/conventions.test.ts`. The private key is
   never rendered in logs or non-deploy artifacts.
 
-- [ ] **Unit 3: Dashboard flag deploy/workflow wiring**
+- [x] **Unit 3: Dashboard flag deploy/workflow wiring**
 
   **Goal:** Add the independently controlled dashboard server-side flag while keeping the dashboard
   default-off behavior and ensuring no VAPID material or endpoint configuration crosses the service
@@ -428,7 +428,7 @@ behavioral assertions before changing implementation or workflow wiring.
   **Verification:** Dashboard tests prove absent/false/malformed disabled behavior, exact-true
   rendering, and the absence of VAPID material. Workflow inspection proves the flag comes from `vars`.
 
-- [ ] **Unit 4: Operator docs and disabled-state integration verification**
+- [x] **Unit 4: Operator docs and disabled-state integration verification**
 
   **Goal:** Document the ready-but-off contract and verify that configured production/repository
   Environment state remains absent or disabled without exposing secret values.

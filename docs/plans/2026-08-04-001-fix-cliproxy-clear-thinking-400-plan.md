@@ -1,7 +1,7 @@
 ---
 title: "fix: Neutralize cliproxy clear_thinking injection so older Anthropic models work with thinking off"
 type: fix
-status: active
+status: completed
 date: 2026-08-04
 deepened: 2026-08-04
 ---
@@ -177,7 +177,7 @@ payload.override production application
 **Verification:**
 - Focused tests prove the surviving template/deploy boundary and field-scoped alias behavior; no production write occurs in this unit. Unit 2 is blocked pending a safe field-scoped/upstream mechanism.
 
-- [ ] **Unit 2: Apply the override through an operator-gated production rollout with rollback evidence**
+- [ ] **Unit 2: Apply the override through an operator-gated production rollout with rollback evidence** — moot: #1036 closed 2026-08-22 after a re-probe returned 200 for every affected model
 
 **Goal:** Remain blocked. Do not mutate the live config until CLIProxyAPI provides a safe field-scoped payload endpoint or an upstream-reviewed mechanism that does not replace the secret-bearing document.
 
@@ -197,7 +197,7 @@ payload.override production application
 **Verification:**
 - Verification is intentionally not available until the safe field-scoped/upstream mechanism is approved. Unit 3 remains blocked.
 
-- [ ] **Unit 3: Verify affected and control models, monitor, then close #1036**
+- [ ] **Unit 3: Verify affected and control models, monitor, then close #1036** — moot: see Unit 2
 
 **Goal:** Remain blocked until Unit 2 has a safe field-scoped/upstream application mechanism; then prove the override clears the 400 with thinking off, preserves existing consumers, and remains healthy through immediate checks plus one automated-path reconciliation.
 

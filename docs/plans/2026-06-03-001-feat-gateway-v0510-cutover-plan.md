@@ -91,7 +91,7 @@ Residual risk class carried over from the v0.50.0 plan: **LLM execution surface*
 
 ## Implementation Units
 
-- [ ] **Unit 1: Daemon-level preflight on the droplet (operational gate, no committed change)**
+- [x] **Unit 1: Daemon-level preflight on the droplet (operational gate, no committed change)**
 
 **Goal:** Prove the v0.51.0 **gateway** service boots healthy with real materialized secrets, on an isolated compose project disjoint from `/opt/gateway`, before the production pin moves.
 
@@ -115,7 +115,7 @@ Residual risk class carried over from the v0.50.0 plan: **LLM execution surface*
 
 **Verification:** gateway service builds and boots past `loadGatewayConfig` (no `Missing required secret`) on v0.51.0; no sustained duplicate Discord session left on the production token; build+boot time recorded; temp secrets securely deleted and **verified absent**; temp project + paths removed; `/opt/gateway` untouched.
 
-- [ ] **Unit 2: Bump daemon pin to v0.51.0 + raise Renovate ceiling**
+- [x] **Unit 2: Bump daemon pin to v0.51.0 + raise Renovate ceiling**
 
 **Goal:** Move the committed pin and ceiling; correct stale rationale.
 
@@ -133,7 +133,7 @@ Residual risk class carried over from the v0.50.0 plan: **LLM execution surface*
 
 **Verification:** valid JSON `v0.51.0`; `npx renovate-config-validator` passes; comment accurate.
 
-- [ ] **Unit 3: Docs + correct #373**
+- [x] **Unit 3: Docs + correct #373**
 
 **Goal:** Update operator docs to the v0.51.0 + mention-loop contract; close the public record.
 

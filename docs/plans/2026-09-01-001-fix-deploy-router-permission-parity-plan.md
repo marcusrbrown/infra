@@ -1,7 +1,7 @@
 ---
 title: 'fix: Restore deploy router and guard reusable-workflow permission parity'
 type: fix
-status: active
+status: completed
 date: 2026-09-01
 ---
 
@@ -150,7 +150,7 @@ Documentation is silent on the *failure mode* (startup rejection vs. silent down
 
 ## Implementation Units
 
-- [ ] **Unit 1: Restore router permission parity**
+- [x] **Unit 1: Restore router permission parity**
 
 **Goal:** Push-triggered deploys start again. This is the production restore and should land on its own.
 
@@ -181,7 +181,7 @@ Documentation is silent on the *failure mode* (startup rejection vs. silent down
 - Pre-merge: push the branch and run `gh workflow run deploy.yaml --ref <branch>`. Jobs being created at all is the proof — startup validation passed. A router dispatch fans out to every app caller, so the resulting runs park at their Environment approval gates and should be cancelled rather than approved.
 - After merge, the router run on the merge commit creates jobs and reaches the dashboard approval gate instead of `startup_failure`.
 
-- [ ] **Unit 2: Guard caller/callee permission parity**
+- [x] **Unit 2: Guard caller/callee permission parity**
 
 **Goal:** Any future callee job demanding a scope its caller does not grant fails the test suite.
 
@@ -209,7 +209,7 @@ Documentation is silent on the *failure mode* (startup rejection vs. silent down
 **Verification:**
 - Removing the `permissions:` block added in Unit 1 makes this test fail with a message identifying the dashboard caller and the `actions` scope.
 
-- [ ] **Unit 3: Record the diagnostic signature**
+- [x] **Unit 3: Record the diagnostic signature**
 
 **Goal:** The next occurrence is recognized from symptoms rather than re-derived over two days.
 

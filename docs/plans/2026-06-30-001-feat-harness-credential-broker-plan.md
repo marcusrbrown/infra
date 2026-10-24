@@ -161,7 +161,7 @@ run end (success/fail/cancel): best-effort revoke; TTL+sweeper is the backstop
 
 ## Implementation Units
 
-- [ ] **Unit 1: OIDC verification + allowlist policy**
+- [x] **Unit 1: OIDC verification + allowlist policy**
 
 **Goal:** Verify a GitHub Actions OIDC JWT and decide whether its claims satisfy the trust allowlist.
 
@@ -195,7 +195,7 @@ run end (success/fail/cancel): best-effort revoke; TTL+sweeper is the backstop
 
 ---
 
-- [ ] **Unit 2: cliproxy mint/revoke client**
+- [x] **Unit 2: cliproxy mint/revoke client**
 
 **Goal:** Add a short-lived key to cliproxy and remove it, safely, against the management API.
 
@@ -232,7 +232,7 @@ run end (success/fail/cancel): best-effort revoke; TTL+sweeper is the backstop
 
 ---
 
-- [ ] **Unit 3: HTTP service (mint endpoint + audit)**
+- [x] **Unit 3: HTTP service (mint endpoint + audit)**
 
 **Goal:** Wire OIDC verification + minting behind `POST /v1/mint`, returning an `auth.json` payload, with structured audit and a health endpoint.
 
@@ -272,7 +272,7 @@ run end (success/fail/cancel): best-effort revoke; TTL+sweeper is the backstop
 
 ---
 
-- [ ] **Unit 4: Sweeper (TTL backstop + reconcile)**
+- [x] **Unit 4: Sweeper (TTL backstop + reconcile)**
 
 **Goal:** Guarantee minted keys are revoked even when a run crashes or cancels without signalling.
 
@@ -306,7 +306,7 @@ run end (success/fail/cancel): best-effort revoke; TTL+sweeper is the backstop
 
 ---
 
-- [ ] **Unit 5: Provisioning + deploy + host validation**
+- [x] **Unit 5: Provisioning + deploy + host validation**
 
 **Goal:** Provision the broker droplet and deploy the stack following the repo's droplet conventions, with secrets materialized over SSH stdin.
 
@@ -342,7 +342,7 @@ run end (success/fail/cancel): best-effort revoke; TTL+sweeper is the backstop
 
 ---
 
-- [ ] **Unit 6: CLI command group + MCP gating**
+- [x] **Unit 6: CLI command group + MCP gating**
 
 **Goal:** Operator CLI surface for the broker, correctly gated out of MCP where sensitive.
 
@@ -374,7 +374,7 @@ run end (success/fail/cancel): best-effort revoke; TTL+sweeper is the backstop
 
 ---
 
-- [ ] **Unit 7: Deploy workflow + environment gate**
+- [x] **Unit 7: Deploy workflow + environment gate**
 
 **Goal:** A gated per-app deploy workflow wired into the router, with the `broker` GitHub Environment pre-created and protected.
 
@@ -401,7 +401,7 @@ run end (success/fail/cancel): best-effort revoke; TTL+sweeper is the backstop
 
 ---
 
-- [ ] **Unit 8: Operator docs**
+- [x] **Unit 8: Operator docs**
 
 **Goal:** Operator runbook + repo doc updates for the new app.
 

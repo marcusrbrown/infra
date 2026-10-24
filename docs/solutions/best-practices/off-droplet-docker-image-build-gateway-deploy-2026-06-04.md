@@ -1,6 +1,7 @@
 ---
 title: Off-droplet Docker image build for a single-droplet deploy (CI build → GHCR push → droplet pull)
 date: 2026-06-04
+last_updated: 2026-10-24
 category: docs/solutions/best-practices
 module: apps/gateway
 problem_type: best_practice
@@ -34,14 +35,14 @@ A single-droplet deploy that builds its image on the target host has a latent re
 bomb: `docker compose up --build` builds the new image *while the old stack is still running*,
 so peak memory is roughly old-stack + build. On a small droplet (the gateway runs on
 `s-1vcpu-2gb`) building a memory-heavy image (a Node/OpenCode workspace image) blows past
-available RAM and thrashes swap — a `fro-bot/agent` v0.54.1 cutover did exactly this and took
-the gateway down for ~50 minutes (see `docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md`).
+available RAM and thrashes swap. A daemon-bump cutover did exactly this and took the gateway
+down for ~50 minutes. A cold build cache (fresh upstream ref) makes it worse than a patch bump.
 
 The durable fix is to move the build off the droplet entirely:
 
 ```text
-CI runner (16 GB):  checkout pinned ref → build → push to GHCR → capture digest
-Droplet (2 GB):     pull digest-pinned image → up -d --no-build → verify running digest
+CI runner:  checkout pinned ref → build → push to GHCR → capture digest
+Droplet:    pull digest-pinned image → up -d --no-build → verify running digest
 ```
 
 This playbook captures the reusable mechanics so other single-droplet deploys
@@ -55,51 +56,50 @@ The CI runner builds and pushes; the droplet pulls and recreates without buildin
 
 ```bash
 docker compose --project-directory "$DEPLOY_DIR" pull
-docker compose --project-directory "$DEPLOY_DIR" up -d --no-build --wait --wait-timeout 120 --remove-orphans
+docker compose --project-directory "$DEPLOY_DIR" up -d --no-build --wait --wait-timeout <seconds> --remove-orphans
 ```
 
 `--no-build` is belt-and-suspenders: even an accidental future code path cannot trigger a
-host build.
+host build. The wait timeout is a single named constant in `deploy.ts`; size it to outlast the
+slowest service healthcheck start period.
 
 ### 2. Materialize the image pins unconditionally
 
 Write the `image:` digest pins on **every** deploy. Do not gate them behind an optional
-feature flag (the gateway's announce/Caddy override is a conditional *layer* merged into the
-same file — the image pins are not). If the default path can omit the override, Compose can
-drift back toward `build:` semantics and the host builds again.
+feature flag (the gateway's Caddy/announce/operator sections are conditional _layers_ merged
+into the same file — the image pins are not). If the default path can omit the override,
+Compose can drift back toward `build:` semantics and the host builds again.
 
 ```ts
-// buildComposeOverride(): image pins always present; announce/Caddy is a conditional layer
-return `services:
-  gateway:
-    image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}${announceGatewaySection}
-  workspace:
-    image: ${WORKSPACE_IMAGE_NAME}@${workspaceDigest}
-${caddySection}${volumesSection}`
+// buildComposeOverride(): image pins always present; Caddy/announce/operator are conditional layers
+gateway:
+  image: ${GATEWAY_IMAGE_NAME}@${gatewayDigest}
+workspace:
+  image: ${WORKSPACE_IMAGE_NAME}@${workspaceDigest}
 ```
 
 ### 3. Pin by digest, not tag — and validate the shape
 
 GHCR tags are mutable; digests are identity. Capture the pushed digest from
 `docker/build-push-action` (`outputs.digest`), pin `image: ...@sha256:<digest>`, and validate
-the shape before it reaches a compose file or a remote command:
+both digests (required, and matching `^sha256:[0-9a-f]{64}$`) before any SSH:
 
 ```ts
 const DIGEST_RE = /^sha256:[0-9a-f]{64}$/
-if (!DIGEST_RE.test(gatewayDigest)) {
-  throw new Error('GATEWAY_IMAGE_DIGEST is not a valid sha256 digest')
-}
+if (!gatewayDigest) throw new Error("GATEWAY_IMAGE_DIGEST is required but not set. ...")
+if (!DIGEST_RE.test(gatewayDigest)) throw new Error("GATEWAY_IMAGE_DIGEST has an invalid format ...")
+// same two checks for WORKSPACE_IMAGE_DIGEST
 ```
 
-Validating up front (before any SSH) keeps a malformed digest from materializing a bad image
-reference or reaching an interpolated remote command.
+Failing up front keeps a missing or malformed digest from silently falling through to a host
+build, materializing a bad image reference, or reaching an interpolated remote command.
 
 ### 4. Compose `build:` + `image:` coexistence — PROVEN, not assumed
 
 The load-bearing assumption is that a service with BOTH an upstream `build:` and an override
 `image:` pin, run with `pull` + `up --no-build`, uses the pulled image and never host-builds.
-Prove it on the target's actual Compose version before relying on it. Disjoint-project proof
-(verified on Docker Compose v5.1.3):
+Prove it on the target's actual Compose version before relying on it, and re-check after a
+Compose upgrade. Disjoint-project proof:
 
 ```bash
 # A Dockerfile that, IF built, writes an obvious marker the pulled image lacks:
@@ -128,6 +128,11 @@ Results that must hold:
 If any of these don't hold on your Compose version, add an explicit guard before adopting.
 
 ### 5. Verify the running image by digest — in two steps
+
+The deploy's post-`up` digest readback (Phase 9c in `deploy.ts`, asserted by
+`assertRunningImageDigest`) runs for both `gateway` and `workspace`. A mismatch throws, the
+deploy fails loudly, and the secrets checksum is not persisted, so the next deploy recreates
+the containers.
 
 A **container** has no `.RepoDigests` field; the **image** does. Inspecting the container
 directly returns a template error and empty output, which silently fails verification.
@@ -195,17 +200,20 @@ baked into a layer.
 
 ### 8. Safe failure is deliberate
 
-The deploy job depends on the build job, so a failed build/push never touches the live stack:
+The deploy job depends on the build job (and the non-blocking `scan-images` job and the
+`notify` job), so a failed build/push never touches the live stack:
 
 ```yaml
 deploy-gateway:
-  needs: build-images
+  needs: [build-images, scan-images, notify]
+  if: ${{ !cancelled() && needs.build-images.result == 'success' && needs.scan-images.result == 'success' }}
 ```
 
-On the droplet, the `pull` runs before `up`, so an unavailable image errors before any
-recreate — the old stack stays live. Break-glass when CI/GHCR is unavailable: build + push the
-pinned ref from a workstation (ample RAM — the off-droplet build done by hand), then deploy
-locally with the digests supplied manually:
+`scan-images` is `continue-on-error` and exits 0 on findings, so it informs the approval gate
+rather than blocking the deploy. On the droplet, the `pull` runs before `up`, so an
+unavailable image errors before any recreate — the old stack stays live. Break-glass when
+CI/GHCR is unavailable: build + push the pinned ref from a workstation (ample RAM — the
+off-droplet build done by hand), then deploy locally with the digests supplied manually:
 
 ```bash
 GATEWAY_IMAGE_DIGEST="sha256:..." \
@@ -213,11 +221,75 @@ WORKSPACE_IMAGE_DIGEST="sha256:..." \
 bunx @marcusrbrown/infra gateway deploy --local
 ```
 
-Never run `docker compose up --build` on the droplet — that reintroduces the swap-thrash.
+## Recognizing a host build or swap thrash
+
+If someone reintroduces a host build (or an image pin silently drops), the failure has a
+distinctive signature. **Do not** "fix" it with `--build` on the droplet; fix the pin path.
+
+- A deploy step runs far past the normal few minutes and stays `in_progress`.
+- Load average is tens on a 1-vCPU box (e.g. ~31 and still climbing across 1/5/15-min), with
+  almost no free RAM and deep swap.
+- `docker ps` itself times out on the droplet; SSH probes hang from CPU starvation.
+- The public endpoint returns `000` (down) while the old stack is starved.
+
+Responding:
+
+- **Use external probes only** — the public endpoint, the GitHub run API, `doctl`. They add
+  zero droplet load. Never SSH-hammer a thrashing droplet: it can't run `docker ps`, and UFW
+  rate-limits new connections (6 per 30s), so piling on SSH risks a lockout and worsens the
+  thrash.
+- **Restore** with a DigitalOcean power-cycle (`doctl compute droplet-action power-cycle`) and
+  cancel the stuck run (`gh run cancel`; SSH is severed anyway). In the original incident the
+  stack was back in ~90 s.
+- **Recover through the pipeline**, not by hand on the droplet: redeploy with CI-built digests
+  (or the break-glass workstation build above). What not to do: `docker compose build` or
+  `up --build` on the droplet, with or without stopping the old stack first.
+
+The workspace container also carries a fixed memory limit with swap capped equal to it
+(`mem_limit`/`memswap_limit` in the override), and the deploy reads both back from the running
+container (Phase 9d) — so a runaway workspace is OOM-killed instead of dragging the whole host
+into swap. See `apps/gateway/AGENTS.md` for sizing and the memory-limit anti-patterns.
+
+## A green deploy is not a fresh deploy
+
+`docker compose up --wait` asserts container _health_, and slash-command registration asserts
+the daemon registered _something_; neither proves the running image is the one just built. A
+historical failure let a moved upstream pin update source on disk for weeks while the running
+container kept executing an old image — health and registration both passed. The digest
+readback in section 5 is what closes this gap now: it compares the running image's identity to
+the pushed digest, so a stale or locally built image fails the deploy.
+
+Detection signals when digest verification is unavailable or you're triaging by hand:
+
+- The running image's `Created` timestamp is far older than the container's `Created`.
+- `RepoDigests` on the running image doesn't contain the pin from `compose.override.yaml`.
+- The new behavior the bump should add is absent. Grep for a behavior string inside the
+  running container's bundle, e.g.
+  `docker exec "$CID" grep -rl "<new-behavior-string>" /app/packages/gateway/dist/main.mjs`,
+  or query the live Discord guild-commands API for a new command.
+
+Related gotchas:
+
+- **Source ref ≠ running image.** The deploy still `git reset --hard`s the droplet's source
+  directory early, so it shows the new ref immediately, but the running image only changes
+  after `up` recreates containers. A failure (or power-cycle) mid-deploy leaves the **old
+  image** with a **new source dir**. Verify the image digest, never the git checkout.
+- **Two independent `fro-bot/agent` version surfaces.** The CI PR-reviewer Action is pinned in
+  `.github/workflows/fro-bot.yaml`; the deployed Discord daemon is pinned in
+  `apps/gateway/upstream.json`, which `build-images` reads to pick the ref it checks out and
+  builds. A daemon behavior fix ships only via an `upstream.json` bump plus a gated redeploy;
+  bumping the Action SHA changes how PRs are reviewed, not the live daemon.
+- **Never `git clean -xfd` the droplet deploy directory during manual recovery.** It deletes
+  the untracked `secrets/` files, and some secret values exist only in the GitHub Environment,
+  not in a local `.env`. Restore by running the real deploy pipeline (or `--local` with the
+  materializer), not by hand-editing. On macOS, a local deploy needs a short `TMPDIR` (the
+  deploy roots its SSH `ControlPath` under `/tmp` to stay under the socket path-length limit).
+- **A pinned upstream ref doesn't guarantee a runnable image.** Probe a freshly built image's
+  boot before trusting a cutover; see the upgrade playbook below.
 
 ## Why This Matters
 
-- Eliminates swap-thrash outages on small droplets — the build moves to a 16 GB runner.
+- Eliminates swap-thrash outages on small droplets — the build moves to a CI runner with ample RAM.
 - Deploys become reproducible and immutable: the droplet runs exactly the digest CI pushed.
 - Verification answers "are we really running the pushed image?" as a hard digest check, not a tag.
 - Safety is preserved: a failed build or unavailable image leaves the old stack running.
@@ -234,13 +306,12 @@ building on its droplet.
 ## Examples
 
 The shipped implementation lives in `apps/gateway/src/deploy.ts`,
-`.github/workflows/deploy-gateway.yaml` (the `build-images` job + digest outputs), and
-`.github/workflows/deploy.yaml` (the `deploy-gateway` caller permission grant). `apps/gateway/AGENTS.md`
-documents the operator flow + the break-glass runbook.
+`.github/workflows/deploy-gateway.yaml` (the `build-images` and `scan-images` jobs + digest
+outputs), and `.github/workflows/deploy.yaml` (the `deploy-gateway` caller permission grant).
+`apps/gateway/AGENTS.md` documents the operator flow + the break-glass runbook.
 
 ## Related
 
-- `docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md` — the outage that motivated this. Its "build off-droplet (GHCR) and pull" prevention option is what this playbook operationalizes; that option is now the implemented path.
-- `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` — added `--build` to defeat stale-image reuse for an **on-host** build. That guidance applies to host-built `build:` services; under this off-droplet model the droplet pulls a digest-pinned image and must not use `--build`.
 - `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md` — complementary image-swap discipline: probe the pinned image, verify the real contract, keep cutover rollback-safe.
+- `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md` — earlier gateway deploy-pipeline cascade (different failure class).
 - `../integration-issues/docker-network-stale-subnet-cleanup-2026-06-18.md` — deploy-sequencing companion: pull images before any disruptive cleanup; stale Docker network IPAM state requires a live-state migration step between pull and compose up.

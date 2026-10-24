@@ -60,7 +60,7 @@ Residual risk class carried over from the v0.50.0 plan: **LLM execution surface*
 
 - `docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md` — **the** lesson driving this plan: the daemon's config loader (`readSecret`) is authoritative for boot-required secrets, NOT compose. Invariant: REQUIRED (loader) ⊆ WIRED (compose). An isolated single-service preflight does not validate the daemon's contract.
 - `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md` — probe the exact pinned image; verify reviewer/release claims against the pinned tag; anchor cutover with backup + smoke test.
-- `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` — deploy must `--build` (already in `deploy.ts`); a moved pin that never rebuilt hid a broken image.
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md` — deploy must `--build` (already in `deploy.ts`); a moved pin that never rebuilt hid a broken image.
 
 ### Verified Contract (at tag v0.51.0, this session)
 
@@ -197,4 +197,4 @@ Residual risk class carried over from the v0.50.0 plan: **LLM execution surface*
 - Compound doc: `docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md` (the undeployable-upstream incident + the daemon-loader-vs-compose lesson)
 - Verified contract: `fro-bot/agent` `packages/gateway/src/config.ts` + `deploy/compose.yaml` @ tag `v0.51.0`
 - Related code: `apps/gateway/src/deploy.ts`, `apps/gateway/upstream.json`, `.github/workflows/deploy-gateway.yaml`, `.github/renovate.json5`
-- Learnings: `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md`, `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md`
+- Learnings: `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md`, `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`

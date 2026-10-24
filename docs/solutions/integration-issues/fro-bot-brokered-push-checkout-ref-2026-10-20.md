@@ -51,7 +51,7 @@ Before, the checkout came first and had no `ref`, so it checked out the default 
     token: ${{ secrets.FRO_BOT_PAT }}
 ```
 
-After, the `prehead` step (`.github/workflows/fro-bot.yaml:895`) runs first, and the checkout (`.github/workflows/fro-bot.yaml:931-934`) uses its output:
+After, the `prehead` step (`id: prehead` in `.github/workflows/fro-bot.yaml`) runs first, and the checkout (`.github/workflows/fro-bot.yaml:931-934`) uses its output:
 
 ```yaml
 - name: Checkout repository
@@ -71,7 +71,7 @@ Brokered push rebuilds the agent's changes as a working-tree diff against `trust
 
 ## Prevention
 
-- Never set the checkout `ref` and `trusted-head-sha` separately. The `fro-bot-content checkout matches the brokered-push anchor` suite in `packages/cli/src/conventions.test.ts:3680` pins the step order, the shared ref, the checkout credentials, and the same-repo guard in the `prehead` script.
+- Never set the checkout `ref` and `trusted-head-sha` separately. The `fro-bot-content checkout matches the brokered-push anchor` suite in `packages/cli/src/conventions.test.ts` pins the step order, the shared ref, the checkout credentials, and the same-repo guard in the `prehead` script.
 - When the action pin moves, re-check that `reconstructChanges` still diffs against the anchor. The links above are at the incident's tag.
 - When a mention fails with a path rejection, read the run's OpenCode log artifact before blaming the agent: it shows every edit permission the agent asked for.
 - Not yet confirmed live: bot comments skip the job, so the first check is the next human `@fro-bot` mention on a same-repo PR that changes a path outside the allowlist.

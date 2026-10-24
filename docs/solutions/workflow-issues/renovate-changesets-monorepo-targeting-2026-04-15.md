@@ -105,8 +105,10 @@ the reusable workflow didn't expose:
     commit-back: 'true'
     max-retries: '3'
     target-package: '@marcusrbrown/infra'
-    exclude-patterns: '.github/**,apps/**,bun.lock,package.json'
+    exclude-patterns: '.github/**,bun.lock,package.json,apps/**,packages/shared/**'
 ```
+
+The `exclude-patterns` input in `.github/workflows/renovate-changesets.yaml` is the live value (it has since gained `packages/shared/**`); the snippet above reflects it as of the last refresh.
 
 - **`exclude-patterns`**: Removes non-CLI files from the action's file
   detection before package resolution runs. github-actions SHA pins,

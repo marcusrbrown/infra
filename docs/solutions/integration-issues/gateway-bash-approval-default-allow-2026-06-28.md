@@ -106,5 +106,5 @@ Production verification — gateway logs for the deny smoke showed the full chai
 
 ## Related Issues
 
-- `docs/solutions/integration-issues/gateway-mention-loop-permission-and-empty-workspace-2026-06-05.md` — the direct parent: added `{"external_directory":"allow","doom_loop":"allow"}` to stop headless hangs, which is the config that left bash at default-allow. Its Fix 1 config guidance is now superseded by the code-owned policy here.
+- `docs/solutions/integration-issues/gateway-mention-loop-stalls-2026-06-03.md` — the direct parent (its permissions layer): added `{"external_directory":"allow","doom_loop":"allow"}` to stop headless hangs, which is the config that left bash at default-allow. That original config guidance is now superseded by the code-owned policy here.
 - `docs/solutions/integration-issues/gateway-operator-repos-unmounted-and-keyless-bindings-2026-06-24.md` — adjacent gateway fail-closed gating / denylist precedent.

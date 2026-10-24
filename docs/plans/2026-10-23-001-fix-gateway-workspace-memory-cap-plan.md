@@ -40,7 +40,7 @@ On 2026-10-23 the workspace's long-lived `opencode serve` reached about 1.1 GiB 
 ### Deferred to Separate Tasks
 
 - The stale "gateway has NO public HTTP surface" paragraph in `.github/workflows/fro-bot.yaml` `SCHEDULE_PROMPT`: separate docs fix.
-- The stale "no persistent volume for `/workspace/repos`" claim in `docs/solutions/integration-issues/gateway-mention-loop-permission-and-empty-workspace-2026-06-05.md`: `ce:compound-refresh` later.
+- The stale "no persistent volume for `/workspace/repos`" claim in `docs/solutions/integration-issues/gateway-mention-loop-stalls-2026-06-03.md`: `ce:compound-refresh` later.
 
 ## Context & Research
 
@@ -57,11 +57,11 @@ On 2026-10-23 the workspace's long-lived `opencode serve` reached about 1.1 GiB 
 ### Institutional Learnings
 
 - `docs/solutions/workflow-issues/primary-source-verification-for-delegated-findings-2026-09-12.md`: remote probes fail closed. Require a recognized value, never infer state from an exit code.
-- `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md`: verify the running container, not the rendered config alone.
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`: verify the running container, not the rendered config alone.
 - `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md`: test status parsing against realistic remote stdout, not pre-parsed objects.
 - `docs/solutions/integration-issues/ssh-agent-too-many-authentication-failures-2026-06-13.md`: status keeps `-i` with `IdentitiesOnly=yes`. CLI helpers stay inside `packages/cli`.
 - `docs/solutions/integration-issues/gateway-operator-health-probe-untrusted-peer-2026-10-14.md`: a check that never logs success is not a check. The readback logs a success line.
-- `docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md`: the earlier memory outage on this droplet, from on-host builds. Off-droplet builds stay.
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`: the earlier memory outage on this droplet, from on-host builds. Off-droplet builds stay.
 
 ### External References
 

@@ -110,7 +110,7 @@ concurrency:
 
 - infra PR #682 — fix(deploy): remove aggregate concurrency that cancels gated deploys
 - infra PR #670 — umami `3.2.0` image bump (the stranded deploy)
-- [gateway-deploy-stale-image-2026-05-31.md](./gateway-deploy-stale-image-2026-05-31.md) — deploy-freshness failure (stale image), same deploy-pipeline area, different mechanism.
+- [off-droplet-docker-image-build-gateway-deploy-2026-06-04.md](../best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md) — deploy-freshness failure (stale image), same deploy-pipeline area, different mechanism.
 - [gateway-do-firewall-in-deploy-path-2026-06-19.md](./gateway-do-firewall-in-deploy-path-2026-06-19.md) — "don't couple unrelated deploy concerns" theme.
 - [cliproxy-healthcheck-tooling-migration-2026-06-09.md](./cliproxy-healthcheck-tooling-migration-2026-06-09.md) — deploy-gate fragility from app-image tooling.
 - [vpn-lightsail-first-provision-cascade-2026-06-10.md](./vpn-lightsail-first-provision-cascade-2026-06-10.md) — paths-filter / change-detection workflow lesson.

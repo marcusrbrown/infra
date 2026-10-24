@@ -3,7 +3,7 @@ title: 'feat: Off-droplet gateway image build (CI → GHCR → droplet pull)'
 type: feat
 status: completed
 date: 2026-06-04
-origin: docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md
+origin: docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md
 ---
 
 # feat: Off-droplet gateway image build (CI → GHCR → droplet pull)
@@ -26,7 +26,7 @@ The gateway deploy is the only deploy in the repo that **builds images on the ta
 from source — `gateway` and `workspace` — are exactly the memory-heavy ones, and the build runs
 concurrently with the live stack. On a 2 GB droplet the combined footprint exceeds available RAM,
 and a fresh upstream ref (cold build cache) makes it worse. See origin:
-`docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md`.
+`docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`.
 
 ## Requirements Trace
 
@@ -59,8 +59,8 @@ and a fresh upstream ref (cold build cache) makes it worse. See origin:
 
 ### Institutional Learnings
 
-- `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` — `--build` was *added* because `up` on a `build:` service won't rebuild on source change. Off-droplet build must guarantee the **pulled image actually reflects the pinned ref**, and verification must check the running image, not the source tree.
-- `docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md` (origin) — explicitly recommends "build off-droplet (GHCR) and pull" as the no-recurring-cost fix; preserve "old stack stays live until the new artifact is ready."
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md` — `--build` was *added* because `up` on a `build:` service won't rebuild on source change. Off-droplet build must guarantee the **pulled image actually reflects the pinned ref**, and verification must check the running image, not the source tree.
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md` (origin) — explicitly recommends "build off-droplet (GHCR) and pull" as the no-recurring-cost fix; preserve "old stack stays live until the new artifact is ready."
 - `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md` — `readRemoteChecksum()` must fail on SSH errors (not act like first-deploy); secret bytes via stdin + `0600`, never argv. The checksum/sentinel gate must remain authoritative after the artifact source changes.
 - `docs/solutions/workflow-issues/gateway-v0500-undeployable-upstream-2026-06-02.md` — a valid image tag is not proof of a valid boot contract; keep pre-cutover/post-deploy verification against the actual running container.
 
@@ -212,7 +212,7 @@ and a fresh upstream ref (cold build cache) makes it worse. See origin:
 
 ## Sources & References
 
-- **Origin document:** `docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md`
+- **Origin document:** `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`
 - Related code: `apps/gateway/src/deploy.ts` (`buildComposeOverride`, compose-arg builder, `resolveUpstreamPin`), `.github/workflows/deploy-gateway.yaml`, `.github/workflows/deploy.yaml`
-- Related learnings: `gateway-deploy-stale-image-2026-05-31.md`, `gateway-first-deploy-cascade-2026-05-20.md`, `gateway-v0500-undeployable-upstream-2026-06-02.md`
+- Related learnings: `off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`, `gateway-first-deploy-cascade-2026-05-20.md`, `gateway-v0500-undeployable-upstream-2026-06-02.md`
 - Upstream: `fro-bot/agent` `deploy/compose.yaml`, `deploy/gateway.Dockerfile`, `deploy/workspace.Dockerfile`

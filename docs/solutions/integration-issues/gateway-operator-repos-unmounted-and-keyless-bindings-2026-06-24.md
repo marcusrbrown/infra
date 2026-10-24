@@ -81,7 +81,7 @@ The redaction denylist gate is fail-closed: `surface-gate.ts` `bindingToRepoKey`
 }
 ```
 
-The documented `backfill-deny-keys` operation is the intended remediation, but it has no runnable entrypoint in the shipped image — so a one-off direct S3 patch is the interim path until the upstream backfill CLI ships.
+The documented `backfill-deny-keys` operation is the intended remediation, but it has no runnable entrypoint in the shipped image — so a one-off direct S3 patch was the interim path at the time (upstream `fro-bot/agent#1000` is now closed).
 
 ### Bug 2 — the /operator/repos route is never mounted
 
@@ -95,7 +95,7 @@ listBindings: bindingsStore.listBindings.bind(bindingsStore),
 
 (or align the repos-route mount condition and `buildReposRoute` to consume `bindingsLookup`, so there is a single bindings dep instead of two).
 
-Both are upstream code bugs, tracked as `fro-bot/agent#1000` (keyless bindings + no runnable backfill entrypoint) and `fro-bot/agent#1001` (route never mounted).
+Both are upstream code bugs, tracked as `fro-bot/agent#1000` (keyless bindings + no runnable backfill entrypoint) and `fro-bot/agent#1001` (route never mounted). Both upstream issues are now closed.
 
 ## Why This Works
 
@@ -109,7 +109,7 @@ The redaction gate is fail-closed by design: a binding with missing deny keys is
 
 ## Related
 
-- [gateway-mention-loop-permission-and-empty-workspace-2026-06-05.md](./gateway-mention-loop-permission-and-empty-workspace-2026-06-05.md) — `/fro-bot add-project` binding persistence and empty-workspace state (shared binding-store area, different failure mode).
+- [gateway-mention-loop-stalls-2026-06-03.md](./gateway-mention-loop-stalls-2026-06-03.md) — `/fro-bot add-project` binding persistence and empty-workspace state (shared binding-store area, different failure mode).
 - [gateway-caddy-announce-ingress-self-404-2026-06-04.md](./gateway-caddy-announce-ingress-self-404-2026-06-04.md) — a different `404` route-resolution class (Caddy directive ordering), same "route returns 404 by construction" debugging instinct.
 - [dashboard-operator-session-container-hairpin-2026-06-21.md](./dashboard-operator-session-container-hairpin-2026-06-21.md) — adjacent operator surface (session validation hairpin), same topology area.
-- Upstream: `fro-bot/agent#1000` (keyless bindings / no runnable backfill entrypoint), `fro-bot/agent#1001` (operator repos route never mounted).
+- Upstream (both closed): `fro-bot/agent#1000` (keyless bindings / no runnable backfill entrypoint), `fro-bot/agent#1001` (operator repos route never mounted).

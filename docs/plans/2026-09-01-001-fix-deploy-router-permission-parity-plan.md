@@ -76,7 +76,7 @@ Dashboard is the only mismatch. There are no reusable-workflow calls outside `de
 - `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md` — **records this exact rule already**: a called reusable workflow's permissions are capped by the caller, and granting only in the callee is insufficient. The knowledge existed in June and the mistake recurred in August, which is the case for an enforceable gate rather than another document.
 - `docs/solutions/workflow-issues/aggregate-deploy-concurrency-cancels-gated-deploys-2026-06-25.md` — per-app concurrency belongs inside the app workflow, not the aggregate router. #1223's move of concurrency to the callee's deploy job is consistent with this; the plan must not undo it.
 - `docs/solutions/integration-issues/npm-publish-stacked-auth-failures-2026-08-23.md` — cross-system contracts need explicit assertions; runtime logs alone cannot separate stacked causes.
-- `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` — a green check is not proof of the intended contract; verify the effective behavior.
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md` — a green check is not proof of the intended contract; verify the effective behavior.
 
 ### External References
 

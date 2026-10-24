@@ -71,6 +71,8 @@ const domainKeys = await runCapture(local(['ssh-keyscan', CLIPROXY_DOMAIN]))
 const ipKeys = await runCapture(local(['ssh-keyscan', '-H', dropletIp]))
 ```
 
+_(Now centralized: `apps/cliproxy/server/provision-droplet.ts` calls the shared `pinHostKeys` helper in `packages/shared/server/droplet-helpers.ts`, which keeps the same unhashed-domain plus hashed-IP split.)_
+
 ### Fix 4: Missing auth-dir (PR #39)
 
 Added one line to `apps/cliproxy/config/config.yaml`:

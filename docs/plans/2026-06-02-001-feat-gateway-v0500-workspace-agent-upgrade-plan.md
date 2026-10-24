@@ -65,7 +65,7 @@ Both are addressed: risk class 1 via an isolated droplet preflight that gates th
 ### Institutional Learnings
 
 - `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md` — probe the exact pinned image, trace breaks to code edits, verify reviewer claims against the pinned image, anchor cutover with backup + smoke test.
-- `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` — deploy must `--build`; stale-image reuse hid the v0.46.1 packaging crash.
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md` — deploy must `--build`; stale-image reuse hid the v0.46.1 packaging crash.
 - `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md` — `git clean -xfd` wiped untracked secret files (recovered); first-deploy cascade context.
 
 ### Verified Contract Delta (v0.46.3 → v0.50.0)
@@ -283,4 +283,4 @@ Source-verified by reading `deploy/compose.yaml` at tag `v0.50.0` directly:
 - Upstream: `fro-bot/agent` #727 (workspace agent shipped via PR #725 `805c58c`, released v0.50.0), #713 (S3 deadlock fixed v0.49.0)
 - Verified contract: `fro-bot/agent` `deploy/compose.yaml` @ tag `v0.50.0`
 - Related code: `apps/gateway/src/deploy.ts`, `apps/umami/src/deploy.ts` (`.env` validation precedent), `packages/cli/src/commands/gateway/deploy.ts`, `.github/workflows/deploy-gateway.yaml`, `.github/renovate.json5`, `apps/gateway/upstream.json`
-- Learnings: `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md`, `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md`
+- Learnings: `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md`, `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`

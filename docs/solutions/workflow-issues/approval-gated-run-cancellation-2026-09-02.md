@@ -2,7 +2,7 @@
 title: Approval-gated GitHub Actions runs ignore cancellation requests
 date: 2026-09-02
 category: docs/solutions/workflow-issues
-last_updated: 2026-10-15
+last_updated: 2026-10-24
 module: infra
 problem_type: workflow_issue
 component: development_workflow
@@ -67,7 +67,7 @@ printf '%s\n' '{"environment_ids":[<id>],"state":"rejected"}' |
     "/repos/{owner}/{repo}/actions/runs/{run_id}/pending_deployments"
 ```
 
-## Why cancellation automation cannot work around it
+## Why approval automation cannot work around it
 
 Per GitHub's REST reference, `pending_deployments` requires the caller to be a required reviewer of
 the Environment. `github-actions[bot]` is not a required reviewer, and GitHub limits App review to
@@ -124,6 +124,8 @@ the cost is one wasted approval click.
 The reframe is the important part: the stale run cannot be prevented, so approving it is made
 harmless. It fails fast, freeing the concurrency slot so the newer run advances to its own gate;
 the stale deployment becomes unreachable.
+
+Superseded _waiting_ dashboard runs are now also cancelled automatically by `.github/workflows/cancel-superseded-dashboard-deploys.yaml`. It triggers on `workflow_run` (`requested`) of `Deploy Dashboard`, only for `workflow_dispatch` runs on `main`. It lists `deploy-dashboard.yaml` dispatch runs in `waiting`, `queued`, and `pending` status and requests cancellation (`POST .../actions/runs/{run_id}/cancel`, using `GITHUB_TOKEN` with `actions: write`) of every run whose ID is lower than the triggering run's, then reads each run back and warns if it has not reached a terminal state. This shows `GITHUB_TOKEN` can cancel waiting gated runs, which the earlier no-op finding above did not anticipate; the read-back still treats an accepted request as unproven. It fails open: list, cancel, and read-back errors are warnings and the job always exits 0. Router-dispatched runs (`Deploy` via `workflow_call`) are not covered. The `Reject stale dashboard dispatch` step remains the fail-closed backstop.
 
 ## Live verification
 

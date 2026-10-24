@@ -86,5 +86,5 @@ The reconciliation loop only closes reports **after** trusted classification. On
 
 - [`workflow-issues/fro-bot-schedule-session-bloat-no-op-2026-06-14.md`](fro-bot-schedule-session-bloat-no-op-2026-06-14.md) — same `fro-bot.yaml` daily-autoheal surface, different failure mode (session bloat / silent no-op).
 - [`integration-issues/cliproxy-claude-oauth-refresh-expiry-2026-06-20.md`](../integration-issues/cliproxy-claude-oauth-refresh-expiry-2026-06-20.md) — durable canonical-issue/marker state as health signal (closed/absent == healthy).
-- [`integration-issues/agent-s3-key-layout-diverged-from-pinned-action-2026-08-03.md`](../integration-issues/agent-s3-key-layout-diverged-from-pinned-action-2026-08-03.md) — sibling "a contract's assumed authority was never actually verified/seeded."
+- [`integration-issues/agent-s3-iam-layout-drift-from-action-2026-08-03.md`](../integration-issues/agent-s3-iam-layout-drift-from-action-2026-08-03.md) — sibling "a contract's assumed authority was never actually verified/seeded."
 - Issues: #1028 (canonical), #905 (introduced the label contract), #897–#1012 (the orphaned reports).

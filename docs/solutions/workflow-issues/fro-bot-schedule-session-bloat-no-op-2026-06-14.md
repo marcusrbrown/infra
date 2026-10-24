@@ -102,4 +102,4 @@ After (scheduled runs start fresh; other triggers keep continuity):
 ## Related
 
 - `fro-bot/agent#898` — upstream issue: scheduled runs resume one ever-growing per-cron session.
-- `docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md` — separate Fro Bot workflow lesson about distinguishing independent `fro-bot/agent` surfaces (the CI Action SHA vs the gateway daemon pin); same file (`fro-bot.yaml`), different failure class.
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md` — separate Fro Bot workflow lesson about distinguishing independent `fro-bot/agent` surfaces (the CI Action SHA vs the gateway daemon pin); same file (`fro-bot.yaml`), different failure class.

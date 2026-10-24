@@ -11,7 +11,7 @@ tags: [gateway, docker-compose, digitalocean, deploy, ssh, ufw, controlmaster, s
 module: apps/gateway
 related_issues: []
 related_docs:
-  - docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md
+  - docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md
   - docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md
   - docs/solutions/workflow-issues/bun-deploy-user-permissions-ci-2026-04-02.md
 ---
@@ -157,7 +157,7 @@ Each fix is structural at the layer it addresses: append `\n` when materializing
 
 ### Wave-specific guardrails
 
-- **Wave 1 / contract drift**: pin upstream by SemVer tag (not `latest`), audit the upstream compose contract before each major bump, treat compose `environment` / `volumes` / `secrets` as a versioned API. Note: auditing the contract is necessary but **not sufficient** for `build:`-from-source compose services — the deploy must also force a rebuild (`docker compose up --build`), or a moved pin updates source on disk while the running container keeps a stale image. See [gateway-deploy-stale-image-2026-05-31.md](./gateway-deploy-stale-image-2026-05-31.md).
+- **Wave 1 / contract drift**: pin upstream by SemVer tag (not `latest`), audit the upstream compose contract before each major bump, treat compose `environment` / `volumes` / `secrets` as a versioned API. Note: auditing the contract is necessary but **not sufficient** for `build:`-from-source compose services — the deploy must also force a rebuild (`docker compose up --build`), or a moved pin updates source on disk while the running container keeps a stale image. _(Historical: the droplet no longer builds. It pulls CI-built, digest-pinned images and runs `docker compose up -d --no-build` in `apps/gateway/src/deploy.ts` — see [off-droplet-docker-image-build-gateway-deploy-2026-06-04.md](../best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md).)_
 - **Wave 2 / secret corruption**: never use `gh secret set --body "$(cat <<'EOF' ... EOF)"`. Pipe via stdin (`bun -e 'process.stdout.write(...)' | gh secret set --env <env> <name>`) or use `gh secret set --env <env> <name> < file`. Audit all secrets via single sweep when one looks corrupt, not one at a time.
 - **Wave 3 / PEM newline**: test the actual file contents written to disk in CI key tests, not just the mode bits. Specifically cover both branches (trailing newline missing → appended; existing → not doubled).
 - **Wave 4 / SSH rate limit**: keep deploys connection-pooled by default (ControlMaster=auto + ControlPersist). Watch UFW counters during first deploys of new apps. Don't blame "transient network" without demanding evidence from counters or logs.
@@ -172,7 +172,7 @@ Each fix is structural at the layer it addresses: append `\n` when materializing
 
 ## Related Issues
 
-- [gateway-deploy-stale-image-2026-05-31.md](./gateway-deploy-stale-image-2026-05-31.md) — same app and deploy path; the missing `docker compose up --build` that let a moved pin run a stale image (and masked a broken upstream image)
+- [off-droplet-docker-image-build-gateway-deploy-2026-06-04.md](../best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md) — same app and deploy path; replaced the on-host `docker compose up --build` (which let a moved pin run a stale image and masked a broken upstream image) with CI-built, digest-pinned images
 - [cliproxy-first-deploy-cascade-2026-04-06.md](./cliproxy-first-deploy-cascade-2026-04-06.md) — same shape of cascade for the cliproxy app, 4 waves
 - [bun-deploy-user-permissions-ci-2026-04-02.md](./bun-deploy-user-permissions-ci-2026-04-02.md) — earlier deploy-cascade precedent (3 waves of permission failures during keeweb deploy bootstrap)
 - PRs: [#273](https://github.com/marcusrbrown/infra/pull/273), [#276](https://github.com/marcusrbrown/infra/pull/276), [#277](https://github.com/marcusrbrown/infra/pull/277), [#278](https://github.com/marcusrbrown/infra/pull/278)

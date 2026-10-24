@@ -104,7 +104,7 @@ Two gaps stay open after recovery. The run that triggered the incident stayed `r
 - #1652 and Fro Bot's triage comment on it.
 - `apps/gateway/src/deploy.ts` `buildComposeOverride`: emits no memory settings for any service today.
 - `apps/gateway/server/provision-droplet.ts`: `s-1vcpu-2gb`, no swap setup.
-- `docs/solutions/workflow-issues/gateway-deploy-resourcing-thrash-2026-06-04.md`: the earlier memory outage on this droplet, caused by on-droplet builds.
+- `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`: the earlier memory outage on this droplet, caused by on-droplet builds.
 - `docs/brainstorms/2026-05-17-gateway-deployment-requirements.md`: the resize triggers (gateway memory headroom under 25%).
 - fro-bot/agent `apps/workspace-agent/src/opencode-server.ts` at the pinned tag: supervisor respawn budget and `degraded` state.
 - anomalyco/opencode#47727: `opencode serve` per-directory instance growth.

@@ -71,7 +71,7 @@ The compliance question (Polymarket ToS 2.1.4 prohibits VPN geo-circumvention) i
 - **`docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md`** — SSH key trailing-`\n` (GH Actions strips it; OpenSSH PEM needs it; `materializeIdentityFile` already handles this); ControlMaster for SSH rate-limits (already in `droplet-helpers.ts`); test fixtures must mirror real tool output.
 - **`docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md`** — pin **unhashed domain** entries for CI (connects by domain), hashed IP separately; one canonical host env name (here the static IP / `VPN_HOST` is the single identity); `bun.lock` must be regenerated for the new workspace member.
 - **`docs/solutions/workflow-issues/umami-first-deploy-cascade-2026-05-29.md`** — GitHub Environment auto-creates **ungated** on first workflow reference; pre-create with reviewer + branch policy (watch the readonly `UID` bash builtin); `ssh -i <key> -o IdentitiesOnly=yes` for file-backed keys (already in helpers); fail-closed on credential operations.
-- **`docs/solutions/workflow-issues/gateway-deploy-stale-image-2026-05-31.md`** — never `git clean -xfd` a droplet deploy dir holding untracked secrets; `--wait`/active asserts liveness not freshness — verify the WG interface is actually up + a peer handshake works, not just `systemctl is-active`.
+- **`docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`** — never `git clean -xfd` a droplet deploy dir holding untracked secrets; `--wait`/active asserts liveness not freshness — verify the WG interface is actually up + a peer handshake works, not just `systemctl is-active`.
 - **`docs/solutions/workflow-issues/bun-deploy-user-permissions-ci-2026-04-02.md`** — CI uses `bun install --frozen-lockfile --ignore-scripts`; run `bun install` + commit `bun.lock` after adding `apps/vpn/package.json`.
 
 ### External References
@@ -467,5 +467,5 @@ deploy.ts
 
 - **Origin document:** [docs/brainstorms/2026-06-09-vpn-egress-box-requirements.md](docs/brainstorms/2026-06-09-vpn-egress-box-requirements.md)
 - Related code: `apps/gateway/src/deploy.ts`, `apps/cliproxy/src/deploy.ts`, `apps/gateway/server/provision-droplet.ts`, `packages/shared/server/droplet-helpers.ts`, `packages/cli/src/commands/gateway/`, `packages/cli/src/commands/mcp.ts`, `packages/cli/src/commands/status.ts`, `packages/cli/src/conventions.test.ts`
-- Related learnings: `docs/solutions/workflow-issues/{gateway,cliproxy,umami}-first-deploy-cascade-*.md`, `gateway-deploy-stale-image-2026-05-31.md`, `bun-deploy-user-permissions-ci-2026-04-02.md`
+- Related learnings: `docs/solutions/workflow-issues/{gateway,cliproxy,umami}-first-deploy-cascade-*.md`, `off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`, `bun-deploy-user-permissions-ci-2026-04-02.md`
 - External: AWS SDK for JS v3 `@aws-sdk/client-lightsail@3.1065.0`; WireGuard `wg-quick`/systemd

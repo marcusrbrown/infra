@@ -100,7 +100,7 @@ The auto-triggered ungated run failed benignly (secret-validation step, pre-SSH)
 
 ### Wave 5 — Fail-closed rotation + Caddy staged after rotation
 
-The deploy brings up `db` + `umami` internal-only, rotates admin over the internal network, **then** starts `caddy` — so there's never a public window with default creds. Rotation fails closed: any non-zero login exit other than 22 aborts (`deploy.ts:433` — e.g. curl exit 7 connection-refused, 255 ssh failure); exit 22 (`--fail-with-body` clean auth rejection) is the only "skip"; success requires the new password logging in **and** the default being rejected. The bearer token is passed via a stdin curl-config file, never argv (not `ps`-visible).
+The deploy brings up `db` + `umami` internal-only, rotates admin over the internal network, **then** starts `caddy` — so there's never a public window with default creds. Rotation fails closed: any non-zero login exit other than 22 aborts (the login-probe exit check in `rotateAdminPassword`, `apps/umami/src/deploy.ts` — e.g. curl exit 7 connection-refused, 255 ssh failure); exit 22 (`--fail-with-body` clean auth rejection) is the only "skip"; success requires the new password logging in **and** the default being rejected. The bearer token is passed via a stdin curl-config file, never argv (not `ps`-visible).
 
 ### Wave 6 — DB-password fingerprint guard
 

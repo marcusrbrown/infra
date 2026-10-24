@@ -48,12 +48,16 @@ HOST="${UMAMI_DOMAIN:?Set UMAMI_DOMAIN to the exact deployed host}"
 AGE_RECIPIENT="${AGE_RECIPIENT:?Set AGE_RECIPIENT to the age public recipient}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 export GH_REPO="${GH_REPO:-marcusrbrown/infra}"
+umask 077
 RUN_DIR="${RUN_DIR:-$HOME/umami-pg18-migration}"
 mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR"
 
-SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes
-  -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile="$REPO_ROOT/.github/known_hosts"
-  "root@${HOST}")
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes
+  -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile="$REPO_ROOT/.github/known_hosts")
+SSH=(ssh "${SSH_OPTS[@]}" "root@${HOST}")
+# AGENTS.md blocks call bare `ssh "$REMOTE" …`. This wrapper forces the pinned host-key options on them too.
+REMOTE="root@${HOST}"
+ssh() { command ssh "${SSH_OPTS[@]}" "$@"; }
 DC='docker compose -f /opt/umami/docker-compose.yaml'
 
 MANIFEST_SQL="$RUN_DIR/manifest.sql"
@@ -65,6 +69,8 @@ BACKUP_RESTORED="$RUN_DIR/backup.restored.manifest"
 CUTOVER_AGE="$RUN_DIR/cutover.dump.age"
 CUTOVER_MANIFEST="$RUN_DIR/cutover.source.manifest"
 CUTOVER_RESTORED="$RUN_DIR/cutover.restored.manifest"
+# Empty until P4 (pg15, umami) and S1 (pg18) write the files. Those steps re-assign them in the parent shell,
+# and every consumer is guarded with ${VAR:?}.
 PG15_IMAGE="$(cat "$RUN_DIR/pg15.image" 2>/dev/null || true)"
 PG18_IMAGE="$(cat "$RUN_DIR/pg18.image" 2>/dev/null || true)"
 UMAMI_IMAGE="$(cat "$RUN_DIR/umami.image" 2>/dev/null || true)"
@@ -80,7 +86,7 @@ age_identity() { printf 'define age_identity for your password manager\n' >&2; r
 verify_age_artifact() (
   set -Eeuo pipefail
   umask 077
-  f="$1"; image="$2"
+  f="${1:?FILE.age required}"; image="${2:?IMAGE required (is PG15_IMAGE/PG18_IMAGE set?)}"
   ( cd "$(dirname "$f")" && shasum -a 256 -c "$(basename "$f").sha256" )
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
@@ -96,8 +102,8 @@ verify_age_artifact() (
 
 # restart_stack: bring the production stack back and require pg_isready plus the public heartbeat.
 restart_stack() {
-  "${SSH[@]}" "$DC up -d --wait --wait-timeout 180 db umami caddy && $DC exec -T db pg_isready -U umami -d umami" > /dev/null
-  curl -fsS -o /dev/null "https://${HOST}/api/heartbeat"
+  "${SSH[@]}" "$DC up -d --wait --wait-timeout 180 db umami caddy && $DC exec -T db pg_isready -U umami -d umami" > /dev/null \
+    && curl -fsS -o /dev/null "https://${HOST}/api/heartbeat"
 }
 ```
 
@@ -107,7 +113,8 @@ restart_stack() {
 # PG15: /var/lib/postgresql/data), cleanup is `docker rm -f -v`, the dump streams from age (no plaintext file).
 disposable_restore() (
   set -Eeuo pipefail
-  image="$1"; tmpfs_path="$2"; age_file="$3"; out="$4"
+  image="${1:?IMAGE required (is PG15_IMAGE/PG18_IMAGE set?)}"; tmpfs_path="${2:?TMPFS_PATH required}"
+  age_file="${3:?FILE.age required}"; out="${4:?OUT_MANIFEST required}"
   name="umami-pg18-dispose-$$-$(date +%s)"
   cleanup() {
     s=$?; trap - EXIT
@@ -154,6 +161,57 @@ REMOTE
 ```
 
 `sentinel_check` computes the `computeDbPasswordFingerprint` value (`sha256` over `umami-db-pw-v1:` + the password) from `/opt/umami/.env` on the droplet and compares it to the sentinel. Neither value is printed.
+
+**Freeze and retention helpers.** Run after the blocks above, again in every new shell. Every `gh` listing failure propagates (`|| return 1`, no command substitution around the listing), so a failed listing can never read as zero remaining runs:
+
+```bash
+# freeze_list FILE: append the ids of every waiting/queued/requested/pending/in-progress run of the umami
+# deploy workflow and of the router (deploy.yaml) to FILE. Non-zero if any listing fails.
+freeze_list() {
+  local wf st
+  : > "$1" || return 1
+  for wf in deploy-umami.yaml deploy.yaml; do
+    for st in waiting queued requested pending in_progress; do
+      gh run list --workflow "$wf" --status "$st" --limit 100 --json databaseId --jq '.[].databaseId' >> "$1" || return 1
+    done
+  done
+}
+freeze_cancel() {
+  local f id
+  f="$(mktemp)" || return 1
+  freeze_list "$f" || { rm -f "$f"; return 1; }
+  while read -r id; do
+    gh run cancel "$id" < /dev/null || { rm -f "$f"; return 1; }
+  done < "$f"
+  rm -f "$f"
+}
+freeze_assert() {
+  local f n
+  f="$(mktemp)" || return 1
+  for _ in $(seq 1 12); do
+    freeze_list "$f" || { rm -f "$f"; echo 'freeze_listing=FAIL' >&2; return 1; }
+    n="$(grep -c . "$f" || true)"
+    if [ "$n" = 0 ]; then rm -f "$f"; echo 'freeze_runs_remaining=0'; return 0; fi
+    sleep 5
+  done
+  rm -f "$f"
+  echo "freeze_runs_remaining=$n" >&2
+  return 1
+}
+
+# retention_disable_assert: disable and stop the retention timer and service, then assert disabled/inactive/inactive.
+retention_disable_assert() {
+  "${SSH[@]}" bash -s <<'REMOTE'
+set -Eeuo pipefail
+systemctl disable --now umami-retention.timer
+systemctl stop umami-retention.service
+test "$(systemctl is-enabled umami-retention.timer || true)" = disabled
+test "$(systemctl is-active umami-retention.timer || true)" = inactive
+test "$(systemctl is-active umami-retention.service || true)" = inactive
+echo 'timer_disabled_inactive=PASS'
+REMOTE
+}
+```
 
 **Manifest SQL.** Defined once. Prints `table|count|md5` per public table, with no hardcoded table list. Session settings are pinned so row text is comparable across majors. Run once; the file persists in `$RUN_DIR`:
 
@@ -244,12 +302,16 @@ Nothing here changes the droplet. Outputs are saved under `$RUN_DIR` (non-secret
 
 ```bash
 ( set -Eeuo pipefail
-  "${SSH[@]}" true && echo 'ssh_pinned_hostkey=PASS'
+  "${SSH[@]}" true
+  echo 'ssh_pinned_hostkey=PASS'
   docker info --format 'server={{.ServerVersion}} ctx_ok'
   docker run --rm --platform linux/amd64 --entrypoint uname alpine:latest -m
-  gh auth status > /dev/null && echo 'gh_auth=PASS'
+  gh auth status > /dev/null
+  echo 'gh_auth=PASS'
   age --version
-  test "$(printf 'roundtrip' | age -r "$AGE_RECIPIENT" | age -d -i <(age_identity))" = roundtrip && echo 'age_roundtrip=PASS'
+  rt="$(printf 'roundtrip' | age -r "$AGE_RECIPIENT" | age -d -i <(age_identity))"
+  test "$rt" = roundtrip
+  echo 'age_roundtrip=PASS'
 )
 ```
 
@@ -293,9 +355,9 @@ REMOTE
 ) > "$RUN_DIR/preflight.host" && cat "$RUN_DIR/preflight.host" || { cat "$RUN_DIR/preflight.host"; echo 'P3=STOP'; false; }
 ```
 
-Expect: at least 1 GiB free on `/`, timer and service states recorded (the timer is armed and fires daily around 00:30–01:00 UTC), sentinel `64 600` and `MATCH`. The `env_mtime` is compared again in step 6. STOP: `MISMATCH`, sentinel missing or wrong size/mode, or low disk. Never fix a sentinel by hand.
+Expect: at least 1 GiB free on `/`, the timer `enabled=enabled active=active` and the service `inactive`. That is the normal armed state since the retention ENABLE gate (daily around 00:30–01:00 UTC), not a STOP; step 4.1 disables it. Sentinel `64 600` and `MATCH`. The `env_mtime` is compared again in step 6. STOP: a retention service that is `active` or `activating` (wait for it to finish), `MISMATCH`, sentinel missing or wrong size/mode, or low disk. Never fix a sentinel by hand.
 
-**P4. Images, volumes, rollback artifact, anchor identity.** Run AGENTS.md Retention §1 first (deployed compose pins the same images as the repo). Then:
+**P4. Images, volumes, rollback artifact, anchor identity.** Run AGENTS.md Retention §1 first (deployed compose pins the same images as the repo). Its bare `ssh "$REMOTE"` calls go through the pinned-options `ssh` wrapper from session setup (`REMOTE` is set there). Then:
 
 ```bash
 ( set -Eeuo pipefail
@@ -307,13 +369,18 @@ Expect: at least 1 GiB free on `/`, timer and service states recorded (the timer
   grep -Fx 'umami_umami-db-data' "$RUN_DIR/preflight.volumes"
   if grep -Fx 'umami_umami-db-data-pg18' "$RUN_DIR/preflight.volumes"; then echo 'pg18_volume_preexisting=FAIL' >&2; exit 1; fi
   "${SSH[@]}" 'cat /opt/umami/docker-compose.yaml' > "$RUN_DIR/compose.pg15.yaml"
-  grep -Fq 'umami-db-data:/var/lib/postgresql/data' "$RUN_DIR/compose.pg15.yaml"
+  grep -Fq 'umami-db-data:/var/lib/postgresql/data' "$RUN_DIR/compose.pg15.yaml" || { echo 'compose_pg15_layout=FAIL' >&2; exit 1; }
   ( cd "$RUN_DIR" && shasum -a 256 compose.pg15.yaml | tee compose.pg15.yaml.sha256 )
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami -c \"SELECT count(*) FROM website WHERE name = 'systematic'\"" | tee "$RUN_DIR/preflight.systematic"
+  [ "$(cat "$RUN_DIR/preflight.systematic")" = 1 ] || { echo 'systematic_row_count=FAIL' >&2; exit 1; }
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami -c \"SELECT md5(string_agg(website_id::text, ',' ORDER BY website_id::text)) FROM website WHERE name = 'systematic'\"" > "$RUN_DIR/preflight.systematic.id"
   printf 'destroy_by=finalize_date+7d\n' > "$RUN_DIR/DELETION_DEADLINE"
-)
+) \
+  && PG15_IMAGE="$(cat "$RUN_DIR/pg15.image")" && UMAMI_IMAGE="$(cat "$RUN_DIR/umami.image")" \
+  && : "${PG15_IMAGE:?pg15.image empty}" "${UMAMI_IMAGE:?umami.image empty}"
 ```
+
+The last line assigns the image variables in the parent shell (a subshell cannot); later steps fail fast if they are empty.
 
 Expect: the PG15 and umami image references printed, the anchor `umami_umami-db-data` listed, the new `umami_umami-db-data-pg18` absent, the saved compose containing the PG15 mount path, and `1` for the `systematic` website count. `compose.pg15.yaml` plus its checksum is the rollback artifact for step 7. STOP: a pre-existing `umami_umami-db-data-pg18` volume (a prior attempt; investigate, do not reuse), a count other than `1` (the plan's identification of the website row is wrong; fix the query before continuing), or a droplet compose that does not match the PG15 layout.
 
@@ -354,7 +421,8 @@ Expect: the stack restart/heartbeat `PASS` line, a non-empty `.age` and manifest
 ( set -Eeuo pipefail
   verify_age_artifact "$BACKUP_AGE" "$PG15_IMAGE"
   disposable_restore "$PG15_IMAGE" /var/lib/postgresql/data "$BACKUP_AGE" "$BACKUP_RESTORED"
-  diff -u "$BACKUP_MANIFEST" "$BACKUP_RESTORED" && echo 'exact_manifest_diff=PASS'
+  if ! diff -u "$BACKUP_MANIFEST" "$BACKUP_RESTORED"; then echo 'exact_manifest_diff=FAIL' >&2; exit 1; fi
+  echo 'exact_manifest_diff=PASS'
   ( cd "$RUN_DIR" && shasum -a 256 backup.restored.manifest )
 )
 ```
@@ -378,11 +446,16 @@ Never on the droplet: memory is the binding constraint there. Staging uses the s
   case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo 'digest_format=FAIL' >&2; exit 1 ;; esac
   printf 'postgres:18-alpine@%s\n' "$digest" > "$RUN_DIR/pg18.image"
   cat "$RUN_DIR/pg18.image"
-)
-PG18_IMAGE="$(cat "$RUN_DIR/pg18.image")"
-for img in "$PG18_IMAGE" "$PG15_IMAGE" "$UMAMI_IMAGE"; do docker pull --platform linux/amd64 "$img" > /dev/null; done
-docker run --rm --platform linux/amd64 --entrypoint uname "$PG18_IMAGE" -m
+) \
+  && PG18_IMAGE="$(cat "$RUN_DIR/pg18.image")" \
+  && : "${PG18_IMAGE:?pg18.image empty}" "${PG15_IMAGE:?run P4 first}" "${UMAMI_IMAGE:?run P4 first}" \
+  && docker pull --platform linux/amd64 "$PG18_IMAGE" > /dev/null \
+  && docker pull --platform linux/amd64 "$PG15_IMAGE" > /dev/null \
+  && docker pull --platform linux/amd64 "$UMAMI_IMAGE" > /dev/null \
+  && docker run --rm --platform linux/amd64 --entrypoint uname "$PG18_IMAGE" -m
 ```
+
+The chain assigns `PG18_IMAGE` in the parent shell (it is also the already-frozen path when `pg18.image` exists) and stops at the first failure.
 
 Expect: one `postgres:18-alpine@sha256:…` line saved to `pg18.image` and `x86_64`. STOP: digest not resolvable or emulation missing.
 
@@ -409,7 +482,8 @@ Expect: `list_entries=` greater than 0 from the PG18 `pg_restore --list`, `-rw--
 ```bash
 ( set -Eeuo pipefail
   disposable_restore "$PG18_IMAGE" /var/lib/postgresql "$BACKUP_AGE" "$RUN_DIR/stage.disposable.manifest"
-  diff -u "$BACKUP_MANIFEST" "$RUN_DIR/stage.disposable.manifest" && echo 'staging_disposable_manifest_diff=PASS'
+  if ! diff -u "$BACKUP_MANIFEST" "$RUN_DIR/stage.disposable.manifest"; then echo 'staging_disposable_manifest_diff=FAIL' >&2; exit 1; fi
+  echo 'staging_disposable_manifest_diff=PASS'
 )
 ```
 
@@ -420,6 +494,7 @@ Expect: `disposable_container_removal=PASS`, empty diff. STOP: any difference.
 ```bash
 ( set -Eeuo pipefail
   umask 077
+  : "${PG18_IMAGE:?run S1 first}" "${UMAMI_IMAGE:?run P4 first}"
   mkdir -p "$STAGE_DIR"
   pw="$(openssl rand -hex 24)"; secret="$(openssl rand -hex 32)"
   {
@@ -458,6 +533,12 @@ services:
       db:
         condition: service_healthy
     networks: [internal]
+    healthcheck:
+      test: [CMD-SHELL, 'curl -f http://localhost:3000/api/heartbeat || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 networks:
   internal:
     internal: true
@@ -468,7 +549,7 @@ YAML
 )
 ```
 
-Expect: `db` healthy. Only `db` starts; `umami` waits until S7. No `ports:` key exists anywhere in the file.
+Expect: `db` healthy. Only `db` starts; `umami` waits until S7. No `ports:` key exists anywhere in the file. The `umami` healthcheck is copied verbatim from `apps/umami/docker-compose.yaml`, so `up --wait` in S7 waits for real readiness (heartbeat) before logs are captured.
 
 **S5. Layout, SCRAM and collation gates on the fresh staged cluster.**
 
@@ -476,7 +557,9 @@ Expect: `db` healthy. Only `db` starts; `umami` waits until S7. No `ports:` key 
 ( set -Eeuo pipefail
   DC_CMD="docker compose -f $STAGE_DIR/compose.yaml" EXPECT_VOLUME="${STAGE}_umami-db-data-pg18" \
     PG18_IMAGE="$PG18_IMAGE" "$LAYOUT_GATE" | tee "$RUN_DIR/stage.layout"
-  grep '^db_collation=' "$RUN_DIR/stage.layout" | diff -u "$RUN_DIR/preflight.collation" - && echo 'stage_collation_after_init=MATCH'
+  grep '^db_collation=' "$RUN_DIR/stage.layout" > "$RUN_DIR/stage.init.collation"
+  if ! diff -u "$RUN_DIR/preflight.collation" "$RUN_DIR/stage.init.collation"; then echo 'stage_collation_after_init=FAIL' >&2; exit 1; fi
+  echo 'stage_collation_after_init=MATCH'
 )
 ```
 
@@ -492,9 +575,11 @@ Expect: `layout_mount=PASS`, `layout_pgdata=PASS`, `layout_fresh_cluster=PASS`, 
   sdc exec -T db pg_restore --exit-on-error --create --no-owner -U umami -d postgres < "$STAGE_DIR/input.dump"
   printf 'restore_seconds=%s\n' "$(( $(date +%s) - start ))"
   sdc exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami < "$MANIFEST_SQL" | LC_ALL=C sort > "$RUN_DIR/stage.restored.manifest"
-  diff -u "$BACKUP_MANIFEST" "$RUN_DIR/stage.restored.manifest" && echo 'staging_manifest_diff=PASS'
-  sdc exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami < "$IDENTITY_SQL" | grep '^db_collation=' \
-    | diff -u "$RUN_DIR/preflight.collation" - && echo 'stage_collation_after_restore=MATCH'
+  if ! diff -u "$BACKUP_MANIFEST" "$RUN_DIR/stage.restored.manifest"; then echo 'staging_manifest_diff=FAIL' >&2; exit 1; fi
+  echo 'staging_manifest_diff=PASS'
+  sdc exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami < "$IDENTITY_SQL" | grep '^db_collation=' > "$RUN_DIR/stage.restored.collation"
+  if ! diff -u "$RUN_DIR/preflight.collation" "$RUN_DIR/stage.restored.collation"; then echo 'stage_collation_after_restore=FAIL' >&2; exit 1; fi
+  echo 'stage_collation_after_restore=MATCH'
 )
 ```
 
@@ -507,9 +592,10 @@ Expect: `staging_manifest_diff=PASS` (names, exact counts and checksums equal) a
   sdc() { docker compose -f "$STAGE_DIR/compose.yaml" "$@"; }
   sdc up -d --wait --wait-timeout 300 umami
   sdc logs --no-color umami > "$RUN_DIR/stage.umami.log" 2>&1
-  grep -Ei 'migration|prisma|datasource' "$RUN_DIR/stage.umami.log" | tee "$RUN_DIR/stage.prisma.out"
-  grep -Eq 'No pending migrations to apply|already in sync' "$RUN_DIR/stage.prisma.out" && echo 'prisma_noop=PASS'
-  if grep -Eq 'Applying migration|migrations? (have been|was) applied' "$RUN_DIR/stage.prisma.out"; then echo 'prisma_noop=FAIL' >&2; exit 1; fi
+  grep -Ei 'migration|prisma|datasource' "$RUN_DIR/stage.umami.log" | tee "$RUN_DIR/stage.prisma.out" || true
+  if grep -Eq 'Applying migration|migrations? (have been|was) applied' "$RUN_DIR/stage.prisma.out"; then echo 'prisma_noop=FAIL (migration applied)' >&2; exit 1; fi
+  if ! grep -Eq 'No pending migrations to apply|already in sync' "$RUN_DIR/stage.prisma.out"; then echo 'prisma_noop=FAIL (no no-op marker in output)' >&2; exit 1; fi
+  echo 'prisma_noop=PASS'
   sdc exec -T umami curl -fsS http://localhost:3000/api/heartbeat
 )
 ```
@@ -539,13 +625,20 @@ Integration test with a **local, uncommitted edit** of the image constant (Unit 
   cd "$REPO_ROOT"
   sed -i.pg15 "s|^const postgresImage = .*|const postgresImage = '${PG18_IMAGE}'|" apps/umami/retention.integration.test.ts
   trap 'mv -f apps/umami/retention.integration.test.ts.pg15 apps/umami/retention.integration.test.ts' EXIT
-  DOCKER_DEFAULT_PLATFORM=linux/amd64 bun test apps/umami/retention.integration.test.ts 2>&1 | tee "$RUN_DIR/stage.integration.out"
-  grep -E '(^| )1 pass' "$RUN_DIR/stage.integration.out" && grep -Eq '(^| )0 skip' "$RUN_DIR/stage.integration.out"
+  NO_COLOR=1 DOCKER_DEFAULT_PLATFORM=linux/amd64 bun test apps/umami/retention.integration.test.ts 2>&1 | tee "$RUN_DIR/stage.integration.out"
+  pass="$(sed -n 's/^ *\([0-9][0-9]*\) pass$/\1/p' "$RUN_DIR/stage.integration.out")"
+  fail="$(sed -n 's/^ *\([0-9][0-9]*\) fail$/\1/p' "$RUN_DIR/stage.integration.out")"
+  skip="$(sed -n 's/^ *\([0-9][0-9]*\) skip$/\1/p' "$RUN_DIR/stage.integration.out")"
+  if [ "${pass:-0}" -ge 1 ] && [ "${fail:-1}" -eq 0 ] && [ "${skip:-0}" -eq 0 ]; then
+    echo "integration_test=PASS pass=$pass fail=$fail skip=${skip:-0}"
+  else
+    echo "integration_test=FAIL pass=${pass:-?} fail=${fail:-?} skip=${skip:-?}" >&2; exit 1
+  fi
 )
 git -C "$REPO_ROOT" status --short apps/umami/retention.integration.test.ts
 ```
 
-Expect: `1 pass`, `0 skip`; the `git status` line is empty (edit reverted). STOP: a skip is not evidence; run it again after fixing Docker access.
+Expect: a zero `bun test` exit (pipefail carries it through `tee`) and `integration_test=PASS`: `N pass` with N≥1, `0 fail`, and no `skip` line (Bun prints a `skip` line only when something was skipped, so absence means zero); the `git status` line is empty (edit reverted). STOP: any nonzero exit, a nonzero skip count (a skip is not evidence; fix Docker access and re-run), or a missing summary.
 
 **S9. Rehearse the R4 revert on a restored copy.** Uses the real rollback artifact (`compose.pg15.yaml`: PG15 image, `umami-db-data`, `/var/lib/postgresql/data` mount) in its own project, with an override that makes the network internal. Only `db` starts, so nothing is published. The production revert itself is not run in advance.
 
@@ -562,7 +655,8 @@ Expect: `1 pass`, `0 skip`; the `git status` line is empty (edit reverted). STOP
   rdc exec -T db psql -X -v ON_ERROR_STOP=1 -U umami -d postgres -c 'DROP DATABASE IF EXISTS umami WITH (FORCE);' < /dev/null
   rdc exec -T db pg_restore --exit-on-error --create --no-owner -U umami -d postgres < "$STAGE_DIR/input.dump"
   rdc exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami < "$MANIFEST_SQL" | LC_ALL=C sort > "$RUN_DIR/stage.r4.manifest"
-  diff -u "$BACKUP_MANIFEST" "$RUN_DIR/stage.r4.manifest" && echo 'r4_rehearsal_manifest_diff=PASS'
+  if ! diff -u "$BACKUP_MANIFEST" "$RUN_DIR/stage.r4.manifest"; then echo 'r4_rehearsal_manifest_diff=FAIL' >&2; exit 1; fi
+  echo 'r4_rehearsal_manifest_diff=PASS'
   rdc exec -T db psql -X -At -q -U umami -d umami -c 'SHOW data_directory' < /dev/null
   rdc down -v --remove-orphans
 )
@@ -584,7 +678,8 @@ Expect: `r4_rehearsal_manifest_diff=PASS` and a `/var/lib/postgresql/data` data 
   echo "left_containers=$(docker ps -aq --filter "name=$STAGE" | wc -l | tr -d ' ')"
   echo "left_volumes=$(docker volume ls -q | grep -c "$STAGE" || true)"
   echo "left_networks=$(docker network ls --format '{{.Name}}' | grep -c "$STAGE" || true)"
-  test ! -e "$STAGE_DIR" && echo 'plaintext_and_env_removed=PASS'
+  test ! -e "$STAGE_DIR"
+  echo 'plaintext_and_env_removed=PASS'
 )
 docker ps -a; docker volume ls; docker network ls
 ```
@@ -607,57 +702,28 @@ Preconditions (all must hold):
 **No step that stops PG15 `db` or touches the PG15 volume runs until the cutover dump (4.3) is encrypted, checksum-recorded and decrypt-tested (4.4).** Never run both majors at once on this host (memory). Never `docker compose down` and never remove `umami_umami-db-data` before finalize.
 
 ```bash
-test "$(date -u +%H)" -ge 2 && echo 'window_ok=PASS' || { echo 'window_ok=FAIL (inside 00:00-02:00 UTC)'; false; }
+if [ "$(date -u +%H)" -ge 2 ]; then echo 'window_ok=PASS'; else echo 'window_ok=FAIL (inside 00:00-02:00 UTC)' >&2; false; fi
 ```
 
 ### 4.1 Disable the retention timer
 
-Use AGENTS.md Retention §7 (`systemctl disable --now umami-retention.timer && systemctl stop umami-retention.service`), then assert:
+Same as AGENTS.md Retention §7 (`systemctl disable --now umami-retention.timer && systemctl stop umami-retention.service`), then assert disabled/inactive/inactive. `retention_disable_assert` (shared helpers) does both:
 
 ```bash
-"${SSH[@]}" bash -s <<'REMOTE'
-set -Eeuo pipefail
-test "$(systemctl is-enabled umami-retention.timer || true)" = disabled
-test "$(systemctl is-active umami-retention.timer || true)" = inactive
-test "$(systemctl is-active umami-retention.service || true)" = inactive
-echo 'timer_disabled_inactive=PASS'
-REMOTE
+retention_disable_assert
 ```
 
 Expect: `timer_disabled_inactive=PASS`. STOP: any assertion fails (a running retention service can race the restore). Rollback: none needed. The timer stays disabled; it is re-armed only by the ENABLE gate in step 6. `deploy.ts` leaves a disabled timer disabled.
 
 ### 4.2 Deploy freeze
 
-Only after 4.1. Holding environment approvals is not enough: the deploy-gate Discord notification invites approval. Cancel every waiting, queued, requested, pending or in-progress run of the umami deploy workflow and of the router (`deploy.yaml`, whose path filter can deploy umami). Cancelling a router run also cancels its other apps; re-dispatch those after the freeze clears. If an `in_progress` run was mid-deploy, the 4.3 state checks catch a half-applied stack.
+Only after 4.1. Holding environment approvals is not enough: the deploy-gate Discord notification invites approval. Cancel every waiting, queued, requested, pending or in-progress run of the umami deploy workflow and of the router (`deploy.yaml`, whose path filter can deploy umami). Cancelling a router run also cancels its other apps; re-dispatch those after the freeze clears. If an `in_progress` run was mid-deploy, the 4.3 state checks catch a half-applied stack. The helpers are defined in session setup; any `gh` listing failure makes the step fail, never read as zero runs.
 
 ```bash
-freeze_ids() (
-  set -Eeuo pipefail
-  for wf in deploy-umami.yaml deploy.yaml; do
-    for st in waiting queued requested pending in_progress; do
-      gh run list --workflow "$wf" --status "$st" --limit 100 --json databaseId --jq '.[].databaseId'
-    done
-  done
-)
-freeze_cancel() {
-  local ids id
-  ids="$(freeze_ids)" || return 1
-  for id in $ids; do gh run cancel "$id" || return 1; done
-}
-freeze_assert() {
-  local ids n
-  for _ in $(seq 1 12); do
-    ids="$(freeze_ids)" || return 1
-    n="$(printf '%s' "$ids" | grep -c . || true)"
-    [ "$n" = 0 ] && { echo 'freeze_runs_remaining=0'; return 0; }
-    sleep 5
-  done
-  echo "freeze_runs_remaining=$n" >&2; return 1
-}
-freeze_cancel; freeze_assert
+freeze_cancel && freeze_assert
 ```
 
-Expect: `freeze_runs_remaining=0`. STOP: any run remains. Also: keep the hold on Renovate umami PRs and merge nothing to `main` that touches `apps/umami/**` (outside the path filter's doc/test exclusions). The freeze clears only after the pin PR merges and its deploy is approved. Re-run `freeze_cancel; freeze_assert` immediately before 4.6. Rollback: none; the freeze is lifted by the operator (step 6 and Unit 3).
+Expect: `freeze_runs_remaining=0`. STOP: any run remains, or any `freeze_listing=FAIL` / non-zero exit (fix `gh` auth or connectivity and repeat). Also: keep the hold on Renovate umami PRs and merge nothing to `main` that touches `apps/umami/**` (outside the path filter's doc/test exclusions). The freeze clears only after the pin PR merges and its deploy is approved. Re-run `freeze_cancel && freeze_assert` immediately before 4.6. Rollback: none; the freeze is lifted by the operator (step 6 and Unit 3).
 
 ### 4.3 Quiesce and final dump
 
@@ -699,6 +765,7 @@ Pre-pull the PG18 image on the droplet first (no state change), then stop the PG
 
 ```bash
 ( set -Eeuo pipefail
+  : "${PG18_IMAGE:?run S1 first}"
   "${SSH[@]}" "docker pull '$PG18_IMAGE'" > /dev/null
   "${SSH[@]}" "$DC stop db"
   "${SSH[@]}" "$DC ps --status running --services" | tee "$RUN_DIR/cutover.running2"
@@ -717,18 +784,20 @@ Expect: `pg15_stopped=PASS`, the anchor volume still present. Rollback: `"${SSH[
 ```bash
 PR_COMPOSE="${PR_COMPOSE:?Set PR_COMPOSE to apps/umami/docker-compose.yaml from the PR branch checkout}"
 ( set -Eeuo pipefail
+  : "${PG18_IMAGE:?run S1 first}"
   freeze_assert
   now="$("${SSH[@]}" 'cat /opt/umami/docker-compose.yaml' | shasum -a 256 | cut -d' ' -f1)"
   want="$(cut -d' ' -f1 "$RUN_DIR/compose.pg15.yaml.sha256")"
   [ "$now" = "$want" ] || { echo 'droplet_compose_drift=FAIL (a deploy ran?)' >&2; exit 1; }
-  grep -Fxq "    image: ${PG18_IMAGE}" "$PR_COMPOSE"
-  grep -Fxq '      - umami-db-data-pg18:/var/lib/postgresql' "$PR_COMPOSE"
-  grep -Fxq '  umami-db-data-pg18:' "$PR_COMPOSE"
+  for line in "    image: ${PG18_IMAGE}" '      - umami-db-data-pg18:/var/lib/postgresql' '  umami-db-data-pg18:'; do
+    grep -Fxq -- "$line" "$PR_COMPOSE" || { echo "pr_compose_layout=FAIL (missing line: $line)" >&2; exit 1; }
+  done
   if grep -Eq '/var/lib/postgresql/data|PGDATA' "$PR_COMPOSE"; then echo 'pr_compose_layout=FAIL' >&2; exit 1; fi
   echo 'pr_compose_layout=PASS'
   "${SSH[@]}" 'cat > /opt/umami/docker-compose.yaml.new && mv -f /opt/umami/docker-compose.yaml.new /opt/umami/docker-compose.yaml' < "$PR_COMPOSE"
   remote="$("${SSH[@]}" 'sha256sum /opt/umami/docker-compose.yaml' | cut -d' ' -f1)"
-  [ "$remote" = "$(shasum -a 256 "$PR_COMPOSE" | cut -d' ' -f1)" ] && echo 'droplet_compose_matches_pr=PASS'
+  [ "$remote" = "$(shasum -a 256 "$PR_COMPOSE" | cut -d' ' -f1)" ] || { echo 'droplet_compose_matches_pr=FAIL' >&2; exit 1; }
+  echo 'droplet_compose_matches_pr=PASS'
   "${SSH[@]}" "$DC config --quiet"
   "${SSH[@]}" "$DC up -d --wait --wait-timeout 180 db"
 )
@@ -741,7 +810,9 @@ Expect: `pr_compose_layout=PASS`, `droplet_compose_matches_pr=PASS`, `db` health
 ```bash
 ( set -Eeuo pipefail
   "${SSH[@]}" "DC_CMD='$DC' EXPECT_VOLUME=umami_umami-db-data-pg18 PG18_IMAGE='$PG18_IMAGE' bash -s" < "$LAYOUT_GATE" | tee "$RUN_DIR/cutover.layout"
-  grep '^db_collation=' "$RUN_DIR/cutover.layout" | diff -u "$RUN_DIR/preflight.collation" - && echo 'cutover_collation_after_init=MATCH'
+  grep '^db_collation=' "$RUN_DIR/cutover.layout" > "$RUN_DIR/cutover.init.collation"
+  if ! diff -u "$RUN_DIR/preflight.collation" "$RUN_DIR/cutover.init.collation"; then echo 'cutover_collation_after_init=FAIL' >&2; exit 1; fi
+  echo 'cutover_collation_after_init=MATCH'
   "${SSH[@]}" 'docker volume ls --format "{{.Name}}"' | grep -E '^umami_' | tee "$RUN_DIR/cutover.volumes"
 )
 ```
@@ -759,9 +830,12 @@ Forced drop of the pre-created database on the fresh PG18 cluster, then `pg_rest
     | "${SSH[@]}" "$DC exec -T db pg_restore --exit-on-error --create --no-owner -U umami -d postgres"
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami" < "$MANIFEST_SQL" \
     | LC_ALL=C sort > "$CUTOVER_RESTORED"
-  diff -u "$CUTOVER_MANIFEST" "$CUTOVER_RESTORED" && echo 'cutover_manifest_diff=PASS'
+  if ! diff -u "$CUTOVER_MANIFEST" "$CUTOVER_RESTORED"; then echo 'cutover_manifest_diff=FAIL' >&2; exit 1; fi
+  echo 'cutover_manifest_diff=PASS'
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami" < "$IDENTITY_SQL" | tee "$RUN_DIR/cutover.restored.identity"
-  grep '^db_collation=' "$RUN_DIR/cutover.restored.identity" | diff -u "$RUN_DIR/preflight.collation" - && echo 'cutover_collation_after_restore=MATCH'
+  grep '^db_collation=' "$RUN_DIR/cutover.restored.identity" > "$RUN_DIR/cutover.restored.collation"
+  if ! diff -u "$RUN_DIR/preflight.collation" "$RUN_DIR/cutover.restored.collation"; then echo 'cutover_collation_after_restore=FAIL' >&2; exit 1; fi
+  echo 'cutover_collation_after_restore=MATCH'
   ( cd "$RUN_DIR" && shasum -a 256 cutover.restored.manifest )
 )
 ```
@@ -777,9 +851,10 @@ Do not run admin rotation or `deploy.ts`: admin state comes from the dump. Probe
   since="$("${SSH[@]}" 'date -u +%Y-%m-%dT%H:%M:%SZ')"
   "${SSH[@]}" "$DC up -d --wait --wait-timeout 180 umami"
   "${SSH[@]}" "$DC logs --no-color --since '$since' umami" > "$RUN_DIR/cutover.umami.log" 2>&1
-  grep -Ei 'migration|prisma|datasource' "$RUN_DIR/cutover.umami.log" | tee "$RUN_DIR/cutover.prisma.out"
-  grep -Eq 'No pending migrations to apply|already in sync' "$RUN_DIR/cutover.prisma.out" && echo 'prisma_noop=PASS'
-  if grep -Eq 'Applying migration|migrations? (have been|was) applied' "$RUN_DIR/cutover.prisma.out"; then echo 'prisma_noop=FAIL' >&2; exit 1; fi
+  grep -Ei 'migration|prisma|datasource' "$RUN_DIR/cutover.umami.log" | tee "$RUN_DIR/cutover.prisma.out" || true
+  if grep -Eq 'Applying migration|migrations? (have been|was) applied' "$RUN_DIR/cutover.prisma.out"; then echo 'prisma_noop=FAIL (migration applied)' >&2; exit 1; fi
+  if ! grep -Eq 'No pending migrations to apply|already in sync' "$RUN_DIR/cutover.prisma.out"; then echo 'prisma_noop=FAIL (no no-op marker in output)' >&2; exit 1; fi
+  echo 'prisma_noop=PASS'
   "${SSH[@]}" "$DC exec -T umami curl -fsS http://localhost:3000/api/heartbeat"
 )
 ```
@@ -819,9 +894,9 @@ After the pin PR merges and the first `umami deploy` is approved, confirm the gu
 before="$("${SSH[@]}" 'sha256sum < /opt/umami/.db-password-fingerprint')"   # run BEFORE approving the deploy
 # ...approve and let the deploy finish, then:
 after="$("${SSH[@]}" 'sha256sum < /opt/umami/.db-password-fingerprint')"
-[ "$before" = "$after" ] && echo 'sentinel_rewrite=UNCHANGED' || echo 'sentinel_rewrite=CHANGED'
-sentinel_check
-"${SSH[@]}" 'systemctl is-active umami-retention.timer'
+if [ "$before" = "$after" ]; then echo 'sentinel_rewrite=UNCHANGED'; else echo 'sentinel_rewrite=CHANGED' >&2; false; fi \
+  && sentinel_check \
+  && "${SSH[@]}" 'systemctl is-active umami-retention.timer'
 ```
 
 Expect: `UNCHANGED`, `MATCH`, `active`. STOP: a deploy that aborts on the fingerprint guard or leaves the timer inactive; keep the freeze and investigate.
@@ -838,16 +913,23 @@ The pre-umami manifest gate result is the `cutover_manifest_diff=PASS` from 4.8 
 ( set -Eeuo pipefail
   curl -fsS "https://${HOST}/api/heartbeat"; echo
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami" < "$IDENTITY_SQL" | tee "$RUN_DIR/live.identity"
-  grep -Eq '^server_version=18\.' "$RUN_DIR/live.identity" && echo 'server_version_is_pg18_target=PASS'
+  grep -Eq '^server_version=18\.' "$RUN_DIR/live.identity" || { echo 'server_version_is_pg18_target=FAIL' >&2; exit 1; }
+  echo 'server_version_is_pg18_target=PASS'
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami" < "$MANIFEST_SQL" | LC_ALL=C sort > "$RUN_DIR/live.manifest"
-  diff <(cut -d'|' -f1 "$CUTOVER_MANIFEST") <(cut -d'|' -f1 "$RUN_DIR/live.manifest") && echo 'table_set=EQUAL'
-  paste -d'|' <(cut -d'|' -f1,2 "$CUTOVER_MANIFEST") <(cut -d'|' -f2 "$RUN_DIR/live.manifest") \
-    | awk -F'|' '$3 < $2 { print "BELOW:" $1; bad = 1 } END { exit bad }' && echo 'counts_not_below_source=PASS'
+  if ! diff <(cut -d'|' -f1 "$CUTOVER_MANIFEST") <(cut -d'|' -f1 "$RUN_DIR/live.manifest"); then echo 'table_set=FAIL' >&2; exit 1; fi
+  echo 'table_set=EQUAL'
+  if ! paste -d'|' <(cut -d'|' -f1,2 "$CUTOVER_MANIFEST") <(cut -d'|' -f2 "$RUN_DIR/live.manifest") \
+    | awk -F'|' '$3 < $2 { print "BELOW:" $1; bad = 1 } END { exit bad }'; then echo 'counts_not_below_source=FAIL' >&2; exit 1; fi
+  echo 'counts_not_below_source=PASS'
   sys="$("${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami -c \"SELECT count(*) || '|' || md5(string_agg(website_id::text, ',' ORDER BY website_id::text)) FROM website WHERE name = 'systematic'\"")"
-  [ "$sys" = "$(cat "$RUN_DIR/preflight.systematic")|$(cat "$RUN_DIR/preflight.systematic.id")" ] && echo 'systematic_website_id=PRESERVED'
-  "${SSH[@]}" "$DC exec -T umami printenv PRIVATE_MODE DISABLE_TELEMETRY" | paste -sd, - | grep -Fx '1,1' && echo 'privacy_invariants=PASS'
+  [ "$sys" = "$(cat "$RUN_DIR/preflight.systematic")|$(cat "$RUN_DIR/preflight.systematic.id")" ] || { echo 'systematic_website_id=FAIL' >&2; exit 1; }
+  echo 'systematic_website_id=PRESERVED'
+  priv="$("${SSH[@]}" "$DC exec -T umami printenv PRIVATE_MODE DISABLE_TELEMETRY" | paste -sd, -)"
+  [ "$priv" = '1,1' ] || { echo 'privacy_invariants=FAIL' >&2; exit 1; }
+  echo 'privacy_invariants=PASS'
   now="$("${SSH[@]}" 'stat -c env_mtime=%Y /opt/umami/.env')"
-  grep -Fx "$now" "$RUN_DIR/preflight.host" > /dev/null && echo 'env_untouched=PASS'
+  grep -Fx "$now" "$RUN_DIR/preflight.host" > /dev/null || { echo 'env_untouched=FAIL' >&2; exit 1; }
+  echo 'env_untouched=PASS'
 )
 ```
 
@@ -863,7 +945,8 @@ The recovery point for the supervised apply is the decrypt-tested cutover dump. 
 ( set -Eeuo pipefail
   verify_age_artifact "$CUTOVER_AGE" "$PG18_IMAGE"
   disposable_restore "$PG18_IMAGE" /var/lib/postgresql "$CUTOVER_AGE" "$RUN_DIR/cutover.disposable.manifest"
-  diff -u "$CUTOVER_MANIFEST" "$RUN_DIR/cutover.disposable.manifest" && echo 'cutover_disposable_diff=PASS'
+  if ! diff -u "$CUTOVER_MANIFEST" "$RUN_DIR/cutover.disposable.manifest"; then echo 'cutover_disposable_diff=FAIL' >&2; exit 1; fi
+  echo 'cutover_disposable_diff=PASS'
 )
 ```
 
@@ -873,7 +956,7 @@ Expect: `cutover.dump.age: OK`, `plaintext_removed=PASS`, `disposable_container_
 
 A Postgres major invalidates the PG15 retention evidence. Run, in order, from `apps/umami/AGENTS.md`:
 
-1. **Retention §1** from the **PR branch checkout** (so the expected images are the PG18 pins; this is the confirming check that the droplet compose and the PR compose agree).
+1. **Retention §1** from the **PR branch checkout** (re-run the setup block there so `REPO_ROOT` and the pinned `.github/known_hosts` come from that checkout; the expected images are then the PG18 pins, and this is the confirming check that the droplet compose and the PR compose agree). Its bare `ssh "$REMOTE"` calls run through the pinned-options `ssh` wrapper from session setup. The same applies to §3 to §7.
 2. **Retention §3** `--check` with exact counts. Zero null timestamps, a stable orphan baseline.
 3. **Retention §4** supervised `--apply`, behind its typed `APPLY UMAMI RETENTION` prompt. Backup receipt = the decrypt-tested `cutover.dump.age` checksum from 4.3/6.2. Do not batch or retry a failed apply without investigation.
 4. **Retention §5** post-check (every table `remaining=0`, no positive orphan delta, zero nulls) and the service checks.
@@ -897,25 +980,28 @@ Caddy start (4.10) is the point of no return.
 
 ### 7.1 Pre-Caddy revert (explicit sequence)
 
-Uses the compose artifact saved in pre-flight. Image, volume key and mount destination revert together. Never `down`, never touch `umami_umami-db-data`.
+Uses the compose artifact saved in pre-flight. Image, volume key and mount destination revert together. Never `down`, never touch `umami_umami-db-data`. The first step disables and stops the retention timer and service and asserts disabled/inactive/inactive **before any database switch**, so the timer can never fire against the reverted PG15. After a post-cutover re-arm (step 6) this step is what disarms it; before the cutover's own 4.1 it is a harmless repeat. A failed comparison exits before `restart_stack`, so the stack stays quiesced.
 
 ```bash
 ( set -Eeuo pipefail
+  retention_disable_assert
   freeze_assert
   "${SSH[@]}" "$DC stop umami caddy db"
   "${SSH[@]}" 'cat > /opt/umami/docker-compose.yaml.new && mv -f /opt/umami/docker-compose.yaml.new /opt/umami/docker-compose.yaml' < "$RUN_DIR/compose.pg15.yaml"
   remote="$("${SSH[@]}" 'sha256sum /opt/umami/docker-compose.yaml' | cut -d' ' -f1)"
-  [ "$remote" = "$(cut -d' ' -f1 "$RUN_DIR/compose.pg15.yaml.sha256")" ] && echo 'compose_reverted=PASS'
+  [ "$remote" = "$(cut -d' ' -f1 "$RUN_DIR/compose.pg15.yaml.sha256")" ] || { echo 'compose_reverted=FAIL' >&2; exit 1; }
+  echo 'compose_reverted=PASS'
   "${SSH[@]}" "$DC up -d --wait --wait-timeout 180 db"
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami" < "$MANIFEST_SQL" \
     | LC_ALL=C sort > "$RUN_DIR/revert.manifest"
-  diff -u "$CUTOVER_MANIFEST" "$RUN_DIR/revert.manifest" && echo 'revert_manifest_diff=PASS'
+  if ! diff -u "$CUTOVER_MANIFEST" "$RUN_DIR/revert.manifest"; then echo 'revert_manifest_diff=FAIL (stack left quiesced)' >&2; exit 1; fi
+  echo 'revert_manifest_diff=PASS'
   "${SSH[@]}" "$DC exec -T db psql -X -At -q -U umami -d umami -c 'SHOW data_directory'" < /dev/null
   restart_stack
 )
 ```
 
-Expect: `compose_reverted=PASS`, `revert_manifest_diff=PASS` (PG15 manifest equals the quiesced source), data directory `/var/lib/postgresql/data`, heartbeat green. The timer stays disabled; re-arm only through Retention §6 after the migration is retried or abandoned. STOP: a manifest diff on the PG15 volume. Do not start `umami`; the off-droplet `.age` dumps are the next recovery source (7.3).
+Expect: `timer_disabled_inactive=PASS`, `freeze_runs_remaining=0`, `compose_reverted=PASS`, `revert_manifest_diff=PASS` (PG15 manifest equals the quiesced source), data directory `/var/lib/postgresql/data`, heartbeat green. The timer stays disabled; re-arm only through Retention §6 after the migration is retried or abandoned. STOP: a manifest diff on the PG15 volume. Do not start `umami`; the off-droplet `.age` dumps are the next recovery source (7.3).
 
 Before retrying the cutover, remove the abandoned PG18 volume only after confirming no container uses it:
 
@@ -934,16 +1020,41 @@ PG18 dumps cannot load into PG15, so rolling back discards PG18 writes since Cad
 ( set -Eeuo pipefail
   read -r -p 'Type ROLL BACK UMAMI TO PG15 AND DISCARD PG18 WRITES to continue: ' ok
   [ "$ok" = 'ROLL BACK UMAMI TO PG15 AND DISCARD PG18 WRITES' ]
+  retention_disable_assert
   "${SSH[@]}" "$DC exec -T db pg_dump -Fc --create -U umami -d umami" | age -r "$AGE_RECIPIENT" > "$RUN_DIR/pg18-forensic.dump.age"
   ( cd "$RUN_DIR" && shasum -a 256 pg18-forensic.dump.age | tee pg18-forensic.dump.age.sha256 )
 )
 ```
 
-Then 7.1. The final `diff` there compares against the cutover source manifest, so it also states exactly what was discarded.
+The timer is disabled and asserted inactive here, before the dump, and again as the first step of 7.1. Then run 7.1. Its final `diff` compares against the cutover source manifest, so it also states exactly what was discarded.
 
 ### 7.3 Off-droplet dump restore
 
-The PG15 dump restores into PG15 or PG18 only, and only into a stack whose compose matches the target. Use the AGENTS.md Backup & restore emergency-restore block (forced drop, then `pg_restore --exit-on-error --create --no-owner`, retention timer left disabled, restart-on-exit trap) with one delta: the archive is encrypted, so replace the final `' < "$BACKUP"` redirect with `' < <(age -d -i <(age_identity) "$CUTOVER_AGE")`. Never replay into a non-empty `umami` database.
+The PG15 dump restores into PG15 or PG18 only, and only into a stack whose running compose matches the target. This is the AGENTS.md Backup & restore emergency-restore block adjusted for an encrypted archive and the pinned SSH array: no `$BACKUP` plaintext file, the archive is checksum-validated first, and `age` streams into the remote `pg_restore` under `pipefail`, so an `age` failure fails the step. Deviation from AGENTS.md: on any failure the stack is left quiesced (not restarted) and the retention timer stays disabled; restart only after the cause is understood. Never replay into a non-empty `umami` database; the forced drop below is the only reset.
+
+```bash
+( set -Eeuo pipefail
+  ( cd "$RUN_DIR" && shasum -a 256 -c cutover.dump.age.sha256 )
+  on_exit() {
+    s=$?; trap - EXIT
+    if [ "$s" -ne 0 ]; then echo 'emergency restore FAILED: NO-GO; stack left quiesced, timer disabled' >&2; fi
+    exit "$s"
+  }
+  trap on_exit EXIT
+  retention_disable_assert
+  "${SSH[@]}" "$DC stop caddy umami"
+  "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -U umami -d postgres -c 'DROP DATABASE IF EXISTS umami WITH (FORCE);'" < /dev/null
+  age -d -i <(age_identity) "$CUTOVER_AGE" \
+    | "${SSH[@]}" "$DC exec -T db pg_restore --exit-on-error --create --no-owner -U umami -d postgres"
+  "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami" < "$MANIFEST_SQL" \
+    | LC_ALL=C sort > "$RUN_DIR/emergency.restored.manifest"
+  if ! diff -u "$CUTOVER_MANIFEST" "$RUN_DIR/emergency.restored.manifest"; then echo 'emergency_manifest_diff=FAIL' >&2; exit 1; fi
+  echo 'emergency_manifest_diff=PASS'
+  restart_stack
+)
+```
+
+Expect: `shasum` `OK`, `timer_disabled_inactive=PASS`, `emergency_manifest_diff=PASS`, then a green restart/heartbeat. STOP: any failure; the dump is the recovery source, not a reason to improvise.
 
 ### 7.4 Repo state
 
@@ -959,7 +1070,8 @@ If the pin PR already merged, revert it as one change (image, key, mount destina
 ( set -Eeuo pipefail
   curl -fsS "https://${HOST}/api/heartbeat"; echo
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami" < "$IDENTITY_SQL" | grep -E '^server_version=18\.'
-  [ -z "$("${SSH[@]}" 'docker ps -aq --filter volume=umami_umami-db-data')" ] && echo 'anchor_unreferenced=PASS'
+  [ -z "$("${SSH[@]}" 'docker ps -aq --filter volume=umami_umami-db-data')" ] || { echo 'anchor_unreferenced=FAIL' >&2; exit 1; }
+  echo 'anchor_unreferenced=PASS'
   if "${SSH[@]}" "grep -F 'umami-db-data:' /opt/umami/docker-compose.yaml"; then echo 'compose_references_anchor=FAIL' >&2; exit 1; fi
   read -r -p 'Type REMOVE UMAMI PG15 VOLUME to destroy the rollback anchor: ' ok
   [ "$ok" = 'REMOVE UMAMI PG15 VOLUME' ]

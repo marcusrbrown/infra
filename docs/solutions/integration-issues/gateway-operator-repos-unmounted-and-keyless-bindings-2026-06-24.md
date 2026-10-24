@@ -2,7 +2,7 @@
 title: Gateway operator /operator/repos returns 404 — unmounted route plus keyless legacy bindings
 date: 2026-06-24
 category: docs/solutions/integration-issues/
-module: gateway
+module: apps/gateway
 problem_type: integration_issue
 component: tooling
 symptoms:

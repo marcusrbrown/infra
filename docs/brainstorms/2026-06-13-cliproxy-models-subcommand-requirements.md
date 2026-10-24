@@ -1,5 +1,5 @@
 ---
-title: cliproxy models subcommand
+topic: cliproxy models subcommand
 date: 2026-06-13
 status: completed
 scope: standard

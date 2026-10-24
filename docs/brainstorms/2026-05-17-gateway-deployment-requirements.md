@@ -1,3 +1,9 @@
+---
+date: 2026-05-17
+topic: Gateway Deployment Requirements
+status: completed
+---
+
 # Gateway Deployment Requirements
 
 **Date:** 2026-05-17

@@ -2,7 +2,7 @@
 title: 'Gateway v0.50.0 undeployable: daemon required secrets its own compose never wired'
 date: 2026-06-02
 category: workflow-issues
-module: gateway
+module: apps/gateway
 problem_type: workflow_issue
 component: tooling
 symptoms:

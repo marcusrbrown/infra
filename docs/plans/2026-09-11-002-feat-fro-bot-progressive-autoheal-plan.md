@@ -1,5 +1,5 @@
 ---
-title: feat: Add deterministic Fro Bot progressive autoheal reconciliation
+title: "feat: Add deterministic Fro Bot progressive autoheal reconciliation"
 type: feat
 status: completed
 date: 2026-09-11

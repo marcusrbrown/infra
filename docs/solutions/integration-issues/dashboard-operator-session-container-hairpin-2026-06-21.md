@@ -7,8 +7,8 @@ problem_type: integration_issue
 component: authentication
 symptoms:
   - Dashboard monitoring page (dashboard.fro.bot/) redirect-loops after enabling DASHBOARD_GATEWAY_OPERATOR_SESSION_ENABLED=true
-  - Container logs spam "gateway-auth: session validation failed {path:/}" + "operator-client: network error {route:/operator/session}"
-  - OAuth callback succeeds ("OAuth callback: session issued") but the very next request to / re-redirects to /auth/login
+  - 'Container logs spam "gateway-auth: session validation failed {path:/}" + "operator-client: network error {route:/operator/session}"'
+  - 'OAuth callback succeeds ("OAuth callback: session issued") but the very next request to / re-redirects to /auth/login'
   - From inside the dashboard container, fetch to https://dashboard.fro.bot/operator/session returns UND_ERR_CONNECT_TIMEOUT
 root_cause: config_error
 resolution_type: config_change

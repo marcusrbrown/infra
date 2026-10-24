@@ -1,3 +1,9 @@
+---
+date: 2026-05-25
+topic: Fro Bot OpenAI Routing — Per-Repo Opt-In
+status: completed
+---
+
 # Fro Bot OpenAI Routing — Per-Repo Opt-In
 
 **Status**: completed

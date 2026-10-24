@@ -1,5 +1,5 @@
 ---
-title: Cancelled / incomplete deploy detection
+topic: Cancelled / incomplete deploy detection
 date: 2026-06-25
 status: completed
 type: requirements

@@ -29,10 +29,7 @@ The bin (`src/cli.ts`) is bundled because it imports `infra-shared`, which must 
 ```jsonc
 // packages/cli/package.json
 "exports": {
-  "./vpn/peers": {
-    "types": "./src/commands/vpn/peers.ts",   // in-repo TS consumer (moduleResolution: Bundler reads exports)
-    "default": "./src/commands/vpn/peers.ts"  // ship as source — NOT ./dist/...
-  }
+  "./vpn/peers": "./src/commands/vpn/peers.ts"  // ship as source — NOT ./dist/... (one string serves both types and runtime)
 },
 "bin": { "infra": "./dist/cli.js" },           // only the bin is bundled
 "files": ["dist", "src/commands/vpn/peers.ts"],

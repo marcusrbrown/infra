@@ -1,6 +1,7 @@
 ---
 title: Scheduled Fro Bot runs no-op when the per-cron session grows unbounded
 date: 2026-06-14
+last_updated: 2026-10-24
 category: workflow-issues
 module: fro-bot
 problem_type: workflow_issue
@@ -22,6 +23,8 @@ tags:
 ---
 
 # Scheduled Fro Bot runs no-op when the per-cron session grows unbounded
+
+> **Status:** fixed upstream. `fro-bot/agent#902` scopes schedule sessions per run, and `#1237` removed the old schedule-session scaffolding, so `#898` is closed. `.github/workflows/fro-bot.yaml` still passes `skip-cache`, now keyed on the classified daily-equivalent mode rather than `github.event_name == 'schedule'`. The snippets below show the June stopgap.
 
 ## Context
 

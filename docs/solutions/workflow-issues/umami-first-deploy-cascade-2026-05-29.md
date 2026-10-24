@@ -50,7 +50,7 @@ Waves 1, 2, 5, 6 were fixed before push (during implementation + `ce:review mode
 
 ### Wave 1 — Resolve the real numbered image tag
 
-`umamisoftware/umami:3.1.0` is the immutable numbered tag (`postgresql-latest` is a rolling alias to the same PostgreSQL-only image). Pinned digest + numbered tag in `apps/umami/docker-compose.yaml`, Renovate-tracked like `cli-proxy-api`/`caddy`:
+`umamisoftware/umami:3.1.0` is the immutable numbered tag (`postgresql-latest` is a rolling alias to the same PostgreSQL-only image). Pinned digest + numbered tag in `apps/umami/docker-compose.yaml`, Renovate-tracked like `cli-proxy-api`/`caddy`. The snippet shows the pins as of 2026-05-29; the current pins are in that file:
 
 ```yaml
 image: umamisoftware/umami:3.1.0@sha256:81119aa498f910fe1bf590c0974dfd00afd3f3563dd55528bb3bd002f06f3dfb

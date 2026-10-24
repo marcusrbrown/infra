@@ -1,6 +1,7 @@
 ---
 title: SSH status checks fail with "Too many authentication failures" when ssh-agent key order exceeds MaxAuthTries
 date: 2026-06-13
+last_updated: 2026-10-24
 category: docs/solutions/integration-issues
 module: packages/cli
 problem_type: integration_issue
@@ -48,7 +49,7 @@ tags:
 
 Make the status SSH deterministic by using the app's own key via `-i <key> -o IdentitiesOnly=yes` so OpenSSH offers exactly one identity and never cycles agent keys.
 
-A CLI-local helper `packages/cli/src/lib/ssh-identity.ts`:
+A CLI-local helper `packages/cli/src/lib/ssh-identity.ts` (its `materializeIdentityFile` now delegates to the shared implementation; `buildIdentityArgs` is unchanged):
 
 ```ts
 // materializeIdentityFile: write the key to a temp 0600 file (trailing newline
@@ -94,7 +95,7 @@ When `<APP>_SSH_KEY` is unset, `buildIdentityArgs` returns no args and a no-op c
 
 - Any SSH-spawning CLI or MCP command that must survive a many-key ssh-agent should authenticate with the app's own key via `-i <key> -o IdentitiesOnly=yes`, not bare ssh-agent reliance.
 - Build known-hosts args **before** materializing the temp key, so an early throw during arg construction can't leak the 0600 key file (clean up in a `finally` regardless).
-- Keep the materialization helper CLI-local in `packages/cli` — do not import from `@marcusrbrown/infra-shared`, which would re-break the published npm install (the published CLI must be self-contained).
+- Route SSH identity materialization through `packages/cli/src/lib/ssh-identity.ts`. It was a CLI-local copy while `packages/cli` could not import `@marcusrbrown/infra-shared`; it now delegates to the shared `materializeIdentityFile`, which the CLI build inlines (see [cli-bun-build-publish-model-2026-06-20.md](../best-practices/cli-bun-build-publish-model-2026-06-20.md)). The published CLI must stay self-contained: no runtime `workspace:*` dependency.
 - When verifying `.env`-driven SSH behavior, run through Bun's native `.env` autoload, not shell `source` — `source` corrupts multi-line PEM values and yields a false `invalid format`.
 
 ## Related Issues

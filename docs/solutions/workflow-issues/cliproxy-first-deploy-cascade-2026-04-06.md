@@ -46,8 +46,8 @@ Run `bun install` after adding the new `apps/cliproxy` workspace member, then co
 Eliminated `CLIPROXY_HOST` entirely. Consolidated to `CLIPROXY_DOMAIN` in:
 - `apps/cliproxy/src/deploy.ts` (env interface + validation)
 - `.github/workflows/deploy.yaml` (env block)
-- `packages/cli/src/commands/cliproxy-deploy.ts` (CLI env allowlist)
-- `packages/cli/src/commands/cliproxy-login.ts` (fallback env var)
+- `packages/cli/src/commands/cliproxy/deploy.ts` (CLI env allowlist)
+- `packages/cli/src/commands/cliproxy/login.ts` (fallback env var)
 - All test files and snapshots
 
 One name, one secret, zero confusion.

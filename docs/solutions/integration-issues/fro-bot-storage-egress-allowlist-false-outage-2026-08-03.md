@@ -47,7 +47,7 @@ A content/storage job split (PR #1013) moved the daily-autoheal prompt into the 
 
 - **The autoheal ingests untrusted content mid-run** — it reads issue/PR/comment bodies, other repositories' files, and drives a headless browser to live pages. Indirect prompt injection enters through that content, so an operator-*triggered* run is not a trusted *session*.
 - **The job holds `FRO_BOT_PAT` in the model session by design.** `configureGhAuth` writes the PAT into `GH_CONFIG_DIR/hosts.yml` specifically so the env-scrubbed model bash can run `gh`; model bash can `gh auth token` / read `hosts.yml` and exfiltrate it.
-- **The AWS/OIDC credentials are reachable via `/proc`.** Env scrubbing (`filter-env.ts` `DENY_PREFIXES = ['AWS_', 'INPUT_']` at the pinned `v0.96.0`) only protects the OpenCode *child*; the parent `fro-bot/agent` action process still holds the credentials, and same-UID descendants can read the ancestor's initial environment via `/proc/<pid>/environ`.
+- **The AWS/OIDC credentials are reachable via `/proc`.** Env scrubbing (`filter-env.ts` `DENY_PREFIXES = ['AWS_', 'INPUT_']` at the then-pinned `v0.96.0`) only protects the OpenCode *child*; the parent `fro-bot/agent` action process still holds the credentials, and same-UID descendants can read the ancestor's initial environment via `/proc/<pid>/environ`.
 
 So the storage job is genuinely prompt-injectable and credential-bearing; unrestricted egress would enable arbitrary-host exfiltration. Removal was rejected.
 

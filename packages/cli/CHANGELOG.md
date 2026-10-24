@@ -1,5 +1,13 @@
 # @marcusrbrown/infra
 
+## 0.26.2
+
+### Patch Changes
+
+- Group update for dependencies: `@modelcontextprotocol/sdk`, `@types/bun`, `bun` ([#1682](https://github.com/marcusrbrown/infra/pull/1682))
+  
+  **Multi-package update** for packages: `@marcusrbrown/infra`.
+
 ## 0.26.1
 
 ### Patch Changes

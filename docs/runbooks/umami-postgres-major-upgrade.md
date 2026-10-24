@@ -8,7 +8,7 @@ Plan: [`docs/plans/2026-06-01-001-feat-umami-postgres-major-upgrade-plan.md`](..
 
 - **Evidence hygiene.** Evidence files, notes and chat hold digests, counts, checksums, pass/fail and the `SCRAM-SHA-256$` prefix only. Never `rolpassword`, sentinel content, `.env` values, passwords, or rows.
 - **Gates.** Each hard gate is a command, then `Expect:`, then `STOP:`. A STOP means do not continue; take the `Rollback:` line next to the last destructive step, or investigate. Gates are never relaxed.
-- **Shell.** Use `bash` from a repo checkout. Strict blocks are subshells `( set -Eeuo pipefail … )`, so a failure returns non-zero without killing the terminal. Every multi-stage pipe runs under `pipefail`.
+- **Shell.** Use `bash` from a repo checkout. Strict blocks are subshells `( set -Eeuo pipefail … )`, so a failure returns non-zero without killing the terminal. Every multi-stage pipe runs under `pipefail`. Bash ignores errexit everywhere inside a command used as the left side of `&&`/`||`, in an `if`/`while` condition or after `!`, so a strict subshell is never used that way: run it as a standalone statement, then branch on `$?`. Likewise, a pass/fail check never depends on a command's failure being swallowed in a test: capture the value first (a standalone assignment fails the block), then compare.
 - **SSH.** Operator pattern from AGENTS.md (`root@${HOST}`, `HOST` from `UMAMI_DOMAIN`, deploy key in ssh-agent) with `StrictHostKeyChecking=yes` against the pinned `.github/known_hosts`. Never `ssh-keyscan`; a host-key error is a STOP.
 - **Dumps.** SSH stdout streams straight into `age -r "$AGE_RECIPIENT"` on the workstation. The droplet holds no dump. Plaintext exists only in `mktemp -d` directories under `umask 077` (decrypt tests, staging input) and is deleted right after use.
 - **AGENTS.md references** (all in `apps/umami/AGENTS.md`):
@@ -266,7 +266,8 @@ mounts="$(docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} {{.Destination
 printf 'mounts=%s\n' "$mounts"
 [ "$mounts" = "volume ${EXPECT_VOLUME} /var/lib/postgresql" ] || { echo 'layout_mount=FAIL' >&2; exit 1; }
 echo 'layout_mount=PASS'
-if dc config | grep -q 'PGDATA'; then echo 'layout_pgdata_override=FAIL' >&2; exit 1; fi
+cfg="$(dc config)"
+if grep -q 'PGDATA' <<< "$cfg"; then echo 'layout_pgdata_override=FAIL' >&2; exit 1; fi
 img_id="$(docker inspect -f '{{.Image}}' "$cid")"
 img_pgdata="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$img_id" | sed -n 's/^PGDATA=//p')"
 ctr_pgdata="$(dc exec -T db printenv PGDATA < /dev/null)"
@@ -352,7 +353,10 @@ systemctl list-timers --all --no-pager umami-retention.timer
 stat -c 'env_mtime=%Y' /opt/umami/.env
 REMOTE
   sentinel_check
-) > "$RUN_DIR/preflight.host" && cat "$RUN_DIR/preflight.host" || { cat "$RUN_DIR/preflight.host"; echo 'P3=STOP'; false; }
+) > "$RUN_DIR/preflight.host"
+rc=$?
+cat "$RUN_DIR/preflight.host"
+if [ "$rc" -ne 0 ]; then echo "P3=STOP (rc=$rc)" >&2; false; fi
 ```
 
 Expect: at least 1 GiB free on `/`, the timer `enabled=enabled active=active` and the service `inactive`. That is the normal armed state since the retention ENABLE gate (daily around 00:30–01:00 UTC), not a STOP; step 4.1 disables it. Sentinel `64 600` and `MATCH`. The `env_mtime` is compared again in step 6. STOP: a retention service that is `active` or `activating` (wait for it to finish), `MISMATCH`, sentinel missing or wrong size/mode, or low disk. Never fix a sentinel by hand.
@@ -366,7 +370,7 @@ Expect: at least 1 GiB free on `/`, the timer `enabled=enabled active=active` an
   printf '%s\n' "$imgs" | grep '^umamisoftware/umami:' > "$RUN_DIR/umami.image"
   cat "$RUN_DIR/pg15.image" "$RUN_DIR/umami.image"
   "${SSH[@]}" 'docker volume ls --format "{{.Name}}"' | grep -E '^umami_' | tee "$RUN_DIR/preflight.volumes"
-  grep -Fx 'umami_umami-db-data' "$RUN_DIR/preflight.volumes"
+  grep -Fx 'umami_umami-db-data' "$RUN_DIR/preflight.volumes" || { echo 'anchor_volume=FAIL (umami_umami-db-data missing)' >&2; exit 1; }
   if grep -Fx 'umami_umami-db-data-pg18' "$RUN_DIR/preflight.volumes"; then echo 'pg18_volume_preexisting=FAIL' >&2; exit 1; fi
   "${SSH[@]}" 'cat /opt/umami/docker-compose.yaml' > "$RUN_DIR/compose.pg15.yaml"
   grep -Fq 'umami-db-data:/var/lib/postgresql/data' "$RUN_DIR/compose.pg15.yaml" || { echo 'compose_pg15_layout=FAIL' >&2; exit 1; }
@@ -375,12 +379,17 @@ Expect: at least 1 GiB free on `/`, the timer `enabled=enabled active=active` an
   [ "$(cat "$RUN_DIR/preflight.systematic")" = 1 ] || { echo 'systematic_row_count=FAIL' >&2; exit 1; }
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami -c \"SELECT md5(string_agg(website_id::text, ',' ORDER BY website_id::text)) FROM website WHERE name = 'systematic'\"" > "$RUN_DIR/preflight.systematic.id"
   printf 'destroy_by=finalize_date+7d\n' > "$RUN_DIR/DELETION_DEADLINE"
-) \
-  && PG15_IMAGE="$(cat "$RUN_DIR/pg15.image")" && UMAMI_IMAGE="$(cat "$RUN_DIR/umami.image")" \
-  && : "${PG15_IMAGE:?pg15.image empty}" "${UMAMI_IMAGE:?umami.image empty}"
+)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "P4=STOP (rc=$rc); PG15_IMAGE/UMAMI_IMAGE not assigned" >&2; false
+else
+  PG15_IMAGE="$(cat "$RUN_DIR/pg15.image")"; UMAMI_IMAGE="$(cat "$RUN_DIR/umami.image")"
+  : "${PG15_IMAGE:?pg15.image empty}" "${UMAMI_IMAGE:?umami.image empty}"
+fi
 ```
 
-The last line assigns the image variables in the parent shell (a subshell cannot); later steps fail fast if they are empty.
+The strict block runs as a standalone statement and the next line branches on its `$?`. A `( set -e … ) && next` form would switch errexit off inside the subshell. The assignments run in the parent shell (a subshell cannot) and only after the block succeeded; later steps fail fast if they are empty.
 
 Expect: the PG15 and umami image references printed, the anchor `umami_umami-db-data` listed, the new `umami_umami-db-data-pg18` absent, the saved compose containing the PG15 mount path, and `1` for the `systematic` website count. `compose.pg15.yaml` plus its checksum is the rollback artifact for step 7. STOP: a pre-existing `umami_umami-db-data-pg18` volume (a prior attempt; investigate, do not reuse), a count other than `1` (the plan's identification of the website row is wrong; fix the query before continuing), or a droplet compose that does not match the PG15 layout.
 
@@ -446,16 +455,21 @@ Never on the droplet: memory is the binding constraint there. Staging uses the s
   case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo 'digest_format=FAIL' >&2; exit 1 ;; esac
   printf 'postgres:18-alpine@%s\n' "$digest" > "$RUN_DIR/pg18.image"
   cat "$RUN_DIR/pg18.image"
-) \
-  && PG18_IMAGE="$(cat "$RUN_DIR/pg18.image")" \
-  && : "${PG18_IMAGE:?pg18.image empty}" "${PG15_IMAGE:?run P4 first}" "${UMAMI_IMAGE:?run P4 first}" \
-  && docker pull --platform linux/amd64 "$PG18_IMAGE" > /dev/null \
-  && docker pull --platform linux/amd64 "$PG15_IMAGE" > /dev/null \
-  && docker pull --platform linux/amd64 "$UMAMI_IMAGE" > /dev/null \
-  && docker run --rm --platform linux/amd64 --entrypoint uname "$PG18_IMAGE" -m
+)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "S1=STOP (rc=$rc); PG18_IMAGE not assigned" >&2; false
+else
+  PG18_IMAGE="$(cat "$RUN_DIR/pg18.image")"
+  : "${PG18_IMAGE:?pg18.image empty}" "${PG15_IMAGE:?run P4 first}" "${UMAMI_IMAGE:?run P4 first}" \
+    && docker pull --platform linux/amd64 "$PG18_IMAGE" > /dev/null \
+    && docker pull --platform linux/amd64 "$PG15_IMAGE" > /dev/null \
+    && docker pull --platform linux/amd64 "$UMAMI_IMAGE" > /dev/null \
+    && docker run --rm --platform linux/amd64 --entrypoint uname "$PG18_IMAGE" -m
+fi
 ```
 
-The chain assigns `PG18_IMAGE` in the parent shell (it is also the already-frozen path when `pg18.image` exists) and stops at the first failure.
+The digest block runs standalone and the next lines branch on its `$?`; `PG18_IMAGE` is assigned in the parent shell only after it succeeded (it is also the already-frozen path when `pg18.image` exists). The pull chain stops at the first failure.
 
 Expect: one `postgres:18-alpine@sha256:…` line saved to `pg18.image` and `x86_64`. STOP: digest not resolvable or emulation missing.
 
@@ -1007,7 +1021,8 @@ Before retrying the cutover, remove the abandoned PG18 volume only after confirm
 
 ```bash
 ( set -Eeuo pipefail
-  [ -z "$("${SSH[@]}" 'docker ps -aq --filter volume=umami_umami-db-data-pg18')" ]
+  users="$("${SSH[@]}" 'docker ps -aq --filter volume=umami_umami-db-data-pg18')"
+  [ -z "$users" ] || { echo 'pg18_volume_in_use=FAIL' >&2; exit 1; }
   "${SSH[@]}" 'docker volume rm umami_umami-db-data-pg18'
 )
 ```
@@ -1070,9 +1085,11 @@ If the pin PR already merged, revert it as one change (image, key, mount destina
 ( set -Eeuo pipefail
   curl -fsS "https://${HOST}/api/heartbeat"; echo
   "${SSH[@]}" "$DC exec -T db psql -X -v ON_ERROR_STOP=1 -At -q -U umami -d umami" < "$IDENTITY_SQL" | grep -E '^server_version=18\.'
-  [ -z "$("${SSH[@]}" 'docker ps -aq --filter volume=umami_umami-db-data')" ] || { echo 'anchor_unreferenced=FAIL' >&2; exit 1; }
+  users="$("${SSH[@]}" 'docker ps -aq --filter volume=umami_umami-db-data')"
+  [ -z "$users" ] || { echo 'anchor_unreferenced=FAIL' >&2; exit 1; }
   echo 'anchor_unreferenced=PASS'
-  if "${SSH[@]}" "grep -F 'umami-db-data:' /opt/umami/docker-compose.yaml"; then echo 'compose_references_anchor=FAIL' >&2; exit 1; fi
+  refs="$("${SSH[@]}" "grep -cF 'umami-db-data:' /opt/umami/docker-compose.yaml || true")"
+  [ "$refs" = 0 ] || { echo 'compose_references_anchor=FAIL' >&2; exit 1; }
   read -r -p 'Type REMOVE UMAMI PG15 VOLUME to destroy the rollback anchor: ' ok
   [ "$ok" = 'REMOVE UMAMI PG15 VOLUME' ]
   "${SSH[@]}" 'docker volume rm umami_umami-db-data'

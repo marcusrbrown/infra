@@ -222,8 +222,9 @@ const CHECKSUM_PATH = `${REMOTE_DIR}/.secrets-checksum`
 const ENV_PATH = `${DEPLOY_DIR}/.env`
 const DEFAULT_REMOTE_USER = 'root'
 const CLIPROXY_EGRESS_HOST = 'cliproxy.fro.bot'
-// OpenCode fetches its model catalog from models.dev at startup; the sandboxed workspace reaches it through the mitmproxy egress allowlist.
-const OPENCODE_CATALOG_HOST = 'models.dev'
+// OpenCode fetches its model catalog at startup; the sandboxed workspace reaches it through the mitmproxy egress allowlist.
+// V1 uses models.dev, V2 uses models.opencode.ai. Keep both so a V1 rollback keeps working.
+const OPENCODE_CATALOG_HOSTS = ['models.dev', 'models.opencode.ai'] as const
 // Mirrors upstream's default (packages/gateway/src/bindings/backfill-runner.ts:
 // `process.env.S3_PREFIX ?? 'fro-bot-state'`). The deploy does not otherwise reference
 // S3_PREFIX; this default keeps the tagged-write probe key under the real run-state scope.
@@ -1166,7 +1167,7 @@ export function buildGatewayEnvFileContents(opts: {
 
   const readyTimeoutLine = readyTimeoutMs === undefined ? '' : `\nWORKSPACE_OPENCODE_READY_TIMEOUT_MS=${readyTimeoutMs}`
 
-  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\nWORKSPACE_EGRESS_HOSTS=${CLIPROXY_EGRESS_HOST},${OPENCODE_CATALOG_HOST}${readyTimeoutLine}\n`
+  return `OBJECT_STORE_HOSTS=${objectStoreHosts}\nWORKSPACE_OPENCODE_MODEL=${model}\nWORKSPACE_OPENCODE_CONFIG=${escapedConfig}\nWORKSPACE_EGRESS_HOSTS=${[CLIPROXY_EGRESS_HOST, ...OPENCODE_CATALOG_HOSTS].join(',')}${readyTimeoutLine}\n`
 }
 
 /**

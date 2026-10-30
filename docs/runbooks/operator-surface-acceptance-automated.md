@@ -43,7 +43,7 @@ The dashboard session lasts seven days. When it lapses, or after logout, opening
 
 The gateway allows 3 launches per minute and 10 per hour per operator, in fixed windows. A refused launch shows "Too many launch requests" in the Launch panel (`429 rate limited`) and creates no run. A refusal can last until the hourly window ends, so retries do not help.
 
-Run the [checks that launch nothing](#checks-that-launch-nothing) first, then spend the eight launches below, at least 20 seconds apart. The limit is keyed to the operator, so manual launches and earlier passes in the same hour count too. Launch against `fro-bot/agent`. Two launches stay in reserve; do not retry a launch that created a run.
+Run the [checks that launch nothing](#checks-that-launch-nothing) first, then spend the nine launches below, at least 20 seconds apart. The limit is keyed to the operator, so manual launches and earlier passes in the same hour count too. Launch against `fro-bot/agent`. One launch stays in reserve; do not retry a launch that created a run.
 
 | Launch | Prompt | Covers |
 | --- | --- | --- |
@@ -55,12 +55,58 @@ Run the [checks that launch nothing](#checks-that-launch-nothing) first, then sp
 | L6 | Question trigger, choose an option and "Submit answers" | [10](operator-surface-acceptance.md#10-agent-question) steps 1, 2 |
 | L7 | Question trigger, press "Skip" | [10](operator-surface-acceptance.md#10-agent-question) step 3 |
 | L8 | Question trigger, then cancel while the question is open | [7](operator-surface-acceptance.md#7-cancel-a-running-run), [10](operator-surface-acceptance.md#10-agent-question) step 5 |
+| L9 | Background-subagent drain trigger | [17](operator-surface-acceptance.md#17-run-wait-reason) steps 1–5 |
 
-- The approval and question trigger prompts are in [check 9](operator-surface-acceptance.md#9-tool-approval) and [check 10](operator-surface-acceptance.md#10-agent-question).
+- The approval, question and drain trigger prompts are in [check 9](operator-surface-acceptance.md#9-tool-approval), [check 10](operator-surface-acceptance.md#10-agent-question) and [check 17](operator-surface-acceptance.md#17-run-wait-reason).
 - Generate the 8,000-unit and 8,001-unit prompt files with the one-liner in [check 16](operator-surface-acceptance.md#16-launch-prompt), then fill the field from the file: `fill @eN "$(cat /tmp/prompt-8000.txt)"`.
 - While an approval (L3–L5) or question (L6, L7) is pending, collapse the card and wait about 20 seconds for the list refresh to cover the collapsed-badge steps ([9 step 4](operator-surface-acceptance.md#9-tool-approval), [10 step 7](operator-surface-acceptance.md#10-agent-question)). Expand it again before pressing a button.
 - In L1, expand the card while the run is live for [check 8](operator-surface-acceptance.md#8-checkout-details). After it finishes, confirm the card has no Cancel control ([check 6](operator-surface-acceptance.md#6-single-cancel-after-completion)). For [check 16 step 1](operator-surface-acceptance.md#16-launch-prompt), hook `window.alert` with `eval` before expanding, then confirm that the `<img>` and `<b>` text is literal, `<strong>` wraps "markdown bold", the link shows its host, and no alert fired.
 - Cancel asks for confirmation: press "Cancel run", then "Confirm cancel".
+
+### L9 wait reason
+
+Run L9 after L8 has finished, and launch nothing else until L9 ends. The subagent sleeps 90 seconds, so do steps 1–4 inside that window; "Confirming it has finished" then covers the follow-up reply.
+
+1. Expand the card and re-snapshot until the reason line under the repo name shows. Screenshot it. If no line shows within 60 seconds, look for `background dispatch observed` with the run ID in `bunx @marcusrbrown/infra gateway logs gateway`. Without that line, record check 17 as `not triggered` with the run ID and skip to step 5.
+2. Collapse the card, wait about 20 seconds for the list refresh, and screenshot it. While it is collapsed, read the run's current status once from page context. Define `runId` inline. The gateway replays the latest status to a new stream, so the first `status` frame is the current one:
+
+   ```js
+   ;(async () => {
+     const ctl = new AbortController()
+     const timer = setTimeout(() => ctl.abort(), 10000)
+     try {
+       const res = await fetch(`/operator/runs/${runId}/stream`, {
+         credentials: "same-origin",
+         signal: ctl.signal,
+         headers: {accept: "text/event-stream"},
+       })
+       const reader = res.body.getReader()
+       const decoder = new TextDecoder()
+       let buf = ""
+       for (;;) {
+         const {value, done} = await reader.read()
+         if (done) break
+         buf += decoder.decode(value, {stream: true})
+         for (const frame of buf.split("\n\n").slice(0, -1)) {
+           if ((frame.match(/^event: (.*)$/m) || [])[1] !== "status") continue
+           const data = JSON.parse((frame.match(/^data: (.*)$/m) || [])[1] || "null")
+           ctl.abort()
+           return {status: data?.status, waitReason: data?.waitReason ?? null}
+         }
+       }
+     } catch {
+     } finally {
+       clearTimeout(timer)
+     }
+     return {status: null, waitReason: null}
+   })()
+   ```
+
+   Record `status` and `waitReason`. Expect `running` with `awaiting-background-task` or `confirming-completion`.
+
+3. Expand the card again and re-snapshot until the reason line returns. Screenshot it.
+4. Run `set offline on`, wait about 5 seconds, and snapshot: the line is blank while the card reconnects. Run `set offline off`, wait about 10 seconds, and snapshot again: the line shows the current reason.
+5. Wait for the terminal status. Confirm the line is gone, reload, and confirm it stays gone.
 
 ### Cancel safety
 
@@ -123,6 +169,7 @@ Record these as `skip` or `not automated`:
 - [Check 12](operator-surface-acceptance.md#12-push) delivery steps. `not automated`.
 - [Check 13](operator-surface-acceptance.md#13-question-notification-deep-link) notification taps. The deep-link simulation above covers only that `/#<runId>` opens the run.
 - [Check 16](operator-surface-acceptance.md#16-launch-prompt) step 4 has no safe trigger. `skip`.
+- [Check 17](operator-surface-acceptance.md#17-run-wait-reason) step 6: "Finishing its reply" and "Agent still working" have no safe trigger. Record them only when they occur.
 
 ---
 
@@ -145,8 +192,8 @@ Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved se
 
    Empty output means clean. Any output means the next launch on that repo fails with "Checkout refused: uncommitted changes"; report it to the operator. The gateway log may not show the refusal, so the checkout status is the reliable signal.
 
-   Clean up only with the operator's approval, one path at a time. Before removing a file, confirm three things: it is the only dirty path, nothing holds it open (`fuser`/`lsof`), and its size and mtime are stable. Remove it as root, because the workspace UID 10001 has no host account and `sudo -u '#10001'` fails. Then read back `git status --porcelain` and run one `Reply with only the word OK.` launch on that repo. That launch uses one of the two reserve launches.
+   Clean up only with the operator's approval, one path at a time. Before removing a file, confirm three things: it is the only dirty path, nothing holds it open (`fuser`/`lsof`), and its size and mtime are stable. Remove it as root, because the workspace UID 10001 has no host account and `sudo -u '#10001'` fails. Then read back `git status --porcelain` and run one `Reply with only the word OK.` launch on that repo. That launch uses the reserve launch.
 
 3. Save evidence under `/tmp/operator-acceptance-<expected>/`: a screenshot per check named `NN-name.png`, and secret-free JSON for health, the `ready` frame, `/operator/runs`, and `/operator/session` (`login`, `expiresAt`, and `push` only).
 4. Before recording a result, read the saved JSON back from disk. A subagent's summary is not evidence.
-5. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, or `simulated`, and cite the run ID for checks 5–11 and 13.
+5. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, or `simulated`, and cite the run ID for checks 5–11, 13 and 17.

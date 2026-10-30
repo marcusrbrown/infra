@@ -33,7 +33,7 @@ Runs on `ubuntu-latest` with `packages: write` permission (job-scoped only; the 
 2. Checks out `fro-bot/agent` at that ref.
 3. Logs in to `ghcr.io` with `GITHUB_TOKEN`.
 4. Builds `deploy/gateway.Dockerfile` (context: upstream root) and pushes to `ghcr.io/marcusrbrown/infra-gateway:<ref>-<github.sha>`. Captures the pushed digest from `build-push-action` outputs. The tag is keyed on the infra commit as well as the upstream ref so repeated builds at the same upstream ref no longer overwrite each other's tag.
-5. Builds `deploy/workspace.Dockerfile` (context: upstream root) with `--build-arg OPENCODE_VERSION=<version>` and pushes to `ghcr.io/marcusrbrown/infra-workspace:<ref>-<github.sha>`. Captures the pushed digest. The version is read from `packages/runtime/src/shared/opencode-v2-pin.json` in the checked-out upstream source (the `Read workspace OpenCode V2 pin` step), so it always matches the asset digests the Dockerfile verifies. A major of 2 or higher selects OpenCode V2; the gateway build takes no OpenCode arg.
+5. Builds `deploy/workspace.Dockerfile` (context: upstream root) and pushes to `ghcr.io/marcusrbrown/infra-workspace:<ref>-<github.sha>`. Captures the pushed digest.
 6. Exposes both digests as job outputs (`gateway_digest`, `workspace_digest`).
 
 Both build steps pin a `docker/setup-buildx-action` builder to a fixed `moby/buildkit` image, set `SOURCE_DATE_EPOCH` as a build-arg, and export with `rewrite-timestamp=true` — this makes config/history/index timestamps and in-layer tar timestamps deterministic for a given upstream ref. Bit-reproducibility of a ref is not guaranteed. The upstream Dockerfiles install Alpine packages without version pins, because Alpine's branch index drops older versions and an exact pin would fail the build. Rebuilding the same ref can therefore pick up newer packages and produce a different digest. The deployed image is always the digest this job pushed. To check whether a ref reproduced, compare the digests of two published tags sharing an upstream ref prefix (`<ref>-<sha>`). Layers map to instructions via the image config `history` (skipping `empty_layer` entries), so a drifting index names the instruction that caused it; equal size with a different digest is timestamp drift, not content.
@@ -93,19 +93,6 @@ Rollback means restoring a pre-upgrade snapshot of the `workspace-repos` volume 
 The ownership migration ran at the v0.118.2 cutover. Rolling back between releases at or after v0.118.2 is a paired pin reversal with the dashboard and needs no volume restore; the snapshot requirement applies only when a rollback crosses the migration.
 
 Rolling back to a release without durable operator sessions leaves the session records in `operator-web/sessions/` in place, and the older daemon cannot revoke them on logout. To invalidate them, rotate `GATEWAY_OPERATOR_CSRF_SECRET` or delete `operator-web/sessions/*`.
-
-### Revert from OpenCode V2
-
-The gateway and workspace run OpenCode V2 from `fro-bot/agent` v0.130.0 (the first release with the V2 workspace and the V2 gateway loop). The workspace image selects V2 through the `OPENCODE_VERSION` build-arg; the gateway picks V1 or V2 per run from the workspace `/readyz` `opencodeVersion`. They switch together. An old gateway (pre-v0.130.0) must never run behind a V2 workspace: it would drive the V1 loop against a V2 server. A new gateway behind a V1 workspace is safe.
-
-To revert, use either path. Both ship the gateway and workspace together.
-
-- **Previous images (fast, byte-identical).** Redeploy the previous gateway and workspace images by digest through the break-glass path: set `GATEWAY_IMAGE_DIGEST` and `WORKSPACE_IMAGE_DIGEST` to the pair from the last successful `deploy-gateway` run before the switch (its `build-images` log, verified on the droplet by that run's digest readback) and run `bunx @marcusrbrown/infra gateway deploy --local` (the digest validation is in `apps/gateway/src/deploy.ts`). No rebuild is needed.
-- **Revert the commit.** Reverting the V2 switch commit restores `upstream.json` to the previous ref and removes the build-arg, so `build-images` rebuilds V1 at the old ref. The digests may differ from the previous pair (see [CI: build-images job](#ci-build-images-job)).
-
-V2 keeps no OpenCode session state across workspace restarts (it recreates its database on every spawn), so a mention thread loses OpenCode context when the workspace restarts. Rolling back to V1 needs no `workspace-repos` volume restore, because both sides are past the v0.118.2 ownership migration (see [Rollback is not pin reversal](#rollback-is-not-pin-reversal)).
-
-Before relying on a recorded pair, confirm it matches the live `RepoDigests` (verification command in [Droplet: deploy-gateway job](#droplet-deploy-gateway-job) step 11). The previous run's digests must serve the operator contract the pinned dashboard requires.
 
 ## CLI COMMANDS
 

@@ -65,9 +65,57 @@ Run the [checks that launch nothing](#checks-that-launch-nothing) first, then sp
 
 ### L9 wait reason
 
-Run L9 after L8 has finished, and launch nothing else until L9 ends. The subagent sleeps 90 seconds, so do steps 1–4 inside that window; "Confirming it has finished" then covers the follow-up reply.
+Run L9 after L8 has finished, and launch nothing else until L9 ends. The reason is not on the wire for the first 85–90 seconds after launch. Then `awaiting-background-task` lasts about 40 seconds and `confirming-completion` about 15, so the window is roughly 55 seconds. Steps 1–4 must fit inside it: have every command ready before you launch, and do not spend the window on setup.
 
-1. Expand the card and re-snapshot until the reason line under the repo name shows. Screenshot it. If no line shows within 60 seconds, look for `background dispatch observed` with the run ID in `bunx @marcusrbrown/infra gateway logs gateway`. Without that line, record check 17 as `not triggered` with the run ID and skip to step 5.
+Timing procedure:
+
+- Commands in one session run one at a time. An `eval` that waits blocks every later command, so record frames with a non-blocking observer: right after pressing Launch, run one `eval` that finds the new run, starts a stream reader that stores each `status` frame with a timestamp on `window.__obs`, and returns at once. The run can take a few seconds to appear, so the snippet retries for up to 10 seconds. Define `launchedAt` inline as the time just before the press, and take it from the shell clock truncated to whole seconds. Read `window.__obs` later with a single `eval`. Do not reload before step 5, because a reload discards the observer.
+
+  ```js
+  ;(async () => {
+    const since = Date.parse(launchedAt)
+    let run
+    for (let i = 0; i < 10 && !run; i++) {
+      const {runs} = await fetch("/operator/runs", {credentials: "same-origin"}).then(res => res.json())
+      run = runs.find(r => Date.parse(r.createdAt) >= since)
+      if (!run) await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+    if (!run) return null
+    const obs = (window.__obs = {runId: run.runId, frames: [], end: null})
+    void (async () => {
+      const res = await fetch(`/operator/runs/${run.runId}/stream`, {
+        credentials: "same-origin",
+        headers: {accept: "text/event-stream"},
+      })
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ""
+      for (;;) {
+        const {value, done} = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, {stream: true})
+        const frames = buf.split("\n\n")
+        buf = frames.pop()
+        for (const frame of frames) {
+          if ((frame.match(/^event: (.*)$/m) || [])[1] !== "status") continue
+          const data = JSON.parse((frame.match(/^data: (.*)$/m) || [])[1] || "null")
+          obs.frames.push({at: new Date().toISOString(), status: data?.status, waitReason: data?.waitReason ?? null})
+        }
+      }
+      obs.end = "closed"
+    })().catch(() => {
+      obs.end = "error"
+    })
+    return run.runId
+  })()
+  ```
+
+- A new run's card opens expanded. Confirm that in a snapshot, leave it expanded, and run nothing else until about 80 seconds after launch.
+- From about 80 seconds, use short `wait --text` calls instead of polling: `wait --text "Waiting on a background task"` times out after about 25 seconds, so repeat it until about 120 seconds after launch. If the line has already moved on, it reads "Confirming it has finished"; record whichever label shows.
+- Do not wrap agent-browser commands in `timeout`. Killing the wrapper can kill the browser daemon, which discards the page and the observer.
+- Take timings from the observer's frame timestamps and the run's `createdAt`. Do not use the `updatedAt` in `/operator/runs`: it does not change when the reason changes.
+
+1. Screenshot and snapshot the reason line under the repo name as soon as a `wait --text` call sees it. If no line shows within about 120 seconds, look for `background dispatch observed` in `bunx @marcusrbrown/infra gateway logs gateway`; the line carries the session ID, not the run ID, so match it to the launch by order. Without that line, record check 17 as `not triggered` with the run ID and skip to step 5. With that line but no label yet, keep waiting another 30–60 seconds before recording a failure.
 2. Collapse the card, wait about 20 seconds for the list refresh, and screenshot it. While it is collapsed, read the run's current status once from page context. Define `runId` inline. The gateway replays the latest status to a new stream, so the first `status` frame is the current one:
 
    ```js
@@ -104,9 +152,9 @@ Run L9 after L8 has finished, and launch nothing else until L9 ends. The subagen
 
    Record `status` and `waitReason`. Expect `running` with `awaiting-background-task` or `confirming-completion`.
 
-3. Expand the card again and re-snapshot until the reason line returns. Screenshot it.
-4. Run `set offline on`, wait about 5 seconds, and snapshot: the line is blank while the card reconnects. Run `set offline off`, wait about 10 seconds, and snapshot again: the line shows the current reason.
-5. Wait for the terminal status. Confirm the line is gone, reload, and confirm it stays gone.
+3. Expand the card again and `wait --text` for the current reason line, which may already read "Confirming it has finished". Screenshot it.
+4. Run `set offline on`, wait about 5 seconds, and snapshot: the line is blank while the card reconnects. Run `set offline off`, wait about 10 seconds, and snapshot again: the line shows the current reason. If the run has already finished, record step 4 as `not run` with the timestamps. In one pass, 5 seconds of `set offline on` left the open stream connected and the line never went blank. If that happens, record step 4 as `inconclusive`, not as a failure.
+5. Wait for the terminal status. Confirm the card is expanded (its text includes "Raw text") and the line is gone, reload, and confirm the card is expanded again and the line stays gone.
 
 ### Cancel safety
 

@@ -100,19 +100,12 @@ The gateway and workspace run OpenCode V2 from `fro-bot/agent` v0.130.0 (the fir
 
 To revert, use either path. Both ship the gateway and workspace together.
 
-- **Previous images (fast, byte-identical).** Redeploy the previous gateway and workspace images by digest through the break-glass path: set `GATEWAY_IMAGE_DIGEST` and `WORKSPACE_IMAGE_DIGEST` to the pair below and run `bunx @marcusrbrown/infra gateway deploy --local` (the digest validation is in `apps/gateway/src/deploy.ts`). No rebuild is needed.
-- **Revert the commit.** Reverting the V2 switch commit restores `upstream.json` to the previous ref and removes the build-arg, so `build-images` rebuilds V1 at the old ref. The digests may differ from the recorded pair (see [CI: build-images job](#ci-build-images-job)).
+- **Previous images (fast, byte-identical).** Redeploy the previous gateway and workspace images by digest through the break-glass path: set `GATEWAY_IMAGE_DIGEST` and `WORKSPACE_IMAGE_DIGEST` to the pair from the last successful `deploy-gateway` run before the switch (its `build-images` log, verified on the droplet by that run's digest readback) and run `bunx @marcusrbrown/infra gateway deploy --local` (the digest validation is in `apps/gateway/src/deploy.ts`). No rebuild is needed.
+- **Revert the commit.** Reverting the V2 switch commit restores `upstream.json` to the previous ref and removes the build-arg, so `build-images` rebuilds V1 at the old ref. The digests may differ from the previous pair (see [CI: build-images job](#ci-build-images-job)).
 
 V2 keeps no OpenCode session state across workspace restarts (it recreates its database on every spawn), so a mention thread loses OpenCode context when the workspace restarts. Rolling back to V1 needs no `workspace-repos` volume restore, because both sides are past the v0.118.2 ownership migration (see [Rollback is not pin reversal](#rollback-is-not-pin-reversal)).
 
-**Images running before the V2 switch** (last successful `deploy-gateway` run: `workflow_dispatch` run `38698076821`, 2026-10-15, infra commit `3453e7a`, upstream ref `v0.122.1`; digests from that run's `build-images` log, and both resolve in GHCR as of the switch):
-
-| Image | Reference | Digest |
-| --- | --- | --- |
-| gateway | `ghcr.io/marcusrbrown/infra-gateway:v0.122.1-3453e7a0e3127dd56827515ccb7528c18a5e2bb8` | `sha256:8e4cb3992830947f22ef3d382eea52e74d27c399f13c79be4ff394a50d628acf` |
-| workspace | `ghcr.io/marcusrbrown/infra-workspace:v0.122.1-3453e7a0e3127dd56827515ccb7528c18a5e2bb8` | `sha256:8807585e92b29daa60bdcae79cb39a155fe9d34654b257e328ec27f245c29cfe` |
-
-That run's `deploy-gateway` job verified both digests on the droplet. The record was read from CI logs, not from the droplet: confirm the live `RepoDigests` (verification command in [Droplet: deploy-gateway job](#droplet-deploy-gateway-job) step 11) still match before relying on it, and refresh this table after any later deploy.
+Before relying on a recorded pair, confirm it matches the live `RepoDigests` (verification command in [Droplet: deploy-gateway job](#droplet-deploy-gateway-job) step 11). The previous run's digests must serve the operator contract the pinned dashboard requires.
 
 ## CLI COMMANDS
 

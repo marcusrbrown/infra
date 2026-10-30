@@ -217,6 +217,19 @@ The gateway accepts a launch prompt of up to 8,000 UTF-16 units, so an emoji cou
 3. **Over the limit.** Paste an 8,001-unit prompt. Expect: the launch is refused, an inline status says the prompt is too long, and no run is created. The Launch button is disabled while the prompt is over the limit; an enabled button is a regression ([fro-bot/dashboard#676](https://github.com/fro-bot/dashboard/issues/676), closed).
 4. **Provider failure reason.** A run that fails with `session-error` because of the model provider shows a label such as "Model provider unavailable", "Model not available", or "Model provider rejected the request", both live and after a run-list reload. No safe trigger exists, so record this only when such a failure occurs. Not yet observed.
 
+### 17. Run wait reason
+
+A `running` status frame can carry a `waitReason` that says why the run has not finished. The gateway sets one only while the run drains: the root session has gone idle, but a background subagent the run started (a `task` call in background mode) is not settled yet. A run without a background subagent never carries a reason, however long it runs. An open approval or question and every terminal status hide the reason. The dashboard shows it as a quiet line under the repo name on the expanded card only.
+
+Trigger prompt (practical, not guaranteed): "Use the task tool in background mode to start one subagent. Its only job: run `sleep 90` in the shell, then reply DONE. Do not create, edit or delete any files. Wait for its completion notice. After you receive it, write at least 300 words explaining what happened, then end with the word FINISHED." The prompt writes nothing to the checkout. When the gateway adopts the subagent, its log records `run-core: background dispatch observed`. Without that line the run never drains and no reason is expected; record the check as not triggered, with the run ID.
+
+1. **Label while draining.** Expand the card after the run starts. Expect: the line reads "Waiting on a background task" while the subagent sleeps, then "Confirming it has finished" while the run writes its follow-up reply. In DevTools, the run's `status` frames carry `waitReason` `awaiting-background-task`, then `confirming-completion`. Failure: the subagent was adopted but no line appears, or the card shows a raw value such as `awaiting-background-task`.
+2. **Collapsed card.** Collapse the card while the line shows and let the run list refresh. Expect: the badge reads "Running" and no reason line shows. Failure: a reason line on the collapsed card.
+3. **Re-expand.** Expand the card again while the run still drains. Expect: the current reason shows again within a few seconds. The gateway replays the latest status, reason included, to a new stream. Failure: no line while the run still drains.
+4. **Reconnect.** With the line showing, set DevTools → Network to Offline for about 5 seconds, then back to No throttling. Expect: the line goes blank while the card reconnects, then shows the current reason again. Failure: the line stays blank after the card reconnects while the run still drains.
+5. **Finished.** Expect: the line clears when the run reaches a terminal status, and stays clear after a run-list reload. Failure: a reason line on a finished run.
+6. **Rare reasons.** "Finishing its reply" (`awaiting-reply`) and "Agent still working" (`agent-working`) appear only in short windows and have no safe trigger. Record them only when they occur.
+
 ---
 
 ## Outstanding acceptance
@@ -242,7 +255,7 @@ Comment on [fro-bot/.github#3512](https://github.com/fro-bot/.github/issues/3512
 - The health JSON from check 1.
 - The `contractVersion` from the `ready` frame in check 4.
 - Pass, fail, or skipped for each numbered check.
-- Run IDs for every failure, and for checks 7–11 and 13.
+- Run IDs for every failure, and for checks 7–11, 13 and 17.
 
 Do not include cookies, tokens, CSRF values, or notification endpoints.
 

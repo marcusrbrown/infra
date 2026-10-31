@@ -318,7 +318,8 @@ export interface ProviderAuthOptions {
 
 export type ProviderAuthState = 'healthy' | 'dead' | 'unknown'
 
-export type ProviderAuthReason = 'ok' | 'auth-401' | 'auth-unavailable-503' | 'unrelated-http' | 'timeout' | 'network'
+export type ProviderAuthReason =
+  'ok' | 'auth-401' | 'auth-unavailable-503' | 'provider-missing' | 'unrelated-http' | 'timeout' | 'network'
 
 export interface ProviderAuthClassification {
   state: ProviderAuthState
@@ -330,12 +331,44 @@ interface ProviderAuthProbeResult {
   human: CheckResult
 }
 
+async function readBodyText(response: Response): Promise<string> {
+  try {
+    return await response.text()
+  } catch {
+    return ''
+  }
+}
+
+const PROVIDER_MISSING_MESSAGE = /unknown provider for model/i
+
+/**
+ * A 400 means the provider is not registered when the body carries `error.code === 'model_not_found'`
+ * or the "unknown provider for model" message. Non-JSON bodies fall back to the message regex on raw text.
+ */
+function isProviderMissingBody(bodyText: string): boolean {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyText)
+  } catch {
+    return PROVIDER_MISSING_MESSAGE.test(bodyText)
+  }
+  if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) {
+    const {error} = parsed
+    if (typeof error === 'object' && error !== null) {
+      if ('code' in error && error.code === 'model_not_found') return true
+      if ('message' in error && typeof error.message === 'string') return PROVIDER_MISSING_MESSAGE.test(error.message)
+    }
+  }
+  return PROVIDER_MISSING_MESSAGE.test(bodyText)
+}
+
 /**
  * Probe the upstream provider auth by sending a minimal chat completion request.
  * Returns a CheckResult — never throws.
  *
  * - 200 → ok
  * - 401 OR (503 with auth-unavailable body markers) → error with remediation hint
+ * - 400 with model_not_found / "unknown provider for model" (provider not registered) → error with remediation hint
  * - other non-2xx → warning (don't fail status on unrelated upstream issues)
  * - fetch throw (timeout/network) → warning (flaky probe should not fail status)
  *
@@ -397,14 +430,27 @@ async function runProviderAuthProbe(
       }
     }
 
+    // The body is read at most once: only 400 and 503 consult it, and each is a distinct status.
+    // 400 model_not_found: the proxy has no provider registered for the model (e.g. credential lost)
+    if (response.status === 400) {
+      const bodyText = await readBodyText(response)
+
+      if (isProviderMissingBody(bodyText)) {
+        return {
+          classification: {state: 'dead', reason: 'provider-missing'},
+          human: {
+            title: 'Upstream provider auth (anthropic)',
+            level: 'error',
+            summary: `Anthropic provider not registered for ${model} (HTTP ${response.status}) — check /v1/models; run: cliproxy login claude`,
+            details: details.length > 0 ? details : undefined,
+          },
+        }
+      }
+    }
+
     // 503 may be auth_unavailable — check body for known markers
     if (response.status === 503) {
-      let bodyText = ''
-      try {
-        bodyText = await response.text()
-      } catch {
-        // ignore body read failure
-      }
+      const bodyText = await readBodyText(response)
 
       const isAuthUnavailable = /auth_unavailable|no auth available|providers=claude/i.test(bodyText)
 

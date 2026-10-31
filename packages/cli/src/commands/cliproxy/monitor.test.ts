@@ -1195,6 +1195,54 @@ describe('cliproxy monitor', () => {
     )
   })
 
+  it('opens the issue and sends Discord for a live provider-missing 400 exactly like auth-401', async () => {
+    const incidentBody =
+      '{"error":{"message":"unknown provider for model claude-sonnet-4-6","type":"invalid_request_error","code":"model_not_found","param":"model"}}'
+    const runLiveOutage = async (probeResponse: () => Response) => {
+      configureSyntheticEnvironment()
+      process.env.CLIPROXY_API_KEY = 'provider-key'
+      const requests: {url: string; method: string; body?: string}[] = []
+      installFetch(async (input, init) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        const body = typeof init?.body === 'string' ? init.body : undefined
+        requests.push({url, method, body})
+        if (url.includes('/v1/chat/completions')) return probeResponse()
+        if (url === 'https://discord.example/webhook') return new Response(null, {status: 204})
+        if (method === 'GET' && url.endsWith('/issues?state=all&per_page=100')) return new Response('[]', {status: 200})
+        if (method === 'GET' && url.includes('/labels/')) return new Response('missing', {status: 404})
+        if (method === 'POST' && url.endsWith('/labels')) return new Response('{}', {status: 201})
+        if (method === 'POST' && url.endsWith('/issues')) {
+          return new Response(JSON.stringify({number: 42, state: 'open', title: 'x', body: body ?? '', labels: []}), {
+            status: 201,
+          })
+        }
+        if (method === 'PATCH' && url.endsWith('/issues/42')) return new Response('{}', {status: 200})
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+      const {ctx, captured} = createCapturedCtx()
+      await runMonitor({validation: 'live'}, ctx)
+      return {requests, stdout: captured.stdout.join('\n')}
+    }
+
+    const auth401 = await runLiveOutage(() => new Response('Unauthorized', {status: 401}))
+    const providerMissing = await runLiveOutage(() => new Response(incidentBody, {status: 400}))
+
+    const shape = (requests: {url: string; method: string}[]) =>
+      requests.map(request => `${request.method} ${request.url.replace(/\d+$/, 'N')}`)
+    expect(shape(providerMissing.requests)).toEqual(shape(auth401.requests))
+    expect(providerMissing.requests.filter(request => request.url === 'https://discord.example/webhook')).toHaveLength(
+      1,
+    )
+    expect(
+      providerMissing.requests.find(request => request.method === 'POST' && request.url.endsWith('/issues'))?.body,
+    ).toContain('cliproxy login claude')
+    expect(providerMissing.stdout).toMatch(
+      /CLIProxy auth monitor summary: probe=dead reason=provider-missing transition=outage issue=created discord=outage-sent at \S+/,
+    )
+    expect(providerMissing.stdout).not.toContain('invalid_request_error')
+  })
+
   it('keeps an unknown provider result silent when no canonical issue exists', async () => {
     configureSyntheticEnvironment()
     process.env.CLIPROXY_API_KEY = 'provider-key'

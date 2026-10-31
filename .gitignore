@@ -36,3 +36,6 @@ bun.lockb
 !.opencode/commands/
 !.opencode/themes/
 !.opencode/tui.json
+
+# Archify ships pre-rendered example pages; doctor needs only the JSON examples
+.agents/skills/archify/examples/*.html

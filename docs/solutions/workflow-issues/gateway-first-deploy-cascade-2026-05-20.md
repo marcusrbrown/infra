@@ -7,12 +7,15 @@ resolution_type: code_fix
 severity: critical
 date: 2026-05-20
 last_refreshed: 2026-05-31
+last_updated: 2026-10-31
 tags: [gateway, docker-compose, digitalocean, deploy, ssh, ufw, controlmaster, secrets, ndjson]
 module: apps/gateway
 related_issues: []
 related_docs:
   - docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md
   - docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md
+  - docs/solutions/workflow-issues/broker-first-deploy-cascade-2026-06-30.md
+  - docs/solutions/integration-issues/cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md
   - docs/solutions/workflow-issues/bun-deploy-user-permissions-ci-2026-04-02.md
 ---
 
@@ -82,10 +85,9 @@ EOF
 
 **[PR #276](https://github.com/marcusrbrown/infra/pull/276)**: append `\n` when the materialized key file is missing it. GitHub Actions strips trailing whitespace from secret env-var injection; OpenSSH PEM keys REQUIRE `\n` after `-----END OPENSSH PRIVATE KEY-----`. Two-line change in `apps/gateway/src/deploy.ts`:
 
+<!-- prettier-ignore -->
 ```ts
-const keyContent = env.GATEWAY_SSH_KEY.endsWith('\n')
-  ? env.GATEWAY_SSH_KEY
-  : `${env.GATEWAY_SSH_KEY}\n`
+const keyContent = env.GATEWAY_SSH_KEY.endsWith('\n') ? env.GATEWAY_SSH_KEY : `${env.GATEWAY_SSH_KEY}\n`
 writeFileSync(keyPath, keyContent, {mode: 0o600})
 ```
 
@@ -95,16 +97,20 @@ The `endsWith('\n')` check makes the fix idempotent — locally-supplied keys wi
 
 **[PR #277](https://github.com/marcusrbrown/infra/pull/277)**: multiplex all deploy SSH connections through one TCP connection via OpenSSH ControlMaster. Eliminates the 6-connections-in-7s burst that triggered UFW's default `limit ssh` (6/30s/source) rule.
 
+<!-- prettier-ignore -->
 ```ts
 function sshCommand(host: string, command: string, keyPath?: string, controlPath?: string): string[] {
   return [
     'ssh',
     ...sshIdentityOptions(keyPath),
-    '-o', 'BatchMode=yes',
-    '-o', 'ConnectTimeout=10',
-    '-o', 'StrictHostKeyChecking=yes',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'ConnectTimeout=10',
+    '-o',
+    'StrictHostKeyChecking=yes',
     ...(controlPath
-      ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`, '-o', 'ControlPersist=300']
+      ? ['-o', `ControlMaster=auto`, '-o', `ControlPath=${controlPath}`, '-o', `ControlPersist=300`]
       : []),
     `${DEFAULT_REMOTE_USER}@${host}`,
     command,
@@ -112,7 +118,7 @@ function sshCommand(host: string, command: string, keyPath?: string, controlPath
 }
 ```
 
-Threaded `controlPath` through `sshCommand()`, `writeRemoteFile()`, `remoteGitExists()`, `readRemoteChecksum()`, plus scp invocations. The deploy entry point always creates a tmpdir (CI and local mode) and derives `controlPath = <tmpdir>/cm-%C`. Existing `finally { rmSync(keyTmpDir, recursive: true) }` cleans up the socket along with the key.
+Threaded `controlPath` through `sshCommand()`, `writeRemoteFile()`, `remoteGitExists()`, `readRemoteChecksum()`, plus scp invocations. The deploy creates a short control-socket directory under `/tmp` (`controlTmpDir`, `gw-cm-*`) so the socket path stays under the unix socket limit, separate from the key directory under `os.tmpdir()` (`keyTmpDir`). It derives `controlPath = <controlTmpDir>/cm-%C`, and the `finally` block removes both `controlTmpDir` and `keyTmpDir`.
 
 **Empirical proof the fix works**: UFW counter on droplet was at `163 packets / 9180 bytes` blocked before. After a successful deploy ran end-to-end with this fix, the counter remained at exactly `163 / 9180` — zero new blocked packets. The entire deploy ran through one TCP connection.
 
@@ -120,6 +126,7 @@ Threaded `controlPath` through `sshCommand()`, `writeRemoteFile()`, `remoteGitEx
 
 **[PR #278](https://github.com/marcusrbrown/infra/pull/278)**: parse `docker compose ps --format json` as NDJSON (one JSON object per line, the format since Compose v2.21+). The existing parser called bare `JSON.parse(stdoutText)` expecting a single array.
 
+<!-- prettier-ignore -->
 ```ts
 export function parseComposePsOutput(stdoutText: string): ComposePsEntry[] {
   const trimmed = stdoutText.trim()
@@ -131,6 +138,7 @@ export function parseComposePsOutput(stdoutText: string): ComposePsEntry[] {
     return Array.isArray(parsed) ? (parsed as ComposePsEntry[]) : []
   }
 
+  // NDJSON: one JSON object per non-empty line.
   return trimmed
     .split('\n')
     .map(line => line.trim())
@@ -170,8 +178,31 @@ Each fix is structural at the layer it addresses: append `\n` when materializing
 - **Demand evidence from counters and logs before broadening blast radius.** Tonight's UFW diagnosis took ~5 minutes once Oracle was dispatched with the symptom log. Earlier "transient network" reasoning would have wasted hours.
 - **When a fix is structural at the right layer, don't accept retries or workarounds.** ControlMaster (Wave 4) was the structural answer; retry-with-backoff would have shipped a 5x slower deploy.
 
+## Recurrence: cliproxy deploy hit the UFW SSH limit (2026-10-31)
+
+The Wave 4 failure came back on a different app because a deploy gained one step. Rule: **count the SSH connections one deploy opens, and never add an ssh/scp call without the shared `controlPath`.**
+
+- **Symptom.** Router run 41203355464, the first cliproxy deploy after [PR #1730](https://github.com/marcusrbrown/infra/pull/1730) added an image prune. `deploy-cliproxy` failed at `Updating Docker Compose stack` with `ssh: connect to host <host> port 22: Connection timed out` (exit 255). The prune step just before it had succeeded over SSH.
+- **Cause.** The cliproxy droplet runs UFW with `22/tcp LIMIT IN`: the iptables chain `ufw-user-limit`, `--hitcount 6 --seconds 30` per source. Each ssh/scp call opened its own connection: mkdir, scp compose, scp Caddyfile, a `test -f` probe, the prune, then compose. That is 6 in about 8 s. Before #1730 there were 5.
+- **Diagnostic.** The droplet journal shows 5 accepted sessions from runner addresses, then `[UFW LIMIT BLOCK]` with `DPT=22` for the SYN retries of the next connection. fail2ban was not installed and sshd `MaxStartups` was not involved.
+- **Fix.** [PR #1733](https://github.com/marcusrbrown/infra/pull/1733) made every cliproxy ssh/scp step share one ControlMaster socket per deploy. The temp socket directory is removed on success and on failure. Use a short fixed socket name (the macOS unix socket path limit is 104 bytes). The options, `apps/cliproxy/src/deploy.ts:132-134` (`controlOptions`):
+
+  <!-- prettier-ignore -->
+  ```ts
+  function controlOptions(controlPath: string): string[] {
+    return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`, '-o', 'ControlPersist=60s']
+  }
+  ```
+
+  `sshCommand` and `scpCommand` both take `controlPath` as a required parameter, so a command cannot be built without one. Tests in `apps/cliproxy/src/deploy.test.ts` assert that every remote call shares one `ControlPath` and that the temp directory is gone after both a successful and a failed deploy.
+
+- **Verified.** Router run 41204701071: deploy job OK, 1 accepted SSH session, 0 `UFW LIMIT BLOCK`.
+- Cliproxy's contract is also in `apps/cliproxy/AGENTS.md:23`. Disk-pressure context for the prune step: [cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md](../integration-issues/cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md).
+
 ## Related Issues
 
+- [cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md](../integration-issues/cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md) — the prune step that tipped cliproxy over the limit (recurrence section above)
+- [broker-first-deploy-cascade-2026-06-30.md](./broker-first-deploy-cascade-2026-06-30.md) — same UFW limit hit during broker provisioning and deploy
 - [off-droplet-docker-image-build-gateway-deploy-2026-06-04.md](../best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md) — same app and deploy path; replaced the on-host `docker compose up --build` (which let a moved pin run a stale image and masked a broken upstream image) with CI-built, digest-pinned images
 - [cliproxy-first-deploy-cascade-2026-04-06.md](./cliproxy-first-deploy-cascade-2026-04-06.md) — same shape of cascade for the cliproxy app, 4 waves
 - [bun-deploy-user-permissions-ci-2026-04-02.md](./bun-deploy-user-permissions-ci-2026-04-02.md) — earlier deploy-cascade precedent (3 waves of permission failures during keeweb deploy bootstrap)

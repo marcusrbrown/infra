@@ -108,9 +108,9 @@ Run each of the following on a separate run:
 
 1. Send the trigger prompt. Expect: the card shows a waiting-for-approval status with buttons "Once", "Always", and "Reject".
 2. **Once:** press "Once". Expect: the request clears from the card and the run proceeds. Failure: the request stays pending or the run stalls.
-3. **Reject:** on a new run, press "Reject". Expect: the request clears from the card and the run ends within about a second. Failure: the request stays pending or the run keeps going. Whether the rejected `rm` was skipped is not visible here.
+3. **Reject:** on a new run, press "Reject". Expect: the request clears from the card and the run ends within about a second. Failure: the request stays pending or the run keeps going. Whether the rejected `rm` was skipped is not visible here. **Do not run this step on OpenCode V2 (gateway v0.130.x).** Reject can quarantine the repo. The lock remains until its 900-second lease expires and a takeover confirms the repo is quiet (fro-bot/agent#2001). Record it as "not run on V2".
 4. **Collapsed status.** While a request is pending, collapse the card and let the run list refresh. Expect: the card's status badge reads "Waiting for approval". Failure: the collapsed card still reads "Running".
-5. **Always:** on a new run, press "Always". Expect: a second control, "Confirm always", appears and nothing is applied until you press it. After confirming, matching requests for the rest of that run no longer prompt (not yet observed: the trigger raises only one request per run); a new run prompts again. Failure: "Always" applies without confirmation, or applies beyond that run.
+5. **Always:** on a new run, press "Always". Expect: a second control, "Confirm always", appears and nothing is applied until you press it. After confirming, matching requests for the rest of that run no longer prompt (not yet observed: the trigger raises only one request per run); a new run prompts again. Failure: "Always" applies without confirmation, or applies beyond that run. Skip Always until fro-bot/agent#1990 ships. An Always approval reaches every later run on the same repo.
 
 ### 10. Agent question
 
@@ -219,7 +219,9 @@ The gateway accepts a launch prompt of up to 8,000 UTF-16 units, so an emoji cou
 
 ### 17. Run wait reason
 
-A `running` status frame can carry a `waitReason` that says why the run has not finished. The gateway sets one only while the run drains: the root session has gone idle, but a background subagent the run started (a `task` call in background mode) is not settled yet. A run without a background subagent never carries a reason, however long it runs. An open approval or question and every terminal status hide the reason. The dashboard shows it as a quiet line under the repo name on the expanded card only.
+On OpenCode V1, a `running` status frame can carry a `waitReason` that says why the run has not finished. The gateway sets one only while the run drains: the root session has gone idle, but a background subagent the run started (a `task` call in background mode) is not settled yet. A run without a background subagent never carries a reason, however long it runs. An open approval or question and every terminal status hide the reason. The dashboard shows it as a quiet line under the repo name on the expanded card only.
+
+On V2, skip check 17 and record "not demonstrable" (fro-bot/agent#2007).
 
 Trigger prompt (practical, not guaranteed): "Use the task tool in background mode to start one subagent. Its only job: run `sleep 90` in the shell, then reply DONE. Do not create, edit or delete any files. Wait for its completion notice. After you receive it, write at least 300 words explaining what happened, then end with the word FINISHED." The prompt writes nothing to the checkout. When the gateway adopts the subagent, its log records `run-core: background dispatch observed`. Without that line the run never drains and no reason is expected; record the check as not triggered, with the run ID. The reason is not on the wire for the first 70–90 seconds after launch. Then `awaiting-background-task` lasts about 40–70 seconds and `confirming-completion` about 7–15, so the window is roughly 45–75 seconds, and steps 1–4 must fit inside it.
 

@@ -1,6 +1,7 @@
 ---
 title: Claude OAuth refresh token expiry broke Anthropic-routed CLIProxyAPI requests
 date: 2026-06-20
+last_updated: 2026-10-31
 category: docs/solutions/integration-issues/
 module: apps/cliproxy
 problem_type: integration_issue
@@ -11,6 +12,7 @@ symptoms:
   - "Anthropic-routed requests returned 503 auth_unavailable: no auth available (providers=claude)"
   - OpenAI/Codex requests still succeeded, making the failure look non-global
   - Downstream repo api-keys remained intact, ruling out key loss
+  - "Probe returned HTTP 400 model_not_found (unknown provider for model) and the monitor logged unknown/unrelated-http with no alert"
 root_cause: config_error
 resolution_type: config_change
 severity: high
@@ -87,13 +89,24 @@ The root cause was the proxy's **upstream Anthropic OAuth refresh token expiring
   - **Both** fail → suspect the downstream key/config or a proxy-wide problem.
   - Only **one repo** fails while same-provider repos work → suspect that repo's downstream key.
 - **A "green the day before" run does not prove the bearer still works** — confirm a real successful proxy call (`Completed OpenCode execution, success:true`) when establishing a working→broken timeline.
-- **The repository monitor probes the real provider route** — `infra cliproxy monitor` uses the structured Anthropic auth probe behind `cliproxy status` and classifies healthy, definitive auth failure, and transient unknown results without parsing human output. Scheduled execution requires `.github/workflows/cliproxy-auth-monitor.yaml` on the default branch with the required repository secrets configured; GitHub schedule delivery is best-effort at the nominal 15-minute cadence (`7,22,37,52` minutes past the hour).
-- **Definitive auth failure has durable transition state** — the monitor opens or reopens the canonical GitHub issue labeled `cliproxy-auth-monitor`, sends one outage notification through the dedicated outbound Discord webhook, and persists a safe notification marker. An open issue means dead provider auth; a closed or absent issue means healthy auth. Unknown or transient probe results preserve issue and notification state, while an active outage receives a safe last-check heartbeat.
+- **The repository monitor probes the real provider route** — `infra cliproxy monitor` uses the structured Anthropic auth probe behind `cliproxy status` and classifies healthy, definitive auth failure, and transient unknown results without parsing human output. The definitive dead reasons are `auth-401`, `auth-unavailable-503`, and `provider-missing` (a 400 `model_not_found` / "unknown provider for model" response; see [the 2026-10-31 miss](#2026-10-31-the-monitor-did-not-alert-on-provider-missing)). Scheduled execution requires `.github/workflows/cliproxy-auth-monitor.yaml` on the default branch with the required repository secrets configured; GitHub schedule delivery is best-effort at the nominal 15-minute cadence (`7,22,37,52` minutes past the hour).
+- **Definitive auth failure (`auth-401`, `auth-unavailable-503`, `provider-missing`) has durable transition state** — the monitor opens or reopens the canonical GitHub issue labeled `cliproxy-auth-monitor`, sends one outage notification through the dedicated outbound Discord webhook, and persists a safe notification marker. An open issue means dead provider auth. The issue records the last definitive probe result, so a closed or absent issue does not prove current health while probe results are `unknown`. Unknown or transient probe results preserve issue and notification state, while an active outage receives a safe last-check heartbeat.
 - **Recovery is explicit and transition-only** — after `infra cliproxy login claude` succeeds, verify with `infra cliproxy status` and trigger an immediate manual live monitor run. The monitor closes the canonical issue and sends recovery only when the prior notified state was dead. Synthetic validation uses `cliproxy-auth-monitor-test`, is owner-only, and never probes Anthropic or mutates production monitor state.
 - **Do not treat CLIProxyAPI api-key slugs as identity** — they are truncated and ambiguous across repos.
 
+## 2026-10-31: the monitor did not alert on provider-missing
+
+The probe missed a total Claude outage. When the Claude credential file was truncated to 0 bytes and the container restarted (see [the disk-full incident](./cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md)), the proxy no longer registered the Anthropic provider. Every Claude request returned `400 {"error":{"message":"unknown provider for model claude-sonnet-4-6","type":"invalid_request_error","code":"model_not_found"}}`.
+
+- **Symptom.** Scheduled `cliproxy-auth-monitor.yaml` run 41167811877 (04:15Z) logged `probe=unknown reason=unrelated-http transition=none issue=none discord=none`. `cliproxy status` printed `[WARN] Anthropic probe returned HTTP 400`. No issue, no Discord alert.
+- **Cause.** `runProviderAuthProbe` (`packages/cli/src/commands/cliproxy/status.ts:377`) treated only 401, or a 503 with auth markers, as dead. Every other non-2xx was `unknown/unrelated-http`, and the monitor changes nothing on `unknown`.
+- **Fix, [PR #1729](https://github.com/marcusrbrown/infra/pull/1729), released as `@marcusrbrown/infra@0.26.3`.** A 400 whose body signals a missing provider is now `{state: 'dead', reason: 'provider-missing'}` and takes the same issue and Discord path as `auth-401`. `isProviderMissingBody` in `packages/cli/src/commands/cliproxy/status.ts` checks `error.code === 'model_not_found'` first; if `error.message` is a string, it returns that message's `/unknown provider for model/i` result; otherwise it runs the regex on the raw body, including non-JSON input. The summary reads `Anthropic provider not registered for <model> (HTTP 400) — check /v1/models; run: cliproxy login claude`. The `fro-bot.yaml` daily-report prompt lists `provider-missing` as an auth-dead reason (`.github/workflows/fro-bot.yaml:337`). Tests cover the incident body, fallback matching, unrelated 400s and the monitor notification.
+- **Rule.** Classify a probe on the provider's semantic error code, not only the HTTP status. The `unknown` bucket must not be able to hide total provider loss: when a failure is a definitive statement about the provider, give it a dead reason.
+- **Diagnosis.** `/v1/models` with no `anthropic/*` models plus a 400 `model_not_found` means the provider route is missing. Check whether the credential loaded, including for zero-byte auth files.
+
 ## Related Issues
 
+- `docs/solutions/integration-issues/cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md` — the disk-full outage that truncated the Claude credential and exposed the `provider-missing` gap.
 - `docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md` — same app, but initial-setup `auth-dir`/config/host-key cascade, not upstream OAuth expiry.
 - `docs/solutions/workflow-issues/cliproxy-healthcheck-tooling-migration-2026-06-09.md` — same deploy path, but a broken in-container healthcheck binary, not auth.
 - `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md` — same proxy + OAuth token volume, from the upgrade-playbook angle (back up the auth volume before risky changes).

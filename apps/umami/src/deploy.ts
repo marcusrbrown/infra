@@ -861,6 +861,21 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
       spawnFn,
     )
 
+    // Phase 6b: Reclaim disk from unused images before pulling (best-effort; failure only warns).
+    try {
+      await runCommand(
+        'Pruning unused images (disk reclaim)',
+        sshCommand(host, 'docker image prune -af', keyPath, controlPath),
+        deployEnv,
+        spawnFn,
+      )
+    } catch (error) {
+      console.warn(
+        '[deploy] Image prune failed (non-fatal, continuing):',
+        error instanceof Error ? error.message : error,
+      )
+    }
+
     // Phase 7: docker compose pull (all images)
     await runCommand(
       'Pulling Docker images',

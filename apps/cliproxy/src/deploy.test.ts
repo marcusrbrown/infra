@@ -205,6 +205,32 @@ function scpConfigCalls(calls: string[][]): string[][] {
   )
 }
 
+function makePruneSpawn(pruneExitCode: number): {spawnFn: typeof Bun.spawn; remoteCommands: string[]} {
+  const remoteCommands: string[] = []
+  const spawnFn = mock((command: string[]) => {
+    const last = command.at(-1) ?? ''
+    if (command[0] === 'ssh') remoteCommands.push(last)
+    return {
+      stdout: new Response(last.includes('test -f') ? 'EXISTS\n' : '').body,
+      stderr: new Response('').body,
+      exited: Promise.resolve(last.includes('docker image prune') ? pruneExitCode : 0),
+    }
+  }) as unknown as typeof Bun.spawn
+  return {spawnFn, remoteCommands}
+}
+
+function writeDeployFiles(dir: string): {compose: string; config: string; caddy: string} {
+  const files = {
+    compose: join(dir, 'docker-compose.yaml'),
+    config: join(dir, 'config.yaml'),
+    caddy: join(dir, 'Caddyfile'),
+  }
+  writeFileSync(files.config, EMPTY_ALIAS_YAML)
+  writeFileSync(files.compose, '')
+  writeFileSync(files.caddy, '')
+  return files
+}
+
 // ─── Test setup ───────────────────────────────────────────────────────────────
 
 let tmpDir: string
@@ -1053,5 +1079,33 @@ describe('deploy', () => {
     } finally {
       process.argv = process.argv.filter(argument => argument !== '--force-config')
     }
+  })
+
+  describe('image prune before pull', () => {
+    test('prunes unused images before docker compose pull, without system prune or volumes', async () => {
+      const {spawnFn, remoteCommands} = makePruneSpawn(0)
+
+      await deploy({files: writeDeployFiles(tmpDir), env: makeDeployEnv(), fetch: makeSimpleFetch(), spawn: spawnFn})
+
+      const pruneIndex = remoteCommands.findIndex(command => command.includes('docker image prune -af'))
+      const pullIndex = remoteCommands.findIndex(command => command.includes('docker compose pull'))
+      expect(pruneIndex).toBeGreaterThan(-1)
+      expect(pullIndex).toBeGreaterThan(pruneIndex)
+      for (const command of remoteCommands) {
+        expect(command).not.toContain('system prune')
+        expect(command).not.toContain('--volumes')
+      }
+    })
+
+    test('continues to pull and up when the prune fails', async () => {
+      const {spawnFn, remoteCommands} = makePruneSpawn(1)
+
+      await expect(
+        deploy({files: writeDeployFiles(tmpDir), env: makeDeployEnv(), fetch: makeSimpleFetch(), spawn: spawnFn}),
+      ).resolves.toBeUndefined()
+
+      expect(remoteCommands.some(command => command.includes('docker image prune -af'))).toBe(true)
+      expect(remoteCommands.some(command => command.includes('docker compose pull && docker compose up'))).toBe(true)
+    })
   })
 })

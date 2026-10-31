@@ -442,6 +442,13 @@ export async function deploy(opts: DeployOptions = {}): Promise<void> {
     )
   }
 
+  // Reclaim disk from unused images before pulling (best-effort; failure only warns).
+  try {
+    await runCommand('Pruning unused images (disk reclaim)', sshCommand(host, 'docker image prune -af'), env, spawnFn)
+  } catch (error) {
+    console.warn('[deploy] Image prune failed (non-fatal, continuing):', error instanceof Error ? error.message : error)
+  }
+
   await runCommand(
     'Updating Docker Compose stack',
     // --wait blocks until caddy reports healthy; caddy's healthcheck probes

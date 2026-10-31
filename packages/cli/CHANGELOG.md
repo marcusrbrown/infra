@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.26.3
+
+### Patch Changes
+
+- `cliproxy monitor` and `cliproxy status` now treat an unregistered Anthropic provider (HTTP 400 `model_not_found`) as a dead provider, so a lost Claude credential opens the outage issue and sends the Discord alert. ([#1729](https://github.com/marcusrbrown/infra/pull/1729))
+
 ## 0.26.2
 
 ### Patch Changes

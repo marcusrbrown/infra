@@ -82,6 +82,22 @@ function emptyStream(): ReadableStream<Uint8Array> {
   })
 }
 
+/** Records non-build spawns; the docker image prune exits with `pruneExitCode`. */
+function makeRecordingSpawn(pruneExitCode = 0) {
+  const sshCommands: string[] = []
+  const mockSpawn = (cmd: string[], _opts: unknown) => {
+    const isPrune = cmd.join(' ').includes('docker image prune')
+    if (cmd[0] !== 'bun') sshCommands.push(cmd.join(' '))
+    return {
+      stdin: {write: () => {}, end: () => {}},
+      stdout: emptyStream(),
+      stderr: emptyStream(),
+      exited: Promise.resolve(isPrune ? pruneExitCode : 0),
+    }
+  }
+  return {sshCommands, spawn: mockSpawn as unknown as typeof Bun.spawn}
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -604,6 +620,40 @@ describe('deploy (broker)', () => {
       expect(composeUpCommand).toContain(
         'docker compose pull && docker compose up -d --force-recreate --wait --wait-timeout 90',
       )
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // deploy — best-effort image prune before pull
+  // ---------------------------------------------------------------------------
+
+  describe('deploy — image prune before pull', () => {
+    const okFetch: FetchFn = async () => new Response(JSON.stringify([]), {status: 200})
+
+    it('prunes unused images before docker compose pull, without system prune or volumes', async () => {
+      setValidEnv()
+      const {sshCommands, spawn} = makeRecordingSpawn()
+
+      await deploy({fetch: okFetch, spawn})
+
+      const pruneIndex = sshCommands.findIndex(cmd => cmd.includes('docker image prune -af'))
+      const pullIndex = sshCommands.findIndex(cmd => cmd.includes('docker compose pull'))
+      expect(pruneIndex).toBeGreaterThan(-1)
+      expect(pullIndex).toBeGreaterThan(pruneIndex)
+      for (const cmd of sshCommands) {
+        expect(cmd).not.toContain('system prune')
+        expect(cmd).not.toContain('--volumes')
+      }
+    })
+
+    it('continues to pull and up when the prune fails', async () => {
+      setValidEnv()
+      const {sshCommands, spawn} = makeRecordingSpawn(1)
+
+      await deploy({fetch: okFetch, spawn})
+
+      expect(sshCommands.some(cmd => cmd.includes('docker image prune -af'))).toBe(true)
+      expect(sshCommands.some(cmd => cmd.includes('docker compose pull && docker compose up'))).toBe(true)
     })
   })
 

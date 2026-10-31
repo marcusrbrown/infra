@@ -23,7 +23,7 @@ Images are pinned to numbered tags by digest in `docker-compose.yaml` (the sourc
 5. **DB-password fingerprint guard** — reads the sentinel from the remote (aborts on read/transport error), compares to the current password hash; aborts on mismatch to prevent volume-bricking password changes.
 6. Materializes `/opt/umami/.env` over SSH **stdin** (never argv); secret values are boundary-validated (no newlines/shell metacharacters).
 7. Uploads `docker-compose.yaml` + `config/Caddyfile`.
-8. `docker compose pull` (all images).
+8. `docker compose pull` (all images), preceded by a best-effort `docker image prune -af` (failure only warns).
 9. `docker compose up -d --wait --wait-timeout 180 db umami` — Caddy is **NOT** started yet; container health (`pg_isready` + umami `/api/heartbeat`) via `--wait` is the authoritative success signal; 180s covers first-boot DB migrations.
 10. **Automated admin-password rotation** (fail-closed; runs before Caddy to prevent any public default-credential window).
 11. `docker compose up -d --wait --wait-timeout 180 caddy` — publicly exposes the service **only after** rotation is complete.

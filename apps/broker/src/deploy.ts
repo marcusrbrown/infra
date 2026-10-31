@@ -435,6 +435,18 @@ export async function deploy(deps: DeployDeps = {}): Promise<void> {
   // Materialize secrets via stdin (never argv).
   await writeRemoteEnvFile(host, env, controlPath, deps)
 
+  // Reclaim disk from unused images before pulling (best-effort; failure only warns).
+  try {
+    await runCommand(
+      'Pruning unused images (disk reclaim)',
+      sshCommand(host, 'docker image prune -af', controlPath),
+      env,
+      deps,
+    )
+  } catch (error) {
+    console.warn('[deploy] Image prune failed (non-fatal, continuing):', error instanceof Error ? error.message : error)
+  }
+
   // Pull and start the stack.
   await runCommand(
     'Updating Docker Compose stack',

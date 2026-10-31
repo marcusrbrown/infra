@@ -58,7 +58,8 @@ interface SpawnCall {
 /**
  * Builds a fake SpawnFn that records all calls and returns configurable results.
  * `responses` is consumed in order; additional calls receive fresh successful
- * results so a response stream is never consumed twice.
+ * results so a response stream is never consumed twice. The best-effort image
+ * prune does not consume a response slot, so indices cover the other commands.
  */
 function makeFakeSpawn(
   responses: (SpawnResult | undefined)[],
@@ -70,8 +71,8 @@ function makeFakeSpawn(
   const spawnFn: SpawnFn = (cmd, opts) => {
     const call: SpawnCall = {cmd: [...cmd], stdinData: ''}
 
-    const callIndex = idx++
     const command = cmd.join(' ')
+    const callIndex = command.includes('docker image prune') ? -1 : idx++
     const result =
       override?.(cmd, callIndex) ??
       (command.includes('systemctl is-active')
@@ -450,6 +451,47 @@ describe('db-password fingerprint guard', () => {
         fetch: fetchHeartbeatOk,
       }),
     ).resolves.toBeUndefined()
+  })
+})
+
+// ─── best-effort image prune before pull ─────────────────────────────────────
+
+describe('image prune before docker compose pull', () => {
+  const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+
+  function runDeploy(override?: Parameters<typeof makeFakeSpawn>[1]) {
+    const responses = Array.from<SpawnResult | undefined>({length: 20})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    const {spawnFn, calls} = makeFakeSpawn(responses, override)
+    const done = deploy({env: VALID_ENV, spawn: spawnFn, resolve: resolvesOk, fetch: fetchHeartbeatOk})
+    return {done, calls}
+  }
+
+  it('prunes unused images before docker compose pull, without system prune or volumes', async () => {
+    const {done, calls} = runDeploy()
+    await done
+
+    const commands = calls.map(c => c.cmd.join(' '))
+    const pruneIndex = commands.findIndex(c => c.includes('docker image prune -af'))
+    const pullIndex = commands.findIndex(c => c.includes('docker compose pull'))
+    expect(pruneIndex).toBeGreaterThan(-1)
+    expect(pullIndex).toBeGreaterThan(pruneIndex)
+    for (const command of commands) {
+      expect(command).not.toContain('system prune')
+      expect(command).not.toContain('--volumes')
+    }
+  })
+
+  it('continues to pull and up when the prune fails', async () => {
+    const {done, calls} = runDeploy(cmd =>
+      cmd.join(' ').includes('docker image prune') ? makeSpawnResult('', 'no space left', 1) : undefined,
+    )
+    await expect(done).resolves.toBeUndefined()
+
+    const commands = calls.map(c => c.cmd.join(' '))
+    expect(commands.some(c => c.includes('docker image prune -af'))).toBe(true)
+    expect(commands.some(c => c.includes('docker compose pull'))).toBe(true)
+    expect(commands.some(c => c.includes('docker compose up -d --wait --wait-timeout 180 db umami'))).toBe(true)
   })
 })
 

@@ -50,8 +50,8 @@ Run the [checks that launch nothing](#checks-that-launch-nothing) first, then sp
 | L1 | Inert prompt: `Reply with only the word OK. <img src=x onerror=alert(1)> <b>bold tag</b> **markdown bold** [link](https://example.com)` | [5](operator-surface-acceptance.md#5-launch-and-stream), [6](operator-surface-acceptance.md#6-single-cancel-after-completion), [8](operator-surface-acceptance.md#8-checkout-details), [16 step 1](operator-surface-acceptance.md#16-launch-prompt) |
 | L2 | 8,000-unit prompt | [16 step 2](operator-surface-acceptance.md#16-launch-prompt) |
 | L3 | Approval trigger, press "Once" | [9](operator-surface-acceptance.md#9-tool-approval) steps 1, 2 |
-| L4 | Approval trigger, press "Always" then "Confirm always" | [9](operator-surface-acceptance.md#9-tool-approval) step 5 |
-| L5 | Approval trigger, press "Reject" | [9](operator-surface-acceptance.md#9-tool-approval) step 3; also shows a new run prompts again after "Always" |
+| L4 | Approval trigger, press "Always" then "Confirm always" | [9](operator-surface-acceptance.md#9-tool-approval) step 5. **Skip Always until fro-bot/agent#1990 ships.** An Always approval reaches every later run on the same repo |
+| L5 | Approval trigger, press "Reject" | [9](operator-surface-acceptance.md#9-tool-approval) step 3; also shows a new run prompts again after "Always". **Skip on OpenCode V2:** Reject can quarantine the repo. The lock remains until its 900-second lease expires and a takeover confirms the repo is quiet (fro-bot/agent#2001) |
 | L6 | Question trigger, choose an option and "Submit answers" | [10](operator-surface-acceptance.md#10-agent-question) steps 1, 2 |
 | L7 | Question trigger, press "Skip" | [10](operator-surface-acceptance.md#10-agent-question) step 3 |
 | L8 | Question trigger, then cancel while the question is open | [7](operator-surface-acceptance.md#7-cancel-a-running-run), [10](operator-surface-acceptance.md#10-agent-question) step 5 |
@@ -64,6 +64,8 @@ Run the [checks that launch nothing](#checks-that-launch-nothing) first, then sp
 - Cancel asks for confirmation: press "Cancel run", then "Confirm cancel".
 
 ### L9 wait reason
+
+On OpenCode V2, skip L9 and record check 17 as "not demonstrable" (fro-bot/agent#2007).
 
 Run L9 after L8 has finished, and launch nothing else until L9 ends. The reason is not on the wire for the first 70–90 seconds after launch. Then `awaiting-background-task` lasts about 40–70 seconds and `confirming-completion` about 7–15, so the window is roughly 45–75 seconds. Steps 1–3 must fit inside it: have every command ready before you launch, and do not spend the window on setup.
 

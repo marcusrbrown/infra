@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
-import {existsSync} from 'node:fs'
-import {resolve} from 'node:path'
+import {existsSync, mkdtempSync, rmSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join, resolve} from 'node:path'
 
 import {
   applyOAuthModelAlias,
@@ -33,6 +34,8 @@ export interface DeployOptions {
   spawn?: typeof Bun.spawn
   files?: DeployFiles
   env?: DeployEnv
+  /** Parent directory for the SSH control socket; defaults to os.tmpdir(). */
+  tempRoot?: string
 }
 
 function resolveDeployFiles(): DeployFiles {
@@ -125,17 +128,32 @@ async function runCommand(
   }
 }
 
-function sshCommand(host: string, command: string): string[] {
-  return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', `${DEFAULT_REMOTE_USER}@${host}`, command]
+// Every ssh/scp call shares one control socket: the droplet's UFW rate-limits new SSH connections (6 per 30 s).
+function controlOptions(controlPath: string): string[] {
+  return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`, '-o', 'ControlPersist=60s']
 }
 
-function scpCommand(host: string, source: string, destination: string): string[] {
+function sshCommand(host: string, command: string, controlPath: string): string[] {
+  return [
+    'ssh',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'ConnectTimeout=10',
+    ...controlOptions(controlPath),
+    `${DEFAULT_REMOTE_USER}@${host}`,
+    command,
+  ]
+}
+
+function scpCommand(host: string, source: string, destination: string, controlPath: string): string[] {
   return [
     'scp',
     '-o',
     'BatchMode=yes',
     '-o',
     'ConnectTimeout=10',
+    ...controlOptions(controlPath),
     source,
     `${DEFAULT_REMOTE_USER}@${host}:${destination}`,
   ]
@@ -157,9 +175,10 @@ async function remoteFileExists(
   host: string,
   path: string,
   env: DeployEnv,
+  controlPath: string,
   spawnFn: typeof Bun.spawn = Bun.spawn,
 ): Promise<boolean> {
-  const proc = spawnFn(sshCommand(host, `test -f '${path}' && echo EXISTS || echo MISSING`), {
+  const proc = spawnFn(sshCommand(host, `test -f '${path}' && echo EXISTS || echo MISSING`, controlPath), {
     env,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -414,56 +433,92 @@ export async function deploy(opts: DeployOptions = {}): Promise<void> {
   // Validate management key before any SSH, upload, or container operation.
   await preflightManagementKeyCheck(env, files, fetchImpl)
 
-  await runCommand('Creating remote directories', sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`), env, spawnFn)
+  let tmpDir: string | undefined
 
-  await runCommand(
-    'Uploading docker-compose.yaml',
-    scpCommand(host, files.compose, `${REMOTE_DIR}/docker-compose.yaml`),
-    env,
-    spawnFn,
-  )
-  await runCommand(
-    'Uploading config/Caddyfile',
-    scpCommand(host, files.caddy, `${REMOTE_DIR}/config/Caddyfile`),
-    env,
-    spawnFn,
-  )
-
-  // config.yaml contains runtime state (API keys, settings) managed via the management API.
-  // Only upload on first deploy or when explicitly forced. Overwriting would wipe API keys.
-  const configExists = await remoteFileExists(host, `${REMOTE_DIR}/config/config.yaml`, env, spawnFn)
-  const trackedConfigUploaded = !configExists || forceConfig
-  if (trackedConfigUploaded) {
-    const label = forceConfig ? 'Uploading config/config.yaml (forced)' : 'Uploading config/config.yaml (first deploy)'
-    await runCommand(label, scpCommand(host, files.config, `${REMOTE_DIR}/config/config.yaml`), env, spawnFn)
-  } else {
-    console.warn(
-      '\u001B[1;34m==>\u001B[0m Skipping config/config.yaml (exists on server, use --force-config to overwrite)',
-    )
-  }
-
-  // Reclaim disk from unused images before pulling (best-effort; failure only warns).
   try {
-    await runCommand('Pruning unused images (disk reclaim)', sshCommand(host, 'docker image prune -af'), env, spawnFn)
-  } catch (error) {
-    console.warn('[deploy] Image prune failed (non-fatal, continuing):', error instanceof Error ? error.message : error)
+    // Control socket lives in a per-deploy temp dir; a short fixed name keeps the path under the unix socket limit.
+    tmpDir = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'cliproxy-deploy-'))
+    const controlPath = join(tmpDir, 'cm')
+
+    await runCommand(
+      'Creating remote directories',
+      sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`, controlPath),
+      env,
+      spawnFn,
+    )
+
+    await runCommand(
+      'Uploading docker-compose.yaml',
+      scpCommand(host, files.compose, `${REMOTE_DIR}/docker-compose.yaml`, controlPath),
+      env,
+      spawnFn,
+    )
+    await runCommand(
+      'Uploading config/Caddyfile',
+      scpCommand(host, files.caddy, `${REMOTE_DIR}/config/Caddyfile`, controlPath),
+      env,
+      spawnFn,
+    )
+
+    // config.yaml contains runtime state (API keys, settings) managed via the management API.
+    // Only upload on first deploy or when explicitly forced. Overwriting would wipe API keys.
+    const configExists = await remoteFileExists(host, `${REMOTE_DIR}/config/config.yaml`, env, controlPath, spawnFn)
+    const trackedConfigUploaded = !configExists || forceConfig
+    if (trackedConfigUploaded) {
+      const label = forceConfig
+        ? 'Uploading config/config.yaml (forced)'
+        : 'Uploading config/config.yaml (first deploy)'
+      await runCommand(
+        label,
+        scpCommand(host, files.config, `${REMOTE_DIR}/config/config.yaml`, controlPath),
+        env,
+        spawnFn,
+      )
+    } else {
+      console.warn(
+        '\u001B[1;34m==>\u001B[0m Skipping config/config.yaml (exists on server, use --force-config to overwrite)',
+      )
+    }
+
+    // Reclaim disk from unused images before pulling (best-effort; failure only warns).
+    try {
+      await runCommand(
+        'Pruning unused images (disk reclaim)',
+        sshCommand(host, 'docker image prune -af', controlPath),
+        env,
+        spawnFn,
+      )
+    } catch (error) {
+      console.warn(
+        '[deploy] Image prune failed (non-fatal, continuing):',
+        error instanceof Error ? error.message : error,
+      )
+    }
+
+    await runCommand(
+      'Updating Docker Compose stack',
+      // --wait blocks until caddy reports healthy; caddy's healthcheck probes
+      // http://cli-proxy-api:8317/healthz, so a healthy caddy transitively proves
+      // the proxy is serving. --wait-timeout caps the block at 90s.
+      sshCommand(
+        host,
+        `cd ${REMOTE_DIR} && docker compose pull && docker compose up -d --wait --wait-timeout 90`,
+        controlPath,
+      ),
+      env,
+      spawnFn,
+    )
+
+    // Apply oauth-model-alias after the stack is healthy (management API reachable)
+    // and before healthCheck so a failed alias apply fails the deploy.
+    await applyOAuthModelAliasStep(env, files, fetchImpl)
+
+    await healthCheck(env, fetchImpl)
+  } finally {
+    if (tmpDir) {
+      rmSync(tmpDir, {recursive: true, force: true})
+    }
   }
-
-  await runCommand(
-    'Updating Docker Compose stack',
-    // --wait blocks until caddy reports healthy; caddy's healthcheck probes
-    // http://cli-proxy-api:8317/healthz, so a healthy caddy transitively proves
-    // the proxy is serving. --wait-timeout caps the block at 90s.
-    sshCommand(host, `cd ${REMOTE_DIR} && docker compose pull && docker compose up -d --wait --wait-timeout 90`),
-    env,
-    spawnFn,
-  )
-
-  // Apply oauth-model-alias after the stack is healthy (management API reachable)
-  // and before healthCheck so a failed alias apply fails the deploy.
-  await applyOAuthModelAliasStep(env, files, fetchImpl)
-
-  await healthCheck(env, fetchImpl)
 }
 
 if (import.meta.main) {

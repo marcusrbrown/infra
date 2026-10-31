@@ -1,4 +1,4 @@
-import {mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {mkdtempSync, readdirSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, mock, spyOn, test} from 'bun:test'
@@ -203,6 +203,27 @@ function scpConfigCalls(calls: string[][]): string[][] {
   return calls.filter(
     command => command[0] === 'scp' && command.some(argument => argument.includes('config/config.yaml')),
   )
+}
+
+function remoteCalls(calls: string[][]): string[][] {
+  return calls.filter(command => command[0] === 'ssh' || command[0] === 'scp')
+}
+
+function controlPathOf(command: string[]): string | undefined {
+  return command.find(argument => argument.startsWith('ControlPath='))
+}
+
+function expectSharedSocket(calls: string[][], tempRoot: string, expectedCount: number): void {
+  const remote = remoteCalls(calls)
+  expect(remote).toHaveLength(expectedCount)
+
+  const socket = controlPathOf(remote[0] ?? [])
+  expect(socket).toStartWith(`ControlPath=${tempRoot}/cliproxy-deploy-`)
+  for (const command of remote) {
+    expect(controlPathOf(command)).toBe(socket)
+    expect(command).toContain('ControlMaster=auto')
+    expect(command).toContain('ControlPersist=60s')
+  }
 }
 
 function makePruneSpawn(pruneExitCode: number): {spawnFn: typeof Bun.spawn; remoteCommands: string[]} {
@@ -1079,6 +1100,90 @@ describe('deploy', () => {
     } finally {
       process.argv = process.argv.filter(argument => argument !== '--force-config')
     }
+  })
+
+  describe('ssh connection multiplexing', () => {
+    test('normal deploy runs every ssh/scp call over one control socket', async () => {
+      const {spawnFn, calls} = makeConfigProbeSpawn({stdout: 'EXISTS\n', exitCode: 0})
+
+      await deploy({
+        files: writeDeployFiles(tmpDir),
+        env: makeDeployEnv(),
+        fetch: makeSimpleFetch(),
+        spawn: spawnFn,
+        tempRoot: tmpDir,
+      })
+
+      // mkdir, scp compose, scp Caddyfile, config probe, image prune, compose pull/up
+      expectSharedSocket(calls, tmpDir, 6)
+    })
+
+    test('first deploy also uploads config.yaml over the same control socket', async () => {
+      const {spawnFn, calls} = makeConfigProbeSpawn({stdout: 'MISSING\n', exitCode: 0})
+
+      await deploy({
+        files: writeDeployFiles(tmpDir),
+        env: makeDeployEnv(),
+        fetch: makeSimpleFetch(),
+        spawn: spawnFn,
+        tempRoot: tmpDir,
+      })
+
+      expect(scpConfigCalls(calls)).toHaveLength(1)
+      expectSharedSocket(calls, tmpDir, 7)
+    })
+
+    test('forced config upload uses the same control socket', async () => {
+      const {spawnFn, calls} = makeConfigProbeSpawn({stdout: 'EXISTS\n', exitCode: 0})
+      process.argv.push('--force-config')
+
+      try {
+        await deploy({
+          files: writeDeployFiles(tmpDir),
+          env: makeDeployEnv(),
+          fetch: makeSimpleFetch(),
+          spawn: spawnFn,
+          tempRoot: tmpDir,
+        })
+      } finally {
+        process.argv = process.argv.filter(argument => argument !== '--force-config')
+      }
+
+      expect(scpConfigCalls(calls)).toHaveLength(1)
+      expectSharedSocket(calls, tmpDir, 7)
+    })
+
+    test('removes the control socket directory after a successful deploy', async () => {
+      const root = mkdtempSync(join(tmpDir, 'root-'))
+      const {spawnFn} = makeConfigProbeSpawn({stdout: 'EXISTS\n', exitCode: 0})
+
+      await deploy({
+        files: writeDeployFiles(tmpDir),
+        env: makeDeployEnv(),
+        fetch: makeSimpleFetch(),
+        spawn: spawnFn,
+        tempRoot: root,
+      })
+
+      expect(readdirSync(root)).toEqual([])
+    })
+
+    test('removes the control socket directory when the deploy fails', async () => {
+      const root = mkdtempSync(join(tmpDir, 'root-'))
+      const {spawnFn} = makeConfigProbeSpawn({stdout: '', exitCode: 255})
+
+      await expect(
+        deploy({
+          files: writeDeployFiles(tmpDir),
+          env: makeDeployEnv(),
+          fetch: makeSimpleFetch(),
+          spawn: spawnFn,
+          tempRoot: root,
+        }),
+      ).rejects.toThrow(/Could not determine whether remote file/)
+
+      expect(readdirSync(root)).toEqual([])
+    })
   })
 
   describe('image prune before pull', () => {

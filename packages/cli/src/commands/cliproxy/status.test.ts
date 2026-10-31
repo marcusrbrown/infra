@@ -1,4 +1,4 @@
-import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
+import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../lib/mcp-ctx-fixture'
 import {
@@ -1166,6 +1166,77 @@ describe('checkProviderAuth', () => {
       const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
 
       expect(result).toEqual({state: 'dead', reason: 'auth-unavailable-503'})
+    }
+  })
+
+  it('classifies the model_not_found 400 from a lost Claude credential as dead provider-missing', async () => {
+    const incidentBody =
+      '{"error":{"message":"unknown provider for model claude-sonnet-4-6","type":"invalid_request_error","code":"model_not_found","param":"model"}}'
+    globalThis.fetch = createFetchImplementation(
+      async () => new Response(incidentBody, {status: 400, headers: {'content-type': 'application/json'}}),
+    )
+
+    const state = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+    const human = await checkProviderAuth('https://cliproxy.example.com', 'test-api-key')
+
+    expect(state).toEqual({state: 'dead', reason: 'provider-missing'})
+    expect(human.level).toBe('error')
+    expect(human.summary).toBe(
+      'Anthropic provider not registered for claude-sonnet-4-6 (HTTP 400) — check /v1/models; run: cliproxy login claude',
+    )
+    expect(JSON.stringify(state)).not.toContain('invalid_request_error')
+  })
+
+  it('classifies a non-JSON 400 carrying only the unknown-provider message as dead', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () => new Response('Error: Unknown provider for model claude-sonnet-4-6', {status: 400}),
+    )
+
+    const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result).toEqual({state: 'dead', reason: 'provider-missing'})
+  })
+
+  it('classifies a JSON 400 with only the model_not_found code as dead', async () => {
+    globalThis.fetch = createFetchImplementation(
+      async () => new Response('{"error":{"code":"model_not_found","message":"nope"}}', {status: 400}),
+    )
+
+    const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+    expect(result).toEqual({state: 'dead', reason: 'provider-missing'})
+  })
+
+  it('keeps a 400 without provider-missing markers unknown/unrelated-http', async () => {
+    for (const body of [
+      '{"error":{"message":"max_tokens must be positive","type":"invalid_request_error","code":"invalid_value"}}',
+      'Bad Request',
+      '',
+    ]) {
+      globalThis.fetch = createFetchImplementation(async () => new Response(body, {status: 400}))
+
+      const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+      expect(result).toEqual({state: 'unknown', reason: 'unrelated-http'})
+    }
+  })
+
+  it('reads the provider probe response body at most once', async () => {
+    for (const [status, body, reason] of [
+      [400, '{"error":{"code":"model_not_found"}}', 'provider-missing'],
+      [400, 'Bad Request', 'unrelated-http'],
+      [503, 'auth_unavailable', 'auth-unavailable-503'],
+      [503, 'Service Unavailable', 'unrelated-http'],
+    ] as const) {
+      const response = new Response(body, {status})
+      const textSpy = spyOn(response, 'text')
+      globalThis.fetch = createFetchImplementation(async () => response)
+
+      const result = await checkProviderAuthState('https://cliproxy.example.com', 'test-api-key')
+
+      expect(result.reason).toBe(reason)
+      expect(textSpy.mock.calls.length).toBeLessThanOrEqual(1)
+      expect(response.bodyUsed).toBe(textSpy.mock.calls.length === 1)
     }
   })
 

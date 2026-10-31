@@ -334,7 +334,7 @@ env:
              `cliproxy-auth-monitor` should be open; flag a stale open issue
              as reconciliation drift.
              - Auth dead: the summary reports `probe=dead` with reason
-               `auth-401` or `auth-unavailable-503`. The canonical
+               `auth-401`, `auth-unavailable-503`, or `provider-missing`. The canonical
                `cliproxy-auth-monitor` issue should be open; flag it if
                absent. Recovery is reporting only — this workflow must NOT
                attempt remediation. Note that recovery requires manual

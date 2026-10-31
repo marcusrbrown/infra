@@ -12,7 +12,7 @@ interface CommandResult {
 const appDirectory = new URL('.', import.meta.url).pathname
 const applySqlPath = `${appDirectory}/retention.sql`
 const checkSqlPath = `${appDirectory}/retention-check.sql`
-const postgresImage = 'postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5'
+const postgresImage = 'postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5'
 const dockerProbe = Bun.spawnSync(['docker', 'info'])
 const dockerAvailable = dockerProbe.exitCode === 0
 const imageProbe = dockerAvailable ? Bun.spawnSync(['docker', 'image', 'inspect', postgresImage]) : undefined

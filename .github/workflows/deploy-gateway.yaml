@@ -115,6 +115,16 @@ jobs:
           ref: ${{ steps.upstream.outputs.ref }}
           path: upstream-agent
 
+      # The workspace image runs OpenCode V2 when OPENCODE_VERSION has major >= 2; without the
+      # build-arg it falls back to the Dockerfile's V1 harness default. Read the version from the
+      # checked-out upstream pin so it can never disagree with the asset digests the Dockerfile
+      # verifies against that same file. The gateway image takes no OpenCode build-arg.
+      - name: Read workspace OpenCode V2 pin
+        id: opencode-v2
+        run: |
+          version="$(jq -er .version upstream-agent/packages/runtime/src/shared/opencode-v2-pin.json)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -154,6 +164,7 @@ jobs:
           tags: ghcr.io/marcusrbrown/infra-workspace:${{ steps.upstream.outputs.ref }}-${{ github.sha }}
           build-args: |
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            OPENCODE_VERSION=${{ steps.opencode-v2.outputs.version }}
           outputs: type=registry,rewrite-timestamp=true
 
   scan-images:

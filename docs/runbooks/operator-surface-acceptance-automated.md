@@ -65,7 +65,7 @@ Run the [checks that launch nothing](#checks-that-launch-nothing) first, then sp
 
 ### L9 wait reason
 
-Run L9 after L8 has finished, and launch nothing else until L9 ends. The reason is not on the wire for the first 85–90 seconds after launch. Then `awaiting-background-task` lasts about 40 seconds and `confirming-completion` about 15, so the window is roughly 55 seconds. Steps 1–4 must fit inside it: have every command ready before you launch, and do not spend the window on setup.
+Run L9 after L8 has finished, and launch nothing else until L9 ends. The reason is not on the wire for the first 70–90 seconds after launch. Then `awaiting-background-task` lasts about 40–70 seconds and `confirming-completion` about 7–15, so the window is roughly 45–75 seconds. Steps 1–3 must fit inside it: have every command ready before you launch, and do not spend the window on setup.
 
 Timing procedure:
 
@@ -110,8 +110,8 @@ Timing procedure:
   })()
   ```
 
-- A new run's card opens expanded. Confirm that in a snapshot, leave it expanded, and run nothing else until about 80 seconds after launch.
-- From about 80 seconds, use short `wait --text` calls instead of polling: `wait --text "Waiting on a background task"` times out after about 25 seconds, so repeat it until about 120 seconds after launch. If the line has already moved on, it reads "Confirming it has finished"; record whichever label shows.
+- A new run's card opens expanded. Confirm that in a snapshot, leave it expanded, and run nothing else until about 65 seconds after launch.
+- From about 65 seconds, use short `wait --text` calls instead of polling: `wait --text "Waiting on a background task"` times out after about 25 seconds, so repeat it until about 120 seconds after launch. If the line has already moved on, it reads "Confirming it has finished"; record whichever label shows.
 - Do not wrap agent-browser commands in `timeout`. Killing the wrapper can kill the browser daemon, which discards the page and the observer.
 - Take timings from the observer's frame timestamps and the run's `createdAt`. Do not use the `updatedAt` in `/operator/runs`: it does not change when the reason changes.
 
@@ -153,7 +153,7 @@ Timing procedure:
    Record `status` and `waitReason`. Expect `running` with `awaiting-background-task` or `confirming-completion`.
 
 3. Expand the card again and `wait --text` for the current reason line, which may already read "Confirming it has finished". Screenshot it.
-4. Run `set offline on`, wait about 5 seconds, and snapshot: the line is blank while the card reconnects. Run `set offline off`, wait about 10 seconds, and snapshot again: the line shows the current reason. If the run has already finished, record step 4 as `not run` with the timestamps. In one pass, 5 seconds of `set offline on` left the open stream connected and the line never went blank. If that happens, record step 4 as `inconclusive`, not as a failure.
+4. Not automatable (see [Not automatable](#not-automatable)). Record `not automated`.
 5. Wait for the terminal status. Confirm the card is expanded (its text includes "Raw text") and the line is gone, reload, and confirm the card is expanded again and the line stays gone.
 
 ### Cancel safety
@@ -217,6 +217,7 @@ Record these as `skip` or `not automated`:
 - [Check 12](operator-surface-acceptance.md#12-push) delivery steps. `not automated`.
 - [Check 13](operator-surface-acceptance.md#13-question-notification-deep-link) notification taps. The deep-link simulation above covers only that `/#<runId>` opens the run.
 - [Check 16](operator-surface-acceptance.md#16-launch-prompt) step 4 has no safe trigger. `skip`.
+- [Check 17](operator-surface-acceptance.md#17-run-wait-reason) step 4 (reconnect). Browser offline mode does not drop an open SSE stream, so the card never reconnects. The behaviour is covered by fro-bot/dashboard `web/src/operator/wait-reason-label.test.ts` (a reconnecting connection clears the label, and a replayed running frame shows it again). `not automated`.
 - [Check 17](operator-surface-acceptance.md#17-run-wait-reason) step 6: "Finishing its reply" and "Agent still working" have no safe trigger. Record them only when they occur.
 
 ---

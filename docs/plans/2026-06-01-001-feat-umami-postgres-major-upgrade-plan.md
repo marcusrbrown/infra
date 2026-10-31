@@ -1,7 +1,7 @@
 ---
 title: 'feat: Umami Postgres 15→18 major-version migration'
 type: feat
-status: active
+status: completed
 date: 2026-06-01
 deepened: 2026-10-24
 ---
@@ -151,7 +151,7 @@ Primary sources (see Sources & References):
 **Verification:**
 - Renovate config validates. A subsequent Renovate run will not open a PG≥16 PR at all while the `<16` ceiling holds — `allowedVersions` excludes those versions outright. (`dependencyDashboardApproval: true` gates the *allowed* in-range updates and remains in force after the ceiling is later lifted, so the *next* major still requires explicit approval; it is not what blocks PG16+ today — the ceiling is.)
 
-- [ ] **Unit 2: Migration runbook**
+- [x] **Unit 2: Migration runbook**
 
 **Goal:** A durable, operator-followable runbook capturing the full dump/restore migration with workstation staging validation, preserve-old-volume rollback, password/fingerprint verification, layout gates, and verification. Satisfies R2–R8 as written procedure.
 
@@ -205,7 +205,7 @@ Primary sources (see Sources & References):
 **Verification:**
 - The runbook is self-contained: an operator can execute it end-to-end without external context, every destructive step has a stated rollback, staging gates the production cutover, and the layout gates make a silent empty init impossible to miss.
 
-- [ ] **Unit 3: Execute cutover + land the pin bump**
+- [x] **Unit 3: Execute cutover + land the pin bump**
 
 **Goal:** Perform the migration on `metrics.fro.bot` following Unit 2, and land the accompanying repo changes (compose image pin, volume key and mount destination, tests, docs, lifted Renovate ceiling) once the live stack is verified healthy on PG18.
 

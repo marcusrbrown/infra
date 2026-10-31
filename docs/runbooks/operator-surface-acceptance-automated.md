@@ -65,7 +65,7 @@ Run the [checks that launch nothing](#checks-that-launch-nothing) first, then sp
 
 ### L9 wait reason
 
-Run L9 after L8 has finished, and launch nothing else until L9 ends. The reason is not on the wire for the first 85–90 seconds after launch. Then `awaiting-background-task` lasts about 40 seconds and `confirming-completion` about 15, so the window is roughly 55 seconds. Steps 1–4 must fit inside it: have every command ready before you launch, and do not spend the window on setup.
+Run L9 after L8 has finished, and launch nothing else until L9 ends. The reason is not on the wire for the first 70–90 seconds after launch. Then `awaiting-background-task` lasts about 40–70 seconds and `confirming-completion` about 7–15, so the window is roughly 45–75 seconds. Steps 1–4 must fit inside it: have every command ready before you launch, and do not spend the window on setup.
 
 Timing procedure:
 
@@ -110,8 +110,8 @@ Timing procedure:
   })()
   ```
 
-- A new run's card opens expanded. Confirm that in a snapshot, leave it expanded, and run nothing else until about 80 seconds after launch.
-- From about 80 seconds, use short `wait --text` calls instead of polling: `wait --text "Waiting on a background task"` times out after about 25 seconds, so repeat it until about 120 seconds after launch. If the line has already moved on, it reads "Confirming it has finished"; record whichever label shows.
+- A new run's card opens expanded. Confirm that in a snapshot, leave it expanded, and run nothing else until about 65 seconds after launch.
+- From about 65 seconds, use short `wait --text` calls instead of polling: `wait --text "Waiting on a background task"` times out after about 25 seconds, so repeat it until about 120 seconds after launch. If the line has already moved on, it reads "Confirming it has finished"; record whichever label shows.
 - Do not wrap agent-browser commands in `timeout`. Killing the wrapper can kill the browser daemon, which discards the page and the observer.
 - Take timings from the observer's frame timestamps and the run's `createdAt`. Do not use the `updatedAt` in `/operator/runs`: it does not change when the reason changes.
 

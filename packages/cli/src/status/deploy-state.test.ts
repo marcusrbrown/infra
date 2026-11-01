@@ -17,24 +17,51 @@ import {APP_IDS, observationSchema} from './observation'
 const NOW = new Date('2026-11-01T23:00:00.000Z')
 const TOKEN = 'ghs_test_token_must_never_leak'
 
+interface DeploymentFixture {
+  id: number
+  ref: string
+  created_at: string
+}
+
+interface StatusFixture {
+  id: number
+  state: string
+  created_at: string
+}
+
+/** One deployment's status history; its id is replaced per app so concurrent reads stay separate. */
 interface Sequence {
-  deployments: {id: number; environment: string; created_at: string}[]
-  statuses: {id: number; state: string; created_at: string}[]
+  deployments: DeploymentFixture[]
+  statuses: StatusFixture[]
+}
+
+/** Several deployments with their own histories, newest first, as the API lists them. */
+interface History {
+  deployments: DeploymentFixture[]
+  statusesByDeployment: Record<string, StatusFixture[]>
+}
+
+function readFixture(name: string): unknown {
+  return JSON.parse(readFileSync(join(import.meta.dir, '__fixtures__', `deployments-${name}.json`), 'utf8'))
 }
 
 function fixture(name: string): Sequence {
-  return JSON.parse(readFileSync(join(import.meta.dir, '__fixtures__', `deployments-${name}.json`), 'utf8')) as Sequence
+  return readFixture(name) as Sequence
+}
+
+function historyFixture(name: string): History {
+  return readFixture(name) as History
 }
 
 /** A synthetic sequence for a state the live repo has no current example of. */
 function sequenceOf(state: string, createdAt = '2026-11-01T22:00:00Z'): Sequence {
   return {
-    deployments: [{id: 1, environment: 'x', created_at: '2026-11-01T21:59:00Z'}],
+    deployments: [{id: 1, ref: 'main', created_at: '2026-11-01T21:59:00Z'}],
     statuses: [{id: 10, state, created_at: createdAt}],
   }
 }
 
-type Route = Sequence | {listStatus: number} | {statusesStatus: number} | {throws: true} | {listBody: unknown}
+type Route = Sequence | History | {listStatus: number} | {statusesStatus: number} | {throws: true} | {listBody: unknown}
 
 interface Call {
   url: URL
@@ -42,13 +69,13 @@ interface Call {
 }
 
 /**
- * The statuses route has no `environment` parameter, so the fake resolves the app from the deployment id the
- * list route handed out. Using one fixed id per app keeps that lookup exact when apps run concurrently.
+ * The statuses route has no `environment` parameter, so the fake records which statuses each listed
+ * deployment id owns. A `Sequence` gets one fixed id per app, which keeps lookups exact when apps run
+ * concurrently; a `History` keeps its real ids. The list route honours the `ref` filter, like the API.
  */
 function fakeGitHubByApp(routes: Partial<Record<AppId, Route>>, fallback: Route = fixture('broker-success')) {
   const calls: Call[] = []
-  const idToApp = new Map<number, AppId>()
-  APP_IDS.forEach((app, index) => idToApp.set(1000 + index, app))
+  const statusesById = new Map<number, Response | StatusFixture[]>()
   const idOf = (app: AppId) => 1000 + APP_IDS.indexOf(app)
 
   const fetchFn = async (input: string, init?: RequestInit): Promise<Response> => {
@@ -62,19 +89,33 @@ function fakeGitHubByApp(routes: Partial<Record<AppId, Route>>, fallback: Route 
       if ('throws' in route) throw new TypeError('connect ECONNREFUSED')
       if ('listStatus' in route) return new Response('{"message":"nope"}', {status: route.listStatus})
       if ('listBody' in route) return Response.json(route.listBody)
+
       // A `statusesStatus` route still has a deployment to list; only its status read fails.
-      const deployments = 'deployments' in route ? route.deployments : fixture('broker-success').deployments
-      return Response.json(deployments.slice(0, perPage).map(d => ({...d, id: idOf(app), environment: app})))
+      const base = 'deployments' in route ? route : fixture('broker-success')
+      const ref = url.searchParams.get('ref')
+      let listed = base.deployments
+      if ('statusesByDeployment' in base) {
+        for (const deployment of base.deployments) {
+          statusesById.set(deployment.id, base.statusesByDeployment[String(deployment.id)] ?? [])
+        }
+      } else {
+        listed = base.deployments.map(deployment => ({...deployment, id: idOf(app)}))
+        statusesById.set(
+          idOf(app),
+          'statusesStatus' in route ? new Response(null, {status: route.statusesStatus}) : base.statuses,
+        )
+      }
+      listed = listed.filter(deployment => ref === null || deployment.ref === ref)
+
+      return Response.json(listed.slice(0, perPage))
     }
 
     const statusMatch = /^\/repos\/marcusrbrown\/infra\/deployments\/(\d+)\/statuses$/.exec(url.pathname)
     if (statusMatch !== null) {
-      const app = idToApp.get(Number(statusMatch[1]))
-      if (app === undefined) return new Response('unknown deployment', {status: 404})
-      const route = routes[app] ?? fallback
-      if ('statusesStatus' in route) return new Response('{"message":"forbidden"}', {status: route.statusesStatus})
-      if (!('statuses' in route)) return Response.json([])
-      return Response.json(route.statuses.slice(0, perPage))
+      const statuses = statusesById.get(Number(statusMatch[1]))
+      if (statuses === undefined) return new Response('unknown deployment', {status: 404})
+      if (statuses instanceof Response) return new Response('{"message":"forbidden"}', {status: statuses.status})
+      return Response.json(statuses.slice(0, perPage))
     }
 
     return new Response('unexpected', {status: 404})
@@ -141,12 +182,13 @@ describe('readDeployStates', () => {
     }
   })
 
-  it('asks for exactly the newest deployment and the newest status', async () => {
+  it('asks for exactly the newest main deployment and the newest status', async () => {
     const {calls} = await readOne('gateway', fixture('broker-success'))
     const own = calls.filter(call => call.url.searchParams.get('environment') === 'gateway')
 
     expect(own).toHaveLength(1)
     expect(own[0]?.url.pathname).toBe('/repos/marcusrbrown/infra/deployments')
+    expect(own[0]?.url.searchParams.get('ref')).toBe('main')
     expect(own[0]?.url.searchParams.get('per_page')).toBe('1')
     const statusCalls = calls.filter(call => call.url.pathname.endsWith('/statuses'))
     expect(statusCalls.every(call => call.url.searchParams.get('per_page') === '1')).toBe(true)
@@ -168,10 +210,49 @@ describe('readDeployStates', () => {
       expect(observation?.result === 'fail' && observation.detail).toEqual({since: '2026-10-08T05:42:41Z'})
     })
 
-    it('reads the recorded keeweb failure sequence (waiting, failure) as fail', async () => {
-      const {observation} = await readOne('keeweb', fixture('keeweb-failure'))
+    it('reads a failure on main as fail', async () => {
+      const {observation} = await readOne('keeweb', sequenceOf('failure'))
 
-      expect(observation?.result).toBe('fail')
+      expect(observation).toMatchObject({result: 'fail', detail: {since: '2026-11-01T22:00:00Z'}})
+    })
+  })
+
+  describe('only main deployments count', () => {
+    it('ignores a rejected branch deployment that is the newest overall (recorded keeweb case)', async () => {
+      const history = historyFixture('keeweb-branch-rejected')
+      // The real newest deployment is a rejected branch dispatch; the unfiltered read would be `fail`.
+      expect(history.deployments[0]?.ref).toBe('feat/deploy-gate-notify')
+      expect(history.statusesByDeployment[String(history.deployments[0]?.id)]?.[0]?.state).toBe('failure')
+
+      const {observation, calls} = await readOne('keeweb', history)
+
+      expect(observation).toEqual({
+        id: 'deploy-state',
+        kind: 'deploy-state',
+        source: 'github-api',
+        result: 'pass',
+        observedAt: NOW.toISOString(),
+        detail: {since: '2026-04-14T01:48:21Z'},
+      })
+      expect(calls.filter(call => call.url.searchParams.get('environment') === 'keeweb')).toHaveLength(1)
+      expect(calls.some(call => call.url.pathname.includes('/deployments/4359044301/statuses'))).toBe(true)
+      expect(calls.some(call => call.url.pathname.includes('/deployments/6927872427/'))).toBe(false)
+    })
+
+    it('keeps the call budget with the ref filter', async () => {
+      const {calls} = await readOne('keeweb', historyFixture('keeweb-branch-rejected'))
+
+      expect(calls).toHaveLength(DEPLOY_STATE_CALL_BUDGET)
+    })
+
+    it.each([
+      ['a deployment from another ref', [{id: 1, ref: 'feat/x'}]],
+      ['a deployment without a ref', [{id: 1}]],
+    ])('reads %s, returned despite the filter, as unknown / api-error', async (_label, listBody) => {
+      const {observation, observations} = await readOne('keeweb', {listBody})
+
+      expect(observation).toMatchObject({result: 'unknown', detail: {reason: 'api-error'}})
+      expect(observations.broker.result).toBe('pass')
     })
   })
 

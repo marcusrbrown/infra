@@ -9,7 +9,7 @@ import {APP_IDS} from './observation'
 /**
  * Deploy state from the GitHub Deployments API: one environment per app, named after the app.
  *
- * Each app costs two calls: the newest deployment, then that deployment's newest status. The read never
+ * Each app costs two calls: the newest `main` deployment, then that deployment's newest status. The read never
  * walks history, so an `inactive` newest status is reported as such (see `mapDeploymentState`).
  *
  * `observedAt` is the read time. When the observed state began (the status `created_at`) is kept apart in
@@ -17,13 +17,18 @@ import {APP_IDS} from './observation'
  */
 
 export const DEPLOY_STATE_ID = 'deploy-state'
+/**
+ * Only deployments of `main` count. A branch dispatch that the environment's branch policy rejects creates a
+ * deployment that ends in `failure` without ever touching the live app, so it must not read as the app's state.
+ */
+export const DEPLOY_STATE_REF = 'main'
 export const DEPLOY_STATE_CALLS_PER_APP = 2
 /** Hard ceiling on GitHub API calls for one `readDeployStates`: 2 per app, 14 for 7 apps. */
 export const DEPLOY_STATE_CALL_BUDGET = APP_IDS.length * DEPLOY_STATE_CALLS_PER_APP
 
 const SPEC = {id: DEPLOY_STATE_ID, kind: 'deploy-state', source: 'github-api'} as const
 
-const deploymentListSchema = z.array(z.object({id: z.number().int().positive()}))
+const deploymentListSchema = z.array(z.object({id: z.number().int().positive(), ref: z.string()}))
 const statusListSchema = z.array(z.object({state: z.string().min(1).max(32), created_at: z.iso.datetime()}))
 
 export type DeployStateMapping = {result: 'pass' | 'fail'} | {result: 'unknown'; reason: string}
@@ -66,13 +71,15 @@ async function readAppDeployState(app: AppId, fetchFn: FetchLike, token: string,
   const deployments = await githubGetJson(
     fetchFn,
     token,
-    `/repos/${GITHUB_REPOSITORY}/deployments?environment=${encodeURIComponent(app)}&per_page=1`,
+    `/repos/${GITHUB_REPOSITORY}/deployments?environment=${encodeURIComponent(app)}&ref=${DEPLOY_STATE_REF}&per_page=1`,
     deploymentListSchema,
   )
   if (!deployments.ok) return apiError(now)
 
   const newest = deployments.data[0]
   if (newest === undefined) return notMeasured(SPEC, 'none')
+  // The `ref` filter is a request, not a guarantee: re-check it, and fail closed on anything else.
+  if (newest.ref !== DEPLOY_STATE_REF) return apiError(now)
 
   const statuses = await githubGetJson(
     fetchFn,

@@ -1284,6 +1284,39 @@ describe('getGatewayStatusSummary — observations and facts', () => {
     expect(noLimitCollection.facts.workspace).toMatchObject({limitBytes: 0, opencode: 'skipped'})
   })
 
+  it.each([
+    ['ready', {readyz: '{"ready":true,"opencode":"ready"}'}, 'pass', undefined],
+    ['starting', {readyz: '{"ready":false,"opencode":"starting"}'}, 'unknown', 'supervisor-starting'],
+    ['an empty supervisor body (unknown)', {readyz: ''}, 'unknown', 'supervisor-unknown'],
+    ['degraded', {readyz: DEGRADED_BODY}, 'fail', 'supervisor-degraded'],
+    ['down', {readyz: '{"ready":false,"opencode":"down"}'}, 'fail', 'supervisor-down'],
+    ['skipped near the limit', {readyzSkipped: true}, 'fail', 'near-limit'],
+    ['an OOM kill with a ready supervisor', {oomKill: 1}, 'fail', 'oom-kill'],
+    ['OOMKilled with a ready supervisor', {oomKilled: true}, 'fail', 'oom-kill'],
+  ] as const)('maps the supervisor state %s to the resource observation', async (_label, probe, expected, reason) => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout(probe)),
+    )
+
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
+    const resource = collection.observations.find(entry => entry.id === 'workspace-memory')
+
+    expect(resource?.result).toBe(expected)
+    expect(resource?.detail).toEqual(reason === undefined ? undefined : {reason})
+  })
+
+  it('does not call a skipped probe near-limit when the workspace has no memory limit', async () => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({memory: 0, readyzSkipped: true})),
+    )
+
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(collection.observations.find(entry => entry.id === 'workspace-memory')?.result).toBe('pass')
+  })
+
   it('makes the resource check unknown and keeps compose results when the extra call fails', async () => {
     const {spawn} = makeRouter(
       () => proc(composeJson),

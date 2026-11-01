@@ -81,7 +81,11 @@ export function declaredObservation(app: AppId, id: string): DeclaredObservation
 export type ProbeOutcome = {kind: 'ok'; observation: Observation} | {kind: 'failed'} | {kind: 'none'}
 
 export type CollectorOutcome =
-  {kind: 'ok'; collection: AppCollection} | {kind: 'missing-config'} | {kind: 'failed'} | {kind: 'none'}
+  | {kind: 'ok'; collection: AppCollection}
+  | {kind: 'missing-config'}
+  | {kind: 'failed'}
+  | {kind: 'timeout'}
+  | {kind: 'none'}
 
 function unknown(declared: DeclaredObservation, reason: string, now: Date): Observation {
   return observe(declared, 'unknown', {detail: {reason}, now})
@@ -103,6 +107,7 @@ function resolveObservation(
     case 'collector':
       if (collector.kind === 'missing-config') return notMeasured(declared, 'missing-config')
       if (collector.kind === 'failed') return unknown(declared, 'check-failed', now)
+      if (collector.kind === 'timeout') return unknown(declared, 'timeout', now)
       if (collector.kind === 'none') return unknown(declared, 'missing-result', now)
       return (
         collector.collection.observations.find(observation => observation.id === declared.id) ??

@@ -1,6 +1,6 @@
 import type {StatusEnvelope} from '../status/observation'
 import type {SpawnFn} from './gateway/status'
-import {describe, expect, it} from 'bun:test'
+import {afterEach, describe, expect, it, spyOn} from 'bun:test'
 import {goke} from 'goke'
 import {createCapturedCtx} from '../lib/mcp-ctx-fixture'
 import {STATUS_SCHEMA_VERSION, statusEnvelopeSchema} from '../status/observation'
@@ -203,7 +203,7 @@ describe('top-level status --json (typed contract)', () => {
     expect(observation(envelope, 'umami', 'compose-services').result).toBe('pass')
   })
 
-  it('makes only the gateway collector observations unknown when it rejects, and still writes the stderr line', async () => {
+  it('makes only the gateway collector observations unknown when it rejects, without writing to stderr', async () => {
     const baseline = (await runJson()).envelope
     const {envelope, captured} = await runJson({
       getGatewayStatusSummary: async () => {
@@ -225,7 +225,7 @@ describe('top-level status --json (typed contract)', () => {
     for (const app of APPS.filter(name => name !== 'gateway')) {
       expect(appOf(envelope, app)).toEqual(appOf(baseline, app))
     }
-    expect(captured.stderr).toEqual(['gateway status check failed: Gateway exploded'])
+    expect(captured.stderr).toEqual([])
     expect(captured.stdout).toHaveLength(1)
     expect(captured.exit).toBeNull()
   })
@@ -240,7 +240,7 @@ describe('top-level status --json (typed contract)', () => {
     expect(appOf(envelope, 'keeweb').facts).toEqual({})
     expect(observation(envelope, 'keeweb', 'public-reachability').result).toBe('pass')
     expect(appOf(envelope, 'cliproxy').facts).toMatchObject({runningVersion: 'v1.2.3'})
-    expect(captured.stderr).toEqual(['keeweb status check failed: Keeweb exploded'])
+    expect(captured.stderr).toEqual([])
   })
 
   it('makes the public reachability unknown when its probe rejects, and keeps the collector observations', async () => {
@@ -259,7 +259,7 @@ describe('top-level status --json (typed contract)', () => {
       detail: {reason: 'check-failed'},
     })
     expect(observation(envelope, 'dashboard', 'compose-services').result).toBe('pass')
-    expect(captured.stderr).toEqual(['dashboard status check failed: probe exploded'])
+    expect(captured.stderr).toEqual([])
   })
 
   it('reports the ssh observations as not measured from config when GATEWAY_HOST is unset, and still probes', async () => {
@@ -357,6 +357,124 @@ describe('top-level status --json (typed contract)', () => {
     })
   })
 
+  it('marks only a hung collector unknown with reason timeout, and still prints within the deadline', async () => {
+    const baseline = (await runJson()).envelope
+    const started = performance.now()
+    const {envelope, captured} = await runJson({
+      collectorDeadlineMs: 25,
+      getUmamiStatusSummary: () => new Promise(() => undefined),
+    })
+
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(observation(envelope, 'umami', 'compose-services')).toMatchObject({
+      result: 'unknown',
+      source: 'ssh',
+      observedAt: FIXED_NOW.toISOString(),
+      detail: {reason: 'timeout'},
+    })
+    expect(observation(envelope, 'umami', 'public-reachability').result).toBe('pass')
+    expect(observation(envelope, 'umami', 'deploy-state').result).toBe('not_measured')
+    expect(appOf(envelope, 'umami').facts).toEqual({})
+    for (const app of APPS.filter(name => name !== 'umami')) {
+      expect(appOf(envelope, app)).toEqual(appOf(baseline, app))
+    }
+    expect(captured.stderr).toEqual([])
+    expect(captured.exit).toBeNull()
+  })
+
+  it('times out every hung collector independently', async () => {
+    const hang = () => new Promise<never>(() => undefined)
+    const {envelope} = await runJson({
+      collectorDeadlineMs: 25,
+      getGatewayStatusSummary: hang,
+      getVpnStatusSummary: hang,
+    })
+
+    expect(observation(envelope, 'gateway', 'workspace-memory').detail).toEqual({reason: 'timeout'})
+    expect(observation(envelope, 'vpn', 'wireguard-interface').detail).toEqual({reason: 'timeout'})
+    expect(observation(envelope, 'dashboard', 'compose-services').result).toBe('pass')
+  })
+
+  it('does not apply the collector deadline to the public probe', async () => {
+    const {envelope} = await runJson({
+      collectorDeadlineMs: 10,
+      publicProbes: {
+        ...makeStatusDependencies().publicProbes,
+        umami: async () => {
+          await Bun.sleep(60)
+          return probeObservation()
+        },
+      },
+    })
+
+    expect(observation(envelope, 'umami', 'public-reachability').result).toBe('pass')
+  })
+
+  it('ignores a collector that rejects after its deadline', async () => {
+    const {envelope} = await runJson({
+      collectorDeadlineMs: 10,
+      getUmamiStatusSummary: async () => {
+        await Bun.sleep(40)
+        throw new Error('late failure')
+      },
+    })
+    await Bun.sleep(80)
+
+    expect(observation(envelope, 'umami', 'compose-services').detail).toEqual({reason: 'timeout'})
+  })
+
+  it('probes the broker at BROKER_DOMAIN, adding https when it has no scheme', async () => {
+    for (const [domain, expected] of [
+      ['broker.example.com', 'https://broker.example.com'],
+      ['https://broker.example.com', 'https://broker.example.com'],
+    ] as const) {
+      const seen: (string | undefined)[] = []
+      const {ctx} = createCapturedCtx()
+      await withStatusEnv(async () => {
+        process.env.BROKER_DOMAIN = domain
+        await unifiedStatusAction(
+          {json: true},
+          ctx,
+          makeStatusDependencies({
+            publicProbes: {
+              broker: async options => {
+                seen.push(options?.baseUrl)
+                return probeObservation()
+              },
+            },
+          }),
+        )
+      })
+
+      expect(seen).toEqual([expected])
+    }
+  })
+
+  it('probes the broker at the default origin when BROKER_DOMAIN is unset or empty, ignoring BROKER_HOST', async () => {
+    for (const domain of [undefined, '']) {
+      const seen: (string | undefined)[] = []
+      const {ctx} = createCapturedCtx()
+      await withStatusEnv(async () => {
+        process.env.BROKER_HOST = '203.0.113.7'
+        if (domain !== undefined) process.env.BROKER_DOMAIN = domain
+        await unifiedStatusAction(
+          {json: true},
+          ctx,
+          makeStatusDependencies({
+            publicProbes: {
+              broker: async options => {
+                seen.push(options?.baseUrl)
+                return probeObservation()
+              },
+            },
+          }),
+        )
+      })
+
+      expect(seen).toEqual([undefined])
+    }
+  })
+
   it('exits 0 even when every observation fails', async () => {
     const failing = async () => {
       throw new Error('down')
@@ -379,7 +497,7 @@ describe('top-level status --json (typed contract)', () => {
     )
 
     expect(captured.exit).toBeNull()
-    expect(captured.stderr).toHaveLength(6)
+    expect(captured.stderr).toEqual([])
     expect(statusEnvelopeSchema.safeParse(JSON.parse(captured.stdout[0] ?? '')).success).toBe(true)
   })
 })
@@ -421,6 +539,30 @@ describe('top-level status table (rendered from observations)', () => {
     expect(lines).toContain('| dashboard | ✅ pass | ❓ unknown | ⚪ not measured | — | — |')
     expect(lines).toContain('| keeweb | ✅ pass | — | ⚪ not measured | — | — |')
     expect(captured.stderr).toEqual(['dashboard status check failed: Dashboard exploded'])
+  })
+
+  it('reports a timed-out collector on stderr in table mode and keeps the other rows', async () => {
+    const captured = await runTable({
+      collectorDeadlineMs: 25,
+      getVpnStatusSummary: () => new Promise(() => undefined),
+    })
+
+    expect(captured.stdout).toContain('| vpn | ⚪ not measured | ❓ unknown | ⚪ not measured | ⚪ not measured | — |')
+    expect(captured.stdout).toContain('| keeweb | ✅ pass | — | ⚪ not measured | — | — |')
+    expect(captured.stderr).toEqual(['vpn status check timed out after 25ms'])
+  })
+
+  it('keeps stderr lines for rejected probes in table mode', async () => {
+    const captured = await runTable({
+      publicProbes: {
+        ...makeStatusDependencies().publicProbes,
+        dashboard: async () => {
+          throw new Error('probe exploded')
+        },
+      },
+    })
+
+    expect(captured.stderr).toEqual(['dashboard status check failed: probe exploded'])
   })
 
   it('has the same number of cells in every row and never prints the structured workspace', async () => {
@@ -546,5 +688,109 @@ describe('top-level status command (registerStatus wiring)', () => {
 
     // Verify the command runs without throwing (goke uses its own ctx for output)
     await expect(cli.runMatchedCommand()).resolves.toBeUndefined()
+  })
+})
+
+function sshHost(cmd: string[]): string | undefined {
+  return cmd.find(arg => /^(?:root|ubuntu)@/.test(arg))?.split('@')[1]
+}
+
+describe('top-level status with the real default dependencies (production wiring)', () => {
+  const originalFetch = globalThis.fetch
+  let spawnSpy: ReturnType<typeof spyOn<typeof Bun, 'spawn'>> | undefined
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    spawnSpy?.mockRestore()
+    spawnSpy = undefined
+  })
+
+  const composeNdjson = (...names: string[]) =>
+    names.map(name => JSON.stringify({Name: name, State: 'running', Health: 'healthy'})).join('\n')
+
+  function remoteStdout(cmd: string[]): string {
+    if (cmd[0] === 'gh') return JSON.stringify([{createdAt: '2026-10-30T09:00:00Z', url: 'https://example.com/run/1'}])
+
+    const command = cmd.at(-1) ?? ''
+    switch (sshHost(cmd)) {
+      case 'cliproxy.fro.bot':
+        return 'eceasy/cli-proxy-api:v7.2.139\npostgres:16\n'
+      case 'gateway.example.com':
+        return command.includes('ps --format json')
+          ? JSON.stringify([
+              {Name: 'gateway', State: 'running', Health: 'healthy'},
+              {Name: 'workspace', State: 'running', Health: ''},
+            ])
+          : workspaceStdout()
+      case 'umami.example.com':
+        return composeNdjson('umami', 'db')
+      case 'dashboard.example.com':
+        return composeNdjson('dashboard')
+      case 'vpn.example.com':
+        return 'interface: wg0\n  public key: SERVERKEY==\n  listening port: 51820\n\npeer: PEER1==\n  allowed ips: 10.8.0.2/32\n'
+      default:
+        return ''
+    }
+  }
+
+  function fakeFetch(): typeof fetch {
+    const responses: Record<string, () => Response> = {
+      'https://kw.igg.ms/': () => new Response('<html>KeeWeb</html>', {status: 200}),
+      'https://cliproxy.fro.bot/healthz': () => Response.json({status: 'ok'}),
+      'https://broker.fro.bot/healthz': () => Response.json({status: 'ok'}),
+      'https://metrics.fro.bot/api/heartbeat': () => Response.json({ok: true}),
+      'https://dashboard.fro.bot/api/healthz': () => Response.json({status: 'ok'}),
+      'https://dashboard.fro.bot/operator/health': () => Response.json({contractVersion: '2.4.0'}),
+    }
+
+    return Object.assign(
+      async (input: string | URL | Request) => {
+        const handler = responses[String(input)]
+        return handler === undefined ? new Response('not found', {status: 404}) : handler()
+      },
+      {preconnect: originalFetch.preconnect},
+    )
+  }
+
+  it('builds a valid envelope from mocked fetch and ssh output', async () => {
+    globalThis.fetch = fakeFetch()
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((cmd: string[]) =>
+      proc(remoteStdout(cmd))) as unknown as typeof Bun.spawn)
+    const {ctx, captured} = createCapturedCtx()
+    const savedKey = process.env.CLIPROXY_MANAGEMENT_KEY
+
+    try {
+      await withStatusEnv(async () => {
+        process.env.CLIPROXY_MANAGEMENT_KEY = ''
+        await unifiedStatusAction({json: true}, ctx)
+      })
+    } finally {
+      if (savedKey === undefined) delete process.env.CLIPROXY_MANAGEMENT_KEY
+      else process.env.CLIPROXY_MANAGEMENT_KEY = savedKey
+    }
+
+    expect(captured.stderr).toEqual([])
+    expect(captured.stdout).toHaveLength(1)
+    const envelope = statusEnvelopeSchema.parse(JSON.parse(captured.stdout[0] ?? ''))
+
+    expect(envelope.apps.map(entry => entry.app)).toEqual([...APPS])
+    expect(observation(envelope, 'gateway', 'public-reachability')).toMatchObject({
+      result: 'pass',
+      source: 'http',
+      detail: {statusCode: 200, contractVersion: '2.4.0'},
+    })
+    expect(observation(envelope, 'gateway', 'compose-services')).toMatchObject({result: 'pass', source: 'ssh'})
+    expect(observation(envelope, 'gateway', 'workspace-memory').result).toBe('pass')
+    expect(observation(envelope, 'broker', 'public-reachability')).toMatchObject({
+      result: 'pass',
+      source: 'http',
+      detail: {statusCode: 200},
+    })
+    expect(observation(envelope, 'umami', 'public-reachability').result).toBe('pass')
+    expect(observation(envelope, 'vpn', 'wireguard-interface').result).toBe('pass')
+    expect(appOf(envelope, 'gateway').facts.workspace).toMatchObject({status: 'ok', limitBytes: LIMIT_BYTES})
+    expect(appOf(envelope, 'cliproxy').facts).toMatchObject({runningVersion: 'v7.2.139', managementAccess: 'no-key'})
+    expect(appOf(envelope, 'keeweb').facts.lastDeploy).toBe('2026-10-30T09:00:00Z')
+    expect(appOf(envelope, 'vpn').facts).toEqual({peerCount: 1, serverPublicKey: 'SERVERKEY=='})
   })
 })

@@ -90,11 +90,20 @@ export function makeStatusDependencies(overrides: Partial<StatusDependencies> = 
     getVpnStatusSummary: async () => healthyVpn,
     publicProbes,
     now: () => FIXED_NOW,
+    collectorDeadlineMs: 5000,
     ...overrides,
   }
 }
 
-export const STATUS_ENV_KEYS = ['GATEWAY_HOST', 'UMAMI_DOMAIN', 'DASHBOARD_DOMAIN', 'VPN_HOST', 'CLIPROXY_URL'] as const
+export const STATUS_ENV_KEYS = [
+  'GATEWAY_HOST',
+  'UMAMI_DOMAIN',
+  'DASHBOARD_DOMAIN',
+  'VPN_HOST',
+  'CLIPROXY_URL',
+  'BROKER_DOMAIN',
+  'BROKER_HOST',
+] as const
 
 /** Set every host variable the unified status command reads so host-keyed collectors run. */
 export function withStatusEnv<T>(run: () => Promise<T>): Promise<T> {
@@ -104,6 +113,8 @@ export function withStatusEnv<T>(run: () => Promise<T>): Promise<T> {
   process.env.DASHBOARD_DOMAIN = 'dashboard.example.com'
   process.env.VPN_HOST = 'vpn.example.com'
   delete process.env.CLIPROXY_URL
+  delete process.env.BROKER_DOMAIN
+  delete process.env.BROKER_HOST
 
   return run().finally(() => {
     for (const [key, value] of saved) {

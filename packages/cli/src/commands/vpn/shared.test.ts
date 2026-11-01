@@ -110,7 +110,7 @@ function makeSpawnOk(output: string): SpawnFn {
   }
 }
 
-function makeSpawnError(message: string): SpawnFn {
+function makeSpawnExit(exitCode: number, message: string): SpawnFn {
   return (_cmd, _opts) => {
     const encoder = new TextEncoder()
     return {
@@ -125,7 +125,7 @@ function makeSpawnError(message: string): SpawnFn {
           controller.close()
         },
       }),
-      exited: Promise.resolve(1),
+      exited: Promise.resolve(exitCode),
     }
   }
 }
@@ -169,12 +169,33 @@ describe('getVpnStatusSummary', () => {
     expect(collection.facts).toEqual({})
   })
 
-  it('makes the observation unknown, without stderr text, when SSH fails', async () => {
-    const collection = await getVpnStatusSummary('1.2.3.4', makeSpawnError('Connection refused'))
+  it('makes the observation unknown, without stderr text, when SSH itself fails (exit 255)', async () => {
+    const collection = await getVpnStatusSummary('1.2.3.4', makeSpawnExit(255, 'ssh: Connection refused'))
 
     expect(collection.observations[0]).toMatchObject({result: 'unknown', detail: {reason: 'ssh-failed'}})
     expect(JSON.stringify(collection)).not.toContain('refused')
     expect(JSON.stringify(collection)).not.toContain('1.2.3.4')
+  })
+
+  it('fails the observation when wg show exits nonzero over a working SSH session', async () => {
+    const collection = await getVpnStatusSummary(
+      '1.2.3.4',
+      makeSpawnExit(1, 'Unable to access interface: No such device'),
+    )
+
+    expect(collection.observations[0]).toMatchObject({result: 'fail', detail: {reason: 'interface-down'}})
+    expect(collection.facts).toEqual({})
+    expect(JSON.stringify(collection)).not.toContain('No such device')
+  })
+
+  it('exposes the exit code on a failed getVpnWgStatus without changing its error text', async () => {
+    const {getVpnWgStatus} = await import('./shared')
+
+    const ssh = await getVpnWgStatus('1.2.3.4', makeSpawnExit(255, 'Connection refused'))
+    const wg = await getVpnWgStatus('1.2.3.4', makeSpawnExit(1, 'No such device'))
+
+    expect(ssh).toEqual({ok: false, error: 'SSH command failed (exit 255): Connection refused', exitCode: 255})
+    expect(wg).toEqual({ok: false, error: 'SSH command failed (exit 1): No such device', exitCode: 1})
   })
 
   it('rejects an invalid host before spawning SSH', async () => {

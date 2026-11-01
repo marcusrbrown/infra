@@ -244,19 +244,29 @@ export async function getGatewayWorkspaceStatus(
 // ─── Unified status aggregator export ────────────────────────────────────────
 
 /**
- * Memory and OOM evidence from the workspace probe: `fail` on any kernel OOM kill or a supervisor that is
- * down or degraded, `unknown` when the probe gave no usable answer. The full block is in `facts.workspace`.
+ * Memory and OOM evidence from the workspace probe: `fail` on any kernel OOM kill, a supervisor that is down
+ * or degraded, or a probe skipped near the limit; `unknown` when the supervisor is starting or the probe gave
+ * no usable answer. The full block is in `facts.workspace`.
  */
 function workspaceObservation(workspace: WorkspaceMemoryStatus): Observation {
   const spec = declaredObservation('gateway', 'workspace-memory')
 
   if (workspace.status === 'unknown') return observe(spec, 'unknown', {detail: {reason: 'probe-failed'}})
   if (workspace.oomKilled || workspace.oomKills > 0) return observe(spec, 'fail', {detail: {reason: 'oom-kill'}})
-  if (workspace.opencode === 'down' || workspace.opencode === 'degraded') {
-    return observe(spec, 'fail', {detail: {reason: `supervisor-${workspace.opencode}`}})
+  switch (workspace.opencode) {
+    case 'ready':
+      return observe(spec, 'pass')
+    case 'down':
+    case 'degraded':
+      return observe(spec, 'fail', {detail: {reason: `supervisor-${workspace.opencode}`}})
+    case 'skipped':
+      // With a limit, a skipped probe means usage was within the probe headroom of it. With no limit there is
+      // nothing to be near, so the memory evidence stands.
+      return workspace.limitBytes > 0 ? observe(spec, 'fail', {detail: {reason: 'near-limit'}}) : observe(spec, 'pass')
+    case 'starting':
+    case 'unknown':
+      return observe(spec, 'unknown', {detail: {reason: `supervisor-${workspace.opencode}`}})
   }
-
-  return observe(spec, 'pass')
 }
 
 export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Promise<AppCollection> {

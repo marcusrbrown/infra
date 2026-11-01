@@ -314,22 +314,26 @@ describe('status MCP tool (Tier-1, in-process call)', () => {
     }
   })
 
-  test('keeps a collector failure on a separate stderr block, so the JSON block still parses', async () => {
-    const client = await connectStatusClient({
+  test('reports a collector failure inside the JSON: one block, equal to the CLI stdout, nothing on stderr', async () => {
+    const failing = {
       getGatewayStatusSummary: async () => {
         throw new Error('Gateway exploded')
       },
-    })
+    }
+    const client = await connectStatusClient(failing)
     try {
       const result = await withStatusEnv(() => client.callTool({name: 'status', arguments: {json: true}}))
+      const cli = createCapturedCtx()
+      await withStatusEnv(() => unifiedStatusAction({json: true}, cli.ctx, makeStatusDependencies(failing)))
 
       const blocks = textBlocks(result)
-      expect(blocks).toHaveLength(2)
-      const [json = '', stderr = ''] = blocks
+      expect(blocks).toHaveLength(1)
+      const [json = ''] = blocks
       const envelope = statusEnvelopeSchema.parse(JSON.parse(json))
       expect(envelope.apps.find(entry => entry.app === 'gateway')?.observations[1]?.result).toBe('unknown')
-      expect(json).not.toContain('status check failed')
-      expect(stderr).toContain('gateway status check failed: Gateway exploded')
+      expect(json.trimEnd()).toBe(cli.captured.stdout[0] ?? '')
+      expect(cli.captured.stderr).toEqual([])
+      expect(json).not.toContain('Gateway exploded')
     } finally {
       await client.close()
     }

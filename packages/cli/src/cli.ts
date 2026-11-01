@@ -39,6 +39,8 @@ cli.version(pkg.version)
 try {
   cli.parse(process.argv, {run: false})
   await cli.runMatchedCommand()
+  // A collector that hit its deadline may still own a live SSH child, which would keep the process running.
+  if (cli.matchedCommandName === 'status') process.exit(0)
 } catch (error) {
   if (error instanceof Error) {
     console.error(error.message)

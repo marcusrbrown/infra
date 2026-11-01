@@ -71,6 +71,8 @@ export interface VpnStatusResult {
   ok: boolean
   wgShow?: WgShowResult
   error?: string
+  /** Exit code of the SSH command when it ran and failed; 255 is SSH itself failing. */
+  exitCode?: number
 }
 
 /**
@@ -123,6 +125,7 @@ export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn
     return {
       ok: false,
       error: `SSH command failed (exit ${exitCode}): ${redacted}`,
+      exitCode,
     }
   }
 
@@ -133,12 +136,15 @@ export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
+const SSH_FAILURE_EXIT_CODE = 255
+
 /**
  * Get the VPN's WireGuard observation and facts for the unified status command.
  *
  * SSH + `wg show` only — never calls the Lightsail/AWS API.
  * The MCP runtime needs no AWS credentials to call this function.
- * An SSH failure is `unknown` (the interface could not be observed); a reachable box whose wg0 is down is `fail`.
+ * SSH exit 255 is `unknown` (the interface could not be observed). Any other nonzero exit from
+ * `sudo wg show wg0`, or output without an interface, means SSH worked and wg0 is down: `fail`.
  *
  * @param host - The VPN box hostname or IP (validated before SSH).
  * @param spawn - Injectable spawn function (defaults to Bun.spawn).
@@ -147,7 +153,7 @@ export async function getVpnStatusSummary(host: string, spawn?: SpawnFn): Promis
   const result = await getVpnWgStatus(host, spawn)
   const spec = declaredObservation('vpn', 'wireguard-interface')
 
-  if (result.error !== undefined) {
+  if (result.exitCode === SSH_FAILURE_EXIT_CODE) {
     return {observations: [observe(spec, 'unknown', {detail: {reason: 'ssh-failed'}})], facts: {}}
   }
 

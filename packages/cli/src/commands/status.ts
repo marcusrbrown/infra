@@ -39,9 +39,12 @@ export interface StatusDependencies {
   getVpnStatusSummary: (host: string) => Promise<AppCollection>
   publicProbes: PublicProbeMap
   now: () => Date
+  /** Per-app collector deadline in milliseconds; the public probes have their own timeouts. */
+  collectorDeadlineMs: number
 }
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
+export const COLLECTOR_DEADLINE_MS = 30_000
 
 const defaultDependencies: StatusDependencies = {
   getKeewebStatusSummary,
@@ -52,6 +55,7 @@ const defaultDependencies: StatusDependencies = {
   getVpnStatusSummary,
   publicProbes: PUBLIC_PROBES,
   now: () => new Date(),
+  collectorDeadlineMs: COLLECTOR_DEADLINE_MS,
 }
 
 const TABLE_COLUMNS: {kind: ObservationKind; label: string}[] = [
@@ -76,36 +80,68 @@ function stripTrailingSlash(value: string): string {
   return value.endsWith('/') ? value.slice(0, -1) : value
 }
 
+/** `BROKER_DOMAIN` is usually a bare hostname; a value with a scheme is used as given. */
+function brokerBaseUrl(domain: string | undefined): string | undefined {
+  const trimmed = domain?.trim() ?? ''
+  if (trimmed === '') return undefined
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+}
+
 function describeReason(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason)
 }
 
 type Collector = {kind: 'run'; run: () => Promise<AppCollection>} | {kind: 'missing-config'} | {kind: 'none'}
 
+const TIMED_OUT = Symbol('collector-timed-out')
+
 function hostCollector(host: string, run: (host: string) => Promise<AppCollection>): Collector {
   return host === '' ? {kind: 'missing-config'} : {kind: 'run', run: () => run(host)}
 }
 
+/**
+ * Race a collector against its deadline. A collector that settles later is ignored: nothing here can stop the
+ * work it started, so the CLI entry point exits explicitly after printing (see `cli.ts`).
+ */
+async function withDeadline(
+  run: () => Promise<AppCollection>,
+  deadlineMs: number,
+): Promise<AppCollection | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<typeof TIMED_OUT>(resolve => {
+    timer = setTimeout(() => resolve(TIMED_OUT), deadlineMs)
+  })
+  const work = run()
+  // A rejection after the deadline has no reader; keep it from surfacing as unhandled.
+  work.catch(() => undefined)
+
+  try {
+    return await Promise.race([work, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Failure detail goes to stderr only in table mode; in JSON mode it is already inside the observation. */
 async function collectApp(
   app: AppId,
   probe: (() => Promise<Observation>) | undefined,
   collector: Collector,
-  ctx: ActionCtx,
-  now: () => Date,
+  options: {ctx: ActionCtx; now: () => Date; deadlineMs: number; json: boolean},
 ): Promise<AppStatus> {
+  const {ctx, now, deadlineMs, json} = options
   const [probeResult, collectorResult] = await Promise.allSettled([
     probe === undefined ? Promise.resolve(undefined) : probe(),
-    collector.kind === 'run' ? collector.run() : Promise.resolve(undefined),
+    collector.kind === 'run' ? withDeadline(collector.run, deadlineMs) : Promise.resolve(undefined),
   ])
 
-  for (const result of [probeResult, collectorResult]) {
-    if (result.status === 'rejected') {
-      ctx.console.error(`${app} status check failed: ${describeReason(result.reason)}`)
-    }
+  const logFailure = (message: string): void => {
+    if (!json) ctx.console.error(`${app} ${message}`)
   }
 
   let probeOutcome: ProbeOutcome = {kind: 'none'}
   if (probeResult.status === 'rejected') {
+    logFailure(`status check failed: ${describeReason(probeResult.reason)}`)
     probeOutcome = {kind: 'failed'}
   } else if (probeResult.value !== undefined) {
     probeOutcome = {kind: 'ok', observation: probeResult.value}
@@ -113,7 +149,11 @@ async function collectApp(
 
   let collectorOutcome: CollectorOutcome = {kind: collector.kind === 'run' ? 'none' : collector.kind}
   if (collectorResult.status === 'rejected') {
+    logFailure(`status check failed: ${describeReason(collectorResult.reason)}`)
     collectorOutcome = {kind: 'failed'}
+  } else if (collectorResult.value === TIMED_OUT) {
+    logFailure(`status check timed out after ${deadlineMs}ms`)
+    collectorOutcome = {kind: 'timeout'}
   } else if (collectorResult.value !== undefined) {
     collectorOutcome = {kind: 'ok', collection: collectorResult.value}
   }
@@ -156,16 +196,29 @@ export async function unifiedStatusAction(
     broker: {kind: 'none'},
   }
 
+  // The cliproxy URL can be overridden for the SSH and management checks, so its probe follows it.
+  // BROKER_HOST is the SSH host or IP and would fail TLS, so only BROKER_DOMAIN selects the broker target.
+  const probeBaseUrls: Partial<Record<AppId, string>> = {
+    cliproxy: cliproxyBaseUrl,
+    broker: brokerBaseUrl(process.env.BROKER_DOMAIN),
+  }
+  const json = options.json === true
+
   const apps = await Promise.all(
     APP_IDS.map(app => {
       const probe = dependencies.publicProbes[app]
-      // The cliproxy URL can be overridden for the SSH and management checks, so the probe follows it.
-      const probeOptions: ProbeOptions | undefined = app === 'cliproxy' ? {baseUrl: cliproxyBaseUrl} : undefined
-      return collectApp(app, probe && (() => probe(probeOptions)), collectors[app], ctx, dependencies.now)
+      const baseUrl = probeBaseUrls[app]
+      const probeOptions: ProbeOptions | undefined = baseUrl === undefined ? undefined : {baseUrl}
+      return collectApp(app, probe && (() => probe(probeOptions)), collectors[app], {
+        ctx,
+        now: dependencies.now,
+        deadlineMs: dependencies.collectorDeadlineMs,
+        json,
+      })
     }),
   )
 
-  if (options.json === true) {
+  if (json) {
     const envelope: StatusEnvelope = {
       schemaVersion: STATUS_SCHEMA_VERSION,
       generatedAt: dependencies.now().toISOString(),

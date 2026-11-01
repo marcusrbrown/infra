@@ -522,12 +522,20 @@ export async function checkProviderAuth(
   return probe.human
 }
 
+export type ManagementAccess = 'ok' | 'no-key' | 'denied' | 'rate-limited' | 'unavailable'
+
+interface ManagementAuthFailure {
+  access: Exclude<ManagementAccess, 'ok' | 'no-key'>
+  result: CheckResult
+}
+
 /**
  * Probe the management API with a cheap auth check before issuing parallel calls.
- * Returns null on success, or a CheckResult describing the auth failure.
+ * Returns null on success, or the failure with its `managementAccess` class: 401/403 `denied`, 429
+ * `rate-limited`, anything else (5xx, other statuses, network errors) `unavailable`.
  * Never throws.
  */
-async function probeManagementAuth(baseUrl: string, key: string): Promise<CheckResult | null> {
+async function probeManagementAuth(baseUrl: string, key: string): Promise<ManagementAuthFailure | null> {
   const endpoint = `${baseUrl}/v0/management/config`
 
   try {
@@ -552,45 +560,60 @@ async function probeManagementAuth(baseUrl: string, key: string): Promise<CheckR
 
       if (isBanBody) {
         return {
-          title: 'Management access',
-          level: 'error',
-          summary: 'IP banned — stop retrying for ~30 min. Management checks skipped.',
+          access: 'denied',
+          result: {
+            title: 'Management access',
+            level: 'error',
+            summary: 'IP banned — stop retrying for ~30 min. Management checks skipped.',
+          },
         }
       }
 
       return {
-        title: 'Management access',
-        level: 'error',
-        summary: 'Management API returned HTTP 403. Management checks skipped.',
+        access: 'denied',
+        result: {
+          title: 'Management access',
+          level: 'error',
+          summary: 'Management API returned HTTP 403. Management checks skipped.',
+        },
       }
     }
 
     if (response.status === 401) {
       return {
-        title: 'Management access',
-        level: 'error',
-        summary: 'Management API returned HTTP 401 (invalid key). Management checks skipped.',
+        access: 'denied',
+        result: {
+          title: 'Management access',
+          level: 'error',
+          summary: 'Management API returned HTTP 401 (invalid key). Management checks skipped.',
+        },
       }
     }
 
     return {
-      title: 'Management access',
-      level: 'warning',
-      summary: `Management auth probe returned HTTP ${response.status}. Management checks skipped.`,
+      access: response.status === 429 ? 'rate-limited' : 'unavailable',
+      result: {
+        title: 'Management access',
+        level: 'warning',
+        summary: `Management auth probe returned HTTP ${response.status}. Management checks skipped.`,
+      },
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return {
-      title: 'Management access',
-      level: 'error',
-      summary: `Management auth probe failed: ${message}`,
+      access: 'unavailable',
+      result: {
+        title: 'Management access',
+        level: 'error',
+        summary: `Management auth probe failed: ${message}`,
+      },
     }
   }
 }
 
 type ManagementChecks =
   | {kind: 'no-key'}
-  | {kind: 'auth-failure'; result: CheckResult}
+  | {kind: 'auth-failure'; result: CheckResult; access: ManagementAuthFailure['access']}
   | {kind: 'checks'; usage: CheckResult; version: CheckResult}
 
 /**
@@ -604,7 +627,7 @@ async function runManagementChecks(baseUrl: string, key: string | undefined): Pr
 
   const authFailure = await probeManagementAuth(baseUrl, key)
   if (authFailure !== null) {
-    return {kind: 'auth-failure', result: authFailure}
+    return {kind: 'auth-failure', result: authFailure.result, access: authFailure.access}
   }
 
   const [usage, version] = await Promise.all([checkUsageStats(baseUrl, key), checkVersion(baseUrl, key)])
@@ -679,13 +702,13 @@ export async function getCliproxyStatusSummary(
     container = observe(spec, 'unknown', {detail: {reason: 'ssh-failed'}})
   }
 
-  let managementAccess: JsonValue = 'ok'
+  let managementAccess: ManagementAccess = 'ok'
   let latestVersion: string | null = null
   let usage: JsonValue = null
   if (mgmt.kind === 'no-key') {
     managementAccess = 'no-key'
   } else if (mgmt.kind === 'auth-failure') {
-    managementAccess = 'denied'
+    managementAccess = mgmt.access
   } else {
     latestVersion = mgmt.version.level === 'ok' ? mgmt.version.summary : null
     usage = parseUsageCounts(mgmt.usage)

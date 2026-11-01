@@ -3,8 +3,8 @@ import {z} from 'zod'
 /**
  * The typed status contract emitted by `status --json` (and read by the snapshot and the public site).
  *
- * The version is the literal integer 1 and readers reject anything else. It is versioned separately
- * from the CLI: bump it only when a reader written against this shape would misread new output.
+ * The version is the literal integer 1 and readers reject anything else. The schemas are strict, so any
+ * change to the shape bumps `schemaVersion`.
  *
  * Every observation says what it proves (`kind`), how it came out (`result`), when (`observedAt`) and
  * how it was measured (`source`). `unknown` means the check could not decide; `not_measured` means it

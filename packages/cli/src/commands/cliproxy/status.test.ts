@@ -710,6 +710,57 @@ describe('getCliproxyStatusSummary (typed collection)', () => {
     })
   })
 
+  it.each([
+    [401, 'denied'],
+    [403, 'denied'],
+    [429, 'rate-limited'],
+    [500, 'unavailable'],
+    [503, 'unavailable'],
+  ] as const)('maps a %d auth probe response to managementAccess %s', async (status, expected) => {
+    globalThis.fetch = managementFetch({status})
+
+    const collection = await getCliproxyStatusSummary(BASE, 'some-key', runningSpawn())
+
+    expect(collection.facts).toMatchObject({managementAccess: expected, latestVersion: null, usage: null})
+    expect(collection.observations[0]?.result).toBe('pass')
+  })
+
+  it('maps a 403 ip-ban body to denied', async () => {
+    globalThis.fetch = createFetchImplementation(async () => Response.json({error: 'IP banned'}, {status: 403}))
+
+    const collection = await getCliproxyStatusSummary(BASE, 'some-key', runningSpawn())
+
+    expect(collection.facts.managementAccess).toBe('denied')
+  })
+
+  it('maps a network error on the auth probe to unavailable', async () => {
+    globalThis.fetch = createFetchImplementation(async () => {
+      throw new Error('socket hang up')
+    })
+
+    const collection = await getCliproxyStatusSummary(BASE, 'some-key', runningSpawn())
+
+    expect(collection.facts).toMatchObject({managementAccess: 'unavailable', latestVersion: null, usage: null})
+    expect(JSON.stringify(collection)).not.toContain('socket')
+  })
+
+  it('keeps managementAccess ok when the auth probe passes but usage and version requests fail', async () => {
+    globalThis.fetch = createFetchImplementation(async url =>
+      url.endsWith('/v0/management/config')
+        ? Response.json({})
+        : new Response('boom', {status: url.includes('usage-queue') ? 500 : 429}),
+    )
+
+    const collection = await getCliproxyStatusSummary(BASE, 'good-key', runningSpawn())
+
+    expect(collection.facts).toEqual({
+      runningVersion: 'v7.2.139',
+      latestVersion: null,
+      usage: null,
+      managementAccess: 'ok',
+    })
+  })
+
   it('reports a missing management key as managementAccess no-key without calling the management API', async () => {
     const urls: string[] = []
     globalThis.fetch = createFetchImplementation(async url => {

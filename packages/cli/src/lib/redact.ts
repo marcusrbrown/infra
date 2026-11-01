@@ -1,21 +1,35 @@
 /**
- * Redact every occurrence of a host value from text, case-insensitively.
- *
- * Used to scrub a resolved SSH host out of error output before it surfaces to an
- * MCP consumer. The host can be a misdirected secret (an agent may point the
- * `--key` env-var selector at, e.g., `AWS_SECRET_ACCESS_KEY`), so its value must
- * never appear in returned errors.
- *
- * Two subtleties this handles that a plain `replaceAll(host, ...)` does not:
- *   1. OpenSSH lowercases the hostname in "Could not resolve hostname <name>"
- *      stderr, so the match must be case-insensitive.
- *   2. Validated hosts contain `.` and `-`, which are regex-significant, so the
- *      host is escaped before building the matcher (no over-redaction).
- *
- * An empty/falsy host is a no-op (an empty matcher would match everywhere).
+ * Lowercase ASCII `A-Z` only. Unicode lowercasing can change a string's length, which would misalign match
+ * offsets between the folded copy and the original text.
+ */
+function lowerAscii(value: string): string {
+  let result = ''
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0
+    result += code >= 65 && code <= 90 ? String.fromCodePoint(code + 32) : char
+  }
+  return result
+}
+
+/**
+ * Replace every occurrence of `host` in `text` with `<host>`, matching ASCII letters case-insensitively and
+ * every other character literally. OpenSSH lowercases the hostname in its errors, and the host can be a
+ * misdirected secret, so it must never survive in text returned to an MCP consumer. An empty host is a no-op.
  */
 export function redactHost(text: string, host: string): string {
   if (!host) return text
-  const escaped = host.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
-  return text.replaceAll(new RegExp(escaped, 'gi'), '<host>')
+
+  const foldedText = lowerAscii(text)
+  const foldedHost = lowerAscii(host)
+
+  let result = ''
+  let cursor = 0
+  let match = foldedText.indexOf(foldedHost, cursor)
+  while (match !== -1) {
+    result += `${text.slice(cursor, match)}<host>`
+    cursor = match + foldedHost.length
+    match = foldedText.indexOf(foldedHost, cursor)
+  }
+
+  return result + text.slice(cursor)
 }

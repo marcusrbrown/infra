@@ -3,6 +3,7 @@ import {afterEach, describe, expect, it} from 'bun:test'
 import {observationSchema} from './observation'
 import {
   httpGet,
+  MAX_BODY_CHARS,
   probeBroker,
   probeCliproxy,
   probeDashboard,
@@ -185,7 +186,7 @@ describe.each(probeCases)('$name probe', ({name, probe, url, okBody}) => {
     await probe({...baseOptions, baseUrl: 'https://probe.example.test'})
 
     expect(recorder.urls).toHaveLength(1)
-    expect(recorder.urls[0]?.startsWith('https://probe.example.test')).toBe(true)
+    expect(new URL(recorder.urls[0] ?? '').origin).toBe('https://probe.example.test')
   })
 })
 
@@ -337,5 +338,211 @@ describe('httpGet', () => {
     const attempt = await httpGet('https://example.test/', {timeoutMs: 1000})
 
     expect(attempt.kind === 'network-error' ? attempt.timedOut : null).toBe(false)
+  })
+})
+
+const bodyCheckingProbes = [
+  {name: 'umami', probe: probeUmami},
+  {name: 'gateway', probe: probeGateway},
+] as const
+
+interface TrackedBody {
+  response: (status: number) => Response
+  cancelled: () => boolean
+}
+
+function erroredBody(): TrackedBody {
+  let cancelled = false
+  return {
+    response: status =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error('stream broke: SECRET-STREAM-ERROR'))
+          },
+          cancel() {
+            cancelled = true
+          },
+        }),
+        {status},
+      ),
+    cancelled: () => cancelled,
+  }
+}
+
+function stalledBody(): TrackedBody {
+  let cancelled = false
+  return {
+    response: status =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true
+          },
+        }),
+        {status},
+      ),
+    cancelled: () => cancelled,
+  }
+}
+
+describe.each(bodyCheckingProbes)('$name probe response-body failures', ({probe}) => {
+  it('reports fail with the original status, one request and no read, for a non-2xx whose body errors', async () => {
+    const body = erroredBody()
+    const recorder = installFetch(async () => body.response(503))
+
+    const observation = await probe(baseOptions)
+
+    expect(observation.result).toBe('fail')
+    expect(observation.detail?.statusCode).toBe(503)
+    expect(recorder.urls).toHaveLength(1)
+    expect(JSON.stringify(observation)).not.toContain('SECRET-STREAM-ERROR')
+    expect(observationSchema.safeParse(observation).success).toBe(true)
+  })
+
+  it('returns promptly with the original status for a non-2xx whose body never closes, and cancels the body', async () => {
+    const body = stalledBody()
+    const recorder = installFetch(async () => body.response(502))
+    const started = performance.now()
+
+    const observation = await probe({...baseOptions, timeoutMs: 5000})
+
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(observation.result).toBe('fail')
+    expect(observation.detail?.statusCode).toBe(502)
+    expect(recorder.urls).toHaveLength(1)
+    expect(body.cancelled()).toBe(true)
+  })
+
+  it('reports fail keeping the status code, with one request, when a 2xx body errors', async () => {
+    const body = erroredBody()
+    const recorder = installFetch(async () => body.response(200))
+
+    const observation = await probe(baseOptions)
+
+    expect(observation.result).toBe('fail')
+    expect(observation.detail?.statusCode).toBe(200)
+    expect(observation.detail?.reason).toBeUndefined()
+    expect(recorder.urls).toHaveLength(1)
+    expect(JSON.stringify(observation)).not.toContain('SECRET-STREAM-ERROR')
+  })
+
+  it('reports fail keeping the status code, with one request, when a 2xx body stalls past the timeout', async () => {
+    const body = stalledBody()
+    const recorder = installFetch(async () => body.response(200))
+
+    const observation = await probe({...baseOptions, timeoutMs: 30})
+
+    expect(observation.result).toBe('fail')
+    expect(observation.detail?.statusCode).toBe(200)
+    expect(recorder.urls).toHaveLength(1)
+    expect(body.cancelled()).toBe(true)
+  })
+})
+
+describe('httpGet bounded body reads', () => {
+  it('does not read or retry a non-2xx body, and returns the attempt with no body', async () => {
+    const body = erroredBody()
+    const recorder = installFetch(async () => body.response(500))
+
+    const attempt = await httpGet('https://example.test/', {timeoutMs: 1000, retries: 2, readBody: true})
+
+    expect(attempt.kind).toBe('response')
+    if (attempt.kind === 'response') {
+      expect(attempt.status).toBe(500)
+      expect(attempt.ok).toBe(false)
+      expect(attempt.body).toBeUndefined()
+    }
+    expect(recorder.urls).toHaveLength(1)
+  })
+
+  it('does not throw when cancelling the body of a non-2xx response fails', async () => {
+    installFetch(
+      async () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              throw new Error('cancel exploded')
+            },
+          }),
+          {status: 500},
+        ),
+    )
+
+    const attempt = await httpGet('https://example.test/', {timeoutMs: 1000, readBody: true})
+
+    expect(attempt.kind === 'response' ? attempt.status : null).toBe(500)
+  })
+
+  it('truncates a body larger than the limit to exactly the limit and cancels the stream', async () => {
+    let cancelled = false
+    let pulls = 0
+    installFetch(
+      async () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              pulls += 1
+              controller.enqueue(new TextEncoder().encode('x'.repeat(10_000)))
+            },
+            cancel() {
+              cancelled = true
+            },
+          }),
+          {status: 200},
+        ),
+    )
+
+    const attempt = await httpGet('https://example.test/', {timeoutMs: 1000, readBody: true})
+
+    expect(attempt.kind === 'response' ? attempt.body?.length : null).toBe(MAX_BODY_CHARS)
+    expect(cancelled).toBe(true)
+    expect(pulls).toBeLessThan(20)
+  })
+
+  it('decodes multi-byte characters split across chunks', async () => {
+    const bytes = new TextEncoder().encode('{"v":"€uro"}')
+    const split = bytes.indexOf(0xe2) + 1
+    installFetch(
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(bytes.slice(0, split))
+              controller.enqueue(bytes.slice(split))
+              controller.close()
+            },
+          }),
+          {status: 200},
+        ),
+    )
+
+    const attempt = await httpGet('https://example.test/', {timeoutMs: 1000, readBody: true})
+
+    expect(attempt.kind === 'response' ? attempt.body : null).toBe('{"v":"€uro"}')
+  })
+
+  it('returns a response attempt with no body when a 2xx body read fails, without retrying', async () => {
+    const body = erroredBody()
+    const recorder = installFetch(async () => body.response(200))
+
+    const attempt = await httpGet('https://example.test/', {timeoutMs: 1000, retries: 2, readBody: true})
+
+    expect(attempt.kind).toBe('response')
+    if (attempt.kind === 'response') {
+      expect(attempt.status).toBe(200)
+      expect(attempt.body).toBeUndefined()
+    }
+    expect(recorder.urls).toHaveLength(1)
+  })
+
+  it('still retries when fetch itself rejects', async () => {
+    const recorder = installFetch(async () => {
+      throw new Error('boom')
+    })
+
+    await httpGet('https://example.test/', {timeoutMs: 1000, retries: 1, readBody: true})
+
+    expect(recorder.urls).toHaveLength(2)
   })
 })

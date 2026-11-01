@@ -17,7 +17,7 @@ import type {AppId, Observation, ObservationDetail} from './observation'
 
 export const PUBLIC_PROBE_TIMEOUT_MS = 10_000
 const PUBLIC_PROBE_RETRIES = 1
-const MAX_BODY_CHARS = 64 * 1024
+export const MAX_BODY_CHARS = 64 * 1024
 
 export const KEEWEB_ORIGIN = 'https://kw.igg.ms'
 export const CLIPROXY_ORIGIN = 'https://cliproxy.fro.bot'
@@ -36,7 +36,7 @@ export interface HttpResponseAttempt {
   status: number
   ok: boolean
   durationMs: number
-  /** Present only when `readBody` was requested; truncated to a bounded length. */
+  /** Present only for a 2xx when `readBody` was requested and the read finished; truncated to `MAX_BODY_CHARS`. */
   body?: string
 }
 
@@ -65,9 +65,57 @@ function isTimeoutError(error: unknown): boolean {
   return error.name === 'TimeoutError' || error.name === 'AbortError'
 }
 
+/** Best effort: a non-2xx body is never read, so release it without waiting or throwing. */
+function discardBody(response: Response): void {
+  try {
+    response.body?.cancel().catch(() => undefined)
+  } catch {
+    // Nothing to release.
+  }
+}
+
 /**
- * GET with an abort timeout and optional retry on network error.
- * Duration is that of the final attempt.
+ * Read at most `MAX_BODY_CHARS` decoded characters, then cancel the stream. A read error or the abort
+ * signal (the request timeout) yields `undefined`; the caller already has the status code.
+ */
+async function readBoundedBody(response: Response, signal: AbortSignal): Promise<string | undefined> {
+  const reader = response.body?.getReader()
+  if (reader === undefined) {
+    return ''
+  }
+
+  const aborted = new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason)
+    }
+    signal.addEventListener('abort', () => reject(signal.reason), {once: true})
+  })
+  aborted.catch(() => undefined)
+
+  const decoder = new TextDecoder()
+  let text = ''
+  try {
+    while (text.length < MAX_BODY_CHARS) {
+      const chunk = await Promise.race([reader.read(), aborted])
+      if (chunk.done) {
+        text += decoder.decode()
+        break
+      }
+      text += decoder.decode(chunk.value, {stream: true})
+    }
+
+    return text.slice(0, MAX_BODY_CHARS)
+  } catch {
+    return undefined
+  } finally {
+    reader.cancel().catch(() => undefined)
+  }
+}
+
+/**
+ * GET with an abort timeout and optional retry on network error. Only a rejected `fetch()` is retried.
+ * A non-2xx response returns at once with its status and no body. A 2xx body that cannot be read in time
+ * comes back as a response attempt with `body` undefined. Duration is that of the final attempt.
  */
 export async function httpGet(url: string, options: HttpGetOptions): Promise<HttpAttempt> {
   const retries = options.retries ?? 0
@@ -75,18 +123,11 @@ export async function httpGet(url: string, options: HttpGetOptions): Promise<Htt
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const startedAt = performance.now()
-    try {
-      const response = await fetch(url, {signal: AbortSignal.timeout(options.timeoutMs)})
-      const body = options.readBody === true ? (await response.text()).slice(0, MAX_BODY_CHARS) : undefined
+    const signal = AbortSignal.timeout(options.timeoutMs)
 
-      return {
-        kind: 'response',
-        response,
-        status: response.status,
-        ok: response.ok,
-        durationMs: Math.max(0, performance.now() - startedAt),
-        body,
-      }
+    let response: Response
+    try {
+      response = await fetch(url, {signal})
     } catch (error) {
       lastError = {
         kind: 'network-error',
@@ -94,6 +135,23 @@ export async function httpGet(url: string, options: HttpGetOptions): Promise<Htt
         timedOut: isTimeoutError(error),
         durationMs: Math.max(0, performance.now() - startedAt),
       }
+      continue
+    }
+
+    let body: string | undefined
+    if (!response.ok) {
+      discardBody(response)
+    } else if (options.readBody === true) {
+      body = await readBoundedBody(response, signal)
+    }
+
+    return {
+      kind: 'response',
+      response,
+      status: response.status,
+      ok: response.ok,
+      durationMs: Math.max(0, performance.now() - startedAt),
+      body,
     }
   }
 

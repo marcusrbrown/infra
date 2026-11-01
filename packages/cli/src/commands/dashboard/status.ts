@@ -41,7 +41,7 @@ export interface DashboardStatusResult {
 
 export type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -92,7 +92,7 @@ export function isAllRunning(rows: ServiceRow[]): boolean {
 
 function defaultSpawn(
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ): ReturnType<SpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
@@ -100,6 +100,7 @@ function defaultSpawn(
 export async function getDashboardComposeStatus(
   host: string,
   spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
 ): Promise<DashboardStatusResult> {
   validateDashboardHost(host)
 
@@ -131,7 +132,7 @@ export async function getDashboardComposeStatus(
   let exitCode: number
 
   try {
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     ;[stdoutText, stderrText, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -169,8 +170,12 @@ export async function getDashboardComposeStatus(
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
-export async function getDashboardStatusSummary(host: string, spawn?: SpawnFn): Promise<AppCollection> {
-  const result = await getDashboardComposeStatus(host, spawn)
+export async function getDashboardStatusSummary(
+  host: string,
+  spawn?: SpawnFn,
+  signal?: AbortSignal,
+): Promise<AppCollection> {
+  const result = await getDashboardComposeStatus(host, spawn, signal)
 
   return {
     observations: [composeObservation(declaredObservation('dashboard', 'compose-services'), result)],

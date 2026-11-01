@@ -105,7 +105,7 @@ describe('parseComposePs', () => {
 
 type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -726,5 +726,32 @@ describe('getDashboardComposeStatus — SSH identity injection', () => {
     if (keyPath) {
       expect(() => statSync(keyPath)).toThrow()
     }
+  })
+})
+
+describe('getDashboardStatusSummary abort signal', () => {
+  it('passes the signal to the ssh spawn', async () => {
+    const controller = new AbortController()
+    const seen: (AbortSignal | undefined)[] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(opts.signal)
+      return makeSpawn('')(cmd, opts)
+    }
+
+    await getDashboardStatusSummary('dashboard.fro.bot', spawn, controller.signal)
+
+    expect(seen).toEqual([controller.signal])
+  })
+
+  it('omits the signal option when none is given', async () => {
+    const seen: string[][] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(Object.keys(opts))
+      return makeSpawn('')(cmd, opts)
+    }
+
+    await getDashboardStatusSummary('dashboard.fro.bot', spawn)
+
+    expect(seen.flat()).not.toContain('signal')
   })
 })

@@ -21,7 +21,7 @@ export interface WgShowResult {
 
 export type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -62,7 +62,7 @@ export function parseWgShowOutput(output: string): WgShowResult {
 
 function defaultSpawn(
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ): ReturnType<SpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
@@ -81,7 +81,11 @@ export interface VpnStatusResult {
  * SSH-only — never calls the Lightsail/AWS API.
  * Validates host before constructing any SSH argv.
  */
-export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn): Promise<VpnStatusResult> {
+export async function getVpnWgStatus(
+  host: string,
+  spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
+): Promise<VpnStatusResult> {
   validateVpnHost(host)
 
   const knownHostsArgs = buildKnownHostsArgs()
@@ -110,7 +114,7 @@ export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn
   let exitCode: number
 
   try {
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     ;[stdoutText, stderrText, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -149,8 +153,8 @@ const SSH_FAILURE_EXIT_CODE = 255
  * @param host - The VPN box hostname or IP (validated before SSH).
  * @param spawn - Injectable spawn function (defaults to Bun.spawn).
  */
-export async function getVpnStatusSummary(host: string, spawn?: SpawnFn): Promise<AppCollection> {
-  const result = await getVpnWgStatus(host, spawn)
+export async function getVpnStatusSummary(host: string, spawn?: SpawnFn, signal?: AbortSignal): Promise<AppCollection> {
+  const result = await getVpnWgStatus(host, spawn, signal)
   const spec = declaredObservation('vpn', 'wireguard-interface')
 
   if (result.exitCode === SSH_FAILURE_EXIT_CODE) {

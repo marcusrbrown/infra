@@ -41,7 +41,7 @@ export interface UmamiStatusResult {
 
 export type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -92,12 +92,16 @@ export function isAllRunning(rows: ServiceRow[]): boolean {
 
 function defaultSpawn(
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ): ReturnType<SpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
 
-export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defaultSpawn): Promise<UmamiStatusResult> {
+export async function getUmamiComposeStatus(
+  host: string,
+  spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
+): Promise<UmamiStatusResult> {
   validateUmamiHost(host)
 
   const knownHostsArgs = buildKnownHostsArgs()
@@ -126,7 +130,7 @@ export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defau
   let exitCode: number
 
   try {
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     ;[stdoutText, stderrText, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -164,8 +168,12 @@ export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defau
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
-export async function getUmamiStatusSummary(host: string, spawn?: SpawnFn): Promise<AppCollection> {
-  const result = await getUmamiComposeStatus(host, spawn)
+export async function getUmamiStatusSummary(
+  host: string,
+  spawn?: SpawnFn,
+  signal?: AbortSignal,
+): Promise<AppCollection> {
+  const result = await getUmamiComposeStatus(host, spawn, signal)
 
   return {
     observations: [composeObservation(declaredObservation('umami', 'compose-services'), result)],

@@ -52,7 +52,7 @@ export interface GatewayStatusResult {
 
 export type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -106,7 +106,7 @@ export function isAllRunning(rows: ServiceRow[]): boolean {
 
 function defaultSpawn(
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ): ReturnType<SpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
@@ -114,6 +114,7 @@ function defaultSpawn(
 export async function getGatewayComposeStatus(
   host: string,
   spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
 ): Promise<GatewayStatusResult> {
   validateGatewayHost(host)
 
@@ -143,7 +144,7 @@ export async function getGatewayComposeStatus(
   let exitCode: number
 
   try {
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     ;[stdoutText, stderrText, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -188,6 +189,7 @@ export async function getGatewayWorkspaceStatus(
   host: string,
   spawn: SpawnFn = defaultSpawn,
   timeoutMs: number = WORKSPACE_PROBE_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<WorkspaceMemoryStatus> {
   validateGatewayHost(host)
 
@@ -218,7 +220,7 @@ export async function getGatewayWorkspaceStatus(
   })
 
   try {
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     const collected = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
     // A killed child may reject the pending reads after the race is already decided.
     collected.catch(() => undefined)
@@ -269,8 +271,12 @@ function workspaceObservation(workspace: WorkspaceMemoryStatus): Observation {
   }
 }
 
-export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Promise<AppCollection> {
-  const result = await getGatewayComposeStatus(host, spawn)
+export async function getGatewayStatusSummary(
+  host: string,
+  spawn?: SpawnFn,
+  signal?: AbortSignal,
+): Promise<AppCollection> {
+  const result = await getGatewayComposeStatus(host, spawn, signal)
   const compose = composeObservation(declaredObservation('gateway', 'compose-services'), result)
 
   // No services means an SSH or compose failure: there is nothing to probe.
@@ -287,7 +293,7 @@ export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Pr
   }
 
   // Probe even when a service is down: the workspace itself may still be running.
-  const workspace = await getGatewayWorkspaceStatus(host, spawn)
+  const workspace = await getGatewayWorkspaceStatus(host, spawn, undefined, signal)
 
   return {
     observations: [compose, workspaceObservation(workspace)],

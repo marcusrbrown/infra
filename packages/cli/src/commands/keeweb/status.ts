@@ -114,7 +114,7 @@ export async function checkHttpReachability(verbose: boolean): Promise<CheckResu
   }
 }
 
-export async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
+export async function checkLastDeploy(verbose: boolean, signal?: AbortSignal): Promise<CheckResult> {
   try {
     const proc = Bun.spawn(
       [
@@ -132,6 +132,7 @@ export async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
       {
         stderr: 'pipe',
         stdout: 'pipe',
+        ...(signal === undefined ? {} : {signal}),
       },
     )
 
@@ -329,8 +330,11 @@ function printCheckResult(result: CheckResult, ctx: ActionCtx): void {
  * facts. `lastDeploy` is the newest successful deploy run's time (null when `gh` cannot say) and
  * `contentHash` compares the live page with the local build.
  */
-export async function getKeewebStatusSummary(): Promise<AppCollection> {
-  const [lastDeployResult, contentHashResult] = await Promise.all([checkLastDeploy(false), checkContentHash(false)])
+export async function getKeewebStatusSummary(signal?: AbortSignal): Promise<AppCollection> {
+  const [lastDeployResult, contentHashResult] = await Promise.all([
+    checkLastDeploy(false, signal),
+    checkContentHash(false),
+  ])
 
   return {
     observations: [],

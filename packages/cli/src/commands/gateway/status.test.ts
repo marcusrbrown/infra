@@ -102,7 +102,7 @@ describe('isAllRunning', () => {
 
 type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -434,7 +434,7 @@ describe('getGatewayComposeStatus — NDJSON stdout', () => {
 
 type StatusSpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -1383,5 +1383,44 @@ describe('getGatewayStatusSummary — observations and facts', () => {
 
     expect(JSON.stringify(collection)).not.toContain('gateway.example.com')
     expect(JSON.stringify(collection)).not.toContain('Connection refused')
+  })
+})
+
+describe('abort signal pass-through', () => {
+  let originalHost: string | undefined
+
+  beforeEach(() => {
+    originalHost = process.env.GATEWAY_HOST
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.GATEWAY_HOST
+    else process.env.GATEWAY_HOST = originalHost
+  })
+
+  it('passes the signal to both the compose call and the workspace probe', async () => {
+    const controller = new AbortController()
+    const seen: (AbortSignal | undefined)[] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(opts.signal)
+      return cmd.at(-1)?.includes('ps --format json') === true ? proc(composeJson) : proc(workspaceStdout())
+    }
+
+    await getGatewayStatusSummary('gateway.example.com', spawn, controller.signal)
+
+    expect(seen).toEqual([controller.signal, controller.signal])
+  })
+
+  it('omits the signal option entirely when none is given', async () => {
+    const seen: string[][] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(Object.keys(opts))
+      return cmd.at(-1)?.includes('ps --format json') === true ? proc(composeJson) : proc(workspaceStdout())
+    }
+
+    await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(seen.flat()).not.toContain('signal')
   })
 })

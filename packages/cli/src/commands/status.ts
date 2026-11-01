@@ -30,13 +30,14 @@ declare const process: {
 
 type PublicProbeMap = Partial<Record<AppId, (options?: ProbeOptions) => Promise<Observation>>>
 
+/** Each collector gets a signal that aborts when its deadline fires, so it can kill any child it spawned. */
 export interface StatusDependencies {
-  getKeewebStatusSummary: () => Promise<AppCollection>
-  getCliproxyStatusSummary: (baseUrl: string, key: string) => Promise<AppCollection>
-  getGatewayStatusSummary: (host: string) => Promise<AppCollection>
-  getUmamiStatusSummary: (host: string) => Promise<AppCollection>
-  getDashboardStatusSummary: (host: string) => Promise<AppCollection>
-  getVpnStatusSummary: (host: string) => Promise<AppCollection>
+  getKeewebStatusSummary: (signal?: AbortSignal) => Promise<AppCollection>
+  getCliproxyStatusSummary: (baseUrl: string, key: string, signal?: AbortSignal) => Promise<AppCollection>
+  getGatewayStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
+  getUmamiStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
+  getDashboardStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
+  getVpnStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
   publicProbes: PublicProbeMap
   now: () => Date
   /** Per-app collector deadline in milliseconds; the public probes have their own timeouts. */
@@ -48,11 +49,11 @@ export const COLLECTOR_DEADLINE_MS = 30_000
 
 const defaultDependencies: StatusDependencies = {
   getKeewebStatusSummary,
-  getCliproxyStatusSummary,
-  getGatewayStatusSummary,
-  getUmamiStatusSummary,
-  getDashboardStatusSummary,
-  getVpnStatusSummary,
+  getCliproxyStatusSummary: (baseUrl, key, signal) => getCliproxyStatusSummary(baseUrl, key, undefined, signal),
+  getGatewayStatusSummary: (host, signal) => getGatewayStatusSummary(host, undefined, signal),
+  getUmamiStatusSummary: (host, signal) => getUmamiStatusSummary(host, undefined, signal),
+  getDashboardStatusSummary: (host, signal) => getDashboardStatusSummary(host, undefined, signal),
+  getVpnStatusSummary: (host, signal) => getVpnStatusSummary(host, undefined, signal),
   publicProbes: PUBLIC_PROBES,
   now: () => new Date(),
   collectorDeadlineMs: COLLECTOR_DEADLINE_MS,
@@ -91,31 +92,36 @@ function describeReason(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason)
 }
 
-type Collector = {kind: 'run'; run: () => Promise<AppCollection>} | {kind: 'missing-config'} | {kind: 'none'}
+type Collector =
+  {kind: 'run'; run: (signal: AbortSignal) => Promise<AppCollection>} | {kind: 'missing-config'} | {kind: 'none'}
 
 const TIMED_OUT = Symbol('collector-timed-out')
 
-function hostCollector(host: string, run: (host: string) => Promise<AppCollection>): Collector {
-  return host === '' ? {kind: 'missing-config'} : {kind: 'run', run: () => run(host)}
+function hostCollector(host: string, run: (host: string, signal: AbortSignal) => Promise<AppCollection>): Collector {
+  return host === '' ? {kind: 'missing-config'} : {kind: 'run', run: signal => run(host, signal)}
 }
 
 /**
- * Race a collector against its deadline. A collector that settles later is ignored: nothing here can stop the
- * work it started, so the CLI entry point exits explicitly after printing (see `cli.ts`).
+ * Race a collector against its deadline. When the deadline fires, the signal handed to the collector aborts,
+ * which kills any child process it spawned. A collector that settles later is ignored.
  */
 async function withDeadline(
-  run: () => Promise<AppCollection>,
+  run: Collector & {kind: 'run'},
   deadlineMs: number,
 ): Promise<AppCollection | typeof TIMED_OUT> {
+  const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<typeof TIMED_OUT>(resolve => {
-    timer = setTimeout(() => resolve(TIMED_OUT), deadlineMs)
+    timer = setTimeout(() => {
+      controller.abort()
+      resolve(TIMED_OUT)
+    }, deadlineMs)
   })
-  const work = run()
-  // A rejection after the deadline has no reader; keep it from surfacing as unhandled.
-  work.catch(() => undefined)
 
   try {
+    const work = run.run(controller.signal)
+    // A rejection after the deadline has no reader; keep it from surfacing as unhandled.
+    work.catch(() => undefined)
     return await Promise.race([work, deadline])
   } finally {
     clearTimeout(timer)
@@ -132,7 +138,7 @@ async function collectApp(
   const {ctx, now, deadlineMs, json} = options
   const [probeResult, collectorResult] = await Promise.allSettled([
     probe === undefined ? Promise.resolve(undefined) : probe(),
-    collector.kind === 'run' ? withDeadline(collector.run, deadlineMs) : Promise.resolve(undefined),
+    collector.kind === 'run' ? withDeadline(collector, deadlineMs) : Promise.resolve(undefined),
   ])
 
   const logFailure = (message: string): void => {
@@ -187,8 +193,11 @@ export async function unifiedStatusAction(
   const vpnHost = process.env.VPN_HOST ?? ''
 
   const collectors: Record<AppId, Collector> = {
-    keeweb: {kind: 'run', run: () => dependencies.getKeewebStatusSummary()},
-    cliproxy: {kind: 'run', run: () => dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey)},
+    keeweb: {kind: 'run', run: signal => dependencies.getKeewebStatusSummary(signal)},
+    cliproxy: {
+      kind: 'run',
+      run: signal => dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey, signal),
+    },
     gateway: hostCollector(gatewayHost, dependencies.getGatewayStatusSummary),
     umami: hostCollector(umamiHost, dependencies.getUmamiStatusSummary),
     dashboard: hostCollector(dashboardHost, dependencies.getDashboardStatusSummary),

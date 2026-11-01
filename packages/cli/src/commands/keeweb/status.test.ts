@@ -200,6 +200,33 @@ describe('keeweb status helpers', () => {
       })
     })
 
+    it('passes the abort signal to the gh spawn', async () => {
+      const controller = new AbortController()
+      const seen: unknown[] = []
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((_cmd: unknown, opts: {signal?: AbortSignal}) => {
+        seen.push(opts.signal)
+        return mockSpawnResult(0, '[]')
+      }) as unknown as typeof Bun.spawn)
+      fileSpy = packagedInstall()
+
+      await getKeewebStatusSummary(controller.signal)
+
+      expect(seen).toEqual([controller.signal])
+    })
+
+    it('omits the signal from the gh spawn options when none is given', async () => {
+      const seen: string[][] = []
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((_cmd: unknown, opts: object) => {
+        seen.push(Object.keys(opts))
+        return mockSpawnResult(0, '[]')
+      }) as unknown as typeof Bun.spawn)
+      fileSpy = packagedInstall()
+
+      await getKeewebStatusSummary()
+
+      expect(seen.flat()).not.toContain('signal')
+    })
+
     it('reports a null last deploy when gh cannot say, without failing', async () => {
       spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() => mockSpawnResult(1, '', 'not logged in'))
       fileSpy = packagedInstall()

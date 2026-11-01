@@ -1644,3 +1644,36 @@ describe('cliproxyStatusAction — provider auth probe wiring', () => {
     expect(captured.exit?.code).toBe(1)
   })
 })
+
+describe('cliproxy abort signal', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('passes the signal to the ssh spawn in getCliproxyStatusSummary and inspectRunningContainer', async () => {
+    globalThis.fetch = createFetchImplementation(async () => Response.json({}))
+    const controller = new AbortController()
+    const seen: (AbortSignal | undefined)[] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(opts.signal)
+      return makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n')(cmd, opts)
+    }
+
+    await getCliproxyStatusSummary('https://cliproxy.example.com', '', spawn, controller.signal)
+    await inspectRunningContainer('cliproxy-example-com', spawn, controller.signal)
+
+    expect(seen).toEqual([controller.signal, controller.signal])
+  })
+
+  it('omits the signal option when none is given', async () => {
+    const seen: string[][] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(Object.keys(opts))
+      return makeSpawnResult('')(cmd, opts)
+    }
+
+    await inspectRunningContainer('cliproxy-example-com', spawn)
+
+    expect(seen.flat()).not.toContain('signal')
+  })
+})

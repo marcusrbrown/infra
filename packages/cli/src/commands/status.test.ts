@@ -8,6 +8,7 @@ import {
   EXPECTED_OBSERVATION_IDS,
   FIXED_NOW,
   healthyGateway,
+  healthyUmami,
   makeStatusDependencies,
   okWorkspace,
   probeObservation,
@@ -37,6 +38,18 @@ function proc(stdout: string, exitCode = 0): ReturnType<SpawnFn> {
     }),
     exited: Promise.resolve(exitCode),
   }
+}
+
+/** A child that never exits on its own; like Bun's `signal` option, aborting kills it and lets `exited` settle. */
+function hangingProc(signal: AbortSignal | undefined, onKill: () => void): ReturnType<SpawnFn> {
+  const exited = new Promise<number>(resolve => {
+    signal?.addEventListener('abort', () => {
+      onKill()
+      resolve(143)
+    })
+  })
+
+  return {stdout: new ReadableStream({}), stderr: new ReadableStream({}), exited}
 }
 
 async function runJson(overrides?: Parameters<typeof makeStatusDependencies>[0]) {
@@ -393,6 +406,62 @@ describe('top-level status --json (typed contract)', () => {
     expect(observation(envelope, 'gateway', 'workspace-memory').detail).toEqual({reason: 'timeout'})
     expect(observation(envelope, 'vpn', 'wireguard-interface').detail).toEqual({reason: 'timeout'})
     expect(observation(envelope, 'dashboard', 'compose-services').result).toBe('pass')
+  })
+
+  it('aborts the signal of a timed-out collector, killing its ssh child, and keeps the other apps intact', async () => {
+    const baseline = (await runJson()).envelope
+    const killed: string[] = []
+    const signals: (AbortSignal | undefined)[] = []
+    const hangingSpawn: SpawnFn = (_cmd, opts) => {
+      signals.push(opts.signal)
+      return hangingProc(opts.signal, () => killed.push('ssh'))
+    }
+
+    const started = performance.now()
+    const {envelope, captured} = await runJson({
+      collectorDeadlineMs: 25,
+      getGatewayStatusSummary: (host, signal) => getGatewayStatusSummary(host, hangingSpawn, signal),
+    })
+
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(signals).toHaveLength(1)
+    expect(signals[0]?.aborted).toBe(true)
+    expect(killed).toEqual(['ssh'])
+    expect(observation(envelope, 'gateway', 'compose-services').detail).toEqual({reason: 'timeout'})
+    expect(observation(envelope, 'gateway', 'workspace-memory').detail).toEqual({reason: 'timeout'})
+    for (const app of APPS.filter(name => name !== 'gateway')) {
+      expect(appOf(envelope, app)).toEqual(appOf(baseline, app))
+    }
+    expect(captured.stderr).toEqual([])
+  })
+
+  it('aborts the workspace probe spawn too when compose finishes but the probe hangs', async () => {
+    const killed: string[] = []
+    const spawn: SpawnFn = (cmd, opts) =>
+      cmd.at(-1)?.includes('ps --format json') === true
+        ? proc(JSON.stringify([{Name: 'gateway', State: 'running', Health: 'healthy'}]))
+        : hangingProc(opts.signal, () => killed.push('probe'))
+
+    const {envelope} = await runJson({
+      collectorDeadlineMs: 25,
+      getGatewayStatusSummary: (host, signal) => getGatewayStatusSummary(host, spawn, signal),
+    })
+
+    expect(killed).toEqual(['probe'])
+    expect(observation(envelope, 'gateway', 'compose-services').detail).toEqual({reason: 'timeout'})
+  })
+
+  it('never aborts the signal of a collector that finishes before its deadline', async () => {
+    const signals: (AbortSignal | undefined)[] = []
+    await runJson({
+      getUmamiStatusSummary: async (_host, signal) => {
+        signals.push(signal)
+        return healthyUmami
+      },
+    })
+
+    expect(signals).toHaveLength(1)
+    expect(signals[0]?.aborted).toBe(false)
   })
 
   it('does not apply the collector deadline to the public probe', async () => {

@@ -35,7 +35,7 @@ interface CheckResult {
 
 export type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -44,7 +44,7 @@ export type SpawnFn = (
 
 function defaultSpawn(
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ): ReturnType<SpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
@@ -252,7 +252,11 @@ export type RunningContainer =
   {kind: 'running'; version: string} | {kind: 'none'} | {kind: 'unavailable'; summary: string}
 
 /** Ask the host which CLIProxyAPI image is running. Never throws: SSH problems come back as `unavailable`. */
-export async function inspectRunningContainer(host: string, spawn: SpawnFn = defaultSpawn): Promise<RunningContainer> {
+export async function inspectRunningContainer(
+  host: string,
+  spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
+): Promise<RunningContainer> {
   let cleanup: () => void = () => undefined
 
   try {
@@ -282,7 +286,7 @@ export async function inspectRunningContainer(host: string, spawn: SpawnFn = def
       ...(process.env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK} : {}),
     }
 
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     const [stdoutText, stderrText, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -684,12 +688,13 @@ export async function getCliproxyStatusSummary(
   baseUrl: string,
   key: string,
   spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
 ): Promise<AppCollection> {
   const normalizedBaseUrl = stripTrailingSlash(baseUrl)
   const host = new URL(normalizedBaseUrl).hostname
   const [mgmt, running] = await Promise.all([
     runManagementChecks(normalizedBaseUrl, key || undefined),
-    inspectRunningContainer(host, spawn),
+    inspectRunningContainer(host, spawn, signal),
   ])
 
   const spec = declaredObservation('cliproxy', 'container-running')

@@ -90,7 +90,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root. Exception: `provision`/`deploy` need the repo-root `.env` (Bun loads `.env` from CWD only), so run them via the root wrappers `bun run provision:<app>` / `bun run deploy:<app>` (cliproxy, gateway, umami) instead of `--cwd`.
 - **Changesets**: `@changesets/cli` for versioning. Renovate/dependency changes under `apps/**` (Docker image pins, runtime deps) are excluded from changeset generation in `.github/workflows/renovate-changesets.yaml` (`exclude-patterns` includes `apps/**`); releases track the published `@marcusrbrown/infra` CLI only, while app dependency bumps are deployment changes tracked in git history and deploy workflows.
 - **Tests**: Colocated `*.test.ts` alongside source. Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic snapshots. Mock at boundaries (fetch, Bun.spawn), not internals. CI runs `bun test --recursive` as a parallel job alongside lint/type-check.
-- **CI Node pin**: All workflows running `bun run lint` or `bunx tsc` must pin Node 24 via `actions/setup-node` — ESLint binary shebang uses system Node, which on ubuntu-latest is Node 20 (lacks ES2024 APIs like `Object.groupBy`).
+- **CI Node pin**: All workflows running `bun run lint` or `bunx tsc` must pin Node 26 via `actions/setup-node` — ESLint and TypeScript binary shebangs use system Node, so an explicit pin avoids relying on the ubuntu-latest default and ensures ES2024 APIs like `Object.groupBy` are available.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 

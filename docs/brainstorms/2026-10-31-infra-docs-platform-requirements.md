@@ -50,7 +50,7 @@ The rule against publishing public host IPs and named third-party services is en
 - R6. Every 30 minutes a scheduled run records public-safe observations:
   - Reachability: external HTTPS probes of keeweb, cliproxy, umami, broker and the dashboard, and of the gateway through the dashboard's public operator health route, including its contract version.
   - Deploy state: for each app, from the GitHub Actions API, the latest deploy job, its conclusion and time, and whether it is waiting at its gate.
-  - End-to-end: the latest cliproxy auth monitor run, which exercises the Claude route through a real model call.
+  - End-to-end: the probe result (`healthy`, `dead` or `unknown`) and probe time from the latest scheduled, live cliproxy auth monitor run, which exercises the Claude route through a real model call. Synthetic validation runs are ignored, and the run's workflow conclusion is never treated as the result, since the monitor succeeds for every probe outcome.
 - R7. The snapshot uses no deploy Environment secrets and no SSH.
 - R8. The daily report gains one row: the age of the last successful snapshot. That row is flagged once the snapshot is more than 2 runs late.
 - R9. The VPN has no external probe. It shows deploy state only, and its live health reads "not measured".
@@ -80,7 +80,7 @@ The rule against publishing public host IPs and named third-party services is en
 
 **Redaction gate**
 
-- R18. The build fails if any built page, diagram or history file contains one of these. The error names the file and the value.
+- R18. The build fails if any built page, diagram or history file contains one of these. The error names the file and location. An address or hostname match also prints the value. A secret match prints only the pattern identifier, never the matched text, so a blocked build can't leak it into public Actions logs.
   - A globally routable IP literal, IPv4 or IPv6, including defanged forms such as `203.0.113[.]5`. Private ranges (RFC1918), loopback, `0.0.0.0/8`, link-local and CGNAT addresses are allowed.
   - A hostname outside a committed allowlist.
   - A string that matches a committed set of secret patterns.
@@ -94,7 +94,7 @@ The rule against publishing public host IPs and named third-party services is en
 - AE2. **Covers R8.** Given scheduled runs have stopped for 90 minutes, when the next daily report runs, its snapshot-age row is flagged with the time of the last successful snapshot.
 - AE3. **Covers R10, R11.** Given the latest history artifact is missing or invalid, when any site build runs, the build fails visibly, publishes nothing, and the published site keeps its previous history.
 - AE4. **Covers R10.** Given a docs-only merge to `main`, when the site rebuilds, it carries the full history forward from the latest artifact, and no samples are lost.
-- AE5. **Covers R18, R19.** Given a runbook edit adds a public host IP, an unlisted host or a token-shaped string, when the site builds, the build fails and names the file and the value. An allowlist change in the same PR can clear a hostname. Nothing clears a public IP or a secret match.
+- AE5. **Covers R18, R19.** Given a runbook edit adds a public host IP, an unlisted host or a token-shaped string, when the site builds, the build fails and names the file and location. It shows the offending IP or host, but for the token only the pattern that matched, never the token itself. An allowlist change in the same PR can clear a hostname. Nothing clears a public IP or a secret match.
 - AE6. **Covers R1, R6.** Given the gateway's operator health returns 200 with contract `1.14.0` while model calls fail:
   - The gateway's reachability observation passes.
   - Its end-to-end observation reads "not measured".

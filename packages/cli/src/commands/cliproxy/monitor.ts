@@ -47,6 +47,17 @@ export function formatMonitorRunSummary(summary: MonitorRunSummary): string {
   return `CLIProxy auth monitor summary: probe=${summary.probeState} reason=${summary.probeReason} transition=${summary.transition} issue=${issue} discord=${summary.discord} at ${summary.timestamp}`
 }
 
+/**
+ * Early, reconciliation-free observation line. Carries only the probe outcome and its timestamp so a dead route stays
+ * observable even when issue or Discord reconciliation later fails. The prefix must never match the daily report's
+ * `CLIProxy auth monitor summary:` line.
+ */
+export function formatMonitorProbeLine(
+  probe: Pick<MonitorRunSummary, 'probeState' | 'probeReason' | 'timestamp'>,
+): string {
+  return `CLIProxy auth monitor probe: probe=${probe.probeState} reason=${probe.probeReason} at ${probe.timestamp}`
+}
+
 interface GitHubIssue {
   number: number
   state: 'open' | 'closed'
@@ -455,6 +466,9 @@ export async function cliproxyMonitorAction(
   try {
     const classification =
       validation === 'live' ? await checkProviderAuthState(proxyUrl, inputs.apiKey) : providerState(validation)
+    ctx.console.log(
+      formatMonitorProbeLine({probeState: classification.state, probeReason: classification.reason, timestamp}),
+    )
     const finish = (
       transition: MonitorTransition,
       issue: MonitorIssueAction[] = [],

@@ -1492,4 +1492,136 @@ describe('cliproxy monitor', () => {
     expect(help).not.toContain('--api-key')
     expect(help).not.toContain('--webhook')
   })
+
+  describe('probe line', () => {
+    const probeLinePattern = /^CLIProxy auth monitor probe: probe=(healthy|dead|unknown) reason=(\S+) at (\S+)$/
+    const probeLines = (stdout: string[]): string[] =>
+      stdout.filter(line => line.startsWith('CLIProxy auth monitor probe:'))
+    const summaryLines = (stdout: string[]): string[] =>
+      stdout.filter(line => line.startsWith('CLIProxy auth monitor summary:'))
+
+    it('prints the probe line before the summary on a successful run, with the same timestamp', async () => {
+      configureSyntheticEnvironment()
+      installFetch(async () => new Response('[]', {status: 200}))
+      const {ctx, captured} = createCapturedCtx()
+
+      await runMonitor({validation: 'synthetic-healthy'}, ctx)
+
+      const probeIndex = captured.stdout.findIndex(line => line.startsWith('CLIProxy auth monitor probe:'))
+      const summaryIndex = captured.stdout.findIndex(line => line.startsWith('CLIProxy auth monitor summary:'))
+      expect(probeIndex).toBeGreaterThanOrEqual(0)
+      expect(probeIndex).toBeLessThan(summaryIndex)
+      expect(probeLines(captured.stdout)).toHaveLength(1)
+      expect(summaryLines(captured.stdout)).toHaveLength(1)
+      const probe = probeLinePattern.exec(captured.stdout[probeIndex] ?? '')
+      expect(probe?.[1]).toBe('healthy')
+      expect(probe?.[2]).toBe('ok')
+      expect(captured.stdout[summaryIndex]?.endsWith(` at ${probe?.[3]}`)).toBe(true)
+      expect(captured.exit).toBeNull()
+    })
+
+    it('does not match the daily-report summary prefix and carries no reconciliation fields', async () => {
+      configureSyntheticEnvironment()
+      installFetch(async () => new Response('[]', {status: 200}))
+      const {ctx, captured} = createCapturedCtx()
+
+      await runMonitor({validation: 'synthetic-healthy'}, ctx)
+
+      const [line] = probeLines(captured.stdout)
+      expect(line).toBeDefined()
+      expect(line).not.toMatch(/^CLIProxy auth monitor summary:/)
+      expect(line).not.toContain('transition=')
+      expect(line).not.toContain('issue=')
+      expect(line).not.toContain('discord=')
+      expect(line).not.toContain('http')
+    })
+
+    it('has printed probe=dead before reconciliation fails, and still exits 1 with no summary', async () => {
+      configureSyntheticEnvironment()
+      const {ctx, captured} = createCapturedCtx()
+      let probeLineSeenAtFirstGithubCall = false
+
+      await expect(
+        cliproxyMonitorAction({validation: 'synthetic-dead'}, ctx, {
+          fetch: globalThis.fetch,
+          sleep: async () => {},
+          ghApi: async () => {
+            probeLineSeenAtFirstGithubCall ||= probeLines(captured.stdout).length === 1
+            throw new Error('github-http-secret-detail')
+          },
+          setTimeout: originalSetTimeout,
+          clearTimeout: originalClearTimeout,
+        }),
+      ).rejects.toBeInstanceOf(MockProcessExit)
+
+      expect(probeLineSeenAtFirstGithubCall).toBe(true)
+      const [line] = probeLines(captured.stdout)
+      expect(line).toMatch(/^CLIProxy auth monitor probe: probe=dead reason=auth-401 at \S+$/)
+      expect(summaryLines(captured.stdout)).toHaveLength(0)
+      expect(captured.exit?.code).toBe(1)
+      expect(captured.stderr.join('')).toContain('reconciliation')
+      expect([...captured.stdout, ...captured.stderr].join('\n')).not.toContain('secret-detail')
+    })
+
+    it('reflects the synthetic outcome for both synthetic modes', async () => {
+      configureSyntheticEnvironment()
+      installFetch(async (input, init) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        if (url === 'https://discord.example/webhook') return new Response(null, {status: 204})
+        if (method === 'GET' && url.includes('/issues?state=all')) return new Response('[]', {status: 200})
+        if (method === 'GET' && url.includes('/labels/')) return new Response('missing', {status: 404})
+        if (method === 'POST' && url.endsWith('/labels')) return new Response('{}', {status: 201})
+        if (method === 'POST' && url.endsWith('/issues'))
+          return new Response(JSON.stringify({number: 42, state: 'open', title: 'x', body: '', labels: []}), {
+            status: 201,
+          })
+        if (method === 'PATCH') return new Response('{}', {status: 200})
+        throw new Error(`unexpected ${method} ${url}`)
+      })
+
+      const healthy = createCapturedCtx()
+      await runMonitor({validation: 'synthetic-healthy'}, healthy.ctx)
+      expect(probeLines(healthy.captured.stdout)).toEqual([
+        expect.stringMatching(/^CLIProxy auth monitor probe: probe=healthy reason=ok at \S+$/),
+      ])
+
+      const dead = createCapturedCtx()
+      await runMonitor({validation: 'synthetic-dead'}, dead.ctx)
+      expect(probeLines(dead.captured.stdout)).toEqual([
+        expect.stringMatching(/^CLIProxy auth monitor probe: probe=dead reason=auth-401 at \S+$/),
+      ])
+      expect(summaryLines(dead.captured.stdout)).toHaveLength(1)
+    })
+
+    it('prints the live unknown probe line without provider text or URLs', async () => {
+      configureSyntheticEnvironment()
+      process.env.CLIPROXY_API_KEY = 'secret-provider-key'
+      installFetch(async input => {
+        const url = String(input)
+        if (url.includes('/v1/chat/completions'))
+          return new Response('HOSTILE_BODY https://secret.example', {status: 503})
+        if (url.includes('/issues?state=all')) return new Response('[]', {status: 200})
+        throw new Error(`unexpected ${url}`)
+      })
+      const {ctx, captured} = createCapturedCtx()
+
+      await runMonitor({validation: 'live'}, ctx)
+
+      const lines = probeLines(captured.stdout)
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toMatch(/^CLIProxy auth monitor probe: probe=unknown reason=unrelated-http at \S+$/)
+      expect(lines[0]).not.toContain('HOSTILE_BODY')
+      expect(lines[0]).not.toContain('secret')
+      expect(summaryLines(captured.stdout)).toHaveLength(1)
+    })
+
+    it('prints no probe line when the monitor fails before the probe', async () => {
+      const {ctx, captured} = createCapturedCtx()
+
+      await expect(runMonitor({validation: 'live'}, ctx)).rejects.toBeInstanceOf(MockProcessExit)
+
+      expect(probeLines(captured.stdout)).toHaveLength(0)
+    })
+  })
 })

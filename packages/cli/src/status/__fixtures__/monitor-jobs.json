@@ -1,0 +1,12 @@
+{
+  "jobs": [
+    {
+      "completed_at": "2026-11-01T22:56:08Z",
+      "conclusion": "success",
+      "id": 125006846977,
+      "name": "Probe CLIProxy Anthropic auth",
+      "started_at": "2026-11-01T22:55:55Z",
+      "status": "completed"
+    }
+  ]
+}

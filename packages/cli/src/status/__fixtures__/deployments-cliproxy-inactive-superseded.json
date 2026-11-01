@@ -1,0 +1,41 @@
+{
+  "deployments": [
+    {
+      "created_at": "2026-10-24T16:40:39Z",
+      "environment": "cliproxy",
+      "id": 7301451563
+    }
+  ],
+  "statuses": [
+    {
+      "created_at": "2026-10-25T21:39:50Z",
+      "id": 20570005862,
+      "state": "inactive"
+    },
+    {
+      "created_at": "2026-10-24T20:21:27Z",
+      "id": 20506201748,
+      "state": "success"
+    },
+    {
+      "created_at": "2026-10-24T20:20:55Z",
+      "id": 20506176010,
+      "state": "in_progress"
+    },
+    {
+      "created_at": "2026-10-24T20:20:53Z",
+      "id": 20506174225,
+      "state": "queued"
+    },
+    {
+      "created_at": "2026-10-24T16:40:40Z",
+      "id": 20496042273,
+      "state": "waiting"
+    },
+    {
+      "created_at": "2026-10-24T16:40:40Z",
+      "id": 20496042250,
+      "state": "waiting"
+    }
+  ]
+}

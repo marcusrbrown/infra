@@ -1,0 +1,31 @@
+{
+  "deployments": [
+    {
+      "created_at": "2026-10-31T18:27:00Z",
+      "environment": "broker",
+      "id": 7462600608
+    }
+  ],
+  "statuses": [
+    {
+      "created_at": "2026-10-31T18:27:46Z",
+      "id": 21072263370,
+      "state": "success"
+    },
+    {
+      "created_at": "2026-10-31T18:27:21Z",
+      "id": 21072249545,
+      "state": "in_progress"
+    },
+    {
+      "created_at": "2026-10-31T18:27:19Z",
+      "id": 21072248405,
+      "state": "queued"
+    },
+    {
+      "created_at": "2026-10-31T18:27:00Z",
+      "id": 21072238047,
+      "state": "waiting"
+    }
+  ]
+}

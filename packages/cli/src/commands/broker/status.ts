@@ -4,6 +4,7 @@ import type {StatusSummary} from '../status'
 
 import {z} from 'zod'
 
+import {httpGet, PUBLIC_PROBE_TIMEOUT_MS} from '../../status/public-probes'
 import {validateBrokerHost} from './host'
 
 declare const process: {
@@ -12,31 +13,27 @@ declare const process: {
 }
 
 const DEFAULT_BROKER_URL = 'https://broker.fro.bot'
-const HTTP_TIMEOUT_MS = 10_000
 
 // ─── HTTP health check ────────────────────────────────────────────────────────
 
 export async function checkBrokerHealth(baseUrl: string): Promise<{ok: boolean; summary: string}> {
   const url = `${baseUrl}/healthz`
-  const startedAt = performance.now()
+  // Operator-facing text: the shared GET primitive keeps the raw error so this summary can include it.
+  // The typed, public-safe observation lives in probeBroker (status/public-probes).
+  const attempt = await httpGet(url, {timeoutMs: PUBLIC_PROBE_TIMEOUT_MS})
+  const elapsedMs = Math.max(0, Math.round(attempt.durationMs))
 
-  try {
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    })
-    const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt))
+  if (attempt.kind === 'response') {
+    return {
+      ok: attempt.ok,
+      summary: `GET ${url} → ${attempt.status} (${elapsedMs}ms)`,
+    }
+  }
 
-    return {
-      ok: response.ok,
-      summary: `GET ${url} → ${response.status} (${elapsedMs}ms)`,
-    }
-  } catch (error) {
-    const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt))
-    const message = error instanceof Error ? error.message : String(error)
-    return {
-      ok: false,
-      summary: `Request failed after ${elapsedMs}ms: ${message}`,
-    }
+  const message = attempt.error instanceof Error ? attempt.error.message : String(attempt.error)
+  return {
+    ok: false,
+    summary: `Request failed after ${elapsedMs}ms: ${message}`,
   }
 }
 

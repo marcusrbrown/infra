@@ -8,6 +8,7 @@ import {z} from 'zod'
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {httpGet} from '../../status/public-probes'
 import {validateCliproxyHost} from './host'
 
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
@@ -78,13 +79,12 @@ export function toNumber(value: unknown): number | null {
 }
 
 export async function checkHttpReachability(url: string, verbose: boolean): Promise<CheckResult> {
-  const startedAt = performance.now()
+  // Operator-facing text: the shared GET primitive keeps the raw error so this summary can include it.
+  // The typed, public-safe observation lives in probeCliproxy (status/public-probes).
+  const attempt = await httpGet(url, {timeoutMs: HTTP_TIMEOUT_MS})
 
-  try {
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    })
-    const elapsedMs = performance.now() - startedAt
+  if (attempt.kind === 'response') {
+    const {response} = attempt
     const details: string[] = []
 
     if (verbose) {
@@ -97,20 +97,19 @@ export async function checkHttpReachability(url: string, verbose: boolean): Prom
 
     return {
       title: 'HTTP reachability',
-      level: response.ok ? 'ok' : 'error',
-      summary: `GET ${url} → ${response.status} (${formatDurationMs(elapsedMs)})`,
+      level: attempt.ok ? 'ok' : 'error',
+      summary: `GET ${url} → ${attempt.status} (${formatDurationMs(attempt.durationMs)})`,
       details,
     }
-  } catch (error) {
-    const elapsedMs = performance.now() - startedAt
-    const message = error instanceof Error ? error.message : String(error)
+  }
 
-    return {
-      title: 'HTTP reachability',
-      level: 'error',
-      summary: `Request failed after ${formatDurationMs(elapsedMs)}: ${message}`,
-      details: verbose ? [`URL: ${url}`, `Timeout: ${HTTP_TIMEOUT_MS}ms`] : undefined,
-    }
+  const message = attempt.error instanceof Error ? attempt.error.message : String(attempt.error)
+
+  return {
+    title: 'HTTP reachability',
+    level: 'error',
+    summary: `Request failed after ${formatDurationMs(attempt.durationMs)}: ${message}`,
+    details: verbose ? [`URL: ${url}`, `Timeout: ${HTTP_TIMEOUT_MS}ms`] : undefined,
   }
 }
 

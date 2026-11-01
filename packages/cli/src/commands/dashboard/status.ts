@@ -1,11 +1,13 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
-import type {StatusSummary} from '../status'
+import type {AppCollection} from '../../status/collect'
 import {z} from 'zod'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {composeObservation, servicesFact} from '../../status/collect'
+import {declaredObservation} from '../../status/declared'
 import {validateDashboardHost} from './host'
 
 declare const process: {
@@ -167,56 +169,12 @@ export async function getDashboardComposeStatus(
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
-export async function getDashboardStatusSummary(host: string, spawn?: SpawnFn): Promise<StatusSummary> {
-  let result: DashboardStatusResult
-
-  try {
-    result = await getDashboardComposeStatus(host, spawn)
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error)
-    return {
-      app: 'dashboard',
-      http: `ERROR: ${errorMsg}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
-    }
-  }
-
-  // Three-way split: no services → ERROR, services present but degraded → DEGRADED, all healthy → OK
-  if (result.services.length === 0) {
-    const errorMsg = result.error ?? 'No services reported'
-    return {
-      app: 'dashboard',
-      http: `ERROR: ${errorMsg}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
-    }
-  }
-
-  const rows = result.services.map(s => `${s.service}:${s.state}/${s.health}`).join(', ')
-
-  if (!result.ok) {
-    return {
-      app: 'dashboard',
-      http: `DEGRADED: ${rows}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
-    }
-  }
+export async function getDashboardStatusSummary(host: string, spawn?: SpawnFn): Promise<AppCollection> {
+  const result = await getDashboardComposeStatus(host, spawn)
 
   return {
-    app: 'dashboard',
-    http: `OK: ${rows}`,
-    lastDeploy: '—',
-    version: '—',
-    contentHash: '—',
-    usageStats: '—',
+    observations: [composeObservation(declaredObservation('dashboard', 'compose-services'), result)],
+    facts: {services: servicesFact(result.services)},
   }
 }
 

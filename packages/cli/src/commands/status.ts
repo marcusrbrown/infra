@@ -1,10 +1,22 @@
 import type {goke} from 'goke'
 
 import type {ActionCtx} from '../lib/action-ctx'
-import type {WorkspaceMemoryStatus} from './gateway/workspace-memory'
+import type {AppCollection} from '../status/collect'
+import type {CollectorOutcome, ProbeOutcome} from '../status/declared'
+import type {
+  AppId,
+  AppStatus,
+  Observation,
+  ObservationKind,
+  ObservationResult,
+  StatusEnvelope,
+} from '../status/observation'
+import type {ProbeOptions} from '../status/public-probes'
 
 import {z} from 'zod'
-import {getBrokerStatusSummary} from './broker/status'
+import {assembleAppStatus, worstResult} from '../status/declared'
+import {APP_IDS, STATUS_SCHEMA_VERSION} from '../status/observation'
+import {PUBLIC_PROBES} from '../status/public-probes'
 import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getDashboardStatusSummary} from './dashboard'
 import {getGatewayStatusSummary} from './gateway'
@@ -16,141 +28,162 @@ declare const process: {
   env: Record<string, string | undefined>
 }
 
-export interface StatusSummary {
-  app: 'keeweb' | 'cliproxy' | 'gateway' | 'umami' | 'dashboard' | 'vpn' | 'broker'
-  http: string
-  lastDeploy: string
-  version: string
-  contentHash: string
-  usageStats: string
-  /** Structured workspace memory status; only the gateway summary sets it. */
-  workspace?: WorkspaceMemoryStatus
-}
+type PublicProbeMap = Partial<Record<AppId, (options?: ProbeOptions) => Promise<Observation>>>
 
-type AppName = StatusSummary['app']
-
-interface StatusDependencies {
-  getKeewebStatusSummary: (verbose: boolean) => Promise<StatusSummary>
-  getCliproxyStatusSummary: (baseUrl: string, key: string, verbose: boolean) => Promise<StatusSummary>
-  getGatewayStatusSummary: (host: string) => Promise<StatusSummary>
-  getUmamiStatusSummary: (host: string) => Promise<StatusSummary>
-  getDashboardStatusSummary: (host: string) => Promise<StatusSummary>
-  getVpnStatusSummary: (host: string) => Promise<StatusSummary>
-  getBrokerStatusSummary: (host: string) => Promise<StatusSummary>
+export interface StatusDependencies {
+  getKeewebStatusSummary: () => Promise<AppCollection>
+  getCliproxyStatusSummary: (baseUrl: string, key: string) => Promise<AppCollection>
+  getGatewayStatusSummary: (host: string) => Promise<AppCollection>
+  getUmamiStatusSummary: (host: string) => Promise<AppCollection>
+  getDashboardStatusSummary: (host: string) => Promise<AppCollection>
+  getVpnStatusSummary: (host: string) => Promise<AppCollection>
+  publicProbes: PublicProbeMap
+  now: () => Date
 }
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
-const ERROR_PREFIX = '❌'
-const TABLE_COLUMNS: {key: keyof StatusSummary; label: string}[] = [
-  {key: 'app', label: 'App'},
-  {key: 'http', label: 'HTTP'},
-  {key: 'lastDeploy', label: 'Last Deploy'},
-  {key: 'version', label: 'Version'},
-  {key: 'contentHash', label: 'Content Hash'},
-  {key: 'usageStats', label: 'Usage Stats'},
+
+const defaultDependencies: StatusDependencies = {
+  getKeewebStatusSummary,
+  getCliproxyStatusSummary,
+  getGatewayStatusSummary,
+  getUmamiStatusSummary,
+  getDashboardStatusSummary,
+  getVpnStatusSummary,
+  publicProbes: PUBLIC_PROBES,
+  now: () => new Date(),
+}
+
+const TABLE_COLUMNS: {kind: ObservationKind; label: string}[] = [
+  {kind: 'reachability', label: 'Reachability'},
+  {kind: 'container-health', label: 'Container'},
+  {kind: 'deploy-state', label: 'Deploy'},
+  {kind: 'end-to-end', label: 'End-to-end'},
+  {kind: 'resource', label: 'Resource'},
 ]
+
+const RESULT_CELLS: Record<ObservationResult, string> = {
+  pass: '✅ pass',
+  fail: '❌ fail',
+  unknown: '❓ unknown',
+  not_measured: '⚪ not measured',
+}
+
+/** A kind the app does not declare renders as an em dash. */
+const UNDECLARED_CELL = '—'
 
 function stripTrailingSlash(value: string): string {
   return value.endsWith('/') ? value.slice(0, -1) : value
 }
 
-function errorSummary(app: AppName, reason: unknown): StatusSummary {
-  const message = reason instanceof Error ? reason.message : String(reason)
-  const errorCell = `${ERROR_PREFIX} ${message}`
-
-  return {
-    app,
-    http: errorCell,
-    lastDeploy: errorCell,
-    version: errorCell,
-    contentHash: errorCell,
-    usageStats: errorCell,
-  }
+function describeReason(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason)
 }
 
-function toJsonPayload(rows: StatusSummary[]): Record<AppName, StatusSummary> {
-  return {
-    keeweb: rows.find(row => row.app === 'keeweb') ?? errorSummary('keeweb', 'missing result'),
-    cliproxy: rows.find(row => row.app === 'cliproxy') ?? errorSummary('cliproxy', 'missing result'),
-    gateway: rows.find(row => row.app === 'gateway') ?? errorSummary('gateway', 'missing result'),
-    umami: rows.find(row => row.app === 'umami') ?? errorSummary('umami', 'missing result'),
-    dashboard: rows.find(row => row.app === 'dashboard') ?? errorSummary('dashboard', 'missing result'),
-    vpn: rows.find(row => row.app === 'vpn') ?? errorSummary('vpn', 'missing result'),
-    broker: rows.find(row => row.app === 'broker') ?? errorSummary('broker', 'missing result'),
-  }
+type Collector = {kind: 'run'; run: () => Promise<AppCollection>} | {kind: 'missing-config'} | {kind: 'none'}
+
+function hostCollector(host: string, run: (host: string) => Promise<AppCollection>): Collector {
+  return host === '' ? {kind: 'missing-config'} : {kind: 'run', run: () => run(host)}
 }
 
-function formatRow(row: StatusSummary): string {
-  const values = TABLE_COLUMNS.map(({key}) => row[key])
-  return `| ${values.join(' | ')} |`
+async function collectApp(
+  app: AppId,
+  probe: (() => Promise<Observation>) | undefined,
+  collector: Collector,
+  ctx: ActionCtx,
+  now: () => Date,
+): Promise<AppStatus> {
+  const [probeResult, collectorResult] = await Promise.allSettled([
+    probe === undefined ? Promise.resolve(undefined) : probe(),
+    collector.kind === 'run' ? collector.run() : Promise.resolve(undefined),
+  ])
+
+  for (const result of [probeResult, collectorResult]) {
+    if (result.status === 'rejected') {
+      ctx.console.error(`${app} status check failed: ${describeReason(result.reason)}`)
+    }
+  }
+
+  let probeOutcome: ProbeOutcome = {kind: 'none'}
+  if (probeResult.status === 'rejected') {
+    probeOutcome = {kind: 'failed'}
+  } else if (probeResult.value !== undefined) {
+    probeOutcome = {kind: 'ok', observation: probeResult.value}
+  }
+
+  let collectorOutcome: CollectorOutcome = {kind: collector.kind === 'run' ? 'none' : collector.kind}
+  if (collectorResult.status === 'rejected') {
+    collectorOutcome = {kind: 'failed'}
+  } else if (collectorResult.value !== undefined) {
+    collectorOutcome = {kind: 'ok', collection: collectorResult.value}
+  }
+
+  return assembleAppStatus(app, probeOutcome, collectorOutcome, now())
+}
+
+function formatRow(app: AppStatus): string {
+  const cells = TABLE_COLUMNS.map(({kind}) => {
+    const worst = worstResult(app, kind)
+    return worst === undefined ? UNDECLARED_CELL : RESULT_CELLS[worst]
+  })
+
+  return `| ${[app.app, ...cells].join(' | ')} |`
+}
+
+function formatHeader(): string {
+  return `| ${['App', ...TABLE_COLUMNS.map(({label}) => label)].join(' | ')} |`
 }
 
 export async function unifiedStatusAction(
-  options: {json?: boolean; verbose?: boolean},
+  options: {json?: boolean},
   ctx: ActionCtx,
-  dependencies: StatusDependencies = {
-    getKeewebStatusSummary,
-    getCliproxyStatusSummary,
-    getGatewayStatusSummary,
-    getUmamiStatusSummary,
-    getDashboardStatusSummary,
-    getVpnStatusSummary,
-    getBrokerStatusSummary,
-  },
+  dependencies: StatusDependencies = defaultDependencies,
 ): Promise<void> {
-  const verbose = options.verbose === true
   const cliproxyBaseUrl = stripTrailingSlash(process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
   const cliproxyKey = process.env.CLIPROXY_MANAGEMENT_KEY ?? ''
   const gatewayHost = process.env.GATEWAY_HOST ?? ''
   const umamiHost = process.env.UMAMI_DOMAIN ?? ''
   const dashboardHost = process.env.DASHBOARD_DOMAIN ?? ''
   const vpnHost = process.env.VPN_HOST ?? ''
-  const brokerHost = process.env.BROKER_DOMAIN ?? process.env.BROKER_HOST ?? ''
 
-  const results = await Promise.allSettled([
-    dependencies.getKeewebStatusSummary(verbose),
-    dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey, verbose),
-    dependencies.getGatewayStatusSummary(gatewayHost),
-    dependencies.getUmamiStatusSummary(umamiHost),
-    dependencies.getDashboardStatusSummary(dashboardHost),
-    dependencies.getVpnStatusSummary(vpnHost),
-    dependencies.getBrokerStatusSummary(brokerHost),
-  ])
+  const collectors: Record<AppId, Collector> = {
+    keeweb: {kind: 'run', run: () => dependencies.getKeewebStatusSummary()},
+    cliproxy: {kind: 'run', run: () => dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey)},
+    gateway: hostCollector(gatewayHost, dependencies.getGatewayStatusSummary),
+    umami: hostCollector(umamiHost, dependencies.getUmamiStatusSummary),
+    dashboard: hostCollector(dashboardHost, dependencies.getDashboardStatusSummary),
+    vpn: hostCollector(vpnHost, dependencies.getVpnStatusSummary),
+    broker: {kind: 'none'},
+  }
 
-  const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker']
-  const rows: StatusSummary[] = results.map((result, index) => {
-    const app = appNames[index] ?? 'keeweb'
-    if (result.status === 'fulfilled') {
-      return result.value
-    }
-    const reason = result.reason
-    const message = reason instanceof Error ? reason.message : String(reason)
-    ctx.console.error(`${app} status check failed: ${message}`)
-    return errorSummary(app, reason)
-  })
+  const apps = await Promise.all(
+    APP_IDS.map(app => {
+      const probe = dependencies.publicProbes[app]
+      // The cliproxy URL can be overridden for the SSH and management checks, so the probe follows it.
+      const probeOptions: ProbeOptions | undefined = app === 'cliproxy' ? {baseUrl: cliproxyBaseUrl} : undefined
+      return collectApp(app, probe && (() => probe(probeOptions)), collectors[app], ctx, dependencies.now)
+    }),
+  )
 
   if (options.json === true) {
-    ctx.console.log(JSON.stringify(toJsonPayload(rows)))
+    const envelope: StatusEnvelope = {
+      schemaVersion: STATUS_SCHEMA_VERSION,
+      generatedAt: dependencies.now().toISOString(),
+      apps,
+    }
+    ctx.console.log(JSON.stringify(envelope))
     return
   }
 
-  ctx.console.log('| App | HTTP | Last Deploy | Version | Content Hash | Usage Stats |')
-  for (const row of rows) {
-    ctx.console.log(formatRow(row))
+  ctx.console.log(formatHeader())
+  for (const app of apps) {
+    ctx.console.log(formatRow(app))
   }
 }
 
 export function registerStatus(
   cli: ReturnType<typeof goke>,
-  dependencies: StatusDependencies = {
-    getKeewebStatusSummary,
-    getCliproxyStatusSummary,
-    getGatewayStatusSummary,
-    getUmamiStatusSummary,
-    getDashboardStatusSummary,
-    getVpnStatusSummary,
-    getBrokerStatusSummary,
-  },
+  dependencies: StatusDependencies = defaultDependencies,
 ): void {
   cli
     .command('status', 'Show status of all deployments')
@@ -159,12 +192,8 @@ export function registerStatus(
       z
         .boolean()
         .describe(
-          'Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, vpn, and broker summary objects. The gateway object also carries a structured workspace field.',
+          'Output a schema-versioned JSON envelope: schemaVersion, generatedAt, and one entry per app with typed observations (id, kind, result, observedAt, source) and facts. The gateway workspace memory status is in facts.workspace.',
         ),
-    )
-    .option(
-      '--verbose',
-      z.boolean().describe('Include verbose per-app health check details when building the summary rows.'),
     )
     .action((options, ctx) => unifiedStatusAction(options, ctx, dependencies))
 }

@@ -60,7 +60,7 @@ The [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) C
 ```bash
 bunx @marcusrbrown/infra --help
 bunx @marcusrbrown/infra status          # all deployments, human-readable
-bunx @marcusrbrown/infra status --json   # machine-readable
+bunx @marcusrbrown/infra status --json   # schema-versioned typed observations per app
 bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 ```
 

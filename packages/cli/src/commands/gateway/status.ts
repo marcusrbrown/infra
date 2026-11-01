@@ -1,18 +1,20 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
-import type {StatusSummary} from '../status'
+import type {AppCollection} from '../../status/collect'
+import type {Observation} from '../../status/observation'
 import {z} from 'zod'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {composeObservation, observe, servicesFact} from '../../status/collect'
+import {declaredObservation} from '../../status/declared'
 // ─── Minimal ctx interface (subset of GokeExecutionContext used by this action) ─
 import {validateGatewayHost} from './host'
 import {
   buildWorkspaceProbeScript,
   COMPOSE_PROJECT_DIR,
   formatWorkspaceMemory,
-  formatWorkspaceSummary,
   parseWorkspaceProbeOutput,
   unknownWorkspace,
   type WorkspaceMemoryStatus,
@@ -241,35 +243,45 @@ export async function getGatewayWorkspaceStatus(
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
-export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Promise<StatusSummary> {
+/**
+ * Memory and OOM evidence from the workspace probe: `fail` on any kernel OOM kill or a supervisor that is
+ * down or degraded, `unknown` when the probe gave no usable answer. The full block is in `facts.workspace`.
+ */
+function workspaceObservation(workspace: WorkspaceMemoryStatus): Observation {
+  const spec = declaredObservation('gateway', 'workspace-memory')
+
+  if (workspace.status === 'unknown') return observe(spec, 'unknown', {detail: {reason: 'probe-failed'}})
+  if (workspace.oomKilled || workspace.oomKills > 0) return observe(spec, 'fail', {detail: {reason: 'oom-kill'}})
+  if (workspace.opencode === 'down' || workspace.opencode === 'degraded') {
+    return observe(spec, 'fail', {detail: {reason: `supervisor-${workspace.opencode}`}})
+  }
+
+  return observe(spec, 'pass')
+}
+
+export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Promise<AppCollection> {
   const result = await getGatewayComposeStatus(host, spawn)
+  const compose = composeObservation(declaredObservation('gateway', 'compose-services'), result)
 
   // No services means an SSH or compose failure: there is nothing to probe.
   if (result.services.length === 0) {
-    const errorMsg = result.error ?? 'No services reported'
     return {
-      app: 'gateway',
-      http: `ERROR: ${errorMsg}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
+      observations: [
+        compose,
+        observe(declaredObservation('gateway', 'workspace-memory'), 'unknown', {
+          detail: {reason: 'compose-unavailable'},
+        }),
+      ],
+      facts: {services: []},
     }
   }
 
   // Probe even when a service is down: the workspace itself may still be running.
-  const rows = result.services.map(s => `${s.service}:${s.state}/${s.health}`).join(', ')
   const workspace = await getGatewayWorkspaceStatus(host, spawn)
-  const prefix = result.ok ? `OK: ${rows}` : `DEGRADED: ${rows}`
 
   return {
-    app: 'gateway',
-    http: `${prefix}; ${formatWorkspaceSummary(workspace)}`,
-    lastDeploy: '—',
-    version: '—',
-    contentHash: '—',
-    usageStats: '—',
-    workspace,
+    observations: [compose, workspaceObservation(workspace)],
+    facts: {services: servicesFact(result.services), workspace: {...workspace}},
   }
 }
 

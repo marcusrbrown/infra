@@ -1,8 +1,10 @@
-import type {StatusSummary} from '../status'
+import type {AppCollection} from '../../status/collect'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {observe} from '../../status/collect'
+import {declaredObservation} from '../../status/declared'
 import {validateVpnHost} from './host'
 
 declare const process: {
@@ -132,39 +134,29 @@ export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn
 // ─── Unified status aggregator export ────────────────────────────────────────
 
 /**
- * Get a structured VPN status summary for the unified status dashboard.
+ * Get the VPN's WireGuard observation and facts for the unified status command.
  *
  * SSH + `wg show` only — never calls the Lightsail/AWS API.
  * The MCP runtime needs no AWS credentials to call this function.
+ * An SSH failure is `unknown` (the interface could not be observed); a reachable box whose wg0 is down is `fail`.
  *
  * @param host - The VPN box hostname or IP (validated before SSH).
  * @param spawn - Injectable spawn function (defaults to Bun.spawn).
  */
-export async function getVpnStatusSummary(host: string, spawn?: SpawnFn): Promise<StatusSummary> {
+export async function getVpnStatusSummary(host: string, spawn?: SpawnFn): Promise<AppCollection> {
   const result = await getVpnWgStatus(host, spawn)
+  const spec = declaredObservation('vpn', 'wireguard-interface')
 
-  if (!result.ok || !result.wgShow) {
-    const errorMsg = result.error ?? 'WireGuard interface not up'
-    return {
-      app: 'vpn',
-      http: `ERROR: ${errorMsg}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
-    }
+  if (result.error !== undefined) {
+    return {observations: [observe(spec, 'unknown', {detail: {reason: 'ssh-failed'}})], facts: {}}
   }
 
-  const {wgShow} = result
-  const pubKeyInfo = wgShow.serverPublicKey ? ` pubkey:${wgShow.serverPublicKey}` : ''
-  const peerInfo = `${wgShow.peerCount} peer(s)`
+  if (!result.ok || !result.wgShow) {
+    return {observations: [observe(spec, 'fail', {detail: {reason: 'interface-down'}})], facts: {}}
+  }
 
   return {
-    app: 'vpn',
-    http: `OK: wg0 up,${pubKeyInfo} ${peerInfo}`,
-    lastDeploy: '—',
-    version: '—',
-    contentHash: '—',
-    usageStats: '—',
+    observations: [observe(spec, 'pass')],
+    facts: {peerCount: result.wgShow.peerCount, serverPublicKey: result.wgShow.serverPublicKey ?? null},
   }
 }

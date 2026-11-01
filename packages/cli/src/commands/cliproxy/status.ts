@@ -1,6 +1,7 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
-import type {StatusSummary} from '../status'
+import type {AppCollection} from '../../status/collect'
+import type {JsonValue} from '../../status/observation'
 
 import {HTTP_TIMEOUT_MS, managementHeaders} from '@marcusrbrown/infra-shared/cliproxy/management'
 import {z} from 'zod'
@@ -8,6 +9,8 @@ import {z} from 'zod'
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {observe} from '../../status/collect'
+import {declaredObservation} from '../../status/declared'
 import {httpGet} from '../../status/public-probes'
 import {validateCliproxyHost} from './host'
 
@@ -245,7 +248,11 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
   }
 }
 
-export async function checkRunningVersion(host: string, spawn: SpawnFn = defaultSpawn): Promise<CheckResult> {
+export type RunningContainer =
+  {kind: 'running'; version: string} | {kind: 'none'} | {kind: 'unavailable'; summary: string}
+
+/** Ask the host which CLIProxyAPI image is running. Never throws: SSH problems come back as `unavailable`. */
+export async function inspectRunningContainer(host: string, spawn: SpawnFn = defaultSpawn): Promise<RunningContainer> {
   let cleanup: () => void = () => undefined
 
   try {
@@ -284,28 +291,33 @@ export async function checkRunningVersion(host: string, spawn: SpawnFn = default
 
     if (exitCode !== 0) {
       return {
-        title: 'Running version',
-        level: 'warning',
+        kind: 'unavailable',
         summary: `SSH command failed (exit ${exitCode}): ${redactHost(stderrText.trim(), host) || 'unknown error'}`,
       }
     }
 
     const imageMatch = /(?:^|\s)eceasy\/cli-proxy-api:([^\s@]+)/m.exec(stdoutText)
-    if (!imageMatch) {
-      return {
-        title: 'Running version',
-        level: 'warning',
-        summary: 'No running eceasy/cli-proxy-api container found.',
-      }
-    }
-
-    return {title: 'Running version', level: 'ok', summary: imageMatch[1] ?? 'unknown'}
+    return imageMatch ? {kind: 'running', version: imageMatch[1] ?? 'unknown'} : {kind: 'none'}
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return {title: 'Running version', level: 'warning', summary: `Unable to check running version via SSH: ${message}`}
+    return {kind: 'unavailable', summary: `Unable to check running version via SSH: ${message}`}
   } finally {
     cleanup()
   }
+}
+
+export async function checkRunningVersion(host: string, spawn: SpawnFn = defaultSpawn): Promise<CheckResult> {
+  const container = await inspectRunningContainer(host, spawn)
+
+  if (container.kind === 'running') {
+    return {title: 'Running version', level: 'ok', summary: container.version}
+  }
+
+  if (container.kind === 'none') {
+    return {title: 'Running version', level: 'warning', summary: 'No running eceasy/cli-proxy-api container found.'}
+  }
+
+  return {title: 'Running version', level: 'warning', summary: container.summary}
 }
 
 const DEFAULT_PROVIDER_MODEL = 'claude-sonnet-4-6'
@@ -610,53 +622,7 @@ function printCheckResult(result: CheckResult, ctx: ActionCtx): void {
   }
 }
 
-function formatCheckSummary(result: CheckResult): string {
-  return `${levelLabel(result.level)}: ${result.summary}`
-}
-
 const RUNNING_VERSION_NOT_CHECKED_SUMMARY = 'Not checked for explicit URL override.'
-
-export function formatVersionSummary(running: CheckResult, available: CheckResult): string {
-  const latestFailure = /429|rate limit/i.test(available.summary)
-    ? 'rate-limited'
-    : /auth|\b40[13]\b|ip banned/i.test(available.summary)
-      ? 'auth'
-      : 'unknown'
-
-  if (running.summary === RUNNING_VERSION_NOT_CHECKED_SUMMARY) {
-    if (available.level === 'ok') {
-      return `not checked (latest ${available.summary})`
-    }
-
-    if (available.summary === 'Not checked (no management key).') {
-      return 'not checked (latest: no key)'
-    }
-
-    return `not checked (latest ${latestFailure})`
-  }
-
-  if (running.level === 'ok' && available.level === 'ok') {
-    return running.summary === available.summary
-      ? `${running.summary} (latest)`
-      : `${running.summary} (latest ${available.summary})`
-  }
-
-  if (running.level === 'ok') {
-    return available.summary === 'Not checked (no management key).'
-      ? `${running.summary} (latest: no key)`
-      : `${running.summary} (latest ${latestFailure})`
-  }
-
-  if (available.level === 'ok') {
-    return `unknown (latest ${available.summary})`
-  }
-
-  if (latestFailure === 'auth') {
-    return 'unknown (auth)'
-  }
-
-  return latestFailure === 'rate-limited' ? 'unknown (latest rate-limited)' : 'unknown'
-}
 
 function getRunningVersionNotChecked(host: string): CheckResult {
   try {
@@ -668,53 +634,71 @@ function getRunningVersionNotChecked(host: string): CheckResult {
   }
 }
 
-export function formatUsageSummaryLine(result: CheckResult): string | null {
-  // v7 recent-window format: "recent: N" or "recent: N, errors: M"
+/** Read the recent-window counts back out of a `checkUsageStats` summary (`recent: N` / `recent: N, errors: M`). */
+function parseUsageCounts(result: CheckResult): {recent: number; errors: number} | null {
   const recentMatch = /recent:\s*(\d+)/.exec(result.summary)
   if (!recentMatch) {
     return null
   }
-  const total = Number(recentMatch[1])
   const errorMatch = /errors:\s*(\d+)/.exec(result.summary)
-  const errors = errorMatch ? Number(errorMatch[1]) : 0
-  return `Recent requests: ${total}${errors > 0 ? `, ${errors} errors` : ''}`
+  return {recent: Number(recentMatch[1]), errors: errorMatch ? Number(errorMatch[1]) : 0}
 }
 
+export function formatUsageSummaryLine(result: CheckResult): string | null {
+  const counts = parseUsageCounts(result)
+  if (counts === null) {
+    return null
+  }
+  return `Recent requests: ${counts.recent}${counts.errors > 0 ? `, ${counts.errors} errors` : ''}`
+}
+
+/**
+ * Unified-status collector. Reachability comes from the shared public probe, so this supplies the SSH
+ * container observation plus facts: the running and latest versions and recent usage (null when the
+ * management API could not say; `managementAccess` says why).
+ */
 export async function getCliproxyStatusSummary(
   baseUrl: string,
   key: string,
-  verbose: boolean,
   spawn: SpawnFn = defaultSpawn,
-): Promise<StatusSummary> {
+): Promise<AppCollection> {
   const normalizedBaseUrl = stripTrailingSlash(baseUrl)
   const host = new URL(normalizedBaseUrl).hostname
-  const [httpResult, mgmt, running] = await Promise.all([
-    checkHttpReachability(`${normalizedBaseUrl}/healthz`, verbose),
+  const [mgmt, running] = await Promise.all([
     runManagementChecks(normalizedBaseUrl, key || undefined),
-    checkRunningVersion(host, spawn),
+    inspectRunningContainer(host, spawn),
   ])
 
-  let available: CheckResult
-  let usageStats: string
-
-  if (mgmt.kind === 'no-key') {
-    available = {title: 'Latest available version', level: 'warning', summary: 'Not checked (no management key).'}
-    usageStats = '— (no key)'
-  } else if (mgmt.kind === 'auth-failure') {
-    available = mgmt.result
-    usageStats = formatCheckSummary(mgmt.result)
+  const spec = declaredObservation('cliproxy', 'container-running')
+  let container
+  if (running.kind === 'running') {
+    container = observe(spec, 'pass')
+  } else if (running.kind === 'none') {
+    container = observe(spec, 'fail', {detail: {reason: 'not-running'}})
   } else {
-    available = mgmt.version
-    usageStats = formatCheckSummary(mgmt.usage)
+    container = observe(spec, 'unknown', {detail: {reason: 'ssh-failed'}})
+  }
+
+  let managementAccess: JsonValue = 'ok'
+  let latestVersion: string | null = null
+  let usage: JsonValue = null
+  if (mgmt.kind === 'no-key') {
+    managementAccess = 'no-key'
+  } else if (mgmt.kind === 'auth-failure') {
+    managementAccess = 'denied'
+  } else {
+    latestVersion = mgmt.version.level === 'ok' ? mgmt.version.summary : null
+    usage = parseUsageCounts(mgmt.usage)
   }
 
   return {
-    app: 'cliproxy',
-    http: formatCheckSummary(httpResult),
-    lastDeploy: '—',
-    version: formatVersionSummary(running, available),
-    contentHash: '—',
-    usageStats,
+    observations: [container],
+    facts: {
+      runningVersion: running.kind === 'running' ? running.version : null,
+      latestVersion,
+      usage,
+      managementAccess,
+    },
   }
 }
 

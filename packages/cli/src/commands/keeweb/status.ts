@@ -1,7 +1,7 @@
 import type {goke} from 'goke'
 
 import type {ActionCtx} from '../../lib/action-ctx'
-import type {StatusSummary} from '../status'
+import type {AppCollection} from '../../status/collect'
 
 import {join} from 'node:path'
 import {z} from 'zod'
@@ -18,6 +18,8 @@ interface CheckResult {
   level: CheckLevel
   summary: string
   details?: string[]
+  /** Machine-readable outcome for the typed status contract: the run's ISO time, or `match`/`differs`. */
+  value?: string
 }
 
 const ghRunSchema = z.array(
@@ -182,6 +184,7 @@ export async function checkLastDeploy(verbose: boolean): Promise<CheckResult> {
       level: 'ok',
       summary: `${formatDate(latestRun.createdAt)}`,
       details,
+      value: latestRun.createdAt,
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -288,6 +291,7 @@ export async function checkContentHash(verbose: boolean, repoRoot?: string): Pro
         level: 'ok',
         summary: 'Remote index.html matches local dist/index.html',
         details,
+        value: 'match',
       }
     }
 
@@ -296,6 +300,7 @@ export async function checkContentHash(verbose: boolean, repoRoot?: string): Pro
       level: 'warning',
       summary: 'Remote index.html differs from local dist/index.html',
       details,
+      value: 'differs',
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -319,24 +324,20 @@ function printCheckResult(result: CheckResult, ctx: ActionCtx): void {
   }
 }
 
-function formatCheckSummary(result: CheckResult): string {
-  return `${levelLabel(result.level)}: ${result.summary}`
-}
-
-export async function getKeewebStatusSummary(verbose: boolean): Promise<StatusSummary> {
-  const [httpResult, lastDeployResult, contentHashResult] = await Promise.all([
-    checkHttpReachability(verbose),
-    checkLastDeploy(verbose),
-    checkContentHash(verbose),
-  ])
+/**
+ * KeeWeb has no SSH path: reachability comes from the shared public probe, so this collector only supplies
+ * facts. `lastDeploy` is the newest successful deploy run's time (null when `gh` cannot say) and
+ * `contentHash` compares the live page with the local build.
+ */
+export async function getKeewebStatusSummary(): Promise<AppCollection> {
+  const [lastDeployResult, contentHashResult] = await Promise.all([checkLastDeploy(false), checkContentHash(false)])
 
   return {
-    app: 'keeweb',
-    http: formatCheckSummary(httpResult),
-    lastDeploy: formatCheckSummary(lastDeployResult),
-    version: '—',
-    contentHash: formatCheckSummary(contentHashResult),
-    usageStats: '—',
+    observations: [],
+    facts: {
+      lastDeploy: lastDeployResult.value ?? null,
+      contentHash: contentHashResult.value ?? 'unavailable',
+    },
   }
 }
 

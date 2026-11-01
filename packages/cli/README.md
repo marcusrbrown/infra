@@ -188,8 +188,12 @@ bunx @marcusrbrown/infra vpn client remove laptop
 
 ```bash
 bunx @marcusrbrown/infra status          # all deployments
-bunx @marcusrbrown/infra status --json   # machine-readable output
+bunx @marcusrbrown/infra status --json   # schema-versioned typed observations
 ```
+
+The table has one row per app and the columns `App | Reachability | Container | Deploy | End-to-end | Resource`. Each cell is the worst result of that kind (`pass`, `fail`, `unknown`, `not measured`), and `—` marks a kind the app does not declare. Deploy and End-to-end read `not measured` until their readers land.
+
+`status --json` prints `{schemaVersion, generatedAt, apps}`. Each entry in `apps` has `app`, `observations` and `facts`. An observation has `id`, `kind`, `result`, `observedAt` (null when `not_measured`), `source` and an optional bounded `detail`. `unknown` means the check could not decide; `not_measured` means it was never attempted (for example, a missing host variable). A failing collector makes only its own observations `unknown`. `facts` holds non-check values: versions, content hash, usage, last deploy, and the gateway's `workspace` memory status. The exit code is always 0; read the JSON for health. The per-app `<app> status --json` output is unchanged.
 
 ### MCP Bridge
 

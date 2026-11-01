@@ -1,6 +1,5 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
-import type {StatusSummary} from '../status'
 
 import {z} from 'zod'
 
@@ -34,33 +33,6 @@ export async function checkBrokerHealth(baseUrl: string): Promise<{ok: boolean; 
   return {
     ok: false,
     summary: `Request failed after ${elapsedMs}ms: ${message}`,
-  }
-}
-
-// ─── Unified status summary ───────────────────────────────────────────────────
-
-export async function getBrokerStatusSummary(host: string): Promise<StatusSummary> {
-  if (!host) {
-    return {
-      app: 'broker',
-      http: '— (host not set)',
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
-    }
-  }
-
-  const baseUrl = `https://${host}`
-  const health = await checkBrokerHealth(baseUrl)
-
-  return {
-    app: 'broker',
-    http: health.ok ? `OK: ${health.summary}` : `ERROR: ${health.summary}`,
-    lastDeploy: '—',
-    version: '—',
-    contentHash: '—',
-    usageStats: '—',
   }
 }
 

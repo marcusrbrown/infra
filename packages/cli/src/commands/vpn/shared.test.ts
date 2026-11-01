@@ -131,7 +131,7 @@ function makeSpawnError(message: string): SpawnFn {
 }
 
 describe('getVpnStatusSummary', () => {
-  it('returns a structured summary with app=vpn when wg show succeeds', async () => {
+  it('passes the wireguard observation and reports peer count and server key as facts', async () => {
     const wgOutput = [
       'interface: wg0',
       '  public key: serverpubkey==',
@@ -142,30 +142,39 @@ describe('getVpnStatusSummary', () => {
       '  allowed ips: 10.8.0.2/32',
     ].join('\n')
 
-    const summary = await getVpnStatusSummary('1.2.3.4', makeSpawnOk(wgOutput))
+    const collection = await getVpnStatusSummary('1.2.3.4', makeSpawnOk(wgOutput))
 
-    expect(summary.app).toBe('vpn')
-    expect(summary.http).toContain('OK')
+    expect(collection.observations).toEqual([
+      expect.objectContaining({
+        id: 'wireguard-interface',
+        kind: 'container-health',
+        source: 'ssh',
+        result: 'pass',
+      }),
+    ])
+    expect(collection.facts).toEqual({peerCount: 1, serverPublicKey: 'serverpubkey=='})
   })
 
-  it('includes the server public key in the http field', async () => {
-    const wgOutput = [
-      'interface: wg0',
-      '  public key: MYPUBLICKEY==',
-      '  private key: (hidden)',
-      '  listening port: 51820',
-    ].join('\n')
+  it('reports a null server key when wg show omits it', async () => {
+    const collection = await getVpnStatusSummary('1.2.3.4', makeSpawnOk('interface: wg0\n  listening port: 51820\n'))
 
-    const summary = await getVpnStatusSummary('1.2.3.4', makeSpawnOk(wgOutput))
-
-    expect(summary.http).toContain('MYPUBLICKEY==')
+    expect(collection.observations[0]?.result).toBe('pass')
+    expect(collection.facts).toEqual({peerCount: 0, serverPublicKey: null})
   })
 
-  it('returns error summary when SSH fails', async () => {
-    const summary = await getVpnStatusSummary('1.2.3.4', makeSpawnError('Connection refused'))
+  it('fails the observation when SSH works but wg0 is not up', async () => {
+    const collection = await getVpnStatusSummary('1.2.3.4', makeSpawnOk(''))
 
-    expect(summary.app).toBe('vpn')
-    expect(summary.http).toContain('ERROR')
+    expect(collection.observations[0]).toMatchObject({result: 'fail', detail: {reason: 'interface-down'}})
+    expect(collection.facts).toEqual({})
+  })
+
+  it('makes the observation unknown, without stderr text, when SSH fails', async () => {
+    const collection = await getVpnStatusSummary('1.2.3.4', makeSpawnError('Connection refused'))
+
+    expect(collection.observations[0]).toMatchObject({result: 'unknown', detail: {reason: 'ssh-failed'}})
+    expect(JSON.stringify(collection)).not.toContain('refused')
+    expect(JSON.stringify(collection)).not.toContain('1.2.3.4')
   })
 
   it('rejects an invalid host before spawning SSH', async () => {
@@ -189,10 +198,10 @@ describe('getVpnStatusSummary', () => {
     // We import the module and check it doesn't have AWS client construction.
     // The real assertion is structural: getVpnStatusSummary only uses SSH.
     const wgOutput = 'interface: wg0\n  public key: key==\n  private key: (hidden)\n  listening port: 51820\n'
-    const summary = await getVpnStatusSummary('1.2.3.4', makeSpawnOk(wgOutput))
+    const collection = await getVpnStatusSummary('1.2.3.4', makeSpawnOk(wgOutput))
 
     // If this resolves without AWS credentials, it's SSH-only.
-    expect(summary.app).toBe('vpn')
+    expect(collection.observations[0]?.result).toBe('pass')
   })
 
   it('SSH user contract: connects as ubuntu@host, not root@host', async () => {

@@ -426,7 +426,7 @@ flowchart LR
 
 ### Phase A — Typed status contract
 
-- [ ] **Unit 1: Observation contract and shared public probes**
+- [x] **Unit 1: Observation contract and shared public probes**
 
 **Goal:** Define the schema-versioned observation contract and one public HTTPS probe module that both `status` and the snapshot use.
 
@@ -468,7 +468,7 @@ flowchart LR
 
 **Verification:** Probes and schema tests pass. The broker and cliproxy status tests still pass after delegating.
 
-- [ ] **Unit 2: Migrate unified `status` to the typed contract**
+- [x] **Unit 2: Migrate unified `status` to the typed contract**
 
 **Goal:** `status --json` emits the versioned envelope, the table is rendered from observations, and partial failures stay inside the observation that failed.
 

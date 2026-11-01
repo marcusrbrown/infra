@@ -7,6 +7,7 @@ import {
   checkLastDeploy,
   formatDate,
   formatDurationMs,
+  getKeewebStatusSummary,
   hashSha256,
   keewebStatusAction,
 } from './status'
@@ -147,6 +148,7 @@ describe('keeweb status helpers', () => {
       expect(result.level).toBe('ok')
       expect(result.summary).toBe(formatDate('2026-01-15T10:30:00Z'))
       expect(result.details).toEqual(['Run URL: https://example.com'])
+      expect(result.value).toBe('2026-01-15T10:30:00Z')
     })
 
     it('returns warning when no successful runs are found', async () => {
@@ -177,6 +179,35 @@ describe('keeweb status helpers', () => {
       expect(result.level).toBe('warning')
       expect(result.summary).toContain('Unable to query')
       expect(result.summary).toContain('gh not found')
+    })
+  })
+
+  describe('getKeewebStatusSummary', () => {
+    const packagedInstall = () =>
+      spyOn(Bun, 'file').mockImplementation(() => ({exists: async () => false}) as ReturnType<typeof Bun.file>)
+
+    it('supplies facts only, with the last deploy time and an unavailable content hash outside a source checkout', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
+        mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
+      )
+      fileSpy = packagedInstall()
+
+      const collection = await getKeewebStatusSummary()
+
+      expect(collection).toEqual({
+        observations: [],
+        facts: {lastDeploy: '2026-01-15T10:30:00Z', contentHash: 'unavailable'},
+      })
+    })
+
+    it('reports a null last deploy when gh cannot say, without failing', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() => mockSpawnResult(1, '', 'not logged in'))
+      fileSpy = packagedInstall()
+
+      const collection = await getKeewebStatusSummary()
+
+      expect(collection.facts.lastDeploy).toBeNull()
+      expect(JSON.stringify(collection)).not.toContain('logged in')
     })
   })
 
@@ -311,6 +342,7 @@ describe('keeweb status helpers', () => {
 
       expect(result.level).toBe('ok')
       expect(result.summary).toContain('matches')
+      expect(result.value).toBe('match')
     })
 
     it('source checkout with mismatched hashes returns warning', async () => {
@@ -339,6 +371,7 @@ describe('keeweb status helpers', () => {
 
       expect(result.level).toBe('warning')
       expect(result.summary).toContain('differs')
+      expect(result.value).toBe('differs')
     })
 
     it('resolves dist path off injected repoRoot without depth arithmetic', async () => {

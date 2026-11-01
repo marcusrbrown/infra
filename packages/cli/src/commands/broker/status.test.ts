@@ -1,7 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../lib/mcp-ctx-fixture'
-import {brokerStatusAction, checkBrokerHealth, getBrokerStatusSummary} from './status'
+import {brokerStatusAction, checkBrokerHealth} from './status'
 
 const originalFetch = globalThis.fetch
 
@@ -55,39 +55,6 @@ describe('checkBrokerHealth', () => {
 
     expect(result.ok).toBe(false)
     expect(result.summary).toContain('Network timeout')
-  })
-})
-
-// ─── getBrokerStatusSummary ───────────────────────────────────────────────────
-
-describe('getBrokerStatusSummary', () => {
-  afterEach(() => {
-    globalThis.fetch = originalFetch
-  })
-
-  it('returns host-not-set sentinel when host is empty', async () => {
-    const summary = await getBrokerStatusSummary('')
-
-    expect(summary.app).toBe('broker')
-    expect(summary.http).toContain('host not set')
-  })
-
-  it('returns OK http when /healthz returns 200', async () => {
-    globalThis.fetch = createFetchImplementation(async () => new Response('{"status":"ok"}', {status: 200}))
-
-    const summary = await getBrokerStatusSummary('broker.example.com')
-
-    expect(summary.app).toBe('broker')
-    expect(summary.http).toMatch(/^OK/)
-  })
-
-  it('returns ERROR http when /healthz returns 500', async () => {
-    globalThis.fetch = createFetchImplementation(async () => new Response('error', {status: 500}))
-
-    const summary = await getBrokerStatusSummary('broker.example.com')
-
-    expect(summary.app).toBe('broker')
-    expect(summary.http).toMatch(/^ERROR/)
   })
 })
 

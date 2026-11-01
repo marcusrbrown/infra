@@ -33,6 +33,11 @@ export function hasToken(token: string | undefined): token is string {
   return token !== undefined && token.trim() !== ''
 }
 
+/** `GITHUB_TOKEN`, falling back to `GH_TOKEN`; a blank value counts as unset. */
+export function resolveGithubToken(env: Record<string, string | undefined>): string | undefined {
+  return [env.GITHUB_TOKEN, env.GH_TOKEN].find(hasToken)
+}
+
 function apiHeaders(token: string): Record<string, string> {
   return {
     accept: 'application/vnd.github+json',

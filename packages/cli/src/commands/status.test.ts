@@ -3,8 +3,11 @@ import type {SpawnFn} from './gateway/status'
 import {afterEach, describe, expect, it, spyOn} from 'bun:test'
 import {goke} from 'goke'
 import {createCapturedCtx} from '../lib/mcp-ctx-fixture'
+import {readDeployStates} from '../status/deploy-state'
+import {readMonitorState} from '../status/monitor-state'
 import {STATUS_SCHEMA_VERSION, statusEnvelopeSchema} from '../status/observation'
 import {
+  deployObservation,
   EXPECTED_OBSERVATION_IDS,
   FIXED_NOW,
   healthyGateway,
@@ -12,6 +15,7 @@ import {
   makeStatusDependencies,
   okWorkspace,
   probeObservation,
+  routeObservation,
   withStatusEnv,
 } from './__fixtures__/status-dependencies'
 import {DEGRADED_BODY, LIMIT_BYTES, workspaceStdout} from './gateway/__fixtures__/workspace-probe'
@@ -140,8 +144,75 @@ describe('top-level status --json (typed contract)', () => {
     expect(captured.stdout[0]).not.toContain('errorSummary')
   })
 
-  it('declares deploy-state as not measured from config for every app until its reader exists', async () => {
+  it('reports deploy-state from the github-api reader for every app and provider-route from the monitor', async () => {
     const {envelope} = await runJson()
+
+    for (const app of APPS) {
+      expect(observation(envelope, app, 'deploy-state')).toEqual({
+        id: 'deploy-state',
+        kind: 'deploy-state',
+        source: 'github-api',
+        result: 'pass',
+        observedAt: FIXED_NOW.toISOString(),
+      })
+    }
+    expect(observation(envelope, 'cliproxy', 'provider-route')).toMatchObject({
+      kind: 'end-to-end',
+      source: 'monitor',
+      result: 'pass',
+    })
+  })
+
+  it('hands the GITHUB_TOKEN to both readers, preferring it over GH_TOKEN', async () => {
+    const seen: (string | undefined)[] = []
+    const readers = {
+      readDeployStates: async (options: {token: string | undefined}) => {
+        seen.push(options.token)
+        return {}
+      },
+      readMonitorState: async (options: {token: string | undefined}) => {
+        seen.push(options.token)
+        return routeObservation()
+      },
+    }
+    const {ctx} = createCapturedCtx()
+    await withStatusEnv(async () => {
+      process.env.GITHUB_TOKEN = 'primary-token'
+      process.env.GH_TOKEN = 'fallback-token'
+      await unifiedStatusAction({json: true}, ctx, makeStatusDependencies(readers))
+    })
+
+    expect(seen).toEqual(['primary-token', 'primary-token'])
+  })
+
+  it('falls back to GH_TOKEN, and treats a blank GITHUB_TOKEN as unset', async () => {
+    const seen: (string | undefined)[] = []
+    const readers = {
+      readDeployStates: async (options: {token: string | undefined}) => {
+        seen.push(options.token)
+        return {}
+      },
+    }
+    const {ctx} = createCapturedCtx()
+    await withStatusEnv(async () => {
+      process.env.GITHUB_TOKEN = '  '
+      process.env.GH_TOKEN = 'fallback-token'
+      await unifiedStatusAction({json: true}, ctx, makeStatusDependencies(readers))
+    })
+
+    expect(seen).toEqual(['fallback-token'])
+  })
+
+  it('keeps deploy-state and provider-route not measured (missing-config) without a token, with no request', async () => {
+    const requested: string[] = []
+    const {envelope} = await runJson({
+      readDeployStates,
+      readMonitorState,
+      fetch: async input => {
+        requested.push(input)
+        return new Response('{}')
+      },
+    })
 
     for (const app of APPS) {
       expect(observation(envelope, app, 'deploy-state')).toEqual({
@@ -150,14 +221,93 @@ describe('top-level status --json (typed contract)', () => {
         source: 'config',
         result: 'not_measured',
         observedAt: null,
-        detail: {reason: 'not-implemented'},
+        detail: {reason: 'missing-config'},
       })
     }
     expect(observation(envelope, 'cliproxy', 'provider-route')).toMatchObject({
-      kind: 'end-to-end',
       source: 'config',
       result: 'not_measured',
-      detail: {reason: 'not-implemented'},
+      detail: {reason: 'missing-config'},
+    })
+    expect(requested).toEqual([])
+  })
+
+  it('reads the real deploy state and monitor probe through an injected fetch when a token is set', async () => {
+    const requested: string[] = []
+    const fetchFn = async (input: string): Promise<Response> => {
+      requested.push(input)
+      const url = new URL(input)
+      if (url.pathname.endsWith('/deployments')) return Response.json([{id: 7}])
+      if (url.pathname.endsWith('/statuses'))
+        return Response.json([{state: 'waiting', created_at: '2026-11-01T11:00:00Z'}])
+      return new Response('nope', {status: 404})
+    }
+    const {ctx, captured} = createCapturedCtx()
+    await withStatusEnv(async () => {
+      process.env.GITHUB_TOKEN = 'a-token'
+      await unifiedStatusAction(
+        {json: true},
+        ctx,
+        makeStatusDependencies({readDeployStates, readMonitorState, fetch: fetchFn}),
+      )
+    })
+    const envelope = statusEnvelopeSchema.parse(JSON.parse(captured.stdout[0] ?? ''))
+
+    expect(observation(envelope, 'dashboard', 'deploy-state')).toMatchObject({
+      source: 'github-api',
+      result: 'unknown',
+      detail: {reason: 'at_gate', since: '2026-11-01T11:00:00Z'},
+    })
+    expect(observation(envelope, 'cliproxy', 'provider-route')).toMatchObject({
+      source: 'monitor',
+      result: 'unknown',
+      detail: {reason: 'api-error'},
+    })
+    expect(requested.length).toBeGreaterThan(0)
+    expect(captured.stdout[0]).not.toContain('a-token')
+  })
+
+  it('makes only the GitHub observations unknown when a reader throws, leaving probes and collectors alone', async () => {
+    const {envelope, captured} = await runJson({
+      readDeployStates: async () => {
+        throw new Error('deployments exploded')
+      },
+    })
+
+    for (const app of APPS) {
+      expect(observation(envelope, app, 'deploy-state')).toMatchObject({
+        source: 'github-api',
+        result: 'unknown',
+        detail: {reason: 'check-failed'},
+      })
+    }
+    expect(observation(envelope, 'cliproxy', 'provider-route').result).toBe('pass')
+    expect(observation(envelope, 'gateway', 'public-reachability').result).toBe('pass')
+    expect(observation(envelope, 'gateway', 'compose-services').result).toBe('pass')
+    expect(captured.stderr).toEqual([])
+
+    const monitorFailed = (
+      await runJson({
+        readMonitorState: async () => {
+          throw new Error('monitor exploded')
+        },
+      })
+    ).envelope
+    expect(observation(monitorFailed, 'cliproxy', 'provider-route')).toMatchObject({
+      source: 'monitor',
+      result: 'unknown',
+      detail: {reason: 'check-failed'},
+    })
+    expect(observation(monitorFailed, 'cliproxy', 'deploy-state').result).toBe('pass')
+  })
+
+  it('reports a missing reader result as unknown for just that app', async () => {
+    const {envelope} = await runJson({readDeployStates: async () => ({keeweb: deployObservation('fail')})})
+
+    expect(observation(envelope, 'keeweb', 'deploy-state').result).toBe('fail')
+    expect(observation(envelope, 'gateway', 'deploy-state')).toMatchObject({
+      result: 'unknown',
+      detail: {reason: 'missing-result'},
     })
   })
 
@@ -233,7 +383,7 @@ describe('top-level status --json (typed contract)', () => {
       })
     }
     expect(observation(envelope, 'gateway', 'public-reachability').result).toBe('pass')
-    expect(observation(envelope, 'gateway', 'deploy-state').result).toBe('not_measured')
+    expect(observation(envelope, 'gateway', 'deploy-state').result).toBe('pass')
     expect(appOf(envelope, 'gateway').facts).toEqual({})
     for (const app of APPS.filter(name => name !== 'gateway')) {
       expect(appOf(envelope, app)).toEqual(appOf(baseline, app))
@@ -386,7 +536,7 @@ describe('top-level status --json (typed contract)', () => {
       detail: {reason: 'timeout'},
     })
     expect(observation(envelope, 'umami', 'public-reachability').result).toBe('pass')
-    expect(observation(envelope, 'umami', 'deploy-state').result).toBe('not_measured')
+    expect(observation(envelope, 'umami', 'deploy-state').result).toBe('pass')
     expect(appOf(envelope, 'umami').facts).toEqual({})
     for (const app of APPS.filter(name => name !== 'umami')) {
       expect(appOf(envelope, app)).toEqual(appOf(baseline, app))
@@ -578,13 +728,13 @@ describe('top-level status table (rendered from observations)', () => {
     expect(captured.stdout.join('\n')).toBe(
       [
         '| App | Reachability | Container | Deploy | End-to-end | Resource |',
-        '| keeweb | ✅ pass | — | ⚪ not measured | — | — |',
-        '| cliproxy | ✅ pass | ✅ pass | ⚪ not measured | ⚪ not measured | — |',
-        '| gateway | ✅ pass | ✅ pass | ⚪ not measured | — | ✅ pass |',
-        '| umami | ✅ pass | ✅ pass | ⚪ not measured | — | — |',
-        '| dashboard | ✅ pass | ✅ pass | ⚪ not measured | — | — |',
-        '| vpn | ⚪ not measured | ✅ pass | ⚪ not measured | ⚪ not measured | — |',
-        '| broker | ✅ pass | — | ⚪ not measured | — | — |',
+        '| keeweb | ✅ pass | — | ✅ pass | — | — |',
+        '| cliproxy | ✅ pass | ✅ pass | ✅ pass | ✅ pass | — |',
+        '| gateway | ✅ pass | ✅ pass | ✅ pass | — | ✅ pass |',
+        '| umami | ✅ pass | ✅ pass | ✅ pass | — | — |',
+        '| dashboard | ✅ pass | ✅ pass | ✅ pass | — | — |',
+        '| vpn | ⚪ not measured | ✅ pass | ✅ pass | ⚪ not measured | — |',
+        '| broker | ✅ pass | — | ✅ pass | — | — |',
       ].join('\n'),
     )
     expect(captured.exit).toBeNull()
@@ -603,10 +753,10 @@ describe('top-level status table (rendered from observations)', () => {
     })
     const lines = captured.stdout
 
-    expect(lines).toContain('| umami | ❌ fail | ✅ pass | ⚪ not measured | — | — |')
-    expect(lines).toContain('| broker | ❓ unknown | — | ⚪ not measured | — | — |')
-    expect(lines).toContain('| dashboard | ✅ pass | ❓ unknown | ⚪ not measured | — | — |')
-    expect(lines).toContain('| keeweb | ✅ pass | — | ⚪ not measured | — | — |')
+    expect(lines).toContain('| umami | ❌ fail | ✅ pass | ✅ pass | — | — |')
+    expect(lines).toContain('| broker | ❓ unknown | — | ✅ pass | — | — |')
+    expect(lines).toContain('| dashboard | ✅ pass | ❓ unknown | ✅ pass | — | — |')
+    expect(lines).toContain('| keeweb | ✅ pass | — | ✅ pass | — | — |')
     expect(captured.stderr).toEqual(['dashboard status check failed: Dashboard exploded'])
   })
 
@@ -616,8 +766,8 @@ describe('top-level status table (rendered from observations)', () => {
       getVpnStatusSummary: () => new Promise(() => undefined),
     })
 
-    expect(captured.stdout).toContain('| vpn | ⚪ not measured | ❓ unknown | ⚪ not measured | ⚪ not measured | — |')
-    expect(captured.stdout).toContain('| keeweb | ✅ pass | — | ⚪ not measured | — | — |')
+    expect(captured.stdout).toContain('| vpn | ⚪ not measured | ❓ unknown | ✅ pass | ⚪ not measured | — |')
+    expect(captured.stdout).toContain('| keeweb | ✅ pass | — | ✅ pass | — | — |')
     expect(captured.stderr).toEqual(['vpn status check timed out after 25ms'])
   })
 
@@ -632,6 +782,21 @@ describe('top-level status table (rendered from observations)', () => {
     })
 
     expect(captured.stderr).toEqual(['dashboard status check failed: probe exploded'])
+  })
+
+  it('shows real Deploy and End-to-end results: failed deploy, gated deploy, dead route', async () => {
+    const captured = await runTable({
+      readDeployStates: async () => ({
+        ...Object.fromEntries(APPS.map(app => [app, deployObservation()])),
+        keeweb: deployObservation('fail'),
+        dashboard: deployObservation('unknown', {reason: 'at_gate'}),
+      }),
+      readMonitorState: async () => routeObservation('fail', {reason: 'auth-401'}),
+    })
+
+    expect(captured.stdout).toContain('| keeweb | ✅ pass | — | ❌ fail | — | — |')
+    expect(captured.stdout).toContain('| dashboard | ✅ pass | ✅ pass | ❓ unknown | — | — |')
+    expect(captured.stdout).toContain('| cliproxy | ✅ pass | ✅ pass | ✅ pass | ❌ fail | — |')
   })
 
   it('has the same number of cells in every row and never prints the structured workspace', async () => {
@@ -857,6 +1022,12 @@ describe('top-level status with the real default dependencies (production wiring
     })
     expect(observation(envelope, 'umami', 'public-reachability').result).toBe('pass')
     expect(observation(envelope, 'vpn', 'wireguard-interface').result).toBe('pass')
+    // No token in the test env, so the real GitHub readers make no request.
+    expect(observation(envelope, 'gateway', 'deploy-state')).toMatchObject({
+      source: 'config',
+      result: 'not_measured',
+      detail: {reason: 'missing-config'},
+    })
     expect(appOf(envelope, 'gateway').facts.workspace).toMatchObject({status: 'ok', limitBytes: LIMIT_BYTES})
     expect(appOf(envelope, 'cliproxy').facts).toMatchObject({runningVersion: 'v7.2.139', managementAccess: 'no-key'})
     expect(appOf(envelope, 'keeweb').facts.lastDeploy).toBe('2026-10-30T09:00:00Z')

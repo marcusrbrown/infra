@@ -160,12 +160,11 @@ describe('contract', () => {
 
 describe('parseProbeLine', () => {
   it('strips the runner timestamp, a BOM and CRLF, and parses the recorded log shape', () => {
-    expect(parseProbeLine(fixtureText('monitor-log-healthy.txt'))).toEqual({
-      kind: 'probe',
-      state: 'healthy',
-      reason: 'ok',
-      at: PROBE_AT,
-    })
+    // Build the CRLF input here so the test does not depend on the line endings git leaves on disk.
+    const crlf = fixtureText('monitor-log-healthy.txt').replaceAll('\r\n', '\n').replaceAll('\n', '\r\n')
+    expect(crlf).toContain('\r\n')
+
+    expect(parseProbeLine(crlf)).toEqual({kind: 'probe', state: 'healthy', reason: 'ok', at: PROBE_AT})
   })
 
   it('does not match the daily report summary line', () => {

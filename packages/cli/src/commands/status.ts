@@ -3,6 +3,8 @@ import type {goke} from 'goke'
 import type {ActionCtx} from '../lib/action-ctx'
 import type {AppCollection} from '../status/collect'
 import type {CollectorOutcome, ProbeOutcome} from '../status/declared'
+import type {FetchLike} from '../status/github-api'
+import type {GithubReaders, GithubReads} from '../status/github-reads'
 import type {
   AppId,
   AppStatus,
@@ -15,12 +17,17 @@ import type {ProbeOptions} from '../status/public-probes'
 
 import {z} from 'zod'
 import {assembleAppStatus, worstResult} from '../status/declared'
+import {readDeployStates} from '../status/deploy-state'
+import {resolveGithubToken} from '../status/github-api'
+import {githubObservationsFor, runGithubReads} from '../status/github-reads'
+import {readMonitorState} from '../status/monitor-state'
 import {APP_IDS, STATUS_SCHEMA_VERSION} from '../status/observation'
 import {PUBLIC_PROBES} from '../status/public-probes'
 import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getDashboardStatusSummary} from './dashboard'
 import {getGatewayStatusSummary} from './gateway'
 import {getKeewebStatusSummary} from './keeweb/status'
+import {registerStatusSnapshot} from './status-snapshot'
 import {getUmamiStatusSummary} from './umami'
 import {getVpnStatusSummary} from './vpn'
 
@@ -28,10 +35,13 @@ declare const process: {
   env: Record<string, string | undefined>
 }
 
-type PublicProbeMap = Partial<Record<AppId, (options?: ProbeOptions) => Promise<Observation>>>
+export type PublicProbeMap = Partial<Record<AppId, (options?: ProbeOptions) => Promise<Observation>>>
 
-/** Each collector gets a signal that aborts when its deadline fires, so it can kill any child it spawned. */
-export interface StatusDependencies {
+/**
+ * Each collector gets a signal that aborts when its deadline fires, so it can kill any child it spawned.
+ * The public probes and the two GitHub readers are shared with `status snapshot`.
+ */
+export interface StatusDependencies extends GithubReaders {
   getKeewebStatusSummary: (signal?: AbortSignal) => Promise<AppCollection>
   getCliproxyStatusSummary: (baseUrl: string, key: string, signal?: AbortSignal) => Promise<AppCollection>
   getGatewayStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
@@ -39,6 +49,8 @@ export interface StatusDependencies {
   getDashboardStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
   getVpnStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
   publicProbes: PublicProbeMap
+  /** Transport for the GitHub readers; defaults to the global `fetch`. */
+  fetch?: FetchLike
   now: () => Date
   /** Per-app collector deadline in milliseconds; the public probes have their own timeouts. */
   collectorDeadlineMs: number
@@ -55,6 +67,8 @@ const defaultDependencies: StatusDependencies = {
   getDashboardStatusSummary: (host, signal) => getDashboardStatusSummary(host, undefined, signal),
   getVpnStatusSummary: (host, signal) => getVpnStatusSummary(host, undefined, signal),
   publicProbes: PUBLIC_PROBES,
+  readDeployStates,
+  readMonitorState,
   now: () => new Date(),
   collectorDeadlineMs: COLLECTOR_DEADLINE_MS,
 }
@@ -133,9 +147,9 @@ async function collectApp(
   app: AppId,
   probe: (() => Promise<Observation>) | undefined,
   collector: Collector,
-  options: {ctx: ActionCtx; now: () => Date; deadlineMs: number; json: boolean},
+  options: {ctx: ActionCtx; now: () => Date; deadlineMs: number; json: boolean; githubReads: Promise<GithubReads>},
 ): Promise<AppStatus> {
-  const {ctx, now, deadlineMs, json} = options
+  const {ctx, now, deadlineMs, json, githubReads} = options
   const [probeResult, collectorResult] = await Promise.allSettled([
     probe === undefined ? Promise.resolve(undefined) : probe(),
     collector.kind === 'run' ? withDeadline(collector, deadlineMs) : Promise.resolve(undefined),
@@ -164,7 +178,14 @@ async function collectApp(
     collectorOutcome = {kind: 'ok', collection: collectorResult.value}
   }
 
-  return assembleAppStatus(app, probeOutcome, collectorOutcome, now())
+  // The readers started before the collectors, so this wait is only for whatever is still outstanding.
+  return assembleAppStatus(
+    app,
+    probeOutcome,
+    collectorOutcome,
+    now(),
+    githubObservationsFor(app, await githubReads, now()),
+  )
 }
 
 function formatRow(app: AppStatus): string {
@@ -213,6 +234,13 @@ export async function unifiedStatusAction(
   }
   const json = options.json === true
 
+  // Without a token the readers make no request and report `not_measured` (missing-config).
+  const githubReads = runGithubReads(dependencies, {
+    token: resolveGithubToken(process.env),
+    now: dependencies.now(),
+    ...(dependencies.fetch === undefined ? {} : {fetch: dependencies.fetch}),
+  })
+
   const apps = await Promise.all(
     APP_IDS.map(app => {
       const probe = dependencies.publicProbes[app]
@@ -223,6 +251,7 @@ export async function unifiedStatusAction(
         now: dependencies.now,
         deadlineMs: dependencies.collectorDeadlineMs,
         json,
+        githubReads,
       })
     }),
   )
@@ -258,4 +287,6 @@ export function registerStatus(
         ),
     )
     .action((options, ctx) => unifiedStatusAction(options, ctx, dependencies))
+
+  registerStatusSnapshot(cli, dependencies)
 }

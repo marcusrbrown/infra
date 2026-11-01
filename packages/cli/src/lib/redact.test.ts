@@ -56,4 +56,37 @@ describe('redactHost', () => {
       'lookup failed for <host>.internal',
     )
   })
+  it('treats a dot as literal: a.b does not match axb', () => {
+    expect(redactHost('axb a.b', 'a.b')).toBe('axb <host>')
+  })
+
+  it('matches mixed-case text against a mixed-case host', () => {
+    expect(redactHost('ssh: Could not resolve GaTeWay.Example.COM now', 'gateway.EXAMPLE.com')).toBe(
+      'ssh: Could not resolve <host> now',
+    )
+  })
+
+  it('redacts adjacent occurrences', () => {
+    expect(redactHost('abab', 'ab')).toBe('<host><host>')
+    expect(redactHost('h1.test,h1.test', 'h1.test')).toBe('<host>,<host>')
+  })
+
+  it('does not rescan inside a replacement: overlapping occurrences are consumed left to right', () => {
+    expect(redactHost('aaa', 'aa')).toBe('<host>a')
+    expect(redactHost('xx.xx.xx', 'xx.xx')).toBe('<host>.xx')
+  })
+
+  it('keeps offsets aligned after non-ASCII text before the match', () => {
+    expect(redactHost('İstanbul → ünïcode 😀 host.example.test!', 'HOST.example.test')).toBe(
+      'İstanbul → ünïcode 😀 <host>!',
+    )
+  })
+
+  it('only folds ASCII letters, so non-ASCII case variants are not matched', () => {
+    expect(redactHost('ÉCOLE.example é.example', 'école.example')).toBe('ÉCOLE.example é.example')
+  })
+
+  it('returns the text untouched when the host does not occur', () => {
+    expect(redactHost('nothing to see', 'gateway.example.com')).toBe('nothing to see')
+  })
 })

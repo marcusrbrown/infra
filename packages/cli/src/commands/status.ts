@@ -1,10 +1,22 @@
 import type {goke} from 'goke'
 
 import type {ActionCtx} from '../lib/action-ctx'
-import type {WorkspaceMemoryStatus} from './gateway/workspace-memory'
+import type {AppCollection} from '../status/collect'
+import type {CollectorOutcome, ProbeOutcome} from '../status/declared'
+import type {
+  AppId,
+  AppStatus,
+  Observation,
+  ObservationKind,
+  ObservationResult,
+  StatusEnvelope,
+} from '../status/observation'
+import type {ProbeOptions} from '../status/public-probes'
 
 import {z} from 'zod'
-import {getBrokerStatusSummary} from './broker/status'
+import {assembleAppStatus, worstResult} from '../status/declared'
+import {APP_IDS, STATUS_SCHEMA_VERSION} from '../status/observation'
+import {PUBLIC_PROBES} from '../status/public-probes'
 import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getDashboardStatusSummary} from './dashboard'
 import {getGatewayStatusSummary} from './gateway'
@@ -16,141 +28,224 @@ declare const process: {
   env: Record<string, string | undefined>
 }
 
-export interface StatusSummary {
-  app: 'keeweb' | 'cliproxy' | 'gateway' | 'umami' | 'dashboard' | 'vpn' | 'broker'
-  http: string
-  lastDeploy: string
-  version: string
-  contentHash: string
-  usageStats: string
-  /** Structured workspace memory status; only the gateway summary sets it. */
-  workspace?: WorkspaceMemoryStatus
-}
+type PublicProbeMap = Partial<Record<AppId, (options?: ProbeOptions) => Promise<Observation>>>
 
-type AppName = StatusSummary['app']
-
-interface StatusDependencies {
-  getKeewebStatusSummary: (verbose: boolean) => Promise<StatusSummary>
-  getCliproxyStatusSummary: (baseUrl: string, key: string, verbose: boolean) => Promise<StatusSummary>
-  getGatewayStatusSummary: (host: string) => Promise<StatusSummary>
-  getUmamiStatusSummary: (host: string) => Promise<StatusSummary>
-  getDashboardStatusSummary: (host: string) => Promise<StatusSummary>
-  getVpnStatusSummary: (host: string) => Promise<StatusSummary>
-  getBrokerStatusSummary: (host: string) => Promise<StatusSummary>
+/** Each collector gets a signal that aborts when its deadline fires, so it can kill any child it spawned. */
+export interface StatusDependencies {
+  getKeewebStatusSummary: (signal?: AbortSignal) => Promise<AppCollection>
+  getCliproxyStatusSummary: (baseUrl: string, key: string, signal?: AbortSignal) => Promise<AppCollection>
+  getGatewayStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
+  getUmamiStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
+  getDashboardStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
+  getVpnStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
+  publicProbes: PublicProbeMap
+  now: () => Date
+  /** Per-app collector deadline in milliseconds; the public probes have their own timeouts. */
+  collectorDeadlineMs: number
 }
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
-const ERROR_PREFIX = '❌'
-const TABLE_COLUMNS: {key: keyof StatusSummary; label: string}[] = [
-  {key: 'app', label: 'App'},
-  {key: 'http', label: 'HTTP'},
-  {key: 'lastDeploy', label: 'Last Deploy'},
-  {key: 'version', label: 'Version'},
-  {key: 'contentHash', label: 'Content Hash'},
-  {key: 'usageStats', label: 'Usage Stats'},
+export const COLLECTOR_DEADLINE_MS = 30_000
+
+const defaultDependencies: StatusDependencies = {
+  getKeewebStatusSummary,
+  getCliproxyStatusSummary: (baseUrl, key, signal) => getCliproxyStatusSummary(baseUrl, key, undefined, signal),
+  getGatewayStatusSummary: (host, signal) => getGatewayStatusSummary(host, undefined, signal),
+  getUmamiStatusSummary: (host, signal) => getUmamiStatusSummary(host, undefined, signal),
+  getDashboardStatusSummary: (host, signal) => getDashboardStatusSummary(host, undefined, signal),
+  getVpnStatusSummary: (host, signal) => getVpnStatusSummary(host, undefined, signal),
+  publicProbes: PUBLIC_PROBES,
+  now: () => new Date(),
+  collectorDeadlineMs: COLLECTOR_DEADLINE_MS,
+}
+
+const TABLE_COLUMNS: {kind: ObservationKind; label: string}[] = [
+  {kind: 'reachability', label: 'Reachability'},
+  {kind: 'container-health', label: 'Container'},
+  {kind: 'deploy-state', label: 'Deploy'},
+  {kind: 'end-to-end', label: 'End-to-end'},
+  {kind: 'resource', label: 'Resource'},
 ]
+
+const RESULT_CELLS: Record<ObservationResult, string> = {
+  pass: '✅ pass',
+  fail: '❌ fail',
+  unknown: '❓ unknown',
+  not_measured: '⚪ not measured',
+}
+
+/** A kind the app does not declare renders as an em dash. */
+const UNDECLARED_CELL = '—'
 
 function stripTrailingSlash(value: string): string {
   return value.endsWith('/') ? value.slice(0, -1) : value
 }
 
-function errorSummary(app: AppName, reason: unknown): StatusSummary {
-  const message = reason instanceof Error ? reason.message : String(reason)
-  const errorCell = `${ERROR_PREFIX} ${message}`
+/** `BROKER_DOMAIN` is usually a bare hostname; a value with a scheme is used as given. */
+function brokerBaseUrl(domain: string | undefined): string | undefined {
+  const trimmed = domain?.trim() ?? ''
+  if (trimmed === '') return undefined
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+}
 
-  return {
-    app,
-    http: errorCell,
-    lastDeploy: errorCell,
-    version: errorCell,
-    contentHash: errorCell,
-    usageStats: errorCell,
+function describeReason(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason)
+}
+
+type Collector =
+  {kind: 'run'; run: (signal: AbortSignal) => Promise<AppCollection>} | {kind: 'missing-config'} | {kind: 'none'}
+
+const TIMED_OUT = Symbol('collector-timed-out')
+
+function hostCollector(host: string, run: (host: string, signal: AbortSignal) => Promise<AppCollection>): Collector {
+  return host === '' ? {kind: 'missing-config'} : {kind: 'run', run: signal => run(host, signal)}
+}
+
+/**
+ * Race a collector against its deadline. When the deadline fires, the signal handed to the collector aborts,
+ * which kills any child process it spawned. A collector that settles later is ignored.
+ */
+async function withDeadline(
+  run: Collector & {kind: 'run'},
+  deadlineMs: number,
+): Promise<AppCollection | typeof TIMED_OUT> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<typeof TIMED_OUT>(resolve => {
+    timer = setTimeout(() => {
+      controller.abort()
+      resolve(TIMED_OUT)
+    }, deadlineMs)
+  })
+
+  try {
+    const work = run.run(controller.signal)
+    // A rejection after the deadline has no reader; keep it from surfacing as unhandled.
+    work.catch(() => undefined)
+    return await Promise.race([work, deadline])
+  } finally {
+    clearTimeout(timer)
   }
 }
 
-function toJsonPayload(rows: StatusSummary[]): Record<AppName, StatusSummary> {
-  return {
-    keeweb: rows.find(row => row.app === 'keeweb') ?? errorSummary('keeweb', 'missing result'),
-    cliproxy: rows.find(row => row.app === 'cliproxy') ?? errorSummary('cliproxy', 'missing result'),
-    gateway: rows.find(row => row.app === 'gateway') ?? errorSummary('gateway', 'missing result'),
-    umami: rows.find(row => row.app === 'umami') ?? errorSummary('umami', 'missing result'),
-    dashboard: rows.find(row => row.app === 'dashboard') ?? errorSummary('dashboard', 'missing result'),
-    vpn: rows.find(row => row.app === 'vpn') ?? errorSummary('vpn', 'missing result'),
-    broker: rows.find(row => row.app === 'broker') ?? errorSummary('broker', 'missing result'),
+/** Failure detail goes to stderr only in table mode; in JSON mode it is already inside the observation. */
+async function collectApp(
+  app: AppId,
+  probe: (() => Promise<Observation>) | undefined,
+  collector: Collector,
+  options: {ctx: ActionCtx; now: () => Date; deadlineMs: number; json: boolean},
+): Promise<AppStatus> {
+  const {ctx, now, deadlineMs, json} = options
+  const [probeResult, collectorResult] = await Promise.allSettled([
+    probe === undefined ? Promise.resolve(undefined) : probe(),
+    collector.kind === 'run' ? withDeadline(collector, deadlineMs) : Promise.resolve(undefined),
+  ])
+
+  const logFailure = (message: string): void => {
+    if (!json) ctx.console.error(`${app} ${message}`)
   }
+
+  let probeOutcome: ProbeOutcome = {kind: 'none'}
+  if (probeResult.status === 'rejected') {
+    logFailure(`status check failed: ${describeReason(probeResult.reason)}`)
+    probeOutcome = {kind: 'failed'}
+  } else if (probeResult.value !== undefined) {
+    probeOutcome = {kind: 'ok', observation: probeResult.value}
+  }
+
+  let collectorOutcome: CollectorOutcome = {kind: collector.kind === 'run' ? 'none' : collector.kind}
+  if (collectorResult.status === 'rejected') {
+    logFailure(`status check failed: ${describeReason(collectorResult.reason)}`)
+    collectorOutcome = {kind: 'failed'}
+  } else if (collectorResult.value === TIMED_OUT) {
+    logFailure(`status check timed out after ${deadlineMs}ms`)
+    collectorOutcome = {kind: 'timeout'}
+  } else if (collectorResult.value !== undefined) {
+    collectorOutcome = {kind: 'ok', collection: collectorResult.value}
+  }
+
+  return assembleAppStatus(app, probeOutcome, collectorOutcome, now())
 }
 
-function formatRow(row: StatusSummary): string {
-  const values = TABLE_COLUMNS.map(({key}) => row[key])
-  return `| ${values.join(' | ')} |`
+function formatRow(app: AppStatus): string {
+  const cells = TABLE_COLUMNS.map(({kind}) => {
+    const worst = worstResult(app, kind)
+    return worst === undefined ? UNDECLARED_CELL : RESULT_CELLS[worst]
+  })
+
+  return `| ${[app.app, ...cells].join(' | ')} |`
+}
+
+function formatHeader(): string {
+  return `| ${['App', ...TABLE_COLUMNS.map(({label}) => label)].join(' | ')} |`
 }
 
 export async function unifiedStatusAction(
-  options: {json?: boolean; verbose?: boolean},
+  options: {json?: boolean},
   ctx: ActionCtx,
-  dependencies: StatusDependencies = {
-    getKeewebStatusSummary,
-    getCliproxyStatusSummary,
-    getGatewayStatusSummary,
-    getUmamiStatusSummary,
-    getDashboardStatusSummary,
-    getVpnStatusSummary,
-    getBrokerStatusSummary,
-  },
+  dependencies: StatusDependencies = defaultDependencies,
 ): Promise<void> {
-  const verbose = options.verbose === true
   const cliproxyBaseUrl = stripTrailingSlash(process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL)
   const cliproxyKey = process.env.CLIPROXY_MANAGEMENT_KEY ?? ''
   const gatewayHost = process.env.GATEWAY_HOST ?? ''
   const umamiHost = process.env.UMAMI_DOMAIN ?? ''
   const dashboardHost = process.env.DASHBOARD_DOMAIN ?? ''
   const vpnHost = process.env.VPN_HOST ?? ''
-  const brokerHost = process.env.BROKER_DOMAIN ?? process.env.BROKER_HOST ?? ''
 
-  const results = await Promise.allSettled([
-    dependencies.getKeewebStatusSummary(verbose),
-    dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey, verbose),
-    dependencies.getGatewayStatusSummary(gatewayHost),
-    dependencies.getUmamiStatusSummary(umamiHost),
-    dependencies.getDashboardStatusSummary(dashboardHost),
-    dependencies.getVpnStatusSummary(vpnHost),
-    dependencies.getBrokerStatusSummary(brokerHost),
-  ])
+  const collectors: Record<AppId, Collector> = {
+    keeweb: {kind: 'run', run: signal => dependencies.getKeewebStatusSummary(signal)},
+    cliproxy: {
+      kind: 'run',
+      run: signal => dependencies.getCliproxyStatusSummary(cliproxyBaseUrl, cliproxyKey, signal),
+    },
+    gateway: hostCollector(gatewayHost, dependencies.getGatewayStatusSummary),
+    umami: hostCollector(umamiHost, dependencies.getUmamiStatusSummary),
+    dashboard: hostCollector(dashboardHost, dependencies.getDashboardStatusSummary),
+    vpn: hostCollector(vpnHost, dependencies.getVpnStatusSummary),
+    broker: {kind: 'none'},
+  }
 
-  const appNames: AppName[] = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker']
-  const rows: StatusSummary[] = results.map((result, index) => {
-    const app = appNames[index] ?? 'keeweb'
-    if (result.status === 'fulfilled') {
-      return result.value
+  // The cliproxy URL can be overridden for the SSH and management checks, so its probe follows it.
+  // BROKER_HOST is the SSH host or IP and would fail TLS, so only BROKER_DOMAIN selects the broker target.
+  const probeBaseUrls: Partial<Record<AppId, string>> = {
+    cliproxy: cliproxyBaseUrl,
+    broker: brokerBaseUrl(process.env.BROKER_DOMAIN),
+  }
+  const json = options.json === true
+
+  const apps = await Promise.all(
+    APP_IDS.map(app => {
+      const probe = dependencies.publicProbes[app]
+      const baseUrl = probeBaseUrls[app]
+      const probeOptions: ProbeOptions | undefined = baseUrl === undefined ? undefined : {baseUrl}
+      return collectApp(app, probe && (() => probe(probeOptions)), collectors[app], {
+        ctx,
+        now: dependencies.now,
+        deadlineMs: dependencies.collectorDeadlineMs,
+        json,
+      })
+    }),
+  )
+
+  if (json) {
+    const envelope: StatusEnvelope = {
+      schemaVersion: STATUS_SCHEMA_VERSION,
+      generatedAt: dependencies.now().toISOString(),
+      apps,
     }
-    const reason = result.reason
-    const message = reason instanceof Error ? reason.message : String(reason)
-    ctx.console.error(`${app} status check failed: ${message}`)
-    return errorSummary(app, reason)
-  })
-
-  if (options.json === true) {
-    ctx.console.log(JSON.stringify(toJsonPayload(rows)))
+    ctx.console.log(JSON.stringify(envelope))
     return
   }
 
-  ctx.console.log('| App | HTTP | Last Deploy | Version | Content Hash | Usage Stats |')
-  for (const row of rows) {
-    ctx.console.log(formatRow(row))
+  ctx.console.log(formatHeader())
+  for (const app of apps) {
+    ctx.console.log(formatRow(app))
   }
 }
 
 export function registerStatus(
   cli: ReturnType<typeof goke>,
-  dependencies: StatusDependencies = {
-    getKeewebStatusSummary,
-    getCliproxyStatusSummary,
-    getGatewayStatusSummary,
-    getUmamiStatusSummary,
-    getDashboardStatusSummary,
-    getVpnStatusSummary,
-    getBrokerStatusSummary,
-  },
+  dependencies: StatusDependencies = defaultDependencies,
 ): void {
   cli
     .command('status', 'Show status of all deployments')
@@ -159,12 +254,8 @@ export function registerStatus(
       z
         .boolean()
         .describe(
-          'Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, vpn, and broker summary objects. The gateway object also carries a structured workspace field.',
+          'Output a schema-versioned JSON envelope: schemaVersion, generatedAt, and one entry per app with typed observations (id, kind, result, observedAt, source) and facts. The gateway workspace memory status is in facts.workspace.',
         ),
-    )
-    .option(
-      '--verbose',
-      z.boolean().describe('Include verbose per-app health check details when building the summary rows.'),
     )
     .action((options, ctx) => unifiedStatusAction(options, ctx, dependencies))
 }

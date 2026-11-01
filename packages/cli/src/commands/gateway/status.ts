@@ -1,18 +1,20 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
-import type {StatusSummary} from '../status'
+import type {AppCollection} from '../../status/collect'
+import type {Observation} from '../../status/observation'
 import {z} from 'zod'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {composeObservation, observe, servicesFact} from '../../status/collect'
+import {declaredObservation} from '../../status/declared'
 // ─── Minimal ctx interface (subset of GokeExecutionContext used by this action) ─
 import {validateGatewayHost} from './host'
 import {
   buildWorkspaceProbeScript,
   COMPOSE_PROJECT_DIR,
   formatWorkspaceMemory,
-  formatWorkspaceSummary,
   parseWorkspaceProbeOutput,
   unknownWorkspace,
   type WorkspaceMemoryStatus,
@@ -50,7 +52,7 @@ export interface GatewayStatusResult {
 
 export type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -104,7 +106,7 @@ export function isAllRunning(rows: ServiceRow[]): boolean {
 
 function defaultSpawn(
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ): ReturnType<SpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
@@ -112,6 +114,7 @@ function defaultSpawn(
 export async function getGatewayComposeStatus(
   host: string,
   spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
 ): Promise<GatewayStatusResult> {
   validateGatewayHost(host)
 
@@ -141,7 +144,7 @@ export async function getGatewayComposeStatus(
   let exitCode: number
 
   try {
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     ;[stdoutText, stderrText, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -186,6 +189,7 @@ export async function getGatewayWorkspaceStatus(
   host: string,
   spawn: SpawnFn = defaultSpawn,
   timeoutMs: number = WORKSPACE_PROBE_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<WorkspaceMemoryStatus> {
   validateGatewayHost(host)
 
@@ -216,7 +220,7 @@ export async function getGatewayWorkspaceStatus(
   })
 
   try {
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     const collected = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
     // A killed child may reject the pending reads after the race is already decided.
     collected.catch(() => undefined)
@@ -241,35 +245,59 @@ export async function getGatewayWorkspaceStatus(
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
-export async function getGatewayStatusSummary(host: string, spawn?: SpawnFn): Promise<StatusSummary> {
-  const result = await getGatewayComposeStatus(host, spawn)
+/**
+ * Memory and OOM evidence from the workspace probe: `fail` on any kernel OOM kill, a supervisor that is down
+ * or degraded, or a probe skipped near the limit; `unknown` when the supervisor is starting or the probe gave
+ * no usable answer. The full block is in `facts.workspace`.
+ */
+function workspaceObservation(workspace: WorkspaceMemoryStatus): Observation {
+  const spec = declaredObservation('gateway', 'workspace-memory')
+
+  if (workspace.status === 'unknown') return observe(spec, 'unknown', {detail: {reason: 'probe-failed'}})
+  if (workspace.oomKilled || workspace.oomKills > 0) return observe(spec, 'fail', {detail: {reason: 'oom-kill'}})
+  switch (workspace.opencode) {
+    case 'ready':
+      return observe(spec, 'pass')
+    case 'down':
+    case 'degraded':
+      return observe(spec, 'fail', {detail: {reason: `supervisor-${workspace.opencode}`}})
+    case 'skipped':
+      // With a limit, a skipped probe means usage was within the probe headroom of it. With no limit there is
+      // nothing to be near, so the memory evidence stands.
+      return workspace.limitBytes > 0 ? observe(spec, 'fail', {detail: {reason: 'near-limit'}}) : observe(spec, 'pass')
+    case 'starting':
+    case 'unknown':
+      return observe(spec, 'unknown', {detail: {reason: `supervisor-${workspace.opencode}`}})
+  }
+}
+
+export async function getGatewayStatusSummary(
+  host: string,
+  spawn?: SpawnFn,
+  signal?: AbortSignal,
+): Promise<AppCollection> {
+  const result = await getGatewayComposeStatus(host, spawn, signal)
+  const compose = composeObservation(declaredObservation('gateway', 'compose-services'), result)
 
   // No services means an SSH or compose failure: there is nothing to probe.
   if (result.services.length === 0) {
-    const errorMsg = result.error ?? 'No services reported'
     return {
-      app: 'gateway',
-      http: `ERROR: ${errorMsg}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
+      observations: [
+        compose,
+        observe(declaredObservation('gateway', 'workspace-memory'), 'unknown', {
+          detail: {reason: 'compose-unavailable'},
+        }),
+      ],
+      facts: {services: []},
     }
   }
 
   // Probe even when a service is down: the workspace itself may still be running.
-  const rows = result.services.map(s => `${s.service}:${s.state}/${s.health}`).join(', ')
-  const workspace = await getGatewayWorkspaceStatus(host, spawn)
-  const prefix = result.ok ? `OK: ${rows}` : `DEGRADED: ${rows}`
+  const workspace = await getGatewayWorkspaceStatus(host, spawn, undefined, signal)
 
   return {
-    app: 'gateway',
-    http: `${prefix}; ${formatWorkspaceSummary(workspace)}`,
-    lastDeploy: '—',
-    version: '—',
-    contentHash: '—',
-    usageStats: '—',
-    workspace,
+    observations: [compose, workspaceObservation(workspace)],
+    facts: {services: servicesFact(result.services), workspace: {...workspace}},
   }
 }
 

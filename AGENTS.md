@@ -65,7 +65,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Configure agent action | `bunx @marcusrbrown/infra agent setup` | Generalized model-credential setup; absorbs `cliproxy setup` |
 | Wire agent storage | `bunx @marcusrbrown/infra agent storage --repo OWNER/REPO --manifest FILE` | Fail-closed resource/OIDC prechecks, non-secret S3 variables, workflow verification |
 | Teardown agent storage | `bunx @marcusrbrown/infra agent storage teardown --repo OWNER/REPO --manifest FILE` | Unwire variables and remove repo-scoped resources; retain state by default |
-| Unified status | `bunx @marcusrbrown/infra status` | All deployments, `--json` for machine output |
+| Unified status | `bunx @marcusrbrown/infra status` | Table of typed observations per app; `--json` emits `{schemaVersion, generatedAt, apps[{app, observations, facts}]}` (gateway workspace memory is `facts.workspace`). Exit code is always 0 |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
 | Configure TypeScript | `tsconfig.json` | Extends `@bfra.me/tsconfig`, Bun types |
@@ -162,7 +162,7 @@ bunx @marcusrbrown/infra agent setup              # Generalized fro-bot/agent mo
 bunx @marcusrbrown/infra agent storage --repo OWNER/REPO --manifest FILE  # Wire non-secret S3 vars + verify workflow
 bunx @marcusrbrown/infra agent storage teardown --repo OWNER/REPO --manifest FILE  # Unwire + remove repo resources
 bunx @marcusrbrown/infra status                   # Unified status (all deployments)
-bunx @marcusrbrown/infra status --json            # Machine-readable status
+bunx @marcusrbrown/infra status --json            # Schema-versioned typed observations per app
 bunx @marcusrbrown/infra mcp                      # Start MCP server
 bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on server
 bun run provision:umami                         # Provision umami droplet (loads root .env; also :cliproxy, :gateway)

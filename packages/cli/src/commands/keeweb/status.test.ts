@@ -7,6 +7,7 @@ import {
   checkLastDeploy,
   formatDate,
   formatDurationMs,
+  getKeewebStatusSummary,
   hashSha256,
   keewebStatusAction,
 } from './status'
@@ -147,6 +148,7 @@ describe('keeweb status helpers', () => {
       expect(result.level).toBe('ok')
       expect(result.summary).toBe(formatDate('2026-01-15T10:30:00Z'))
       expect(result.details).toEqual(['Run URL: https://example.com'])
+      expect(result.value).toBe('2026-01-15T10:30:00Z')
     })
 
     it('returns warning when no successful runs are found', async () => {
@@ -177,6 +179,62 @@ describe('keeweb status helpers', () => {
       expect(result.level).toBe('warning')
       expect(result.summary).toContain('Unable to query')
       expect(result.summary).toContain('gh not found')
+    })
+  })
+
+  describe('getKeewebStatusSummary', () => {
+    const packagedInstall = () =>
+      spyOn(Bun, 'file').mockImplementation(() => ({exists: async () => false}) as ReturnType<typeof Bun.file>)
+
+    it('supplies facts only, with the last deploy time and an unavailable content hash outside a source checkout', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
+        mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
+      )
+      fileSpy = packagedInstall()
+
+      const collection = await getKeewebStatusSummary()
+
+      expect(collection).toEqual({
+        observations: [],
+        facts: {lastDeploy: '2026-01-15T10:30:00Z', contentHash: 'unavailable'},
+      })
+    })
+
+    it('passes the abort signal to the gh spawn', async () => {
+      const controller = new AbortController()
+      const seen: unknown[] = []
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((_cmd: unknown, opts: {signal?: AbortSignal}) => {
+        seen.push(opts.signal)
+        return mockSpawnResult(0, '[]')
+      }) as unknown as typeof Bun.spawn)
+      fileSpy = packagedInstall()
+
+      await getKeewebStatusSummary(controller.signal)
+
+      expect(seen).toEqual([controller.signal])
+    })
+
+    it('omits the signal from the gh spawn options when none is given', async () => {
+      const seen: string[][] = []
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((_cmd: unknown, opts: object) => {
+        seen.push(Object.keys(opts))
+        return mockSpawnResult(0, '[]')
+      }) as unknown as typeof Bun.spawn)
+      fileSpy = packagedInstall()
+
+      await getKeewebStatusSummary()
+
+      expect(seen.flat()).not.toContain('signal')
+    })
+
+    it('reports a null last deploy when gh cannot say, without failing', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() => mockSpawnResult(1, '', 'not logged in'))
+      fileSpy = packagedInstall()
+
+      const collection = await getKeewebStatusSummary()
+
+      expect(collection.facts.lastDeploy).toBeNull()
+      expect(JSON.stringify(collection)).not.toContain('logged in')
     })
   })
 
@@ -311,6 +369,7 @@ describe('keeweb status helpers', () => {
 
       expect(result.level).toBe('ok')
       expect(result.summary).toContain('matches')
+      expect(result.value).toBe('match')
     })
 
     it('source checkout with mismatched hashes returns warning', async () => {
@@ -339,6 +398,7 @@ describe('keeweb status helpers', () => {
 
       expect(result.level).toBe('warning')
       expect(result.summary).toContain('differs')
+      expect(result.value).toBe('differs')
     })
 
     it('resolves dist path off injected repoRoot without depth arithmetic', async () => {

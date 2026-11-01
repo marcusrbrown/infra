@@ -1,11 +1,13 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
-import type {StatusSummary} from '../status'
+import type {AppCollection} from '../../status/collect'
 import {z} from 'zod'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {composeObservation, servicesFact} from '../../status/collect'
+import {declaredObservation} from '../../status/declared'
 import {validateUmamiHost} from './host'
 
 declare const process: {
@@ -39,7 +41,7 @@ export interface UmamiStatusResult {
 
 export type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -90,12 +92,16 @@ export function isAllRunning(rows: ServiceRow[]): boolean {
 
 function defaultSpawn(
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ): ReturnType<SpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
 
-export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defaultSpawn): Promise<UmamiStatusResult> {
+export async function getUmamiComposeStatus(
+  host: string,
+  spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
+): Promise<UmamiStatusResult> {
   validateUmamiHost(host)
 
   const knownHostsArgs = buildKnownHostsArgs()
@@ -124,7 +130,7 @@ export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defau
   let exitCode: number
 
   try {
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     ;[stdoutText, stderrText, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -162,56 +168,16 @@ export async function getUmamiComposeStatus(host: string, spawn: SpawnFn = defau
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
-export async function getUmamiStatusSummary(host: string, spawn?: SpawnFn): Promise<StatusSummary> {
-  let result: UmamiStatusResult
-
-  try {
-    result = await getUmamiComposeStatus(host, spawn)
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error)
-    return {
-      app: 'umami',
-      http: `ERROR: ${errorMsg}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
-    }
-  }
-
-  // Three-way split: no services → ERROR, services present but degraded → DEGRADED, all healthy → OK
-  if (result.services.length === 0) {
-    const errorMsg = result.error ?? 'No services reported'
-    return {
-      app: 'umami',
-      http: `ERROR: ${errorMsg}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
-    }
-  }
-
-  const rows = result.services.map(s => `${s.service}:${s.state}/${s.health}`).join(', ')
-
-  if (!result.ok) {
-    return {
-      app: 'umami',
-      http: `DEGRADED: ${rows}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
-    }
-  }
+export async function getUmamiStatusSummary(
+  host: string,
+  spawn?: SpawnFn,
+  signal?: AbortSignal,
+): Promise<AppCollection> {
+  const result = await getUmamiComposeStatus(host, spawn, signal)
 
   return {
-    app: 'umami',
-    http: `OK: ${rows}`,
-    lastDeploy: '—',
-    version: '—',
-    contentHash: '—',
-    usageStats: '—',
+    observations: [composeObservation(declaredObservation('umami', 'compose-services'), result)],
+    facts: {services: servicesFact(result.services)},
   }
 }
 

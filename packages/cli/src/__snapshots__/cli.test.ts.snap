@@ -270,8 +270,7 @@ Commands:
 
   status                               Show status of all deployments
 
-    --json                             Output machine-readable JSON with keeweb, cliproxy, gateway, umami, dashboard, vpn, and broker summary objects. The gateway object also carries a structured workspace field.
-    --verbose                          Include verbose per-app health check details when building the summary rows.
+    --json                             Output a schema-versioned JSON envelope: schemaVersion, generatedAt, and one entry per app with typed observations (id, kind, result, observedAt, source) and facts. The gateway workspace memory status is in facts.workspace.
 
 
   mcp                                  Start a stdio MCP server exposing all CLI commands as tools for coding agents

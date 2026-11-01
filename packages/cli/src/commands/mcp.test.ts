@@ -29,13 +29,16 @@ import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js'
 import {afterAll, afterEach, beforeAll, beforeEach, describe, expect, test} from 'bun:test'
 import {goke} from 'goke'
 
+import {createCapturedCtx} from '../lib/mcp-ctx-fixture'
+import {statusEnvelopeSchema} from '../status/observation'
+import {makeStatusDependencies, withStatusEnv} from './__fixtures__/status-dependencies'
 import {registerBrokerCommands} from './broker'
 import {registerCliproxyCommands} from './cliproxy'
 import {registerDashboardCommands} from './dashboard'
 import {registerGatewayCommands} from './gateway'
 import {registerKeewebCommands} from './keeweb'
 import {MCP_ALLOWLIST, registerMcp} from './mcp'
-import {registerStatus} from './status'
+import {registerStatus, unifiedStatusAction} from './status'
 import {registerUmamiCommands} from './umami'
 import {registerVpnCommands} from './vpn'
 
@@ -263,5 +266,76 @@ describe('cliproxy_models MCP tool (Tier-1, in-process call)', () => {
     expect(text).toContain('claude-opus-4')
     expect(text).toContain('claude-sonnet-4-5')
     expect(text).toContain('gpt-4o')
+  })
+})
+
+// ─── status --json through the MCP capture path (Tier-1, in-process call) ────
+
+async function connectStatusClient(overrides?: Parameters<typeof makeStatusDependencies>[0]): Promise<Client> {
+  const cli = goke('infra')
+  registerStatus(cli, makeStatusDependencies(overrides))
+  cli.matchedCommandName = 'mcp'
+
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
+  await createMcpAction({
+    cli,
+    commandFilter: (name: string) => MCP_ALLOWLIST.has(name),
+    createTransport: () => serverTransport,
+  })()
+
+  const client = new Client({name: 'test-client-status', version: '1.0.0'}, {capabilities: {}})
+  await client.connect(clientTransport)
+  return client
+}
+
+function textBlocks(result: Awaited<ReturnType<Client['callTool']>>): string[] {
+  return (result.content as {type: string; text?: string}[])
+    .filter(block => block.type === 'text')
+    .map(block => block.text ?? '')
+}
+
+describe('status MCP tool (Tier-1, in-process call)', () => {
+  test('returns one parseable JSON block that equals the CLI output, with no stderr', async () => {
+    const client = await connectStatusClient()
+    try {
+      const result = await withStatusEnv(() => client.callTool({name: 'status', arguments: {json: true}}))
+      const cli = createCapturedCtx()
+      await withStatusEnv(() => unifiedStatusAction({json: true}, cli.ctx, makeStatusDependencies()))
+
+      const blocks = textBlocks(result)
+      expect(blocks).toHaveLength(1)
+      const [json = ''] = blocks
+      expect(statusEnvelopeSchema.safeParse(JSON.parse(json)).success).toBe(true)
+      // The MCP capture appends the console newline.
+      expect(json.trimEnd()).toBe(cli.captured.stdout[0] ?? '')
+      expect(result.isError).not.toBe(true)
+    } finally {
+      await client.close()
+    }
+  })
+
+  test('reports a collector failure inside the JSON: one block, equal to the CLI stdout, nothing on stderr', async () => {
+    const failing = {
+      getGatewayStatusSummary: async () => {
+        throw new Error('Gateway exploded')
+      },
+    }
+    const client = await connectStatusClient(failing)
+    try {
+      const result = await withStatusEnv(() => client.callTool({name: 'status', arguments: {json: true}}))
+      const cli = createCapturedCtx()
+      await withStatusEnv(() => unifiedStatusAction({json: true}, cli.ctx, makeStatusDependencies(failing)))
+
+      const blocks = textBlocks(result)
+      expect(blocks).toHaveLength(1)
+      const [json = ''] = blocks
+      const envelope = statusEnvelopeSchema.parse(JSON.parse(json))
+      expect(envelope.apps.find(entry => entry.app === 'gateway')?.observations[1]?.result).toBe('unknown')
+      expect(json.trimEnd()).toBe(cli.captured.stdout[0] ?? '')
+      expect(cli.captured.stderr).toEqual([])
+      expect(json).not.toContain('Gateway exploded')
+    } finally {
+      await client.close()
+    }
   })
 })

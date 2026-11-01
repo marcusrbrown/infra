@@ -11,8 +11,8 @@ import {
   cliproxyStatusAction,
   formatDurationMs,
   formatUsageSummaryLine,
-  formatVersionSummary,
   getCliproxyStatusSummary,
+  inspectRunningContainer,
   levelLabel,
   stripTrailingSlash,
   toNumber,
@@ -348,61 +348,34 @@ describe('cliproxy status helpers', () => {
     })
   })
 
-  describe('formatVersionSummary', () => {
-    const check = (level: 'ok' | 'warning' | 'error', summary: string) => ({
-      title: 'version',
-      level,
-      summary,
+  describe('inspectRunningContainer', () => {
+    it('returns the running image tag', async () => {
+      const spawn = makeSpawnResult('cli-proxy-api\teceasy/cli-proxy-api:v7.2.138@sha256:deadbeef\n')
+
+      expect(await inspectRunningContainer('cliproxy-example-com', spawn)).toEqual({
+        kind: 'running',
+        version: 'v7.2.138',
+      })
     })
 
-    it('formats differing healthy versions as running with latest context', () => {
-      expect(formatVersionSummary(check('ok', 'v7.2.139'), check('ok', 'v7.2.140'))).toBe('v7.2.139 (latest v7.2.140)')
+    it('returns none when SSH works but no CLIProxyAPI container is listed', async () => {
+      const spawn = makeSpawnResult('nginx:latest\nredis:7\n')
+
+      expect(await inspectRunningContainer('cliproxy-example-com', spawn)).toEqual({kind: 'none'})
     })
 
-    it('collapses equal healthy versions to a latest marker', () => {
-      expect(formatVersionSummary(check('ok', 'v7.2.139'), check('ok', 'v7.2.139'))).toBe('v7.2.139 (latest)')
-    })
-
-    it('compacts an unavailable running version', () => {
-      expect(
-        formatVersionSummary(
-          check('warning', 'SSH command failed (exit 255): Permission denied'),
-          check('ok', 'v7.2.140'),
-        ),
-      ).toBe('unknown (latest v7.2.140)')
-    })
-
-    it('compacts an unavailable latest version', () => {
-      expect(
-        formatVersionSummary(check('ok', 'v7.2.139'), check('error', 'GET latest-version failed with HTTP 500')),
-      ).toBe('v7.2.139 (latest unknown)')
-    })
-
-    it('labels a rate-limited latest version distinctly', () => {
-      expect(
-        formatVersionSummary(check('ok', 'v7.2.139'), check('warning', 'Rate limited by management API (HTTP 429).')),
-      ).toBe('v7.2.139 (latest rate-limited)')
-    })
-
-    it('labels a missing management key without leaking the diagnostic into the cell', () => {
-      expect(formatVersionSummary(check('ok', 'v7.2.139'), check('warning', 'Not checked (no management key).'))).toBe(
-        'v7.2.139 (latest: no key)',
+    it('returns unavailable when SSH fails, and for an invalid host before spawning', async () => {
+      const failed = await inspectRunningContainer(
+        'cliproxy-example-com',
+        makeSpawnResult('', 'Permission denied\n', 255),
       )
-    })
+      const neverSpawn: SpawnFn = () => {
+        throw new Error('spawn must not be called for an invalid host')
+      }
+      const invalid = await inspectRunningContainer('-oProxyCommand=evil', neverSpawn)
 
-    it('collapses both unavailable versions to unknown', () => {
-      expect(formatVersionSummary(check('warning', 'SSH unavailable'), check('error', 'management API failed'))).toBe(
-        'unknown',
-      )
-    })
-
-    it('keeps a rate-limit label when both version checks are degraded', () => {
-      expect(
-        formatVersionSummary(
-          check('warning', 'SSH unavailable'),
-          check('warning', 'Rate limited by management API (HTTP 429).'),
-        ),
-      ).toBe('unknown (latest rate-limited)')
+      expect(failed.kind).toBe('unavailable')
+      expect(invalid.kind).toBe('unavailable')
     })
   })
 
@@ -677,38 +650,152 @@ describe('usage-queue migration', () => {
   })
 })
 
-describe('management auth failure surfaces in unified summary (FIX 4)', () => {
+function managementFetch(options: {status?: number; usage?: unknown[]; latest?: string} = {}) {
+  const {status = 200, usage = [{status: 200}, {status: 500}], latest = 'v7.2.140'} = options
+  return createFetchImplementation(async url => {
+    if (!url.includes('/v0/management/')) return new Response('ok', {status: 200})
+    if (status !== 200) return new Response('Unauthorized', {status})
+    if (url.includes('/usage-queue')) return Response.json(usage)
+    if (url.includes('/latest-version')) return Response.json({'latest-version': latest})
+    return Response.json({})
+  })
+}
+
+describe('getCliproxyStatusSummary (typed collection)', () => {
+  const BASE = 'https://cliproxy.example.com'
+  const runningSpawn = () => makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n')
+
   afterEach(() => {
     globalThis.fetch = originalFetch
   })
 
-  it('getCliproxyStatusSummary with a bad key (401) shows auth failure in version and usageStats, not "— (no key)"', async () => {
-    globalThis.fetch = createFetchImplementation(async (url, init) => {
-      const hdrs = init?.headers
-      const hasKey =
-        hdrs instanceof Headers
-          ? hdrs.has('x-management-key')
-          : hdrs !== null && hdrs !== undefined && typeof hdrs === 'object' && 'x-management-key' in hdrs
-      if (url.includes('/v0/management/') && hasKey) {
-        return new Response('Unauthorized', {status: 401})
-      }
+  it('reports the container observation and the version, latest version and usage facts', async () => {
+    globalThis.fetch = managementFetch()
 
-      return new Response('ok', {status: 200})
+    const collection = await getCliproxyStatusSummary(BASE, 'good-key', runningSpawn())
+
+    expect(collection.observations).toEqual([
+      expect.objectContaining({id: 'container-running', kind: 'container-health', source: 'ssh', result: 'pass'}),
+    ])
+    expect(collection.facts).toEqual({
+      runningVersion: 'v7.2.139',
+      latestVersion: 'v7.2.140',
+      usage: {recent: 2, errors: 1},
+      managementAccess: 'ok',
+    })
+  })
+
+  it('does not call the public health endpoint (reachability is the shared probe)', async () => {
+    const urls: string[] = []
+    globalThis.fetch = createFetchImplementation(async url => {
+      urls.push(url)
+      return Response.json({})
     })
 
-    const summary = await getCliproxyStatusSummary(
-      'https://cliproxy.example.com',
-      'bad-key',
-      false,
-      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    await getCliproxyStatusSummary(BASE, 'good-key', runningSpawn())
+
+    expect(urls.some(url => url.endsWith('/healthz'))).toBe(false)
+  })
+
+  it('reports a bad management key as managementAccess denied with null version and usage, distinct from no key', async () => {
+    globalThis.fetch = managementFetch({status: 401})
+
+    const collection = await getCliproxyStatusSummary(BASE, 'bad-key', runningSpawn())
+
+    expect(collection.facts).toEqual({
+      runningVersion: 'v7.2.139',
+      latestVersion: null,
+      usage: null,
+      managementAccess: 'denied',
+    })
+  })
+
+  it.each([
+    [401, 'denied'],
+    [403, 'denied'],
+    [429, 'rate-limited'],
+    [500, 'unavailable'],
+    [503, 'unavailable'],
+  ] as const)('maps a %d auth probe response to managementAccess %s', async (status, expected) => {
+    globalThis.fetch = managementFetch({status})
+
+    const collection = await getCliproxyStatusSummary(BASE, 'some-key', runningSpawn())
+
+    expect(collection.facts).toMatchObject({managementAccess: expected, latestVersion: null, usage: null})
+    expect(collection.observations[0]?.result).toBe('pass')
+  })
+
+  it('maps a 403 ip-ban body to denied', async () => {
+    globalThis.fetch = createFetchImplementation(async () => Response.json({error: 'IP banned'}, {status: 403}))
+
+    const collection = await getCliproxyStatusSummary(BASE, 'some-key', runningSpawn())
+
+    expect(collection.facts.managementAccess).toBe('denied')
+  })
+
+  it('maps a network error on the auth probe to unavailable', async () => {
+    globalThis.fetch = createFetchImplementation(async () => {
+      throw new Error('socket hang up')
+    })
+
+    const collection = await getCliproxyStatusSummary(BASE, 'some-key', runningSpawn())
+
+    expect(collection.facts).toMatchObject({managementAccess: 'unavailable', latestVersion: null, usage: null})
+    expect(JSON.stringify(collection)).not.toContain('socket')
+  })
+
+  it('keeps managementAccess ok when the auth probe passes but usage and version requests fail', async () => {
+    globalThis.fetch = createFetchImplementation(async url =>
+      url.endsWith('/v0/management/config')
+        ? Response.json({})
+        : new Response('boom', {status: url.includes('usage-queue') ? 500 : 429}),
     )
 
-    // Must NOT show the no-key sentinel — a bad key is distinct from no key
-    expect(summary.version).not.toBe('— (no key)')
-    expect(summary.usageStats).not.toBe('— (no key)')
-    // Must contain some error/auth indicator
-    expect(summary.version.toLowerCase()).toMatch(/error|auth|401|management|unauthorized/i)
-    expect(summary.usageStats.toLowerCase()).toMatch(/error|auth|401|management|unauthorized/i)
+    const collection = await getCliproxyStatusSummary(BASE, 'good-key', runningSpawn())
+
+    expect(collection.facts).toEqual({
+      runningVersion: 'v7.2.139',
+      latestVersion: null,
+      usage: null,
+      managementAccess: 'ok',
+    })
+  })
+
+  it('reports a missing management key as managementAccess no-key without calling the management API', async () => {
+    const urls: string[] = []
+    globalThis.fetch = createFetchImplementation(async url => {
+      urls.push(url)
+      return Response.json({})
+    })
+
+    const collection = await getCliproxyStatusSummary(BASE, '', runningSpawn())
+
+    expect(urls).toEqual([])
+    expect(collection.facts).toMatchObject({managementAccess: 'no-key', latestVersion: null, usage: null})
+    expect(collection.observations[0]?.result).toBe('pass')
+  })
+
+  it('fails the container observation when no CLIProxyAPI container runs', async () => {
+    const collection = await getCliproxyStatusSummary(BASE, '', makeSpawnResult('nginx:latest\n'))
+
+    expect(collection.observations[0]).toMatchObject({result: 'fail', detail: {reason: 'not-running'}})
+    expect(collection.facts.runningVersion).toBeNull()
+  })
+
+  it('makes the container observation unknown, without stderr text, when SSH fails', async () => {
+    const collection = await getCliproxyStatusSummary(
+      BASE,
+      '',
+      makeSpawnResult('', 'ssh: connect to host cliproxy.example.com: Connection refused\n', 255),
+    )
+
+    expect(collection.observations[0]).toMatchObject({result: 'unknown', detail: {reason: 'ssh-failed'}})
+    expect(JSON.stringify(collection)).not.toContain('Connection refused')
+    expect(JSON.stringify(collection)).not.toContain('cliproxy.example.com')
+  })
+
+  it('rejects an unparseable base URL so the unified command can mark the app unknown', async () => {
+    await expect(getCliproxyStatusSummary('not a url', '', runningSpawn())).rejects.toThrow()
   })
 })
 
@@ -791,19 +878,6 @@ describe('reachability probe targets /healthz liveness endpoint', () => {
     const output = [...captured.stdout, ...captured.stderr].join('\n')
     expect(output).toContain('OK')
     expect(output).not.toMatch(/ERROR.*HTTP reachability|HTTP reachability.*ERROR/)
-  })
-
-  it('getCliproxyStatusSummary reports http ok when /healthz returns 200 and bare base returns 404', async () => {
-    const BASE = 'https://cliproxy.example.com'
-    globalThis.fetch = createFetchImplementation(async url => {
-      if (url === `${BASE}/healthz`) return new Response('{"status":"ok"}', {status: 200})
-      if (url === BASE) return new Response('Not Found', {status: 404})
-      return new Response('ok', {status: 200})
-    })
-
-    const summary = await getCliproxyStatusSummary(BASE, '', false, makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'))
-
-    expect(summary.http).toMatch(/^OK/)
   })
 })
 
@@ -961,7 +1035,6 @@ describe('management auth probe (ban-awareness)', () => {
     await getCliproxyStatusSummary(
       'https://cliproxy.example.com',
       'bad-key',
-      false,
       makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
     )
 
@@ -1569,5 +1642,38 @@ describe('cliproxyStatusAction — provider auth probe wiring', () => {
 
     expect(threw).toBeInstanceOf(MockProcessExit)
     expect(captured.exit?.code).toBe(1)
+  })
+})
+
+describe('cliproxy abort signal', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('passes the signal to the ssh spawn in getCliproxyStatusSummary and inspectRunningContainer', async () => {
+    globalThis.fetch = createFetchImplementation(async () => Response.json({}))
+    const controller = new AbortController()
+    const seen: (AbortSignal | undefined)[] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(opts.signal)
+      return makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n')(cmd, opts)
+    }
+
+    await getCliproxyStatusSummary('https://cliproxy.example.com', '', spawn, controller.signal)
+    await inspectRunningContainer('cliproxy-example-com', spawn, controller.signal)
+
+    expect(seen).toEqual([controller.signal, controller.signal])
+  })
+
+  it('omits the signal option when none is given', async () => {
+    const seen: string[][] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(Object.keys(opts))
+      return makeSpawnResult('')(cmd, opts)
+    }
+
+    await inspectRunningContainer('cliproxy-example-com', spawn)
+
+    expect(seen.flat()).not.toContain('signal')
   })
 })

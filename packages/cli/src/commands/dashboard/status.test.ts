@@ -105,7 +105,7 @@ describe('parseComposePs', () => {
 
 type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -279,45 +279,67 @@ describe('getDashboardComposeStatus', () => {
 // ─── getDashboardStatusSummary ────────────────────────────────────────────────
 
 describe('getDashboardStatusSummary', () => {
-  it('shows service rows with DEGRADED marker when services present but unhealthy', async () => {
-    const ndjson = [
-      JSON.stringify({Name: 'dashboard', State: 'running', Health: 'unhealthy'}),
-      JSON.stringify({Name: 'db', State: 'running', Health: 'healthy'}),
-    ].join('\n')
+  const row = (name: string, health: string) => JSON.stringify({Name: name, State: 'running', Health: health})
 
-    const summary = await getDashboardStatusSummary('dashboard.fro.bot', makeSpawn(ndjson))
+  it('fails container health with the degraded reason when a service is unhealthy', async () => {
+    const ndjson = [row('dashboard', 'unhealthy'), row('db', 'healthy')].join('\n')
 
-    expect(summary.http).toContain('DEGRADED')
-    expect(summary.http).toContain('dashboard')
-    expect(summary.http).not.toContain('No services reported')
+    const collection = await getDashboardStatusSummary('dashboard.fro.bot', makeSpawn(ndjson))
+
+    expect(collection.observations).toEqual([
+      expect.objectContaining({
+        id: 'compose-services',
+        kind: 'container-health',
+        source: 'ssh',
+        result: 'fail',
+        detail: {reason: 'degraded'},
+      }),
+    ])
+    expect(collection.facts.services).toEqual([
+      {service: 'dashboard', state: 'running', health: 'unhealthy'},
+      {service: 'db', state: 'running', health: 'healthy'},
+    ])
   })
 
-  it('shows ERROR with no-services message when compose ps returns empty output', async () => {
-    const summary = await getDashboardStatusSummary('dashboard.fro.bot', makeSpawn(''))
+  it('fails container health when compose ps lists nothing', async () => {
+    const collection = await getDashboardStatusSummary('dashboard.fro.bot', makeSpawn(''))
 
-    expect(summary.http).toContain('ERROR')
-    expect(summary.http).toContain('No services')
-    expect(summary.http).not.toContain('DEGRADED')
+    expect(collection.observations[0]).toMatchObject({result: 'fail', detail: {reason: 'no-services'}})
+    expect(collection.facts.services).toEqual([])
   })
 
-  it('shows OK with service rows when all services are healthy', async () => {
-    const ndjson = [
-      JSON.stringify({Name: 'dashboard', State: 'running', Health: 'healthy'}),
-      JSON.stringify({Name: 'db', State: 'running', Health: 'healthy'}),
-    ].join('\n')
+  it('passes container health when every service is healthy or has no healthcheck', async () => {
+    const ndjson = [row('dashboard', 'healthy'), row('db', '')].join('\n')
 
-    const summary = await getDashboardStatusSummary('dashboard.fro.bot', makeSpawn(ndjson))
+    const collection = await getDashboardStatusSummary('dashboard.fro.bot', makeSpawn(ndjson))
 
-    expect(summary.http).toContain('OK')
-    expect(summary.http).toContain('dashboard')
-    expect(summary.http).not.toContain('DEGRADED')
-    expect(summary.http).not.toContain('ERROR')
+    expect(collection.observations[0]).toMatchObject({id: 'compose-services', result: 'pass'})
+    expect(collection.observations[0]?.observedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(collection.facts.services).toEqual([
+      {service: 'dashboard', state: 'running', health: 'healthy'},
+      {service: 'db', state: 'running', health: 'n-a'},
+    ])
   })
 
-  it('returns a summary with app: dashboard', async () => {
-    const ndjson = JSON.stringify([{Name: 'dashboard', State: 'running', Health: 'healthy'}])
-    const summary = await getDashboardStatusSummary('dashboard.fro.bot', makeSpawn(ndjson))
-    expect(summary.app).toBe('dashboard')
+  it('makes container health unknown, without stderr text, when SSH fails', async () => {
+    const collection = await getDashboardStatusSummary(
+      'dashboard.fro.bot',
+      makeSpawn('', 'connection refused by dashboard.fro.bot', 255),
+    )
+
+    expect(collection.observations[0]).toMatchObject({result: 'unknown', detail: {reason: 'compose-failed'}})
+    expect(JSON.stringify(collection)).not.toContain('refused')
+    expect(JSON.stringify(collection)).not.toContain('dashboard.fro.bot')
+  })
+
+  it('makes container health unknown when compose output is not JSON', async () => {
+    const collection = await getDashboardStatusSummary('dashboard.fro.bot', makeSpawn('not json at all'))
+
+    expect(collection.observations[0]).toMatchObject({result: 'unknown', detail: {reason: 'compose-failed'}})
+  })
+
+  it('rejects an invalid host so the unified command can mark the app unknown', async () => {
+    await expect(getDashboardStatusSummary('-oProxyCommand=evil', makeSpawn(''))).rejects.toThrow()
   })
 })
 
@@ -704,5 +726,32 @@ describe('getDashboardComposeStatus — SSH identity injection', () => {
     if (keyPath) {
       expect(() => statSync(keyPath)).toThrow()
     }
+  })
+})
+
+describe('getDashboardStatusSummary abort signal', () => {
+  it('passes the signal to the ssh spawn', async () => {
+    const controller = new AbortController()
+    const seen: (AbortSignal | undefined)[] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(opts.signal)
+      return makeSpawn('')(cmd, opts)
+    }
+
+    await getDashboardStatusSummary('dashboard.fro.bot', spawn, controller.signal)
+
+    expect(seen).toEqual([controller.signal])
+  })
+
+  it('omits the signal option when none is given', async () => {
+    const seen: string[][] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(Object.keys(opts))
+      return makeSpawn('')(cmd, opts)
+    }
+
+    await getDashboardStatusSummary('dashboard.fro.bot', spawn)
+
+    expect(seen.flat()).not.toContain('signal')
   })
 })

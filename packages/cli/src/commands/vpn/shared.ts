@@ -1,8 +1,10 @@
-import type {StatusSummary} from '../status'
+import type {AppCollection} from '../../status/collect'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {observe} from '../../status/collect'
+import {declaredObservation} from '../../status/declared'
 import {validateVpnHost} from './host'
 
 declare const process: {
@@ -19,7 +21,7 @@ export interface WgShowResult {
 
 export type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -60,7 +62,7 @@ export function parseWgShowOutput(output: string): WgShowResult {
 
 function defaultSpawn(
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ): ReturnType<SpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
@@ -69,6 +71,8 @@ export interface VpnStatusResult {
   ok: boolean
   wgShow?: WgShowResult
   error?: string
+  /** Exit code of the SSH command when it ran and failed; 255 is SSH itself failing. */
+  exitCode?: number
 }
 
 /**
@@ -77,7 +81,11 @@ export interface VpnStatusResult {
  * SSH-only — never calls the Lightsail/AWS API.
  * Validates host before constructing any SSH argv.
  */
-export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn): Promise<VpnStatusResult> {
+export async function getVpnWgStatus(
+  host: string,
+  spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
+): Promise<VpnStatusResult> {
   validateVpnHost(host)
 
   const knownHostsArgs = buildKnownHostsArgs()
@@ -106,7 +114,7 @@ export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn
   let exitCode: number
 
   try {
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     ;[stdoutText, stderrText, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -121,6 +129,7 @@ export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn
     return {
       ok: false,
       error: `SSH command failed (exit ${exitCode}): ${redacted}`,
+      exitCode,
     }
   }
 
@@ -131,40 +140,33 @@ export async function getVpnWgStatus(host: string, spawn: SpawnFn = defaultSpawn
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
+const SSH_FAILURE_EXIT_CODE = 255
+
 /**
- * Get a structured VPN status summary for the unified status dashboard.
+ * Get the VPN's WireGuard observation and facts for the unified status command.
  *
  * SSH + `wg show` only — never calls the Lightsail/AWS API.
  * The MCP runtime needs no AWS credentials to call this function.
+ * SSH exit 255 is `unknown` (the interface could not be observed). Any other nonzero exit from
+ * `sudo wg show wg0`, or output without an interface, means SSH worked and wg0 is down: `fail`.
  *
  * @param host - The VPN box hostname or IP (validated before SSH).
  * @param spawn - Injectable spawn function (defaults to Bun.spawn).
  */
-export async function getVpnStatusSummary(host: string, spawn?: SpawnFn): Promise<StatusSummary> {
-  const result = await getVpnWgStatus(host, spawn)
+export async function getVpnStatusSummary(host: string, spawn?: SpawnFn, signal?: AbortSignal): Promise<AppCollection> {
+  const result = await getVpnWgStatus(host, spawn, signal)
+  const spec = declaredObservation('vpn', 'wireguard-interface')
 
-  if (!result.ok || !result.wgShow) {
-    const errorMsg = result.error ?? 'WireGuard interface not up'
-    return {
-      app: 'vpn',
-      http: `ERROR: ${errorMsg}`,
-      lastDeploy: '—',
-      version: '—',
-      contentHash: '—',
-      usageStats: '—',
-    }
+  if (result.exitCode === SSH_FAILURE_EXIT_CODE) {
+    return {observations: [observe(spec, 'unknown', {detail: {reason: 'ssh-failed'}})], facts: {}}
   }
 
-  const {wgShow} = result
-  const pubKeyInfo = wgShow.serverPublicKey ? ` pubkey:${wgShow.serverPublicKey}` : ''
-  const peerInfo = `${wgShow.peerCount} peer(s)`
+  if (!result.ok || !result.wgShow) {
+    return {observations: [observe(spec, 'fail', {detail: {reason: 'interface-down'}})], facts: {}}
+  }
 
   return {
-    app: 'vpn',
-    http: `OK: wg0 up,${pubKeyInfo} ${peerInfo}`,
-    lastDeploy: '—',
-    version: '—',
-    contentHash: '—',
-    usageStats: '—',
+    observations: [observe(spec, 'pass')],
+    facts: {peerCount: result.wgShow.peerCount, serverPublicKey: result.wgShow.serverPublicKey ?? null},
   }
 }

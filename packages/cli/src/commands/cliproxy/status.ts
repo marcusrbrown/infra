@@ -1,6 +1,7 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
-import type {StatusSummary} from '../status'
+import type {AppCollection} from '../../status/collect'
+import type {JsonValue} from '../../status/observation'
 
 import {HTTP_TIMEOUT_MS, managementHeaders} from '@marcusrbrown/infra-shared/cliproxy/management'
 import {z} from 'zod'
@@ -8,6 +9,9 @@ import {z} from 'zod'
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
 import {buildIdentityArgs} from '../../lib/ssh-identity'
+import {observe} from '../../status/collect'
+import {declaredObservation} from '../../status/declared'
+import {httpGet} from '../../status/public-probes'
 import {validateCliproxyHost} from './host'
 
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
@@ -31,7 +35,7 @@ interface CheckResult {
 
 export type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -40,7 +44,7 @@ export type SpawnFn = (
 
 function defaultSpawn(
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ): ReturnType<SpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<SpawnFn>
 }
@@ -78,13 +82,12 @@ export function toNumber(value: unknown): number | null {
 }
 
 export async function checkHttpReachability(url: string, verbose: boolean): Promise<CheckResult> {
-  const startedAt = performance.now()
+  // Operator-facing text: the shared GET primitive keeps the raw error so this summary can include it.
+  // The typed, public-safe observation lives in probeCliproxy (status/public-probes).
+  const attempt = await httpGet(url, {timeoutMs: HTTP_TIMEOUT_MS})
 
-  try {
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    })
-    const elapsedMs = performance.now() - startedAt
+  if (attempt.kind === 'response') {
+    const {response} = attempt
     const details: string[] = []
 
     if (verbose) {
@@ -97,20 +100,19 @@ export async function checkHttpReachability(url: string, verbose: boolean): Prom
 
     return {
       title: 'HTTP reachability',
-      level: response.ok ? 'ok' : 'error',
-      summary: `GET ${url} → ${response.status} (${formatDurationMs(elapsedMs)})`,
+      level: attempt.ok ? 'ok' : 'error',
+      summary: `GET ${url} → ${attempt.status} (${formatDurationMs(attempt.durationMs)})`,
       details,
     }
-  } catch (error) {
-    const elapsedMs = performance.now() - startedAt
-    const message = error instanceof Error ? error.message : String(error)
+  }
 
-    return {
-      title: 'HTTP reachability',
-      level: 'error',
-      summary: `Request failed after ${formatDurationMs(elapsedMs)}: ${message}`,
-      details: verbose ? [`URL: ${url}`, `Timeout: ${HTTP_TIMEOUT_MS}ms`] : undefined,
-    }
+  const message = attempt.error instanceof Error ? attempt.error.message : String(attempt.error)
+
+  return {
+    title: 'HTTP reachability',
+    level: 'error',
+    summary: `Request failed after ${formatDurationMs(attempt.durationMs)}: ${message}`,
+    details: verbose ? [`URL: ${url}`, `Timeout: ${HTTP_TIMEOUT_MS}ms`] : undefined,
   }
 }
 
@@ -246,7 +248,15 @@ export async function checkVersion(baseUrl: string, key: string): Promise<CheckR
   }
 }
 
-export async function checkRunningVersion(host: string, spawn: SpawnFn = defaultSpawn): Promise<CheckResult> {
+export type RunningContainer =
+  {kind: 'running'; version: string} | {kind: 'none'} | {kind: 'unavailable'; summary: string}
+
+/** Ask the host which CLIProxyAPI image is running. Never throws: SSH problems come back as `unavailable`. */
+export async function inspectRunningContainer(
+  host: string,
+  spawn: SpawnFn = defaultSpawn,
+  signal?: AbortSignal,
+): Promise<RunningContainer> {
   let cleanup: () => void = () => undefined
 
   try {
@@ -276,7 +286,7 @@ export async function checkRunningVersion(host: string, spawn: SpawnFn = default
       ...(process.env.SSH_AUTH_SOCK ? {SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK} : {}),
     }
 
-    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe'})
+    const child = spawn(sshCmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
     const [stdoutText, stderrText, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -285,28 +295,33 @@ export async function checkRunningVersion(host: string, spawn: SpawnFn = default
 
     if (exitCode !== 0) {
       return {
-        title: 'Running version',
-        level: 'warning',
+        kind: 'unavailable',
         summary: `SSH command failed (exit ${exitCode}): ${redactHost(stderrText.trim(), host) || 'unknown error'}`,
       }
     }
 
     const imageMatch = /(?:^|\s)eceasy\/cli-proxy-api:([^\s@]+)/m.exec(stdoutText)
-    if (!imageMatch) {
-      return {
-        title: 'Running version',
-        level: 'warning',
-        summary: 'No running eceasy/cli-proxy-api container found.',
-      }
-    }
-
-    return {title: 'Running version', level: 'ok', summary: imageMatch[1] ?? 'unknown'}
+    return imageMatch ? {kind: 'running', version: imageMatch[1] ?? 'unknown'} : {kind: 'none'}
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return {title: 'Running version', level: 'warning', summary: `Unable to check running version via SSH: ${message}`}
+    return {kind: 'unavailable', summary: `Unable to check running version via SSH: ${message}`}
   } finally {
     cleanup()
   }
+}
+
+export async function checkRunningVersion(host: string, spawn: SpawnFn = defaultSpawn): Promise<CheckResult> {
+  const container = await inspectRunningContainer(host, spawn)
+
+  if (container.kind === 'running') {
+    return {title: 'Running version', level: 'ok', summary: container.version}
+  }
+
+  if (container.kind === 'none') {
+    return {title: 'Running version', level: 'warning', summary: 'No running eceasy/cli-proxy-api container found.'}
+  }
+
+  return {title: 'Running version', level: 'warning', summary: container.summary}
 }
 
 const DEFAULT_PROVIDER_MODEL = 'claude-sonnet-4-6'
@@ -511,12 +526,20 @@ export async function checkProviderAuth(
   return probe.human
 }
 
+export type ManagementAccess = 'ok' | 'no-key' | 'denied' | 'rate-limited' | 'unavailable'
+
+interface ManagementAuthFailure {
+  access: Exclude<ManagementAccess, 'ok' | 'no-key'>
+  result: CheckResult
+}
+
 /**
  * Probe the management API with a cheap auth check before issuing parallel calls.
- * Returns null on success, or a CheckResult describing the auth failure.
+ * Returns null on success, or the failure with its `managementAccess` class: 401/403 `denied`, 429
+ * `rate-limited`, anything else (5xx, other statuses, network errors) `unavailable`.
  * Never throws.
  */
-async function probeManagementAuth(baseUrl: string, key: string): Promise<CheckResult | null> {
+async function probeManagementAuth(baseUrl: string, key: string): Promise<ManagementAuthFailure | null> {
   const endpoint = `${baseUrl}/v0/management/config`
 
   try {
@@ -541,45 +564,60 @@ async function probeManagementAuth(baseUrl: string, key: string): Promise<CheckR
 
       if (isBanBody) {
         return {
-          title: 'Management access',
-          level: 'error',
-          summary: 'IP banned — stop retrying for ~30 min. Management checks skipped.',
+          access: 'denied',
+          result: {
+            title: 'Management access',
+            level: 'error',
+            summary: 'IP banned — stop retrying for ~30 min. Management checks skipped.',
+          },
         }
       }
 
       return {
-        title: 'Management access',
-        level: 'error',
-        summary: 'Management API returned HTTP 403. Management checks skipped.',
+        access: 'denied',
+        result: {
+          title: 'Management access',
+          level: 'error',
+          summary: 'Management API returned HTTP 403. Management checks skipped.',
+        },
       }
     }
 
     if (response.status === 401) {
       return {
-        title: 'Management access',
-        level: 'error',
-        summary: 'Management API returned HTTP 401 (invalid key). Management checks skipped.',
+        access: 'denied',
+        result: {
+          title: 'Management access',
+          level: 'error',
+          summary: 'Management API returned HTTP 401 (invalid key). Management checks skipped.',
+        },
       }
     }
 
     return {
-      title: 'Management access',
-      level: 'warning',
-      summary: `Management auth probe returned HTTP ${response.status}. Management checks skipped.`,
+      access: response.status === 429 ? 'rate-limited' : 'unavailable',
+      result: {
+        title: 'Management access',
+        level: 'warning',
+        summary: `Management auth probe returned HTTP ${response.status}. Management checks skipped.`,
+      },
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return {
-      title: 'Management access',
-      level: 'error',
-      summary: `Management auth probe failed: ${message}`,
+      access: 'unavailable',
+      result: {
+        title: 'Management access',
+        level: 'error',
+        summary: `Management auth probe failed: ${message}`,
+      },
     }
   }
 }
 
 type ManagementChecks =
   | {kind: 'no-key'}
-  | {kind: 'auth-failure'; result: CheckResult}
+  | {kind: 'auth-failure'; result: CheckResult; access: ManagementAuthFailure['access']}
   | {kind: 'checks'; usage: CheckResult; version: CheckResult}
 
 /**
@@ -593,7 +631,7 @@ async function runManagementChecks(baseUrl: string, key: string | undefined): Pr
 
   const authFailure = await probeManagementAuth(baseUrl, key)
   if (authFailure !== null) {
-    return {kind: 'auth-failure', result: authFailure}
+    return {kind: 'auth-failure', result: authFailure.result, access: authFailure.access}
   }
 
   const [usage, version] = await Promise.all([checkUsageStats(baseUrl, key), checkVersion(baseUrl, key)])
@@ -611,53 +649,7 @@ function printCheckResult(result: CheckResult, ctx: ActionCtx): void {
   }
 }
 
-function formatCheckSummary(result: CheckResult): string {
-  return `${levelLabel(result.level)}: ${result.summary}`
-}
-
 const RUNNING_VERSION_NOT_CHECKED_SUMMARY = 'Not checked for explicit URL override.'
-
-export function formatVersionSummary(running: CheckResult, available: CheckResult): string {
-  const latestFailure = /429|rate limit/i.test(available.summary)
-    ? 'rate-limited'
-    : /auth|\b40[13]\b|ip banned/i.test(available.summary)
-      ? 'auth'
-      : 'unknown'
-
-  if (running.summary === RUNNING_VERSION_NOT_CHECKED_SUMMARY) {
-    if (available.level === 'ok') {
-      return `not checked (latest ${available.summary})`
-    }
-
-    if (available.summary === 'Not checked (no management key).') {
-      return 'not checked (latest: no key)'
-    }
-
-    return `not checked (latest ${latestFailure})`
-  }
-
-  if (running.level === 'ok' && available.level === 'ok') {
-    return running.summary === available.summary
-      ? `${running.summary} (latest)`
-      : `${running.summary} (latest ${available.summary})`
-  }
-
-  if (running.level === 'ok') {
-    return available.summary === 'Not checked (no management key).'
-      ? `${running.summary} (latest: no key)`
-      : `${running.summary} (latest ${latestFailure})`
-  }
-
-  if (available.level === 'ok') {
-    return `unknown (latest ${available.summary})`
-  }
-
-  if (latestFailure === 'auth') {
-    return 'unknown (auth)'
-  }
-
-  return latestFailure === 'rate-limited' ? 'unknown (latest rate-limited)' : 'unknown'
-}
 
 function getRunningVersionNotChecked(host: string): CheckResult {
   try {
@@ -669,53 +661,72 @@ function getRunningVersionNotChecked(host: string): CheckResult {
   }
 }
 
-export function formatUsageSummaryLine(result: CheckResult): string | null {
-  // v7 recent-window format: "recent: N" or "recent: N, errors: M"
+/** Read the recent-window counts back out of a `checkUsageStats` summary (`recent: N` / `recent: N, errors: M`). */
+function parseUsageCounts(result: CheckResult): {recent: number; errors: number} | null {
   const recentMatch = /recent:\s*(\d+)/.exec(result.summary)
   if (!recentMatch) {
     return null
   }
-  const total = Number(recentMatch[1])
   const errorMatch = /errors:\s*(\d+)/.exec(result.summary)
-  const errors = errorMatch ? Number(errorMatch[1]) : 0
-  return `Recent requests: ${total}${errors > 0 ? `, ${errors} errors` : ''}`
+  return {recent: Number(recentMatch[1]), errors: errorMatch ? Number(errorMatch[1]) : 0}
 }
 
+export function formatUsageSummaryLine(result: CheckResult): string | null {
+  const counts = parseUsageCounts(result)
+  if (counts === null) {
+    return null
+  }
+  return `Recent requests: ${counts.recent}${counts.errors > 0 ? `, ${counts.errors} errors` : ''}`
+}
+
+/**
+ * Unified-status collector. Reachability comes from the shared public probe, so this supplies the SSH
+ * container observation plus facts: the running and latest versions and recent usage (null when the
+ * management API could not say; `managementAccess` says why).
+ */
 export async function getCliproxyStatusSummary(
   baseUrl: string,
   key: string,
-  verbose: boolean,
   spawn: SpawnFn = defaultSpawn,
-): Promise<StatusSummary> {
+  signal?: AbortSignal,
+): Promise<AppCollection> {
   const normalizedBaseUrl = stripTrailingSlash(baseUrl)
   const host = new URL(normalizedBaseUrl).hostname
-  const [httpResult, mgmt, running] = await Promise.all([
-    checkHttpReachability(`${normalizedBaseUrl}/healthz`, verbose),
+  const [mgmt, running] = await Promise.all([
     runManagementChecks(normalizedBaseUrl, key || undefined),
-    checkRunningVersion(host, spawn),
+    inspectRunningContainer(host, spawn, signal),
   ])
 
-  let available: CheckResult
-  let usageStats: string
-
-  if (mgmt.kind === 'no-key') {
-    available = {title: 'Latest available version', level: 'warning', summary: 'Not checked (no management key).'}
-    usageStats = '— (no key)'
-  } else if (mgmt.kind === 'auth-failure') {
-    available = mgmt.result
-    usageStats = formatCheckSummary(mgmt.result)
+  const spec = declaredObservation('cliproxy', 'container-running')
+  let container
+  if (running.kind === 'running') {
+    container = observe(spec, 'pass')
+  } else if (running.kind === 'none') {
+    container = observe(spec, 'fail', {detail: {reason: 'not-running'}})
   } else {
-    available = mgmt.version
-    usageStats = formatCheckSummary(mgmt.usage)
+    container = observe(spec, 'unknown', {detail: {reason: 'ssh-failed'}})
+  }
+
+  let managementAccess: ManagementAccess = 'ok'
+  let latestVersion: string | null = null
+  let usage: JsonValue = null
+  if (mgmt.kind === 'no-key') {
+    managementAccess = 'no-key'
+  } else if (mgmt.kind === 'auth-failure') {
+    managementAccess = mgmt.access
+  } else {
+    latestVersion = mgmt.version.level === 'ok' ? mgmt.version.summary : null
+    usage = parseUsageCounts(mgmt.usage)
   }
 
   return {
-    app: 'cliproxy',
-    http: formatCheckSummary(httpResult),
-    lastDeploy: '—',
-    version: formatVersionSummary(running, available),
-    contentHash: '—',
-    usageStats,
+    observations: [container],
+    facts: {
+      runningVersion: running.kind === 'running' ? running.version : null,
+      latestVersion,
+      usage,
+      managementAccess,
+    },
   }
 }
 

@@ -102,7 +102,7 @@ describe('isAllRunning', () => {
 
 type SpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -434,7 +434,7 @@ describe('getGatewayComposeStatus — NDJSON stdout', () => {
 
 type StatusSpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'; signal?: AbortSignal},
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -1221,7 +1221,7 @@ describe('gatewayStatusAction — --json', () => {
   })
 })
 
-describe('getGatewayStatusSummary — workspace suffix', () => {
+describe('getGatewayStatusSummary — observations and facts', () => {
   let originalHost: string | undefined
 
   beforeEach(() => {
@@ -1234,118 +1234,193 @@ describe('getGatewayStatusSummary — workspace suffix', () => {
     else process.env.GATEWAY_HOST = originalHost
   })
 
-  const prefix = 'OK: gateway:running/healthy, workspace:running/n-a, mitmproxy:running/healthy'
+  const results = (collection: Awaited<ReturnType<typeof getGatewayStatusSummary>>) =>
+    Object.fromEntries(collection.observations.map(entry => [entry.id, entry.result]))
 
-  it('appends the tagged suffix after the unchanged compose prefix', async () => {
+  it('passes container health and the resource check when every service runs and the workspace is clean', async () => {
     const {spawn} = makeRouter(
       () => proc(composeJson),
       () => proc(workspaceStdout()),
     )
 
-    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
 
-    expect(summary.http).toBe(`${prefix}; workspace mem=412/896MiB oom_kills=0 opencode=ready`)
+    expect(results(collection)).toEqual({'compose-services': 'pass', 'workspace-memory': 'pass'})
+    expect(collection.facts.services).toEqual([
+      {service: 'gateway', state: 'running', health: 'healthy'},
+      {service: 'workspace', state: 'running', health: 'n-a'},
+      {service: 'mitmproxy', state: 'running', health: 'healthy'},
+    ])
+    expect(collection.facts.workspace).toMatchObject({status: 'ok', opencode: 'ready', limitBytes: LIMIT_BYTES})
   })
 
-  it('contains no table delimiter', async () => {
+  it('fails the resource check on an OOM kill and a degraded supervisor, keeping container health', async () => {
     const {spawn} = makeRouter(
       () => proc(composeJson),
       () => proc(workspaceStdout({oomKill: 1, readyz: DEGRADED_BODY})),
     )
 
-    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
 
-    expect(summary.http).not.toContain('|')
-    expect(summary.http).toBe(`${prefix}; workspace mem=412/896MiB oom_kills=1 opencode=degraded`)
+    expect(results(collection)).toEqual({'compose-services': 'pass', 'workspace-memory': 'fail'})
+    expect(collection.observations[1]?.detail).toEqual({reason: 'oom-kill'})
   })
 
-  it('uses limit=none when no limit is set', async () => {
+  it('fails on a degraded supervisor alone and passes with no limit set', async () => {
+    const degraded = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({readyz: DEGRADED_BODY})),
+    )
+    const noLimit = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout({memory: 0, readyzSkipped: true})),
+    )
+
+    const degradedCollection = await getGatewayStatusSummary('gateway.example.com', degraded.spawn)
+    const noLimitCollection = await getGatewayStatusSummary('gateway.example.com', noLimit.spawn)
+
+    expect(degradedCollection.observations[1]).toMatchObject({result: 'fail', detail: {reason: 'supervisor-degraded'}})
+    expect(results(noLimitCollection)['workspace-memory']).toBe('pass')
+    expect(noLimitCollection.facts.workspace).toMatchObject({limitBytes: 0, opencode: 'skipped'})
+  })
+
+  it.each([
+    ['ready', {readyz: '{"ready":true,"opencode":"ready"}'}, 'pass', undefined],
+    ['starting', {readyz: '{"ready":false,"opencode":"starting"}'}, 'unknown', 'supervisor-starting'],
+    ['an empty supervisor body (unknown)', {readyz: ''}, 'unknown', 'supervisor-unknown'],
+    ['degraded', {readyz: DEGRADED_BODY}, 'fail', 'supervisor-degraded'],
+    ['down', {readyz: '{"ready":false,"opencode":"down"}'}, 'fail', 'supervisor-down'],
+    ['skipped near the limit', {readyzSkipped: true}, 'fail', 'near-limit'],
+    ['an OOM kill with a ready supervisor', {oomKill: 1}, 'fail', 'oom-kill'],
+    ['OOMKilled with a ready supervisor', {oomKilled: true}, 'fail', 'oom-kill'],
+  ] as const)('maps the supervisor state %s to the resource observation', async (_label, probe, expected, reason) => {
+    const {spawn} = makeRouter(
+      () => proc(composeJson),
+      () => proc(workspaceStdout(probe)),
+    )
+
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
+    const resource = collection.observations.find(entry => entry.id === 'workspace-memory')
+
+    expect(resource?.result).toBe(expected)
+    expect(resource?.detail).toEqual(reason === undefined ? undefined : {reason})
+  })
+
+  it('does not call a skipped probe near-limit when the workspace has no memory limit', async () => {
     const {spawn} = makeRouter(
       () => proc(composeJson),
       () => proc(workspaceStdout({memory: 0, readyzSkipped: true})),
     )
 
-    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
 
-    expect(summary.http).toBe(`${prefix}; workspace mem=412MiB limit=none oom_kills=0 opencode=skipped`)
+    expect(collection.observations.find(entry => entry.id === 'workspace-memory')?.result).toBe('pass')
   })
 
-  it('reports workspace=unknown and keeps the compose prefix when the extra call fails', async () => {
+  it('makes the resource check unknown and keeps compose results when the extra call fails', async () => {
     const {spawn} = makeRouter(
       () => proc(composeJson),
       () => proc('', 255, 'Connection reset'),
     )
 
-    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
 
-    expect(summary.http).toBe(`${prefix}; workspace=unknown`)
-    expect(summary.http).not.toContain('|')
+    expect(results(collection)).toEqual({'compose-services': 'pass', 'workspace-memory': 'unknown'})
+    expect(collection.facts.workspace).toEqual({status: 'unknown', reason: 'SSH command failed (exit 255)'})
   })
 
-  it('still probes and appends the suffix when a service is down, keeping the non-OK prefix', async () => {
+  it('still probes the workspace when a service is down, failing container health', async () => {
     const {spawn, calls} = makeRouter(
       () => proc(composeJsonDegraded),
       () => proc(workspaceStdout()),
     )
 
-    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
 
     expect(calls).toHaveLength(2)
-    expect(summary.http).toBe(
-      'DEGRADED: gateway:exited/n-a, workspace:running/n-a, mitmproxy:running/healthy; workspace mem=412/896MiB oom_kills=0 opencode=ready',
-    )
-    expect(summary.http).not.toContain('|')
-    expect(summary.workspace).toMatchObject({status: 'ok', opencode: 'ready', limitBytes: LIMIT_BYTES})
+    expect(results(collection)).toEqual({'compose-services': 'fail', 'workspace-memory': 'pass'})
+    expect(collection.observations[0]?.detail).toEqual({reason: 'degraded'})
+    expect(collection.facts.services).toContainEqual({service: 'gateway', state: 'exited', health: 'n-a'})
+    expect(collection.facts.workspace).toMatchObject({status: 'ok', opencode: 'ready', limitBytes: LIMIT_BYTES})
   })
 
-  it('lists every service row with its state in the DEGRADED summary', async () => {
-    const {spawn} = makeRouter(
-      () =>
-        proc(
-          JSON.stringify([
-            {Name: 'gateway', State: 'exited', Health: ''},
-            {Name: 'workspace', State: 'running', Health: ''},
-            {Name: 'caddy', State: 'restarting', Health: 'unhealthy'},
-            {Name: 'mitmproxy', State: 'running', Health: 'healthy'},
-          ]),
-        ),
-      () => proc(workspaceStdout()),
-    )
-
-    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
-
-    expect(summary.http).toBe(
-      'DEGRADED: gateway:exited/n-a, workspace:running/n-a, caddy:restarting/unhealthy, mitmproxy:running/healthy; workspace mem=412/896MiB oom_kills=0 opencode=ready',
-    )
-    expect(summary.http.startsWith('DEGRADED:')).toBe(true)
-    expect(summary.http).not.toContain('No services reported')
-  })
-
-  it('reports workspace=unknown, not a missing field, when a service is down and the probe fails', async () => {
+  it('keeps an unknown workspace block, not a missing field, when a service is down and the probe fails', async () => {
     const {spawn} = makeRouter(
       () => proc(composeJsonDegraded),
       () => proc('', 255, 'Connection reset'),
     )
 
-    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
 
-    expect(summary.http).toBe(
-      'DEGRADED: gateway:exited/n-a, workspace:running/n-a, mitmproxy:running/healthy; workspace=unknown',
-    )
-    expect(summary.workspace?.status).toBe('unknown')
+    expect(results(collection)).toEqual({'compose-services': 'fail', 'workspace-memory': 'unknown'})
+    expect(collection.facts.workspace).toMatchObject({status: 'unknown'})
   })
 
-  it('does not add the suffix or run the probe when compose itself errors', async () => {
+  it('makes both observations unknown and skips the workspace probe when compose itself errors', async () => {
     const {spawn, calls} = makeRouter(
       () => proc('', 1, 'Connection refused'),
       () => proc(workspaceStdout()),
     )
 
-    const summary = await getGatewayStatusSummary('gateway.example.com', spawn)
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
 
-    expect(summary.http.startsWith('ERROR:')).toBe(true)
-    expect(summary.http).not.toContain('workspace')
-    expect(summary.workspace).toBeUndefined()
+    expect(results(collection)).toEqual({'compose-services': 'unknown', 'workspace-memory': 'unknown'})
+    expect(collection.observations.map(entry => entry.detail)).toEqual([
+      {reason: 'compose-failed'},
+      {reason: 'compose-unavailable'},
+    ])
+    expect('workspace' in collection.facts).toBe(false)
     expect(calls).toHaveLength(1)
+  })
+
+  it('never copies stderr text or the host into an observation', async () => {
+    const {spawn} = makeRouter(
+      () => proc('', 255, 'ssh: connect to host gateway.example.com port 22: Connection refused'),
+      () => proc(workspaceStdout()),
+    )
+
+    const collection = await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(JSON.stringify(collection)).not.toContain('gateway.example.com')
+    expect(JSON.stringify(collection)).not.toContain('Connection refused')
+  })
+})
+
+describe('abort signal pass-through', () => {
+  let originalHost: string | undefined
+
+  beforeEach(() => {
+    originalHost = process.env.GATEWAY_HOST
+    process.env.GATEWAY_HOST = 'gateway.example.com'
+  })
+
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.GATEWAY_HOST
+    else process.env.GATEWAY_HOST = originalHost
+  })
+
+  it('passes the signal to both the compose call and the workspace probe', async () => {
+    const controller = new AbortController()
+    const seen: (AbortSignal | undefined)[] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(opts.signal)
+      return cmd.at(-1)?.includes('ps --format json') === true ? proc(composeJson) : proc(workspaceStdout())
+    }
+
+    await getGatewayStatusSummary('gateway.example.com', spawn, controller.signal)
+
+    expect(seen).toEqual([controller.signal, controller.signal])
+  })
+
+  it('omits the signal option entirely when none is given', async () => {
+    const seen: string[][] = []
+    const spawn: SpawnFn = (cmd, opts) => {
+      seen.push(Object.keys(opts))
+      return cmd.at(-1)?.includes('ps --format json') === true ? proc(composeJson) : proc(workspaceStdout())
+    }
+
+    await getGatewayStatusSummary('gateway.example.com', spawn)
+
+    expect(seen.flat()).not.toContain('signal')
   })
 })

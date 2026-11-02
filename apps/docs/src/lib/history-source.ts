@@ -62,6 +62,19 @@ export function readHistoryDir(dir: string): History {
 }
 
 /**
+ * The artifact directory from `STATUS_HISTORY_DIR`, or undefined for a fixture build. With
+ * `STATUS_HISTORY_REQUIRED=1` an unset directory throws, so a publishing build can never fall back to the fixture.
+ */
+export function historyDirFromEnv(env: Record<string, string | undefined> = process.env): string | undefined {
+  const dir = env.STATUS_HISTORY_DIR
+  if (dir !== undefined && dir !== '') return dir
+  if (env.STATUS_HISTORY_REQUIRED === '1') {
+    throw new StatusHistoryError('STATUS_HISTORY_REQUIRED is set but STATUS_HISTORY_DIR is not; refusing the fixture')
+  }
+  return undefined
+}
+
+/**
  * `STATUS_HISTORY_DIR` selects the real artifact. Without it the committed fixture is used, so a PR build never
  * depends on an artifact being reachable. Either way an invalid history throws.
  */
@@ -69,7 +82,7 @@ export function loadStatusHistory(
   env: Record<string, string | undefined> = process.env,
   cwd: string = process.cwd(),
 ): LoadedHistory {
-  const dir = env.STATUS_HISTORY_DIR
-  if (dir !== undefined && dir !== '') return {history: readHistoryDir(resolve(cwd, dir)), source: 'artifact'}
+  const dir = historyDirFromEnv(env)
+  if (dir !== undefined) return {history: readHistoryDir(resolve(cwd, dir)), source: 'artifact'}
   return {history: readHistoryDir(resolve(cwd, 'fixtures/history')), source: 'fixture'}
 }

@@ -37,6 +37,24 @@ describe('loadStatusHistory', () => {
     expect(loaded.source).toBe('artifact')
   })
 
+  it('refuses the fixture when STATUS_HISTORY_REQUIRED=1 and no directory is set', () => {
+    expect(() => loadStatusHistory({STATUS_HISTORY_REQUIRED: '1'}, DOCS_ROOT)).toThrow(/STATUS_HISTORY_REQUIRED/)
+    expect(() => loadStatusHistory({STATUS_HISTORY_REQUIRED: '1', STATUS_HISTORY_DIR: ''}, DOCS_ROOT)).toThrow(
+      /STATUS_HISTORY_REQUIRED/,
+    )
+  })
+
+  it('reads the artifact when STATUS_HISTORY_REQUIRED=1 and a directory is set', () => {
+    const dir = copyFixture()
+    const env = {STATUS_HISTORY_REQUIRED: '1', STATUS_HISTORY_DIR: dir}
+
+    expect(loadStatusHistory(env, DOCS_ROOT).source).toBe('artifact')
+  })
+
+  it('still uses the fixture when the flag is not 1', () => {
+    expect(loadStatusHistory({STATUS_HISTORY_REQUIRED: '0'}, DOCS_ROOT).source).toBe('fixture')
+  })
+
   it('fails with a clear message when the directory is missing', () => {
     expect(() => loadStatusHistory({STATUS_HISTORY_DIR: join(tmpdir(), 'no-such-history-dir')}, DOCS_ROOT)).toThrow(
       /Status history: meta\.json is missing/,

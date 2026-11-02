@@ -4,6 +4,8 @@ import process from 'node:process'
 
 import {APP_IDS} from '@marcusrbrown/infra-shared/status/history-schema'
 
+import {historyDirFromEnv} from '../src/lib/history-source'
+
 /**
  * Build-level check on the rendered status pages: they exist, carry the fixture marker exactly when the build
  * used the fixture, show sample counts and coverage, and never show a percentage next to a figure.
@@ -50,7 +52,7 @@ export function verifyStatusOutput(distDir: string, options: {expectFixture: boo
 
 if (import.meta.main) {
   const dist = process.argv[2] ?? 'dist'
-  const expectFixture = (process.env.STATUS_HISTORY_DIR ?? '') === ''
+  const expectFixture = historyDirFromEnv() === undefined
   const problems = verifyStatusOutput(dist, {expectFixture})
   if (problems.length > 0) {
     for (const problem of problems) console.error(`status output: ${problem}`)

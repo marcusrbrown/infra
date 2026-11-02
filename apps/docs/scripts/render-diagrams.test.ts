@@ -14,6 +14,10 @@ import {afterEach, describe, expect, it} from 'bun:test'
 import {discoverSpecs, renderDiagrams} from './render-diagrams'
 
 const REPO_ROOT = resolve(import.meta.dir, '../../..')
+
+// CI test jobs check out shallow; the real render is exercised by site.yaml's full-history build.
+const SHALLOW_CHECKOUT =
+  Bun.spawnSync(['git', 'rev-parse', '--is-shallow-repository'], {cwd: REPO_ROOT}).stdout.toString().trim() === 'true'
 const ARCHIFY = join(REPO_ROOT, '.agents/skills/archify')
 const ARCHIFY_BIN = join(ARCHIFY, 'bin/archify.mjs')
 
@@ -226,21 +230,25 @@ describe('renderDiagrams', () => {
 })
 
 describe('render-diagrams CLI', () => {
-  it('works with cwd set to apps/docs and publishes only HTML', () => {
-    const result = Bun.spawnSync(['bun', 'run', 'scripts/render-diagrams.ts'], {
-      cwd: join(REPO_ROOT, 'apps/docs'),
-      env: {...process.env, NO_COLOR: '1'},
-    })
-    expect(result.exitCode, result.stderr.toString()).toBe(0)
+  it.skipIf(SHALLOW_CHECKOUT)(
+    'works with cwd set to apps/docs and publishes only HTML',
+    () => {
+      const result = Bun.spawnSync(['bun', 'run', 'scripts/render-diagrams.ts'], {
+        cwd: join(REPO_ROOT, 'apps/docs'),
+        env: {...process.env, NO_COLOR: '1'},
+      })
+      expect(result.exitCode, result.stderr.toString()).toBe(0)
 
-    const published = readdirSync(join(REPO_ROOT, 'apps/docs/public/diagrams'))
-    expect(published.length).toBe(specs.length)
-    expect(published.every(file => file.endsWith('.html'))).toBe(true)
-    expect(published.some(file => file.includes('delivery'))).toBe(false)
+      const published = readdirSync(join(REPO_ROOT, 'apps/docs/public/diagrams'))
+      expect(published.length).toBe(specs.length)
+      expect(published.every(file => file.endsWith('.html'))).toBe(true)
+      expect(published.some(file => file.includes('delivery'))).toBe(false)
 
-    const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'apps/docs/src/generated/diagrams.json'), 'utf8')) as {
-      name: string
-    }[]
-    expect(manifest.map(entry => entry.name).toSorted()).toEqual(specs.map(spec => spec.name).toSorted())
-  }, 180_000)
+      const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'apps/docs/src/generated/diagrams.json'), 'utf8')) as {
+        name: string
+      }[]
+      expect(manifest.map(entry => entry.name).toSorted()).toEqual(specs.map(spec => spec.name).toSorted())
+    },
+    180_000,
+  )
 })

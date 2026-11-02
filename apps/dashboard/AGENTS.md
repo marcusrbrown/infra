@@ -242,7 +242,7 @@ For rollback procedures, see [`docs/runbooks/dashboard-released-image-rollback.m
 | `infra dashboard deploy [--image-version <calver>] [--digest <sha256>]` | Dispatch the Deploy Dashboard workflow (default), optionally with explicit image inputs, or `--local`; image flags are remote-only and `--digest` requires `--image-version` |
 | `infra dashboard logs [service] [--tail N]`| Stream container logs via SSH (CI-guarded; emits a sensitive-data warning) |
 
-`infra status` includes a `dashboard` row (and a `dashboard` key under `--json`).
+`infra status` includes a `dashboard` row. With `--json`, the schema-versioned envelope's `apps` array contains an entry with `app: 'dashboard'`, typed `observations`, and `facts`.
 
 Valid services for `dashboard logs`: `dashboard`, `caddy`.
 

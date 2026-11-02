@@ -28,8 +28,15 @@ export function cancelAndExit(message = 'Setup cancelled.'): never {
   process.exit(0)
 }
 
+/**
+ * The value clack prompts resolve to when the user cancels. Derived from `isCancel`'s type predicate so it tracks
+ * clack's own typing: plain `symbol` before @clack/prompts 1.8.1, `typeof CANCEL_SYMBOL` (a `unique symbol`) after.
+ * A bare `symbol` no longer round-trips through `Promise<T | symbol>` generics once the cancel value is a unique symbol.
+ */
+export type ClackCancel = typeof clack.isCancel extends (value: unknown) => value is infer Cancel ? Cancel : never
+
 export async function promptValue<T extends string | boolean>(
-  promise: Promise<T | symbol>,
+  promise: Promise<T | ClackCancel>,
   cancelMessage?: string,
 ): Promise<T> {
   const value = await promise

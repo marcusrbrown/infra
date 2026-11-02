@@ -148,6 +148,7 @@ export function registerStatusSnapshot(cli: ReturnType<typeof goke>, deps: Snaps
           'History directory holding meta.json and apps/<app>.json. It must already contain a valid history unless --bootstrap is given.',
         ),
     )
+    .required()
     .option(
       '--bootstrap',
       z

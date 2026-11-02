@@ -393,7 +393,7 @@ describe('status snapshot with the real GitHub readers and a mocked fetch (integ
 
       if (url.pathname === '/repos/marcusrbrown/infra/deployments') {
         const index = APP_NAMES.indexOf(url.searchParams.get('environment') ?? '')
-        return Response.json([{id: 100 + index}])
+        return Response.json([{id: 100 + index, ref: 'main'}])
       }
       const statuses = /\/deployments\/(\d+)\/statuses$/.exec(url.pathname)
       if (statuses !== null) {

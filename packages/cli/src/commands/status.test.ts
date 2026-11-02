@@ -237,7 +237,7 @@ describe('top-level status --json (typed contract)', () => {
     const fetchFn = async (input: string): Promise<Response> => {
       requested.push(input)
       const url = new URL(input)
-      if (url.pathname.endsWith('/deployments')) return Response.json([{id: 7}])
+      if (url.pathname.endsWith('/deployments')) return Response.json([{id: 7, ref: 'main'}])
       if (url.pathname.endsWith('/statuses'))
         return Response.json([{state: 'waiting', created_at: '2026-11-01T11:00:00Z'}])
       return new Response('nope', {status: 404})

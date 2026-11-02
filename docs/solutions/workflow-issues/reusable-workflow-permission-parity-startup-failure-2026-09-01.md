@@ -1,6 +1,7 @@
 ---
 title: Reusable workflow permission parity causes deploy router startup failure
 date: 2026-09-01
+last_updated: 2026-11-02
 category: docs/solutions/workflow-issues
 module: infra
 problem_type: workflow_issue
@@ -9,9 +10,9 @@ root_cause: config_error
 resolution_type: code_fix
 severity: critical
 symptoms:
-  - 'Deploy router run is startup_failure with zero jobs created'
+  - "Deploy router run is startup_failure with zero jobs created"
   - 'GitHub reports "This run likely failed because of a workflow file issue"'
-  - 'Direct workflow_dispatch of the same callee succeeds while the router call fails'
+  - "Direct workflow_dispatch of the same callee succeeds while the router call fails"
 tags:
   - github-actions
   - reusable-workflow
@@ -19,35 +20,27 @@ tags:
   - startup-failure
   - deploy
   - workflow-call
+  - workflow-run
+  - github-pages
 ---
 
 # Reusable workflow permission parity causes deploy router startup failure
 
 ## Diagnostic signature
 
-The deploy router run is **`startup_failure`** with zero jobs created, and GitHub reports
-**"This run likely failed because of a workflow file issue"**. The same callee succeeds under a
-direct `workflow_dispatch` but fails when invoked through `workflow_call`. That discriminator
-points to the caller/callee boundary rather than the callee's deploy logic.
+The deploy router run is **`startup_failure`** with zero jobs created, and GitHub reports **"This run likely failed because of a workflow file issue"**. The same callee succeeds under a direct `workflow_dispatch` but fails when invoked through `workflow_call`. That discriminator points to the caller/callee boundary rather than the callee's deploy logic.
 
 ## Cause
 
-A reusable workflow's jobs cannot request a `GITHUB_TOKEN` permission scope that its caller does
-not grant. The caller's job-level `permissions:` block caps the callee's workflow-level and
-job-level permissions; a job-level block replaces, rather than merges with, the caller workflow's
-top-level block.
+A reusable workflow's jobs cannot request a `GITHUB_TOKEN` permission scope that its caller does not grant. The caller's job-level `permissions:` block caps the callee's workflow-level and job-level permissions; a job-level block replaces, rather than merges with, the caller workflow's top-level block.
 
 ## Why local checks miss it
 
-`actionlint` has no cross-workflow permission-cap check, and both workflow files parse as valid
-YAML. Add a repository convention test that resolves local reusable-workflow calls and verifies
-that each caller's effective grant covers the maximum permission demand of its callee.
+`actionlint` has no cross-workflow permission-cap check, and both workflow files parse as valid YAML. Add a repository convention test that resolves local reusable-workflow calls and verifies that each caller's effective grant covers the maximum permission demand of its callee.
 
 ### Scope boundary
 
-The guard resolves one level of `uses:`: the router and its direct callee. If a callee later gains
-its own local `uses: ./.github/workflows/...` call, that second-level demand is not walked. No
-nested calls exist today.
+The guard resolves one level of `uses:`: the router and its direct callee. If a callee later gains its own local `uses: ./.github/workflows/...` call, that second-level demand is not walked. No nested calls exist today.
 
 ## Pre-merge verification
 
@@ -57,11 +50,25 @@ Dispatch the router on a branch:
 gh workflow run deploy.yaml --ref <branch>
 ```
 
-Jobs being created at all proves startup validation passed. Non-`main` refs are refused at the
-per-app Environment branch policy with zero steps executed, so nothing deploys.
+Jobs being created at all proves startup validation passed. Non-`main` refs are refused at the per-app Environment branch policy with zero steps executed, so nothing deploys.
 
 ## Prior art
 
-The underlying permission rule was documented in June 2026 in
-`docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`,
-but documentation alone did not prevent recurrence. The executable parity check is the guardrail.
+The underlying permission rule was documented in June 2026 in `docs/solutions/best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md`, but documentation alone did not prevent recurrence. The executable parity check is the guardrail.
+
+## Publishing from a low-privilege workflow: trigger with `workflow_run`
+
+The cap above rules out `workflow_call` for publishing the docs site. `Status Snapshot` holds read-only scopes, while the `Site` deploy job needs `pages: write` and `id-token: write`, so a snapshot job that called `Site` would fail at startup with zero jobs. Granting the snapshot job those scopes would hand a deploy credential to a job that only probes. `Site` is a separate workflow that the snapshot's completion triggers:
+
+<!-- prettier-ignore -->
+```yaml
+  workflow_run:
+    workflows: [Status Snapshot]
+    types: [completed]
+```
+
+The trigger fires for every completed snapshot run, so the build job's guard decides which ones publish.
+
+Concurrency must sit at workflow level. A group on the deploy job alone orders only deploys: builds can finish out of order, and the older build then reaches the deploy job last. A workflow-level group also cancels the older build. A `workflow_run` that the build guard would skip falls through to its own `github.run_id` group, so it cannot cancel a real publish.
+
+Current configuration: [`.github/workflows/site.yaml`](../../../.github/workflows/site.yaml) and [`docs/runbooks/docs-site.md`](../../runbooks/docs-site.md).

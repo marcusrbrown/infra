@@ -2,8 +2,6 @@
 
 Personal infrastructure management — deploy automation, operational CLI, and tooling.
 
-Docs and live status: <https://mrbro.dev/infra/>.
-
 <p align="center">
   <a href="https://www.npmjs.com/package/@marcusrbrown/infra"><img src="https://img.shields.io/npm/v/@marcusrbrown/infra?style=flat-square" alt="npm version"></a>
   <a href="https://github.com/marcusrbrown/infra/actions/workflows/ci.yaml"><img src="https://github.com/marcusrbrown/infra/actions/workflows/ci.yaml/badge.svg" alt="CI"></a>

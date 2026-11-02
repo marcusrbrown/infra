@@ -4,6 +4,7 @@ _extends: .github:common-settings.yaml
 repository:
   name: infra
   description: Personal infrastructure management
+  homepage: https://mrbro.dev/infra/
   topics: infra, keeweb, deploy, bun, github-actions
 
 labels:

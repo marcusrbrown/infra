@@ -1,4 +1,4 @@
-import {existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
+import {existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
@@ -4704,6 +4704,46 @@ describe('status-snapshot.yaml: contract', () => {
     expect(snapshot.env?.GITHUB_TOKEN).toBe('$' + '{{ github.token }}')
   })
 
+  it('runs the Take snapshot script so --bootstrap reaches the command only when the input is true', async () => {
+    const {steps} = await load()
+    const script = step(steps, 'Take snapshot').run ?? ''
+    const dir = mkdtempSync(join(tmpdir(), 'snapshot-step-'))
+    try {
+      const binDir = join(dir, 'bin')
+      const argvFile = join(dir, 'argv.txt')
+      mkdirSync(binDir)
+      // A fake `bun` that records one argument per line and prints a counts-only line.
+      writeFileSync(join(binDir, 'bun'), '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$ARGV_FILE"\necho "added: 7"\n', {
+        mode: 0o755,
+      })
+      const executable = script.replaceAll('$' + '{{ runner.temp }}', dir)
+      expect(executable).not.toContain('$' + '{{')
+
+      for (const bootstrap of ['true', 'false']) {
+        rmSync(argvFile, {force: true})
+        const result = Bun.spawnSync(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', executable], {
+          cwd: dir,
+          env: {
+            PATH: `${binDir}:${Bun.env.PATH ?? ''}`,
+            BOOTSTRAP: bootstrap,
+            RUNNER_TEMP: dir,
+            ARGV_FILE: argvFile,
+          },
+        })
+        expect(result.exitCode, `BOOTSTRAP=${bootstrap}: ${result.stderr.toString()}`).toBe(0)
+
+        const argv = readFileSync(argvFile, 'utf8').split('\n').filter(Boolean)
+        expect(argv.slice(0, 5)).toEqual(['run', 'packages/cli/src/cli.ts', 'status', 'snapshot', '--history'])
+        expect(argv[5]).toBe(join(dir, 'status-history'))
+        expect(argv.includes('--bootstrap'), `BOOTSTRAP=${bootstrap}: ${argv.join(' ')}`).toBe(bootstrap === 'true')
+        expect(argv).toHaveLength(bootstrap === 'true' ? 7 : 6)
+        expect(result.stdout.toString()).toContain('added: 7')
+      }
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
   it('uploads the history from main only, kept 7 days, failing if it is empty', async () => {
     const {steps} = await load()
     const upload = step(steps, 'Upload status history')
@@ -4718,19 +4758,20 @@ describe('status-snapshot.yaml: contract', () => {
     })
   })
 
-  it('orders lookup, guard, download, snapshot, upload and summary', async () => {
+  it('orders lookup, guard, download, snapshot and summary, with upload as the last step', async () => {
     const {steps} = await load()
     const order = [
       'Locate status history',
       'Check history state',
       'Download status history',
       'Take snapshot',
-      'Upload status history',
       'Write step summary',
+      'Upload status history',
     ].map(name => steps.findIndex(candidate => candidate.name === name))
 
     expect(order.every(index => index > -1)).toBe(true)
     expect(order).toEqual(order.toSorted((left, right) => left - right))
+    expect(steps.at(-1)?.name).toBe('Upload status history')
   })
 
   it('writes counts only to the step summary', async () => {

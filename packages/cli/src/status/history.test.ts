@@ -146,6 +146,24 @@ describe('merge: window and duplicates', () => {
     expect(rerun.history).toEqual(first.history)
   })
 
+  it('trims and succeeds when every previous sample has aged out and the incoming sample is a duplicate', () => {
+    const previous = historyOf(() => [sample(-100 * DAY, {run: '555'})])
+
+    const merged = mergeHistory({previous, incoming: incomingFor('555', 1), now: NOW})
+
+    expect(merged.added).toBe(0)
+    expect(merged.trimmed).toBe(APP_IDS.length)
+    for (const app of APP_IDS) expect(merged.history.apps[app]).toEqual([])
+  })
+
+  it('still fails newest-regressed when the previous newest sample is inside the window', () => {
+    // On the boundary the previous newest is still inside the window, so a backwards meta is a regression.
+    const previous = historyOf(() => [sample(-HISTORY_WINDOW_MS, {run: '555'})])
+    const next: History = {...previous, meta: {schemaVersion: 1, lastSampleAt: iso(-HISTORY_WINDOW_MS - HOUR)}}
+
+    expect(errorCode(() => assertHistoryInvariants({previous, next, now: NOW}))).toBe('newest-regressed')
+  })
+
   it('treats a new attempt of the same run as a new sample, and a rerun with a later clock as a no-op', () => {
     const first = mergeHistory({previous: tenDays(), incoming: incomingFor('9001', 1), now: NOW})
     const retry = mergeHistory({previous: first.history, incoming: incomingFor('9001', 2), now: NOW})
@@ -272,6 +290,20 @@ describe('schemas', () => {
     expect(
       historySampleSchema.safeParse({...valid, d: {'public-reachability': {url: 'https://x.invalid'}}}).success,
     ).toBe(false)
+  })
+
+  it('accepts a local run id carrying an ISO timestamp, and the legacy bare `local`, but nothing looser', () => {
+    for (const run of ['local', 'local-2026-11-01T12:00:00.000Z', 'local-2026-11-01T12:00:00Z']) {
+      expect(historySampleSchema.safeParse({...valid, run}).success, run).toBe(true)
+    }
+    for (const run of [
+      'local-',
+      'local-yesterday',
+      'local-2026-11-01T12:00:00.000Z/../x',
+      'local-2026-11-01 12:00:00',
+    ]) {
+      expect(historySampleSchema.safeParse({...valid, run}).success, run).toBe(false)
+    }
   })
 
   it('pins schemaVersion 1 in meta and requires the app file to be a list', () => {

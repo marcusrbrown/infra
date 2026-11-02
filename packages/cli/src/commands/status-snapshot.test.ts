@@ -147,13 +147,50 @@ describe('status snapshot', () => {
     expect(retry.stdout[1]).toBe('added: 7')
   })
 
-  it('falls back to run "local" attempt 1 outside Actions', async () => {
-    expect(resolveRunIdentity({})).toEqual({run: 'local', att: 1})
-    expect(resolveRunIdentity({GITHUB_RUN_ID: '77'})).toEqual({run: '77', att: 1})
+  it('identifies a local run by its own timestamp and keeps the stable id for a GitHub run', async () => {
+    expect(resolveRunIdentity({}, FIXED_NOW)).toEqual({run: `local-${FIXED_NOW.toISOString()}`, att: 1})
+    expect(resolveRunIdentity({GITHUB_RUN_ID: '  '}, FIXED_NOW)).toEqual({
+      run: `local-${FIXED_NOW.toISOString()}`,
+      att: 1,
+    })
+    expect(resolveRunIdentity({GITHUB_RUN_ID: '77'}, FIXED_NOW)).toEqual({run: '77', att: 1})
+    expect(resolveRunIdentity({GITHUB_RUN_ID: '77', GITHUB_RUN_ATTEMPT: '3'}, FIXED_NOW)).toEqual({run: '77', att: 3})
 
     await run({bootstrap: true}, {env: {}})
     const loaded = await loadHistory(history, 'existing')
-    expect(loaded?.apps.keeweb[0]).toMatchObject({run: 'local', att: 1})
+    expect(loaded?.apps.keeweb[0]).toMatchObject({run: `local-${FIXED_NOW.toISOString()}`, att: 1})
+  })
+
+  it('adds one sample per app for each of two local snapshots taken at different times', async () => {
+    const first = new Date(FIXED_NOW.getTime() - 2 * HOUR)
+    const second = new Date(FIXED_NOW.getTime() - HOUR)
+    await run({bootstrap: true, now: first.toISOString()}, {env: {}})
+
+    const captured = await run({now: second.toISOString()}, {env: {}})
+
+    expect(captured.exit).toBeNull()
+    expect(captured.stdout[0]).toBe('samples: keeweb=2 cliproxy=2 gateway=2 umami=2 dashboard=2 vpn=2 broker=2')
+    expect(captured.stdout[1]).toBe('added: 7')
+    const loaded = await loadHistory(history, 'existing')
+    expect(loaded?.apps.keeweb.map(entry => entry.run)).toEqual([
+      `local-${first.toISOString()}`,
+      `local-${second.toISOString()}`,
+    ])
+  })
+
+  it('lets a local snapshot succeed after the bootstrap sample has aged out of the 90-day window', async () => {
+    const first = new Date(FIXED_NOW.getTime() - 100 * DAY)
+    await run({bootstrap: true, now: first.toISOString()}, {env: {}})
+
+    const captured = await run({now: FIXED_NOW.toISOString()}, {env: {}})
+
+    expect(captured.exit).toBeNull()
+    expect(captured.stderr).toEqual([])
+    expect(captured.stdout[0]).toBe('samples: keeweb=1 cliproxy=1 gateway=1 umami=1 dashboard=1 vpn=1 broker=1')
+    expect(captured.stdout[1]).toBe('added: 7')
+    expect(captured.stdout[2]).toBe('trimmed: 7')
+    const loaded = await loadHistory(history, 'existing')
+    expect(loaded?.apps.keeweb[0]).toMatchObject({t: FIXED_NOW.toISOString(), run: `local-${FIXED_NOW.toISOString()}`})
   })
 
   it('exits non-zero for an invalid run id, attempt or --now, writing nothing', async () => {
@@ -378,10 +415,17 @@ describe('status snapshot with the real GitHub readers and a mocked fetch (integ
     authorization: string | null
   }
 
-  /** Deployments: keeweb failed, dashboard is at its gate, everything else succeeded. Monitor: healthy 5 minutes ago. */
+  const API_ORIGIN = 'https://api.github.com'
+  const STORAGE_ORIGIN = 'https://logs.example-storage.test'
+  const PROBE_AT = new Date(FIXED_NOW.getTime() - 5 * 60_000).toISOString()
+
+  /**
+   * Deployments: keeweb failed, dashboard is at its gate, everything else succeeded. Monitor: healthy 5 minutes ago.
+   * The log endpoint answers 302 to a signed storage URL that serves the log text, like the real API.
+   */
   function fakeGitHub() {
     const calls: Call[] = []
-    const probeAt = new Date(FIXED_NOW.getTime() - 5 * 60_000).toISOString()
+    const probeAt = PROBE_AT
     const stateOf = (id: number): string => {
       const app = APP_IDS[id - 100]
       return app === 'keeweb' ? 'failure' : app === 'dashboard' ? 'waiting' : 'success'
@@ -391,6 +435,13 @@ describe('status snapshot with the real GitHub readers and a mocked fetch (integ
       const url = new URL(input)
       calls.push({url: input, authorization: new Headers(init?.headers).get('authorization')})
 
+      if (url.origin === STORAGE_ORIGIN) {
+        return url.pathname === '/signed/job-6.txt'
+          ? new Response(
+              `2026-11-01T11:55:00.0000000Z CLIProxy auth monitor probe: probe=healthy reason=ok at ${probeAt}\n`,
+            )
+          : new Response('not found', {status: 404})
+      }
       if (url.pathname === '/repos/marcusrbrown/infra/deployments') {
         const index = APP_NAMES.indexOf(url.searchParams.get('environment') ?? '')
         return Response.json([{id: 100 + index, ref: 'main'}])
@@ -404,9 +455,7 @@ describe('status snapshot with the real GitHub readers and a mocked fetch (integ
       }
       if (url.pathname.endsWith('/jobs')) return Response.json({jobs: [{id: 6}]})
       if (url.pathname.endsWith('/logs')) {
-        return new Response(
-          `2026-11-01T11:55:00.0000000Z CLIProxy auth monitor probe: probe=healthy reason=ok at ${probeAt}\n`,
-        )
+        return new Response(null, {status: 302, headers: {location: `${STORAGE_ORIGIN}/signed/job-6.txt?sig=abc`}})
       }
       return new Response('not found', {status: 404})
     }
@@ -441,15 +490,22 @@ describe('status snapshot with the real GitHub readers and a mocked fetch (integ
       d: {'deploy-state': {reason: 'at_gate', since: '2026-11-01T11:00:00Z'}},
     })
     expect(JSON.parse(files['apps/gateway.json'] ?? '[]')[0].r['deploy-state']).toBe('p')
+    // The stored route result comes from the probe line the storage host served after the redirect.
     expect(JSON.parse(files['apps/cliproxy.json'] ?? '[]')[0]).toMatchObject({
       r: {'deploy-state': 'p', 'provider-route': 'p'},
-      d: {'provider-route': {reason: 'ok'}},
+      d: {'provider-route': {reason: 'ok', probeAt: PROBE_AT}},
     })
 
-    // The token only ever travels as the Authorization header to the API origin.
-    expect(github.calls.length).toBeGreaterThan(0)
-    expect(github.calls.every(call => call.url.startsWith('https://api.github.com/'))).toBe(true)
-    expect(github.calls.every(call => call.authorization === `Bearer ${TOKEN}`)).toBe(true)
+    // The token travels as a bearer header to the API origin only; the signed storage request carries none.
+    const apiCalls = github.calls.filter(call => call.url.startsWith(`${API_ORIGIN}/`))
+    const storageCalls = github.calls.filter(call => call.url.startsWith(`${STORAGE_ORIGIN}/`))
+    expect(apiCalls.length).toBeGreaterThan(0)
+    expect(apiCalls.every(call => call.authorization === `Bearer ${TOKEN}`)).toBe(true)
+    expect(apiCalls.some(call => new URL(call.url).pathname.endsWith('/logs'))).toBe(true)
+    expect(storageCalls).toHaveLength(1)
+    expect(storageCalls.every(call => call.authorization === null)).toBe(true)
+    expect(storageCalls.some(call => call.url.includes(TOKEN))).toBe(false)
+    expect(apiCalls.length + storageCalls.length).toBe(github.calls.length)
     expect(JSON.stringify(files)).not.toContain(TOKEN)
     expect(captured.stdout.join('\n')).not.toContain(TOKEN)
     expect(JSON.stringify(files)).not.toMatch(/https?:|github\.com/)

@@ -33,10 +33,13 @@ export type SnapshotDependencies = Pick<
 
 type Env = Record<string, string | undefined>
 
-/** `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` identify a sample; a local run is `local` attempt 1. */
-export function resolveRunIdentity(env: Env): RunIdentity {
+/**
+ * `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` identify a sample. A run outside Actions is `local-<ISO time>` attempt 1,
+ * so separate local invocations never dedupe against each other.
+ */
+export function resolveRunIdentity(env: Env, now: Date): RunIdentity {
   const run = env.GITHUB_RUN_ID?.trim() ?? ''
-  if (run === '') return {run: 'local', att: 1}
+  if (run === '') return {run: `local-${now.toISOString()}`, att: 1}
 
   const attempt = env.GITHUB_RUN_ATTEMPT?.trim() ?? ''
   if (!/^\d{1,20}$/.test(run) || (attempt !== '' && !/^\d{1,5}$/.test(attempt))) {
@@ -107,7 +110,7 @@ export async function statusSnapshotAction(
 ): Promise<void> {
   try {
     const now = resolveNow(options.now, deps.now)
-    const identity = resolveRunIdentity(env)
+    const identity = resolveRunIdentity(env, now)
     // Fail before any network call when the history is missing, already there, or unreadable.
     const previous = await loadHistory(options.history, options.bootstrap === true ? 'bootstrap' : 'existing')
 

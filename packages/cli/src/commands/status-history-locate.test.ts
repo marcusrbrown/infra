@@ -12,6 +12,7 @@ import {makeStatusDependencies} from './__fixtures__/status-dependencies'
 import {MCP_ALLOWLIST} from './mcp'
 import {registerStatus} from './status'
 import {
+  HISTORY_LOCATE_CALL_BUDGET,
   HISTORY_LOCATE_RUN_CHECK_BUDGET,
   locateHistory,
   SNAPSHOT_WORKFLOW_PATH,
@@ -45,14 +46,34 @@ function artifact({runId, createdAt, expired = false, branch = 'main', name = 's
   }
 }
 
-/** A fake GitHub boundary: an artifact list, per-run details, and an optional forced failure. */
+/**
+ * A fake GitHub boundary: an artifact list, per-run details, the newest successful snapshot run, and optional
+ * forced failures. Unless `latestSuccess` is given, the newest successful run is the newest usable artifact's run.
+ */
 function fakeApi(config: {
   artifacts: ReturnType<typeof artifact>[]
   totalCount?: number
   runs?: Record<number, FakeRun>
   failList?: boolean
   failRun?: number
+  /** Run id of the newest successful snapshot run; `null` means there is none. */
+  latestSuccess?: number | null
+  failLatest?: boolean
 }) {
+  const usable = config.artifacts
+    .filter(entry => {
+      const run = config.runs?.[entry.workflow_run.id] ?? {}
+      return (
+        !entry.expired &&
+        entry.name === 'status-history' &&
+        entry.workflow_run.head_branch === 'main' &&
+        ['schedule', 'workflow_dispatch'].includes(run.event ?? 'schedule') &&
+        run.path === undefined &&
+        (run.branch ?? 'main') === 'main'
+      )
+    })
+    .toSorted((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+  const latestSuccess = config.latestSuccess === undefined ? (usable[0]?.workflow_run.id ?? null) : config.latestSuccess
   const calls: {url: string; authorization: string | null}[] = []
   const fetchFn: FetchLike = async (input, init) => {
     const url = new URL(input)
@@ -61,6 +82,13 @@ function fakeApi(config: {
     if (url.pathname === `/repos/${REPOSITORY}/actions/artifacts`) {
       if (config.failList === true) return new Response('nope', {status: 500})
       return Response.json({total_count: config.totalCount ?? config.artifacts.length, artifacts: config.artifacts})
+    }
+    if (url.pathname === `/repos/${REPOSITORY}/actions/workflows/status-snapshot.yaml/runs`) {
+      if (config.failLatest === true) return new Response('nope', {status: 500})
+      return Response.json({
+        total_count: latestSuccess === null ? 0 : 1,
+        workflow_runs: latestSuccess === null ? [] : [{id: latestSuccess}],
+      })
     }
     const match = /\/actions\/runs\/(\d+)$/.exec(url.pathname)
     if (match !== null) {
@@ -93,6 +121,7 @@ describe('locateHistory', () => {
     expect(api.calls.map(call => new URL(call.url).pathname)).toEqual([
       `/repos/${REPOSITORY}/actions/artifacts`,
       `/repos/${REPOSITORY}/actions/runs/2`,
+      `/repos/${REPOSITORY}/actions/workflows/status-snapshot.yaml/runs`,
     ])
   })
 
@@ -198,6 +227,76 @@ describe('locateHistory', () => {
       reason: 'run-check-budget-exceeded',
     })
     expect(api.calls).toHaveLength(1 + HISTORY_LOCATE_RUN_CHECK_BUDGET)
+    expect(api.calls.length).toBeLessThanOrEqual(HISTORY_LOCATE_CALL_BUDGET)
+  })
+
+  it('budgets one list call, the candidate run checks, and the latest-success check', async () => {
+    expect(HISTORY_LOCATE_CALL_BUDGET).toBe(1 + HISTORY_LOCATE_RUN_CHECK_BUDGET + 1)
+
+    // The worst case that still succeeds: every candidate but the last fails its run check.
+    const many = Array.from({length: HISTORY_LOCATE_RUN_CHECK_BUDGET}, (_, index) =>
+      artifact({runId: index + 1, createdAt: at(index + 1)}),
+    )
+    const api = fakeApi({
+      artifacts: many,
+      runs: Object.fromEntries(many.slice(0, -1).map((_, index) => [index + 1, {event: 'push'}])),
+      latestSuccess: HISTORY_LOCATE_RUN_CHECK_BUDGET,
+    })
+
+    expect(await locateHistory(api.fetchFn, TOKEN, REPOSITORY)).toEqual({
+      state: 'found',
+      runId: HISTORY_LOCATE_RUN_CHECK_BUDGET,
+    })
+    expect(api.calls).toHaveLength(HISTORY_LOCATE_CALL_BUDGET)
+  })
+
+  describe('stale-artifact guard', () => {
+    it('refuses an artifact from run 100 when the newest successful snapshot run is 101', async () => {
+      const api = fakeApi({artifacts: [artifact({runId: 100, createdAt: at(30)})], latestSuccess: 101})
+
+      expect(await locateHistory(api.fetchFn, TOKEN, REPOSITORY)).toEqual({state: 'error', reason: 'stale-artifact'})
+    })
+
+    it('finds the artifact when it is from the newest successful snapshot run', async () => {
+      const api = fakeApi({artifacts: [artifact({runId: 101, createdAt: at(30)})], latestSuccess: 101})
+
+      expect(await locateHistory(api.fetchFn, TOKEN, REPOSITORY)).toEqual({state: 'found', runId: 101})
+      expect(api.calls.map(call => new URL(call.url).pathname)).toEqual([
+        `/repos/${REPOSITORY}/actions/artifacts`,
+        `/repos/${REPOSITORY}/actions/runs/101`,
+        `/repos/${REPOSITORY}/actions/workflows/status-snapshot.yaml/runs`,
+      ])
+    })
+
+    it('is stale when an artifact was found but no snapshot run has succeeded', async () => {
+      const api = fakeApi({artifacts: [artifact({runId: 100, createdAt: at(30)})], latestSuccess: null})
+
+      expect(await locateHistory(api.fetchFn, TOKEN, REPOSITORY)).toEqual({state: 'error', reason: 'stale-artifact'})
+    })
+
+    it('is an API error, not found, when the latest-success call fails', async () => {
+      const api = fakeApi({artifacts: [artifact({runId: 100, createdAt: at(30)})], failLatest: true})
+
+      expect(await locateHistory(api.fetchFn, TOKEN, REPOSITORY)).toEqual({state: 'error', reason: 'api-error'})
+    })
+
+    it('asks for the newest successful run of the snapshot workflow on main, one result', async () => {
+      const api = fakeApi({artifacts: [artifact({runId: 100, createdAt: at(30)})]})
+      await locateHistory(api.fetchFn, TOKEN, REPOSITORY)
+
+      const latest = new URL(api.calls.at(-1)?.url ?? '')
+      expect(latest.pathname).toBe(`/repos/${REPOSITORY}/actions/workflows/status-snapshot.yaml/runs`)
+      expect(latest.searchParams.get('branch')).toBe('main')
+      expect(latest.searchParams.get('status')).toBe('success')
+      expect(latest.searchParams.get('per_page')).toBe('1')
+    })
+
+    it('makes no latest-success call when nothing was found', async () => {
+      const empty = fakeApi({artifacts: []})
+      await locateHistory(empty.fetchFn, TOKEN, REPOSITORY)
+
+      expect(empty.calls).toHaveLength(1)
+    })
   })
 
   it('asks for the named artifact with a page size and sends the token only as a bearer header', async () => {
@@ -245,6 +344,34 @@ describe('status history-locate action', () => {
 
   it('exits non-zero on an API error and prints nothing on stdout', async () => {
     const {captured} = await run({api: fakeApi({artifacts: [], failList: true})})
+
+    expect(captured.exit).toEqual({code: 1})
+    expect(captured.stdout).toEqual([])
+    expect(captured.stderr).toEqual(['status history-locate failed: api-error'])
+  })
+
+  it('exits non-zero with nothing on stdout or in GITHUB_OUTPUT for a stale artifact', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'history-locate-'))
+    try {
+      const file = join(dir, 'out')
+      const {captured} = await run({
+        env: {GITHUB_TOKEN: TOKEN, GITHUB_REPOSITORY: REPOSITORY, GITHUB_OUTPUT: file},
+        api: fakeApi({artifacts: [artifact({runId: 100, createdAt: at(30)})], latestSuccess: 101}),
+      })
+
+      expect(captured.exit).toEqual({code: 1})
+      expect(captured.stdout).toEqual([])
+      expect(captured.stderr).toEqual(['status history-locate failed: stale-artifact'])
+      expect(await Bun.file(file).exists()).toBe(false)
+    } finally {
+      await rm(dir, {recursive: true, force: true})
+    }
+  })
+
+  it('exits non-zero when the latest-success call fails', async () => {
+    const {captured} = await run({
+      api: fakeApi({artifacts: [artifact({runId: 100, createdAt: at(30)})], failLatest: true}),
+    })
 
     expect(captured.exit).toEqual({code: 1})
     expect(captured.stdout).toEqual([])

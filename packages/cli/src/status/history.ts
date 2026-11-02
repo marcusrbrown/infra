@@ -91,8 +91,8 @@ export const historySampleSchema = z
   .strictObject({
     /** When the snapshot ran. */
     t: z.iso.datetime(),
-    /** `GITHUB_RUN_ID`, or `local`. */
-    run: z.string().regex(/^(?:\d{1,20}|local)$/),
+    /** `GITHUB_RUN_ID`, or `local-<ISO time>` for a run outside Actions (bare `local` is the legacy form). */
+    run: z.string().regex(/^(?:\d{1,20}|local(?:-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z)?)$/),
     /** `GITHUB_RUN_ATTEMPT`. */
     att: z.number().int().min(1).max(10_000),
     r: z.record(observationIdSchema, resultCodeSchema),
@@ -246,8 +246,11 @@ export function assertHistoryInvariants({previous, next, now, maxBytes = HISTORY
   }
 
   if (previous !== undefined) {
+    // A previous newest that has aged out of the window cannot be regressed from: trimming removed it.
     const floor = Date.parse(previous.meta.lastSampleAt)
-    if (newest < floor || Date.parse(next.meta.lastSampleAt) < floor) throw new HistoryError('newest-regressed')
+    if (floor >= cutoff && (newest < floor || Date.parse(next.meta.lastSampleAt) < floor)) {
+      throw new HistoryError('newest-regressed')
+    }
   }
 
   if (serializeHistory(next).bytes > maxBytes) throw new HistoryError('too-large')

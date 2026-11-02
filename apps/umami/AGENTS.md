@@ -586,7 +586,7 @@ Renovate opens standalone, changelog-linked PRs for the `umamisoftware/umami` an
 | `infra umami deploy` | Dispatch the Deploy Umami workflow (default) or `--local`          |
 | `infra umami logs`   | Stream container logs (CI-guarded; emits a sensitive-data warning) |
 
-`infra status` includes a `umami` row (and a `umami` key under `--json`).
+`infra status` includes a `umami` row. With `--json`, the schema-versioned envelope's `apps` array contains an entry with `app: 'umami'`, typed `observations`, and `facts`.
 
 ## Provisioning
 

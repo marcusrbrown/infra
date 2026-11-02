@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Infrastructure Topology",
+    "output": "apps/docs/.diagrams/topology.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "gh-actions",
+      "type": "cloud",
+      "label": "GitHub Actions",
+      "sublabel": "gated deploy workflows",
+      "tag": "environment gates",
+      "pos": [40, 56],
+      "size": [170, 584]
+    },
+    {
+      "id": "app-keeweb",
+      "type": "backend",
+      "label": "KeeWeb",
+      "sublabel": "static site on a VM",
+      "tag": "rsync",
+      "pos": [300, 40],
+      "size": [190, 64]
+    },
+    {
+      "id": "app-umami",
+      "type": "backend",
+      "label": "Umami",
+      "sublabel": "analytics + Postgres + Caddy",
+      "pos": [300, 132],
+      "size": [190, 64]
+    },
+    {
+      "id": "app-vpn",
+      "type": "backend",
+      "label": "WireGuard VPN",
+      "sublabel": "wg-quick on a VM",
+      "pos": [300, 224],
+      "size": [190, 64]
+    },
+    {
+      "id": "app-dashboard",
+      "type": "frontend",
+      "label": "Operator dashboard",
+      "sublabel": "dashboard + Caddy",
+      "pos": [300, 316],
+      "size": [190, 64]
+    },
+    {
+      "id": "app-gateway",
+      "type": "backend",
+      "label": "Fro Bot gateway",
+      "sublabel": "gateway + workspace + egress proxy",
+      "pos": [300, 408],
+      "size": [190, 64]
+    },
+    {
+      "id": "app-cliproxy",
+      "type": "backend",
+      "label": "CLIProxyAPI",
+      "sublabel": "Caddy + proxy",
+      "pos": [300, 500],
+      "size": [190, 64]
+    },
+    {
+      "id": "app-broker",
+      "type": "security",
+      "label": "Credential broker",
+      "sublabel": "broker + Caddy",
+      "pos": [300, 592],
+      "size": [190, 64]
+    },
+    {
+      "id": "operator-browser",
+      "type": "external",
+      "label": "Operator browser",
+      "sublabel": "GitHub OAuth session",
+      "pos": [580, 230],
+      "size": [160, 64]
+    },
+    {
+      "id": "ghcr",
+      "type": "cloud",
+      "label": "GHCR",
+      "sublabel": "digest-pinned images",
+      "pos": [580, 394],
+      "size": [160, 64]
+    },
+    {
+      "id": "consumers",
+      "type": "external",
+      "label": "Agent runs",
+      "sublabel": "consumer repo workflows",
+      "pos": [580, 560],
+      "size": [160, 100]
+    },
+    {
+      "id": "providers",
+      "type": "external",
+      "label": "Model providers",
+      "sublabel": "upstream APIs",
+      "pos": [840, 500],
+      "size": [160, 64]
+    }
+  ],
+  "boundaries": [
+    {"kind": "security-group", "label": "Shared private VPC", "wraps": ["app-dashboard", "app-gateway"], "pad": 14}
+  ],
+  "connections": [
+    {"id": "deploy-keeweb", "from": "gh-actions", "to": "app-keeweb", "label": "rsync", "variant": "emphasis"},
+    {"id": "deploy-umami", "from": "gh-actions", "to": "app-umami", "label": "SSH", "variant": "emphasis"},
+    {"id": "deploy-vpn", "from": "gh-actions", "to": "app-vpn", "label": "SSH", "variant": "emphasis"},
+    {"id": "deploy-dashboard", "from": "gh-actions", "to": "app-dashboard", "label": "SSH", "variant": "emphasis"},
+    {"id": "deploy-gateway", "from": "gh-actions", "to": "app-gateway", "label": "SSH", "variant": "emphasis"},
+    {"id": "deploy-cliproxy", "from": "gh-actions", "to": "app-cliproxy", "label": "SSH", "variant": "emphasis"},
+    {"id": "deploy-broker", "from": "gh-actions", "to": "app-broker", "label": "SSH", "variant": "emphasis"},
+    {"id": "browser-dashboard", "from": "operator-browser", "to": "app-dashboard", "label": "HTTPS"},
+    {
+      "id": "dashboard-gateway",
+      "from": "app-dashboard",
+      "to": "app-gateway",
+      "label": "operator path",
+      "variant": "security"
+    },
+    {"id": "ghcr-dashboard", "from": "ghcr", "to": "app-dashboard", "label": "pull", "variant": "dashed"},
+    {"id": "ghcr-gateway", "from": "ghcr", "to": "app-gateway", "label": "pull", "variant": "dashed"},
+    {"id": "gateway-cliproxy", "from": "app-gateway", "to": "app-cliproxy", "label": "model calls"},
+    {"id": "cliproxy-providers", "from": "app-cliproxy", "to": "providers", "label": "OAuth"},
+    {"id": "consumers-cliproxy", "from": "consumers", "to": "app-cliproxy", "label": "API key"},
+    {"id": "consumers-broker", "from": "consumers", "to": "app-broker", "label": "OIDC", "variant": "security"},
+    {
+      "id": "broker-cliproxy",
+      "from": "app-broker",
+      "to": "app-cliproxy",
+      "label": "mint + revoke",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Deploys",
+      "items": [
+        "Each app deploys from its own workflow behind a per-app approval gate",
+        "KeeWeb deploys by rsync; the other six by SSH",
+        "Gateway and dashboard images come from GHCR, pinned by digest"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Operator path",
+      "items": [
+        "The browser talks only to the dashboard Caddy",
+        "Caddy proxies the operator routes to the gateway over the private VPC",
+        "The gateway listener is not reachable from the public edge"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "CLIProxyAPI consumers",
+      "items": [
+        "Gateway workspaces and consumer workflows call the proxy with API keys",
+        "Workflows can swap an OIDC token for a short-lived key at the broker",
+        "The broker mints and revokes keys through the proxy management API"
+      ]
+    }
+  ]
+}

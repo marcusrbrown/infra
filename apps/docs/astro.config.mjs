@@ -16,7 +16,7 @@ export default defineConfig({
         {label: 'Guides', items: [{autogenerate: {directory: 'guides'}}]},
         {label: 'Runbooks', items: [{autogenerate: {directory: 'runbooks'}}]},
         {label: 'Solutions', items: [{autogenerate: {directory: 'solutions'}}]},
-        {label: 'Architecture', items: [{autogenerate: {directory: 'architecture'}}]},
+        {label: 'Architecture', items: [{autogenerate: {directory: 'architecture'}}, {slug: 'diagrams'}]},
       ],
     }),
   ],

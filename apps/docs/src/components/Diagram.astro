@@ -1,0 +1,67 @@
+---
+// Embeds a rendered Archify diagram. The pages come from scripts/render-diagrams.ts, which also writes the manifest.
+interface Props {
+  /** Manifest name, for example `topology` or `apps-keeweb`. */
+  name: string
+  title: string
+}
+
+interface ManifestEntry {
+  name: string
+  title: string
+  specCommit: string
+}
+
+const {name, title} = Astro.props
+
+const manifests = import.meta.glob<ManifestEntry[]>('../generated/diagrams.json', {eager: true, import: 'default'})
+const manifest = Object.values(manifests)[0]
+if (manifest === undefined) {
+  throw new Error('src/generated/diagrams.json is missing: run `bun run scripts/render-diagrams.ts` in apps/docs first')
+}
+const entry = manifest.find(candidate => candidate.name === name)
+if (entry === undefined) {
+  throw new Error(`<Diagram name="${name}">: no such diagram (known: ${manifest.map(item => item.name).join(', ')})`)
+}
+
+// BASE_URL already carries the site base (`/infra/`); normalize so a missing trailing slash cannot break the path.
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/')
+const src = `${base}diagrams/${name}.html`
+const label = entry.specCommit === 'unmerged' ? 'spec not merged yet' : `spec last changed in ${entry.specCommit}`
+---
+
+<figure class="diagram">
+  <iframe
+    src={src}
+    title={title}
+    loading="lazy"
+    sandbox="allow-scripts"
+    class="diagram-frame"></iframe>
+  <figcaption>
+    <a href={src}>Open full screen</a>
+    <span class="diagram-commit">{label}</span>
+  </figcaption>
+</figure>
+
+<style>
+  .diagram {
+    margin: 1.5rem 0;
+  }
+  .diagram-frame {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+    background: var(--sl-color-bg);
+  }
+  figcaption {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    justify-content: space-between;
+    margin-top: 0.5rem;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+</style>

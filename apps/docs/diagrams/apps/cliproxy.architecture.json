@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "CLIProxyAPI Deploy",
+    "output": "apps/docs/.diagrams/apps-cliproxy.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "API clients",
+      "sublabel": "one bearer key per repo",
+      "pos": [40, 150],
+      "size": [150, 60]
+    },
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "Operator",
+      "sublabel": "management key",
+      "pos": [40, 270],
+      "size": [150, 60]
+    },
+    {
+      "id": "caddy",
+      "type": "cloud",
+      "label": "Caddy",
+      "sublabel": "TLS, healthcheck",
+      "pos": [310, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "proxy",
+      "type": "backend",
+      "label": "cli-proxy-api",
+      "sublabel": "digest-pinned image",
+      "pos": [580, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "auth",
+      "type": "database",
+      "label": "cliproxy_auth",
+      "sublabel": "OAuth token volume",
+      "pos": [580, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "config",
+      "type": "database",
+      "label": "config.yaml",
+      "sublabel": "runtime API keys",
+      "pos": [580, 340],
+      "size": [150, 60]
+    },
+    {
+      "id": "providers",
+      "type": "external",
+      "label": "Model providers",
+      "sublabel": "upstream APIs",
+      "pos": [870, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "deploy",
+      "type": "backend",
+      "label": "deploy.ts",
+      "sublabel": "one shared SSH session",
+      "pos": [870, 340],
+      "size": [150, 60]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "Droplet, Compose network",
+      "wraps": ["caddy", "proxy", "auth", "config"],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {"id": "client-calls", "from": "clients", "to": "caddy", "label": "HTTPS", "variant": "emphasis"},
+    {"id": "operator-calls", "from": "operator", "to": "caddy", "label": "manage", "variant": "security"},
+    {"id": "reverse-proxy", "from": "caddy", "to": "proxy", "label": "proxy", "variant": "emphasis"},
+    {"id": "oauth", "from": "proxy", "to": "providers", "label": "OAuth"},
+    {"id": "tokens", "from": "proxy", "to": "auth", "label": "tokens"},
+    {"id": "keys", "from": "proxy", "to": "config", "label": "API keys"},
+    {"id": "upload", "from": "deploy", "to": "config", "label": "upload if absent", "variant": "dashed"},
+    {"id": "alias-put", "from": "deploy", "to": "proxy", "label": "alias PUT", "variant": "security"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Stack",
+      "items": [
+        "Caddy terminates TLS and owns the healthcheck, probing the proxy's /healthz",
+        "The OAuth token volume survives container recreation"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Config safety",
+      "items": [
+        "Deploy uploads config.yaml only when none exists on the server",
+        "Managed changes use field-scoped management endpoints",
+        "A whole-document PUT is forbidden in unattended deploys"
+      ]
+    }
+  ]
+}

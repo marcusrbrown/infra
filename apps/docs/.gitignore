@@ -6,5 +6,6 @@ src/content/docs/solutions/
 
 public/diagrams/
 .diagrams/
+src/generated/diagrams.json
 dist/
 .astro/

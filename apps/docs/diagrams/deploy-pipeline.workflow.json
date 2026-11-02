@@ -1,0 +1,125 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Deploy Pipeline",
+    "output": "apps/docs/.diagrams/deploy-pipeline.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "legend": {
+      "entries": {
+        "external": {"label": "Trigger or service"},
+        "backend": {"label": "Workflow job"},
+        "cloud": {"label": "Ungated job"},
+        "security": {"label": "Approval gate"},
+        "database": {"label": "Target host"}
+      }
+    }
+  },
+  "lanes": [
+    {"id": "router", "label": "Deploy router"},
+    {"id": "app", "label": "Per-app workflow"},
+    {"id": "gate", "label": "Environment gate", "variant": "exception"},
+    {"id": "target", "label": "Gated deploy job"},
+    {"id": "host", "label": "Host"}
+  ],
+  "mainPath": ["push", "detect", "reusable", "notify", "gate", "deploy", "host"],
+  "nodes": [
+    {
+      "id": "push",
+      "lane": "router",
+      "col": 0,
+      "type": "external",
+      "label": "Push to main",
+      "sublabel": "or manual dispatch"
+    },
+    {
+      "id": "detect",
+      "lane": "router",
+      "col": 1,
+      "type": "backend",
+      "label": "detect-changes",
+      "sublabel": "paths-filter, every",
+      "tag": "docs and tests skipped"
+    },
+    {
+      "id": "reusable",
+      "lane": "app",
+      "col": 2,
+      "type": "backend",
+      "label": "Per-app deploy",
+      "sublabel": "reusable workflow",
+      "tag": "one per app"
+    },
+    {
+      "id": "notify",
+      "lane": "app",
+      "col": 3,
+      "type": "cloud",
+      "label": "notify",
+      "sublabel": "ungated, main only",
+      "tag": "never blocks"
+    },
+    {"id": "discord", "lane": "app", "col": 4, "type": "external", "label": "Discord", "sublabel": "gate message"},
+    {
+      "id": "gate",
+      "lane": "gate",
+      "col": 4,
+      "type": "security",
+      "label": "Approval gate",
+      "sublabel": "required reviewer",
+      "tag": "main-only branch"
+    },
+    {
+      "id": "deploy",
+      "lane": "target",
+      "col": 5,
+      "type": "backend",
+      "label": "deploy job",
+      "sublabel": "SSH, compose or rsync"
+    },
+    {
+      "id": "host",
+      "lane": "host",
+      "col": 5,
+      "type": "database",
+      "label": "Droplet or VM",
+      "sublabel": "app stack updated"
+    }
+  ],
+  "edges": [
+    {"id": "push-detect", "from": "push", "to": "detect", "label": "path filter"},
+    {"id": "detect-reusable", "from": "detect", "to": "reusable", "label": "changed app", "variant": "emphasis"},
+    {"id": "reusable-notify", "from": "reusable", "to": "notify"},
+    {
+      "id": "notify-discord",
+      "from": "notify",
+      "to": "discord",
+      "label": "webhook",
+      "variant": "dashed",
+      "role": "async"
+    },
+    {"id": "notify-gate", "from": "notify", "to": "gate", "label": "needs, result ignored", "variant": "security"},
+    {"id": "gate-deploy", "from": "gate", "to": "deploy", "label": "approved", "variant": "emphasis"},
+    {"id": "deploy-host", "from": "deploy", "to": "host", "label": "update stack", "variant": "emphasis"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Routing",
+      "items": [
+        "One push to main fans out to every app whose paths changed",
+        "Docs and test-only changes never match a deploy filter"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Gate",
+      "items": [
+        "Each app has its own GitHub Environment with a required reviewer",
+        "The notify job fires before the gate, and a failed notify never skips the deploy",
+        "Gateway adds image build and scan jobs ahead of its gate"
+      ]
+    }
+  ]
+}

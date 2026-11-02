@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "WireGuard VPN Deploy",
+    "output": "apps/docs/.diagrams/apps-vpn.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "peers",
+      "type": "external",
+      "label": "WireGuard clients",
+      "sublabel": "one per device",
+      "pos": [40, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "key",
+      "type": "security",
+      "label": "server.key",
+      "sublabel": "mode 0600, stays on box",
+      "pos": [310, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "wg0",
+      "type": "backend",
+      "label": "wg-quick@wg0",
+      "sublabel": "native systemd unit",
+      "pos": [310, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "conf",
+      "type": "database",
+      "label": "wg0.conf",
+      "sublabel": "rendered on the box",
+      "pos": [310, 340],
+      "size": [150, 60]
+    },
+    {
+      "id": "internet",
+      "type": "external",
+      "label": "Internet",
+      "sublabel": "egress",
+      "pos": [580, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "deploy",
+      "type": "backend",
+      "label": "deploy.ts",
+      "sublabel": "SSH only, wipe guard",
+      "pos": [580, 340],
+      "size": [150, 60]
+    },
+    {
+      "id": "cli",
+      "type": "external",
+      "label": "vpn client add",
+      "sublabel": "CLI, operator-run",
+      "pos": [850, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "roster",
+      "type": "security",
+      "label": "VPN_PEERS",
+      "sublabel": "peer roster secret",
+      "pos": [850, 340],
+      "size": [150, 60]
+    }
+  ],
+  "boundaries": [{"kind": "security-group", "label": "VM, no Docker", "wraps": ["key", "wg0", "conf"], "pad": 20}],
+  "connections": [
+    {"id": "tunnel", "from": "peers", "to": "wg0", "label": "tunnel", "variant": "emphasis"},
+    {"id": "egress", "from": "wg0", "to": "internet", "label": "egress", "variant": "emphasis"},
+    {"id": "private-key", "from": "key", "to": "wg0", "label": "private key", "variant": "security"},
+    {"id": "config", "from": "conf", "to": "wg0", "label": "config"},
+    {"id": "render", "from": "deploy", "to": "conf", "label": "render", "variant": "emphasis"},
+    {"id": "read-roster", "from": "roster", "to": "deploy", "label": "roster", "variant": "security"},
+    {"id": "sync", "from": "cli", "to": "roster", "label": "sync", "variant": "security"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Deploy",
+      "items": [
+        "The server key is generated once on the box and preserved on every deploy",
+        "The config is rendered on the box from the roster; only the public key is read back",
+        "Deploy restarts the unit and gates on wg show"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Guards",
+      "items": [
+        "Rotating the server key invalidates every client config",
+        "An empty roster is blocked when the live box has peers",
+        "AWS credentials are used only when provisioning"
+      ]
+    }
+  ]
+}

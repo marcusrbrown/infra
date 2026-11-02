@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Umami Analytics Deploy",
+    "output": "apps/docs/.diagrams/apps-umami.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "visitors",
+      "type": "external",
+      "label": "Tracked sites",
+      "sublabel": "cookie-free script",
+      "pos": [40, 120],
+      "size": [150, 60]
+    },
+    {
+      "id": "admin",
+      "type": "external",
+      "label": "Admin",
+      "sublabel": "dashboard login",
+      "pos": [40, 280],
+      "size": [150, 60]
+    },
+    {
+      "id": "caddy",
+      "type": "cloud",
+      "label": "Caddy",
+      "sublabel": "auto TLS, ports 80/443",
+      "pos": [310, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "umami",
+      "type": "backend",
+      "label": "Umami",
+      "sublabel": "app + tracker API :3000",
+      "pos": [580, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "Postgres",
+      "sublabel": "internal only, named volume",
+      "pos": [850, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "retention",
+      "type": "backend",
+      "label": "Retention timer",
+      "sublabel": "systemd, daily, 13 months",
+      "pos": [850, 360],
+      "size": [150, 60]
+    },
+    {
+      "id": "deploy",
+      "type": "backend",
+      "label": "deploy.ts",
+      "sublabel": "SSH, fail-closed guards",
+      "pos": [580, 360],
+      "size": [150, 60]
+    }
+  ],
+  "boundaries": [
+    {"kind": "security-group", "label": "Droplet, Compose network", "wraps": ["caddy", "umami", "db"], "pad": 20}
+  ],
+  "connections": [
+    {"id": "events", "from": "visitors", "to": "caddy", "label": "events", "variant": "emphasis"},
+    {"id": "login", "from": "admin", "to": "caddy", "label": "login"},
+    {"id": "proxy", "from": "caddy", "to": "umami", "label": "proxy", "variant": "emphasis"},
+    {"id": "sql", "from": "umami", "to": "db", "label": "SQL", "variant": "emphasis"},
+    {"id": "purge", "from": "retention", "to": "db", "label": "psql", "variant": "dashed"},
+    {"id": "rotate", "from": "deploy", "to": "umami", "label": "rotate admin", "variant": "security"},
+    {"id": "start-last", "from": "deploy", "to": "caddy", "label": "starts last", "variant": "dashed"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Deploy order",
+      "items": [
+        "Database and app start first and must be healthy",
+        "The default admin password is rotated on the host before Caddy starts",
+        "Caddy then opens the public surface"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Data",
+      "items": [
+        "Postgres is never published to the host",
+        "The deploy only runs up, never down with volumes",
+        "Retention deletes children before parents and fails closed"
+      ]
+    }
+  ]
+}

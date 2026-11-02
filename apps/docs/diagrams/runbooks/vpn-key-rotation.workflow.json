@@ -1,0 +1,145 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Runbook Map: VPN Server Key Rotation",
+    "output": "apps/docs/.diagrams/runbooks-vpn-key-rotation.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "legend": {
+      "entries": {
+        "backend": {"label": "Step"},
+        "database": {"label": "Data safeguard"},
+        "external": {"label": "Trigger or outcome"},
+        "security": {"label": "STOP gate or decision"},
+        "messagebus": {"label": "Irreversible step"}
+      }
+    }
+  },
+  "lanes": [
+    {"id": "operator", "label": "Operator"},
+    {"id": "guards", "label": "Deploy guards", "variant": "exception"},
+    {"id": "box", "label": "VPN box"},
+    {"id": "clients", "label": "Clients"}
+  ],
+  "mainPath": ["decide", "run", "wipe-guard", "rotate", "render", "health", "reissue", "verify"],
+  "nodes": [
+    {
+      "id": "decide",
+      "lane": "operator",
+      "col": 0,
+      "type": "security",
+      "icon": "decision",
+      "tag": "DECISION",
+      "label": "Rotate the key?",
+      "sublabel": "every client must be reissued"
+    },
+    {
+      "id": "run",
+      "lane": "operator",
+      "col": 1,
+      "type": "backend",
+      "label": "Run the deploy",
+      "sublabel": "vpn deploy --force-server-key"
+    },
+    {
+      "id": "wipe-guard",
+      "lane": "guards",
+      "col": 2,
+      "type": "security",
+      "icon": "stop",
+      "tag": "STOP",
+      "label": "Wipe guard",
+      "sublabel": "empty roster, live peers"
+    },
+    {
+      "id": "rotate",
+      "lane": "box",
+      "col": 3,
+      "type": "messagebus",
+      "icon": "flag",
+      "tag": "IRREVERSIBLE",
+      "label": "Regenerate server key",
+      "sublabel": "old key discarded"
+    },
+    {
+      "id": "render",
+      "lane": "box",
+      "col": 4,
+      "type": "backend",
+      "label": "Render config, restart",
+      "sublabel": "wg0.conf from the roster"
+    },
+    {
+      "id": "health",
+      "lane": "guards",
+      "col": 4,
+      "type": "security",
+      "icon": "stop",
+      "tag": "STOP",
+      "label": "Health gate",
+      "sublabel": "wg show, expected peers"
+    },
+    {
+      "id": "reissue",
+      "lane": "clients",
+      "col": 5,
+      "type": "backend",
+      "label": "Reissue every client",
+      "sublabel": "remove, add, then deploy"
+    },
+    {
+      "id": "verify",
+      "lane": "operator",
+      "col": 5,
+      "type": "backend",
+      "label": "Verify",
+      "sublabel": "status shows the new key"
+    },
+    {
+      "id": "abort",
+      "lane": "operator",
+      "col": 2,
+      "type": "external",
+      "label": "Stop, fix the roster",
+      "sublabel": "set the override only to wipe"
+    }
+  ],
+  "edges": [
+    {"id": "decide-run", "from": "decide", "to": "run", "label": "yes", "variant": "emphasis"},
+    {"id": "run-guard", "from": "run", "to": "wipe-guard", "label": "CI deploy"},
+    {"id": "guard-rotate", "from": "wipe-guard", "to": "rotate", "label": "roster ok", "variant": "emphasis"},
+    {
+      "id": "guard-abort",
+      "from": "wipe-guard",
+      "to": "abort",
+      "label": "abort",
+      "variant": "security",
+      "role": "error"
+    },
+    {"id": "rotate-render", "from": "rotate", "to": "render"},
+    {"id": "render-health", "from": "render", "to": "health", "label": "interface up?"},
+    {"id": "health-reissue", "from": "health", "to": "reissue", "label": "healthy", "variant": "emphasis"},
+    {"id": "reissue-verify", "from": "reissue", "to": "verify", "label": "new configs live"}
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Why it is irreversible",
+      "items": [
+        "The server private key lives only on the box; rotating replaces it",
+        "Every existing client config fails the handshake until it is reissued",
+        "Old client configs are permanently invalid"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Guards",
+      "items": [
+        "The wipe guard aborts an empty roster when the live box has peers",
+        "The health gate checks the interface and the expected peer count, not just liveness",
+        "Only the public key is ever read back from the box"
+      ]
+    }
+  ]
+}

@@ -1,6 +1,8 @@
 ---
 // The newest sample time. Absolute UTC works without JavaScript; the script adds the relative age and reveals the
-// stale warning once the sample is older than the threshold. `verify-status-output` requires the hooks on every page.
+// stale warning once the sample is older than the threshold, and recomputes both every minute and when a hidden tab
+// becomes visible again, so a page left open does not keep showing "fresh". `verify-status-output` requires the hooks
+// on every page.
 import {formatUtc, STALE_THRESHOLD_MS} from '../lib/history-view'
 
 interface Props {
@@ -27,19 +29,25 @@ const staleMinutes = STALE_THRESHOLD_MS / 60_000
     var then = Date.parse(el.getAttribute('datetime') || '')
     if (isNaN(then)) return
     var limit = Number(el.getAttribute('data-stale-minutes')) * 60000
-    var minutes = Math.max(0, Math.round((Date.now() - then) / 60000))
     var age = document.getElementById('status-age')
-    if (age) {
-      age.textContent =
-        minutes < 60
-          ? ' (' + minutes + ' min ago)'
-          : minutes < 2880
-            ? ' (' + Math.round(minutes / 60) + ' h ago)'
-            : ' (' + Math.round(minutes / 1440) + ' days ago)'
+    var warn = document.getElementById('status-stale')
+    function update() {
+      var elapsed = Date.now() - then
+      var minutes = Math.max(0, Math.round(elapsed / 60000))
+      if (age) {
+        age.textContent =
+          minutes < 60
+            ? ' (' + minutes + ' min ago)'
+            : minutes < 2880
+              ? ' (' + Math.round(minutes / 60) + ' h ago)'
+              : ' (' + Math.round(minutes / 1440) + ' days ago)'
+      }
+      if (warn) warn.hidden = elapsed <= limit
     }
-    if (Date.now() - then > limit) {
-      var warn = document.getElementById('status-stale')
-      if (warn) warn.hidden = false
-    }
+    update()
+    setInterval(update, 60000)
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) update()
+    })
   })()
 </script>

@@ -234,28 +234,41 @@ function findTagEnd(source: string, start: number): number {
   return -1
 }
 
+export interface HtmlViews {
+  /** What a reader sees: text nodes, entities decoded, inline tags dropped, block tags as line breaks. */
+  visible: View
+  /** What a reader does not see but the page ships: attribute values, comments, script and style bodies. */
+  invisible: View
+}
+
 /**
- * Text a reader (or a crawler) would see: text nodes with inline tags dropped, so a token that Shiki
- * split across `<span>`s is whole again; block tags become line breaks, so neighbouring elements do not
- * fuse into one token; every attribute value on its own line; script and style bodies verbatim.
+ * Two streams per HTML file, so that neither can corrupt the other.
+ *
+ * `visible`: inline tags are dropped, so a token that Shiki split across `<span>`s is whole again; block tags
+ * become line breaks, so neighbouring elements do not fuse into one token. Attribute values never enter it, or
+ * they would sit between the two halves of a split token.
+ *
+ * `invisible`: every attribute value, comment body and script or style body on its own line(s), each character
+ * keeping its offset in the original file for line numbers.
  */
-export function extractHtml(source: string): View {
-  const builder = new ViewBuilder()
+export function extractHtml(source: string): HtmlViews {
+  const visible = new ViewBuilder()
+  const invisible = new ViewBuilder()
   let i = 0
   while (i < source.length) {
     const lt = source.indexOf('<', i)
     if (lt === -1) {
-      decodeEntitiesInto(builder, source, i, source.length)
+      decodeEntitiesInto(visible, source, i, source.length)
       break
     }
-    decodeEntitiesInto(builder, source, i, lt)
+    decodeEntitiesInto(visible, source, i, lt)
     const next = source.charAt(lt + 1)
     if (source.startsWith('<!--', lt)) {
       const close = source.indexOf('-->', lt + 4)
       const end = close === -1 ? source.length : close
-      builder.push('\n', lt)
-      builder.pushRun(source.slice(lt + 4, end), lt + 4)
-      builder.push('\n', end)
+      invisible.push('\n', lt)
+      invisible.pushRun(source.slice(lt + 4, end), lt + 4)
+      invisible.push('\n', end)
       i = close === -1 ? source.length : close + 3
     } else if (next === '!' || next === '?') {
       const close = source.indexOf('>', lt)
@@ -263,20 +276,20 @@ export function extractHtml(source: string): View {
     } else if (/[a-z/]/i.test(next)) {
       const end = findTagEnd(source, lt)
       if (end === -1) {
-        decodeEntitiesInto(builder, source, lt, source.length)
+        decodeEntitiesInto(visible, source, lt, source.length)
         break
       }
       const tag = source.slice(lt, end + 1)
       const name = (TAG_NAME_RE.exec(tag)?.[1] ?? '').toLowerCase()
-      if (!INLINE_TAGS.has(name)) builder.push('\n', lt)
+      if (!INLINE_TAGS.has(name)) visible.push('\n', lt)
       if (!tag.startsWith('</')) {
         for (const match of tag.matchAll(ATTRIBUTE_RE)) {
           const group = [2, 3, 4].find(n => match[n] !== undefined)
           const span = group === undefined ? undefined : match.indices?.[group]
           if (span === undefined) continue
-          builder.push('\n', lt + span[0])
-          decodeEntitiesInto(builder, source, lt + span[0], lt + span[1])
-          builder.push('\n', lt + span[1])
+          invisible.push('\n', lt + span[0])
+          decodeEntitiesInto(invisible, source, lt + span[0], lt + span[1])
+          invisible.push('\n', lt + span[1])
         }
       }
       i = end + 1
@@ -285,16 +298,17 @@ export function extractHtml(source: string): View {
         const rest = source.slice(i)
         const found = closer.exec(rest)
         const bodyEnd = found === null ? source.length : i + found.index
-        builder.pushRun(source.slice(i, bodyEnd), i)
-        builder.push('\n', bodyEnd)
+        invisible.push('\n', i)
+        invisible.pushRun(source.slice(i, bodyEnd), i)
+        invisible.push('\n', bodyEnd)
         i = bodyEnd
       }
     } else {
-      builder.push('<', lt)
+      visible.push('<', lt)
       i = lt + 1
     }
   }
-  return builder.build()
+  return {visible: visible.build(), invisible: invisible.build()}
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -402,8 +416,12 @@ function isSpecialUseName(host: string): boolean {
 const LABEL = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?'
 const DOTTED_NAME_TAIL_RE = new RegExp(String.raw`${LABEL}(?:\.${LABEL})+$`, 'i')
 const BARE_HOST_RE = new RegExp(String.raw`(?<![\w.-])(?:\*\.)?(${LABEL}(?:\.${LABEL})+)(?![\w-])`, 'gi')
-// Group 1: scheme (absent for protocol-relative `//host`), group 2: userinfo, group 3: host.
-const URL_RE = /(?:\b(https?|wss?):|(?<![\w:/.-]))\/\/(?:([^\s/?#<>"'`\\]*)@)?([^\s/?#:<>"'`\\@[\]]+)/gi
+// Group 1: scheme (any `scheme://` with an authority: postgres, ssh, redis, https...; absent for protocol-relative
+// `//host`), group 2: userinfo, group 3: host. `file:///path` has no authority, so it does not match.
+const URL_RE = /(?:([a-z][a-z0-9+.-]*):|(?<![\w:/.-]))\/\/(?:([^\s/?#<>"'`\\]*)@)?([^\s/?#:<>"'`\\@[\]]+)/gi
+// SCP-style remote `user@host.tld:path` (git over SSH). Group 1: user, group 2: host. The path must follow the
+// colon directly, so `ops@host.tld: text` in prose is not a remote.
+const SCP_RE = new RegExp(String.raw`(?<![\w.@-])([\w.-]+)@(${LABEL}(?:\.${LABEL})+)(?=:[\w~./-])`, 'gi')
 const IPV4_RE = /(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)/g
 const IPV6_RE = /(?<![\w:.])[0-9a-f:.]*:[0-9a-f:.]*/gi
 
@@ -452,6 +470,8 @@ function findHostnames(text: string, tlds: ReadonlySet<string>): Candidate[] {
   for (const match of text.matchAll(URL_RE)) {
     const start = match.index ?? 0
     const scheme = match[1]
+    // `file://` names a path, not a host: `file:///etc/hosts`, and tools that take `file://merged.json`.
+    if (scheme?.toLowerCase() === 'file') continue
     const info = match[2]
     if (info !== undefined) {
       const infoStart = start + match[0].indexOf('//') + 2
@@ -465,6 +485,14 @@ function findHostnames(text: string, tlds: ReadonlySet<string>): Candidate[] {
     if (scheme === undefined && !tlds.has(host.slice(host.lastIndexOf('.') + 1))) continue
     const hostStart = start + match[0].length - hostText.length
     found.push({kind: 'hostname', value: host, start: hostStart, end: hostStart + raw.length})
+  }
+
+  for (const match of text.matchAll(SCP_RE)) {
+    const start = (match.index ?? 0) + match[0].length - (match[2] ?? '').length
+    const host = (match[2] ?? '').toLowerCase()
+    userinfo.push({start: match.index ?? 0, end: start})
+    if (parseIp(host) !== undefined || !validHostname(host)) continue
+    found.push({kind: 'hostname', value: host, start, end: start + host.length})
   }
 
   for (const match of text.matchAll(BARE_HOST_RE)) {
@@ -548,8 +576,12 @@ export function scanView(config: GateConfig, file: string, scopePath: string, or
 const HTML_EXTENSIONS = new Set(['.html', '.htm'])
 
 export function scanText(config: GateConfig, file: string, scopePath: string, text: string): Finding[] {
-  const view = HTML_EXTENSIONS.has(extname(scopePath).toLowerCase()) ? extractHtml(text) : {text}
-  return scanView(config, file, scopePath, text, view)
+  if (!HTML_EXTENSIONS.has(extname(scopePath).toLowerCase())) return scanView(config, file, scopePath, text, {text})
+  const {visible, invisible} = extractHtml(text)
+  return dedupe([
+    ...scanView(config, file, scopePath, text, visible),
+    ...scanView(config, file, scopePath, text, invisible),
+  ])
 }
 
 /** Frontmatter fields of a solution document that the solutions index renders. */

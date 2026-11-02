@@ -232,6 +232,104 @@ describe('hostname findings', () => {
   })
 })
 
+describe('authority URLs', () => {
+  const SCHEMES = [
+    'postgres',
+    'postgresql',
+    'mysql',
+    'mongodb',
+    'mongodb+srv',
+    'redis',
+    'rediss',
+    'amqp',
+    'ssh',
+    'sftp',
+    'ftp',
+    'ftps',
+    'git',
+    'svn',
+    'ldap',
+    'ldaps',
+    'smtp',
+    'smtps',
+    'imap',
+    'ws',
+    'wss',
+    'http',
+    'https',
+  ]
+
+  it.each(SCHEMES)('checks the host of a %s:// URL on any TLD', scheme => {
+    expect(hostValues(`connect ${scheme}://private-db.acme.cloud/db`)).toEqual(['private-db.acme.cloud'])
+    expect(hostValues(`connect ${scheme}://user:pw@private-db.acme.cloud:1234/db`)).toEqual(['private-db.acme.cloud'])
+  })
+
+  it('fails a postgresql URL in the source pass and in the dist pass', () => {
+    const root = fixtureRepo({
+      'ARCHITECTURE.md': '# A\n\n```sh\npsql postgresql://private-db.acme.cloud/db\n```\n',
+    })
+    expect(scanSource(NONE, root).map(formatFinding)).toEqual([
+      'ARCHITECTURE.md:4: hostname private-db.acme.cloud is not on the allowlist',
+    ])
+    const dist = fixtureDist({
+      'index.html': '<pre><code><span>postgresql://private-db.acme.cloud/db</span></code></pre>',
+      'notes.txt': 'postgresql://private-db.acme.cloud/db',
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/index.html:1: hostname private-db.acme.cloud is not on the allowlist',
+      'dist/notes.txt:1: hostname private-db.acme.cloud is not on the allowlist',
+    ])
+  })
+
+  it('fails an ssh URL and prints the host only, never the userinfo', () => {
+    const findings = scan('ssh://deploy@box.acme.xyz')
+    expect(findings).toEqual([{kind: 'hostname', value: 'box.acme.xyz', file: 'doc.md', line: 1}])
+    const output = JSON.stringify([buildReport(findings), findings.map(formatAnnotation)])
+    expect(output).not.toContain('deploy')
+  })
+
+  it('never prints the credentials of a database URL', () => {
+    const findings = scan('DATABASE_URL=postgres://admin:hunter2@db.acme.cloud:5432/app')
+    expect(findings).toEqual([{kind: 'hostname', value: 'db.acme.cloud', file: 'doc.md', line: 1}])
+    const output = JSON.stringify([buildReport(findings), findings.map(formatAnnotation)])
+    expect(output).not.toContain('hunter2')
+    expect(output).not.toContain('admin')
+  })
+
+  it('does not take a dotted userinfo name for a host', () => {
+    expect(hostValues('ssh://first.last.acme.cloud@box.heatvision.co/x')).toEqual(['box.heatvision.co'])
+  })
+
+  it('passes private IPs, special-use names and file URLs', () => {
+    expect(scan('redis://10.0.0.5:6379')).toEqual([])
+    expect(scan('postgres://db.internal:5432/x ssh://deploy@box.test amqp://broker.example/ ldap://localhost')).toEqual(
+      [],
+    )
+    expect(scan('file:///etc/hosts')).toEqual([])
+    expect(scan('--lifecycle-configuration file://merged.json FILE://other.acme.cloud/x')).toEqual([])
+  })
+
+  it('still fails a public IP in a non-HTTP URL', () => {
+    expect(ipValues('redis://8.8.8.8:6379')).toEqual(['8.8.8.8'])
+  })
+
+  it('checks the host of an SCP-style git remote on any TLD', () => {
+    const allowed = withAllowlist([{host: 'github.com', reason: 'repo links', scope: ['**/*.md']}])
+    expect(hostValues('git clone git@github.com:owner/repo.git', allowed)).toEqual([])
+    expect(hostValues('git clone git@git.acme.cloud:owner/repo.git', allowed)).toEqual(['git.acme.cloud'])
+    expect(hostValues('git clone deploy@10.0.0.5:owner/repo.git', allowed)).toEqual([])
+    expect(hostValues('git clone git@git.internal:owner/repo.git', allowed)).toEqual([])
+  })
+
+  it('does not take prose after an email-like token for an SCP remote', () => {
+    expect(hostValues('mail ops@team.acme.cloud: thanks, or ops@team.acme.cloud.')).toEqual([])
+  })
+
+  it('does not flag comment slashes or a scheme without an authority', () => {
+    expect(hostValues('// see https://example.com and a//b.acme.cloud and mailto:ops@host.test')).toEqual([])
+  })
+})
+
 describe('secret findings', () => {
   it('reports a GitHub token by pattern ID only', () => {
     const findings = scan(`export TOKEN=${GITHUB_TOKEN}\n`)
@@ -323,8 +421,79 @@ describe('HTML extraction', () => {
     expect(scanText(NONE, 'p.html', 'p.html', html)).toEqual([{kind: 'ip', value: '8.8.8.8', file: 'p.html', line: 5}])
   })
 
-  it('keeps the text of a plain view identical to the source', () => {
-    expect(extractHtml('<p>hello</p>').text.trim()).toBe('hello')
+  it('rejoins an IP that styled spans split, whatever attributes the spans carry', () => {
+    const split = (attrs: string): string =>
+      `<pre><code><span ${attrs}>8.8</span><span ${attrs}>.8.8</span></code></pre>`
+    for (const attrs of ['style="color:red"', 'class="token ip"', 'style="--shiki-light:#24292e" class="line"']) {
+      expect(scanText(NONE, 'p.html', 'p.html', split(attrs)).map(formatFinding)).toEqual([
+        'p.html:1: globally reachable IP 8.8.8.8',
+      ])
+    }
+    const html = '<pre><code><span style="color:red">8.8</span><span style="color:blue">.8.8</span></code></pre>'
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding)).toEqual([
+      'p.html:1: globally reachable IP 8.8.8.8',
+    ])
+  })
+
+  it('rejoins a hostname split across styled spans, and honors the allowlist for it', () => {
+    const html =
+      '<code><span style="color:red">box.heat</span><span class="a">vision</span><span style="color:blue">.co</span></code>'
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding)).toEqual([
+      'p.html:1: hostname box.heatvision.co is not on the allowlist',
+    ])
+    const allowed = withAllowlist([{host: 'box.heatvision.co', reason: 'fixture host', scope: ['**/*.html']}])
+    expect(scanText(allowed, 'p.html', 'p.html', html)).toEqual([])
+  })
+
+  it('catches a secret split across styled spans by pattern ID only', () => {
+    const html = `<pre><code><span style="color:red">${GITHUB_TOKEN.slice(0, 10)}</span><span class="x">${GITHUB_TOKEN.slice(10, 25)}</span><span style="color:blue">${GITHUB_TOKEN.slice(25)}</span></code></pre>`
+    const findings = scanText(NONE, 'p.html', 'p.html', html)
+    expect(findings).toEqual([{kind: 'secret', id: 'github-pat', file: 'p.html', line: 1}])
+    const output = JSON.stringify([buildReport(findings), findings.map(formatAnnotation)])
+    expect(output).not.toContain(GITHUB_TOKEN.slice(4, 16))
+  })
+
+  it('still catches a public host in an href attribute, and an IP in a data attribute', () => {
+    const html = '<a href="https://attr.heatvision.co/x" data-ip="8.8.4.4">link</a>'
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding).toSorted()).toEqual([
+      'p.html:1: globally reachable IP 8.8.4.4',
+      'p.html:1: hostname attr.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('does not let an attribute value glue onto the visible text next to it', () => {
+    const html = '<span title="x">box.heatvision.</span><span title="co">co</span>'
+    expect(hostValues(html)).toEqual([])
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding)).toEqual([
+      'p.html:1: hostname box.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('reports split tokens and attribute values on their own original lines', () => {
+    const html = [
+      '<!doctype html>',
+      '<html>',
+      '<a class="k"',
+      '   href="https://attr.heatvision.co/x">link</a>',
+      '<pre><code>',
+      '<span style="c:red">8.8</span><span style="c:blue">.4.4</span>',
+      '<span style="c:red">ops.heat</span><span class="z">vision.co</span>',
+      '</code></pre>',
+      '<!-- see c.heatvision.co -->',
+      '</html>',
+    ].join('\n')
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding).toSorted()).toEqual([
+      'p.html:4: hostname attr.heatvision.co is not on the allowlist',
+      'p.html:6: globally reachable IP 8.8.4.4',
+      'p.html:7: hostname ops.heatvision.co is not on the allowlist',
+      'p.html:9: hostname c.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('keeps the visible text of a plain view identical to the source', () => {
+    expect(extractHtml('<p>hello</p>').visible.text.trim()).toBe('hello')
+    expect(extractHtml('<a title="t">hello</a>').visible.text).toBe('hello')
+    expect(extractHtml('<a title="t">hello</a>').invisible.text.trim()).toBe('t')
     expect(defang('a[.]b').text).toBe('a.b')
     expect(defang('a[.]b').map).toEqual([0, 1, 4])
   })

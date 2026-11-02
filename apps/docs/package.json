@@ -1,0 +1,16 @@
+{
+  "name": "@marcusrbrown/infra-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run generate && astro build",
+    "dev": "bun run generate && astro dev",
+    "generate": "bun run scripts/generate-content.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.8",
+    "@marcusrbrown/infra-shared": "workspace:*",
+    "astro": "7.4.4"
+  }
+}

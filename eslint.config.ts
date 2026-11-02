@@ -3,7 +3,20 @@ import {defineConfig} from '@bfra.me/eslint-config'
 export default defineConfig(
   {
     name: '@marcusrbrown/infra',
-    ignores: ['.agents/', '.opencode/', 'docs/', 'dist/', '.cache/', '**/AGENTS.md'],
+    ignores: [
+      '.agents/',
+      '.opencode/',
+      'docs/',
+      'dist/',
+      '.cache/',
+      '**/AGENTS.md',
+      // apps/docs: Astro/Starlight output and content generated from the sources above
+      'apps/docs/.astro/',
+      'apps/docs/.diagrams/',
+      'apps/docs/dist/',
+      'apps/docs/public/diagrams/',
+      'apps/docs/src/content/docs/{architecture,guides,runbooks,solutions}/',
+    ],
     typescript: true,
   },
   {

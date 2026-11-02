@@ -1173,8 +1173,11 @@ describe('fro-bot.yaml: brokered-push app paths', () => {
     if (typeof rawPaths !== 'string') return
 
     const appsDirectory = resolve(REPO_ROOT, 'apps')
+    // apps/docs is the generated public site: no AGENTS.md of its own and not a deploy package, so it stays out of the
+    // brokered-push allowlist. Any other new app must still carry src/ and AGENTS.md and be listed.
+    const NOT_DEPLOY_PACKAGES = new Set(['docs'])
     const appNames = readdirSync(appsDirectory, {withFileTypes: true})
-      .filter(entry => entry.isDirectory())
+      .filter(entry => entry.isDirectory() && !NOT_DEPLOY_PACKAGES.has(entry.name))
       .map(entry => entry.name)
     const missingAppArtifacts = appNames.flatMap(appName => {
       const missing: string[] = []

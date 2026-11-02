@@ -3,6 +3,11 @@
   extends: ['github>marcusrbrown/renovate-config#5.2.16'],
   packageRules: [
     {
+      description: ['Vendored agent skills are updated by their installer (skills-lock.json), not Renovate'],
+      matchFileNames: ['.agents/skills/**'],
+      enabled: false,
+    },
+    {
       description: ['Disable digest updates for bfra-me GitHub Actions'],
       matchManagers: ['github-actions'],
       matchPackageNames: ['bfra-me/.github'],

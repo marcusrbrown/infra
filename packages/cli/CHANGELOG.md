@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.27.1
+
+### Patch Changes
+
+- `status snapshot` now requires `--history` and `gateway restore` requires `--input`, failing with a clear error when the option is missing. Help output uses the compact layout and marks required options. ([#1761](https://github.com/marcusrbrown/infra/pull/1761))
+
 ## 0.27.0
 
 ### Minor Changes

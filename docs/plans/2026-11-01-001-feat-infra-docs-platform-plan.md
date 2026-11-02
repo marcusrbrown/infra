@@ -519,7 +519,7 @@ flowchart LR
 
 ### Phase B — Public snapshot and history
 
-- [ ] **Unit 3: Auth monitor prints its probe line before reconciliation**
+- [x] **Unit 3: Auth monitor prints its probe line before reconciliation**
 
 **Goal:** The snapshot can always read the monitor's probe result, even when reconciliation fails.
 
@@ -543,7 +543,7 @@ flowchart LR
 
 **Verification:** The monitor tests pass, and the existing daily-report parser still matches the final summary line.
 
-- [ ] **Unit 4: Deploy-state and monitor readers**
+- [x] **Unit 4: Deploy-state and monitor readers**
 
 **Goal:** Deterministic, read-only reads of each app's latest deployment state from the GitHub Deployments API, plus the auth monitor's latest live probe from the Actions API.
 
@@ -599,7 +599,7 @@ flowchart LR
 
 **Verification:** Reader tests pass against the recorded API fixtures. A manual run against the live repo prints sane states for all 7 apps.
 
-- [ ] **Unit 5: `status snapshot` command and history store**
+- [x] **Unit 5: `status snapshot` command and history store**
 
 **Goal:** One CLI command that produces a public-safe sample and merges it into the 90-day history, enforcing the invariants that stop published history from shrinking or going blank.
 
@@ -645,7 +645,7 @@ flowchart LR
 
 **Verification:** Tests pass. A local run against a temp directory with `--bootstrap` and then a normal run produces two samples per app.
 
-- [ ] **Unit 6: `status-snapshot.yaml` workflow**
+- [x] **Unit 6: `status-snapshot.yaml` workflow**
 
 **Goal:** Run the snapshot on schedule and persist its history artifact, without touching any deploy secrets.
 
@@ -698,7 +698,7 @@ flowchart LR
 - Conventions tests pass and actionlint is clean.
 - After merge, a bootstrap dispatch on `main` creates the artifact, and the next scheduled run appends to it. The artifact and its contents are read back.
 
-- [ ] **Unit 7: Daily report snapshot-age row**
+- [x] **Unit 7: Daily report snapshot-age row**
 
 **Goal:** The daily report flags a stalled snapshot within a day.
 

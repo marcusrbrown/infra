@@ -280,6 +280,9 @@ Commands:
     --now [iso]                        UTC ISO timestamp (for example 2026-11-01T12:00:00Z) to use as the sample time and the 90-day trim reference instead of the clock. Intended for tests and replays.
 
 
+  status history-locate                Find the newest usable status-history artifact for the snapshot workflow. Needs GITHUB_TOKEN or GH_TOKEN (read-only, actions: read) and reads GITHUB_REPOSITORY. Prints exactly "found run-id=<id>" or "empty" and exits 0; any API error, truncated listing or exhausted call budget exits non-zero, so an outage is never mistaken for an empty history. When GITHUB_OUTPUT is set it also appends state= and run-id= lines. CLI-only: not exposed over MCP.
+
+
   mcp                                  Start a stdio MCP server exposing all CLI commands as tools for coding agents
 
 

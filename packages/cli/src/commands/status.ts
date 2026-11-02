@@ -27,6 +27,7 @@ import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getDashboardStatusSummary} from './dashboard'
 import {getGatewayStatusSummary} from './gateway'
 import {getKeewebStatusSummary} from './keeweb/status'
+import {registerStatusHistoryLocate} from './status-history-locate'
 import {registerStatusSnapshot} from './status-snapshot'
 import {getUmamiStatusSummary} from './umami'
 import {getVpnStatusSummary} from './vpn'
@@ -289,4 +290,5 @@ export function registerStatus(
     .action((options, ctx) => unifiedStatusAction(options, ctx, dependencies))
 
   registerStatusSnapshot(cli, dependencies)
+  registerStatusHistoryLocate(cli, dependencies)
 }

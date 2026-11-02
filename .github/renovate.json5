@@ -102,7 +102,7 @@
       // config before the ceiling moves.
       automerge: false,
       dependencyDashboardApproval: true,
-      allowedVersions: '<0.131.0',
+      allowedVersions: '<0.134.0',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in apps/gateway/upstream.json so new

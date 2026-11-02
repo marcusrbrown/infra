@@ -27,10 +27,11 @@ Gitignored output: `src/content/docs/{architecture,guides,runbooks,solutions}`, 
 
 ### Redaction gate: known limits
 
-The gate guards against accidental leaks, not crafted input. Two gaps are accepted by decision:
+The gate guards against accidental leaks, not crafted input. Three gaps are accepted by decision:
 
 - **Inline-element splitting in hand-written MDX.** `8.8.<span>8.8</span>` is not rejoined, because the gate cannot tell a split token from adjacent text. Highlighter-generated spans are rejoined.
 - **Bare hostnames on TLDs missing from `redaction/hostname-tlds.json`.** A hostname with a scheme is always checked; a bare one is checked only when its TLD is listed.
+- **Multi-host connection strings.** Only the first host after the scheme is checked on any TLD; later hosts in a comma-separated list are checked only when their TLD is listed.
 
 History comes from `STATUS_HISTORY_DIR`, or the fixture when it is unset. `STATUS_HISTORY_REQUIRED=1` makes an unset directory a build error, so a publishing build never falls back to the fixture. CI sets both on every non-PR run.
 

@@ -2,21 +2,14 @@
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro'
 import {APP_IDS} from '@marcusrbrown/infra-shared/status/history-schema'
 
+import LastSample from '../components/LastSample.astro'
 import StatusNotes from '../components/StatusNotes.astro'
 import {SERVICES} from '../data/services'
-import {
-  formatUtc,
-  PROOF_KINDS,
-  PROOF_LABELS,
-  RESULT_DISPLAY,
-  STALE_THRESHOLD_MS,
-  VERDICT_DISPLAY,
-} from '../lib/history-view'
+import {PROOF_KINDS, PROOF_LABELS, RESULT_DISPLAY, VERDICT_DISPLAY} from '../lib/history-view'
 import {loadStatusData} from '../lib/status-data'
 
 const {source, meta, views} = loadStatusData()
 const base = import.meta.env.BASE_URL.replace(/\/?$/, '/')
-const staleMinutes = STALE_THRESHOLD_MS / 60_000
 ---
 
 <StarlightPage
@@ -26,15 +19,7 @@ const staleMinutes = STALE_THRESHOLD_MS / 60_000
     tableOfContents: false,
   }}
 >
-  <p>
-    Last sample <time id="status-generated" datetime={meta.lastSampleAt} data-stale-minutes={staleMinutes}
-      >{formatUtc(meta.lastSampleAt)}</time
-    ><span id="status-age"></span>.
-  </p>
-  <p id="status-stale" hidden>
-    ⚠️ The newest sample is more than {staleMinutes} minutes old. The snapshot may have stopped, so these results can be out of
-    date.
-  </p>
+  <LastSample lastSampleAt={meta.lastSampleAt} />
 
   <StatusNotes fixture={source === 'fixture'} />
 
@@ -81,30 +66,6 @@ const staleMinutes = STALE_THRESHOLD_MS / 60_000
     Legend: ✅ pass, ❌ fail, ❓ unknown (the check could not decide), ⚪ not measured (nothing in the public snapshot checks
     it). Each app's service page has its sample counts, coverage and gaps.
   </p>
-
-  <script is:inline>
-    ;(function () {
-      var el = document.getElementById('status-generated')
-      if (!el) return
-      var then = Date.parse(el.getAttribute('datetime') || '')
-      if (isNaN(then)) return
-      var limit = Number(el.getAttribute('data-stale-minutes')) * 60000
-      var minutes = Math.max(0, Math.round((Date.now() - then) / 60000))
-      var age = document.getElementById('status-age')
-      if (age) {
-        age.textContent =
-          minutes < 60
-            ? ' (' + minutes + ' min ago)'
-            : minutes < 2880
-              ? ' (' + Math.round(minutes / 60) + ' h ago)'
-              : ' (' + Math.round(minutes / 1440) + ' days ago)'
-      }
-      if (Date.now() - then > limit) {
-        var warn = document.getElementById('status-stale')
-        if (warn) warn.hidden = false
-      }
-    })()
-  </script>
 </StarlightPage>
 
 <style>

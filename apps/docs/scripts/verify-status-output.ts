@@ -8,10 +8,12 @@ import {historyDirFromEnv} from '../src/lib/history-source'
 
 /**
  * Build-level check on the rendered status pages: they exist, carry the fixture marker exactly when the build
- * used the fixture, show sample counts and coverage, and never show a percentage next to a figure.
+ * used the fixture, show the last-sample time with its stale-warning hook, show sample counts and coverage, and never show a percentage next to a figure.
  */
 
 export const FIXTURE_MARKER = 'data-history-source="fixture"'
+/** The hidden stale warning that the shared last-sample client script reveals. */
+export const STALE_HOOK = 'id="status-stale"'
 
 /** Visible text only: tags (and so inline styles and attributes), scripts and styles are removed. */
 export function visibleText(html: string): string {
@@ -39,11 +41,11 @@ export function verifyStatusOutput(distDir: string, options: {expectFixture: boo
 
     const text = visibleText(html)
     if (/\d\s*%/.test(text)) problems.push(`${page}: shows a percentage next to a figure`)
+    if (!text.includes('Last sample')) problems.push(`${page}: missing the last-sample time`)
+    if (!html.includes(STALE_HOOK)) problems.push(`${page}: missing the stale-warning hook`)
     if (page.startsWith('services/')) {
       if (!/samples? recorded of about \d+ expected/.test(text)) problems.push(`${page}: missing the coverage figure`)
       if (!/\d+ of \d+ samples? passed/.test(text)) problems.push(`${page}: missing "N of M samples passed"`)
-    } else if (!text.includes('Last sample')) {
-      problems.push(`${page}: missing the last-sample time`)
     }
   }
 

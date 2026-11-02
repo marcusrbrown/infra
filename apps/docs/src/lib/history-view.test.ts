@@ -102,13 +102,26 @@ describe('gaps', () => {
 })
 
 describe('coverage', () => {
-  it('reads "100 samples recorded of about 336 expected" for a 7-day window', () => {
+  it('reads "3 samples recorded of about 3 expected" for samples at 10:00, 10:30 and 11:00', () => {
+    const samples = [0, 30, 60].map(m => sample(m, reachability('p')))
+    const view = buildAppView('keeweb', samples, new Date(at(60)))
+
+    expect(coverageLabel(view.coverage)).toBe('3 samples recorded of about 3 expected')
+  })
+
+  it('reads "1 sample recorded of about 1 expected" for a lone bootstrap sample', () => {
+    const view = buildAppView('keeweb', [sample(0, reachability('p'))], new Date(at(0)))
+
+    expect(coverageLabel(view.coverage)).toBe('1 sample recorded of about 1 expected')
+  })
+
+  it('reads "100 samples recorded of about 337 expected" for a 7-day window', () => {
     const samples = Array.from({length: 100}, (_, index) => sample(index * 30, reachability('p')))
     const view = buildAppView('keeweb', samples, new Date(T0 + 7 * 24 * 60 * MINUTE))
 
     expect(view.coverage.recorded).toBe(100)
-    expect(view.coverage.expected).toBe(336)
-    expect(coverageLabel(view.coverage)).toBe('100 samples recorded of about 336 expected')
+    expect(view.coverage.expected).toBe(337)
+    expect(coverageLabel(view.coverage)).toBe('100 samples recorded of about 337 expected')
   })
 
   it('starts the window at the first sample, or 90 days back, whichever is later', () => {
@@ -118,7 +131,7 @@ describe('coverage', () => {
     const view = buildAppView('keeweb', [old, recent], now)
 
     expect(view.coverage.recorded).toBe(1)
-    expect(view.coverage.expected).toBe(2)
+    expect(view.coverage.expected).toBe(3)
     expect(view.coverage.windowStart).toBe(recent.t)
   })
 
@@ -131,7 +144,7 @@ describe('coverage', () => {
     )
 
     expect(view.coverage.recorded).toBe(0)
-    expect(view.coverage.expected).toBe(90 * 48)
+    expect(view.coverage.expected).toBe(90 * 48 + 1)
   })
 
   it('never renders a percentage', () => {
@@ -254,6 +267,55 @@ describe('deploy state', () => {
 
     expect(view.verdict).toBe('partial')
     expect(view.verdictLabel).toContain('approval')
+  })
+})
+
+describe('deploy verdict', () => {
+  const claimsDeploy = (label: string) => /deploy succeeded/i.test(label)
+
+  it('claims "last deploy succeeded" only when the deploy state is succeeded', () => {
+    const view = buildAppView('keeweb', [sample(0, reachability('p'))], new Date(at(0)))
+
+    expect(view.deploy.state).toBe('succeeded')
+    expect(view.verdict).toBe('pass')
+    expect(view.verdictLabel).toContain('last deploy succeeded')
+  })
+
+  it('is not "Checks passed" when reachability passes but the deploy observation is absent', () => {
+    const view = buildAppView('keeweb', [sample(0, {'public-reachability': 'p'})], new Date(at(0)))
+
+    expect(view.deploy.state).toBe('not_measured')
+    expect(view.verdict).not.toBe('pass')
+    expect(claimsDeploy(view.verdictLabel)).toBe(false)
+  })
+
+  it('is partial when the deploy state is not_measured', () => {
+    const view = buildAppView('keeweb', [sample(0, {'public-reachability': 'p', 'deploy-state': 'n'})], new Date(at(0)))
+
+    expect(view.verdict).toBe('partial')
+    expect(view.verdictLabel).toBe('Reachable; deploy state not measured')
+  })
+
+  it('is unknown when the deploy state is unknown for a reason other than the gate or a running deploy', () => {
+    const view = buildAppView(
+      'keeweb',
+      [sample(0, {'public-reachability': 'p', 'deploy-state': 'u'}, {'deploy-state': {reason: 'api-error'}})],
+      new Date(at(0)),
+    )
+
+    expect(view.verdict).toBe('unknown')
+    expect(view.verdictLabel).toContain('Deploy state')
+  })
+
+  it('does not claim a succeeded deploy for a deployment that never ran', () => {
+    const view = buildAppView(
+      'keeweb',
+      [sample(0, {'public-reachability': 'p', 'deploy-state': 'n'}, {'deploy-state': {reason: 'none'}})],
+      new Date(at(0)),
+    )
+
+    expect(view.verdict).toBe('partial')
+    expect(claimsDeploy(view.verdictLabel)).toBe(false)
   })
 })
 

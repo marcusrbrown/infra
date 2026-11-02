@@ -4,6 +4,7 @@ import {APP_IDS} from '@marcusrbrown/infra-shared/status/history-schema'
 
 import AppStatus from '../../components/AppStatus.astro'
 import Diagram from '../../components/Diagram.astro'
+import LastSample from '../../components/LastSample.astro'
 import StatusNotes from '../../components/StatusNotes.astro'
 import {cliStatusCommand, DASHBOARD_URL, SERVICES} from '../../data/services'
 import {resolveRunbooks} from '../../lib/runbook-links'
@@ -17,7 +18,7 @@ const app = APP_IDS.find(candidate => candidate === Astro.params.app)
 if (app === undefined) throw new Error(`Unknown service "${Astro.params.app}"`)
 
 const info = SERVICES[app]
-const {source, views} = loadStatusData()
+const {source, meta, views} = loadStatusData()
 const runbooks = resolveRunbooks(info.runbooks)
 const base = import.meta.env.BASE_URL.replace(/\/?$/, '/')
 ---
@@ -30,6 +31,8 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/')
   }}
 >
   <p>{info.summary}</p>
+
+  <LastSample lastSampleAt={meta.lastSampleAt} />
 
   <StatusNotes fixture={source === 'fixture'} />
 

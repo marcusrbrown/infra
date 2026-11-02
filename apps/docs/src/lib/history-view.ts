@@ -285,6 +285,8 @@ function verdictFor(
   if (deploy.state === 'at_gate') return {verdict: 'partial', label: 'Reachable; deploy waiting at the approval gate'}
   if (deploy.state === 'running') return {verdict: 'partial', label: 'Reachable; deploy running'}
   if (deploy.state === 'none') return {verdict: 'partial', label: 'Reachable; no deployment recorded'}
+  // Past this point only a recorded success may claim a deploy; anything else is honest about what is missing.
+  if (deploy.state !== 'succeeded') return {verdict: 'partial', label: 'Reachable; deploy state not measured'}
   if (e2e.measured) return {verdict: 'pass', label: 'Reachable; last deploy succeeded; model route healthy'}
   return {verdict: 'pass', label: 'Reachable; last deploy succeeded'}
 }
@@ -333,7 +335,8 @@ export function buildAppView(app: AppId, samples: readonly HistorySample[], now:
     cells,
     coverage: {
       recorded: inWindow.length,
-      expected: Math.round((windowEnd - windowStart) / SAMPLE_INTERVAL_MS),
+      // The window opens on a sample, so it holds one more than the whole intervals that fit in it.
+      expected: 1 + Math.round((windowEnd - windowStart) / SAMPLE_INTERVAL_MS),
       windowStart: new Date(windowStart).toISOString(),
       windowEnd: new Date(windowEnd).toISOString(),
     },

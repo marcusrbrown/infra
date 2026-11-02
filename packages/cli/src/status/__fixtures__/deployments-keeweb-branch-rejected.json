@@ -1,0 +1,52 @@
+{
+  "deployments": [
+    {
+      "id": 6927872427,
+      "ref": "feat/deploy-gate-notify",
+      "created_at": "2026-10-08T05:19:40Z"
+    },
+    {
+      "id": 6194703943,
+      "ref": "fix/ci-deploy-router-permission-parity-1227",
+      "created_at": "2026-09-01T04:44:18Z"
+    },
+    {
+      "id": 4359044301,
+      "ref": "main",
+      "created_at": "2026-04-14T01:38:50Z"
+    }
+  ],
+  "statusesByDeployment": {
+    "6927872427": [
+      {
+        "id": 19441552207,
+        "state": "failure",
+        "created_at": "2026-10-08T05:19:42Z"
+      },
+      {
+        "id": 19441551478,
+        "state": "waiting",
+        "created_at": "2026-10-08T05:19:41Z"
+      }
+    ],
+    "6194703943": [
+      {
+        "id": 17602948742,
+        "state": "failure",
+        "created_at": "2026-09-01T04:44:21Z"
+      },
+      {
+        "id": 17602948219,
+        "state": "waiting",
+        "created_at": "2026-09-01T04:44:19Z"
+      }
+    ],
+    "4359044301": [
+      {
+        "id": 12453856941,
+        "state": "success",
+        "created_at": "2026-04-14T01:48:21Z"
+      }
+    ]
+  }
+}

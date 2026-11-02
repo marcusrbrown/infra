@@ -444,6 +444,20 @@ env:
        - Check .github/known_hosts contains host keys for broker.fro.bot
          (both domain and droplet IP entries).
 
+       Docs status snapshot (table row only — never open an issue):
+       - Status snapshot age: read the newest `status-history` artifact
+         with `gh api "repos/{owner}/{repo}/actions/artifacts?name=status-history&per_page=100"`,
+         keeping only artifacts with `expired == false` and
+         `workflow_run.head_branch == "main"`. Age is now minus the
+         newest `created_at`. Apply this decision tree:
+         a. The API call fails: report Missing (unknown). Do not infer
+            freshness from anything else.
+         b. The call succeeds and no artifact qualifies: report Not
+            bootstrapped.
+         c. Age is 90 minutes or less: report Fresh.
+         d. Age is more than 90 minutes: report Stale (> 90 min). The
+            snapshot cron runs at minutes 11 and 41 of every hour.
+
        Report findings as issues only for this category, except deploys
        at their approval gate (deploy job never ran a step), which are
        table rows only. Do NOT modify deploy scripts, workflow files, or
@@ -803,6 +817,7 @@ env:
     | broker | broker.fro.bot/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | broker | Env secrets/variable | ✅ Set / ⚠️ Missing | [details] |
     | broker | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | docs | Status snapshot age | ✅ Fresh / ⚠️ Stale (> 90 min) / ⚠️ Not bootstrapped / — Missing | [artifact time] |
 
     ### Live Site Review
     | Check | Status | Details |

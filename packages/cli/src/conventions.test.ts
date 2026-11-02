@@ -1,4 +1,4 @@
-import {existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
+import {existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
@@ -3573,6 +3573,60 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     })
   })
 
+  describe('Deploy Pipeline Health: status snapshot age row', () => {
+    const SNAPSHOT_ROW = /^\s*\|\s*docs\s*\|\s*Status snapshot age\s*\|/
+    const LAST_DEPLOY_ROW = /\|\s*Last deploy-[\w-]+ run\s*\|/
+
+    it('adds the docs row with all four states and an artifact-time detail', async () => {
+      const {parsed} = await loadFroBotWorkflow()
+      const rows = (parsed.env?.SCHEDULE_PROMPT ?? '').split('\n').filter(line => SNAPSHOT_ROW.test(line))
+
+      expect(rows).toHaveLength(1)
+      const row = rows[0] ?? ''
+      for (const state of ['✅ Fresh', '⚠️ Stale (> 90 min)', '⚠️ Not bootstrapped', '— Missing', '[artifact time]']) {
+        expect(row, `row is missing ${state}`).toContain(state)
+      }
+      expect(LAST_DEPLOY_ROW.test(row)).toBe(false)
+    })
+
+    it('leaves exactly seven Last deploy-<app> rows', async () => {
+      const {parsed} = await loadFroBotWorkflow()
+      const rows = (parsed.env?.SCHEDULE_PROMPT ?? '').split('\n').filter(line => LAST_DEPLOY_ROW.test(line))
+
+      expect(rows).toHaveLength(7)
+    })
+
+    it('names the artifact, the 90-minute threshold and all four outcomes in the decision tree', async () => {
+      const {category} = await loadHealthCategory()
+      const start = category.indexOf('Docs status snapshot')
+      const closing = category.indexOf('Report findings as issues only for this category')
+
+      expect(start, 'status snapshot block not found').toBeGreaterThan(-1)
+      const tree = category.slice(start, closing)
+      expect(tree).toContain('`status-history`')
+      expect(tree).toContain('actions/artifacts?name=status-history')
+      expect(tree).toContain('`expired == false`')
+      expect(tree).toContain('`workflow_run.head_branch == "main"`')
+      expect(tree).toContain('`created_at`')
+      expect(tree).toMatch(/90 minutes or less: report Fresh/)
+      expect(tree).toMatch(/more than 90 minutes: report Stale \(> 90 min\)/)
+      expect(tree).toMatch(/no artifact qualifies: report Not bootstrapped/)
+      expect(tree).toMatch(/API call fails: report Missing \(unknown\)/)
+      expect(tree).toMatch(/never open an issue/)
+    })
+
+    it('keeps the category closing line last, after the status snapshot block', async () => {
+      const {category} = await loadHealthCategory()
+      const tree = category.indexOf('Docs status snapshot')
+      const closing = category.indexOf('Report findings as issues only for this category')
+
+      expect(tree).toBeGreaterThan(category.indexOf(' Broker: - '))
+      expect(closing).toBeGreaterThan(tree)
+      expect(category.trimEnd().endsWith('or the deployed servers.')).toBe(true)
+      expect(category.indexOf('Report findings as issues only', closing + 1)).toBe(-1)
+    })
+  })
+
   it('documents the safe adoptable-report path and pins the fixed GitHub-output delimiter', async () => {
     const {parsed} = await loadFroBotWorkflow()
     const schedulePrompt = parsed.env?.SCHEDULE_PROMPT ?? ''
@@ -4474,5 +4528,265 @@ describe('deploy gate notify: script stays off the published surface', () => {
     for (const command of MCP_ALLOWLIST) {
       expect(command).not.toMatch(/deploy-gate|notify/)
     }
+  })
+})
+
+describe('status-snapshot.yaml: contract', () => {
+  const WORKFLOW_FILE = resolve(REPO_ROOT, '.github/workflows/status-snapshot.yaml')
+  const HISTORY_DIR = '$' + '{{ runner.temp }}/status-history'
+
+  interface SnapshotStep {
+    name?: string
+    id?: string
+    uses?: string
+    if?: string
+    run?: string
+    env?: Record<string, string>
+    with?: Record<string, unknown>
+  }
+
+  interface SnapshotWorkflow {
+    name?: string
+    on?: {
+      schedule?: {cron?: string}[]
+      workflow_dispatch?: {inputs?: Record<string, {type?: string; default?: unknown}>}
+      [event: string]: unknown
+    }
+    permissions?: Record<string, string>
+    concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
+    jobs?: Record<
+      string,
+      {permissions?: Record<string, string>; environment?: unknown; uses?: string; steps?: SnapshotStep[]}
+    >
+  }
+
+  async function load(): Promise<{text: string; parsed: SnapshotWorkflow; steps: SnapshotStep[]}> {
+    const text = await Bun.file(WORKFLOW_FILE).text()
+    const parsed = parseYaml(text) as SnapshotWorkflow
+    return {text, parsed, steps: parsed.jobs?.snapshot?.steps ?? []}
+  }
+
+  function step(steps: SnapshotStep[], name: string): SnapshotStep {
+    const found = steps.find(candidate => candidate.name === name)
+    expect(found, `step '${name}' not found`).toBeDefined()
+    return found ?? {}
+  }
+
+  it('is a .yaml file named Status Snapshot, with no .yml twin', async () => {
+    const {parsed} = await load()
+
+    expect(parsed.name).toBe('Status Snapshot')
+    expect(existsSync(resolve(REPO_ROOT, '.github/workflows/status-snapshot.yml'))).toBe(false)
+  })
+
+  it('SHA-pins every action with a version comment (shape only, never an exact SHA)', async () => {
+    const {text} = await load()
+    const usesLines = text.split('\n').filter(line => /^\s*(?:-\s+)?uses:/.test(line))
+
+    expect(usesLines.length).toBeGreaterThanOrEqual(4)
+    for (const line of usesLines) {
+      const match = USES_SHA_LINE_RE.exec(line)
+      expect(match, `not SHA-pinned: ${line.trim()}`).not.toBeNull()
+      expect(match?.[2] ?? '', `not a full SHA: ${line.trim()}`).toMatch(/^[a-f0-9]{40}$/)
+      expect(VERSION_COMMENT_RE.test(match?.[3] ?? ''), `missing version comment: ${line.trim()}`).toBe(true)
+    }
+  })
+
+  it('references no secret other than github.token', async () => {
+    const {text} = await load()
+
+    expect(text).not.toMatch(/secrets\./)
+    expect(text).not.toContain('secrets: inherit')
+    const expressions = [...text.matchAll(/\$\{\{([^}]*)\}\}/g)].map(match => (match[1] ?? '').trim())
+    const credentials = expressions.filter(expression => /token|secret|key|password/i.test(expression))
+    expect(credentials.length).toBeGreaterThan(0)
+    for (const expression of credentials) {
+      expect(expression).toBe('github.token')
+    }
+  })
+
+  it('installs with frozen lockfile and without scripts, on a persist-credentials:false checkout', async () => {
+    const {text, steps} = await load()
+
+    expect(text).toContain('bun install --frozen-lockfile --ignore-scripts')
+    expect(step(steps, 'Checkout default branch').with?.['persist-credentials']).toBe(false)
+  })
+
+  it('runs on a half-hourly cron that avoids minute 0, plus workflow_dispatch, and never on pull requests', async () => {
+    const {parsed, text} = await load()
+
+    expect(parsed.on?.schedule).toEqual([{cron: '11,41 * * * *'}])
+    const minutes = (parsed.on?.schedule?.[0]?.cron ?? '').split(' ')[0]?.split(',') ?? []
+    expect(minutes).not.toContain('0')
+    expect(parsed.on).toHaveProperty('workflow_dispatch')
+    expect(text).not.toMatch(/pull_request(?:_target)?\s*:/)
+    expect(text).not.toMatch(/^\s*workflow_call\s*:/m)
+  })
+
+  it('serializes in group status-snapshot without cancelling an in-flight run', async () => {
+    const {parsed} = await load()
+
+    expect(parsed.concurrency).toEqual({group: 'status-snapshot', 'cancel-in-progress': false})
+  })
+
+  it('grants exactly contents/actions/deployments read on the job, contents read on the workflow', async () => {
+    const {parsed} = await load()
+
+    expect(parsed.permissions).toEqual({contents: 'read'})
+    expect(parsed.jobs?.snapshot?.permissions).toEqual({contents: 'read', actions: 'read', deployments: 'read'})
+  })
+
+  it('has one job, no environment and no publish job', async () => {
+    const {parsed, text} = await load()
+
+    expect(Object.keys(parsed.jobs ?? {})).toEqual(['snapshot'])
+    expect(parsed.jobs?.snapshot).not.toHaveProperty('environment')
+    expect(parsed.jobs?.snapshot).not.toHaveProperty('uses')
+    expect(text).not.toContain('environment:')
+    expect(text).not.toMatch(/pages: write|id-token: write/)
+  })
+
+  it('declares a boolean bootstrap input that defaults to false and is actually used', async () => {
+    const {parsed, steps} = await load()
+
+    const input = parsed.on?.workflow_dispatch?.inputs?.bootstrap
+    expect(input?.type).toBe('boolean')
+    expect(input?.default).toBe(false)
+    expect(step(steps, 'Take snapshot').env?.BOOTSTRAP).toContain('inputs.bootstrap')
+    expect(step(steps, 'Check history state').env?.BOOTSTRAP).toContain('inputs.bootstrap')
+  })
+
+  it('looks the history up with the CLI locate step, passing only the workflow token', async () => {
+    const {steps} = await load()
+    const locate = step(steps, 'Locate status history')
+
+    expect(locate.id).toBe('locate')
+    expect(locate.run).toBe('bun run packages/cli/src/cli.ts status history-locate')
+    expect(locate.env?.GITHUB_TOKEN).toBe('$' + '{{ github.token }}')
+  })
+
+  it('fails closed before any download when history state and bootstrap disagree, or off main', async () => {
+    const {steps} = await load()
+    const guard = step(steps, 'Check history state')
+    const script = guard.run ?? ''
+
+    expect(guard.env?.HISTORY_STATE).toBe('$' + '{{ steps.locate.outputs.state }}')
+    expect(guard.env?.REF).toBe('$' + '{{ github.ref }}')
+    expect(script).toContain('[ "$REF" != "refs/heads/main" ]')
+    expect(script).toContain('[ "$HISTORY_STATE" = "empty" ] && [ "$BOOTSTRAP" != "true" ]')
+    expect(script).toContain('[ "$HISTORY_STATE" = "found" ] && [ "$BOOTSTRAP" = "true" ]')
+    expect(script).toContain('[ "$HISTORY_STATE" != "found" ] && [ "$HISTORY_STATE" != "empty" ]')
+    expect(script.match(/exit 1/g)).toHaveLength(4)
+  })
+
+  it('downloads only a found history, from the located run, into the history directory', async () => {
+    const {steps} = await load()
+    const download = step(steps, 'Download status history')
+
+    expect(download.uses?.startsWith('actions/download-artifact@')).toBe(true)
+    expect(download.if).toBe("steps.locate.outputs.state == 'found'")
+    expect(download.with).toEqual({
+      name: 'status-history',
+      path: HISTORY_DIR,
+      'run-id': '$' + '{{ steps.locate.outputs.run-id }}',
+      'github-token': '$' + '{{ github.token }}',
+    })
+  })
+
+  it('passes --history to status snapshot and adds --bootstrap only from the input', async () => {
+    const {steps} = await load()
+    const snapshot = step(steps, 'Take snapshot')
+    const script = snapshot.run ?? ''
+
+    expect(script).toContain(`bun run packages/cli/src/cli.ts status snapshot --history ${HISTORY_DIR}`)
+    expect(script).toContain('args+=(--bootstrap)')
+    expect(script).toContain('[ "$BOOTSTRAP" = "true" ]')
+    expect(snapshot.env?.GITHUB_TOKEN).toBe('$' + '{{ github.token }}')
+  })
+
+  it('runs the Take snapshot script so --bootstrap reaches the command only when the input is true', async () => {
+    const {steps} = await load()
+    const script = step(steps, 'Take snapshot').run ?? ''
+    const dir = mkdtempSync(join(tmpdir(), 'snapshot-step-'))
+    try {
+      const binDir = join(dir, 'bin')
+      const argvFile = join(dir, 'argv.txt')
+      mkdirSync(binDir)
+      // A fake `bun` that records one argument per line and prints a counts-only line.
+      writeFileSync(join(binDir, 'bun'), '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$ARGV_FILE"\necho "added: 7"\n', {
+        mode: 0o755,
+      })
+      const executable = script.replaceAll('$' + '{{ runner.temp }}', dir)
+      expect(executable).not.toContain('$' + '{{')
+
+      for (const bootstrap of ['true', 'false']) {
+        rmSync(argvFile, {force: true})
+        const result = Bun.spawnSync(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', executable], {
+          cwd: dir,
+          env: {
+            PATH: `${binDir}:${Bun.env.PATH ?? ''}`,
+            BOOTSTRAP: bootstrap,
+            RUNNER_TEMP: dir,
+            ARGV_FILE: argvFile,
+          },
+        })
+        expect(result.exitCode, `BOOTSTRAP=${bootstrap}: ${result.stderr.toString()}`).toBe(0)
+
+        const argv = readFileSync(argvFile, 'utf8').split('\n').filter(Boolean)
+        expect(argv.slice(0, 5)).toEqual(['run', 'packages/cli/src/cli.ts', 'status', 'snapshot', '--history'])
+        expect(argv[5]).toBe(join(dir, 'status-history'))
+        expect(argv.includes('--bootstrap'), `BOOTSTRAP=${bootstrap}: ${argv.join(' ')}`).toBe(bootstrap === 'true')
+        expect(argv).toHaveLength(bootstrap === 'true' ? 7 : 6)
+        expect(result.stdout.toString()).toContain('added: 7')
+      }
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  it('uploads the history from main only, kept 7 days, failing if it is empty', async () => {
+    const {steps} = await load()
+    const upload = step(steps, 'Upload status history')
+
+    expect(upload.uses?.startsWith('actions/upload-artifact@')).toBe(true)
+    expect(upload.if).toBe("github.ref == 'refs/heads/main'")
+    expect(upload.with).toEqual({
+      name: 'status-history',
+      path: HISTORY_DIR,
+      'retention-days': 7,
+      'if-no-files-found': 'error',
+    })
+  })
+
+  it('orders lookup, guard, download, snapshot and summary, with upload as the last step', async () => {
+    const {steps} = await load()
+    const order = [
+      'Locate status history',
+      'Check history state',
+      'Download status history',
+      'Take snapshot',
+      'Write step summary',
+      'Upload status history',
+    ].map(name => steps.findIndex(candidate => candidate.name === name))
+
+    expect(order.every(index => index > -1)).toBe(true)
+    expect(order).toEqual(order.toSorted((left, right) => left - right))
+    expect(steps.at(-1)?.name).toBe('Upload status history')
+  })
+
+  it('writes counts only to the step summary', async () => {
+    const {steps} = await load()
+    const script = step(steps, 'Write step summary').run ?? ''
+
+    expect(script).toContain('"$RUNNER_TEMP/snapshot-output.txt"')
+    expect(script).toContain('$GITHUB_STEP_SUMMARY')
+    expect(script).not.toMatch(/https?:|\$\{\{|github\.com|curl/)
+  })
+
+  it('does not run lint or tsc, so it needs no Node pin', async () => {
+    const {text} = await load()
+
+    expect(text).not.toMatch(/bun run lint|bunx tsc/)
+    expect(text).not.toContain('actions/setup-node')
   })
 })

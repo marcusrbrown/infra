@@ -98,6 +98,8 @@ const CLI_ONLY_TOOLS = [
   // Broker: mutating / sensitive — CLI-only
   'broker_deploy',
   'broker_logs',
+  // Snapshot writes the public history directory: CLI-only, run by the status-snapshot workflow
+  'status_snapshot',
 ].sort()
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

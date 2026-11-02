@@ -8,10 +8,10 @@ import {PUBLIC_REACHABILITY_ID} from './public-probes'
  * Who supplies a declared observation:
  * - `probe`: the shared public probe
  * - `collector`: the app's SSH/API collector
- * - `not-implemented`: a reader that lands later; reported as not measured
+ * - `github`: the GitHub Deployments reader or the auth monitor reader
  * - `not-applicable`: the app has nothing to measure; reported as not measured
  */
-export type ObservationOwner = 'probe' | 'collector' | 'not-implemented' | 'not-applicable'
+export type ObservationOwner = 'probe' | 'collector' | 'github' | 'not-applicable'
 
 export interface DeclaredObservation {
   id: string
@@ -31,8 +31,8 @@ const publicReachability: DeclaredObservation = {
 const deployState: DeclaredObservation = {
   id: 'deploy-state',
   kind: 'deploy-state',
-  source: 'config',
-  owner: 'not-implemented',
+  source: 'github-api',
+  owner: 'github',
 }
 
 const composeServices: DeclaredObservation = {
@@ -49,7 +49,7 @@ export const DECLARED_OBSERVATIONS: Record<AppId, readonly DeclaredObservation[]
     publicReachability,
     {id: 'container-running', kind: 'container-health', source: 'ssh', owner: 'collector'},
     deployState,
-    {id: 'provider-route', kind: 'end-to-end', source: 'config', owner: 'not-implemented'},
+    {id: 'provider-route', kind: 'end-to-end', source: 'monitor', owner: 'github'},
   ],
   gateway: [
     publicReachability,
@@ -95,12 +95,14 @@ function resolveObservation(
   declared: DeclaredObservation,
   probe: ProbeOutcome,
   collector: CollectorOutcome,
+  github: readonly Observation[],
   now: Date,
 ): Observation {
   switch (declared.owner) {
-    case 'not-implemented':
     case 'not-applicable':
       return notMeasured(declared, declared.owner)
+    case 'github':
+      return github.find(observation => observation.id === declared.id) ?? unknown(declared, 'missing-result', now)
     case 'probe':
       if (probe.kind === 'ok') return probe.observation
       return unknown(declared, probe.kind === 'failed' ? 'check-failed' : 'missing-result', now)
@@ -118,12 +120,21 @@ function resolveObservation(
 
 /**
  * Build one app's entry from its declaration: every declared observation appears exactly once, in
- * declared order. Observations a collector returns but the app did not declare are dropped.
+ * declared order. Observations a collector returns but the app did not declare are dropped. `github` holds
+ * what the GitHub readers produced for this app; a declared observation they did not supply is `unknown`.
  */
-export function assembleAppStatus(app: AppId, probe: ProbeOutcome, collector: CollectorOutcome, now: Date): AppStatus {
+export function assembleAppStatus(
+  app: AppId,
+  probe: ProbeOutcome,
+  collector: CollectorOutcome,
+  now: Date,
+  github: readonly Observation[] = [],
+): AppStatus {
   return {
     app,
-    observations: DECLARED_OBSERVATIONS[app].map(declared => resolveObservation(declared, probe, collector, now)),
+    observations: DECLARED_OBSERVATIONS[app].map(declared =>
+      resolveObservation(declared, probe, collector, github, now),
+    ),
     facts: collector.kind === 'ok' ? collector.collection.facts : {},
   }
 }

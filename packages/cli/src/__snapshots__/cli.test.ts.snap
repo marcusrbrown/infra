@@ -273,6 +273,16 @@ Commands:
     --json                             Output a schema-versioned JSON envelope: schemaVersion, generatedAt, and one entry per app with typed observations (id, kind, result, observedAt, source) and facts. The gateway workspace memory status is in facts.workspace.
 
 
+  status snapshot                      Take one public-safe status sample and merge it into the 90-day history directory. Runs only the public HTTPS probes, the GitHub Deployments reader and the auth monitor reader (GITHUB_TOKEN or GH_TOKEN, read-only); it uses no SSH and no deploy secrets. Stages every file as a temp file before renaming any into place; any invariant violation exits non-zero and writes nothing. Prints counts only. Exits 0 once the snapshot is written, even when observations are fail or unknown, because those are data. CLI-only: not exposed over MCP.
+
+    --history <dir>                    History directory holding meta.json and apps/<app>.json. It must already contain a valid history unless --bootstrap is given.
+    --bootstrap                        Create the history and its first sample. Fails if meta.json or any app file already exists; without this flag a missing history fails.
+    --now [iso]                        UTC ISO timestamp (for example 2026-11-01T12:00:00Z) to use as the sample time and the 90-day trim reference instead of the clock. Intended for tests and replays.
+
+
+  status history-locate                Find the newest usable status-history artifact for the snapshot workflow. Needs GITHUB_TOKEN or GH_TOKEN (read-only, actions: read) and reads GITHUB_REPOSITORY. Prints exactly "found run-id=<id>" or "empty" and exits 0; any API error, truncated listing or exhausted call budget exits non-zero, so an outage is never mistaken for an empty history. When GITHUB_OUTPUT is set it also appends state= and run-id= lines. CLI-only: not exposed over MCP.
+
+
   mcp                                  Start a stdio MCP server exposing all CLI commands as tools for coding agents
 
 

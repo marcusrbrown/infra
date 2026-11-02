@@ -26,13 +26,17 @@ const isoTimestampSchema = z.iso.datetime()
 
 /**
  * Detail is deliberately a closed, bounded set of scalar keys: a status code, a duration, a contract
- * version and a short slug-shaped reason. There is no free-text field, so raw response bodies, URLs and
+ * version, two ISO times (`since`, `probeAt`) and a short slug-shaped reason. There is no free-text field, so raw response bodies, URLs and
  * error messages have nowhere to go.
  */
 export const observationDetailSchema = z.strictObject({
   statusCode: z.number().int().min(100).max(599).optional(),
   durationMs: z.number().int().min(0).max(600_000).optional(),
   contractVersion: z.string().min(1).max(64).optional(),
+  /** When the observed state began (a deployment status `created_at`), e.g. "waiting since". Not `observedAt`. */
+  since: isoTimestampSchema.optional(),
+  /** When the monitor's probe ran, as its probe line reports it. Not `observedAt`. */
+  probeAt: isoTimestampSchema.optional(),
   reason: z
     .string()
     .max(32)

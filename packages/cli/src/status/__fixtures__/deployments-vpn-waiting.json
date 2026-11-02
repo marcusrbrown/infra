@@ -1,0 +1,22 @@
+{
+  "deployments": [
+    {
+      "created_at": "2026-11-01T22:56:43Z",
+      "environment": "vpn",
+      "id": 7480391588,
+      "ref": "main"
+    }
+  ],
+  "statuses": [
+    {
+      "created_at": "2026-11-01T22:56:44Z",
+      "id": 21129673336,
+      "state": "waiting"
+    },
+    {
+      "created_at": "2026-11-01T22:56:44Z",
+      "id": 21129673325,
+      "state": "waiting"
+    }
+  ]
+}

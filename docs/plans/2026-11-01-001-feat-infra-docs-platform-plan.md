@@ -727,7 +727,7 @@ flowchart LR
 
 ### Phase C: Public site
 
-- [ ] **Unit 8: Docs workspace scaffold and content generator**
+- [x] **Unit 8: Docs workspace scaffold and content generator**
 
 **Goal:** A private Starlight workspace that renders the operator docs from their source files, with link rewriting and titles taken from each file's H1.
 
@@ -789,7 +789,7 @@ flowchart LR
 - `bun run --cwd apps/docs build` succeeds locally.
 - Root `tsc`, lint and `bun test --recursive` still pass.
 
-- [ ] **Unit 9: Archify diagram specs and render step**
+- [x] **Unit 9: Archify diagram specs and render step**
 
 **Goal:** The v1 diagram set, rendered at build time and embedded on the site, with a "spec last changed in" label on each.
 
@@ -838,7 +838,7 @@ flowchart LR
 
 **Verification:** 14 diagrams render. One is checked in a browser to confirm the iframe theme toggle works with an opaque origin; if it doesn't, the embed falls back to static.
 
-- [ ] **Unit 10: Status and service pages**
+- [x] **Unit 10: Status and service pages**
 
 **Goal:** A status overview and per-app service pages that render history honestly.
 
@@ -879,7 +879,7 @@ flowchart LR
 
 **Verification:** View-model tests pass. A local build using fixture history renders every service page.
 
-- [ ] **Unit 11: Redaction gate**
+- [x] **Unit 11: Redaction gate**
 
 **Goal:** Block publication of globally routable IPs, unlisted hostnames and secret-shaped strings. Secrets are reported by pattern ID only.
 
@@ -929,7 +929,7 @@ flowchart LR
 
 **Verification:** The gate tests pass, and the gate is clean over the full local build.
 
-- [ ] **Unit 12: `site.yaml` workflow and publish wiring**
+- [x] **Unit 12: `site.yaml` workflow and publish wiring**
 
 **Goal:** Build, gate and deploy the site, and publish after each snapshot.
 
@@ -988,7 +988,7 @@ flowchart LR
 - After merge, the first `main` build deploys and `https://mrbro.dev/infra/` serves the status page and a diagram.
 - The next snapshot republishes, with the sample count increased.
 
-- [ ] **Unit 13: Rollout runbook and repo docs**
+- [x] **Unit 13: Rollout runbook and repo docs**
 
 **Goal:** Document how to operate the site and make it discoverable.
 

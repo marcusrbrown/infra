@@ -17,6 +17,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── apps/vpn/           WireGuard VPN egress box (see apps/vpn/AGENTS.md)
 ├── apps/broker/        OIDC credential broker (see apps/broker/AGENTS.md)
 ├── apps/agent/         Operator-run AWS S3 durable-storage provisioner (see apps/agent/AGENTS.md)
+├── apps/docs/          Public docs site, not deployable (see apps/docs/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
 ├── packages/shared/    Shared provisioning helpers (see packages/shared/AGENTS.md)
 ├── docs/               Brainstorms → plans → solutions (compound learning)
@@ -66,6 +67,10 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Wire agent storage | `bunx @marcusrbrown/infra agent storage --repo OWNER/REPO --manifest FILE` | Fail-closed resource/OIDC prechecks, non-secret S3 variables, workflow verification |
 | Teardown agent storage | `bunx @marcusrbrown/infra agent storage teardown --repo OWNER/REPO --manifest FILE` | Unwire variables and remove repo-scoped resources; retain state by default |
 | Unified status | `bunx @marcusrbrown/infra status` | Table of typed observations per app; `--json` emits `{schemaVersion, generatedAt, apps[{app, observations, facts}]}` (gateway workspace memory is `facts.workspace`). Exit code is always 0 |
+| Docs site | `apps/docs/AGENTS.md` | Build pipeline, adding diagrams and sources, anti-patterns; published at `https://mrbro.dev/infra/` by `.github/workflows/site.yaml` |
+| Docs site runbook | `docs/runbooks/docs-site.md` | Pages enablement, history bootstrap and reset, emergency takedown, 60-day schedule disable |
+| Status snapshot and history | `.github/workflows/status-snapshot.yaml`, `bunx @marcusrbrown/infra status snapshot --history DIR` | Half-hourly public probes appended to the `status-history` artifact; `status history-locate` finds the newest usable one |
+| Redaction allowlist | `apps/docs/redaction/hostname-allowlist.json` | Reasoned, scoped hostname entries for the docs gate; same PR as the text that needs it |
 | Add workflow | `.github/workflows/` | Use `.yaml` extension, SHA-pin all actions |
 | Configure ESLint | `eslint.config.ts` | Flat config via `@bfra.me/eslint-config` |
 | Configure TypeScript | `tsconfig.json` | Extends `@bfra.me/tsconfig`, Bun types |
@@ -172,6 +177,8 @@ bun run deploy:vpn                              # Local VPN deploy (loads root .
 bun run provision:broker                        # Provision broker droplet (loads root .env)
 bun run deploy:broker                           # Local broker deploy (loads root .env)
 bun run provision:agent                         # Provision agent OIDC/S3/IAM resources (loads root .env)
+bun run --cwd apps/docs build                   # Build the docs site (both redaction gates run; fixture history unless STATUS_HISTORY_DIR is set)
+bunx @marcusrbrown/infra status snapshot --history <dir>  # Append one status sample to a history directory (CI only; --bootstrap for the first)
 ```
 
 ## NOTES

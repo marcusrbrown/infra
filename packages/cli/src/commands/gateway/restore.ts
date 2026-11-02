@@ -275,10 +275,8 @@ export function registerGatewayRestore(cli: ReturnType<typeof goke>): void {
       'gateway restore',
       'Restore the mitmproxy CA certificate and private key from a local tarball into the gateway Docker volume. Restarts mitmproxy and gateway services after restore and confirms byte-equal content before reporting success.',
     )
-    .option(
-      '--input <file>',
-      z.string().describe('Path to the tarball produced by `gateway backup --include-ca`. Required.'),
-    )
+    .option('--input <file>', z.string().describe('Path to the tarball produced by `gateway backup --include-ca`.'))
+    .required()
     .option(
       '--include-ca',
       z

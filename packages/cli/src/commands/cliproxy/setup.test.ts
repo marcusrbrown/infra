@@ -1,6 +1,7 @@
 /// <reference types="bun" />
 
 import type {SpinnerResult} from '@clack/prompts'
+import type {ClackCancel} from '../agent/setup-core/prompts'
 import type {ProviderId} from './setup/providers'
 import {log} from '@clack/prompts'
 import {afterEach, beforeEach, describe, expect, it, mock, spyOn} from 'bun:test'
@@ -722,7 +723,7 @@ function makeSpinner(): SpinnerResult {
 
 // Auto-answering promptValue: returns 'test-key-name' without awaiting the clack prompt
 // (clack prompts hang in non-TTY test environments)
-async function autoPromptValue<T>(_prompt: Promise<T | symbol>): Promise<T> {
+async function autoPromptValue<T>(_prompt: Promise<T | ClackCancel>): Promise<T> {
   return 'test-key-name' as T
 }
 
@@ -756,7 +757,7 @@ describe('runSetupCommand action handler', () => {
         },
         prompts: {
           promptValue: autoPromptValue,
-          confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+          confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
           intro: () => {},
           note: () => {},
           outro: () => {},
@@ -793,7 +794,7 @@ describe('runSetupCommand action handler', () => {
         },
         prompts: {
           promptValue: autoPromptValue,
-          confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+          confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
           intro: () => {},
           note: () => {},
           outro: () => {},
@@ -847,7 +848,7 @@ describe('runSetupCommand action handler', () => {
             },
             prompts: {
               promptValue: autoPromptValue,
-              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
               intro: () => {},
               note: () => {},
               outro: () => {},
@@ -899,7 +900,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -955,7 +956,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1014,7 +1015,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1075,7 +1076,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1136,7 +1137,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1200,7 +1201,7 @@ describe('runSetupCommand action handler', () => {
             },
             prompts: {
               promptValue: autoPromptValue,
-              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
               intro: () => {},
               note: () => {},
               outro: () => {},
@@ -1253,7 +1254,7 @@ describe('runSetupCommand action handler', () => {
             },
             prompts: {
               promptValue: autoPromptValue,
-              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
               intro: () => {},
               note: () => {},
               outro: () => {},
@@ -1307,7 +1308,7 @@ describe('runSetupCommand action handler', () => {
             },
             prompts: {
               promptValue: autoPromptValue,
-              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
               intro: () => {},
               note: () => {},
               outro: () => {},
@@ -1355,7 +1356,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1411,14 +1412,14 @@ describe('runSetupCommand action handler', () => {
     globalThis.fetch = mock(async () => new Response(JSON.stringify(MODELS_FIXTURE))) as unknown as typeof fetch
 
     const confirmMessages: string[] = []
-    const captureConfirm = (opts: {message: string}): Promise<boolean | symbol> => {
+    const captureConfirm = (opts: {message: string}): Promise<boolean | ClackCancel> => {
       confirmMessages.push(opts.message)
       return Promise.resolve(true)
     }
 
     // Interactive mode resolves promptValue to the awaited prompt result. Our captureConfirm
     // returns true, so the wizard proceeds past the key-reuse gate. We assert on the captured message.
-    const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
+    const interactivePromptValue = async <T>(prompt: Promise<T | ClackCancel>): Promise<T> => {
       const result = await prompt
       return result as T
     }
@@ -1494,13 +1495,13 @@ describe('runSetupCommand action handler', () => {
     // confirm, then reject only that one — otherwise the test would cancel at the
     // first prompt and never exercise the gate it claims to cover.
     const confirmMessages: string[] = []
-    const messageAwareConfirm = (opts: {message: string}): Promise<boolean | symbol> => {
+    const messageAwareConfirm = (opts: {message: string}): Promise<boolean | ClackCancel> => {
       confirmMessages.push(opts.message)
       const isKeyReusePrompt = opts.message.includes('Verify it matches the bearer token')
       return Promise.resolve(!isKeyReusePrompt)
     }
 
-    const interactivePromptValue = async <T>(prompt: Promise<T | symbol>): Promise<T> => {
+    const interactivePromptValue = async <T>(prompt: Promise<T | ClackCancel>): Promise<T> => {
       const result = await prompt
       return result as T
     }
@@ -1613,7 +1614,7 @@ describe('runSetupCommand action handler', () => {
             },
             prompts: {
               promptValue: autoPromptValue,
-              confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+              confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
               intro: () => {},
               note: () => {},
               outro: () => {},
@@ -1668,7 +1669,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1731,7 +1732,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1785,7 +1786,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1875,7 +1876,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -1923,7 +1924,7 @@ describe('runSetupCommand action handler', () => {
           },
           prompts: {
             promptValue: autoPromptValue,
-            confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+            confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
             intro: () => {},
             note: () => {},
             outro: () => {},
@@ -2001,7 +2002,7 @@ describe('post-write readback verification', () => {
         },
         prompts: {
           promptValue: autoPromptValue,
-          confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+          confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
           intro: () => {},
           note: () => {},
           outro: () => {},
@@ -2195,7 +2196,7 @@ describe('post-write readback verification', () => {
         },
         prompts: {
           promptValue: autoPromptValue,
-          confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+          confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
           intro: () => {},
           note: () => {},
           outro: () => {},
@@ -2307,7 +2308,7 @@ describe('non-interactive overwrite warning concurrency caveat', () => {
       },
       prompts: {
         promptValue: autoPromptValue,
-        confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+        confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
         intro: () => {},
         note: () => {},
         outro: () => {},

@@ -2,10 +2,10 @@
 
 import type {SpinnerResult} from '@clack/prompts'
 
+import type {ClackCancel} from './setup-core/prompts'
 import {log} from '@clack/prompts'
 import {describe, expect, it, mock, spyOn} from 'bun:test'
 import {goke} from 'goke'
-
 import {registerCliproxySetup, runSetupCommand} from '../cliproxy/setup'
 import {MCP_ALLOWLIST} from '../mcp'
 import {registerAgentCommands} from './index'
@@ -72,8 +72,8 @@ function makeSetupDeps(writes: {kind: string; name: string; value: string}[]) {
         fn(makeSpinner()),
     },
     prompts: {
-      promptValue: async <T>(_prompt: Promise<T | symbol>): Promise<T> => true as T,
-      confirm: () => Promise.resolve(true) as Promise<boolean | symbol>,
+      promptValue: async <T>(_prompt: Promise<T | ClackCancel>): Promise<T> => true as T,
+      confirm: () => Promise.resolve(true) as Promise<boolean | ClackCancel>,
       intro: () => {},
       note: () => {},
       outro: () => {},

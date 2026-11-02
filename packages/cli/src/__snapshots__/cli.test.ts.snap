@@ -3,29 +3,20 @@
 exports[`infra CLI shows root help with registered top-level commands 1`] = `
 "infra/x.x.x
 
-
 Usage:
   $ infra <command> [options]
 
-
 Commands:
   keeweb status                        Show operational health of the KeeWeb deployment
-
     --verbose                          Enable verbose output for all commands
 
-
   keeweb deploy                        Trigger KeeWeb deployment. Default mode dispatches the GitHub Deploy KeeWeb workflow. Use --local to run apps/keeweb/deploy.sh directly from this repo.
-
     --local                            Run local deployment using apps/keeweb/deploy.sh instead of triggering GitHub Actions. (default: false)
     --nginx                            Include nginx config deployment. Valid only with --local and passed through to deploy.sh as --nginx. (default: false)
     --dry-run                          Print planned actions without validating preconditions, executing deploy.sh, or triggering GitHub Actions. (default: false)
 
-
   keeweb open                          Open KeeWeb in the default browser
-
-
   agent setup                          Configure generalized Fro Bot agent model-credential setup and GitHub secrets and variables.
-
     --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
     --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
     --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
@@ -36,103 +27,73 @@ Commands:
     --verify-smoke                     Run a smoke test against the proxy after setup completes.
     --ack-key-reuse                    Acknowledge that --key matches the bearer token inside the existing OPENCODE_AUTH_JSON. Required in non-interactive mode when --key is supplied for a repo with existing OPENCODE_AUTH_JSON. (default: false)
 
-
   agent storage                        Verify the provisioned S3 handoff and wire non-secret GitHub storage variables. AWS readback requires AGENT_AWS_ACCESS_KEY_ID and AGENT_AWS_SECRET_ACCESS_KEY and ignores ambient AWS_* values.
-
     --repo [repo]                      Target GitHub repository in owner/repo format.
     --manifest [manifest]              Handoff manifest path, or - to read JSON from stdin. (default: -)
     --plan                             Verify and report storage writes without mutating GitHub.
     --dry-run                          Alias for --plan.
 
-
   agent storage teardown               Unwire S3 variables and remove the repo-scoped storage resources.
-
     --repo [repo]                      Target GitHub repository in owner/repo format.
     --manifest [manifest]              Handoff manifest path, or - to read JSON from stdin. (default: -)
     --purge-state                      Delete versioned session-prefix objects instead of retaining them.
     --plan                             Read back and report teardown actions without mutating.
 
-
   cliproxy status                      Show operational health of CLIProxyAPI and its management endpoints.
-
     --url [url]                        Base URL for CLIProxyAPI health checks. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
     --api-key [key]                    Downstream API key (bearer) for the upstream provider-auth probe. Falls back to CLIPROXY_API_KEY. Skipped when absent.
     --verbose                          Enable verbose output for all commands
 
-
   cliproxy deploy                      Deploy CLIProxyAPI. Default mode triggers the GitHub Deploy CLIProxy workflow, while --local runs apps/cliproxy/src/deploy.ts directly with Bun.
-
     --local                            Run local deployment with Bun using apps/cliproxy/src/deploy.ts instead of triggering GitHub Actions. (default: false)
     --force-config                     Force upload config.yaml even if it exists on the server. WARNING: overwrites runtime API keys and settings. (default: false)
     --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
 
-
   cliproxy config get                  Fetch current CLIProxyAPI config as JSON.
-
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
     --output [file]                    Write config JSON to a file instead of stdout. File permissions set to 0600 (owner-read-only).
     --json                             Output raw JSON instead of aligned key: value columns.
 
-
   cliproxy config set <field> <value>  Update a mutable CLIProxyAPI config field via its dedicated management endpoint.
-
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
-
   cliproxy keys list                   List CLIProxyAPI API keys from the management API.
-
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
     --json                             Output raw JSON array instead of a numbered list.
 
-
   cliproxy keys add <key>              Add an API key by fetching current keys, appending the value, and replacing full key set.
-
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
-
 
   cliproxy keys remove <key>           Remove an API key via management API endpoint query parameter.
-
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
 
-
   cliproxy login <provider>            Run provider login on the remote CLIProxyAPI host. Supported providers: claude, codex.
-
     --host [host]                      CLIProxyAPI droplet host for SSH execution. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
 
-
   cliproxy models [provider]           List the models CLIProxyAPI serves.
-
     --url [url]                        Base URL for CLIProxyAPI. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        API key (bearer). Falls back to CLIPROXY_API_KEY when omitted.
     --verbose                          Show owned_by and created date for each model.
 
-
   cliproxy monitor                     Reconcile Anthropic provider authentication with one canonical GitHub issue and transition-only Discord alerts. Requires CLIPROXY_API_KEY, CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK, GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_ACTOR, and GITHUB_REPOSITORY_OWNER environment variables; prefer the cliproxy-auth-monitor.yaml GitHub Actions entrypoint for scheduled or synthetic validation.
-
     --validation [mode]                Validation mode (live, synthetic-dead, or synthetic-healthy): live probes Anthropic; synthetic modes are owner-only isolated test transitions. (default: live)
 
-
   cliproxy open                        Launch CLIProxyAPI TUI dashboard via SSH.
-
     --host [host]                      SSH host for CLIProxyAPI server. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
 
-
   cliproxy reset-quota [auth-index]    Reset the quota for one CLIProxyAPI auth record, or list valid auth indexes.
-
     --url [url]                        Base URL for CLIProxyAPI management requests. Falls back to CLIPROXY_URL or https://cliproxy.fro.bot.
     --key [key]                        Management API key. Falls back to CLIPROXY_MANAGEMENT_KEY when omitted.
     --list                             List auth records and their auth indexes without resetting quota.
     --json                             Output auth records as JSON when used with --list.
 
-
   cliproxy setup                       Interactively onboard a GitHub repository to CLIProxyAPI by creating or reusing a key and wiring the required GitHub secrets and variables.
-
     --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
     --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
     --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
@@ -143,148 +104,100 @@ Commands:
     --verify-smoke                     Run a smoke test against the proxy after setup completes.
     --ack-key-reuse                    Acknowledge that --key matches the bearer token inside the existing OPENCODE_AUTH_JSON. Required in non-interactive mode when --key is supplied for a repo with existing OPENCODE_AUTH_JSON. (default: false)
 
-
   broker status                        Show operational health of the credential broker.
-
     --url [url]                        Base URL for broker health checks. Falls back to BROKER_DOMAIN, BROKER_HOST, or https://broker.fro.bot.
     --key [key]                        Environment variable name holding the broker host. Falls back to BROKER_DOMAIN when omitted.
     --verbose                          Enable verbose output for all commands
 
-
   broker deploy                        Deploy the credential broker. Default mode triggers the GitHub Deploy Broker workflow, while --local runs apps/broker/src/deploy.ts directly with Bun.
-
     --local                            Run local deployment with Bun using apps/broker/src/deploy.ts instead of triggering GitHub Actions. (default: false)
     --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
 
-
   broker logs                          Stream credential broker service logs via SSH.
-
     --tail [n]                         Number of log lines to tail. (default: 100)
     --service [service]                Docker Compose service name to stream logs from. (default: broker)
     --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive broker data. (default: false)
     --key [key]                        Environment variable name holding the SSH host. Falls back to BROKER_HOST when omitted.
 
-
   gateway status                       Show operational health of the gateway deployment via docker compose ps.
-
     --key [key]                        Environment variable name holding the SSH host. Falls back to GATEWAY_HOST when omitted.
     --json                             Output a single JSON object with ok, services and the structured workspace memory status.
 
-
   gateway deploy                       Deploy the gateway. Default mode triggers the GitHub Deploy Gateway workflow, while --local runs apps/gateway deploy directly with Bun.
-
     --local                            Run local deployment with Bun using apps/gateway instead of triggering GitHub Actions. (default: false)
     --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
     --force-recreate                   Force recreate containers. Forwarded only in local mode. (default: false)
 
-
   gateway logs [service]               Stream logs from a gateway service via SSH and docker compose.
-
     --tail [n]                         Number of log lines to tail from each service. (default: 100)
     --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive credentials. (default: false)
     --key [key]                        Environment variable name holding the SSH host. Falls back to GATEWAY_HOST when omitted.
 
-
   gateway backup                       Back up the mitmproxy CA certificate and private key from the gateway Docker volume to a local tarball. The output contains the CA private trust anchor — treat it as sensitive material.
-
     --output [file]                    Local path to write the CA tarball. File permissions are set to 0600 after writing. (default: apps/gateway/.local/mitmproxy-ca.tar)
     --include-ca                       Include the mitmproxy CA certificate and private key in the backup. Currently the only supported backup target. (default: true)
 
-
   gateway restore                      Restore the mitmproxy CA certificate and private key from a local tarball into the gateway Docker volume. Restarts mitmproxy and gateway services after restore and confirms byte-equal content before reporting success.
-
-    --input <file>                     Path to the tarball produced by \`gateway backup --include-ca\`. Required.
+    --input <file>                     Path to the tarball produced by \`gateway backup --include-ca\`. (required)
     --include-ca                       Restore the mitmproxy CA certificate and private key. Currently the only supported restore target. (default: true)
 
-
   umami status                         Show operational health of the Umami analytics deployment via docker compose ps.
-
     --key [key]                        Environment variable name holding the SSH host. Falls back to UMAMI_DOMAIN when omitted.
 
-
   umami deploy                         Deploy Umami analytics. Default mode triggers the GitHub Deploy Umami workflow, while --local runs apps/umami deploy directly with Bun.
-
     --local                            Run local deployment with Bun using apps/umami instead of triggering GitHub Actions. (default: false)
     --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
 
-
   umami logs [service]                 Stream logs from an Umami service via SSH and docker compose.
-
     --tail [n]                         Number of log lines to tail from each service. (default: 100)
     --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive credentials. (default: false)
     --key [key]                        Environment variable name holding the SSH host. Falls back to UMAMI_DOMAIN when omitted.
 
-
   dashboard status                     Show operational health of the dashboard deployment via docker compose ps.
-
     --key [key]                        Environment variable name holding the SSH host. Falls back to DASHBOARD_DOMAIN when omitted.
 
-
   dashboard deploy                     Deploy the dashboard. Default mode triggers the GitHub Deploy Dashboard workflow, while --local runs apps/dashboard deploy directly with Bun.
-
     --local                            Run local deployment with Bun using apps/dashboard instead of triggering GitHub Actions. (default: false)
     --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
     --image-version <version>          CalVer version to deploy (e.g. 2026.06.47). Remote-only. Triggers the versioned release path and requires dashboard environment approval. Must match YYYY.MM.N. Forwarded as -f version=<value> to gh workflow run.
     --digest <digest>                  Expected sha256 digest (e.g. sha256:abc...def). Remote-only. Requires --image-version. When set, the workflow fails if GHCR resolves the tag to a different digest. Must match sha256:<64 hex chars>.
 
-
   dashboard logs [service]             Stream logs from a dashboard service via SSH and docker compose.
-
     --tail [n]                         Number of log lines to tail from each service. (default: 100)
     --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive credentials. (default: false)
     --key [key]                        Environment variable name holding the SSH host. Falls back to DASHBOARD_DOMAIN when omitted.
 
-
   vpn status                           Show operational health of the VPN box via SSH and wg show.
-
     --key [key]                        Environment variable name holding the SSH host. Falls back to VPN_HOST when omitted.
 
-
   vpn deploy                           Deploy the VPN. Default mode triggers the GitHub Deploy VPN workflow, while --local runs apps/vpn deploy directly with Bun.
-
     --local                            Run local deployment with Bun using apps/vpn instead of triggering GitHub Actions. (default: false)
     --dry-run                          Validate deploy prerequisites and print planned actions without executing local deploy or dispatching workflow. (default: false)
     --force-server-key                 Force regeneration of the server WireGuard keypair. WARNING: invalidates all existing client configs. (default: false)
 
-
   vpn logs                             Stream WireGuard VPN logs via SSH and journalctl.
-
     --tail [n]                         Number of log lines to tail. (default: 100)
     --allow-ci                         Allow log streaming in CI environments. Logs may contain sensitive VPN data. (default: false)
     --key [key]                        Environment variable name holding the SSH host. Falls back to VPN_HOST when omitted.
 
-
   vpn client add <name>                Add a new VPN client peer. Generates a keypair, assigns a tunnel IP, writes the client .conf to apps/vpn/clients/, and syncs the roster to the VPN_PEERS GitHub secret (best-effort).
-
     --split-tunnel [cidrs]             Comma-separated CIDRs for split-tunnel routing. Defaults to 0.0.0.0/0 (full tunnel).
     --dns [dns]                        DNS server for the client config.
     --server-pubkey [key]              Server public key. Falls back to VPN_SERVER_PUBKEY env var.
     --endpoint [host]                  VPN server endpoint (IP or hostname). Falls back to VPN_HOST env var.
 
-
   vpn client list                      List all VPN client peers from peers.json.
-
-
   vpn client remove <name>             Remove a VPN client peer from peers.json and sync the roster to the VPN_PEERS GitHub secret (best-effort). Run \`infra vpn deploy\` to revoke access.
-
-
   status                               Show status of all deployments
-
     --json                             Output a schema-versioned JSON envelope: schemaVersion, generatedAt, and one entry per app with typed observations (id, kind, result, observedAt, source) and facts. The gateway workspace memory status is in facts.workspace.
 
-
   status snapshot                      Take one public-safe status sample and merge it into the 90-day history directory. Runs only the public HTTPS probes, the GitHub Deployments reader and the auth monitor reader (GITHUB_TOKEN or GH_TOKEN, read-only); it uses no SSH and no deploy secrets. Stages every file as a temp file before renaming any into place; any invariant violation exits non-zero and writes nothing. Prints counts only. Exits 0 once the snapshot is written, even when observations are fail or unknown, because those are data. CLI-only: not exposed over MCP.
-
-    --history <dir>                    History directory holding meta.json and apps/<app>.json. It must already contain a valid history unless --bootstrap is given.
+    --history <dir>                    History directory holding meta.json and apps/<app>.json. It must already contain a valid history unless --bootstrap is given. (required)
     --bootstrap                        Create the history and its first sample. Fails if meta.json or any app file already exists; without this flag a missing history fails.
     --now [iso]                        UTC ISO timestamp (for example 2026-11-01T12:00:00Z) to use as the sample time and the 90-day trim reference instead of the clock. Intended for tests and replays.
 
-
   status history-locate                Find the newest usable status-history artifact for the snapshot workflow. Needs GITHUB_TOKEN or GH_TOKEN (read-only, actions: read) and reads GITHUB_REPOSITORY. Prints exactly "found run-id=<id>" or "empty" and exits 0; any API error, truncated listing or exhausted call budget exits non-zero, so an outage is never mistaken for an empty history. When GITHUB_OUTPUT is set it also appends state= and run-id= lines. CLI-only: not exposed over MCP.
-
-
   mcp                                  Start a stdio MCP server exposing all CLI commands as tools for coding agents
-
 
 Options:
   --verbose      Enable verbose output for all commands

@@ -1,6 +1,7 @@
 /// <reference types="bun" />
 
 import type {MultiSelectOptions, TextOptions} from '@clack/prompts'
+import type {ClackCancel} from '../../agent/setup-core/prompts'
 import {describe, expect, it, spyOn} from 'bun:test'
 
 import {parseProviders, promptForModel, promptForProviders} from './providers'
@@ -10,12 +11,18 @@ import {parseProviders, promptForModel, promptForProviders} from './providers'
 // generic signature, so mockImplementation requires the same generic. We provide a
 // concrete instantiation and widen through `unknown` — this is safe because the
 // concrete type is a structural subtype of the generic at the call site.
-function asMultiselectImpl<V>(fn: (opts: MultiSelectOptions<V>) => Promise<V[] | symbol>) {
-  return fn as unknown as <Value>(opts: MultiSelectOptions<Value>) => Promise<Value[] | symbol>
+function asMultiselectImpl<V>(fn: (opts: MultiSelectOptions<V>) => Promise<V[] | ClackCancel>) {
+  return fn as unknown as <Value>(opts: MultiSelectOptions<Value>) => Promise<Value[] | ClackCancel>
 }
 
-function asTextImpl(fn: (opts: TextOptions) => Promise<string | symbol>) {
-  return fn as unknown as (opts: TextOptions) => Promise<string | symbol>
+function asTextImpl(fn: (opts: TextOptions) => Promise<string | ClackCancel>) {
+  return fn as unknown as (opts: TextOptions) => Promise<string | ClackCancel>
+}
+
+// clack's cancel value is a `unique symbol` as of @clack/prompts 1.8.1, and the library offers no way to mint one
+// without a TTY. `Symbol()` is a plain `symbol`, so narrow it once here instead of at every call site.
+function makeCancelSymbol(): ClackCancel {
+  return Symbol('cancel') as ClackCancel
 }
 
 describe('option parsing', () => {
@@ -73,7 +80,7 @@ describe('interactive provider/model prompts', () => {
   describe('promptForProviders', () => {
     it('happy path: anthropic-only selection returns [anthropic]', async () => {
       const clack = await import('@clack/prompts')
-      // multiselect<Value> returns Promise<Value[] | symbol>; resolved value is string[] | symbol
+      // multiselect<Value> returns Promise<Value[] | ClackCancel>; resolved value is string[] | ClackCancel
       const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(['anthropic'])
 
       const result = await promptForProviders()
@@ -116,7 +123,7 @@ describe('interactive provider/model prompts', () => {
 
     it('edge case: cancel mid-flow causes process.exit(0)', async () => {
       const clack = await import('@clack/prompts')
-      const cancelSymbol = Symbol('cancel')
+      const cancelSymbol: ClackCancel = makeCancelSymbol()
       const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(cancelSymbol)
       const isCancelSpy = spyOn(clack, 'isCancel').mockImplementation(v => v === cancelSymbol)
       const cancelSpy = spyOn(clack, 'cancel').mockImplementation(() => {})
@@ -226,7 +233,7 @@ describe('interactive provider/model prompts', () => {
 
     it('edge case: cancel during model select causes process.exit(0)', async () => {
       const clack = await import('@clack/prompts')
-      const cancelSymbol = Symbol('cancel')
+      const cancelSymbol: ClackCancel = makeCancelSymbol()
       const selectSpy = spyOn(clack, 'select').mockResolvedValue(cancelSymbol)
       const isCancelSpy = spyOn(clack, 'isCancel').mockImplementation(v => v === cancelSymbol)
       const cancelSpy = spyOn(clack, 'cancel').mockImplementation(() => {})

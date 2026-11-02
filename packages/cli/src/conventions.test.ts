@@ -1173,8 +1173,11 @@ describe('fro-bot.yaml: brokered-push app paths', () => {
     if (typeof rawPaths !== 'string') return
 
     const appsDirectory = resolve(REPO_ROOT, 'apps')
+    // apps/docs is the generated public site: no AGENTS.md of its own and not a deploy package, so it stays out of the
+    // brokered-push allowlist. Any other new app must still carry src/ and AGENTS.md and be listed.
+    const NOT_DEPLOY_PACKAGES = new Set(['docs'])
     const appNames = readdirSync(appsDirectory, {withFileTypes: true})
-      .filter(entry => entry.isDirectory())
+      .filter(entry => entry.isDirectory() && !NOT_DEPLOY_PACKAGES.has(entry.name))
       .map(entry => entry.name)
     const missingAppArtifacts = appNames.flatMap(appName => {
       const missing: string[] = []
@@ -2131,7 +2134,7 @@ describe('deploy-gateway.yaml: concurrency is workflow-scoped, with unchanged ga
       concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
       jobs?: {
         'deploy-gateway'?: {
-          concurrency?: unknown
+          concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
           environment?: string
           needs?: string | string[]
         }
@@ -4788,5 +4791,651 @@ describe('status-snapshot.yaml: contract', () => {
 
     expect(text).not.toMatch(/bun run lint|bunx tsc/)
     expect(text).not.toContain('actions/setup-node')
+  })
+})
+
+describe('site.yaml: contract', () => {
+  const WORKFLOW_FILE = resolve(REPO_ROOT, '.github/workflows/site.yaml')
+  const TOKEN = '$' + '{{ github.token }}'
+
+  interface SiteStep {
+    name?: string
+    id?: string
+    uses?: string
+    if?: string
+    run?: string
+    env?: Record<string, string>
+    with?: Record<string, unknown>
+  }
+
+  interface SiteJob {
+    if?: string
+    needs?: string
+    permissions?: Record<string, string>
+    environment?: {name?: string; url?: string}
+    concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
+    steps?: SiteStep[]
+  }
+
+  interface SiteWorkflow {
+    name?: string
+    on?: {
+      push?: {branches?: string[]; paths?: string[]}
+      pull_request?: {paths?: string[]}
+      workflow_dispatch?: unknown
+      workflow_run?: {workflows?: string[]; types?: string[]}
+    }
+    permissions?: Record<string, string>
+    concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
+    jobs?: Record<string, SiteJob>
+  }
+
+  async function load(): Promise<{text: string; parsed: SiteWorkflow; build: SiteJob; deploy: SiteJob}> {
+    const text = await Bun.file(WORKFLOW_FILE).text()
+    const parsed = parseYaml(text) as SiteWorkflow
+    return {text, parsed, build: parsed.jobs?.build ?? {}, deploy: parsed.jobs?.deploy ?? {}}
+  }
+
+  function step(job: SiteJob, name: string): SiteStep {
+    const found = job.steps?.find(candidate => candidate.name === name)
+    expect(found, `step '${name}' not found`).toBeDefined()
+    return found ?? {}
+  }
+
+  type ExprValue = string | boolean
+
+  /**
+   * Evaluate the simple expressions this workflow uses with a recursive-descent parser. Precedence, lowest to
+   * highest: `||`, `&&`, `==`/`!=`, then string literals, `github.*` context paths and parentheses. Anything else throws.
+   * Like GitHub expressions, `&&` and `||` return an operand (not a boolean), so `cond && a || b` is a ternary.
+   */
+  function evalExpression(expression: string, context: Record<string, string>): ExprValue {
+    type Value = ExprValue
+    const tokens: string[] = []
+    const tokenRe = /\s*(?:('[^']*'|"[^"]*")|(github(?:\.[a-z_]+)+)|(==|!=|&&|\|\||[()]))/y
+    let offset = 0
+    while (offset < expression.length) {
+      if (expression.slice(offset).trim() === '') break
+      tokenRe.lastIndex = offset
+      const match = tokenRe.exec(expression)
+      if (match === null) {
+        throw new Error(`unsupported if expression at '${expression.slice(offset).trim()}': ${expression}`)
+      }
+      tokens.push(match[0].trim())
+      offset = tokenRe.lastIndex
+    }
+
+    let position = 0
+    const peek = (): string | undefined => tokens[position]
+    const take = (): string => {
+      const token = tokens[position]
+      if (token === undefined) throw new Error(`unexpected end of if expression: ${expression}`)
+      position += 1
+      return token
+    }
+
+    const parsePrimary = (): Value => {
+      const token = take()
+      if (token === '(') {
+        const inner = parseOr()
+        if (take() !== ')') throw new Error(`expected ')' in if expression: ${expression}`)
+        return inner
+      }
+      if (token.startsWith("'") || token.startsWith('"')) return token.slice(1, -1)
+      if (token.startsWith('github.')) return context[token] ?? ''
+      throw new Error(`unexpected '${token}' in if expression: ${expression}`)
+    }
+    const parseEquality = (): Value => {
+      let left = parsePrimary()
+      for (let operator = peek(); operator === '==' || operator === '!='; operator = peek()) {
+        take()
+        const right = parsePrimary()
+        left = operator === '==' ? left === right : left !== right
+      }
+      return left
+    }
+    const parseAnd = (): Value => {
+      let left = parseEquality()
+      while (peek() === '&&') {
+        take()
+        const right = parseEquality()
+        left = left ? right : left
+      }
+      return left
+    }
+    function parseOr(): Value {
+      let left = parseAnd()
+      while (peek() === '||') {
+        take()
+        const right = parseAnd()
+        left = left || right
+      }
+      return left
+    }
+
+    const result = parseOr()
+    if (position < tokens.length) throw new Error(`unexpected '${peek()}' in if expression: ${expression}`)
+    return result
+  }
+
+  function evalIf(expression: string | undefined, context: Record<string, string>): boolean {
+    return expression === undefined ? true : Boolean(evalExpression(expression, context))
+  }
+
+  /** The workflow-level concurrency group, with its single `${{ }}` expression evaluated. */
+  function resolveGroup(group: string | undefined, context: Record<string, string>): string {
+    const match = /^([^$]*)\$\{\{([^}]+)\}\}$/.exec(group ?? '')
+    expect(match, `group is not a prefix plus one expression: ${group}`).not.toBeNull()
+    return `${match?.[1] ?? ''}${String(evalExpression(match?.[2] ?? '', context))}`
+  }
+
+  function substitute(value: string, context: Record<string, string>): string {
+    return value.replaceAll(/\$\{\{([^}]+)\}\}/g, (_match, raw: string) => {
+      const key = raw.trim()
+      const resolved = context[key]
+      expect(resolved, `no test value for expression '${key}'`).toBeDefined()
+      return resolved ?? ''
+    })
+  }
+
+  type EventName = 'push' | 'pull_request' | 'workflow_dispatch' | 'workflow_run'
+  type Locate = 'found' | 'empty' | 'error'
+
+  interface HistoryRun {
+    ran: string[]
+    downloadedRunIds: string[]
+    failedAt?: string
+    exportedEnv: string
+  }
+
+  // Runs the history steps of the build job (locate through select) against a fake `bun` boundary.
+  function runHistorySteps(build: SiteJob, event: EventName, locate: Locate): HistoryRun {
+    const dir = mkdtempSync(join(tmpdir(), 'site-history-'))
+    try {
+      const binDir = join(dir, 'bin')
+      mkdirSync(binDir)
+      // A fake `bun` standing in for `status history-locate`: appends outputs, or fails like an API error.
+      writeFileSync(
+        join(binDir, 'bun'),
+        [
+          '#!/bin/sh',
+          'case "$FAKE_LOCATE" in',
+          String.raw`  found) printf "state=found\nrun-id=777\n" >> "$GITHUB_OUTPUT"; echo "found run-id=777" ;;`,
+          String.raw`  empty) printf "state=empty\n" >> "$GITHUB_OUTPUT"; echo empty ;;`,
+          '  *) echo "status history-locate failed: api-error" >&2; exit 1 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        {mode: 0o755},
+      )
+      const outputFile = join(dir, 'output')
+      const envFile = join(dir, 'github-env')
+      writeFileSync(outputFile, '')
+      writeFileSync(envFile, '')
+
+      const context: Record<string, string> = {
+        'github.event_name': event,
+        'github.token': 'test-token',
+        'github.repository': 'owner/repo',
+        'github.event.workflow_run.id': '555',
+        'runner.temp': dir,
+        'steps.locate.outputs.state': '',
+        'steps.locate.outputs.run-id': '',
+      }
+      const result: HistoryRun = {ran: [], downloadedRunIds: [], exportedEnv: ''}
+      const names = (build.steps ?? []).map(candidate => candidate.name)
+      const first = names.indexOf('Locate status history')
+      const last = names.indexOf('Select status history')
+      expect(first).toBeGreaterThan(-1)
+      expect(last).toBeGreaterThan(first)
+
+      for (const current of (build.steps ?? []).slice(first, last + 1)) {
+        if (!evalIf(current.if, context)) continue
+        const label = current.name ?? ''
+        result.ran.push(label)
+
+        if (current.uses !== undefined) {
+          result.downloadedRunIds.push(substitute(String(current.with?.['run-id']), context))
+          continue
+        }
+
+        const env = Object.fromEntries(
+          Object.entries(current.env ?? {}).map(([key, value]) => [key, substitute(String(value), context)]),
+        )
+        const spawned = Bun.spawnSync(
+          ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', current.run ?? ''],
+          {
+            cwd: dir,
+            env: {
+              PATH: `${binDir}:${Bun.env.PATH ?? ''}`,
+              ...env,
+              FAKE_LOCATE: locate,
+              GITHUB_OUTPUT: outputFile,
+              GITHUB_ENV: envFile,
+              RUNNER_TEMP: dir,
+            },
+          },
+        )
+        if (spawned.exitCode !== 0) {
+          result.failedAt = label
+          break
+        }
+        const outputs = Object.fromEntries(
+          readFileSync(outputFile, 'utf8')
+            .split('\n')
+            .filter(Boolean)
+            .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+        )
+        context['steps.locate.outputs.state'] = outputs.state ?? ''
+        context['steps.locate.outputs.run-id'] = outputs['run-id'] ?? ''
+      }
+      result.exportedEnv = readFileSync(envFile, 'utf8').replaceAll(dir, '<tmp>')
+      return result
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  }
+
+  it('is a .yaml file named Site, with no .yml twin', async () => {
+    const {parsed} = await load()
+
+    expect(parsed.name).toBe('Site')
+    expect(existsSync(resolve(REPO_ROOT, '.github/workflows/site.yml'))).toBe(false)
+  })
+
+  it('serializes publishes in one workflow-level group where a newer run cancels an older one', async () => {
+    const {parsed} = await load()
+    const publishRun = {
+      'github.event.workflow_run.conclusion': 'success',
+      'github.event.workflow_run.head_branch': 'main',
+      'github.event.workflow_run.event': 'schedule',
+    }
+    const group = (context: Record<string, string>): string => resolveGroup(parsed.concurrency?.group, context)
+
+    expect(parsed.concurrency?.['cancel-in-progress']).toBe(true)
+    expect(group({'github.event_name': 'push', 'github.ref': 'refs/heads/main'})).toBe('site-publish')
+    expect(group({'github.event_name': 'workflow_dispatch', 'github.ref': 'refs/heads/main'})).toBe('site-publish')
+    expect(group({'github.event_name': 'workflow_run', 'github.ref': 'refs/heads/main', ...publishRun})).toBe(
+      'site-publish',
+    )
+    expect(
+      group({
+        'github.event_name': 'workflow_run',
+        'github.ref': 'refs/heads/main',
+        ...publishRun,
+        'github.event.workflow_run.event': 'workflow_dispatch',
+      }),
+    ).toBe('site-publish')
+    expect(group({'github.event_name': 'pull_request', 'github.ref': 'refs/pull/7/merge'})).toBe(
+      'site-refs/pull/7/merge',
+    )
+    expect(group({'github.event_name': 'pull_request', 'github.ref': 'refs/pull/8/merge'})).not.toBe(
+      group({'github.event_name': 'pull_request', 'github.ref': 'refs/pull/7/merge'}),
+    )
+  })
+
+  it('puts a workflow_run the build guard would skip in its own group, so it cannot cancel a real publish', async () => {
+    const {parsed} = await load()
+    const base = {
+      'github.event_name': 'workflow_run',
+      'github.ref': 'refs/heads/main',
+      'github.event.workflow_run.conclusion': 'success',
+      'github.event.workflow_run.head_branch': 'main',
+      'github.event.workflow_run.event': 'schedule',
+    }
+    const skipped: Record<string, string>[] = [
+      {'github.event.workflow_run.conclusion': 'failure'},
+      {'github.event.workflow_run.conclusion': 'cancelled'},
+      {'github.event.workflow_run.head_branch': 'feature'},
+      {'github.event.workflow_run.event': 'push'},
+    ]
+
+    for (const override of skipped) {
+      const context = {...base, ...override}
+      const first = resolveGroup(parsed.concurrency?.group, {...context, 'github.run_id': '101'})
+      const second = resolveGroup(parsed.concurrency?.group, {...context, 'github.run_id': '102'})
+
+      expect(first).toBe('site-101')
+      expect(second).not.toBe(first)
+      expect(evalIf(parsed.jobs?.build?.if, context), JSON.stringify(override)).toBe(false)
+    }
+  })
+
+  it('SHA-pins every action with a version comment (shape only, never an exact SHA)', async () => {
+    const {text} = await load()
+    const usesLines = text.split('\n').filter(line => /^\s*(?:-\s+)?uses:/.test(line))
+
+    expect(usesLines.length).toBeGreaterThanOrEqual(7)
+    for (const line of usesLines) {
+      const match = USES_SHA_LINE_RE.exec(line)
+      expect(match, `not SHA-pinned: ${line.trim()}`).not.toBeNull()
+      expect(match?.[2] ?? '', `not a full SHA: ${line.trim()}`).toMatch(/^[a-f0-9]{40}$/)
+      expect(VERSION_COMMENT_RE.test(match?.[3] ?? ''), `missing version comment: ${line.trim()}`).toBe(true)
+    }
+  })
+
+  it('references no secret other than github.token', async () => {
+    const {text} = await load()
+
+    expect(text).not.toMatch(/secrets\./)
+    expect(text).not.toContain('secrets: inherit')
+    const expressions = [...text.matchAll(/\$\{\{([^}]*)\}\}/g)].map(match => (match[1] ?? '').trim())
+    const credentials = expressions.filter(expression => /token|secret|key|password/i.test(expression))
+    expect(credentials.length).toBeGreaterThan(0)
+    for (const expression of credentials) {
+      expect(expression).toBe('github.token')
+    }
+  })
+
+  it('installs with frozen lockfile and without scripts, on a full-history persist-credentials:false checkout', async () => {
+    const {text, build} = await load()
+    const checkout = step(build, 'Checkout')
+
+    expect(text).toContain('bun install --frozen-lockfile --ignore-scripts')
+    expect(checkout.with?.['fetch-depth']).toBe(0)
+    expect(checkout.with?.['persist-credentials']).toBe(false)
+  })
+
+  it('pins Node 26 for the Astro and Archify binaries that spawn node', async () => {
+    const {build} = await load()
+    const setupNode = step(build, 'Setup Node.js')
+
+    expect(setupNode.uses?.startsWith('actions/setup-node@')).toBe(true)
+    expect(setupNode.with?.['node-version']).toBe(26)
+  })
+
+  it('triggers on main pushes, pull requests, dispatch and a Status Snapshot workflow_run, with matching path filters', async () => {
+    const {parsed} = await load()
+    const paths = parsed.on?.push?.paths ?? []
+
+    expect(parsed.on?.push?.branches).toEqual(['main'])
+    expect(parsed.on).toHaveProperty('workflow_dispatch')
+    expect(parsed.on?.workflow_run).toEqual({workflows: ['Status Snapshot'], types: ['completed']})
+    expect(parsed.on?.pull_request?.paths).toEqual(paths)
+    for (const required of [
+      'ARCHITECTURE.md',
+      'STRUCTURE.md',
+      'apps/*/AGENTS.md',
+      'docs/runbooks/**',
+      'docs/solutions/**',
+      'apps/docs/**',
+      'packages/shared/docs/**',
+      'packages/shared/status/**',
+      '.agents/skills/archify/**',
+      '.github/workflows/site.yaml',
+    ]) {
+      expect(paths).toContain(required)
+    }
+  })
+
+  it('names a workflow_run target that matches the snapshot workflow name', async () => {
+    const {parsed} = await load()
+    const snapshot = parseYaml(
+      await Bun.file(resolve(REPO_ROOT, '.github/workflows/status-snapshot.yaml')).text(),
+    ) as SiteWorkflow
+
+    expect(parsed.on?.workflow_run?.workflows).toEqual([snapshot.name ?? ''])
+  })
+
+  it('grants contents read at the top, and the build job only contents and actions read', async () => {
+    const {parsed, build} = await load()
+
+    expect(parsed.permissions).toEqual({contents: 'read'})
+    expect(build.permissions).toEqual({contents: 'read', actions: 'read'})
+    expect(Object.values(build.permissions ?? {}).every(level => level === 'read')).toBe(true)
+  })
+
+  it('has no job-level concurrency, so only the workflow-level group applies and PR builds run in parallel', async () => {
+    const {build} = await load()
+
+    expect(build.concurrency).toBeUndefined()
+  })
+
+  it('guards a workflow_run build on conclusion, head branch and triggering event', async () => {
+    const {build} = await load()
+    const guard = build.if ?? ''
+
+    expect(guard).toContain("github.event.workflow_run.conclusion == 'success'")
+    expect(guard).toContain("github.event.workflow_run.head_branch == 'main'")
+    expect(guard).toContain("github.event.workflow_run.event == 'schedule'")
+    expect(guard).toContain("github.event.workflow_run.event == 'workflow_dispatch'")
+
+    const run = (overrides: Record<string, string>): boolean =>
+      evalIf(guard, {
+        'github.event_name': 'workflow_run',
+        'github.event.workflow_run.conclusion': 'success',
+        'github.event.workflow_run.head_branch': 'main',
+        'github.event.workflow_run.event': 'schedule',
+        ...overrides,
+      })
+
+    expect(run({})).toBe(true)
+    expect(run({'github.event.workflow_run.event': 'workflow_dispatch'})).toBe(true)
+    expect(run({'github.event.workflow_run.conclusion': 'failure'})).toBe(false)
+    expect(run({'github.event.workflow_run.conclusion': 'cancelled'})).toBe(false)
+    expect(run({'github.event.workflow_run.head_branch': 'feature'})).toBe(false)
+    expect(run({'github.event.workflow_run.event': 'push'})).toBe(false)
+    for (const event of ['push', 'pull_request', 'workflow_dispatch']) {
+      expect(evalIf(guard, {'github.event_name': event})).toBe(true)
+    }
+  })
+
+  it('rejects if-expression syntax the evaluator does not support', () => {
+    const context = {'github.event_name': 'push'}
+
+    expect(() => evalIf("!(github.event_name == 'push')", context)).toThrow(/unsupported/)
+    expect(() => evalIf("contains(github.event_name, 'pu')", context)).toThrow(/unsupported/)
+    expect(() => evalIf("github.event_name == 'push' &&", context)).toThrow(/unexpected end/)
+    expect(() => evalIf("(github.event_name == 'push'", context)).toThrow(/unexpected end/)
+    expect(() => evalIf("(github.event_name == 'push' github.ref)", context)).toThrow(/expected '\)'/)
+    expect(evalIf("github.event_name == 'push' || github.event_name == 'x' && github.ref == 'y'", context)).toBe(true)
+  })
+
+  it('returns operand values from && and || like GitHub expressions', () => {
+    const context = {'github.a': 'x', 'github.b': 'y'}
+
+    expect(evalExpression("github.a == 'x' && 'yes' || 'no'", context)).toBe('yes')
+    expect(evalExpression("github.a == 'z' && 'yes' || 'no'", context)).toBe('no')
+    expect(evalExpression("github.missing || 'fallback'", context)).toBe('fallback')
+    expect(evalExpression('github.a && github.b', context)).toBe('y')
+    expect(evalExpression("'' && 'never'", context)).toBe('')
+    expect(evalExpression("github.a || 'unused'", context)).toBe('x')
+    expect(evalExpression("github.a == 'x' || github.b == 'q' && 'z'", context)).toBe(true)
+    expect(evalExpression("(github.a == 'x' || github.b == 'q') && 'z'", context)).toBe('z')
+  })
+
+  it('deploys only from main and never for a pull request', async () => {
+    const {deploy} = await load()
+
+    expect(deploy.needs).toBe('build')
+    expect(deploy.if).toBe("github.ref == 'refs/heads/main' && github.event_name != 'pull_request'")
+    const cases: [string, string, boolean][] = [
+      ['push', 'refs/heads/main', true],
+      ['workflow_dispatch', 'refs/heads/main', true],
+      ['workflow_run', 'refs/heads/main', true],
+      ['workflow_dispatch', 'refs/heads/feature', false],
+      ['pull_request', 'refs/pull/1/merge', false],
+      ['pull_request', 'refs/heads/main', false],
+    ]
+    for (const [event, ref, expected] of cases) {
+      expect(evalIf(deploy.if, {'github.event_name': event, 'github.ref': ref}), `${event} on ${ref}`).toBe(expected)
+    }
+  })
+
+  it('gives the deploy job exactly pages and id-token write, the github-pages environment and no concurrency of its own', async () => {
+    const {deploy} = await load()
+
+    expect(deploy.permissions).toEqual({pages: 'write', 'id-token': 'write'})
+    expect(deploy.environment).toEqual({
+      name: 'github-pages',
+      url: '$' + '{{ steps.deployment.outputs.page_url }}',
+    })
+    expect(deploy.concurrency).toBeUndefined()
+    expect(deploy.steps).toHaveLength(1)
+    expect(deploy.steps?.[0]?.uses?.startsWith('actions/deploy-pages@')).toBe(true)
+    expect(deploy.steps?.[0]?.id).toBe('deployment')
+  })
+
+  it('gives write scopes to no job except deploy', async () => {
+    const {parsed} = await load()
+
+    expect(Object.keys(parsed.jobs ?? {})).toEqual(['build', 'deploy'])
+    const writers = Object.entries(parsed.jobs ?? {}).filter(([, job]) =>
+      Object.values(job.permissions ?? {}).includes('write'),
+    )
+    expect(writers.map(([name]) => name)).toEqual(['deploy'])
+  })
+
+  it('runs the docs build with the commit SHA, so blob links pin the built commit', async () => {
+    const {build} = await load()
+    const built = step(build, 'Build site')
+
+    expect(built.run).toBe('bun run --cwd apps/docs build')
+    expect(built.env?.GITHUB_SHA).toBe('$' + '{{ github.sha }}')
+  })
+
+  it('uploads exactly the apps/docs/dist directory the dist gate scans, and not for pull requests', async () => {
+    const {build} = await load()
+    const upload = step(build, 'Upload Pages artifact')
+    const docsPackage = JSON.parse(await Bun.file(resolve(REPO_ROOT, 'apps/docs/package.json')).text()) as {
+      scripts: Record<string, string>
+    }
+
+    expect(upload.uses?.startsWith('actions/upload-pages-artifact@')).toBe(true)
+    expect(upload.with).toEqual({path: 'apps/docs/dist'})
+    expect(upload.if).toBe("github.event_name != 'pull_request'")
+    expect(docsPackage.scripts['redact:dist']).toContain('--dist dist')
+    expect(docsPackage.scripts['verify:status']).toContain(' dist')
+    expect(docsPackage.scripts.build).toContain('astro build')
+    expect(evalIf(upload.if, {'github.event_name': 'pull_request'})).toBe(false)
+    expect(evalIf(upload.if, {'github.event_name': 'push'})).toBe(true)
+    expect(evalIf(upload.if, {'github.event_name': 'workflow_run'})).toBe(true)
+  })
+
+  it('runs the build gates in order: generate, diagrams, source gate, astro build, dist gate, status check', async () => {
+    const {build} = await load()
+    const docsPackage = JSON.parse(await Bun.file(resolve(REPO_ROOT, 'apps/docs/package.json')).text()) as {
+      scripts: Record<string, string>
+    }
+    const stages = (docsPackage.scripts.build ?? '').split('&&').map(stage => stage.trim())
+
+    expect(stages).toEqual([
+      'bun run generate',
+      'bun run diagrams',
+      'bun run redact:source',
+      'astro build',
+      'bun run redact:dist',
+      'bun run verify:status',
+    ])
+    // The gates must scan the source and the dist the upload ships.
+    expect(docsPackage.scripts['redact:source']).toContain('redaction-gate.ts --source')
+    expect(docsPackage.scripts['redact:dist']).toContain('redaction-gate.ts --dist dist')
+    expect(docsPackage.scripts['verify:status']).toContain('verify-status-output.ts dist')
+
+    const names = (build.steps ?? []).map(candidate => candidate.name)
+    const built = names.indexOf('Build site')
+    const uploaded = names.indexOf('Upload Pages artifact')
+    expect(built).toBeGreaterThan(-1)
+    expect(uploaded).toBeGreaterThan(built)
+    // The upload is the only step after the build, and nothing else runs the build.
+    expect(names.slice(built + 1)).toEqual(['Upload Pages artifact'])
+    expect((build.steps ?? []).filter(candidate => /apps\/docs build/.test(candidate.run ?? ''))).toHaveLength(1)
+  })
+
+  it('orders the history steps before the build, and the build before the upload', async () => {
+    const {build} = await load()
+    const names = (build.steps ?? []).map(candidate => candidate.name)
+    const order = [
+      'Locate status history',
+      'Require located history',
+      'Download status history (snapshot run)',
+      'Download status history (located run)',
+      'Select status history',
+      'Build site',
+      'Upload Pages artifact',
+    ].map(name => names.indexOf(name))
+
+    expect(order.every(index => index > -1)).toBe(true)
+    expect(order).toEqual(order.toSorted((left, right) => left - right))
+    expect(names.at(-1)).toBe('Upload Pages artifact')
+  })
+
+  describe('history source per trigger (steps run against a fake bun boundary)', () => {
+    it('workflow_run: downloads the triggering run by github.event.workflow_run.id, with no lookup', async () => {
+      const {build} = await load()
+      const run = runHistorySteps(build, 'workflow_run', 'error')
+
+      expect(run.failedAt).toBeUndefined()
+      expect(run.ran).toEqual(['Download status history (snapshot run)', 'Select status history'])
+      expect(run.downloadedRunIds).toEqual(['555'])
+      expect(run.exportedEnv).toContain('STATUS_HISTORY_DIR=<tmp>/status-history')
+      expect(run.exportedEnv).toContain('STATUS_HISTORY_REQUIRED=1')
+    })
+
+    it('workflow_run: downloads from the triggering run and nothing else', async () => {
+      const {build} = await load()
+      const download = step(build, 'Download status history (snapshot run)')
+
+      expect(download.with).toEqual({
+        name: 'status-history',
+        path: '$' + '{{ runner.temp }}/status-history',
+        'run-id': '$' + '{{ github.event.workflow_run.id }}',
+        'github-token': TOKEN,
+      })
+    })
+
+    for (const event of ['push', 'workflow_dispatch'] as const) {
+      it(`${event}: locates, then downloads the located run and requires the artifact source`, async () => {
+        const {build} = await load()
+        const run = runHistorySteps(build, event, 'found')
+
+        expect(run.failedAt).toBeUndefined()
+        expect(run.ran).toEqual([
+          'Locate status history',
+          'Require located history',
+          'Download status history (located run)',
+          'Select status history',
+        ])
+        expect(run.downloadedRunIds).toEqual(['777'])
+        expect(run.exportedEnv).toContain('STATUS_HISTORY_REQUIRED=1')
+      })
+
+      it(`${event}: fails closed on an empty history, before any download or export`, async () => {
+        const {build} = await load()
+        const run = runHistorySteps(build, event, 'empty')
+
+        expect(run.failedAt).toBe('Require located history')
+        expect(run.downloadedRunIds).toEqual([])
+        expect(run.exportedEnv).toBe('')
+      })
+
+      it(`${event}: fails closed on a lookup error, before any download or export`, async () => {
+        const {build} = await load()
+        const run = runHistorySteps(build, event, 'error')
+
+        expect(run.failedAt).toBe('Locate status history')
+        expect(run.downloadedRunIds).toEqual([])
+        expect(run.exportedEnv).toBe('')
+      })
+    }
+
+    it('pull_request: runs no history step, so the fixture is used', async () => {
+      const {build} = await load()
+      const run = runHistorySteps(build, 'pull_request', 'error')
+
+      expect(run.ran).toEqual([])
+      expect(run.downloadedRunIds).toEqual([])
+      expect(run.exportedEnv).toBe('')
+    })
+
+    it('never sets the artifact variables outside the Select step', async () => {
+      const {build} = await load()
+
+      for (const current of build.steps ?? []) {
+        if (current.name === 'Select status history') continue
+        expect(JSON.stringify(current)).not.toMatch(/STATUS_HISTORY/)
+      }
+      expect(step(build, 'Select status history').if).toBe("github.event_name != 'pull_request'")
+    })
   })
 })

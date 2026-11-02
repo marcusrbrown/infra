@@ -1,0 +1,818 @@
+import {existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {dirname, join, resolve} from 'node:path'
+import {afterEach, describe, expect, it} from 'bun:test'
+import {
+  buildReport,
+  defang,
+  extractHtml,
+  formatAnnotation,
+  formatFinding,
+  loadConfig,
+  parseAllowlist,
+  parseTlds,
+  runCli,
+  scanDist,
+  scanSource,
+  scanText,
+  type Finding,
+  type GateConfig,
+} from './redaction-gate'
+
+const REPO_ROOT = resolve(import.meta.dir, '../../..')
+const REAL = loadConfig()
+
+const temps: string[] = []
+afterEach(() => {
+  for (const dir of temps.splice(0)) rmSync(dir, {recursive: true, force: true})
+})
+
+function tempDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'redaction-gate-'))
+  temps.push(dir)
+  return dir
+}
+
+function writeTree(root: string, files: Record<string, string | Uint8Array>): void {
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), {recursive: true})
+    writeFileSync(join(root, path), content)
+  }
+}
+
+/** The real secret rules and TLD list, with a fixture allowlist. */
+function withAllowlist(allowlist: GateConfig['allowlist'] = []): GateConfig {
+  return {...REAL, allowlist}
+}
+
+const NONE = withAllowlist()
+
+function fixtureRepo(files: Record<string, string>): string {
+  const root = tempDir()
+  writeTree(root, files)
+  return root
+}
+
+function fixtureDist(files: Record<string, string | Uint8Array>): string {
+  const root = tempDir()
+  writeTree(root, files)
+  return root
+}
+
+function run(argv: string[], env: Record<string, string | undefined>, options: Parameters<typeof runCli>[3]) {
+  let out = ''
+  let err = ''
+  const code = runCli(argv, env, {out: text => (out += text), err: text => (err += text)}, options)
+  return {code, out, err}
+}
+
+// Secret-shaped fixtures are assembled at runtime so no scanner sees a literal token in this file.
+const GITHUB_TOKEN = ['gh', 'p_', 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'].join('')
+const JWT = [
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9',
+  'eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ',
+  'SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c',
+].join('.')
+
+function scan(text: string, config: GateConfig = NONE, file = 'doc.md', scopePath = file): Finding[] {
+  return scanText(config, file, scopePath, text)
+}
+
+function ipValues(text: string): string[] {
+  return scan(text)
+    .filter(finding => finding.kind === 'ip')
+    .map(finding => finding.value)
+}
+
+function hostValues(text: string, config: GateConfig = NONE): string[] {
+  return scan(text, config)
+    .filter(finding => finding.kind === 'hostname')
+    .map(finding => finding.value)
+}
+
+describe('IP findings', () => {
+  it('fails a public IPv4, plain and defanged', () => {
+    expect(ipValues('resolver 8.8.8.8')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 8.8.8[.]8')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 8[dot]8[dot]8[dot]8')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 8(.)8(dot)8[DOT]8')).toEqual(['8.8.8.8'])
+  })
+
+  it('fails a public IPv4 written with fullwidth or ideographic dots', () => {
+    expect(ipValues('https://8。8。8。8/')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 8．8．8．8')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 8｡8｡8｡8')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 8。8[.]8．8')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 10。116。0。3')).toEqual([])
+  })
+
+  it('passes private, loopback, unspecified and documentation IPv4', () => {
+    for (const ip of ['10.116.0.3', '172.28.0.2', '127.0.0.1', '0.0.0.0', '203.0.113.5', '192.168.1.1']) {
+      expect(ipValues(`host ${ip}:9300`)).toEqual([])
+    }
+  })
+
+  it('fails a global IPv6 and passes ULA, link-local and loopback', () => {
+    expect(ipValues('edge 2606:4700::1 here')).toEqual(['2606:4700::1'])
+    expect(ipValues('edge [2606:4700::1]:443')).toEqual(['2606:4700::1'])
+    for (const ip of ['fd00::1', 'fe80::1', '::1', '2001:db8::1']) expect(ipValues(`addr ${ip} ok`)).toEqual([])
+  })
+
+  it('unwraps IPv4-mapped IPv6 before classifying', () => {
+    expect(ipValues('v4-mapped ::ffff:8.8.8.8')).toEqual(['::ffff:8.8.8.8'])
+    expect(ipValues('v4-mapped ::ffff:10.0.0.1')).toEqual([])
+  })
+
+  it('does not treat versions, timestamps, MACs or C++ scopes as addresses', () => {
+    const text = 'version 1.2.3 at 12:30:45 mac aa:bb:cc:dd:ee:ff std::vector Foo::Bar v1.2.3.4 1.2.3.4.5'
+    expect(ipValues(text)).toEqual([])
+  })
+
+  it('reports the line of the address', () => {
+    const [finding] = scan('one\ntwo\nconnect to 8.8.4.4 now\n')
+    expect(finding).toEqual({kind: 'ip', value: '8.8.4.4', file: 'doc.md', line: 3})
+  })
+})
+
+describe('hostname findings', () => {
+  it('fails an unlisted host and names the file and line', () => {
+    const findings = scan('intro\n\nDeploys to box.heatvision.co today.\n', NONE, 'apps/keeweb/AGENTS.md')
+    expect(findings).toEqual([{kind: 'hostname', value: 'box.heatvision.co', file: 'apps/keeweb/AGENTS.md', line: 3}])
+    expect(formatFinding(findings[0] as Finding)).toBe(
+      'apps/keeweb/AGENTS.md:3: hostname box.heatvision.co is not on the allowlist',
+    )
+  })
+
+  it('fails a defanged URL host in any case', () => {
+    expect(hostValues('HXXPS://box[.]heatvision[.]co')).toEqual(['box.heatvision.co'])
+    expect(hostValues('hxxp://box(dot)heatvision(.)co/path')).toEqual(['box.heatvision.co'])
+    expect(hostValues('box%2Eheatvision.co')).toEqual(['box.heatvision.co'])
+    expect(hostValues('url(data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27')).toEqual([
+      'www.w3.org',
+    ])
+  })
+
+  it('fails a host written with fullwidth or ideographic dots', () => {
+    expect(hostValues('https://secret。acme。xyz/')).toEqual(['secret.acme.xyz'])
+    expect(hostValues('see box．heatvision｡co today')).toEqual(['box.heatvision.co'])
+    const allowed = withAllowlist([{host: 'box.heatvision.co', reason: 'fixture host', scope: ['**/*.md']}])
+    expect(hostValues('see box。heatvision。co today', allowed)).toEqual([])
+  })
+
+  it('finds URL hosts for http, https, ws, wss and protocol-relative forms', () => {
+    const text = [
+      'a http://one.heatvision.co/x',
+      'b https://two.heatvision.co:8443/x',
+      'c ws://three.heatvision.co',
+      'd wss://four.heatvision.co/socket',
+      'e <script src="//five.heatvision.co/a.js">',
+    ].join('\n')
+    expect(hostValues(text).toSorted()).toEqual([
+      'five.heatvision.co',
+      'four.heatvision.co',
+      'one.heatvision.co',
+      'three.heatvision.co',
+      'two.heatvision.co',
+    ])
+  })
+
+  it('finds bare hosts in prose and code', () => {
+    expect(hostValues('run `ssh deploy@host.heatvision.co` first')).toEqual(['host.heatvision.co'])
+    expect(hostValues('see (docs.github.com) and *.fro.bot, then ghcr.io/org/img:1.0')).toEqual([
+      'docs.github.com',
+      'fro.bot',
+      'ghcr.io',
+    ])
+    expect(hostValues('path /etc/letsencrypt/live/box.heatvision.co/fullchain.pem')).toEqual(['box.heatvision.co'])
+  })
+
+  it('takes the host after URL userinfo and never prints the userinfo', () => {
+    const findings = scan('clone https://admin:hunter2@evil.heatvision.co/x.git')
+    expect(findings).toEqual([{kind: 'hostname', value: 'evil.heatvision.co', file: 'doc.md', line: 1}])
+    const output = JSON.stringify([buildReport(findings), findings.map(formatAnnotation)])
+    expect(output).not.toContain('hunter2')
+    expect(output).not.toContain('admin')
+  })
+
+  it('does not flag filenames, dotted identifiers, versions, SHAs or npm scopes', () => {
+    const text = [
+      'AGENTS.md deploy.sh lib.rs conftest.py package.json docker-compose.yaml eslint.config.ts',
+      'process.env import.meta.dir console.log res.status Bun.write fs.readFileSync',
+      'version 1.2.3 v7.x v0.130.1 gpt-5.5-fast 10.0.1 e.g. i.e. vx.y.z',
+      'sha 0123456789abcdef0123456789abcdef01234567',
+      'pkg `@bfra.me/eslint-config` and @bfra.me/tsconfig',
+      'https://localhost:3000 http://gateway:9300 https://example.com https://svc.internal/x host.example.org',
+      'wg0.conf umami.dump.list stage.retention.check docker-compose.yaml.new',
+      'viewer.kind.cloud logger.info config.app',
+    ].join('\n')
+    expect(hostValues(text)).toEqual([])
+  })
+
+  it('does not take a host from the middle of a longer token', () => {
+    expect(hostValues('box.heatvision.co.conf foo_bar.heatvision.co x-y.heatvision.co_z')).toEqual([])
+  })
+
+  it('passes an allowlisted host only inside its scope', () => {
+    const config = withAllowlist([
+      {host: 'www.w3.org', reason: 'xmlns in diagrams', scope: ['diagrams/*.html']},
+      {host: 'github.com', reason: 'repo links', scope: ['**/*.md']},
+    ])
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+    expect(scanText(config, 'diagrams/a.html', 'diagrams/a.html', svg)).toEqual([])
+    expect(scanText(config, 'pages/a.html', 'pages/a.html', svg).map(formatFinding)).toEqual([
+      'pages/a.html:1: hostname www.w3.org is not on the allowlist',
+    ])
+    expect(scanText(config, 'apps/x/AGENTS.md', 'apps/x/AGENTS.md', 'https://github.com/o/r')).toEqual([])
+    expect(scanText(config, 'a.html', 'a.html', 'https://github.com/o/r')).toHaveLength(1)
+  })
+
+  it('does not let one allowlisted host cover its siblings', () => {
+    const config = withAllowlist([{host: 'fro.bot', reason: 'apex', scope: ['**/*.md']}])
+    expect(hostValues('fro.bot and gateway.fro.bot', config)).toEqual(['gateway.fro.bot'])
+  })
+})
+
+describe('authority URLs', () => {
+  const SCHEMES = [
+    'postgres',
+    'postgresql',
+    'mysql',
+    'mongodb',
+    'mongodb+srv',
+    'redis',
+    'rediss',
+    'amqp',
+    'ssh',
+    'sftp',
+    'ftp',
+    'ftps',
+    'git',
+    'svn',
+    'ldap',
+    'ldaps',
+    'smtp',
+    'smtps',
+    'imap',
+    'ws',
+    'wss',
+    'http',
+    'https',
+  ]
+
+  it.each(SCHEMES)('checks the host of a %s:// URL on any TLD', scheme => {
+    expect(hostValues(`connect ${scheme}://private-db.acme.cloud/db`)).toEqual(['private-db.acme.cloud'])
+    expect(hostValues(`connect ${scheme}://user:pw@private-db.acme.cloud:1234/db`)).toEqual(['private-db.acme.cloud'])
+  })
+
+  it('fails a postgresql URL in the source pass and in the dist pass', () => {
+    const root = fixtureRepo({
+      'ARCHITECTURE.md': '# A\n\n```sh\npsql postgresql://private-db.acme.cloud/db\n```\n',
+    })
+    expect(scanSource(NONE, root).map(formatFinding)).toEqual([
+      'ARCHITECTURE.md:4: hostname private-db.acme.cloud is not on the allowlist',
+    ])
+    const dist = fixtureDist({
+      'index.html': '<pre><code><span>postgresql://private-db.acme.cloud/db</span></code></pre>',
+      'notes.txt': 'postgresql://private-db.acme.cloud/db',
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/index.html:1: hostname private-db.acme.cloud is not on the allowlist',
+      'dist/notes.txt:1: hostname private-db.acme.cloud is not on the allowlist',
+    ])
+  })
+
+  it('fails an ssh URL and prints the host only, never the userinfo', () => {
+    const findings = scan('ssh://deploy@box.acme.xyz')
+    expect(findings).toEqual([{kind: 'hostname', value: 'box.acme.xyz', file: 'doc.md', line: 1}])
+    const output = JSON.stringify([buildReport(findings), findings.map(formatAnnotation)])
+    expect(output).not.toContain('deploy')
+  })
+
+  it('never prints the credentials of a database URL', () => {
+    const findings = scan('DATABASE_URL=postgres://admin:hunter2@db.acme.cloud:5432/app')
+    expect(findings).toEqual([{kind: 'hostname', value: 'db.acme.cloud', file: 'doc.md', line: 1}])
+    const output = JSON.stringify([buildReport(findings), findings.map(formatAnnotation)])
+    expect(output).not.toContain('hunter2')
+    expect(output).not.toContain('admin')
+  })
+
+  it('does not take a dotted userinfo name for a host', () => {
+    expect(hostValues('ssh://first.last.acme.cloud@box.heatvision.co/x')).toEqual(['box.heatvision.co'])
+  })
+
+  it('passes private IPs, special-use names and file URLs', () => {
+    expect(scan('redis://10.0.0.5:6379')).toEqual([])
+    expect(scan('postgres://db.internal:5432/x ssh://deploy@box.test amqp://broker.example/ ldap://localhost')).toEqual(
+      [],
+    )
+    expect(scan('file:///etc/hosts')).toEqual([])
+    expect(scan('--lifecycle-configuration file://merged.json FILE://other.acme.cloud/x')).toEqual([])
+  })
+
+  it('still fails a public IP in a non-HTTP URL', () => {
+    expect(ipValues('redis://8.8.8.8:6379')).toEqual(['8.8.8.8'])
+  })
+
+  it('checks the host of an SCP-style git remote on any TLD', () => {
+    const allowed = withAllowlist([{host: 'github.com', reason: 'repo links', scope: ['**/*.md']}])
+    expect(hostValues('git clone git@github.com:owner/repo.git', allowed)).toEqual([])
+    expect(hostValues('git clone git@git.acme.cloud:owner/repo.git', allowed)).toEqual(['git.acme.cloud'])
+    expect(hostValues('git clone deploy@10.0.0.5:owner/repo.git', allowed)).toEqual([])
+    expect(hostValues('git clone git@git.internal:owner/repo.git', allowed)).toEqual([])
+  })
+
+  it('does not take prose after an email-like token for an SCP remote', () => {
+    expect(hostValues('mail ops@team.acme.cloud: thanks, or ops@team.acme.cloud.')).toEqual([])
+  })
+
+  it('does not flag comment slashes or a scheme without an authority', () => {
+    expect(hostValues('// see https://example.com and a//b.acme.cloud and mailto:ops@host.test')).toEqual([])
+  })
+})
+
+describe('secret findings', () => {
+  it('reports a GitHub token by pattern ID only', () => {
+    const findings = scan(`export TOKEN=${GITHUB_TOKEN}\n`)
+    expect(findings).toEqual([{kind: 'secret', id: 'github-pat', file: 'doc.md', line: 1}])
+    const rendered = [formatFinding, formatAnnotation].map(format => format(findings[0] as Finding)).join('\n')
+    expect(rendered).toContain('github-pat')
+    expect(rendered).not.toContain(GITHUB_TOKEN)
+    expect(rendered).not.toContain(GITHUB_TOKEN.slice(4, 16))
+  })
+
+  it('reports a JWT by pattern ID only, with no host or IP findings from its segments', () => {
+    const findings = scan(`Authorization: Bearer ${JWT}`)
+    expect(findings.map(finding => finding.kind)).toEqual(['secret'])
+    expect(findings.map(formatFinding).join('\n')).not.toContain('eyJ')
+  })
+
+  it('drops host and IP candidates that overlap a secret match (one finding per line and ID)', () => {
+    const rules = [{id: 'test-secret', regex: /tok:[a-z0-9.]+/g, keywords: []}]
+    const config: GateConfig = {...NONE, rules}
+    const findings = scanText(
+      config,
+      'doc.md',
+      'doc.md',
+      'key tok:abc.heatvision.co and tok:8.8.8.8 and beside.heatvision.co',
+    )
+    expect(findings.map(formatFinding)).toEqual([
+      'doc.md:1: secret pattern test-secret',
+      'doc.md:1: hostname beside.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('still reports a host that sits on the same line as, but outside, a secret', () => {
+    const findings = scan(`curl https://api.heatvision.co/cb?token=${JWT}`)
+    expect(findings.map(finding => finding.kind).toSorted()).toEqual(['hostname', 'secret'])
+    expect(findings.map(formatFinding).join('\n')).not.toContain(JWT.slice(0, 24))
+  })
+
+  it('does not flag a SHA, base64 inside an SVG data URI, or a three-part version', () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0h10v10H0z"/></svg>'
+    const text = [
+      'commit 0123456789abcdef0123456789abcdef01234567',
+      `background: url("data:image/svg+xml;base64,${btoa(svg)}")`,
+      'bun 1.2.3',
+    ].join('\n')
+    expect(scan(text)).toEqual([])
+  })
+})
+
+describe('HTML extraction', () => {
+  it('rejoins a hostname that syntax highlighting split across inline spans', () => {
+    const html =
+      '<pre><code><span style="c">ssh</span> <span>deploy@host</span><span>.heatvision</span><span>.co</span></code></pre>'
+    const findings = scanText(NONE, 'p.html', 'p.html', html)
+    expect(findings.map(finding => (finding.kind === 'hostname' ? finding.value : ''))).toEqual(['host.heatvision.co'])
+  })
+
+  it('does not fuse text across block elements', () => {
+    expect(scanText(NONE, 'p.html', 'p.html', '<p>see box.heatvision.</p><p>co</p>')).toEqual([])
+  })
+
+  it('scans attribute values and decodes entities', () => {
+    const html = '<a href="https://attr.heatvision.co/x" data-x="box&#46;heatvision&period;co">link</a>'
+    const hosts = scanText(NONE, 'p.html', 'p.html', html).map(finding =>
+      finding.kind === 'hostname' ? finding.value : '',
+    )
+    expect(hosts.toSorted()).toEqual(['attr.heatvision.co', 'box.heatvision.co'])
+  })
+
+  it('normalizes unicode dots inside attribute values', () => {
+    const html =
+      '<a href="https://8。8。8。8/" data-x="https://secret。acme。xyz/" data-y="8&#x3002;8&#xFF0E;8&#xFF61;8">x</a>'
+    const findings = scanText(NONE, 'p.html', 'p.html', html)
+    expect(findings.map(formatFinding).toSorted()).toEqual([
+      'p.html:1: globally reachable IP 8.8.8.8',
+      'p.html:1: hostname secret.acme.xyz is not on the allowlist',
+    ])
+  })
+
+  it('scans script bodies and comments verbatim', () => {
+    const html = '<script>fetch("https://api.heatvision.co/v1")</script><!-- see ops.heatvision.co -->'
+    const hosts = scanText(NONE, 'p.html', 'p.html', html).map(finding =>
+      finding.kind === 'hostname' ? finding.value : '',
+    )
+    expect(hosts.toSorted()).toEqual(['api.heatvision.co', 'ops.heatvision.co'])
+  })
+
+  it('reports line numbers from the original HTML', () => {
+    const html = '<!doctype html>\n<html>\n<body>\n<p>one</p>\n<p>8.8.8.8</p>\n</body>\n</html>\n'
+    expect(scanText(NONE, 'p.html', 'p.html', html)).toEqual([{kind: 'ip', value: '8.8.8.8', file: 'p.html', line: 5}])
+  })
+
+  it('rejoins an IP that styled spans split, whatever attributes the spans carry', () => {
+    const split = (attrs: string): string =>
+      `<pre><code><span ${attrs}>8.8</span><span ${attrs}>.8.8</span></code></pre>`
+    for (const attrs of ['style="color:red"', 'class="token ip"', 'style="--shiki-light:#24292e" class="line"']) {
+      expect(scanText(NONE, 'p.html', 'p.html', split(attrs)).map(formatFinding)).toEqual([
+        'p.html:1: globally reachable IP 8.8.8.8',
+      ])
+    }
+    const html = '<pre><code><span style="color:red">8.8</span><span style="color:blue">.8.8</span></code></pre>'
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding)).toEqual([
+      'p.html:1: globally reachable IP 8.8.8.8',
+    ])
+  })
+
+  it('rejoins a hostname split across styled spans, and honors the allowlist for it', () => {
+    const html =
+      '<code><span style="color:red">box.heat</span><span class="a">vision</span><span style="color:blue">.co</span></code>'
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding)).toEqual([
+      'p.html:1: hostname box.heatvision.co is not on the allowlist',
+    ])
+    const allowed = withAllowlist([{host: 'box.heatvision.co', reason: 'fixture host', scope: ['**/*.html']}])
+    expect(scanText(allowed, 'p.html', 'p.html', html)).toEqual([])
+  })
+
+  it('catches a secret split across styled spans by pattern ID only', () => {
+    const html = `<pre><code><span style="color:red">${GITHUB_TOKEN.slice(0, 10)}</span><span class="x">${GITHUB_TOKEN.slice(10, 25)}</span><span style="color:blue">${GITHUB_TOKEN.slice(25)}</span></code></pre>`
+    const findings = scanText(NONE, 'p.html', 'p.html', html)
+    expect(findings).toEqual([{kind: 'secret', id: 'github-pat', file: 'p.html', line: 1}])
+    const output = JSON.stringify([buildReport(findings), findings.map(formatAnnotation)])
+    expect(output).not.toContain(GITHUB_TOKEN.slice(4, 16))
+  })
+
+  it('still catches a public host in an href attribute, and an IP in a data attribute', () => {
+    const html = '<a href="https://attr.heatvision.co/x" data-ip="8.8.4.4">link</a>'
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding).toSorted()).toEqual([
+      'p.html:1: globally reachable IP 8.8.4.4',
+      'p.html:1: hostname attr.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('does not let an attribute value glue onto the visible text next to it', () => {
+    const html = '<span title="x">box.heatvision.</span><span title="co">co</span>'
+    expect(hostValues(html)).toEqual([])
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding)).toEqual([
+      'p.html:1: hostname box.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('reports split tokens and attribute values on their own original lines', () => {
+    const html = [
+      '<!doctype html>',
+      '<html>',
+      '<a class="k"',
+      '   href="https://attr.heatvision.co/x">link</a>',
+      '<pre><code>',
+      '<span style="c:red">8.8</span><span style="c:blue">.4.4</span>',
+      '<span style="c:red">ops.heat</span><span class="z">vision.co</span>',
+      '</code></pre>',
+      '<!-- see c.heatvision.co -->',
+      '</html>',
+    ].join('\n')
+    expect(scanText(NONE, 'p.html', 'p.html', html).map(formatFinding).toSorted()).toEqual([
+      'p.html:4: hostname attr.heatvision.co is not on the allowlist',
+      'p.html:6: globally reachable IP 8.8.4.4',
+      'p.html:7: hostname ops.heatvision.co is not on the allowlist',
+      'p.html:9: hostname c.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('keeps the visible text of a plain view identical to the source', () => {
+    expect(extractHtml('<p>hello</p>').visible.text.trim()).toBe('hello')
+    expect(extractHtml('<a title="t">hello</a>').visible.text).toBe('hello')
+    expect(extractHtml('<a title="t">hello</a>').invisible.text.trim()).toBe('t')
+    expect(defang('a[.]b').text).toBe('a.b')
+    expect(defang('a[.]b').map).toEqual([0, 1, 4])
+  })
+})
+
+describe('config validation', () => {
+  const entry = {host: 'mrbro.dev', reason: 'site origin', scope: ['**/*.md']}
+
+  it('accepts a well-formed allowlist', () => {
+    expect(parseAllowlist([entry])).toEqual([entry])
+  })
+
+  it.each([
+    ['a wildcard host', {...entry, host: '*.fro.bot'}],
+    ['an uppercase host', {...entry, host: 'MrBro.dev'}],
+    ['a single-label host', {...entry, host: 'localhost'}],
+    ['an empty reason', {...entry, reason: ' '}],
+    ['a missing reason', {host: 'mrbro.dev', scope: ['**/*.md']}],
+    ['an empty scope', {...entry, scope: []}],
+    ['a match-everything scope', {...entry, scope: ['**/*']}],
+  ])('rejects %s', (_name, bad) => {
+    expect(() => parseAllowlist([bad])).toThrow()
+  })
+
+  it('rejects a TLD that is also a file extension', () => {
+    expect(() => parseTlds({tlds: ['com', 'sh'], fileExtensions: ['sh']})).toThrow(/sh/)
+  })
+
+  it('loads the committed config with a reason on every allowlist entry', () => {
+    expect(REAL.rules.length).toBeGreaterThan(150)
+    expect(REAL.allowlist.length).toBeGreaterThan(0)
+    for (const entry of REAL.allowlist) expect(entry.reason.length).toBeGreaterThan(10)
+  })
+
+  it('excludes the generic high-entropy rule', () => {
+    expect(REAL.rules.some(rule => rule.id === 'generic-api-key')).toBe(false)
+  })
+})
+
+describe('reporting', () => {
+  const host = (n: number, line = 1): Finding => ({kind: 'hostname', value: `h${n}.heatvision.co`, file: 'a.md', line})
+
+  it('deduplicates identical findings', () => {
+    const report = buildReport([host(1), host(1), host(1, 2)])
+    expect(report.total).toBe(2)
+  })
+
+  it('caps the printed findings at 50 and says how many were hidden', () => {
+    const report = buildReport(Array.from({length: 60}, (_, n) => host(n)))
+    expect(report.total).toBe(60)
+    expect(report.lines).toHaveLength(51)
+    expect(report.lines.at(-1)).toContain('10 more')
+    expect(report.annotations).toHaveLength(50)
+    expect(report.summary).toBe('redaction gate: 60 findings')
+  })
+
+  it('formats annotations with escaped properties and the same masking', () => {
+    expect(formatAnnotation({kind: 'ip', value: '8.8.8.8', file: 'a,b:c.md', line: 7})).toBe(
+      '::error file=a%2Cb%3Ac.md,line=7::globally reachable IP 8.8.8.8',
+    )
+    expect(formatAnnotation({kind: 'secret', id: 'github-pat', file: 'a.md', line: 2})).toBe(
+      '::error file=a.md,line=2::secret pattern github-pat',
+    )
+  })
+})
+
+describe('source pass', () => {
+  it('scans exactly the rendered files and reports real line numbers', () => {
+    const root = fixtureRepo({
+      'ARCHITECTURE.md': '# Architecture\n\nok\n',
+      'STRUCTURE.md': '# Structure\n\n\n\nDeploys to a.heatvision.co\n',
+      'apps/vpn/AGENTS.md': '# VPN\n\ndns 8.8.8.8\n',
+      'docs/runbooks/rotate.md': '# Rotate\n\n```sh\nssh deploy@b.heatvision.co\n```\n',
+      'README.md': '# Readme\n\nnot rendered: c.heatvision.co\n',
+      'docs/brainstorms/idea.md': '# Idea\n\nnot rendered: d.heatvision.co\n',
+    })
+    const findings = scanSource(NONE, root)
+    expect(findings.map(formatFinding)).toEqual([
+      'STRUCTURE.md:5: hostname a.heatvision.co is not on the allowlist',
+      'apps/vpn/AGENTS.md:3: globally reachable IP 8.8.8.8',
+      'docs/runbooks/rotate.md:4: hostname b.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('scans solution frontmatter titles, and nothing else in a solution', () => {
+    const root = fixtureRepo({
+      'ARCHITECTURE.md': '# A\n',
+      'docs/solutions/fix.md':
+        '---\ntitle: Rotating the e.heatvision.co key\ndate: 2026-01-01\nmodule: infra\nproblem_type: ops\n---\n\n# Body\n\nbody mentions f.heatvision.co\n',
+    })
+    expect(scanSource(NONE, root).map(formatFinding)).toEqual([
+      'docs/solutions/fix.md:2: hostname e.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('scans diagram specs', () => {
+    const root = fixtureRepo({
+      'ARCHITECTURE.md': '# A\n',
+      'apps/docs/diagrams/apps/vpn.architecture.json': '{\n  "label": "egress 8.8.4.4"\n}\n',
+    })
+    expect(scanSource(NONE, root).map(formatFinding)).toEqual([
+      'apps/docs/diagrams/apps/vpn.architecture.json:2: globally reachable IP 8.8.4.4',
+    ])
+  })
+
+  it('passes a clean fixture', () => {
+    const root = fixtureRepo({'ARCHITECTURE.md': '# A\n\nSee `10.116.0.3` and AGENTS.md.\n'})
+    expect(scanSource(NONE, root)).toEqual([])
+  })
+})
+
+describe('dist pass', () => {
+  it('scans text files of any extension', () => {
+    const dist = fixtureDist({
+      'index.html': '<p>fine</p>',
+      'notes.weirdext': 'resolver 8.8.8.8\nand h.heatvision.co\n',
+      'data.map': '{"x":"y.heatvision.co"}',
+      noext: 'z.heatvision.co',
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/data.map:1: hostname y.heatvision.co is not on the allowlist',
+      'dist/noext:1: hostname z.heatvision.co is not on the allowlist',
+      'dist/notes.weirdext:1: globally reachable IP 8.8.8.8',
+      'dist/notes.weirdext:2: hostname h.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  it('matches allowlist scopes against dist-relative paths', () => {
+    const config = withAllowlist([{host: 'www.w3.org', reason: 'xmlns', scope: ['diagrams/*.html']}])
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+    const dist = fixtureDist({'diagrams/a.html': svg, 'other/b.html': svg})
+    expect(scanDist(config, dist, 'dist').map(formatFinding)).toEqual([
+      'dist/other/b.html:1: hostname www.w3.org is not on the allowlist',
+    ])
+  })
+
+  it('fails binary files that are not on the image and font list, and allows the ones that are', () => {
+    const binary = new Uint8Array([0xff, 0xfe, 0x00, 0x01, 0x80, 0x81])
+    const dist = fixtureDist({
+      'logo.png': binary,
+      'inter.woff2': binary,
+      'favicon.ico': binary,
+      'payload.bin': binary,
+      'archive.tar.gz': new Uint8Array([0x1f, 0x8b, 0x08, 0x00]),
+      noextension: binary,
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/archive.tar.gz: binary file type .gz is not on the allowed list',
+      'dist/noextension: binary file type (no extension) is not on the allowed list',
+      'dist/payload.bin: binary file type .bin is not on the allowed list',
+    ])
+  })
+
+  it('scans a text file even when it carries an image extension', () => {
+    const dist = fixtureDist({'logo.png': 'z.heatvision.co'})
+    expect(scanDist(NONE, dist, 'dist')).toHaveLength(1)
+  })
+
+  it('fails any symlink in dist, whether it points at a file, a directory or nothing', () => {
+    const outside = fixtureDist({'secret.txt': 'h.heatvision.co', 'dir/x.txt': 'ok'})
+    const dist = fixtureDist({'index.html': '<p>fine</p>', 'real/a.txt': 'fine'})
+    symlinkSync(join(outside, 'secret.txt'), join(dist, 'link-file'))
+    symlinkSync(join(outside, 'dir'), join(dist, 'real/link-dir'))
+    symlinkSync(join(outside, 'missing'), join(dist, 'dangling'))
+    symlinkSync('index.html', join(dist, 'alias.html'))
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/alias.html: symlink is not allowed (the Pages upload would follow it)',
+      'dist/dangling: symlink is not allowed (the Pages upload would follow it)',
+      'dist/link-file: symlink is not allowed (the Pages upload would follow it)',
+      'dist/real/link-dir: symlink is not allowed (the Pages upload would follow it)',
+    ])
+    const result = run(['--dist', dist], {GITHUB_ACTIONS: 'true'}, {config: NONE})
+    expect(result.code).toBe(1)
+    expect(result.out).toContain('::error file=')
+    expect(result.out).toContain('link-file')
+  })
+
+  it('scans the text of a gzipped Pagefind fragment', () => {
+    const gz = (text: string): Uint8Array => Bun.gzipSync(new TextEncoder().encode(text))
+    const dist = fixtureDist({
+      'pagefind/fragment/leak.pf_fragment': gz('8.8.8.8'),
+      'pagefind/fragment/host.pf_fragment': gz(
+        `pagefind_dcd${JSON.stringify({content: 'deploys to box.heatvision.co'})}`,
+      ),
+      'pagefind/fragment/clean.pf_fragment': gz('nothing to see, 10.116.0.3'),
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/pagefind/fragment/host.pf_fragment:1: hostname box.heatvision.co is not on the allowlist',
+      'dist/pagefind/fragment/leak.pf_fragment:1: globally reachable IP 8.8.8.8',
+    ])
+  })
+
+  it('scopes a Pagefind fragment as page text, and does not parse it as HTML', () => {
+    const config = withAllowlist([
+      {host: 'box.heatvision.co', reason: 'page text', scope: ['**/*.html']},
+      {host: 'only.diagrams.co', reason: 'diagram markup only', scope: ['diagrams/*.html']},
+    ])
+    const gz = (text: string): Uint8Array => Bun.gzipSync(new TextEncoder().encode(text))
+    const dist = fixtureDist({
+      'pagefind/fragment/a.pf_fragment': gz('see box.heatvision.co and only.diagrams.co and <8.8.8.8>'),
+    })
+    expect(scanDist(config, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/pagefind/fragment/a.pf_fragment:1: globally reachable IP 8.8.8.8',
+      'dist/pagefind/fragment/a.pf_fragment:1: hostname only.diagrams.co is not on the allowlist',
+    ])
+  })
+
+  it('scans a Pagefind fragment for unicode-dotted addresses and for secrets', () => {
+    const gz = (text: string): Uint8Array => Bun.gzipSync(new TextEncoder().encode(text))
+    const dist = fixtureDist({
+      'pagefind/fragment/a.pf_fragment': gz('8。8。8。8'),
+      'pagefind/fragment/b.pf_fragment': gz(`token ${GITHUB_TOKEN}`),
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/pagefind/fragment/a.pf_fragment:1: globally reachable IP 8.8.8.8',
+      'dist/pagefind/fragment/b.pf_fragment:1: secret pattern github-pat',
+    ])
+  })
+
+  it('fails a Pagefind fragment that does not decompress to UTF-8 text, or is a broken gzip stream', () => {
+    const dist = fixtureDist({
+      'pagefind/fragment/binary.pf_fragment': Bun.gzipSync(new Uint8Array([0xff, 0xfe, 0x00, 0x01, 0x80])),
+      'pagefind/fragment/broken.pf_fragment': new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x01, 0x02, 0x03]),
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/pagefind/fragment/binary.pf_fragment: binary file type .pf_fragment is not on the allowed list',
+      'dist/pagefind/fragment/broken.pf_fragment: binary file type .pf_fragment is not on the allowed list',
+    ])
+  })
+
+  it('passes the gzipped binary Pagefind index, metadata and wasm containers', () => {
+    const container = Bun.gzipSync(new Uint8Array([0xff, 0xfe, 0x00, 0x01, 0x80]))
+    const dist = fixtureDist({
+      'pagefind/index/en_abc.pf_index': container,
+      'pagefind/pagefind.en_abc.pf_meta': container,
+      'pagefind/wasm.en.pagefind': container,
+    })
+    expect(scanDist(NONE, dist, 'dist')).toEqual([])
+  })
+
+  it('does not skip a Pagefind-named file that is not gzip, or a gzip file outside pagefind/', () => {
+    const dist = fixtureDist({
+      'pagefind/fragment/en_x.pf_fragment': 'h.heatvision.co',
+      'elsewhere/en_x.pf_fragment': Bun.gzipSync(new TextEncoder().encode('h.heatvision.co')),
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/elsewhere/en_x.pf_fragment: binary file type .pf_fragment is not on the allowed list',
+      'dist/pagefind/fragment/en_x.pf_fragment:1: hostname h.heatvision.co is not on the allowlist',
+    ])
+  })
+
+  const realDist = resolve(import.meta.dir, '../dist')
+  it.skipIf(!existsSync(join(realDist, 'pagefind')))(
+    'real build: no symlink, no binary finding, and every Pagefind fragment decompresses to text',
+    () => {
+      const fragments = [...new Bun.Glob('pagefind/fragment/*.pf_fragment').scanSync({cwd: realDist})]
+      expect(fragments.length).toBeGreaterThan(0)
+      const findings = scanDist(REAL, realDist, 'dist')
+      const structural = findings.filter(finding => finding.kind === 'binary' || finding.kind === 'symlink')
+      expect(structural.map(formatFinding)).toEqual([])
+      expect(findings.filter(finding => finding.file.endsWith('.pf_fragment')).map(formatFinding)).toEqual([])
+    },
+    60_000,
+  )
+})
+
+describe('CLI', () => {
+  const dirtyRepo = (): string => {
+    const root = tempDir()
+    writeTree(root, {'ARCHITECTURE.md': `# A\n\nresolver 8.8.8.8\ntoken ${GITHUB_TOKEN}\n`})
+    return root
+  }
+
+  it('exits 0 when clean and 1 on any finding', () => {
+    const clean = tempDir()
+    writeTree(clean, {'ARCHITECTURE.md': '# A\n'})
+    expect(run(['--source'], {}, {repoRoot: clean, config: NONE})).toMatchObject({
+      code: 0,
+      out: 'redaction gate: clean\n',
+    })
+    expect(run(['--source'], {}, {repoRoot: dirtyRepo(), config: NONE}).code).toBe(1)
+  })
+
+  it('prints values for IPs, pattern IDs for secrets, and annotations only under GitHub Actions', () => {
+    const repoRoot = dirtyRepo()
+    const quiet = run(['--source'], {}, {repoRoot, config: NONE})
+    expect(quiet.out).toContain('ARCHITECTURE.md:3: globally reachable IP 8.8.8.8')
+    expect(quiet.out).toContain('ARCHITECTURE.md:4: secret pattern github-pat')
+    expect(quiet.out).not.toContain('::error')
+    expect(quiet.out).not.toContain(GITHUB_TOKEN)
+
+    const summaryFile = join(tempDir(), 'summary.md')
+    const ci = run(['--source'], {GITHUB_ACTIONS: 'true', GITHUB_STEP_SUMMARY: summaryFile}, {repoRoot, config: NONE})
+    expect(ci.out).toContain('::error file=ARCHITECTURE.md,line=3::globally reachable IP 8.8.8.8')
+    expect(ci.out).toContain('::error file=ARCHITECTURE.md,line=4::secret pattern github-pat')
+    const summary = readFileSync(summaryFile, 'utf8')
+    expect(summary).toContain('github-pat')
+    for (const output of [ci.out, ci.err, summary]) expect(output).not.toContain(GITHUB_TOKEN)
+  })
+
+  it('scans a dist directory', () => {
+    const dist = tempDir()
+    writeTree(dist, {'index.html': '<p>8.8.8.8</p>'})
+    const result = run(['--dist', dist], {}, {config: NONE})
+    expect(result.code).toBe(1)
+    expect(result.out).toContain('index.html:1: globally reachable IP 8.8.8.8')
+  })
+
+  it('exits 2 on bad usage or a missing dist directory', () => {
+    expect(run([], {}, {config: NONE}).code).toBe(2)
+    expect(run(['--bogus'], {}, {config: NONE}).code).toBe(2)
+    expect(run(['--dist'], {}, {config: NONE}).code).toBe(2)
+    expect(run(['--dist', join(tempDir(), 'missing')], {}, {config: NONE}).code).toBe(2)
+  })
+})
+
+describe('corpus', () => {
+  it('the real repo sources pass the gate', () => {
+    const findings = scanSource(REAL, REPO_ROOT)
+    expect(findings.map(formatFinding)).toEqual([])
+  })
+})

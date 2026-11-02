@@ -5,7 +5,9 @@
   "type": "module",
   "exports": {
     "./server/droplet-helpers": "./server/droplet-helpers.ts",
-    "./cliproxy/management": "./cliproxy/management.ts"
+    "./cliproxy/management": "./cliproxy/management.ts",
+    "./docs/frontmatter": "./docs/frontmatter.ts",
+    "./status/history-schema": "./status/history-schema.ts"
   },
   "dependencies": {
     "yaml": "2.9.1",

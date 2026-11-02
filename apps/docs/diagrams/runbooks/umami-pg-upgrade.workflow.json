@@ -1,0 +1,212 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Runbook Map: Umami Postgres Major Upgrade",
+    "output": "apps/docs/.diagrams/runbooks-umami-pg-upgrade.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "legend": {
+      "entries": {
+        "backend": {"label": "Step"},
+        "database": {"label": "Data safeguard"},
+        "external": {"label": "Trigger or outcome"},
+        "security": {"label": "STOP gate or decision"},
+        "messagebus": {"label": "Irreversible step"}
+      }
+    }
+  },
+  "lanes": [
+    {"id": "prep", "label": "Prepare"},
+    {"id": "cutover", "label": "Cutover"},
+    {"id": "gates", "label": "STOP gates", "variant": "exception"},
+    {"id": "after", "label": "After the point of no return"},
+    {"id": "recover", "label": "Recover"}
+  ],
+  "mainPath": [
+    "pre",
+    "backup",
+    "staging",
+    "quiesce",
+    "gate-dump",
+    "switch",
+    "gate-layout",
+    "restore",
+    "gate-manifest",
+    "caddy",
+    "verify"
+  ],
+  "nodes": [
+    {"id": "pre", "lane": "prep", "col": 0, "type": "backend", "label": "Pre-flight", "sublabel": "read-only checks"},
+    {
+      "id": "backup",
+      "lane": "prep",
+      "col": 1,
+      "type": "database",
+      "label": "Backup",
+      "sublabel": "encrypted dump, listed"
+    },
+    {
+      "id": "staging",
+      "lane": "prep",
+      "col": 2,
+      "type": "backend",
+      "label": "Staging validation",
+      "sublabel": "restore on a workstation"
+    },
+    {
+      "id": "quiesce",
+      "lane": "cutover",
+      "col": 2,
+      "type": "backend",
+      "label": "Quiesce",
+      "sublabel": "timer off, freeze, final dump"
+    },
+    {
+      "id": "gate-dump",
+      "lane": "gates",
+      "col": 3,
+      "type": "security",
+      "icon": "stop",
+      "tag": "STOP",
+      "label": "Verify cutover dump",
+      "sublabel": "decrypt, pg_restore --list"
+    },
+    {
+      "id": "switch",
+      "lane": "cutover",
+      "col": 3,
+      "type": "backend",
+      "label": "Switch to PG18",
+      "sublabel": "stop PG15, new volume"
+    },
+    {
+      "id": "gate-layout",
+      "lane": "gates",
+      "col": 4,
+      "type": "security",
+      "icon": "stop",
+      "tag": "STOP",
+      "label": "Layout gates",
+      "sublabel": "mount, fresh cluster, SCRAM"
+    },
+    {
+      "id": "restore",
+      "lane": "cutover",
+      "col": 4,
+      "type": "backend",
+      "label": "Restore, start umami",
+      "sublabel": "internal only"
+    },
+    {
+      "id": "gate-manifest",
+      "lane": "gates",
+      "col": 5,
+      "type": "security",
+      "icon": "stop",
+      "tag": "STOP",
+      "label": "Manifest and migrations",
+      "sublabel": "counts, checksums, no-op"
+    },
+    {
+      "id": "caddy",
+      "lane": "cutover",
+      "col": 5,
+      "type": "messagebus",
+      "icon": "flag",
+      "tag": "IRREVERSIBLE",
+      "label": "Start Caddy",
+      "sublabel": "point of no return"
+    },
+    {
+      "id": "verify",
+      "lane": "after",
+      "col": 5,
+      "type": "backend",
+      "label": "Verify and finalize",
+      "sublabel": "heartbeat, supervised retention"
+    },
+    {
+      "id": "revert",
+      "lane": "recover",
+      "col": 4,
+      "type": "backend",
+      "label": "Pre-Caddy revert",
+      "sublabel": "PG15 volume untouched"
+    },
+    {
+      "id": "rollback-choice",
+      "lane": "recover",
+      "col": 5,
+      "type": "security",
+      "icon": "decision",
+      "tag": "DECISION",
+      "label": "Roll forward or back",
+      "sublabel": "lossy rollback needs a record"
+    }
+  ],
+  "edges": [
+    {"id": "pre-backup", "from": "pre", "to": "backup"},
+    {"id": "backup-staging", "from": "backup", "to": "staging"},
+    {"id": "staging-quiesce", "from": "staging", "to": "quiesce", "label": "pin PR approved", "variant": "emphasis"},
+    {"id": "quiesce-gate", "from": "quiesce", "to": "gate-dump", "label": "final dump"},
+    {"id": "gate-switch", "from": "gate-dump", "to": "switch", "label": "dump verified", "variant": "emphasis"},
+    {"id": "switch-gate", "from": "switch", "to": "gate-layout", "label": "PG18 healthy"},
+    {"id": "layout-restore", "from": "gate-layout", "to": "restore", "label": "layout ok", "variant": "emphasis"},
+    {"id": "restore-gate", "from": "restore", "to": "gate-manifest", "label": "restored"},
+    {"id": "manifest-caddy", "from": "gate-manifest", "to": "caddy", "label": "all pass", "variant": "emphasis"},
+    {"id": "caddy-verify", "from": "caddy", "to": "verify", "label": "heartbeat"},
+    {"id": "dump-fail", "from": "gate-dump", "to": "revert", "label": "fail", "variant": "security", "role": "error"},
+    {
+      "id": "layout-fail",
+      "from": "gate-layout",
+      "to": "revert",
+      "label": "fail",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "manifest-fail",
+      "from": "gate-manifest",
+      "to": "revert",
+      "label": "fail",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "choice-revert",
+      "from": "rollback-choice",
+      "to": "revert",
+      "label": "lossy rollback",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "caddy-problem",
+      "from": "caddy",
+      "to": "rollback-choice",
+      "label": "problem",
+      "variant": "dashed",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "How to read this map",
+      "items": [
+        "STOP gates are hard gates: on a failure, do not continue; revert or investigate",
+        "Starting Caddy is the one irreversible step; later writes land only in PG18",
+        "PG15 stays untouched as the rollback anchor until finalize"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Safeguards",
+      "items": [
+        "No step that stops PG15 runs until the cutover dump is encrypted, checksummed and decrypt-tested",
+        "Never both majors at once on the host, never compose down, never remove the PG15 volume before finalize"
+      ]
+    }
+  ]
+}

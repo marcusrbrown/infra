@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Operator Path: Browser to Gateway",
+    "output": "apps/docs/.diagrams/operator-path.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "participants": [
+    {"id": "browser", "type": "external", "label": "Browser", "sublabel": "operator"},
+    {"id": "caddy", "type": "cloud", "label": "Dashboard Caddy", "sublabel": "TLS + /operator/*"},
+    {"id": "dashboard", "type": "frontend", "label": "Dashboard app", "sublabel": "UI on :3000"},
+    {"id": "gateway", "type": "backend", "label": "Gateway listener", "sublabel": "session, OAuth, SSE"},
+    {"id": "github", "type": "external", "label": "GitHub OAuth", "sublabel": "identity"}
+  ],
+  "segments": [
+    {"from": 150, "to": 318, "label": "Page load"},
+    {"from": 328, "to": 622, "label": "Sign in"},
+    {"from": 634, "to": 746, "label": "Run stream"}
+  ],
+  "messages": [
+    {"id": "page-request", "from": "browser", "to": "caddy", "y": 170, "label": "GET /", "variant": "default"},
+    {
+      "id": "page-forward",
+      "from": "caddy",
+      "to": "dashboard",
+      "y": 198,
+      "label": "forward to app",
+      "variant": "default"
+    },
+    {
+      "id": "session-check",
+      "from": "dashboard",
+      "to": "gateway",
+      "y": 226,
+      "label": "GET /operator/session",
+      "variant": "security",
+      "note": "Server-side, via a Caddy alias"
+    },
+    {
+      "id": "session-result",
+      "from": "gateway",
+      "to": "dashboard",
+      "y": 290,
+      "label": "identity or 401",
+      "variant": "return"
+    },
+    {
+      "id": "page-response",
+      "from": "dashboard",
+      "to": "browser",
+      "y": 310,
+      "label": "page, or 302 to login",
+      "variant": "return"
+    },
+    {
+      "id": "login-start",
+      "from": "browser",
+      "to": "caddy",
+      "y": 350,
+      "label": "GET /operator/auth/github/start",
+      "variant": "default"
+    },
+    {
+      "id": "login-proxy",
+      "from": "caddy",
+      "to": "gateway",
+      "y": 378,
+      "label": "proxy over the VPC",
+      "variant": "emphasis"
+    },
+    {
+      "id": "login-redirect",
+      "from": "gateway",
+      "to": "browser",
+      "y": 406,
+      "label": "302 to GitHub",
+      "variant": "return",
+      "note": "Responses travel back through Caddy"
+    },
+    {"id": "authorize", "from": "browser", "to": "github", "y": 466, "label": "authorize", "variant": "security"},
+    {
+      "id": "authorize-code",
+      "from": "github",
+      "to": "browser",
+      "y": 494,
+      "label": "redirect with code",
+      "variant": "return"
+    },
+    {
+      "id": "callback",
+      "from": "browser",
+      "to": "caddy",
+      "y": 522,
+      "label": "GET /operator/auth/github/callback",
+      "variant": "default"
+    },
+    {
+      "id": "callback-proxy",
+      "from": "caddy",
+      "to": "gateway",
+      "y": 550,
+      "label": "proxy over the VPC",
+      "variant": "emphasis"
+    },
+    {
+      "id": "exchange",
+      "from": "gateway",
+      "to": "github",
+      "y": 578,
+      "label": "exchange code, read user",
+      "variant": "security"
+    },
+    {
+      "id": "session-cookie",
+      "from": "gateway",
+      "to": "browser",
+      "y": 606,
+      "label": "session cookie, 302 back",
+      "variant": "return"
+    },
+    {
+      "id": "stream-request",
+      "from": "browser",
+      "to": "caddy",
+      "y": 670,
+      "label": "GET /operator/runs/:runId/stream",
+      "variant": "default"
+    },
+    {
+      "id": "stream-proxy",
+      "from": "caddy",
+      "to": "gateway",
+      "y": 698,
+      "label": "proxy, no buffering",
+      "variant": "emphasis"
+    },
+    {
+      "id": "stream-frames",
+      "from": "gateway",
+      "to": "browser",
+      "y": 726,
+      "label": "event: ready, then frames",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Same origin",
+      "items": [
+        "Browser calls to /operator/* go to the dashboard host, never to the gateway host",
+        "Caddy proxies that prefix to the gateway listener over the private VPC",
+        "Everything else goes to the dashboard app"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Auth",
+      "items": [
+        "The gateway is the single auth authority: GitHub OAuth, then an allowlist of numeric user IDs",
+        "The dashboard never mints sessions; it asks the gateway",
+        "Unauthenticated calls get 401"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Streaming",
+      "items": [
+        "The run stream is server-sent events",
+        "Caddy turns off response buffering so frames arrive as sent",
+        "The first frame is event: ready with the contract version"
+      ]
+    }
+  ]
+}

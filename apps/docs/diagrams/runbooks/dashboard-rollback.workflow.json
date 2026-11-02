@@ -1,0 +1,162 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Runbook Map: Dashboard Image Rollback",
+    "output": "apps/docs/.diagrams/runbooks-dashboard-rollback.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "legend": {
+      "entries": {
+        "backend": {"label": "Step"},
+        "database": {"label": "Data safeguard"},
+        "external": {"label": "Trigger or outcome"},
+        "security": {"label": "STOP gate or decision"},
+        "messagebus": {"label": "Irreversible step"}
+      }
+    }
+  },
+  "lanes": [
+    {"id": "operator", "label": "Operator"},
+    {"id": "git", "label": "Git and CI"},
+    {"id": "gates", "label": "Gates and stops", "variant": "exception"},
+    {"id": "droplet", "label": "Droplet"}
+  ],
+  "mainPath": ["detect", "paired", "prior", "revert", "pr", "approve", "deploy", "verify"],
+  "nodes": [
+    {
+      "id": "detect",
+      "lane": "operator",
+      "col": 0,
+      "type": "external",
+      "label": "Bad release seen",
+      "sublabel": "healthz, status, logs"
+    },
+    {
+      "id": "paired",
+      "lane": "operator",
+      "col": 1,
+      "type": "security",
+      "icon": "decision",
+      "tag": "DECISION",
+      "label": "Contract changed?",
+      "sublabel": "operator contract version"
+    },
+    {
+      "id": "stop-paired",
+      "lane": "gates",
+      "col": 2,
+      "type": "security",
+      "icon": "stop",
+      "tag": "STOP",
+      "label": "Roll back with gateway",
+      "sublabel": "never dashboard-only"
+    },
+    {
+      "id": "prior",
+      "lane": "operator",
+      "col": 2,
+      "type": "backend",
+      "label": "Find the prior digest",
+      "sublabel": "or bump forward if good"
+    },
+    {
+      "id": "revert",
+      "lane": "git",
+      "col": 3,
+      "type": "backend",
+      "label": "Revert the pin",
+      "sublabel": "or edit the image line"
+    },
+    {
+      "id": "pr",
+      "lane": "git",
+      "col": 4,
+      "type": "backend",
+      "label": "PR and merge",
+      "sublabel": "deploy workflow starts"
+    },
+    {
+      "id": "approve",
+      "lane": "gates",
+      "col": 4,
+      "type": "security",
+      "icon": "decision",
+      "tag": "DECISION",
+      "label": "Approve the gate",
+      "sublabel": "dashboard environment"
+    },
+    {
+      "id": "deploy",
+      "lane": "droplet",
+      "col": 5,
+      "type": "messagebus",
+      "icon": "flag",
+      "tag": "IRREVERSIBLE",
+      "label": "Locked deploy",
+      "sublabel": "always prunes images"
+    },
+    {
+      "id": "stop-failed",
+      "lane": "gates",
+      "col": 5,
+      "type": "security",
+      "icon": "stop",
+      "tag": "STOP",
+      "label": "Deploy stopped",
+      "sublabel": "read stage and code"
+    },
+    {
+      "id": "verify",
+      "lane": "operator",
+      "col": 5,
+      "type": "backend",
+      "label": "Verify",
+      "sublabel": "status, healthz, logs"
+    }
+  ],
+  "edges": [
+    {"id": "detect-paired", "from": "detect", "to": "paired"},
+    {"id": "paired-prior", "from": "paired", "to": "prior", "label": "no", "variant": "emphasis"},
+    {
+      "id": "paired-stop",
+      "from": "paired",
+      "to": "stop-paired",
+      "label": "yes",
+      "variant": "security",
+      "role": "branch"
+    },
+    {"id": "prior-revert", "from": "prior", "to": "revert"},
+    {"id": "revert-pr", "from": "revert", "to": "pr"},
+    {"id": "pr-approve", "from": "pr", "to": "approve", "label": "gate waits", "variant": "security"},
+    {"id": "approve-deploy", "from": "approve", "to": "deploy", "label": "approved", "variant": "emphasis"},
+    {"id": "deploy-verify", "from": "deploy", "to": "verify", "label": "healthy", "variant": "emphasis"},
+    {
+      "id": "deploy-stop",
+      "from": "deploy",
+      "to": "stop-failed",
+      "label": "failure code",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Why it is irreversible",
+      "items": [
+        "The deploy always prunes unused images before it acquires the pinned digest",
+        "There is no automatic rollback if publication or runtime convergence fails",
+        "The superseded image stays locally for one generation, and the next deploy may prune it"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Source of truth",
+      "items": [
+        "The compose pin is the contract; there is no override file or runtime flag",
+        "Cache presence alone is never permission to change runtime state"
+      ]
+    }
+  ]
+}

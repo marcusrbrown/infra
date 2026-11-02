@@ -1,0 +1,53 @@
+---
+// The newest sample time. Absolute UTC works without JavaScript; the script adds the relative age and reveals the
+// stale warning once the sample is older than the threshold, and recomputes both every minute and when a hidden tab
+// becomes visible again, so a page left open does not keep showing "fresh". `verify-status-output` requires the hooks
+// on every page.
+import {formatUtc, STALE_THRESHOLD_MS} from '../lib/history-view'
+
+interface Props {
+  lastSampleAt: string
+}
+
+const {lastSampleAt} = Astro.props
+const staleMinutes = STALE_THRESHOLD_MS / 60_000
+---
+
+<p>
+  Last sample <time id="status-generated" datetime={lastSampleAt} data-stale-minutes={staleMinutes}
+    >{formatUtc(lastSampleAt)}</time
+  ><span id="status-age"></span>.
+</p>
+<p id="status-stale" hidden>
+  ⚠️ The newest sample is more than {staleMinutes} minutes old. The snapshot may have stopped, so these results can be out of date.
+</p>
+
+<script is:inline>
+  ;(function () {
+    var el = document.getElementById('status-generated')
+    if (!el) return
+    var then = Date.parse(el.getAttribute('datetime') || '')
+    if (isNaN(then)) return
+    var limit = Number(el.getAttribute('data-stale-minutes')) * 60000
+    var age = document.getElementById('status-age')
+    var warn = document.getElementById('status-stale')
+    function update() {
+      var elapsed = Date.now() - then
+      var minutes = Math.max(0, Math.round(elapsed / 60000))
+      if (age) {
+        age.textContent =
+          minutes < 60
+            ? ' (' + minutes + ' min ago)'
+            : minutes < 2880
+              ? ' (' + Math.round(minutes / 60) + ' h ago)'
+              : ' (' + Math.round(minutes / 1440) + ' days ago)'
+      }
+      if (warn) warn.hidden = elapsed <= limit
+    }
+    update()
+    setInterval(update, 60000)
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) update()
+    })
+  })()
+</script>

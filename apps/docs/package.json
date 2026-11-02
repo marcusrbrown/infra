@@ -1,0 +1,20 @@
+{
+  "name": "@marcusrbrown/infra-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run generate && bun run diagrams && bun run redact:source && astro build && bun run redact:dist && bun run verify:status",
+    "dev": "bun run generate && bun run diagrams && astro dev",
+    "diagrams": "bun run scripts/render-diagrams.ts",
+    "generate": "bun run scripts/generate-content.ts",
+    "redact:dist": "bun run scripts/redaction-gate.ts --dist dist",
+    "redact:source": "bun run scripts/redaction-gate.ts --source",
+    "test": "bun test",
+    "verify:status": "bun run scripts/verify-status-output.ts dist"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.8",
+    "@marcusrbrown/infra-shared": "workspace:*",
+    "astro": "7.4.4"
+  }
+}

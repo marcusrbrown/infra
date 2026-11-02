@@ -1,4 +1,8 @@
+import {APP_IDS, OBSERVATION_KINDS, sampleDetailSchema} from '@marcusrbrown/infra-shared/status/history-schema'
 import {z} from 'zod'
+
+export {APP_IDS, OBSERVATION_KINDS} from '@marcusrbrown/infra-shared/status/history-schema'
+export type {AppId, ObservationKind} from '@marcusrbrown/infra-shared/status/history-schema'
 
 /**
  * The typed status contract emitted by `status --json` (and read by the snapshot and the public site).
@@ -12,15 +16,11 @@ import {z} from 'zod'
  */
 export const STATUS_SCHEMA_VERSION = 1 as const
 
-export const OBSERVATION_KINDS = ['reachability', 'container-health', 'deploy-state', 'end-to-end', 'resource'] as const
 export const OBSERVATION_RESULTS = ['pass', 'fail', 'unknown', 'not_measured'] as const
 export const OBSERVATION_SOURCES = ['http', 'ssh', 'github-api', 'monitor', 'config'] as const
-export const APP_IDS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker'] as const
 
-export type ObservationKind = (typeof OBSERVATION_KINDS)[number]
 export type ObservationResult = (typeof OBSERVATION_RESULTS)[number]
 export type ObservationSource = (typeof OBSERVATION_SOURCES)[number]
-export type AppId = (typeof APP_IDS)[number]
 
 const isoTimestampSchema = z.iso.datetime()
 
@@ -29,19 +29,8 @@ const isoTimestampSchema = z.iso.datetime()
  * version, two ISO times (`since`, `probeAt`) and a short slug-shaped reason. There is no free-text field, so raw response bodies, URLs and
  * error messages have nowhere to go.
  */
-export const observationDetailSchema = z.strictObject({
-  statusCode: z.number().int().min(100).max(599).optional(),
+export const observationDetailSchema = sampleDetailSchema.extend({
   durationMs: z.number().int().min(0).max(600_000).optional(),
-  contractVersion: z.string().min(1).max(64).optional(),
-  /** When the observed state began (a deployment status `created_at`), e.g. "waiting since". Not `observedAt`. */
-  since: isoTimestampSchema.optional(),
-  /** When the monitor's probe ran, as its probe line reports it. Not `observedAt`. */
-  probeAt: isoTimestampSchema.optional(),
-  reason: z
-    .string()
-    .max(32)
-    .regex(/^[a-z][a-z0-9_-]*$/)
-    .optional(),
 })
 
 const observationBaseShape = {

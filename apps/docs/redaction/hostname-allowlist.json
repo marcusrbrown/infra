@@ -1,0 +1,242 @@
+[
+  {
+    "host": "mrbro.dev",
+    "reason": "Site origin: the canonical URL and sitemap entries for the user site this project site sits under",
+    "scope": ["**/*.md", "**/*.html", "sitemap-*.xml"]
+  },
+  {
+    "host": "fro.bot",
+    "reason": "Fro Bot apex domain, named in the Umami guide as the tracked-site context",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "cliproxy.fro.bot",
+    "reason": "Public CLIProxyAPI endpoint: probed by the status page and named in its operator guide",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "gateway.fro.bot",
+    "reason": "Public Fro Bot gateway endpoint: probed by the status page and named in its operator guide",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "dashboard.fro.bot",
+    "reason": "Public operator dashboard endpoint: probed by the status page and named in its operator guide",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "metrics.fro.bot",
+    "reason": "Public Umami analytics endpoint: probed by the status page and named in its operator guide",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "broker.fro.bot",
+    "reason": "Public credential broker endpoint: probed by the status page and named in its operator guide",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "box.heatvision.co",
+    "reason": "KeeWeb deploy target (Mail-In-A-Box server), named in the KeeWeb guide and the architecture overview",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "kw.igg.ms",
+    "reason": "Public KeeWeb site host, named in the KeeWeb guide",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "github.com",
+    "reason": "Repository, release and workflow links; also the JetBrains Mono link in Archify diagram HTML",
+    "scope": ["**/*.md", "**/*.html", "_astro/*.js", "pagefind/*.js"]
+  },
+  {
+    "host": "api.github.com",
+    "reason": "GitHub REST API host named in the operator-auth lifecycle runbook",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "githubusercontent.com",
+    "reason": "GitHub-owned content domain named in the agent storage runbook egress list",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "token.actions.githubusercontent.com",
+    "reason": "GitHub Actions OIDC issuer named in the agent IAM trust-policy docs",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "ghcr.io",
+    "reason": "GitHub Container Registry host in image references",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "discord.com",
+    "reason": "Discord API and developer-portal links in the gateway and token runbooks",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "sts.amazonaws.com",
+    "reason": "AWS STS endpoint named in the agent OIDC docs",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "us-west-2.console.aws.amazon.com",
+    "reason": "AWS console link in the VPN runbook",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "registry.npmjs.org",
+    "reason": "npm registry host in the agent storage runbook egress list",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "nodejs.org",
+    "reason": "Node.js download host in the agent storage runbook egress list",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "models.dev",
+    "reason": "Model catalog host named in the gateway guide",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "models.opencode.ai",
+    "reason": "OpenCode model catalog host named in the gateway guide",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "umami.is",
+    "reason": "Umami project site named in the Umami guide",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "www.w3.org",
+    "reason": "XML namespace URI in SVG: Archify diagram HTML, Starlight/Pagefind bundle CSS and JS, and the sitemap xhtml namespace",
+    "scope": ["diagrams/*.html", "_astro/*.css", "_astro/*.js", "pagefind/*.css", "pagefind/*.js", "sitemap-*.xml"]
+  },
+  {
+    "host": "openfontlicense.org",
+    "reason": "SIL OFL link in the Archify diagram HTML font notice",
+    "scope": ["diagrams/*.html"]
+  },
+  {
+    "host": "openai.com",
+    "reason": "Brand-mark attribution link in Archify diagram HTML",
+    "scope": ["diagrams/*.html"]
+  },
+  {
+    "host": "apache.org",
+    "reason": "Brand-mark attribution link in Archify diagram HTML",
+    "scope": ["diagrams/*.html"]
+  },
+  {
+    "host": "www.apache.org",
+    "reason": "Brand-mark attribution link in Archify diagram HTML",
+    "scope": ["diagrams/*.html"]
+  },
+  {
+    "host": "angular.dev",
+    "reason": "Brand-mark attribution link in the Archify software notices embedded in diagram HTML",
+    "scope": ["diagrams/*.html"]
+  },
+  {
+    "host": "creativecommons.org",
+    "reason": "License link in the Archify software notices embedded in diagram HTML",
+    "scope": ["diagrams/*.html"]
+  },
+  {
+    "host": "get.jenkins.io",
+    "reason": "Brand-mark attribution link in the Archify software notices embedded in diagram HTML",
+    "scope": ["diagrams/*.html"]
+  },
+  {
+    "host": "www.rust-lang.org",
+    "reason": "Brand-mark attribution link in Archify diagram HTML",
+    "scope": ["diagrams/*.html"]
+  },
+  {
+    "host": "adamlaki.com",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "cloudcannon.com",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "codesyntax.com",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "gmail.com",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "goudarzjafari.com",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "harrymkt.github.io",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "marufalom.com",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "surfverse.com",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "thetechbasket.com",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "upenn.edu",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "yekta.dev",
+    "reason": "Pagefind UI translation credit inside the bundled UI strings",
+    "scope": ["_astro/ui-core.*.js", "pagefind/pagefind-ui.js", "pagefind/pagefind-component-ui.js"]
+  },
+  {
+    "host": "git.io",
+    "reason": "URL in a comment of the bundled Pagefind highlight script",
+    "scope": ["pagefind/pagefind-highlight.js"]
+  },
+  {
+    "host": "markjs.io",
+    "reason": "URL in a comment of the bundled Pagefind highlight script",
+    "scope": ["pagefind/pagefind-highlight.js"]
+  },
+  {
+    "host": "bugs.webkit.org",
+    "reason": "Browser-bug reference in a comment of the bundled Pagefind CSS",
+    "scope": ["pagefind/*.css"]
+  },
+  {
+    "host": "bugzilla.mozilla.org",
+    "reason": "Browser-bug reference in a comment of the bundled Pagefind CSS",
+    "scope": ["pagefind/*.css"]
+  },
+  {
+    "host": "www.sitemaps.org",
+    "reason": "Sitemap XML schema namespace",
+    "scope": ["sitemap-*.xml"]
+  },
+  {
+    "host": "www.google.com",
+    "reason": "Sitemap extension XML namespace",
+    "scope": ["sitemap-*.xml"]
+  }
+]

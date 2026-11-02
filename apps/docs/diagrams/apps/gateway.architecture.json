@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Fro Bot Gateway Deploy",
+    "output": "apps/docs/.diagrams/apps-gateway.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "webhook",
+      "type": "external",
+      "label": "Webhook senders",
+      "sublabel": "opt-in, HMAC signed",
+      "pos": [40, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "dashboard",
+      "type": "external",
+      "label": "Dashboard Caddy",
+      "sublabel": "operator route",
+      "pos": [40, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "ghcr",
+      "type": "cloud",
+      "label": "GHCR",
+      "sublabel": "images by digest",
+      "pos": [40, 340],
+      "size": [150, 60]
+    },
+    {
+      "id": "discord",
+      "type": "external",
+      "label": "Discord",
+      "sublabel": "commands + mentions",
+      "pos": [290, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "gateway",
+      "type": "backend",
+      "label": "Gateway daemon",
+      "sublabel": "per-channel run queue",
+      "pos": [290, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "workspace",
+      "type": "backend",
+      "label": "Workspace",
+      "sublabel": "OpenCode, uid 10001",
+      "pos": [540, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "repos",
+      "type": "database",
+      "label": "workspace-repos",
+      "sublabel": "volume, checkouts",
+      "pos": [540, 340],
+      "size": [150, 60]
+    },
+    {
+      "id": "mitm",
+      "type": "security",
+      "label": "mitmproxy",
+      "sublabel": "egress allowlist",
+      "pos": [790, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "certs",
+      "type": "database",
+      "label": "mitmproxy CA",
+      "sublabel": "named volume",
+      "pos": [790, 340],
+      "size": [150, 60]
+    },
+    {
+      "id": "cliproxy",
+      "type": "external",
+      "label": "CLIProxyAPI",
+      "sublabel": "model endpoint",
+      "pos": [1040, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "state",
+      "type": "cloud",
+      "label": "Object store",
+      "sublabel": "state + sessions",
+      "pos": [290, 470],
+      "size": [150, 60]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "Droplet, Compose stack",
+      "wraps": ["gateway", "workspace", "repos", "mitm", "certs"],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {"id": "operator-listener", "from": "dashboard", "to": "gateway", "label": "operator", "variant": "security"},
+    {"id": "announce", "from": "webhook", "to": "gateway", "label": "announce", "variant": "dashed"},
+    {"id": "pull", "from": "ghcr", "to": "gateway", "label": "pull", "variant": "dashed"},
+    {"id": "discord-api", "from": "gateway", "to": "discord", "label": "Discord API", "variant": "emphasis"},
+    {"id": "run", "from": "gateway", "to": "workspace", "label": "clone, run", "variant": "emphasis"},
+    {"id": "egress", "from": "workspace", "to": "mitm", "label": "egress", "variant": "security"},
+    {"id": "allowlisted", "from": "mitm", "to": "cliproxy", "label": "allowlist", "variant": "security"},
+    {"id": "checkouts", "from": "workspace", "to": "repos", "label": "checkouts"},
+    {"id": "ca", "from": "mitm", "to": "certs", "label": "CA"},
+    {"id": "persist", "from": "gateway", "to": "state", "label": "state"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Stack",
+      "items": [
+        "Images are built in CI and pulled by digest; the droplet never builds",
+        "A Caddy service joins the stack only when announce or the operator listener is on"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Isolation",
+      "items": [
+        "The workspace sits on its own sandbox network with no host ports",
+        "All workspace egress goes through mitmproxy, which fails closed on an empty allowlist",
+        "The operator listener is published only on the private VPC address, restricted to the dashboard host"
+      ]
+    }
+  ]
+}

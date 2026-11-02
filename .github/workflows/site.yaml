@@ -1,0 +1,160 @@
+---
+name: Site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ARCHITECTURE.md
+      - STRUCTURE.md
+      - apps/*/AGENTS.md
+      - docs/runbooks/**
+      - docs/solutions/**
+      - apps/docs/**
+      - packages/shared/docs/**
+      - packages/shared/status/**
+      - .agents/skills/archify/**
+      - .github/workflows/site.yaml
+  pull_request:
+    paths:
+      - ARCHITECTURE.md
+      - STRUCTURE.md
+      - apps/*/AGENTS.md
+      - docs/runbooks/**
+      - docs/solutions/**
+      - apps/docs/**
+      - packages/shared/docs/**
+      - packages/shared/status/**
+      - .agents/skills/archify/**
+      - .github/workflows/site.yaml
+  workflow_dispatch:
+  workflow_run:
+    workflows: [Status Snapshot]
+    types: [completed]
+
+permissions:
+  contents: read
+
+# One publish group: a newer push, dispatch or snapshot run cancels an older in-flight one, so a slow older build
+# can never deploy after a newer one. A workflow_run that the build guard will skip gets a unique group, so it
+# cannot cancel a real publish. Each pull request gets its own group.
+concurrency:
+  group: >-
+    site-${{ github.event_name == 'pull_request' && github.ref ||
+    github.event_name != 'workflow_run' && 'publish' ||
+    github.event.workflow_run.conclusion == 'success' &&
+    github.event.workflow_run.head_branch == 'main' &&
+    (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch') &&
+    'publish' || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build site
+    # A workflow_run build publishes only after a successful snapshot from a writer event on main.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # Full history: diagram labels read each spec's last commit.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      # Astro and Archify run under node, and ubuntu-latest's default lacks ES2024 APIs.
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      - name: Locate status history
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        id: locate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NO_COLOR: 1
+        run: bun run packages/cli/src/cli.ts status history-locate
+
+      - name: Require located history
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          HISTORY_STATE: ${{ steps.locate.outputs.state }}
+        run: |
+          if [ "$HISTORY_STATE" != "found" ]; then
+            echo "::error::No usable status history (state: ${HISTORY_STATE:-none}). See docs/runbooks/docs-site.md."
+            exit 1
+          fi
+
+      - name: Download status history (snapshot run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: status-history
+          path: ${{ runner.temp }}/status-history
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Download status history (located run)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: status-history
+          path: ${{ runner.temp }}/status-history
+          run-id: ${{ steps.locate.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      # Pull requests set neither variable, so they build from the committed fixture.
+      - name: Select status history
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "STATUS_HISTORY_DIR=$RUNNER_TEMP/status-history"
+            echo "STATUS_HISTORY_REQUIRED=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Build site
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          NO_COLOR: 1
+        run: bun run --cwd apps/docs build
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: apps/docs/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

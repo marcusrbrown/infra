@@ -1,10 +1,41 @@
-import type {AppId, Observation, ObservationResult} from './observation'
+import type {
+  AppId,
+  History,
+  HistorySample,
+  ResultCode,
+  SampleDetail,
+} from '@marcusrbrown/infra-shared/status/history-schema'
+import type {Observation, ObservationResult} from './observation'
 import {randomUUID} from 'node:crypto'
 import {mkdir, readdir, readFile, rename, rm, stat, writeFile} from 'node:fs/promises'
 import {join} from 'node:path'
 
-import {z} from 'zod'
-import {APP_IDS, observationDetailSchema} from './observation'
+import {
+  APP_IDS,
+  HISTORY_SCHEMA_VERSION,
+  HISTORY_WINDOW_DAYS,
+  HISTORY_WINDOW_MS,
+  historyAppFileSchema,
+  historyMetaSchema,
+  historySampleSchema,
+  sampleDetailSchema,
+} from '@marcusrbrown/infra-shared/status/history-schema'
+
+export {
+  HISTORY_SCHEMA_VERSION,
+  HISTORY_WINDOW_DAYS,
+  HISTORY_WINDOW_MS,
+  historyAppFileSchema,
+  historyMetaSchema,
+  historySampleSchema,
+}
+export type {
+  History,
+  HistoryMeta,
+  HistorySample,
+  ResultCode,
+  SampleDetail,
+} from '@marcusrbrown/infra-shared/status/history-schema'
 
 /**
  * The 90-day public status history: `meta.json` plus one `apps/<app>.json` list per app.
@@ -23,14 +54,8 @@ import {APP_IDS, observationDetailSchema} from './observation'
  * - the whole history stays under 10 MB uncompressed
  */
 
-export const HISTORY_SCHEMA_VERSION = 1 as const
-export const HISTORY_WINDOW_DAYS = 90
-export const HISTORY_WINDOW_MS = HISTORY_WINDOW_DAYS * 24 * 60 * 60_000
 export const HISTORY_MAX_BYTES = 10 * 1024 * 1024
 export const MAX_FUTURE_SKEW_MS = 5 * 60_000
-/** Most observations one sample can carry; the largest app declares four. */
-const MAX_OBSERVATIONS_PER_SAMPLE = 32
-
 const MESSAGES = {
   'missing-history': 'history not found; pass --bootstrap to create it',
   'history-exists': 'history already exists; refusing to bootstrap over it',
@@ -63,62 +88,15 @@ export class HistoryError extends Error {
 }
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
+// The sample, meta and app-file schemas live in `@marcusrbrown/infra-shared/status/history-schema`.
 
 const RESULT_CODES = {pass: 'p', fail: 'f', unknown: 'u', not_measured: 'n'} as const satisfies Record<
   ObservationResult,
   string
 >
-const resultCodeSchema = z.enum(['p', 'f', 'u', 'n'])
-export type ResultCode = z.infer<typeof resultCodeSchema>
-
-const observationIdSchema = z
-  .string()
-  .max(64)
-  .regex(/^[a-z][a-z0-9-]*$/)
 
 /** The detail keys a public sample may carry; `durationMs` is noise and stays out. */
 const SAMPLE_DETAIL_KEYS = ['statusCode', 'reason', 'contractVersion', 'since', 'probeAt'] as const
-const sampleDetailSchema = observationDetailSchema.pick({
-  statusCode: true,
-  reason: true,
-  contractVersion: true,
-  since: true,
-  probeAt: true,
-})
-export type SampleDetail = z.infer<typeof sampleDetailSchema>
-
-export const historySampleSchema = z
-  .strictObject({
-    /** When the snapshot ran. */
-    t: z.iso.datetime(),
-    /** `GITHUB_RUN_ID`, or `local-<ISO time>` for a run outside Actions (bare `local` is the legacy form). */
-    run: z.string().regex(/^(?:\d{1,20}|local(?:-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z)?)$/),
-    /** `GITHUB_RUN_ATTEMPT`. */
-    att: z.number().int().min(1).max(10_000),
-    r: z.record(observationIdSchema, resultCodeSchema),
-    d: z.record(observationIdSchema, sampleDetailSchema).optional(),
-  })
-  .refine(sample => {
-    const count = Object.keys(sample.r).length
-    return count >= 1 && count <= MAX_OBSERVATIONS_PER_SAMPLE
-  }, 'r must hold 1 to 32 results')
-  .refine(sample => Object.keys(sample.d ?? {}).every(id => id in sample.r), 'd may only describe ids present in r')
-
-export type HistorySample = z.infer<typeof historySampleSchema>
-
-export const historyMetaSchema = z.strictObject({
-  schemaVersion: z.literal(HISTORY_SCHEMA_VERSION),
-  lastSampleAt: z.iso.datetime(),
-})
-
-export type HistoryMeta = z.infer<typeof historyMetaSchema>
-
-export const historyAppFileSchema = z.array(historySampleSchema)
-
-export interface History {
-  meta: HistoryMeta
-  apps: Record<AppId, HistorySample[]>
-}
 
 export interface RunIdentity {
   run: string

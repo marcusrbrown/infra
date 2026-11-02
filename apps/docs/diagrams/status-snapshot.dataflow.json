@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Status Snapshot Data Flow",
+    "output": "apps/docs/.diagrams/status-snapshot.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "stages": [{"label": "Sources"}, {"label": "Read"}, {"label": "Merge"}, {"label": "Store"}, {"label": "Site"}],
+  "nodes": [
+    {
+      "id": "s-history",
+      "type": "database",
+      "label": "Status history",
+      "sublabel": "artifact from last run",
+      "stage": 0,
+      "row": 0
+    },
+    {
+      "id": "s-endpoints",
+      "type": "external",
+      "label": "Public endpoints",
+      "sublabel": "app health URLs",
+      "stage": 0,
+      "row": 1
+    },
+    {
+      "id": "s-deployments",
+      "type": "cloud",
+      "label": "Deployments API",
+      "sublabel": "one environment per app",
+      "stage": 0,
+      "row": 2
+    },
+    {
+      "id": "s-monitor",
+      "type": "cloud",
+      "label": "Auth monitor run",
+      "sublabel": "newest scheduled run",
+      "stage": 0,
+      "row": 3
+    },
+    {
+      "id": "r-history",
+      "type": "backend",
+      "label": "Locate + download",
+      "sublabel": "status history-locate",
+      "stage": 1,
+      "row": 0
+    },
+    {
+      "id": "r-probes",
+      "type": "backend",
+      "label": "Public probes",
+      "sublabel": "HTTP reachability",
+      "stage": 1,
+      "row": 1
+    },
+    {"id": "r-deploy", "type": "backend", "label": "Deploy state", "sublabel": "newest status", "stage": 1, "row": 2},
+    {
+      "id": "r-monitor",
+      "type": "backend",
+      "label": "Monitor probe line",
+      "sublabel": "probe, reason, at",
+      "stage": 1,
+      "row": 3
+    },
+    {"id": "cron", "type": "external", "label": "Cron", "sublabel": "twice an hour, main", "stage": 1, "row": 4},
+    {
+      "id": "merge",
+      "type": "backend",
+      "label": "Merge + validate",
+      "sublabel": "status snapshot",
+      "tag": "fail closed",
+      "stage": 2,
+      "row": 2
+    },
+    {
+      "id": "upload",
+      "type": "database",
+      "label": "History artifact",
+      "sublabel": "upload on main",
+      "stage": 3,
+      "row": 2
+    },
+    {
+      "id": "site",
+      "type": "backend",
+      "label": "Site build",
+      "sublabel": "workflow_run",
+      "tag": "Pages",
+      "stage": 4,
+      "row": 2
+    }
+  ],
+  "flows": [
+    {"id": "f-history", "from": "s-history", "to": "r-history", "label": "prior run", "classification": "artifact"},
+    {"id": "f-endpoints", "from": "s-endpoints", "to": "r-probes", "label": "HTTP probes", "classification": "public"},
+    {
+      "id": "f-deployments",
+      "from": "s-deployments",
+      "to": "r-deploy",
+      "label": "deploy status",
+      "classification": "read-only"
+    },
+    {
+      "id": "f-monitor",
+      "from": "s-monitor",
+      "to": "r-monitor",
+      "label": "probe line",
+      "classification": "parsed fields"
+    },
+    {"id": "f-merge-history", "from": "r-history", "to": "merge", "label": "past samples", "variant": "emphasis"},
+    {"id": "f-merge-probes", "from": "r-probes", "to": "merge", "label": "reachability"},
+    {"id": "f-merge-deploy", "from": "r-deploy", "to": "merge", "label": "deploy state"},
+    {"id": "f-merge-monitor", "from": "r-monitor", "to": "merge", "label": "end-to-end"},
+    {"id": "f-cron", "from": "cron", "to": "merge", "label": "tick", "variant": "dashed"},
+    {"id": "f-upload", "from": "merge", "to": "upload", "label": "new history", "variant": "emphasis"},
+    {"id": "f-site", "from": "upload", "to": "site", "label": "snapshot done", "variant": "dashed"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Read-only inputs",
+      "items": [
+        "Probes, the Deployments API and the monitor's probe line are all read-only",
+        "Only parsed fields cross from the monitor log, never raw text"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Fail closed",
+      "items": [
+        "The merge rejects a history that loses samples, moves backwards in time or repeats a run",
+        "A bad history never becomes the next artifact"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Publishing",
+      "items": [
+        "The site build starts from the finished snapshot run",
+        "It runs only for scheduled or manual runs on main"
+      ]
+    }
+  ]
+}

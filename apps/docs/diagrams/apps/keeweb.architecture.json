@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "KeeWeb Deploy",
+    "output": "apps/docs/.diagrams/apps-keeweb.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "release",
+      "type": "cloud",
+      "label": "KeeWeb release",
+      "sublabel": "zip, cached locally",
+      "pos": [40, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "build",
+      "type": "backend",
+      "label": "build.ts",
+      "sublabel": "verify SHA-256, unpack",
+      "pos": [285, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "secret",
+      "type": "security",
+      "label": "Dropbox app secret",
+      "sublabel": "env var, never in git",
+      "pos": [285, 210],
+      "size": [150, 60]
+    },
+    {
+      "id": "dist",
+      "type": "database",
+      "label": "dist/",
+      "sublabel": "rebuilt every run",
+      "pos": [530, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "deploy",
+      "type": "backend",
+      "label": "deploy.sh",
+      "sublabel": "content only by default",
+      "pos": [775, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "site",
+      "type": "database",
+      "label": "Site directory",
+      "sublabel": "group-writable",
+      "pos": [1060, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "activate",
+      "type": "security",
+      "label": "Activation script",
+      "sublabel": "only sudo target",
+      "pos": [1060, 210],
+      "size": [150, 60]
+    },
+    {
+      "id": "nginx",
+      "type": "cloud",
+      "label": "nginx config",
+      "sublabel": "only with --nginx",
+      "pos": [1060, 360],
+      "size": [150, 60]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "Server VM, scoped deploy user",
+      "wraps": ["site", "activate", "nginx"],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {"id": "fetch", "from": "release", "to": "build", "label": "download", "variant": "emphasis"},
+    {
+      "id": "inject",
+      "from": "secret",
+      "to": "build",
+      "label": "inject",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {"id": "write-dist", "from": "build", "to": "dist", "label": "write", "variant": "emphasis"},
+    {"id": "validate", "from": "dist", "to": "deploy", "label": "validated"},
+    {"id": "rsync", "from": "deploy", "to": "site", "label": "rsync", "variant": "emphasis"},
+    {"id": "sudo", "from": "deploy", "to": "activate", "label": "sudo", "variant": "security"},
+    {"id": "conf", "from": "deploy", "to": "nginx", "label": "scp, reload", "variant": "dashed"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Build",
+      "items": [
+        "The release zip is verified by SHA-256 on every build, cached or fresh",
+        "The config template in git stays secret-free; the secret lands only in dist/"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Deploy",
+      "items": [
+        "The deploy user can write the site directory and run one activation script",
+        "The nginx config ships only with --nginx, with backup and automatic restore on failure"
+      ]
+    }
+  ]
+}

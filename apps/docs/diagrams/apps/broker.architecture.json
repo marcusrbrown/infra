@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Credential Broker Deploy",
+    "output": "apps/docs/.diagrams/apps-broker.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "runner",
+      "type": "external",
+      "label": "Actions run",
+      "sublabel": "presents an OIDC token",
+      "pos": [40, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "caddy",
+      "type": "cloud",
+      "label": "Caddy",
+      "sublabel": "mint + healthz only",
+      "pos": [310, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "oidc",
+      "type": "security",
+      "label": "OIDC verify",
+      "sublabel": "RS256, replay denylist",
+      "pos": [580, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "policy",
+      "type": "security",
+      "label": "Trust policy",
+      "sublabel": "code-owned allowlist",
+      "pos": [850, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "mint",
+      "type": "backend",
+      "label": "Mint + revoke",
+      "sublabel": "single-flight lock",
+      "pos": [850, 360],
+      "size": [150, 60]
+    },
+    {
+      "id": "live",
+      "type": "database",
+      "label": "Live set",
+      "sublabel": "in memory, 30 min TTL",
+      "pos": [580, 360],
+      "size": [150, 60]
+    },
+    {
+      "id": "sweeper",
+      "type": "backend",
+      "label": "Sweeper",
+      "sublabel": "60 s tick, 5 min reconcile",
+      "pos": [580, 520],
+      "size": [150, 60]
+    },
+    {
+      "id": "cliproxy",
+      "type": "external",
+      "label": "CLIProxyAPI",
+      "sublabel": "management API",
+      "pos": [1120, 450],
+      "size": [150, 60]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "Droplet, Compose stack",
+      "wraps": ["caddy", "oidc", "policy", "mint", "live", "sweeper"],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {"id": "mint-request", "from": "runner", "to": "caddy", "label": "POST /v1/mint", "variant": "emphasis"},
+    {"id": "forward", "from": "caddy", "to": "oidc", "label": "forward", "variant": "emphasis"},
+    {"id": "claims", "from": "oidc", "to": "policy", "label": "claims", "variant": "security"},
+    {"id": "allowed", "from": "policy", "to": "mint", "label": "allowed", "variant": "emphasis"},
+    {"id": "record", "from": "mint", "to": "live", "label": "record"},
+    {"id": "expire", "from": "sweeper", "to": "live", "label": "expire"},
+    {"id": "mint-key", "from": "mint", "to": "cliproxy", "label": "add key", "variant": "security"},
+    {"id": "revoke-key", "from": "sweeper", "to": "cliproxy", "label": "revoke", "variant": "security"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Mint",
+      "items": [
+        "Verify the OIDC token, then check its claims against the code-owned policy",
+        "Mint a ghact- key through the proxy management API with read-back",
+        "Return the OpenCode auth payload"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Revoke",
+      "items": [
+        "There is no run-end revoke; the sweeper is the mandatory backstop",
+        "Reconcile revokes only expired ghact- keys and never touches other keys",
+        "The broker is single-instance: its lock is valid only because there is one"
+      ]
+    }
+  ]
+}

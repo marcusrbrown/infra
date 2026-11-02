@@ -10,5 +10,5 @@
     "noEmit": true
   },
   "include": ["**/*.ts"],
-  "exclude": ["dist", "node_modules", ".cache"]
+  "exclude": ["dist", "node_modules", ".cache", "apps/docs/.astro", "apps/docs/dist", "apps/docs/src"]
 }

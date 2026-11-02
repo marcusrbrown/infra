@@ -1,0 +1,155 @@
+---
+// One app's current observations, 90-day sample counts, coverage, gaps, deploy state and probe age.
+// Everything shown comes from the view model, which only carries the bounded fields a sample can hold.
+import type {AppView} from '../lib/history-view'
+
+import {
+  breakdownLabel,
+  coverageLabel,
+  detailText,
+  formatUtc,
+  GAP_THRESHOLD_MS,
+  passLabel,
+  RESULT_DISPLAY,
+  VERDICT_DISPLAY,
+} from '../lib/history-view'
+
+interface Props {
+  view: AppView
+}
+
+const {view} = Astro.props
+const verdict = VERDICT_DISPLAY[view.verdict]
+const gapMinutes = GAP_THRESHOLD_MS / 60_000
+---
+
+<section>
+  <h2 id="current-status">Current status</h2>
+  <p>
+    <strong>{verdict.symbol} {verdict.word}:</strong>{' '}
+    {view.verdictLabel}.
+    {
+      view.latestSampleAt !== undefined && (
+        <>
+          Latest sample <time datetime={view.latestSampleAt}>{formatUtc(view.latestSampleAt)}</time>.
+        </>
+      )
+    }
+  </p>
+
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Observation</th>
+          <th scope="col">What it proves</th>
+          <th scope="col">Latest</th>
+          <th scope="col">Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          view.observations.map(observation => (
+            <tr>
+              <th scope="row">
+                <code>{observation.id}</code>
+              </th>
+              <td>{observation.proof}</td>
+              <td>
+                {RESULT_DISPLAY[observation.latest].symbol} {RESULT_DISPLAY[observation.latest].word}
+              </td>
+              <td>{detailText(observation.detail)}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="deploy-state">Deploy state</h2>
+  <p>
+    {view.deploy.label}
+    {
+      view.deploy.since !== undefined && (
+        <>
+          , since <time datetime={view.deploy.since}>{formatUtc(view.deploy.since)}</time>
+        </>
+      )
+    }.
+  </p>
+
+  <h2 id="end-to-end">End-to-end probe</h2>
+  {
+    view.endToEnd.measured ? (
+      <p>
+        {RESULT_DISPLAY[view.endToEnd.result].symbol} {RESULT_DISPLAY[view.endToEnd.result].word}.
+        {view.endToEnd.probeAt !== undefined && view.endToEnd.probeAgeMinutes !== undefined && (
+          <>
+            {' '}
+            The probe ran <time datetime={view.endToEnd.probeAt}>{formatUtc(view.endToEnd.probeAt)}</time>,{' '}
+            {view.endToEnd.probeAgeMinutes} minutes before the latest sample.
+          </>
+        )}
+        {view.endToEnd.stale && <strong> Stale probe: treat this result as unknown.</strong>}
+      </p>
+    ) : (
+      <p>⚪ Not measured. This service has no end-to-end probe in the public snapshot.</p>
+    )
+  }
+
+  <h2 id="history">History</h2>
+  <p>
+    {coverageLabel(view.coverage)}, from <time datetime={view.coverage.windowStart}>{formatUtc(view.coverage.windowStart)}</time>.
+  </p>
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Observation</th>
+          <th scope="col">Samples passed</th>
+          <th scope="col">Other outcomes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          view.observations.map(observation => (
+            <tr>
+              <th scope="row">
+                <code>{observation.id}</code>
+              </th>
+              <td>{observation.counts.total === 0 ? 'Not recorded in the public snapshot' : passLabel(observation.counts)}</td>
+              <td>{breakdownLabel(observation.counts) || 'None'}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="gaps">Gaps</h2>
+  {
+    view.gaps.length === 0 ? (
+      <p>No gaps longer than {gapMinutes} minutes between samples.</p>
+    ) : (
+      <>
+        <p>
+          {view.gaps.length} {view.gaps.length === 1 ? 'gap' : 'gaps'} longer than {gapMinutes} minutes between samples:
+        </p>
+        <ul>
+          {view.gaps.map(gap => (
+            <li>
+              <time datetime={gap.from}>{formatUtc(gap.from)}</time> to <time datetime={gap.to}>{formatUtc(gap.to)}</time>:
+              no sample for {gap.minutes} minutes
+            </li>
+          ))}
+        </ul>
+      </>
+    )
+  }
+</section>
+
+<style>
+  .table-scroll {
+    overflow-x: auto;
+  }
+</style>

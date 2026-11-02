@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Operator Dashboard Deploy",
+    "output": "apps/docs/.diagrams/apps-dashboard.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "browser",
+      "type": "external",
+      "label": "Operator browser",
+      "sublabel": "GitHub OAuth session",
+      "pos": [40, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "caddy",
+      "type": "cloud",
+      "label": "Caddy",
+      "sublabel": "TLS, operator route",
+      "pos": [310, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "dashboard",
+      "type": "frontend",
+      "label": "Dashboard app",
+      "sublabel": "Hono :3000, read-only",
+      "pos": [580, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "data",
+      "type": "database",
+      "label": "Host files",
+      "sublabel": "env, PEM keys, data dir",
+      "pos": [580, 340],
+      "size": [150, 60]
+    },
+    {
+      "id": "github",
+      "type": "external",
+      "label": "GitHub",
+      "sublabel": "Apps + OAuth",
+      "pos": [850, 200],
+      "size": [150, 60]
+    },
+    {
+      "id": "gateway",
+      "type": "backend",
+      "label": "Gateway listener",
+      "sublabel": "private VPC only",
+      "pos": [310, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "ghcr",
+      "type": "cloud",
+      "label": "GHCR image",
+      "sublabel": "tag + digest pinned",
+      "pos": [850, 60],
+      "size": [150, 60]
+    },
+    {
+      "id": "deploy",
+      "type": "backend",
+      "label": "deploy.ts",
+      "sublabel": "one locked SSH transaction",
+      "pos": [850, 340],
+      "size": [150, 60]
+    }
+  ],
+  "boundaries": [
+    {"kind": "security-group", "label": "Droplet, Compose network", "wraps": ["caddy", "dashboard", "data"], "pad": 20}
+  ],
+  "connections": [
+    {"id": "https", "from": "browser", "to": "caddy", "label": "HTTPS", "variant": "emphasis"},
+    {"id": "app", "from": "caddy", "to": "dashboard", "label": "app", "variant": "emphasis"},
+    {
+      "id": "operator-route",
+      "from": "caddy",
+      "to": "gateway",
+      "label": "/operator/* over VPC",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {"id": "state", "from": "dashboard", "to": "data", "label": "reads"},
+    {"id": "apps", "from": "dashboard", "to": "github", "label": "App + OAuth", "variant": "security"},
+    {
+      "id": "image",
+      "from": "ghcr",
+      "to": "dashboard",
+      "label": "image",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {"id": "publish", "from": "deploy", "to": "data", "label": "publish files", "variant": "dashed"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Same origin",
+      "items": [
+        "Caddy proxies /operator/* to the gateway over the private VPC",
+        "A Caddy network alias lets the app reach the same route without leaving the host",
+        "Everything else goes to the app"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Hardening and deploy",
+      "items": [
+        "Read-only root, all capabilities dropped, no new privileges",
+        "The image is the upstream release, verified by digest after every deploy",
+        "A prune failure stops the deploy; there is no automatic rollback"
+      ]
+    }
+  ]
+}

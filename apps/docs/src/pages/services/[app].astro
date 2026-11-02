@@ -1,0 +1,56 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro'
+import {APP_IDS} from '@marcusrbrown/infra-shared/status/history-schema'
+
+import AppStatus from '../../components/AppStatus.astro'
+import Diagram from '../../components/Diagram.astro'
+import LastSample from '../../components/LastSample.astro'
+import StatusNotes from '../../components/StatusNotes.astro'
+import {cliStatusCommand, DASHBOARD_URL, SERVICES} from '../../data/services'
+import {resolveRunbooks} from '../../lib/runbook-links'
+import {loadStatusData} from '../../lib/status-data'
+
+export function getStaticPaths() {
+  return APP_IDS.map(app => ({params: {app}}))
+}
+
+const app = APP_IDS.find(candidate => candidate === Astro.params.app)
+if (app === undefined) throw new Error(`Unknown service "${Astro.params.app}"`)
+
+const info = SERVICES[app]
+const {source, meta, views} = loadStatusData()
+const runbooks = resolveRunbooks(info.runbooks)
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/')
+---
+
+<StarlightPage
+  frontmatter={{
+    title: info.title,
+    description: info.summary,
+    tableOfContents: false,
+  }}
+>
+  <p>{info.summary}</p>
+
+  <LastSample lastSampleAt={meta.lastSampleAt} />
+
+  <StatusNotes fixture={source === 'fixture'} />
+
+  <AppStatus view={views[app]} />
+
+  <section>
+    <h2 id="architecture">Architecture</h2>
+    <Diagram name={`apps-${app}`} title={`${info.title} architecture`} />
+  </section>
+
+  <section>
+    <h2 id="links">Links</h2>
+    <ul>
+      <li><a href={`${base}guides/${app}/`}>{info.title} operator guide</a></li>
+      {runbooks.map(runbook => <li>Runbook: <a href={`${base}runbooks/${runbook.slug}/`}>{runbook.title}</a></li>)}
+      {info.dashboard && <li>Operator dashboard: <a href={DASHBOARD_URL}>{DASHBOARD_URL}</a></li>}
+      <li>Status from the CLI: <code>{cliStatusCommand(app)}</code></li>
+      <li><a href={`${base}status/`}>All services</a></li>
+    </ul>
+  </section>
+</StarlightPage>

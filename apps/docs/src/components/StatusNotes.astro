@@ -1,0 +1,35 @@
+---
+// Fixture marker (only when history comes from the committed fixture) and the "what this proves" disclaimer.
+interface Props {
+  fixture: boolean
+}
+
+const {fixture} = Astro.props
+---
+
+{
+  fixture && (
+    <div class="fixture-note" role="note" data-history-source="fixture">
+      <strong>Fixture data.</strong> This build used the committed sample history, not live results. Nothing on this
+      page describes the real services.
+    </div>
+  )
+}
+
+<p class="proves">
+  <strong>What this proves.</strong> Public history covers reachability, deploy state and the auth monitor's live model-route
+  probe for CLIProxyAPI; container, disk and memory health are checked privately, not here. It does not cover gateway model
+  calls and it is not an uptime SLA. Every figure is a count of samples the snapshot recorded; gaps are shown, not hidden.
+</p>
+
+<style>
+  .fixture-note {
+    margin: 1rem 0;
+    padding: 0.75rem 1rem;
+    border: 2px dashed var(--sl-color-orange);
+    border-radius: 0.25rem;
+  }
+  .proves {
+    margin: 1rem 0;
+  }
+</style>

@@ -1,0 +1,50 @@
+---
+title: Diagrams
+description: Architecture, workflow and runbook diagrams for the infra deploy packages.
+---
+
+import Diagram from '../../components/Diagram.astro'
+
+These diagrams are rendered at build time from the specs in `apps/docs/diagrams/`. Each one opens full screen, and the label under it names the commit that last changed its spec. The per-app diagrams sit on each service page.
+
+## System diagrams
+
+### Topology
+
+All seven monitored apps, the deploy and image path, the operator path between dashboard and gateway, and the CLIProxyAPI consumers.
+
+<Diagram name="topology" title="Infrastructure topology" />
+
+### Deploy pipeline
+
+How a push to main reaches a host: the router, the per-app workflow, the notify job and the approval gate.
+
+<Diagram name="deploy-pipeline" title="Deploy pipeline" />
+
+### Operator path
+
+The browser, the dashboard Caddy and the gateway operator listener over the private VPC, with GitHub OAuth and the run stream.
+
+<Diagram name="operator-path" title="Operator path: browser to gateway" />
+
+### Status snapshot
+
+How a scheduled snapshot gathers probes, deploy state and the auth monitor's probe line, merges them into the history artifact, and triggers the site build.
+
+<Diagram name="status-snapshot" title="Status snapshot data flow" />
+
+## Runbook maps
+
+Each map marks the STOP gates and decisions, and the irreversible steps. The runbook itself stays the source of truth.
+
+### Umami Postgres major upgrade
+
+<Diagram name="runbooks-umami-pg-upgrade" title="Runbook map: Umami Postgres major upgrade" />
+
+### VPN server key rotation
+
+<Diagram name="runbooks-vpn-key-rotation" title="Runbook map: VPN server key rotation" />
+
+### Dashboard image rollback
+
+<Diagram name="runbooks-dashboard-rollback" title="Runbook map: dashboard image rollback" />

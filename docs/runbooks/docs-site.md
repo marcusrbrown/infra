@@ -10,7 +10,8 @@ The public docs site at `https://mrbro.dev/infra/` is built by `.github/workflow
 2. When a snapshot run completes, `Site` starts through `workflow_run`. It builds only if that run succeeded, ran on `main`, and came from `schedule` or `workflow_dispatch`.
 3. `Site` downloads the triggering run's artifact, builds, runs the redaction gate twice, and deploys `apps/docs/dist`.
 4. A push to `main` that touches a rendered source or `apps/docs/**`, or a manual dispatch, locates the newest usable artifact with `status history-locate` and fails if there is none.
-5. Pull requests build with the committed fixture and never download history, upload a Pages artifact, or deploy.
+5. Publishes share one concurrency group: a newer push, dispatch or snapshot run cancels an older in-flight one, so an older build never deploys after a newer one. A cancelled deploy leaves the live site as it was. Each pull request has its own group.
+6. Pull requests build with the committed fixture and never download history, upload a Pages artifact, or deploy.
 
 History lives only in the artifact (7-day retention, newest copy wins). The site never writes it.
 

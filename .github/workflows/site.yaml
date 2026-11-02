@@ -35,6 +35,19 @@ on:
 permissions:
   contents: read
 
+# One publish group: a newer push, dispatch or snapshot run cancels an older in-flight one, so a slow older build
+# can never deploy after a newer one. A workflow_run that the build guard will skip gets a unique group, so it
+# cannot cancel a real publish. Each pull request gets its own group.
+concurrency:
+  group: >-
+    site-${{ github.event_name == 'pull_request' && github.ref ||
+    github.event_name != 'workflow_run' && 'publish' ||
+    github.event.workflow_run.conclusion == 'success' &&
+    github.event.workflow_run.head_branch == 'main' &&
+    (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch') &&
+    'publish' || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build site
@@ -141,9 +154,6 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    concurrency:
-      group: pages
-      cancel-in-progress: false
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

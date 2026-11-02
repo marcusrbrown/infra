@@ -2134,7 +2134,7 @@ describe('deploy-gateway.yaml: concurrency is workflow-scoped, with unchanged ga
       concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
       jobs?: {
         'deploy-gateway'?: {
-          concurrency?: unknown
+          concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
           environment?: string
           needs?: string | string[]
         }
@@ -4826,7 +4826,7 @@ describe('site.yaml: contract', () => {
       workflow_run?: {workflows?: string[]; types?: string[]}
     }
     permissions?: Record<string, string>
-    concurrency?: unknown
+    concurrency?: {group?: string; 'cancel-in-progress'?: boolean}
     jobs?: Record<string, SiteJob>
   }
 
@@ -4842,14 +4842,15 @@ describe('site.yaml: contract', () => {
     return found ?? {}
   }
 
-  /**
-   * Evaluate the simple `if:` expressions this workflow uses with a recursive-descent parser. Precedence, lowest to
-   * highest: `||`, `&&`, `==`/`!=`, then string literals, `github.*` context paths and parentheses. Anything else throws.
-   */
-  function evalIf(expression: string | undefined, context: Record<string, string>): boolean {
-    if (expression === undefined) return true
+  type ExprValue = string | boolean
 
-    type Value = string | boolean
+  /**
+   * Evaluate the simple expressions this workflow uses with a recursive-descent parser. Precedence, lowest to
+   * highest: `||`, `&&`, `==`/`!=`, then string literals, `github.*` context paths and parentheses. Anything else throws.
+   * Like GitHub expressions, `&&` and `||` return an operand (not a boolean), so `cond && a || b` is a ternary.
+   */
+  function evalExpression(expression: string, context: Record<string, string>): ExprValue {
+    type Value = ExprValue
     const tokens: string[] = []
     const tokenRe = /\s*(?:('[^']*'|"[^"]*")|(github(?:\.[a-z_]+)+)|(==|!=|&&|\|\||[()]))/y
     let offset = 0
@@ -4898,7 +4899,7 @@ describe('site.yaml: contract', () => {
       while (peek() === '&&') {
         take()
         const right = parseEquality()
-        left = Boolean(left) && Boolean(right)
+        left = left ? right : left
       }
       return left
     }
@@ -4907,14 +4908,25 @@ describe('site.yaml: contract', () => {
       while (peek() === '||') {
         take()
         const right = parseAnd()
-        left = Boolean(left) || Boolean(right)
+        left = left || right
       }
       return left
     }
 
     const result = parseOr()
     if (position < tokens.length) throw new Error(`unexpected '${peek()}' in if expression: ${expression}`)
-    return Boolean(result)
+    return result
+  }
+
+  function evalIf(expression: string | undefined, context: Record<string, string>): boolean {
+    return expression === undefined ? true : Boolean(evalExpression(expression, context))
+  }
+
+  /** The workflow-level concurrency group, with its single `${{ }}` expression evaluated. */
+  function resolveGroup(group: string | undefined, context: Record<string, string>): string {
+    const match = /^([^$]*)\$\{\{([^}]+)\}\}$/.exec(group ?? '')
+    expect(match, `group is not a prefix plus one expression: ${group}`).not.toBeNull()
+    return `${match?.[1] ?? ''}${String(evalExpression(match?.[2] ?? '', context))}`
   }
 
   function substitute(value: string, context: Record<string, string>): string {
@@ -5024,12 +5036,69 @@ describe('site.yaml: contract', () => {
     }
   }
 
-  it('is a .yaml file named Site, with no .yml twin and no workflow-level concurrency', async () => {
+  it('is a .yaml file named Site, with no .yml twin', async () => {
     const {parsed} = await load()
 
     expect(parsed.name).toBe('Site')
     expect(existsSync(resolve(REPO_ROOT, '.github/workflows/site.yml'))).toBe(false)
-    expect(parsed.concurrency).toBeUndefined()
+  })
+
+  it('serializes publishes in one workflow-level group where a newer run cancels an older one', async () => {
+    const {parsed} = await load()
+    const publishRun = {
+      'github.event.workflow_run.conclusion': 'success',
+      'github.event.workflow_run.head_branch': 'main',
+      'github.event.workflow_run.event': 'schedule',
+    }
+    const group = (context: Record<string, string>): string => resolveGroup(parsed.concurrency?.group, context)
+
+    expect(parsed.concurrency?.['cancel-in-progress']).toBe(true)
+    expect(group({'github.event_name': 'push', 'github.ref': 'refs/heads/main'})).toBe('site-publish')
+    expect(group({'github.event_name': 'workflow_dispatch', 'github.ref': 'refs/heads/main'})).toBe('site-publish')
+    expect(group({'github.event_name': 'workflow_run', 'github.ref': 'refs/heads/main', ...publishRun})).toBe(
+      'site-publish',
+    )
+    expect(
+      group({
+        'github.event_name': 'workflow_run',
+        'github.ref': 'refs/heads/main',
+        ...publishRun,
+        'github.event.workflow_run.event': 'workflow_dispatch',
+      }),
+    ).toBe('site-publish')
+    expect(group({'github.event_name': 'pull_request', 'github.ref': 'refs/pull/7/merge'})).toBe(
+      'site-refs/pull/7/merge',
+    )
+    expect(group({'github.event_name': 'pull_request', 'github.ref': 'refs/pull/8/merge'})).not.toBe(
+      group({'github.event_name': 'pull_request', 'github.ref': 'refs/pull/7/merge'}),
+    )
+  })
+
+  it('puts a workflow_run the build guard would skip in its own group, so it cannot cancel a real publish', async () => {
+    const {parsed} = await load()
+    const base = {
+      'github.event_name': 'workflow_run',
+      'github.ref': 'refs/heads/main',
+      'github.event.workflow_run.conclusion': 'success',
+      'github.event.workflow_run.head_branch': 'main',
+      'github.event.workflow_run.event': 'schedule',
+    }
+    const skipped: Record<string, string>[] = [
+      {'github.event.workflow_run.conclusion': 'failure'},
+      {'github.event.workflow_run.conclusion': 'cancelled'},
+      {'github.event.workflow_run.head_branch': 'feature'},
+      {'github.event.workflow_run.event': 'push'},
+    ]
+
+    for (const override of skipped) {
+      const context = {...base, ...override}
+      const first = resolveGroup(parsed.concurrency?.group, {...context, 'github.run_id': '101'})
+      const second = resolveGroup(parsed.concurrency?.group, {...context, 'github.run_id': '102'})
+
+      expect(first).toBe('site-101')
+      expect(second).not.toBe(first)
+      expect(evalIf(parsed.jobs?.build?.if, context), JSON.stringify(override)).toBe(false)
+    }
   })
 
   it('SHA-pins every action with a version comment (shape only, never an exact SHA)', async () => {
@@ -5116,7 +5185,7 @@ describe('site.yaml: contract', () => {
     expect(Object.values(build.permissions ?? {}).every(level => level === 'read')).toBe(true)
   })
 
-  it('has no concurrency group on the build job, so PR builds run in parallel', async () => {
+  it('has no job-level concurrency, so only the workflow-level group applies and PR builds run in parallel', async () => {
     const {build} = await load()
 
     expect(build.concurrency).toBeUndefined()
@@ -5162,6 +5231,19 @@ describe('site.yaml: contract', () => {
     expect(evalIf("github.event_name == 'push' || github.event_name == 'x' && github.ref == 'y'", context)).toBe(true)
   })
 
+  it('returns operand values from && and || like GitHub expressions', () => {
+    const context = {'github.a': 'x', 'github.b': 'y'}
+
+    expect(evalExpression("github.a == 'x' && 'yes' || 'no'", context)).toBe('yes')
+    expect(evalExpression("github.a == 'z' && 'yes' || 'no'", context)).toBe('no')
+    expect(evalExpression("github.missing || 'fallback'", context)).toBe('fallback')
+    expect(evalExpression('github.a && github.b', context)).toBe('y')
+    expect(evalExpression("'' && 'never'", context)).toBe('')
+    expect(evalExpression("github.a || 'unused'", context)).toBe('x')
+    expect(evalExpression("github.a == 'x' || github.b == 'q' && 'z'", context)).toBe(true)
+    expect(evalExpression("(github.a == 'x' || github.b == 'q') && 'z'", context)).toBe('z')
+  })
+
   it('deploys only from main and never for a pull request', async () => {
     const {deploy} = await load()
 
@@ -5180,7 +5262,7 @@ describe('site.yaml: contract', () => {
     }
   })
 
-  it('gives the deploy job exactly pages and id-token write, the github-pages environment and a serial pages group', async () => {
+  it('gives the deploy job exactly pages and id-token write, the github-pages environment and no concurrency of its own', async () => {
     const {deploy} = await load()
 
     expect(deploy.permissions).toEqual({pages: 'write', 'id-token': 'write'})
@@ -5188,7 +5270,7 @@ describe('site.yaml: contract', () => {
       name: 'github-pages',
       url: '$' + '{{ steps.deployment.outputs.page_url }}',
     })
-    expect(deploy.concurrency).toEqual({group: 'pages', 'cancel-in-progress': false})
+    expect(deploy.concurrency).toBeUndefined()
     expect(deploy.steps).toHaveLength(1)
     expect(deploy.steps?.[0]?.uses?.startsWith('actions/deploy-pages@')).toBe(true)
     expect(deploy.steps?.[0]?.id).toBe('deployment')
@@ -5228,6 +5310,36 @@ describe('site.yaml: contract', () => {
     expect(evalIf(upload.if, {'github.event_name': 'pull_request'})).toBe(false)
     expect(evalIf(upload.if, {'github.event_name': 'push'})).toBe(true)
     expect(evalIf(upload.if, {'github.event_name': 'workflow_run'})).toBe(true)
+  })
+
+  it('runs the build gates in order: generate, diagrams, source gate, astro build, dist gate, status check', async () => {
+    const {build} = await load()
+    const docsPackage = JSON.parse(await Bun.file(resolve(REPO_ROOT, 'apps/docs/package.json')).text()) as {
+      scripts: Record<string, string>
+    }
+    const stages = (docsPackage.scripts.build ?? '').split('&&').map(stage => stage.trim())
+
+    expect(stages).toEqual([
+      'bun run generate',
+      'bun run diagrams',
+      'bun run redact:source',
+      'astro build',
+      'bun run redact:dist',
+      'bun run verify:status',
+    ])
+    // The gates must scan the source and the dist the upload ships.
+    expect(docsPackage.scripts['redact:source']).toContain('redaction-gate.ts --source')
+    expect(docsPackage.scripts['redact:dist']).toContain('redaction-gate.ts --dist dist')
+    expect(docsPackage.scripts['verify:status']).toContain('verify-status-output.ts dist')
+
+    const names = (build.steps ?? []).map(candidate => candidate.name)
+    const built = names.indexOf('Build site')
+    const uploaded = names.indexOf('Upload Pages artifact')
+    expect(built).toBeGreaterThan(-1)
+    expect(uploaded).toBeGreaterThan(built)
+    // The upload is the only step after the build, and nothing else runs the build.
+    expect(names.slice(built + 1)).toEqual(['Upload Pages artifact'])
+    expect((build.steps ?? []).filter(candidate => /apps\/docs build/.test(candidate.run ?? ''))).toHaveLength(1)
   })
 
   it('orders the history steps before the build, and the build before the upload', async () => {

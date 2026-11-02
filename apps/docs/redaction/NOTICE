@@ -1,0 +1,73 @@
+Vendored secret-detection rules
+===============================
+
+apps/docs/redaction/secret-rules.json is derived from the default gitleaks rule set.
+
+  Project:   gitleaks (https://github.com/gitleaks/gitleaks)
+  Source:    config/gitleaks.toml
+  Tag:       v8.30.1
+  Commit:    83d9cd684c87d95d656c1458ef04895a7f1cbd8e
+  SHA-256:   e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf (of config/gitleaks.toml at that commit)
+  Retrieved: 2026-11-01
+  License:   MIT (text below)
+
+Conversion
+----------
+
+Each [[rules]] entry became one JSON object: id, regex, and the optional flags, secretGroup, entropy and
+keywords fields. The gate honors keywords (a rule runs only if one appears in the text), the secret group
+and the entropy floor. Dropped: descriptions, per-rule [[rules.allowlists]], path filters, the global
+[allowlist], and tags.
+
+The Go (RE2) patterns were translated for JavaScript:
+  - A leading (?i), (?s) or (?m) group became the RegExp flag.
+  - Named groups (?P<name>...) became (?<name>...), and \z became $.
+  - Inline modifier groups, (?i), (?i:...) and (?-i:...) in mid-pattern, are not supported by the runtime.
+    They were lifted to the whole pattern: any 'i' makes the entire rule case-insensitive. That is a
+    superset of the original matches, which suits a redaction gate, but it can over-report.
+    Rules affected: adobe-client-secret, alibaba-access-key-id, atlassian-api-token,
+    authress-service-client-access-key, cisco-meraki-api-key, cohere-api-token, curl-auth-header,
+    doppler-api-token, duffel-api-token, dynatrace-api-token, easypost-api-token, easypost-test-api-token,
+    etsy-access-token, facebook-page-access-token, flutterwave-encryption-key, flutterwave-public-key,
+    flutterwave-secret-key, frameio-api-token, gocardless-api-token, hashicorp-tf-api-token,
+    huggingface-access-token, huggingface-organization-api-token, intra42-client-secret,
+    kubernetes-secret-yaml, linear-api-key, okta-access-token, planetscale-api-token, planetscale-password,
+    postman-api-token, privateai-api-token, sendgrid-api-token, sendinblue-api-token, sumologic-access-id,
+    sumologic-access-token, telegram-bot-api-token, vault-service-token.
+
+Excluded rules
+--------------
+
+  generic-api-key   The generic high-entropy rule. It matches any key-looking assignment and needs
+                    allowlists and stopwords that this snapshot drops.
+  pkcs12-file       A path-only rule with no content regex.
+
+Every other rule in the tag compiles in JavaScript after the translation above (220 of 222 rules kept).
+
+To refresh: fetch config/gitleaks.toml at a newer tag, repeat the conversion, update this file, and run
+the gate over the corpus.
+
+gitleaks license
+----------------
+
+MIT License
+
+Copyright (c) 2019 Zachary Rice
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

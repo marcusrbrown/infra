@@ -3,9 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun run generate && astro build",
-    "dev": "bun run generate && astro dev",
+    "build": "bun run generate && bun run diagrams && bun run redact:source && astro build && bun run redact:dist",
+    "dev": "bun run generate && bun run diagrams && astro dev",
+    "diagrams": "bun run scripts/render-diagrams.ts",
     "generate": "bun run scripts/generate-content.ts",
+    "redact:dist": "bun run scripts/redaction-gate.ts --dist dist",
+    "redact:source": "bun run scripts/redaction-gate.ts --source",
     "test": "bun test"
   },
   "dependencies": {

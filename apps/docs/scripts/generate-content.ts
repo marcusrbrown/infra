@@ -20,7 +20,7 @@ export interface GenerateResult {
   pages: string[]
 }
 
-interface Source {
+export interface Source {
   relPath: string
   slug: string
 }
@@ -44,7 +44,8 @@ const SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i
 const URI_AUTOLINK_RE = /<[a-z][a-z0-9+.-]{1,31}:[^\s<>]*>/iy
 const EMAIL_AUTOLINK_RE = /<[\w.!#$%&'*+/=?^`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*>/iy
 
-function discoverSources(repoRoot: string): Source[] {
+/** The repo files the site renders. The redaction gate scans exactly this set. */
+export function discoverSources(repoRoot: string): Source[] {
   const sources: Source[] = []
   const add = (relPath: string, slug: string): void => {
     if (existsSync(join(repoRoot, relPath))) sources.push({relPath, slug})

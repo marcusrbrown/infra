@@ -22,8 +22,15 @@ Gitignored output: `src/content/docs/{architecture,guides,runbooks,solutions}`, 
 2. `diagrams` renders each spec with Archify, publishes only the `*.html` files, and writes the manifest.
 3. `redact:source` runs the gate on the source markdown.
 4. `astro build` writes `dist`.
-5. `redact:dist` runs the gate on every text file in `dist`.
+5. `redact:dist` runs the gate on every text file in `dist`, including the text inside gzipped Pagefind fragments, and fails on any symlink, because the Pages upload dereferences symlinks.
 6. `verify:status` checks the built status pages against the history source.
+
+### Redaction gate: known limits
+
+The gate guards against accidental leaks, not crafted input. Two gaps are accepted by decision:
+
+- **Inline-element splitting in hand-written MDX.** `8.8.<span>8.8</span>` is not rejoined, because the gate cannot tell a split token from adjacent text. Highlighter-generated spans are rejoined.
+- **Bare hostnames on TLDs missing from `redaction/hostname-tlds.json`.** A hostname with a scheme is always checked; a bare one is checked only when its TLD is listed.
 
 History comes from `STATUS_HISTORY_DIR`, or the fixture when it is unset. `STATUS_HISTORY_REQUIRED=1` makes an unset directory a build error, so a publishing build never falls back to the fixture. CI sets both on every non-PR run.
 

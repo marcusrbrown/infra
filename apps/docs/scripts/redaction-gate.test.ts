@@ -1,4 +1,4 @@
-import {existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join, resolve} from 'node:path'
 import {afterEach, describe, expect, it} from 'bun:test'
@@ -98,6 +98,14 @@ describe('IP findings', () => {
     expect(ipValues('resolver 8(.)8(dot)8[DOT]8')).toEqual(['8.8.8.8'])
   })
 
+  it('fails a public IPv4 written with fullwidth or ideographic dots', () => {
+    expect(ipValues('https://8。8。8。8/')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 8．8．8．8')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 8｡8｡8｡8')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 8。8[.]8．8')).toEqual(['8.8.8.8'])
+    expect(ipValues('resolver 10。116。0。3')).toEqual([])
+  })
+
   it('passes private, loopback, unspecified and documentation IPv4', () => {
     for (const ip of ['10.116.0.3', '172.28.0.2', '127.0.0.1', '0.0.0.0', '203.0.113.5', '192.168.1.1']) {
       expect(ipValues(`host ${ip}:9300`)).toEqual([])
@@ -142,6 +150,13 @@ describe('hostname findings', () => {
     expect(hostValues('url(data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27')).toEqual([
       'www.w3.org',
     ])
+  })
+
+  it('fails a host written with fullwidth or ideographic dots', () => {
+    expect(hostValues('https://secret。acme。xyz/')).toEqual(['secret.acme.xyz'])
+    expect(hostValues('see box．heatvision｡co today')).toEqual(['box.heatvision.co'])
+    const allowed = withAllowlist([{host: 'box.heatvision.co', reason: 'fixture host', scope: ['**/*.md']}])
+    expect(hostValues('see box。heatvision。co today', allowed)).toEqual([])
   })
 
   it('finds URL hosts for http, https, ws, wss and protocol-relative forms', () => {
@@ -283,6 +298,16 @@ describe('HTML extraction', () => {
       finding.kind === 'hostname' ? finding.value : '',
     )
     expect(hosts.toSorted()).toEqual(['attr.heatvision.co', 'box.heatvision.co'])
+  })
+
+  it('normalizes unicode dots inside attribute values', () => {
+    const html =
+      '<a href="https://8。8。8。8/" data-x="https://secret。acme。xyz/" data-y="8&#x3002;8&#xFF0E;8&#xFF61;8">x</a>'
+    const findings = scanText(NONE, 'p.html', 'p.html', html)
+    expect(findings.map(formatFinding).toSorted()).toEqual([
+      'p.html:1: globally reachable IP 8.8.8.8',
+      'p.html:1: hostname secret.acme.xyz is not on the allowlist',
+    ])
   })
 
   it('scans script bodies and comments verbatim', () => {
@@ -458,21 +483,86 @@ describe('dist pass', () => {
     expect(scanDist(NONE, dist, 'dist')).toHaveLength(1)
   })
 
-  it('skips gzipped Pagefind fragments; their text is what the scanned HTML already contains', () => {
-    const phrase = 'leaks to box.heatvision.co from 8.8.8.8'
-    const fragment = Bun.gzipSync(
-      new TextEncoder().encode(`pagefind_dcd${JSON.stringify({url: '/a/', content: phrase})}`),
-    )
+  it('fails any symlink in dist, whether it points at a file, a directory or nothing', () => {
+    const outside = fixtureDist({'secret.txt': 'h.heatvision.co', 'dir/x.txt': 'ok'})
+    const dist = fixtureDist({'index.html': '<p>fine</p>', 'real/a.txt': 'fine'})
+    symlinkSync(join(outside, 'secret.txt'), join(dist, 'link-file'))
+    symlinkSync(join(outside, 'dir'), join(dist, 'real/link-dir'))
+    symlinkSync(join(outside, 'missing'), join(dist, 'dangling'))
+    symlinkSync('index.html', join(dist, 'alias.html'))
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/alias.html: symlink is not allowed (the Pages upload would follow it)',
+      'dist/dangling: symlink is not allowed (the Pages upload would follow it)',
+      'dist/link-file: symlink is not allowed (the Pages upload would follow it)',
+      'dist/real/link-dir: symlink is not allowed (the Pages upload would follow it)',
+    ])
+    const result = run(['--dist', dist], {GITHUB_ACTIONS: 'true'}, {config: NONE})
+    expect(result.code).toBe(1)
+    expect(result.out).toContain('::error file=')
+    expect(result.out).toContain('link-file')
+  })
+
+  it('scans the text of a gzipped Pagefind fragment', () => {
+    const gz = (text: string): Uint8Array => Bun.gzipSync(new TextEncoder().encode(text))
     const dist = fixtureDist({
-      'a/index.html': `<main><p>${phrase}</p></main>`,
-      'pagefind/fragment/en_abc.pf_fragment': fragment,
-      'pagefind/index/en_abc.pf_index': fragment,
-      'pagefind/pagefind.en_abc.pf_meta': fragment,
-      'pagefind/wasm.en.pagefind': fragment,
+      'pagefind/fragment/leak.pf_fragment': gz('8.8.8.8'),
+      'pagefind/fragment/host.pf_fragment': gz(
+        `pagefind_dcd${JSON.stringify({content: 'deploys to box.heatvision.co'})}`,
+      ),
+      'pagefind/fragment/clean.pf_fragment': gz('nothing to see, 10.116.0.3'),
     })
-    const files = scanDist(NONE, dist, 'dist').map(finding => finding.file)
-    expect(files.length).toBeGreaterThan(0)
-    expect(new Set(files)).toEqual(new Set(['dist/a/index.html']))
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/pagefind/fragment/host.pf_fragment:1: hostname box.heatvision.co is not on the allowlist',
+      'dist/pagefind/fragment/leak.pf_fragment:1: globally reachable IP 8.8.8.8',
+    ])
+  })
+
+  it('scopes a Pagefind fragment as page text, and does not parse it as HTML', () => {
+    const config = withAllowlist([
+      {host: 'box.heatvision.co', reason: 'page text', scope: ['**/*.html']},
+      {host: 'only.diagrams.co', reason: 'diagram markup only', scope: ['diagrams/*.html']},
+    ])
+    const gz = (text: string): Uint8Array => Bun.gzipSync(new TextEncoder().encode(text))
+    const dist = fixtureDist({
+      'pagefind/fragment/a.pf_fragment': gz('see box.heatvision.co and only.diagrams.co and <8.8.8.8>'),
+    })
+    expect(scanDist(config, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/pagefind/fragment/a.pf_fragment:1: globally reachable IP 8.8.8.8',
+      'dist/pagefind/fragment/a.pf_fragment:1: hostname only.diagrams.co is not on the allowlist',
+    ])
+  })
+
+  it('scans a Pagefind fragment for unicode-dotted addresses and for secrets', () => {
+    const gz = (text: string): Uint8Array => Bun.gzipSync(new TextEncoder().encode(text))
+    const dist = fixtureDist({
+      'pagefind/fragment/a.pf_fragment': gz('8。8。8。8'),
+      'pagefind/fragment/b.pf_fragment': gz(`token ${GITHUB_TOKEN}`),
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/pagefind/fragment/a.pf_fragment:1: globally reachable IP 8.8.8.8',
+      'dist/pagefind/fragment/b.pf_fragment:1: secret pattern github-pat',
+    ])
+  })
+
+  it('fails a Pagefind fragment that does not decompress to UTF-8 text, or is a broken gzip stream', () => {
+    const dist = fixtureDist({
+      'pagefind/fragment/binary.pf_fragment': Bun.gzipSync(new Uint8Array([0xff, 0xfe, 0x00, 0x01, 0x80])),
+      'pagefind/fragment/broken.pf_fragment': new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x01, 0x02, 0x03]),
+    })
+    expect(scanDist(NONE, dist, 'dist').map(formatFinding).toSorted()).toEqual([
+      'dist/pagefind/fragment/binary.pf_fragment: binary file type .pf_fragment is not on the allowed list',
+      'dist/pagefind/fragment/broken.pf_fragment: binary file type .pf_fragment is not on the allowed list',
+    ])
+  })
+
+  it('passes the gzipped binary Pagefind index, metadata and wasm containers', () => {
+    const container = Bun.gzipSync(new Uint8Array([0xff, 0xfe, 0x00, 0x01, 0x80]))
+    const dist = fixtureDist({
+      'pagefind/index/en_abc.pf_index': container,
+      'pagefind/pagefind.en_abc.pf_meta': container,
+      'pagefind/wasm.en.pagefind': container,
+    })
+    expect(scanDist(NONE, dist, 'dist')).toEqual([])
   })
 
   it('does not skip a Pagefind-named file that is not gzip, or a gzip file outside pagefind/', () => {
@@ -488,31 +578,14 @@ describe('dist pass', () => {
 
   const realDist = resolve(import.meta.dir, '../dist')
   it.skipIf(!existsSync(join(realDist, 'pagefind')))(
-    'real build: everything in a Pagefind fragment was already found in the scanned HTML',
+    'real build: no symlink, no binary finding, and every Pagefind fragment decompresses to text',
     () => {
-      const open = {...REAL, allowlist: []}
-      const valuesOf = (text: string, scopePath: string): Set<string> =>
-        new Set(
-          scanText(open, scopePath, scopePath, text).map(finding =>
-            finding.kind === 'secret' ? `secret:${finding.id}` : finding.kind === 'binary' ? '' : finding.value,
-          ),
-        )
-
-      const fromHtml = new Set<string>()
-      for (const path of new Bun.Glob('**/*.html').scanSync({cwd: realDist})) {
-        for (const value of valuesOf(readFileSync(join(realDist, path), 'utf8'), path)) fromHtml.add(value)
-      }
-      expect(fromHtml.size).toBeGreaterThan(0)
-
-      let fragments = 0
-      for (const path of new Bun.Glob('pagefind/fragment/*.pf_fragment').scanSync({cwd: realDist})) {
-        const text = new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(readFileSync(join(realDist, path)))))
-        const data = JSON.parse(text.slice('pagefind_dcd'.length)) as {content: string; meta?: Record<string, string>}
-        const fragmentText = [data.content, ...Object.values(data.meta ?? {})].join('\n')
-        for (const value of valuesOf(fragmentText, 'fragment.txt')) expect(fromHtml.has(value)).toBe(true)
-        fragments++
-      }
-      expect(fragments).toBeGreaterThan(0)
+      const fragments = [...new Bun.Glob('pagefind/fragment/*.pf_fragment').scanSync({cwd: realDist})]
+      expect(fragments.length).toBeGreaterThan(0)
+      const findings = scanDist(REAL, realDist, 'dist')
+      const structural = findings.filter(finding => finding.kind === 'binary' || finding.kind === 'symlink')
+      expect(structural.map(formatFinding)).toEqual([])
+      expect(findings.filter(finding => finding.file.endsWith('.pf_fragment')).map(formatFinding)).toEqual([])
     },
     60_000,
   )

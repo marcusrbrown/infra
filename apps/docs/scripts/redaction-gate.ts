@@ -20,6 +20,7 @@ export type Finding =
   | {kind: 'ip'; value: string; file: string; line: number}
   | {kind: 'hostname'; value: string; file: string; line: number}
   | {kind: 'binary'; extension: string; file: string}
+  | {kind: 'symlink'; file: string}
 
 export interface SecretRule {
   id: string
@@ -299,7 +300,8 @@ export function extractHtml(source: string): View {
 // ---------------------------------------------------------------------------------------------------
 // Defang normalization
 
-const DEFANG_RE = /\[\.\]|\[dot\]|\(\.\)|\(dot\)|\[:\](?=\/\/)|hxxps?(?=:\/\/|\[:\]\/\/)|%2e|%2f|%3a|%40/gi
+const DEFANG_RE =
+  /\[\.\]|\[dot\]|\(\.\)|\(dot\)|\[:\](?=\/\/)|hxxps?(?=:\/\/|\[:\]\/\/)|%2e|%2f|%3a|%40|[\u3002\uFF0E\uFF61]/gi
 /** URL-encoded punctuation (`http%3A%2F%2Fhost`, as in a CSS `data:` URI) would otherwise glue onto the host. */
 const PERCENT_ESCAPES: Readonly<Record<string, string>> = {'%2e': '.', '%2f': '/', '%3a': ':', '%40': '@'}
 
@@ -311,7 +313,8 @@ interface Normalized {
 
 /**
  * `[.]`, `[dot]`, `(.)`, `(dot)` become `.`; `hxxp(s)` becomes `http(s)`, in any case; `%2E`, `%2F`, `%3A` and
- * `%40` become `.`, `/`, `:` and `@`.
+ * `%40` become `.`, `/`, `:` and `@`; the ideographic, fullwidth and halfwidth full stops (U+3002, U+FF0E,
+ * U+FF61) become `.`.
  */
 export function defang(input: string): Normalized {
   let text = ''
@@ -582,14 +585,27 @@ function gitTracked(repoRoot: string, pathspec: string): string[] {
   }
 }
 
-function walk(dir: string): string[] {
-  const files: string[] = []
+interface Tree {
+  files: string[]
+  symlinks: string[]
+}
+
+/** Regular files and symlinks under `dir`. A symlink is reported, never followed. */
+function walk(dir: string): Tree {
+  const tree: Tree = {files: [], symlinks: []}
   for (const entry of readdirSync(dir, {withFileTypes: true})) {
     const path = join(dir, entry.name)
-    if (entry.isDirectory()) files.push(...walk(path))
-    else if (entry.isFile()) files.push(path)
+    if (entry.isSymbolicLink()) {
+      tree.symlinks.push(path)
+    } else if (entry.isDirectory()) {
+      const sub = walk(path)
+      tree.files.push(...sub.files)
+      tree.symlinks.push(...sub.symlinks)
+    } else if (entry.isFile()) {
+      tree.files.push(path)
+    }
   }
-  return files.toSorted()
+  return {files: tree.files.toSorted(), symlinks: tree.symlinks.toSorted()}
 }
 
 /** The rendered sources, the solution frontmatter, the diagram specs and the committed site pages. */
@@ -637,21 +653,24 @@ const BINARY_EXTENSIONS = new Set([
   '.eot',
 ])
 
-/** Pagefind writes gzipped fragments, indexes and metadata whose text comes from the scanned HTML. */
-const PAGEFIND_EXTENSIONS = new Set(['.pf_fragment', '.pf_index', '.pf_meta', '.pf_filter', '.pagefind'])
+/**
+ * Pagefind writes gzipped files. Fragments carry the page text verbatim, so they are decompressed and
+ * scanned like any text file. The index, metadata, filter and wasm containers are binary even when
+ * decompressed (CBOR word tables, WebAssembly); they hold tokenized words, not the page text.
+ */
+const PAGEFIND_FRAGMENT_EXTENSION = '.pf_fragment'
+const PAGEFIND_OPAQUE_EXTENSIONS = new Set(['.pf_index', '.pf_meta', '.pf_filter', '.pagefind'])
 
 function isGzip(bytes: Uint8Array): boolean {
   return bytes[0] === 0x1f && bytes[1] === 0x8b
 }
 
-export function isPagefindArtifact(distRelPath: string, bytes: Uint8Array): boolean {
-  return (
-    distRelPath.split('/').includes('pagefind') &&
-    PAGEFIND_EXTENSIONS.has(extname(distRelPath).toLowerCase()) &&
-    isGzip(bytes)
-  )
+function pagefindKind(distRelPath: string, bytes: Uint8Array): 'fragment' | 'opaque' | undefined {
+  if (!distRelPath.split('/').includes('pagefind') || !isGzip(bytes)) return undefined
+  const extension = extname(distRelPath).toLowerCase()
+  if (extension === PAGEFIND_FRAGMENT_EXTENSION) return 'fragment'
+  return PAGEFIND_OPAQUE_EXTENSIONS.has(extension) ? 'opaque' : undefined
 }
-
 const UTF8 = new TextDecoder('utf-8', {fatal: true})
 
 function decodeText(bytes: Uint8Array): string | undefined {
@@ -663,21 +682,45 @@ function decodeText(bytes: Uint8Array): string | undefined {
   }
 }
 
-/** Every text-decodable file in `distDir`, whatever its extension. */
+/**
+ * Every text-decodable file in `distDir`, whatever its extension, plus the text inside Pagefind fragments.
+ * Any symlink fails: the Pages upload dereferences symlinks, so a target outside the scan would ship.
+ */
 export function scanDist(config: GateConfig, distDir: string, displayDir = distDir): Finding[] {
   const findings: Finding[] = []
-  for (const path of walk(distDir)) {
-    const rel = relative(distDir, path).split(sep).join('/')
+  const tree = walk(distDir)
+  const relOf = (path: string): string => relative(distDir, path).split(sep).join('/')
+  for (const path of tree.symlinks) findings.push({kind: 'symlink', file: join(displayDir, relOf(path))})
+  for (const path of tree.files) {
+    const rel = relOf(path)
     const shown = join(displayDir, rel)
-    const bytes = new Uint8Array(readFileSync(path))
-    if (isPagefindArtifact(rel, bytes)) continue
+    const raw = new Uint8Array(readFileSync(path))
+    const pagefind = pagefindKind(rel, raw)
+    if (pagefind === 'opaque') continue
+    let bytes = raw
+    if (pagefind === 'fragment') {
+      try {
+        bytes = Bun.gunzipSync(raw)
+      } catch {
+        findings.push({kind: 'binary', extension: extname(rel).toLowerCase(), file: shown})
+        continue
+      }
+    }
     const text = decodeText(bytes)
     if (text === undefined) {
       const extension = extname(rel).toLowerCase()
       if (!BINARY_EXTENSIONS.has(extension)) findings.push({kind: 'binary', extension, file: shown})
       continue
     }
-    findings.push(...scanText(config, shown, rel, text.replaceAll('\r\n', '\n')))
+    const normalized = text.replaceAll('\r\n', '\n')
+    if (pagefind === 'fragment') {
+      // Fragment text is the rendered page text, so it is scoped like that page's HTML (allowlist globs for
+      // `**/*.html`), but it is plain text: never run it through the HTML extractor.
+      const scope = `${rel.slice(0, -extname(rel).length)}.html`
+      findings.push(...scanView(config, shown, scope, normalized, {text: normalized}))
+    } else {
+      findings.push(...scanText(config, shown, rel, normalized))
+    }
   }
   return findings
 }
@@ -694,7 +737,9 @@ export function dedupe(findings: readonly Finding[]): Finding[] {
         ? `secret|${finding.id}|${finding.file}|${finding.line}`
         : finding.kind === 'binary'
           ? `binary|${finding.file}`
-          : `${finding.kind}|${finding.value}|${finding.file}|${finding.line}`
+          : finding.kind === 'symlink'
+            ? `symlink|${finding.file}`
+            : `${finding.kind}|${finding.value}|${finding.file}|${finding.line}`
     if (seen.has(key)) continue
     seen.add(key)
     unique.push(finding)
@@ -703,7 +748,7 @@ export function dedupe(findings: readonly Finding[]): Finding[] {
 }
 
 function location(finding: Finding): string {
-  return finding.kind === 'binary' ? finding.file : `${finding.file}:${finding.line}`
+  return finding.kind === 'binary' || finding.kind === 'symlink' ? finding.file : `${finding.file}:${finding.line}`
 }
 
 function describe(finding: Finding): string {
@@ -720,6 +765,9 @@ function describe(finding: Finding): string {
     case 'binary': {
       return `binary file type ${finding.extension === '' ? '(no extension)' : finding.extension} is not on the allowed list`
     }
+    case 'symlink': {
+      return 'symlink is not allowed (the Pages upload would follow it)'
+    }
   }
 }
 
@@ -732,7 +780,7 @@ const escapeData = (value: string): string =>
 const escapeProperty = (value: string): string => escapeData(value).replaceAll(':', '%3A').replaceAll(',', '%2C')
 
 export function formatAnnotation(finding: Finding): string {
-  const line = finding.kind === 'binary' ? '' : `,line=${finding.line}`
+  const line = finding.kind === 'binary' || finding.kind === 'symlink' ? '' : `,line=${finding.line}`
   return `::error file=${escapeProperty(finding.file)}${line}::${escapeData(describe(finding))}`
 }
 

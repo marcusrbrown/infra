@@ -1,4 +1,5 @@
 import type {AppStatus} from './observation'
+import {OBSERVATION_KINDS_BY_ID} from '@marcusrbrown/infra-shared/status/history-schema'
 import {describe, expect, it} from 'bun:test'
 import {composeObservation, notMeasured, observe} from './collect'
 import {assembleAppStatus, DECLARED_OBSERVATIONS, declaredObservation, worstResult} from './declared'
@@ -12,6 +13,13 @@ describe('DECLARED_OBSERVATIONS', () => {
     for (const app of APP_IDS) {
       const ids = DECLARED_OBSERVATIONS[app].map(declared => declared.id)
       expect(new Set(ids).size).toBe(ids.length)
+    }
+  })
+
+  it('matches the id-to-kind map the public site reads from the shared history schema', () => {
+    for (const app of APP_IDS) {
+      const declared = Object.fromEntries(DECLARED_OBSERVATIONS[app].map(entry => [entry.id, entry.kind]))
+      expect(OBSERVATION_KINDS_BY_ID[app]).toEqual(declared)
     }
   })
 

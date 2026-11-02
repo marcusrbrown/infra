@@ -1,0 +1,90 @@
+[
+  {
+    "t": "2026-10-30T08:11:00.000Z",
+    "run": "9000000001",
+    "att": 1,
+    "r": {"public-reachability": "p", "deploy-state": "p", "provider-route": "p"},
+    "d": {
+      "public-reachability": {"statusCode": 200},
+      "deploy-state": {"since": "2026-10-29T09:30:00Z"},
+      "provider-route": {"reason": "ok", "probeAt": "2026-10-30T08:09:00.000Z"}
+    }
+  },
+  {
+    "t": "2026-10-30T08:42:00.000Z",
+    "run": "9000000002",
+    "att": 1,
+    "r": {"public-reachability": "p", "deploy-state": "p", "provider-route": "p"},
+    "d": {
+      "public-reachability": {"statusCode": 200},
+      "deploy-state": {"since": "2026-10-29T09:30:00Z"},
+      "provider-route": {"reason": "ok", "probeAt": "2026-10-30T08:40:00.000Z"}
+    }
+  },
+  {
+    "t": "2026-10-30T09:10:00.000Z",
+    "run": "9000000003",
+    "att": 1,
+    "r": {"public-reachability": "p", "deploy-state": "p", "provider-route": "p"},
+    "d": {
+      "public-reachability": {"statusCode": 200},
+      "deploy-state": {"since": "2026-10-29T09:30:00Z"},
+      "provider-route": {"reason": "ok", "probeAt": "2026-10-30T09:08:00.000Z"}
+    }
+  },
+  {
+    "t": "2026-10-30T09:42:00.000Z",
+    "run": "9000000004",
+    "att": 1,
+    "r": {"public-reachability": "p", "deploy-state": "p", "provider-route": "p"},
+    "d": {
+      "public-reachability": {"statusCode": 200},
+      "deploy-state": {"since": "2026-10-29T09:30:00Z"},
+      "provider-route": {"reason": "ok", "probeAt": "2026-10-30T09:40:00.000Z"}
+    }
+  },
+  {
+    "t": "2026-10-30T11:12:00.000Z",
+    "run": "9000000005",
+    "att": 1,
+    "r": {"public-reachability": "p", "deploy-state": "p", "provider-route": "p"},
+    "d": {
+      "public-reachability": {"statusCode": 200},
+      "deploy-state": {"since": "2026-10-29T09:30:00Z"},
+      "provider-route": {"reason": "ok", "probeAt": "2026-10-30T11:10:00.000Z"}
+    }
+  },
+  {
+    "t": "2026-10-30T11:42:00.000Z",
+    "run": "9000000006",
+    "att": 1,
+    "r": {"public-reachability": "p", "deploy-state": "p", "provider-route": "u"},
+    "d": {
+      "public-reachability": {"statusCode": 200},
+      "deploy-state": {"since": "2026-10-29T09:30:00Z"},
+      "provider-route": {"reason": "stale", "probeAt": "2026-10-30T10:32:00.000Z"}
+    }
+  },
+  {
+    "t": "2026-10-30T12:10:00.000Z",
+    "run": "9000000007",
+    "att": 1,
+    "r": {"public-reachability": "p", "deploy-state": "p", "provider-route": "p"},
+    "d": {
+      "public-reachability": {"statusCode": 200},
+      "deploy-state": {"since": "2026-10-29T09:30:00Z"},
+      "provider-route": {"reason": "ok", "probeAt": "2026-10-30T12:08:00.000Z"}
+    }
+  },
+  {
+    "t": "2026-10-30T12:41:00.000Z",
+    "run": "9000000008",
+    "att": 1,
+    "r": {"public-reachability": "p", "deploy-state": "p", "provider-route": "p"},
+    "d": {
+      "public-reachability": {"statusCode": 200},
+      "deploy-state": {"since": "2026-10-29T09:30:00Z"},
+      "provider-route": {"reason": "ok", "probeAt": "2026-10-30T12:39:00.000Z"}
+    }
+  }
+]

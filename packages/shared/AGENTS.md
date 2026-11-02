@@ -9,6 +9,7 @@ Shared TypeScript utilities for DigitalOcean droplet provisioning and CLIProxyAP
 | `server/droplet-helpers.ts` | Shared helpers: `ssh`, `scp`, `run`, `runCapture`, `sleep`, `validateDoctl`, `dropletExists`, `getSshFingerprint`, `getDropletIpWithWait`, `waitForSsh`, `pinHostKeys` |
 | `cliproxy/management.ts` | Management helpers and types: `OAuthModelAliasEntry`, `OAuthModelAlias`, `HTTP_TIMEOUT_MS`, `toStringArray`, `parseManagementKeyList`, `managementHeaders`, `requestJson`, `parseClaudeEntries`, `readOAuthModelAliasFromConfig`, `applyOAuthModelAlias`, `readBackOAuthModelAlias`, `setEqualOAuthModelAlias` |
 | `docs/frontmatter.ts` | Docs frontmatter parser and validators (`parseFrontmatter`, `validateDoc`, `validateSolution`, `validatePlan`, `validateBrainstorm`); used by `packages/cli/src/docs-frontmatter.test.ts` and `apps/docs` |
+| `status/history-schema.ts` | Public status history contract: `APP_IDS`, sample/meta/app-file Zod schemas, `OBSERVATION_KINDS_BY_ID`; written by `packages/cli/src/status/history.ts`, read by `apps/docs` |
 
 ## USAGE
 

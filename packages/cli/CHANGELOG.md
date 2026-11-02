@@ -1,5 +1,13 @@
 # @marcusrbrown/infra
 
+## 0.27.0
+
+### Minor Changes
+
+- Add `status snapshot --history <dir> [--bootstrap] [--now <iso>]`, a CLI-only command that takes one public-safe status sample (public probes, the GitHub Deployments state and the auth monitor probe, with no SSH) and merges it into a 90-day history directory, refusing to write if any history invariant fails, plus `status history-locate`, which finds the newest snapshot history artifact on `main`. Unified `status` now reads each app's Deploy state and cliproxy's End-to-end result from GitHub when `GITHUB_TOKEN` or `GH_TOKEN` is set. ([#1756](https://github.com/marcusrbrown/infra/pull/1756))
+
+- `status --json` now prints a schema-versioned envelope (`{schemaVersion, generatedAt, apps}`) of typed observations and facts per app instead of one flat summary object per app, and the `status` table has the columns App, Reachability, Container, Deploy, End-to-end and Resource; the command's own `--verbose` option was removed because it no longer changes the output. ([#1753](https://github.com/marcusrbrown/infra/pull/1753))
+
 ## 0.26.3
 
 ### Patch Changes

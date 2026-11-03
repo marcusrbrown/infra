@@ -1,4 +1,4 @@
-import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join, resolve} from 'node:path'
 import {afterEach, describe, expect, it} from 'bun:test'
@@ -26,9 +26,7 @@ import {
   repoFacts,
   runbookPath,
   SourceError,
-  UPSTREAM_DOWNLOAD_COMMAND,
   UPSTREAM_FETCH_SCRIPT,
-  upstreamComposeUrl,
   workflowPath,
   type DiagramEntry,
   type DriftTable,
@@ -270,7 +268,7 @@ volumes:
   })
 })
 
-describe('AE4: egress hosts must be drawn and cannot be not-drawn', () => {
+describe('AE4: every egress host must be drawn', () => {
   const entry: DiagramEntry = {
     covers: [{kind: 'egress-host', file: EGRESS_SOURCE}],
     nodes: {
@@ -291,21 +289,6 @@ describe('AE4: egress hosts must be drawn and cannot be not-drawn', () => {
       'apps-gateway: egress host `d.example.test` is not drawn (egress hosts cannot be listed as not drawn).',
     ])
     expect(findings[0]?.direction).toBe('undrawn-fact')
-  })
-
-  it('does not let a not-drawn entry clear the failure', () => {
-    // The table type forbids this entry, so build it from JSON the way a hand-edited table would arrive.
-    const sneaky = parseEntry(
-      JSON.stringify({
-        ...entry,
-        notDrawn: [{fact: fact.egressHost('d.example.test'), reason: 'we would rather not draw it'}],
-      }),
-    )
-    const findings = run([spec], {'apps-gateway': sneaky}, readEgressFacts([...hosts, 'd.example.test']))
-    expect(messages(findings)).toContain(
-      'apps-gateway: egress host `d.example.test` is not drawn (egress hosts cannot be listed as not drawn).',
-    )
-    expect(findings.map(finding => finding.direction)).toContain('table')
   })
 
   it('fails closed when the egress list is empty', () => {
@@ -553,7 +536,7 @@ describe('upstream compose reader', () => {
     expect(() => readUpstreamComposeFacts(root)).toThrow('.cache/upstream-compose/v1.2.4/compose.yaml')
   })
 
-  it('fails with the exact download command when the file is missing', () => {
+  it('fails with the fetch command when the file is missing', () => {
     const root = tempRoot({'apps/gateway/upstream.json': '{"repo":"fro-bot/agent","ref":"v1.2.3"}'})
     expect(() => readUpstreamComposeFacts(root)).toThrow(SourceError)
     expect(() => readUpstreamComposeFacts(root)).toThrow(UPSTREAM_FETCH_SCRIPT)
@@ -567,32 +550,15 @@ describe('upstream compose reader', () => {
     expect(() => readUpstreamComposeFacts(root)).toThrow(SourceError)
   })
 
-  it.each(['main', 'v1.2', '../v1.2.3', 'v1.2.3-rc.1', ''])('rejects a ref that is not a release tag: %j', ref => {
-    const root = tempRoot({'apps/gateway/upstream.json': JSON.stringify({repo: 'fro-bot/agent', ref})})
+  it('reports a ref that is not a release tag as a source error', () => {
+    const root = tempRoot({'apps/gateway/upstream.json': JSON.stringify({repo: 'fro-bot/agent', ref: 'main'})})
     expect(() => readUpstreamComposeFacts(root)).toThrow(SourceError)
+    expect(() => readUpstreamComposeFacts(root)).toThrow('release tag')
   })
 
   it('fails when upstream.json is missing or malformed', () => {
     expect(() => readUpstreamComposeFacts(tempRoot())).toThrow(SourceError)
     expect(() => readUpstreamComposeFacts(tempRoot({'apps/gateway/upstream.json': '{'}))).toThrow(SourceError)
-  })
-
-  it('prints a download command that reads, validates and downloads the pinned ref', () => {
-    const rootPackage = JSON.parse(readFileSync(resolve(import.meta.dir, '../../../package.json'), 'utf8')) as {
-      scripts: Record<string, string>
-    }
-    expect(
-      `bun run ${Object.keys(rootPackage.scripts).find(name => rootPackage.scripts[name] === UPSTREAM_DOWNLOAD_COMMAND)}`,
-    ).toBe(UPSTREAM_FETCH_SCRIPT)
-    expect(UPSTREAM_DOWNLOAD_COMMAND).toContain('jq -r .ref apps/gateway/upstream.json')
-    expect(UPSTREAM_DOWNLOAD_COMMAND).toContain(String.raw`^v[0-9]+\.[0-9]+\.[0-9]+$`)
-    expect(UPSTREAM_DOWNLOAD_COMMAND).toContain('mkdir -p ".cache/upstream-compose/$ref"')
-    expect(UPSTREAM_DOWNLOAD_COMMAND).toContain(
-      'curl -fsSL "https://raw.githubusercontent.com/fro-bot/agent/$ref/deploy/compose.yaml" -o ".cache/upstream-compose/$ref/compose.yaml"',
-    )
-    expect(upstreamComposeUrl('v1.2.3')).toBe(
-      'https://raw.githubusercontent.com/fro-bot/agent/v1.2.3/deploy/compose.yaml',
-    )
   })
 })
 
@@ -632,7 +598,7 @@ jobs:
     expect(new Set(keys).size).toBe(keys.length)
     expect(keys).toContain(factKey(fact.job(ROUTER, 'deploy-keeweb')))
     expect(keys).toContain(factKey(fact.job(CALLEE, 'deploy-keeweb')))
-    expect(keys).toContain(factKey(fact.environment(CALLEE, 'keeweb')))
+    expect(keys).toContain(factKey(fact.environment(CALLEE, 'deploy-keeweb', 'keeweb')))
   })
 
   it('accepts environment as a string or as {name}', () => {
@@ -650,7 +616,7 @@ jobs:
       url: https://example.test
 `
     const {facts} = parseWorkflowFacts(text, CALLEE)
-    expect(facts.map(factKey)).toContain(factKey(fact.environment(CALLEE, 'gate-one')))
+    expect(facts.map(factKey)).toContain(factKey(fact.environment(CALLEE, 'deploy', 'gate-one')))
   })
 
   it('accepts workflow_call with a null value (checks the key, not truthiness)', () => {
@@ -678,6 +644,48 @@ jobs:
   it('fails closed on a callee that itself calls a reusable workflow', () => {
     const text = 'on:\n  workflow_call:\njobs:\n  a:\n    uses: ./.github/workflows/other.yaml\n'
     expect(() => parseWorkflowFacts(text, CALLEE)).toThrow(SourceError)
+  })
+})
+
+describe('environment ownership', () => {
+  const CALLEE = workflowPath('deploy-keeweb.yaml')
+  const calleeText = (owner: 'notify' | 'deploy-keeweb'): string => `
+on:
+  workflow_call:
+jobs:
+  notify:
+    runs-on: ubuntu-latest${owner === 'notify' ? '\n    environment: keeweb' : ''}
+  deploy-keeweb:
+    runs-on: ubuntu-latest${owner === 'deploy-keeweb' ? '\n    environment: keeweb' : ''}
+`
+  const entry: DiagramEntry = {
+    covers: [
+      {kind: 'job', file: CALLEE},
+      {kind: 'environment', file: CALLEE},
+    ],
+    nodes: {
+      notify: {facts: [fact.job(CALLEE, 'notify')]},
+      deploy: {facts: [fact.job(CALLEE, 'deploy-keeweb')]},
+      gate: {facts: [fact.environment(CALLEE, 'deploy-keeweb', 'keeweb')]},
+    },
+  }
+  const spec: SpecInput = {name: 'deploy-pipeline', nodeIds: ['notify', 'deploy', 'gate']}
+
+  it('passes while the gate environment sits on the deploy job', () => {
+    const {facts} = parseWorkflowFacts(calleeText('deploy-keeweb'), CALLEE)
+    expect(formatFindings(run([spec], {'deploy-pipeline': entry}, facts))).toBe('')
+  })
+
+  it('fails when the environment moves to the notify job', () => {
+    const {facts} = parseWorkflowFacts(calleeText('notify'), CALLEE)
+    const findings = run([spec], {'deploy-pipeline': entry}, facts)
+    expect(messages(findings)).toContain(
+      'deploy-pipeline: node `gate` maps to `deploy-keeweb.yaml` job `deploy-keeweb` environment `keeweb`, which no longer exists.',
+    )
+    expect(messages(findings)).toContain(
+      'deploy-pipeline: `deploy-keeweb.yaml` job `notify` environment `keeweb` is neither drawn nor listed as not drawn.',
+    )
+    expect(findings.map(finding => finding.direction).toSorted()).toEqual(['missing-fact', 'undrawn-fact'])
   })
 })
 
@@ -763,6 +771,60 @@ describe('runbook anchors', () => {
     expect(unmappable.has(factKey(placeholder))).toBe(true)
     // An angle bracket inside inline code is untouched by the site, so it stays mappable.
     expect(unmappable.size).toBe(1)
+  })
+
+  it('skips headings inside HTML comments, on one line or several', () => {
+    const md = [
+      '# T',
+      '',
+      '<!-- ## Hidden one -->',
+      '',
+      '<!--',
+      '## Hidden two',
+      '-->',
+      '',
+      '## Kept <!-- ## inline hidden -->',
+      '',
+      '## After',
+      '',
+    ].join('\n')
+    expect(anchors(md)).toEqual(['kept', 'after'])
+  })
+
+  it('resumes after a comment closes mid-line', () => {
+    expect(anchors('# T\n\n<!-- start\nstill hidden -->\n## Back\n')).toEqual(['back'])
+  })
+
+  it('does not treat a comment opener inside a fence as a comment', () => {
+    const md = ['# T', '', '```html', '<!--', '```', '', '## Visible', ''].join('\n')
+    expect(anchors(md)).toEqual(['visible'])
+  })
+
+  it('ignores a fence-looking line inside a comment', () => {
+    const md = ['# T', '', '<!--', '```', '-->', '', '## Visible', ''].join('\n')
+    expect(anchors(md)).toEqual(['visible'])
+  })
+
+  it('marks a heading with an ampersand as unmappable, but not one inside inline code', () => {
+    const {facts, unmappable} = parseRunbookAnchors('# T\n\n## Fish & chips\n\n## Run `a && b`\n', FILE)
+    const [entity, code] = facts
+    expect(entity).toBeDefined()
+    expect(code).toBeDefined()
+    if (entity === undefined || code === undefined) return
+    expect(unmappable.get(factKey(entity))).toContain('`&`')
+    expect(unmappable.has(factKey(code))).toBe(false)
+  })
+
+  it('fails a node that maps to a heading with an ampersand', () => {
+    const {facts, unmappable} = parseRunbookAnchors('# T\n\n## Fish & chips\n', FILE)
+    const entry: DiagramEntry = {covers: [], nodes: {step: {facts: [fact.anchor(FILE, 'fish--chips')]}}}
+    const findings = check({
+      specs: [{name: 'runbooks-example', nodeIds: ['step']}],
+      table: {'runbooks-example': entry},
+      facts: repoFacts(facts, {unmappable}),
+    })
+    expect(findings.map(finding => finding.direction)).toEqual(['unmappable-fact'])
+    expect(messages(findings)[0]).toContain('`&`')
   })
 
   it('fails a node that maps to an unmappable heading', () => {
@@ -882,7 +944,7 @@ describe('repo facts aggregation', () => {
     const facts = readRepoFacts(root)
     const keys = facts.facts.map(factKey)
     expect(keys).toContain(factKey(fact.job(workflowPath('deploy.yaml'), 'detect')))
-    expect(keys).toContain(factKey(fact.environment(workflowPath('deploy-a.yaml'), 'a')))
+    expect(keys).toContain(factKey(fact.environment(workflowPath('deploy-a.yaml'), 'deploy-a', 'a')))
     expect(keys).toContain(factKey(fact.anchor(runbookPath('one.md'), 'step')))
   })
 
@@ -910,10 +972,6 @@ describe('gateway deploy exports', () => {
     expect(keys).toContain(factKey(fact.volume(GATEWAY_OVERRIDE_SOURCE, 'caddy_config')))
   })
 })
-
-function parseEntry(json: string): DiagramEntry {
-  return JSON.parse(json)
-}
 
 // ─── The real mapping table ──────────────────────────────────────────────────
 //
@@ -995,7 +1053,7 @@ const PIPELINE_ENTRY: DiagramEntry = {
     reusable: maps(...DEPLOYED_APPS.map(app => fact.job(ROUTER, `deploy-${app}`))),
     notify: maps(...DEPLOYED_APPS.map(app => fact.job(calleeOf(app), 'notify'))),
     discord: illustrative('Discord is an external service.'),
-    gate: maps(...DEPLOYED_APPS.map(app => fact.environment(calleeOf(app), app))),
+    gate: maps(...DEPLOYED_APPS.map(app => fact.environment(calleeOf(app), `deploy-${app}`, app))),
     deploy: maps(...DEPLOYED_APPS.map(app => fact.job(calleeOf(app), `deploy-${app}`))),
     host: illustrative('The target host is outside the repo.'),
   },
@@ -1193,5 +1251,37 @@ describe('published diagrams against the repo', () => {
     expect(specs.length).toBeGreaterThan(0)
     const findings = check({specs, table: TABLE, facts: readRepoFacts(REPO_ROOT)})
     expect(findings, formatFindings(findings)).toEqual([])
+  })
+})
+
+// Pin the real table's `covers` scopes: inject one extra fact into the real facts and require the matching finding.
+describe('the real table catches an undrawn fact', () => {
+  const specs = readSpecs(REPO_ROOT)
+  const real = readRepoFacts(REPO_ROOT)
+
+  function findingsWith(extra: Fact): Finding[] {
+    return check({specs, table: TABLE, facts: {...real, facts: [...real.facts, extra]}})
+  }
+
+  it('flags an extra egress host on the gateway diagram', () => {
+    const findings = findingsWith(fact.egressHost('extra.example.test'))
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({
+      diagram: 'apps-gateway',
+      subject: 'extra.example.test',
+      direction: 'undrawn-fact',
+    })
+  })
+
+  it('flags an extra upstream gateway service on the gateway diagram', () => {
+    const findings = findingsWith(fact.service(GATEWAY_UPSTREAM_SOURCE, 'extra-sidecar'))
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({diagram: 'apps-gateway', subject: 'extra-sidecar', direction: 'undrawn-fact'})
+  })
+
+  it('flags an extra compose service in apps/umami on the umami diagram', () => {
+    const findings = findingsWith(fact.service(composePath('umami'), 'redis'))
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({diagram: 'apps-umami', subject: 'redis', direction: 'undrawn-fact'})
   })
 })

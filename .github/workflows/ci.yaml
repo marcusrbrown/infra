@@ -86,15 +86,7 @@ jobs:
 
       # Data file only: an upstream checkout would put its tests where `bun test --recursive` runs them.
       - name: Download upstream gateway compose
-        run: |
-          set -euo pipefail
-          REF=$(jq -r .ref apps/gateway/upstream.json)
-          if [[ ! "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::apps/gateway/upstream.json ref must be a release tag (vX.Y.Z), got: $REF"
-            exit 1
-          fi
-          mkdir -p ".cache/upstream-compose/$REF"
-          curl -fsSL "https://raw.githubusercontent.com/fro-bot/agent/$REF/deploy/compose.yaml" -o ".cache/upstream-compose/$REF/compose.yaml"
+        run: bun run fetch:upstream-compose
 
       - name: Run tests
         run: bun test --recursive

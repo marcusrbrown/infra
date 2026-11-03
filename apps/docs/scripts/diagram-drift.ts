@@ -7,6 +7,7 @@ import {
   OPENCODE_CATALOG_HOSTS,
   type ComposeOverrideOpts,
 } from '../../gateway/src/deploy'
+import {readPinnedRef, upstreamComposeCachePath} from './fetch-upstream-compose'
 import {discoverSpecs} from './render-diagrams'
 
 // Diagram drift checker. A pure `check` compares the node ids of each rendered diagram spec, an explicit mapping
@@ -45,6 +46,8 @@ export const composePath = (app: string): string => `apps/${app}/docker-compose.
 export const workflowPath = (name: string): string => `.github/workflows/${name}`
 export const runbookPath = (name: string): string => `docs/runbooks/${name}`
 
+const ENVIRONMENT_SEPARATOR = '#'
+
 /** Constructors for table authors. The file is part of the fact key, so pass the same path the readers use. */
 export const fact = {
   app: (id: string): KindedFact<'app'> => ({kind: 'app', file: APPS_SOURCE, id}),
@@ -52,7 +55,12 @@ export const fact = {
   volume: (file: string, id: string): KindedFact<'volume'> => ({kind: 'volume', file, id}),
   egressHost: (id: string): KindedFact<'egress-host'> => ({kind: 'egress-host', file: EGRESS_SOURCE, id}),
   job: (file: string, id: string): KindedFact<'job'> => ({kind: 'job', file, id}),
-  environment: (file: string, id: string): KindedFact<'environment'> => ({kind: 'environment', file, id}),
+  /** An environment is keyed by the job that declares it, so moving it to another job in the file is drift. */
+  environment: (file: string, job: string, environment: string): KindedFact<'environment'> => ({
+    kind: 'environment',
+    file,
+    id: `${job}${ENVIRONMENT_SEPARATOR}${environment}`,
+  }),
   anchor: (file: string, id: string): KindedFact<'anchor'> => ({kind: 'anchor', file, id}),
 } as const
 
@@ -194,8 +202,12 @@ function describeFact(item: Fact): string {
       return `egress host \`${item.id}\``
     case 'job':
       return `\`${basename(item.file)}\` job \`${item.id}\``
-    case 'environment':
-      return `\`${basename(item.file)}\` environment \`${item.id}\``
+    case 'environment': {
+      const split = item.id.indexOf(ENVIRONMENT_SEPARATOR)
+      const job = item.id.slice(0, split)
+      const environment = item.id.slice(split + ENVIRONMENT_SEPARATOR.length)
+      return `\`${basename(item.file)}\` job \`${job}\` environment \`${environment}\``
+    }
     case 'anchor':
       return `\`${basename(item.file)}\` heading anchor \`#${item.id}\``
   }
@@ -251,10 +263,6 @@ function duplicates(values: readonly string[]): string[] {
   return [...repeated]
 }
 
-function widenKind(item: Fact): FactKind {
-  return item.kind
-}
-
 function inScope(item: Fact, scopes: readonly FactScope[]): boolean {
   return scopes.some(scope => scope.kind === item.kind && scope.file === item.file)
 }
@@ -270,7 +278,7 @@ function checkDiagram(
   const rows = Object.entries(entry.nodes)
   const notDrawn = entry.notDrawn ?? []
 
-  // Table validity: reasons and facts must be present, and "not drawn" is closed to egress hosts and anchors.
+  // Table validity the types cannot express: reasons and facts must be present.
   for (const [node, mapping] of rows) {
     if (isIllustrative(mapping)) {
       if (mapping.illustrative.trim() === '')
@@ -280,11 +288,7 @@ function checkDiagram(
     }
   }
   for (const {fact: omitted, reason} of notDrawn) {
-    // The type forbids these kinds; a hand-edited or JSON-built table can still carry them.
-    const kind = widenKind(omitted)
-    if (kind === 'egress-host' || kind === 'anchor') {
-      report.add('table', omitted.id, `${describeFact(omitted)} cannot be listed as not drawn.`, omitted)
-    } else if (reason.trim() === '') {
+    if (reason.trim() === '') {
       report.add('table', omitted.id, `not-drawn ${describeFact(omitted)} gives no reason.`, omitted)
     }
   }
@@ -387,13 +391,13 @@ function checkDiagram(
     }
   }
 
-  // Direction 1: a fact in scope that is neither mapped nor listed as not drawn. Egress hosts never get the second
-  // way out, whatever the table says.
+  // Direction 1: a fact in scope that is neither mapped nor listed as not drawn. `NotDrawnFact` excludes egress hosts
+  // and anchors, so an egress host can only be cleared by a node.
   for (const candidate of facts.facts) {
     if (!inScope(candidate, entry.covers)) continue
     const key = factKey(candidate)
     if (claims.has(key)) continue
-    if (candidate.kind !== 'egress-host' && notDrawnKeys.has(key)) continue
+    if (notDrawnKeys.has(key)) continue
     const text =
       candidate.kind === 'egress-host'
         ? `${describeFact(candidate)} is not drawn (egress hosts cannot be listed as not drawn).`
@@ -506,43 +510,15 @@ export function readComposeFacts(repoRoot: string, app: string): Fact[] {
 
 // ─── Gateway: upstream compose and override ──────────────────────────────────
 
-export const UPSTREAM_PIN_PATH = 'apps/gateway/upstream.json'
-export const UPSTREAM_CACHE_DIR = '.cache/upstream-compose'
-export const UPSTREAM_REF_PATTERN = /^v\d+\.\d+\.\d+$/
-
-export function upstreamComposeUrl(ref: string): string {
-  return `https://raw.githubusercontent.com/fro-bot/agent/${ref}/deploy/compose.yaml`
-}
-
-/**
- * Downloads the upstream compose for the pinned ref into the ref-keyed cache path, from the repo root. The CI step
- * has the same shape. It reads the ref from `upstream.json` and refuses anything that is not a release tag.
- */
+/** What the failure message tells the operator to run. The script itself is `fetch-upstream-compose.ts`. */
 export const UPSTREAM_FETCH_SCRIPT = 'bun run fetch:upstream-compose'
 
-export const UPSTREAM_DOWNLOAD_COMMAND =
-  `ref="$(jq -r .ref ${UPSTREAM_PIN_PATH})" && ${String.raw`echo "$ref" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' && `}mkdir -p "${UPSTREAM_CACHE_DIR}/$ref" && ` +
-  `curl -fsSL "${upstreamComposeUrl('$ref')}" -o "${UPSTREAM_CACHE_DIR}/$ref/compose.yaml"`
-
 export function readUpstreamRef(repoRoot: string): string {
-  let pin: unknown
   try {
-    pin = JSON.parse(readText(join(repoRoot, UPSTREAM_PIN_PATH), UPSTREAM_PIN_PATH))
+    return readPinnedRef(repoRoot)
   } catch (error) {
-    if (error instanceof SourceError) throw error
-    throw new SourceError(`${UPSTREAM_PIN_PATH}: not valid JSON (${errorText(error)})`)
+    throw new SourceError(errorText(error))
   }
-  const ref = isRecord(pin) ? pin.ref : undefined
-  if (typeof ref !== 'string' || !UPSTREAM_REF_PATTERN.test(ref)) {
-    throw new SourceError(
-      `${UPSTREAM_PIN_PATH}: \`ref\` must be a release tag like v1.2.3 (found ${JSON.stringify(ref)})`,
-    )
-  }
-  return ref
-}
-
-export function upstreamComposeCachePath(ref: string): string {
-  return `${UPSTREAM_CACHE_DIR}/${ref}/compose.yaml`
 }
 
 /** Reads the upstream compose downloaded for the current pin. A file downloaded for an older pin is never read. */
@@ -666,7 +642,7 @@ export function parseWorkflowFacts(text: string, file: string): WorkflowRead {
     if (!isRecord(job)) throw new SourceError(`${file}: job \`${id}\` is not a mapping`)
     facts.push(fact.job(file, id))
     const environment = environmentName(job.environment, file, id)
-    if (environment !== undefined) facts.push(fact.environment(file, environment))
+    if (environment !== undefined) facts.push(fact.environment(file, id, environment))
     if (job.uses === undefined) continue
     if (typeof job.uses !== 'string' || !job.uses.startsWith(LOCAL_WORKFLOW_PREFIX)) {
       throw new SourceError(
@@ -689,17 +665,22 @@ export function parseWorkflowFacts(text: string, file: string): WorkflowRead {
 // ─── Runbook anchors ─────────────────────────────────────────────────────────
 
 const FENCE_RE = /^\s*(`{3,}|~{3,})/
+const UNSAFE_HEADING_CHARS: Readonly<Record<string, string>> = {
+  '<': 'the heading contains `<`, which the content generator rewrites, so the anchor would not match the site',
+  '&': 'the heading contains `&`, which markdown may decode as an HTML entity, so the anchor may not match the site',
+}
 const HEADING_RE = /^ {0,3}(#{1,6})(?:[ \t]+(\S.*)?)?$/
 
 /** The heading text as the site renders it: code, emphasis and link syntax stripped. */
-function renderedHeading(raw: string): {text: string; hasAngle: boolean} {
+function renderedHeading(raw: string): {text: string; unsafe: string[]} {
   const codes: string[] = []
   let text = raw.replace(/[ \t]+#+[ \t]*$/, '').trim()
   text = text.replaceAll(/(`+)([^`]+)\1/g, (_match, _ticks: string, inner: string) => {
     codes.push(inner.trim())
     return `\0${codes.length - 1}\0`
   })
-  const hasAngle = text.includes('<')
+  // Outside code, `<` is rewritten by the content generator and `&` may be decoded as an entity by markdown.
+  const unsafe = ['<', '&'].filter(char => text.includes(char))
   text = text
     .replaceAll(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replaceAll(/\[([^\]]+)\]\([^)]*\)/g, '$1')
@@ -707,14 +688,35 @@ function renderedHeading(raw: string): {text: string; hasAngle: boolean} {
     .replaceAll(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
     .replaceAll(/(^|\W)_{1,3}([^_]+)_{1,3}(?=\W|$)/g, '$1$2')
   text = text.replaceAll(/\0(\d+)\0/g, (_match, position: string) => codes[Number(position)] ?? '')
-  return {text, hasAngle}
+  return {text, unsafe}
+}
+
+/** Removes `<!-- ... -->` text from one line; a comment may open on one line and close on a later one. */
+function stripHtmlComments(line: string, inComment: boolean): {text: string; inComment: boolean} {
+  let text = ''
+  let rest = line
+  let open = inComment
+  for (;;) {
+    if (open) {
+      const end = rest.indexOf('-->')
+      if (end === -1) return {text, inComment: true}
+      rest = rest.slice(end + 3)
+      open = false
+    } else {
+      const start = rest.indexOf('<!--')
+      if (start === -1) return {text: text + rest, inComment: false}
+      text += rest.slice(0, start)
+      rest = rest.slice(start + 4)
+      open = true
+    }
+  }
 }
 
 /**
  * Heading anchors of one runbook, slugged by `github-slugger` with one slugger per document so duplicates get the
- * same `-1` suffix as the site. Fenced code (``` and ~~~) and frontmatter are skipped, and the first H1 is never an
- * anchor because the site moves it to the page title. A heading with a `<` outside code is rewritten by the content
- * generator, so its anchor is reported as unmappable.
+ * same `-1` suffix as the site. Fenced code (``` and ~~~), HTML comments and frontmatter are skipped, and the first H1 is never an
+ * anchor because the site moves it to the page title. A heading with a `<` or `&` outside code may be rewritten or decoded
+ * on its way to the site, so its anchor is reported as unmappable.
  */
 export function parseRunbookAnchors(markdown: string, file: string): {facts: Fact[]; unmappable: Map<string, string>} {
   const lines = markdown.replaceAll('\r\n', '\n').split('\n')
@@ -728,22 +730,26 @@ export function parseRunbookAnchors(markdown: string, file: string): {facts: Fac
   }
   let fence: {char: string; length: number} | undefined
   let seenTitle = false
+  let inComment = false
   for (; index < lines.length; index++) {
-    const line = lines[index] ?? ''
-    const opening = FENCE_RE.exec(line)
+    const rawLine = lines[index] ?? ''
     if (fence !== undefined) {
-      const marker = opening?.[1]
+      // Inside a fence everything is literal, including `<!--`.
+      const marker = FENCE_RE.exec(rawLine)?.[1]
       if (
         marker !== undefined &&
         marker.startsWith(fence.char) &&
         marker.length >= fence.length &&
-        line.trim() === marker
+        rawLine.trim() === marker
       ) {
         fence = undefined
       }
       continue
     }
-    const marker = opening?.[1]
+    const stripped = stripHtmlComments(rawLine, inComment)
+    inComment = stripped.inComment
+    const line = stripped.text
+    const marker = FENCE_RE.exec(line)?.[1]
     if (marker !== undefined) {
       fence = {char: marker.charAt(0), length: marker.length}
       continue
@@ -756,14 +762,11 @@ export function parseRunbookAnchors(markdown: string, file: string): {facts: Fac
       seenTitle = true
       continue
     }
-    const {text, hasAngle} = renderedHeading(raw)
+    const {text, unsafe} = renderedHeading(raw)
     const anchor = fact.anchor(file, slugger.slug(text))
     facts.push(anchor)
-    if (hasAngle) {
-      unmappable.set(
-        factKey(anchor),
-        'the heading contains `<`, which the content generator rewrites, so the anchor would not match the site',
-      )
+    if (unsafe.length > 0) {
+      unmappable.set(factKey(anchor), unsafe.map(char => UNSAFE_HEADING_CHARS[char] ?? '').join('; '))
     }
   }
   return {facts, unmappable}

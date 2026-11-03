@@ -51,7 +51,7 @@ Run the [checks that launch nothing](#checks-that-launch-nothing) first, then sp
 | L2 | 8,000-unit prompt | [16 step 2](operator-surface-acceptance.md#16-launch-prompt) |
 | L3 | Approval trigger, press "Once" | [9](operator-surface-acceptance.md#9-tool-approval) steps 1, 2 |
 | L4 | Approval trigger, press "Always" then "Confirm always" | [9](operator-surface-acceptance.md#9-tool-approval) step 5 |
-| L5 | Approval trigger, press "Reject" | [9](operator-surface-acceptance.md#9-tool-approval) step 3; also shows a new run prompts again after "Always". **Skip on OpenCode V2:** Reject can quarantine the repo. Instead, launch the trigger again after L4 and press "Once": it must prompt, which shows "Always" stayed within its run. The lock remains until its 900-second lease expires and a takeover confirms the repo is quiet (fro-bot/agent#2001) |
+| L5 | Approval trigger, press "Reject" | [9](operator-surface-acceptance.md#9-tool-approval) step 3; also shows a new run prompts again after "Always" |
 | L6 | Question trigger, choose an option and "Submit answers" | [10](operator-surface-acceptance.md#10-agent-question) steps 1, 2 |
 | L7 | Question trigger, press "Skip" | [10](operator-surface-acceptance.md#10-agent-question) step 3 |
 | L8 | Question trigger, then cancel while the question is open | [7](operator-surface-acceptance.md#7-cancel-a-running-run), [10](operator-surface-acceptance.md#10-agent-question) step 5 |
@@ -65,9 +65,7 @@ Run the [checks that launch nothing](#checks-that-launch-nothing) first, then sp
 
 ### L9 wait reason
 
-On OpenCode V2, skip L9 and record check 17 as "not demonstrable" (fro-bot/agent#2007).
-
-Run L9 after L8 has finished, and launch nothing else until L9 ends. The reason is not on the wire for the first 70–90 seconds after launch. Then `awaiting-background-task` lasts about 40–70 seconds and `confirming-completion` about 7–15, so the window is roughly 45–75 seconds. Steps 1–3 must fit inside it: have every command ready before you launch, and do not spend the window on setup.
+Run L9 after L8 has finished, and launch nothing else until L9 ends. The first reason can appear within about 15–20 seconds of launch, so start the observer at launch. `awaiting-background-task` lasts roughly 40–45 seconds and is the only reason that tells a background run from a plain one, because every run ends with about 5 seconds of `confirming-completion`. A stretch with no reason between the subagent finishing and confirmation starting is normal. Steps 1–3 must fit inside the `awaiting-background-task` window: have every command ready before you launch, and do not spend the window on setup.
 
 Timing procedure:
 
@@ -112,12 +110,12 @@ Timing procedure:
   })()
   ```
 
-- A new run's card opens expanded. Confirm that in a snapshot, leave it expanded, and run nothing else until about 65 seconds after launch.
-- From about 65 seconds, use short `wait --text` calls instead of polling: `wait --text "Waiting on a background task"` times out after about 25 seconds, so repeat it until about 120 seconds after launch. If the line has already moved on, it reads "Confirming it has finished"; record whichever label shows.
+- A new run's card opens expanded. Confirm that in a snapshot and leave it expanded.
+- Right after the observer returns, use short `wait --text` calls instead of polling: `wait --text "Waiting on a background task"` times out after about 25 seconds, so repeat it once, until about 60 seconds after launch. The "Confirming it has finished" line shows for only about 5 seconds near the end; the observer's frames are the record for it.
 - Do not wrap agent-browser commands in `timeout`. Killing the wrapper can kill the browser daemon, which discards the page and the observer.
 - Take timings from the observer's frame timestamps and the run's `createdAt`. Do not use the `updatedAt` in `/operator/runs`: it does not change when the reason changes.
 
-1. Screenshot and snapshot the reason line under the repo name as soon as a `wait --text` call sees it. If no line shows within about 120 seconds, look for `background dispatch observed` in `bunx @marcusrbrown/infra gateway logs gateway`; the line carries the session ID, not the run ID, so match it to the launch by order. Without that line, record check 17 as `not triggered` with the run ID and skip to step 5. With that line but no label yet, keep waiting another 30–60 seconds before recording a failure.
+1. Screenshot and snapshot the reason line under the repo name as soon as a `wait --text` call sees it. If no line shows within about 45 seconds, look for `background dispatch observed` in `bunx @marcusrbrown/infra gateway logs gateway`; the line carries the session ID, not the run ID, so match it to the launch by order. Without that line, record check 17 as `not triggered` with the run ID and skip to step 5. With that line but no label yet, keep waiting another 30 seconds before recording a failure.
 2. Collapse the card, wait about 20 seconds for the list refresh, and screenshot it. While it is collapsed, read the run's current status once from page context. Define `runId` inline. The gateway replays the latest status to a new stream, so the first `status` frame is the current one:
 
    ```js
@@ -152,9 +150,9 @@ Timing procedure:
    })()
    ```
 
-   Record `status` and `waitReason`. Expect `running` with `awaiting-background-task` or `confirming-completion`.
+   Record `status` and `waitReason`. Expect `running` with `awaiting-background-task`; `null` means the quiet stretch has begun, so record that and move on.
 
-3. Expand the card again and `wait --text` for the current reason line, which may already read "Confirming it has finished". Screenshot it.
+3. Expand the card again and `wait --text` for the current reason line. Screenshot it. If the quiet stretch has begun, no line shows; record that instead of a failure.
 4. Not automatable (see [Not automatable](#not-automatable)). Record `not automated`.
 5. Wait for the terminal status. Confirm the card is expanded (its text includes "Raw text") and the line is gone, reload, and confirm the card is expanded again and the line stays gone.
 

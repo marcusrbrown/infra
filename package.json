@@ -14,6 +14,7 @@
     "deploy:gateway": "bun run apps/gateway/src/deploy.ts",
     "deploy:umami": "bun run apps/umami/src/deploy.ts",
     "deploy:vpn": "bun run apps/vpn/src/deploy.ts",
+    "fetch:upstream-compose": "ref=\"$(jq -r .ref apps/gateway/upstream.json)\" && echo \"$ref\" | grep -Eq '^v[0-9]+\\.[0-9]+\\.[0-9]+$' && mkdir -p \".cache/upstream-compose/$ref\" && curl -fsSL \"https://raw.githubusercontent.com/fro-bot/agent/$ref/deploy/compose.yaml\" -o \".cache/upstream-compose/$ref/compose.yaml\"",
     "fix": "eslint --fix",
     "lint": "eslint",
     "prepare": "simple-git-hooks",

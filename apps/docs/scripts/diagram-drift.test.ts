@@ -1,6 +1,6 @@
-import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
-import {dirname, join} from 'node:path'
+import {dirname, join, resolve} from 'node:path'
 import {afterEach, describe, expect, it} from 'bun:test'
 import {
   APPS_SOURCE,
@@ -21,23 +21,26 @@ import {
   readEgressFacts,
   readOverrideFacts,
   readRepoFacts,
+  readSpecs,
   readUpstreamComposeFacts,
   repoFacts,
   runbookPath,
   SourceError,
   UPSTREAM_DOWNLOAD_COMMAND,
+  UPSTREAM_FETCH_SCRIPT,
   upstreamComposeUrl,
   workflowPath,
   type DiagramEntry,
+  type DriftTable,
   type Fact,
   type Finding,
+  type NodeMapping,
   type SpecInput,
   type TableEntry,
 } from './diagram-drift'
 
-// Fixture-level tests for the pure checker and the source readers. The real mapping table and the real-repo check
-// are added by the next unit; nothing here reads the diagrams or the sources of this repository, except the two
-// "real export" sanity checks at the bottom.
+// Fixture-level tests for the pure checker and the source readers, then the real mapping table and the real-repo
+// check at the bottom. Only the two "real export" sanity checks and the real-repo check read this repository.
 
 const temps: string[] = []
 afterEach(() => {
@@ -553,7 +556,7 @@ describe('upstream compose reader', () => {
   it('fails with the exact download command when the file is missing', () => {
     const root = tempRoot({'apps/gateway/upstream.json': '{"repo":"fro-bot/agent","ref":"v1.2.3"}'})
     expect(() => readUpstreamComposeFacts(root)).toThrow(SourceError)
-    expect(() => readUpstreamComposeFacts(root)).toThrow(UPSTREAM_DOWNLOAD_COMMAND)
+    expect(() => readUpstreamComposeFacts(root)).toThrow(UPSTREAM_FETCH_SCRIPT)
   })
 
   it('fails on an empty download', () => {
@@ -575,6 +578,12 @@ describe('upstream compose reader', () => {
   })
 
   it('prints a download command that reads, validates and downloads the pinned ref', () => {
+    const rootPackage = JSON.parse(readFileSync(resolve(import.meta.dir, '../../../package.json'), 'utf8')) as {
+      scripts: Record<string, string>
+    }
+    expect(
+      `bun run ${Object.keys(rootPackage.scripts).find(name => rootPackage.scripts[name] === UPSTREAM_DOWNLOAD_COMMAND)}`,
+    ).toBe(UPSTREAM_FETCH_SCRIPT)
     expect(UPSTREAM_DOWNLOAD_COMMAND).toContain('jq -r .ref apps/gateway/upstream.json')
     expect(UPSTREAM_DOWNLOAD_COMMAND).toContain(String.raw`^v[0-9]+\.[0-9]+\.[0-9]+$`)
     expect(UPSTREAM_DOWNLOAD_COMMAND).toContain('mkdir -p ".cache/upstream-compose/$ref"')
@@ -849,7 +858,7 @@ describe('repo facts aggregation', () => {
       'apps/umami/docker-compose.yaml': UMAMI_COMPOSE,
     })
     const facts = readRepoFacts(root)
-    expect(facts.sourceErrors.get(GATEWAY_UPSTREAM_SOURCE)).toContain(UPSTREAM_DOWNLOAD_COMMAND)
+    expect(facts.sourceErrors.get(GATEWAY_UPSTREAM_SOURCE)).toContain(UPSTREAM_FETCH_SCRIPT)
     // The other sources are still read.
     expect(facts.facts.map(factKey)).toContain(factKey(fact.service(UMAMI, 'umami')))
     expect(facts.sources.has(UMAMI)).toBe(true)
@@ -902,9 +911,287 @@ describe('gateway deploy exports', () => {
   })
 })
 
-// Unit 2 adds below this line: the real mapping table (TABLE) and the real-repo check that runs `discoverSpecs`,
-// `readSpecs` and `readRepoFacts` against the working tree and asserts `check` returns no findings.
-
 function parseEntry(json: string): DiagramEntry {
   return JSON.parse(json)
 }
+
+// ─── The real mapping table ──────────────────────────────────────────────────
+//
+// One entry per rendered spec, keyed by the name `discoverSpecs` returns. Each node maps to the facts it stands for or
+// is illustrative with a reason. Labels, digests and pins are never checked. To change a diagram or a source, edit the
+// spec and this table in the same PR; the failure message names the diagram, the node or fact, and the direction.
+//
+// Hostnames appear here, not in the specs: spec text must not contain them, so the egress rows carry the mapping.
+
+const REPO_ROOT = resolve(import.meta.dir, '../../..')
+
+const maps = (...facts: Fact[]): NodeMapping => ({facts})
+const illustrative = (reason: string): NodeMapping => ({illustrative: reason})
+
+const gatewayFact = {
+  upstreamService: (id: string) => fact.service(GATEWAY_UPSTREAM_SOURCE, id),
+  upstreamVolume: (id: string) => fact.volume(GATEWAY_UPSTREAM_SOURCE, id),
+  overrideService: (id: string) => fact.service(GATEWAY_OVERRIDE_SOURCE, id),
+  overrideVolume: (id: string) => fact.volume(GATEWAY_OVERRIDE_SOURCE, id),
+} as const
+
+/** A Caddy node covers the service and its two volumes in the app's compose file. */
+const caddyOf = (app: string): NodeMapping => {
+  const file = composePath(app)
+  return maps(fact.service(file, 'caddy'), fact.volume(file, 'caddy_data'), fact.volume(file, 'caddy_config'))
+}
+
+const composeScopes = (app: string): DiagramEntry['covers'] => [
+  {kind: 'service', file: composePath(app)},
+  {kind: 'volume', file: composePath(app)},
+]
+
+const DEPLOYED_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard', 'broker'] as const
+
+const ROUTER = workflowPath('deploy.yaml')
+const calleeOf = (app: string): string => workflowPath(`deploy-${app}.yaml`)
+
+const GATEWAY_ENTRY: DiagramEntry = {
+  covers: [
+    {kind: 'service', file: GATEWAY_UPSTREAM_SOURCE},
+    {kind: 'volume', file: GATEWAY_UPSTREAM_SOURCE},
+    {kind: 'service', file: GATEWAY_OVERRIDE_SOURCE},
+    {kind: 'volume', file: GATEWAY_OVERRIDE_SOURCE},
+    {kind: 'egress-host', file: EGRESS_SOURCE},
+  ],
+  nodes: {
+    webhook: illustrative('Webhook senders are external callers.'),
+    dashboard: illustrative('The dashboard Caddy belongs to the dashboard deployment.'),
+    ghcr: illustrative('GHCR is an external registry.'),
+    discord: illustrative('Discord is an external service.'),
+    gateway: maps(gatewayFact.upstreamService('gateway')),
+    workspace: maps(gatewayFact.upstreamService('workspace')),
+    repos: maps(gatewayFact.upstreamVolume('workspace-repos')),
+    mitm: maps(gatewayFact.upstreamService('mitmproxy')),
+    certs: maps(gatewayFact.upstreamVolume('mitmproxy-certs')),
+    // These facts exist while the operator listener is enabled, as in production; the test snapshot assumes that.
+    caddy: maps(
+      gatewayFact.overrideService('caddy'),
+      gatewayFact.overrideVolume('caddy_data'),
+      gatewayFact.overrideVolume('caddy_config'),
+    ),
+    cliproxy: maps(fact.egressHost('cliproxy.fro.bot')),
+    catalog: maps(fact.egressHost('models.dev'), fact.egressHost('models.opencode.ai')),
+    state: illustrative('Object storage is set by environment values, not by the compose files.'),
+  },
+}
+
+const PIPELINE_ENTRY: DiagramEntry = {
+  covers: [
+    {kind: 'job', file: ROUTER},
+    ...DEPLOYED_APPS.flatMap((app): DiagramEntry['covers'] => [
+      {kind: 'job', file: calleeOf(app)},
+      {kind: 'environment', file: calleeOf(app)},
+    ]),
+  ],
+  nodes: {
+    push: illustrative('A push to main is a trigger, not repo structure.'),
+    detect: maps(fact.job(ROUTER, 'detect-changes')),
+    reusable: maps(...DEPLOYED_APPS.map(app => fact.job(ROUTER, `deploy-${app}`))),
+    notify: maps(...DEPLOYED_APPS.map(app => fact.job(calleeOf(app), 'notify'))),
+    discord: illustrative('Discord is an external service.'),
+    gate: maps(...DEPLOYED_APPS.map(app => fact.environment(calleeOf(app), app))),
+    deploy: maps(...DEPLOYED_APPS.map(app => fact.job(calleeOf(app), `deploy-${app}`))),
+    host: illustrative('The target host is outside the repo.'),
+  },
+  notDrawn: [
+    {
+      fact: fact.job(calleeOf('gateway'), 'build-images'),
+      reason: 'It is an app-specific pre-deploy job that the generic pipeline leaves out.',
+    },
+    {
+      fact: fact.job(calleeOf('gateway'), 'scan-images'),
+      reason: 'It is an app-specific pre-deploy job that the generic pipeline leaves out.',
+    },
+    {
+      fact: fact.job(calleeOf('dashboard'), 'validate-inputs'),
+      reason: 'It is an app-specific pre-deploy job that the generic pipeline leaves out.',
+    },
+  ],
+}
+
+/** A runbook-map entry: every node maps to one or more heading anchors, and several nodes may share one. */
+function runbookEntry(file: string, nodes: Readonly<Record<string, readonly string[]>>): DiagramEntry {
+  return {
+    covers: [],
+    nodes: Object.fromEntries(
+      Object.entries(nodes).map(([node, anchors]) => [
+        node,
+        maps(...anchors.map(id => fact.anchor(runbookPath(file), id))),
+      ]),
+    ),
+  }
+}
+
+const TABLE = {
+  topology: {
+    covers: [{kind: 'app', file: APPS_SOURCE}],
+    nodes: {
+      'gh-actions': illustrative('GitHub Actions is an external platform.'),
+      ...Object.fromEntries(DEPLOYED_APPS.map(app => [`app-${app}`, maps(fact.app(app))])),
+      'operator-browser': illustrative('The operator browser is not part of the repo.'),
+      ghcr: illustrative('GHCR is an external registry.'),
+      consumers: illustrative('Agent runs happen in consumer repos outside this repo.'),
+      providers: illustrative('Model providers are external services.'),
+    },
+  },
+
+  'apps-broker': {
+    covers: composeScopes('broker'),
+    nodes: {
+      runner: illustrative('The Actions run is an external caller.'),
+      caddy: caddyOf('broker'),
+      // One node claims the service. The checker rejects a fact claimed by two nodes, so the other three modules that
+      // run inside the same container are illustrative.
+      oidc: illustrative('It is a module inside the broker service.'),
+      policy: illustrative('It is a module inside the broker service.'),
+      mint: maps(fact.service(composePath('broker'), 'broker')),
+      live: illustrative('It is in-memory state with no compose volume.'),
+      sweeper: illustrative('It is a module inside the broker service.'),
+      cliproxy: illustrative('CLIProxyAPI is a separate deployment.'),
+    },
+  },
+
+  'apps-cliproxy': {
+    covers: composeScopes('cliproxy'),
+    nodes: {
+      clients: illustrative('API clients are external callers.'),
+      operator: illustrative('The operator is a person, not a service.'),
+      caddy: caddyOf('cliproxy'),
+      proxy: maps(fact.service(composePath('cliproxy'), 'cli-proxy-api')),
+      auth: maps(fact.volume(composePath('cliproxy'), 'cliproxy_auth')),
+      config: illustrative('config.yaml is a bind-mounted host file, not a compose volume.'),
+      providers: illustrative('Model providers are external services.'),
+      deploy: illustrative('deploy.ts runs from the repo, not inside the stack.'),
+    },
+  },
+
+  'apps-dashboard': {
+    covers: composeScopes('dashboard'),
+    nodes: {
+      browser: illustrative('The operator browser is not part of the repo.'),
+      caddy: caddyOf('dashboard'),
+      dashboard: maps(fact.service(composePath('dashboard'), 'dashboard')),
+      data: illustrative('Host files are bind mounts, not compose volumes.'),
+      github: illustrative('GitHub is an external service.'),
+      gateway: illustrative('The gateway listener belongs to the gateway deployment.'),
+      ghcr: illustrative('GHCR is an external registry.'),
+      deploy: illustrative('deploy.ts runs from the repo, not inside the stack.'),
+    },
+  },
+
+  'apps-gateway': GATEWAY_ENTRY,
+
+  'apps-keeweb': {
+    covers: [],
+    noCompose: {app: 'keeweb', reason: 'KeeWeb ships static files to a host and has no compose stack.'},
+    nodes: {
+      release: illustrative('The KeeWeb release zip is downloaded at build time.'),
+      build: illustrative('build.ts is a repo script, not a compose service.'),
+      secret: illustrative('The Dropbox app secret is a CI secret.'),
+      dist: illustrative('dist/ is a build output directory.'),
+      deploy: illustrative('deploy.sh runs in CI, not in a stack.'),
+      site: illustrative('The site directory lives on the host.'),
+      activate: illustrative('The activation script is a host file.'),
+      nginx: illustrative('The nginx config is a host file.'),
+    },
+  },
+
+  'apps-umami': {
+    covers: composeScopes('umami'),
+    nodes: {
+      visitors: illustrative('Tracked sites are external callers.'),
+      admin: illustrative('The admin is a person, not a service.'),
+      caddy: caddyOf('umami'),
+      umami: maps(fact.service(composePath('umami'), 'umami')),
+      db: maps(fact.service(composePath('umami'), 'db'), fact.volume(composePath('umami'), 'umami-db-data-pg18')),
+      retention: illustrative('The retention timer is a host systemd unit, not a compose service.'),
+      deploy: illustrative('deploy.ts runs from the repo, not inside the stack.'),
+    },
+  },
+
+  'apps-vpn': {
+    covers: [],
+    noCompose: {app: 'vpn', reason: 'The VPN box runs WireGuard on the host and has no compose stack.'},
+    nodes: {
+      peers: illustrative('WireGuard clients are external devices.'),
+      key: illustrative('server.key is a file on the host.'),
+      wg0: illustrative('wg-quick@wg0 is a host systemd unit.'),
+      conf: illustrative('wg0.conf is a rendered host file.'),
+      internet: illustrative('The internet is outside the repo.'),
+      deploy: illustrative('deploy.ts runs from the repo, not on the box.'),
+      cli: illustrative('The vpn client command runs on the operator machine.'),
+      roster: illustrative('VPN_PEERS is a GitHub Environment secret.'),
+    },
+  },
+
+  'deploy-pipeline': PIPELINE_ENTRY,
+
+  'runbooks-dashboard-rollback': runbookEntry('dashboard-released-image-rollback.md', {
+    detect: ['when-to-use'],
+    // The paired-contract rule sits in the intro paragraph, which has no heading of its own. Procedure is the nearest.
+    paired: ['contract-changes-roll-back-paired'],
+    'stop-paired': ['contract-changes-roll-back-paired'],
+    prior: ['step-1-identify-the-prior-digest', 'a-newer-release-exists-and-is-known-good'],
+    revert: ['step-2-revert-the-compose-pin-commit', 'the-revert-conflicts'],
+    pr: ['step-3-push-and-open-a-pr', 'step-4-merge-and-deploy'],
+    approve: ['step-4-merge-and-deploy'],
+    deploy: ['step-4-merge-and-deploy'],
+    'stop-failed': ['deployment-stops-before-or-during-rollback'],
+    verify: ['step-5-verify'],
+  }),
+
+  'runbooks-umami-pg-upgrade': runbookEntry('umami-postgres-major-upgrade.md', {
+    pre: ['1-pre-flight-read-only'],
+    backup: ['2-backup-feeds-staging'],
+    staging: ['3-staging-validation-workstation-only-before-the-pin-pr-is-written'],
+    quiesce: ['41-disable-the-retention-timer', '42-deploy-freeze', '43-quiesce-and-final-dump'],
+    'gate-dump': ['44-verify-the-cutover-dump-hard-gate'],
+    switch: [
+      '45-stop-pg15-db-leave-umami_umami-db-data-untouched',
+      '46-switch-the-droplet-compose-by-hand-start-only-pg18-db',
+    ],
+    'gate-layout': ['47-layout-gates-hard-stop-before-restore'],
+    restore: ['48-restore-with-the-staging-validated-flags-manifest-gate-before-umami', '49-start-umami-internal-only'],
+    'gate-manifest': [
+      '48-restore-with-the-staging-validated-flags-manifest-gate-before-umami',
+      '49-start-umami-internal-only',
+    ],
+    caddy: ['410-start-caddy-the-point-of-no-return'],
+    verify: ['61-verify-the-live-stack', '63-supervised-retention-on-pg18', '8-finalize'],
+    revert: ['71-pre-caddy-revert-explicit-sequence'],
+    'rollback-choice': ['7-rollback-matrix-r4', '72-after-caddy-starts-lossy-explicit-decision'],
+  }),
+
+  'runbooks-vpn-key-rotation': runbookEntry('vpn-egress-box.md', {
+    decide: ['rotate-the-wireguard-server-key'],
+    run: ['rotate-the-wireguard-server-key'],
+    'wipe-guard': ['wipe-guard'],
+    rotate: ['rotate-the-wireguard-server-key'],
+    render: ['rotate-the-wireguard-server-key'],
+    // The health gate is described only inside the wipe guard section.
+    health: ['wipe-guard'],
+    reissue: ['option-b-regenerate-and-reissue', 'client-onboarding'],
+    verify: ['step-5-verify'],
+    abort: ['wipe-guard'],
+  }),
+
+  'status-snapshot': {outOfScope: 'It is a data flow with no single repo source of structural facts.'},
+  'operator-path': {outOfScope: 'It is a request sequence with no single repo source of structural facts.'},
+} satisfies DriftTable
+
+// ─── Real-repo check ─────────────────────────────────────────────────────────
+
+describe('published diagrams against the repo', () => {
+  it('has no drift between the diagram specs, the mapping table and the repo sources', () => {
+    const specs = readSpecs(REPO_ROOT)
+    expect(specs.length).toBeGreaterThan(0)
+    const findings = check({specs, table: TABLE, facts: readRepoFacts(REPO_ROOT)})
+    expect(findings, formatFindings(findings)).toEqual([])
+  })
+})

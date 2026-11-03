@@ -518,6 +518,8 @@ export function upstreamComposeUrl(ref: string): string {
  * Downloads the upstream compose for the pinned ref into the ref-keyed cache path, from the repo root. The CI step
  * has the same shape. It reads the ref from `upstream.json` and refuses anything that is not a release tag.
  */
+export const UPSTREAM_FETCH_SCRIPT = 'bun run fetch:upstream-compose'
+
 export const UPSTREAM_DOWNLOAD_COMMAND =
   `ref="$(jq -r .ref ${UPSTREAM_PIN_PATH})" && ${String.raw`echo "$ref" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' && `}mkdir -p "${UPSTREAM_CACHE_DIR}/$ref" && ` +
   `curl -fsSL "${upstreamComposeUrl('$ref')}" -o "${UPSTREAM_CACHE_DIR}/$ref/compose.yaml"`
@@ -550,7 +552,7 @@ export function readUpstreamComposeFacts(repoRoot: string): Fact[] {
   const path = join(repoRoot, relPath)
   if (!existsSync(path)) {
     throw new SourceError(
-      `the upstream gateway compose for ${ref} is missing at ${relPath}. Download it from the repo root:\n${UPSTREAM_DOWNLOAD_COMMAND}`,
+      `the upstream gateway compose for ${ref} is missing at ${relPath}. Download it from the repo root: ${UPSTREAM_FETCH_SCRIPT}`,
     )
   }
   return parseComposeFacts(readText(path, relPath), GATEWAY_UPSTREAM_SOURCE)

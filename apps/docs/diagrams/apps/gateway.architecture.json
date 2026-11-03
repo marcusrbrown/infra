@@ -89,6 +89,22 @@
       "size": [150, 60]
     },
     {
+      "id": "caddy",
+      "type": "cloud",
+      "label": "Caddy",
+      "sublabel": "TLS ingress, when enabled",
+      "pos": [290, 340],
+      "size": [150, 60]
+    },
+    {
+      "id": "catalog",
+      "type": "external",
+      "label": "Model catalog",
+      "sublabel": "allowlisted metadata",
+      "pos": [1040, 340],
+      "size": [150, 60]
+    },
+    {
       "id": "state",
       "type": "cloud",
       "label": "Object store",
@@ -101,7 +117,7 @@
     {
       "kind": "security-group",
       "label": "Droplet, Compose stack",
-      "wraps": ["gateway", "workspace", "repos", "mitm", "certs"],
+      "wraps": ["gateway", "workspace", "repos", "mitm", "certs", "caddy"],
       "pad": 20
     }
   ],
@@ -110,9 +126,11 @@
     {"id": "announce", "from": "webhook", "to": "gateway", "label": "announce", "variant": "dashed"},
     {"id": "pull", "from": "ghcr", "to": "gateway", "label": "pull", "variant": "dashed"},
     {"id": "discord-api", "from": "gateway", "to": "discord", "label": "Discord API", "variant": "emphasis"},
+    {"id": "ingress", "from": "caddy", "to": "gateway", "label": "ingress"},
     {"id": "run", "from": "gateway", "to": "workspace", "label": "clone, run", "variant": "emphasis"},
     {"id": "egress", "from": "workspace", "to": "mitm", "label": "egress", "variant": "security"},
     {"id": "allowlisted", "from": "mitm", "to": "cliproxy", "label": "allowlist", "variant": "security"},
+    {"id": "catalog-egress", "from": "mitm", "to": "catalog", "label": "allowlist", "variant": "security"},
     {"id": "checkouts", "from": "workspace", "to": "repos", "label": "checkouts"},
     {"id": "ca", "from": "mitm", "to": "certs", "label": "CA"},
     {"id": "persist", "from": "gateway", "to": "state", "label": "state"}

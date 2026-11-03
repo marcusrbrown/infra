@@ -163,7 +163,7 @@ The 14 diagram specs in `apps/docs/diagrams/` are hand-written. The only freshne
 
 - **Pure checker plus a thin real-repo wrapper.** The checker takes specs, a table and facts in memory and returns findings. The mutation tests feed it fixtures. The real-repo test reads files, calls the checker and asserts no findings. Tests never edit real files, which would race with parallel `bun test` workers, and gateway failures don't stop the other diagrams from being checked.
 - **Facts are keyed by `(kind, file, id)`.** The kinds are app, service, volume, egress-host, job, environment and anchor. With the file in the key, the router's `deploy-keeweb` job and the callee's `deploy-keeweb` job are different facts. The `gate` node claiming a job's environment and the `deploy` node claiming the job itself can both be valid.
-- **The table lives in the test file and is keyed by node.** Each node's value is either a list of facts or an illustrative reason, so "mapped and illustrative" can't be written. Not-drawn entries are a separate per-diagram list of facts with reasons. The checker reports only what the type can't rule out: a fact claimed by two nodes, a fact both mapped and not drawn, and duplicate node ids in a spec.
+- **The table lives in the test file and is keyed by node.** Each node's value is either a list of facts or an illustrative reason, so "mapped and illustrative" can't be written. Not-drawn entries are a separate per-diagram list of facts with reasons. The checker reports only what the type can't rule out: a non-anchor fact claimed by two nodes, a fact both mapped and not drawn, and duplicate node ids in a spec. Anchors are the one shared kind: several runbook steps may map to the same heading.
 - **One node can cover several facts of several kinds.** For example, umami's `db` covers the `db` service and the `umami-db-data-pg18` volume, and each Caddy node covers the service and both Caddy volumes. This keeps the diagrams uncluttered. The only new nodes are gateway Caddy and a model-catalog egress node.
 - **Gateway facts record which source they came from.** Upstream facts come from the downloaded upstream compose. Override facts come from `buildComposeOverride` with a production snapshot: announce, the operator listener and operator auth all enabled, as production runs today. The table documents that the Caddy facts hold while the operator listener is enabled; the test does not read production toggles. A service or volume the override declares but upstream doesn't define is accepted only when a table row claims it as an override fact. So an upstream rename of `workspace` still fails, because the override's `workspace` is then unclaimed by any override row and the new upstream name is undrawn.
 - **Every rendered spec needs a table entry.** The spec set comes from `discoverSpecs`. A spec with no table entry fails, and so does a table entry with no spec. Specs outside v1 are listed as out of scope with a reason.
@@ -215,7 +215,7 @@ Directions per checked spec:
 2. A mapped fact that no longer exists fails.
 3. A spec node that is neither mapped nor illustrative fails.
 4. A table row whose node isn't in the spec fails.
-5. A fact claimed by two nodes, a fact both mapped and not drawn, and duplicate node ids fail.
+5. A non-anchor fact claimed by two nodes, a fact both mapped and not drawn, and duplicate node ids fail.
 
 ## Implementation Units
 
@@ -266,7 +266,7 @@ Directions per checked spec:
 - AE5: a spec fixture drops `certs` while its table row remains. The finding is "table row `certs` has no node in the spec."
 - AE6: changing only an image digest in a compose fixture produces zero findings.
 - Edge cases:
-  - The same fact is claimed by two nodes.
+  - The same service is claimed by two nodes, and fails.
   - A fact is both mapped and listed as not drawn.
   - A spec has duplicate node ids.
   - A node maps to a service plus a volume.
@@ -274,7 +274,7 @@ Directions per checked spec:
   - `environment: {name: x}`.
   - Inline-code, duplicate and `~~~`-fenced headings.
   - A fenced `# comment` is not an anchor.
-  - Two runbook-map steps share one anchor.
+  - Two runbook-map steps share one anchor, and pass.
 - Error paths:
   - Empty or null compose parse.
   - A compose file with `include:`.
@@ -309,7 +309,7 @@ Directions per checked spec:
   - Each Caddy node maps to `caddy` plus `caddy_data` and `caddy_config`.
   - umami `db` maps to `db` plus `umami-db-data-pg18`.
   - cliproxy `auth` maps to `cliproxy_auth`.
-  - broker `oidc`, `policy`, `mint` and `sweeper` map to the `broker` service. `live` is illustrative, since it is in-memory state.
+  - broker `mint` maps to the `broker` service. `oidc`, `policy` and `sweeper` are illustrative modules inside that service, and `live` is illustrative in-memory state.
   - dashboard `data` (bind mounts) is illustrative.
   - KeeWeb and VPN are declared to have no compose file. Every node inside their app diagrams is illustrative, with a reason, because no compose file defines them.
   - Gateway: `gateway`, `workspace`, `mitm`, `repos` and `certs` map to the upstream facts. The new Caddy node maps to the override facts, and `cliproxy` plus the new `catalog` node map to the three egress hosts. `webhook`, `dashboard`, `ghcr`, `discord` and `state` are illustrative. `state` is env-derived object storage.

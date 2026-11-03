@@ -87,7 +87,7 @@ The docs-platform plan accepted this risk for v1 and deferred detection here. Th
 - **The mapping lives in the test, not in the specs.** Archify's schema rejects extra properties on components and on `meta`, and both `validate` and `deliver` fail on them.
 - **Structure only.** Matching free text causes false failures. Structural facts cover the drift that misleads a reader. Runbook steps match heading anchors, not heading text. A rename that changes an anchor fails, because it also breaks links to that section.
 - **Egress hosts must be drawn.** The allowlist is the security property the gateway diagram shows, so the not-drawn escape hatch doesn't apply to it.
-- **Upstream compose comes from a CI checkout at the pinned ref.** The test reads the gateway's upstream compose from a sparse checkout at the `upstream.json` ref, as `deploy-gateway.yaml` already does. No copy is vendored, so a Renovate pin bump is checked against the compose it actually brings in. A vendored copy would need a manual refresh on every bump.
+- **Upstream compose is downloaded at the pinned ref.** CI downloads only fro-bot/agent's `deploy/compose.yaml` at the `upstream.json` ref, into a ref-keyed path under the gitignored `.cache`. No copy is vendored, so a Renovate pin bump is checked against the compose it actually brings in. A vendored copy would need a manual refresh on every bump. A checkout of upstream's `deploy/` directory was rejected because it ships `*.test.mjs` files that `bun test --recursive` would run.
 - **The override is checked as production runs it.** The gateway has the operator listener and announce enabled, so the Caddy service and its volumes are facts the diagram must account for.
 - **Prior work.** `docs/ideation/2026-10-31-infra-docs-platform-ideation.md` (#3) records this idea as unexplored, and the docs-platform requirements and plan deferred it. This scope keeps that idea's conventions-test half and drops the citation and PR-nudge halves.
 
@@ -95,7 +95,7 @@ The docs-platform plan accepted this risk for v1 and deferred detection here. Th
 
 ## Dependencies / Assumptions
 
-- R7 needs the CI test job to check out fro-bot/agent's `deploy/compose.yaml` at the pinned ref. The change to `ci.yaml` was approved during this brainstorm.
+- R7 needs the CI test job and the scheduled autoheal run to download fro-bot/agent's `deploy/compose.yaml` at the pinned ref. Both workflow changes were approved.
 - Only the deploy router and its callee workflows count as the pipeline (R9). The diagram doesn't draw other workflows, such as `site.yaml` and `status-snapshot.yaml`.
 
 ---

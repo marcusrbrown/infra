@@ -3908,6 +3908,168 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
   })
 })
 
+// ─── upstream gateway compose download step ───────────────────────────────────
+//
+// The diagram drift check reads fro-bot/agent's deploy/compose.yaml at the ref pinned in
+// apps/gateway/upstream.json. CI's test job and the autoheal storage job (whose agent runs
+// `bun test --recursive`) each download that one data file before tests run. The step must stay a
+// plain `run:` (no checkout action, no third-party code in the workspace, no token) and must
+// reject any ref that is not a release tag before it builds a URL or a path from it.
+// See docs/plans/2026-11-03-001-feat-diagram-drift-detection-plan.md (Unit 3).
+
+describe('upstream gateway compose download step', () => {
+  const STEP_NAME = 'Download upstream gateway compose'
+  const REF_PATTERN = String.raw`^v[0-9]+\.[0-9]+\.[0-9]+$`
+  const TARGETS = [
+    {workflow: 'ci.yaml', job: 'test'},
+    {workflow: 'fro-bot.yaml', job: 'fro-bot-storage'},
+  ] as const
+
+  interface DownloadStepCandidate {
+    name?: string
+    uses?: string
+    run?: string
+    env?: Record<string, string>
+    with?: Record<string, unknown>
+    [key: string]: unknown
+  }
+
+  function loadSteps(workflow: string, job: string): DownloadStepCandidate[] {
+    const text = readFileSync(resolve(REPO_ROOT, '.github/workflows', workflow), 'utf8')
+    const parsed = parseYaml(text) as {jobs?: Record<string, {steps?: DownloadStepCandidate[]}>}
+    return parsed.jobs?.[job]?.steps ?? []
+  }
+
+  /** Returns the download step's definition; fails when it is missing or declared more than once. */
+  function requireDownloadStep(workflow: string, job: string): DownloadStepCandidate {
+    const matches = loadSteps(workflow, job).filter(step => step.name === STEP_NAME)
+    expect(matches, `${workflow} ${job}: expected exactly one "${STEP_NAME}" step`).toHaveLength(1)
+    return matches[0] as DownloadStepCandidate
+  }
+
+  /** Accepts `$REF` and `${REF}` so the assertions pin the contract, not the quoting style. */
+  function withRef(template: string): RegExp {
+    const escaped = template.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
+    return new RegExp(escaped.replace('<ref>', String.raw`(?:\$REF|\$\{REF\})`))
+  }
+
+  for (const {workflow, job} of TARGETS) {
+    describe(`${workflow} ${job}`, () => {
+      it('has exactly one download step, not named like a checkout', () => {
+        const step = requireDownloadStep(workflow, job)
+        expect(step.name).not.toBe('Checkout repository')
+        expect(step.run, 'download step must be a run: step').toBeDefined()
+      })
+
+      it('reads the ref from apps/gateway/upstream.json with jq', () => {
+        const run = requireDownloadStep(workflow, job).run ?? ''
+        expect(run).toContain('jq -r .ref apps/gateway/upstream.json')
+      })
+
+      it('validates the ref as a release tag and fails otherwise', () => {
+        const run = requireDownloadStep(workflow, job).run ?? ''
+        expect(run).toContain('set -euo pipefail')
+        expect(run).toContain(REF_PATTERN)
+        const guardStart = run.indexOf(REF_PATTERN)
+        const guardEnd = run.slice(guardStart).search(/\n\s*fi\b/)
+        expect(guardEnd, 'ref validation must be an if block').toBeGreaterThan(-1)
+        expect(run.slice(guardStart, guardStart + guardEnd), 'a rejected ref must exit non-zero').toContain('exit 1')
+        // Validation runs before the ref reaches a path or a URL.
+        expect(guardStart).toBeLessThan(run.indexOf('mkdir'))
+        expect(guardStart).toBeLessThan(run.indexOf('curl'))
+      })
+
+      it('writes to .cache/upstream-compose/<ref>/compose.yaml', () => {
+        const run = requireDownloadStep(workflow, job).run ?? ''
+        expect(run).toMatch(withRef('mkdir -p ".cache/upstream-compose/<ref>"'))
+        expect(run).toMatch(withRef('-o ".cache/upstream-compose/<ref>/compose.yaml"'))
+      })
+
+      it('downloads with curl -fsSL from fro-bot/agent raw deploy/compose.yaml at the ref', () => {
+        const run = requireDownloadStep(workflow, job).run ?? ''
+        expect(run).toMatch(
+          withRef('curl -fsSL "https://raw.githubusercontent.com/fro-bot/agent/<ref>/deploy/compose.yaml"'),
+        )
+      })
+
+      it('uses no action, no token and no expression', () => {
+        const step = requireDownloadStep(workflow, job)
+        const run = step.run ?? ''
+        expect(step.uses, 'a checkout or any action would put upstream code in the workspace').toBeUndefined()
+        expect(step.with).toBeUndefined()
+        expect(step.env, 'the step needs no env, so no secret can reach it').toBeUndefined()
+        expect(run).not.toContain('$' + '{{')
+        expect(run).not.toMatch(/token|secret|authorization|FRO_BOT_PAT/i)
+        expect(run).not.toMatch(/\bgit\b|\bgh\b/)
+      })
+    })
+  }
+
+  it('is the same script in both workflows', () => {
+    const scripts = TARGETS.map(({workflow, job}) => requireDownloadStep(workflow, job).run)
+    expect(scripts[1]).toBe(scripts[0])
+  })
+
+  describe('executed against a stubbed curl', () => {
+    const script = requireDownloadStep('ci.yaml', 'test').run ?? ''
+
+    function runScript(ref: string): {exitCode: number; curlCalls: string[]; written: boolean} {
+      const dir = mkdtempSync(join(tmpdir(), 'upstream-compose-'))
+      try {
+        mkdirSync(join(dir, 'apps/gateway'), {recursive: true})
+        writeFileSync(join(dir, 'apps/gateway/upstream.json'), JSON.stringify({repo: 'fro-bot/agent', ref}))
+        const stubDir = join(dir, 'stub-bin')
+        mkdirSync(stubDir)
+        const callLog = join(dir, 'curl-calls.log')
+        // Stub records its argv and honours -o so the script's output path is observable.
+        writeFileSync(
+          join(stubDir, 'curl'),
+          [
+            '#!/usr/bin/env bash',
+            String.raw`printf '%s\n' "$*" >> "$CURL_CALL_LOG"`,
+            'while [ $# -gt 0 ]; do',
+            '  if [ "$1" = "-o" ]; then : > "$2"; fi',
+            '  shift',
+            'done',
+          ].join('\n'),
+          {mode: 0o755},
+        )
+        const result = Bun.spawnSync(['bash', '-c', script], {
+          cwd: dir,
+          // Hermetic env: never clone process.env into a fixture.
+          env: {PATH: `${stubDir}:${process.env.PATH ?? '/usr/bin:/bin'}`, CURL_CALL_LOG: callLog},
+          stdout: 'pipe',
+          stderr: 'pipe',
+        })
+        return {
+          exitCode: result.exitCode,
+          curlCalls: existsSync(callLog) ? readFileSync(callLog, 'utf8').trim().split('\n') : [],
+          written: existsSync(join(dir, '.cache/upstream-compose', ref, 'compose.yaml')),
+        }
+      } finally {
+        rmSync(dir, {recursive: true, force: true})
+      }
+    }
+
+    it('downloads the pinned release tag to the ref-keyed path', () => {
+      const result = runScript('v1.2.3')
+      expect(result.exitCode).toBe(0)
+      expect(result.curlCalls).toEqual([
+        '-fsSL https://raw.githubusercontent.com/fro-bot/agent/v1.2.3/deploy/compose.yaml -o .cache/upstream-compose/v1.2.3/compose.yaml',
+      ])
+      expect(result.written).toBe(true)
+    })
+
+    for (const badRef of ['main', 'v1.2', 'v1.2.3-rc.1', '1.2.3', 'v1.2.3/../x', '../v1.2.3', 'null']) {
+      it(`rejects ref ${JSON.stringify(badRef)} before any download`, () => {
+        const result = runScript(badRef)
+        expect(result.exitCode).not.toBe(0)
+        expect(result.curlCalls).toEqual([])
+      })
+    }
+  })
+})
+
 // ─── deploy gate notification: pre-gate `notify` job contract ─────────────────
 //
 // Every app deploy workflow carries an ungated `notify` job that posts one Discord

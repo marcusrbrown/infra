@@ -79,7 +79,7 @@ The 14 diagram specs in `apps/docs/diagrams/` are hand-written. The only freshne
   "verdict": "build-new-within-scope",
   "scope": "apps/docs, apps/gateway, packages/cli/src, .github/workflows (repo tests and workflows)",
   "freshness": {
-    "vcs_reference": "0e2195d8d185c1eb0e284a377c0033f9b38e1e0b"
+    "vcs_reference": "7299ed67ed4ba3bc91a3274fd608650850675340"
   },
   "budget": {
     "max_search_passes": 3,
@@ -219,7 +219,7 @@ Directions per checked spec:
 
 ## Implementation Units
 
-- [ ] **Unit 1: Fact readers and pure checker**
+- [x] **Unit 1: Fact readers and pure checker**
 
 **Goal:** Build the source readers and a pure `check` function that returns structured findings.
 
@@ -287,7 +287,7 @@ Directions per checked spec:
 
 - Each acceptance example and each direction has a fixture test that fails when the corresponding checker branch is removed (mutation-checked).
 
-- [ ] **Unit 2: Mapping table, real-repo check, and day-one fixes**
+- [x] **Unit 2: Mapping table, real-repo check, and day-one fixes**
 
 **Goal:** Map every in-scope diagram, run the checker against the real repo, and fix the gaps the first run finds.
 
@@ -340,7 +340,7 @@ Directions per checked spec:
 - `bun test --recursive` passes with the download present, and fails with the download command without it.
 - The rendered gateway diagram shows the new nodes, and the site build's redaction gate stays clean.
 
-- [ ] **Unit 3: Upstream download in CI and autoheal**
+- [x] **Unit 3: Upstream download in CI and autoheal**
 
 **Goal:** Every CI and autoheal test run has the pinned upstream compose file, and no upstream code enters the workspace.
 
@@ -372,7 +372,7 @@ Directions per checked spec:
 
 - actionlint is clean, and the PR's CI test job downloads the file and passes the drift test.
 
-- [ ] **Unit 4: Docs**
+- [x] **Unit 4: Docs**
 
 **Goal:** Document how to maintain the table and run the check locally.
 
@@ -387,7 +387,7 @@ Directions per checked spec:
 
 **Approach:**
 
-- The failure message and the root AGENTS.md COMMANDS line carry the download command. `apps/docs/AGENTS.md` covers table maintenance and points to the COMMANDS line rather than repeating it.
+- The download command is the root `fetch:upstream-compose` script, which a test pins to the checker's command. The failure message, the root AGENTS.md COMMANDS line and `apps/docs/AGENTS.md` name the script.
 - No pinned versions in prose.
 
 **Test scenarios:**

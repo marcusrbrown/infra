@@ -112,7 +112,7 @@ Run each of the following on a separate run:
 4. **Collapsed status.** While a request is pending, collapse the card and let the run list refresh. Expect: the card's status badge reads "Waiting for approval". Failure: the collapsed card still reads "Running".
 5. **Always:** on a new run, press "Always". Expect: a second control, "Confirm always", appears and nothing is applied until you press it. After confirming, matching requests for the rest of that run no longer prompt (a second `rm` in the same run goes through without a prompt); a new run prompts again. Failure: "Always" applies without confirmation, or applies beyond that run (fro-bot/agent#1990).
 
-**Long commands.** The dashboard card shows the full command in a wrapping block with all three choices, with no truncation. The Discord card shows Deny only, plus "Too long to show here, so it can only be rejected." (the Discord part is still to be verified). After a reject, the transcript line shows only the tool name (`⨯ bash`), not the command.
+**Long commands.** The dashboard card shows the full command in a wrapping block with all three choices, with no truncation. The Discord card shows Deny only, the line "Too long to show here, so it can only be rejected.", and the command cut off with an ellipsis. After a reject, the transcript line shows only the tool name (`⨯ bash`), not the command. Discord runs don't ask before `echo` or `touch`, so test this there with a long command that does ask, such as one `rm -f` naming 120 paths under `/tmp/`.
 
 ### 10. Agent question
 

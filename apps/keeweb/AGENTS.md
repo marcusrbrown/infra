@@ -20,12 +20,13 @@ Self-hosted KeeWeb v1.18.7 password manager at `kw.igg.ms`. Download-based build
 3. `dist/` cleared and rebuilt every run
 4. `DROPBOX_APP_SECRET` env var injected into `dist/config.json` at `.settings.dropboxSecret`
 5. `config/kw.igg.ms.conf` copied to `dist/`
+6. `config/kw-security-headers.conf` copied to `dist/`
 
 **Critical**: `config/config.json` (template) is never modified. Secret only goes into `dist/config.json`.
 
 **Integrity**: SHA-256 of the release zip is verified on every build (cache hit and fresh download) via `Bun.CryptoHasher('sha256')`. Expected hash is the `EXPECTED_SHA256` constant in `src/build.ts` (sourced from KeeWeb's official `Verify.sha256`). Mismatch deletes the corrupt file and aborts.
 
-**Testability**: `build.ts` exports `buildKeeweb(options?)` and guards its top-level execution with `import.meta.main` so tests can import it without triggering a build. Fixtures in `src/__fixtures__/` (e.g., `test-archive.zip`) stand in for real downloads.
+**Testability**: `build.ts` exports individual build helpers (including `ensureCachedArchive`, `verifyArchiveHash`, `extractArchive`, and `writeConfigWithSecret`) and guards its top-level execution with `import.meta.main` so tests can import them without triggering a build. The cache, extraction, config-injection, and copy helpers accept path overrides for isolated tests. Fixtures in `src/__fixtures__/` (e.g., `test-archive.zip`) stand in for real downloads.
 
 ## DEPLOY FLOW
 

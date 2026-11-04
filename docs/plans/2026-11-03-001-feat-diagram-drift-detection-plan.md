@@ -1,7 +1,7 @@
 ---
 title: "feat: Fail CI when a published diagram drifts from the repo"
 type: feat
-status: active
+status: completed
 date: 2026-11-03
 origin: docs/brainstorms/2026-11-03-diagram-drift-detection-requirements.md
 ---

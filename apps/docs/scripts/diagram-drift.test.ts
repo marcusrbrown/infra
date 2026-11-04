@@ -1192,7 +1192,6 @@ const TABLE = {
 
   'runbooks-dashboard-rollback': runbookEntry('dashboard-released-image-rollback.md', {
     detect: ['when-to-use'],
-    // The paired-contract rule sits in the intro paragraph, which has no heading of its own. Procedure is the nearest.
     paired: ['contract-changes-roll-back-paired'],
     'stop-paired': ['contract-changes-roll-back-paired'],
     prior: ['step-1-identify-the-prior-digest', 'a-newer-release-exists-and-is-known-good'],

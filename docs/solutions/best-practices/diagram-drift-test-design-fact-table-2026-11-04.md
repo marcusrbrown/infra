@@ -24,24 +24,24 @@ tags:
 
 ## Context
 
-The docs site publishes hand-written Archify specs from `apps/docs/diagrams/`. Before #1785, the only freshness signal was a "spec last changed" label, and one hardcoded list of topology apps. A compose, workflow, egress or runbook change could leave a public diagram wrong without any check failing. Archify's schemas set `additionalProperties: false` on the spec, `meta` and components. Both `validate` and `deliver` reject a citation field, so the link from a node to its source can't live in the spec.
+The docs site publishes hand-written Archify specs from `apps/docs/diagrams/`. A compose, workflow, egress or runbook change could leave a public diagram wrong without any check failing. Archify's schemas set `additionalProperties: false` on the spec, `meta` and components. Both `validate` and `deliver` reject a citation field, so the link from a node to its source can't live in the spec.
 
 ## Guidance
 
 Keep the mapping in the test (`apps/docs/scripts/diagram-drift.test.ts`). The checker (`apps/docs/scripts/diagram-drift.ts`) compares three sets: spec nodes, table rows, and facts read from the repo.
 
 - **Key facts by `(kind, file, id)`.** The kinds are app, service, volume, egress-host, job, environment and anchor. Putting the file in the key keeps a router job and a callee job with the same id apart. An environment also carries the job that declares it, so moving a gate from the deploy job to `notify` fails.
-- **Each node either maps to facts or is illustrative with a reason, never both.** `NodeMapping` is a discriminated union, so the "both" case can't be written. An out-of-scope diagram gets a table entry with a reason. That way every spec that `discoverSpecs` renders must appear in the table, and a new diagram can't go unchecked.
-- **Not-drawn facts are a separate per-diagram list, each with a reason.** `NotDrawnKind` excludes egress hosts and anchors, so the type system rules out an undrawn egress host and no runtime check is needed. The allowlist is the security property the gateway diagram exists to show.
+- **Each node either maps to facts or is illustrative with a reason.** `NodeMapping` is a union of the two shapes. It has no discriminant, so the type does not forbid a value carrying both properties, and the checker treats such a value as illustrative. Every spec that `discoverSpecs` renders needs a table entry. A diagram that is excluded gets an out-of-scope entry with a reason.
+- **Not-drawn facts are a separate per-diagram list, each with a reason.** `NotDrawnKind` excludes egress hosts and anchors, so a well-typed table can't list either as not drawn. The checker reports any in-scope egress host that no node claims. The allowlist is the security property the gateway diagram exists to show.
 - **Check every direction:**
   - A fact that is neither mapped nor listed as not drawn.
   - A mapped fact that no longer exists.
   - A spec node missing from the table.
   - A table row whose node is gone from the spec.
   - A fact claimed by two nodes, a fact both mapped and not drawn, a duplicate node id, or a not-drawn entry for a fact that vanished.
-- **Only anchors may be shared.** Several runbook steps can map to one heading. Any other fact belongs to one node. The broker diagram first mapped four nodes to the `broker` service. Now only `mint` claims it, and the others are illustrative modules. Don't weaken uniqueness to fit a diagram.
-- **Read gateway facts from both sources, tagged by origin.** They come from the upstream compose at the pinned ref plus `buildComposeOverride` run with the production configuration. A service declared only by the override passes only when the table claims it with an override source, so an upstream rename can't hide behind the override's old name. Egress hosts come from constants exported by `apps/gateway/src/deploy.ts`.
-- **Fail closed per source.** Readers throw `SourceError`, and `readRepoFacts` records each one as a finding. One broken source can't mask the others, and an empty parse or an `include:` fails rather than reading as zero facts.
+- **Only anchors may be shared.** Several runbook steps can map to one heading. Any other fact belongs to one node. When several nodes depict parts of one service, one claims it and the rest are illustrative.
+- **Read gateway facts from both sources, tagged by origin.** They come from the upstream compose at the pinned ref plus `buildComposeOverride` run with the production configuration. A service declared only by the override is a separate override fact, so it must be mapped with its override source or listed as not drawn. After an upstream rename, the old name left in the override needs one of those, and can't pass silently. Egress hosts come from constants exported by `apps/gateway/src/deploy.ts`.
+- **Fail closed per source.** Readers throw `SourceError`. `readRepoFacts` records it and keeps reading independent sources, and the checker reports the error for every diagram that depends on that source. A broken router workflow also hides its callee workflows. An empty parse or an `include:` fails rather than reading as zero facts.
 - **Don't check what churns.** Labels, card text, image tags, digests and action pins are not facts, so digest bumps stay green. Network membership is out of scope.
 
 ## Heading anchors must match the site
@@ -57,7 +57,7 @@ A runbook map points at heading anchors, so `parseRunbookAnchors` slugs headings
 
 ## Why This Matters
 
-A check that fails on prose gets deleted. Structural facts change rarely but mislead when they're wrong: an added egress host, a renamed service, a moved approval gate. With keyed facts and a discriminated table, every finding names the diagram, the node or fact, and the direction, so the fix goes into the PR that caused the drift.
+Structural facts change rarely but mislead when they're wrong: an added egress host, a renamed service, a moved approval gate. With keyed facts and a node-keyed table, every finding names the diagram, the node or fact, and the direction, so the fix goes into the PR that caused the drift.
 
 ## When to Apply
 
@@ -67,7 +67,7 @@ A check that fails on prose gets deleted. Structural facts change rarely but mis
 
 ## Examples
 
-A table entry mixes mapped and illustrative nodes:
+A table entry mixes mapped and illustrative nodes (abbreviated):
 
 ```ts
 nodes: {

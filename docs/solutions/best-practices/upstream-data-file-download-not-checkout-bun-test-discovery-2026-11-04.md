@@ -23,8 +23,6 @@ tags:
 
 # Download one upstream data file instead of checking out upstream source: Bun test discovery ignores .gitignore
 
-Plan review for the diagram drift check (#1785) caught this before anything shipped.
-
 ## Problem
 
 The drift check needs one upstream file: the gateway's `deploy/compose.yaml` at the ref pinned in `apps/gateway/upstream.json`. The first plan fetched it with a sparse `actions/checkout` of fro-bot/agent `deploy/` into a gitignored `upstream-agent/`, excluded from `tsc` and ESLint. Upstream `deploy/` ships `*.test.mjs` files under `deploy/scripts/`. `bun test --recursive` would have run them in two places:
@@ -51,21 +49,13 @@ Fetch the one data file at a validated ref, into a dot-prefixed path keyed by re
   export const UPSTREAM_REF_PATTERN = /^v\d+\.\d+\.\d+$/
   ```
 
-- It downloads the raw file to `.cache/upstream-compose/<ref>/compose.yaml`. The path carries the ref, so a file fetched for an older pin is never read after a bump, and no stale-file guard is needed.
+- It downloads the raw file to `.cache/upstream-compose/<ref>/compose.yaml`. Because the path carries the ref, a file cached under a different pin is never read.
 - It fails on a non-2xx response or an empty body, uses a 30 s timeout, and writes to a temp file before renaming it into place.
 - It uses no action, no token and no checkout.
 
-Both workflows run the same bare step:
+Both workflows call `bun run fetch:upstream-compose` after dependency installation and before tests. `packages/cli/src/conventions.test.ts` (`upstream gateway compose download step`) enforces that both jobs share the same token-free step.
 
-```yaml
-# Data file only: an upstream checkout would put its tests where `bun test --recursive` runs them.
-- name: Download upstream gateway compose
-  run: bun run fetch:upstream-compose
-```
-
-The checker fails closed. If the file for the current ref is missing or parses empty, it reports a source error that names `bun run fetch:upstream-compose`. It never skips the gateway checks.
-
-A first implementation used `jq`, a bash regex and `curl` in both workflows, plus a `package.json` one-liner. Its `grep -Eq` checked the ref line by line, so a multi-line value could pass. The repo also allows only two shell scripts. One TypeScript script fixes both and keeps the ref rule in one place.
+The checker fails closed and never skips the gateway checks. If the file for the current ref is missing, the source error names `bun run fetch:upstream-compose`. An empty or invalid compose file also fails the check.
 
 ## When to Apply
 
@@ -76,12 +66,7 @@ A first implementation used `jq`, a bash regex and `curl` in both workflows, plu
 ## Prevention
 
 - Store fetched fixtures under a dot-prefixed directory. Don't rely on `.gitignore` to keep files out of `bun test`.
-- Validate refs as whole strings, in TypeScript, in one place.
-- The conventions tests in `packages/cli/src/conventions.test.ts` (`upstream gateway compose download step`) pin the workflow shape:
-  - exactly one download step per job, with only `name` and `run`;
-  - no expression, token or secret;
-  - placed after install and before the step that runs tests;
-  - identical in both workflows.
+- Validate refs as whole strings, in TypeScript, in one place. A line-by-line check such as `grep -Eq` lets a multi-line value through.
 
 ## Related
 

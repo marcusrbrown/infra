@@ -3908,6 +3908,86 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
   })
 })
 
+// ─── upstream gateway compose download step ───────────────────────────────────
+//
+// The diagram drift check reads fro-bot/agent's deploy/compose.yaml at the ref pinned in
+// apps/gateway/upstream.json. CI's test job and the autoheal storage job (whose agent runs
+// `bun test --recursive`) each download that one data file before tests run, by calling the one
+// implementation: `bun run fetch:upstream-compose` -> apps/docs/scripts/fetch-upstream-compose.ts.
+// The step must stay a bare `run:` (no checkout action, no third-party code in the workspace, no
+// token). Ref validation, the URL, the cache path and the failure modes are tested against a fake
+// fetch in apps/docs/scripts/fetch-upstream-compose.test.ts.
+// See docs/plans/2026-11-03-001-feat-diagram-drift-detection-plan.md (Unit 3).
+
+describe('upstream gateway compose download step', () => {
+  const STEP_NAME = 'Download upstream gateway compose'
+  const STEP_RUN = 'bun run fetch:upstream-compose'
+  const SCRIPT_PATH = 'apps/docs/scripts/fetch-upstream-compose.ts'
+  const TARGETS = [
+    {workflow: 'ci.yaml', job: 'test', after: 'Install dependencies', before: 'Run tests'},
+    {workflow: 'fro-bot.yaml', job: 'fro-bot-storage', after: 'Install dependencies', before: 'Run Fro Bot'},
+  ] as const
+
+  interface StepCandidate {
+    name?: string
+    [key: string]: unknown
+  }
+
+  function loadSteps(workflow: string, job: string): StepCandidate[] {
+    const text = readFileSync(resolve(REPO_ROOT, '.github/workflows', workflow), 'utf8')
+    const parsed = parseYaml(text) as {jobs?: Record<string, {steps?: StepCandidate[]}>}
+    return parsed.jobs?.[job]?.steps ?? []
+  }
+
+  /** Returns the download step's definition; fails when it is missing or declared more than once. */
+  function requireDownloadStep(workflow: string, job: string): StepCandidate {
+    const matches = loadSteps(workflow, job).filter(step => step.name === STEP_NAME)
+    expect(matches, `${workflow} ${job}: expected exactly one "${STEP_NAME}" step`).toHaveLength(1)
+    return matches[0] as StepCandidate
+  }
+
+  for (const {workflow, job, after, before} of TARGETS) {
+    describe(`${workflow} ${job}`, () => {
+      it('has exactly one download step, and it runs exactly the fetch script', () => {
+        const step = requireDownloadStep(workflow, job)
+        expect(step.run).toBe(STEP_RUN)
+      })
+
+      it('declares nothing but a name and a run: no action, with, env, condition, expression or token', () => {
+        const step = requireDownloadStep(workflow, job)
+        expect(Object.keys(step).toSorted(), 'a uses/with/env/if key would widen what the step can do').toEqual([
+          'name',
+          'run',
+        ])
+        expect(JSON.stringify(step)).not.toContain('$' + '{{')
+        expect(JSON.stringify(step)).not.toMatch(/token|secret|authorization|FRO_BOT_PAT/i)
+      })
+
+      it(`runs after "${after}" and before "${before}"`, () => {
+        const names = loadSteps(workflow, job).map(step => step.name)
+        const download = names.indexOf(STEP_NAME)
+        expect(names.indexOf(after), `${after} step`).toBeGreaterThan(-1)
+        expect(names.indexOf(before), `${before} step`).toBeGreaterThan(-1)
+        expect(download).toBeGreaterThan(names.indexOf(after))
+        expect(download).toBeLessThan(names.indexOf(before))
+      })
+    })
+  }
+
+  it('is the same step in both workflows', () => {
+    const [first, second] = TARGETS.map(({workflow, job}) => requireDownloadStep(workflow, job))
+    expect(second).toEqual(first)
+  })
+
+  it('points the root fetch:upstream-compose script at the TypeScript implementation', () => {
+    const rootPackage = JSON.parse(readFileSync(resolve(REPO_ROOT, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>
+    }
+    expect(rootPackage.scripts?.['fetch:upstream-compose']).toBe(`bun run ${SCRIPT_PATH}`)
+    expect(existsSync(resolve(REPO_ROOT, SCRIPT_PATH))).toBe(true)
+  })
+})
+
 // ─── deploy gate notification: pre-gate `notify` job contract ─────────────────
 //
 // Every app deploy workflow carries an ungated `notify` job that posts one Discord

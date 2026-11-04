@@ -1050,6 +1050,10 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
 
+      # Data file only: an upstream checkout would put its tests where `bun test --recursive` runs them.
+      - name: Download upstream gateway compose
+        run: bun run fetch:upstream-compose
+
       # One pre-agent classification output drives prompt selection, cache
       # behavior, and the reconciler guard. `daily-equivalent` is `schedule` or
       # `workflow_dispatch` with an omitted or exactly empty raw prompt; every

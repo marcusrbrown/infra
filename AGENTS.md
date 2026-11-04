@@ -127,6 +127,7 @@ bun install                                    # Install dependencies
 bun run lint                                   # ESLint check
 bun run fix                                    # ESLint --fix (includes Prettier)
 bunx tsc --noEmit                              # Type check
+bun run fetch:upstream-compose                 # Download the pinned upstream gateway compose (needed by the diagram drift test)
 bun test --recursive                           # Run all tests (from repo root)
 bun test                                       # Run tests in current package
 bun run --cwd apps/keeweb build                # Build KeeWeb dist

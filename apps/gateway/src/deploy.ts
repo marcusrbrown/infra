@@ -221,10 +221,10 @@ const SECRETS_DIR = `${DEPLOY_DIR}/secrets`
 const CHECKSUM_PATH = `${REMOTE_DIR}/.secrets-checksum`
 const ENV_PATH = `${DEPLOY_DIR}/.env`
 const DEFAULT_REMOTE_USER = 'root'
-const CLIPROXY_EGRESS_HOST = 'cliproxy.fro.bot'
+export const CLIPROXY_EGRESS_HOST = 'cliproxy.fro.bot'
 // OpenCode fetches its model catalog at startup; the sandboxed workspace reaches it through the mitmproxy egress allowlist.
 // V1 uses models.dev, V2 uses models.opencode.ai. Keep both so a V1 rollback keeps working.
-const OPENCODE_CATALOG_HOSTS = ['models.dev', 'models.opencode.ai'] as const
+export const OPENCODE_CATALOG_HOSTS = ['models.dev', 'models.opencode.ai'] as const
 // Mirrors upstream's default (packages/gateway/src/bindings/backfill-runner.ts:
 // `process.env.S3_PREFIX ?? 'fro-bot-state'`). The deploy does not otherwise reference
 // S3_PREFIX; this default keeps the tagged-write probe key under the real run-state scope.

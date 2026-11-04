@@ -14,6 +14,7 @@
     "deploy:gateway": "bun run apps/gateway/src/deploy.ts",
     "deploy:umami": "bun run apps/umami/src/deploy.ts",
     "deploy:vpn": "bun run apps/vpn/src/deploy.ts",
+    "fetch:upstream-compose": "bun run apps/docs/scripts/fetch-upstream-compose.ts",
     "fix": "eslint --fix",
     "lint": "eslint",
     "prepare": "simple-git-hooks",

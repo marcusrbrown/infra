@@ -127,14 +127,6 @@ describe('diagram specs', () => {
     }
   })
 
-  it('draws exactly the 7 monitored apps in the topology', () => {
-    const topology = readJson(join(REPO_ROOT, 'apps/docs/diagrams/topology.architecture.json'))
-    const components = topology.components as {id: string}[]
-    const apps = components.filter(component => component.id.startsWith('app-')).map(component => component.id.slice(4))
-    expect(apps.toSorted()).toEqual(MONITORED_APPS)
-    expect(components.some(component => component.id === 'app-agent')).toBe(false)
-  })
-
   it('keeps IP literals and hostnames out of every spec', () => {
     for (const spec of specs) {
       const text = readFileSync(join(REPO_ROOT, spec.path), 'utf8')

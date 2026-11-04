@@ -35,9 +35,17 @@ The gate guards against accidental leaks, not crafted input. Three gaps are acce
 
 History comes from `STATUS_HISTORY_DIR`, or the fixture when it is unset. `STATUS_HISTORY_REQUIRED=1` makes an unset directory a build error, so a publishing build never falls back to the fixture. CI sets both on every non-PR run.
 
+## Diagram drift check
+
+`scripts/diagram-drift.test.ts` fails when a diagram disagrees with the repo on a structural fact: topology apps, compose services and volumes, the gateway's upstream compose plus override, workspace egress hosts, deploy jobs and gate environments, and runbook heading anchors. Its table maps every spec node to the facts it stands for, or marks it illustrative with a reason; facts a diagram leaves out are listed as not drawn with a reason. Egress hosts can't be listed as not drawn.
+
+- A finding names the diagram, the node or fact, and the direction. Fix the spec, the table, or both, in the same PR.
+- The gateway checks read the upstream compose for the pinned ref from `.cache/upstream-compose/`. Fetch it with `bun run fetch:upstream-compose` from the repo root; CI downloads it before `bun test`.
+- Labels, card text, image digests and action pins are not checked. `status-snapshot` and `operator-path` are out of scope.
+
 ## Adding things
 
-- **Diagram:** add `diagrams/<name>.<type>.json`, then embed it with `<Diagram name="<name>" title="…" />`. Per-app specs live in `diagrams/apps/` and attach to the service page by name.
+- **Diagram:** add `diagrams/<name>.<type>.json` and a table entry in `scripts/diagram-drift.test.ts`, then embed it with `<Diagram name="<name>" title="…" />`. Per-app specs live in `diagrams/apps/` and attach to the service page by name.
 - **Rendered source:** add the path to `discoverSources` and `RENDERED_PATH_RE` in `scripts/generate-content.ts`, add the path to the `paths` filters in `site.yaml`, and cover it with a test.
 - **Service:** add the app to the shared status contract, give it an entry in `src/data/services.ts` and an `apps/<name>.architecture.json` spec, and add its fixture history file.
 - **Hostname:** a reasoned entry in `redaction/hostname-allowlist.json`, in the same PR as the text that needs it.

@@ -79,7 +79,7 @@ The 14 diagram specs in `apps/docs/diagrams/` are hand-written. The only freshne
   "verdict": "build-new-within-scope",
   "scope": "apps/docs, apps/gateway, packages/cli/src, .github/workflows (repo tests and workflows)",
   "freshness": {
-    "vcs_reference": "0e2195d8d185c1eb0e284a377c0033f9b38e1e0b"
+    "vcs_reference": "7299ed67ed4ba3bc91a3274fd608650850675340"
   },
   "budget": {
     "max_search_passes": 3,
@@ -168,7 +168,7 @@ The 14 diagram specs in `apps/docs/diagrams/` are hand-written. The only freshne
 - **Gateway facts record which source they came from.** Upstream facts come from the downloaded upstream compose. Override facts come from `buildComposeOverride` with a production snapshot: announce, the operator listener and operator auth all enabled, as production runs today. The table documents that the Caddy facts hold while the operator listener is enabled; the test does not read production toggles. A service or volume the override declares but upstream doesn't define is accepted only when a table row claims it as an override fact. So an upstream rename of `workspace` still fails, because the override's `workspace` is then unclaimed by any override row and the new upstream name is undrawn.
 - **Every rendered spec needs a table entry.** The spec set comes from `discoverSpecs`. A spec with no table entry fails, and so does a table entry with no spec. Specs outside v1 are listed as out of scope with a reason.
 - **Egress facts come from exported constants and have no not-drawn option.** Export `CLIPROXY_EGRESS_HOST` and `OPENCODE_CATALOG_HOSTS` from `apps/gateway/src/deploy.ts`; nothing else in production code changes. The not-drawn type has no egress kind, and the checker never consults not-drawn entries for egress. Egress nodes use generic labels because spec text must not contain hostnames, and the table carries the host-to-node mapping.
-- **Upstream compose is downloaded as a single data file, keyed by ref.** A run step reads `ref` from `apps/gateway/upstream.json`, rejects anything that isn't a release tag, and downloads fro-bot/agent's raw `deploy/compose.yaml` at that ref to `.cache/upstream-compose/<ref>/compose.yaml`. No checkout action and no third-party code land in the workspace, and `.cache` is dot-prefixed and already gitignored. Because the path carries the ref, a file fetched for an older pin is never read after a bump, so no stale-checkout guard is needed. The checker fails when the file for the current ref is missing or parses empty, and the message prints the exact download command.
+- **Upstream compose is downloaded as a single data file, keyed by ref.** `apps/docs/scripts/fetch-upstream-compose.ts`, run as `bun run fetch:upstream-compose`, reads `ref` from `apps/gateway/upstream.json`, rejects anything that isn't a release tag, and downloads fro-bot/agent's raw `deploy/compose.yaml` at that ref to `.cache/upstream-compose/<ref>/compose.yaml`. No checkout action and no third-party code land in the workspace, and `.cache` is dot-prefixed and already gitignored. Because the path carries the ref, a file fetched for an older pin is never read after a bump, so no stale-checkout guard is needed. The checker fails when the file for the current ref is missing or parses empty, and the message names the fetch script.
 - **Runbook anchors.** The heading text is rendered the way the site renders it: inline code, emphasis and link syntax are stripped, and fenced code (both ``` and ~~~) is skipped. The anchor comes from `github-slugger`, declared in `apps/docs` at the version Astro resolves, with one slugger per document so duplicates get the same `-1` suffix the site uses. The H1 is never an anchor, because `generate-content.ts` moves it to frontmatter. A mapped heading containing `<` fails, because `generate-content.ts` rewrites those.
 - **Runbook-map steps are always mapped.** Every step maps to an anchor in its runbook. Several steps may share one anchor when a section covers more than one step. No runbook-map node is illustrative, so a renamed or removed heading can't fall out of the check.
 - **The non-deployable app list is kept by name (`docs`, `agent`).** A new `apps/*` directory then fails until it is either drawn or added to the list. Deriving the list from the deploy workflows would silently ignore a new app that has no workflow yet.
@@ -219,7 +219,7 @@ Directions per checked spec:
 
 ## Implementation Units
 
-- [ ] **Unit 1: Fact readers and pure checker**
+- [x] **Unit 1: Fact readers and pure checker**
 
 **Goal:** Build the source readers and a pure `check` function that returns structured findings.
 
@@ -287,7 +287,7 @@ Directions per checked spec:
 
 - Each acceptance example and each direction has a fixture test that fails when the corresponding checker branch is removed (mutation-checked).
 
-- [ ] **Unit 2: Mapping table, real-repo check, and day-one fixes**
+- [x] **Unit 2: Mapping table, real-repo check, and day-one fixes**
 
 **Goal:** Map every in-scope diagram, run the checker against the real repo, and fix the gaps the first run finds.
 
@@ -340,7 +340,7 @@ Directions per checked spec:
 - `bun test --recursive` passes with the download present, and fails with the download command without it.
 - The rendered gateway diagram shows the new nodes, and the site build's redaction gate stays clean.
 
-- [ ] **Unit 3: Upstream download in CI and autoheal**
+- [x] **Unit 3: Upstream download in CI and autoheal**
 
 **Goal:** Every CI and autoheal test run has the pinned upstream compose file, and no upstream code enters the workspace.
 
@@ -356,12 +356,12 @@ Directions per checked spec:
 
 **Approach:**
 
-- One run step, identical in both workflows. It reads `ref` from `apps/gateway/upstream.json` with `jq` and rejects a value that isn't a release tag. It then downloads `https://raw.githubusercontent.com/fro-bot/agent/<ref>/deploy/compose.yaml` to `.cache/upstream-compose/<ref>/compose.yaml`, failing on any HTTP error. It uses no token and no action.
+- One step, identical in both workflows: `run: bun run fetch:upstream-compose`. The TypeScript script validates the ref, downloads the raw compose file to the ref-keyed cache path, fails on a non-2xx response or empty body, and uses no token and no action.
 - In `fro-bot-storage`, place the step after the dependency install and before `Run Fro Bot`, with a name other than `Checkout repository`. Leave the storage job's step-order constraints, AWS credential steps and git push step untouched.
 
 **Patterns to follow:**
 
-- `deploy-gateway.yaml` (`jq -r .ref apps/gateway/upstream.json`), and the existing `fro-bot.yaml` conventions tests
+- `deploy-gateway.yaml`'s read of `apps/gateway/upstream.json`, and the existing `fro-bot.yaml` conventions tests
 
 **Test scenarios:**
 
@@ -372,7 +372,7 @@ Directions per checked spec:
 
 - actionlint is clean, and the PR's CI test job downloads the file and passes the drift test.
 
-- [ ] **Unit 4: Docs**
+- [x] **Unit 4: Docs**
 
 **Goal:** Document how to maintain the table and run the check locally.
 
@@ -387,7 +387,7 @@ Directions per checked spec:
 
 **Approach:**
 
-- The failure message and the root AGENTS.md COMMANDS line carry the download command. `apps/docs/AGENTS.md` covers table maintenance and points to the COMMANDS line rather than repeating it.
+- The download is the root `fetch:upstream-compose` script. The failure message, the root AGENTS.md COMMANDS line and `apps/docs/AGENTS.md` name it.
 - No pinned versions in prose.
 
 **Test scenarios:**

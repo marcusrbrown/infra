@@ -9,6 +9,7 @@ export default defineConfig(
       'docs/',
       'dist/',
       '.cache/',
+      '.cortexkit/',
       '**/AGENTS.md',
       // apps/docs: Astro/Starlight output and content generated from the sources above
       'apps/docs/.astro/',

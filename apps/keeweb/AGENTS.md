@@ -32,11 +32,16 @@ Self-hosted KeeWeb v1.18.7 password manager at `kw.igg.ms`. Download-based build
 
 ```text
 deploy.sh [--nginx]
-  ├── Validates dist/index.html and dist/config.json exist
-  ├── rsync dist/ → deploy-kw@box.heatvision.co:/home/user-data/www/kw.igg.ms/
-  ├── ssh: sudo /usr/local/bin/kw-deploy-activate (set perms 775 + setgid)
-  └── [--nginx] backup existing conf → scp new conf → nginx -t → reload (auto-restore on failure)
+  ├── Validates dist/index.html and dist/config.json (plus both nginx files with --nginx)
+  ├── Backs up the current site into the deploy user's backups directory
+  ├── rsync dist/ → deploy-kw@box.heatvision.co:/home/user-data/www/kw.igg.ms/ (excludes nginx files)
+  ├── [--nginx] scp site config and security headers snippet → deploy user's staging directory
+  └── ssh: sudo /usr/local/bin/kw-deploy-activate [--nginx]
+        ├── Sets site ownership and permissions (775 + setgid)
+        └── [--nginx] backs up/installs staged configs → nginx -t → reload
 ```
+
+On `nginx -t` failure, the activation helper restores existing configuration backups and exits nonzero. This does not roll back site content, and a reload failure does not take the configuration-restore path. The deploy user stages files; only the privileged activation helper installs nginx configuration.
 
 ## SERVER
 

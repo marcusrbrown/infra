@@ -6,10 +6,15 @@ import type {AppCollection} from '../../status/collect'
 import {join} from 'node:path'
 import {z} from 'zod'
 import {findRepoRoot} from '../../lib/repo-root'
+import {DEPLOY_STATE_REF, mapDeploymentState} from '../../status/deploy-state'
 
 const SITE_URL = 'https://kw.igg.ms/'
 const GH_REPO = 'marcusrbrown/infra'
 const HTTP_TIMEOUT_MS = 10_000
+const DEPLOYMENT_ENVIRONMENT = 'keeweb'
+/** Newest `main` deployments to inspect, one status read each. Deploys are rare; this never walks history. */
+const DEPLOYMENT_SCAN_LIMIT = 10
+const LAST_DEPLOY_TITLE = 'Last successful deploy'
 
 type CheckLevel = 'ok' | 'info' | 'warning' | 'error'
 
@@ -22,10 +27,12 @@ interface CheckResult {
   value?: string
 }
 
-const ghRunSchema = z.array(
+const deploymentListSchema = z.array(z.object({id: z.number().int().positive(), ref: z.string()}))
+const deploymentStatusListSchema = z.array(
   z.object({
-    createdAt: z.string().min(1),
-    url: z.url(),
+    state: z.string().min(1).max(32),
+    created_at: z.iso.datetime(),
+    target_url: z.string().optional(),
   }),
 )
 
@@ -114,86 +121,123 @@ export async function checkHttpReachability(verbose: boolean): Promise<CheckResu
   }
 }
 
-export async function checkLastDeploy(verbose: boolean, signal?: AbortSignal): Promise<CheckResult> {
-  try {
-    const proc = Bun.spawn(
-      [
-        'gh',
-        'run',
-        'list',
-        '--workflow=Deploy KeeWeb',
-        '--status=success',
-        '--limit=1',
-        '--json',
-        'createdAt,url',
-        '--repo',
-        GH_REPO,
-      ],
-      {
-        stderr: 'pipe',
-        stdout: 'pipe',
-        ...(signal === undefined ? {} : {signal}),
-      },
-    )
+type GhApiResult<T> = {ok: true; data: T} | {ok: false; result: CheckResult}
 
-    const [exitCode, stdout, stderr] = await Promise.all([
-      proc.exited,
-      streamToText(proc.stdout),
-      streamToText(proc.stderr),
-    ])
+/** `gh api` GET of `path`, parsed through `schema`. Any failure comes back as a ready-to-print warning. */
+async function ghApiJson<T>(
+  path: string,
+  schema: z.ZodType<T>,
+  verbose: boolean,
+  signal?: AbortSignal,
+): Promise<GhApiResult<T>> {
+  const proc = Bun.spawn(['gh', 'api', path], {
+    stderr: 'pipe',
+    stdout: 'pipe',
+    ...(signal === undefined ? {} : {signal}),
+  })
 
-    if (exitCode !== 0) {
-      const baseDetails = stderr.trim() ? [stderr.trim()] : []
-      const verboseDetails = verbose && stdout.trim() ? [...baseDetails, `Raw stdout: ${stdout.trim()}`] : baseDetails
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    streamToText(proc.stdout),
+    streamToText(proc.stderr),
+  ])
 
-      return {
-        title: 'Last successful deploy',
+  if (exitCode !== 0) {
+    const baseDetails = stderr.trim() ? [stderr.trim()] : []
+    const verboseDetails = verbose && stdout.trim() ? [...baseDetails, `Raw stdout: ${stdout.trim()}`] : baseDetails
+
+    return {
+      ok: false,
+      result: {
+        title: LAST_DEPLOY_TITLE,
         level: 'warning',
-        summary: `Unable to query GitHub Actions (gh exited ${exitCode})`,
+        summary: `Unable to query GitHub deployments (gh exited ${exitCode})`,
         details: verboseDetails,
-      }
+      },
     }
+  }
 
-    const parsed = ghRunSchema.safeParse(JSON.parse(stdout))
-    if (!parsed.success) {
-      return {
-        title: 'Last successful deploy',
+  const parsed = schema.safeParse(JSON.parse(stdout))
+  if (!parsed.success) {
+    return {
+      ok: false,
+      result: {
+        title: LAST_DEPLOY_TITLE,
         level: 'warning',
         summary: 'GitHub CLI output did not match expected schema',
         details: verbose ? [parsed.error.message, `Raw stdout: ${stdout.trim()}`] : undefined,
-      }
+      },
+    }
+  }
+
+  return {ok: true, data: parsed.data}
+}
+
+/**
+ * The newest `main` deployment of the `keeweb` environment whose latest status is `success`.
+ *
+ * A gated deploy job creates that deployment and its status, so this is evidence from the deploy job itself. Router
+ * and standalone deploys both write it. A workflow run that succeeded with the deploy job skipped creates none, so it
+ * can never be counted. A failed lookup is never skipped over: an older success would be reported as the latest.
+ */
+export async function checkLastDeploy(verbose: boolean, signal?: AbortSignal): Promise<CheckResult> {
+  try {
+    const deployments = await ghApiJson(
+      `/repos/${GH_REPO}/deployments?environment=${DEPLOYMENT_ENVIRONMENT}&ref=${DEPLOY_STATE_REF}&per_page=${DEPLOYMENT_SCAN_LIMIT}`,
+      deploymentListSchema,
+      verbose,
+      signal,
+    )
+    if (!deployments.ok) {
+      return deployments.result
     }
 
-    const [latestRun] = parsed.data
+    // The `ref` filter is a request, not a guarantee: re-check it.
+    const mainDeployments = deployments.data.filter(deployment => deployment.ref === DEPLOY_STATE_REF)
 
-    if (!latestRun) {
+    for (const deployment of mainDeployments) {
+      const statuses = await ghApiJson(
+        `/repos/${GH_REPO}/deployments/${deployment.id}/statuses?per_page=1`,
+        deploymentStatusListSchema,
+        verbose,
+        signal,
+      )
+      if (!statuses.ok) {
+        return statuses.result
+      }
+
+      const [latest] = statuses.data
+      if (latest === undefined || mapDeploymentState(latest.state).result !== 'pass') {
+        continue
+      }
+
+      const details = latest.target_url === undefined ? [] : [`Deploy job: ${latest.target_url}`]
+
+      if (verbose) {
+        details.push(`Raw created_at: ${latest.created_at}`)
+      }
+
       return {
-        title: 'Last successful deploy',
-        level: 'warning',
-        summary: 'No successful Deploy KeeWeb workflow runs found',
+        title: LAST_DEPLOY_TITLE,
+        level: 'ok',
+        summary: `${formatDate(latest.created_at)}`,
+        details,
+        value: latest.created_at,
       }
-    }
-
-    const details = [`Run URL: ${latestRun.url}`]
-
-    if (verbose) {
-      details.push(`Raw createdAt: ${latestRun.createdAt}`)
     }
 
     return {
-      title: 'Last successful deploy',
-      level: 'ok',
-      summary: `${formatDate(latestRun.createdAt)}`,
-      details,
-      value: latestRun.createdAt,
+      title: LAST_DEPLOY_TITLE,
+      level: 'warning',
+      summary: 'No successful KeeWeb deployments found on main',
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
 
     return {
-      title: 'Last successful deploy',
+      title: LAST_DEPLOY_TITLE,
       level: 'warning',
-      summary: `Unable to query GitHub Actions: ${message}`,
+      summary: `Unable to query GitHub deployments: ${message}`,
       details: verbose
         ? ['Requires GitHub CLI authenticated with access to marcusrbrown/infra', 'Install: https://cli.github.com/']
         : undefined,
@@ -327,7 +371,7 @@ function printCheckResult(result: CheckResult, ctx: ActionCtx): void {
 
 /**
  * KeeWeb has no SSH path: reachability comes from the shared public probe, so this collector only supplies
- * facts. `lastDeploy` is the newest successful deploy run's time (null when `gh` cannot say) and
+ * facts. `lastDeploy` is the newest successful `main` deployment's time (null when `gh` cannot say) and
  * `contentHash` compares the live page with the local build.
  */
 export async function getKeewebStatusSummary(signal?: AbortSignal): Promise<AppCollection> {

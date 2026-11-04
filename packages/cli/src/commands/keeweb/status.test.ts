@@ -42,6 +42,54 @@ function mockSpawnResult(exitCode: number, stdout: string, stderr = ''): SpawnRe
   } as unknown as SpawnResult
 }
 
+interface FakeDeployment {
+  id: number
+  ref?: string
+  /** Newest first, like the API. The status read asks for `per_page=1`, so only the first is returned. */
+  statuses: {state: string; created_at: string; target_url?: string}[]
+}
+
+const DEPLOYMENTS_PATH = '/repos/marcusrbrown/infra/deployments?'
+const SUCCESS_TIME = '2026-04-14T01:48:21Z'
+const SUCCESS_JOB = 'https://github.com/marcusrbrown/infra/actions/runs/24376256533/job/71190337752'
+// Run 26855044047: a successful run of the standalone workflow whose `deploy-keeweb` job was skipped.
+const SKIPPED_JOB_RUN = [
+  {createdAt: '2026-06-02T23:54:01Z', url: 'https://github.com/marcusrbrown/infra/actions/runs/26855044047'},
+]
+
+/**
+ * Fake `gh` at the spawn boundary: serves the Deployments API for the given list (newest first) and records every
+ * invocation. A `gh run list` call is answered with the skipped-job run so a regression to the run lookup is visible.
+ */
+function fakeDeploymentsGh(deployments: FakeDeployment[], calls: string[][] = []): typeof Bun.spawn {
+  return ((cmd: unknown) => {
+    const args = cmd as string[]
+    calls.push(args)
+    const path = args[2] ?? ''
+
+    if (args[1] === 'run') return mockSpawnResult(0, JSON.stringify(SKIPPED_JOB_RUN))
+    if (args[1] !== 'api') return mockSpawnResult(1, '', `unexpected gh call: ${args.join(' ')}`)
+
+    if (path.startsWith(DEPLOYMENTS_PATH)) {
+      const perPage = Number(/per_page=(\d+)/.exec(path)?.[1] ?? 30)
+      return mockSpawnResult(
+        0,
+        JSON.stringify(deployments.slice(0, perPage).map(d => ({id: d.id, ref: d.ref ?? 'main'}))),
+      )
+    }
+
+    const match = /\/deployments\/(\d+)\/statuses\?/.exec(path)
+    const deployment = deployments.find(d => d.id === Number(match?.[1]))
+    if (deployment === undefined) return mockSpawnResult(1, '', `unexpected gh api path: ${path}`)
+    return mockSpawnResult(0, JSON.stringify(deployment.statuses.slice(0, 1)))
+  }) as unknown as typeof Bun.spawn
+}
+
+const SUCCESSFUL_DEPLOYMENT: FakeDeployment = {
+  id: 4359044301,
+  statuses: [{state: 'success', created_at: SUCCESS_TIME, target_url: SUCCESS_JOB}],
+}
+
 describe('keeweb status helpers', () => {
   let fetchMock: ReturnType<typeof mock<typeof fetch>>
   let fileSpy: ReturnType<typeof spyOn<typeof Bun, 'file'>> | undefined
@@ -138,26 +186,128 @@ describe('keeweb status helpers', () => {
   })
 
   describe('checkLastDeploy', () => {
-    it('returns ok for valid gh output', async () => {
-      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
-        mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
+    it('reports the newest successful main deployment of the keeweb environment', async () => {
+      const calls: string[][] = []
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT], calls))
+
+      const result = await checkLastDeploy(false)
+
+      expect(result.level).toBe('ok')
+      expect(result.summary).toBe(formatDate(SUCCESS_TIME))
+      expect(result.details).toEqual([`Deploy job: ${SUCCESS_JOB}`])
+      expect(result.value).toBe(SUCCESS_TIME)
+
+      const [list] = calls
+      expect(list?.slice(0, 2)).toEqual(['gh', 'api'])
+      expect(list?.[2]).toContain('environment=keeweb')
+      expect(list?.[2]).toContain('ref=main')
+    })
+
+    it('does not count a newer successful run whose deploy job was skipped (issue #1773)', async () => {
+      const calls: string[][] = []
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT], calls))
+
+      const result = await checkLastDeploy(false)
+
+      // The skipped-job run (2026-06-02) is the newest successful *run*; it created no deployment.
+      expect(result.value).toBe(SUCCESS_TIME)
+      expect(result.value).not.toContain('2026-06-02')
+      expect(calls.some(args => args[1] === 'run')).toBe(false)
+    })
+
+    it('finds a router-driven deploy, which the standalone workflow lookup never saw', async () => {
+      const routerJob = 'https://github.com/marcusrbrown/infra/actions/runs/27000000000/job/80000000000'
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(
+        fakeDeploymentsGh([
+          {id: 5000000001, statuses: [{state: 'success', created_at: '2026-07-01T12:00:00Z', target_url: routerJob}]},
+        ]),
       )
 
       const result = await checkLastDeploy(false)
 
       expect(result.level).toBe('ok')
-      expect(result.summary).toBe(formatDate('2026-01-15T10:30:00Z'))
-      expect(result.details).toEqual(['Run URL: https://example.com'])
-      expect(result.value).toBe('2026-01-15T10:30:00Z')
+      expect(result.value).toBe('2026-07-01T12:00:00Z')
+      expect(result.details).toEqual([`Deploy job: ${routerJob}`])
     })
 
-    it('returns warning when no successful runs are found', async () => {
-      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() => mockSpawnResult(0, '[]'))
+    it.each(['failure', 'error', 'waiting', 'in_progress', 'queued', 'pending', 'inactive', 'mystery'])(
+      'skips a newer deployment whose latest status is %s and reports the older success',
+      async state => {
+        spawnSpy = spyOn(Bun, 'spawn').mockImplementation(
+          fakeDeploymentsGh([
+            {id: 5000000002, statuses: [{state, created_at: '2026-08-01T00:00:00Z'}]},
+            SUCCESSFUL_DEPLOYMENT,
+          ]),
+        )
+
+        const result = await checkLastDeploy(false)
+
+        expect(result.level).toBe('ok')
+        expect(result.value).toBe(SUCCESS_TIME)
+      },
+    )
+
+    it('never reports a failure as the last deploy', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(
+        fakeDeploymentsGh([{id: 5000000003, statuses: [{state: 'failure', created_at: '2026-08-01T00:00:00Z'}]}]),
+      )
 
       const result = await checkLastDeploy(false)
 
       expect(result.level).toBe('warning')
       expect(result.summary).toContain('No successful')
+      expect(result.value).toBeUndefined()
+    })
+
+    it('never reports a success on a non-main ref as the last deploy', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(
+        fakeDeploymentsGh([
+          {id: 5000000004, ref: 'fix/branch', statuses: [{state: 'success', created_at: '2026-08-01T00:00:00Z'}]},
+          SUCCESSFUL_DEPLOYMENT,
+        ]),
+      )
+
+      const result = await checkLastDeploy(false)
+
+      expect(result.value).toBe(SUCCESS_TIME)
+    })
+
+    it('reports unavailable when the only success is on a non-main ref', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(
+        fakeDeploymentsGh([
+          {id: 5000000004, ref: 'fix/branch', statuses: [{state: 'success', created_at: '2026-08-01T00:00:00Z'}]},
+        ]),
+      )
+
+      const result = await checkLastDeploy(false)
+
+      expect(result.level).toBe('warning')
+      expect(result.value).toBeUndefined()
+    })
+
+    it('returns warning when there are no deployments', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([]))
+
+      const result = await checkLastDeploy(false)
+
+      expect(result.level).toBe('warning')
+      expect(result.summary).toContain('No successful')
+    })
+
+    it('gives up after a bounded number of deployments instead of walking history', async () => {
+      const calls: string[][] = []
+      const failures = Array.from({length: 25}, (_, index) => ({
+        id: 5100000000 + index,
+        statuses: [{state: 'failure', created_at: '2026-08-01T00:00:00Z'}],
+      }))
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh(failures, calls))
+
+      const result = await checkLastDeploy(false)
+
+      expect(result.level).toBe('warning')
+      expect(result.value).toBeUndefined()
+      // One list call plus at most one status call per scanned deployment.
+      expect(calls.length).toBeLessThanOrEqual(11)
     })
 
     it('returns warning when gh exits non-zero', async () => {
@@ -167,6 +317,46 @@ describe('keeweb status helpers', () => {
 
       expect(result.level).toBe('warning')
       expect(result.summary).toContain('gh exited 1')
+      expect(result.details).toEqual(['boom'])
+      expect(result.value).toBeUndefined()
+    })
+
+    it('does not fall back to an older deployment when a status read fails', async () => {
+      const inner = fakeDeploymentsGh([{id: 5000000005, statuses: []}, SUCCESSFUL_DEPLOYMENT])
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((cmd: unknown, opts: unknown) => {
+        const path = (cmd as string[])[2] ?? ''
+        if (path.includes('/deployments/5000000005/statuses')) return mockSpawnResult(1, '', 'rate limited')
+        return (inner as unknown as (c: unknown, o: unknown) => SpawnResult)(cmd, opts)
+      }) as unknown as typeof Bun.spawn)
+
+      const result = await checkLastDeploy(false)
+
+      expect(result.level).toBe('warning')
+      expect(result.summary).toContain('gh exited 1')
+      expect(result.value).toBeUndefined()
+    })
+
+    it('returns warning when the API output does not match the expected schema', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
+        mockSpawnResult(0, JSON.stringify({message: 'Not Found'})),
+      )
+
+      const result = await checkLastDeploy(false)
+
+      expect(result.level).toBe('warning')
+      expect(result.summary).toContain('did not match expected schema')
+      expect(result.value).toBeUndefined()
+    })
+
+    it('returns warning when a status has no usable timestamp', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(
+        fakeDeploymentsGh([{id: 5000000006, statuses: [{state: 'success', created_at: 'yesterday'}]}]),
+      )
+
+      const result = await checkLastDeploy(false)
+
+      expect(result.level).toBe('warning')
+      expect(result.value).toBeUndefined()
     })
 
     it('returns warning when gh cannot be invoked', async () => {
@@ -180,6 +370,14 @@ describe('keeweb status helpers', () => {
       expect(result.summary).toContain('Unable to query')
       expect(result.summary).toContain('gh not found')
     })
+
+    it('adds the raw timestamp in verbose mode', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT]))
+
+      const result = await checkLastDeploy(true)
+
+      expect(result.details).toEqual([`Deploy job: ${SUCCESS_JOB}`, `Raw created_at: ${SUCCESS_TIME}`])
+    })
   })
 
   describe('getKeewebStatusSummary', () => {
@@ -187,38 +385,38 @@ describe('keeweb status helpers', () => {
       spyOn(Bun, 'file').mockImplementation(() => ({exists: async () => false}) as ReturnType<typeof Bun.file>)
 
     it('supplies facts only, with the last deploy time and an unavailable content hash outside a source checkout', async () => {
-      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
-        mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
-      )
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT]))
       fileSpy = packagedInstall()
 
       const collection = await getKeewebStatusSummary()
 
       expect(collection).toEqual({
         observations: [],
-        facts: {lastDeploy: '2026-01-15T10:30:00Z', contentHash: 'unavailable'},
+        facts: {lastDeploy: SUCCESS_TIME, contentHash: 'unavailable'},
       })
     })
 
-    it('passes the abort signal to the gh spawn', async () => {
+    it('passes the abort signal to every gh spawn', async () => {
       const controller = new AbortController()
       const seen: unknown[] = []
-      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((_cmd: unknown, opts: {signal?: AbortSignal}) => {
+      const inner = fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT])
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((cmd: unknown, opts: {signal?: AbortSignal}) => {
         seen.push(opts.signal)
-        return mockSpawnResult(0, '[]')
+        return (inner as unknown as (c: unknown) => SpawnResult)(cmd)
       }) as unknown as typeof Bun.spawn)
       fileSpy = packagedInstall()
 
       await getKeewebStatusSummary(controller.signal)
 
-      expect(seen).toEqual([controller.signal])
+      expect(seen).toEqual([controller.signal, controller.signal])
     })
 
     it('omits the signal from the gh spawn options when none is given', async () => {
       const seen: string[][] = []
-      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((_cmd: unknown, opts: object) => {
+      const inner = fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT])
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((cmd: unknown, opts: object) => {
         seen.push(Object.keys(opts))
-        return mockSpawnResult(0, '[]')
+        return (inner as unknown as (c: unknown) => SpawnResult)(cmd)
       }) as unknown as typeof Bun.spawn)
       fileSpy = packagedInstall()
 
@@ -235,6 +433,15 @@ describe('keeweb status helpers', () => {
 
       expect(collection.facts.lastDeploy).toBeNull()
       expect(JSON.stringify(collection)).not.toContain('logged in')
+    })
+
+    it('reports a null last deploy rather than a skipped-job run time', async () => {
+      spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([]))
+      fileSpy = packagedInstall()
+
+      const collection = await getKeewebStatusSummary()
+
+      expect(collection.facts.lastDeploy).toBeNull()
     })
   })
 
@@ -473,9 +680,7 @@ describe('keewebStatusAction (Tier-2 ctx capture)', () => {
     fetchMock.mockImplementation(createFetchImplementation(async () => new Response('ok', {status: 200})))
 
     // Mock gh CLI returning a successful run
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
-      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
-    )
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT]))
 
     // Mock local dist file as missing (avoids filesystem dependency)
     fileSpy = spyOn(Bun, 'file').mockImplementation(
@@ -501,9 +706,7 @@ describe('keewebStatusAction (Tier-2 ctx capture)', () => {
   it('writes HTTP check result to captured stdout', async () => {
     fetchMock.mockImplementation(createFetchImplementation(async () => new Response('ok', {status: 200})))
 
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
-      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
-    )
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT]))
 
     fileSpy = spyOn(Bun, 'file').mockImplementation(
       () =>
@@ -523,9 +726,7 @@ describe('keewebStatusAction (Tier-2 ctx capture)', () => {
   it('writes summary line to captured stdout', async () => {
     fetchMock.mockImplementation(createFetchImplementation(async () => new Response('ok', {status: 200})))
 
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
-      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
-    )
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT]))
 
     fileSpy = spyOn(Bun, 'file').mockImplementation(
       () =>
@@ -546,9 +747,7 @@ describe('keewebStatusAction (Tier-2 ctx capture)', () => {
     // HTTP 500 → error level
     fetchMock.mockImplementation(createFetchImplementation(async () => new Response('error', {status: 500})))
 
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
-      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
-    )
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT]))
 
     fileSpy = spyOn(Bun, 'file').mockImplementation(
       () =>
@@ -571,9 +770,7 @@ describe('keewebStatusAction (Tier-2 ctx capture)', () => {
   it('does not call ctx.process.exit when all checks pass', async () => {
     fetchMock.mockImplementation(createFetchImplementation(async () => new Response('ok', {status: 200})))
 
-    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(() =>
-      mockSpawnResult(0, JSON.stringify([{createdAt: '2026-01-15T10:30:00Z', url: 'https://example.com'}])),
-    )
+    spawnSpy = spyOn(Bun, 'spawn').mockImplementation(fakeDeploymentsGh([SUCCESSFUL_DEPLOYMENT]))
 
     fileSpy = spyOn(Bun, 'file').mockImplementation(
       () =>

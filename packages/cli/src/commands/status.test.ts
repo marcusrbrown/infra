@@ -943,7 +943,11 @@ describe('top-level status with the real default dependencies (production wiring
     names.map(name => JSON.stringify({Name: name, State: 'running', Health: 'healthy'})).join('\n')
 
   function remoteStdout(cmd: string[]): string {
-    if (cmd[0] === 'gh') return JSON.stringify([{createdAt: '2026-10-30T09:00:00Z', url: 'https://example.com/run/1'}])
+    if (cmd[0] === 'gh') {
+      return (cmd[2] ?? '').includes('/statuses')
+        ? JSON.stringify([{state: 'success', created_at: '2026-10-30T09:00:00Z'}])
+        : JSON.stringify([{id: 1, ref: 'main'}])
+    }
 
     const command = cmd.at(-1) ?? ''
     switch (sshHost(cmd)) {

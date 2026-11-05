@@ -3,7 +3,7 @@
 import type {GenericSecretNames} from './prompts'
 import type {ProviderId} from './providers'
 import {z} from 'zod'
-import {PROVIDER_DEFAULTS} from './providers'
+import {PROVIDER_DEFAULTS, PROVIDER_ORDER} from './providers'
 
 export const harnessSchema = z.enum(['opencode', 'claude-code', 'generic'])
 export type Harness = z.infer<typeof harnessSchema>
@@ -45,8 +45,7 @@ export function getHarnessTemplate(
   if (harness === 'opencode') {
     // Normalize provider list: default to anthropic-only, always sort anthropic first
     const rawProviders = values.providers ?? ['anthropic']
-    // Stable ordering: anthropic always before openai regardless of input order
-    const PROVIDER_ORDER: ProviderId[] = ['anthropic', 'openai']
+    // Stable ordering (anthropic, openai, opencode-go) regardless of input order
     const providers = PROVIDER_ORDER.filter(p => rawProviders.includes(p))
 
     // Resolve model
@@ -59,13 +58,13 @@ export function getHarnessTemplate(
       throw new Error('model required when multiple providers selected')
     }
 
-    // Build auth JSON object (anthropic-first insertion order)
+    // Build auth JSON object (canonical provider insertion order)
     const authObj: Record<string, {type: string; key: string}> = {}
     for (const p of providers) {
       authObj[p] = {type: 'api', key: keyValue}
     }
 
-    // Build config JSON object (anthropic-first insertion order)
+    // Build config JSON object (canonical provider insertion order)
     const providerConfig: Record<string, {options: {baseURL: string}}> = {}
     for (const p of providers) {
       providerConfig[p] = {options: {baseURL: `${baseUrl}/v1`}}

@@ -19,7 +19,9 @@ const modelsResponseSchema = z
   })
   .passthrough()
 
-export const MODEL_ID_RE = /^(?:anthropic|openai)\/[a-z\d](?:[a-z\d.\-]*[a-z\d])?$/
+export {MODEL_ID_RE} from './providers'
+
+const OPENCODE_GO_OWNER = 'opencode-go'
 
 const HTTP_TIMEOUT_MS = 10_000
 
@@ -47,6 +49,10 @@ function entryMatchesProvider(entry: ModelEntry, provider: string): boolean {
   }
   const pattern = PROVIDER_ID_PATTERNS[provider]
   return pattern === undefined ? false : pattern.test(id)
+}
+
+function stripGoPrefix(id: string): string {
+  return id.startsWith(`${OPENCODE_GO_OWNER}/`) ? id.slice(OPENCODE_GO_OWNER.length + 1) : id
 }
 
 /** Local copy — avoids a circular import with setup.ts (validation → setup → validation). */
@@ -155,10 +161,32 @@ export async function verifyModelsAvailable(
     }
   }
 
+  // OpenCode Go presence check: no Go-owned entries means the proxy has not exposed Go yet.
+  if (providers.includes(OPENCODE_GO_OWNER) && !entries.some(e => e.owned_by === OPENCODE_GO_OWNER)) {
+    throw new Error(
+      'No OpenCode Go models on proxy. Trigger a cliproxy deploy (`infra cliproxy deploy`) to expose OpenCode Go models.',
+    )
+  }
+
   // Model presence check: strip provider prefix to get bare id
   const slashIndex = model.indexOf('/')
   const bareId = slashIndex === -1 ? model : model.slice(slashIndex + 1)
   const providerPrefix = slashIndex === -1 ? undefined : model.slice(0, slashIndex)
+
+  // OpenCode Go: the proxy lists each exposed model as both `<id>` and `opencode-go/<id>`, both with
+  // owned_by opencode-go. Match on owner explicitly so a same-named Claude/OpenAI id never satisfies it.
+  if (providerPrefix === OPENCODE_GO_OWNER) {
+    const goEntries = entries.filter(e => e.owned_by === OPENCODE_GO_OWNER)
+    if (!goEntries.some(e => e.id === bareId || e.id === model)) {
+      const available = [...new Set(goEntries.map(e => stripGoPrefix(e.id)))]
+      throw new Error(
+        `Model "${bareId}" is not exposed by the proxy under owned_by ${OPENCODE_GO_OWNER}. ` +
+          `Available ${OPENCODE_GO_OWNER}: ${available.length > 0 ? available.join(', ') : '(none)'}. ` +
+          'Trigger a cliproxy deploy (`infra cliproxy deploy`) to expose OpenCode Go models.',
+      )
+    }
+    return
+  }
 
   const modelPresent = entries.some(e => e.id === bareId || e.id === model)
   if (!modelPresent) {

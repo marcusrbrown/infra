@@ -2365,3 +2365,132 @@ describe('non-interactive overwrite warning concurrency caveat', () => {
     expect(concurrencyWarnings).toHaveLength(0)
   })
 })
+
+describe('opencode-go provider setup', () => {
+  const BASE_URL = 'https://cliproxy.fro.bot'
+  const KEY = 'sk-test-key'
+
+  // Real /v1/models shape: the proxy lists each Go model as a bare id and a prefixed id, both owned by opencode-go.
+  const GO_MODELS_FIXTURE = {
+    data: [
+      {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+      {id: 'glm-5.3', owned_by: 'opencode-go'},
+      {id: 'opencode-go/glm-5.3', owned_by: 'opencode-go'},
+    ],
+  }
+
+  let originalFetch: typeof globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  originalFetch = globalThis.fetch
+
+  it('anthropic,opencode-go + opencode-go/glm-5.3 writes both providers base URLs and auth under one key', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(GO_MODELS_FIXTURE))) as unknown as typeof fetch
+
+    const plan = await buildNonInteractivePlan(
+      {
+        key: KEY,
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: 'anthropic,opencode-go',
+        model: 'opencode-go/glm-5.3',
+        force: true,
+      },
+      BASE_URL,
+    )
+
+    const config = JSON.parse(plan.template.secrets.find(s => s.name === 'OPENCODE_CONFIG')?.value ?? '{}')
+    const auth = JSON.parse(plan.template.secrets.find(s => s.name === 'OPENCODE_AUTH_JSON')?.value ?? '{}')
+
+    expect(config.provider.anthropic.options.baseURL).toBe(`${BASE_URL}/v1`)
+    expect(config.provider['opencode-go'].options.baseURL).toBe(`${BASE_URL}/v1`)
+    expect(auth.anthropic).toEqual({type: 'api', key: KEY})
+    expect(auth['opencode-go']).toEqual({type: 'api', key: KEY})
+    expect(plan.template.variables.find(v => v.name === 'FRO_BOT_MODEL')?.value).toBe('opencode-go/glm-5.3')
+  })
+
+  it('opencode-go model without opencode-go in --providers is rejected', () => {
+    expect(() =>
+      validateSetupOptions(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'anthropic',
+          model: 'opencode-go/glm-5.3',
+        },
+        false,
+      ),
+    ).toThrow(/Model prefix opencode-go does not match selected providers/)
+  })
+
+  it('the model check fails with the deploy hint when the model is not owned_by opencode-go', async () => {
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify({data: [{id: 'glm-5.3', owned_by: 'other'}]})),
+    ) as unknown as typeof fetch
+
+    await expect(
+      buildNonInteractivePlan(
+        {
+          key: KEY,
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'opencode-go',
+          model: 'opencode-go/glm-5.3',
+          force: true,
+        },
+        BASE_URL,
+      ),
+    ).rejects.toThrow(/cliproxy deploy/)
+  })
+
+  it('opencode-go without --force is refused before any network call', async () => {
+    const fetchMock = mock(async () => new Response('{}'))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await expect(
+      buildNonInteractivePlan(
+        {key: KEY, repo: 'owner/repo', harness: 'opencode', providers: 'opencode-go', model: 'opencode-go/glm-5.3'},
+        BASE_URL,
+      ),
+    ).rejects.toThrow(/Refusing destructive provider change/)
+    expect(fetchMock.mock.calls.length).toBe(0)
+  })
+
+  it('requiresDestructiveProviderChangeConfirmation is true for opencode-go', () => {
+    expect(requiresDestructiveProviderChangeConfirmation(['opencode-go'])).toBe(true)
+    expect(requiresDestructiveProviderChangeConfirmation(['anthropic', 'opencode-go'])).toBe(true)
+  })
+
+  it('--dry-run renders the opencode-go config and auth without any fetch', async () => {
+    const fetchMock = mock(async () => new Response('{}'))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const plan = await buildNonInteractivePlan(
+      {
+        repo: 'owner/repo',
+        harness: 'opencode',
+        providers: 'anthropic,opencode-go',
+        model: 'opencode-go/glm-5.3',
+        dryRun: true,
+      },
+      BASE_URL,
+    )
+
+    expect(fetchMock.mock.calls.length).toBe(0)
+    const config = plan.template.secrets.find(s => s.name === 'OPENCODE_CONFIG')?.value ?? ''
+    expect(config).toContain('"opencode-go":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}')
+  })
+
+  it('help text lists opencode-go as a supported provider and model example', () => {
+    const cli = goke('infra')
+    registerCliproxySetup(cli)
+    cli.help()
+
+    const helpText = cli.helpText()
+
+    expect(helpText).toContain('anthropic, openai, opencode-go')
+    expect(helpText).toContain('opencode-go/glm-5.3')
+  })
+})

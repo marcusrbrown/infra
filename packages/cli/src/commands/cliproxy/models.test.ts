@@ -160,6 +160,54 @@ describe('cliproxyModelsAction — plain output', () => {
     expect(output).not.toContain('claude')
   })
 
+  it('filters to opencode-go and shows each Go model once even though the proxy lists bare and prefixed ids', async () => {
+    const goResponse = {
+      object: 'list',
+      data: [
+        ...MIXED_MODELS_RESPONSE.data,
+        {id: 'glm-5.3', object: 'model', owned_by: 'opencode-go', created: 1_720_000_000},
+        {id: 'opencode-go/glm-5.3', object: 'model', owned_by: 'opencode-go', created: 1_720_000_000},
+        {id: 'kimi-k3', object: 'model', owned_by: 'opencode-go', created: 1_721_000_000},
+        {id: 'opencode-go/kimi-k3', object: 'model', owned_by: 'opencode-go', created: 1_721_000_000},
+      ],
+    }
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(goResponse), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', provider: 'opencode-go'}, ctx)
+
+    const lines = captured.stdout.join('\n').split('\n').filter(Boolean)
+    expect(lines).toEqual(['opencode-go/glm-5.3', 'opencode-go/kimi-k3'])
+  })
+
+  it('unfiltered listing groups opencode-go after openai without double prefixes', async () => {
+    const goResponse = {
+      object: 'list',
+      data: [
+        {id: 'opencode-go/glm-5.3', object: 'model', owned_by: 'opencode-go', created: 1_720_000_000},
+        {id: 'gpt-4o', object: 'model', owned_by: 'openai', created: 1_705_000_000},
+      ],
+    }
+    globalThis.fetch = createFetchImplementation(
+      async () =>
+        new Response(JSON.stringify(goResponse), {
+          status: 200,
+          headers: {'content-type': 'application/json'},
+        }),
+    )
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key'}, ctx)
+
+    expect(captured.stdout.join('\n').split('\n').filter(Boolean)).toEqual(['openai/gpt-4o', 'opencode-go/glm-5.3'])
+  })
+
   it('infers anthropic provider via id pattern when owned_by is absent', async () => {
     globalThis.fetch = createFetchImplementation(
       async () =>
@@ -435,6 +483,20 @@ describe('cliproxyModelsAction — validation errors', () => {
     expect(fetchCalled).toBe(false)
     expect(captured.stderr.join('')).toMatch(/gemini|provider/i)
     expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('unknown-provider error names all three providers', async () => {
+    globalThis.fetch = createFetchImplementation(async () => new Response('{}', {status: 200}))
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyModelsAction({url: 'https://cliproxy.example.com', key: 'test-api-key', provider: 'gemini'}, ctx),
+    ).rejects.toMatchObject({name: 'MockProcessExit', code: 1})
+
+    const stderr = captured.stderr.join('')
+    expect(stderr).toContain('anthropic')
+    expect(stderr).toContain('openai')
+    expect(stderr).toContain('opencode-go')
   })
 
   it('exits with error when no API key is provided', async () => {

@@ -355,3 +355,93 @@ describe('getHarnessTemplate provider-aware', () => {
     })
   })
 })
+
+// ── opencode-go provider ─────────────────────────────────────────────────────
+
+function secret(template: HarnessTemplate, name: string): string {
+  return template.secrets.find((e: SecretAssignment) => e.name === name)?.value ?? ''
+}
+
+describe('getHarnessTemplate opencode-go', () => {
+  it("providers: ['anthropic', 'opencode-go'] → both base URLs and both auth entries under one key", () => {
+    const template = getHarnessTemplate('opencode', {
+      keyValue: 'sk-shared',
+      providers: ['anthropic', 'opencode-go'],
+      model: 'opencode-go/glm-5.3',
+    })
+
+    expect(secret(template, 'OPENCODE_CONFIG')).toBe(
+      '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}},"opencode-go":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
+    )
+    expect(secret(template, 'OPENCODE_AUTH_JSON')).toBe(
+      '{"anthropic":{"type":"api","key":"sk-shared"},"opencode-go":{"type":"api","key":"sk-shared"}}',
+    )
+    expect(template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')?.value).toBe(
+      'opencode-go/glm-5.3',
+    )
+  })
+
+  it('does not add an npm or models block to the opencode-go provider entry', () => {
+    const template = getHarnessTemplate('opencode', {
+      keyValue: 'sk-shared',
+      providers: ['opencode-go'],
+      model: 'opencode-go/glm-5.3',
+    })
+    const parsed = JSON.parse(secret(template, 'OPENCODE_CONFIG'))
+
+    expect(Object.keys(parsed.provider['opencode-go'])).toEqual(['options'])
+    expect(Object.keys(parsed.provider['opencode-go'].options)).toEqual(['baseURL'])
+  })
+
+  it("providers: ['opencode-go'] with no model → default opencode-go/glm-5.3", () => {
+    const template = getHarnessTemplate('opencode', {keyValue: 'sk-go', providers: ['opencode-go']})
+
+    expect(template.variables.find((e: VariableAssignment) => e.name === 'FRO_BOT_MODEL')?.value).toBe(
+      'opencode-go/glm-5.3',
+    )
+    expect(secret(template, 'OPENCODE_AUTH_JSON')).toBe('{"opencode-go":{"type":"api","key":"sk-go"}}')
+  })
+
+  it('canonical order is anthropic, openai, opencode-go regardless of input order', () => {
+    const template = getHarnessTemplate('opencode', {
+      keyValue: 'k',
+      providers: ['opencode-go', 'openai', 'anthropic'],
+      model: 'opencode-go/glm-5.3',
+    })
+
+    expect(Object.keys(JSON.parse(secret(template, 'OPENCODE_AUTH_JSON')))).toEqual([
+      'anthropic',
+      'openai',
+      'opencode-go',
+    ])
+    expect(Object.keys(JSON.parse(secret(template, 'OPENCODE_CONFIG')).provider)).toEqual([
+      'anthropic',
+      'openai',
+      'opencode-go',
+    ])
+  })
+
+  it('honors a trailing-slash base URL for the opencode-go entry', () => {
+    const template = getHarnessTemplate('opencode', {
+      keyValue: 'k',
+      baseUrl: 'https://cliproxy.example.com/',
+      providers: ['opencode-go'],
+    })
+
+    expect(JSON.parse(secret(template, 'OPENCODE_CONFIG')).provider['opencode-go'].options.baseURL).toBe(
+      'https://cliproxy.example.com/v1',
+    )
+  })
+
+  it('anthropic and openai outputs stay byte-identical when opencode-go is not selected', () => {
+    const template = getHarnessTemplate('opencode', {
+      keyValue: 'sk-dual',
+      providers: ['anthropic', 'openai'],
+      model: 'openai/gpt-5.4-mini',
+    })
+
+    expect(secret(template, 'OPENCODE_AUTH_JSON')).toBe(
+      '{"anthropic":{"type":"api","key":"sk-dual"},"openai":{"type":"api","key":"sk-dual"}}',
+    )
+  })
+})

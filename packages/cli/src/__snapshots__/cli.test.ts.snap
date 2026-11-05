@@ -20,8 +20,8 @@ Commands:
     --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
     --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
     --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
-    --providers [providers]            Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai. Example: --providers anthropic,openai
-    --model [model]                    Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o
+    --providers [providers]            Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai, opencode-go. Example: --providers anthropic,openai
+    --model [model]                    Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o, opencode-go/glm-5.3
     --force                            Overwrite existing GitHub secrets and variables without prompting.
     --dry-run                          Print the plan without applying any changes.
     --verify-smoke                     Run a smoke test against the proxy after setup completes.
@@ -97,8 +97,8 @@ Commands:
     --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
     --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
     --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
-    --providers [providers]            Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai. Example: --providers anthropic,openai
-    --model [model]                    Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o
+    --providers [providers]            Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai, opencode-go. Example: --providers anthropic,openai
+    --model [model]                    Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o, opencode-go/glm-5.3
     --force                            Overwrite existing GitHub secrets and variables without prompting.
     --dry-run                          Print the plan without applying any changes.
     --verify-smoke                     Run a smoke test against the proxy after setup completes.

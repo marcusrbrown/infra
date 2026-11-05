@@ -38,7 +38,7 @@ const PROVIDER_ID_PATTERNS: Record<string, RegExp> = {
   anthropic: /^claude-/i,
 }
 
-const VALID_PROVIDERS = ['anthropic', 'openai'] as const
+const VALID_PROVIDERS = ['anthropic', 'openai', 'opencode-go'] as const
 type ValidProvider = (typeof VALID_PROVIDERS)[number]
 
 function isValidProvider(value: string): value is ValidProvider {
@@ -108,6 +108,21 @@ function sortEntries(entries: ModelEntry[]): ModelEntry[] {
 }
 
 /**
+ * Collapses entries that display identically. The proxy lists each OpenCode Go model twice
+ * (`glm-5.3` and `opencode-go/glm-5.3`, both owned_by opencode-go); both render as `opencode-go/glm-5.3`.
+ * Keeps the first of each, so sort order is preserved.
+ */
+function dedupeByDisplayId(entries: ModelEntry[]): ModelEntry[] {
+  const seen = new Set<string>()
+  return entries.filter(entry => {
+    const displayId = `${deriveProvider(entry)}/${stripProviderPrefix(entry.id)}`
+    if (seen.has(displayId)) return false
+    seen.add(displayId)
+    return true
+  })
+}
+
+/**
  * Formats a model entry for plain output: `provider/raw_id`.
  */
 function formatPlainLine(entry: ModelEntry): string {
@@ -164,7 +179,7 @@ export async function cliproxyModelsAction(options: ModelsOptions, ctx: ActionCt
 
     // Validate provider before any HTTP call
     if (options.provider !== undefined && !isValidProvider(options.provider)) {
-      throw new Error(`Unknown provider "${options.provider}". Use anthropic or openai.`)
+      throw new Error(`Unknown provider "${options.provider}". Use ${VALID_PROVIDERS.join(', ')}.`)
     }
 
     const endpoint = `${baseUrl}/v1/models`
@@ -185,7 +200,7 @@ export async function cliproxyModelsAction(options: ModelsOptions, ctx: ActionCt
     }
 
     // Sort: provider-grouped (asc), date-asc within each group
-    entries = sortEntries(entries)
+    entries = dedupeByDisplayId(sortEntries(entries))
 
     if (options.verbose) {
       // --verbose: emit a single JSON array (pretty-printed) of the fields we have.
@@ -225,6 +240,8 @@ export function registerCliproxyModels(cli: ReturnType<typeof goke>): void {
     .example('infra cliproxy models')
     .example('# Filter to Anthropic models only')
     .example('infra cliproxy models anthropic')
+    .example('# Filter to OpenCode Go models only')
+    .example('infra cliproxy models opencode-go')
     .example('# Show verbose output with owned_by and created date')
     .example('infra cliproxy models --verbose')
     .example('# Filter to OpenAI models with verbose output')

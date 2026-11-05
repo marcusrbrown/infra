@@ -25,6 +25,7 @@
     "provision:gateway": "bun run apps/gateway/server/provision-droplet.ts",
     "provision:umami": "bun run apps/umami/server/provision-droplet.ts",
     "provision:vpn": "bun run apps/vpn/server/provision.ts",
+    "refresh:go-privacy": "bun run apps/cliproxy/scripts/refresh-go-privacy.ts",
     "test": "bun test --recursive",
     "version-changesets": "changeset version"
   },

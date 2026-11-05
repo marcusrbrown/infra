@@ -265,6 +265,16 @@ The gateway deploy runs this same probe automatically as a fail-closed preflight
 
 §Required with the operator listener trio: `GATEWAY_VPC_IP` and `DASHBOARD_VPC_IP` must both be set whenever the listener trio is set; the deploy fails before any SSH otherwise. With the listener trio unset, both are ignored. `DIGITALOCEAN_ACCESS_TOKEN` is a provisioning-only concern (used locally by `provision-droplet.ts` to create the Cloud Firewall) — it is not part of this all-or-none group and is not required in the `gateway` GitHub Environment. See [Operator private path](#operator-private-path-dashboard-same-origin) for the full bridge topology.
 
+### OpenCode Go through the proxy
+
+The workspace runs an OpenCode Go model only through `cliproxy.fro.bot`. Three values select it:
+
+- `WORKSPACE_OPENCODE_MODEL=opencode-go/<id>` — `<id>` is a bare id listed by cliproxy `/v1/models` with `owned_by: opencode-go`.
+- `WORKSPACE_OPENCODE_CONFIG` — carries `provider["opencode-go"].options.baseURL` set to `https://cliproxy.fro.bot/v1`.
+- `WORKSPACE_OPENCODE_AUTH` — carries an `opencode-go` entry holding the dedicated scoped cliproxy key.
+
+The deploy guard checks the base URL of the provider named by the model prefix, so it rejects a Go model whose base URL points at OpenCode directly or whose `opencode-go` provider block is missing. The egress allowlist gains no OpenCode inference host. `apps/gateway/src/deploy.test.ts` pins this behavior.
+
 ## GHCR IMAGES
 
 The `gateway` and `workspace` images are published to:

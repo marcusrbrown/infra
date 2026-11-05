@@ -5,7 +5,15 @@ import {getLocalDeployEnv, resolveLocalDeployScriptPath, validateRemotePrecondit
 
 const cliDir = resolve(import.meta.dir, '../../..')
 
-const envKeys = ['CLIPROXY_DOMAIN', 'CLIPROXY_MANAGEMENT_KEY', 'HOME', 'PATH', 'SSH_AUTH_SOCK'] as const
+const envKeys = [
+  'CLIPROXY_API_KEY',
+  'CLIPROXY_DOMAIN',
+  'CLIPROXY_MANAGEMENT_KEY',
+  'CLIPROXY_OPENCODE_GO_KEY',
+  'HOME',
+  'PATH',
+  'SSH_AUTH_SOCK',
+] as const
 
 type ManagedEnvKey = (typeof envKeys)[number]
 
@@ -95,20 +103,39 @@ describe('cliproxy deploy', () => {
   describe('getLocalDeployEnv', () => {
     it('returns the expected deploy environment when required variables are present', () => {
       setManagedEnv({
+        CLIPROXY_API_KEY: undefined,
         CLIPROXY_DOMAIN: 'cliproxy.example.com',
         CLIPROXY_MANAGEMENT_KEY: 'test-management-key',
+        CLIPROXY_OPENCODE_GO_KEY: undefined,
         HOME: '/tmp/test-home',
         PATH: '/usr/bin:/bin',
         SSH_AUTH_SOCK: '/tmp/test-sock',
       })
 
       expect(getLocalDeployEnv()).toEqual({
+        CLIPROXY_API_KEY: '',
         CLIPROXY_DOMAIN: 'cliproxy.example.com',
         CLIPROXY_MANAGEMENT_KEY: 'test-management-key',
+        CLIPROXY_OPENCODE_GO_KEY: '',
         HOME: '/tmp/test-home',
         PATH: '/usr/bin:/bin',
         SSH_AUTH_SOCK: '/tmp/test-sock',
       })
+    })
+
+    it('passes the OpenCode Go and downstream keys through to the local deploy script', () => {
+      setManagedEnv({
+        CLIPROXY_API_KEY: 'downstream-key-value',
+        CLIPROXY_OPENCODE_GO_KEY: 'go-key-value',
+        HOME: '/tmp/test-home',
+        PATH: '/usr/bin:/bin',
+        SSH_AUTH_SOCK: '/tmp/test-sock',
+      })
+
+      const env = getLocalDeployEnv()
+
+      expect(env.CLIPROXY_OPENCODE_GO_KEY).toBe('go-key-value')
+      expect(env.CLIPROXY_API_KEY).toBe('downstream-key-value')
     })
 
     it('throws when PATH is missing', () => {
@@ -170,6 +197,18 @@ describe('cliproxy deploy', () => {
       expect(stdout).toContain('Dry run: local CLIProxyAPI deploy')
       expect(stdout).toContain(deployScriptPath)
       expect(stdout).toContain('CLIPROXY_DOMAIN=')
+    })
+
+    it('reports whether the OpenCode Go keys are set without printing them', async () => {
+      const {stdout, exitCode} = await runDeployCommand(['--local', '--dry-run'], {
+        CLIPROXY_API_KEY: 'downstream-key-value',
+        CLIPROXY_OPENCODE_GO_KEY: undefined,
+      })
+
+      expect(exitCode).toBe(0)
+      expect(stdout).toContain('CLIPROXY_OPENCODE_GO_KEY: (unset)')
+      expect(stdout).toContain('CLIPROXY_API_KEY: set')
+      expect(stdout).not.toContain('downstream-key-value')
     })
 
     it('rejects invalid options with a non-zero exit code', async () => {

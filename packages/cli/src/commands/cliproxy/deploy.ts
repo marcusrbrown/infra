@@ -38,6 +38,8 @@ export function getLocalDeployEnv(): Record<string, string> {
     SSH_AUTH_SOCK: sshAuthSock,
     CLIPROXY_DOMAIN: process.env.CLIPROXY_DOMAIN ?? '',
     CLIPROXY_MANAGEMENT_KEY: process.env.CLIPROXY_MANAGEMENT_KEY ?? '',
+    CLIPROXY_OPENCODE_GO_KEY: process.env.CLIPROXY_OPENCODE_GO_KEY ?? '',
+    CLIPROXY_API_KEY: process.env.CLIPROXY_API_KEY ?? '',
   }
 }
 
@@ -111,6 +113,12 @@ export function registerCliproxyDeploy(cli: CliInstance): void {
             console.log('- WARNING: --force-config will overwrite server config.yaml (wipes API keys)')
           }
           console.log(`- CLIPROXY_DOMAIN=${env.CLIPROXY_DOMAIN || '(unset)'}`)
+          // Presence only: the keys themselves are never printed.
+          console.log(`- CLIPROXY_OPENCODE_GO_KEY: ${env.CLIPROXY_OPENCODE_GO_KEY ? 'set' : '(unset)'}`)
+          console.log(`- CLIPROXY_API_KEY: ${env.CLIPROXY_API_KEY ? 'set' : '(unset)'}`)
+          console.log(
+            '- OpenCode Go step: applied after oauth-model-alias when enabled in settings.json (requires both keys)',
+          )
           return
         }
 

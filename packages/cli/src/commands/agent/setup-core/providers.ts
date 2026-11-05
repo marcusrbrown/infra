@@ -5,10 +5,15 @@ import {z} from 'zod'
 
 import {cancelAndExit} from './prompts'
 
-const providerIdSchema = z.enum(['anthropic', 'openai'])
+/** Canonical provider order: also the stable key order written into OPENCODE_AUTH_JSON / OPENCODE_CONFIG. */
+export const PROVIDER_ORDER = ['anthropic', 'openai', 'opencode-go'] as const
+
+const providerIdSchema = z.enum(PROVIDER_ORDER)
 export type ProviderId = z.infer<typeof providerIdSchema>
 
-const MODEL_ID_RE = /^(?:anthropic|openai)\/[a-z\d](?:[a-z\d.\-]*[a-z\d])?$/
+const SUPPORTED_PROVIDERS = PROVIDER_ORDER.join(', ')
+
+export const MODEL_ID_RE = /^(?:anthropic|openai|opencode-go)\/[a-z\d](?:[a-z\d.\-]*[a-z\d])?$/
 
 /**
  * Parse a comma-separated provider list string into a validated ProviderId array.
@@ -21,13 +26,13 @@ export function parseProviders(input: string): ProviderId[] {
     .filter(Boolean)
 
   if (parts.length === 0) {
-    throw new Error('--providers must not be empty. Supported values: anthropic, openai')
+    throw new Error(`--providers must not be empty. Supported values: ${SUPPORTED_PROVIDERS}`)
   }
 
   const parsed = parts.map(p => {
     const result = providerIdSchema.safeParse(p)
     if (!result.success) {
-      throw new Error(`Unknown provider "${p}". Supported values: anthropic, openai`)
+      throw new Error(`Unknown provider "${p}". Supported values: ${SUPPORTED_PROVIDERS}`)
     }
     return result.data
   })
@@ -43,6 +48,7 @@ export function parseProviders(input: string): ProviderId[] {
 export const PROVIDER_DEFAULTS: Record<ProviderId, string> = {
   anthropic: 'anthropic/claude-sonnet-4-6',
   openai: 'openai/gpt-5.4-mini',
+  'opencode-go': 'opencode-go/glm-5.3',
 }
 
 const CUSTOM_MODEL_SENTINEL = '__custom__'
@@ -60,6 +66,7 @@ export async function promptForProviders(): Promise<ProviderId[]> {
       options: [
         {value: 'anthropic', label: 'Anthropic'},
         {value: 'openai', label: 'OpenAI'},
+        {value: 'opencode-go', label: 'OpenCode Go'},
       ],
       initialValues: ['anthropic'],
       required: false,
@@ -90,6 +97,7 @@ export async function promptForModel(providers: ProviderId[]): Promise<string> {
     options: [
       {value: 'openai/gpt-5.4-mini', label: 'openai/gpt-5.4-mini'},
       {value: 'anthropic/claude-sonnet-4-6', label: 'anthropic/claude-sonnet-4-6'},
+      {value: 'opencode-go/glm-5.3', label: 'opencode-go/glm-5.3'},
       {value: CUSTOM_MODEL_SENTINEL, label: 'Enter custom model ID...'},
     ],
   })

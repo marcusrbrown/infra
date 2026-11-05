@@ -15,6 +15,7 @@ import {APP_IDS} from '../status/observation'
 import {
   deployObservation,
   FIXED_NOW,
+  goRouteObservation,
   makeStatusDependencies,
   probeObservation,
   routeObservation,
@@ -114,7 +115,12 @@ describe('status snapshot', () => {
         d: {'public-reachability': {statusCode: 200}},
       },
     ])
-    expect(Object.keys(cliproxy[0]?.r ?? {})).toEqual(['public-reachability', 'deploy-state', 'provider-route'])
+    expect(Object.keys(cliproxy[0]?.r ?? {})).toEqual([
+      'public-reachability',
+      'deploy-state',
+      'provider-route',
+      'provider-route-go',
+    ])
     // Only the observations this command measures; the VPN has no public probe and no end-to-end route.
     expect(Object.keys(vpn[0]?.r ?? {})).toEqual(['deploy-state'])
   })
@@ -328,8 +334,10 @@ describe('status snapshot', () => {
             keeweb: deployObservation('fail'),
             gateway: deployObservation('unknown', {reason: 'at_gate', since: '2026-11-01T11:00:00Z'}),
           }),
-          readMonitorState: async () =>
+          readMonitorState: async () => [
             routeObservation('fail', {reason: 'auth-401', probeAt: '2026-11-01T11:58:00.000Z'}),
+            goRouteObservation(),
+          ],
         }),
       },
     )
@@ -492,8 +500,8 @@ describe('status snapshot with the real GitHub readers and a mocked fetch (integ
     expect(JSON.parse(files['apps/gateway.json'] ?? '[]')[0].r['deploy-state']).toBe('p')
     // The stored route result comes from the probe line the storage host served after the redirect.
     expect(JSON.parse(files['apps/cliproxy.json'] ?? '[]')[0]).toMatchObject({
-      r: {'deploy-state': 'p', 'provider-route': 'p'},
-      d: {'provider-route': {reason: 'ok', probeAt: PROBE_AT}},
+      r: {'deploy-state': 'p', 'provider-route': 'p', 'provider-route-go': 'u'},
+      d: {'provider-route': {reason: 'ok', probeAt: PROBE_AT}, 'provider-route-go': {reason: 'no-probe-line'}},
     })
 
     // The token travels as a bearer header to the API origin only; the signed storage request carries none.
@@ -526,8 +534,12 @@ describe('status snapshot with the real GitHub readers and a mocked fetch (integ
     const files = await readFiles(history)
     expect(github.calls).toEqual([])
     expect(JSON.parse(files['apps/cliproxy.json'] ?? '[]')[0]).toMatchObject({
-      r: {'public-reachability': 'p', 'deploy-state': 'n', 'provider-route': 'n'},
-      d: {'deploy-state': {reason: 'missing-config'}, 'provider-route': {reason: 'missing-config'}},
+      r: {'public-reachability': 'p', 'deploy-state': 'n', 'provider-route': 'n', 'provider-route-go': 'n'},
+      d: {
+        'deploy-state': {reason: 'missing-config'},
+        'provider-route': {reason: 'missing-config'},
+        'provider-route-go': {reason: 'missing-config'},
+      },
     })
   })
 })

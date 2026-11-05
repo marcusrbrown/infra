@@ -1,10 +1,16 @@
+import type {OpenCodeGoSettings, ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 import type {goke} from 'goke'
+
 import type {ActionCtx} from '../../lib/action-ctx'
 
 import {z} from 'zod'
-
+import {GO_PROBE_LINE_PREFIX} from '../../status/monitor-state'
 import {
+  checkGoRouteState,
   checkProviderAuthState,
+  resolveGoSettings,
+  type GoRouteClassification,
+  type GoRouteReason,
   type ProviderAuthClassification,
   type ProviderAuthReason,
   type ProviderAuthState,
@@ -13,10 +19,7 @@ import {
 declare const process: {env: Record<string, string | undefined>}
 
 const DEFAULT_CLIPROXY_URL = 'https://cliproxy.fro.bot'
-const PRODUCTION_LABEL = 'cliproxy-auth-monitor'
-const TEST_LABEL = 'cliproxy-auth-monitor-test'
-const PRODUCTION_IDENTITY_MARKER = '<!-- cliproxy-auth-monitor:v1 -->'
-const TEST_IDENTITY_MARKER = '<!-- cliproxy-auth-monitor-test:v1 -->'
+const GO_RUNBOOK = 'docs/runbooks/cliproxy-opencode-go.md'
 const MAX_DISCORD_ATTEMPTS = 3
 const MAX_GITHUB_ATTEMPTS = 3
 const GITHUB_TIMEOUT_MS = 10_000
@@ -35,16 +38,20 @@ export type MonitorDiscordAction = 'none' | 'outage-sent' | 'recovery-sent'
 
 export interface MonitorRunSummary {
   probeState: ProviderAuthState
-  probeReason: ProviderAuthReason
+  probeReason: ProviderAuthReason | GoRouteReason
   transition: MonitorTransition
   issue: MonitorIssueAction[]
   discord: MonitorDiscordAction
   timestamp: string
 }
 
-export function formatMonitorRunSummary(summary: MonitorRunSummary): string {
+const CLAUDE_SUMMARY_PREFIX = 'CLIProxy auth monitor summary:'
+const CLAUDE_PROBE_PREFIX = 'CLIProxy auth monitor probe:'
+const GO_SUMMARY_PREFIX = 'CLIProxy Go monitor summary:'
+
+export function formatMonitorRunSummary(summary: MonitorRunSummary, summaryPrefix = CLAUDE_SUMMARY_PREFIX): string {
   const issue = summary.issue.length > 0 ? summary.issue.join('+') : 'none'
-  return `CLIProxy auth monitor summary: probe=${summary.probeState} reason=${summary.probeReason} transition=${summary.transition} issue=${issue} discord=${summary.discord} at ${summary.timestamp}`
+  return `${summaryPrefix} probe=${summary.probeState} reason=${summary.probeReason} transition=${summary.transition} issue=${issue} discord=${summary.discord} at ${summary.timestamp}`
 }
 
 /**
@@ -54,8 +61,88 @@ export function formatMonitorRunSummary(summary: MonitorRunSummary): string {
  */
 export function formatMonitorProbeLine(
   probe: Pick<MonitorRunSummary, 'probeState' | 'probeReason' | 'timestamp'>,
+  probePrefix = CLAUDE_PROBE_PREFIX,
 ): string {
-  return `CLIProxy auth monitor probe: probe=${probe.probeState} reason=${probe.probeReason} at ${probe.timestamp}`
+  return `${probePrefix} probe=${probe.probeState} reason=${probe.probeReason} at ${probe.timestamp}`
+}
+
+/** The Go route's early observation line: same shape as the Claude one, with its own prefix. */
+export function formatGoMonitorProbeLine(
+  probe: Pick<MonitorRunSummary, 'probeState' | 'probeReason' | 'timestamp'>,
+): string {
+  return formatMonitorProbeLine(probe, GO_PROBE_LINE_PREFIX)
+}
+
+/**
+ * Everything that differs between the two monitored routes: the label, the identity and notification markers, the
+ * issue title and body, the Discord text and the output prefixes. The Claude values are fixed; the Go route has
+ * its own so the two never share an issue, a label or an alert.
+ */
+interface RouteConfig {
+  label: string
+  identityMarker: string
+  /** The `<!-- <prefix>:last-check=… -->` / `:notified=…` marker family. */
+  markerPrefix: string
+  issueTitle: string
+  labelDescription: string
+  issueDescription: string
+  remediation: (reason: string) => string
+  discordDead: (timestamp: string, synthetic: boolean, reason: string) => string
+  discordHealthy: (timestamp: string, synthetic: boolean) => string
+  summaryPrefix: string
+}
+
+const syntheticPrefix = (synthetic: boolean): string => (synthetic ? '[synthetic test] ' : '')
+
+function claudeRoute(label: string, identityMarker: string, markerPrefix: string): RouteConfig {
+  return {
+    label,
+    identityMarker,
+    markerPrefix,
+    issueTitle: 'CLIProxy Anthropic authentication outage',
+    labelDescription: 'CLIProxy auth monitor state',
+    issueDescription: 'CLIProxyAPI Anthropic authentication monitor.',
+    remediation: () => '\nRemediation: cliproxy login claude.',
+    discordDead: (timestamp, synthetic) =>
+      `${syntheticPrefix(synthetic)}CLIProxy Anthropic authentication is unavailable as of ${timestamp}. Run cliproxy login claude.`,
+    discordHealthy: (timestamp, synthetic) =>
+      `${syntheticPrefix(synthetic)}CLIProxy Anthropic authentication recovered as of ${timestamp}.`,
+    summaryPrefix: CLAUDE_SUMMARY_PREFIX,
+  }
+}
+
+const PRODUCTION_ROUTE = claudeRoute(
+  'cliproxy-auth-monitor',
+  '<!-- cliproxy-auth-monitor:v1 -->',
+  'cliproxy-auth-monitor',
+)
+const TEST_ROUTE = claudeRoute(
+  'cliproxy-auth-monitor-test',
+  '<!-- cliproxy-auth-monitor-test:v1 -->',
+  'cliproxy-auth-monitor-test',
+)
+
+/** The reason as issue and Discord text: `session-header-dropped` says what broke, the others stay the bare token. */
+function goReasonText(reason: string): string {
+  return reason === 'session-header-dropped'
+    ? `${reason} — the proxy stopped forwarding the session header, so Go answers 400 MissingSessionID`
+    : reason
+}
+
+/** The OpenCode Go route. Live only: the synthetic modes exercise the Claude route's isolated test issue. */
+const GO_ROUTE: RouteConfig = {
+  label: 'cliproxy-go-monitor',
+  identityMarker: '<!-- cliproxy-go-monitor:v1 -->',
+  markerPrefix: 'cliproxy-go-monitor',
+  issueTitle: 'CLIProxy OpenCode Go route outage',
+  labelDescription: 'CLIProxy Go monitor state',
+  issueDescription: 'CLIProxyAPI OpenCode Go route monitor.',
+  remediation: reason => `\nReason: ${goReasonText(reason)}.\nRemediation: see ${GO_RUNBOOK}.`,
+  discordDead: (timestamp, synthetic, reason) =>
+    `${syntheticPrefix(synthetic)}CLIProxy OpenCode Go route is unavailable as of ${timestamp} (reason: ${goReasonText(reason)}). See ${GO_RUNBOOK}.`,
+  discordHealthy: (timestamp, synthetic) =>
+    `${syntheticPrefix(synthetic)}CLIProxy OpenCode Go route recovered as of ${timestamp}.`,
+  summaryPrefix: GO_SUMMARY_PREFIX,
 }
 
 interface GitHubIssue {
@@ -115,6 +202,10 @@ export interface MonitorRuntime {
   ghApi: (token: string, path: string, method: string, body?: string) => Promise<MonitorGhResponse>
   setTimeout: typeof setTimeout
   clearTimeout: typeof clearTimeout
+  /** Tracked OpenCode Go settings. Defaults to the committed ones; tests inject their own. */
+  goSettings?: OpenCodeGoSettings
+  /** Parsed OpenCode Go privacy snapshot. Defaults to the committed one; tests inject their own. */
+  goSnapshot?: ParsedSnapshot
 }
 
 const defaultMonitorRuntime: MonitorRuntime = {
@@ -302,28 +393,28 @@ function createGitHubClient(
 }
 
 function issueBody(
-  identityMarker: string,
+  route: RouteConfig,
   state: 'dead' | 'healthy',
   timestamp: string,
   includeState: boolean,
+  reason: string,
 ): string {
-  const markerPrefix = identityMarker === TEST_IDENTITY_MARKER ? 'cliproxy-auth-monitor-test' : 'cliproxy-auth-monitor'
-  const marker = includeState ? `\n<!-- ${markerPrefix}:notified=${state} -->` : ''
-  const remediation = state === 'dead' ? '\nRemediation: cliproxy login claude.' : ''
-  return `${identityMarker}\nCLIProxyAPI Anthropic authentication monitor.${remediation}\nLast check: ${timestamp}.\n<!-- ${markerPrefix}:last-check=${timestamp} -->${marker}`
+  const marker = includeState ? `\n<!-- ${route.markerPrefix}:notified=${state} -->` : ''
+  const remediation = state === 'dead' ? route.remediation(reason) : ''
+  return `${route.identityMarker}\n${route.issueDescription}${remediation}\nLast check: ${timestamp}.\n<!-- ${route.markerPrefix}:last-check=${timestamp} -->${marker}`
 }
 
 function issueHasLabel(issue: GitHubIssue, label: string): boolean {
   return issue.labels.some(candidate => candidate.name === label)
 }
 
-function notifiedState(body: string | null, identityMarker: string): 'dead' | 'healthy' | null {
-  const markerPrefix = identityMarker === TEST_IDENTITY_MARKER ? 'cliproxy-auth-monitor-test' : 'cliproxy-auth-monitor'
-  const match = body?.match(new RegExp(`<!-- ${markerPrefix}:notified=(dead|healthy) -->`))
+function notifiedState(body: string | null, route: RouteConfig): 'dead' | 'healthy' | null {
+  const match = body?.match(new RegExp(`<!-- ${route.markerPrefix}:notified=(dead|healthy) -->`))
   return match?.[1] === 'dead' || match?.[1] === 'healthy' ? match[1] : null
 }
 
-async function resolveIssue(client: GitHubClient, identityMarker: string, label: string): Promise<GitHubIssue | null> {
+async function resolveIssue(client: GitHubClient, route: RouteConfig): Promise<GitHubIssue | null> {
+  const {identityMarker, label} = route
   const issues: GitHubIssue[] = []
   let page = 1
   while (true) {
@@ -341,13 +432,14 @@ async function resolveIssue(client: GitHubClient, identityMarker: string, label:
   return marked[0] ?? null
 }
 
-async function ensureLabel(client: GitHubClient, label: string): Promise<void> {
+async function ensureLabel(client: GitHubClient, route: RouteConfig): Promise<void> {
+  const {label} = route
   const encoded = encodeURIComponent(label)
   const status = await client.requestStatus(`/labels/${encoded}`)
   if (status === 404) {
     await client.request('/labels', z.unknown(), {
       method: 'POST',
-      body: JSON.stringify({name: label, color: 'b60205', description: 'CLIProxy auth monitor state'}),
+      body: JSON.stringify({name: label, color: 'b60205', description: route.labelDescription}),
     })
     return
   }
@@ -368,23 +460,22 @@ async function updateIssue(
 
 async function createIssue(
   client: GitHubClient,
-  label: string,
-  identityMarker: string,
+  route: RouteConfig,
   body: string,
   sleep: MonitorRuntime['sleep'],
 ): Promise<GitHubIssue> {
-  await ensureLabel(client, label)
+  await ensureLabel(client, route)
   for (let attempt = 1; attempt <= MAX_GITHUB_ATTEMPTS; attempt++) {
     try {
       return await client.request('/issues', githubIssueSchema, {
         method: 'POST',
-        body: JSON.stringify({title: 'CLIProxy Anthropic authentication outage', body, labels: [label]}),
+        body: JSON.stringify({title: route.issueTitle, body, labels: [route.label]}),
         retry: false,
       })
     } catch (error) {
       const retryable = error instanceof Error && /github-(?:transient|timeout)/.test(error.message)
       if (!retryable || attempt === MAX_GITHUB_ATTEMPTS) throw error
-      const appeared = await resolveIssue(client, identityMarker, label)
+      const appeared = await resolveIssue(client, route)
       if (appeared) return appeared
       await sleep(attempt * 100)
     }
@@ -394,15 +485,15 @@ async function createIssue(
 
 async function sendDiscord(
   webhook: string,
+  route: RouteConfig,
   state: 'dead' | 'healthy',
   timestamp: string,
   synthetic: boolean,
+  reason: string,
   runtime: MonitorRuntime,
 ): Promise<void> {
   const content =
-    state === 'dead'
-      ? `${synthetic ? '[synthetic test] ' : ''}CLIProxy Anthropic authentication is unavailable as of ${timestamp}. Run cliproxy login claude.`
-      : `${synthetic ? '[synthetic test] ' : ''}CLIProxy Anthropic authentication recovered as of ${timestamp}.`
+    state === 'dead' ? route.discordDead(timestamp, synthetic, reason) : route.discordHealthy(timestamp, synthetic)
   for (let attempt = 1; attempt <= MAX_DISCORD_ATTEMPTS; attempt++) {
     try {
       const controller = new AbortController()
@@ -436,15 +527,110 @@ async function sendDiscord(
 async function persistNotifiedMarker(
   client: GitHubClient,
   issue: GitHubIssue,
-  identityMarker: string,
+  route: RouteConfig,
   state: 'dead' | 'healthy',
   timestamp: string,
+  reason: string,
 ): Promise<void> {
-  await updateIssue(client, issue, issue.state, issueBody(identityMarker, state, timestamp, true))
+  await updateIssue(client, issue, issue.state, issueBody(route, state, timestamp, true, reason))
 }
 
 function providerState(validation: Exclude<MonitorValidation, 'live'>): ProviderAuthClassification {
   return validation === 'synthetic-dead' ? {state: 'dead', reason: 'auth-401'} : {state: 'healthy', reason: 'ok'}
+}
+
+interface Reconciliation {
+  route: RouteConfig
+  classification: {state: ProviderAuthState; reason: ProviderAuthReason | GoRouteReason}
+  inputs: MonitorInputs
+  client: GitHubClient
+  runtime: MonitorRuntime
+  timestamp: string
+  synthetic: boolean
+  ctx: ActionCtx
+}
+
+/**
+ * Reconcile one route's canonical issue and transition-only Discord alert with its probe result. Each route has its
+ * own issue, label and markers, so a route can neither open, close nor update the other's issue. Throws on any
+ * GitHub or Discord failure; the caller decides what that costs.
+ */
+async function reconcileRoute(input: Reconciliation): Promise<MonitorRunSummary> {
+  const {route, classification, inputs, client, runtime, timestamp, synthetic, ctx} = input
+  const {reason} = classification
+  const finish = (
+    transition: MonitorTransition,
+    issue: MonitorIssueAction[] = [],
+    discord: MonitorDiscordAction = 'none',
+  ): MonitorRunSummary => {
+    const summary: MonitorRunSummary = {
+      probeState: classification.state,
+      probeReason: reason,
+      transition,
+      issue,
+      discord,
+      timestamp,
+    }
+    ctx.console.log(formatMonitorRunSummary(summary, route.summaryPrefix))
+    return summary
+  }
+  const issue = await resolveIssue(client, route)
+
+  if (classification.state === 'unknown') return finish('none')
+
+  const target = classification.state === 'dead' ? 'dead' : 'healthy'
+  if (!issue && target === 'healthy') return finish('none')
+
+  const issueActions: MonitorIssueAction[] = []
+
+  if (!issue) {
+    const created = await createIssue(client, route, issueBody(route, 'dead', timestamp, false, reason), runtime.sleep)
+    await sendDiscord(inputs.discordWebhook, route, 'dead', timestamp, synthetic, reason, runtime)
+    await persistNotifiedMarker(client, created, route, 'dead', timestamp, reason)
+    return finish('outage', ['created'], 'outage-sent')
+  }
+
+  if (target === 'dead') {
+    const currentMarker = notifiedState(issue.body, route)
+    const wasOpen = issue.state === 'open'
+    const body = issueBody(route, 'dead', timestamp, currentMarker === 'dead', reason)
+    await updateIssue(client, issue, 'open', body)
+    issue.state = 'open'
+    issueActions.push(wasOpen ? 'updated' : 'reopened')
+    if (currentMarker === 'dead' && wasOpen) return finish('none', issueActions)
+    await sendDiscord(inputs.discordWebhook, route, 'dead', timestamp, synthetic, reason, runtime)
+    await persistNotifiedMarker(client, issue, route, 'dead', timestamp, reason)
+    return finish(wasOpen ? 'notification-retry' : 'outage', issueActions, 'outage-sent')
+  }
+
+  const currentMarker = notifiedState(issue.body, route)
+  const wasOpen = issue.state === 'open'
+  if (issue.state === 'open') {
+    await updateIssue(
+      client,
+      issue,
+      'closed',
+      issueBody(route, currentMarker === 'dead' ? 'dead' : 'healthy', timestamp, currentMarker !== null, reason),
+    )
+    issue.state = 'closed'
+    issueActions.push('closed')
+  } else if (currentMarker === 'healthy' || currentMarker === null) {
+    return finish('none', issueActions)
+  }
+
+  if (currentMarker === 'dead') {
+    await sendDiscord(inputs.discordWebhook, route, 'healthy', timestamp, synthetic, reason, runtime)
+    await persistNotifiedMarker(client, issue, route, 'healthy', timestamp, reason)
+    return finish(wasOpen ? 'recovery' : 'notification-retry', issueActions, 'recovery-sent')
+  }
+  await persistNotifiedMarker(client, issue, route, 'healthy', timestamp, reason)
+  return finish('repair', issueActions)
+}
+
+function failureCategory(error: unknown): MonitorFailureCategory {
+  if (error instanceof Error && /trusted-label-mismatch/.test(error.message)) return 'trusted-label-mismatch'
+  if (error instanceof Error && /ambiguous-identity/.test(error.message)) return 'ambiguous-state'
+  return 'reconciliation'
 }
 
 export async function cliproxyMonitorAction(
@@ -460,105 +646,91 @@ export async function cliproxyMonitorAction(
   const proxyUrl = process.env.CLIPROXY_URL ?? DEFAULT_CLIPROXY_URL
   if (!validateProxyOrigin(proxyUrl)) return safeError(ctx, 'untrusted-proxy-origin')
 
-  const label = validation === 'live' ? PRODUCTION_LABEL : TEST_LABEL
+  const live = validation === 'live'
+  const claude = live ? PRODUCTION_ROUTE : TEST_ROUTE
   const client = createGitHubClient(inputs.githubToken, inputs.repository, runtime.sleep, runtime.ghApi)
   const timestamp = new Date().toISOString()
+  const synthetic = !live
+  // A route's failure is recorded, not thrown, so the other route still probes and reconciles. Either failing is an
+  // operational failure of the run: the exit code reflects both.
+  const failures: {name: string; category: MonitorFailureCategory}[] = []
+
+  // Both probe lines print before any reconciliation, so a dead route stays observable when GitHub or Discord fail.
+  let claudeProbe: ProviderAuthClassification | undefined
   try {
-    const classification =
-      validation === 'live' ? await checkProviderAuthState(proxyUrl, inputs.apiKey) : providerState(validation)
-    ctx.console.log(
-      formatMonitorProbeLine({probeState: classification.state, probeReason: classification.reason, timestamp}),
-    )
-    const finish = (
-      transition: MonitorTransition,
-      issue: MonitorIssueAction[] = [],
-      discord: MonitorDiscordAction = 'none',
-    ): MonitorRunSummary => {
-      const summary: MonitorRunSummary = {
-        probeState: classification.state,
-        probeReason: classification.reason,
-        transition,
-        issue,
-        discord,
-        timestamp,
-      }
-      ctx.console.log(formatMonitorRunSummary(summary))
-      return summary
-    }
-    const identityMarker = validation === 'live' ? PRODUCTION_IDENTITY_MARKER : TEST_IDENTITY_MARKER
-    const issue = await resolveIssue(client, identityMarker, label)
-
-    if (classification.state === 'unknown') return finish('none')
-
-    const target = classification.state === 'dead' ? 'dead' : 'healthy'
-    if (!issue && target === 'healthy') return finish('none')
-
-    const issueActions: MonitorIssueAction[] = []
-
-    if (!issue) {
-      const created = await createIssue(
-        client,
-        label,
-        identityMarker,
-        issueBody(identityMarker, 'dead', timestamp, false),
-        runtime.sleep,
-      )
-      await sendDiscord(inputs.discordWebhook, 'dead', timestamp, validation !== 'live', runtime)
-      await persistNotifiedMarker(client, created, identityMarker, 'dead', timestamp)
-      return finish('outage', ['created'], 'outage-sent')
-    }
-
-    if (target === 'dead') {
-      const currentMarker = notifiedState(issue.body, identityMarker)
-      const wasOpen = issue.state === 'open'
-      const body = issueBody(identityMarker, 'dead', timestamp, currentMarker === 'dead')
-      await updateIssue(client, issue, 'open', body)
-      issue.state = 'open'
-      issueActions.push(wasOpen ? 'updated' : 'reopened')
-      if (currentMarker === 'dead' && wasOpen) return finish('none', issueActions)
-      await sendDiscord(inputs.discordWebhook, 'dead', timestamp, validation !== 'live', runtime)
-      await persistNotifiedMarker(client, issue, identityMarker, 'dead', timestamp)
-      return finish(wasOpen ? 'notification-retry' : 'outage', issueActions, 'outage-sent')
-    }
-
-    const currentMarker = notifiedState(issue.body, identityMarker)
-    const wasOpen = issue.state === 'open'
-    if (issue.state === 'open') {
-      await updateIssue(
-        client,
-        issue,
-        'closed',
-        issueBody(identityMarker, currentMarker === 'dead' ? 'dead' : 'healthy', timestamp, currentMarker !== null),
-      )
-      issue.state = 'closed'
-      issueActions.push('closed')
-    } else if (currentMarker === 'healthy' || currentMarker === null) {
-      return finish('none', issueActions)
-    }
-
-    if (currentMarker === 'dead') {
-      await sendDiscord(inputs.discordWebhook, 'healthy', timestamp, validation !== 'live', runtime)
-      await persistNotifiedMarker(client, issue, identityMarker, 'healthy', timestamp)
-      return finish(wasOpen ? 'recovery' : 'notification-retry', issueActions, 'recovery-sent')
-    }
-    await persistNotifiedMarker(client, issue, identityMarker, 'healthy', timestamp)
-    return finish('repair', issueActions)
+    claudeProbe = live ? await checkProviderAuthState(proxyUrl, inputs.apiKey) : providerState(validation)
+    ctx.console.log(formatMonitorProbeLine({probeState: claudeProbe.state, probeReason: claudeProbe.reason, timestamp}))
   } catch (error) {
-    const category =
-      error instanceof Error && /trusted-label-mismatch/.test(error.message)
-        ? 'trusted-label-mismatch'
-        : error instanceof Error && /ambiguous-identity/.test(error.message)
-          ? 'ambiguous-state'
-          : 'reconciliation'
-    safeError(ctx, category)
+    failures.push({name: 'auth', category: failureCategory(error)})
   }
+
+  let goProbe: GoRouteClassification | undefined
+  // The Go route is off on purpose when the tracked settings say so: no probe, no line, no issue, no alert.
+  let goSettings: OpenCodeGoSettings | undefined
+  if (live) {
+    try {
+      goSettings = resolveGoSettings(runtime.goSettings)
+    } catch {
+      failures.push({name: 'Go', category: 'reconciliation'})
+    }
+  }
+  if (goSettings?.enabled === true) {
+    try {
+      goProbe = await checkGoRouteState(proxyUrl, inputs.apiKey, {settings: goSettings, snapshot: runtime.goSnapshot})
+      ctx.console.log(formatGoMonitorProbeLine({probeState: goProbe.state, probeReason: goProbe.reason, timestamp}))
+    } catch {
+      failures.push({name: 'Go', category: 'reconciliation'})
+    }
+  }
+
+  let claudeSummary: MonitorRunSummary | undefined
+  if (claudeProbe !== undefined) {
+    try {
+      claudeSummary = await reconcileRoute({
+        route: claude,
+        classification: claudeProbe,
+        inputs,
+        client,
+        runtime,
+        timestamp,
+        synthetic,
+        ctx,
+      })
+    } catch (error) {
+      failures.push({name: 'auth', category: failureCategory(error)})
+    }
+  }
+
+  if (goProbe !== undefined) {
+    try {
+      await reconcileRoute({
+        route: GO_ROUTE,
+        classification: goProbe,
+        inputs,
+        client,
+        runtime,
+        timestamp,
+        synthetic: false,
+        ctx,
+      })
+    } catch (error) {
+      failures.push({name: 'Go', category: failureCategory(error)})
+    }
+  }
+
+  if (failures.length > 0) {
+    for (const failure of failures) ctx.console.error(`CLIProxy ${failure.name} monitor failed: ${failure.category}`)
+    ctx.process.exit(1)
+    return
+  }
+  return claudeSummary
 }
 
 export function registerCliproxyMonitor(cli: ReturnType<typeof goke>): void {
   cli
     .command(
       'cliproxy monitor',
-      'Reconcile Anthropic provider authentication with one canonical GitHub issue and transition-only Discord alerts. Requires CLIPROXY_API_KEY, CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK, GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_ACTOR, and GITHUB_REPOSITORY_OWNER environment variables; prefer the cliproxy-auth-monitor.yaml GitHub Actions entrypoint for scheduled or synthetic validation.',
+      'Reconcile Anthropic and OpenCode Go provider routes, each with its own canonical GitHub issue and transition-only Discord alerts. Requires CLIPROXY_API_KEY, CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK, GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_ACTOR, and GITHUB_REPOSITORY_OWNER environment variables; prefer the cliproxy-auth-monitor.yaml GitHub Actions entrypoint for scheduled or synthetic validation.',
     )
     .option(
       '--validation [mode]',
@@ -566,7 +738,7 @@ export function registerCliproxyMonitor(cli: ReturnType<typeof goke>): void {
         .enum(monitorValidationModes)
         .default('live')
         .describe(
-          'Validation mode (live, synthetic-dead, or synthetic-healthy): live probes Anthropic; synthetic modes are owner-only isolated test transitions.',
+          'Validation mode (live, synthetic-dead, or synthetic-healthy): live probes Anthropic and OpenCode Go; synthetic modes are owner-only isolated Anthropic test transitions.',
         ),
     )
     .example('# Run the live provider-auth monitor')

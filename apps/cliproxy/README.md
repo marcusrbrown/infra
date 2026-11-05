@@ -55,7 +55,7 @@ GitHub Environment: **`cliproxy`**
 | `CLIPROXY_MANAGEMENT_KEY` | Management API bearer token — must match the droplet's `MANAGEMENT_PASSWORD` |
 | `CLIPROXY_DOMAIN`         | FQDN of the CLIProxyAPI instance                                             |
 
-Repository secret: `DIGITALOCEAN_ACCESS_TOKEN` (used by the provision script).
+Repository secrets: `DIGITALOCEAN_ACCESS_TOKEN` (used by the provision script), `CLIPROXY_OPENCODE_GO_KEY` (the OpenCode Go key for the `opencode-go` upstream) and `CLIPROXY_API_KEY`. See [OpenCode Go upstream](AGENTS.md#opencode-go-upstream) and [`docs/runbooks/cliproxy-opencode-go.md`](../../docs/runbooks/cliproxy-opencode-go.md).
 
 Local `.env`: `CLIPROXY_MANAGEMENT_KEY` must match the `MANAGEMENT_PASSWORD` set during provisioning (printed once at provision time).
 
@@ -72,7 +72,7 @@ Key operational notes:
 
 ### Anthropic auth monitoring
 
-`infra cliproxy monitor` probes the Anthropic route and reconciles one canonical GitHub issue with transition-only alerts to a dedicated Discord webhook, using a `gh api` subprocess (parsed with Zod) rather than a direct REST client. The repository workflow at `.github/workflows/cliproxy-auth-monitor.yaml` runs at a nominal 15-minute cadence (`7,22,37,52` minutes past the hour); GitHub schedule delivery is best-effort. Manual validation supports `live`, `synthetic-dead`, and `synthetic-healthy`; synthetic Discord alerts are prefixed `[synthetic test]`. Synthetic modes are owner-only, use an isolated test identity, and never probe Anthropic or mutate production monitor state. Running the command directly (outside the workflow) requires `gh` locally; the scheduled workflow already provides it and is the preferred entrypoint. See [`apps/cliproxy/AGENTS.md`](AGENTS.md) for the label-trust-anchor issue-adoption policy.
+`infra cliproxy monitor` probes the Anthropic route and, when `enabled` is true in `packages/shared/opencode-go/settings.json`, the OpenCode Go route. Each route reconciles its own canonical GitHub issue with transition-only alerts to a dedicated Discord webhook, using a `gh api` subprocess (parsed with Zod) rather than a direct REST client. The repository workflow at `.github/workflows/cliproxy-auth-monitor.yaml` runs at a nominal 15-minute cadence (`7,22,37,52` minutes past the hour); GitHub schedule delivery is best-effort. Manual validation supports `live`, `synthetic-dead`, and `synthetic-healthy`; synthetic Discord alerts are prefixed `[synthetic test]`. Synthetic modes are owner-only, use an isolated test identity, and never probe Anthropic or mutate production monitor state. Running the command directly (outside the workflow) requires `gh` locally; the scheduled workflow already provides it and is the preferred entrypoint. See [`apps/cliproxy/AGENTS.md`](AGENTS.md) for the label-trust-anchor issue-adoption policy.
 
 Configure repository secrets `CLIPROXY_API_KEY` and `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK`. The latter must be a dedicated outbound Discord webhook, not the gateway inbound webhook. Do not log its URL. The monitor uses the canonical non-secret proxy default and emits fixed safe summaries; raw provider errors are not sent to public issue or Discord surfaces.
 
@@ -91,7 +91,7 @@ bunx @marcusrbrown/infra cliproxy keys remove <name>        # remove an API key
 bunx @marcusrbrown/infra cliproxy login claude              # OAuth login (SSH + TTY)
 bunx @marcusrbrown/infra cliproxy open                      # open built-in TUI via SSH
 bunx @marcusrbrown/infra cliproxy setup                     # interactive onboarding wizard
-bunx @marcusrbrown/infra cliproxy monitor                   # Anthropic auth monitor
+bunx @marcusrbrown/infra cliproxy monitor                   # Anthropic and OpenCode Go route monitor
 ```
 
 `cliproxy setup` generates an API key, sets `OPENCODE_AUTH_JSON` and `OPENCODE_CONFIG` secrets on the target repo, and verifies the connection. Non-interactive flags: `--key`, `--repo`, `--harness`, `--providers`, `--model`, `--force`, `--dry-run`, `--verify-smoke`.

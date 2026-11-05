@@ -58,6 +58,23 @@ describe('option parsing', () => {
     it('rejects "__proto__" (prototype-chain safety)', () => {
       expect(() => parseProviders('__proto__')).toThrow()
     })
+
+    it("parses \"anthropic,opencode-go\" to ['anthropic', 'opencode-go']", () => {
+      expect(parseProviders('anthropic,opencode-go')).toEqual(['anthropic', 'opencode-go'])
+    })
+
+    it('parses "opencode-go" alone', () => {
+      expect(parseProviders('opencode-go')).toEqual(['opencode-go'])
+    })
+
+    it('rejects duplicate opencode-go', () => {
+      expect(() => parseProviders('opencode-go,opencode-go')).toThrow(/duplicate/i)
+    })
+
+    it('names all three providers in the unknown-provider and empty errors', () => {
+      expect(() => parseProviders('gemini')).toThrow('Supported values: anthropic, openai, opencode-go')
+      expect(() => parseProviders('')).toThrow('Supported values: anthropic, openai, opencode-go')
+    })
   })
 })
 
@@ -98,6 +115,20 @@ describe('interactive provider/model prompts', () => {
       const result = await promptForProviders()
 
       expect(result).toEqual(['anthropic', 'openai'])
+
+      multiselectSpy.mockRestore()
+    })
+
+    it('offers OpenCode Go as a provider option, unchecked by default', async () => {
+      const clack = await import('@clack/prompts')
+      const multiselectSpy = spyOn(clack, 'multiselect').mockResolvedValue(['anthropic', 'opencode-go'])
+
+      const result = await promptForProviders()
+
+      expect(result).toEqual(['anthropic', 'opencode-go'])
+      const call = multiselectSpy.mock.calls[0]?.[0] as {options: {value: string}[]; initialValues: string[]}
+      expect(call.options.map(o => o.value)).toEqual(['anthropic', 'openai', 'opencode-go'])
+      expect(call.initialValues).toEqual(['anthropic'])
 
       multiselectSpy.mockRestore()
     })
@@ -163,6 +194,44 @@ describe('interactive provider/model prompts', () => {
       expect(selectSpy).not.toHaveBeenCalled()
 
       selectSpy.mockRestore()
+    })
+
+    it('happy path: single opencode-go provider returns opencode-go/glm-5.3 without prompting', async () => {
+      const clack = await import('@clack/prompts')
+      const selectSpy = spyOn(clack, 'select')
+
+      const result = await promptForModel(['opencode-go'])
+
+      expect(result).toBe('opencode-go/glm-5.3')
+      expect(selectSpy).not.toHaveBeenCalled()
+
+      selectSpy.mockRestore()
+    })
+
+    it('offers opencode-go/glm-5.3 as a preset when multiple providers are selected', async () => {
+      const clack = await import('@clack/prompts')
+      const selectSpy = spyOn(clack, 'select').mockResolvedValue('opencode-go/glm-5.3')
+
+      const result = await promptForModel(['anthropic', 'opencode-go'])
+
+      expect(result).toBe('opencode-go/glm-5.3')
+      const options = (selectSpy.mock.calls[0]?.[0] as {options: {value: string}[]}).options.map(o => o.value)
+      expect(options).toContain('opencode-go/glm-5.3')
+
+      selectSpy.mockRestore()
+    })
+
+    it('accepts a custom opencode-go model typed at the prompt', async () => {
+      const clack = await import('@clack/prompts')
+      const selectSpy = spyOn(clack, 'select').mockResolvedValue('__custom__')
+      const textSpy = spyOn(clack, 'text').mockResolvedValue('opencode-go/kimi-k3')
+
+      const result = await promptForModel(['anthropic', 'opencode-go'])
+
+      expect(result).toBe('opencode-go/kimi-k3')
+
+      selectSpy.mockRestore()
+      textSpy.mockRestore()
     })
 
     it('happy path: both providers, operator picks openai/gpt-5.4-mini from select', async () => {

@@ -306,7 +306,7 @@ async function buildInteractivePlan(
 }
 
 /**
- * Returns true when the provider list includes anything beyond anthropic-only.
+ * Returns true when the provider list includes anything beyond anthropic-only (openai, opencode-go).
  * Anthropic-only repos see no behavior change (G7 invariant).
  */
 export function requiresDestructiveProviderChangeConfirmation(providers: ProviderId[]): boolean {
@@ -768,7 +768,7 @@ export function registerSetupCommand(cli: ReturnType<typeof goke>, commandLabel:
       z
         .string()
         .describe(
-          'Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai. Example: --providers anthropic,openai',
+          'Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai, opencode-go. Example: --providers anthropic,openai',
         ),
     )
     .option(
@@ -777,7 +777,7 @@ export function registerSetupCommand(cli: ReturnType<typeof goke>, commandLabel:
         .string()
         .regex(MODEL_ID_RE)
         .describe(
-          'Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o',
+          'Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o, opencode-go/glm-5.3',
         ),
     )
     .option(
@@ -807,6 +807,10 @@ export function registerSetupCommand(cli: ReturnType<typeof goke>, commandLabel:
     .example('# Enable both providers non-interactively (requires --force and --model)')
     .example(
       `infra ${commandLabel} --repo owner/repo --harness opencode --providers anthropic,openai --model openai/gpt-5.4-mini --key sk-existing --ack-key-reuse --force`,
+    )
+    .example('# Route a repo to OpenCode Go through the proxy (requires the cliproxy deploy to expose Go models)')
+    .example(
+      `infra ${commandLabel} --repo owner/repo --harness opencode --providers anthropic,opencode-go --model opencode-go/glm-5.3 --key sk-existing --ack-key-reuse --force`,
     )
     .action(async (options, ctx) => {
       await runSetupCommand(options, {ctx, commandLabel})

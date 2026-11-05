@@ -332,3 +332,339 @@ export function setEqualOAuthModelAlias(desired: OAuthModelAlias, actual: OAuthM
 
   return true
 }
+
+// ─── OpenAI-compatibility upstream helpers ────────────────────────────────────
+
+/** A model exposed by an `openai-compatibility` upstream. */
+export interface OpenAICompatModel {
+  name: string
+  alias: string
+}
+
+/**
+ * One entry of the CLIProxyAPI `openai-compatibility` section.
+ *
+ * `prefix`, `headers` and `disabled` are optional on the tracked (desired) side;
+ * `normalizeOpenAICompatEntry` fills them in so desired and live entries compare equal.
+ * Server-added fields (`auth-index`) are not part of this type.
+ */
+export interface OpenAICompatEntry {
+  name: string
+  prefix?: string
+  'base-url': string
+  'api-key-entries': {'api-key': string}[]
+  models: OpenAICompatModel[]
+  headers?: Record<string, string>
+  disabled?: boolean
+}
+
+const OPENAI_COMPAT_ENDPOINT = '/v0/management/openai-compatibility'
+
+/** Longest response-body excerpt placed in an error message. */
+const ERROR_BODY_LIMIT = 200
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Parse one raw `openai-compatibility` entry into a normalized {@link OpenAICompatEntry}.
+ *
+ * - Drops server-added fields such as `auth-index` (and any other unknown field).
+ * - Defaults `prefix` to '', `headers` to {}, `disabled` to false and a missing model `alias` to ''.
+ * - Throws on a malformed shape. Errors name the field path only — never a field value, since
+ *   `api-key` values are secrets.
+ */
+export function normalizeOpenAICompatEntry(raw: unknown, index = 0): OpenAICompatEntry {
+  const at = `openai-compatibility[${index}]`
+  if (!isRecord(raw)) {
+    throw new TypeError(`${at} is not an object`)
+  }
+
+  if (typeof raw.name !== 'string' || raw.name === '') {
+    throw new TypeError(`${at}.name is missing or not a non-empty string`)
+  }
+  if (typeof raw['base-url'] !== 'string' || raw['base-url'] === '') {
+    throw new TypeError(`${at}.base-url is missing or not a non-empty string`)
+  }
+  if (raw.prefix !== undefined && raw.prefix !== null && typeof raw.prefix !== 'string') {
+    throw new TypeError(`${at}.prefix is not a string`)
+  }
+  if (raw.disabled !== undefined && raw.disabled !== null && typeof raw.disabled !== 'boolean') {
+    throw new TypeError(`${at}.disabled is not a boolean`)
+  }
+
+  const rawKeys = raw['api-key-entries'] ?? []
+  if (!Array.isArray(rawKeys)) {
+    throw new TypeError(`${at}.api-key-entries is not an array`)
+  }
+  const apiKeyEntries = rawKeys.map((item: unknown, keyIndex) => {
+    if (!isRecord(item) || typeof item['api-key'] !== 'string') {
+      throw new TypeError(`${at}.api-key-entries[${keyIndex}].api-key is missing or not a string`)
+    }
+    return {'api-key': item['api-key']}
+  })
+
+  const rawModels = raw.models ?? []
+  if (!Array.isArray(rawModels)) {
+    throw new TypeError(`${at}.models is not an array`)
+  }
+  const models = rawModels.map((item: unknown, modelIndex): OpenAICompatModel => {
+    if (!isRecord(item) || typeof item.name !== 'string' || item.name === '') {
+      throw new TypeError(`${at}.models[${modelIndex}].name is missing or not a non-empty string`)
+    }
+    if (item.alias !== undefined && item.alias !== null && typeof item.alias !== 'string') {
+      throw new TypeError(`${at}.models[${modelIndex}].alias is not a string`)
+    }
+    return {name: item.name, alias: item.alias ?? ''}
+  })
+
+  const rawHeaders = raw.headers ?? {}
+  if (!isRecord(rawHeaders)) {
+    throw new TypeError(`${at}.headers is not an object`)
+  }
+  const headers: Record<string, string> = {}
+  for (const [headerName, headerValue] of Object.entries(rawHeaders)) {
+    if (typeof headerValue !== 'string') {
+      throw new TypeError(`${at}.headers.${headerName} is not a string`)
+    }
+    headers[headerName] = headerValue
+  }
+
+  return {
+    name: raw.name,
+    prefix: raw.prefix ?? '',
+    'base-url': raw['base-url'],
+    'api-key-entries': apiKeyEntries,
+    models,
+    headers,
+    disabled: raw.disabled ?? false,
+  }
+}
+
+/** A management API call that got an HTTP response with a non-2xx status. A transport failure is not one. */
+export class ManagementHttpError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ManagementHttpError'
+    this.status = status
+  }
+}
+
+/** Replace every secret occurrence in `text` and cap its length for use in an error message. */
+function scrubForError(text: string, secrets: readonly string[]): string {
+  let scrubbed = text
+  for (const secret of secrets) {
+    if (secret !== '') scrubbed = scrubbed.split(secret).join('[redacted]')
+  }
+  return scrubbed.length > ERROR_BODY_LIMIT ? `${scrubbed.slice(0, ERROR_BODY_LIMIT)}…` : scrubbed
+}
+
+/**
+ * Read back the `openai-compatibility` list from the CLIProxyAPI management API.
+ * The GET response wraps the list as `{"openai-compatibility": [...]}`; only an explicit `[]`
+ * or `null` is an empty section. Entries are normalized (see {@link normalizeOpenAICompatEntry}).
+ *
+ * Throws on a malformed payload, including an object without the field, rather than returning []
+ * — a mutating caller treats [] as "empty section, safe to bootstrap". The management key and live `api-key` values are
+ * NEVER included in thrown error messages.
+ */
+export async function readBackOpenAICompat({
+  baseUrl,
+  key,
+  fetch: fetchFn = globalThis.fetch,
+}: {
+  baseUrl: string
+  key: string
+  fetch?: typeof globalThis.fetch
+}): Promise<OpenAICompatEntry[]> {
+  const response = await fetchFn(`${baseUrl}${OPENAI_COMPAT_ENDPOINT}`, {
+    method: 'GET',
+    headers: managementHeaders(key),
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+  })
+
+  if (!response.ok) {
+    const responseBody = await response.text()
+    throw new Error(
+      `GET ${OPENAI_COMPAT_ENDPOINT} failed with HTTP ${response.status}: ${scrubForError(responseBody, [key])}`,
+    )
+  }
+
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    // The parser message can quote a fragment of the body, which holds live api-key values.
+    throw new Error(`GET ${OPENAI_COMPAT_ENDPOINT} returned malformed JSON`)
+  }
+
+  if (!isRecord(payload)) {
+    throw new TypeError(`GET ${OPENAI_COMPAT_ENDPOINT} returned an unexpected shape: expected an object`)
+  }
+
+  if (!('openai-compatibility' in payload)) {
+    throw new TypeError(
+      `GET ${OPENAI_COMPAT_ENDPOINT} returned an unexpected shape: missing the openai-compatibility field`,
+    )
+  }
+
+  const list = payload['openai-compatibility']
+  if (list === null) return []
+  if (!Array.isArray(list)) {
+    throw new TypeError(
+      `GET ${OPENAI_COMPAT_ENDPOINT} returned an unexpected shape: openai-compatibility is not an array`,
+    )
+  }
+
+  return list.map((raw: unknown, index) => normalizeOpenAICompatEntry(raw, index))
+}
+
+/**
+ * Replace the whole `openai-compatibility` list via a bare-array PUT.
+ *
+ * The body IS the array — not wrapped in `{items: ...}` (rejected by the server). A bare `[]`
+ * is ACCEPTED by the server and clears the section, so this throws before sending anything when
+ * `body` is empty: this guard is the only protection against wiping the section.
+ *
+ * The management key and `api-key` values are NEVER included in thrown error messages.
+ */
+export async function applyOpenAICompat({
+  baseUrl,
+  key,
+  body,
+  fetch: fetchFn = globalThis.fetch,
+}: {
+  baseUrl: string
+  key: string
+  body: readonly OpenAICompatEntry[]
+  fetch?: typeof globalThis.fetch
+}): Promise<void> {
+  if (body.length === 0) {
+    throw new Error(
+      `Refusing to PUT an empty ${OPENAI_COMPAT_ENDPOINT} list: the server would accept it and clear the section`,
+    )
+  }
+
+  const response = await fetchFn(`${baseUrl}${OPENAI_COMPAT_ENDPOINT}`, {
+    method: 'PUT',
+    headers: managementHeaders(key),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+  })
+
+  if (!response.ok) {
+    const responseBody = await response.text()
+    const secrets = [key, ...body.flatMap(entry => entry['api-key-entries'].map(item => item['api-key']))]
+    throw new ManagementHttpError(
+      `PUT ${OPENAI_COMPAT_ENDPOINT} failed with HTTP ${response.status}: ${scrubForError(responseBody, secrets)}`,
+      response.status,
+    )
+  }
+}
+
+/**
+ * Enable or disable one `openai-compatibility` entry by name via PATCH.
+ * The body is exactly `{name, value: {disabled}}`. A disabled entry's models leave `/v1/models`
+ * within about 180 ms while the management GET still lists the entry.
+ *
+ * The management key is NEVER included in thrown error messages.
+ */
+export async function patchOpenAICompatDisabled({
+  baseUrl,
+  key,
+  name,
+  disabled,
+  fetch: fetchFn = globalThis.fetch,
+}: {
+  baseUrl: string
+  key: string
+  name: string
+  disabled: boolean
+  fetch?: typeof globalThis.fetch
+}): Promise<void> {
+  const response = await fetchFn(`${baseUrl}${OPENAI_COMPAT_ENDPOINT}`, {
+    method: 'PATCH',
+    headers: managementHeaders(key),
+    body: JSON.stringify({name, value: {disabled}}),
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+  })
+
+  if (!response.ok) {
+    const responseBody = await response.text()
+    throw new ManagementHttpError(
+      `PATCH ${OPENAI_COMPAT_ENDPOINT} failed with HTTP ${response.status}: ${scrubForError(responseBody, [key])}`,
+      response.status,
+    )
+  }
+}
+
+function sameStringSet(a: Iterable<string>, b: Iterable<string>): boolean {
+  const setA = new Set(a)
+  const setB = new Set(b)
+  if (setA.size !== setB.size) return false
+  for (const item of setA) {
+    if (!setB.has(item)) return false
+  }
+  return true
+}
+
+/**
+ * Order-insensitive equality for two `openai-compatibility` entries, after normalization
+ * (missing `prefix`/`headers`/`disabled` default to ''/{}/false).
+ *
+ * - Models compare as a set of `{name, alias}`.
+ * - API keys compare as a set of `api-key` values.
+ * - Headers compare as a map (key order is irrelevant).
+ */
+export function setEqualOpenAICompatEntry(desired: OpenAICompatEntry, actual: OpenAICompatEntry): boolean {
+  const a = normalizeOpenAICompatEntry(desired)
+  const b = normalizeOpenAICompatEntry(actual)
+
+  if (a.name !== b.name || a.prefix !== b.prefix || a['base-url'] !== b['base-url'] || a.disabled !== b.disabled) {
+    return false
+  }
+
+  const modelKey = (model: OpenAICompatModel): string => JSON.stringify([model.name, model.alias])
+  if (!sameStringSet(a.models.map(modelKey), b.models.map(modelKey))) return false
+
+  if (
+    !sameStringSet(
+      a['api-key-entries'].map(item => item['api-key']),
+      b['api-key-entries'].map(item => item['api-key']),
+    )
+  ) {
+    return false
+  }
+
+  const headersA = Object.entries(a.headers ?? {})
+  const headersB = Object.entries(b.headers ?? {})
+  if (headersA.length !== headersB.length) return false
+  const mapB = new Map(headersB)
+  return headersA.every(([name, value]) => mapB.get(name) === value)
+}
+
+/**
+ * Order-insensitive equality for two `openai-compatibility` lists, matching entries by `name`.
+ * Returns false if counts or names differ, or any matched pair differs.
+ */
+export function setEqualOpenAICompat(
+  desired: readonly OpenAICompatEntry[],
+  actual: readonly OpenAICompatEntry[],
+): boolean {
+  if (desired.length !== actual.length) return false
+
+  const actualByName = new Map(actual.map(entry => [entry.name, entry]))
+  if (actualByName.size !== actual.length) return false
+
+  const seen = new Set<string>()
+  for (const entry of desired) {
+    if (seen.has(entry.name)) return false
+    seen.add(entry.name)
+    const match = actualByName.get(entry.name)
+    if (match === undefined || !setEqualOpenAICompatEntry(entry, match)) return false
+  }
+  return true
+}

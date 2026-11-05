@@ -1,3 +1,4 @@
+import type {OpenCodeGoSettings, ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 import {chmod, mkdtemp, rm, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
@@ -13,6 +14,23 @@ import {
   runGhApiOnce,
 } from './monitor'
 
+// Fixed Go policy for every run: the committed snapshot and settings change by design, so no test reads them.
+const GO_TEST_ENTRY = {zeroRetention: true, trainsOnData: false, regionGated: false, agreementExpiry: null}
+const GO_TEST_SNAPSHOT: ParsedSnapshot = {
+  source: {
+    repo: 'anomalyco/opencode',
+    path: 'services/www/src/docs/content/console/go.mdx',
+    commit: 'a'.repeat(40),
+  },
+  models: {
+    'glm-5.3': GO_TEST_ENTRY,
+    'kimi-k3': GO_TEST_ENTRY,
+    'iceman-contributor-free': {...GO_TEST_ENTRY, trainsOnData: true},
+  },
+  invalid: [],
+}
+const GO_TEST_SETTINGS: OpenCodeGoSettings = {enabled: true, defaultProbeModel: 'glm-5.3'}
+
 const originalFetch = globalThis.fetch
 const originalSetTimeout = globalThis.setTimeout
 const originalClearTimeout = globalThis.clearTimeout
@@ -25,8 +43,11 @@ function runMonitor(
   options: Parameters<typeof cliproxyMonitorAction>[0],
   ctx: Parameters<typeof cliproxyMonitorAction>[1],
   sleep: (milliseconds: number) => Promise<void> = async () => {},
+  goSettings: OpenCodeGoSettings = GO_TEST_SETTINGS,
 ): ReturnType<typeof cliproxyMonitorAction> {
   return cliproxyMonitorAction(options, ctx, {
+    goSettings,
+    goSnapshot: GO_TEST_SNAPSHOT,
     fetch: globalThis.fetch,
     sleep,
     ghApi: async (_token, path, method, body) => {
@@ -1622,6 +1643,529 @@ describe('cliproxy monitor', () => {
       await expect(runMonitor({validation: 'live'}, ctx)).rejects.toBeInstanceOf(MockProcessExit)
 
       expect(probeLines(captured.stdout)).toHaveLength(0)
+    })
+  })
+})
+
+describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
+  const originalEnv: Record<string, string | undefined> = {}
+  const ENV_KEYS = [
+    'CLIPROXY_API_KEY',
+    'CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK',
+    'GITHUB_TOKEN',
+    'GITHUB_REPOSITORY',
+    'GITHUB_ACTOR',
+    'GITHUB_REPOSITORY_OWNER',
+    'CLIPROXY_URL',
+  ] as const
+  const CLAUDE_LABEL = 'cliproxy-auth-monitor'
+  const GO_LABEL = 'cliproxy-go-monitor'
+  const CLAUDE_MARKER = '<!-- cliproxy-auth-monitor:v1 -->'
+  const GO_MARKER = '<!-- cliproxy-go-monitor:v1 -->'
+  const SECRET_KEY = 'provider-secret-key-never-print'
+
+  interface WorldIssue {
+    number: number
+    state: 'open' | 'closed'
+    title: string
+    body: string
+    labels: {name: string}[]
+  }
+
+  type Reply = () => Response | Promise<Response>
+
+  interface WorldOptions {
+    /** The model list the proxy serves; defaults to a healthy Claude plus one eligible Go model. */
+    models?: Reply
+    claude?: Reply
+    go?: Reply
+    issues?: WorldIssue[]
+    /** Reject writes whose body mentions this marker (an operational failure on one route). */
+    failWritesFor?: string
+  }
+
+  const claudeOk = () => Response.json({choices: []})
+  const goOk = () => Response.json({choices: [], usage: {opencode: {billing_source: 'go', list_cost: '0.00006'}}})
+  const goModels = (ids: string[] = ['glm-5.3']) =>
+    Response.json({
+      data: [
+        {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+        ...ids.flatMap(id => [
+          {id, owned_by: 'opencode-go'},
+          {id: `opencode-go/${id}`, owned_by: 'opencode-go'},
+        ]),
+      ],
+    })
+
+  interface Recorded {
+    url: string
+    method: string
+    body?: string
+    session: string | null
+  }
+
+  function installWorld(options: WorldOptions = {}) {
+    const issues: WorldIssue[] = options.issues ?? []
+    const recorded: Recorded[] = []
+    const discord: string[] = []
+    const labels = new Set<string>()
+    let nextNumber = 100
+
+    installFetch(async (input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      const body = typeof init?.body === 'string' ? init.body : undefined
+      const session = new Headers(init?.headers).get('x-opencode-session')
+      recorded.push({url, method, body, session})
+
+      if (url.endsWith('/v1/models')) return (options.models ?? (() => goModels()))()
+      if (url.endsWith('/v1/chat/completions')) {
+        const model = (JSON.parse(body ?? '{}') as {model?: string}).model ?? ''
+        return model.startsWith('claude') ? (options.claude ?? claudeOk)() : (options.go ?? goOk)()
+      }
+      if (url === 'https://discord.example/webhook') {
+        discord.push((JSON.parse(body ?? '{}') as {content: string}).content)
+        return new Response(null, {status: 204})
+      }
+      if (method === 'GET' && url.includes('/issues?state=all')) return Response.json(issues)
+      if (method === 'GET' && url.includes('/labels/')) {
+        const name = decodeURIComponent(url.split('/labels/')[1] ?? '')
+        return new Response('{}', {status: labels.has(name) ? 200 : 404})
+      }
+      if (method === 'POST' && url.endsWith('/labels')) {
+        labels.add((JSON.parse(body ?? '{}') as {name: string}).name)
+        return new Response('{}', {status: 201})
+      }
+      if (options.failWritesFor !== undefined && body?.includes(options.failWritesFor)) {
+        return new Response('boom', {status: 500})
+      }
+      if (method === 'POST' && url.endsWith('/issues')) {
+        const parsed = JSON.parse(body ?? '{}') as {title: string; body: string; labels: string[]}
+        nextNumber += 1
+        const created: WorldIssue = {
+          number: nextNumber,
+          state: 'open',
+          title: parsed.title,
+          body: parsed.body,
+          labels: parsed.labels.map(name => ({name})),
+        }
+        issues.push(created)
+        return Response.json(created, {status: 201})
+      }
+      if (method === 'PATCH' && /\/issues\/\d+$/.test(url)) {
+        const parsed = JSON.parse(body ?? '{}') as {state: 'open' | 'closed'; body: string}
+        const target = issues.find(issue => url.endsWith(`/issues/${issue.number}`))
+        if (target === undefined) return new Response('missing', {status: 404})
+        target.state = parsed.state
+        target.body = parsed.body
+        return Response.json(target)
+      }
+      throw new Error(`unexpected ${method} ${url}`)
+    })
+
+    const writes = () =>
+      recorded.filter(request => request.method !== 'GET' && new URL(request.url).hostname === 'api.github.com')
+    const issueFor = (label: string) => issues.find(issue => issue.labels.some(candidate => candidate.name === label))
+    return {issues, recorded, discord, writes, issueFor}
+  }
+
+  function liveEnvironment(): void {
+    process.env.CLIPROXY_API_KEY = SECRET_KEY
+    process.env.CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK = 'https://discord.example/webhook'
+    process.env.GITHUB_TOKEN = 'github-token'
+    process.env.GITHUB_REPOSITORY = 'owner/repo'
+    process.env.GITHUB_ACTOR = 'owner'
+    process.env.GITHUB_REPOSITORY_OWNER = 'owner'
+    delete process.env.CLIPROXY_URL
+  }
+
+  const goLines = (stdout: string[]) => stdout.filter(line => line.startsWith('CLIProxy Go monitor probe:'))
+  const claudeLines = (stdout: string[]) => stdout.filter(line => line.startsWith('CLIProxy auth monitor probe:'))
+  const goSummaries = (stdout: string[]) => stdout.filter(line => line.startsWith('CLIProxy Go monitor summary:'))
+
+  const openIssue = (label: string, marker: string, extra = ''): WorldIssue => ({
+    number: label === GO_LABEL ? 7 : 5,
+    state: 'open',
+    title: 'x',
+    body: `${marker}${extra}`,
+    labels: [{name: label}],
+  })
+
+  beforeEach(() => {
+    for (const name of ENV_KEYS) originalEnv[name] = process.env[name]
+    liveEnvironment()
+  })
+
+  afterEach(() => {
+    for (const name of ENV_KEYS) {
+      const original = originalEnv[name]
+      if (original === undefined) delete process.env[name]
+      else process.env[name] = original
+    }
+    globalThis.fetch = originalFetch
+  })
+
+  it('prints both probe lines in one run and touches neither issue when both routes are healthy', async () => {
+    const world = installWorld()
+    const {ctx, captured} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    expect(claudeLines(captured.stdout)).toEqual([
+      expect.stringMatching(/^CLIProxy auth monitor probe: probe=healthy reason=ok at \S+$/),
+    ])
+    expect(goLines(captured.stdout)).toEqual([
+      expect.stringMatching(/^CLIProxy Go monitor probe: probe=healthy reason=ok at \S+$/),
+    ])
+    expect(goSummaries(captured.stdout)).toEqual([
+      expect.stringMatching(
+        /^CLIProxy Go monitor summary: probe=healthy reason=ok transition=none issue=none discord=none at \S+$/,
+      ),
+    ])
+    expect(world.writes()).toHaveLength(0)
+    expect(captured.exit).toBeNull()
+  })
+
+  it('prints both probe lines before reconciling, with one timestamp, and keeps the Claude lines as they were', async () => {
+    installWorld()
+    const {ctx, captured} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    const claudeAt = /ok at (\S+)$/.exec(claudeLines(captured.stdout)[0] ?? '')?.[1]
+    const goAt = /ok at (\S+)$/.exec(goLines(captured.stdout)[0] ?? '')?.[1]
+    expect(claudeAt).toBeDefined()
+    expect(goAt).toBe(claudeAt)
+    const firstSummary = captured.stdout.findIndex(line => line.includes('monitor summary:'))
+    expect(captured.stdout.findIndex(line => line.startsWith('CLIProxy Go monitor probe:'))).toBeLessThan(firstSummary)
+    expect(captured.stdout.filter(line => line.startsWith('CLIProxy auth monitor summary:'))).toHaveLength(1)
+  })
+
+  describe.each([
+    {
+      reason: 'provider-missing',
+      label: 'an empty Go list',
+      options: {models: () => Response.json({data: [{id: 'claude-sonnet-4-6', owned_by: 'anthropic'}]})},
+    },
+    {
+      reason: 'provider-missing',
+      label: 'a model_not_found 400',
+      options: {
+        go: () =>
+          new Response('{"error":{"message":"unknown provider for model glm-5.3","code":"model_not_found"}}', {
+            status: 400,
+          }),
+      },
+    },
+    {
+      reason: 'privacy-noncompliant',
+      label: 'an exposed model outside the snapshot',
+      options: {models: () => goModels(['glm-5.3', 'brand-new-model'])},
+    },
+    {
+      reason: 'privacy-noncompliant',
+      label: 'an exposed model that trains on data',
+      options: {models: () => goModels(['glm-5.3', 'iceman-contributor-free'])},
+    },
+    {
+      reason: 'billing-not-go',
+      label: 'a 2xx billed to the balance',
+      options: {go: () => Response.json({usage: {opencode: {billing_source: 'balance'}}})},
+    },
+    {reason: 'quota-or-billing', label: 'a 429', options: {go: () => new Response('limit', {status: 429})}},
+    {reason: 'quota-or-billing', label: 'a 402', options: {go: () => new Response('balance', {status: 402})}},
+    {reason: 'auth-401', label: 'a 401', options: {go: () => new Response('nope', {status: 401})}},
+    {
+      reason: 'auth-unavailable-503',
+      label: 'a 503 auth_unavailable',
+      options: {go: () => new Response('auth_unavailable', {status: 503})},
+    },
+  ] satisfies {reason: string; label: string; options: WorldOptions}[])(
+    'a dead Go route: $label',
+    ({reason, options}) => {
+      it(`opens only the Go issue and sends one Go Discord alert (reason ${reason})`, async () => {
+        const world = installWorld(options)
+        const {ctx, captured} = createCapturedCtx()
+
+        await runMonitor({validation: 'live'}, ctx)
+
+        expect(goLines(captured.stdout)).toEqual([
+          expect.stringMatching(
+            new RegExp(String.raw`^CLIProxy Go monitor probe: probe=dead reason=${reason} at \S+$`),
+          ),
+        ])
+        expect(claudeLines(captured.stdout)[0]).toContain('probe=healthy reason=ok')
+        const goIssue = world.issueFor(GO_LABEL)
+        expect(goIssue).toMatchObject({title: 'CLIProxy OpenCode Go route outage', state: 'open'})
+        expect(goIssue?.body).toContain(GO_MARKER)
+        expect(goIssue?.body).toContain(`Reason: ${reason}.`)
+        expect(goIssue?.body).toContain('<!-- cliproxy-go-monitor:notified=dead -->')
+        expect(world.issueFor(CLAUDE_LABEL)).toBeUndefined()
+        expect(world.discord).toHaveLength(1)
+        expect(world.discord[0]).toContain('OpenCode Go route is unavailable')
+        expect(world.discord[0]).toContain(`reason: ${reason}`)
+        expect(world.discord[0]).not.toContain('Anthropic')
+        expect(goSummaries(captured.stdout)[0]).toContain('transition=outage issue=created discord=outage-sent')
+        expect(captured.exit).toBeNull()
+      })
+    },
+  )
+
+  it('leaves the Claude issue exactly as it was while the Go route is dead', async () => {
+    const claudeIssue = openIssue(CLAUDE_LABEL, CLAUDE_MARKER, '\n<!-- cliproxy-auth-monitor:notified=dead -->')
+    const before = {...claudeIssue}
+    // An unknown Claude result changes nothing, so any write to the Claude issue would come from the Go route.
+    const world = installWorld({
+      issues: [claudeIssue],
+      claude: () => new Response('teapot', {status: 418}),
+      go: () => new Response('limit', {status: 429}),
+    })
+    const {ctx} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    expect(claudeIssue).toEqual(before)
+    expect(world.issueFor(GO_LABEL)).toBeDefined()
+    expect(world.writes().every(request => !request.url.endsWith(`/issues/${claudeIssue.number}`))).toBe(true)
+  })
+
+  it('opens the Go issue and alerts when a 400 MissingSessionID shows the proxy dropped the session header', async () => {
+    const world = installWorld({go: () => new Response('{"type":"MissingSessionID"}', {status: 400})})
+    const {ctx, captured} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    expect(goLines(captured.stdout)[0]).toMatch(/probe=dead reason=session-header-dropped at /)
+    expect(goSummaries(captured.stdout)[0]).toContain('transition=outage issue=created discord=outage-sent')
+    expect(world.issueFor(GO_LABEL)?.body).toContain('the proxy stopped forwarding the session header')
+    expect(world.issueFor(CLAUDE_LABEL)).toBeUndefined()
+    expect(world.discord).toHaveLength(1)
+    expect(world.discord[0]).toContain('reason: session-header-dropped')
+    expect(world.discord[0]).toContain('the proxy stopped forwarding the session header')
+    expect(captured.exit).toBeNull()
+  })
+
+  it('keeps an unknown Go result silent when no Go issue exists', async () => {
+    const world = installWorld({go: () => new Response('teapot', {status: 418})})
+    const {ctx, captured} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    expect(goLines(captured.stdout)[0]).toMatch(/probe=unknown reason=unrelated-http at /)
+    expect(world.writes()).toHaveLength(0)
+    expect(captured.exit).toBeNull()
+  })
+
+  it('does not repeat the Discord alert while a Go outage stays open', async () => {
+    const goIssue = openIssue(GO_LABEL, GO_MARKER, '\n<!-- cliproxy-go-monitor:notified=dead -->')
+    const world = installWorld({issues: [goIssue], go: () => new Response('limit', {status: 429})})
+    const {ctx, captured} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    expect(world.discord).toHaveLength(0)
+    expect(goSummaries(captured.stdout)[0]).toContain('transition=none issue=updated discord=none')
+    expect(goIssue.state).toBe('open')
+  })
+
+  it('closes the Go issue and sends a Go recovery after quota-or-billing clears', async () => {
+    const goIssue = openIssue(
+      GO_LABEL,
+      GO_MARKER,
+      '\nReason: quota-or-billing.\n<!-- cliproxy-go-monitor:notified=dead -->',
+    )
+    const world = installWorld({issues: [goIssue]})
+    const {ctx, captured} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    expect(goIssue.state).toBe('closed')
+    expect(goIssue.body).toContain('<!-- cliproxy-go-monitor:notified=healthy -->')
+    expect(world.discord).toHaveLength(1)
+    expect(world.discord[0]).toContain('OpenCode Go route recovered')
+    expect(goSummaries(captured.stdout)[0]).toContain('transition=recovery issue=closed discord=recovery-sent')
+  })
+
+  it('reconciles the routes independently: Claude dead and Go healthy', async () => {
+    const world = installWorld({claude: () => new Response('Unauthorized', {status: 401})})
+    const {ctx, captured} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    expect(world.issueFor(CLAUDE_LABEL)).toMatchObject({title: 'CLIProxy Anthropic authentication outage'})
+    expect(world.issueFor(GO_LABEL)).toBeUndefined()
+    expect(world.discord).toHaveLength(1)
+    expect(world.discord[0]).toContain('Anthropic')
+    expect(claudeLines(captured.stdout)[0]).toContain('probe=dead reason=auth-401')
+    expect(goLines(captured.stdout)[0]).toContain('probe=healthy reason=ok')
+  })
+
+  it('opens both issues with two alerts when both routes are dead', async () => {
+    const world = installWorld({
+      claude: () => new Response('Unauthorized', {status: 401}),
+      go: () => new Response('limit', {status: 429}),
+    })
+    const {ctx} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    expect(world.issueFor(CLAUDE_LABEL)).toBeDefined()
+    expect(world.issueFor(GO_LABEL)).toBeDefined()
+    expect(world.discord).toHaveLength(2)
+  })
+
+  it('still reconciles Go, and exits 1, when the Claude reconciliation fails', async () => {
+    const world = installWorld({
+      claude: () => new Response('Unauthorized', {status: 401}),
+      go: () => new Response('limit', {status: 429}),
+      failWritesFor: CLAUDE_MARKER,
+    })
+    const {ctx, captured} = createCapturedCtx()
+
+    await expect(runMonitor({validation: 'live'}, ctx)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(world.issueFor(GO_LABEL)).toBeDefined()
+    expect(world.discord.some(text => text.includes('OpenCode Go route is unavailable'))).toBe(true)
+    expect(captured.exit?.code).toBe(1)
+    expect(captured.stderr.join('\n')).toContain('CLIProxy auth monitor failed: reconciliation')
+    expect(goSummaries(captured.stdout)).toHaveLength(1)
+  })
+
+  it('still reconciles Claude, and exits 1, when the Go reconciliation fails', async () => {
+    const world = installWorld({
+      claude: () => new Response('Unauthorized', {status: 401}),
+      go: () => new Response('limit', {status: 429}),
+      failWritesFor: GO_MARKER,
+    })
+    const {ctx, captured} = createCapturedCtx()
+
+    await expect(runMonitor({validation: 'live'}, ctx)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(world.issueFor(CLAUDE_LABEL)).toBeDefined()
+    expect(world.discord.some(text => text.includes('Anthropic'))).toBe(true)
+    expect(captured.exit?.code).toBe(1)
+    expect(captured.stderr.join('\n')).toContain('CLIProxy Go monitor failed: reconciliation')
+    expect(captured.stderr.join('\n')).not.toContain('CLIProxy auth monitor failed')
+    expect(claudeLines(captured.stdout)).toHaveLength(1)
+    expect(goLines(captured.stdout)).toHaveLength(1)
+  })
+
+  it('reports both failures in one run when both reconciliations fail', async () => {
+    installWorld({
+      claude: () => new Response('Unauthorized', {status: 401}),
+      go: () => new Response('limit', {status: 429}),
+      failWritesFor: '<!-- cliproxy-',
+    })
+    const {ctx, captured} = createCapturedCtx()
+
+    await expect(runMonitor({validation: 'live'}, ctx)).rejects.toBeInstanceOf(MockProcessExit)
+
+    expect(captured.stderr.join('\n')).toContain('CLIProxy auth monitor failed: reconciliation')
+    expect(captured.stderr.join('\n')).toContain('CLIProxy Go monitor failed: reconciliation')
+    expect(captured.exit?.code).toBe(1)
+  })
+
+  it('sends a fresh non-empty x-opencode-session on every Go request, and none on the Claude probe', async () => {
+    const first = installWorld()
+    await runMonitor({validation: 'live'}, createCapturedCtx().ctx)
+    const second = installWorld()
+    await runMonitor({validation: 'live'}, createCapturedCtx().ctx)
+
+    const goChat = (recorded: Recorded[]) =>
+      recorded.filter(
+        request => request.url.endsWith('/v1/chat/completions') && !(request.body ?? '').includes('claude-'),
+      )
+    const sessions = [...goChat(first.recorded), ...goChat(second.recorded)].map(request => request.session)
+    expect(sessions).toHaveLength(2)
+    for (const session of sessions) expect(session).toMatch(/^infra-monitor-[\da-f-]{36}$/)
+    expect(new Set(sessions).size).toBe(2)
+    const claudeChat = first.recorded.filter(
+      request => request.url.endsWith('/v1/chat/completions') && (request.body ?? '').includes('claude-'),
+    )
+    expect(claudeChat.every(request => request.session === null)).toBe(true)
+  })
+
+  it('never prints the key, the session, usage, cost, or a response body', async () => {
+    installWorld({
+      go: () =>
+        Response.json({
+          usage: {opencode: {billing_source: 'balance', list_cost: '0.00006', allowance: {remaining: 41}}},
+          hostile: 'HOSTILE_BODY',
+        }),
+    })
+    const {ctx, captured} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    for (const needle of [SECRET_KEY, 'infra-monitor-', 'list_cost', '0.00006', 'allowance', 'HOSTILE_BODY']) {
+      expect(output).not.toContain(needle)
+    }
+    expect(goLines(captured.stdout)[0]).toContain('reason=billing-not-go')
+  })
+
+  it('does not probe the Go route in the synthetic modes', async () => {
+    const world = installWorld()
+    process.env.GITHUB_ACTOR = 'owner'
+    const {ctx, captured} = createCapturedCtx()
+
+    await runMonitor({validation: 'synthetic-healthy'}, ctx)
+
+    expect(world.recorded.some(request => request.url.includes('/v1/'))).toBe(false)
+    expect(goLines(captured.stdout)).toHaveLength(0)
+  })
+
+  describe('when the tracked settings turn the Go route off', () => {
+    const disabled = {enabled: false, defaultProbeModel: 'glm-5.3'}
+    const isGoRequest = (request: Recorded): boolean =>
+      request.url.endsWith('/v1/models') ||
+      (request.url.endsWith('/v1/chat/completions') && !(request.body ?? '').includes('claude-'))
+
+    it('makes no Go request, prints no Go line or summary, and leaves the Go issue and Discord alone', async () => {
+      const goIssue = openIssue(GO_LABEL, GO_MARKER, '\n<!-- cliproxy-go-monitor:notified=dead -->')
+      const before = {...goIssue}
+      // Everything Go would see is dead, so any probe or write would show up as a Go line, issue change or alert.
+      const world = installWorld({
+        issues: [goIssue],
+        models: () => Response.json({data: []}),
+        go: () => new Response('limit', {status: 429}),
+      })
+      const {ctx, captured} = createCapturedCtx()
+
+      await runMonitor({validation: 'live'}, ctx, undefined, disabled)
+
+      expect(world.recorded.filter(isGoRequest)).toHaveLength(0)
+      expect(goLines(captured.stdout)).toHaveLength(0)
+      expect(goSummaries(captured.stdout)).toHaveLength(0)
+      expect(goIssue).toEqual(before)
+      expect(world.writes()).toHaveLength(0)
+      expect(world.discord).toHaveLength(0)
+      expect(claudeLines(captured.stdout)).toHaveLength(1)
+      expect(captured.exit).toBeNull()
+    })
+
+    it('still reconciles the Claude route, and only the Claude route', async () => {
+      const goIssue = openIssue(GO_LABEL, GO_MARKER, '\n<!-- cliproxy-go-monitor:notified=dead -->')
+      const before = {...goIssue}
+      const world = installWorld({issues: [goIssue], claude: () => new Response('Unauthorized', {status: 401})})
+      const {ctx} = createCapturedCtx()
+
+      await runMonitor({validation: 'live'}, ctx, undefined, disabled)
+
+      expect(world.issueFor(CLAUDE_LABEL)).toBeDefined()
+      expect(world.discord).toHaveLength(1)
+      expect(world.discord[0]).toContain('Anthropic')
+      expect(goIssue).toEqual(before)
+    })
+
+    it('probes Go again once the setting is true', async () => {
+      const world = installWorld()
+      const {ctx, captured} = createCapturedCtx()
+
+      await runMonitor({validation: 'live'}, ctx, undefined, {enabled: true})
+
+      expect(world.recorded.some(isGoRequest)).toBe(true)
+      expect(goLines(captured.stdout)).toHaveLength(1)
     })
   })
 })

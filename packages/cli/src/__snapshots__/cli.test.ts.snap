@@ -20,8 +20,8 @@ Commands:
     --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
     --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
     --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
-    --providers [providers]            Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai. Example: --providers anthropic,openai
-    --model [model]                    Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o
+    --providers [providers]            Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai, opencode-go. Example: --providers anthropic,openai
+    --model [model]                    Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o, opencode-go/glm-5.3
     --force                            Overwrite existing GitHub secrets and variables without prompting.
     --dry-run                          Print the plan without applying any changes.
     --verify-smoke                     Run a smoke test against the proxy after setup completes.
@@ -81,8 +81,8 @@ Commands:
     --key [key]                        API key (bearer). Falls back to CLIPROXY_API_KEY when omitted.
     --verbose                          Show owned_by and created date for each model.
 
-  cliproxy monitor                     Reconcile Anthropic provider authentication with one canonical GitHub issue and transition-only Discord alerts. Requires CLIPROXY_API_KEY, CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK, GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_ACTOR, and GITHUB_REPOSITORY_OWNER environment variables; prefer the cliproxy-auth-monitor.yaml GitHub Actions entrypoint for scheduled or synthetic validation.
-    --validation [mode]                Validation mode (live, synthetic-dead, or synthetic-healthy): live probes Anthropic; synthetic modes are owner-only isolated test transitions. (default: live)
+  cliproxy monitor                     Reconcile Anthropic and OpenCode Go provider routes, each with its own canonical GitHub issue and transition-only Discord alerts. Requires CLIPROXY_API_KEY, CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK, GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_ACTOR, and GITHUB_REPOSITORY_OWNER environment variables; prefer the cliproxy-auth-monitor.yaml GitHub Actions entrypoint for scheduled or synthetic validation.
+    --validation [mode]                Validation mode (live, synthetic-dead, or synthetic-healthy): live probes Anthropic and OpenCode Go; synthetic modes are owner-only isolated Anthropic test transitions. (default: live)
 
   cliproxy open                        Launch CLIProxyAPI TUI dashboard via SSH.
     --host [host]                      SSH host for CLIProxyAPI server. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.
@@ -97,8 +97,8 @@ Commands:
     --key [key]                        Existing CLIProxyAPI API key value. When provided, setup skips key creation and reuses this key for GitHub secrets.
     --repo [repo]                      Target GitHub repository in owner/repo format. Skips the repository prompt when provided.
     --harness [harness]                Harness template to configure. Choose opencode, claude-code, or generic. Generic remains interactive-only.
-    --providers [providers]            Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai. Example: --providers anthropic,openai
-    --model [model]                    Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o
+    --providers [providers]            Comma-separated list of providers to enable. Default: anthropic. Supported values: anthropic, openai, opencode-go. Example: --providers anthropic,openai
+    --model [model]                    Override the default model. Must be provider-prefixed and lowercase. Required when multiple providers selected. Examples: anthropic/claude-sonnet-4-6, openai/gpt-4o, opencode-go/glm-5.3
     --force                            Overwrite existing GitHub secrets and variables without prompting.
     --dry-run                          Print the plan without applying any changes.
     --verify-smoke                     Run a smoke test against the proxy after setup completes.

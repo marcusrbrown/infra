@@ -1,0 +1,196 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repo": "anomalyco/opencode",
+    "path": "services/www/src/docs/content/console/go.mdx",
+    "commit": "5eeb906b27f993c26037196b6d4a2a95cb606f6b"
+  },
+  "models": {
+    "beam-free": {
+      "zeroRetention": false,
+      "trainsOnData": false,
+      "regionGated": true,
+      "agreementExpiry": null
+    },
+    "claude-haiku-5-5": {
+      "zeroRetention": false,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "deepseek-v4-pro": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": true,
+      "agreementExpiry": "2026-11-30"
+    },
+    "deepseek-v4.1-flash": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": true,
+      "agreementExpiry": "2026-11-30"
+    },
+    "gemini-4-argon": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "glm-5.2": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "glm-5.3": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "glm-5.3-flash": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "gpt-5.6-luna": {
+      "zeroRetention": false,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "gpt-6-luna": {
+      "zeroRetention": false,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "grok-4.7": {
+      "zeroRetention": false,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "hy3": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "hy4": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "hy4-preview": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "iceman-contributor-free": {
+      "zeroRetention": false,
+      "trainsOnData": true,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "kimi-k2.7-code": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "kimi-k3": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "kimi-k3.1-pro": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "longcat-2.0": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "mimo-v2.5": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "mimo-v2.5-pro": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "mimo-v2.6-flash": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "mimo-v2.6-pro": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "minimax-m3": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "minimax-m3.1-flash": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "muse-spark-1.2-contributor": {
+      "zeroRetention": false,
+      "trainsOnData": true,
+      "regionGated": true,
+      "agreementExpiry": null
+    },
+    "muse-spark-1.3-contributor": {
+      "zeroRetention": false,
+      "trainsOnData": true,
+      "regionGated": true,
+      "agreementExpiry": null
+    },
+    "qwen3.7-plus": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "qwen3.8-flash": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "qwen3.8-max": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
+    "step-5-preview": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    }
+  }
+}

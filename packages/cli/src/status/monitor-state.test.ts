@@ -4,15 +4,18 @@ import {describe, expect, it} from 'bun:test'
 
 import {DECLARED_OBSERVATIONS} from './declared'
 import {
+  GO_MONITOR_OBSERVATION_ID,
+  GO_PROBE_REASON_STATE,
   MONITOR_API_CALL_BUDGET,
   MONITOR_LOG_RETRY_BUDGET,
   MONITOR_OBSERVATION_ID,
   MONITOR_STALE_AFTER_MS,
+  parseGoProbeLine,
   parseProbeLine,
   PROBE_REASON_STATE,
   readMonitorState,
 } from './monitor-state'
-import {observationSchema} from './observation'
+import {observationSchema, type Observation} from './observation'
 
 const NOW = new Date('2026-11-01T23:00:00.000Z')
 const TOKEN = 'ghs_test_token_must_never_leak'
@@ -47,6 +50,10 @@ function runnerLog(...lines: string[]): string {
 
 function probeLine(state = 'healthy', reason = 'ok', at = PROBE_AT): string {
   return `CLIProxy auth monitor probe: probe=${state} reason=${reason} at ${at}`
+}
+
+function goProbeLine(state = 'healthy', reason = 'ok', at = PROBE_AT): string {
+  return `CLIProxy Go monitor probe: probe=${state} reason=${reason} at ${at}`
 }
 
 interface Scenario {
@@ -123,10 +130,18 @@ function run(overrides: Partial<RunFixture> = {}): RunFixture {
   return {...realRun, ...overrides}
 }
 
+function pick(observations: readonly Observation[], id: string): Observation {
+  const found = observations.find(candidate => candidate.id === id)
+  if (found === undefined) throw new Error(`readMonitorState returned no ${id} observation`)
+  return found
+}
+
 async function readWithToken(scenario: Scenario, token: string | undefined) {
   const github = fakeGitHub(scenario)
-  const observation = await readMonitorState({token, fetch: github.fetchFn, now: NOW})
-  return {observation, ...github}
+  const observations = await readMonitorState({token, fetch: github.fetchFn, now: NOW})
+  const observation = pick(observations, MONITOR_OBSERVATION_ID)
+  const goObservation = pick(observations, GO_MONITOR_OBSERVATION_ID)
+  return {observation, goObservation, observations, ...github}
 }
 
 function read(scenario: Scenario = {}) {
@@ -143,6 +158,27 @@ describe('contract', () => {
     expect(MONITOR_API_CALL_BUDGET).toBe(3)
     expect(MONITOR_LOG_RETRY_BUDGET).toBe(1)
     expect(MONITOR_STALE_AFTER_MS).toBe(45 * 60_000)
+  })
+
+  it('declares the Go route as its own end-to-end monitor observation', () => {
+    const declared = DECLARED_OBSERVATIONS.cliproxy.find(entry => entry.id === GO_MONITOR_OBSERVATION_ID)
+    expect(declared).toMatchObject({id: 'provider-route-go', kind: 'end-to-end', source: 'monitor', owner: 'github'})
+  })
+
+  it('only accepts Go reason/state pairs the Go classifier can emit', () => {
+    expect(GO_PROBE_REASON_STATE).toEqual({
+      ok: 'healthy',
+      'billing-not-go': 'dead',
+      'provider-missing': 'dead',
+      'privacy-noncompliant': 'dead',
+      'quota-or-billing': 'dead',
+      'auth-401': 'dead',
+      'auth-unavailable-503': 'dead',
+      'session-header-dropped': 'dead',
+      'unrelated-http': 'unknown',
+      timeout: 'unknown',
+      network: 'unknown',
+    })
   })
 
   it('only accepts reason/state pairs the cliproxy classifier can emit', () => {
@@ -200,6 +236,61 @@ describe('parseProbeLine', () => {
   it('reports an empty or whitespace-only log as none', () => {
     expect(parseProbeLine('')).toEqual({kind: 'none'})
     expect(parseProbeLine('\n  \n')).toEqual({kind: 'none'})
+  })
+})
+
+describe('parseGoProbeLine', () => {
+  it('parses a Go probe line and ignores the Claude one in the same log', () => {
+    const log = runnerLog(probeLine('dead', 'auth-401'), goProbeLine('healthy', 'ok'))
+
+    expect(parseGoProbeLine(log)).toEqual({kind: 'probe', state: 'healthy', reason: 'ok', at: PROBE_AT})
+    expect(parseProbeLine(log)).toEqual({kind: 'probe', state: 'dead', reason: 'auth-401', at: PROBE_AT})
+  })
+
+  it('reads one line of each route as neither multiple nor missing', () => {
+    const log = runnerLog(probeLine(), goProbeLine())
+
+    expect(parseProbeLine(log).kind).toBe('probe')
+    expect(parseGoProbeLine(log).kind).toBe('probe')
+  })
+
+  it('reports a log with only the Claude line as no Go line', () => {
+    expect(parseGoProbeLine(runnerLog(probeLine()))).toEqual({kind: 'none'})
+  })
+
+  it('does not match a Go summary line', () => {
+    expect(parseGoProbeLine(runnerLog(`CLIProxy Go monitor summary: probe=healthy reason=ok at ${PROBE_AT}`))).toEqual({
+      kind: 'none',
+    })
+  })
+
+  it('rejects two Go lines', () => {
+    expect(parseGoProbeLine(runnerLog(goProbeLine(), goProbeLine()))).toEqual({kind: 'multiple'})
+  })
+
+  it.each(['quota-or-billing', 'billing-not-go', 'privacy-noncompliant', 'session-header-dropped'])(
+    'rejects the Go-only reason %s on a Claude line, and accepts it on a Go line',
+    reason => {
+      expect(parseProbeLine(runnerLog(probeLine('dead', reason)))).toEqual({kind: 'malformed'})
+      expect(parseGoProbeLine(runnerLog(goProbeLine('dead', reason)))).toMatchObject({kind: 'probe', reason})
+    },
+  )
+
+  it('rejects the retired probe-misconfigured reason on a Go line', () => {
+    expect(parseGoProbeLine(runnerLog(goProbeLine('unknown', 'probe-misconfigured')))).toEqual({kind: 'malformed'})
+  })
+
+  it('rejects session-header-dropped paired with a non-dead state', () => {
+    expect(parseGoProbeLine(runnerLog(goProbeLine('unknown', 'session-header-dropped')))).toEqual({kind: 'malformed'})
+  })
+
+  it.each([
+    ['an unknown reason', goProbeLine('dead', 'bogus')],
+    ['a state that does not match its reason', goProbeLine('healthy', 'quota-or-billing')],
+    ['a non-ISO time', goProbeLine('healthy', 'ok', 'yesterday')],
+    ['trailing fields', `${goProbeLine()} cost=0.1`],
+  ])('marks %s as malformed', (_label, line) => {
+    expect(parseGoProbeLine(runnerLog(line))).toEqual({kind: 'malformed'})
   })
 })
 
@@ -271,6 +362,117 @@ describe('readMonitorState', () => {
     const {observation} = await read({logs: [runnerLog(probeLine(state, reason))]})
 
     expect(observation).toMatchObject({result: 'fail', detail: {reason}})
+  })
+
+  describe('two routes in one job log', () => {
+    const NOW_ISO = NOW.toISOString()
+
+    it('returns one observation per route, in declared order, from the one log read', async () => {
+      const {observations, logApiRequests} = await read({logs: [runnerLog(probeLine(), goProbeLine())]})
+
+      expect(observations.map(observation => observation.id)).toEqual(['provider-route', 'provider-route-go'])
+      expect(observations).toEqual([
+        {
+          id: 'provider-route',
+          kind: 'end-to-end',
+          source: 'monitor',
+          result: 'pass',
+          observedAt: NOW_ISO,
+          detail: {reason: 'ok', probeAt: PROBE_AT},
+        },
+        {
+          id: 'provider-route-go',
+          kind: 'end-to-end',
+          source: 'monitor',
+          result: 'pass',
+          observedAt: NOW_ISO,
+          detail: {reason: 'ok', probeAt: PROBE_AT},
+        },
+      ])
+      expect(logApiRequests()).toHaveLength(1)
+    })
+
+    it('keeps the routes independent: Claude healthy and Go dead', async () => {
+      const {observation, goObservation} = await read({
+        logs: [runnerLog(probeLine(), goProbeLine('dead', 'quota-or-billing'))],
+      })
+
+      expect(observation).toMatchObject({result: 'pass', detail: {reason: 'ok'}})
+      expect(goObservation).toMatchObject({result: 'fail', detail: {reason: 'quota-or-billing', probeAt: PROBE_AT}})
+    })
+
+    it('keeps the routes independent: Claude dead and Go healthy', async () => {
+      const {observation, goObservation} = await read({
+        logs: [runnerLog(probeLine('dead', 'auth-401'), goProbeLine())],
+      })
+
+      expect(observation).toMatchObject({result: 'fail', detail: {reason: 'auth-401'}})
+      expect(goObservation.result).toBe('pass')
+    })
+
+    it('makes only the Go observation unknown when the Go line is missing (a log from before the Go route)', async () => {
+      const {observation, goObservation} = await read({logs: [runnerLog(probeLine())]})
+
+      expect(observation.result).toBe('pass')
+      expect(goObservation).toMatchObject({result: 'unknown', source: 'monitor', detail: {reason: 'no-probe-line'}})
+    })
+
+    it('makes only the Go observation unknown when the Go line is malformed', async () => {
+      const {observation, goObservation} = await read({
+        logs: [runnerLog(probeLine(), goProbeLine('healthy', 'quota-or-billing'))],
+      })
+
+      expect(observation.result).toBe('pass')
+      expect(goObservation).toMatchObject({result: 'unknown', detail: {reason: 'malformed-probe-line'}})
+    })
+
+    it('makes only the Go observation unknown for two Go lines', async () => {
+      const {observation, goObservation} = await read({
+        logs: [runnerLog(probeLine(), goProbeLine(), goProbeLine())],
+      })
+
+      expect(observation.result).toBe('pass')
+      expect(goObservation).toMatchObject({result: 'unknown', detail: {reason: 'multiple-probe-lines'}})
+    })
+
+    it('makes only the Claude observation unknown when the Claude line carries a Go-only reason', async () => {
+      const {observation, goObservation} = await read({
+        logs: [runnerLog(probeLine('dead', 'quota-or-billing'), goProbeLine())],
+      })
+
+      expect(observation).toMatchObject({result: 'unknown', detail: {reason: 'malformed-probe-line'}})
+      expect(goObservation.result).toBe('pass')
+    })
+
+    it('judges freshness per route', async () => {
+      const old = '2026-11-01T21:00:00.000Z'
+      const {observation, goObservation} = await read({
+        logs: [runnerLog(probeLine(), goProbeLine('dead', 'auth-401', old))],
+      })
+
+      expect(observation.result).toBe('pass')
+      expect(goObservation).toMatchObject({result: 'unknown', detail: {reason: 'stale', probeAt: old}})
+    })
+
+    it('gives both routes the same unknown reason when the run itself cannot be read', async () => {
+      const {observations} = await read({runsStatus: 500})
+
+      expect(observations.map(observation => observation.detail)).toEqual([
+        {reason: 'api-error'},
+        {reason: 'api-error'},
+      ])
+      expect(observations.map(observation => observation.id)).toEqual(['provider-route', 'provider-route-go'])
+    })
+
+    it('never carries log text, cost or usage into either observation', async () => {
+      const hostile = `${goProbeLine('dead', 'quota-or-billing')} list_cost=0.00006 allowance=41`
+      const {observations} = await read({logs: [runnerLog(probeLine(), hostile)]})
+
+      for (const observation of observations) {
+        expect(observationSchema.safeParse(observation).success).toBe(true)
+        expect(JSON.stringify(observation)).not.toMatch(/list_cost|allowance|0\.00006/)
+      }
+    })
   })
 
   describe('freshness', () => {
@@ -453,9 +655,9 @@ describe('readMonitorState', () => {
       const github = fakeGitHub()
       const direct = async (input: string, init?: RequestInit) =>
         new URL(input).pathname.endsWith('/logs') ? new Response(runnerLog(probeLine())) : github.fetchFn(input, init)
-      const observation = await readMonitorState({token: TOKEN, fetch: direct, now: NOW})
+      const [observation] = await readMonitorState({token: TOKEN, fetch: direct, now: NOW})
 
-      expect(observation.result).toBe('pass')
+      expect(observation?.result).toBe('pass')
     })
 
     it('refuses a non-https redirect target', async () => {
@@ -464,7 +666,7 @@ describe('readMonitorState', () => {
         new URL(input).pathname.endsWith('/logs')
           ? new Response(null, {status: 302, headers: {location: 'http://logs.example.invalid/x'}})
           : github.fetchFn(input, init)
-      const observation = await readMonitorState({token: TOKEN, fetch: downgraded, now: NOW})
+      const [observation] = await readMonitorState({token: TOKEN, fetch: downgraded, now: NOW})
 
       expect(observation).toMatchObject({result: 'unknown', detail: {reason: 'api-error'}})
     })
@@ -490,11 +692,19 @@ describe('readMonitorState', () => {
 
   describe('missing token', () => {
     it.each([undefined, '', '  '])('reports not_measured / config for %p without any request', async token => {
-      const {observation, requests} = await readWithToken({}, token)
+      const {observation, goObservation, requests} = await readWithToken({}, token)
 
       expect(requests).toHaveLength(0)
       expect(observation).toEqual({
         id: 'provider-route',
+        kind: 'end-to-end',
+        source: 'config',
+        result: 'not_measured',
+        observedAt: null,
+        detail: {reason: 'missing-config'},
+      })
+      expect(goObservation).toEqual({
+        id: 'provider-route-go',
         kind: 'end-to-end',
         source: 'config',
         result: 'not_measured',

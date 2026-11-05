@@ -74,6 +74,19 @@ describe('model flag validation', () => {
   it('rejects "openai/" (empty tail)', () => {
     expect(MODEL_ID_RE.test('openai/')).toBe(false)
   })
+
+  it('accepts "opencode-go/glm-5.3"', () => {
+    expect(MODEL_ID_RE.test('opencode-go/glm-5.3')).toBe(true)
+  })
+
+  it('rejects "opencode-go/" (empty tail) and "opencode-go/GLM-5.3" (uppercase)', () => {
+    expect(MODEL_ID_RE.test('opencode-go/')).toBe(false)
+    expect(MODEL_ID_RE.test('opencode-go/GLM-5.3')).toBe(false)
+  })
+
+  it('rejects unknown provider prefix "opencode/glm-5.3"', () => {
+    expect(MODEL_ID_RE.test('opencode/glm-5.3')).toBe(false)
+  })
 })
 
 // ── verifyModelsAvailable ─────────────────────────────────────────────────────
@@ -398,6 +411,31 @@ describe('validateSetupOptions — providers/model validation', () => {
     expect(() => validateSetupOptions({harness: 'opencode', providers: 'claude'}, false)).toThrow(/Unknown provider/)
   })
 
+  it('accepts anthropic,opencode-go with an opencode-go model', () => {
+    expect(() =>
+      validateSetupOptions(
+        {
+          key: 'sk-test',
+          repo: 'owner/repo',
+          harness: 'opencode',
+          providers: 'anthropic,opencode-go',
+          model: 'opencode-go/glm-5.3',
+        },
+        false,
+      ),
+    ).not.toThrow()
+  })
+
+  it('error: opencode-go model without opencode-go in --providers is rejected', () => {
+    expect(() =>
+      validateSetupOptions({harness: 'opencode', providers: 'anthropic', model: 'opencode-go/glm-5.3'}, false),
+    ).toThrow(/Model prefix opencode-go does not match selected providers/)
+  })
+
+  it('error: unknown provider message lists opencode-go as supported', () => {
+    expect(() => validateSetupOptions({harness: 'opencode', providers: 'claude'}, false)).toThrow(/opencode-go/)
+  })
+
   it('interactive mode: providers/model checks are skipped even with invalid combo', () => {
     // Multiple providers without model — would fail in non-interactive, but interactive skips all checks
     expect(() => validateSetupOptions({providers: 'anthropic,openai'}, true)).not.toThrow()
@@ -489,6 +527,107 @@ describe('verifyModelsAvailable — exact key redacted in error body', () => {
 
     expect(errorMessage).toContain('500')
     expect(errorMessage).not.toContain(rawKey)
+  })
+})
+
+// ── OpenCode Go: owner-aware model verification ──────────────────────────────
+
+describe('verifyModelsAvailable — opencode-go', () => {
+  let originalFetch: typeof globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  originalFetch = globalThis.fetch
+
+  const BASE_URL = 'https://cliproxy.fro.bot'
+  const KEY = 'sk-test-key'
+
+  function serve(data: unknown[]): void {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify({data}))) as unknown as typeof fetch
+  }
+
+  it('passes when the bare id is listed with owned_by opencode-go', async () => {
+    serve([{id: 'glm-5.3', owned_by: 'opencode-go'}])
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['opencode-go'], 'opencode-go/glm-5.3')).resolves.toBeUndefined()
+  })
+
+  it('passes when only the prefixed id is listed with owned_by opencode-go', async () => {
+    serve([{id: 'opencode-go/glm-5.3', owned_by: 'opencode-go'}])
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['opencode-go'], 'opencode-go/glm-5.3')).resolves.toBeUndefined()
+  })
+
+  it('passes for anthropic+opencode-go with the real both-forms /v1/models shape', async () => {
+    serve([
+      {id: 'claude-sonnet-4-6', owned_by: 'anthropic'},
+      {id: 'glm-5.3', owned_by: 'opencode-go'},
+      {id: 'opencode-go/glm-5.3', owned_by: 'opencode-go'},
+    ])
+
+    await expect(
+      verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'opencode-go'], 'opencode-go/glm-5.3'),
+    ).resolves.toBeUndefined()
+  })
+
+  it('fails with the deploy hint when the model id exists only under another owner', async () => {
+    serve([
+      {id: 'glm-5.3', owned_by: 'someone-else'},
+      {id: 'kimi-k3', owned_by: 'opencode-go'},
+    ])
+
+    const error = await verifyModelsAvailable(BASE_URL, KEY, ['opencode-go'], 'opencode-go/glm-5.3').catch(
+      (error_: unknown) => error_ as Error,
+    )
+
+    expect(error).toBeInstanceOf(Error)
+    const message = (error as Error).message
+    expect(message).toContain('glm-5.3')
+    expect(message).toContain('kimi-k3')
+    expect(message).toContain('cliproxy deploy')
+  })
+
+  it('fails with the deploy hint when no opencode-go entries are listed at all', async () => {
+    serve([{id: 'claude-sonnet-4-6', owned_by: 'anthropic'}])
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['opencode-go'], 'opencode-go/glm-5.3')).rejects.toThrow(
+      /cliproxy deploy/,
+    )
+  })
+
+  it('fails when opencode-go is selected but not exposed, even if the chosen model is anthropic', async () => {
+    serve([{id: 'claude-sonnet-4-6', owned_by: 'anthropic'}])
+
+    await expect(
+      verifyModelsAvailable(BASE_URL, KEY, ['anthropic', 'opencode-go'], 'anthropic/claude-sonnet-4-6'),
+    ).rejects.toThrow(/No OpenCode Go models on proxy/)
+  })
+
+  it('does not accept an id with no owned_by even when it carries the opencode-go/ prefix', async () => {
+    serve([{id: 'opencode-go/glm-5.3'}])
+
+    await expect(verifyModelsAvailable(BASE_URL, KEY, ['opencode-go'], 'opencode-go/glm-5.3')).rejects.toThrow(
+      /cliproxy deploy/,
+    )
+  })
+
+  it('anthropic-only still short-circuits without a fetch (regression)', async () => {
+    const fetchSpy = mock(async () => new Response('{}'))
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+
+    await verifyModelsAvailable(BASE_URL, KEY, ['anthropic'], 'anthropic/claude-sonnet-4-6')
+
+    expect(fetchSpy.mock.calls.length).toBe(0)
+  })
+
+  it('does not echo the key in the not-found error', async () => {
+    serve([{id: 'kimi-k3', owned_by: 'opencode-go'}])
+
+    const error = await verifyModelsAvailable(BASE_URL, KEY, ['opencode-go'], 'opencode-go/glm-5.3').catch(
+      (error_: unknown) => error_ as Error,
+    )
+
+    expect((error as Error).message).not.toContain(KEY)
   })
 })
 

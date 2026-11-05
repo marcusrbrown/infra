@@ -137,7 +137,7 @@ These success criteria carry forward unchanged:
   "verdict": "extend",
   "scope": "marcusrbrown/infra: apps/cliproxy, apps/broker, apps/gateway, apps/docs, packages/shared/cliproxy, packages/shared/status, packages/cli (agent setup-core, cliproxy, status), .github/workflows",
   "freshness": {
-    "vcs_reference": "origin/main bcc2af8"
+    "vcs_reference": "origin/main 9d33e44"
   },
   "budget": {
     "max_search_passes": 3,
@@ -347,7 +347,7 @@ flowchart TD
 
 ## Implementation Units
 
-- [ ] **Unit 1: Privacy snapshot, settings and eligibility**
+- [x] **Unit 1: Privacy snapshot, settings and eligibility**
 
 **Goal:** Add the tracked snapshot and settings, plus one pure eligibility module that the deploy, the monitor and the refresh script all share.
 
@@ -399,7 +399,7 @@ flowchart TD
 - The committed snapshot parses.
 - Eligibility against a fixture of the real live list returns a non-empty set with no DeepSeek model in it.
 
-- [ ] **Unit 2: Management primitives for the upstream section**
+- [x] **Unit 2: Management primitives for the upstream section**
 
 **Goal:** Add generic GET, PUT, PATCH-disable, normalization and comparison for `openai-compatibility`.
 
@@ -437,7 +437,7 @@ flowchart TD
 
 - Tests pass, and every error path carries a key-leak assertion.
 
-- [ ] **Unit 3: Deploy step and secret wiring**
+- [x] **Unit 3: Deploy step and secret wiring**
 
 **Goal:** The cliproxy deploy applies the Go entry with a full preflight, verifies it, and proves routing works.
 
@@ -506,7 +506,7 @@ flowchart TD
 - After merge, the live deploy prints its success line.
 - `/v1/models` lists the eligible ids under `owned_by: opencode-go`.
 
-- [ ] **Unit 4: `agent setup` and `cliproxy models` provider**
+- [x] **Unit 4: `agent setup` and `cliproxy models` provider**
 
 **Goal:** Let repos choose Go routed through the proxy, and let model listing filter to Go.
 
@@ -554,7 +554,7 @@ flowchart TD
 
 - After the deploy, a dry-run of setup against a scratch repo shows the expected config and auth.
 
-- [ ] **Unit 5: Two-route probe, monitor and status**
+- [x] **Unit 5: Two-route probe, monitor and status**
 
 **Goal:** Go gets its own probe, alert state, and status observation, and the public view stops mixing routes.
 
@@ -630,7 +630,7 @@ flowchart TD
 - After the deploy, a monitor run started by dispatch prints both probe lines.
 - The next status snapshot carries `provider-route-go`.
 
-- [ ] **Unit 6: Scheduled privacy-snapshot refresh workflow**
+- [x] **Unit 6: Scheduled privacy-snapshot refresh workflow**
 
 **Goal:** Reviewed snapshot changes arrive by PR, with no hand-editing.
 
@@ -678,7 +678,7 @@ flowchart TD
 - A dispatched run with no upstream change exits clean.
 - A fixture change in the script test produces the expected PR body.
 
-- [ ] **Unit 7: Gateway Go acceptance pins**
+- [x] **Unit 7: Gateway Go acceptance pins**
 
 **Goal:** Prove the gateway accepts Go routed through the proxy and still rejects direct Go, without changing the guard.
 
@@ -709,7 +709,7 @@ flowchart TD
 
 - The tests pass against the unchanged guard, and mutating its host check makes them fail.
 
-- [ ] **Unit 8: Docs, runbook and rule amendment**
+- [x] **Unit 8: Docs, runbook and rule amendment**
 
 **Goal:** Record the new rule, the secrets, the rollout steps and the operator procedures.
 

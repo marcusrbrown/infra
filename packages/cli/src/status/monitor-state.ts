@@ -1,4 +1,4 @@
-import type {ProviderAuthReason, ProviderAuthState} from '../commands/cliproxy/status'
+import type {GoRouteReason, ProviderAuthReason, ProviderAuthState} from '../commands/cliproxy/status'
 import type {FetchLike, GitHubReadOptions} from './github-api'
 import type {Observation} from './observation'
 import {z} from 'zod'
@@ -16,11 +16,18 @@ import {GITHUB_REPOSITORY, githubGetJson, githubGetLogText, hasToken} from './gi
  * such line. It copies `probe`, `reason` and `at` only, never log text, issue fields, URLs or Discord fields.
  *
  * Fail-closed: anything it cannot positively parse is `unknown` with a slug reason, never `pass`.
+ *
+ * One job probes two routes and prints one line per route, each with its own prefix and its own reason map:
+ * Claude (`provider-route`) and OpenCode Go (`provider-route-go`). The routes are read from the same job log and
+ * judged independently; a missing or malformed line makes only its own observation `unknown`, and a reason from
+ * the other route's vocabulary is malformed.
  */
 
 export const MONITOR_OBSERVATION_ID = 'provider-route'
 export const MONITOR_WORKFLOW_FILE = 'cliproxy-auth-monitor.yaml'
 export const PROBE_LINE_PREFIX = 'CLIProxy auth monitor probe:'
+export const GO_MONITOR_OBSERVATION_ID = 'provider-route-go'
+export const GO_PROBE_LINE_PREFIX = 'CLIProxy Go monitor probe:'
 
 /**
  * Call budget for one read: the run list, the job list and the log request are 3 API calls. The log request
@@ -35,6 +42,7 @@ export const MONITOR_STALE_AFTER_MS = 45 * 60_000
 const MAX_FUTURE_SKEW_MS = 5 * 60_000
 
 const SPEC = {id: MONITOR_OBSERVATION_ID, kind: 'end-to-end', source: 'monitor'} as const
+const GO_SPEC = {id: GO_MONITOR_OBSERVATION_ID, kind: 'end-to-end', source: 'monitor'} as const
 
 /**
  * Every reason the cliproxy classifier emits and the one state it belongs to. Keyed on the reason union, so
@@ -45,6 +53,25 @@ export const PROBE_REASON_STATE: Record<ProviderAuthReason, ProviderAuthState> =
   'auth-401': 'dead',
   'auth-unavailable-503': 'dead',
   'provider-missing': 'dead',
+  'unrelated-http': 'unknown',
+  timeout: 'unknown',
+  network: 'unknown',
+}
+
+/**
+ * Every reason the Go classifier emits and the state it belongs to. Separate from the Claude map so a Claude probe
+ * line can never carry a Go-only reason (`quota-or-billing`, `billing-not-go`, `privacy-noncompliant`,
+ * `session-header-dropped`); adding a Go reason fails type-check here until it is classified.
+ */
+export const GO_PROBE_REASON_STATE: Record<GoRouteReason, ProviderAuthState> = {
+  ok: 'healthy',
+  'billing-not-go': 'dead',
+  'provider-missing': 'dead',
+  'privacy-noncompliant': 'dead',
+  'quota-or-billing': 'dead',
+  'auth-401': 'dead',
+  'auth-unavailable-503': 'dead',
+  'session-header-dropped': 'dead',
   'unrelated-http': 'unknown',
   timeout: 'unknown',
   network: 'unknown',
@@ -63,44 +90,62 @@ const runsSchema = z.object({
 const jobsSchema = z.object({jobs: z.array(z.object({id: z.number().int().positive()}))})
 const isoSchema = z.iso.datetime()
 
-export type ProbeParse =
-  | {kind: 'probe'; state: ProviderAuthState; reason: ProviderAuthReason; at: string}
+export type RouteProbeParse<Reason extends string> =
+  | {kind: 'probe'; state: ProviderAuthState; reason: Reason; at: string}
   | {kind: 'none'}
   | {kind: 'multiple'}
   | {kind: 'malformed'}
 
+export type ProbeParse = RouteProbeParse<ProviderAuthReason>
+export type GoProbeParse = RouteProbeParse<GoRouteReason>
+
 const RUNNER_PREFIX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z /
 const PROBE_LINE = /^CLIProxy auth monitor probe: probe=([a-z]+) reason=([a-z0-9-]+) at (\S+)$/
+const GO_PROBE_LINE = /^CLIProxy Go monitor probe: probe=([a-z]+) reason=([a-z0-9-]+) at (\S+)$/
 
-function isReason(value: string): value is ProviderAuthReason {
-  return Object.keys(PROBE_REASON_STATE).includes(value)
-}
-
-/** Strict parse of the one probe line in a job log. Pure; exported for tests. */
-export function parseProbeLine(log: string): ProbeParse {
+/** Strict parse of the one probe line with `prefix` in a job log, against one route's reason map. */
+function parseRouteLine<Reason extends string>(
+  log: string,
+  prefix: string,
+  pattern: RegExp,
+  reasonStates: Readonly<Record<Reason, ProviderAuthState>>,
+): RouteProbeParse<Reason> {
   const lines = log
     .replace(/^\uFEFF/, '')
     .split('\n')
     .map(line => line.replace(/\r$/, '').replace(RUNNER_PREFIX, ''))
-    .filter(line => line.startsWith(PROBE_LINE_PREFIX))
+    .filter(line => line.startsWith(prefix))
 
   if (lines.length === 0) return {kind: 'none'}
   if (lines.length > 1) return {kind: 'multiple'}
 
-  const match = PROBE_LINE.exec(lines[0] ?? '')
+  const match = pattern.exec(lines[0] ?? '')
   if (match === null) return {kind: 'malformed'}
 
   const [, state, reason, at] = match
   if (state === undefined || reason === undefined || at === undefined) return {kind: 'malformed'}
-  if (!isReason(reason) || PROBE_REASON_STATE[reason] !== state || !isoSchema.safeParse(at).success) {
+  const knownReason = Object.keys(reasonStates).find((candidate): candidate is Reason => candidate === reason)
+  if (knownReason === undefined || reasonStates[knownReason] !== state || !isoSchema.safeParse(at).success) {
     return {kind: 'malformed'}
   }
 
-  return {kind: 'probe', state: PROBE_REASON_STATE[reason], reason, at}
+  return {kind: 'probe', state: reasonStates[knownReason], reason: knownReason, at}
 }
 
-function unknown(reason: string, now: Date): Observation {
-  return observe(SPEC, 'unknown', {detail: {reason}, now})
+/** Strict parse of the one Claude probe line in a job log. Pure; exported for tests. */
+export function parseProbeLine(log: string): ProbeParse {
+  return parseRouteLine(log, PROBE_LINE_PREFIX, PROBE_LINE, PROBE_REASON_STATE)
+}
+
+/** Strict parse of the one Go probe line in a job log. Pure; exported for tests. */
+export function parseGoProbeLine(log: string): GoProbeParse {
+  return parseRouteLine(log, GO_PROBE_LINE_PREFIX, GO_PROBE_LINE, GO_PROBE_REASON_STATE)
+}
+
+type RouteSpec = typeof SPEC | typeof GO_SPEC
+
+function unknown(spec: RouteSpec, reason: string, now: Date): Observation {
+  return observe(spec, 'unknown', {detail: {reason}, now})
 }
 
 /** Read the single job log, retrying once when it comes back empty. */
@@ -118,12 +163,40 @@ async function readLog(
   return {kind: 'empty'}
 }
 
-/** The cliproxy `provider-route` observation. Without a token nothing is requested: `not_measured`. */
-export async function readMonitorState(options: GitHubReadOptions): Promise<Observation> {
+/** One route's observation from its parsed probe line. Freshness is judged per route. */
+function routeObservation(spec: RouteSpec, parsed: RouteProbeParse<string>, now: Date): Observation {
+  switch (parsed.kind) {
+    case 'none':
+      return unknown(spec, 'no-probe-line', now)
+    case 'multiple':
+      return unknown(spec, 'multiple-probe-lines', now)
+    case 'malformed':
+      return unknown(spec, 'malformed-probe-line', now)
+    case 'probe':
+      break
+  }
+
+  const age = now.getTime() - Date.parse(parsed.at)
+  if (age < -MAX_FUTURE_SKEW_MS) return unknown(spec, 'malformed-probe-line', now)
+  if (age > MONITOR_STALE_AFTER_MS) {
+    return observe(spec, 'unknown', {detail: {reason: 'stale', probeAt: parsed.at}, now})
+  }
+
+  const result = parsed.state === 'healthy' ? 'pass' : parsed.state === 'dead' ? 'fail' : 'unknown'
+  return observe(spec, result, {detail: {reason: parsed.reason, probeAt: parsed.at}, now})
+}
+
+/**
+ * The cliproxy route observations, `provider-route` then `provider-route-go`, from one job log read. Without a
+ * token nothing is requested: both are `not_measured`. When the run itself cannot be read, both carry the same
+ * `unknown` reason.
+ */
+export async function readMonitorState(options: GitHubReadOptions): Promise<Observation[]> {
   const now = options.now ?? new Date()
   const {token} = options
-  if (!hasToken(token)) return notMeasured(SPEC, 'missing-config')
+  if (!hasToken(token)) return [notMeasured(SPEC, 'missing-config'), notMeasured(GO_SPEC, 'missing-config')]
 
+  const both = (reason: string): Observation[] => [unknown(SPEC, reason, now), unknown(GO_SPEC, reason, now)]
   const fetchFn: FetchLike = options.fetch ?? fetch
 
   const runs = await githubGetJson(
@@ -132,12 +205,12 @@ export async function readMonitorState(options: GitHubReadOptions): Promise<Obse
     `/repos/${GITHUB_REPOSITORY}/actions/workflows/${MONITOR_WORKFLOW_FILE}/runs?event=schedule&branch=main&per_page=1`,
     runsSchema,
   )
-  if (!runs.ok) return unknown('api-error', now)
+  if (!runs.ok) return both('api-error')
 
   const run = runs.data.workflow_runs[0]
   // Re-check what the API filter promised: a synthetic or off-branch run must never decide the route state.
-  if (run === undefined || run.event !== 'schedule' || run.head_branch !== 'main') return unknown('no-run', now)
-  if (run.status !== 'completed') return unknown('running', now)
+  if (run === undefined || run.event !== 'schedule' || run.head_branch !== 'main') return both('no-run')
+  if (run.status !== 'completed') return both('running')
 
   const jobs = await githubGetJson(
     fetchFn,
@@ -145,32 +218,16 @@ export async function readMonitorState(options: GitHubReadOptions): Promise<Obse
     `/repos/${GITHUB_REPOSITORY}/actions/runs/${run.id}/jobs?per_page=2`,
     jobsSchema,
   )
-  if (!jobs.ok) return unknown('api-error', now)
+  if (!jobs.ok) return both('api-error')
   const [job, ...extra] = jobs.data.jobs
-  if (job === undefined || extra.length > 0) return unknown('job-missing', now)
+  if (job === undefined || extra.length > 0) return both('job-missing')
 
   const log = await readLog(fetchFn, token, job.id)
-  if (log.kind === 'error') return unknown('api-error', now)
-  if (log.kind === 'empty') return unknown('log-empty', now)
+  if (log.kind === 'error') return both('api-error')
+  if (log.kind === 'empty') return both('log-empty')
 
-  const parsed = parseProbeLine(log.text)
-  switch (parsed.kind) {
-    case 'none':
-      return unknown('no-probe-line', now)
-    case 'multiple':
-      return unknown('multiple-probe-lines', now)
-    case 'malformed':
-      return unknown('malformed-probe-line', now)
-    case 'probe':
-      break
-  }
-
-  const age = now.getTime() - Date.parse(parsed.at)
-  if (age < -MAX_FUTURE_SKEW_MS) return unknown('malformed-probe-line', now)
-  if (age > MONITOR_STALE_AFTER_MS) {
-    return observe(SPEC, 'unknown', {detail: {reason: 'stale', probeAt: parsed.at}, now})
-  }
-
-  const result = parsed.state === 'healthy' ? 'pass' : parsed.state === 'dead' ? 'fail' : 'unknown'
-  return observe(SPEC, result, {detail: {reason: parsed.reason, probeAt: parsed.at}, now})
+  return [
+    routeObservation(SPEC, parseProbeLine(log.text), now),
+    routeObservation(GO_SPEC, parseGoProbeLine(log.text), now),
+  ]
 }

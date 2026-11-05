@@ -7,7 +7,11 @@
     "./server/droplet-helpers": "./server/droplet-helpers.ts",
     "./cliproxy/management": "./cliproxy/management.ts",
     "./docs/frontmatter": "./docs/frontmatter.ts",
-    "./status/history-schema": "./status/history-schema.ts"
+    "./status/history-schema": "./status/history-schema.ts",
+    "./opencode-go/eligibility": "./opencode-go/eligibility.ts",
+    "./opencode-go/parse-privacy-table": "./opencode-go/parse-privacy-table.ts",
+    "./opencode-go/privacy-snapshot.json": "./opencode-go/privacy-snapshot.json",
+    "./opencode-go/settings.json": "./opencode-go/settings.json"
   },
   "dependencies": {
     "yaml": "2.9.1",

@@ -1,17 +1,24 @@
+import type {OpenAICompatEntry} from './management'
 import {mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {afterEach, beforeEach, describe, expect, mock, spyOn, test} from 'bun:test'
 
+import {afterEach, beforeEach, describe, expect, mock, spyOn, test} from 'bun:test'
 import {
   applyOAuthModelAlias,
+  applyOpenAICompat,
   managementHeaders,
+  ManagementHttpError,
+  normalizeOpenAICompatEntry,
   parseClaudeEntries,
   parseManagementKeyList,
+  patchOpenAICompatDisabled,
   readBackOAuthModelAlias,
+  readBackOpenAICompat,
   readOAuthModelAliasFromConfig,
   requestJson,
   setEqualOAuthModelAlias,
+  setEqualOpenAICompat,
   toStringArray,
 } from './management'
 
@@ -675,5 +682,380 @@ describe('setEqualOAuthModelAlias', () => {
 
   test('returns true for two empty sets', () => {
     expect(setEqualOAuthModelAlias({claude: []}, {claude: []})).toBe(true)
+  })
+})
+
+/** Await a promise that must reject and return its error message. */
+async function messageOf(promise: Promise<unknown>): Promise<string> {
+  try {
+    await promise
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  throw new Error('expected promise to reject')
+}
+
+// ─── openai-compatibility helpers ─────────────────────────────────────────────
+
+describe('openai-compatibility helpers', () => {
+  const BASE_URL = 'https://cliproxy.example.com'
+  const MGMT_KEY = 'secret-mgmt-key-do-not-log'
+  const UPSTREAM_KEY = 'sk-upstream-fixture-key-do-not-log'
+  const ENDPOINT = `${BASE_URL}/v0/management/openai-compatibility`
+
+  const tracked: OpenAICompatEntry = {
+    name: 'opencode-go',
+    prefix: 'opencode-go',
+    'base-url': 'https://opencode.ai/inference/go/v1',
+    'api-key-entries': [{'api-key': UPSTREAM_KEY}],
+    models: [
+      {name: 'glm-5.3', alias: 'glm-5.3'},
+      {name: 'kimi-k2.6', alias: 'kimi-k2.6'},
+    ],
+    headers: {'x-opencode-session': '$X-Opencode-Session'},
+    disabled: false,
+  }
+
+  /** Shape the server returns: `auth-index` added to each key entry, `disabled` always present. */
+  const liveShape = {
+    name: 'opencode-go',
+    prefix: 'opencode-go',
+    'base-url': 'https://opencode.ai/inference/go/v1',
+    'api-key-entries': [{'api-key': UPSTREAM_KEY, 'auth-index': 'a1b2c3d4'}],
+    models: [
+      {name: 'kimi-k2.6', alias: 'kimi-k2.6'},
+      {name: 'glm-5.3', alias: 'glm-5.3'},
+    ],
+    headers: {'x-opencode-session': '$X-Opencode-Session'},
+    disabled: false,
+  }
+
+  interface Recorded {
+    url: string
+    init: RequestInit
+  }
+
+  function recordingFetch(respond: () => Response): {fetch: typeof fetch; calls: Recorded[]} {
+    const calls: Recorded[] = []
+    const fake = mock((url: string, init: RequestInit) => {
+      calls.push({url, init})
+      return Promise.resolve(respond())
+    })
+    return {fetch: fake as unknown as typeof fetch, calls}
+  }
+
+  function expectNoLeak(message: string): void {
+    expect(message.length).toBeGreaterThan(0)
+    expect(message).not.toContain(MGMT_KEY)
+    expect(message).not.toContain(UPSTREAM_KEY)
+  }
+
+  describe('normalizeOpenAICompatEntry', () => {
+    test('drops auth-index and defaults disabled to false', () => {
+      const {disabled: _disabled, ...withoutDisabled} = liveShape
+      const normalized = normalizeOpenAICompatEntry(withoutDisabled)
+      expect(normalized.disabled).toBe(false)
+      expect(normalized['api-key-entries']).toEqual([{'api-key': UPSTREAM_KEY}])
+      expect(JSON.stringify(normalized)).not.toContain('auth-index')
+    })
+
+    test('defaults prefix, headers and model alias when absent', () => {
+      const normalized = normalizeOpenAICompatEntry({
+        name: 'x',
+        'base-url': 'https://example.com/v1',
+        'api-key-entries': [],
+        models: [{name: 'm'}],
+      })
+      expect(normalized.prefix).toBe('')
+      expect(normalized.headers).toEqual({})
+      expect(normalized.models).toEqual([{name: 'm', alias: ''}])
+    })
+
+    test.each([
+      ['not an object', 'nope', /openai-compatibility\[0\] is not an object/],
+      ['missing name', {'base-url': 'https://e.com'}, /\.name is missing/],
+      ['missing base-url', {name: 'x'}, /\.base-url is missing/],
+      [
+        'non-string api-key',
+        {name: 'x', 'base-url': 'u', 'api-key-entries': [{'api-key': 7}]},
+        /api-key-entries\[0\]\.api-key/,
+      ],
+      ['non-array models', {name: 'x', 'base-url': 'u', models: 'm'}, /\.models is not an array/],
+      ['non-string header', {name: 'x', 'base-url': 'u', headers: {h: 1}}, /\.headers\.h is not a string/],
+      ['non-boolean disabled', {name: 'x', 'base-url': 'u', disabled: 'yes'}, /\.disabled is not a boolean/],
+    ])('throws on %s without echoing values', (_label, raw, pattern) => {
+      expect(() => normalizeOpenAICompatEntry(raw)).toThrow(pattern)
+    })
+
+    test('error for a malformed key entry does not contain a sibling api-key value', () => {
+      const raw = {
+        name: 'x',
+        'base-url': 'u',
+        'api-key-entries': [{'api-key': UPSTREAM_KEY}, {'api-key': 7}],
+      }
+      let message = ''
+      try {
+        normalizeOpenAICompatEntry(raw)
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error)
+      }
+      expectNoLeak(message)
+    })
+  })
+
+  describe('readBackOpenAICompat', () => {
+    test('GETs the endpoint with the management key and unwraps and normalizes the list', async () => {
+      const {fetch: fakeFetch, calls} = recordingFetch(
+        () => new Response(JSON.stringify({'openai-compatibility': [liveShape]}), {status: 200}),
+      )
+
+      const result = await readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: fakeFetch})
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.url).toBe(ENDPOINT)
+      expect(calls[0]?.init.method).toBe('GET')
+      expect((calls[0]?.init.headers as Headers).get('x-management-key')).toBe(MGMT_KEY)
+      expect(result).toHaveLength(1)
+      expect(JSON.stringify(result)).not.toContain('auth-index')
+      expect(result[0]?.disabled).toBe(false)
+    })
+
+    test.each([
+      ['null', {'openai-compatibility': null}],
+      ['empty', {'openai-compatibility': []}],
+    ])('returns [] when the section is %s', async (_label, payload) => {
+      const {fetch: fakeFetch} = recordingFetch(() => new Response(JSON.stringify(payload), {status: 200}))
+      expect(await readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: fakeFetch})).toEqual([])
+    })
+
+    test.each([
+      ['an empty object', {}],
+      ['an unrelated wrapper', {'openai-compat': [liveShape]}],
+    ])('throws a field-path error instead of returning [] for %s', async (_label, payload) => {
+      const {fetch: fakeFetch} = recordingFetch(() => new Response(JSON.stringify(payload), {status: 200}))
+      const message = await messageOf(readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: fakeFetch}))
+      expect(message).toContain('missing the openai-compatibility field')
+      expectNoLeak(message)
+    })
+
+    test('throws on a non-2xx and the message carries no key value', async () => {
+      const {fetch: fakeFetch} = recordingFetch(() => new Response(`denied for ${MGMT_KEY}`, {status: 403}))
+      const message = await messageOf(readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: fakeFetch}))
+      expect(message).toMatch(/GET .*openai-compatibility failed with HTTP 403/)
+      expectNoLeak(message)
+    })
+
+    test('throws on malformed JSON and the message carries no key value', async () => {
+      const {fetch: fakeFetch} = recordingFetch(() => new Response(`{"api-key": "${UPSTREAM_KEY}`, {status: 200}))
+      const message = await messageOf(readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: fakeFetch}))
+      expect(message).toContain('malformed JSON')
+      expectNoLeak(message)
+    })
+
+    test('throws on a non-object payload and on a non-array section', async () => {
+      const arrayPayload = recordingFetch(() => new Response('[]', {status: 200}))
+      expect(
+        await messageOf(readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: arrayPayload.fetch})),
+      ).toContain('unexpected shape')
+
+      const stringSection = recordingFetch(
+        () => new Response(JSON.stringify({'openai-compatibility': UPSTREAM_KEY}), {status: 200}),
+      )
+      const message = await messageOf(
+        readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: stringSection.fetch}),
+      )
+      expect(message).toContain('not an array')
+      expectNoLeak(message)
+    })
+
+    test('throws on a malformed entry naming the field, not the value', async () => {
+      const bad = {...liveShape, 'api-key-entries': [{'api-key': UPSTREAM_KEY}, {'api-key': null}]}
+      const {fetch: fakeFetch} = recordingFetch(
+        () => new Response(JSON.stringify({'openai-compatibility': [bad]}), {status: 200}),
+      )
+      const message = await messageOf(readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: fakeFetch}))
+      expect(message).toContain('openai-compatibility[0].api-key-entries[1].api-key')
+      expectNoLeak(message)
+    })
+  })
+
+  describe('applyOpenAICompat', () => {
+    test('PUTs a bare array equal to the tracked entry', async () => {
+      const {fetch: fakeFetch, calls} = recordingFetch(() => new Response('{"status":"ok"}', {status: 200}))
+
+      await applyOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, body: [tracked], fetch: fakeFetch})
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.url).toBe(ENDPOINT)
+      expect(calls[0]?.init.method).toBe('PUT')
+      expect((calls[0]?.init.headers as Headers).get('x-management-key')).toBe(MGMT_KEY)
+      expect(JSON.parse(calls[0]?.init.body as string)).toEqual([tracked])
+    })
+
+    test('throws on an empty list before sending any request', async () => {
+      const {fetch: fakeFetch, calls} = recordingFetch(() => new Response('{}', {status: 200}))
+
+      const message = await messageOf(applyOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, body: [], fetch: fakeFetch}))
+
+      expect(calls).toHaveLength(0)
+      expect(message).toContain('empty')
+      expectNoLeak(message)
+    })
+
+    test.each([400, 500])('throws on HTTP %d and the message carries no key value', async status => {
+      // A hostile/verbose server echoes the request secrets back in its error body.
+      const {fetch: fakeFetch} = recordingFetch(
+        () => new Response(`bad entry ${UPSTREAM_KEY} via ${MGMT_KEY}`, {status}),
+      )
+
+      const message = await messageOf(
+        applyOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, body: [tracked], fetch: fakeFetch}),
+      )
+
+      expect(message).toContain(`HTTP ${status}`)
+      expect(message).toContain('[redacted]')
+      expectNoLeak(message)
+    })
+
+    test('a non-2xx raises a ManagementHttpError carrying the status; a transport failure does not', async () => {
+      const rejected = recordingFetch(() => new Response('no', {status: 422}))
+      const error = await applyOpenAICompat({
+        baseUrl: BASE_URL,
+        key: MGMT_KEY,
+        body: [tracked],
+        fetch: rejected.fetch,
+      }).then(
+        () => undefined,
+        (error_: unknown) => error_,
+      )
+      expect(error).toBeInstanceOf(ManagementHttpError)
+      expect((error as ManagementHttpError).status).toBe(422)
+
+      const dropped = recordingFetch(() => {
+        throw new TypeError('socket closed')
+      })
+      const transport = await applyOpenAICompat({
+        baseUrl: BASE_URL,
+        key: MGMT_KEY,
+        body: [tracked],
+        fetch: dropped.fetch,
+      }).then(
+        () => undefined,
+        (error_: unknown) => error_,
+      )
+      expect(transport).toBeInstanceOf(TypeError)
+      expect(transport).not.toBeInstanceOf(ManagementHttpError)
+    })
+
+    test('truncates a long error body', async () => {
+      const {fetch: fakeFetch} = recordingFetch(() => new Response('x'.repeat(5000), {status: 500}))
+      const message = await messageOf(
+        applyOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, body: [tracked], fetch: fakeFetch}),
+      )
+      expect(message.length).toBeLessThan(400)
+    })
+  })
+
+  describe('patchOpenAICompatDisabled', () => {
+    test('PATCH disable body is exactly {name, value: {disabled: true}}', async () => {
+      const {fetch: fakeFetch, calls} = recordingFetch(() => new Response('{"status":"ok"}', {status: 200}))
+
+      await patchOpenAICompatDisabled({
+        baseUrl: BASE_URL,
+        key: MGMT_KEY,
+        name: 'opencode-go',
+        disabled: true,
+        fetch: fakeFetch,
+      })
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.url).toBe(ENDPOINT)
+      expect(calls[0]?.init.method).toBe('PATCH')
+      expect((calls[0]?.init.headers as Headers).get('x-management-key')).toBe(MGMT_KEY)
+      expect(JSON.parse(calls[0]?.init.body as string)).toEqual({name: 'opencode-go', value: {disabled: true}})
+    })
+
+    test('can re-enable with disabled: false', async () => {
+      const {fetch: fakeFetch, calls} = recordingFetch(() => new Response('{}', {status: 200}))
+      await patchOpenAICompatDisabled({
+        baseUrl: BASE_URL,
+        key: MGMT_KEY,
+        name: 'opencode-go',
+        disabled: false,
+        fetch: fakeFetch,
+      })
+      expect(JSON.parse(calls[0]?.init.body as string)).toEqual({name: 'opencode-go', value: {disabled: false}})
+    })
+
+    test.each([404, 500])('throws on HTTP %d and the message carries no key value', async status => {
+      const {fetch: fakeFetch} = recordingFetch(() => new Response(`no such entry; key ${MGMT_KEY}`, {status}))
+      const message = await messageOf(
+        patchOpenAICompatDisabled({
+          baseUrl: BASE_URL,
+          key: MGMT_KEY,
+          name: 'opencode-go',
+          disabled: true,
+          fetch: fakeFetch,
+        }),
+      )
+      expect(message).toContain(`HTTP ${status}`)
+      expectNoLeak(message)
+    })
+  })
+
+  describe('setEqualOpenAICompat', () => {
+    test('a readback carrying auth-index and disabled: false equals the tracked entry', () => {
+      const {disabled: _disabled, ...trackedWithoutDisabled} = tracked
+      const live = [normalizeOpenAICompatEntry(liveShape)]
+      expect(setEqualOpenAICompat([trackedWithoutDisabled], live)).toBe(true)
+      expect(setEqualOpenAICompat([tracked], live)).toBe(true)
+    })
+
+    test('models in a different order compare equal', () => {
+      const reordered = {...tracked, models: [...tracked.models].reverse()}
+      expect(setEqualOpenAICompat([tracked], [reordered])).toBe(true)
+    })
+
+    test('headers compare as a map regardless of key order', () => {
+      const a = {...tracked, headers: {a: '1', b: '2'}}
+      const b = {...tracked, headers: {b: '2', a: '1'}}
+      expect(setEqualOpenAICompat([a], [b])).toBe(true)
+    })
+
+    test('header value, extra header and missing header differences are unequal', () => {
+      expect(setEqualOpenAICompat([tracked], [{...tracked, headers: {'x-opencode-session': 'other'}}])).toBe(false)
+      expect(setEqualOpenAICompat([tracked], [{...tracked, headers: {...tracked.headers, extra: '1'}}])).toBe(false)
+      expect(setEqualOpenAICompat([tracked], [{...tracked, headers: {}}])).toBe(false)
+    })
+
+    test('a differing model alias, a missing model or an extra model is unequal', () => {
+      const glm = {name: 'glm-5.3', alias: 'glm-5.3'}
+      const kimi = {name: 'kimi-k2.6', alias: 'kimi-k2.6'}
+      expect(setEqualOpenAICompat([tracked], [{...tracked, models: [{name: 'glm-5.3', alias: 'other'}, kimi]}])).toBe(
+        false,
+      )
+      expect(setEqualOpenAICompat([tracked], [{...tracked, models: [glm]}])).toBe(false)
+      expect(
+        setEqualOpenAICompat([tracked], [{...tracked, models: [...tracked.models, {name: 'x', alias: 'x'}]}]),
+      ).toBe(false)
+    })
+
+    test('a differing api-key, base-url, prefix or disabled flag is unequal', () => {
+      expect(setEqualOpenAICompat([tracked], [{...tracked, 'api-key-entries': [{'api-key': 'rotated'}]}])).toBe(false)
+      expect(setEqualOpenAICompat([tracked], [{...tracked, 'base-url': 'https://other.example/v1'}])).toBe(false)
+      expect(setEqualOpenAICompat([tracked], [{...tracked, prefix: 'other'}])).toBe(false)
+      expect(setEqualOpenAICompat([tracked], [{...tracked, disabled: true}])).toBe(false)
+    })
+
+    test('lists of different length, name, or an empty vs non-empty list are unequal', () => {
+      expect(setEqualOpenAICompat([tracked], [])).toBe(false)
+      expect(setEqualOpenAICompat([], [tracked])).toBe(false)
+      expect(setEqualOpenAICompat([tracked], [{...tracked, name: 'other'}])).toBe(false)
+      expect(setEqualOpenAICompat([tracked], [tracked, {...tracked, name: 'extra'}])).toBe(false)
+    })
+
+    test('two empty lists are equal', () => {
+      expect(setEqualOpenAICompat([], [])).toBe(true)
+    })
   })
 })

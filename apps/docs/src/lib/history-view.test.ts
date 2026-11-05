@@ -368,6 +368,105 @@ describe('end-to-end probe', () => {
   })
 })
 
+describe('end-to-end probe: the Go route never blends into the Claude cell', () => {
+  const both = (
+    claude: 'p' | 'f' | 'u',
+    go: 'p' | 'f' | 'u',
+    detail: HistorySample['d'] = {},
+    minutes = 60,
+  ): HistorySample =>
+    sample(
+      minutes,
+      {'public-reachability': 'p', 'deploy-state': 'p', 'provider-route': claude, 'provider-route-go': go},
+      {'provider-route': {reason: 'ok', probeAt: at(minutes - 10)}, ...detail},
+    )
+
+  it('builds the cell, verdict and endToEnd from provider-route when provider-route-go fails', () => {
+    const withGoFail = buildAppView(
+      'cliproxy',
+      [both('p', 'f', {'provider-route-go': {reason: 'quota-or-billing', probeAt: at(50)}})],
+      new Date(at(60)),
+    )
+    const claudeOnly = buildAppView(
+      'cliproxy',
+      [
+        sample(
+          60,
+          {'public-reachability': 'p', 'deploy-state': 'p', 'provider-route': 'p'},
+          {'provider-route': {reason: 'ok', probeAt: at(50)}},
+        ),
+      ],
+      new Date(at(60)),
+    )
+
+    expect(withGoFail.cells['end-to-end']).toEqual(claudeOnly.cells['end-to-end'])
+    expect(withGoFail.cells['end-to-end'].result).toBe('pass')
+    expect(withGoFail.endToEnd).toEqual(claudeOnly.endToEnd)
+    expect(withGoFail.verdict).toBe('pass')
+    expect(withGoFail.verdictLabel).toBe(claudeOnly.verdictLabel)
+  })
+
+  it('still fails on a dead Claude route when Go passes', () => {
+    const view = buildAppView('cliproxy', [both('f', 'p')], new Date(at(60)))
+
+    expect(view.cells['end-to-end'].result).toBe('fail')
+    expect(view.verdict).toBe('fail')
+  })
+
+  it('takes the stale flag from the Claude probe only, in both directions', () => {
+    const goStale = buildAppView(
+      'cliproxy',
+      [both('p', 'u', {'provider-route-go': {reason: 'stale', probeAt: at(0)}})],
+      new Date(at(60)),
+    )
+    const claudeStale = buildAppView(
+      'cliproxy',
+      [
+        sample(
+          60,
+          {
+            'public-reachability': 'p',
+            'deploy-state': 'p',
+            'provider-route': 'u',
+            'provider-route-go': 'p',
+          },
+          {'provider-route': {reason: 'stale', probeAt: at(0)}, 'provider-route-go': {reason: 'ok', probeAt: at(55)}},
+        ),
+      ],
+      new Date(at(60)),
+    )
+
+    expect(goStale.endToEnd.stale).toBe(false)
+    expect(goStale.cells['end-to-end'].note).toBeUndefined()
+    expect(goStale.verdict).toBe('pass')
+    expect(claudeStale.endToEnd.stale).toBe(true)
+    expect(claudeStale.verdict).toBe('unknown')
+  })
+
+  it('does not publish a Go row in Phase 1', () => {
+    const view = buildAppView('cliproxy', [both('p', 'p')], new Date(at(60)))
+
+    expect(view.observations.map(observation => observation.id)).toEqual([
+      'public-reachability',
+      'deploy-state',
+      'provider-route',
+    ])
+  })
+
+  it('renders an older sample that predates provider-route-go exactly as before', () => {
+    const older = sample(
+      60,
+      {'public-reachability': 'p', 'deploy-state': 'p', 'provider-route': 'p'},
+      {'provider-route': {reason: 'ok', probeAt: at(50)}},
+    )
+    const view = buildAppView('cliproxy', [older], new Date(at(60)))
+
+    expect(view.endToEnd).toMatchObject({result: 'pass', measured: true, stale: false})
+    expect(view.verdict).toBe('pass')
+    expect(view.cells['end-to-end'].result).toBe('pass')
+  })
+})
+
 describe('generatedAt staleness', () => {
   it('is stale only after 90 minutes', () => {
     expect(isStale(at(0), new Date(at(90)))).toBe(false)

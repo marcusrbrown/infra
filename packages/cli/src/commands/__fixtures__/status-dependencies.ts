@@ -82,6 +82,16 @@ export function routeObservation(
   })
 }
 
+export function goRouteObservation(
+  result: 'pass' | 'fail' | 'unknown' = 'pass',
+  detail?: Observation['detail'],
+): Observation {
+  return observe(declaredObservation('cliproxy', 'provider-route-go'), result, {
+    now: FIXED_NOW,
+    ...(detail === undefined ? {} : {detail}),
+  })
+}
+
 export function probeObservation(result: 'pass' | 'fail' | 'unknown' = 'pass'): Observation {
   return observe({id: 'public-reachability', kind: 'reachability', source: 'http'}, result, {
     detail: {statusCode: 200, durationMs: 42},
@@ -110,7 +120,7 @@ export function makeStatusDependencies(overrides: Partial<StatusDependencies> = 
     getVpnStatusSummary: async () => healthyVpn,
     publicProbes,
     readDeployStates: async () => Object.fromEntries(APP_IDS.map(app => [app, deployObservation()])),
-    readMonitorState: async () => routeObservation(),
+    readMonitorState: async () => [routeObservation(), goRouteObservation()],
     now: () => FIXED_NOW,
     collectorDeadlineMs: 5000,
     ...overrides,
@@ -152,7 +162,7 @@ export function withStatusEnv<T>(run: () => Promise<T>): Promise<T> {
 
 export const EXPECTED_OBSERVATION_IDS: Record<AppId, string[]> = {
   keeweb: ['public-reachability', 'deploy-state'],
-  cliproxy: ['public-reachability', 'container-running', 'deploy-state', 'provider-route'],
+  cliproxy: ['public-reachability', 'container-running', 'deploy-state', 'provider-route', 'provider-route-go'],
   gateway: ['public-reachability', 'compose-services', 'workspace-memory', 'deploy-state'],
   umami: ['public-reachability', 'compose-services', 'deploy-state'],
   dashboard: ['public-reachability', 'compose-services', 'deploy-state'],

@@ -5519,3 +5519,343 @@ describe('site.yaml: contract', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// OpenCode Go proxy route: deploy secret wiring and router filters
+// ---------------------------------------------------------------------------
+//
+// CLIPROXY_OPENCODE_GO_KEY and CLIPROXY_API_KEY are repository secrets (the router's deploy-cliproxy caller job
+// has no environment, so it cannot resolve Environment-scoped secrets: actions/runner#4453). The router passes them
+// to the callee explicitly, the callee declares them optional, and apps/cliproxy/src/deploy.ts preflight is the
+// only gate on them. See docs/plans/2026-11-04-001-feat-opencode-go-proxy-route-plan.md (Unit 3).
+
+async function loadWorkflowYaml(path: string): Promise<Record<string, unknown>> {
+  const parsed: unknown = parseYaml(await Bun.file(path).text())
+  if (!isRecord(parsed)) throw new Error(`${path} did not parse to a mapping`)
+  return parsed
+}
+
+function workflowJob(workflow: Record<string, unknown>, id: string): Record<string, unknown> {
+  const jobs = isRecord(workflow.jobs) ? workflow.jobs : {}
+  const found = jobs[id]
+  if (!isRecord(found)) throw new Error(`job ${id} not found`)
+  return found
+}
+
+/** Expands a single top-level `{a,b}/**` brace into its alternatives. */
+function expandBraceGlob(pattern: string): string[] {
+  const match = /^\{([^}]+)\}(\/.*)$/.exec(pattern)
+  if (!match) return [pattern]
+  return (match[1] ?? '').split(',').map(alternative => `${alternative}${match[2] ?? ''}`)
+}
+
+describe('cliproxy deploy: OpenCode Go secret wiring and router filters', () => {
+  const GO_SECRETS = ['CLIPROXY_OPENCODE_GO_KEY', 'CLIPROXY_API_KEY'] as const
+  const CALLEE = resolve(REPO_ROOT, '.github/workflows/deploy-cliproxy.yaml')
+  const ROUTER = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  /** The first (brace-expanded) pattern of a dorny/paths-filter group. */
+  async function filterGroup(name: string): Promise<string[]> {
+    const detect = workflowJob(await loadWorkflowYaml(ROUTER), 'detect-changes')
+    const filterStep = stepsOf(detect).find(step => step.id === 'filter')
+    const filters = isRecord(filterStep?.with) ? filterStep.with.filters : undefined
+    const parsed: unknown = typeof filters === 'string' ? parseYaml(filters) : undefined
+    const group = isRecord(parsed) ? parsed[name] : undefined
+    if (!Array.isArray(group)) throw new Error(`paths-filter group ${name} not found`)
+    return group.filter((pattern): pattern is string => typeof pattern === 'string')
+  }
+
+  for (const secret of GO_SECRETS) {
+    it(`deploy-cliproxy.yaml declares ${secret} as an optional workflow_call secret`, async () => {
+      const workflow = await loadWorkflowYaml(CALLEE)
+      const on = isRecord(workflow.on) ? workflow.on : {}
+      const call = isRecord(on.workflow_call) ? on.workflow_call : {}
+      const secrets = isRecord(call.secrets) ? call.secrets : {}
+      expect(secrets[secret]).toEqual({required: false})
+    })
+
+    it(`deploy-cliproxy.yaml puts ${secret} in the Deploy step env and nowhere else`, async () => {
+      const steps = stepsOf(workflowJob(await loadWorkflowYaml(CALLEE), 'deploy-cliproxy'))
+      const deployStep = steps.find(step => step.run === 'bun run --cwd apps/cliproxy deploy')
+      expect(deployStep).toBeDefined()
+      const env = isRecord(deployStep?.env) ? deployStep.env : {}
+      expect(env[secret]).toBe(ghaExpression(`secrets.${secret}`))
+      for (const other of steps.filter(step => step !== deployStep)) {
+        expect(JSON.stringify(other)).not.toContain(secret)
+      }
+    })
+
+    it(`deploy.yaml passes ${secret} to the deploy-cliproxy call explicitly`, async () => {
+      const call = workflowJob(await loadWorkflowYaml(ROUTER), 'deploy-cliproxy')
+      expect(call.secrets).not.toBe('inherit')
+      const secrets = isRecord(call.secrets) ? call.secrets : {}
+      expect(secrets[secret]).toBe(ghaExpression(`secrets.${secret}`))
+    })
+
+    it(`the callee does not validate ${secret} itself (deploy.ts preflight is the only gate)`, async () => {
+      const steps = stepsOf(workflowJob(await loadWorkflowYaml(CALLEE), 'deploy-cliproxy'))
+      const validate = steps.find(step => step.name === 'Validate required secrets')
+      expect(JSON.stringify(validate)).not.toContain(secret)
+    })
+  }
+
+  it('the router cliproxy filter includes packages/shared/opencode-go/**', async () => {
+    const [first] = await filterGroup('cliproxy')
+    expect(expandBraceGlob(first ?? '')).toContain('packages/shared/opencode-go/**')
+  })
+
+  it('the router broker filter does not include packages/shared/opencode-go', async () => {
+    const broker = await filterGroup('broker')
+    expect(broker.flatMap(expandBraceGlob)).not.toContain('packages/shared/opencode-go/**')
+    expect(broker.join('\n')).not.toContain('opencode-go')
+  })
+
+  it('the cliproxy filter still triggers on the shared cliproxy package and the app', async () => {
+    const [first] = await filterGroup('cliproxy')
+    expect(expandBraceGlob(first ?? '')).toEqual(
+      expect.arrayContaining(['apps/cliproxy/**', 'packages/shared/cliproxy/**']),
+    )
+  })
+
+  it('the local deploy env helper passes both keys through to apps/cliproxy/src/deploy.ts', async () => {
+    const {getLocalDeployEnv} = await import('./commands/cliproxy/deploy')
+    const saved = {go: process.env.CLIPROXY_OPENCODE_GO_KEY, api: process.env.CLIPROXY_API_KEY}
+    process.env.CLIPROXY_OPENCODE_GO_KEY = 'go-sentinel'
+    process.env.CLIPROXY_API_KEY = 'api-sentinel'
+    try {
+      const env = getLocalDeployEnv()
+      expect(env.CLIPROXY_OPENCODE_GO_KEY).toBe('go-sentinel')
+      expect(env.CLIPROXY_API_KEY).toBe('api-sentinel')
+    } finally {
+      if (saved.go === undefined) delete process.env.CLIPROXY_OPENCODE_GO_KEY
+      else process.env.CLIPROXY_OPENCODE_GO_KEY = saved.go
+      if (saved.api === undefined) delete process.env.CLIPROXY_API_KEY
+      else process.env.CLIPROXY_API_KEY = saved.api
+    }
+  })
+
+  it('apps/cliproxy deploy.ts keeps the Go and downstream keys out of ssh/scp child environments', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, 'apps/cliproxy/src/deploy.ts')).text()
+    expect(text).toContain('childProcessEnv')
+    expect(text).toMatch(/HTTP_ONLY_ENV_KEYS[^=]*=\s*new Set\(\[\s*'CLIPROXY_OPENCODE_GO_KEY',\s*'CLIPROXY_API_KEY'/)
+  })
+})
+
+describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
+  const WORKFLOW_FILE = resolve(REPO_ROOT, '.github/workflows/opencode-go-privacy.yaml')
+  const SNAPSHOT_PATH = 'packages/shared/opencode-go/privacy-snapshot.json'
+  const BRANCH = 'opencode-go-privacy'
+
+  async function load(): Promise<{text: string; workflow: Record<string, unknown>; steps: Record<string, unknown>[]}> {
+    const text = await Bun.file(WORKFLOW_FILE).text()
+    const workflow = await loadWorkflowYaml(WORKFLOW_FILE)
+    return {text, workflow, steps: stepsOf(workflowJob(workflow, 'refresh'))}
+  }
+
+  const stepIndex = (steps: Record<string, unknown>[], id: string): number => steps.findIndex(step => step.id === id)
+
+  it('triggers daily and on dispatch only, with workflow-scoped concurrency and read-only permissions', async () => {
+    const {workflow} = await load()
+    const on = isRecord(workflow.on) ? workflow.on : {}
+    expect(Object.keys(on).sort()).toEqual(['schedule', 'workflow_dispatch'])
+    expect(Array.isArray(on.schedule) ? on.schedule : []).toHaveLength(1)
+    expect(workflow.permissions).toEqual({contents: 'read'})
+    expect(workflow.concurrency).toEqual({group: BRANCH, 'cancel-in-progress': false})
+    expect(existsSync(resolve(REPO_ROOT, '.github/workflows/opencode-go-privacy.yml'))).toBe(false)
+  })
+
+  it('SHA-pins every action with a version comment (shape only, never an exact SHA)', async () => {
+    const {text} = await load()
+    const usesLines = text.split('\n').filter(line => /^\s*(?:-\s+)?uses:/.test(line))
+
+    expect(usesLines.length).toBeGreaterThanOrEqual(3)
+    for (const line of usesLines) {
+      const match = USES_SHA_LINE_RE.exec(line)
+      expect(match, `not SHA-pinned: ${line.trim()}`).not.toBeNull()
+      expect(match?.[2] ?? '', `not a full SHA: ${line.trim()}`).toMatch(/^[a-f0-9]{40}$/)
+      expect(VERSION_COMMENT_RE.test(match?.[3] ?? ''), `missing version comment: ${line.trim()}`).toBe(true)
+    }
+  })
+
+  it('never uses secrets: inherit', async () => {
+    const {text} = await load()
+    expect(text).not.toMatch(/secrets:\s*inherit/)
+  })
+
+  it('checks out with persist-credentials: false and no checkout token', async () => {
+    const {steps} = await load()
+    const checkouts = steps.filter(step => typeof step.uses === 'string' && step.uses.startsWith('actions/checkout@'))
+    expect(checkouts).toHaveLength(1)
+    const withBlock = isRecord(checkouts[0]?.with) ? checkouts[0].with : {}
+    expect(withBlock['persist-credentials']).toBe(false)
+    expect(withBlock.token).toBeUndefined()
+  })
+
+  it('runs the refresh after install and before any token is minted, and fails the run when it fails', async () => {
+    const {steps} = await load()
+    const install = steps.findIndex(step => step.run === 'bun install --frozen-lockfile --ignore-scripts')
+    const refresh = stepIndex(steps, 'refresh')
+    const token = stepIndex(steps, 'get-app-token')
+
+    expect(install).toBeGreaterThanOrEqual(0)
+    expect(refresh).toBeGreaterThan(install)
+    expect(token).toBeGreaterThan(refresh)
+    expect(String(steps[refresh]?.run)).toContain('bun run refresh:go-privacy')
+    // No `continue-on-error`: a parse failure must stop the job before the token step.
+    expect(steps[refresh]?.['continue-on-error']).toBeUndefined()
+    expect(steps[refresh]?.if).toBeUndefined()
+  })
+
+  it('mints the App token only when the snapshot changed or a stale PR is open, with exactly contents and pull-requests write', async () => {
+    const {steps} = await load()
+    const step = steps[stepIndex(steps, 'get-app-token')]
+    expect(step?.uses).toMatch(/^actions\/create-github-app-token@[a-f0-9]{40}$/)
+    expect(step?.if).toBe("steps.refresh.outputs.changed == 'true' || steps.stale-pr.outputs.stale == 'true'")
+
+    const withBlock = isRecord(step?.with) ? step.with : {}
+    const permissions = Object.fromEntries(Object.entries(withBlock).filter(([key]) => key.startsWith('permission-')))
+    expect(permissions).toEqual({'permission-contents': 'write', 'permission-pull-requests': 'write'})
+    expect(withBlock['app-id']).toBe(ghaExpression('secrets.APPLICATION_ID'))
+    expect(withBlock['private-key']).toBe(ghaExpression('secrets.APPLICATION_PRIVATE_KEY'))
+  })
+
+  it('exposes the token to the PR step and the stale-PR close step alone', async () => {
+    const {steps} = await load()
+    const tokenRef = ghaExpression('steps.get-app-token.outputs.token')
+    const holders = steps.filter(step => JSON.stringify(step).includes('steps.get-app-token.outputs.token'))
+
+    expect(holders.map(step => step.name)).toEqual(['Open snapshot PR', 'Close stale snapshot PR'])
+    expect(holders[0]?.if).toBe("steps.refresh.outputs.changed == 'true'")
+    expect(holders[1]?.if).toBe("steps.stale-pr.outputs.stale == 'true'")
+    for (const holder of holders) {
+      const env = isRecord(holder.env) ? holder.env : {}
+      expect(env.GH_TOKEN).toBe(tokenRef)
+    }
+    // Passed through the environment to git, never as an argv value.
+    expect(String(holders[0]?.run)).toContain('GIT_CONFIG_VALUE_0')
+    expect(String(holders[0]?.run)).not.toMatch(/\$\{?GH_TOKEN[^"]*"[^"]*\bgit\b/)
+  })
+
+  it('looks for a stale PR with the read-only workflow token, only when the snapshot did not change', async () => {
+    const {steps, workflow} = await load()
+    const refresh = stepIndex(steps, 'refresh')
+    const lookup = stepIndex(steps, 'stale-pr')
+    const token = stepIndex(steps, 'get-app-token')
+    const step = steps[lookup]
+
+    // After the refresh succeeded, before any write-capable token exists.
+    expect(lookup).toBeGreaterThan(refresh)
+    expect(token).toBeGreaterThan(lookup)
+    expect(step?.if).toBe("steps.refresh.outputs.changed != 'true'")
+    expect(isRecord(step?.env) ? step.env : {}).toEqual({GH_TOKEN: ghaExpression('github.token')})
+    expect(step?.['continue-on-error']).toBeUndefined()
+
+    const script = String(step?.run)
+    expect(script).toContain(`branch="${BRANCH}"`)
+    expect(script).toContain(`gh pr list --state open --head "${'$'}{branch}" --base main`)
+    // A fork's same-named branch is not ours to close.
+    expect(script).toContain('isCrossRepository')
+    expect(script).toContain('stale=true')
+    expect(script).toContain('stale=false')
+    expect(script).not.toMatch(/gh pr (?:close|edit|create|merge)|git push|gh api/)
+
+    // The lookup lists pull requests with a read grant only.
+    const job = workflowJob(workflow, 'refresh')
+    expect(job.permissions).toEqual({contents: 'read', 'pull-requests': 'read'})
+  })
+
+  it('closes the stale PR with a comment and deletes its fixed branch, in that order, and runs only when stale', async () => {
+    const {steps} = await load()
+    const close = steps.find(step => step.name === 'Close stale snapshot PR')
+    const token = stepIndex(steps, 'get-app-token')
+
+    expect(close).toBeDefined()
+    expect(steps.indexOf(close ?? {})).toBeGreaterThan(token)
+    expect(close?.if).toBe("steps.stale-pr.outputs.stale == 'true'")
+    const env = isRecord(close?.env) ? close.env : {}
+    expect(env.PR_NUMBER).toBe(ghaExpression('steps.stale-pr.outputs.number'))
+
+    const script = String(close?.run)
+    expect([...script.matchAll(/^\s*branch="([^"]*)"/gm)].map(match => match[1])).toEqual([BRANCH])
+    expect(script).toMatch(/gh pr close "\$\{PR_NUMBER\}" --comment "[^"]*match main[^"]*"/)
+    expect(script).toContain(`gh api --method DELETE "repos/${'$'}{GITHUB_REPOSITORY}/git/refs/heads/${'$'}{branch}"`)
+    expect(script.indexOf('gh pr close')).toBeLessThan(script.indexOf('gh api'))
+    expect(script).not.toMatch(/git push|--delete-branch|--force/)
+  })
+
+  it('passes the read-only workflow token to the refresh step, and no write-capable token appears elsewhere', async () => {
+    const {steps, text} = await load()
+    const refresh = steps[stepIndex(steps, 'refresh')]
+    const env = isRecord(refresh?.env) ? refresh.env : {}
+    expect(env).toEqual({GITHUB_TOKEN: ghaExpression('github.token')})
+
+    // Secrets (the App credentials) are read by the token step alone; the refresh step never sees them.
+    const secretReaders = steps.filter(step => JSON.stringify(step).includes('secrets.'))
+    expect(secretReaders.map(step => step.id)).toEqual(['get-app-token'])
+    expect(JSON.stringify(refresh)).not.toContain('get-app-token')
+    expect(JSON.stringify(steps[stepIndex(steps, 'stale-pr')])).not.toContain('get-app-token')
+    // The job-level and workflow-level grants stay read-only, so github.token cannot write.
+    expect(text).not.toMatch(/^\s+(?:contents|pull-requests|issues): write/m)
+  })
+
+  it('pushes a single fixed branch with --force-with-lease and never a bare force', async () => {
+    const {steps} = await load()
+    const script = String(steps.find(step => step.name === 'Open snapshot PR')?.run)
+
+    expect([...script.matchAll(/^\s*branch="([^"]*)"/gm)].map(match => match[1])).toEqual([BRANCH])
+    expect(script).toContain(`git push origin "${'$'}{branch}" --force-with-lease`)
+    expect(script).not.toMatch(/--force(?!-with-lease)/)
+    expect(script).not.toMatch(/git push [^\n]*\+/)
+    // The branch name is never derived from the run, the date or the upstream SHA.
+    expect(script).not.toMatch(/branch="[^"]*(\$|`)/)
+  })
+
+  it('commits only the snapshot and opens or updates one PR against main', async () => {
+    const {steps} = await load()
+    const script = String(steps.find(step => step.name === 'Open snapshot PR')?.run)
+
+    expect(script).toContain(`snapshot="${SNAPSHOT_PATH}"`)
+    expect(script).toContain(`git add -- "${'$'}{snapshot}"`)
+    expect(script).not.toMatch(/git add (?!--)|git commit -a|git add -A|git add \./)
+    expect(script).toContain('gh pr edit')
+    expect(script).toContain('gh pr create')
+    expect(script).toContain('--base main')
+    expect(existsSync(resolve(REPO_ROOT, SNAPSHOT_PATH))).toBe(true)
+  })
+
+  it('does not enable auto-merge', async () => {
+    const {steps} = await load()
+    // Header comments mention the rule in prose; only executable content is checked.
+    const executable = JSON.stringify(steps)
+    expect(executable).not.toMatch(/auto-?merge|--auto\b|gh pr merge|enablePullRequestAutoMerge/i)
+  })
+
+  it('is main-only, so the PR branch is never cut from another ref', async () => {
+    const {workflow} = await load()
+    expect(workflowJob(workflow, 'refresh').if).toBe("github.ref == 'refs/heads/main'")
+  })
+
+  it('keeps the snapshot path under the renovate-changesets exclude patterns', async () => {
+    const changesets = await loadWorkflowYaml(resolve(REPO_ROOT, '.github/workflows/renovate-changesets.yaml'))
+    const jobs = isRecord(changesets.jobs) ? Object.values(changesets.jobs) : []
+    const patterns = jobs
+      .flatMap(job => stepsOf(job))
+      .map(step => (isRecord(step.with) ? step.with['exclude-patterns'] : undefined))
+      .find((value): value is string => typeof value === 'string')
+
+    expect(patterns).toBeDefined()
+    const globs = (patterns ?? '').split(',').map(pattern => pattern.trim())
+    expect(globs.some(pattern => new Bun.Glob(pattern).match(SNAPSHOT_PATH))).toBe(true)
+  })
+
+  it('does not add the snapshot path to the router filters, which already cover it through the cliproxy group', async () => {
+    const router = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
+    expect(router).not.toContain('privacy-snapshot.json')
+  })
+
+  it('exposes the root script the workflow runs', async () => {
+    const pkg: unknown = JSON.parse(await Bun.file(resolve(REPO_ROOT, 'package.json')).text())
+    const scripts = isRecord(pkg) && isRecord(pkg.scripts) ? pkg.scripts : {}
+    expect(scripts['refresh:go-privacy']).toBe('bun run apps/cliproxy/scripts/refresh-go-privacy.ts')
+  })
+})

@@ -42,8 +42,8 @@ The provider set is hard-coded to Anthropic and OpenAI in setup, model listing, 
 - R2. A Go model id can never collide with a Claude or GPT model id. OpenCode sends the bare upstream id (`glm-5.3`), and the proxy routes it without forcing the prefix. The deploy fails if any exposed Go id equals a model id served by another upstream.
 - R3. The deploy owns the Go upstream entry. It refuses to write if the live upstream section holds any entry it doesn't track. Otherwise it applies the tracked entry with the Go key from a `cliproxy` Environment secret. It then reads the entry back, compares it, and retries briefly before failing closed. Key values never appear in its output.
 - R4. After applying, the deploy sends one minimal request to a Go model through the proxy. It fails unless that request succeeds and is billed to the Go plan.
-- R5. The exposed models are the Go text models that a tracked privacy snapshot marks as zero-retention and not training on submitted data. The deploy reads only the snapshot.
-- R6. A script builds the snapshot from OpenCode's published Go privacy table at a pinned source commit. For each model it records training, retention, any region requirement and any agreement expiry. A scheduled workflow re-runs the script and opens a PR when the table changes, so new and removed models arrive for review without hand-editing.
+- R5. The exposed models are the Go text models that a tracked privacy snapshot marks as zero-retention and not training on submitted data. The deploy decides exposure from the snapshot, the tracked Go settings and the live Go model list, never from the docs page.
+- R6. A script builds the snapshot from OpenCode's published Go privacy table and records the source commit it read. For each model it records training, retention, any region requirement and any agreement expiry. A scheduled workflow re-runs the script and opens a PR when the table changes, so new and removed models arrive for review without hand-editing.
 - R7. The model list fails closed. A model is exposed only when the snapshot shows it as zero-retention. The deploy denies a model if any of these hold:
   - It appears in the live Go model list but not in the snapshot.
   - It is zero-retention only under a non-default region.
@@ -55,7 +55,7 @@ The provider set is hard-coded to Anthropic and OpenAI in setup, model listing, 
 
 - R9. `agent setup` offers OpenCode Go as a provider next to Anthropic and OpenAI. A repo can choose proxy-routed Go with the proxy key it already has.
 - R10. The gateway workspace accepts proxy-routed Go models. Its guard checks only that the selected model's provider points at the proxy. The workspace egress allowlist keeps blocking direct Go, and it must not gain the OpenCode inference host.
-- R11. Broker-minted credentials add the Go provider only together with a proxy base URL for it, so a minted key can never reach OpenCode directly. Every policy-matched run can then spend the Go plan. That is accepted.
+- R11. Broker-minted credentials add the Go provider only together with a proxy base URL for it, so a minted key can never reach OpenCode directly. Every policy-matched run can then spend the Go plan, and that is accepted. The mint response today is a bare `auth.json` map with no place for a base URL, so R11 is deferred until fro-bot/agent agrees a mint contract that carries one. Until then, broker responses stay Anthropic and OpenAI.
 - R12. `cliproxy models` can filter to Go models.
 
 **Status and alerting**
@@ -88,7 +88,7 @@ The provider set is hard-coded to Anthropic and OpenAI in setup, model listing, 
   - Until that PR merges, the live model is denied.
   - After merge, the next deploy exposes it.
   - A model marked as training on submitted data is never exposed.
-- AE5. **Covers R7.** DeepSeek's zero-retention agreement passes its recorded expiry. The next deploy stops exposing DeepSeek, even though the snapshot has not changed.
+- AE5. **Covers R7.** An exposed model's zero-retention agreement passes its recorded expiry. The next deploy stops exposing it, even though the snapshot has not changed. Between deploys, the monitor alerts on the exposed ineligible model.
 - AE6. **Covers R14, R15.** The Go plan hits its 5-hour limit.
   - The monitor opens a Go alert with a quota reason.
   - The Claude alert stays as it was.
@@ -133,7 +133,7 @@ The provider set is hard-coded to Anthropic and OpenAI in setup, model listing, 
 - **Phasing.** Phase 1 delivers all three stated gaps. Phase 2 depends on the billing probe and has real costs:
   - A direct-route key sits in a repo secret that runners can read, and any run in that repo can spend the plan with it.
   - Setup today writes one key and one base URL for every provider.
-- **Broker keys get Go.** This is accepted with its spend exposure. The proxy base URL requirement (R11) closes the misrouting risk.
+- **Broker keys get Go, once the mint contract carries a base URL.** The spend exposure is accepted. The proxy base URL requirement (R11) closes the misrouting risk. Phase 1 defers the broker change until that contract exists upstream.
 - **Prior work.**
   - Per-repo provider opt-in with one proxy key is recorded as completed in `docs/brainstorms/2026-05-25-fro-bot-openai-routing-opt-in-requirements.md`. That work excluded per-provider keys and usage dashboards. Phase 2's direct-route key and usage report are deliberate extensions of it.
   - `agent setup` as the owner of model credentials is recorded as completed in `docs/plans/2026-08-01-001-feat-agent-s3-durable-storage-plan.md`.

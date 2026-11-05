@@ -81,8 +81,8 @@ Commands:
     --key [key]                        API key (bearer). Falls back to CLIPROXY_API_KEY when omitted.
     --verbose                          Show owned_by and created date for each model.
 
-  cliproxy monitor                     Reconcile Anthropic provider authentication with one canonical GitHub issue and transition-only Discord alerts. Requires CLIPROXY_API_KEY, CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK, GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_ACTOR, and GITHUB_REPOSITORY_OWNER environment variables; prefer the cliproxy-auth-monitor.yaml GitHub Actions entrypoint for scheduled or synthetic validation.
-    --validation [mode]                Validation mode (live, synthetic-dead, or synthetic-healthy): live probes Anthropic; synthetic modes are owner-only isolated test transitions. (default: live)
+  cliproxy monitor                     Reconcile Anthropic and OpenCode Go provider routes, each with its own canonical GitHub issue and transition-only Discord alerts. Requires CLIPROXY_API_KEY, CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK, GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_ACTOR, and GITHUB_REPOSITORY_OWNER environment variables; prefer the cliproxy-auth-monitor.yaml GitHub Actions entrypoint for scheduled or synthetic validation.
+    --validation [mode]                Validation mode (live, synthetic-dead, or synthetic-healthy): live probes Anthropic and OpenCode Go; synthetic modes are owner-only isolated Anthropic test transitions. (default: live)
 
   cliproxy open                        Launch CLIProxyAPI TUI dashboard via SSH.
     --host [host]                      SSH host for CLIProxyAPI server. Falls back to CLIPROXY_DOMAIN or cliproxy.fro.bot.

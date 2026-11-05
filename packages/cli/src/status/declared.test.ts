@@ -23,6 +23,35 @@ describe('DECLARED_OBSERVATIONS', () => {
     }
   })
 
+  it('declares the Go route as a second GitHub-owned end-to-end observation after the Claude route', () => {
+    const ids = DECLARED_OBSERVATIONS.cliproxy.map(entry => entry.id)
+
+    expect(ids.indexOf('provider-route-go')).toBe(ids.indexOf('provider-route') + 1)
+    expect(declaredObservation('cliproxy', 'provider-route-go')).toEqual({
+      id: 'provider-route-go',
+      kind: 'end-to-end',
+      source: 'monitor',
+      owner: 'github',
+    })
+    expect(declaredObservation('cliproxy', 'provider-route')).toMatchObject({kind: 'end-to-end', owner: 'github'})
+  })
+
+  it('resolves the Go route from the GitHub readers, and to unknown/missing-result when they omit it', () => {
+    const go = observe(declaredObservation('cliproxy', 'provider-route-go'), 'fail', {
+      now: NOW,
+      detail: {reason: 'quota-or-billing'},
+    })
+
+    const supplied = assembleAppStatus('cliproxy', {kind: 'none'}, {kind: 'none'}, NOW, [go])
+    const omitted = assembleAppStatus('cliproxy', {kind: 'none'}, {kind: 'none'}, NOW, [])
+
+    expect(supplied.observations.find(entry => entry.id === 'provider-route-go')).toEqual(go)
+    expect(omitted.observations.find(entry => entry.id === 'provider-route-go')).toMatchObject({
+      result: 'unknown',
+      detail: {reason: 'missing-result'},
+    })
+  })
+
   it('looks up a declaration and rejects an undeclared id', () => {
     expect(declaredObservation('gateway', 'workspace-memory')).toMatchObject({kind: 'resource', owner: 'collector'})
     expect(() => declaredObservation('keeweb', 'workspace-memory')).toThrow('keeweb does not declare')

@@ -10,6 +10,7 @@ import {
   deployObservation,
   EXPECTED_OBSERVATION_IDS,
   FIXED_NOW,
+  goRouteObservation,
   healthyGateway,
   healthyUmami,
   makeStatusDependencies,
@@ -172,7 +173,7 @@ describe('top-level status --json (typed contract)', () => {
       },
       readMonitorState: async (options: {token: string | undefined}) => {
         seen.push(options.token)
-        return routeObservation()
+        return [routeObservation(), goRouteObservation()]
       },
     }
     const {ctx} = createCapturedCtx()
@@ -299,6 +300,35 @@ describe('top-level status --json (typed contract)', () => {
       detail: {reason: 'check-failed'},
     })
     expect(observation(monitorFailed, 'cliproxy', 'deploy-state').result).toBe('pass')
+  })
+
+  it('reports provider-route-go as its own monitor observation and keeps the Claude route separate', async () => {
+    const {envelope} = await runJson({
+      readMonitorState: async () => [
+        routeObservation('pass', {reason: 'ok'}),
+        goRouteObservation('fail', {reason: 'quota-or-billing'}),
+      ],
+    })
+
+    expect(observation(envelope, 'cliproxy', 'provider-route')).toMatchObject({result: 'pass', detail: {reason: 'ok'}})
+    expect(observation(envelope, 'cliproxy', 'provider-route-go')).toMatchObject({
+      kind: 'end-to-end',
+      source: 'monitor',
+      result: 'fail',
+      detail: {reason: 'quota-or-billing'},
+    })
+  })
+
+  it('makes both route observations unknown when the monitor reader throws', async () => {
+    const {envelope} = await runJson({
+      readMonitorState: async () => {
+        throw new Error('monitor exploded')
+      },
+    })
+
+    for (const id of ['provider-route', 'provider-route-go']) {
+      expect(observation(envelope, 'cliproxy', id)).toMatchObject({result: 'unknown', detail: {reason: 'check-failed'}})
+    }
   })
 
   it('reports a missing reader result as unknown for just that app', async () => {
@@ -791,7 +821,7 @@ describe('top-level status table (rendered from observations)', () => {
         keeweb: deployObservation('fail'),
         dashboard: deployObservation('unknown', {reason: 'at_gate'}),
       }),
-      readMonitorState: async () => routeObservation('fail', {reason: 'auth-401'}),
+      readMonitorState: async () => [routeObservation('fail', {reason: 'auth-401'}), goRouteObservation()],
     })
 
     expect(captured.stdout).toContain('| keeweb | ✅ pass | — | ❌ fail | — | — |')

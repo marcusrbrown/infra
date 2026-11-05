@@ -91,6 +91,7 @@ export const OBSERVATION_KINDS_BY_ID: Record<AppId, Readonly<Record<string, Obse
     'container-running': 'container-health',
     'deploy-state': 'deploy-state',
     'provider-route': 'end-to-end',
+    'provider-route-go': 'end-to-end',
   },
   gateway: {
     'public-reachability': 'reachability',

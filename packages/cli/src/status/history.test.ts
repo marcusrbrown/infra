@@ -115,6 +115,76 @@ describe('merge: happy path', () => {
   })
 })
 
+describe('merge: the Go route observation arrives on top of older samples', () => {
+  const ROUTE = {'public-reachability': 'p', 'deploy-state': 'p', 'provider-route': 'p'} as const
+
+  it('keeps older cliproxy samples without provider-route-go untouched and appends a sample that has it', () => {
+    const older = [sample(-2 * HOUR, {r: ROUTE}), sample(-HOUR, {r: ROUTE})]
+    const previous = historyOf(app => (app === 'cliproxy' ? older : [sample(-HOUR)]))
+    const incoming = {
+      ...incomingFor(),
+      cliproxy: {
+        t: NOW.toISOString(),
+        run: '9001',
+        att: 1,
+        r: {...ROUTE, 'provider-route-go': 'f'},
+        d: {'provider-route-go': {reason: 'quota-or-billing', probeAt: iso(-60_000)}},
+      },
+    } satisfies Record<AppId, HistorySample>
+
+    const merged = mergeHistory({previous, incoming, now: NOW})
+    const cliproxy = merged.history.apps.cliproxy
+
+    expect(cliproxy.slice(0, 2)).toEqual(older)
+    expect(cliproxy.slice(0, 2).every(entry => !('provider-route-go' in entry.r))).toBe(true)
+    expect(cliproxy.at(-1)?.r['provider-route-go']).toBe('f')
+    expect(cliproxy.at(-1)?.d?.['provider-route-go']).toEqual({
+      reason: 'quota-or-billing',
+      probeAt: iso(-60_000),
+    })
+    expect(serializeHistory(merged.history).files.length).toBeGreaterThan(0)
+  })
+
+  it('accepts every Go reason slug in a stored detail and rejects a cost or usage key', () => {
+    const reasons = [
+      'ok',
+      'billing-not-go',
+      'provider-missing',
+      'privacy-noncompliant',
+      'quota-or-billing',
+      'auth-401',
+      'auth-unavailable-503',
+      'probe-misconfigured',
+      'unrelated-http',
+      'timeout',
+      'network',
+      'no-probe-line',
+      'malformed-probe-line',
+      'multiple-probe-lines',
+    ]
+    for (const reason of reasons) {
+      const stored = {...sample(0, {r: {'provider-route-go': 'u'}}), d: {'provider-route-go': {reason}}}
+      expect(historySampleSchema.safeParse(stored).success).toBe(true)
+    }
+    for (const key of ['cost', 'usage', 'listCost', 'billingSource']) {
+      const stored = {...sample(0, {r: {'provider-route-go': 'p'}}), d: {'provider-route-go': {[key]: 1}}}
+      expect(historySampleSchema.safeParse(stored).success).toBe(false)
+    }
+  })
+
+  it('compacts a Go observation with only the allowlisted detail keys', () => {
+    const go = observe({id: 'provider-route-go', kind: 'end-to-end', source: 'monitor'}, 'fail', {
+      now: NOW,
+      detail: {reason: 'quota-or-billing', probeAt: iso(-60_000), durationMs: 5},
+    })
+
+    const compact = compactSample([go], {run: '5', att: 1}, NOW)
+
+    expect(compact.r).toEqual({'provider-route-go': 'f'})
+    expect(compact.d).toEqual({'provider-route-go': {reason: 'quota-or-billing', probeAt: iso(-60_000)}})
+  })
+})
+
 describe('merge: window and duplicates', () => {
   it('trims samples older than 90 days and the invariants allow exactly that drop', () => {
     const previous = historyOf(() => [

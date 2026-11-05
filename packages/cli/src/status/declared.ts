@@ -50,6 +50,7 @@ export const DECLARED_OBSERVATIONS: Record<AppId, readonly DeclaredObservation[]
     {id: 'container-running', kind: 'container-health', source: 'ssh', owner: 'collector'},
     deployState,
     {id: 'provider-route', kind: 'end-to-end', source: 'monitor', owner: 'github'},
+    {id: 'provider-route-go', kind: 'end-to-end', source: 'monitor', owner: 'github'},
   ],
   gateway: [
     publicReachability,

@@ -4,6 +4,15 @@ import type {AppCollection} from '../../status/collect'
 import type {JsonValue} from '../../status/observation'
 
 import {HTTP_TIMEOUT_MS, managementHeaders} from '@marcusrbrown/infra-shared/cliproxy/management'
+import {
+  computeEligibility,
+  parseSettings,
+  parseSnapshot,
+  type OpenCodeGoSettings,
+  type ParsedSnapshot,
+} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
+import privacySnapshotJson from '@marcusrbrown/infra-shared/opencode-go/privacy-snapshot.json'
+import openCodeGoSettingsJson from '@marcusrbrown/infra-shared/opencode-go/settings.json'
 import {z} from 'zod'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
@@ -526,6 +535,306 @@ export async function checkProviderAuth(
   return probe.human
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// OpenCode Go route probe. A separate surface from the Claude probe above: its own reason union, its own state map in
+// status/monitor-state.ts, and a human check that never reports Claude wording.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const GO_OWNER = 'opencode-go'
+const GO_MODEL_PREFIX = `${GO_OWNER}/`
+const GO_SESSION_HEADER = 'x-opencode-session'
+const GO_AUTH_UNAVAILABLE_MARKER = /auth_unavailable|no auth available/i
+const GO_MISSING_SESSION_MARKER = /MissingSessionID/i
+const GO_RUNBOOK = 'docs/runbooks/cliproxy-opencode-go.md'
+
+export type GoRouteReason =
+  | 'ok'
+  | 'billing-not-go'
+  | 'provider-missing'
+  | 'privacy-noncompliant'
+  | 'quota-or-billing'
+  | 'auth-401'
+  | 'auth-unavailable-503'
+  | 'probe-misconfigured'
+  | 'unrelated-http'
+  | 'timeout'
+  | 'network'
+
+export interface GoRouteClassification {
+  state: ProviderAuthState
+  reason: GoRouteReason
+}
+
+export interface GoRouteOptions {
+  verbose?: boolean
+  /** Parsed privacy snapshot. Defaults to the committed one; tests inject their own. */
+  snapshot?: ParsedSnapshot
+  /** Tracked settings. Defaults to the committed ones; tests inject their own. */
+  settings?: OpenCodeGoSettings
+  /** The clock used for agreement expiry. Defaults to now. */
+  now?: Date
+}
+
+interface GoRouteProbeResult {
+  classification: GoRouteClassification
+  human: CheckResult
+}
+
+const modelListSchema = z.object({
+  data: z.array(z.object({id: z.string().optional(), owned_by: z.string().optional()})),
+})
+
+/** Bare ids of every model the proxy lists as `owned_by: opencode-go` (each is listed bare and prefixed). */
+function listedGoIds(payload: unknown): string[] | null {
+  const parsed = modelListSchema.safeParse(payload)
+  if (!parsed.success) return null
+  const ids = new Set<string>()
+  for (const entry of parsed.data.data) {
+    if (entry.owned_by !== GO_OWNER || entry.id === undefined) continue
+    ids.add(entry.id.startsWith(GO_MODEL_PREFIX) ? entry.id.slice(GO_MODEL_PREFIX.length) : entry.id)
+  }
+  return [...ids].toSorted()
+}
+
+function isMissingSessionBody(bodyText: string): boolean {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyText)
+  } catch {
+    return GO_MISSING_SESSION_MARKER.test(bodyText)
+  }
+  if (typeof parsed === 'object' && parsed !== null) {
+    const candidates: unknown[] = [parsed, 'error' in parsed ? parsed.error : undefined]
+    for (const candidate of candidates) {
+      if (
+        typeof candidate === 'object' &&
+        candidate !== null &&
+        'type' in candidate &&
+        candidate.type === 'MissingSessionID'
+      )
+        return true
+    }
+  }
+  return GO_MISSING_SESSION_MARKER.test(bodyText)
+}
+
+/** `usage.opencode.billing_source` of a 2xx body, or null when it is absent or the body is not JSON. */
+function billingSourceOf(bodyText: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(bodyText)
+    if (typeof parsed !== 'object' || parsed === null || !('usage' in parsed)) return null
+    const {usage} = parsed
+    if (typeof usage !== 'object' || usage === null || !('opencode' in usage)) return null
+    const {opencode} = usage
+    if (typeof opencode !== 'object' || opencode === null || !('billing_source' in opencode)) return null
+    return typeof opencode.billing_source === 'string' ? opencode.billing_source : null
+  } catch {
+    return null
+  }
+}
+
+function goResult(
+  state: ProviderAuthState,
+  reason: GoRouteReason,
+  level: CheckLevel,
+  summary: string,
+  details: string[] | undefined,
+): GoRouteProbeResult {
+  return {
+    classification: {state, reason},
+    human: {
+      title: 'OpenCode Go route',
+      level,
+      summary,
+      details: details !== undefined && details.length > 0 ? details : undefined,
+    },
+  }
+}
+
+/** The preferred probe model when it is exposed; otherwise the first exposed id (the list is sorted). */
+function chooseGoProbeModel(exposed: readonly string[], preferred: string | undefined): string | undefined {
+  if (preferred !== undefined && exposed.includes(preferred)) return preferred
+  return exposed[0]
+}
+
+/**
+ * Probe the OpenCode Go route through the proxy: list `/v1/models`, check what is exposed against today's
+ * eligibility, then send one `max_tokens: 1` request with a fresh session id. Never throws on network or HTTP
+ * trouble; a snapshot that does not parse is a repo defect and does throw.
+ *
+ * Drift needs no call to opencode.ai: every exposed id counts as live, so an exposed model that the snapshot
+ * does not list, or lists as ineligible, is `privacy-noncompliant`.
+ *
+ * Neither the key, the session id, usage nor cost appears in the result.
+ */
+async function runGoRouteProbe(baseUrl: string, apiKey: string, options?: GoRouteOptions): Promise<GoRouteProbeResult> {
+  const verbose = options?.verbose === true
+  const snapshot = options?.snapshot ?? parseSnapshot(privacySnapshotJson)
+  const settings = options?.settings ?? parseSettings(openCodeGoSettingsJson)
+  const today = (options?.now ?? new Date()).toISOString().slice(0, 10)
+  const modelsEndpoint = `${baseUrl}/v1/models`
+  const endpoint = `${baseUrl}/v1/chat/completions`
+  const details: string[] = verbose ? [`URL: ${modelsEndpoint}`] : []
+
+  try {
+    const listResponse = await fetch(modelsEndpoint, {
+      headers: {authorization: `Bearer ${apiKey}`},
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    })
+    if (verbose) details.push(`Models status: ${listResponse.status}`)
+
+    if (listResponse.status === 401) {
+      return goResult('dead', 'auth-401', 'error', 'OpenCode Go route unavailable: proxy key rejected (401)', details)
+    }
+    if (!listResponse.ok) {
+      return goResult(
+        'unknown',
+        'unrelated-http',
+        'warning',
+        `Go model list returned HTTP ${listResponse.status}`,
+        details,
+      )
+    }
+
+    const exposed = listedGoIds(await parseJsonResponse(listResponse))
+    if (exposed === null) {
+      return goResult('unknown', 'unrelated-http', 'warning', 'Go model list was not a recognizable response', details)
+    }
+    if (exposed.length === 0) {
+      return goResult(
+        'dead',
+        'provider-missing',
+        'error',
+        `No ${GO_OWNER} models are listed in /v1/models — see ${GO_RUNBOOK}`,
+        details,
+      )
+    }
+
+    const {eligible} = computeEligibility(snapshot, exposed, today)
+    const nonCompliant = exposed.filter(id => !eligible.includes(id))
+    if (nonCompliant.length > 0) {
+      return goResult(
+        'dead',
+        'privacy-noncompliant',
+        'error',
+        `Exposed model(s) not eligible under the privacy snapshot: ${nonCompliant.join(', ')} — disable the entry, see ${GO_RUNBOOK}`,
+        details,
+      )
+    }
+
+    const model = chooseGoProbeModel(exposed, settings.defaultProbeModel)
+    if (model === undefined) {
+      return goResult('dead', 'provider-missing', 'error', 'No eligible Go model is listed', details)
+    }
+    if (verbose) details.push(`Model: ${model}`)
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+        [GO_SESSION_HEADER]: `infra-monitor-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify({model, messages: [{role: 'user', content: 'ping'}], max_tokens: 1}),
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    })
+    if (verbose) details.push(`Status: ${response.status}`)
+
+    if (response.ok) {
+      const bodyText = await readBodyText(response)
+      if (billingSourceOf(bodyText) === 'go') {
+        return goResult('healthy', 'ok', 'ok', `opencode-go route OK (${model})`, details)
+      }
+      return goResult(
+        'dead',
+        'billing-not-go',
+        'error',
+        `Go request for ${model} was not billed to the Go plan — check the OpenCode Console, see ${GO_RUNBOOK}`,
+        details,
+      )
+    }
+
+    if (response.status === 401) {
+      return goResult('dead', 'auth-401', 'error', 'OpenCode Go route unavailable: proxy key rejected (401)', details)
+    }
+    if (response.status === 429 || response.status === 402) {
+      return goResult(
+        'dead',
+        'quota-or-billing',
+        'error',
+        `OpenCode Go plan limit or balance exhausted (HTTP ${response.status})`,
+        details,
+      )
+    }
+
+    // The body is read at most once: only 400 and 503 consult it, and each is a distinct status.
+    if (response.status === 400) {
+      const bodyText = await readBodyText(response)
+      if (isMissingSessionBody(bodyText)) {
+        return goResult(
+          'unknown',
+          'probe-misconfigured',
+          'warning',
+          'Go probe sent no session id (HTTP 400 MissingSessionID)',
+          details,
+        )
+      }
+      if (isProviderMissingBody(bodyText)) {
+        return goResult(
+          'dead',
+          'provider-missing',
+          'error',
+          `OpenCode Go provider not registered for ${model} (HTTP 400) — check /v1/models, see ${GO_RUNBOOK}`,
+          details,
+        )
+      }
+    }
+
+    if (response.status === 503 && GO_AUTH_UNAVAILABLE_MARKER.test(await readBodyText(response))) {
+      return goResult('dead', 'auth-unavailable-503', 'error', 'OpenCode Go upstream auth unavailable (503)', details)
+    }
+
+    return goResult('unknown', 'unrelated-http', 'warning', `Go probe returned HTTP ${response.status}`, details)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const errorName = error instanceof Error ? error.name : ''
+    const isTimeout = /timeout|timed out|aborted/i.test(`${errorName} ${message}`)
+    return goResult(
+      'unknown',
+      isTimeout ? 'timeout' : 'network',
+      'warning',
+      `Go probe failed: ${isTimeout ? 'timed out' : 'network error'}`,
+      verbose ? [`URL: ${modelsEndpoint}`] : undefined,
+    )
+  }
+}
+
+export async function checkGoRouteState(
+  baseUrl: string,
+  apiKey: string,
+  options?: GoRouteOptions,
+): Promise<GoRouteClassification> {
+  const probe = await runGoRouteProbe(baseUrl, apiKey, options)
+  return probe.classification
+}
+
+/** The tracked settings: the injected ones, or the committed `settings.json`. Throws if they do not parse. */
+export function resolveGoSettings(settings?: OpenCodeGoSettings): OpenCodeGoSettings {
+  return settings ?? parseSettings(openCodeGoSettingsJson)
+}
+
+/**
+ * The human Go route check. When the tracked settings turn the route off it is off on purpose: no request is
+ * made and the line is informational (`ok`), so it can never affect the exit code.
+ */
+export async function checkGoRoute(baseUrl: string, apiKey: string, options?: GoRouteOptions): Promise<CheckResult> {
+  if (!resolveGoSettings(options?.settings).enabled) {
+    return {title: 'OpenCode Go route', level: 'ok', summary: 'disabled by tracked settings — not probed'}
+  }
+  const probe = await runGoRouteProbe(baseUrl, apiKey, options)
+  return probe.human
+}
+
 export type ManagementAccess = 'ok' | 'no-key' | 'denied' | 'rate-limited' | 'unavailable'
 
 interface ManagementAuthFailure {
@@ -742,6 +1051,7 @@ export async function cliproxyStatusAction(
   options: StatusOptions,
   ctx: ActionCtx,
   spawn: SpawnFn = defaultSpawn,
+  goSettings?: OpenCodeGoSettings,
 ): Promise<void> {
   let errorCount = 0
   try {
@@ -796,6 +1106,7 @@ export async function cliproxyStatusAction(
     // Upstream provider-auth probe — only when a downstream API key is available.
     if (providerKey) {
       results.push(await checkProviderAuth(baseUrl, providerKey, {verbose}))
+      results.push(await checkGoRoute(baseUrl, providerKey, {verbose, settings: goSettings}))
     } else {
       results.push({
         title: 'Upstream provider auth',

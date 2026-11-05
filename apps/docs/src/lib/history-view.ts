@@ -128,6 +128,13 @@ export interface AppView {
   contractVersion: string | undefined
 }
 
+/**
+ * Observations the history records but the site does not publish yet. The Go route is recorded for status and
+ * history, but it is its own signal: it must not widen the Claude cell, verdict or stale flag, and Phase 1 shows no
+ * Go row. The end-to-end view is therefore built from `provider-route` by id and nothing else in its kind.
+ */
+const UNPUBLISHED_IDS: ReadonlySet<string> = new Set(['provider-route-go'])
+
 const sampleMs = (sample: HistorySample): number => Date.parse(sample.t)
 const isProofKind = (kind: string): kind is ProofKind => (PROOF_KINDS as readonly string[]).includes(kind)
 
@@ -298,7 +305,7 @@ export function buildAppView(app: AppId, samples: readonly HistorySample[], now:
   const latest = inWindow.at(-1)
 
   const observations: ObservationView[] = Object.entries(OBSERVATION_KINDS_BY_ID[app]).flatMap(([id, kind]) => {
-    if (!isProofKind(kind)) return []
+    if (!isProofKind(kind) || UNPUBLISHED_IDS.has(id)) return []
     const carried = inWindow.filter(sample => id in sample.r)
     const latestCode = latest?.r[id]
     return [

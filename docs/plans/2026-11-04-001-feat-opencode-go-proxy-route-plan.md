@@ -554,7 +554,7 @@ flowchart TD
 
 - After the deploy, a dry-run of setup against a scratch repo shows the expected config and auth.
 
-- [ ] **Unit 5: Two-route probe, monitor and status**
+- [x] **Unit 5: Two-route probe, monitor and status**
 
 **Goal:** Go gets its own probe, alert state, and status observation, and the public view stops mixing routes.
 

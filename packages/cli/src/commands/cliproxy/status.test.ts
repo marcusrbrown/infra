@@ -1,7 +1,11 @@
+import type {ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
+
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../lib/mcp-ctx-fixture'
 import {
+  checkGoRoute,
+  checkGoRouteState,
   checkHttpReachability,
   checkProviderAuth,
   checkProviderAuthState,
@@ -1675,5 +1679,433 @@ describe('cliproxy abort signal', () => {
     await inspectRunningContainer('cliproxy-example-com', spawn)
 
     expect(seen.flat()).not.toContain('signal')
+  })
+})
+
+/** The proxy lists each Go model twice: bare and prefixed, both owned by opencode-go. */
+function modelList(ids: string[]): Response {
+  const data = ids.flatMap(id => [
+    {id, object: 'model', owned_by: 'opencode-go'},
+    {id: `opencode-go/${id}`, object: 'model', owned_by: 'opencode-go'},
+  ])
+  return Response.json({object: 'list', data: [{id: 'claude-sonnet-4-6', owned_by: 'anthropic'}, ...data]})
+}
+
+describe('checkGoRouteState (OpenCode Go classification)', () => {
+  const BASE = 'https://cliproxy.example.com'
+  const KEY = 'go-probe-secret-key'
+  const NOW = new Date('2026-11-04T12:00:00.000Z')
+  const entry = (overrides: Partial<ParsedSnapshot['models'][string]> = {}) => ({
+    zeroRetention: true,
+    trainsOnData: false,
+    regionGated: false,
+    agreementExpiry: null,
+    ...overrides,
+  })
+  const snapshot: ParsedSnapshot = {
+    source: {
+      repo: 'anomalyco/opencode',
+      path: 'services/www/src/docs/content/console/go.mdx',
+      commit: 'a'.repeat(40),
+    },
+    models: {
+      'glm-5.3': entry(),
+      'kimi-k3': entry(),
+      'trains-on-data': entry({trainsOnData: true}),
+      'expired-model': entry({agreementExpiry: '2026-11-03'}),
+    },
+    invalid: [],
+  }
+  const settings = {enabled: true, defaultProbeModel: 'glm-5.3'}
+  const options = {snapshot, settings, now: NOW}
+
+  const goOk = () => Response.json({choices: [], usage: {opencode: {billing_source: 'go'}}})
+
+  interface Seen {
+    url: string
+    method: string
+    headers: Record<string, string>
+    body?: string
+  }
+
+  function install(models: () => Response | Promise<Response>, chat: () => Response | Promise<Response>): Seen[] {
+    const seen: Seen[] = []
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      const headers = Object.fromEntries(new Headers(init?.headers).entries())
+      seen.push({
+        url,
+        method: init?.method ?? 'GET',
+        headers,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      })
+      if (url.endsWith('/v1/models')) return models()
+      if (url.endsWith('/v1/chat/completions')) return chat()
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+    return seen
+  }
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('is healthy/ok for a 2xx with billing_source go', async () => {
+    install(() => modelList(['glm-5.3', 'kimi-k3']), goOk)
+
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'healthy', reason: 'ok'})
+  })
+
+  it('is dead/billing-not-go for a 2xx with another billing source or none', async () => {
+    for (const body of [
+      {usage: {opencode: {billing_source: 'balance'}}},
+      {usage: {opencode: {}}},
+      {usage: {}},
+      {choices: []},
+    ]) {
+      install(
+        () => modelList(['glm-5.3']),
+        () => Response.json(body),
+      )
+      expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'billing-not-go'})
+    }
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response('not json', {status: 200}),
+    )
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'billing-not-go'})
+  })
+
+  it('is dead/provider-missing when no opencode-go models are listed', async () => {
+    const seen = install(() => Response.json({data: [{id: 'claude-sonnet-4-6', owned_by: 'anthropic'}]}), goOk)
+
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'provider-missing'})
+    expect(seen.some(request => request.url.endsWith('/v1/chat/completions'))).toBe(false)
+  })
+
+  it('is dead/provider-missing for a model_not_found 400 or the unknown-provider message', async () => {
+    const coded =
+      '{"error":{"message":"unknown provider for model glm-5.3","type":"invalid_request_error","code":"model_not_found"}}'
+    for (const body of [coded, 'unknown provider for model glm-5.3']) {
+      install(
+        () => modelList(['glm-5.3']),
+        () => new Response(body, {status: 400}),
+      )
+      expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'provider-missing'})
+    }
+  })
+
+  it('is dead/privacy-noncompliant when an exposed model is not eligible, without probing', async () => {
+    for (const exposed of [
+      ['glm-5.3', 'trains-on-data'],
+      ['glm-5.3', 'expired-model'],
+      ['glm-5.3', 'not-in-snapshot'],
+    ]) {
+      const seen = install(() => modelList(exposed), goOk)
+      expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'privacy-noncompliant'})
+      expect(seen.some(request => request.url.endsWith('/v1/chat/completions'))).toBe(false)
+    }
+  })
+
+  it('treats an agreement that expires today as still eligible', async () => {
+    const edge = {...snapshot, models: {...snapshot.models, 'glm-5.3': entry({agreementExpiry: '2026-11-04'})}}
+    install(() => modelList(['glm-5.3']), goOk)
+
+    expect(await checkGoRouteState(BASE, KEY, {...options, snapshot: edge})).toEqual({state: 'healthy', reason: 'ok'})
+  })
+
+  it('is dead/quota-or-billing for 429 and 402', async () => {
+    for (const status of [429, 402]) {
+      install(
+        () => modelList(['glm-5.3']),
+        () => new Response('limit', {status}),
+      )
+      expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'quota-or-billing'})
+    }
+  })
+
+  it('is dead/auth-401 for a 401 on the request and on the model list', async () => {
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response('nope', {status: 401}),
+    )
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'auth-401'})
+
+    install(() => new Response('nope', {status: 401}), goOk)
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'auth-401'})
+  })
+
+  it('is dead/auth-unavailable-503 only for a 503 carrying the marker', async () => {
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response('auth_unavailable: no auth available', {status: 503}),
+    )
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'auth-unavailable-503'})
+
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response('temporary', {status: 503}),
+    )
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'unrelated-http'})
+  })
+
+  it('is unknown/probe-misconfigured for a 400 MissingSessionID, never dead', async () => {
+    const body = '{"type":"MissingSessionID","message":"x-opencode-session is required"}'
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response(body, {status: 400}),
+    )
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'probe-misconfigured'})
+
+    const nested = '{"error":{"type":"MissingSessionID"}}'
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response(nested, {status: 400}),
+    )
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'probe-misconfigured'})
+  })
+
+  it('is unknown/unrelated-http for any other non-2xx, and for a bad or failing model list', async () => {
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response('teapot', {status: 418}),
+    )
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'unrelated-http'})
+
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response('{"error":{"message":"bad"}}', {status: 400}),
+    )
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'unrelated-http'})
+
+    install(() => new Response('boom', {status: 500}), goOk)
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'unrelated-http'})
+
+    install(() => Response.json({nope: true}), goOk)
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'unrelated-http'})
+  })
+
+  it('is unknown/timeout or unknown/network for a thrown error, on either request', async () => {
+    install(
+      () => modelList(['glm-5.3']),
+      () => {
+        throw new DOMException('', 'TimeoutError')
+      },
+    )
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'timeout'})
+
+    install(() => {
+      throw new Error('socket hang up')
+    }, goOk)
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'network'})
+  })
+
+  it('prefers the default probe model and falls back to the first exposed id when it is missing', async () => {
+    const preferred = install(() => modelList(['glm-5.3', 'kimi-k3']), goOk)
+    await checkGoRouteState(BASE, KEY, options)
+    const preferredBody = preferred.find(request => request.url.endsWith('/v1/chat/completions'))?.body
+    expect(JSON.parse(preferredBody ?? '{}')).toMatchObject({model: 'glm-5.3', max_tokens: 1})
+
+    const fallback = install(() => modelList(['kimi-k3']), goOk)
+    await checkGoRouteState(BASE, KEY, options)
+    const fallbackBody = fallback.find(request => request.url.endsWith('/v1/chat/completions'))?.body
+    expect(JSON.parse(fallbackBody ?? '{}').model).toBe('kimi-k3')
+
+    const bare = install(() => modelList(['kimi-k3']), goOk)
+    await checkGoRouteState(BASE, KEY, {...options, settings: {enabled: true}})
+    expect(JSON.parse(bare.find(r => r.url.endsWith('/v1/chat/completions'))?.body ?? '{}').model).toBe('kimi-k3')
+  })
+
+  it('sends a fresh non-empty x-opencode-session on every request, and never reuses one', async () => {
+    const sessions: string[] = []
+    for (let run = 0; run < 2; run += 1) {
+      const seen = install(() => modelList(['glm-5.3']), goOk)
+      await checkGoRouteState(BASE, KEY, options)
+      const chat = seen.find(request => request.url.endsWith('/v1/chat/completions'))
+      expect(chat?.method).toBe('POST')
+      expect(chat?.headers['x-opencode-session']).toMatch(/^infra-monitor-[\da-f-]{36}$/)
+      expect(chat?.headers.authorization).toBe(`Bearer ${KEY}`)
+      sessions.push(chat?.headers['x-opencode-session'] ?? '')
+    }
+    expect(new Set(sessions).size).toBe(2)
+  })
+
+  it('uses the committed snapshot and settings by default', async () => {
+    install(() => modelList(['glm-5.3']), goOk)
+
+    expect(await checkGoRouteState(BASE, KEY)).toEqual({state: 'healthy', reason: 'ok'})
+  })
+
+  it('keeps the key, session id, usage and cost out of every human summary and detail', async () => {
+    const body = {
+      usage: {opencode: {billing_source: 'go', list_cost: '0.00006', allowance: {remaining: 41}}},
+      hostile: 'HOSTILE_BODY',
+    }
+    for (const verbose of [false, true]) {
+      install(
+        () => modelList(['glm-5.3']),
+        () => Response.json(body),
+      )
+      const ok = await checkGoRoute(BASE, KEY, {...options, verbose})
+      install(
+        () => modelList(['glm-5.3']),
+        () => new Response('HOSTILE_BODY secret', {status: 502}),
+      )
+      const odd = await checkGoRoute(BASE, KEY, {...options, verbose})
+      install(() => {
+        throw new Error(`HOSTILE_BODY ${KEY}`)
+      }, goOk)
+      const thrown = await checkGoRoute(BASE, KEY, {...options, verbose})
+
+      for (const result of [ok, odd, thrown]) {
+        const text = JSON.stringify(result)
+        expect(text).not.toContain(KEY)
+        expect(text).not.toContain('HOSTILE_BODY')
+        expect(text).not.toContain('infra-monitor-')
+        expect(text).not.toContain('list_cost')
+        expect(text).not.toContain('0.00006')
+        expect(text).not.toContain('allowance')
+      }
+    }
+  })
+
+  it('maps the human check to ok, error and warning under its own heading', async () => {
+    install(() => modelList(['glm-5.3']), goOk)
+    expect(await checkGoRoute(BASE, KEY, options)).toMatchObject({
+      title: 'OpenCode Go route',
+      level: 'ok',
+      summary: 'opencode-go route OK (glm-5.3)',
+    })
+
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response('limit', {status: 429}),
+    )
+    expect((await checkGoRoute(BASE, KEY, options)).level).toBe('error')
+
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response('teapot', {status: 418}),
+    )
+    expect((await checkGoRoute(BASE, KEY, options)).level).toBe('warning')
+
+    install(() => modelList(['glm-5.3', 'trains-on-data']), goOk)
+    expect((await checkGoRoute(BASE, KEY, options)).summary).toContain('trains-on-data')
+  })
+})
+
+describe('cliproxyStatusAction — Go route wiring', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('adds a Go route check after the unchanged Claude check when a provider key is present', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.endsWith('/v1/models')) return Response.json({data: [{id: 'glm-5.3', owned_by: 'opencode-go'}]})
+      if (url.includes('/v1/chat/completions'))
+        return Response.json({choices: [], usage: {opencode: {billing_source: 'go'}}})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com', apiKey: 'my-api-key'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
+
+    const output = captured.stdout.join('\n')
+    expect(output).toContain('[OK] Upstream provider auth (anthropic)')
+    expect(output).toContain('anthropic route OK (claude-sonnet-4-6)')
+    expect(output).toContain('[OK] OpenCode Go route')
+    expect(output.indexOf('Upstream provider auth (anthropic)')).toBeLessThan(output.indexOf('OpenCode Go route'))
+    expect(captured.exit).toBeNull()
+  })
+
+  it('runs no Go request without a provider key', async () => {
+    const urls: string[] = []
+    globalThis.fetch = createFetchImplementation(async url => {
+      urls.push(url)
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx} = createCapturedCtx()
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+    )
+
+    expect(urls.some(url => url.includes('/v1/'))).toBe(false)
+  })
+
+  it('exits 1 when only the Go route is dead', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.endsWith('/v1/models')) return Response.json({data: []})
+      if (url.includes('/v1/chat/completions')) return Response.json({choices: []})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      cliproxyStatusAction(
+        {url: 'https://cliproxy.example.com', apiKey: 'my-api-key'},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      ),
+    ).rejects.toBeInstanceOf(MockProcessExit)
+    expect(captured.exit?.code).toBe(1)
+  })
+})
+
+describe('Go route when the tracked settings turn it off', () => {
+  const disabled = {enabled: false, defaultProbeModel: 'glm-5.3'}
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('checkGoRoute makes no request and reports an informational ok line', async () => {
+    const urls: string[] = []
+    globalThis.fetch = createFetchImplementation(async url => {
+      urls.push(url)
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const result = await checkGoRoute('https://cliproxy.example.com', 'k', {settings: disabled})
+
+    expect(urls).toEqual([])
+    expect(result).toEqual({
+      title: 'OpenCode Go route',
+      level: 'ok',
+      summary: 'disabled by tracked settings — not probed',
+    })
+  })
+
+  it('does not change the exit code when Go would otherwise be dead', async () => {
+    const urls: string[] = []
+    globalThis.fetch = createFetchImplementation(async url => {
+      urls.push(url)
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.endsWith('/v1/models')) return Response.json({data: []})
+      if (url.includes('/v1/chat/completions')) return Response.json({choices: []})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com', apiKey: 'my-api-key'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      disabled,
+    )
+
+    const output = captured.stdout.join('\n')
+    expect(output).toContain('[OK] OpenCode Go route')
+    expect(output).toContain('disabled by tracked settings')
+    expect(urls.some(url => url.endsWith('/v1/models'))).toBe(false)
+    expect(captured.exit).toBeNull()
   })
 })

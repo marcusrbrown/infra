@@ -2992,6 +2992,57 @@ describe('buildGatewayEnvFileContents — CONFIG semantic validation', () => {
   })
 })
 
+// ─── buildGatewayEnvFileContents — OpenCode Go routed through the proxy ───────
+
+describe('buildGatewayEnvFileContents — OpenCode Go acceptance', () => {
+  const GO_MODEL = 'opencode-go/glm-5.3'
+  const GO_PROXY_CONFIG = '{"provider":{"opencode-go":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}'
+
+  test('opencode-go model with the proxy /v1 baseURL → accepted, model and provider block preserved', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: GO_MODEL,
+      config: GO_PROXY_CONFIG,
+    })
+    expect(result.split('\n')).toContain(`WORKSPACE_OPENCODE_MODEL=${GO_MODEL}`)
+    const provider = extractParsedConfig(result).provider as Record<string, {options: {baseURL: string}}>
+    expect(provider['opencode-go']?.options.baseURL).toBe('https://cliproxy.fro.bot/v1')
+  })
+
+  test('opencode-go model with a direct OpenCode inference baseURL → rejected (must route through cliproxy)', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: GO_MODEL,
+        config: '{"provider":{"opencode-go":{"options":{"baseURL":"https://opencode.ai/inference/go/v1"}}}}',
+      }),
+    ).toThrow(/cliproxy\.fro\.bot/)
+  })
+
+  test('opencode-go model with no opencode-go provider block → rejected even when another provider routes via the proxy', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    expect(() =>
+      buildGatewayEnvFileContents({
+        objectStoreHosts: 'host.example.com',
+        model: GO_MODEL,
+        config: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
+      }),
+    ).toThrow(/WORKSPACE_OPENCODE_CONFIG.*provider\["opencode-go"\]/)
+  })
+
+  test('WORKSPACE_EGRESS_HOSTS is unchanged for a Go model (no OpenCode inference host added)', async () => {
+    const {buildGatewayEnvFileContents} = await import('./deploy')
+    const result = buildGatewayEnvFileContents({
+      objectStoreHosts: 'host.example.com',
+      model: GO_MODEL,
+      config: GO_PROXY_CONFIG,
+    })
+    expect(result.split('\n')).toContain('WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev,models.opencode.ai')
+  })
+})
+
 // ─── buildGatewayEnvFileContents — permission policy injection ───────────────
 
 function extractParsedConfig(result: string): Record<string, unknown> {

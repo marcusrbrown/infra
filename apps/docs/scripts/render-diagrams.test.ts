@@ -102,6 +102,7 @@ describe('diagram specs', () => {
     )
   })
 
+  // Each case spawns the archify CLI; the first one also pays Node's cold start.
   for (const spec of specs) {
     it(`${spec.path} validates and points meta.output at the render path`, () => {
       const result = Bun.spawnSync(['node', ARCHIFY_BIN, 'validate', spec.type, spec.path, '--json'], {
@@ -111,7 +112,7 @@ describe('diagram specs', () => {
       expect(result.exitCode, result.stdout.toString()).toBe(0)
       const meta = readJson(join(REPO_ROOT, spec.path)).meta as {output: string}
       expect(meta.output).toBe(`apps/docs/.diagrams/${spec.name}.html`)
-    })
+    }, 30_000)
   }
 
   it('marks a STOP or decision node and an irreversible node on every runbook map', () => {

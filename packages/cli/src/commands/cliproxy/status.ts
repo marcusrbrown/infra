@@ -555,7 +555,7 @@ export type GoRouteReason =
   | 'quota-or-billing'
   | 'auth-401'
   | 'auth-unavailable-503'
-  | 'probe-misconfigured'
+  | 'session-header-dropped'
   | 'unrelated-http'
   | 'timeout'
   | 'network'
@@ -771,11 +771,12 @@ async function runGoRouteProbe(baseUrl: string, apiKey: string, options?: GoRout
     if (response.status === 400) {
       const bodyText = await readBodyText(response)
       if (isMissingSessionBody(bodyText)) {
+        // The probe always sends the session header, so Go never saw it: the proxy dropped it.
         return goResult(
-          'unknown',
-          'probe-misconfigured',
-          'warning',
-          'Go probe sent no session id (HTTP 400 MissingSessionID)',
+          'dead',
+          'session-header-dropped',
+          'error',
+          `The proxy stopped forwarding the ${GO_SESSION_HEADER} header (HTTP 400 MissingSessionID) — see ${GO_RUNBOOK}`,
           details,
         )
       }
@@ -1052,6 +1053,7 @@ export async function cliproxyStatusAction(
   ctx: ActionCtx,
   spawn: SpawnFn = defaultSpawn,
   goSettings?: OpenCodeGoSettings,
+  goSnapshot?: ParsedSnapshot,
 ): Promise<void> {
   let errorCount = 0
   try {
@@ -1106,7 +1108,7 @@ export async function cliproxyStatusAction(
     // Upstream provider-auth probe — only when a downstream API key is available.
     if (providerKey) {
       results.push(await checkProviderAuth(baseUrl, providerKey, {verbose}))
-      results.push(await checkGoRoute(baseUrl, providerKey, {verbose, settings: goSettings}))
+      results.push(await checkGoRoute(baseUrl, providerKey, {verbose, settings: goSettings, snapshot: goSnapshot}))
     } else {
       results.push({
         title: 'Upstream provider auth',

@@ -442,6 +442,17 @@ export function normalizeOpenAICompatEntry(raw: unknown, index = 0): OpenAICompa
   }
 }
 
+/** A management API call that got an HTTP response with a non-2xx status. A transport failure is not one. */
+export class ManagementHttpError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ManagementHttpError'
+    this.status = status
+  }
+}
+
 /** Replace every secret occurrence in `text` and cap its length for use in an error message. */
 function scrubForError(text: string, secrets: readonly string[]): string {
   let scrubbed = text
@@ -453,11 +464,11 @@ function scrubForError(text: string, secrets: readonly string[]): string {
 
 /**
  * Read back the `openai-compatibility` list from the CLIProxyAPI management API.
- * The GET response wraps the list as `{"openai-compatibility": [...]}`; a null or absent
- * field is an empty section. Entries are normalized (see {@link normalizeOpenAICompatEntry}).
+ * The GET response wraps the list as `{"openai-compatibility": [...]}`; only an explicit `[]`
+ * or `null` is an empty section. Entries are normalized (see {@link normalizeOpenAICompatEntry}).
  *
- * Throws on a malformed payload rather than returning [] — a mutating caller treats [] as
- * "empty section, safe to bootstrap". The management key and live `api-key` values are
+ * Throws on a malformed payload, including an object without the field, rather than returning []
+ * — a mutating caller treats [] as "empty section, safe to bootstrap". The management key and live `api-key` values are
  * NEVER included in thrown error messages.
  */
 export async function readBackOpenAICompat({
@@ -494,8 +505,14 @@ export async function readBackOpenAICompat({
     throw new TypeError(`GET ${OPENAI_COMPAT_ENDPOINT} returned an unexpected shape: expected an object`)
   }
 
+  if (!('openai-compatibility' in payload)) {
+    throw new TypeError(
+      `GET ${OPENAI_COMPAT_ENDPOINT} returned an unexpected shape: missing the openai-compatibility field`,
+    )
+  }
+
   const list = payload['openai-compatibility']
-  if (list === undefined || list === null) return []
+  if (list === null) return []
   if (!Array.isArray(list)) {
     throw new TypeError(
       `GET ${OPENAI_COMPAT_ENDPOINT} returned an unexpected shape: openai-compatibility is not an array`,
@@ -541,8 +558,9 @@ export async function applyOpenAICompat({
   if (!response.ok) {
     const responseBody = await response.text()
     const secrets = [key, ...body.flatMap(entry => entry['api-key-entries'].map(item => item['api-key']))]
-    throw new Error(
+    throw new ManagementHttpError(
       `PUT ${OPENAI_COMPAT_ENDPOINT} failed with HTTP ${response.status}: ${scrubForError(responseBody, secrets)}`,
+      response.status,
     )
   }
 }
@@ -576,8 +594,9 @@ export async function patchOpenAICompatDisabled({
 
   if (!response.ok) {
     const responseBody = await response.text()
-    throw new Error(
+    throw new ManagementHttpError(
       `PATCH ${OPENAI_COMPAT_ENDPOINT} failed with HTTP ${response.status}: ${scrubForError(responseBody, [key])}`,
+      response.status,
     )
   }
 }

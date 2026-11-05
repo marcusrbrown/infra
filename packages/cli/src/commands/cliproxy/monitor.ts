@@ -1,4 +1,4 @@
-import type {OpenCodeGoSettings} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
+import type {OpenCodeGoSettings, ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 import type {goke} from 'goke'
 
 import type {ActionCtx} from '../../lib/action-ctx'
@@ -122,6 +122,13 @@ const TEST_ROUTE = claudeRoute(
   'cliproxy-auth-monitor-test',
 )
 
+/** The reason as issue and Discord text: `session-header-dropped` says what broke, the others stay the bare token. */
+function goReasonText(reason: string): string {
+  return reason === 'session-header-dropped'
+    ? `${reason} — the proxy stopped forwarding the session header, so Go answers 400 MissingSessionID`
+    : reason
+}
+
 /** The OpenCode Go route. Live only: the synthetic modes exercise the Claude route's isolated test issue. */
 const GO_ROUTE: RouteConfig = {
   label: 'cliproxy-go-monitor',
@@ -130,9 +137,9 @@ const GO_ROUTE: RouteConfig = {
   issueTitle: 'CLIProxy OpenCode Go route outage',
   labelDescription: 'CLIProxy Go monitor state',
   issueDescription: 'CLIProxyAPI OpenCode Go route monitor.',
-  remediation: reason => `\nReason: ${reason}.\nRemediation: see ${GO_RUNBOOK}.`,
+  remediation: reason => `\nReason: ${goReasonText(reason)}.\nRemediation: see ${GO_RUNBOOK}.`,
   discordDead: (timestamp, synthetic, reason) =>
-    `${syntheticPrefix(synthetic)}CLIProxy OpenCode Go route is unavailable as of ${timestamp} (reason: ${reason}). See ${GO_RUNBOOK}.`,
+    `${syntheticPrefix(synthetic)}CLIProxy OpenCode Go route is unavailable as of ${timestamp} (reason: ${goReasonText(reason)}). See ${GO_RUNBOOK}.`,
   discordHealthy: (timestamp, synthetic) =>
     `${syntheticPrefix(synthetic)}CLIProxy OpenCode Go route recovered as of ${timestamp}.`,
   summaryPrefix: GO_SUMMARY_PREFIX,
@@ -197,6 +204,8 @@ export interface MonitorRuntime {
   clearTimeout: typeof clearTimeout
   /** Tracked OpenCode Go settings. Defaults to the committed ones; tests inject their own. */
   goSettings?: OpenCodeGoSettings
+  /** Parsed OpenCode Go privacy snapshot. Defaults to the committed one; tests inject their own. */
+  goSnapshot?: ParsedSnapshot
 }
 
 const defaultMonitorRuntime: MonitorRuntime = {
@@ -657,17 +666,17 @@ export async function cliproxyMonitorAction(
 
   let goProbe: GoRouteClassification | undefined
   // The Go route is off on purpose when the tracked settings say so: no probe, no line, no issue, no alert.
-  let goEnabled = false
+  let goSettings: OpenCodeGoSettings | undefined
   if (live) {
     try {
-      goEnabled = resolveGoSettings(runtime.goSettings).enabled
+      goSettings = resolveGoSettings(runtime.goSettings)
     } catch {
       failures.push({name: 'Go', category: 'reconciliation'})
     }
   }
-  if (goEnabled) {
+  if (goSettings?.enabled === true) {
     try {
-      goProbe = await checkGoRouteState(proxyUrl, inputs.apiKey)
+      goProbe = await checkGoRouteState(proxyUrl, inputs.apiKey, {settings: goSettings, snapshot: runtime.goSnapshot})
       ctx.console.log(formatGoMonitorProbeLine({probeState: goProbe.state, probeReason: goProbe.reason, timestamp}))
     } catch {
       failures.push({name: 'Go', category: 'reconciliation'})

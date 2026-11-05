@@ -8,6 +8,7 @@ import {join, resolve} from 'node:path'
 import {
   applyOAuthModelAlias,
   applyOpenAICompat,
+  ManagementHttpError,
   patchOpenAICompatDisabled,
   readBackOAuthModelAlias,
   readBackOpenAICompat,
@@ -497,6 +498,25 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * Run a mutating management call. Only a 4xx answer (other than 408) proves the proxy rejected the write and
+ * left the live entry alone, so it passes through as an ordinary failure. A transport error, a timeout, a 408
+ * or a 5xx may follow a write the proxy already applied, so each raises {@link OpenCodeGoUnverifiedError}.
+ */
+async function sendGoWrite(write: () => Promise<void>, env: DeployEnv): Promise<void> {
+  try {
+    await write()
+  } catch (error) {
+    const rejected =
+      error instanceof ManagementHttpError && error.status >= 400 && error.status < 500 && error.status !== 408
+    if (rejected) throw error
+    throw new OpenCodeGoUnverifiedError(
+      'write',
+      `the request was sent and its outcome is unknown: ${redact(describeError(error), env)}`,
+    )
+  }
+}
+
 function isRecordLike(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -738,8 +758,8 @@ async function runGoSmokeRequest(
  * and before `healthCheck`.
  *
  * Before the write (plain errors, live proxy untouched): foreign entries, a disabled live entry while Go is
- * enabled, and id collisions with other providers. After the write, every failure is an
- * {@link OpenCodeGoUnverifiedError} naming the runbook.
+ * enabled, id collisions with other providers, and a 4xx answer to the write itself. From the moment the write
+ * is sent, every other failure is an {@link OpenCodeGoUnverifiedError} naming the runbook.
  *
  * Disabled mode disables the existing entry with a field-scoped PATCH and expects no Go ids to be served.
  */
@@ -786,7 +806,7 @@ export async function applyOpenCodeGoStep(
 
   const desired = buildGoEntry(env.CLIPROXY_OPENCODE_GO_KEY, plan.eligible)
   console.warn(`\u001B[1;34m==>\u001B[0m Applying OpenCode Go upstream (${plan.eligible.length} models)`)
-  await applyOpenAICompat({baseUrl, key: managementKey, body: [desired], fetch: fetchImpl})
+  await sendGoWrite(() => applyOpenAICompat({baseUrl, key: managementKey, body: [desired], fetch: fetchImpl}), env)
 
   try {
     const readback = await pollUntil(GO_READBACK_BACKOFFS_MS, sleepFn, async () => {
@@ -834,13 +854,17 @@ async function disableGoEntry(
 
   if (liveEntry.disabled !== true) {
     console.warn(`\u001B[1;34m==>\u001B[0m Disabling the live "${GO_ENTRY_NAME}" entry`)
-    await patchOpenAICompatDisabled({
-      baseUrl,
-      key: env.CLIPROXY_MANAGEMENT_KEY,
-      name: GO_ENTRY_NAME,
-      disabled: true,
-      fetch: fetchImpl,
-    })
+    await sendGoWrite(
+      () =>
+        patchOpenAICompatDisabled({
+          baseUrl,
+          key: env.CLIPROXY_MANAGEMENT_KEY,
+          name: GO_ENTRY_NAME,
+          disabled: true,
+          fetch: fetchImpl,
+        }),
+      env,
+    )
   }
 
   if (!env.CLIPROXY_API_KEY) {

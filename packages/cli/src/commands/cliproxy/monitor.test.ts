@@ -1,3 +1,4 @@
+import type {OpenCodeGoSettings, ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 import {chmod, mkdtemp, rm, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
@@ -13,6 +14,23 @@ import {
   runGhApiOnce,
 } from './monitor'
 
+// Fixed Go policy for every run: the committed snapshot and settings change by design, so no test reads them.
+const GO_TEST_ENTRY = {zeroRetention: true, trainsOnData: false, regionGated: false, agreementExpiry: null}
+const GO_TEST_SNAPSHOT: ParsedSnapshot = {
+  source: {
+    repo: 'anomalyco/opencode',
+    path: 'services/www/src/docs/content/console/go.mdx',
+    commit: 'a'.repeat(40),
+  },
+  models: {
+    'glm-5.3': GO_TEST_ENTRY,
+    'kimi-k3': GO_TEST_ENTRY,
+    'iceman-contributor-free': {...GO_TEST_ENTRY, trainsOnData: true},
+  },
+  invalid: [],
+}
+const GO_TEST_SETTINGS: OpenCodeGoSettings = {enabled: true, defaultProbeModel: 'glm-5.3'}
+
 const originalFetch = globalThis.fetch
 const originalSetTimeout = globalThis.setTimeout
 const originalClearTimeout = globalThis.clearTimeout
@@ -25,10 +43,11 @@ function runMonitor(
   options: Parameters<typeof cliproxyMonitorAction>[0],
   ctx: Parameters<typeof cliproxyMonitorAction>[1],
   sleep: (milliseconds: number) => Promise<void> = async () => {},
-  goSettings?: {enabled: boolean; defaultProbeModel?: string},
+  goSettings: OpenCodeGoSettings = GO_TEST_SETTINGS,
 ): ReturnType<typeof cliproxyMonitorAction> {
   return cliproxyMonitorAction(options, ctx, {
-    ...(goSettings === undefined ? {} : {goSettings}),
+    goSettings,
+    goSnapshot: GO_TEST_SNAPSHOT,
     fetch: globalThis.fetch,
     sleep,
     ghApi: async (_token, path, method, body) => {
@@ -1909,21 +1928,19 @@ describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
     expect(world.writes().every(request => !request.url.endsWith(`/issues/${claudeIssue.number}`))).toBe(true)
   })
 
-  it('treats a 400 MissingSessionID as unknown and does not change an open Go issue', async () => {
-    const goIssue = openIssue(GO_LABEL, GO_MARKER, '\n<!-- cliproxy-go-monitor:notified=dead -->')
-    const world = installWorld({
-      issues: [goIssue],
-      go: () => new Response('{"type":"MissingSessionID"}', {status: 400}),
-    })
+  it('opens the Go issue and alerts when a 400 MissingSessionID shows the proxy dropped the session header', async () => {
+    const world = installWorld({go: () => new Response('{"type":"MissingSessionID"}', {status: 400})})
     const {ctx, captured} = createCapturedCtx()
 
     await runMonitor({validation: 'live'}, ctx)
 
-    expect(goLines(captured.stdout)[0]).toMatch(/probe=unknown reason=probe-misconfigured at /)
-    expect(goSummaries(captured.stdout)[0]).toContain('transition=none issue=none discord=none')
-    expect(world.writes()).toHaveLength(0)
-    expect(world.discord).toHaveLength(0)
-    expect(goIssue.state).toBe('open')
+    expect(goLines(captured.stdout)[0]).toMatch(/probe=dead reason=session-header-dropped at /)
+    expect(goSummaries(captured.stdout)[0]).toContain('transition=outage issue=created discord=outage-sent')
+    expect(world.issueFor(GO_LABEL)?.body).toContain('the proxy stopped forwarding the session header')
+    expect(world.issueFor(CLAUDE_LABEL)).toBeUndefined()
+    expect(world.discord).toHaveLength(1)
+    expect(world.discord[0]).toContain('reason: session-header-dropped')
+    expect(world.discord[0]).toContain('the proxy stopped forwarding the session header')
     expect(captured.exit).toBeNull()
   })
 

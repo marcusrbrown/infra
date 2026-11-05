@@ -207,6 +207,22 @@ describe('parsePrivacyTable fails closed', () => {
     )
   })
 
+  test.each([
+    ['the colon outside the bold text', '- **DeepSeek V4.1 Flash and V4 Pro**: select **Global** under **Regions**.'],
+    ['an asterisk list marker', '* **DeepSeek V4.1 Flash and V4 Pro:** select **Global** under **Regions**.'],
+    ['no bold label', '- DeepSeek V4.1 Flash and V4 Pro: select **Global** under **Regions**.'],
+  ])('on a reformatted restricted-models bullet with %s, which would drop a region rule', (_label, bullet) => {
+    const original = '- **DeepSeek V4.1 Flash and V4 Pro:** select **Global** under **Regions**.'
+    expect(() => parse(mutate(original, bullet))).toThrow(PrivacyTableError)
+  })
+
+  test('but not on prose inside the restricted-models section', () => {
+    const intro = 'In **Settings › Privacy**, an owner or admin can enable:'
+    expect(parse(mutate(intro, `${intro}\n\nEvery change takes effect at once.`))).toEqual(
+      JSON.parse(readFixture('go.expected.json')),
+    )
+  })
+
   test('on an unrecognized parenthetical in the model list', () => {
     expect(() =>
       parse(

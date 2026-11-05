@@ -2,11 +2,13 @@
 # Daily refresh of the OpenCode Go privacy snapshot (packages/shared/opencode-go/privacy-snapshot.json).
 #
 # Resolves the anomalyco/opencode `dev` head, parses its Go privacy table and, when a model's privacy terms
-# changed, opens or updates ONE stable PR for review. Nothing here deploys or merges: a merged snapshot PR reaches
+# changed, opens or updates ONE stable PR for review. When upstream terms match main again, an open stable PR is
+# stale: the run closes it and deletes its branch. Nothing here deploys or merges: a merged snapshot PR reaches
 # the gated cliproxy deploy through the router's paths-filter, and auto-merge stays off.
 #
-# Credentials: checkout persists none. The refresh step carries only the read-only workflow token. A scoped GitHub App token is minted
-# only after the parse succeeded and the snapshot changed, and reaches git and gh inside the PR step alone.
+# Credentials: checkout persists none. The refresh step and the stale-PR lookup carry only the read-only workflow
+# token. A scoped GitHub App token is minted only after the parse succeeded and either the snapshot changed or a stale
+# PR is open, and reaches git and gh inside the PR step and the close step alone.
 name: OpenCode Go Privacy
 
 on:
@@ -28,6 +30,10 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The stale-PR lookup lists pull requests with the read-only workflow token.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Checkout default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,9 +56,39 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: bun run refresh:go-privacy "${RUNNER_TEMP}/pr-body.md"
 
+      # Unchanged terms mean main already carries them. An open stable PR then holds superseded terms.
+      - name: Find stale snapshot PR
+        id: stale-pr
+        if: steps.refresh.outputs.changed != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          branch="opencode-go-privacy"
+
+          # A same-repository PR only: a fork's branch of the same name is not ours to close.
+          if ! number=$(gh pr list --state open --head "${branch}" --base main --json number,isCrossRepository --jq '[.[] | select(.isCrossRepository | not)] | .[0].number // empty'); then
+            echo "Unable to look up the stable snapshot PR." >&2
+            exit 1
+          fi
+
+          if [[ -z "${number}" ]]; then
+            echo "stale=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ ! "${number}" =~ ^[0-9]+$ ]]; then
+            echo "Unexpected PR number from the lookup." >&2
+            exit 1
+          fi
+
+          echo "Snapshot PR #${number} is stale: upstream terms match main."
+          echo "stale=true" >> "${GITHUB_OUTPUT}"
+          echo "number=${number}" >> "${GITHUB_OUTPUT}"
+
       - name: Get app token
         id: get-app-token
-        if: steps.refresh.outputs.changed == 'true'
+        if: steps.refresh.outputs.changed == 'true' || steps.stale-pr.outputs.stale == 'true'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.APPLICATION_ID }}
@@ -118,3 +154,17 @@ jobs:
           else
             gh pr create --title "${title}" --body-file "${body_file}" --head "${branch}" --base main
           fi
+
+      # Close before deleting the branch: deleting the head branch first would close the PR without the comment.
+      - name: Close stale snapshot PR
+        if: steps.stale-pr.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ steps.get-app-token.outputs.token }}
+          PR_NUMBER: ${{ steps.stale-pr.outputs.number }}
+        run: |
+          set -euo pipefail
+
+          branch="opencode-go-privacy"
+
+          gh pr close "${PR_NUMBER}" --comment "Closing: the upstream OpenCode Go privacy terms now match main, so this refresh is obsolete. A later change to the terms opens a new PR."
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}"

@@ -174,7 +174,7 @@ describe('contract', () => {
       'quota-or-billing': 'dead',
       'auth-401': 'dead',
       'auth-unavailable-503': 'dead',
-      'probe-misconfigured': 'unknown',
+      'session-header-dropped': 'dead',
       'unrelated-http': 'unknown',
       timeout: 'unknown',
       network: 'unknown',
@@ -268,15 +268,21 @@ describe('parseGoProbeLine', () => {
     expect(parseGoProbeLine(runnerLog(goProbeLine(), goProbeLine()))).toEqual({kind: 'multiple'})
   })
 
-  it.each(['quota-or-billing', 'billing-not-go', 'privacy-noncompliant', 'probe-misconfigured'])(
+  it.each(['quota-or-billing', 'billing-not-go', 'privacy-noncompliant', 'session-header-dropped'])(
     'rejects the Go-only reason %s on a Claude line, and accepts it on a Go line',
     reason => {
-      const state = reason === 'probe-misconfigured' ? 'unknown' : 'dead'
-
-      expect(parseProbeLine(runnerLog(probeLine(state, reason)))).toEqual({kind: 'malformed'})
-      expect(parseGoProbeLine(runnerLog(goProbeLine(state, reason)))).toMatchObject({kind: 'probe', reason})
+      expect(parseProbeLine(runnerLog(probeLine('dead', reason)))).toEqual({kind: 'malformed'})
+      expect(parseGoProbeLine(runnerLog(goProbeLine('dead', reason)))).toMatchObject({kind: 'probe', reason})
     },
   )
+
+  it('rejects the retired probe-misconfigured reason on a Go line', () => {
+    expect(parseGoProbeLine(runnerLog(goProbeLine('unknown', 'probe-misconfigured')))).toEqual({kind: 'malformed'})
+  })
+
+  it('rejects session-header-dropped paired with a non-dead state', () => {
+    expect(parseGoProbeLine(runnerLog(goProbeLine('unknown', 'session-header-dropped')))).toEqual({kind: 'malformed'})
+  })
 
   it.each([
     ['an unknown reason', goProbeLine('dead', 'bogus')],

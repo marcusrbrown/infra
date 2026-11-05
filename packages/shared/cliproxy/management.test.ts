@@ -8,6 +8,7 @@ import {
   applyOAuthModelAlias,
   applyOpenAICompat,
   managementHeaders,
+  ManagementHttpError,
   normalizeOpenAICompatEntry,
   parseClaudeEntries,
   parseManagementKeyList,
@@ -821,11 +822,20 @@ describe('openai-compatibility helpers', () => {
 
     test.each([
       ['null', {'openai-compatibility': null}],
-      ['absent', {}],
       ['empty', {'openai-compatibility': []}],
     ])('returns [] when the section is %s', async (_label, payload) => {
       const {fetch: fakeFetch} = recordingFetch(() => new Response(JSON.stringify(payload), {status: 200}))
       expect(await readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: fakeFetch})).toEqual([])
+    })
+
+    test.each([
+      ['an empty object', {}],
+      ['an unrelated wrapper', {'openai-compat': [liveShape]}],
+    ])('throws a field-path error instead of returning [] for %s', async (_label, payload) => {
+      const {fetch: fakeFetch} = recordingFetch(() => new Response(JSON.stringify(payload), {status: 200}))
+      const message = await messageOf(readBackOpenAICompat({baseUrl: BASE_URL, key: MGMT_KEY, fetch: fakeFetch}))
+      expect(message).toContain('missing the openai-compatibility field')
+      expectNoLeak(message)
     })
 
     test('throws on a non-2xx and the message carries no key value', async () => {
@@ -905,6 +915,36 @@ describe('openai-compatibility helpers', () => {
       expect(message).toContain(`HTTP ${status}`)
       expect(message).toContain('[redacted]')
       expectNoLeak(message)
+    })
+
+    test('a non-2xx raises a ManagementHttpError carrying the status; a transport failure does not', async () => {
+      const rejected = recordingFetch(() => new Response('no', {status: 422}))
+      const error = await applyOpenAICompat({
+        baseUrl: BASE_URL,
+        key: MGMT_KEY,
+        body: [tracked],
+        fetch: rejected.fetch,
+      }).then(
+        () => undefined,
+        (error_: unknown) => error_,
+      )
+      expect(error).toBeInstanceOf(ManagementHttpError)
+      expect((error as ManagementHttpError).status).toBe(422)
+
+      const dropped = recordingFetch(() => {
+        throw new TypeError('socket closed')
+      })
+      const transport = await applyOpenAICompat({
+        baseUrl: BASE_URL,
+        key: MGMT_KEY,
+        body: [tracked],
+        fetch: dropped.fetch,
+      }).then(
+        () => undefined,
+        (error_: unknown) => error_,
+      )
+      expect(transport).toBeInstanceOf(TypeError)
+      expect(transport).not.toBeInstanceOf(ManagementHttpError)
     })
 
     test('truncates a long error body', async () => {

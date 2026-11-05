@@ -1691,32 +1691,37 @@ function modelList(ids: string[]): Response {
   return Response.json({object: 'list', data: [{id: 'claude-sonnet-4-6', owned_by: 'anthropic'}, ...data]})
 }
 
+// Fixed policy for every Go test below: the committed snapshot and settings change by design, so no test reads them.
+const goEntry = (overrides: Partial<ParsedSnapshot['models'][string]> = {}) => ({
+  zeroRetention: true,
+  trainsOnData: false,
+  regionGated: false,
+  agreementExpiry: null,
+  ...overrides,
+})
+const GO_SNAPSHOT: ParsedSnapshot = {
+  source: {
+    repo: 'anomalyco/opencode',
+    path: 'services/www/src/docs/content/console/go.mdx',
+    commit: 'a'.repeat(40),
+  },
+  models: {
+    'glm-5.3': goEntry(),
+    'kimi-k3': goEntry(),
+    'trains-on-data': goEntry({trainsOnData: true}),
+    'expired-model': goEntry({agreementExpiry: '2026-11-03'}),
+  },
+  invalid: [],
+}
+const GO_SETTINGS = {enabled: true, defaultProbeModel: 'glm-5.3'}
+
 describe('checkGoRouteState (OpenCode Go classification)', () => {
   const BASE = 'https://cliproxy.example.com'
   const KEY = 'go-probe-secret-key'
   const NOW = new Date('2026-11-04T12:00:00.000Z')
-  const entry = (overrides: Partial<ParsedSnapshot['models'][string]> = {}) => ({
-    zeroRetention: true,
-    trainsOnData: false,
-    regionGated: false,
-    agreementExpiry: null,
-    ...overrides,
-  })
-  const snapshot: ParsedSnapshot = {
-    source: {
-      repo: 'anomalyco/opencode',
-      path: 'services/www/src/docs/content/console/go.mdx',
-      commit: 'a'.repeat(40),
-    },
-    models: {
-      'glm-5.3': entry(),
-      'kimi-k3': entry(),
-      'trains-on-data': entry({trainsOnData: true}),
-      'expired-model': entry({agreementExpiry: '2026-11-03'}),
-    },
-    invalid: [],
-  }
-  const settings = {enabled: true, defaultProbeModel: 'glm-5.3'}
+  const entry = goEntry
+  const snapshot = GO_SNAPSHOT
+  const settings = GO_SETTINGS
   const options = {snapshot, settings, now: NOW}
 
   const goOk = () => Response.json({choices: [], usage: {opencode: {billing_source: 'go'}}})
@@ -1848,20 +1853,42 @@ describe('checkGoRouteState (OpenCode Go classification)', () => {
     expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'unrelated-http'})
   })
 
-  it('is unknown/probe-misconfigured for a 400 MissingSessionID, never dead', async () => {
+  it('is dead/session-header-dropped for a 400 MissingSessionID, because the probe always sends the header', async () => {
     const body = '{"type":"MissingSessionID","message":"x-opencode-session is required"}'
     install(
       () => modelList(['glm-5.3']),
       () => new Response(body, {status: 400}),
     )
-    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'probe-misconfigured'})
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'session-header-dropped'})
 
     const nested = '{"error":{"type":"MissingSessionID"}}'
     install(
       () => modelList(['glm-5.3']),
       () => new Response(nested, {status: 400}),
     )
-    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'probe-misconfigured'})
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'session-header-dropped'})
+  })
+
+  it('sends x-opencode-session on the request that is classified session-header-dropped', async () => {
+    const seen = install(
+      () => modelList(['glm-5.3']),
+      () => new Response('{"type":"MissingSessionID"}', {status: 400}),
+    )
+    await checkGoRouteState(BASE, KEY, options)
+
+    const chat = seen.find(request => request.url.endsWith('/v1/chat/completions'))
+    expect(chat?.headers['x-opencode-session']).toMatch(/^infra-monitor-.+/)
+  })
+
+  it('names the dropped header in the human summary', async () => {
+    install(
+      () => modelList(['glm-5.3']),
+      () => new Response('{"type":"MissingSessionID"}', {status: 400}),
+    )
+    const result = await checkGoRoute(BASE, KEY, options)
+
+    expect(result.level).toBe('error')
+    expect(result.summary).toContain('stopped forwarding the x-opencode-session header')
   })
 
   it('is unknown/unrelated-http for any other non-2xx, and for a bad or failing model list', async () => {
@@ -1929,10 +1956,10 @@ describe('checkGoRouteState (OpenCode Go classification)', () => {
     expect(new Set(sessions).size).toBe(2)
   })
 
-  it('uses the committed snapshot and settings by default', async () => {
-    install(() => modelList(['glm-5.3']), goOk)
+  it('consults the committed snapshot by default: an id it cannot list is privacy-noncompliant', async () => {
+    install(() => modelList(['no-such-model-in-any-snapshot']), goOk)
 
-    expect(await checkGoRouteState(BASE, KEY)).toEqual({state: 'healthy', reason: 'ok'})
+    expect(await checkGoRouteState(BASE, KEY)).toEqual({state: 'dead', reason: 'privacy-noncompliant'})
   })
 
   it('keeps the key, session id, usage and cost out of every human summary and detail', async () => {
@@ -2012,6 +2039,8 @@ describe('cliproxyStatusAction — Go route wiring', () => {
       {url: 'https://cliproxy.example.com', apiKey: 'my-api-key'},
       ctx,
       makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      GO_SETTINGS,
+      GO_SNAPSHOT,
     )
 
     const output = captured.stdout.join('\n')
@@ -2054,6 +2083,8 @@ describe('cliproxyStatusAction — Go route wiring', () => {
         {url: 'https://cliproxy.example.com', apiKey: 'my-api-key'},
         ctx,
         makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+        GO_SETTINGS,
+        GO_SNAPSHOT,
       ),
     ).rejects.toBeInstanceOf(MockProcessExit)
     expect(captured.exit?.code).toBe(1)

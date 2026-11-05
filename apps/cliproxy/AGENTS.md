@@ -80,7 +80,7 @@ Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/s
 | --- | --- | --- | --- |
 | `/v0/management/api-keys` | GET | — | Returns `{"api-keys": [...]}` (hyphenated) |
 | `/v0/management/api-keys` | PUT | bare array `[...]` | NOT wrapped in `{api_keys: ...}` |
-| `/v0/management/api-keys?value=x` | DELETE | — | |
+| `/v0/management/api-keys?value=x` | DELETE | — |  |
 | `/v0/management/config` | GET | — | Read-only via HTTP |
 | `/v0/management/config.yaml` | GET/PUT | complete raw YAML document | Whole-document access is forbidden in unattended deploys; no field-scoped endpoint exists for `payload` or `claude`, so automation must stop/escalate |
 | `/v0/management/{field}` | PUT | `{"value": <val>}` | Per-field updates: `debug`, `request-retry`, `proxy-url`, etc. |
@@ -122,15 +122,15 @@ After the write:
 - **Visibility:** every eligible id must appear in `/v1/models`, bare and prefixed, once each, with `owned_by: opencode-go`.
 - **Smoke request:** one non-streaming request at `max_tokens: 1` on the probe model must return 2xx with `usage.opencode.billing_source: go`. This request is billed to Go.
 
-Any failure after the write raises `OpenCodeGoUnverifiedError`: "OpenCode Go entry APPLIED but UNVERIFIED (<stage>)". The entry is live and unproven. Follow the runbook.
+Any failure after the write raises `OpenCodeGoUnverifiedError`: "OpenCode Go entry APPLIED but UNVERIFIED (<stage>)". The entry is live and unproven. Follow the runbook. The `write` stage covers the PUT and the disable PATCH: a transport error, a timeout, an HTTP 408 or a 5xx may follow a write the proxy already applied. A 4xx answer proves the proxy rejected the write and stays a plain failure. The management GET must hold an `openai-compatibility` field; an object without it fails before any write.
 
 With `enabled: false`, the deploy PATCHes an existing entry to `disabled: true`, expects no Go ids in `/v1/models` and sends no smoke request. It needs no Go key.
 
-The entry maps `x-opencode-session: "$X-Opencode-Session"`, so the client's session header reaches Go. Go answers 400 `MissingSessionID` without it.
+The entry maps `x-opencode-session: "$X-Opencode-Session"`, so the client's session header reaches Go. Go answers 400 `MissingSessionID` without it. The monitor probe always sends the header, so that answer means the proxy dropped it: reason `session-header-dropped`, dead.
 
 **Secrets.** `CLIPROXY_OPENCODE_GO_KEY` (new) and `CLIPROXY_API_KEY` (also used by the monitor) are repository secrets. The router's caller job has no environment, so it cannot read Environment secrets (actions/runner#4453). It passes both explicitly to `deploy-cliproxy.yaml`. Only the deploy's own HTTP calls use them; the environment given to `ssh` and `scp` never contains either.
 
-**Snapshot refresh.** `.github/workflows/opencode-go-privacy.yaml` opens one PR on the branch `opencode-go-privacy` when a model's privacy terms change. Auto-merge is off. A merged PR triggers the gated cliproxy deploy only.
+**Snapshot refresh.** `.github/workflows/opencode-go-privacy.yaml` opens one PR on the branch `opencode-go-privacy` when a model's privacy terms change. Auto-merge is off. A merged PR triggers the gated cliproxy deploy only. When upstream terms match `main` again, the next run closes the open PR with a comment and deletes the branch; the App token is minted for that case too.
 
 ## OPENCODE_CONFIG AND OPENCODE_AUTH_JSON SHAPES
 
@@ -207,16 +207,16 @@ The same job probes a second route with the same `CLIPROXY_API_KEY`. Each route 
 - **Skips** when `enabled` is false in `settings.json`: no probe, no line, no issue and no alert. Only `live` validation probes Go.
 - **Each probe** lists `/v1/models`, compares the `opencode-go` models it exposes with today's eligibility, picks a probe model (`defaultProbeModel` when exposed, else the first exposed id), and sends one request at `max_tokens: 1` with a fresh `x-opencode-session`.
 
-| Reason                                 | State   | Cause                                                |
-| -------------------------------------- | ------- | ---------------------------------------------------- |
-| `ok`                                   | healthy | 2xx with `billing_source: go`                        |
-| `billing-not-go`                       | dead    | 2xx with any other or missing `billing_source`       |
-| `provider-missing`                     | dead    | No `opencode-go` models listed, or `model_not_found` |
-| `privacy-noncompliant`                 | dead    | An exposed model is not eligible                     |
-| `quota-or-billing`                     | dead    | HTTP 429 or 402                                      |
-| `auth-401`, `auth-unavailable-503`     | dead    | Proxy key rejected, or no auth available             |
-| `probe-misconfigured`                  | unknown | HTTP 400 `MissingSessionID`                          |
-| `unrelated-http`, `timeout`, `network` | unknown | Any other failure                                    |
+| Reason | State | Cause |
+| --- | --- | --- |
+| `ok` | healthy | 2xx with `billing_source: go` |
+| `billing-not-go` | dead | 2xx with any other or missing `billing_source` |
+| `provider-missing` | dead | No `opencode-go` models listed, or `model_not_found` |
+| `privacy-noncompliant` | dead | An exposed model is not eligible |
+| `quota-or-billing` | dead | HTTP 429 or 402 |
+| `auth-401`, `auth-unavailable-503` | dead | Proxy key rejected, or no auth available |
+| `session-header-dropped` | dead | HTTP 400 `MissingSessionID`: the proxy stopped forwarding the session header the probe sends |
+| `unrelated-http`, `timeout`, `network` | unknown | Any other failure |
 
 A dead result opens the Go issue and sends Discord. A healthy result closes it. An unknown result changes nothing.
 

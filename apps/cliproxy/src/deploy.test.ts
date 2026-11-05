@@ -212,6 +212,12 @@ interface GoFakeOptions {
   /** Models served by other upstreams. */
   others?: {id: string; owned_by: string}[]
   putStatus?: number
+  /** Status returned for the disable PATCH without applying it. */
+  patchStatus?: number
+  /** The write is applied on the proxy, then the connection fails before the client sees a response. */
+  writeLosesResponse?: boolean
+  /** The management GET answers 200 with a JSON object that has no `openai-compatibility` field. */
+  omitSectionField?: boolean
   /** What the management GET returns instead of the stored section. */
   readbackOverride?: unknown[]
   /** Number of /v1/models reads after a write before the Go models appear. Infinity = never. */
@@ -280,6 +286,7 @@ function makeGoFetch(opts: GoFakeOptions = {}): {
 
     if (urlStr.endsWith('/v0/management/openai-compatibility')) {
       if (method === 'GET') {
+        if (opts.omitSectionField) return json({})
         const list = opts.readbackOverride ?? storedSection.map(entry => ({...entry, 'auth-index': 'idx-1'}))
         return json({'openai-compatibility': list})
       }
@@ -288,15 +295,18 @@ function makeGoFetch(opts: GoFakeOptions = {}): {
         storedSection = JSON.parse(body ?? '[]') as Record<string, unknown>[]
         writeSeen = true
         modelsReadsSinceWrite = 0
+        if (opts.writeLosesResponse) throw new TypeError(`socket closed after PUT ${GO_KEY} ${MGMT_KEY}`)
         return json({status: 'ok'})
       }
       if (method === 'PATCH') {
+        if ((opts.patchStatus ?? 200) >= 400) return new Response('upstream said no', {status: opts.patchStatus})
         const patch = JSON.parse(body ?? '{}') as {name: string; value: {disabled: boolean}}
         storedSection = storedSection.map(entry =>
           entry.name === patch.name ? {...entry, disabled: patch.value.disabled} : entry,
         )
         writeSeen = true
         modelsReadsSinceWrite = 0
+        if (opts.writeLosesResponse) throw new TypeError(`socket closed after PATCH ${GO_KEY} ${MGMT_KEY}`)
         return json({status: 'ok'})
       }
     }
@@ -1777,18 +1787,67 @@ describe('applyOpenCodeGoStep', () => {
       expect(writes(fake.requests)).toHaveLength(0)
     })
 
-    test('a rejected PUT is a plain failure, not "applied but unverified", and leaks no key', async () => {
-      const fake = makeGoFetch({liveIds: LIVE_IDS, putStatus: 500})
+    test.each([400, 403, 422, 429])(
+      'a PUT the proxy rejects with HTTP %i is a plain failure, not "applied but unverified", and leaks no key',
+      async status => {
+        const fake = makeGoFetch({liveIds: LIVE_IDS, putStatus: status})
+
+        const error = await rejection(runGo(fake))
+
+        expect(error.message).toContain(`HTTP ${status}`)
+        expect(error.message).not.toMatch(/unverified/i)
+        expectNoKeys(error.message)
+      },
+    )
+
+    test('a management GET that lacks the openai-compatibility field fails before any PUT', async () => {
+      const fake = makeGoFetch({liveIds: LIVE_IDS, omitSectionField: true})
 
       const error = await rejection(runGo(fake))
 
-      expect(error.message).toMatch(/HTTP 500/)
+      expect(error.message).toContain('openai-compatibility')
+      expect(error.message).toMatch(/missing/)
       expect(error.message).not.toMatch(/unverified/i)
-      expectNoKeys(error.message)
+      expect(writes(fake.requests)).toHaveLength(0)
+    })
+
+    test('the disabled mode also refuses a GET that lacks the field, and sends no PATCH', async () => {
+      const fake = makeGoFetch({liveIds: LIVE_IDS, omitSectionField: true})
+
+      await expect(runGo(fake, {options: DISABLED_OPTIONS})).rejects.toThrow(/missing/)
+      expect(writes(fake.requests)).toHaveLength(0)
     })
   })
 
   describe('applied but unverified', () => {
+    test('a PUT whose response is lost after the proxy applied it', async () => {
+      const fake = makeGoFetch({liveIds: LIVE_IDS, writeLosesResponse: true})
+
+      await expectUnverified(runGo(fake), /\(write\).*socket closed after PUT/)
+      expect(fake.stored()).toEqual([expectedEntry()])
+      expect(writes(fake.requests)).toHaveLength(1)
+    })
+
+    test.each([500, 502, 504, 408])('a PUT answered with HTTP %i may have been applied', async status => {
+      const fake = makeGoFetch({liveIds: LIVE_IDS, putStatus: status})
+
+      await expectUnverified(runGo(fake), new RegExp(String.raw`\(write\).*HTTP ${status}`))
+    })
+
+    test('a PUT that times out is unverified', async () => {
+      const inner = makeGoFetch({liveIds: LIVE_IDS})
+      const fetchFn = mock(async (url: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === 'PUT') throw new DOMException('The operation timed out.', 'TimeoutError')
+        return inner.fetchFn(url, init)
+      }) as unknown as typeof globalThis.fetch
+      const plan = await preflightOpenCodeGo(makeDeployEnv(), GO_OPTIONS, fetchFn)
+
+      await expectUnverified(
+        applyOpenCodeGoStep(makeDeployEnv(), plan, fetchFn, async () => {}),
+        /\(write\).*timed out/,
+      )
+    })
+
     test('a readback mismatch', async () => {
       const fake = makeGoFetch({liveIds: LIVE_IDS, readbackOverride: [expectedEntry({prefix: 'wrong'})]})
 
@@ -1880,6 +1939,28 @@ describe('applyOpenCodeGoStep', () => {
 
       await expect(runGo(fake, {options: DISABLED_OPTIONS})).rejects.toThrow(/other/)
       expect(writes(fake.requests)).toHaveLength(0)
+    })
+
+    test('a disable PATCH whose response is lost after the proxy applied it is unverified', async () => {
+      const fake = makeGoFetch({liveIds: LIVE_IDS, section: [expectedEntry()], writeLosesResponse: true})
+
+      await expectUnverified(runGo(fake, {options: DISABLED_OPTIONS}), /\(write\).*socket closed after PATCH/)
+      expect(writes(fake.requests)).toHaveLength(1)
+    })
+
+    test('a disable PATCH answered with HTTP 503 is unverified', async () => {
+      const fake = makeGoFetch({liveIds: LIVE_IDS, section: [expectedEntry()], patchStatus: 503})
+
+      await expectUnverified(runGo(fake, {options: DISABLED_OPTIONS}), /\(write\).*HTTP 503/)
+    })
+
+    test('a disable PATCH the proxy rejects with HTTP 404 is a plain failure', async () => {
+      const fake = makeGoFetch({liveIds: LIVE_IDS, section: [expectedEntry()], patchStatus: 404})
+
+      const error = await rejection(runGo(fake, {options: DISABLED_OPTIONS}))
+
+      expect(error.message).toContain('HTTP 404')
+      expect(error.message).not.toMatch(/unverified/i)
     })
 
     test('Go ids still visible after the disable are "applied but unverified"', async () => {

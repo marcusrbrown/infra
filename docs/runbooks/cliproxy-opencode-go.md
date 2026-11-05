@@ -129,10 +129,11 @@ Until the deploy finishes, the entry serves its old model list. Do not wait betw
 
 ## Applied but unverified
 
-The error reads `OpenCode Go entry APPLIED but UNVERIFIED (<stage>)`. The write reached the proxy and a later check failed. The entry is live and unproven. Do not assume Go routing works.
+The error reads `OpenCode Go entry APPLIED but UNVERIFIED (<stage>)`. The write reached the proxy, or may have, and the outcome is not proven. The entry is live and unproven. Do not assume Go routing works.
 
 | Stage | What failed | Check |
 | --- | --- | --- |
+| `write` | The write request got no usable answer: a network error, a timeout, an HTTP 408 or a 5xx. The proxy may have applied it. A 4xx answer is a plain failure, not this stage. | Read `GET /v0/management/openai-compatibility`. If the entry is there, check it as for `read-back`. Then rerun the deploy. |
 | `read-back` | The live entry differs from the tracked one. The error names the fields. | Read `GET /v0/management/openai-compatibility`. Compare the named fields. |
 | `visibility` | An eligible id is missing or listed twice, or an ineligible id is served. The error names the ids. | `bunx @marcusrbrown/infra cliproxy models opencode-go` |
 | `smoke request` | The proxy returned a non-2xx status, or the response was not billed to Go. | Check the status in the error. 401 or 403 means a bad key. 429 or 402 means the plan limit or balance. |
@@ -145,6 +146,18 @@ Then:
 3. If the entry cannot be fixed, disable it.
 
 The monitor flags the same state with a Go issue.
+
+---
+
+## Session header dropped
+
+The monitor reports `session-header-dropped` when the probe gets HTTP 400 `MissingSessionID`. The probe always sends `x-opencode-session`, so the proxy stopped forwarding it. Go rejects every request without it, so real traffic fails too.
+
+1. Read `GET /v0/management/openai-compatibility`. The `opencode-go` entry must hold `headers: {"x-opencode-session": "$X-Opencode-Session"}`.
+2. If the header mapping is missing or different, rerun `bunx @marcusrbrown/infra cliproxy deploy`. The deploy writes the tracked entry.
+3. If the mapping is present, the proxy build no longer applies it. Roll back the CLIProxyAPI image or disable the entry ([Emergency disable](#emergency-disable-without-a-deploy)).
+
+The Go issue closes on the next healthy probe.
 
 ---
 
@@ -164,7 +177,7 @@ Merge rules:
 - Merging triggers the gated cliproxy deploy. Approve the gate.
 - Between the merge and the approved deploy, a model that lost eligibility is still served. The monitor reports it as `privacy-noncompliant`. Approve the deploy promptly, or disable.
 
-If upstream reverts the change, the PR goes stale and the workflow does not close it. Close it by hand.
+If upstream reverts the change before you merge, the next daily run finds that the terms match `main` again. It closes the open PR with a comment, then deletes the `opencode-go-privacy` branch. A PR on that branch from a fork is left alone. Do not merge a PR that the workflow closed. A later change to the terms opens a new PR. If the run cannot reach the PR list or the close step fails, the run fails: close the PR by hand and delete the branch.
 
 A run that cannot parse the table fails and opens no PR. The deploy keeps the reviewed snapshot.
 

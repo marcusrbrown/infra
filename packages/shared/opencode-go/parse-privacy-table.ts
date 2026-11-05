@@ -196,13 +196,25 @@ function resolveLabel(label: string, rows: ReadonlyMap<string, Row>): Row[] {
   return [...resolved.values()]
 }
 
-function bulletsOf(lines: readonly string[], label: string, strict: boolean): {label: string; text: string}[] {
+const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s/
+
+/**
+ * The `- **Label:** text` bullets of a section. `every-line` rejects any line that is not such a bullet;
+ * `list-items` rejects only list items that are not, and lets prose between them pass.
+ */
+function bulletsOf(
+  lines: readonly string[],
+  label: string,
+  unmatched: 'every-line' | 'list-items',
+): {label: string; text: string}[] {
   const bullets: {label: string; text: string}[] = []
   for (const line of lines) {
     if (line.trim() === '') continue
     const match = /^- \*\*(.+?):\*\* (.+)$/.exec(line)
     if (match === null) {
-      if (strict) throw new PrivacyTableError(`${label}: unmapped line "${line.trim().slice(0, 60)}"`)
+      if (unmatched === 'every-line' || LIST_ITEM.test(line)) {
+        throw new PrivacyTableError(`${label}: unmapped line "${line.trim().slice(0, 60)}"`)
+      }
       continue
     }
     bullets.push({label: match[1] ?? '', text: match[2] ?? ''})
@@ -227,7 +239,7 @@ function applyFootnotes(
   rows: ReadonlyMap<string, Row>,
   accumulators: ReadonlyMap<string, Accumulator>,
 ): void {
-  for (const {label, text} of bulletsOf(lines, 'Privacy footnotes', true)) {
+  for (const {label, text} of bulletsOf(lines, 'Privacy footnotes', 'every-line')) {
     const targets = resolveLabel(label, rows).map(row => {
       const accumulator = accumulators.get(row.id)
       if (accumulator === undefined) throw new PrivacyTableError(`"${label}" has no accumulator`)
@@ -286,7 +298,11 @@ function applyRestrictedModels(
   rows: ReadonlyMap<string, Row>,
   accumulators: ReadonlyMap<string, Accumulator>,
 ): void {
-  const bullets = bulletsOf(sectionLines(lines, '### Enable restricted models'), 'Enable restricted models', false)
+  const bullets = bulletsOf(
+    sectionLines(lines, '### Enable restricted models'),
+    'Enable restricted models',
+    'list-items',
+  )
   if (bullets.length === 0) throw new PrivacyTableError('Enable restricted models: no bullets found')
   for (const {label, text} of bullets) {
     const targets = resolveLabel(label, rows).map(row => accumulators.get(row.id))

@@ -154,7 +154,7 @@ describe('merge: the Go route observation arrives on top of older samples', () =
       'quota-or-billing',
       'auth-401',
       'auth-unavailable-503',
-      'probe-misconfigured',
+      'session-header-dropped',
       'unrelated-http',
       'timeout',
       'network',

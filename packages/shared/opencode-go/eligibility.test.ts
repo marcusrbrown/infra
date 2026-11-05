@@ -33,8 +33,11 @@ const TODAY = '2026-11-04'
 const evaluate = (models: Record<string, unknown>, liveIds: string[], today = TODAY) =>
   computeEligibility(parseSnapshot(makeSnapshot(models)), liveIds, today)
 
+const readFixtureJson = (name: string): unknown =>
+  JSON.parse(readFileSync(new URL(`__fixtures__/${name}`, import.meta.url), 'utf8'))
+
 const liveFixtureIds = (): string[] => {
-  const raw: unknown = JSON.parse(readFileSync(new URL('__fixtures__/live-models.json', import.meta.url), 'utf8'))
+  const raw = readFixtureJson('live-models.json')
   if (typeof raw !== 'object' || raw === null || !('data' in raw) || !Array.isArray(raw.data)) {
     throw new Error('live-models fixture has no data array')
   }
@@ -171,17 +174,19 @@ describe('parseSettings', () => {
   })
 })
 
-describe('committed snapshot and settings', () => {
-  const snapshot = parseSnapshot(snapshotJson)
+// Model-specific classification runs over fixtures that never change: `go.expected.json` is the parse of the
+// pinned `go.mdx`, and `live-models.json` is a recorded live list. A privacy refresh rewrites the committed
+// snapshot, so nothing about individual models may be asserted against that file.
+describe('classification over the pinned fixtures', () => {
+  const snapshot = parseSnapshot(readFixtureJson('go.expected.json'))
   const live = liveFixtureIds()
   const result = computeEligibility(snapshot, live, TODAY)
 
-  test('the snapshot passes the schema and records a 40-hex source commit', () => {
-    expect(snapshot.source.commit).toMatch(/^[0-9a-f]{40}$/)
+  test('the pinned snapshot passes the schema', () => {
     expect(snapshot.invalid).toEqual([])
   })
 
-  test('over the real live list the eligible set is non-empty and has no DeepSeek model', () => {
+  test('the eligible set is non-empty and has no DeepSeek model', () => {
     expect(result.eligible.length).toBeGreaterThan(0)
     expect(result.eligible.filter(id => id.startsWith('deepseek'))).toEqual([])
     for (const id of live.filter(id => id.startsWith('deepseek'))) {
@@ -197,10 +202,32 @@ describe('committed snapshot and settings', () => {
     expect(result.eligible).toContain('glm-5.3')
   })
 
-  test('settings are valid and the default probe model is eligible', () => {
-    const settings = parseSettings(settingsJson)
-    expect(settings.enabled).toBe(true)
+  test.each([
+    ['enabled', 'settings-enabled.json', true],
+    ['disabled', 'settings-disabled.json', false],
+  ])('the %s settings fixture parses, and its probe model is eligible', (_label, name, enabled) => {
+    const settings = parseSettings(readFixtureJson(name))
+    expect(settings.enabled).toBe(enabled)
     expect(settings.defaultProbeModel).toBeDefined()
     expect(result.eligible).toContain(settings.defaultProbeModel ?? '')
+  })
+})
+
+// The committed files change by design (a reviewed refresh PR, an emergency disable PR), so only invariants
+// that hold after either change are asserted.
+describe('committed snapshot and settings', () => {
+  const snapshot = parseSnapshot(snapshotJson)
+
+  test('the snapshot passes the schema and records a 40-hex source commit', () => {
+    expect(snapshot.source.commit).toMatch(/^[0-9a-f]{40}$/)
+    expect(snapshot.invalid).toEqual([])
+  })
+
+  test('at least one model is eligible against the recorded live list', () => {
+    expect(computeEligibility(snapshot, liveFixtureIds(), TODAY).eligible.length).toBeGreaterThan(0)
+  })
+
+  test('the settings parse, whether Go is enabled or disabled', () => {
+    expect(() => parseSettings(settingsJson)).not.toThrow()
   })
 })

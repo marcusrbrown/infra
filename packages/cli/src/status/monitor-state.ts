@@ -61,7 +61,7 @@ export const PROBE_REASON_STATE: Record<ProviderAuthReason, ProviderAuthState> =
 /**
  * Every reason the Go classifier emits and the state it belongs to. Separate from the Claude map so a Claude probe
  * line can never carry a Go-only reason (`quota-or-billing`, `billing-not-go`, `privacy-noncompliant`,
- * `probe-misconfigured`); adding a Go reason fails type-check here until it is classified.
+ * `session-header-dropped`); adding a Go reason fails type-check here until it is classified.
  */
 export const GO_PROBE_REASON_STATE: Record<GoRouteReason, ProviderAuthState> = {
   ok: 'healthy',
@@ -71,7 +71,7 @@ export const GO_PROBE_REASON_STATE: Record<GoRouteReason, ProviderAuthState> = {
   'quota-or-billing': 'dead',
   'auth-401': 'dead',
   'auth-unavailable-503': 'dead',
-  'probe-misconfigured': 'unknown',
+  'session-header-dropped': 'dead',
   'unrelated-http': 'unknown',
   timeout: 'unknown',
   network: 'unknown',

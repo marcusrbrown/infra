@@ -5706,11 +5706,11 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     expect(steps[refresh]?.if).toBeUndefined()
   })
 
-  it('mints the App token only when the snapshot changed, with exactly contents and pull-requests write', async () => {
+  it('mints the App token only when the snapshot changed or a stale PR is open, with exactly contents and pull-requests write', async () => {
     const {steps} = await load()
     const step = steps[stepIndex(steps, 'get-app-token')]
     expect(step?.uses).toMatch(/^actions\/create-github-app-token@[a-f0-9]{40}$/)
-    expect(step?.if).toBe("steps.refresh.outputs.changed == 'true'")
+    expect(step?.if).toBe("steps.refresh.outputs.changed == 'true' || steps.stale-pr.outputs.stale == 'true'")
 
     const withBlock = isRecord(step?.with) ? step.with : {}
     const permissions = Object.fromEntries(Object.entries(withBlock).filter(([key]) => key.startsWith('permission-')))
@@ -5719,19 +5719,68 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     expect(withBlock['private-key']).toBe(ghaExpression('secrets.APPLICATION_PRIVATE_KEY'))
   })
 
-  it('exposes the token to the PR step alone', async () => {
+  it('exposes the token to the PR step and the stale-PR close step alone', async () => {
     const {steps} = await load()
     const tokenRef = ghaExpression('steps.get-app-token.outputs.token')
     const holders = steps.filter(step => JSON.stringify(step).includes('steps.get-app-token.outputs.token'))
 
-    expect(holders).toHaveLength(1)
-    expect(holders[0]?.name).toBe('Open snapshot PR')
+    expect(holders.map(step => step.name)).toEqual(['Open snapshot PR', 'Close stale snapshot PR'])
     expect(holders[0]?.if).toBe("steps.refresh.outputs.changed == 'true'")
-    const env = isRecord(holders[0]?.env) ? holders[0].env : {}
-    expect(env.GH_TOKEN).toBe(tokenRef)
+    expect(holders[1]?.if).toBe("steps.stale-pr.outputs.stale == 'true'")
+    for (const holder of holders) {
+      const env = isRecord(holder.env) ? holder.env : {}
+      expect(env.GH_TOKEN).toBe(tokenRef)
+    }
     // Passed through the environment to git, never as an argv value.
     expect(String(holders[0]?.run)).toContain('GIT_CONFIG_VALUE_0')
     expect(String(holders[0]?.run)).not.toMatch(/\$\{?GH_TOKEN[^"]*"[^"]*\bgit\b/)
+  })
+
+  it('looks for a stale PR with the read-only workflow token, only when the snapshot did not change', async () => {
+    const {steps, workflow} = await load()
+    const refresh = stepIndex(steps, 'refresh')
+    const lookup = stepIndex(steps, 'stale-pr')
+    const token = stepIndex(steps, 'get-app-token')
+    const step = steps[lookup]
+
+    // After the refresh succeeded, before any write-capable token exists.
+    expect(lookup).toBeGreaterThan(refresh)
+    expect(token).toBeGreaterThan(lookup)
+    expect(step?.if).toBe("steps.refresh.outputs.changed != 'true'")
+    expect(isRecord(step?.env) ? step.env : {}).toEqual({GH_TOKEN: ghaExpression('github.token')})
+    expect(step?.['continue-on-error']).toBeUndefined()
+
+    const script = String(step?.run)
+    expect(script).toContain(`branch="${BRANCH}"`)
+    expect(script).toContain(`gh pr list --state open --head "${'$'}{branch}" --base main`)
+    // A fork's same-named branch is not ours to close.
+    expect(script).toContain('isCrossRepository')
+    expect(script).toContain('stale=true')
+    expect(script).toContain('stale=false')
+    expect(script).not.toMatch(/gh pr (?:close|edit|create|merge)|git push|gh api/)
+
+    // The lookup lists pull requests with a read grant only.
+    const job = workflowJob(workflow, 'refresh')
+    expect(job.permissions).toEqual({contents: 'read', 'pull-requests': 'read'})
+  })
+
+  it('closes the stale PR with a comment and deletes its fixed branch, in that order, and runs only when stale', async () => {
+    const {steps} = await load()
+    const close = steps.find(step => step.name === 'Close stale snapshot PR')
+    const token = stepIndex(steps, 'get-app-token')
+
+    expect(close).toBeDefined()
+    expect(steps.indexOf(close ?? {})).toBeGreaterThan(token)
+    expect(close?.if).toBe("steps.stale-pr.outputs.stale == 'true'")
+    const env = isRecord(close?.env) ? close.env : {}
+    expect(env.PR_NUMBER).toBe(ghaExpression('steps.stale-pr.outputs.number'))
+
+    const script = String(close?.run)
+    expect([...script.matchAll(/^\s*branch="([^"]*)"/gm)].map(match => match[1])).toEqual([BRANCH])
+    expect(script).toMatch(/gh pr close "\$\{PR_NUMBER\}" --comment "[^"]*match main[^"]*"/)
+    expect(script).toContain(`gh api --method DELETE "repos/${'$'}{GITHUB_REPOSITORY}/git/refs/heads/${'$'}{branch}"`)
+    expect(script.indexOf('gh pr close')).toBeLessThan(script.indexOf('gh api'))
+    expect(script).not.toMatch(/git push|--delete-branch|--force/)
   })
 
   it('passes the read-only workflow token to the refresh step, and no write-capable token appears elsewhere', async () => {
@@ -5744,6 +5793,7 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     const secretReaders = steps.filter(step => JSON.stringify(step).includes('secrets.'))
     expect(secretReaders.map(step => step.id)).toEqual(['get-app-token'])
     expect(JSON.stringify(refresh)).not.toContain('get-app-token')
+    expect(JSON.stringify(steps[stepIndex(steps, 'stale-pr')])).not.toContain('get-app-token')
     // The job-level and workflow-level grants stay read-only, so github.token cannot write.
     expect(text).not.toMatch(/^\s+(?:contents|pull-requests|issues): write/m)
   })

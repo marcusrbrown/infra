@@ -630,7 +630,7 @@ flowchart TD
 - After the deploy, a monitor run started by dispatch prints both probe lines.
 - The next status snapshot carries `provider-route-go`.
 
-- [ ] **Unit 6: Scheduled privacy-snapshot refresh workflow**
+- [x] **Unit 6: Scheduled privacy-snapshot refresh workflow**
 
 **Goal:** Reviewed snapshot changes arrive by PR, with no hand-editing.
 

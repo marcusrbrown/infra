@@ -5640,3 +5640,172 @@ describe('cliproxy deploy: OpenCode Go secret wiring and router filters', () => 
     expect(text).toMatch(/HTTP_ONLY_ENV_KEYS[^=]*=\s*new Set\(\[\s*'CLIPROXY_OPENCODE_GO_KEY',\s*'CLIPROXY_API_KEY'/)
   })
 })
+
+describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
+  const WORKFLOW_FILE = resolve(REPO_ROOT, '.github/workflows/opencode-go-privacy.yaml')
+  const SNAPSHOT_PATH = 'packages/shared/opencode-go/privacy-snapshot.json'
+  const BRANCH = 'opencode-go-privacy'
+
+  async function load(): Promise<{text: string; workflow: Record<string, unknown>; steps: Record<string, unknown>[]}> {
+    const text = await Bun.file(WORKFLOW_FILE).text()
+    const workflow = await loadWorkflowYaml(WORKFLOW_FILE)
+    return {text, workflow, steps: stepsOf(workflowJob(workflow, 'refresh'))}
+  }
+
+  const stepIndex = (steps: Record<string, unknown>[], id: string): number => steps.findIndex(step => step.id === id)
+
+  it('triggers daily and on dispatch only, with workflow-scoped concurrency and read-only permissions', async () => {
+    const {workflow} = await load()
+    const on = isRecord(workflow.on) ? workflow.on : {}
+    expect(Object.keys(on).sort()).toEqual(['schedule', 'workflow_dispatch'])
+    expect(Array.isArray(on.schedule) ? on.schedule : []).toHaveLength(1)
+    expect(workflow.permissions).toEqual({contents: 'read'})
+    expect(workflow.concurrency).toEqual({group: BRANCH, 'cancel-in-progress': false})
+    expect(existsSync(resolve(REPO_ROOT, '.github/workflows/opencode-go-privacy.yml'))).toBe(false)
+  })
+
+  it('SHA-pins every action with a version comment (shape only, never an exact SHA)', async () => {
+    const {text} = await load()
+    const usesLines = text.split('\n').filter(line => /^\s*(?:-\s+)?uses:/.test(line))
+
+    expect(usesLines.length).toBeGreaterThanOrEqual(3)
+    for (const line of usesLines) {
+      const match = USES_SHA_LINE_RE.exec(line)
+      expect(match, `not SHA-pinned: ${line.trim()}`).not.toBeNull()
+      expect(match?.[2] ?? '', `not a full SHA: ${line.trim()}`).toMatch(/^[a-f0-9]{40}$/)
+      expect(VERSION_COMMENT_RE.test(match?.[3] ?? ''), `missing version comment: ${line.trim()}`).toBe(true)
+    }
+  })
+
+  it('never uses secrets: inherit', async () => {
+    const {text} = await load()
+    expect(text).not.toMatch(/secrets:\s*inherit/)
+  })
+
+  it('checks out with persist-credentials: false and no checkout token', async () => {
+    const {steps} = await load()
+    const checkouts = steps.filter(step => typeof step.uses === 'string' && step.uses.startsWith('actions/checkout@'))
+    expect(checkouts).toHaveLength(1)
+    const withBlock = isRecord(checkouts[0]?.with) ? checkouts[0].with : {}
+    expect(withBlock['persist-credentials']).toBe(false)
+    expect(withBlock.token).toBeUndefined()
+  })
+
+  it('runs the refresh after install and before any token is minted, and fails the run when it fails', async () => {
+    const {steps} = await load()
+    const install = steps.findIndex(step => step.run === 'bun install --frozen-lockfile --ignore-scripts')
+    const refresh = stepIndex(steps, 'refresh')
+    const token = stepIndex(steps, 'get-app-token')
+
+    expect(install).toBeGreaterThanOrEqual(0)
+    expect(refresh).toBeGreaterThan(install)
+    expect(token).toBeGreaterThan(refresh)
+    expect(String(steps[refresh]?.run)).toContain('bun run refresh:go-privacy')
+    // No `continue-on-error`: a parse failure must stop the job before the token step.
+    expect(steps[refresh]?.['continue-on-error']).toBeUndefined()
+    expect(steps[refresh]?.if).toBeUndefined()
+  })
+
+  it('mints the App token only when the snapshot changed, with exactly contents and pull-requests write', async () => {
+    const {steps} = await load()
+    const step = steps[stepIndex(steps, 'get-app-token')]
+    expect(step?.uses).toMatch(/^actions\/create-github-app-token@[a-f0-9]{40}$/)
+    expect(step?.if).toBe("steps.refresh.outputs.changed == 'true'")
+
+    const withBlock = isRecord(step?.with) ? step.with : {}
+    const permissions = Object.fromEntries(Object.entries(withBlock).filter(([key]) => key.startsWith('permission-')))
+    expect(permissions).toEqual({'permission-contents': 'write', 'permission-pull-requests': 'write'})
+    expect(withBlock['app-id']).toBe(ghaExpression('secrets.APPLICATION_ID'))
+    expect(withBlock['private-key']).toBe(ghaExpression('secrets.APPLICATION_PRIVATE_KEY'))
+  })
+
+  it('exposes the token to the PR step alone', async () => {
+    const {steps} = await load()
+    const tokenRef = ghaExpression('steps.get-app-token.outputs.token')
+    const holders = steps.filter(step => JSON.stringify(step).includes('steps.get-app-token.outputs.token'))
+
+    expect(holders).toHaveLength(1)
+    expect(holders[0]?.name).toBe('Open snapshot PR')
+    expect(holders[0]?.if).toBe("steps.refresh.outputs.changed == 'true'")
+    const env = isRecord(holders[0]?.env) ? holders[0].env : {}
+    expect(env.GH_TOKEN).toBe(tokenRef)
+    // Passed through the environment to git, never as an argv value.
+    expect(String(holders[0]?.run)).toContain('GIT_CONFIG_VALUE_0')
+    expect(String(holders[0]?.run)).not.toMatch(/\$\{?GH_TOKEN[^"]*"[^"]*\bgit\b/)
+  })
+
+  it('passes the read-only workflow token to the refresh step, and no write-capable token appears elsewhere', async () => {
+    const {steps, text} = await load()
+    const refresh = steps[stepIndex(steps, 'refresh')]
+    const env = isRecord(refresh?.env) ? refresh.env : {}
+    expect(env).toEqual({GITHUB_TOKEN: ghaExpression('github.token')})
+
+    // Secrets (the App credentials) are read by the token step alone; the refresh step never sees them.
+    const secretReaders = steps.filter(step => JSON.stringify(step).includes('secrets.'))
+    expect(secretReaders.map(step => step.id)).toEqual(['get-app-token'])
+    expect(JSON.stringify(refresh)).not.toContain('get-app-token')
+    // The job-level and workflow-level grants stay read-only, so github.token cannot write.
+    expect(text).not.toMatch(/^\s+(?:contents|pull-requests|issues): write/m)
+  })
+
+  it('pushes a single fixed branch with --force-with-lease and never a bare force', async () => {
+    const {steps} = await load()
+    const script = String(steps.find(step => step.name === 'Open snapshot PR')?.run)
+
+    expect([...script.matchAll(/^\s*branch="([^"]*)"/gm)].map(match => match[1])).toEqual([BRANCH])
+    expect(script).toContain(`git push origin "${'$'}{branch}" --force-with-lease`)
+    expect(script).not.toMatch(/--force(?!-with-lease)/)
+    expect(script).not.toMatch(/git push [^\n]*\+/)
+    // The branch name is never derived from the run, the date or the upstream SHA.
+    expect(script).not.toMatch(/branch="[^"]*(\$|`)/)
+  })
+
+  it('commits only the snapshot and opens or updates one PR against main', async () => {
+    const {steps} = await load()
+    const script = String(steps.find(step => step.name === 'Open snapshot PR')?.run)
+
+    expect(script).toContain(`snapshot="${SNAPSHOT_PATH}"`)
+    expect(script).toContain(`git add -- "${'$'}{snapshot}"`)
+    expect(script).not.toMatch(/git add (?!--)|git commit -a|git add -A|git add \./)
+    expect(script).toContain('gh pr edit')
+    expect(script).toContain('gh pr create')
+    expect(script).toContain('--base main')
+    expect(existsSync(resolve(REPO_ROOT, SNAPSHOT_PATH))).toBe(true)
+  })
+
+  it('does not enable auto-merge', async () => {
+    const {steps} = await load()
+    // Header comments mention the rule in prose; only executable content is checked.
+    const executable = JSON.stringify(steps)
+    expect(executable).not.toMatch(/auto-?merge|--auto\b|gh pr merge|enablePullRequestAutoMerge/i)
+  })
+
+  it('is main-only, so the PR branch is never cut from another ref', async () => {
+    const {workflow} = await load()
+    expect(workflowJob(workflow, 'refresh').if).toBe("github.ref == 'refs/heads/main'")
+  })
+
+  it('keeps the snapshot path under the renovate-changesets exclude patterns', async () => {
+    const changesets = await loadWorkflowYaml(resolve(REPO_ROOT, '.github/workflows/renovate-changesets.yaml'))
+    const jobs = isRecord(changesets.jobs) ? Object.values(changesets.jobs) : []
+    const patterns = jobs
+      .flatMap(job => stepsOf(job))
+      .map(step => (isRecord(step.with) ? step.with['exclude-patterns'] : undefined))
+      .find((value): value is string => typeof value === 'string')
+
+    expect(patterns).toBeDefined()
+    const globs = (patterns ?? '').split(',').map(pattern => pattern.trim())
+    expect(globs.some(pattern => new Bun.Glob(pattern).match(SNAPSHOT_PATH))).toBe(true)
+  })
+
+  it('does not add the snapshot path to the router filters, which already cover it through the cliproxy group', async () => {
+    const router = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
+    expect(router).not.toContain('privacy-snapshot.json')
+  })
+
+  it('exposes the root script the workflow runs', async () => {
+    const pkg: unknown = JSON.parse(await Bun.file(resolve(REPO_ROOT, 'package.json')).text())
+    const scripts = isRecord(pkg) && isRecord(pkg.scripts) ? pkg.scripts : {}
+    expect(scripts['refresh:go-privacy']).toBe('bun run apps/cliproxy/scripts/refresh-go-privacy.ts')
+  })
+})

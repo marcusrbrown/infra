@@ -1,0 +1,120 @@
+---
+# Daily refresh of the OpenCode Go privacy snapshot (packages/shared/opencode-go/privacy-snapshot.json).
+#
+# Resolves the anomalyco/opencode `dev` head, parses its Go privacy table and, when a model's privacy terms
+# changed, opens or updates ONE stable PR for review. Nothing here deploys or merges: a merged snapshot PR reaches
+# the gated cliproxy deploy through the router's paths-filter, and auto-merge stays off.
+#
+# Credentials: checkout persists none. The refresh step carries only the read-only workflow token. A scoped GitHub App token is minted
+# only after the parse succeeded and the snapshot changed, and reaches git and gh inside the PR step alone.
+name: OpenCode Go Privacy
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opencode-go-privacy
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh privacy snapshot
+    # The PR branch is cut from main; a dispatch from any other ref would compare against the wrong snapshot.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      # A parse failure exits non-zero here, so the run fails before any token is minted.
+      - name: Refresh privacy snapshot
+        id: refresh
+        env:
+          # Read-only token for the api.github.com lookup, so shared runner IPs do not hit the anonymous limit.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun run refresh:go-privacy "${RUNNER_TEMP}/pr-body.md"
+
+      - name: Get app token
+        id: get-app-token
+        if: steps.refresh.outputs.changed == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.APPLICATION_ID }}
+          private-key: ${{ secrets.APPLICATION_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open snapshot PR
+        if: steps.refresh.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.get-app-token.outputs.token }}
+          GIT_USER_NAME: ${{ format('{0}[bot]', steps.get-app-token.outputs.app-slug) }}
+        run: |
+          set -euo pipefail
+
+          branch="opencode-go-privacy"
+          snapshot="packages/shared/opencode-go/privacy-snapshot.json"
+          body_file="${RUNNER_TEMP}/pr-body.md"
+          new_snapshot="${RUNNER_TEMP}/privacy-snapshot.json"
+          title="chore(cliproxy): refresh OpenCode Go privacy snapshot"
+
+          # Hand the token to git for this step only, through the environment so it never appears in argv.
+          auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
+          echo "::add-mask::${auth}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}"
+
+          USER_ID=$(gh api "/users/${GIT_USER_NAME}" --jq .id)
+          git config user.name "${GIT_USER_NAME}"
+          git config user.email "${USER_ID}+${GIT_USER_NAME}@users.noreply.github.com"
+
+          # Keep the refreshed file; the branch checkout below resets the worktree.
+          cp "${snapshot}" "${new_snapshot}"
+
+          git fetch origin main
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+          else
+            # Remove any stale local tracking ref so a first push can lease-create the branch.
+            git update-ref -d "refs/remotes/origin/${branch}"
+          fi
+          git checkout -f -B "${branch}" origin/main
+          cp "${new_snapshot}" "${snapshot}"
+
+          # Only the snapshot is committed, whatever else the worktree holds.
+          git add -- "${snapshot}"
+          if git diff --cached --quiet; then
+            echo "main already carries this snapshot; nothing to open."
+            exit 0
+          fi
+
+          git commit -m "${title}"
+          git push origin "${branch}" --force-with-lease
+
+          if ! existing=$(gh pr list --state open --head "${branch}" --base main --json number --jq '.[0].number // empty'); then
+            echo "Unable to look up the stable snapshot PR." >&2
+            exit 1
+          fi
+          if [[ -n "${existing}" ]]; then
+            echo "Updating snapshot PR #${existing}."
+            gh pr edit "${existing}" --title "${title}" --body-file "${body_file}"
+          else
+            gh pr create --title "${title}" --body-file "${body_file}" --head "${branch}" --base main
+          fi

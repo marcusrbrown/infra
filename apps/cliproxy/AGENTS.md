@@ -107,7 +107,7 @@ The `openai-compatibility` section holds one entry, `opencode-go`, and infra own
 - It has no region requirement. Region-gated models are never exposed.
 - Any agreement expiry is on or after today (UTC; the expiry day counts).
 
-An invalid snapshot entry excludes only that model. These fail the deploy before any write: a snapshot that does not parse, a failed live-list fetch, and an empty eligible set. A live model missing from the snapshot is printed as excluded and the deploy carries on. Expiry is enforced at deploy time only.
+An invalid snapshot entry excludes only that model. These fail the deploy before any write: a snapshot that does not parse, a failed live-list fetch, and an empty eligible set. A live model missing from the snapshot is printed as excluded and the deploy carries on. The deploy excludes a model whose agreement has expired. Between deploys, the monitor flags an exposed model whose agreement has expired as `privacy-noncompliant`; it does not remove the model.
 
 **Guards.** Before the write, a failure leaves the live proxy unchanged:
 

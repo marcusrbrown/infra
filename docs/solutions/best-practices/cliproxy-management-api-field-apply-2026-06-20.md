@@ -1,6 +1,7 @@
 ---
 title: Applying CLIProxyAPI config fields at deploy time via the management API
 date: 2026-06-20
+last_updated: 2026-11-05
 category: best-practices
 module: apps/cliproxy
 problem_type: architecture_pattern
@@ -10,7 +11,9 @@ applies_when:
   - "Setting a CLIProxyAPI config field at deploy time without overwriting config.yaml"
   - "Applying oauth-model-alias (or any management field) that must not wipe runtime api-keys"
   - "Reading back a management mutation to confirm it took effect"
-tags: [cliproxy, management-api, oauth-model-alias, config-yaml, model-aliasing, deploy, fail-closed]
+  - "Writing a management section that has no create-one-entry endpoint, so only a whole-section replace exists"
+tags:
+  [cliproxy, management-api, oauth-model-alias, openai-compatibility, config-yaml, model-aliasing, deploy, fail-closed]
 ---
 
 # Applying CLIProxyAPI config fields at deploy time via the management API
@@ -25,6 +28,7 @@ This is the safe alternative to `--force-config` for managed config fields. Gett
 
 **PUT the bare object — wrapper shapes silently no-op.** `PUT /v0/management/oauth-model-alias` stores the value only when the body is the **bare object** `{claude: [...]}`. The `{value: ...}` and `{oauth-model-alias: ...}` wrappers return `200 {"status":"ok"}` but store **nothing** (verified live). A wrapper looks successful and isn't.
 
+<!-- prettier-ignore -->
 ```ts
 // applyOAuthModelAlias — body IS the field value, no wrapper
 await fetch(`${baseUrl}/v0/management/oauth-model-alias`, {
@@ -47,24 +51,69 @@ await fetch(`${baseUrl}/v0/management/oauth-model-alias`, {
 
 ## The `openai-compatibility` section
 
-This section has no create-one-entry endpoint. The deploy owns it outright and writes the whole list with `PUT /v0/management/openai-compatibility`, behind guards:
+This section has no create-one-entry endpoint. PATCH edits an existing entry by name, and only PUT replaces the whole list. The deploy owns the section outright and writes the whole list with `PUT /v0/management/openai-compatibility`, behind guards. This is the one recorded exception to the field-scoped rule: a whole-section replace is acceptable only for a section infra owns end to end, and only behind every guard below.
 
 - **A bare `[]` PUT clears the section.** The server accepts it. Only `{items: []}` is rejected. The client refuses to send an empty list.
 - **Refuse foreign entries.** The PUT replaces the whole list, so the deploy stops if the live section holds any entry other than the one infra owns.
-- **PATCH `{name, value: {disabled: true}}` disables one entry.** Its models leave `/v1/models` within about a second, while the management GET still lists the entry. Use it for an emergency disable without a deploy.
-- **Normalize the readback.** GET adds `auth-index` to each entry and always returns `disabled`. Drop `auth-index`, default `disabled` to false and compare models as a set. Error text names fields, never values: the GET returns api keys in clear.
+- **PATCH `{name, value: {disabled: true}}` disables one entry.** Its models leave `/v1/models` within a second in a local probe, while the management GET still lists the entry. Use it for an emergency disable without a deploy. Disable never uses PUT.
+- **Normalize the readback.** GET adds `auth-index` to each entry and always returns `disabled`. Drop `auth-index`, default `disabled` to false and compare models as a set. The GET returns upstream api keys in clear: shape-validation errors name fields, never values, and HTTP errors carry a bounded body excerpt with the management key scrubbed.
 
-See `apps/cliproxy/AGENTS.md` (OpenCode Go upstream) and `docs/runbooks/cliproxy-opencode-go.md`.
+### Guards that treat "unknown" as "unsafe"
+
+Three more guards close the gaps between "the read looked fine" and "the write is safe".
+
+**A GET without the wrapper field is an error, not an empty section.** The foreign-entry guard passes on an empty list, so a parser that returned `[]` for an object missing the `openai-compatibility` field would let a whole-section PUT through. `readBackOpenAICompat` in `packages/shared/cliproxy/management.ts` treats only an explicit `null` or array as the section's content:
+
+<!-- prettier-ignore -->
+```ts
+if (!('openai-compatibility' in payload)) {
+  throw new TypeError(
+    `GET ${OPENAI_COMPAT_ENDPOINT} returned an unexpected shape: missing the openai-compatibility field`,
+  )
+}
+```
+
+**A write that may have landed is "unknown", not "failed".** A timeout, a dropped connection or a 5xx can follow a write the proxy already applied. The deploy treats a 4xx other than 408 as a rejection; every other write error is reported as an unknown outcome. `sendGoWrite` in `apps/cliproxy/src/deploy.ts` wraps both the PUT and the disable PATCH:
+
+<!-- prettier-ignore -->
+```ts
+const rejected =
+  error instanceof ManagementHttpError && error.status >= 400 && error.status < 500 && error.status !== 408
+if (rejected) throw error
+throw new OpenCodeGoUnverifiedError(
+  'write',
+  `the request was sent and its outcome is unknown: ${redact(describeError(error), env)}`,
+)
+```
+
+`ManagementHttpError` is raised only when an HTTP response arrived, so a transport failure never looks like a rejection. After an accepted PUT, failures in readback, visibility or the smoke request are also `OpenCodeGoUnverifiedError`: the write may have landed, and the live state is unproven.
+
+**Refuse before writing when the live state disagrees with the tracked policy.** `applyOpenCodeGoStep` in `apps/cliproxy/src/deploy.ts` fails, with the live proxy untouched, when:
+
+- `assertOwnedSection` finds an entry other than `opencode-go`;
+- the live entry is disabled while `settings.json` says `enabled: true` (re-enable deliberately first);
+- `findCollisions` finds an eligible bare or prefixed id already served under another `owned_by`.
+
+Step order in `deploy`: management-key preflight, `preflightOpenCodeGo` (before any SSH), SSH and `docker compose up`, `applyOAuthModelAliasStep`, `applyOpenCodeGoStep`, `healthCheck`. Inside `applyOpenCodeGoStep`, enabled mode runs read, foreign-entry guard, disabled-entry guard, collision check, PUT, readback poll, visibility poll, smoke request. Disabled mode instead PATCHes an existing entry to disabled and checks visibility when a downstream key is available; without a management key it warns and returns.
+
+Residual risk: the live read and the PUT are separate calls, so an entry added between them would be replaced. Deploys are gated and serialized, so the window is accepted.
+
+### Probe the server; do not trust the plan's account of it
+
+The original plan said the server rejects an empty list. A probe showed that a bare `[]` is accepted and clears the section, and that only the wrapped `{items: []}` is rejected. Before writing a client for a replace-everything endpoint, probe three things against the real server: the empty body, a response missing the wrapper field, and the response to a write that never gets an answer. Then write each result into a guard.
+
+See `apps/cliproxy/AGENTS.md` (OpenCode Go upstream), `docs/runbooks/cliproxy-opencode-go.md`, and `docs/solutions/integration-issues/opencode-go-through-cliproxy-session-header-billing-source-2026-11-05.md`.
 
 ## Why This Matters
 
-The bare-object trap is the dangerous one: a deploy that PUTs a wrapper shape gets a 200, reports success, and applies nothing — the aliases silently never exist. Only the read-back-and-compare step turns that into a loud deploy failure. The pattern (bare-object field PUT → read-back → fail-closed → bounded retry → never touch api-keys) generalizes to any CLIProxyAPI management field that must be applied without uploading `config.yaml`.
+The bare-object trap is the dangerous one: a deploy that PUTs a wrapper shape gets a 200, reports success, and applies nothing — the aliases silently never exist. Only the read-back-and-compare step turns that into a loud deploy failure. The field-scoped pattern (bare-object field PUT → read-back → fail-closed → bounded retry → never touch api-keys) generalizes to any CLIProxyAPI management field that has its own endpoint and must be applied without uploading `config.yaml`. A whole-section replace does not generalize: it is allowed only for a section infra owns outright, behind the guards in the `openai-compatibility` section above.
 
 ## When to Apply
 
 - Applying any version-controlled CLIProxyAPI management field at deploy time without overwriting `config.yaml`.
 - Any management-API mutation where a 200 does not prove the value persisted (read-back is mandatory).
 - Model aliasing to close a harness short-id gap (use `fork: true`).
+- Replacing a whole management section that infra owns and that has no field-scoped create endpoint (the `openai-compatibility` guards above).
 
 ## Examples
 
@@ -77,4 +126,7 @@ The bare-object trap is the dangerous one: a deploy that PUTs a wrapper shape ge
 - `docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md` — why `config.yaml` upload is skipped (runtime api-keys); this pattern is the safe alternative for managed fields.
 - `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md` — verifying CLIProxyAPI management-endpoint contracts at a tag (the bare-object shape is exactly the kind of contract to re-verify on upgrades).
 - `docs/solutions/best-practices/cli-bun-build-publish-model-2026-06-20.md` — the boundary removal that let the management helpers move to `packages/shared`.
+- `docs/solutions/integration-issues/opencode-go-through-cliproxy-session-header-billing-source-2026-11-05.md` — routing, billing signal and key scope for the one entry this section manages.
+- `docs/solutions/best-practices/opencode-go-privacy-terms-fail-closed-snapshot-from-docs-prose-2026-11-05.md` — how the entry's eligible model list is decided.
+- `docs/runbooks/cliproxy-opencode-go.md` — enablement, emergency disable, and recovery from "applied but unverified".
 - Shipped in PR #626 / `@marcusrbrown/infra@0.13.3`.

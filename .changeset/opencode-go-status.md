@@ -1,5 +1,0 @@
----
-'@marcusrbrown/infra': minor
----
-
-Monitor and report the OpenCode Go route on its own. `cliproxy monitor` now probes two routes in one run and prints a second `CLIProxy Go monitor probe:` line; the Go probe lists `/v1/models`, treats any exposed model that the privacy snapshot does not allow as `privacy-noncompliant`, then sends one `max_tokens: 1` request with a fresh `x-opencode-session` and requires `billing_source: go`. Plan limits (429 or 402), billing outside the Go plan, a lost provider, a proxy that stops forwarding the session header (`session-header-dropped`) and auth failures open a Go-only issue with its own label, marker and Discord alert; the Claude issue and alert are unchanged. `cliproxy status` adds an `OpenCode Go route` check next to the Claude provider-auth check. `status --json` and the history gain a `provider-route-go` observation (route state and reason only, never cost or usage); the public site still builds its end-to-end cell, verdict and stale flag from `provider-route` alone.

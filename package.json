@@ -27,7 +27,7 @@
     "provision:vpn": "bun run apps/vpn/server/provision.ts",
     "refresh:go-privacy": "bun run apps/cliproxy/scripts/refresh-go-privacy.ts",
     "test": "bun test --recursive",
-    "version-changesets": "changeset version"
+    "version-changesets": "changeset version && bun install --lockfile-only --ignore-scripts"
   },
   "simple-git-hooks": {
     "pre-commit": "bun run lint-staged"

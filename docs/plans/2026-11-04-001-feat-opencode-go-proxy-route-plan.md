@@ -137,7 +137,7 @@ These success criteria carry forward unchanged:
   "verdict": "extend",
   "scope": "marcusrbrown/infra: apps/cliproxy, apps/broker, apps/gateway, apps/docs, packages/shared/cliproxy, packages/shared/status, packages/cli (agent setup-core, cliproxy, status), .github/workflows",
   "freshness": {
-    "vcs_reference": "origin/main bcc2af8"
+    "vcs_reference": "origin/main 9d33e44"
   },
   "budget": {
     "max_search_passes": 3,
@@ -347,7 +347,7 @@ flowchart TD
 
 ## Implementation Units
 
-- [ ] **Unit 1: Privacy snapshot, settings and eligibility**
+- [x] **Unit 1: Privacy snapshot, settings and eligibility**
 
 **Goal:** Add the tracked snapshot and settings, plus one pure eligibility module that the deploy, the monitor and the refresh script all share.
 
@@ -399,7 +399,7 @@ flowchart TD
 - The committed snapshot parses.
 - Eligibility against a fixture of the real live list returns a non-empty set with no DeepSeek model in it.
 
-- [ ] **Unit 2: Management primitives for the upstream section**
+- [x] **Unit 2: Management primitives for the upstream section**
 
 **Goal:** Add generic GET, PUT, PATCH-disable, normalization and comparison for `openai-compatibility`.
 
@@ -506,7 +506,7 @@ flowchart TD
 - After merge, the live deploy prints its success line.
 - `/v1/models` lists the eligible ids under `owned_by: opencode-go`.
 
-- [ ] **Unit 4: `agent setup` and `cliproxy models` provider**
+- [x] **Unit 4: `agent setup` and `cliproxy models` provider**
 
 **Goal:** Let repos choose Go routed through the proxy, and let model listing filter to Go.
 
@@ -678,7 +678,7 @@ flowchart TD
 - A dispatched run with no upstream change exits clean.
 - A fixture change in the script test produces the expected PR body.
 
-- [ ] **Unit 7: Gateway Go acceptance pins**
+- [x] **Unit 7: Gateway Go acceptance pins**
 
 **Goal:** Prove the gateway accepts Go routed through the proxy and still rejects direct Go, without changing the guard.
 

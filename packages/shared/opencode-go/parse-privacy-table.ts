@@ -67,7 +67,7 @@ const MONTHS: readonly string[] = [
 const normalizeName = (name: string): string => name.toLowerCase().replaceAll(/\s+/g, ' ').trim()
 
 /** Reduce `[text](url)` to `text` so sentences read as prose. */
-const stripLinks = (text: string): string => text.replaceAll(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+const stripLinks = (text: string): string => text.replaceAll(/\[([^[\]]*)\]\([^()]*\)/g, '$1')
 
 const splitCells = (line: string): string[] =>
   line
@@ -182,7 +182,9 @@ function readRows(table: Table, endpointIds: ReadonlyMap<string, string>): Map<s
 /** Resolve a footnote label ("A / B", "A and B", "DeepSeek") to the privacy rows it names. */
 function resolveLabel(label: string, rows: ReadonlyMap<string, Row>): Row[] {
   const resolved = new Map<string, Row>()
-  for (const part of label.split(/\s*\/\s*|\s+and\s+/)) {
+  for (const part of normalizeName(label)
+    .split('/')
+    .flatMap(piece => piece.split(' and '))) {
     const token = normalizeName(part)
     const exact = rows.get(token)
     const matches =
@@ -210,7 +212,7 @@ function bulletsOf(
   const bullets: {label: string; text: string}[] = []
   for (const line of lines) {
     if (line.trim() === '') continue
-    const match = /^- \*\*(.+?):\*\* (.+)$/.exec(line)
+    const match = /^- \*\*([^*]+):\*\* (.+)$/.exec(line)
     if (match === null) {
       if (unmatched === 'every-line' || LIST_ITEM.test(line)) {
         throw new PrivacyTableError(`${label}: unmapped line "${line.trim().slice(0, 60)}"`)

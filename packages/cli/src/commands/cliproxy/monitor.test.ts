@@ -1763,7 +1763,8 @@ describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
       throw new Error(`unexpected ${method} ${url}`)
     })
 
-    const writes = () => recorded.filter(request => request.method !== 'GET' && request.url.includes('api.github.com'))
+    const writes = () =>
+      recorded.filter(request => request.method !== 'GET' && new URL(request.url).hostname === 'api.github.com')
     const issueFor = (label: string) => issues.find(issue => issue.labels.some(candidate => candidate.name === label))
     return {issues, recorded, discord, writes, issueFor}
   }

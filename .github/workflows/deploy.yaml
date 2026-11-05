@@ -41,7 +41,7 @@ jobs:
             keeweb_nginx:
               - 'apps/keeweb/config/kw.igg.ms.conf'
             cliproxy:
-              - '{apps/cliproxy,packages/shared/cliproxy}/**'
+              - '{apps/cliproxy,packages/shared/cliproxy,packages/shared/opencode-go}/**'
               - '!**/*.md'
               - '!**/*.test.ts'
               - '!**/__fixtures__/**'
@@ -101,6 +101,8 @@ jobs:
       CLIPROXY_SSH_KEY: ${{ secrets.CLIPROXY_SSH_KEY }}
       CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
       CLIPROXY_DOMAIN: ${{ secrets.CLIPROXY_DOMAIN }}
+      CLIPROXY_OPENCODE_GO_KEY: ${{ secrets.CLIPROXY_OPENCODE_GO_KEY }}
+      CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
       DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
 
   deploy-gateway:

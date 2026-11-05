@@ -5519,3 +5519,124 @@ describe('site.yaml: contract', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// OpenCode Go proxy route: deploy secret wiring and router filters
+// ---------------------------------------------------------------------------
+//
+// CLIPROXY_OPENCODE_GO_KEY and CLIPROXY_API_KEY are repository secrets (the router's deploy-cliproxy caller job
+// has no environment, so it cannot resolve Environment-scoped secrets: actions/runner#4453). The router passes them
+// to the callee explicitly, the callee declares them optional, and apps/cliproxy/src/deploy.ts preflight is the
+// only gate on them. See docs/plans/2026-11-04-001-feat-opencode-go-proxy-route-plan.md (Unit 3).
+
+async function loadWorkflowYaml(path: string): Promise<Record<string, unknown>> {
+  const parsed: unknown = parseYaml(await Bun.file(path).text())
+  if (!isRecord(parsed)) throw new Error(`${path} did not parse to a mapping`)
+  return parsed
+}
+
+function workflowJob(workflow: Record<string, unknown>, id: string): Record<string, unknown> {
+  const jobs = isRecord(workflow.jobs) ? workflow.jobs : {}
+  const found = jobs[id]
+  if (!isRecord(found)) throw new Error(`job ${id} not found`)
+  return found
+}
+
+/** Expands a single top-level `{a,b}/**` brace into its alternatives. */
+function expandBraceGlob(pattern: string): string[] {
+  const match = /^\{([^}]+)\}(\/.*)$/.exec(pattern)
+  if (!match) return [pattern]
+  return (match[1] ?? '').split(',').map(alternative => `${alternative}${match[2] ?? ''}`)
+}
+
+describe('cliproxy deploy: OpenCode Go secret wiring and router filters', () => {
+  const GO_SECRETS = ['CLIPROXY_OPENCODE_GO_KEY', 'CLIPROXY_API_KEY'] as const
+  const CALLEE = resolve(REPO_ROOT, '.github/workflows/deploy-cliproxy.yaml')
+  const ROUTER = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')
+
+  /** The first (brace-expanded) pattern of a dorny/paths-filter group. */
+  async function filterGroup(name: string): Promise<string[]> {
+    const detect = workflowJob(await loadWorkflowYaml(ROUTER), 'detect-changes')
+    const filterStep = stepsOf(detect).find(step => step.id === 'filter')
+    const filters = isRecord(filterStep?.with) ? filterStep.with.filters : undefined
+    const parsed: unknown = typeof filters === 'string' ? parseYaml(filters) : undefined
+    const group = isRecord(parsed) ? parsed[name] : undefined
+    if (!Array.isArray(group)) throw new Error(`paths-filter group ${name} not found`)
+    return group.filter((pattern): pattern is string => typeof pattern === 'string')
+  }
+
+  for (const secret of GO_SECRETS) {
+    it(`deploy-cliproxy.yaml declares ${secret} as an optional workflow_call secret`, async () => {
+      const workflow = await loadWorkflowYaml(CALLEE)
+      const on = isRecord(workflow.on) ? workflow.on : {}
+      const call = isRecord(on.workflow_call) ? on.workflow_call : {}
+      const secrets = isRecord(call.secrets) ? call.secrets : {}
+      expect(secrets[secret]).toEqual({required: false})
+    })
+
+    it(`deploy-cliproxy.yaml puts ${secret} in the Deploy step env and nowhere else`, async () => {
+      const steps = stepsOf(workflowJob(await loadWorkflowYaml(CALLEE), 'deploy-cliproxy'))
+      const deployStep = steps.find(step => step.run === 'bun run --cwd apps/cliproxy deploy')
+      expect(deployStep).toBeDefined()
+      const env = isRecord(deployStep?.env) ? deployStep.env : {}
+      expect(env[secret]).toBe(ghaExpression(`secrets.${secret}`))
+      for (const other of steps.filter(step => step !== deployStep)) {
+        expect(JSON.stringify(other)).not.toContain(secret)
+      }
+    })
+
+    it(`deploy.yaml passes ${secret} to the deploy-cliproxy call explicitly`, async () => {
+      const call = workflowJob(await loadWorkflowYaml(ROUTER), 'deploy-cliproxy')
+      expect(call.secrets).not.toBe('inherit')
+      const secrets = isRecord(call.secrets) ? call.secrets : {}
+      expect(secrets[secret]).toBe(ghaExpression(`secrets.${secret}`))
+    })
+
+    it(`the callee does not validate ${secret} itself (deploy.ts preflight is the only gate)`, async () => {
+      const steps = stepsOf(workflowJob(await loadWorkflowYaml(CALLEE), 'deploy-cliproxy'))
+      const validate = steps.find(step => step.name === 'Validate required secrets')
+      expect(JSON.stringify(validate)).not.toContain(secret)
+    })
+  }
+
+  it('the router cliproxy filter includes packages/shared/opencode-go/**', async () => {
+    const [first] = await filterGroup('cliproxy')
+    expect(expandBraceGlob(first ?? '')).toContain('packages/shared/opencode-go/**')
+  })
+
+  it('the router broker filter does not include packages/shared/opencode-go', async () => {
+    const broker = await filterGroup('broker')
+    expect(broker.flatMap(expandBraceGlob)).not.toContain('packages/shared/opencode-go/**')
+    expect(broker.join('\n')).not.toContain('opencode-go')
+  })
+
+  it('the cliproxy filter still triggers on the shared cliproxy package and the app', async () => {
+    const [first] = await filterGroup('cliproxy')
+    expect(expandBraceGlob(first ?? '')).toEqual(
+      expect.arrayContaining(['apps/cliproxy/**', 'packages/shared/cliproxy/**']),
+    )
+  })
+
+  it('the local deploy env helper passes both keys through to apps/cliproxy/src/deploy.ts', async () => {
+    const {getLocalDeployEnv} = await import('./commands/cliproxy/deploy')
+    const saved = {go: process.env.CLIPROXY_OPENCODE_GO_KEY, api: process.env.CLIPROXY_API_KEY}
+    process.env.CLIPROXY_OPENCODE_GO_KEY = 'go-sentinel'
+    process.env.CLIPROXY_API_KEY = 'api-sentinel'
+    try {
+      const env = getLocalDeployEnv()
+      expect(env.CLIPROXY_OPENCODE_GO_KEY).toBe('go-sentinel')
+      expect(env.CLIPROXY_API_KEY).toBe('api-sentinel')
+    } finally {
+      if (saved.go === undefined) delete process.env.CLIPROXY_OPENCODE_GO_KEY
+      else process.env.CLIPROXY_OPENCODE_GO_KEY = saved.go
+      if (saved.api === undefined) delete process.env.CLIPROXY_API_KEY
+      else process.env.CLIPROXY_API_KEY = saved.api
+    }
+  })
+
+  it('apps/cliproxy deploy.ts keeps the Go and downstream keys out of ssh/scp child environments', async () => {
+    const text = await Bun.file(resolve(REPO_ROOT, 'apps/cliproxy/src/deploy.ts')).text()
+    expect(text).toContain('childProcessEnv')
+    expect(text).toMatch(/HTTP_ONLY_ENV_KEYS[^=]*=\s*new Set\(\[\s*'CLIPROXY_OPENCODE_GO_KEY',\s*'CLIPROXY_API_KEY'/)
+  })
+})

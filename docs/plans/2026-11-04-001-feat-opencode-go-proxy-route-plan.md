@@ -437,7 +437,7 @@ flowchart TD
 
 - Tests pass, and every error path carries a key-leak assertion.
 
-- [ ] **Unit 3: Deploy step and secret wiring**
+- [x] **Unit 3: Deploy step and secret wiring**
 
 **Goal:** The cliproxy deploy applies the Go entry with a full preflight, verifies it, and proves routing works.
 

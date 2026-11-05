@@ -1,15 +1,23 @@
 #!/usr/bin/env bun
 
+import type {OpenAICompatEntry} from '@marcusrbrown/infra-shared/cliproxy/management'
+import type {Exclusion, OpenCodeGoSettings, ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 import {existsSync, mkdtempSync, rmSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
-
 import {
   applyOAuthModelAlias,
+  applyOpenAICompat,
+  patchOpenAICompatDisabled,
   readBackOAuthModelAlias,
+  readBackOpenAICompat,
   readOAuthModelAliasFromConfig,
   setEqualOAuthModelAlias,
+  setEqualOpenAICompat,
 } from '@marcusrbrown/infra-shared/cliproxy/management'
+import {computeEligibility, parseSettings, parseSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
+import snapshotJson from '@marcusrbrown/infra-shared/opencode-go/privacy-snapshot.json'
+import settingsJson from '@marcusrbrown/infra-shared/opencode-go/settings.json'
 
 const DEFAULT_REMOTE_USER = process.env.REMOTE_USER ?? 'root'
 const REMOTE_DIR = '/opt/cliproxy'
@@ -21,12 +29,28 @@ export interface DeployEnv {
   SSH_AUTH_SOCK: string
   CLIPROXY_DOMAIN: string
   CLIPROXY_MANAGEMENT_KEY: string
+  /** The OpenCode Go API key written into the proxy's `opencode-go` upstream entry. Never reaches ssh/scp. */
+  CLIPROXY_OPENCODE_GO_KEY: string
+  /** A downstream proxy key, used only for this deploy's own `/v1/*` calls. Never reaches ssh/scp. */
+  CLIPROXY_API_KEY: string
 }
 
 export interface DeployFiles {
   compose: string
   config: string
   caddy: string
+}
+
+/** Overrides for the tracked OpenCode Go policy; tests inject fixtures, production uses the committed files. */
+export interface OpenCodeGoOptions {
+  /** Raw settings JSON; defaults to `packages/shared/opencode-go/settings.json`. */
+  settings?: unknown
+  /** Raw privacy snapshot JSON; defaults to `packages/shared/opencode-go/privacy-snapshot.json`. */
+  snapshot?: unknown
+  /** Clock for the agreement-expiry check; defaults to the current time. */
+  now?: () => Date
+  /** Sleep used by the readback and visibility polls; defaults to a real timer. */
+  sleep?: (ms: number) => Promise<void>
 }
 
 export interface DeployOptions {
@@ -36,6 +60,7 @@ export interface DeployOptions {
   env?: DeployEnv
   /** Parent directory for the SSH control socket; defaults to os.tmpdir(). */
   tempRoot?: string
+  opencodeGo?: OpenCodeGoOptions
 }
 
 function resolveDeployFiles(): DeployFiles {
@@ -76,7 +101,17 @@ function getDeployEnv(): DeployEnv {
     SSH_AUTH_SOCK: sshAuthSock,
     CLIPROXY_DOMAIN: host,
     CLIPROXY_MANAGEMENT_KEY: process.env.CLIPROXY_MANAGEMENT_KEY ?? '',
+    CLIPROXY_OPENCODE_GO_KEY: process.env.CLIPROXY_OPENCODE_GO_KEY ?? '',
+    CLIPROXY_API_KEY: process.env.CLIPROXY_API_KEY ?? '',
   }
+}
+
+/** Keys that exist only for this process's own HTTP calls. */
+const HTTP_ONLY_ENV_KEYS: ReadonlySet<string> = new Set(['CLIPROXY_OPENCODE_GO_KEY', 'CLIPROXY_API_KEY'])
+
+/** The environment handed to `ssh`/`scp` children: the deploy env without the Go and downstream keys. */
+function childProcessEnv(env: DeployEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => !HTTP_ONLY_ENV_KEYS.has(name)))
 }
 
 function validatePreconditions(files = resolveDeployFiles(), env?: DeployEnv): DeployFiles {
@@ -100,7 +135,7 @@ function validatePreconditions(files = resolveDeployFiles(), env?: DeployEnv): D
 async function runCommand(
   label: string,
   command: string[],
-  env: DeployEnv,
+  env: Record<string, string>,
   spawnFn: typeof Bun.spawn = Bun.spawn,
 ): Promise<void> {
   console.warn(`\u001B[1;34m==>\u001B[0m ${label}`)
@@ -174,7 +209,7 @@ function scpCommand(host: string, source: string, destination: string, controlPa
 async function remoteFileExists(
   host: string,
   path: string,
-  env: DeployEnv,
+  env: Record<string, string>,
   controlPath: string,
   spawnFn: typeof Bun.spawn = Bun.spawn,
 ): Promise<boolean> {
@@ -422,6 +457,417 @@ export async function applyOAuthModelAliasStep(
   console.warn(`\u001B[1;32m✓\u001B[0m Applied ${desired.claude.length} oauth-model-alias entries successfully`)
 }
 
+// ─── OpenCode Go upstream ─────────────────────────────────────────────────────
+
+const GO_ENTRY_NAME = 'opencode-go'
+const GO_BASE_URL = 'https://opencode.ai/inference/go/openai/v1'
+const GO_LIVE_MODELS_URL = 'https://opencode.ai/inference/go/v1/models'
+const GO_SESSION_HEADER = 'x-opencode-session'
+const GO_RUNBOOK = 'docs/runbooks/cliproxy-opencode-go.md'
+
+/** Waits before each readback attempt after the PUT: the proxy reloads in about 180 ms. */
+const GO_READBACK_BACKOFFS_MS = [0, 500, 1000]
+/** Waits before each visibility attempt after the write: about 5.5 s in total. */
+const GO_VISIBILITY_BACKOFFS_MS = [0, 250, 500, 750, 1000, 1000, 1000, 1000]
+
+export type OpenCodeGoPlan =
+  {enabled: false} | {enabled: true; eligible: string[]; excluded: Exclusion[]; probeModel: string}
+
+/** The write reached the proxy but a later check failed, so the live state is unproven. */
+export class OpenCodeGoUnverifiedError extends Error {
+  constructor(stage: string, detail: string) {
+    super(
+      `OpenCode Go entry APPLIED but UNVERIFIED (${stage}): ${detail}. ` +
+        `Do not assume Go routing works. Follow ${GO_RUNBOOK} to inspect or disable the entry.`,
+    )
+    this.name = 'OpenCodeGoUnverifiedError'
+  }
+}
+
+/** Replace every non-empty secret occurrence so an error can carry upstream text safely. */
+function redact(text: string, env: DeployEnv): string {
+  let result = text
+  for (const secret of [env.CLIPROXY_OPENCODE_GO_KEY, env.CLIPROXY_API_KEY, env.CLIPROXY_MANAGEMENT_KEY]) {
+    if (secret) result = result.split(secret).join('[redacted]')
+  }
+  return result
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+async function fetchLiveGoIds(fetchImpl: typeof globalThis.fetch): Promise<string[]> {
+  const failure = (detail: string): Error => new Error(`Could not fetch the live OpenCode Go model list (${detail})`)
+
+  let response: Response
+  try {
+    response = await fetchImpl(GO_LIVE_MODELS_URL, {signal: AbortSignal.timeout(10_000)})
+  } catch (error) {
+    throw failure(describeError(error))
+  }
+  if (!response.ok) {
+    await response.text()
+    throw failure(`HTTP ${response.status}`)
+  }
+
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    throw failure('malformed JSON')
+  }
+  const data = isRecordLike(payload) ? payload.data : undefined
+  if (!Array.isArray(data)) throw failure('unexpected shape')
+  return data.flatMap(item => (isRecordLike(item) && typeof item.id === 'string' && item.id !== '' ? [item.id] : []))
+}
+
+/**
+ * Pre-SSH validation of the OpenCode Go step. Parses the tracked policy, and — when Go is enabled — requires the
+ * three keys, reads the live Go model list and computes the eligible set. Throws before any write or SSH.
+ *
+ * Disabled mode needs no Go key, no downstream key and no network: it only has to parse the tracked policy.
+ */
+export async function preflightOpenCodeGo(
+  env: DeployEnv,
+  options: OpenCodeGoOptions = {},
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<OpenCodeGoPlan> {
+  const settings: OpenCodeGoSettings = parseSettings(options.settings ?? settingsJson)
+  const snapshot: ParsedSnapshot = parseSnapshot(options.snapshot ?? snapshotJson)
+
+  if (!settings.enabled) {
+    console.warn('\u001B[1;34m==>\u001B[0m OpenCode Go is disabled in settings.json — the proxy entry will be disabled')
+    return {enabled: false}
+  }
+
+  const missing = (
+    [
+      'CLIPROXY_OPENCODE_GO_KEY',
+      'CLIPROXY_API_KEY',
+      'CLIPROXY_MANAGEMENT_KEY',
+    ] as const satisfies readonly (keyof DeployEnv)[]
+  ).filter(name => !env[name])
+  if (missing.length > 0) {
+    throw new Error(
+      `OpenCode Go is enabled (packages/shared/opencode-go/settings.json) but ${missing.join(', ')} ` +
+        `${missing.length === 1 ? 'is' : 'are'} not set. Set ${missing.length === 1 ? 'it' : 'them'} or disable Go in settings.json.`,
+    )
+  }
+
+  const liveIds = await fetchLiveGoIds(fetchImpl)
+  const todayUtc = (options.now?.() ?? new Date()).toISOString().slice(0, 10)
+  const {eligible, excluded} = computeEligibility(snapshot, liveIds, todayUtc)
+
+  console.warn(
+    `\u001B[1;34m==>\u001B[0m OpenCode Go: ${eligible.length} eligible model(s), ${excluded.length} excluded`,
+  )
+  for (const {id, reason} of excluded) console.warn(`    excluded: ${id} (${reason})`)
+
+  const [firstEligible] = eligible
+  if (firstEligible === undefined) {
+    throw new Error(
+      'no eligible OpenCode Go models: every live or snapshot model is excluded, so nothing may be exposed. ' +
+        'Review packages/shared/opencode-go/privacy-snapshot.json.',
+    )
+  }
+  const preferred = settings.defaultProbeModel
+  const probeModel = preferred !== undefined && eligible.includes(preferred) ? preferred : firstEligible
+
+  return {enabled: true, eligible, excluded, probeModel}
+}
+
+interface ServedModel {
+  id: string
+  ownedBy: string
+}
+
+/** Read `/v1/models` with the downstream key. Errors carry the status only. */
+async function readServedModels(
+  baseUrl: string,
+  apiKey: string,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<ServedModel[]> {
+  const response = await fetchImpl(`${baseUrl}/v1/models`, {
+    headers: {Authorization: `Bearer ${apiKey}`},
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!response.ok) {
+    await response.text()
+    throw new Error(`GET /v1/models failed with HTTP ${response.status}`)
+  }
+
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    throw new Error('GET /v1/models returned malformed JSON')
+  }
+  const data = isRecordLike(payload) ? payload.data : undefined
+  if (!Array.isArray(data)) throw new TypeError('GET /v1/models returned an unexpected shape')
+  return data.flatMap(item =>
+    isRecordLike(item) && typeof item.id === 'string'
+      ? [{id: item.id, ownedBy: typeof item.owned_by === 'string' ? item.owned_by : ''}]
+      : [],
+  )
+}
+
+function buildGoEntry(goKey: string, eligible: readonly string[]): OpenAICompatEntry {
+  return {
+    name: GO_ENTRY_NAME,
+    prefix: GO_ENTRY_NAME,
+    'base-url': GO_BASE_URL,
+    'api-key-entries': [{'api-key': goKey}],
+    models: eligible.map(id => ({name: id, alias: id})),
+    // Maps the client's own header onto the upstream request; the proxy never forwards headers wholesale.
+    headers: {[GO_SESSION_HEADER]: '$X-Opencode-Session'},
+    disabled: false,
+  }
+}
+
+/** Names of the entry fields that differ. Field names only: values include the api-key. */
+function differingFields(desired: OpenAICompatEntry, actual: OpenAICompatEntry | undefined): string[] {
+  if (actual === undefined) return ['entry missing']
+  const fields: string[] = []
+  const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+  if (desired.prefix !== actual.prefix) fields.push('prefix')
+  if (desired['base-url'] !== actual['base-url']) fields.push('base-url')
+  if (desired.disabled !== actual.disabled) fields.push('disabled')
+  const modelNames = (entry: OpenAICompatEntry): string[] =>
+    entry.models.map(model => JSON.stringify([model.name, model.alias])).sort()
+  if (!same(modelNames(desired), modelNames(actual))) fields.push('models')
+  if (!same(desired.headers, actual.headers)) fields.push('headers')
+  const keys = (entry: OpenAICompatEntry): string[] => entry['api-key-entries'].map(item => item['api-key']).sort()
+  if (!same(keys(desired), keys(actual))) fields.push('api-key-entries')
+  return fields
+}
+
+/** Throws unless the live section is empty or holds only the `opencode-go` entry. */
+function assertOwnedSection(live: readonly OpenAICompatEntry[]): void {
+  const foreign = live.filter(entry => entry.name !== GO_ENTRY_NAME).map(entry => entry.name)
+  if (foreign.length > 0) {
+    throw new Error(
+      `Refusing to write openai-compatibility: the live section holds other entries (${foreign.join(', ')}). ` +
+        `Infra owns only "${GO_ENTRY_NAME}" and the write replaces the whole list. Remove or migrate them first; see ${GO_RUNBOOK}.`,
+    )
+  }
+}
+
+/** Models whose id would be shadowed by, or shadow, an eligible Go id served by another provider. */
+function findCollisions(served: readonly ServedModel[], eligible: readonly string[]): ServedModel[] {
+  const wanted = new Set(eligible.flatMap(id => [id, `${GO_ENTRY_NAME}/${id}`]))
+  return served.filter(model => wanted.has(model.id) && model.ownedBy !== GO_ENTRY_NAME)
+}
+
+/** Problems with the served model list: missing or duplicated eligible ids, and Go-owned ids that must not exist. */
+function visibilityProblems(served: readonly ServedModel[], eligible: readonly string[]): string[] {
+  const problems: string[] = []
+  const expected = new Set(eligible.flatMap(id => [id, `${GO_ENTRY_NAME}/${id}`]))
+  const goOwned = served.filter(model => model.ownedBy === GO_ENTRY_NAME)
+
+  for (const id of expected) {
+    const count = goOwned.filter(model => model.id === id).length
+    if (count === 0) problems.push(`${id} is not visible under owned_by ${GO_ENTRY_NAME}`)
+    else if (count > 1) problems.push(`${id} is listed ${count} times`)
+  }
+  for (const model of goOwned) {
+    if (!expected.has(model.id))
+      problems.push(`${model.id} is exposed under owned_by ${GO_ENTRY_NAME} but is not eligible`)
+  }
+  return problems
+}
+
+async function pollUntil<T>(
+  backoffs: readonly number[],
+  sleepFn: (ms: number) => Promise<void>,
+  attempt: () => Promise<{done: true; value: T} | {done: false; reason: string}>,
+): Promise<{ok: true; value: T} | {ok: false; reason: string}> {
+  let reason = 'no attempt made'
+  for (const backoff of backoffs) {
+    if (backoff > 0) await sleepFn(backoff)
+    const result = await attempt()
+    if (result.done) return {ok: true, value: result.value}
+    reason = result.reason
+  }
+  return {ok: false, reason}
+}
+
+/** One real request through the proxy at `max_tokens: 1`; requires a 2xx that was billed to the Go plan. */
+async function runGoSmokeRequest(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<void> {
+  const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      [GO_SESSION_HEADER]: `infra-deploy-${crypto.randomUUID()}`,
+    },
+    body: JSON.stringify({model, messages: [{role: 'user', content: 'Reply with OK'}], max_tokens: 1}),
+    signal: AbortSignal.timeout(30_000),
+  })
+  if (!response.ok) {
+    await response.text()
+    throw new OpenCodeGoUnverifiedError('smoke request', `the proxy answered HTTP ${response.status}`)
+  }
+
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    throw new OpenCodeGoUnverifiedError('smoke request', 'the 2xx response was not JSON, so billing_source is unknown')
+  }
+  const usage = isRecordLike(payload) ? payload.usage : undefined
+  const opencode = isRecordLike(usage) ? usage.opencode : undefined
+  const billing = isRecordLike(opencode) ? opencode.billing_source : undefined
+  if (billing !== 'go') {
+    const seen = typeof billing === 'string' ? JSON.stringify(billing.slice(0, 32)) : 'missing'
+    throw new OpenCodeGoUnverifiedError('smoke request', `billing_source was ${seen}, expected "go"`)
+  }
+}
+
+/**
+ * Apply the tracked OpenCode Go upstream to the live proxy and prove it routes. Runs after the alias step
+ * and before `healthCheck`.
+ *
+ * Before the write (plain errors, live proxy untouched): foreign entries, a disabled live entry while Go is
+ * enabled, and id collisions with other providers. After the write, every failure is an
+ * {@link OpenCodeGoUnverifiedError} naming the runbook.
+ *
+ * Disabled mode disables the existing entry with a field-scoped PATCH and expects no Go ids to be served.
+ */
+export async function applyOpenCodeGoStep(
+  env: DeployEnv,
+  plan: OpenCodeGoPlan,
+  fetchImpl: typeof globalThis.fetch,
+  sleepFn: (ms: number) => Promise<void> = sleep,
+): Promise<void> {
+  const managementKey = env.CLIPROXY_MANAGEMENT_KEY
+  if (!managementKey) {
+    if (plan.enabled) throw new Error('CLIPROXY_MANAGEMENT_KEY is required to apply the OpenCode Go entry.')
+    console.warn(
+      '\u001B[1;33m⚠\u001B[0m  CLIPROXY_MANAGEMENT_KEY not set — cannot confirm the OpenCode Go entry is disabled',
+    )
+    return
+  }
+
+  const baseUrl = `https://${env.CLIPROXY_DOMAIN}`
+  const live = await readBackOpenAICompat({baseUrl, key: managementKey, fetch: fetchImpl})
+  assertOwnedSection(live)
+  const liveEntry = live.find(entry => entry.name === GO_ENTRY_NAME)
+
+  if (!plan.enabled) {
+    await disableGoEntry(env, baseUrl, liveEntry, fetchImpl, sleepFn)
+    return
+  }
+
+  if (liveEntry?.disabled === true) {
+    throw new Error(
+      `The live "${GO_ENTRY_NAME}" entry is disabled but settings.json says enabled. ` +
+        `Re-enable it deliberately first; see ${GO_RUNBOOK}.`,
+    )
+  }
+
+  const collisions = findCollisions(await readServedModels(baseUrl, env.CLIPROXY_API_KEY, fetchImpl), plan.eligible)
+  if (collisions.length > 0) {
+    throw new Error(
+      `Refusing to expose OpenCode Go: these ids are already served by another provider: ${collisions
+        .map(model => `${model.id} (owned_by ${model.ownedBy || 'unknown'})`)
+        .join(', ')}.`,
+    )
+  }
+
+  const desired = buildGoEntry(env.CLIPROXY_OPENCODE_GO_KEY, plan.eligible)
+  console.warn(`\u001B[1;34m==>\u001B[0m Applying OpenCode Go upstream (${plan.eligible.length} models)`)
+  await applyOpenAICompat({baseUrl, key: managementKey, body: [desired], fetch: fetchImpl})
+
+  try {
+    const readback = await pollUntil(GO_READBACK_BACKOFFS_MS, sleepFn, async () => {
+      const actual = await readBackOpenAICompat({baseUrl, key: managementKey, fetch: fetchImpl})
+      if (setEqualOpenAICompat([desired], actual)) return {done: true, value: true}
+      const fields = differingFields(
+        desired,
+        actual.find(entry => entry.name === GO_ENTRY_NAME),
+      )
+      return {done: false, reason: `differs in: ${fields.join(', ') || 'entry set'}`}
+    })
+    if (!readback.ok) throw new OpenCodeGoUnverifiedError('read-back', `the live entry ${readback.reason}`)
+
+    const visible = await pollUntil(GO_VISIBILITY_BACKOFFS_MS, sleepFn, async () => {
+      const problems = visibilityProblems(
+        await readServedModels(baseUrl, env.CLIPROXY_API_KEY, fetchImpl),
+        plan.eligible,
+      )
+      return problems.length === 0 ? {done: true, value: true} : {done: false, reason: problems.join('; ')}
+    })
+    if (!visible.ok) throw new OpenCodeGoUnverifiedError('visibility', visible.reason)
+
+    await runGoSmokeRequest(baseUrl, env.CLIPROXY_API_KEY, plan.probeModel, fetchImpl)
+  } catch (error) {
+    if (error instanceof OpenCodeGoUnverifiedError) throw error
+    throw new OpenCodeGoUnverifiedError('post-write check', redact(describeError(error), env))
+  }
+
+  console.warn(
+    `\u001B[1;32m✓\u001B[0m OpenCode Go applied and verified: ${plan.eligible.length} models visible, smoke request billed to Go`,
+  )
+}
+
+async function disableGoEntry(
+  env: DeployEnv,
+  baseUrl: string,
+  liveEntry: OpenAICompatEntry | undefined,
+  fetchImpl: typeof globalThis.fetch,
+  sleepFn: (ms: number) => Promise<void>,
+): Promise<void> {
+  if (liveEntry === undefined) {
+    console.warn(`\u001B[1;34m==>\u001B[0m No live "${GO_ENTRY_NAME}" entry — nothing to disable`)
+    return
+  }
+
+  if (liveEntry.disabled !== true) {
+    console.warn(`\u001B[1;34m==>\u001B[0m Disabling the live "${GO_ENTRY_NAME}" entry`)
+    await patchOpenAICompatDisabled({
+      baseUrl,
+      key: env.CLIPROXY_MANAGEMENT_KEY,
+      name: GO_ENTRY_NAME,
+      disabled: true,
+      fetch: fetchImpl,
+    })
+  }
+
+  if (!env.CLIPROXY_API_KEY) {
+    console.warn(
+      '\u001B[1;33m⚠\u001B[0m  CLIPROXY_API_KEY not set — skipping the check that no OpenCode Go model is served',
+    )
+    return
+  }
+
+  try {
+    const gone = await pollUntil(GO_VISIBILITY_BACKOFFS_MS, sleepFn, async () => {
+      const served = (await readServedModels(baseUrl, env.CLIPROXY_API_KEY, fetchImpl)).filter(
+        model => model.ownedBy === GO_ENTRY_NAME,
+      )
+      return served.length === 0
+        ? {done: true, value: true}
+        : {done: false, reason: `still served: ${served.map(model => model.id).join(', ')}`}
+    })
+    if (!gone.ok) throw new OpenCodeGoUnverifiedError('visibility', gone.reason)
+  } catch (error) {
+    if (error instanceof OpenCodeGoUnverifiedError) throw error
+    throw new OpenCodeGoUnverifiedError('post-write check', redact(describeError(error), env))
+  }
+
+  console.warn(`\u001B[1;32m✓\u001B[0m OpenCode Go disabled and verified: no Go model is served`)
+}
+
 export async function deploy(opts: DeployOptions = {}): Promise<void> {
   const env = opts.env ?? getDeployEnv()
   const files = validatePreconditions(opts.files, env)
@@ -433,6 +879,10 @@ export async function deploy(opts: DeployOptions = {}): Promise<void> {
   // Validate management key before any SSH, upload, or container operation.
   await preflightManagementKeyCheck(env, files, fetchImpl)
 
+  // Validate the OpenCode Go policy, keys and live model list before any SSH, the same way.
+  const goPlan = await preflightOpenCodeGo(env, opts.opencodeGo, fetchImpl)
+  const childEnv = childProcessEnv(env)
+
   let tmpDir: string | undefined
 
   try {
@@ -443,26 +893,32 @@ export async function deploy(opts: DeployOptions = {}): Promise<void> {
     await runCommand(
       'Creating remote directories',
       sshCommand(host, `mkdir -p ${REMOTE_DIR}/config`, controlPath),
-      env,
+      childEnv,
       spawnFn,
     )
 
     await runCommand(
       'Uploading docker-compose.yaml',
       scpCommand(host, files.compose, `${REMOTE_DIR}/docker-compose.yaml`, controlPath),
-      env,
+      childEnv,
       spawnFn,
     )
     await runCommand(
       'Uploading config/Caddyfile',
       scpCommand(host, files.caddy, `${REMOTE_DIR}/config/Caddyfile`, controlPath),
-      env,
+      childEnv,
       spawnFn,
     )
 
     // config.yaml contains runtime state (API keys, settings) managed via the management API.
     // Only upload on first deploy or when explicitly forced. Overwriting would wipe API keys.
-    const configExists = await remoteFileExists(host, `${REMOTE_DIR}/config/config.yaml`, env, controlPath, spawnFn)
+    const configExists = await remoteFileExists(
+      host,
+      `${REMOTE_DIR}/config/config.yaml`,
+      childEnv,
+      controlPath,
+      spawnFn,
+    )
     const trackedConfigUploaded = !configExists || forceConfig
     if (trackedConfigUploaded) {
       const label = forceConfig
@@ -471,7 +927,7 @@ export async function deploy(opts: DeployOptions = {}): Promise<void> {
       await runCommand(
         label,
         scpCommand(host, files.config, `${REMOTE_DIR}/config/config.yaml`, controlPath),
-        env,
+        childEnv,
         spawnFn,
       )
     } else {
@@ -485,7 +941,7 @@ export async function deploy(opts: DeployOptions = {}): Promise<void> {
       await runCommand(
         'Pruning unused images (disk reclaim)',
         sshCommand(host, 'docker image prune -af', controlPath),
-        env,
+        childEnv,
         spawnFn,
       )
     } catch (error) {
@@ -505,13 +961,17 @@ export async function deploy(opts: DeployOptions = {}): Promise<void> {
         `cd ${REMOTE_DIR} && docker compose pull && docker compose up -d --wait --wait-timeout 90`,
         controlPath,
       ),
-      env,
+      childEnv,
       spawnFn,
     )
 
     // Apply oauth-model-alias after the stack is healthy (management API reachable)
     // and before healthCheck so a failed alias apply fails the deploy.
     await applyOAuthModelAliasStep(env, files, fetchImpl)
+
+    // Apply the OpenCode Go upstream last, so the live proxy is already serving; a failure here fails the deploy
+    // before healthCheck.
+    await applyOpenCodeGoStep(env, goPlan, fetchImpl, opts.opencodeGo?.sleep)
 
     await healthCheck(env, fetchImpl)
   } finally {

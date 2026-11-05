@@ -182,6 +182,7 @@ Do not edit the `.env` on the droplet directly — the next deploy overwrites it
 - **Never pass secret bytes via argv** — the broker `.env` (management keys, `BROKER_AUD`) is written via SSH stdin only. `--body <value>` patterns are banned.
 - **Never use `ssh-keyscan` in CI** — host keys are pinned in `.github/known_hosts` at provision time and committed. Provisioning scripts may use `ssh-keyscan` locally.
 - **Never scale the broker horizontally** — the single-flight lock is valid only because there is exactly one broker instance (single droplet). Scaling out breaks the lock invariant and requires a distributed lock or CAS-capable management API.
+- **Broker-minted credentials stay Anthropic and OpenAI.** OpenCode Go waits on a mint contract that carries a proxy base URL; the current response is a bare `auth.json` map with nowhere to put one.
 - **Pattern A capability caveat** — a minted key is fungible with the durable cliproxy key for its TTL. cliproxy has no per-key capability surface, so the security property delivered is **short-lived + revocable + off-runner**, not capability-restricted. In-run abuse during the TTL window is a documented non-goal (requires Pattern B / egress containment, deferred).
 
 ## NOTES

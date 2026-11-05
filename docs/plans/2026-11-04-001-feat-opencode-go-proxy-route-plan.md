@@ -709,7 +709,7 @@ flowchart TD
 
 - The tests pass against the unchanged guard, and mutating its host check makes them fail.
 
-- [ ] **Unit 8: Docs, runbook and rule amendment**
+- [x] **Unit 8: Docs, runbook and rule amendment**
 
 **Goal:** Record the new rule, the secrets, the rollout steps and the operator procedures.
 

@@ -45,6 +45,17 @@ await fetch(`${baseUrl}/v0/management/oauth-model-alias`, {
 
 **`fork: true` for listing parity.** For model aliasing specifically, `fork: true` keeps both the short alias and the dated upstream id in `/v1/models`, so harnesses that enumerate models (like `opencode models`) see the short id as a real, usable entry — not just a routing rewrite.
 
+## The `openai-compatibility` section
+
+This section has no create-one-entry endpoint. The deploy owns it outright and writes the whole list with `PUT /v0/management/openai-compatibility`, behind guards:
+
+- **A bare `[]` PUT clears the section.** The server accepts it. Only `{items: []}` is rejected. The client refuses to send an empty list.
+- **Refuse foreign entries.** The PUT replaces the whole list, so the deploy stops if the live section holds any entry other than the one infra owns.
+- **PATCH `{name, value: {disabled: true}}` disables one entry.** Its models leave `/v1/models` within about a second, while the management GET still lists the entry. Use it for an emergency disable without a deploy.
+- **Normalize the readback.** GET adds `auth-index` to each entry and always returns `disabled`. Drop `auth-index`, default `disabled` to false and compare models as a set. Error text names fields, never values: the GET returns api keys in clear.
+
+See `apps/cliproxy/AGENTS.md` (OpenCode Go upstream) and `docs/runbooks/cliproxy-opencode-go.md`.
+
 ## Why This Matters
 
 The bare-object trap is the dangerous one: a deploy that PUTs a wrapper shape gets a 200, reports success, and applies nothing — the aliases silently never exist. Only the read-back-and-compare step turns that into a loud deploy failure. The pattern (bare-object field PUT → read-back → fail-closed → bounded retry → never touch api-keys) generalizes to any CLIProxyAPI management field that must be applied without uploading `config.yaml`.

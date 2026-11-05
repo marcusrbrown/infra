@@ -11,6 +11,8 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 | Provision droplet | `server/provision-droplet.ts` | One-time. Refuses re-run on existing droplet without `--force` |
 | Deploy updates | `src/deploy.ts` | Preserves `config.yaml`, applies only field-scoped management changes |
 | CLI commands | `packages/cli/src/commands/cliproxy/` | See packages/cli/AGENTS.md for command pattern |
+| OpenCode Go policy | `packages/shared/opencode-go/` | `settings.json` and `privacy-snapshot.json`; eligibility logic in `eligibility.ts` |
+| OpenCode Go procedures | `docs/runbooks/cliproxy-opencode-go.md` | Enablement, rotation, emergency disable, re-enable, recovery, snapshot PR review |
 
 ## DEPLOY FLOW
 
@@ -18,11 +20,12 @@ OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Ca
 2. **Upload**: `Caddyfile`, `docker-compose.yaml`, and `config.yaml` (only if it does not exist on the server). `--force-config` overrides the skip. The tracked `payload.override` and `claude` blocks are first-deploy/bootstrap template fragments only; normal deploy never applies them to an existing runtime config.
 3. **Restart**: `docker compose pull && docker compose up -d` from `/opt/cliproxy/`, preceded by a best-effort `docker image prune -af` (failure only warns).
 4. **Model aliases** (`applyOAuthModelAliasStep`): read the `oauth-model-alias` block from the tracked `config.yaml` and PUT it to `/v0/management/oauth-model-alias` (bare object), then read back and fail-closed on mismatch. Skips when the block is empty; throws when the block is present but `CLIPROXY_MANAGEMENT_KEY` is unset. Fork verification via `/v1/models` is best-effort (only when `CLIPROXY_API_KEY` is set) and never fails the deploy. This never touches the runtime `api-keys`, so `--force-config` is not required.
-5. **Health gate**: GET `/v0/management/config` again to confirm the proxy is up and the key still works.
+5. **OpenCode Go upstream** (`applyOpenCodeGoStep`): write and verify the `opencode-go` entry in `openai-compatibility`. Its preflight (`preflightOpenCodeGo`) runs before any SSH. See [OpenCode Go upstream](#opencode-go-upstream).
+6. **Health gate**: GET `/v0/management/config` again to confirm the proxy is up and the key still works.
 
 All ssh/scp calls reuse one SSH connection (ControlMaster socket in a per-deploy temp dir) because the droplet's UFW rate-limits new SSH connections (6 per 30 s); never add an ssh/scp call without the shared `controlPath`.
 
-**Critical**: `config.yaml` on the server holds runtime API keys added via the management API. Unsafe template/SCP overwrite remains banned unless `--force-config` is explicit. Whole-document `GET`/`PUT /v0/management/config.yaml` is forbidden in unattended deploys, including preservation-verified exceptions. Managed config changes must use a field-scoped endpoint; if no field-scoped endpoint exists, automation stops and escalates rather than mutating the whole document. See [`docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md`](../../docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md) and the failed #1042 approach recorded in the plan.
+**Critical**: `config.yaml` on the server holds runtime API keys added via the management API. Unsafe template/SCP overwrite remains banned unless `--force-config` is explicit. Whole-document `GET`/`PUT /v0/management/config.yaml` is forbidden in unattended deploys, including preservation-verified exceptions. Managed config changes must use a field-scoped endpoint; if no field-scoped endpoint exists, automation stops and escalates rather than mutating the whole document. The one recorded exception is the `openai-compatibility` section: infra owns it outright and replaces the whole list through its own endpoint, behind the guards in [OpenCode Go upstream](#opencode-go-upstream). See [`docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md`](../../docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md) and the failed #1042 approach recorded in the plan.
 
 **Model aliasing**: the `oauth-model-alias` block in the tracked `config.yaml` maps client-facing short Anthropic model ids to their dated upstream models with `fork: true` (both ids stay available). It is applied via the management API (step 4), not by uploading `config.yaml` — the block does **not** make `--force-config` safe.
 
@@ -82,6 +85,7 @@ Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/s
 | `/v0/management/config.yaml` | GET/PUT | complete raw YAML document | Whole-document access is forbidden in unattended deploys; no field-scoped endpoint exists for `payload` or `claude`, so automation must stop/escalate |
 | `/v0/management/{field}` | PUT | `{"value": <val>}` | Per-field updates: `debug`, `request-retry`, `proxy-url`, etc. |
 | `/v0/management/oauth-model-alias` | PUT | **bare object** `{claude: [...]}` | NOT wrapped in `{value: ...}` or `{oauth-model-alias: ...}` — those return 200 but store nothing. GET returns `{"oauth-model-alias": {...}}` |
+| `/v0/management/openai-compatibility` | GET/PUT/PATCH | GET returns `{"openai-compatibility": [...]}`; PUT takes a **bare array** and replaces the whole list; PATCH takes `{name, value: {disabled}}` | A bare `[]` PUT is accepted and clears the section. No endpoint creates a single entry. GET adds `auth-index` to each entry and returns api keys in clear |
 | `/v0/management/usage-queue?count=N` | GET | — | v7: returns a **bare JSON array** of recent requests (not wrapped); `/v0/management/usage` was removed in v7 |
 | `/v0/management/latest-version` | GET | — | Returns `{"latest-version": "vX.Y.Z"}` |
 | `/healthz` | GET | — | Liveness endpoint, no auth; returns `{"status":"ok"}` |
@@ -92,39 +96,78 @@ v8 keeps every `/v0/management` path above and adds a separate `/v8/management` 
 
 Before a major bump, take a `cp -p` backup of `config/config.yaml`. To roll back, revert the image pin, deploy, then confirm the live file has no `config-version: 8`. If it does, stop `cli-proxy-api`, `cp` the backup over `config/config.yaml`, and start it again. Leave the `cliproxy_auth` volume alone.
 
+## OPENCODE GO UPSTREAM
+
+The `openai-compatibility` section holds one entry, `opencode-go`, and infra owns the section outright. The policy is tracked in `packages/shared/opencode-go/`: `settings.json` (`enabled`, optional `defaultProbeModel`) and `privacy-snapshot.json` (reviewed privacy terms per model, refreshed by PR). Procedures live in [`docs/runbooks/cliproxy-opencode-go.md`](../../docs/runbooks/cliproxy-opencode-go.md).
+
+**Eligibility.** A model is exposed only when all of these hold:
+
+- The snapshot entry is valid and records zero retention and no training.
+- The model is in the live OpenCode Go model list.
+- It has no region requirement. Region-gated models are never exposed.
+- Any agreement expiry is on or after today (UTC; the expiry day counts).
+
+An invalid snapshot entry excludes only that model. These fail the deploy before any write: a snapshot that does not parse, a failed live-list fetch, and an empty eligible set. A live model missing from the snapshot is printed as excluded and the deploy carries on. Expiry is enforced at deploy time only.
+
+**Guards.** Before the write, a failure leaves the live proxy unchanged:
+
+- **Foreign entry:** any live entry other than `opencode-go` stops the deploy.
+- **Never an empty list:** a bare `[]` PUT clears the section, so the client refuses to send one.
+- **Disabled live entry:** the deploy fails if the live entry is disabled while `settings.json` says `enabled: true`. Follow the re-enable procedure in the runbook.
+- **Collision:** the deploy fails if an eligible bare or prefixed id is already served under another `owned_by`.
+
+After the write:
+
+- **Readback:** the live entry must match the tracked one. `auth-index` is ignored; `disabled` defaults to false; models compare as a set.
+- **Visibility:** every eligible id must appear in `/v1/models`, bare and prefixed, once each, with `owned_by: opencode-go`.
+- **Smoke request:** one non-streaming request at `max_tokens: 1` on the probe model must return 2xx with `usage.opencode.billing_source: go`. This request is billed to Go.
+
+Any failure after the write raises `OpenCodeGoUnverifiedError`: "OpenCode Go entry APPLIED but UNVERIFIED (<stage>)". The entry is live and unproven. Follow the runbook.
+
+With `enabled: false`, the deploy PATCHes an existing entry to `disabled: true`, expects no Go ids in `/v1/models` and sends no smoke request. It needs no Go key.
+
+The entry maps `x-opencode-session: "$X-Opencode-Session"`, so the client's session header reaches Go. Go answers 400 `MissingSessionID` without it.
+
+**Secrets.** `CLIPROXY_OPENCODE_GO_KEY` (new) and `CLIPROXY_API_KEY` (also used by the monitor) are repository secrets. The router's caller job has no environment, so it cannot read Environment secrets (actions/runner#4453). It passes both explicitly to `deploy-cliproxy.yaml`. Only the deploy's own HTTP calls use them; the environment given to `ssh` and `scp` never contains either.
+
+**Snapshot refresh.** `.github/workflows/opencode-go-privacy.yaml` opens one PR on the branch `opencode-go-privacy` when a model's privacy terms change. Auto-merge is off. A merged PR triggers the gated cliproxy deploy only.
+
 ## OPENCODE_CONFIG AND OPENCODE_AUTH_JSON SHAPES
 
-The proxy uses a **single bearer key per consumer repo**. The same key authenticates both `anthropic` and `openai` provider routes for that repo — there are no per-provider keys.
+The proxy uses a **single bearer key per consumer repo**. The same key authenticates the `anthropic`, `openai` and `opencode-go` provider routes for that repo — there are no per-provider keys.
 
 For proxy-routed providers configured via `OPENCODE_CONFIG.provider.<name>.options.baseURL`, the `fro-bot/agent` action does **NOT** require `enable-omo: true` to honor the auth.json. Source: `fro-bot/agent@v0.44.3+` `action.yaml:99-104`. Librarian-verified 2026-05-25.
 
-**Dual-provider `OPENCODE_CONFIG`:**
+**Three-provider `OPENCODE_CONFIG`:**
 
 ```json
 {
   "provider": {
     "anthropic": {"options": {"baseURL": "https://cliproxy.fro.bot/v1"}},
-    "openai":    {"options": {"baseURL": "https://cliproxy.fro.bot/v1"}}
+    "openai": {"options": {"baseURL": "https://cliproxy.fro.bot/v1"}},
+    "opencode-go": {"options": {"baseURL": "https://cliproxy.fro.bot/v1"}}
   }
 }
 ```
 
-**Dual-provider `OPENCODE_AUTH_JSON`** (same proxy key for both providers):
+**Three-provider `OPENCODE_AUTH_JSON`** (same proxy key for every provider):
 
 ```json
 {
   "anthropic": {"type": "api", "key": "<proxy-key>"},
-  "openai":    {"type": "api", "key": "<proxy-key>"}
+  "openai": {"type": "api", "key": "<proxy-key>"},
+  "opencode-go": {"type": "api", "key": "<proxy-key>"}
 }
 ```
 
-Anthropic-only repos use the single-provider subset of these shapes (unchanged from pre-opt-in behavior).
+A repo lists only the providers it selected. Anthropic-only repos use the single-provider subset. A Go model id is `opencode-go/<bare id>`.
 
 ## ANTI-PATTERNS
 
 - **Never overwrite `config.yaml` on the server** without `--force-config` — it wipes runtime API keys (incident: 2026-04-06).
 - **Never PUT `/v0/management/config.yaml` from unattended deploy automation** — whole-document replacement is forbidden. If a managed field lacks a field-scoped endpoint, stop and escalate upstream.
 - **Field-scoped management only**: follow the approved pattern in `docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md`; preserve the runtime file by leaving unsupported managed fields unapplied rather than inventing a raw-config exception.
+- **Never PUT an empty `openai-compatibility` list** — the server accepts a bare `[]` and clears the section. Never hand-add upstream entries: the deploy refuses to write while any entry other than `opencode-go` exists.
 - **Never re-run `provision-droplet.ts` against an existing droplet** without `--force` — it overwrites the management key.
 - **Never use `Authorization: Bearer` for management endpoints** — use `x-management-key`.
 - **Never assume management API body shapes** — empirically verified, not guessed (incident: 2026-04-07).
@@ -135,7 +178,7 @@ Anthropic-only repos use the single-provider subset of these shapes (unchanged f
 
 ## NOTES
 
-- **Secrets**: `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, `CLIPROXY_DOMAIN` scoped to GitHub environment `cliproxy`. `DIGITALOCEAN_ACCESS_TOKEN` is repo-level.
+- **Secrets**: `CLIPROXY_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, `CLIPROXY_DOMAIN` scoped to GitHub environment `cliproxy`. `DIGITALOCEAN_ACCESS_TOKEN`, `CLIPROXY_OPENCODE_GO_KEY` and `CLIPROXY_API_KEY` are repo-level.
 - **Local `.env`**: `CLIPROXY_MANAGEMENT_KEY` must match the droplet's `MANAGEMENT_PASSWORD` (set during provisioning, printed once).
 - **Provisioning SSH key**: `provision-droplet.ts` looks up the DigitalOcean SSH key by name. Default is `fro-bot-cliproxy`; override with `CLIPROXY_SSH_KEY_NAME` env var. Shared helper lives in `packages/shared/server/droplet-helpers.ts`.
 - **Provisioning SSH auth**: when `CLIPROXY_SSH_KEY` is set, `provision-droplet.ts` materializes it to a `0600` temp key file and pins it with `-i` + `IdentitiesOnly=yes` (no ssh-agent needed; cleaned up after); when unset, it falls back to ssh-agent.
@@ -154,6 +197,28 @@ The probe classifies as dead (opening the issue and sending Discord) on HTTP 401
 The dedicated label (`cliproxy-auth-monitor` / `cliproxy-auth-monitor-test`), not the hidden identity marker, is the trust anchor for issue adoption. An issue carrying the marker but not the label is ignored — the monitor never adopts it or restores the label onto it. An issue carrying the label but not the marker fails the run closed rather than being silently adopted. If a race produces more than one labeled+marked issue, resolution deterministically picks the lowest issue number so every later run converges on one canonical issue. GitHub's Issues API has no atomic create-if-absent primitive, so a rare simultaneous first-create can still send a duplicate initial alert; deterministic selection prevents that race from causing persistent reconciliation failure, but it does not eliminate the one-time duplicate.
 
 `gh` is a prerequisite only when running `cliproxy monitor` directly on a local machine (it must be installed and authenticated, or `GITHUB_TOKEN` must be set). The scheduled workflow already provides `gh` in its runner image and remains the preferred entrypoint for both live and synthetic validation.
+
+### OpenCode Go route
+
+The same job probes a second route with the same `CLIPROXY_API_KEY`. Each route reconciles on its own, so a failure on one cannot block the other. The exit code reflects either.
+
+- **Probe line:** `CLIProxy Go monitor probe: probe=<state> reason=<reason> at <timestamp>`, printed before any reconciliation.
+- **Issue:** label `cliproxy-go-monitor`, title "CLIProxy OpenCode Go route outage". Its text points at `docs/runbooks/cliproxy-opencode-go.md`.
+- **Skips** when `enabled` is false in `settings.json`: no probe, no line, no issue and no alert. Only `live` validation probes Go.
+- **Each probe** lists `/v1/models`, compares the `opencode-go` models it exposes with today's eligibility, picks a probe model (`defaultProbeModel` when exposed, else the first exposed id), and sends one request at `max_tokens: 1` with a fresh `x-opencode-session`.
+
+| Reason                                 | State   | Cause                                                |
+| -------------------------------------- | ------- | ---------------------------------------------------- |
+| `ok`                                   | healthy | 2xx with `billing_source: go`                        |
+| `billing-not-go`                       | dead    | 2xx with any other or missing `billing_source`       |
+| `provider-missing`                     | dead    | No `opencode-go` models listed, or `model_not_found` |
+| `privacy-noncompliant`                 | dead    | An exposed model is not eligible                     |
+| `quota-or-billing`                     | dead    | HTTP 429 or 402                                      |
+| `auth-401`, `auth-unavailable-503`     | dead    | Proxy key rejected, or no auth available             |
+| `probe-misconfigured`                  | unknown | HTTP 400 `MissingSessionID`                          |
+| `unrelated-http`, `timeout`, `network` | unknown | Any other failure                                    |
+
+A dead result opens the Go issue and sends Discord. A healthy result closes it. An unknown result changes nothing.
 
 ### Setup and validation
 

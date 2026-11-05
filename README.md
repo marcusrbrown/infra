@@ -64,7 +64,7 @@ bunx @marcusrbrown/infra status --json   # schema-versioned typed observations p
 bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 ```
 
-`bunx @marcusrbrown/infra cliproxy monitor` runs the Anthropic auth monitor from the CLI; see `apps/cliproxy/README.md` for setup and recovery.
+`bunx @marcusrbrown/infra cliproxy monitor` runs the Anthropic and OpenCode Go route monitor from the CLI; see `apps/cliproxy/README.md` for setup and recovery.
 
 ## CI/CD
 
@@ -88,7 +88,7 @@ bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 | **Renovate Changesets** | Renovate PRs | Auto-create changeset files for dependency updates |
 | **Prune Packages** | `workflow_dispatch` | Delete untagged GHCR package versions (dry-run unless `apply: true`) |
 | **Fro Bot** | PRs, @mentions, daily schedule, `workflow_dispatch` | AI code review and autohealing |
-| **CLIProxy Anthropic auth monitor** | Nominal 15-minute schedule, `workflow_dispatch` | Probe Anthropic auth and reconcile GitHub issue/Discord transition alerts |
+| **CLIProxy Anthropic auth monitor** | Nominal 15-minute schedule, `workflow_dispatch` | Probe the Anthropic and OpenCode Go routes and reconcile a GitHub issue/Discord transition alert for each |
 | **Copilot Setup Steps** | `workflow_dispatch`, changes to workflow file | Prepare environment for Copilot coding agent |
 | **Scorecard** | Weekly, push to `main` | OpenSSF security analysis |
 | **Update Repo Settings** | Daily, push to `main` | Sync repo settings from `.github/settings.yml` |
@@ -217,7 +217,8 @@ See [`apps/broker/README.md`](apps/broker/README.md) and [`apps/broker/AGENTS.md
 | `NPM_TOKEN`                             | npm publish token for `@marcusrbrown/infra` package                        |
 | `OPENCODE_AUTH_JSON`                    | LLM provider credentials JSON injected into Fro Bot runs                   |
 | `OPENCODE_CONFIG`                       | OpenCode provider config JSON (e.g. Anthropic `baseURL` override)          |
-| `CLIPROXY_API_KEY`                      | Downstream API key for the Anthropic auth monitor probe                    |
+| `CLIPROXY_API_KEY`                      | Downstream API key for the monitor probes and the deploy's Go checks       |
+| `CLIPROXY_OPENCODE_GO_KEY`              | OpenCode Go API key for the cliproxy `opencode-go` upstream                |
 | `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK` | Dedicated outbound Discord webhook for monitor transitions                 |
 
 **Repository variables:**

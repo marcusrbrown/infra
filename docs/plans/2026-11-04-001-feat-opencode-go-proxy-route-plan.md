@@ -362,6 +362,7 @@ flowchart TD
 - Create: `packages/shared/opencode-go/eligibility.ts`
 - Create: `packages/shared/opencode-go/parse-privacy-table.ts`
 - Create: `packages/shared/opencode-go/__fixtures__/go.mdx`
+- Create: `packages/shared/opencode-go/__fixtures__/go.expected.json`
 - Modify: `packages/shared/package.json` (`exports` entries for the new modules and JSON)
 - Test: `packages/shared/opencode-go/eligibility.test.ts`
 - Test: `packages/shared/opencode-go/parse-privacy-table.test.ts`
@@ -390,7 +391,8 @@ flowchart TD
 - Edge case: one entry with an invalid field is excluded, and its siblings stay eligible.
 - Error path: a malformed snapshot file fails to parse.
 - Error path: the parser fails on an unmapped footnote, a missing column, or zero rows.
-- Integration: the fixture `go.mdx`, a copy of the pinned source, parses to exactly the committed snapshot entries.
+- Integration: the fixture `go.mdx` parses to exactly `go.expected.json`. Both fixture files stay fixed, and no test compares them with the committed snapshot, so a refresh that changes the snapshot never invalidates the parser tests.
+- Integration: the committed snapshot passes the schema, records a 40-hex source commit, and lists at least one eligible model.
 
 **Verification:**
 
@@ -660,6 +662,7 @@ flowchart TD
 
 - Happy path: an unchanged table writes nothing and exits 0.
 - Happy path: a changed row writes a new snapshot with the new source commit.
+- Integration: after a refresh writes a snapshot with an added, removed and changed model, the Unit 1 parser and snapshot tests still pass without any fixture edit.
 - Error path: a fetch failure, a parse failure or zero rows leaves the existing snapshot untouched and exits non-zero.
 - Error path: a SHA from the API that isn't hex is rejected before the raw fetch.
 - Conventions:

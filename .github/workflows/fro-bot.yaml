@@ -469,7 +469,10 @@ env:
        Steps:
        a. Navigate: `npx agent-browser open "https://kw.igg.ms"`
        b. Wait for load: `npx agent-browser wait --load networkidle`
-       c. Full screenshot: `npx agent-browser screenshot --full`
+       c. Full screenshot: `npx agent-browser screenshot --full`. Save
+          every screenshot under `.context/systematic/autoheal-<run-id>/`
+          inside the workspace; files outside the workspace cannot be read
+          back.
        d. Snapshot interactive elements: `npx agent-browser snapshot -i`
        e. Use the snapshot ref to click `More`, then snapshot interactive
           elements again. KeeWeb keeps storage providers collapsed under

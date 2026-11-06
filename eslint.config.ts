@@ -51,6 +51,14 @@ export default defineConfig(
     },
   },
   {
+    // Operator-run provisioning scripts print to the terminal. The published CLI bundles other code from packages/shared/server.
+    name: 'operator-provisioning-console',
+    files: ['apps/*/server/**/*.ts', 'packages/shared/server/droplet-helpers.ts'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
     // Systematic parses its config without trailing-comma support (marcusrbrown/systematic#1313).
     name: 'systematic config overrides',
     files: ['.systematic.jsonc'],

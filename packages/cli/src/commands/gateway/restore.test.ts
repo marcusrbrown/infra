@@ -557,10 +557,11 @@ describe('restoreGatewayCa — SSH and SCP commands include UserKnownHostsFile',
 
     const scpCmd = capturedCmds.find(c => c[0] === 'scp')
     expect(scpCmd).toBeDefined()
-    const knownHostsIdx = scpCmd!.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
+    if (scpCmd === undefined) throw new Error('expected an scp command to be captured')
+    const knownHostsIdx = scpCmd.findIndex(arg => arg.startsWith('UserKnownHostsFile='))
     expect(knownHostsIdx).toBeGreaterThan(-1)
-    expect(scpCmd![knownHostsIdx - 1]).toBe('-o')
-    expect(scpCmd![knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
+    expect(scpCmd[knownHostsIdx - 1]).toBe('-o')
+    expect(scpCmd[knownHostsIdx]).toMatch(/\.github[/\\]known_hosts$/)
 
     Bun.spawnSync(['rm', '-rf', tarDir, realTar])
   })

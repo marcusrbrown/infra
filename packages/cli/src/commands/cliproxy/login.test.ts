@@ -33,6 +33,11 @@ function makeSpawnOk(exitCode = 0): {spawnFn: SpawnFn; calls: {cmd: string[]; op
   return {spawnFn, calls}
 }
 
+function defined<T>(value: T | null | undefined, label: string): T {
+  if (value === undefined || value === null) throw new Error(`expected ${label} to be defined`)
+  return value
+}
+
 // Helper: a SpawnFn that must never be called (proves provider check fires before spawn)
 const neverSpawn: SpawnFn = () => {
   throw new Error('spawn must not be called for invalid provider')
@@ -144,7 +149,7 @@ describe('cliproxy login', () => {
 
       await cliproxyLoginAction('codex', {}, spawnFn)
 
-      const cmd = calls[0]!.cmd
+      const cmd = defined(calls[0], 'recorded spawn call').cmd
       expect(cmd.join(' ')).toContain('--codex-device-login')
       expect(cmd.join(' ')).toContain('--no-browser')
       expect(cmd.join(' ')).not.toContain('--codex-login ')
@@ -157,7 +162,7 @@ describe('cliproxy login', () => {
 
       await cliproxyLoginAction('claude', {}, spawnFn)
 
-      const cmd = calls[0]!.cmd
+      const cmd = defined(calls[0], 'recorded spawn call').cmd
       expect(cmd.join(' ')).toContain('--claude-login')
       expect(cmd.join(' ')).toContain('--no-browser')
     })
@@ -249,7 +254,7 @@ describe('cliproxy login', () => {
       await cliproxyLoginAction('claude', {}, spawnFn)
 
       expect(calls).toHaveLength(1)
-      expect(calls[0]!.cmd).toContain('root@env-host.example.com')
+      expect(defined(calls[0], 'recorded spawn call').cmd).toContain('root@env-host.example.com')
     })
 
     it('forwards resolved host from --host option into ssh argv', async () => {
@@ -261,7 +266,7 @@ describe('cliproxy login', () => {
       await cliproxyLoginAction('claude', {host: 'flag-host.example.com'}, spawnFn)
 
       expect(calls).toHaveLength(1)
-      expect(calls[0]!.cmd).toContain('root@flag-host.example.com')
+      expect(defined(calls[0], 'recorded spawn call').cmd).toContain('root@flag-host.example.com')
     })
   })
 
@@ -310,13 +315,13 @@ describe('cliproxy login', () => {
       const {spawnFn, calls} = makeSpawnOk(0)
       setValidEnv()
       process.env.SSH_AUTH_SOCK = '/tmp/contract-test.sock'
-      const capturedPath = process.env.PATH!
-      const capturedHome = process.env.HOME!
+      const capturedPath = defined(process.env.PATH, 'PATH')
+      const capturedHome = defined(process.env.HOME, 'HOME')
 
       await cliproxyLoginAction('claude', {}, spawnFn)
 
       expect(calls).toHaveLength(1)
-      const {cmd, opts} = calls[0]!
+      const {cmd, opts} = defined(calls[0], 'recorded spawn call')
       const spawnOpts = opts as Parameters<SpawnFn>[1]
 
       // SSH flags
@@ -340,13 +345,13 @@ describe('cliproxy login', () => {
       const {spawnFn, calls} = makeSpawnOk(0)
       setValidEnv()
       process.env.SSH_AUTH_SOCK = '/tmp/contract-test.sock'
-      const capturedPath = process.env.PATH!
-      const capturedHome = process.env.HOME!
+      const capturedPath = defined(process.env.PATH, 'PATH')
+      const capturedHome = defined(process.env.HOME, 'HOME')
 
       await cliproxyLoginAction('codex', {}, spawnFn)
 
       expect(calls).toHaveLength(1)
-      const {cmd, opts} = calls[0]!
+      const {cmd, opts} = defined(calls[0], 'recorded spawn call')
       const spawnOpts = opts as Parameters<SpawnFn>[1]
 
       // SSH flags

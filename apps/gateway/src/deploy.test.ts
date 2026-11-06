@@ -39,6 +39,11 @@ const PUSH_VAPID_ENV_KEYS = [
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+function defined<T>(value: T | null | undefined, label: string): T {
+  if (value === undefined || value === null) throw new Error(`expected ${label} to be defined`)
+  return value
+}
+
 function makeStream(content: string): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(c) {
@@ -1372,8 +1377,9 @@ describe('T1 secret-write failure token confidentiality', () => {
         // Capture stdin content
         const result = makeSpawnResult({captureStdin: true})
         // Intercept stdin writes
-        const origWrite = result.stdin!.write.bind(result.stdin)
-        result.stdin!.write = (data: Uint8Array) => {
+        const stdin = defined(result.stdin, 'captured stdin')
+        const origWrite = stdin.write.bind(stdin)
+        stdin.write = (data: Uint8Array) => {
           stdinContents.push(new TextDecoder().decode(data))
           origWrite(data)
         }
@@ -1792,7 +1798,7 @@ describe('CI key-file contract', () => {
     // File mode must be 0o600 (checked while file existed, before cleanup)
     expect(capturedMode).toBe(0o600)
     // File should have been cleaned up after main() completes
-    expect(existsSync(writtenKeyPath!)).toBe(false)
+    expect(existsSync(defined(writtenKeyPath, 'written key path'))).toBe(false)
   })
 
   test('CI mode: -i <path> and -o IdentitiesOnly=yes appear in every ssh argv', async () => {
@@ -1861,7 +1867,7 @@ describe('CI key-file contract', () => {
 
     // Key file must be cleaned up even though main() threw
     expect(capturedKeyPath).toBeDefined()
-    expect(existsSync(capturedKeyPath!)).toBe(false)
+    expect(existsSync(defined(capturedKeyPath, 'captured key path'))).toBe(false)
   })
 
   test('CI mode: tmp dir cleaned up when key materialization throws (inner catch path)', async () => {
@@ -1913,7 +1919,7 @@ describe('CI key-file contract', () => {
     expect(writtenKeyPath).toBeDefined()
     // File must end with exactly one newline
     expect(capturedContents).toBe(`${KEY_WITHOUT_NEWLINE}\n`)
-    expect(capturedContents!.endsWith('\n')).toBe(true)
+    expect(defined(capturedContents, 'captured key contents').endsWith('\n')).toBe(true)
   })
 
   test('CI mode: key file is not double-newlined when secret already has trailing newline', async () => {
@@ -1943,7 +1949,7 @@ describe('CI key-file contract', () => {
     expect(writtenKeyPath).toBeDefined()
     // Must not double-newline — exactly one trailing newline
     expect(capturedContents).toBe(KEY_WITH_NEWLINE)
-    expect(capturedContents!.endsWith('\n\n')).toBe(false)
+    expect(defined(capturedContents, 'captured key contents').endsWith('\n\n')).toBe(false)
   })
 
   test('local mode: no -i flag in ssh argv, SSH_AUTH_SOCK forwarded', async () => {
@@ -2287,7 +2293,7 @@ describe('upstream stack validation (validate-stack.sh)', () => {
     })
 
     expect(validateCmds).toHaveLength(1)
-    const cmdStr = validateCmds[0]!.join(' ')
+    const cmdStr = defined(validateCmds[0], 'validate-stack.sh command').join(' ')
     // Must reference the upstream script path (deploy/validate-stack.sh relative to REMOTE_DIR)
     expect(cmdStr).toContain('deploy/validate-stack.sh')
     // Must NOT reference a repo-local path (apps/gateway or similar)
@@ -2604,7 +2610,9 @@ describe('buildGatewayEnvFileContents', () => {
     // The raw .env line must have $$ where the original had $
     expect(configLine).toContain('$$SECRET_VAL')
     // Simulating docker-compose interpolation: replace $$ → $ to recover the config value
-    const rawValue = configLine!.slice('WORKSPACE_OPENCODE_CONFIG='.length).replaceAll('$$', '$')
+    const rawValue = defined(configLine, 'WORKSPACE_OPENCODE_CONFIG line')
+      .slice('WORKSPACE_OPENCODE_CONFIG='.length)
+      .replaceAll('$$', '$')
     const parsed = JSON.parse(rawValue) as Record<string, unknown>
     // Provider and baseURL content must survive the permission injection and re-serialization
     const options = ((parsed.provider as Record<string, unknown>).anthropic as Record<string, unknown>)
@@ -2629,7 +2637,9 @@ describe('buildGatewayEnvFileContents', () => {
     // The raw .env line must have $$ where the original had $
     expect(configLine).toContain('$$')
     // Simulating docker-compose interpolation: replace $$ → $ to recover the config value
-    const rawValue = configLine!.slice('WORKSPACE_OPENCODE_CONFIG='.length).replaceAll('$$', '$')
+    const rawValue = defined(configLine, 'WORKSPACE_OPENCODE_CONFIG line')
+      .slice('WORKSPACE_OPENCODE_CONFIG='.length)
+      .replaceAll('$$', '$')
     const parsed = JSON.parse(rawValue) as Record<string, unknown>
     // Provider and baseURL content must survive the permission injection and re-serialization
     const options = ((parsed.provider as Record<string, unknown>).anthropic as Record<string, unknown>)
@@ -2652,7 +2662,9 @@ describe('buildGatewayEnvFileContents', () => {
     // The .env line must contain the backslash characters from the JSON payload
     expect(configLine).toContain('\\\\')
     // Recover: $$ → $ (docker-compose interpolation simulation); backslashes pass through unchanged
-    const rawValue = configLine!.slice('WORKSPACE_OPENCODE_CONFIG='.length).replaceAll('$$', '$')
+    const rawValue = defined(configLine, 'WORKSPACE_OPENCODE_CONFIG line')
+      .slice('WORKSPACE_OPENCODE_CONFIG='.length)
+      .replaceAll('$$', '$')
     const parsed = JSON.parse(rawValue) as Record<string, unknown>
     // Provider and baseURL content must survive the permission injection and re-serialization
     const options = ((parsed.provider as Record<string, unknown>).anthropic as Record<string, unknown>)
@@ -3779,13 +3791,14 @@ describe('buildSecretFileList — normalizePemPrivateKey wiring', () => {
     const secrets = buildSecretFileList(makeEnv({GH_APP_PRIVATE_KEY: singleLineKey}))
     const entry = secrets.find(s => s.name === 'github-app-private-key')
     expect(entry).toBeDefined()
+    const {content} = defined(entry, 'github-app-private-key secret')
     // Transform must have been applied: real newlines present
-    expect(entry!.content.includes('\n')).toBe(true)
+    expect(content.includes('\n')).toBe(true)
     // No literal backslash-n remaining
-    expect(entry!.content.includes(String.raw`\n`)).toBe(false)
+    expect(content.includes(String.raw`\n`)).toBe(false)
     // Exact expected output
     const expected = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\nAB==\n-----END RSA PRIVATE KEY-----\n'
-    expect(entry!.content).toBe(expected)
+    expect(content).toBe(expected)
   })
 
   test('discord-token: NOT transformed — value passed through verbatim', async () => {
@@ -3795,9 +3808,10 @@ describe('buildSecretFileList — normalizePemPrivateKey wiring', () => {
     const secrets = buildSecretFileList(makeEnv({DISCORD_TOKEN: rawToken}))
     const entry = secrets.find(s => s.name === 'discord-token')
     expect(entry).toBeDefined()
+    const {content} = defined(entry, 'discord-token secret')
     // discord-token has no transform — content must be verbatim
-    expect(entry!.content).toBe(rawToken)
-    expect(entry!.content.includes(String.raw`\n`)).toBe(true)
+    expect(content).toBe(rawToken)
+    expect(content.includes(String.raw`\n`)).toBe(true)
   })
 })
 
@@ -4306,7 +4320,7 @@ describe('main() — compose-up args', () => {
     })
 
     expect(composeCmds.length).toBeGreaterThan(0)
-    const composeCmd = composeCmds[0]!
+    const composeCmd = defined(composeCmds[0], 'docker compose command')
     const cmdStr = composeCmd.join(' ')
     expect(cmdStr).toContain('--remove-orphans')
   })
@@ -4341,7 +4355,7 @@ describe('main() — compose-up args', () => {
     })
 
     expect(composeCmds.length).toBeGreaterThan(0)
-    const composeCmd = composeCmds[0]!
+    const composeCmd = defined(composeCmds[0], 'docker compose command')
     const cmdStr = composeCmd.join(' ')
     expect(cmdStr).toContain('--no-build')
     expect(cmdStr).not.toContain('--build')
@@ -8636,7 +8650,7 @@ describe('operator health probe — initial log does not expose URL', () => {
     const initialProbeLogs = warnMessages.filter(m => m.includes('Probing operator health'))
     expect(initialProbeLogs.length).toBeGreaterThan(0)
     // The initial probe log must NOT contain the full URL
-    const initialProbeLog = initialProbeLogs[0]!
+    const initialProbeLog = defined(initialProbeLogs[0], 'initial probe log')
     expect(initialProbeLog).not.toContain('https://dashboard.fro.bot/operator/health')
     // Must use a static message
     expect(initialProbeLog).toContain('Probing operator health')
@@ -9110,7 +9124,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
     })
 
     expect(networkRmCmds).toHaveLength(1)
-    const rmCmd = networkRmCmds[0]!
+    const rmCmd = defined(networkRmCmds[0], 'docker network rm command')
     // The network name must be passed as a separate argv element (not shell-interpolated)
     // This is the safe pattern: ['ssh', ..., 'docker network rm fro-bot_gateway-net']
     // or ['ssh', ..., 'docker', 'network', 'rm', 'fro-bot_gateway-net']
@@ -9318,7 +9332,7 @@ describe('stale gateway-net cleanup (operator subnet migration)', () => {
 
     expect(caughtError).toBeDefined()
     // Error must mention that containers were removed/stopped so operator knows state
-    const msg = caughtError!.message.toLowerCase()
+    const msg = defined(caughtError, 'stale gateway-net error').message.toLowerCase()
     expect(msg).toMatch(/removed|stopped/)
     // Error must guide operator to rerun deploy or bring services back up
     expect(msg).toMatch(/rerun|redeploy|docker compose up|up -d/)
@@ -12437,7 +12451,7 @@ describe('operator push VAPID secret files and compose wiring', () => {
       const match = /cat > '([^']+)'/.exec(remote)
       if (!match) return undefined
       const result = makeSpawnResult({captureStdin: true})
-      capturedWrites.set(match[1]!, result)
+      capturedWrites.set(defined(match[1], 'captured write path'), result)
       return result
     })
 
@@ -12515,7 +12529,7 @@ describe('operator push VAPID enabled-to-absent cleanup', () => {
       expect(cleanupCmd).toContain(`/opt/gateway/deploy/secrets/${hostFile}`)
     }
 
-    const cleanupIndex = remoteCmds.indexOf(cleanupCmd!)
+    const cleanupIndex = remoteCmds.indexOf(defined(cleanupCmd, 'vapid cleanup command'))
     const secretMaterializationIndex = remoteCmds.findIndex(cmd => cmd.includes("cat > '/opt/gateway/deploy/secrets/"))
     const composeUpIndex = remoteCmds.findIndex(cmd => cmd.includes('docker compose') && cmd.includes(' up '))
     expect(cleanupIndex).toBeLessThan(secretMaterializationIndex)

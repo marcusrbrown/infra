@@ -24,6 +24,11 @@ function sample(minutes: number, r: HistorySample['r'], d: HistorySample['d'] | 
 
 const reachability = (code: 'p' | 'f' | 'u' | 'n') => ({'public-reachability': code, 'deploy-state': 'p' as const})
 
+function defined<T>(value: T | null | undefined, label: string): T {
+  if (value === undefined || value === null) throw new Error(`expected ${label} to be defined`)
+  return value
+}
+
 describe('constants', () => {
   it('exports the gap and stale thresholds', () => {
     expect(GAP_THRESHOLD_MS).toBe(45 * MINUTE)
@@ -38,7 +43,7 @@ describe('samples passed', () => {
     const reach = view.observations.find(o => o.id === 'public-reachability')
 
     expect(reach?.counts).toEqual({total: 3, passed: 3, failed: 0, unknown: 0, notMeasured: 0})
-    expect(passLabel(reach!.counts)).toBe('3 of 3 samples passed')
+    expect(passLabel(defined(reach, 'public-reachability observation').counts)).toBe('3 of 3 samples passed')
     expect(view.gaps).toEqual([])
     expect(view.latestSampleAt).toBe(at(60))
   })
@@ -56,7 +61,7 @@ describe('samples passed', () => {
     const reach = view.observations.find(o => o.id === 'public-reachability')
 
     expect(reach?.counts).toEqual({total: 6, passed: 2, failed: 1, unknown: 2, notMeasured: 1})
-    expect(passLabel(reach!.counts)).toBe('2 of 6 samples passed')
+    expect(passLabel(defined(reach, 'public-reachability observation').counts)).toBe('2 of 6 samples passed')
     expect(view.cells.reachability.result).toBe('pass')
   })
 

@@ -16,6 +16,11 @@ import {nextLink, OWNER, pruneUntaggedPackages, readPrunerEnv, TARGET_PACKAGES} 
 
 const TOKEN = 'test-token-must-never-be-logged'
 
+function defined<T>(value: T | null | undefined, label: string): T {
+  if (value === undefined || value === null) throw new Error(`expected ${label} to be defined`)
+  return value
+}
+
 interface FakeVersion {
   id: number
   digest: string
@@ -195,7 +200,7 @@ describe('prune-untagged-packages: safety gates', () => {
     fixtureRealisticPackage(registry, 'infra-gateway', 2, 3)
     fixtureRealisticPackage(registry, 'infra-workspace', 2, 3)
     const firstDigest = registry.versions['infra-gateway']?.[0]?.digest ?? ''
-    registry.manifests['infra-gateway']![firstDigest] = {
+    defined(registry.manifests['infra-gateway'], 'infra-gateway manifests')[firstDigest] = {
       mediaType: 'application/vnd.oci.image.index.v1+json',
       manifests: [{digest: 'sha256:child-1'}],
     }
@@ -215,7 +220,7 @@ describe('prune-untagged-packages: safety gates', () => {
     const firstDigest = registry.versions['infra-gateway']?.[0]?.digest ?? ''
     const childDigest = registry.versions['infra-gateway']?.[2]?.digest ?? '' // an untagged version's digest
     // A manifest that structurally lists a child without claiming a list media type.
-    registry.manifests['infra-gateway']![firstDigest] = {
+    defined(registry.manifests['infra-gateway'], 'infra-gateway manifests')[firstDigest] = {
       mediaType: 'application/vnd.docker.distribution.manifest.v2+json',
       manifests: [{digest: childDigest}],
     }
@@ -370,15 +375,9 @@ describe('prune-untagged-packages: safety gates', () => {
     fixtureRealisticPackage(registry, 'infra-workspace', 2, 0)
     // Shuffle the untagged versions so API return order cannot be relied on.
     const gatewayVersions = registry.versions['infra-gateway'] ?? []
-    registry.versions['infra-gateway'] = [
-      gatewayVersions[4]!,
-      gatewayVersions[0]!,
-      gatewayVersions[3]!,
-      gatewayVersions[1]!,
-      gatewayVersions[2]!,
-      gatewayVersions[5]!,
-      gatewayVersions[6]!,
-    ]
+    registry.versions['infra-gateway'] = [4, 0, 3, 1, 2, 5, 6].map(index =>
+      defined(gatewayVersions[index], `infra-gateway version ${index}`),
+    )
 
     await pruneUntaggedPackages(options(registry, true))
 

@@ -322,8 +322,8 @@ describe('cliproxyModelsAction — verbose output', () => {
     )
     expect(parsed.length).toBe(2)
 
-    // parsed.length === 2 asserted above; non-null access is safe
-    const first = parsed[0]!
+    const first = parsed[0]
+    if (first === undefined) throw new Error('expected a first model entry')
     expect(first).toHaveProperty('id')
     expect(first).toHaveProperty('provider')
     expect(first).toHaveProperty('raw_id')
@@ -418,8 +418,9 @@ describe('cliproxyModelsAction — verbose output', () => {
       captured.stdout.join(''),
     )
     expect(parsed.length).toBe(1)
-    // parsed.length === 1 asserted above; non-null access is safe
-    expect(parsed[0]!.created).toBeNull()
+    const [only] = parsed
+    if (only === undefined) throw new Error('expected a model entry')
+    expect(only.created).toBeNull()
   })
 })
 

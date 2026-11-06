@@ -50,4 +50,12 @@ export default defineConfig(
       'no-console': 'off',
     },
   },
+  {
+    // Systematic parses its config without trailing-comma support (marcusrbrown/systematic#1313).
+    name: 'systematic config overrides',
+    files: ['.systematic.jsonc'],
+    rules: {
+      'prettier/prettier': ['error', {trailingComma: 'none'}],
+    },
+  },
 )

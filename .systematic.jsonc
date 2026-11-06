@@ -3,6 +3,6 @@
   // In-repo decision sources for Systematic past-work search. They are read
   // only when the user allows this repository in search.allow_project_sources.
   "search": {
-    "sources": [{"name": "runbooks", "format": "markdown", "roots": ["docs/runbooks"]}],
-  },
+    "sources": [{"name": "runbooks", "format": "markdown", "roots": ["docs/runbooks"]}]
+  }
 }

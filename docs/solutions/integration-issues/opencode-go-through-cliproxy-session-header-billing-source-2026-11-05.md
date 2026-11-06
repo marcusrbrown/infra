@@ -99,7 +99,7 @@ The monitor reads the committed `settings.json` and skips Go entirely when `enab
 ### Place the keys where the router can read them
 
 - `CLIPROXY_OPENCODE_GO_KEY` (the upstream key) and `CLIPROXY_API_KEY` (the downstream key the deploy and monitor use) are repository secrets, not `cliproxy` Environment secrets. The router's caller job has no environment. `.github/workflows/deploy.yaml` passes both explicitly to `deploy-cliproxy.yaml`, which declares both as optional.
-- A personal Console key on the Go workspace was verified to bill `go`; whether service-account keys draw on the Go plan is untested.
+- Personal and service-account Console keys on the Go workspace both bill `go`. The service-account result comes from a single probe request.
 - Only the deploy's own HTTP calls use these keys. `childProcessEnv` removes both from the `ssh` and `scp` environment, via `HTTP_ONLY_ENV_KEYS`.
 - Disabled mode needs neither key. `preflightOpenCodeGo` requires the Go key, the downstream key and the management key only when `enabled` is true, and fails before any SSH when one is missing.
 - Anyone holding the management key can read the Go key in clear, as they already can the downstream keys.

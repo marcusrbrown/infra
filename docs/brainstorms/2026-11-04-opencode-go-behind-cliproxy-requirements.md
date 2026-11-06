@@ -7,7 +7,7 @@ topic: opencode-go-behind-cliproxy
 
 ## Summary
 
-The CLIProxyAPI key each repo already holds will also serve OpenCode Go models, under an `opencode-go/` prefix. Repos select them through `agent setup`, the gateway workspace and broker-minted keys. Go route health goes into status, and the monitor alerts on it separately from Claude. A second phase waits for a billing probe. It adds a direct Go route for repos that skip the proxy, plus an OpenCode Console CLI area for usage reports and service-account keys.
+The CLIProxyAPI key each repo already holds will also serve OpenCode Go models, under an `opencode-go/` prefix. Repos select them through `agent setup`, the gateway workspace and broker-minted keys. Go route health goes into status, and the monitor alerts on it separately from Claude. A second phase was gated on a billing probe. The probe (R16) ran on 2026-11-06: the Console has no API for key lifecycle or usage export, so R19 and R20 are not buildable, R21 is covered by Phase 1, and the direct route (R17) is deferred until a repo needs to skip the proxy.
 
 ---
 
@@ -66,6 +66,25 @@ The provider set is hard-coded to Anthropic and OpenAI in setup, model listing, 
 
 ### Phase 2: direct route and Console CLI (gated on R16)
 
+**R16 result (2026-11-06).** A throwaway service-account key in the Go workspace, read from stdin and deleted afterwards, made five requests:
+
+- A `glm-5.3` chat completion with `x-opencode-session` returned 200 with `usage.opencode.billing_source: "go"`. Service-account traffic bills the Go plan. The `usage.opencode` fields are `billing_source`, `list_cost`, `allowance` and `tokens`.
+- The same request without the header returned 400 `MissingSessionID`. The header is required, although the docs say "should".
+- `GET /inference/go/v1/models` returned the same list with and without a key.
+- The documented usage export, `GET /console/api/v1/usage/export`, returned 404 with an empty body. The only usage export is the Console UI CSV.
+- The docs describe key creation and revocation in the Console UI only. No HTTP endpoint for either is documented.
+- A Go plan-limit response was not triggered. It stays a passive observation for R14 and R15.
+
+**Disposition.**
+
+- R17: deferred. Keys minted in the Console UI would bill the plan, but every current consumer reaches Go through the proxy, and a direct route adds per-repo keys, an egress allowance and another guard that no repo needs yet.
+- R18: deferred with R17.
+- R19: not buildable. The Console has no key lifecycle API.
+- R20: not buildable on the Console. The documented usage export does not exist.
+- R21: covered by Phase 1. `cliproxy status` probes the Go route and `cliproxy models opencode-go` lists the models.
+
+The original Phase 2 requirements follow, unchanged.
+
 - R16. A live probe runs before Phase 2 is planned. It uses a throwaway service-account key read from stdin, then revokes the key. It answers three questions:
   - Does service-account traffic bill the single-member Go plan or pay-as-you-go balance?
   - Do the usage-export and key-lifecycle endpoints behave as documented?
@@ -94,7 +113,7 @@ The provider set is hard-coded to Anthropic and OpenAI in setup, model listing, 
   - The Claude alert stays as it was.
   - When the limit resets, the Go alert closes.
 - AE7. **Covers R15.** A Go-route response reports billing to the pay-as-you-go balance. The monitor alerts with a billing reason.
-- AE8. **Covers R16, R17, R19.** The probe shows service-account traffic bills the pay-as-you-go balance. The direct route then uses operator-pasted personal keys, and R19 is not built.
+- AE8. **Covers R16, R17, R19.** The probe shows service-account traffic bills the pay-as-you-go balance. The direct route then uses operator-pasted personal keys, and R19 is not built. (The 2026-11-06 probe showed the opposite: service-account traffic bills the Go plan.)
 
 ---
 
@@ -103,7 +122,7 @@ The provider set is hard-coded to Anthropic and OpenAI in setup, model listing, 
 - A repo runs a real agent task, tool calls included, on a Go model through its existing proxy key. A proxy-routed run in the gateway workspace does the same.
 - When the proxy loses its Claude credential, the operator can move a repo's default model to Go and that repo keeps running.
 - A Go outage, plan exhaustion or balance billing shows up as its own alert and status observation on the next monitor run. Claude alerting does not change.
-- Planning can take Phase 1 from this doc as written. Phase 2 needs only the probe result added.
+- Planning can take Phase 1 from this doc as written. Phase 2 needs only the probe result added (recorded under Phase 2).
 
 ---
 

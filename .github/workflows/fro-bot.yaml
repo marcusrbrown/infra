@@ -586,9 +586,10 @@ env:
           - security or hardening features with config knobs
           - default behavior changes that affect us
        d. Skip provider-specific changes for products we do not use.
-          For CLIProxyAPI specifically, skip Codex, Gemini, OpenAI,
-          Vertex, Antigravity, Kimi, Qwen, and GPT-5.x changes — we use
-          Claude only.
+          For CLIProxyAPI specifically, we use Claude OAuth, Codex OAuth
+          (OpenAI models) and the OpenAI-compatible upstream that serves
+          OpenCode Go. Skip changes to the Gemini, Vertex, Antigravity,
+          and native Kimi and Qwen providers.
 
        Output: use at most one trusted tracking issue titled
        "Upstream Modernization Watch — YYYY-MM-DD" (using the most recent

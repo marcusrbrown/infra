@@ -14,6 +14,9 @@ labels:
   - name: cliproxy-auth-monitor
     color: '#b60205'
     description: CLIProxy auth monitor state
+  - name: autoheal-upstream-watch
+    color: '#1d76db'
+    description: Trusted weekly upstream modernization watch
 
 branches:
   - name: main

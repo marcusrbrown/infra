@@ -469,7 +469,10 @@ env:
        Steps:
        a. Navigate: `npx agent-browser open "https://kw.igg.ms"`
        b. Wait for load: `npx agent-browser wait --load networkidle`
-       c. Full screenshot: `npx agent-browser screenshot --full`
+       c. Full screenshot: `npx agent-browser screenshot --full`. Save
+          every screenshot under `.context/systematic/autoheal-<run-id>/`
+          inside the workspace; files outside the workspace cannot be read
+          back.
        d. Snapshot interactive elements: `npx agent-browser snapshot -i`
        e. Use the snapshot ref to click `More`, then snapshot interactive
           elements again. KeeWeb keeps storage providers collapsed under
@@ -586,9 +589,10 @@ env:
           - security or hardening features with config knobs
           - default behavior changes that affect us
        d. Skip provider-specific changes for products we do not use.
-          For CLIProxyAPI specifically, skip Codex, Gemini, OpenAI,
-          Vertex, Antigravity, Kimi, Qwen, and GPT-5.x changes — we use
-          Claude only.
+          For CLIProxyAPI specifically, we use Claude OAuth, Codex OAuth
+          (OpenAI models) and the OpenAI-compatible upstream that serves
+          OpenCode Go. Skip changes to the Gemini, Vertex, Antigravity,
+          and native Kimi and Qwen providers.
 
        Output: use at most one trusted tracking issue titled
        "Upstream Modernization Watch — YYYY-MM-DD" (using the most recent

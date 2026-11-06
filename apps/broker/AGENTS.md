@@ -118,7 +118,7 @@ Each `POST /v1/mint` request:
 2. Evaluates claims against `BROKER_TRUST_POLICY` (`repository_id`, `repository_owner_id`, `job_workflow_ref`, `ref`, `ref_type`, `ref_protected`, `event_name`, `runner_environment`, `repository_visibility`).
 3. Mints a `ghact-<runId>-<expiresAtEpochMs>-<hexrand>` key via cliproxy management API (GET-modify-write + read-back, single-flight lock).
 4. Records the entry in the in-memory live set with a 30-minute TTL.
-5. Returns the OpenCode `auth.json` payload (same shape as `apps/cliproxy/AGENTS.md`).
+5. Returns the OpenCode `auth.json` payload (same shape as `apps/cliproxy/AGENTS.md`): `anthropic`, `openai` and `opencode-go` entries, each carrying the minted key. The consumer must configure `provider.opencode-go.options.baseURL` to cliproxy, because OpenCode's built-in default endpoint for `opencode-go` is `opencode.ai`.
 
 At run end (success/fail/cancel), revocation is handled exclusively by the TTL sweeper and reconcile — there is no run-end revoke endpoint. The sweeper is the mandatory backstop.
 
@@ -182,7 +182,7 @@ Do not edit the `.env` on the droplet directly — the next deploy overwrites it
 - **Never pass secret bytes via argv** — the broker `.env` (management keys, `BROKER_AUD`) is written via SSH stdin only. `--body <value>` patterns are banned.
 - **Never use `ssh-keyscan` in CI** — host keys are pinned in `.github/known_hosts` at provision time and committed. Provisioning scripts may use `ssh-keyscan` locally.
 - **Never scale the broker horizontally** — the single-flight lock is valid only because there is exactly one broker instance (single droplet). Scaling out breaks the lock invariant and requires a distributed lock or CAS-capable management API.
-- **Broker-minted credentials stay Anthropic and OpenAI.** OpenCode Go waits on a mint contract that carries a proxy base URL; the current response is a bare `auth.json` map with nowhere to put one.
+- **The mint response is a bare `auth.json` map.** It carries `anthropic`, `openai` and `opencode-go` entries, each holding the same minted key, and no base URL. A consumer must set `provider.opencode-go.options.baseURL` to cliproxy in its `OPENCODE_CONFIG`; OpenCode's built-in default endpoint for `opencode-go` is `opencode.ai`, so without it the minted key would be sent there.
 - **Pattern A capability caveat** — a minted key is fungible with the durable cliproxy key for its TTL. cliproxy has no per-key capability surface, so the security property delivered is **short-lived + revocable + off-runner**, not capability-restricted. In-run abuse during the TTL window is a documented non-goal (requires Pattern B / egress containment, deferred).
 
 ## NOTES

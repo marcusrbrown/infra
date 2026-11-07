@@ -1369,7 +1369,7 @@ const SNAPSHOT_FIXTURE = {
   schemaVersion: 1,
   source: {
     repo: 'anomalyco/opencode',
-    path: 'services/www/src/docs/content/console/go.mdx',
+    path: 'services/site/src/docs/content/console/go.mdx',
     commit: 'a'.repeat(40),
   },
   models: {

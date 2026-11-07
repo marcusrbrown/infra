@@ -24,7 +24,7 @@ const entry = (overrides: EntryOverrides = {}) => ({
 
 const makeSnapshot = (models: Record<string, unknown>) => ({
   schemaVersion: 1,
-  source: {repo: 'anomalyco/opencode', path: 'services/www/src/docs/content/console/go.mdx', commit: COMMIT},
+  source: {repo: 'anomalyco/opencode', path: 'services/site/src/docs/content/console/go.mdx', commit: COMMIT},
   models,
 })
 
@@ -65,6 +65,12 @@ describe('computeEligibility', () => {
     expect(evaluate({m: entry({zeroRetention: false})}, ['m']).excluded).toEqual([
       {id: 'm', reason: 'not-zero-retention'},
     ])
+  })
+
+  test('a region-gated model that retains data is excluded on retention first, as crouton-alpha-free is', () => {
+    expect(
+      evaluate({'crouton-alpha-free': entry({zeroRetention: false, regionGated: true})}, ['crouton-alpha-free']),
+    ).toEqual({eligible: [], excluded: [{id: 'crouton-alpha-free', reason: 'not-zero-retention'}]})
   })
 
   test('a region-gated model is excluded', () => {
@@ -144,6 +150,16 @@ describe('parseSnapshot', () => {
     ['models as an array', {...makeSnapshot({}), models: []}],
   ])('fails the whole parse on %s', (_label, raw) => {
     expect(() => parseSnapshot(raw)).toThrow()
+  })
+
+  // Upstream moved the page from services/www to services/site. A snapshot still naming the old path was never
+  // parsed from the current page, so it must not load.
+  test('rejects a snapshot that names the retired services/www source path', () => {
+    const stale = {
+      ...makeSnapshot({}),
+      source: {...makeSnapshot({}).source, path: 'services/www/src/docs/content/console/go.mdx'},
+    }
+    expect(() => parseSnapshot(stale)).toThrow(/source\.path/)
   })
 
   test('does not echo entry values in the error', () => {

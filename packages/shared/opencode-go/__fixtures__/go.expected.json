@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "repo": "anomalyco/opencode",
-    "path": "services/www/src/docs/content/console/go.mdx",
+    "path": "services/site/src/docs/content/console/go.mdx",
     "commit": "5eeb906b27f993c26037196b6d4a2a95cb606f6b"
   },
   "models": {

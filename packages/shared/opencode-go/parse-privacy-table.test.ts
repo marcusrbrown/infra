@@ -28,7 +28,7 @@ describe('parsePrivacyTable on the pinned go.mdx', () => {
     expect(parsed.invalid).toEqual([])
     expect(parsed.source).toEqual({
       repo: 'anomalyco/opencode',
-      path: 'services/www/src/docs/content/console/go.mdx',
+      path: 'services/site/src/docs/content/console/go.mdx',
       commit: FIXTURE_COMMIT,
     })
   })

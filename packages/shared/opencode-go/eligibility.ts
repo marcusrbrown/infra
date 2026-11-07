@@ -8,7 +8,7 @@ import {z} from 'zod'
 
 export const SNAPSHOT_SCHEMA_VERSION = 1 as const
 export const SNAPSHOT_SOURCE_REPO = 'anomalyco/opencode'
-export const SNAPSHOT_SOURCE_PATH = 'services/www/src/docs/content/console/go.mdx'
+export const SNAPSHOT_SOURCE_PATH = 'services/site/src/docs/content/console/go.mdx'
 
 const isoDateSchema = z
   .string()

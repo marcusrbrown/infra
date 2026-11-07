@@ -192,7 +192,7 @@ describe('refreshGoPrivacy: changed table', () => {
 
     expect(h.calls.map(call => call.url)).toEqual([COMMIT_API_URL, goMdxUrl(NEW_SHA)])
     expect(goMdxUrl(NEW_SHA)).toBe(
-      `https://raw.githubusercontent.com/anomalyco/opencode/${NEW_SHA}/services/www/src/docs/content/console/go.mdx`,
+      `https://raw.githubusercontent.com/anomalyco/opencode/${NEW_SHA}/services/site/src/docs/content/console/go.mdx`,
     )
     for (const {init} of h.calls) {
       expect(init?.signal).toBeInstanceOf(AbortSignal)

@@ -174,6 +174,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      security-events: write
     steps:
       - name: Scan gateway image
         env:
@@ -194,6 +195,46 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Generate gateway SARIF
+        id: gateway-sarif
+        if: ${{ github.ref == 'refs/heads/main' }}
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+          GATEWAY_DIGEST: ${{ needs.build-images.outputs.gateway_digest }}
+        run: |
+          sarif_dir="$RUNNER_TEMP/trivy-sarif"
+          sarif_file="$sarif_dir/gateway.sarif"
+          mkdir -p "$sarif_dir"
+          # Trivy runs as root inside the container; the output file is created
+          # root-owned with mode 0644, so the runner user can still read it.
+          docker run --rm \
+            -e TRIVY_USERNAME \
+            -e TRIVY_PASSWORD \
+            -v "$sarif_dir:/sarif" \
+            ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+            image --format sarif --severity CRITICAL,HIGH --ignore-unfixed --exit-code 0 \
+            --output '/sarif/gateway.sarif' \
+            'ghcr.io/marcusrbrown/infra-gateway@'"$GATEWAY_DIGEST" \
+            || echo '::warning::Trivy exited non-zero while generating the gateway SARIF'
+          # A missing or empty report must never read as a clean scan: warn
+          # loudly and skip the upload instead of uploading nothing.
+          if [[ -s "$sarif_file" && -r "$sarif_file" ]]; then
+            echo "path=$sarif_file" >> "$GITHUB_OUTPUT"
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No SARIF report was produced for infra-gateway@$GATEWAY_DIGEST; code scanning was NOT updated, so this is not a clean scan"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload gateway SARIF to code scanning
+        if: ${{ github.ref == 'refs/heads/main' && steps.gateway-sarif.outputs.ready == 'true' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ steps.gateway-sarif.outputs.path }}
+          category: trivy-gateway
+
       - name: Scan workspace image
         env:
           TRIVY_USERNAME: ${{ github.actor }}
@@ -212,6 +253,46 @@ jobs:
               || echo '(no scan output produced)'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate workspace SARIF
+        id: workspace-sarif
+        if: ${{ github.ref == 'refs/heads/main' }}
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+          WORKSPACE_DIGEST: ${{ needs.build-images.outputs.workspace_digest }}
+        run: |
+          sarif_dir="$RUNNER_TEMP/trivy-sarif"
+          sarif_file="$sarif_dir/workspace.sarif"
+          mkdir -p "$sarif_dir"
+          # Trivy runs as root inside the container; the output file is created
+          # root-owned with mode 0644, so the runner user can still read it.
+          docker run --rm \
+            -e TRIVY_USERNAME \
+            -e TRIVY_PASSWORD \
+            -v "$sarif_dir:/sarif" \
+            ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+            image --format sarif --severity CRITICAL,HIGH --ignore-unfixed --exit-code 0 \
+            --output '/sarif/workspace.sarif' \
+            'ghcr.io/marcusrbrown/infra-workspace@'"$WORKSPACE_DIGEST" \
+            || echo '::warning::Trivy exited non-zero while generating the workspace SARIF'
+          # A missing or empty report must never read as a clean scan: warn
+          # loudly and skip the upload instead of uploading nothing.
+          if [[ -s "$sarif_file" && -r "$sarif_file" ]]; then
+            echo "path=$sarif_file" >> "$GITHUB_OUTPUT"
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No SARIF report was produced for infra-workspace@$WORKSPACE_DIGEST; code scanning was NOT updated, so this is not a clean scan"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload workspace SARIF to code scanning
+        if: ${{ github.ref == 'refs/heads/main' && steps.workspace-sarif.outputs.ready == 'true' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ steps.workspace-sarif.outputs.path }}
+          category: trivy-workspace
 
   notify:
     needs: [build-images, scan-images]

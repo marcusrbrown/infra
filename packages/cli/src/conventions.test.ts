@@ -1659,8 +1659,13 @@ describe('deploy-gateway.yaml: scan-images report-only invariants', () => {
 
   interface ScanImagesStep {
     name?: string
+    id?: string
+    if?: string
+    uses?: string
     run?: string
     env?: Record<string, string>
+    'continue-on-error'?: boolean
+    with?: Record<string, string>
   }
 
   interface ScanImagesJob {
@@ -1704,10 +1709,35 @@ describe('deploy-gateway.yaml: scan-images report-only invariants', () => {
     expect(scanImages?.['continue-on-error']).toBe(true)
   })
 
-  it('requests only contents: read and packages: read, never security-events', async () => {
+  it('requests only contents: read, packages: read, and security-events: write (SARIF upload)', async () => {
     const {scanImages} = await readScanImages()
-    expect(scanImages?.permissions).toEqual({contents: 'read', packages: 'read'})
-    expect(scanImages?.permissions).not.toHaveProperty('security-events')
+    expect(scanImages?.permissions).toEqual({contents: 'read', packages: 'read', 'security-events': 'write'})
+  })
+
+  it('uploads per-image SARIF to code scanning only on main, only when the report exists, and never blocks the deploy', async () => {
+    const {scanImages} = await readScanImages()
+    expect(scanImages?.['continue-on-error']).toBe(true)
+
+    const steps = scanImages?.steps ?? []
+    const uploads = steps.filter(step => step.uses?.startsWith('github/codeql-action/upload-sarif@'))
+    expect(uploads.map(step => step.with?.category)).toEqual(['trivy-gateway', 'trivy-workspace'])
+
+    for (const upload of uploads) {
+      expect(upload.uses).toMatch(/^github\/codeql-action\/upload-sarif@[\da-f]{40}$/)
+      expect(upload['continue-on-error']).toBe(true)
+      expect(upload.if).toContain("github.ref == 'refs/heads/main'")
+      // hashFiles() cannot see $RUNNER_TEMP (outside the workspace), so the guard is an
+      // explicit file-exists-and-non-empty check in the generating step, surfaced as an output.
+      const generatorId = /steps\.([\w-]+)\.outputs\.ready == 'true'/.exec(upload.if ?? '')?.[1]
+      expect(generatorId).toBeDefined()
+      const generator = steps.find(step => step.id === generatorId)
+      expect(generator?.if).toContain("github.ref == 'refs/heads/main'")
+      expect(generator?.run).toMatch(/--format sarif\b/)
+      expect(generator?.run).toMatch(/--exit-code[ =]0\b/)
+      expect(generator?.run).toMatch(/\[\[ -s "\$sarif_file"/)
+      expect(generator?.run).toContain('::warning::')
+      expect(generator?.run).toContain('ready=false')
+    }
   })
 
   it('every Trivy invocation passes --exit-code 0 so findings never fail the step', async () => {

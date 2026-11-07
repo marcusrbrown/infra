@@ -113,6 +113,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write
     uses: ./.github/workflows/deploy-gateway.yaml
     secrets:
       GATEWAY_SSH_KEY: ${{ secrets.GATEWAY_SSH_KEY }}

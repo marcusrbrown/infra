@@ -122,13 +122,13 @@ describe('POST /v1/mint — happy path', () => {
     const handler = createServer(deps)
     const res = await handler(mintRequest('valid-oidc-token'))
     expect(res.status).toBe(200)
-    const body = (await res.json()) as {anthropic: {type: string; key: string}; openai: {type: string; key: string}}
+    const body = (await res.json()) as Record<string, {type: string; key: string}>
     // auth.json shape per apps/cliproxy/AGENTS.md "OPENCODE_CONFIG AND OPENCODE_AUTH_JSON SHAPES":
-    // {anthropic: {type: "api", key: "<minted-key>"}, openai: {type: "api", key: "<minted-key>"}}
-    expect(body).toHaveProperty('anthropic')
+    // one {type: "api", key: "<minted-key>"} entry per provider, all carrying the same key.
+    expect(Object.keys(body)).toEqual(['anthropic', 'openai', 'opencode-go'])
     expect(body.anthropic).toEqual({type: 'api', key: MINTED_KEY})
-    expect(body).toHaveProperty('openai')
     expect(body.openai).toEqual({type: 'api', key: MINTED_KEY})
+    expect(body['opencode-go']).toEqual({type: 'api', key: MINTED_KEY})
   })
 
   it('records a live-set entry after a successful mint', async () => {

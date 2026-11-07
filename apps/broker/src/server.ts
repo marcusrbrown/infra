@@ -121,16 +121,20 @@ function jsonResponse(status: number, body: unknown): Response {
  *
  * Shape per apps/cliproxy/AGENTS.md "OPENCODE_CONFIG AND OPENCODE_AUTH_JSON SHAPES":
  *   {
- *     "anthropic": {"type": "api", "key": "<minted-key>"},
- *     "openai":    {"type": "api", "key": "<minted-key>"}
+ *     "anthropic":   {"type": "api", "key": "<minted-key>"},
+ *     "openai":      {"type": "api", "key": "<minted-key>"},
+ *     "opencode-go": {"type": "api", "key": "<minted-key>"}
  *   }
  *
- * The same proxy key authenticates both anthropic and openai provider routes.
+ * The same proxy key authenticates the anthropic, openai and opencode-go provider routes.
+ * The consumer must point `provider.opencode-go.options.baseURL` at cliproxy; OpenCode's
+ * built-in default endpoint for opencode-go is opencode.ai.
  */
 function buildAuthJson(mintedKey: string): Record<string, {type: string; key: string}> {
   return {
     anthropic: {type: 'api', key: mintedKey},
     openai: {type: 'api', key: mintedKey},
+    'opencode-go': {type: 'api', key: mintedKey},
   }
 }
 

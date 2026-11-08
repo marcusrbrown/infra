@@ -588,7 +588,7 @@ s3cat "$RUNKEY" | jq '{phase, cancelledBy: .details.cancelledBy}'
 
 If the log lacks `cancel already requested`, the dashboard cancel landed after the abort settled: record G2c as `not reproduced` and repeat with a fresh run, at most twice.
 
-Roughly 6 seconds after the notice, the thread gets a `_(no output)_` message even though the log says the failure reply is suppressed. Record it as a known observation (fro-bot/agent#2116), not a failure.
+From agent v0.136.4, a cancelled run that produced no text posts only the cancel notice (fro-bot/agent#2116). A later `_(no output)_` message in the thread fails G2c.
 
 ### Gate 3: ownership persistence and restart
 
@@ -650,16 +650,16 @@ A grep that prints nothing for G3.2 is the pass. For G3.5, run in the dashboard 
 
 ### Gate 4: attribution rendering
 
-Settled approval and question cards name the decider and ping nobody. Discord rows are automated: the operator clicks, and the agent reads the card over REST. Dashboard rows are blocked.
+Settled approval and question cards name the decider and ping nobody. In every row the operator starts the run from Discord. For Discord rows the operator clicks the Discord button. For dashboard rows the agent decides from the signed-in dashboard session and must not touch Discord. In both cases the agent then reads the card over REST.
 
 | ID | Surface | Decision | Expected card | Result |
 | --- | --- | --- | --- | --- |
 | G4a | Discord | approve | title `✅ Approved`, description `Approved by <@$OP_ID>` | automated |
 | G4b | Discord | deny | title `⛔ Denied`, description `Denied by <@$OP_ID>` | automated |
-| G4c | Dashboard | approve | description `Approved by <login> (dashboard)` | BLOCKED |
-| G4d | Dashboard | deny | description `Denied by <login> (dashboard)` | BLOCKED |
+| G4c | Dashboard | approve | title `✅ Approved`, description `Approved by <login> (dashboard)` | automated |
+| G4d | Dashboard | deny | title `⛔ Denied`, description `Denied by <login> (dashboard)` | automated |
 | G4e | Discord | question answer | title `✅ Answered`, description `Answered by <@$OP_ID>`, then the question text and an answer field | automated |
-| G4f | Dashboard | question answer | description `Answered by <login> (dashboard)` | BLOCKED |
+| G4f | Dashboard | question answer | title `✅ Answered`, description ending `Answered by <login> (dashboard)`, then an answer field | automated |
 
 Every card must have a title with no mention, `edited_timestamp` set, `mentions` empty, `mention_roles` empty, and `mention_everyone` false. The expected `(dashboard)` suffix on question cards applies to agent v0.136.3 and later.
 
@@ -675,10 +675,24 @@ The probe targets do not exist, so nothing in the checkout changes. After each r
 dget "/channels/<thread_id>/messages?limit=50" | jq -c '.[] | select(.embeds | length > 0) | {title: .embeds[0].title, desc: .embeds[0].description, edited: .edited_timestamp, mentions: (.mentions|length), roles: (.mention_roles|length), everyone: .mention_everyone}'
 ```
 
-**Blocked rows (G4c, G4d, G4f).** Do not attempt them. For a run started from Discord, the dashboard shows no approval card, the approvals list returns `[]`, and a decision cannot be applied: approvals are scoped by `thread_id`, while the web GET and POST use `runId`. Record `BLOCKED` and cite fro-bot/agent#2115. Questions share the gap. Once it is fixed, the verified API shapes are:
+**Dashboard rows (G4c, G4d, G4f).** These rows need agent v0.136.4 or later (fro-bot/agent#2115). The operator posts the same prompts as G4a, G4b and G4e, using `$TAG-probe-approve`, `$TAG-probe-deny` and a fresh question, and leaves Discord alone. Then the agent does the following.
 
-- `GET /operator/runs/<runId>/approvals` returns `{approvals: [{requestID, …}]}`. `POST /operator/runs/<runId>/approvals/<requestID>/decision` takes `{decision: 'once'}` or `{decision: 'reject'}`.
-- `GET /operator/runs/<runId>/questions` returns `{requests: [{requestID, questions: [{options}]}]}`. `POST /operator/runs/<runId>/questions/<requestID>/decision` takes `{decision: 'answer', answers: [{options: [0]}]}`.
+1. Find the run. It is the newest entry in `/operator/runs` for the bound repo, with status `waiting_for_approval` or `waiting_for_answer`.
+2. Confirm the gateway lists the pending request under the run ID:
+   - `GET /operator/runs/<runId>/approvals` returns `{approvals: [{requestID, permission, command}]}` with the probe command.
+   - `GET /operator/runs/<runId>/questions` returns `{requests: [{requestID, questions: [{header, text, options}]}]}`.
+3. In the dashboard, open the run's collapsed card. Opening `/#<runId>` doesn't expand it. Clicking toggles the card, so take a fresh snapshot after each click.
+4. Decide in the card:
+   - G4c: the approval prompt shows the command. Click **Once**.
+   - G4d: click **Reject**.
+   - G4f: pick an option and click **Submit answers**.
+5. Check the run after each decision. After **Reject** the run continues, and its reply says the operator rejected the command.
+6. Read the card from the thread as for the Discord rows.
+
+The API shapes for a decision without the UI:
+
+- `POST /operator/runs/<runId>/approvals/<requestID>/decision` takes `{decision: 'once'}` or `{decision: 'reject'}`.
+- `POST /operator/runs/<runId>/questions/<requestID>/decision` takes `{decision: 'answer', answers: [{options: [0]}]}`.
 - Both POSTs need the `x-csrf-token` header from `/operator/session/csrf`. Keep the token inside the `eval`.
 
 ### Finish
@@ -711,11 +725,10 @@ Gate 3, ownership persistence and restart: [PASS/FAIL]
   <ownedSessionIds non-empty mid-run; adoption lines seen; no persist failure or 412 in the run window; COMPLETED record has rootSessionId set and ownedSessionIds []; same ETag after gateway restart; run still listed>
 
 Gate 4, attribution rendering: [PASS/INCOMPLETE/FAIL]
-  <Discord approve/deny/question: plain titles, <@id> descriptions, no mentions on the edits. Dashboard approve, deny and question: BLOCKED, fro-bot/agent#2115>
+  <Discord approve/deny/question: plain titles, <@id> descriptions, no mentions on the edits. Dashboard approve, deny and question: cards listed under the run ID, decided in the dashboard, Discord cards end `(dashboard)`, no mentions>
 
 Drift: <pin vs tracker differences, or none>
 
 Other observations:
-- <known: cancelled run posts a stray "_(no output)_" message ~6 s after the notice, fro-bot/agent#2116>
 - <anything new>
 ```

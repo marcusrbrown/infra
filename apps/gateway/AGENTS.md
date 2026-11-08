@@ -96,7 +96,7 @@ Rolling back to a release without durable operator sessions leaves the session r
 
 ### Revert from OpenCode V2
 
-The gateway and workspace run OpenCode V2 from `fro-bot/agent` v0.130.1. v0.130.0 added the V2 workspace and the V2 gateway loop, and v0.130.1 provisions provider credentials into each V2 spawn. Don't run V2 on v0.130.0: every model call fails with 401. The workspace image selects V2 through the `OPENCODE_VERSION` build-arg; the gateway picks V1 or V2 per run from the workspace `/readyz` `opencodeVersion`. They switch together. An old gateway (pre-v0.130.0) must never run behind a V2 workspace: it would drive the V1 loop against a V2 server. A new gateway behind a V1 workspace is safe.
+The gateway and workspace have run OpenCode V2 since `fro-bot/agent` v0.130.1; `apps/gateway/upstream.json` holds the current pin. v0.130.0 added the V2 workspace and the V2 gateway loop, and v0.130.1 provisions provider credentials into each V2 spawn. Don't run V2 on v0.130.0: every model call fails with 401. The workspace image selects V2 through the `OPENCODE_VERSION` build-arg; the gateway picks V1 or V2 per run from the workspace `/readyz` `opencodeVersion`. They switch together. An old gateway (pre-v0.130.0) must never run behind a V2 workspace: it would drive the V1 loop against a V2 server. A new gateway behind a V1 workspace is safe.
 
 To revert, use either path. Both ship the gateway and workspace together.
 

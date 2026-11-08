@@ -2,7 +2,7 @@
 
 Browser acceptance checklist for the operator surface at `https://dashboard.fro.bot`. Run it after every paired gateway + dashboard operator-contract upgrade. The pair is `apps/gateway/upstream.json` plus the `image:` line in `apps/dashboard/docker-compose.yaml`; the contract version comes from `/operator/health`. Elsewhere in this runbook, `<expected>` means the contract version of the pair under test.
 
-This runbook lists the complete steps for a full acceptance pass. Routine post-deploy acceptance is run by an agent with [`operator-surface-acceptance-automated.md`](operator-surface-acceptance-automated.md).
+This runbook lists the complete steps for a full acceptance pass. Routine post-deploy acceptance is run by an agent with [`operator-surface-acceptance-automated.md`](operator-surface-acceptance-automated.md). The gateway release gates (credential removal, cancel, ownership persistence, approval attribution) are in its [Gateway release gates](operator-surface-acceptance-automated.md#gateway-release-gates-agent-run) section.
 
 Each check lists how to trigger it, what you should see, and what failure looks like. Run the checks in order; [logout](#15-logout-and-csrf) is last because it ends your session.
 

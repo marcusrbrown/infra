@@ -126,4 +126,4 @@ If snapshots were off for more than 7 days, the history has expired; follow the 
 
 ## Gap threshold
 
-A gap is a spacing between samples of more than 45 minutes (`GAP_THRESHOLD_MS` in `apps/docs/src/lib/history-view.ts`). The cron runs every 30 minutes, so this leaves room for one late run. Tune it against measured jitter after a week of real data. Gaps are shown, never interpolated.
+A gap is a spacing between samples of more than 75 minutes (`GAP_THRESHOLD_MS` in `apps/docs/src/lib/history-view.ts`). The cron runs every 30 minutes, but scheduled runs start late. Over the first week no run was skipped, yet the daily 00:11Z run landed up to 56 minutes after the one before. A gap therefore means at least one missed run. A single missed run shows in the coverage count ("N of M samples"). Gaps are shown, never interpolated. The end-to-end probe has its own 45-minute staleness limit (`PROBE_STALE_MS`), because the monitor runs every 15 minutes.

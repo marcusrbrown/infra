@@ -9,6 +9,7 @@ import {
   GAP_THRESHOLD_MS,
   isStale,
   passLabel,
+  PROBE_STALE_MS,
   STALE_THRESHOLD_MS,
 } from './history-view'
 
@@ -30,8 +31,9 @@ function defined<T>(value: T | null | undefined, label: string): T {
 }
 
 describe('constants', () => {
-  it('exports the gap and stale thresholds', () => {
-    expect(GAP_THRESHOLD_MS).toBe(45 * MINUTE)
+  it('exports the gap, probe-staleness and page-staleness thresholds', () => {
+    expect(GAP_THRESHOLD_MS).toBe(75 * MINUTE)
+    expect(PROBE_STALE_MS).toBe(45 * MINUTE)
     expect(STALE_THRESHOLD_MS).toBe(90 * MINUTE)
   })
 })
@@ -75,14 +77,20 @@ describe('samples passed', () => {
 })
 
 describe('gaps', () => {
-  it('marks one gap for samples at T and T+75 minutes', () => {
-    const view = buildAppView('keeweb', [sample(0, reachability('p')), sample(75, reachability('p'))], new Date(at(75)))
+  it('marks one gap for samples at T and T+90 minutes', () => {
+    const view = buildAppView('keeweb', [sample(0, reachability('p')), sample(90, reachability('p'))], new Date(at(90)))
 
-    expect(view.gaps).toEqual([{from: at(0), to: at(75), minutes: 75}])
+    expect(view.gaps).toEqual([{from: at(0), to: at(90), minutes: 90}])
   })
 
-  it('does not mark an interval of exactly 45 minutes', () => {
-    const view = buildAppView('keeweb', [sample(0, reachability('p')), sample(45, reachability('p'))], new Date(at(45)))
+  it('does not mark an interval of exactly 75 minutes', () => {
+    const view = buildAppView('keeweb', [sample(0, reachability('p')), sample(75, reachability('p'))], new Date(at(75)))
+
+    expect(view.gaps).toEqual([])
+  })
+
+  it('does not mark a late daily run 56 minutes after the previous sample', () => {
+    const view = buildAppView('keeweb', [sample(0, reachability('p')), sample(56, reachability('p'))], new Date(at(56)))
 
     expect(view.gaps).toEqual([])
   })
@@ -352,10 +360,16 @@ describe('end-to-end probe', () => {
     expect(view.verdict).toBe('unknown')
   })
 
-  it('flags a probe older than the gap threshold even when its result passed', () => {
-    const view = buildAppView('cliproxy', [route('p', 0, 'ok')], new Date(at(60)))
+  it('flags a probe older than 45 minutes even when its result passed', () => {
+    const view = buildAppView('cliproxy', [route('p', 14, 'ok')], new Date(at(60)))
 
-    expect(view.endToEnd.stale).toBe(true)
+    expect(view.endToEnd).toMatchObject({probeAgeMinutes: 46, stale: true})
+  })
+
+  it('does not flag a probe exactly 45 minutes old', () => {
+    const view = buildAppView('cliproxy', [route('p', 15, 'ok')], new Date(at(60)))
+
+    expect(view.endToEnd).toMatchObject({probeAgeMinutes: 45, stale: false})
   })
 
   it('reports a dead route as failing', () => {

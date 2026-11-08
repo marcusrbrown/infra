@@ -14,8 +14,13 @@ import {APP_IDS, HISTORY_WINDOW_MS, OBSERVATION_KINDS_BY_ID} from '@marcusrbrown
  * of samples recorded against about how many a 30-minute cadence would have produced.
  */
 
-/** Consecutive samples further apart than this leave a gap. Tuned against measured jitter after a week of data. */
-export const GAP_THRESHOLD_MS = 45 * 60_000
+/**
+ * Consecutive samples further apart than this leave a gap. Scheduled runs start late, up to 56 minutes apart at the
+ * daily 00:11Z slot, so a gap means at least one missed run, not a late one. A single missed run shows in coverage.
+ */
+export const GAP_THRESHOLD_MS = 75 * 60_000
+/** The end-to-end probe counts as stale past this age; the monitor runs every 15 minutes. */
+export const PROBE_STALE_MS = 45 * 60_000
 /** The page warns when `generatedAt` is older than this. */
 export const STALE_THRESHOLD_MS = 90 * 60_000
 /** The snapshot cadence, used only to work out how many samples a window should hold. */
@@ -224,7 +229,7 @@ function endToEndView(observation: ObservationView | undefined, sampleAt: string
   const stale =
     result !== 'not_measured' &&
     (observation?.detail?.reason === 'stale' ||
-      (probeAgeMinutes !== undefined && probeAgeMinutes * 60_000 > GAP_THRESHOLD_MS))
+      (probeAgeMinutes !== undefined && probeAgeMinutes * 60_000 > PROBE_STALE_MS))
   return {result, measured: result !== 'not_measured', probeAt, probeAgeMinutes, stale}
 }
 

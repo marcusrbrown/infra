@@ -367,7 +367,7 @@ idle_check() {   # succeeds only when every run record of every bound repo is te
 | P1 | The workspace runs OpenCode V2 at `$OCV`. | `WORKSPACE_IMAGE_OPENCODE_VERSION` and `/readyz` `opencodeVersion` both equal `$OCV`. |
 | P2 | The box is idle before every restart. | `idle_check` prints `active=0` and exits 0. |
 
-**P0.** A gateway deploy approved during acceptance recreates the containers between gates.
+**P0.** A gateway deploy approved during acceptance recreates the containers between gates. Even when the upstream ref stays the same, the new images have different digests: any change under the gateway path filter triggers a rebuild, and Alpine packages float. So a pass is valid only for one digest pair.
 
 1. List gateway deploys that are waiting, queued or running. Each list must be `[]`. If one is not, tell the operator not to approve any gateway deploy gate until acceptance ends, and note the run IDs.
 

@@ -1,6 +1,6 @@
 # CLIProxyAPI Deploy Package
 
-OAuth-authenticated Claude proxy at `cliproxy.fro.bot`. Docker Compose stack (Caddy + cli-proxy-api) on a DigitalOcean Droplet. CLI clients authenticate to the proxy with bearer API keys; the proxy forwards to Claude using stored OAuth tokens.
+Multi-provider proxy at `cliproxy.fro.bot`: Claude OAuth, Codex OAuth (OpenAI models), and an OpenAI-compatible OpenCode Go upstream. Docker Compose stack (Caddy + cli-proxy-api) on a DigitalOcean Droplet. CLI clients authenticate to the proxy with bearer API keys; Claude and Codex use stored OAuth tokens, while OpenCode Go uses its upstream API key. Consumer configuration and credential shapes are documented under [OPENCODE_CONFIG and OPENCODE_AUTH_JSON shapes](#opencode_config-and-opencode_auth_json-shapes).
 
 ## WHERE TO LOOK
 

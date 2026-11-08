@@ -550,6 +550,7 @@ const GO_RUNBOOK = 'docs/runbooks/cliproxy-opencode-go.md'
 export type GoRouteReason =
   | 'ok'
   | 'billing-not-go'
+  | 'billing-fallback'
   | 'provider-missing'
   | 'privacy-noncompliant'
   | 'quota-or-billing'
@@ -578,6 +579,14 @@ export interface GoRouteOptions {
 interface GoRouteProbeResult {
   classification: GoRouteClassification
   human: CheckResult
+  /** The bounded `billing_source` token of a 2xx probe response; absent when none was observed. */
+  billingSource?: string
+}
+
+/** A Go probe's classification and, on a 2xx that named one, the bounded `billing_source` token. */
+export interface GoRouteObservation {
+  classification: GoRouteClassification
+  billingSource?: string
 }
 
 const modelListSchema = z.object({
@@ -618,7 +627,14 @@ function isMissingSessionBody(bodyText: string): boolean {
   return GO_MISSING_SESSION_MARKER.test(bodyText)
 }
 
-/** `usage.opencode.billing_source` of a 2xx body, or null when it is absent or the body is not JSON. */
+const GO_BILLING_TOKEN = /^[\w.-]{1,32}$/
+
+/** The value as a printable token, or `other` when it is not one. Raw body text is never printed. */
+function boundBillingToken(value: string): string {
+  return GO_BILLING_TOKEN.test(value) ? value : 'other'
+}
+
+/** `usage.opencode.billing_source` of a 2xx body, or null when it is absent, empty, not a string or the body is not JSON. */
 function billingSourceOf(bodyText: string): string | null {
   try {
     const parsed: unknown = JSON.parse(bodyText)
@@ -627,7 +643,9 @@ function billingSourceOf(bodyText: string): string | null {
     if (typeof usage !== 'object' || usage === null || !('opencode' in usage)) return null
     const {opencode} = usage
     if (typeof opencode !== 'object' || opencode === null || !('billing_source' in opencode)) return null
-    return typeof opencode.billing_source === 'string' ? opencode.billing_source : null
+    return typeof opencode.billing_source === 'string' && opencode.billing_source !== ''
+      ? opencode.billing_source
+      : null
   } catch {
     return null
   }
@@ -639,6 +657,7 @@ function goResult(
   level: CheckLevel,
   summary: string,
   details: string[] | undefined,
+  billingSource?: string,
 ): GoRouteProbeResult {
   return {
     classification: {state, reason},
@@ -648,6 +667,7 @@ function goResult(
       summary,
       details: details !== undefined && details.length > 0 ? details : undefined,
     },
+    ...(billingSource === undefined ? {} : {billingSource}),
   }
 }
 
@@ -741,9 +761,21 @@ async function runGoRouteProbe(baseUrl: string, apiKey: string, options?: GoRout
     if (verbose) details.push(`Status: ${response.status}`)
 
     if (response.ok) {
-      const bodyText = await readBodyText(response)
-      if (billingSourceOf(bodyText) === 'go') {
-        return goResult('healthy', 'ok', 'ok', `opencode-go route OK (${model})`, details)
+      const billing = billingSourceOf(await readBodyText(response))
+      if (billing === 'go') {
+        return goResult('healthy', 'ok', 'ok', `opencode-go route OK (${model})`, details, 'go')
+      }
+      if (billing !== null) {
+        // The Go usage window ran out and the account fell back to credits: the route works, billed differently.
+        const token = boundBillingToken(billing)
+        return goResult(
+          'unknown',
+          'billing-fallback',
+          'warning',
+          `Go request for ${model} was billed to "${token}", not "go" (Go usage window exhausted or credits fallback); route works — check OpenCode Console usage, see ${GO_RUNBOOK}`,
+          details,
+          token,
+        )
       }
       return goResult(
         'dead',
@@ -817,6 +849,16 @@ export async function checkGoRouteState(
 ): Promise<GoRouteClassification> {
   const probe = await runGoRouteProbe(baseUrl, apiKey, options)
   return probe.classification
+}
+
+/** {@link checkGoRouteState} plus the bounded `billing_source` token a 2xx probe response named, if any. */
+export async function probeGoRoute(
+  baseUrl: string,
+  apiKey: string,
+  options?: GoRouteOptions,
+): Promise<GoRouteObservation> {
+  const {classification, billingSource} = await runGoRouteProbe(baseUrl, apiKey, options)
+  return billingSource === undefined ? {classification} : {classification, billingSource}
 }
 
 /** The tracked settings: the injected ones, or the committed `settings.json`. Throws if they do not parse. */

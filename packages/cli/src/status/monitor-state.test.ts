@@ -169,6 +169,7 @@ describe('contract', () => {
     expect(GO_PROBE_REASON_STATE).toEqual({
       ok: 'healthy',
       'billing-not-go': 'dead',
+      'billing-fallback': 'unknown',
       'provider-missing': 'dead',
       'privacy-noncompliant': 'dead',
       'quota-or-billing': 'dead',
@@ -275,6 +276,25 @@ describe('parseGoProbeLine', () => {
       expect(parseGoProbeLine(runnerLog(goProbeLine('dead', reason)))).toMatchObject({kind: 'probe', reason})
     },
   )
+
+  it('accepts billing-fallback only as unknown on a Go line, and rejects it on a Claude line', () => {
+    expect(parseGoProbeLine(runnerLog(goProbeLine('unknown', 'billing-fallback')))).toMatchObject({
+      kind: 'probe',
+      state: 'unknown',
+      reason: 'billing-fallback',
+    })
+    expect(parseGoProbeLine(runnerLog(goProbeLine('dead', 'billing-fallback')))).toEqual({kind: 'malformed'})
+    expect(parseProbeLine(runnerLog(probeLine('unknown', 'billing-fallback')))).toEqual({kind: 'malformed'})
+  })
+
+  it('ignores the separate Go billing line when it parses the one probe line', () => {
+    const billing = 'CLIProxy Go monitor billing: billing_source=balance'
+    expect(parseGoProbeLine(runnerLog(goProbeLine('unknown', 'billing-fallback'), billing))).toMatchObject({
+      kind: 'probe',
+      reason: 'billing-fallback',
+    })
+    expect(parseGoProbeLine(runnerLog(billing))).toEqual({kind: 'none'})
+  })
 
   it('rejects the retired probe-misconfigured reason on a Go line', () => {
     expect(parseGoProbeLine(runnerLog(goProbeLine('unknown', 'probe-misconfigured')))).toEqual({kind: 'malformed'})

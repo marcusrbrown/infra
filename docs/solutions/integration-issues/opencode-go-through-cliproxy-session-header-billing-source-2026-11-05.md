@@ -1,13 +1,14 @@
 ---
 title: "OpenCode Go through CLIProxyAPI: the session header, double listing, the billing_source signal and key scope"
 date: 2026-11-05
+last_updated: 2026-11-08
 module: apps/cliproxy
 problem_type: integration_issue
 component: tooling
 severity: medium
 symptoms:
   - "Go inference answers HTTP 400 MissingSessionID to any request without x-opencode-session, and CLIProxyAPI forwards no client headers on an openai-compatibility upstream unless mapped"
-  - "A 200 from Go does not say which plan paid; only usage.opencode.billing_source (go or balance) does"
+  - "A 200 from Go does not say which plan paid; only usage.opencode.billing_source does (go for the plan, another value for the credits fallback)"
   - "/v1/models lists every Go model twice, as glm-5.3 and opencode-go/glm-5.3, both with owned_by opencode-go"
   - "A cliproxy Environment secret is unreadable by the router's deploy-cliproxy caller job, which has no environment"
   - "Merging the change put the monitor's Go probe on main before the gated deploy created the live entry, which opened the Go provider-missing issue #1807"
@@ -74,21 +75,21 @@ The entry sets `prefix` and maps each model name to itself, so the proxy lists b
 - `listedGoIds` in `status.ts` strips the prefix and de-duplicates, so the monitor works with bare ids.
 - Clients use `opencode-go/<bare id>` as the model id. The gateway deploy guard checks the base URL of the provider named by that prefix (`apps/gateway/AGENTS.md`, "OpenCode Go through the proxy").
 
-### Make `billing_source` the pass condition
+### Make `billing_source` the signal
 
-2xx responses carry `usage.opencode.billing_source`: `go` for plan traffic, `balance` for pay-as-you-go. The proxy preserves it. Both the deploy and the monitor require `go`.
+2xx responses carry `usage.opencode.billing_source`: `go` for plan traffic, any other value (seen: `balance`) when the account has fallen back to credits because the Go usage window ran out. The proxy preserves it. A present non-`go` value means the route works and bills differently. A missing, null, non-string or empty value proves nothing about billing.
 
-`runGoSmokeRequest` (one non-streaming request at `max_tokens: 1`, billed to Go) raises `OpenCodeGoUnverifiedError` otherwise:
+`runGoSmokeRequest` (one non-streaming request at `max_tokens: 1`) passes on `go`, passes with a warning that names the value on any other present string, and raises `OpenCodeGoUnverifiedError` otherwise:
 
 <!-- prettier-ignore -->
 ```ts
-if (billing !== 'go') {
-  const seen = typeof billing === 'string' ? JSON.stringify(billing.slice(0, 32)) : 'missing'
+if (typeof billing !== 'string' || billing === '') {
+  const seen = typeof billing === 'string' ? JSON.stringify(billing) : 'missing'
   throw new OpenCodeGoUnverifiedError('smoke request', `billing_source was ${seen}, expected "go"`)
 }
 ```
 
-`runGoRouteProbe` returns `ok` only when `billingSourceOf(bodyText) === 'go'`. Any other 2xx is `billing-not-go`. The runbook's first response to an unexpected value is to disable the entry and then check the Console (`docs/runbooks/cliproxy-opencode-go.md`, "Applied but unverified").
+`runGoRouteProbe` returns `ok` for `go`, `unknown` / `billing-fallback` (a warning) for any other present string, and `dead` / `billing-not-go` for a missing one. The observed value is bounded to `[A-Za-z0-9._-]{1,32}`, else `other`; raw body text is never printed. The monitor opens no issue and sends no Discord for the fallback, and prints `CLIProxy Go monitor billing: billing_source=<token>` after the probe line. The runbook covers the response (`docs/runbooks/cliproxy-opencode-go.md`, "Applied but unverified").
 
 ### Classify the monitor reasons separately from Claude's
 
@@ -108,14 +109,14 @@ The monitor reads the committed `settings.json` and skips Go entirely when `enab
 ## Why This Works
 
 - The explicit header mapping is the only path by which the client's session id reaches Go, and every probe supplies its own, so the monitor classifies that failure with one specific reason instead of scattered client errors.
-- `billing_source` is the one field that distinguishes plan traffic from balance traffic. Requiring it in both the deploy and the monitor turns a silent cost leak into a failed deploy or a dead route.
+- `billing_source` is the one field that distinguishes plan traffic from credits traffic. Requiring it in both the deploy and the monitor keeps a missing signal a failure, while the credits fallback stays visible as a warning and a billing line instead of an outage.
 - Checking both ids once each, owned by the right provider, makes the double listing a verified contract instead of an accident.
 - Passing the secrets explicitly from the router moves them out of the one place the caller job cannot read, and stripping them from the SSH child environment keeps them out of remote commands.
 
 ## Prevention
 
 - Treat any new OpenAI-compatible upstream as three questions: which headers does it require, how are its models listed, and what in the response proves what was billed. Probe the real endpoint before writing the entry.
-- Keep deploy-time proof and monitor-time proof on the same signals. The smoke request and the monitor probe both require `billing_source: go`, so a regression is caught by whichever runs first.
+- Keep deploy-time proof and monitor-time proof on the same signals. The smoke request and the monitor probe both require a present `billing_source` and treat a non-`go` value as the credits fallback, so a regression is caught by whichever runs first.
 - Store secrets read by the router's caller job as repository secrets, and pass them explicitly to the called workflow. Never use `secrets: inherit` with a cross-org reusable workflow.
 - Never pass the upstream key or the downstream key through `ssh` or `scp` environment or argv.
 

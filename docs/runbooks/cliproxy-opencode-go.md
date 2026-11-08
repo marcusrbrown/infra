@@ -136,12 +136,12 @@ The error reads `OpenCode Go entry APPLIED but UNVERIFIED (<stage>)`. The write 
 | `write` | The write request got no usable answer: a network error, a timeout, an HTTP 408 or a 5xx. The proxy may have applied it. A 4xx answer is a plain failure, not this stage. | Read `GET /v0/management/openai-compatibility`. If the entry is there, check it as for `read-back`. Then rerun the deploy. |
 | `read-back` | The live entry differs from the tracked one. The error names the fields. | Read `GET /v0/management/openai-compatibility`. Compare the named fields. |
 | `visibility` | An eligible id is missing or listed twice, or an ineligible id is served. The error names the ids. | `bunx @marcusrbrown/infra cliproxy models opencode-go` |
-| `smoke request` | The proxy returned a non-2xx status, or the response was not billed to Go. | Check the status in the error. 401 or 403 means a bad key. 429 or 402 means the plan limit or balance. |
+| `smoke request` | The proxy returned a non-2xx status, or a 2xx carried no `billing_source`. | Check the status in the error. 401 or 403 means a bad key. 429 or 402 means the plan limit or balance. |
 | `post-write check` | A network or parse error after the write. | Rerun the deploy and read the error. |
 
 Then:
 
-1. If `billing_source` was anything other than `go`, disable at once. Requests may be billing the pay-as-you-go balance. Follow [Emergency disable](#emergency-disable-without-a-deploy) (disable only), then check the OpenCode Console.
+1. A present `billing_source` other than `go` is not this error. It is the credits fallback: the Go usage window is exhausted and the account bills credits. The deploy warns and passes, and the monitor stays silent. It is not an outage. Check Console usage. Disable via [Emergency disable](#emergency-disable-without-a-deploy) (disable only) only if the value is unexpected and the Go window is not exhausted.
 2. Otherwise fix the cause and rerun `bunx @marcusrbrown/infra cliproxy deploy`. The deploy writes the entry again and repeats every check.
 3. If the entry cannot be fixed, disable it.
 
@@ -188,5 +188,6 @@ A run that cannot parse the table fails and opens no PR. The deploy keeps the re
 - **Expiry:** the deploy enforces agreement expiry. Between deploys, the monitor flags an expired model as `privacy-noncompliant`.
 - **Region-gated models:** never exposed.
 - **Plan limits:** a 429 or 402 alerts as dead with reason `quota-or-billing`. The Go issue closes on the next healthy probe.
+- **Credits fallback:** a 2xx with a present `billing_source` other than `go` is `unknown` / `billing-fallback`. The monitor prints `CLIProxy Go monitor billing: billing_source=<token>`, opens no issue and sends no alert. `cliproxy status` warns and exits 0. An open Go issue stays as it is until a healthy probe closes it.
 - **Probe allowance:** each probe is one `max_tokens: 1` request. The monitor sends 96 a day. The deploy sends one per run, and `cliproxy status` sends one per run.
 - **Management key:** anyone holding it can read the Go key in clear. It already reads the downstream api keys in clear.

@@ -18,6 +18,7 @@ import {
   getCliproxyStatusSummary,
   inspectRunningContainer,
   levelLabel,
+  probeGoRoute,
   stripTrailingSlash,
   toNumber,
   type SpawnFn,
@@ -1760,18 +1761,65 @@ describe('checkGoRouteState (OpenCode Go classification)', () => {
     expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'healthy', reason: 'ok'})
   })
 
-  it('is dead/billing-not-go for a 2xx with another billing source or none', async () => {
+  it('is unknown/billing-fallback (a warning) for a 2xx billed to a present non-go source', async () => {
+    install(
+      () => modelList(['glm-5.3']),
+      () => Response.json({usage: {opencode: {billing_source: 'balance'}}}),
+    )
+
+    expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'billing-fallback'})
+    const human = await checkGoRoute(BASE, KEY, options)
+    expect(human.level).toBe('warning')
+    expect(human.summary).toContain('"balance"')
+    expect(human.summary).toContain('glm-5.3')
+  })
+
+  it('reports the observed billing token alongside the classification', async () => {
+    install(
+      () => modelList(['glm-5.3']),
+      () => Response.json({usage: {opencode: {billing_source: 'balance'}}}),
+    )
+    expect(await probeGoRoute(BASE, KEY, options)).toEqual({
+      classification: {state: 'unknown', reason: 'billing-fallback'},
+      billingSource: 'balance',
+    })
+
+    install(() => modelList(['glm-5.3']), goOk)
+    expect(await probeGoRoute(BASE, KEY, options)).toEqual({
+      classification: {state: 'healthy', reason: 'ok'},
+      billingSource: 'go',
+    })
+  })
+
+  it('bounds a weird billing_source to the token `other` and never prints it', async () => {
+    for (const weird of ['bal ance <b>HOSTILE_BODY</b>', 'x'.repeat(33), 'caf\u00E9']) {
+      install(
+        () => modelList(['glm-5.3']),
+        () => Response.json({usage: {opencode: {billing_source: weird}}}),
+      )
+      expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'unknown', reason: 'billing-fallback'})
+      expect((await probeGoRoute(BASE, KEY, options)).billingSource).toBe('other')
+      const human = await checkGoRoute(BASE, KEY, options)
+      expect(human.summary).toContain('"other"')
+      expect(JSON.stringify(human)).not.toContain('HOSTILE_BODY')
+    }
+  })
+
+  it('is dead/billing-not-go for a 2xx with a missing, null, non-string or empty billing_source', async () => {
     for (const body of [
-      {usage: {opencode: {billing_source: 'balance'}}},
       {usage: {opencode: {}}},
       {usage: {}},
       {choices: []},
+      {usage: {opencode: {billing_source: null}}},
+      {usage: {opencode: {billing_source: 7}}},
+      {usage: {opencode: {billing_source: ''}}},
     ]) {
       install(
         () => modelList(['glm-5.3']),
         () => Response.json(body),
       )
       expect(await checkGoRouteState(BASE, KEY, options)).toEqual({state: 'dead', reason: 'billing-not-go'})
+      expect((await probeGoRoute(BASE, KEY, options)).billingSource).toBeUndefined()
     }
     install(
       () => modelList(['glm-5.3']),
@@ -2067,6 +2115,29 @@ describe('cliproxyStatusAction — Go route wiring', () => {
     )
 
     expect(urls.some(url => url.includes('/v1/'))).toBe(false)
+  })
+
+  it('does not exit 1 when the Go route is on the credits fallback', async () => {
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.endsWith('/v1/models')) return Response.json({data: [{id: 'glm-5.3', owned_by: 'opencode-go'}]})
+      if (url.includes('/v1/chat/completions'))
+        return Response.json({choices: [], usage: {opencode: {billing_source: 'balance'}}})
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction(
+      {url: 'https://cliproxy.example.com', apiKey: 'my-api-key'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      GO_SETTINGS,
+      GO_SNAPSHOT,
+    )
+
+    const output = captured.stdout.join('\n')
+    expect(output).toContain('[WARN] OpenCode Go route')
+    expect(captured.exit).toBeNull()
   })
 
   it('exits 1 when only the Go route is dead', async () => {

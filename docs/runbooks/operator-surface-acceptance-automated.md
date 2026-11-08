@@ -1,6 +1,6 @@
 # Operator Surface Acceptance (Automated)
 
-How an agent runs the operator surface acceptance checks with [agent-browser](https://github.com/vercel-labs/agent-browser). Run it after every paired gateway + dashboard operator-contract deploy, then post the results. [`operator-surface-acceptance.md`](operator-surface-acceptance.md) is the full manual checklist; this runbook references its check numbers and does not repeat what each check expects. `<expected>` means the contract version reported by `/operator/health`.
+How an agent runs the operator surface acceptance checks with [agent-browser](https://github.com/vercel-labs/agent-browser). Run it after every paired gateway + dashboard operator-contract deploy, then post the results. [`operator-surface-acceptance.md`](operator-surface-acceptance.md) is the full manual checklist; this runbook references its check numbers and does not repeat what each check expects. `<expected>` means the contract version reported by `/operator/health`. After a gateway release deploy, also run the [gateway release gates](#gateway-release-gates-agent-run).
 
 ---
 
@@ -246,3 +246,476 @@ Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved se
 3. Save evidence under `/tmp/operator-acceptance-<expected>/`: a screenshot per check named `NN-name.png`, and secret-free JSON for health, the `ready` frame, `/operator/runs`, and `/operator/session` (`login`, `expiresAt`, and `push` only).
 4. Before recording a result, read the saved JSON back from disk. A subagent's summary is not evidence.
 5. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, or `simulated`, and cite the run ID for checks 5–11, 13 and 17.
+
+---
+
+## Gateway release gates (agent-run)
+
+How an agent runs the gateway release gates after a Fro Bot gateway deploy moves to a new upstream ref (`apps/gateway/upstream.json`). The gates cover stale-credential removal on OpenCode V2, `/fro-bot cancel`, ownership persistence across a gateway restart, and approval attribution. The agent drives the droplet over SSH, reads run state from S3, and reads Discord threads over REST. A human must post the Discord mentions, run the slash commands, toggle the trigger role, and click the Discord buttons, because the agent cannot act in Discord as the operator. Those steps are marked **Operator action**.
+
+- Gates 2 and 3 use the dashboard session from [Browser session](#browser-session). Sign in first. When both passes run in one sitting, finish these gates before [Logout](#logout).
+- The gates start runs by Discord mention, so they spend none of the [launch budget](#launch-budget).
+- Every command below is a pattern: copy it and fill the placeholders. Add no script files to the repo.
+
+### Inputs
+
+| Variable       | Value                                                                                        |
+| -------------- | -------------------------------------------------------------------------------------------- |
+| `REPO`         | Absolute path of the repo checkout. Run from it so Bun finds the root `.env`.                |
+| `WORK`         | `mktemp -d` for this pass. Holds the SSH key and the SSH control socket.                     |
+| `REF`          | Upstream ref under test, as pinned in `apps/gateway/upstream.json`.                          |
+| `OCV`          | OpenCode V2 version the deploying `build-images` job built (`--build-arg OPENCODE_VERSION`). |
+| `TAG`          | `ACCEPT-$REF`. Prefix for every plant, probe and marker.                                     |
+| `CHANNEL`      | ID of the Discord channel bound to the test repo. Operator supplies it.                      |
+| `OWNER_REPO`   | `<owner>/<repo>` the channel is bound to.                                                    |
+| `OP_ID`        | Operator's Discord user ID. Operator supplies it.                                            |
+| `OP_LOGIN`     | Operator's GitHub login.                                                                     |
+| `TRIGGER_ROLE` | Trigger role ID (G2a). Operator supplies it.                                                 |
+
+Secrets come from the repo-root `.env` through `envval` below: `GATEWAY_HOST`, `GATEWAY_SSH_KEY`, `S3_BUCKET`, `S3_REGION`, optional `S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DISCORD_TOKEN`, `DISCORD_GUILD_ID`. The `AWS_*` keys can list and get in the state bucket. Never print, log, or save a value from `.env`.
+
+### Rules
+
+- Run the patterns under `bash`. `zsh` does not word-split unquoted `$(…)`. Tool calls may not share shell state: repeat the [helpers](#helpers) block at the head of each call, with the same `WORK`.
+- Droplet commands run as `root` over SSH with the pinned host key. Many short calls trip SSH rate limits, so every call goes through one multiplexed connection (`gw`).
+- On the droplet host, do not run `rm`, `mv`, `cp`, `mknod`, `chmod`, or `chown`.
+- Do not redirect any remote command to `/dev/*`, including `2>/dev/null`. Use `2>&1`.
+- Do not run `docker compose up`, `down`, or `pull`.
+- Restart only `workspace` (G1) and `gateway` (G3), and only after `idle_check` succeeds.
+- Container-side cleanup is allowed only for the gate's own plants, through `$DC exec -T -u 10001 workspace`.
+- Gateway and workspace logs are unredacted. Filter with `grep` and save only the matched lines.
+- A secret in argv is a leak: the SSH key lives in a mode 600 file, and the Discord token goes to `curl` on stdin.
+- End of pass: `gw 'stat -c "%F %t,%T %a" /dev/null'` must print `character special file 1,3 666`. Anything else: stop and report it to the operator. Do not repair it.
+
+### Helpers
+
+```bash
+REPO=<repo-root>; cd "$REPO"
+WORK=${WORK:-$(mktemp -d)}; echo "WORK=$WORK"
+envval() { (cd "$REPO" && NAME=$1 bun -e 'process.stdout.write(process.env[process.env.NAME] ?? "")'); }
+
+GATEWAY_HOST=$(envval GATEWAY_HOST)
+[[ $GATEWAY_HOST =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || { echo "invalid GATEWAY_HOST"; false; }   # a '-' prefix would be read as an ssh option
+[ -s "$WORK/key" ] || (umask 077; { envval GATEWAY_SSH_KEY; echo; } > "$WORK/key")
+chmod 600 "$WORK/key"
+
+gw() {
+  ssh -i "$WORK/key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile="$REPO/.github/known_hosts" \
+    -o ControlMaster=auto -o ControlPersist=600 -o ControlPath="$WORK/cm" "root@$GATEWAY_HOST" "$@"
+}
+DC='docker compose --project-directory /opt/gateway/deploy'
+wsx() { gw "$DC exec -T -u 10001 workspace sh -s"; }     # container shell as uid 10001; the script comes on stdin
+glog() { gw "docker logs --timestamps --since $1 fro-bot-gateway-1 2>&1"; }
+
+export AWS_ACCESS_KEY_ID=$(envval AWS_ACCESS_KEY_ID) AWS_SECRET_ACCESS_KEY=$(envval AWS_SECRET_ACCESS_KEY) AWS_DEFAULT_REGION=$(envval S3_REGION)
+S3_BUCKET=$(envval S3_BUCKET); S3_ENDPOINT=$(envval S3_ENDPOINT); [ -z "$S3_ENDPOINT" ] || export AWS_ENDPOINT_URL_S3=$S3_ENDPOINT
+BASE=fro-bot-state/discord-gateway
+s3cat() { aws s3 cp "s3://$S3_BUCKET/$1" -; }
+etag() { aws s3api head-object --bucket "$S3_BUCKET" --key "$1" --query ETag --output text; }
+runkeys() { aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/$1/runs/" --query "sort_by(Contents,&LastModified)[-${2:-3}:].Key" --output text | tr '\t' '\n'; }
+
+dget() { printf 'header = "Authorization: Bot %s"\n' "$(envval DISCORD_TOKEN)" | curl -sS -K - "https://discord.com/api/v10$1"; }
+thread() { dget "/channels/$1/messages?limit=50" | jq -r 'reverse[] | [.timestamp[11:23], (.edited_timestamp // "-"), "mentions=\(.mentions|length)", "roles=\(.mention_roles|length)", "everyone=\(.mention_everyone)", (.content|tojson), ([.embeds[]|{title,description}]|tojson)] | @tsv'; }
+
+wait_healthy() {   # $1 = container name
+  for i in $(seq 72); do
+    [ "$(gw "docker inspect --format '{{.State.Health.Status}}' $1")" = healthy ] && { echo "health: healthy $(date -u +%FT%TZ)"; return 0; }
+    sleep 5
+  done
+  echo "health: not healthy after 6 min"; return 1
+}
+
+readyz() { wsx <<'EOF'
+curl -sS -w '\nhttp=%{http_code}\n' http://127.0.0.1:9100/readyz
+EOF
+}
+
+idle_check() {   # succeeds only when every run record of every bound repo is terminal; any listing, read or parse error fails
+  local active=0 bad=0 repo key phase b bkeys rkeys repos
+  bkeys=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/_/_/bindings/by-channel/" --query 'Contents[].Key' --output text) \
+    || { echo "idle-check: binding listing failed"; return 1; }
+  [ -n "$bkeys" ] && [ "$bkeys" != None ] || { echo "idle-check: no bindings listed"; return 1; }
+  repos=$(for b in $bkeys; do s3cat "$b" | jq -er '"\(.owner)/\(.repo)"' || echo "ERR:$b"; done | sort -u)
+  case $repos in *ERR:*) echo "idle-check: unreadable binding"; return 1 ;; esac
+  for repo in $repos; do
+    rkeys=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/$repo/runs/" --query 'Contents[].Key' --output text) \
+      || { echo "idle-check: run listing failed for $repo"; return 1; }
+    [ "$rkeys" = None ] && continue
+    for key in $rkeys; do
+      phase=$(s3cat "$key" | jq -er .phase) || { echo "unreadable: $key"; bad=$((bad+1)); continue; }
+      case $phase in
+        COMPLETED|FAILED|CANCELLED) ;;
+        *) active=$((active+1)); echo "active: $key $phase" ;;
+      esac
+    done
+  done
+  echo "idle-check active=$active unreadable=$bad $(date -u +%FT%TZ)"; [ "$active" -eq 0 ] && [ "$bad" -eq 0 ]
+}
+```
+
+- Channel bindings are `$BASE/_/_/bindings/by-channel/<channelId>.json` with `{owner, repo}`. Run records are `$BASE/<owner>/<repo>/runs/<runId>.json` with `run_id`, `surface`, `thread_id`, `phase`, `started_at`, `last_heartbeat`, and `details.{rootSessionId, ownedSessionIds, cancelledBy}`.
+- `idle_check` reads every run record of every bound repo; the CLI paginates the listings. Run it immediately before each restart. Any phase other than `COMPLETED`, `FAILED` or `CANCELLED` counts as active, and a listing, read or parse failure fails the check. A bound repo with no run records lists as `None` and counts as zero runs.
+- `runkeys` (newest N records) is for finding the run under test. It is not an idle check.
+- The first message in a run thread carries one mention. Every other message must carry none.
+
+### Preconditions
+
+| ID | Check | Pass |
+| --- | --- | --- |
+| P0 | Running image digests equal the digests the deploying `build-images` job pushed, and no gateway deploy is in flight. | Both digests match. |
+| P1 | The workspace runs OpenCode V2 at `$OCV`. | `WORKSPACE_IMAGE_OPENCODE_VERSION` and `/readyz` `opencodeVersion` both equal `$OCV`. |
+| P2 | The box is idle before every restart. | `idle_check` prints `active=0` and exits 0. |
+
+**P0.** A gateway deploy approved during acceptance recreates the containers between gates. Even when the upstream ref stays the same, the new images have different digests: any change under the gateway path filter triggers a rebuild, and Alpine packages float. So a pass is valid only for one digest pair.
+
+1. List gateway deploys that are waiting, queued or running. Each list must be `[]`. If one is not, tell the operator not to approve any gateway deploy gate until acceptance ends, and note the run IDs.
+
+   ```bash
+   for wf in deploy.yaml deploy-gateway.yaml; do for st in waiting queued in_progress; do
+     echo "$wf $st"; gh run list --workflow "$wf" --status "$st" --json databaseId,displayTitle,createdAt
+   done; done
+   ```
+
+2. Find the run that deployed the ref: the newest `deploy.yaml` (or `deploy-gateway.yaml`) run whose gateway job succeeded.
+
+   ```bash
+   gh run list --workflow deploy.yaml --status success --limit 10 --json databaseId,headSha,createdAt,displayTitle
+   gh run view <runId> --json jobs --jq '.jobs[] | select(.name | test("gateway"; "i")) | [.name, .conclusion] | @tsv'
+   ```
+
+3. Read the pushed digests. Expect one `infra-gateway` line and one `infra-workspace` line, each ending `@sha256:<digest>`.
+
+   ```bash
+   gh run view <runId> --log | grep 'pushing manifest for'
+   ```
+
+4. Read the running digests and compare them with step 3.
+
+   ```bash
+   gw sh -s <<'EOF'
+   for s in gateway workspace; do
+     echo "$s $(docker inspect --format '{{json .RepoDigests}}' "$(docker inspect --format '{{.Image}}' "$(docker compose --project-directory /opt/gateway/deploy ps -q $s)")")"
+   done
+   EOF
+   ```
+
+Repeat step 4 before every gate and compare it with the digests recorded for the pass. A change means a deploy landed: match the new digests against the `build-images` output of the run that deployed them, and re-run any gate whose result spans the change.
+
+**P1.**
+
+```bash
+gw "$DC exec -T workspace printenv WORKSPACE_IMAGE_OPENCODE_VERSION"
+readyz
+```
+
+Expect `$OCV`, then `http=200` with `{"ready":true,"opencode":"ready","opencodeVersion":"<OCV>"}`.
+
+**P2.** Run `idle_check` immediately before each restart. Do not restart when it exits non-zero. Wait and re-check.
+
+### Gate 1: stale credential removal on V2
+
+On V2 the entrypoint removes a stale `auth.json` at `/home/opencode/.local/share/opencode/auth.json`, including a symlink, without following the link. Provider credentials still come from the root-only secret. A `docker compose exec` session has `HOME=/var/lib/workspace-agent/home`, so always use the absolute path.
+
+| ID | Check | Pass |
+| --- | --- | --- |
+| G1.1 | Exec identity | `id -u` prints `10001`. |
+| G1.2 | Plant a regular file with a fake key | Listing shows `-rw-------` owned by `opencode`. |
+| G1.3 | Restart `workspace`, wait healthy | `health: healthy`. |
+| G1.4 | File removed | `ABSENT` and `NOT-SYMLINK`. |
+| G1.5 | Entrypoint log since the restart | `opencode config: model=set, provider-overlay=merged-into-config-file`; `auth: present (OpenCode V2: …)`; `opencode-server-v2: provider credentials provisioned { providers: […], count: N }` with N of at least 1; no `cannot remove stale auth.json`. |
+| G1.6 | `/readyz` | `http=200`, `"ready":true`, `"opencodeVersion":"<OCV>"`. |
+| G1.7 | Plant a symlink to a marker, record the marker sha256 | Symlink listed. |
+| G1.8 | Restart `workspace`, wait healthy | `health: healthy`. |
+| G1.9 | Symlink removed, target intact | `LINK-GONE`, `TARGET-EXISTS`, same sha256 as G1.7, marker text `$TAG-MARKER-DO-NOT-TOUCH`; G1.5 and G1.6 again. |
+| G1.10 | Plain mention still gets a model reply | Run `COMPLETED`; a bot message in the run thread contains `$TAG-OK`. |
+| G1.11 | Cleanup | `CLEAN` and `MARKER-DIR-GONE`. |
+
+Any `PRESENT`, `IS-SYMLINK`, `LINK-STILL-THERE`, changed sha256, or `TARGET-MISSING` is a failure: the removal followed the link or did not run. Run G1.11 after a failure too.
+
+```bash
+# G1.1, G1.2: plant as uid 10001. The key is fake; never plant a real provider key.
+wsx <<EOF
+id -u
+mkdir -p /home/opencode/.local/share/opencode
+printf '%s\n' '{"anthropic":{"type":"api","key":"$TAG-FAKE-STALE"}}' > /home/opencode/.local/share/opencode/auth.json
+chmod 600 /home/opencode/.local/share/opencode/auth.json
+ls -l /home/opencode/.local/share/opencode/auth.json
+EOF
+
+# G1.3: restart (P2 first)
+idle_check && { T1=$(date -u +%FT%TZ); gw "$DC restart workspace"; wait_healthy fro-bot-workspace-1; }
+
+# G1.4, G1.5, G1.6
+wsx <<'EOF'
+test -e /home/opencode/.local/share/opencode/auth.json && echo PRESENT || echo ABSENT
+test -L /home/opencode/.local/share/opencode/auth.json && echo IS-SYMLINK || echo NOT-SYMLINK
+EOF
+gw "docker logs --since $T1 fro-bot-workspace-1 2>&1" | grep -E 'workspace-entrypoint: (opencode config|auth)|provider credentials provisioned|cannot remove stale auth.json'
+readyz
+
+# G1.7
+wsx <<EOF
+mkdir -p /home/opencode/$TAG /home/opencode/.local/share/opencode
+printf '%s\n' '$TAG-MARKER-DO-NOT-TOUCH' > /home/opencode/$TAG/marker
+rm -f /home/opencode/.local/share/opencode/auth.json
+ln -s /home/opencode/$TAG/marker /home/opencode/.local/share/opencode/auth.json
+ls -l /home/opencode/.local/share/opencode/auth.json
+sha256sum /home/opencode/$TAG/marker
+EOF
+
+# G1.8
+idle_check && { T1=$(date -u +%FT%TZ); gw "$DC restart workspace"; wait_healthy fro-bot-workspace-1; }
+
+# G1.9
+wsx <<EOF
+test -L /home/opencode/.local/share/opencode/auth.json && echo LINK-STILL-THERE || echo LINK-GONE
+test -e /home/opencode/$TAG/marker && echo TARGET-EXISTS || echo TARGET-MISSING
+sha256sum /home/opencode/$TAG/marker
+cat /home/opencode/$TAG/marker
+EOF
+gw "docker logs --since $T1 fro-bot-workspace-1 2>&1" | grep -E 'workspace-entrypoint: (opencode config|auth)|provider credentials provisioned|cannot remove stale auth.json'
+readyz
+```
+
+**Operator action (G1.10):** post in the bound channel: `@fro-bot reply with exactly the word $TAG-OK and nothing else`. The agent finds the run and its thread:
+
+```bash
+for k in $(runkeys "$OWNER_REPO" 2); do s3cat "$k" | jq -c '{run_id, phase, thread_id, started_at}'; done
+thread <thread_id>
+```
+
+Use the newest record that started after the mention. Wait for `COMPLETED`, then expect a bot message containing `$TAG-OK`.
+
+```bash
+# G1.11: cleanup, run after the gate and after any failed step
+wsx <<EOF
+rm -rf /home/opencode/$TAG
+rm -f /home/opencode/.local/share/opencode/auth.json
+test -e /home/opencode/.local/share/opencode/auth.json && echo STILL-PRESENT || echo CLEAN
+test -e /home/opencode/$TAG && echo MARKER-DIR-PRESENT || echo MARKER-DIR-GONE
+EOF
+```
+
+### Gate 2: `/fro-bot cancel`
+
+Two runs, each started with `@fro-bot Run \`sleep 120\` in the shell and report when it finishes.` The prompt writes nothing, so cancelling it is safe (see [Cancel safety](#cancel-safety)). The ephemeral replies to slash commands are not readable over REST: the operator reads each reply and reports it verbatim, and the agent confirms it against the gateway log.
+
+| ID | Check | Pass |
+| --- | --- | --- |
+| G2a.1 | Trigger role removed from the operator (`false`) | The member read returns `false`. |
+| G2a.2 | `/fro-bot cancel` in the idle bound channel | Reply `You do not have permission to cancel runs.`; no `cancel:` line in the gateway log since the command. |
+| G2a.3 | Trigger role restored (`true`) | The member read returns `true`. |
+| G2a.4 | `/fro-bot cancel` in the idle bound channel | Reply is the `no-executing-run` copy; log `cancel: refused` with `"reason":"no-executing-run"` and `"channelId":"$CHANNEL"`. |
+| G2b | Dashboard cancel first (run C1) | Dashboard POST returns 200 with `"phase":"CANCELLED"`; record `CANCELLED` with `details.cancelledBy.kind` `web-operator` and `login` `$OP_LOGIN`; exactly one notice `Run cancelled by operator $OP_LOGIN.` in the thread, with no mentions. |
+| G2c | Discord cancel first, dashboard cancel within about 5 s (run C2) | Log shows `cancel: handled` with `"outcome":"cancelled"`, then `cancelRun: cancel already requested — retrying approval settlement only`, then `run: execution aborted by operator cancel`. Dashboard POST returns 200. Record `CANCELLED` with `details.cancelledBy.kind` `discord-user` and `discordUserId` `$OP_ID`. Exactly one notice `Run cancelled by <@$OP_ID>.`, no mentions. |
+| G2d | Targeting rows (below) | Each reproducible row shows its reply and log `reason`. |
+
+The operator is the actor named by `$OP_ID` and `$OP_LOGIN`. Notices are posted in the run thread (`thread_id`), not the channel. A role-restore that does not show `true` blocks G2a.4.
+
+```bash
+# G2a.1 / G2a.3: read the operator's roles. Expect false after removal, true after restore.
+dget "/guilds/$(envval DISCORD_GUILD_ID)/members/$OP_ID" | jq --arg r "$TRIGGER_ROLE" '.roles | index($r) != null'
+# G2a.2 / G2a.4: log check, with T0 taken before the operator acts
+T0=$(date -u +%FT%TZ); glog "$T0" | grep 'cancel:'
+```
+
+**Operator action (G2a):** remove your own trigger role (keep Manage Channels). After the agent reads `false`, run `/fro-bot cancel` in the bound channel and report the reply. Restore the role. After the agent reads `true`, run `/fro-bot cancel` again and report the reply.
+
+**Targeting copy and reasons**
+
+| Row | Setup | Log `reason` | Reply |
+| --- | --- | --- | --- |
+| run-finished | `/fro-bot cancel` in the thread of a finished run (the C1 thread) | `run-finished` | `This run has already finished. Nothing to cancel.` |
+| not-a-run-thread | `/fro-bot cancel` in a thread the operator creates by hand in the bound channel | `not-a-run-thread` | `This thread is not a run thread I can find. Use /fro-bot cancel inside the thread of the run you want to stop.` |
+| no-executing-run | `/fro-bot cancel` in the idle bound channel (G2a.4) | `no-executing-run` | `No run is executing here. Queued runs are not cancelled by this command; use /fro-bot clear-queue.` |
+| unbound-channel | `/fro-bot cancel` in a channel with no binding | `unbound-channel` | `No repo is bound to this channel. Use /fro-bot cancel in a bound channel or in a run thread.` |
+
+For `unbound-channel`, first confirm the channel has no binding: `aws s3 ls "s3://$S3_BUCKET/$BASE/_/_/bindings/by-channel/<channelId>.json"` prints nothing.
+
+Record these rows as `not reproduced`:
+
+- Queued (PENDING) run in a thread: a PENDING run has no thread until it is adopted, so the row cannot be reached.
+- `other-channel`, `ambiguous` (the per-channel queue admits one active run) and `lookup-failed`: no safe trigger.
+
+The backticks in the replies render as code formatting in Discord. Any reply outside the table, or a cancel that succeeds where a refusal row applies, is a failure.
+
+**Run C1, dashboard first (G2b).**
+
+**Operator action:** post the `sleep 120` prompt in the bound channel. The agent then finds the run and thread (`runkeys "$OWNER_REPO" 1`, phase `EXECUTING`), waits 20 seconds, and cancels from the dashboard session:
+
+```bash
+cat > "$WORK/cancel.js" <<EOF
+;(async () => {
+  const runId = '<runId>'
+  const {csrfToken} = await fetch('/operator/session/csrf', {credentials: 'same-origin'}).then(r => r.json())
+  const res = await fetch('/operator/runs/' + runId + '/cancel', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {'x-csrf-token': csrfToken},
+  })
+  return {status: res.status, body: await res.json().catch(() => null)}
+})()
+EOF
+agent-browser --session infra-operator-acceptance --restore --restore-save auto eval --stdin < "$WORK/cancel.js"
+```
+
+Then verify the record and notice:
+
+```bash
+s3cat "$RUNKEY" | jq '{phase, thread_id, cancelledBy: .details.cancelledBy}'
+dget "/channels/<thread_id>/messages?limit=50" | jq -r '.[] | select(.content | startswith("Run cancelled by")) | [.content, (.mentions|length), (.mention_roles|length), .mention_everyone] | @tsv'
+```
+
+Expect one row: `Run cancelled by operator $OP_LOGIN.` with `0`, `0`, `false`. Then the operator runs `/fro-bot cancel` in that thread for the `run-finished` row.
+
+**Run C2, Discord first (G2c).** The in-flight collapse is reachable only when the Discord cancel goes first and the dashboard cancel follows within about 5 seconds; the abort settles about 6 seconds after the request. A dashboard-first cancel makes a later Discord cancel resolve `run-finished`.
+
+**Operator action:** post the `sleep 120` prompt. The agent finds the run and thread, writes `$WORK/cancel.js` as above with the new `<runId>`, then starts the following command with a 5-minute tool timeout. It fires the dashboard cancel on the first `cancel: handled` line. Only after it is running, the operator runs `/fro-bot cancel` in the run thread.
+
+```bash
+T2=$(date -u +%FT%TZ)
+grep -m1 --line-buffered 'cancel: handled' < <(gw "docker logs --timestamps --since $T2 -f fro-bot-gateway-1 2>&1") \
+  && agent-browser --session infra-operator-acceptance --restore --restore-save auto eval --stdin < "$WORK/cancel.js"
+```
+
+Wait 15 seconds, then check the log and record:
+
+```bash
+glog "$T2" | grep -E 'cancel: handled|cancelRun:|execution aborted|suppressing user-facing'
+s3cat "$RUNKEY" | jq '{phase, cancelledBy: .details.cancelledBy}'
+```
+
+If the log lacks `cancel already requested`, the dashboard cancel landed after the abort settled: record G2c as `not reproduced` and repeat with a fresh run, at most twice.
+
+Roughly 6 seconds after the notice, the thread gets a `_(no output)_` message even though the log says the failure reply is suppressed. Record it as a known observation (fro-bot/agent#2116), not a failure.
+
+### Gate 3: ownership persistence and restart
+
+A run that spawns a background shell and a background subagent persists its owned sessions without an ownership-persist failure. The finished record survives a gateway restart unchanged.
+
+| ID | Check | Pass |
+| --- | --- | --- |
+| G3.1 | Ownership is exercised | The run record shows a non-empty `details.ownedSessionIds` at least once while the run is `EXECUTING`, and the log has both `run-core: background shell adopted into ownership ledger` and `run-core: background dispatch observed -- adopted into ownership ledger`. |
+| G3.2 | No persist failure in the run window | No `run: failed to persist ownership onto run state`, no `run: patchRunDetails threw while persisting ownership`, and no `PreconditionFailed` or `"httpStatusCode":412` line inside the window. |
+| G3.3 | Final record | `phase` is `COMPLETED`, `details.rootSessionId` is set, and `details.ownedSessionIds` is `[]`. |
+| G3.4 | Survives a gateway restart | After the restart the record has the same ETag and body hash; the log shows `discord shard ready` and `recovery: stale-run sweep complete`. |
+| G3.5 | Still listed | `/operator/runs` lists the run with its terminal status. |
+
+If G3.1 fails, record `not triggered` and re-run with a clearer prompt. A clean G3.2 on an empty ledger proves nothing.
+
+The gateway logs `412 PreconditionFailed` lines from its boot self-test after every start. Count a 412 only when its timestamp falls inside the run window (the record's `started_at` onward) and, if the line carries a `key`, the key belongs to this run. Run the scan before the restart in G3.4.
+
+**Operator action:** post in the bound channel:
+
+```text
+@fro-bot Run `sleep 90` in the background in the shell. Then start a background subagent with the task tool that runs `sleep 60` and reports done. Report when both are finished.
+```
+
+```bash
+T3=$(date -u +%FT%TZ)
+# after the mention: RUNKEY is the newest key whose started_at is after T3
+RUNKEY=$(runkeys "$OWNER_REPO" 1)
+for i in $(seq 30); do
+  s3cat "$RUNKEY" | jq -c '{phase, root: .details.rootSessionId, owned: .details.ownedSessionIds}'
+  phase=$(s3cat "$RUNKEY" | jq -r .phase)
+  case $phase in PENDING|ACKNOWLEDGED|EXECUTING) sleep 20;; *) break;; esac
+done
+
+# G3.1, G3.2: scan the run window, before any restart
+START=$(s3cat "$RUNKEY" | jq -r .started_at)
+glog "$T3" | grep 'adopted into ownership ledger'
+glog "$T3" | awk -v s="${START%Z}" '$1 >= s' | grep -E 'failed to persist ownership|patchRunDetails threw|PreconditionFailed|"httpStatusCode":412'
+
+# G3.3
+s3cat "$RUNKEY" | jq '{phase, root: .details.rootSessionId, owned: .details.ownedSessionIds}'
+
+# G3.4
+before="$(etag "$RUNKEY") $(s3cat "$RUNKEY" | shasum -a 256 | cut -c1-16)"
+idle_check && { T4=$(date -u +%FT%TZ); gw "$DC restart gateway"; wait_healthy fro-bot-gateway-1; }
+glog "$T4" | grep -E 'discord shard ready|recovery: (scanning repos|stale-run sweep complete)'
+after="$(etag "$RUNKEY") $(s3cat "$RUNKEY" | shasum -a 256 | cut -c1-16)"
+[ "$before" = "$after" ] && echo "RECORD BYTE-IDENTICAL" || echo "RECORD CHANGED: $before / $after"
+```
+
+A grep that prints nothing for G3.2 is the pass. For G3.5, run in the dashboard session with `runId` defined inline:
+
+```js
+;(async () => {
+  const {runs} = await fetch("/operator/runs", {credentials: "same-origin"}).then(r => r.json())
+  const run = runs.find(r => r.runId === runId)
+  return {found: Boolean(run), status: run?.status ?? null}
+})()
+```
+
+### Gate 4: attribution rendering
+
+Settled approval and question cards name the decider and ping nobody. Discord rows are automated: the operator clicks, and the agent reads the card over REST. Dashboard rows are blocked.
+
+| ID | Surface | Decision | Expected card | Result |
+| --- | --- | --- | --- | --- |
+| G4a | Discord | approve | title `✅ Approved`, description `Approved by <@$OP_ID>` | automated |
+| G4b | Discord | deny | title `⛔ Denied`, description `Denied by <@$OP_ID>` | automated |
+| G4c | Dashboard | approve | description `Approved by <login> (dashboard)` | BLOCKED |
+| G4d | Dashboard | deny | description `Denied by <login> (dashboard)` | BLOCKED |
+| G4e | Discord | question answer | title `✅ Answered`, description `Answered by <@$OP_ID>`, then the question text and an answer field | automated |
+| G4f | Dashboard | question answer | description `Answered by <login> (dashboard)` | BLOCKED |
+
+Every card must have a title with no mention, `edited_timestamp` set, `mentions` empty, `mention_roles` empty, and `mention_everyone` false. The expected `(dashboard)` suffix on question cards applies to agent v0.136.3 and later.
+
+**Operator action (G4a):** post `@fro-bot Run \`rm -f ./$TAG-probe-approve.txt\` in the shell and report the result.` When the approval card appears in the run thread, click **Approve**.
+
+**Operator action (G4b):** post `@fro-bot Run \`chmod 600 ./$TAG-probe-deny.txt\` in the shell and report the result.` Click **Deny**.
+
+**Operator action (G4e):** post `@fro-bot Before you start, ask me one clarifying question with two options (A or B) using the question tool, then wait for my answer.` Click an option.
+
+The probe targets do not exist, so nothing in the checkout changes. After each run reaches `COMPLETED`, read the card from the run's thread:
+
+```bash
+dget "/channels/<thread_id>/messages?limit=50" | jq -c '.[] | select(.embeds | length > 0) | {title: .embeds[0].title, desc: .embeds[0].description, edited: .edited_timestamp, mentions: (.mentions|length), roles: (.mention_roles|length), everyone: .mention_everyone}'
+```
+
+**Blocked rows (G4c, G4d, G4f).** Do not attempt them. For a run started from Discord, the dashboard shows no approval card, the approvals list returns `[]`, and a decision cannot be applied: approvals are scoped by `thread_id`, while the web GET and POST use `runId`. Record `BLOCKED` and cite fro-bot/agent#2115. Questions share the gap. Once it is fixed, the verified API shapes are:
+
+- `GET /operator/runs/<runId>/approvals` returns `{approvals: [{requestID, …}]}`. `POST /operator/runs/<runId>/approvals/<requestID>/decision` takes `{decision: 'once'}` or `{decision: 'reject'}`.
+- `GET /operator/runs/<runId>/questions` returns `{requests: [{requestID, questions: [{options}]}]}`. `POST /operator/runs/<runId>/questions/<requestID>/decision` takes `{decision: 'answer', answers: [{options: [0]}]}`.
+- Both POSTs need the `x-csrf-token` header from `/operator/session/csrf`. Keep the token inside the `eval`.
+
+### Finish
+
+1. Run G1.11 cleanup if it has not run, then the `/dev/null` check from [Rules](#rules).
+2. Close the shared connection and remove the key: `ssh -O exit -o ControlPath="$WORK/cm" "root@$GATEWAY_HOST"; rm -rf "$WORK"`.
+3. Save matched log lines, record JSON and thread dumps under `/tmp/gateway-acceptance-<REF>/`. Read the saved files back before recording a result.
+
+### Results
+
+Per-check results use `pass`, `fail`, `blocked`, `not reproduced`, `not triggered`, or `not automated`. A gate is `PASS` when every check passes or is named `not reproduced` above, `INCOMPLETE` when any check is `blocked` or `not triggered`, and `FAIL` when any check fails. Post this in the release tracker:
+
+```text
+Live acceptance: agent <REF> (OpenCode V2 <OCV>). Run by <operator>, <date>.
+
+Preconditions:
+- P0 running digests match the build: [PASS/FAIL]
+  <gateway sha256:<8 hex>…, workspace sha256:<8 hex>…, deploying run <runId>; re-verified before each gate: [yes/no]>
+- P1 WORKSPACE_IMAGE_OPENCODE_VERSION = <OCV>: [PASS/FAIL]
+- P2 box idle before each restart: [yes/no]
+  <number of restarts, idle_check result for each>
+
+Gate 1, stale-credential removal on V2: [PASS/FAIL]
+  <stale auth.json ABSENT after restart; symlink gone, target sha256 unchanged; /readyz 200 after both restarts; credentials provisioned (count N); mention replied <TAG>-OK; no "cannot remove stale auth.json"; cleanup CLEAN>
+
+Gate 2, /fro-bot cancel: [PASS/FAIL]
+  <(a) denial copy with the operator's trigger role removed, no cancel: log line; restored role reached no-executing-run; (b) in-flight collapse: Discord first, log "cancel already requested", one notice, CANCELLED, cancelledBy <discord-user|web-operator>; (c) notice text "<exact>", in the thread, no mentions; (d) rows matched: <list>; not reproduced: <list>>
+
+Gate 3, ownership persistence and restart: [PASS/FAIL]
+  <ownedSessionIds non-empty mid-run; adoption lines seen; no persist failure or 412 in the run window; COMPLETED record has rootSessionId set and ownedSessionIds []; same ETag after gateway restart; run still listed>
+
+Gate 4, attribution rendering: [PASS/INCOMPLETE/FAIL]
+  <Discord approve/deny/question: plain titles, <@id> descriptions, no mentions on the edits. Dashboard approve, deny and question: BLOCKED, fro-bot/agent#2115>
+
+Drift: <pin vs tracker differences, or none>
+
+Other observations:
+- <known: cancelled run posts a stray "_(no output)_" message ~6 s after the notice, fro-bot/agent#2116>
+- <anything new>
+```

@@ -331,21 +331,32 @@ curl -sS -w '\nhttp=%{http_code}\n' http://127.0.0.1:9100/readyz
 EOF
 }
 
-idle_check() {   # succeeds only when none of the newest 3 run records per bound repo is in flight
-  local active=0 repo key phase b
-  for repo in $(for b in $(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/_/_/bindings/by-channel/" --query 'Contents[].Key' --output text); do
-      s3cat "$b" | jq -r '"\(.owner)/\(.repo)"'; done | sort -u); do
-    for key in $(runkeys "$repo" 3); do
-      phase=$(s3cat "$key" | jq -r .phase)
-      case $phase in PENDING|ACKNOWLEDGED|EXECUTING) active=$((active+1)); echo "active: $key $phase";; esac
+idle_check() {   # succeeds only when every run record of every bound repo is terminal; any listing, read or parse error fails
+  local active=0 bad=0 repo key phase b bkeys rkeys repos
+  bkeys=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/_/_/bindings/by-channel/" --query 'Contents[].Key' --output text) \
+    || { echo "idle-check: binding listing failed"; return 1; }
+  [ -n "$bkeys" ] && [ "$bkeys" != None ] || { echo "idle-check: no bindings listed"; return 1; }
+  repos=$(for b in $bkeys; do s3cat "$b" | jq -er '"\(.owner)/\(.repo)"' || echo "ERR:$b"; done | sort -u)
+  case $repos in *ERR:*) echo "idle-check: unreadable binding"; return 1 ;; esac
+  for repo in $repos; do
+    rkeys=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/$repo/runs/" --query 'Contents[].Key' --output text) \
+      || { echo "idle-check: run listing failed for $repo"; return 1; }
+    [ "$rkeys" = None ] && continue
+    for key in $rkeys; do
+      phase=$(s3cat "$key" | jq -er .phase) || { echo "unreadable: $key"; bad=$((bad+1)); continue; }
+      case $phase in
+        COMPLETED|FAILED|CANCELLED) ;;
+        *) active=$((active+1)); echo "active: $key $phase" ;;
+      esac
     done
   done
-  echo "idle-check active=$active $(date -u +%FT%TZ)"; [ "$active" -eq 0 ]
+  echo "idle-check active=$active unreadable=$bad $(date -u +%FT%TZ)"; [ "$active" -eq 0 ] && [ "$bad" -eq 0 ]
 }
 ```
 
 - Channel bindings are `$BASE/_/_/bindings/by-channel/<channelId>.json` with `{owner, repo}`. Run records are `$BASE/<owner>/<repo>/runs/<runId>.json` with `run_id`, `surface`, `thread_id`, `phase`, `started_at`, `last_heartbeat`, and `details.{rootSessionId, ownedSessionIds, cancelledBy}`.
-- A bound repo with no run records makes `runkeys` print a JMESPath error. Count it as zero runs.
+- `idle_check` reads every run record of every bound repo; the CLI paginates the listings. Run it immediately before each restart. Any phase other than `COMPLETED`, `FAILED` or `CANCELLED` counts as active, and a listing, read or parse failure fails the check. A bound repo with no run records lists as `None` and counts as zero runs.
+- `runkeys` (newest N records) is for finding the run under test. It is not an idle check.
 - The first message in a run thread carries one mention. Every other message must carry none.
 
 ### Preconditions

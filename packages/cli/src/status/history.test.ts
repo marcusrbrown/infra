@@ -149,6 +149,7 @@ describe('merge: the Go route observation arrives on top of older samples', () =
     const reasons = [
       'ok',
       'billing-not-go',
+      'billing-fallback',
       'provider-missing',
       'privacy-noncompliant',
       'quota-or-billing',

@@ -1638,6 +1638,57 @@ describe('applyOpenCodeGoStep', () => {
       }
     })
 
+    test('a 2xx billed to a present non-go source passes with a warning that names it', async () => {
+      const fake = makeGoFetch({
+        liveIds: LIVE_IDS,
+        chat: {status: 200, body: {usage: {opencode: {billing_source: 'balance', list_cost: '0.00006'}}}},
+      })
+      const logs = captureLogs()
+      try {
+        await runGo(fake)
+
+        const text = logs.text()
+        expect(text).toContain(
+          'OpenCode Go smoke request billed to "balance", not "go" (Go usage window exhausted or credits fallback); route works',
+        )
+        expect(text).not.toMatch(/smoke request billed to Go/)
+        expect(text).toMatch(/OpenCode Go applied and verified/)
+        expect(text).not.toContain('list_cost')
+        expect(writes(fake.requests)).toHaveLength(1)
+      } finally {
+        logs.restore()
+      }
+    })
+
+    test('a weird billing_source is bounded to the token `other` in the warning', async () => {
+      const fake = makeGoFetch({
+        liveIds: LIVE_IDS,
+        chat: {status: 200, body: {usage: {opencode: {billing_source: 'a b HOSTILE_BODY'}}}},
+      })
+      const logs = captureLogs()
+      try {
+        await runGo(fake)
+
+        expect(logs.text()).toContain('billed to "other", not "go"')
+        expect(logs.text()).not.toContain('HOSTILE_BODY')
+      } finally {
+        logs.restore()
+      }
+    })
+
+    test('a go-billed smoke request still reports billing to Go with no warning', async () => {
+      const fake = makeGoFetch({liveIds: LIVE_IDS})
+      const logs = captureLogs()
+      try {
+        await runGo(fake)
+
+        expect(logs.text()).toContain('smoke request billed to Go')
+        expect(logs.text()).not.toContain('credits fallback')
+      } finally {
+        logs.restore()
+      }
+    })
+
     test('the smoke request carries a fresh non-empty x-opencode-session that is never logged', async () => {
       const fake = makeGoFetch({liveIds: LIVE_IDS})
       const logs = captureLogs()
@@ -1879,8 +1930,10 @@ describe('applyOpenCodeGoStep', () => {
     })
 
     test.each([
-      ['balance', {usage: {opencode: {billing_source: 'balance'}}}],
       ['none', {usage: {}}],
+      ['null', {usage: {opencode: {billing_source: null}}}],
+      ['a number', {usage: {opencode: {billing_source: 7}}}],
+      ['an empty string', {usage: {opencode: {billing_source: ''}}}],
       ['a non-object body', 'ok'],
     ])('a 2xx with billing_source %s', async (_label, body) => {
       const fake = makeGoFetch({liveIds: LIVE_IDS, chat: {status: 200, body}})

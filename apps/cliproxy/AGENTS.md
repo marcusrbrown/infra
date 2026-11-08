@@ -120,7 +120,7 @@ After the write:
 
 - **Readback:** the live entry must match the tracked one. `auth-index` is ignored; `disabled` defaults to false; models compare as a set.
 - **Visibility:** every eligible id must appear in `/v1/models`, bare and prefixed, once each, with `owned_by: opencode-go`.
-- **Smoke request:** one non-streaming request at `max_tokens: 1` on the probe model must return 2xx with `usage.opencode.billing_source: go`. This request is billed to Go.
+- **Smoke request:** one non-streaming request at `max_tokens: 1` on the probe model must return 2xx with a `usage.opencode.billing_source`. `go` is the plan. Any other present value is the credits fallback (Go usage window exhausted): the route works, so the deploy warns, naming the value, and passes. A missing `billing_source` or a non-2xx answer raises `OpenCodeGoUnverifiedError`. This request is billed to Go, or to credits during the fallback.
 
 Any failure after the write raises `OpenCodeGoUnverifiedError`: "OpenCode Go entry APPLIED but UNVERIFIED (<stage>)". The entry is live and unproven. Follow the runbook. The `write` stage covers the PUT and the disable PATCH: a transport error, a timeout, an HTTP 408 or a 5xx may follow a write the proxy already applied. A 4xx answer proves the proxy rejected the write and stays a plain failure. The management GET must hold an `openai-compatibility` field; an object without it fails before any write.
 
@@ -203,6 +203,7 @@ The dedicated label (`cliproxy-auth-monitor` / `cliproxy-auth-monitor-test`), no
 The same job probes a second route with the same `CLIPROXY_API_KEY`. Each route reconciles on its own, so a failure on one cannot block the other. The exit code reflects either.
 
 - **Probe line:** `CLIProxy Go monitor probe: probe=<state> reason=<reason> at <timestamp>`, printed before any reconciliation.
+- **Billing line:** `CLIProxy Go monitor billing: billing_source=<token>`, printed right after the probe line when a 2xx named a `billing_source`. The token is the value if it matches `[A-Za-z0-9._-]{1,32}`, else `other`. The status reader ignores it.
 - **Issue:** label `cliproxy-go-monitor`, title "CLIProxy OpenCode Go route outage". Its text points at `docs/runbooks/cliproxy-opencode-go.md`.
 - **Skips** when `enabled` is false in `settings.json`: no probe, no line, no issue and no alert. Only `live` validation probes Go.
 - **Each probe** lists `/v1/models`, compares the `opencode-go` models it exposes with today's eligibility, picks a probe model (`defaultProbeModel` when exposed, else the first exposed id), and sends one request at `max_tokens: 1` with a fresh `x-opencode-session`.
@@ -210,7 +211,8 @@ The same job probes a second route with the same `CLIPROXY_API_KEY`. Each route 
 | Reason | State | Cause |
 | --- | --- | --- |
 | `ok` | healthy | 2xx with `billing_source: go` |
-| `billing-not-go` | dead | 2xx with any other or missing `billing_source` |
+| `billing-not-go` | dead | 2xx with a missing, null, non-string or empty `billing_source` |
+| `billing-fallback` | unknown | 2xx with a present `billing_source` other than `go`: the Go usage window is exhausted and the account bills credits. The route works. `cliproxy status` warns and exits 0; the monitor opens no issue and sends no Discord |
 | `provider-missing` | dead | No `opencode-go` models listed, or `model_not_found` |
 | `privacy-noncompliant` | dead | An exposed model is not eligible |
 | `quota-or-billing` | dead | HTTP 429 or 402 |

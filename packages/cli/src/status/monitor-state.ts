@@ -66,6 +66,7 @@ export const PROBE_REASON_STATE: Record<ProviderAuthReason, ProviderAuthState> =
 export const GO_PROBE_REASON_STATE: Record<GoRouteReason, ProviderAuthState> = {
   ok: 'healthy',
   'billing-not-go': 'dead',
+  'billing-fallback': 'unknown',
   'provider-missing': 'dead',
   'privacy-noncompliant': 'dead',
   'quota-or-billing': 'dead',

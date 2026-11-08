@@ -1869,8 +1869,8 @@ describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
     },
     {
       reason: 'billing-not-go',
-      label: 'a 2xx billed to the balance',
-      options: {go: () => Response.json({usage: {opencode: {billing_source: 'balance'}}})},
+      label: 'a 2xx with no billing_source',
+      options: {go: () => Response.json({usage: {opencode: {}}})},
     },
     {reason: 'quota-or-billing', label: 'a 429', options: {go: () => new Response('limit', {status: 429})}},
     {reason: 'quota-or-billing', label: 'a 402', options: {go: () => new Response('balance', {status: 402})}},
@@ -1943,6 +1943,78 @@ describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
     expect(world.discord[0]).toContain('reason: session-header-dropped')
     expect(world.discord[0]).toContain('the proxy stopped forwarding the session header')
     expect(captured.exit).toBeNull()
+  })
+
+  describe('the Go credits fallback (a 2xx billed to a present non-go source)', () => {
+    const fallback = () => Response.json({usage: {opencode: {billing_source: 'balance', list_cost: '0.00006'}}})
+    const billingLines = (stdout: string[]) => stdout.filter(line => line.startsWith('CLIProxy Go monitor billing:'))
+
+    it('opens no issue, sends no Discord and writes nothing', async () => {
+      const world = installWorld({go: fallback})
+      const {ctx, captured} = createCapturedCtx()
+
+      await runMonitor({validation: 'live'}, ctx)
+
+      expect(goLines(captured.stdout)).toEqual([
+        expect.stringMatching(/^CLIProxy Go monitor probe: probe=unknown reason=billing-fallback at \S+$/),
+      ])
+      expect(goSummaries(captured.stdout)[0]).toContain('transition=none issue=none discord=none')
+      expect(world.writes()).toHaveLength(0)
+      expect(world.discord).toHaveLength(0)
+      expect(world.issueFor(GO_LABEL)).toBeUndefined()
+      expect(captured.exit).toBeNull()
+    })
+
+    it('leaves an open Go outage issue untouched', async () => {
+      const goIssue = openIssue(GO_LABEL, GO_MARKER, '\n<!-- cliproxy-go-monitor:notified=dead -->')
+      const before = {...goIssue}
+      const world = installWorld({issues: [goIssue], go: fallback})
+      const {ctx} = createCapturedCtx()
+
+      await runMonitor({validation: 'live'}, ctx)
+
+      expect(goIssue).toEqual(before)
+      expect(world.writes()).toHaveLength(0)
+      expect(world.discord).toHaveLength(0)
+    })
+
+    it('prints a separate billing line right after the Go probe line, leaving the probe line strict', async () => {
+      installWorld({go: fallback})
+      const {ctx, captured} = createCapturedCtx()
+
+      await runMonitor({validation: 'live'}, ctx)
+
+      expect(billingLines(captured.stdout)).toEqual(['CLIProxy Go monitor billing: billing_source=balance'])
+      const probeIndex = captured.stdout.findIndex(line => line.startsWith('CLIProxy Go monitor probe:'))
+      expect(captured.stdout[probeIndex + 1]).toBe('CLIProxy Go monitor billing: billing_source=balance')
+      expect(goLines(captured.stdout)).toHaveLength(1)
+    })
+
+    it('prints the billing line for a healthy go route and a bounded token for a weird value', async () => {
+      installWorld()
+      const healthy = createCapturedCtx()
+      await runMonitor({validation: 'live'}, healthy.ctx)
+      expect(billingLines(healthy.captured.stdout)).toEqual(['CLIProxy Go monitor billing: billing_source=go'])
+
+      installWorld({go: () => Response.json({usage: {opencode: {billing_source: 'a b HOSTILE_BODY'}}})})
+      const weird = createCapturedCtx()
+      await runMonitor({validation: 'live'}, weird.ctx)
+      expect(billingLines(weird.captured.stdout)).toEqual(['CLIProxy Go monitor billing: billing_source=other'])
+      expect(weird.captured.stdout.join('\n')).not.toContain('HOSTILE_BODY')
+    })
+
+    it('prints no billing line without an observed billing_source', async () => {
+      for (const go of [
+        () => Response.json({usage: {opencode: {}}}),
+        () => new Response('limit', {status: 429}),
+        () => new Response('teapot', {status: 418}),
+      ]) {
+        installWorld({go})
+        const {ctx, captured} = createCapturedCtx()
+        await runMonitor({validation: 'live'}, ctx)
+        expect(billingLines(captured.stdout)).toHaveLength(0)
+      }
+    })
   })
 
   it('keeps an unknown Go result silent when no Go issue exists', async () => {
@@ -2089,7 +2161,7 @@ describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
     installWorld({
       go: () =>
         Response.json({
-          usage: {opencode: {billing_source: 'balance', list_cost: '0.00006', allowance: {remaining: 41}}},
+          usage: {opencode: {list_cost: '0.00006', allowance: {remaining: 41}}},
           hostile: 'HOSTILE_BODY',
         }),
     })

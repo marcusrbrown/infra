@@ -716,13 +716,19 @@ async function pollUntil<T>(
   return {ok: false, reason}
 }
 
-/** One real request through the proxy at `max_tokens: 1`; requires a 2xx that was billed to the Go plan. */
+const GO_BILLING_TOKEN = /^[\w.-]{1,32}$/
+
+/**
+ * One real request through the proxy at `max_tokens: 1`; requires a 2xx that names a `billing_source`. A source
+ * other than `go` means the Go usage window ran out and the account fell back to credits: the route works, so it
+ * passes with a warning. Returns the bounded billing token (`go`, the fallback token, or `other`).
+ */
 async function runGoSmokeRequest(
   baseUrl: string,
   apiKey: string,
   model: string,
   fetchImpl: typeof globalThis.fetch,
-): Promise<void> {
+): Promise<string> {
   const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: {
@@ -747,10 +753,17 @@ async function runGoSmokeRequest(
   const usage = isRecordLike(payload) ? payload.usage : undefined
   const opencode = isRecordLike(usage) ? usage.opencode : undefined
   const billing = isRecordLike(opencode) ? opencode.billing_source : undefined
-  if (billing !== 'go') {
-    const seen = typeof billing === 'string' ? JSON.stringify(billing.slice(0, 32)) : 'missing'
+  if (typeof billing !== 'string' || billing === '') {
+    const seen = typeof billing === 'string' ? JSON.stringify(billing) : 'missing'
     throw new OpenCodeGoUnverifiedError('smoke request', `billing_source was ${seen}, expected "go"`)
   }
+  if (billing === 'go') return 'go'
+
+  const token = GO_BILLING_TOKEN.test(billing) ? billing : 'other'
+  console.warn(
+    `\u001B[1;33m⚠\u001B[0m  OpenCode Go smoke request billed to "${token}", not "go" (Go usage window exhausted or credits fallback); route works`,
+  )
+  return token
 }
 
 /**
@@ -808,6 +821,7 @@ export async function applyOpenCodeGoStep(
   console.warn(`\u001B[1;34m==>\u001B[0m Applying OpenCode Go upstream (${plan.eligible.length} models)`)
   await sendGoWrite(() => applyOpenAICompat({baseUrl, key: managementKey, body: [desired], fetch: fetchImpl}), env)
 
+  let billedTo = 'go'
   try {
     const readback = await pollUntil(GO_READBACK_BACKOFFS_MS, sleepFn, async () => {
       const actual = await readBackOpenAICompat({baseUrl, key: managementKey, fetch: fetchImpl})
@@ -829,14 +843,16 @@ export async function applyOpenCodeGoStep(
     })
     if (!visible.ok) throw new OpenCodeGoUnverifiedError('visibility', visible.reason)
 
-    await runGoSmokeRequest(baseUrl, env.CLIPROXY_API_KEY, plan.probeModel, fetchImpl)
+    billedTo = await runGoSmokeRequest(baseUrl, env.CLIPROXY_API_KEY, plan.probeModel, fetchImpl)
   } catch (error) {
     if (error instanceof OpenCodeGoUnverifiedError) throw error
     throw new OpenCodeGoUnverifiedError('post-write check', redact(describeError(error), env))
   }
 
   console.warn(
-    `\u001B[1;32m✓\u001B[0m OpenCode Go applied and verified: ${plan.eligible.length} models visible, smoke request billed to Go`,
+    `\u001B[1;32m✓\u001B[0m OpenCode Go applied and verified: ${plan.eligible.length} models visible, smoke request ${
+      billedTo === 'go' ? 'billed to Go' : `served (billed to "${billedTo}")`
+    }`,
   )
 }
 

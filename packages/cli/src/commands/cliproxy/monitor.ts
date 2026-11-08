@@ -6,8 +6,8 @@ import type {ActionCtx} from '../../lib/action-ctx'
 import {z} from 'zod'
 import {GO_PROBE_LINE_PREFIX} from '../../status/monitor-state'
 import {
-  checkGoRouteState,
   checkProviderAuthState,
+  probeGoRoute,
   resolveGoSettings,
   type GoRouteClassification,
   type GoRouteReason,
@@ -71,6 +71,14 @@ export function formatGoMonitorProbeLine(
   probe: Pick<MonitorRunSummary, 'probeState' | 'probeReason' | 'timestamp'>,
 ): string {
   return formatMonitorProbeLine(probe, GO_PROBE_LINE_PREFIX)
+}
+
+/**
+ * The Go route's billing observation, printed right after its probe line when a 2xx named a `billing_source`.
+ * Its own prefix keeps it out of `parseGoProbeLine`, which reads only the strict probe line.
+ */
+export function formatGoBillingLine(billingSource: string): string {
+  return `CLIProxy Go monitor billing: billing_source=${billingSource}`
 }
 
 /**
@@ -676,8 +684,10 @@ export async function cliproxyMonitorAction(
   }
   if (goSettings?.enabled === true) {
     try {
-      goProbe = await checkGoRouteState(proxyUrl, inputs.apiKey, {settings: goSettings, snapshot: runtime.goSnapshot})
+      const observed = await probeGoRoute(proxyUrl, inputs.apiKey, {settings: goSettings, snapshot: runtime.goSnapshot})
+      goProbe = observed.classification
       ctx.console.log(formatGoMonitorProbeLine({probeState: goProbe.state, probeReason: goProbe.reason, timestamp}))
+      if (observed.billingSource !== undefined) ctx.console.log(formatGoBillingLine(observed.billingSource))
     } catch {
       failures.push({name: 'Go', category: 'reconciliation'})
     }

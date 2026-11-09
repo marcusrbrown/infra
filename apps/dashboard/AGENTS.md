@@ -189,6 +189,12 @@ SSH when either is missing or malformed. The key travels in the remote-deploy pa
 `DASHBOARD_OPERATOR_ID=831617` (the operator's public numeric GitHub user ID; no input exists for it).
 `DASHBOARD_GATEWAY_OPERATOR_ORIGIN` stays unset.
 
+The `.env` also carries the constant `DASHBOARD_TRUSTED_PROXIES=172.18.0.0/16`, the `dashboard_default`
+Docker network subnet Caddy connects from; the dashboard reads `X-Forwarded-For` only from that peer
+range so its rate limiter keys on real clients. It is not a deploy input or a secret. Re-read the subnet
+with `docker network inspect dashboard_default --format '{{(index .IPAM.Config 0).Subnet}}'` (a droplet
+rebuild can change it). A malformed value stops the dashboard at boot; a `/0` prefix is refused.
+
 The Fro Bot App is not the mrbro-bot App behind the repo secrets `APPLICATION_ID` /
 `APPLICATION_PRIVATE_KEY`; never reuse those here.
 

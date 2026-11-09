@@ -417,6 +417,45 @@ describe('.env file contents', () => {
     expect(contents).not.toContain('BEGIN')
   })
 
+  it('writes the constant trusted-proxy subnet for the dashboard_default network', () => {
+    const contents = buildEnvFileContents({
+      domain: 'dashboard.fro.bot',
+      githubAppId: '123456',
+      froBotAppId: '654321',
+      oauthClientId: 'Iv1.abc123',
+      oauthClientSecret: 'oauthsecret',
+      operatorLogin: 'marcusrbrown',
+      cookieKey: 'cookiekey',
+    })
+    expect(contents.split('\n')).toContain('DASHBOARD_TRUSTED_PROXIES=172.18.0.0/16')
+  })
+
+  it('writes a trusted-proxy value the dashboard parser accepts: IPv4 CIDR, prefix 8-32, never /0', () => {
+    // A malformed value stops the dashboard at boot, so a typo must fail here first.
+    const contents = buildEnvFileContents({
+      domain: 'dashboard.fro.bot',
+      githubAppId: '123456',
+      froBotAppId: '654321',
+      oauthClientId: 'Iv1.abc123',
+      oauthClientSecret: 'oauthsecret',
+      operatorLogin: 'marcusrbrown',
+      cookieKey: 'cookiekey',
+    })
+    const line = contents.split('\n').find(entry => entry.startsWith('DASHBOARD_TRUSTED_PROXIES='))
+    expect(line).toBeDefined()
+    const value = (line ?? '').slice('DASHBOARD_TRUSTED_PROXIES='.length)
+    const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(value)
+    expect(match).not.toBeNull()
+    const octets = (match ?? []).slice(1, 5).map(Number)
+    const prefix = Number((match ?? [])[5])
+    for (const octet of octets) {
+      expect(octet).toBeGreaterThanOrEqual(0)
+      expect(octet).toBeLessThanOrEqual(255)
+    }
+    expect(prefix).toBeGreaterThanOrEqual(8)
+    expect(prefix).toBeLessThanOrEqual(32)
+  })
+
   it('does NOT put the raw PEM in .env', () => {
     const pemContent = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'
     const contents = buildEnvFileContents({
@@ -877,6 +916,7 @@ describe('SECURITY: App key PEM never in spawn argv', () => {
     expect(payload.env).toContain('DASHBOARD_FRO_BOT_APP_ID=654321')
     expect(payload.env).toContain('DASHBOARD_FRO_BOT_APP_KEY_FILE=/run/secrets/fro-bot-app.pem')
     expect(payload.env).toContain('DASHBOARD_OPERATOR_ID=831617')
+    expect(payload.env).toContain('DASHBOARD_TRUSTED_PROXIES=172.18.0.0/16')
     expect(payload.env).not.toContain('FROBOTKEYBODYZZZ')
     for (const call of calls) {
       expect(call.cmd.join(' ')).not.toContain('FROBOTKEYBODYZZZ')

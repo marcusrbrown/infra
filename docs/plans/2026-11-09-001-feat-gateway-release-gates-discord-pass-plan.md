@@ -1,7 +1,7 @@
 ---
 title: "feat: Run gateway release gates without a routine Discord session"
 type: feat
-status: active
+status: completed
 date: 2026-11-09
 origin: docs/brainstorms/2026-11-09-gateway-release-gates-discord-pass-requirements.md
 ---
@@ -155,7 +155,7 @@ Every gate starts its runs with an operator `@fro-bot` mention. Gates 2 and 4 al
 
 ## Implementation Units
 
-- [ ] **Unit 1: Automated gates on dashboard runs**
+- [x] **Unit 1: Automated gates on dashboard runs**
 
 **Goal:** Make G1, G3 and G2b's record checks run with no operator action.
 
@@ -194,7 +194,7 @@ Every gate starts its runs with an operator `@fro-bot` mention. Gates 2 and 4 al
 - G1.10's pass criterion names the final `output` frame and `$TAG-OK`.
 - The intro no longer claims the gates spend no launch budget.
 
-- [ ] **Unit 2: Discord pass, trigger and results**
+- [x] **Unit 2: Discord pass, trigger and results**
 
 **Goal:** Group the Discord checks into one conditional pass with a written trigger and a durable last-pass record.
 
@@ -237,7 +237,7 @@ Every gate starts its runs with an operator `@fro-bot` mention. Gates 2 and 4 al
 - The release count from v0.136.4 to v0.136.5 reads as 1.
 - The paginated `compare` file list for v0.136.4...v0.136.5 is complete, it is checked against the globs and pin fields, and the matching item is noted.
 
-- [ ] **Unit 3: Cross-references and verification**
+- [x] **Unit 3: Cross-references and verification**
 
 **Goal:** Keep the links and the docs site consistent.
 

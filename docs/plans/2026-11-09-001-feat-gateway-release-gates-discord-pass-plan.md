@@ -77,6 +77,36 @@ Every gate starts its runs with an operator `@fro-bot` mention. Gates 2 and 4 al
   - G3 log scans stay inside the run window.
   - The SSH ban list applies.
 
+## Prior-Art Survey
+
+```json
+{
+  "schema_version": 2,
+  "verdict": "extend",
+  "scope": "docs/runbooks",
+  "freshness": {
+    "vcs_reference": "7eca42d"
+  },
+  "budget": {
+    "max_search_passes": 2,
+    "max_candidate_inspections": 6,
+    "exhausted": false
+  },
+  "candidates": [
+    {
+      "path_or_symbol": "docs/runbooks/operator-surface-acceptance-automated.md#gateway-release-gates-agent-run",
+      "description": "Agent-run gateway release gates G1-G4 with operator Discord actions and the Results template",
+      "disposition": "extend"
+    },
+    {
+      "path_or_symbol": "docs/runbooks/operator-surface-acceptance-automated.md#launch-budget",
+      "description": "Browser pass dashboard Launch panel steps, launch spacing and the SSE observer snippet",
+      "disposition": "reuse"
+    }
+  ]
+}
+```
+
 ## Key Technical Decisions
 
 - **Keep the last-pass ref in the #3512 Results comment.** Add a required `Discord pass:` line, read later with a paginated `gh` query. This needs no new file, service or per-release PR, and results already live there. If the tracker closes, the operator carries the newest line into the successor tracker's first results comment.

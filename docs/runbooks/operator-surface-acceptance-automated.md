@@ -377,7 +377,7 @@ Decide this once per release, before P0, and record the deciding item. The last 
 The pass runs when any of these holds, checked in this order. Record the first one that holds:
 
 1. `never passed`: no `Discord pass:` line yields an anchor.
-2. `trigger check failed`: a query errors; the anchor is not an ancestor of `$REF`; or the file list of the compare is empty, has 3,000 or more files, or lacks the `patch` of a pin file.
+2. `trigger check failed`: a query errors; the anchor is not an ancestor of `$REF`; or the file list of the compare is empty, has 300 or more files, or lacks the `patch` of a pin file.
 3. `stale (<n> refs)`: `<n>` is 3 or more.
 4. A [checklist](#discord-pass-checklist) item.
 5. `none`: nothing holds. The pass does not run.
@@ -403,12 +403,12 @@ count_refs() {   # $1 = anchor, $2 = REF
 count_refs "$ANCHOR" "$REF"
 ```
 
-**3. Diff.** Read the compare from the anchor to `$REF`, paginated. The first call must print `ahead`. `diverged` means the anchor is not an ancestor, and `identical` means a same-ref redeploy: run no gates. Then check the file list against the [checklist](#discord-pass-checklist). The patch of a pin file can be absent for a large diff; that is `unreadable` and requires the pass.
+**3. Diff.** Read the compare from the anchor to `$REF`. The compare endpoint lists changed files on its first page only, capped at 300 for the whole comparison, so `--paginate` adds none. A list of 300 means it may be truncated: that is `trigger check failed`. The first call must print `ahead`. `diverged` means the anchor is not an ancestor, and `identical` means a same-ref redeploy: run no gates. Then check the file list against the [checklist](#discord-pass-checklist). The patch of a pin file can be absent for a large diff; that is `unreadable` and requires the pass.
 
 ```bash
 gh api "repos/fro-bot/agent/compare/$ANCHOR...$REF" --jq '"\(.status) ahead_by=\(.ahead_by) commits=\(.total_commits)"'
-gh api --paginate "repos/fro-bot/agent/compare/$ANCHOR...$REF" --jq '.files[] | {filename, previous_filename, status, patch}' | jq -s . > "$WORK/compare.json"
-jq length "$WORK/compare.json"
+gh api "repos/fro-bot/agent/compare/$ANCHOR...$REF" --jq '[.files[] | {filename, previous_filename, status, patch}]' > "$WORK/compare.json"
+jq 'length | if . == 0 or . >= 300 then "trigger check failed: \(.) files" else "files: \(.)" end' "$WORK/compare.json"
 
 # globs: prints each matching path
 jq -r --arg re '^(packages/gateway/src/(program\.ts|config\.ts|(discord|bindings|execute|approvals|operator-contract|web/operator)/.*)|packages/runtime/src/(coordination|agent)/.*)$' \

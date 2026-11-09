@@ -8,7 +8,7 @@ component: tooling
 severity: medium
 symptoms:
   - "Go inference answers HTTP 400 MissingSessionID to any request without x-opencode-session, and CLIProxyAPI forwards no client headers on an openai-compatibility upstream unless mapped"
-  - "A 200 from Go does not say which plan paid; only usage.opencode.billing_source does (go for the plan, another value for the credits fallback)"
+  - "A 200 from Go does not say which plan paid; only usage.opencode.billing_source does (go for the plan, balance for the credits fallback after the Go usage window runs out)"
   - "/v1/models lists every Go model twice, as glm-5.3 and opencode-go/glm-5.3, both with owned_by opencode-go"
   - "A cliproxy Environment secret is unreadable by the router's deploy-cliproxy caller job, which has no environment"
   - "Merging the change put the monitor's Go probe on main before the gated deploy created the live entry, which opened the Go provider-missing issue #1807"
@@ -28,10 +28,11 @@ OpenCode Go is served to consumer repos and the gateway workspace as one `openai
 
 ## Symptoms
 
-Only the last item happened in production. The others were found by probes against Go and a disposable CLIProxyAPI, from CLIProxyAPI source, or in review, before the first deploy.
+The credits fallback and the merge-to-deploy window happened in production. The others were found by probes against Go and a disposable CLIProxyAPI, from CLIProxyAPI source, or in review, before the first deploy.
 
 - Go answers HTTP 400 `MissingSessionID` to any request that lacks `x-opencode-session`. The OpenCode client adds the header only for providers whose id starts with `opencode`, so any other client or probe sends none.
 - A request can return 200 and be billed to either the Go plan or the balance. `/v1/models` and a bare status check look healthy either way.
+- When the Go 5-hour usage window runs out, an account set to fall back to credits keeps answering 2xx with `billing_source: "balance"`.
 - `/v1/models` lists each model bare (`glm-5.3`) and prefixed (`opencode-go/glm-5.3`). A duplicate or a collision with another provider is invisible unless something checks both forms.
 - An upstream key stored as a `cliproxy` Environment secret would be empty in the router's deploy job. Environment secrets are unreadable through a called workflow (actions/runner#4453).
 - Merging the change put the monitor's Go probe on `main` while the live proxy still had no Go entry. The monitor reported `provider-missing` and opened issue #1807. The first healthy probe after the gated deploy closed it.
@@ -41,6 +42,7 @@ Only the last item happened in production. The others were found by probes again
 - **Relying on the client to send the header.** OpenCode adds `x-opencode-session` for providers whose id starts with `opencode`, as observed with a local echo server (`docs/brainstorms/2026-11-04-opencode-go-behind-cliproxy-requirements.md`). The deploy smoke request, the monitor probe and `cliproxy status` are not that client, so each has to send its own value.
 - **Expecting the proxy to pass headers through.** CLIProxyAPI does not forward arbitrary client headers on an `openai-compatibility` upstream. Without an explicit mapping, Go never sees the header.
 - **Treating a listed model or a 2xx as proof of routing.** A model in `/v1/models` proves registration only. A 2xx proves a response only. Neither says which plan was billed.
+- **Treating the credits fallback as an outage.** A billing signal is not a health signal. Requiring `billing_source === 'go'` assumed a plan limit blocks requests; on an account that falls back to credits it only changes the bill. The probe reported `dead` / `billing-not-go`, opening outage issue #1848, and the smoke request threw after the PUT, failing the v8.0.61 deploy (#1853) while the route stayed live. Fixed in #1852.
 - **Using the Console for plan status.** The OpenCode Console has no API for plan status or remaining limits. The response body is the only signal.
 - **Storing the upstream key as an Environment secret.** The router's caller job has no environment, so it cannot read one.
 - **Minting the Go credential with the broker.** The broker builds its auth payload for two providers only. `buildAuthJson` in `apps/broker/src/server.ts` returns a bare provider map keyed `anthropic` and `openai`, each `{type, key}`, with no base URL and no `opencode-go` entry. Tracked upstream in [fro-bot/agent#2078](https://github.com/fro-bot/agent/issues/2078). A Go repo gets its key from `agent setup`.
@@ -119,6 +121,7 @@ The monitor reads the committed `settings.json` and skips Go entirely when `enab
 - Keep deploy-time proof and monitor-time proof on the same signals. The smoke request and the monitor probe both require a present `billing_source` and treat a non-`go` value as the credits fallback, so a regression is caught by whichever runs first.
 - Store secrets read by the router's caller job as repository secrets, and pass them explicitly to the called workflow. Never use `secrets: inherit` with a cross-org reusable workflow.
 - Never pass the upstream key or the downstream key through `ssh` or `scp` environment or argv.
+- Log a signal's observed value, not only the verdict. The first probe line recorded only `billing-not-go`, so the fallback value (`balance`) stayed unknown until the billing line existed.
 
 ### Merge-to-deploy window
 
@@ -129,6 +132,7 @@ Known limits, not fixed:
 - Setting `enabled: false` stops Go monitoring when the PR merges, before the deploy disables the live entry. The Go issue stays open until it is closed by hand (runbook, "Emergency disable without a deploy").
 - Any single 429 or 402 on the completion request is classified `quota-or-billing`, which is dead. `monitor.ts` and `monitor-state.ts` apply no consecutive-failure threshold, so one transient limit response can open and then close an issue.
 - A model that lost eligibility in a merged snapshot PR stays served until the deploy is approved. The monitor reports `privacy-noncompliant` meanwhile.
+- `unknown` never closes an issue. A Go issue already open when the fallback starts stays open until a probe bills `go` again.
 
 ## Related
 

@@ -43,7 +43,7 @@ The dashboard session lasts seven days. When it lapses, or after logout, opening
 
 The gateway allows 3 launches per minute and 10 per hour per operator, in fixed windows. A refused launch shows "Too many launch requests" in the Launch panel (`429 rate limited`) and creates no run. A refusal can last until the hourly window ends, so retries do not help.
 
-Run the [checks that launch nothing](#checks-that-launch-nothing) first, then spend the nine launches below, at least 20 seconds apart. The limit is keyed to the operator, so manual launches and earlier passes in the same hour count too. Launch against `fro-bot/agent`. One launch stays in reserve; do not retry a launch that created a run.
+Run the [checks that launch nothing](#checks-that-launch-nothing) first, then spend the nine launches below, at least 20 seconds apart. The limit is keyed to the operator, so manual launches and earlier passes in the same hour count too. The [gateway release gates](#gateway-release-gates-agent-run) share the window and spend 3 launches (G1.10, G2b, G3.1). Start the second of the two sets at least 60 minutes after the first launch of the earlier set, or after a gateway restart, which clears the counters (G3.4 restarts the gateway). The nine launches plus one in reserve fit only in a fresh window. Launch against `fro-bot/agent`. One launch stays in reserve; do not retry a launch that created a run.
 
 | Launch | Prompt | Covers |
 | --- | --- | --- |
@@ -69,7 +69,7 @@ Run L9 after L8 has finished, and launch nothing else until L9 ends. The first r
 
 Timing procedure:
 
-- Commands in one session run one at a time. An `eval` that waits blocks every later command, so record frames with a non-blocking observer: right after pressing Launch, run one `eval` that finds the new run, starts a stream reader that stores each `status` frame with a timestamp on `window.__obs`, and returns at once. The run can take a few seconds to appear, so the snippet retries for up to 10 seconds. Define `launchedAt` inline as the time just before the press, and take it from the shell clock truncated to whole seconds. Read `window.__obs` later with a single `eval`. Do not reload before step 5, because a reload discards the observer.
+- Commands in one session run one at a time. An `eval` that waits blocks every later command, so record frames with a non-blocking observer: right after pressing Launch, run one `eval` that finds the new run, starts a stream reader that stores each `status` frame with a timestamp on `window.__obs.frames` and each `output` frame on `window.__obs.output`, and returns at once. The run can take a few seconds to appear, so the snippet retries for up to 10 seconds. Define `launchedAt` inline as the time just before the press, and take it from the shell clock truncated to whole seconds. Read `window.__obs` later with a single `eval`. Do not reload before step 5, because a reload discards the observer.
 
   ```js
   ;(async () => {
@@ -81,7 +81,7 @@ Timing procedure:
       if (!run) await new Promise(resolve => setTimeout(resolve, 1000))
     }
     if (!run) return null
-    const obs = (window.__obs = {runId: run.runId, frames: [], end: null})
+    const obs = (window.__obs = {runId: run.runId, frames: [], output: [], end: null})
     void (async () => {
       const res = await fetch(`/operator/runs/${run.runId}/stream`, {
         credentials: "same-origin",
@@ -97,9 +97,13 @@ Timing procedure:
         const frames = buf.split("\n\n")
         buf = frames.pop()
         for (const frame of frames) {
-          if ((frame.match(/^event: (.*)$/m) || [])[1] !== "status") continue
+          const event = (frame.match(/^event: (.*)$/m) || [])[1]
+          if (event !== "status" && event !== "output") continue
           const data = JSON.parse((frame.match(/^data: (.*)$/m) || [])[1] || "null")
-          obs.frames.push({at: new Date().toISOString(), status: data?.status, waitReason: data?.waitReason ?? null})
+          const at = new Date().toISOString()
+          if (event === "output")
+            obs.output.push({at, seq: data?.seq, final: data?.final === true, text: data?.text ?? ""})
+          else obs.frames.push({at, status: data?.status, waitReason: data?.waitReason ?? null})
         }
       }
       obs.end = "closed"
@@ -224,7 +228,7 @@ Record these as `skip` or `not automated`:
 
 ## Logout
 
-Run [check 15](operator-surface-acceptance.md#15-logout-and-csrf) last, after every launch check. Run the snippets from the manual runbook as page-context `eval` code that keeps `csrfToken` in a variable and returns only status codes. `/operator/session` returns 401 afterwards.
+Run [check 15](operator-surface-acceptance.md#15-logout-and-csrf) last, after every launch check and after the [gateway release gates](#gateway-release-gates-agent-run) when they run in the same sitting. Run the snippets from the manual runbook as page-context `eval` code that keeps `csrfToken` in a variable and returns only status codes. `/operator/session` returns 401 afterwards.
 
 Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved session is signed in for the next run. If that page lands on a GitHub login, stop and ask the operator.
 
@@ -251,10 +255,17 @@ Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved se
 
 ## Gateway release gates (agent-run)
 
-How an agent runs the gateway release gates after a Fro Bot gateway deploy moves to a new upstream ref (`apps/gateway/upstream.json`). The gates cover stale-credential removal on OpenCode V2, `/fro-bot cancel`, ownership persistence across a gateway restart, and approval attribution. The agent drives the droplet over SSH, reads run state from S3, and reads Discord threads over REST. A human must post the Discord mentions, run the slash commands, toggle the trigger role, and click the Discord buttons, because the agent cannot act in Discord as the operator. Those steps are marked **Operator action**.
+How an agent runs the gateway release gates after a Fro Bot gateway deploy moves to a new upstream ref (`apps/gateway/upstream.json`). The gates cover stale-credential removal on OpenCode V2, `/fro-bot cancel`, ownership persistence across a gateway restart, and approval attribution. The agent drives the droplet over SSH, reads run state from S3, launches and cancels runs from the dashboard session, and reads Discord threads over REST.
 
-- Gates 2 and 3 use the dashboard session from [Browser session](#browser-session). Sign in first. When both passes run in one sitting, finish these gates before [Logout](#logout).
-- The gates start runs by Discord mention, so they spend none of the [launch budget](#launch-budget).
+Each check is one of two kinds:
+
+- **Automated.** Runs on a dashboard-launched run and needs no Discord action. Every release runs these: P0–P2, G1, G2b.1 and G3.
+- **Discord pass.** Needs a Discord-started run or a human Discord action. The agent cannot act in Discord as the operator: the gateway drops messages written by bots, and Discord accepts slash commands and button clicks only from users. These checks form one [Discord pass](#discord-pass), run in one sitting, and only when [it is triggered](#when-the-discord-pass-runs). Its operator steps are marked **Operator action**.
+
+A release is a new upstream ref. A redeploy at the same ref runs no gates: its new image digests are covered by the P0 checks of the next release.
+
+- G1, G2b.1 and G3 use the dashboard session from [Browser session](#browser-session). Sign in first. When both passes run in one sitting, finish these gates before [Logout](#logout).
+- The automated gates spend 3 launches (G1.10, G2b.1, G3.1) from the [launch budget](#launch-budget). The gateway gates and the browser pass share one per-operator window of 10 launches per hour. Start the second set at least 60 minutes after the first launch of the earlier set, or after a gateway restart, which clears the counters (G3.4 restarts the gateway).
 - Every command below is a pattern: copy it and fill the placeholders. Add no script files to the repo.
 
 ### Inputs
@@ -266,13 +277,13 @@ How an agent runs the gateway release gates after a Fro Bot gateway deploy moves
 | `REF`          | Upstream ref under test, as pinned in `apps/gateway/upstream.json`.                          |
 | `OCV`          | OpenCode V2 version the deploying `build-images` job built (`--build-arg OPENCODE_VERSION`). |
 | `TAG`          | `ACCEPT-$REF`. Prefix for every plant, probe and marker.                                     |
-| `CHANNEL`      | ID of the Discord channel bound to the test repo. Operator supplies it.                      |
-| `OWNER_REPO`   | `<owner>/<repo>` the channel is bound to.                                                    |
-| `OP_ID`        | Operator's Discord user ID. Operator supplies it.                                            |
+| `OWNER_REPO`   | `<owner>/<repo>` of the test repo the gates launch against.                                  |
 | `OP_LOGIN`     | Operator's GitHub login.                                                                     |
-| `TRIGGER_ROLE` | Trigger role ID (G2a). Operator supplies it.                                                 |
+| `CHANNEL`      | Discord pass only. ID of the Discord channel bound to `$OWNER_REPO`. Operator supplies it.   |
+| `OP_ID`        | Discord pass only. Operator's Discord user ID. Operator supplies it.                         |
+| `TRIGGER_ROLE` | Discord pass only. Trigger role ID (G2a). Operator supplies it.                              |
 
-Secrets come from the repo-root `.env` through `envval` below: `GATEWAY_HOST`, `GATEWAY_SSH_KEY`, `S3_BUCKET`, `S3_REGION`, optional `S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DISCORD_TOKEN`, `DISCORD_GUILD_ID`. The `AWS_*` keys can list and get in the state bucket. Never print, log, or save a value from `.env`.
+Secrets come from the repo-root `.env` through `envval` below: `GATEWAY_HOST`, `GATEWAY_SSH_KEY`, `S3_BUCKET`, `S3_REGION`, optional `S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and, for the Discord pass only, `DISCORD_TOKEN` and `DISCORD_GUILD_ID`. The `AWS_*` keys can list and get in the state bucket. Never print, log, or save a value from `.env`.
 
 ### Rules
 
@@ -359,6 +370,94 @@ idle_check() {   # succeeds only when every run record of every bound repo is te
 - `runkeys` (newest N records) is for finding the run under test. It is not an idle check.
 - The first message in a run thread carries one mention. Every other message must carry none.
 
+### When the Discord pass runs
+
+Decide this once per release, before P0, and record the deciding item. The last pass is recorded on the `Discord pass:` line of the Results comment in the release tracker (currently fro-bot/.github#3512). If the tracker closes, the operator carries the newest `Discord pass:` line into the first results comment of the successor tracker, and `TRACKER` below changes.
+
+The pass runs when any of these holds, checked in this order. Record the first one that holds:
+
+1. `never passed`: no `Discord pass:` line yields an anchor.
+2. `trigger check failed`: a query errors; the anchor is not an ancestor of `$REF`; or the file list of the compare is empty, has 300 or more files, or lacks the `patch` of a pin file.
+3. `stale (<n> refs)`: `<n>` is 3 or more.
+4. A [checklist](#discord-pass-checklist) item.
+5. `none`: nothing holds. The pass does not run.
+
+**1. Anchor.** The anchor is the ref of the newest `PASS`. A `FAIL` or `INCOMPLETE` pass leaves the anchor where it was, so the next release diffs from the last `PASS`. The tracker has more than 200 comments: without `--paginate`, `gh api` returns the first page only. Only comments from the owner, members and collaborators count.
+
+```bash
+set -o pipefail
+TRACKER=repos/fro-bot/.github/issues/3512
+LAST=$(gh api --paginate "$TRACKER/comments?per_page=100" --jq '.[] | select(.author_association | IN("OWNER","MEMBER","COLLABORATOR")) | .body | split("\r?\n"; null)[] | select(test("^Discord pass: (PASS on|[A-Z]+ on|not run)"))' | tail -n 1) \
+  || { echo "trigger check failed: tracker query"; false; }
+ANCHOR=$(printf '%s\n' "$LAST" | sed -nE 's/^Discord pass: (PASS on|[A-Z]+ on [^;]*; last passed on|not run[^;]*; last passed on) (v[0-9]+\.[0-9]+\.[0-9]+).*/\2/p')
+echo "anchor: ${ANCHOR:-never passed}"
+```
+
+**2. Staleness.** Count the fro-bot/agent releases after the anchor, up to and including `$REF`, in semver order. Undeployed tags count too. Non-semver tags (the `*-harness.*` builds) are filtered out. An anchor or `$REF` missing from the list is an error.
+
+```bash
+count_refs() {   # $1 = anchor, $2 = REF
+  gh api --paginate repos/fro-bot/agent/releases --jq '.[] | select(.draft | not) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' \
+    | jq -Rn --arg a "$1" --arg r "$2" '[inputs | {t: ., k: (ltrimstr("v") | split(".") | map(tonumber))}] | sort_by(.k) | map(.t) | (index($a)) as $i | (index($r)) as $j | if $i == null or $j == null or $j < $i then error("anchor or ref not in release list") else $j - $i end'
+}
+count_refs "$ANCHOR" "$REF"
+```
+
+**3. Diff.** Read the compare from the anchor to `$REF`. The compare endpoint lists changed files on its first page only, capped at 300 for the whole comparison, so `--paginate` adds none. A list of 300 means it may be truncated: that is `trigger check failed`. The first call must print `ahead`. `diverged` means the anchor is not an ancestor, and `identical` means a same-ref redeploy: run no gates. Then check the file list against the [checklist](#discord-pass-checklist). The patch of a pin file can be absent for a large diff; that is `unreadable` and requires the pass.
+
+```bash
+gh api "repos/fro-bot/agent/compare/$ANCHOR...$REF" --jq '"\(.status) ahead_by=\(.ahead_by) commits=\(.total_commits)"'
+gh api "repos/fro-bot/agent/compare/$ANCHOR...$REF" --jq '[.files[] | {filename, previous_filename, status, patch}]' > "$WORK/compare.json"
+jq 'length | if . == 0 or . >= 300 then "trigger check failed: \(.) files" else "files: \(.)" end' "$WORK/compare.json"
+
+# globs: prints each matching path
+jq -r --arg re '^(packages/gateway/src/(program\.ts|config\.ts|(discord|bindings|execute|approvals|operator-contract|web/operator)/.*)|packages/runtime/src/(coordination|agent)/.*)$' \
+  '.[] | select([.filename, (.previous_filename // empty)] | any(test($re))) | .filename' "$WORK/compare.json"
+
+# pin fields: prints each changed pin line, or "unreadable"
+jq -r '
+  def pin(f; re): .[] | select(.filename == f) | if .patch == null then "unreadable: \(f)" else (.patch | split("\n")[] | select(test(re)) | "\(f): \(.[0:60])") end;
+  pin("packages/gateway/package.json"; "^[-+]\\s*\"discord\\.js\"\\s*:"),
+  pin("packages/runtime/package.json"; "^[-+]\\s*\"@opencode-ai/sdk\"\\s*:"),
+  pin("package.json"; "^[-+]\\s*\"@opencode-ai/sdk\"\\s*:"),
+  pin("deploy/workspace.Dockerfile"; "^[-+]ARG OPENCODE_VERSION="),
+  pin("packages/runtime/src/shared/opencode-v2-pin.json"; "^[-+]\\s*\"version\"\\s*:"),
+  pin("bun.lock"; "^[-+]\\s*\"(discord\\.js|@opencode-ai/sdk)\"\\s*:")
+' "$WORK/compare.json"
+```
+
+**4. Record.** The deciding item goes into the [Results](#results) `Discord pass:` line. When no item holds, the Discord checks are reported as `not run` with the ref of the anchor.
+
+#### Discord pass checklist
+
+A match on any line requires the pass. Test files under these paths count.
+
+| Item | Match in the `compare` file list |
+| --- | --- |
+| Mention and interaction intake | `packages/gateway/src/program.ts` |
+| Gateway config (trigger role, binder allowlist) | `packages/gateway/src/config.ts` |
+| Discord handling | `packages/gateway/src/discord/**`, `packages/gateway/src/bindings/**` |
+| Shared run, cancel, approval and question code | `packages/gateway/src/{execute,approvals,web/operator}/**`, `packages/gateway/src/operator-contract/**` |
+| Runtime run state and agent code | `packages/runtime/src/{coordination,agent}/**` |
+| discord.js | the `discord.js` version line in `packages/gateway/package.json`, or in `bun.lock` |
+| OpenCode | the `@opencode-ai/sdk` version line in `packages/runtime/package.json`, root `package.json` or `bun.lock`; the `ARG OPENCODE_VERSION=` line in `deploy/workspace.Dockerfile`; the `version` line in `packages/runtime/src/shared/opencode-v2-pin.json` |
+
+Other edits to `bun.lock`, `package.json` and the Dockerfile do not match. Name the matching path or pin line as the trigger.
+
+### Dashboard launches
+
+G1.10, G2b.1 and G3.1 each launch one run from the dashboard session. Each launch follows the [Launch budget](#launch-budget) spacing. The prompt omits the `@fro-bot` mention.
+
+1. Take `launchedAt` from the shell clock, truncated to whole seconds: `LAUNCHED_AT=$(date -u +%FT%TZ)`.
+2. **Launch guard.** In the Launch panel, select `$OWNER_REPO`, then take a fresh `snapshot -i` and read the selected repository. Abort the gate, launch nothing, and record `blocked` unless it equals `$OWNER_REPO`.
+3. Fill the prompt and press Launch. For G1.10, start the [observer](#l9-wait-reason) in the next command, with `launchedAt` defined inline. A refusal ("Too many launch requests") created no run: record `blocked` and wait for the window.
+4. Confirm the record is under `$OWNER_REPO`. Expect `surface` `web` and `started_at` at or after `$LAUNCHED_AT`. No such record means the run landed elsewhere: stop the gates and report it. Never retry a launch that created a run.
+
+   ```bash
+   RUNKEY=$(runkeys "$OWNER_REPO" 1)
+   s3cat "$RUNKEY" | jq -c '{run_id, surface, phase, started_at}'
+   ```
+
 ### Preconditions
 
 | ID | Check | Pass |
@@ -415,7 +514,7 @@ Expect `$OCV`, then `http=200` with `{"ready":true,"opencode":"ready","opencodeV
 
 ### Gate 1: stale credential removal on V2
 
-On V2 the entrypoint removes a stale `auth.json` at `/home/opencode/.local/share/opencode/auth.json`, including a symlink, without following the link. Provider credentials still come from the root-only secret. A `docker compose exec` session has `HOME=/var/lib/workspace-agent/home`, so always use the absolute path.
+On V2 the entrypoint removes a stale `auth.json` at `/home/opencode/.local/share/opencode/auth.json`, including a symlink, without following the link. Provider credentials still come from the root-only secret. A `docker compose exec` session has `HOME=/var/lib/workspace-agent/home`, so always use the absolute path. Every G1 check is automated.
 
 | ID | Check | Pass |
 | --- | --- | --- |
@@ -428,7 +527,7 @@ On V2 the entrypoint removes a stale `auth.json` at `/home/opencode/.local/share
 | G1.7 | Plant a symlink to a marker, record the marker sha256 | Symlink listed. |
 | G1.8 | Restart `workspace`, wait healthy | `health: healthy`. |
 | G1.9 | Symlink removed, target intact | `LINK-GONE`, `TARGET-EXISTS`, same sha256 as G1.7, marker text `$TAG-MARKER-DO-NOT-TOUCH`; G1.5 and G1.6 again. |
-| G1.10 | Plain mention still gets a model reply | Run `COMPLETED`; a bot message in the run thread contains `$TAG-OK`. |
+| G1.10 | Dashboard-launched run still gets a model reply | Run `COMPLETED`; the final `output` frame (`final: true`) has `text` containing `$TAG-OK`. No final frame, or an empty final `text`, is a failure. |
 | G1.11 | Cleanup | `CLEAN` and `MARKER-DIR-GONE`. |
 
 Any `PRESENT`, `IS-SYMLINK`, `LINK-STILL-THERE`, changed sha256, or `TARGET-MISSING` is a failure: the removal followed the link or did not run. Run G1.11 after a failure too.
@@ -478,14 +577,34 @@ gw "docker logs --since $T1 fro-bot-workspace-1 2>&1" | grep -E 'workspace-entry
 readyz
 ```
 
-**Operator action (G1.10):** post in the bound channel: `@fro-bot reply with exactly the word $TAG-OK and nothing else`. The agent finds the run and its thread:
+**G1.10.** Launch from the dashboard with the prompt `reply with exactly the word $TAG-OK and nothing else`, following [Dashboard launches](#dashboard-launches). The observer keeps the run's `output` frames on `window.__obs.output`, from launch on, so the check does not depend on the stream's 10-minute replay of the final frame. Wait for `COMPLETED`:
 
 ```bash
-for k in $(runkeys "$OWNER_REPO" 2); do s3cat "$k" | jq -c '{run_id, phase, thread_id, started_at}'; done
-thread <thread_id>
+RUNKEY=$(runkeys "$OWNER_REPO" 1)
+for i in $(seq 30); do
+  phase=$(s3cat "$RUNKEY" | jq -r .phase)
+  case $phase in PENDING|ACKNOWLEDGED|EXECUTING) sleep 10;; *) break;; esac
+done
+s3cat "$RUNKEY" | jq -c '{run_id, phase}'
 ```
 
-Use the newest record that started after the mention. Wait for `COMPLETED`, then expect a bot message containing `$TAG-OK`.
+Then read the observer once, with `tag` defined inline as the value of `$TAG`. It returns booleans only, so the reply text is not echoed:
+
+```js
+;(async () => {
+  const o = window.__obs
+  const fin = o.output.filter(f => f.final).at(-1)
+  return {
+    runId: o.runId,
+    end: o.end,
+    finalSeen: Boolean(fin),
+    emptyFinal: fin ? fin.text.trim() === "" : null,
+    hasMarker: fin ? fin.text.includes(`${tag}-OK`) : null,
+  }
+})()
+```
+
+Pass: `COMPLETED`, `finalSeen` true, `emptyFinal` false, `hasMarker` true. If the page was reloaded and `window.__obs` is gone, re-open `/operator/runs/<runId>/stream` from the page within 10 minutes of completion and read the replayed final `output` frame the same way.
 
 ```bash
 # G1.11: cleanup, run after the gate and after any failed step
@@ -499,17 +618,18 @@ EOF
 
 ### Gate 2: `/fro-bot cancel`
 
-Two runs, each started with `@fro-bot Run \`sleep 120\` in the shell and report when it finishes.` The prompt writes nothing, so cancelling it is safe (see [Cancel safety](#cancel-safety)). The ephemeral replies to slash commands are not readable over REST: the operator reads each reply and reports it verbatim, and the agent confirms it against the gateway log.
+G2b.1 is automated. G2a, G2b.2, G2c and G2d are in the [Discord pass](#discord-pass). Three runs use the prompt ``Run `sleep 120` in the shell and report when it finishes.``: C1 is launched from the dashboard; C1-D and C2 are started in Discord with `@fro-bot` in front of the prompt. The prompt writes nothing, so cancelling it is safe (see [Cancel safety](#cancel-safety)). The ephemeral replies to slash commands are not readable over REST: the operator reads each reply and reports it verbatim, and the agent confirms it against the gateway log.
 
-| ID | Check | Pass |
-| --- | --- | --- |
-| G2a.1 | Trigger role removed from the operator (`false`) | The member read returns `false`. |
-| G2a.2 | `/fro-bot cancel` in the idle bound channel | Reply `You do not have permission to cancel runs.`; no `cancel:` line in the gateway log since the command. |
-| G2a.3 | Trigger role restored (`true`) | The member read returns `true`. |
-| G2a.4 | `/fro-bot cancel` in the idle bound channel | Reply is the `no-executing-run` copy; log `cancel: refused` with `"reason":"no-executing-run"` and `"channelId":"$CHANNEL"`. |
-| G2b | Dashboard cancel first (run C1) | Dashboard POST returns 200 with `"phase":"CANCELLED"`; record `CANCELLED` with `details.cancelledBy.kind` `web-operator` and `login` `$OP_LOGIN`; exactly one notice `Run cancelled by operator $OP_LOGIN.` in the thread, with no mentions. |
-| G2c | Discord cancel first, dashboard cancel within about 5 s (run C2) | Log shows `cancel: handled` with `"outcome":"cancelled"`, then `cancelRun: cancel already requested — retrying approval settlement only`, then `run: execution aborted by operator cancel`. Dashboard POST returns 200. Record `CANCELLED` with `details.cancelledBy.kind` `discord-user` and `discordUserId` `$OP_ID`. Exactly one notice `Run cancelled by <@$OP_ID>.`, no mentions. |
-| G2d | Targeting rows (below) | Each reproducible row shows its reply and log `reason`. |
+| ID | Group | Check | Pass |
+| --- | --- | --- | --- |
+| G2a.1 | Discord pass | Trigger role removed from the operator (`false`) | The member read returns `false`. |
+| G2a.2 | Discord pass | `/fro-bot cancel` in the idle bound channel | Reply `You do not have permission to cancel runs.`; no `cancel:` line in the gateway log since the command. |
+| G2a.3 | Discord pass | Trigger role restored (`true`) | The member read returns `true`. |
+| G2a.4 | Discord pass | `/fro-bot cancel` in the idle bound channel | Reply is the `no-executing-run` copy; log `cancel: refused` with `"reason":"no-executing-run"` and `"channelId":"$CHANNEL"`. |
+| G2b.1 | Automated | Dashboard-launched run, dashboard cancel (run C1) | Dashboard POST returns 200 with `"phase":"CANCELLED"`; record `CANCELLED` with `details.cancelledBy.kind` `web-operator` and `login` `$OP_LOGIN`. |
+| G2b.2 | Discord pass | Discord-started run, dashboard cancel first (run C1-D) | Exactly one notice `Run cancelled by operator $OP_LOGIN.` in the thread, with no mentions. |
+| G2c | Discord pass | Discord cancel first, dashboard cancel within about 5 s (run C2) | Log shows `cancel: handled` with `"outcome":"cancelled"`, then `cancelRun: cancel already requested — retrying approval settlement only`, then `run: execution aborted by operator cancel`. Dashboard POST returns 200. Record `CANCELLED` with `details.cancelledBy.kind` `discord-user` and `discordUserId` `$OP_ID`. Exactly one notice `Run cancelled by <@$OP_ID>.`, no mentions. |
+| G2d | Discord pass | Targeting rows (below) | Each reproducible row shows its reply and log `reason`. |
 
 The operator is the actor named by `$OP_ID` and `$OP_LOGIN`. Notices are posted in the run thread (`thread_id`), not the channel. A role-restore that does not show `true` blocks G2a.4.
 
@@ -526,7 +646,7 @@ T0=$(date -u +%FT%TZ); glog "$T0" | grep 'cancel:'
 
 | Row | Setup | Log `reason` | Reply |
 | --- | --- | --- | --- |
-| run-finished | `/fro-bot cancel` in the thread of a finished run (the C1 thread) | `run-finished` | `This run has already finished. Nothing to cancel.` |
+| run-finished | `/fro-bot cancel` in the thread of a finished run (the C1-D thread) | `run-finished` | `This run has already finished. Nothing to cancel.` |
 | not-a-run-thread | `/fro-bot cancel` in a thread the operator creates by hand in the bound channel | `not-a-run-thread` | `This thread is not a run thread I can find. Use /fro-bot cancel inside the thread of the run you want to stop.` |
 | no-executing-run | `/fro-bot cancel` in the idle bound channel (G2a.4) | `no-executing-run` | `No run is executing here. Queued runs are not cancelled by this command; use /fro-bot clear-queue.` |
 | unbound-channel | `/fro-bot cancel` in a channel with no binding | `unbound-channel` | `No repo is bound to this channel. Use /fro-bot cancel in a bound channel or in a run thread.` |
@@ -540,9 +660,7 @@ Record these rows as `not reproduced`:
 
 The backticks in the replies render as code formatting in Discord. Any reply outside the table, or a cancel that succeeds where a refusal row applies, is a failure.
 
-**Run C1, dashboard first (G2b).**
-
-**Operator action:** post the `sleep 120` prompt in the bound channel. The agent then finds the run and thread (`runkeys "$OWNER_REPO" 1`, phase `EXECUTING`), waits 20 seconds, and cancels from the dashboard session:
+**Run C1, dashboard-launched (G2b.1).** Launch the `sleep 120` prompt from the dashboard, following [Dashboard launches](#dashboard-launches). The agent finds the run (`runkeys "$OWNER_REPO" 1`, phase `EXECUTING`), waits 20 seconds, and cancels from the dashboard session:
 
 ```bash
 cat > "$WORK/cancel.js" <<EOF
@@ -560,7 +678,17 @@ EOF
 agent-browser --session infra-operator-acceptance --restore --restore-save auto eval --stdin < "$WORK/cancel.js"
 ```
 
-Then verify the record and notice:
+Then verify the record:
+
+```bash
+s3cat "$RUNKEY" | jq '{phase, surface, cancelledBy: .details.cancelledBy}'
+```
+
+A web run has no Discord thread (`thread_id` is empty) and posts no cancel notice, so the record is the whole check.
+
+**Run C1-D, Discord-started (G2b.2).** In the Discord pass, after the [Mention intake and reply](#discord-pass) check:
+
+**Operator action:** post `@fro-bot` and the `sleep 120` prompt in the bound channel. The agent finds the run and thread (`runkeys "$OWNER_REPO" 1`, phase `EXECUTING`), waits 20 seconds, writes `$WORK/cancel.js` as above with the run ID, and cancels from the dashboard session. Then it verifies the record and notice:
 
 ```bash
 s3cat "$RUNKEY" | jq '{phase, thread_id, cancelledBy: .details.cancelledBy}'
@@ -571,7 +699,7 @@ Expect one row: `Run cancelled by operator $OP_LOGIN.` with `0`, `0`, `false`. T
 
 **Run C2, Discord first (G2c).** The in-flight collapse is reachable only when the Discord cancel goes first and the dashboard cancel follows within about 5 seconds; the abort settles about 6 seconds after the request. A dashboard-first cancel makes a later Discord cancel resolve `run-finished`.
 
-**Operator action:** post the `sleep 120` prompt. The agent finds the run and thread, writes `$WORK/cancel.js` as above with the new `<runId>`, then starts the following command with a 5-minute tool timeout. It fires the dashboard cancel on the first `cancel: handled` line. Only after it is running, the operator runs `/fro-bot cancel` in the run thread.
+**Operator action:** post `@fro-bot` and the `sleep 120` prompt. The agent finds the run and thread, writes `$WORK/cancel.js` as above with the new `<runId>`, then starts the following command with a 5-minute tool timeout. It fires the dashboard cancel on the first `cancel: handled` line. Only after it is running, the operator runs `/fro-bot cancel` in the run thread.
 
 ```bash
 T2=$(date -u +%FT%TZ)
@@ -592,7 +720,7 @@ From agent v0.136.4, a cancelled run that produced no text posts only the cancel
 
 ### Gate 3: ownership persistence and restart
 
-A run that spawns a background shell and a background subagent persists its owned sessions without an ownership-persist failure. The finished record survives a gateway restart unchanged.
+A run that spawns a background shell and a background subagent persists its owned sessions without an ownership-persist failure. The finished record survives a gateway restart unchanged. Every G3 check is automated. The ownership code has no surface branch, and restart recovery never reloads ownership, so a dashboard-launched run exercises the same path as a Discord-started one.
 
 | ID | Check | Pass |
 | --- | --- | --- |
@@ -606,15 +734,15 @@ If G3.1 fails, record `not triggered` and re-run with a clearer prompt. A clean 
 
 The gateway logs `412 PreconditionFailed` lines from its boot self-test after every start. Count a 412 only when its timestamp falls inside the run window (the record's `started_at` onward) and, if the line carries a `key`, the key belongs to this run. Run the scan before the restart in G3.4.
 
-**Operator action:** post in the bound channel:
+**G3.1.** Launch from the dashboard, following [Dashboard launches](#dashboard-launches), with this prompt:
 
 ```text
-@fro-bot Run `sleep 90` in the background in the shell. Then start a background subagent with the task tool that runs `sleep 60` and reports done. Report when both are finished.
+Run `sleep 90` in the background in the shell. Then start a background subagent with the task tool that runs `sleep 60` and reports done. Report when both are finished.
 ```
 
 ```bash
-T3=$(date -u +%FT%TZ)
-# after the mention: RUNKEY is the newest key whose started_at is after T3
+T3=$(date -u +%FT%TZ)   # taken before pressing Launch
+# after the launch: RUNKEY is the newest key whose started_at is after T3
 RUNKEY=$(runkeys "$OWNER_REPO" 1)
 for i in $(seq 30); do
   s3cat "$RUNKEY" | jq -c '{phase, root: .details.rootSessionId, owned: .details.ownedSessionIds}'
@@ -650,16 +778,16 @@ A grep that prints nothing for G3.2 is the pass. For G3.5, run in the dashboard 
 
 ### Gate 4: attribution rendering
 
-Settled approval and question cards name the decider and ping nobody. In every row the operator starts the run from Discord. For Discord rows the operator clicks the Discord button. For dashboard rows the agent decides from the signed-in dashboard session and must not touch Discord. In both cases the agent then reads the card over REST.
+Settled approval and question cards name the decider and ping nobody. Every G4 check is in the [Discord pass](#discord-pass): the card edits need a Discord-started run, because a web run has no thread. In every row the operator starts the run from Discord. For Discord rows the operator clicks the Discord button. For dashboard rows the agent decides from the signed-in dashboard session and must not touch Discord. In both cases the agent then reads the card over REST.
 
-| ID | Surface | Decision | Expected card | Result |
+| ID | Group | Surface | Decision | Expected card |
 | --- | --- | --- | --- | --- |
-| G4a | Discord | approve | title `✅ Approved`, description `Approved by <@$OP_ID>` | automated |
-| G4b | Discord | deny | title `⛔ Denied`, description `Denied by <@$OP_ID>` | automated |
-| G4c | Dashboard | approve | title `✅ Approved`, description `Approved by <login> (dashboard)` | automated |
-| G4d | Dashboard | deny | title `⛔ Denied`, description `Denied by <login> (dashboard)` | automated |
-| G4e | Discord | question answer | title `✅ Answered`, description `Answered by <@$OP_ID>`, then the question text and an answer field | automated |
-| G4f | Dashboard | question answer | title `✅ Answered`, description ending `Answered by <login> (dashboard)`, then an answer field | automated |
+| G4a | Discord pass | Discord | approve | title `✅ Approved`, description `Approved by <@$OP_ID>` |
+| G4b | Discord pass | Discord | deny | title `⛔ Denied`, description `Denied by <@$OP_ID>` |
+| G4c | Discord pass | Dashboard | approve | title `✅ Approved`, description `Approved by <login> (dashboard)` |
+| G4d | Discord pass | Dashboard | deny | title `⛔ Denied`, description `Denied by <login> (dashboard)` |
+| G4e | Discord pass | Discord | question answer | title `✅ Answered`, description `Answered by <@$OP_ID>`, then the question text and an answer field |
+| G4f | Discord pass | Dashboard | question answer | title `✅ Answered`, description ending `Answered by <login> (dashboard)`, then an answer field |
 
 Every card must have a title with no mention, `edited_timestamp` set, `mentions` empty, `mention_roles` empty, and `mention_everyone` false. The expected `(dashboard)` suffix on question cards applies to agent v0.136.3 and later.
 
@@ -695,6 +823,32 @@ The API shapes for a decision without the UI:
 - `POST /operator/runs/<runId>/questions/<requestID>/decision` takes `{decision: 'answer', answers: [{options: [0]}]}`.
 - Both POSTs need the `x-csrf-token` header from `/operator/session/csrf`. Keep the token inside the `eval`.
 
+### Discord pass
+
+Every check that needs a Discord-started run or a human Discord action. Run it in one sitting with the operator present, after the automated gates and before [Finish](#finish), and only when [it is triggered](#when-the-discord-pass-runs). Steps and pass criteria are in the gate sections linked below. Run in this order:
+
+| Order | ID | Check | Steps |
+| --- | --- | --- | --- |
+| 1 | DP.1 | Mention intake and reply | below |
+| 2 | G2a.1–G2a.4 | Trigger role denial and the idle-channel cancel | [Gate 2](#gate-2-fro-bot-cancel) |
+| 3 | G2b.2 | Thread notice on a dashboard cancel (run C1-D) | [Gate 2](#gate-2-fro-bot-cancel) |
+| 4 | G2d | Targeting rows; the `run-finished` row uses the C1-D thread | [Gate 2](#gate-2-fro-bot-cancel) |
+| 5 | G2c | Discord cancel first, dashboard cancel second (run C2) | [Gate 2](#gate-2-fro-bot-cancel) |
+| 6 | G4a–G4f | Attribution rendering | [Gate 4](#gate-4-attribution-rendering) |
+
+**DP.1.** Pass: the run is `COMPLETED` and a bot message in its thread contains `$TAG-OK`.
+
+**Operator action (DP.1):** post in the bound channel: `@fro-bot reply with exactly the word $TAG-OK and nothing else`. The agent finds the run and its thread:
+
+```bash
+for k in $(runkeys "$OWNER_REPO" 2); do s3cat "$k" | jq -c '{run_id, phase, thread_id, started_at}'; done
+thread <thread_id>
+```
+
+Use the newest record that started after the mention. Wait for `COMPLETED`, then expect a bot message containing `$TAG-OK`.
+
+When the pass does not run, report every row above as `not run` in the [Results](#results), with the ref of the anchor.
+
 ### Finish
 
 1. Run G1.11 cleanup if it has not run, then the `/dev/null` check from [Rules](#rules).
@@ -703,10 +857,22 @@ The API shapes for a decision without the UI:
 
 ### Results
 
-Per-check results use `pass`, `fail`, `blocked`, `not reproduced`, `not triggered`, or `not automated`. A gate is `PASS` when every check passes or is named `not reproduced` above, `INCOMPLETE` when any check is `blocked` or `not triggered`, and `FAIL` when any check fails. Post this in the release tracker:
+Per-check results use `pass`, `fail`, `blocked`, `not reproduced`, `not triggered`, `not automated`, or `not run`. `not run` marks a [Discord pass](#discord-pass) check on a release where the pass did not run; it names the ref of the anchor and counts toward no gate status. A gate is `PASS` when every check that ran passes or is named `not reproduced` above, `INCOMPLETE` when any check is `blocked` or `not triggered`, and `FAIL` when any check fails. A gate whose checks are all `not run` reports `not run`.
+
+The `Discord pass:` line is required. Its three forms are below; `<ref>` is the anchor, or `never` when no pass has passed. Only a `PASS` line moves the anchor.
+
+```text
+Discord pass: PASS on <REF> (trigger: <item>)
+Discord pass: <FAIL|INCOMPLETE> on <REF> (trigger: <item>); last passed on <ref>
+Discord pass: not run (trigger: none); last passed on <ref>
+```
+
+`<item>` is the deciding item from [When the Discord pass runs](#when-the-discord-pass-runs): `never passed`, `stale (<n> refs)`, the matching checklist path or pin line, or `trigger check failed`. Post this in the release tracker:
 
 ```text
 Live acceptance: agent <REF> (OpenCode V2 <OCV>). Run by <operator>, <date>.
+
+Discord pass: <one of the three lines above>
 
 Preconditions:
 - P0 running digests match the build: [PASS/FAIL]
@@ -716,16 +882,19 @@ Preconditions:
   <number of restarts, idle_check result for each>
 
 Gate 1, stale-credential removal on V2: [PASS/FAIL]
-  <stale auth.json ABSENT after restart; symlink gone, target sha256 unchanged; /readyz 200 after both restarts; credentials provisioned (count N); mention replied <TAG>-OK; no "cannot remove stale auth.json"; cleanup CLEAN>
+  <stale auth.json ABSENT after restart; symlink gone, target sha256 unchanged; /readyz 200 after both restarts; credentials provisioned (count N); dashboard run <runId> final output frame contained <TAG>-OK; no "cannot remove stale auth.json"; cleanup CLEAN>
 
-Gate 2, /fro-bot cancel: [PASS/FAIL]
-  <(a) denial copy with the operator's trigger role removed, no cancel: log line; restored role reached no-executing-run; (b) in-flight collapse: Discord first, log "cancel already requested", one notice, CANCELLED, cancelledBy <discord-user|web-operator>; (c) notice text "<exact>", in the thread, no mentions; (d) rows matched: <list>; not reproduced: <list>>
+Gate 2, /fro-bot cancel: [PASS/FAIL/not run]
+  <G2b.1 (run C1 <runId>): dashboard cancel, CANCELLED, cancelledBy web-operator. Discord pass rows, or "not run, last passed on <ref>": (a) denial copy with the operator's trigger role removed, no cancel: log line; restored role reached no-executing-run; (b) G2b.2 (run C1-D <runId>): notice text "<exact>", in the thread, no mentions; (c) G2c (run C2 <runId>): in-flight collapse, Discord first, log "cancel already requested", one notice, CANCELLED, cancelledBy discord-user; (d) G2d rows matched: <list>; not reproduced: <list>>
 
 Gate 3, ownership persistence and restart: [PASS/FAIL]
   <ownedSessionIds non-empty mid-run; adoption lines seen; no persist failure or 412 in the run window; COMPLETED record has rootSessionId set and ownedSessionIds []; same ETag after gateway restart; run still listed>
 
-Gate 4, attribution rendering: [PASS/INCOMPLETE/FAIL]
-  <Discord approve/deny/question: plain titles, <@id> descriptions, no mentions on the edits. Dashboard approve, deny and question: cards listed under the run ID, decided in the dashboard, Discord cards end `(dashboard)`, no mentions>
+Mention intake and reply (DP.1): [PASS/FAIL/not run]
+  <run <runId> COMPLETED, bot message in the thread contained <TAG>-OK, or "not run, last passed on <ref>">
+
+Gate 4, attribution rendering: [PASS/INCOMPLETE/FAIL/not run]
+  <Discord approve/deny/question: plain titles, <@id> descriptions, no mentions on the edits. Dashboard approve, deny and question: cards listed under the run ID, decided in the dashboard, Discord cards end `(dashboard)`, no mentions. Or "not run, last passed on <ref>">
 
 Drift: <pin vs tracker differences, or none>
 

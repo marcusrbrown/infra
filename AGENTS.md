@@ -48,7 +48,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Check dashboard health | `bunx @marcusrbrown/infra dashboard status` | SSH, docker compose ps, service states |
 | Trigger dashboard deploy | `bunx @marcusrbrown/infra dashboard deploy` | Remote (default) or `--local` |
 | Dashboard operator docs | `apps/dashboard/AGENTS.md` | Deploy flow, provisioning, image digest verification, anti-patterns |
-| Operator surface acceptance | `docs/runbooks/operator-surface-acceptance-automated.md` | Agent-run acceptance via agent-browser after every paired gateway + dashboard contract upgrade; `operator-surface-acceptance.md` is the full manual checklist |
+| Operator surface acceptance | `docs/runbooks/operator-surface-acceptance-automated.md` | Agent-run acceptance via agent-browser after every paired gateway + dashboard contract upgrade; `operator-surface-acceptance.md` is the full manual checklist. Gateway release gates run on every new upstream ref with no Discord action; the Discord checks form a separate pass that runs only when triggered |
 | Check umami health | `bunx @marcusrbrown/infra umami status` | SSH, docker compose ps, service states |
 | Trigger umami deploy | `bunx @marcusrbrown/infra umami deploy` | Remote (default) or `--local` |
 | Umami operator docs | `apps/umami/AGENTS.md` | Deploy flow, admin rotation, DB-password runbook, privacy baseline |

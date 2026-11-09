@@ -304,6 +304,9 @@ export function validateGatewayVpcIp(ip: string): string {
 // Numeric GitHub user ID of the operator (marcusrbrown). User IDs are public, so this is a constant, not a secret.
 const DASHBOARD_OPERATOR_ID = '831617'
 
+// The `dashboard_default` Docker network subnet that Caddy connects from. A malformed value stops the dashboard at boot.
+const DASHBOARD_TRUSTED_PROXIES = '172.18.0.0/16'
+
 // A positive integer without leading zeros, as GitHub App IDs are issued.
 const POSITIVE_INTEGER_RE = /^[1-9]\d*$/
 
@@ -467,6 +470,7 @@ export function buildEnvFileContents(opts: {
     `DASHBOARD_FRO_BOT_APP_ID=${froBotAppId}`,
     `DASHBOARD_FRO_BOT_APP_KEY_FILE=/run/secrets/fro-bot-app.pem`,
     `DASHBOARD_OPERATOR_ID=${DASHBOARD_OPERATOR_ID}`,
+    `DASHBOARD_TRUSTED_PROXIES=${DASHBOARD_TRUSTED_PROXIES}`,
     `DASHBOARD_OAUTH_CLIENT_ID=${oauthClientId}`,
     `DASHBOARD_OAUTH_CLIENT_SECRET=${oauthClientSecret}`,
     `DASHBOARD_OAUTH_REDIRECT_URI=https://${domain}/auth/callback`,

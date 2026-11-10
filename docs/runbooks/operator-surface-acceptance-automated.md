@@ -786,7 +786,7 @@ Settled approval and question cards name the decider and ping nobody. Every G4 c
 | G4b | Discord pass | Discord | deny | title `⛔ Denied`, description `Denied by <@$OP_ID>` |
 | G4c | Discord pass | Dashboard | approve | title `✅ Approved`, description `Approved by <login> (dashboard)` |
 | G4d | Discord pass | Dashboard | deny | title `⛔ Denied`, description `Denied by <login> (dashboard)` |
-| G4e | Discord pass | Discord | question answer | title `✅ Answered`, description `Answered by <@$OP_ID>`, then the question text and an answer field |
+| G4e | Discord pass | Discord | question answer | title `✅ Answered`, description ending `Answered by <@$OP_ID>`, then an answer field |
 | G4f | Discord pass | Dashboard | question answer | title `✅ Answered`, description ending `Answered by <login> (dashboard)`, then an answer field |
 
 Every card must have a title with no mention, `edited_timestamp` set, `mentions` empty, `mention_roles` empty, and `mention_everyone` false. The expected `(dashboard)` suffix on question cards applies to agent v0.136.3 and later.

@@ -1,6 +1,7 @@
 ---
 title: "OpenCode V2 gateway rollout: deploy checks passed while every model call failed"
 date: 2026-10-31
+last_updated: 2026-11-10
 module: apps/gateway
 problem_type: workflow_issue
 component: development_workflow
@@ -66,7 +67,7 @@ These help separate "credential never imported" from "cliproxy rejects the key" 
 
 ### 3. Acceptance exclusions
 
-Some operator-surface checks are unsafe or not demonstrable on V2. For example, Reject can quarantine the repo: the lock remains until its 900-second lease expires and a takeover confirms the repo is quiet. The current list is in the runbooks: [operator-surface-acceptance.md](../../runbooks/operator-surface-acceptance.md) and [operator-surface-acceptance-automated.md](../../runbooks/operator-surface-acceptance-automated.md).
+Before fro-bot/agent#2001, Reject on V2 could quarantine a repo until its 900-second lock lease expired and a takeover confirmed the repo was quiet. From v0.133.1, Reject continues the run, and the acceptance runbooks check it. The current exclusions are in the runbooks: [operator-surface-acceptance.md](../../runbooks/operator-surface-acceptance.md) and [operator-surface-acceptance-automated.md](../../runbooks/operator-surface-acceptance-automated.md).
 
 ### 4. Rollback rules
 

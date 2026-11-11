@@ -825,7 +825,7 @@ The API shapes for a decision without the UI:
 
 ### Discord pass
 
-Every check that needs a Discord-started run or a human Discord action. Run it in one sitting with the operator present, after the automated gates and before [Finish](#finish), and only when [it is triggered](#when-the-discord-pass-runs). Steps and pass criteria are in the gate sections linked below. Run in this order:
+Every check that needs a Discord-started run or a human Discord action. Run it in one sitting with the operator present, after the automated gates and before [Finish](#finish), and only when [it is triggered](#when-the-discord-pass-runs). Start it with [P0](#preconditions): no gateway deploy may be in flight, and the running digests must match. The automated gates and the pass can be hours apart, and a same-ref redeploy in between changes the digests. If the digest pair differs from the automated gates' pair, record both pairs in the P0 row. Steps and pass criteria are in the gate sections linked below. Run in this order:
 
 | Order | ID | Check | Steps |
 | --- | --- | --- | --- |

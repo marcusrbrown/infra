@@ -68,6 +68,15 @@ The script always exits 0. It reports through:
 | `skipped` | Webhook secret unset or empty | Check that the `DEPLOY_GATE_DISCORD_WEBHOOK` repository secret exists and that `deploy.yaml` passes it to the callee |
 | `failed` | Discord rejected or never answered after 3 attempts | A 404 means the webhook was deleted or revoked — [rotate](#rotation). 429/5xx/timeouts are transient; the gate is still reachable in GitHub |
 
+While the run waits at its gate, `gh run view --log --job` refuses to print logs, even for the finished `notify` job. Read that job's log through the jobs API and keep only the summary line:
+
+```bash
+gh api "repos/marcusrbrown/infra/actions/jobs/<notify-job-id>/logs" --allow-escape-sequences \
+  | grep -m1 -oE '\{[^{}]*"outcome":"[a-z]+"[^{}]*\}'
+```
+
+It prints, for example, `{"app":"cliproxy","event":"push","outcome":"sent","attempts":1,"status":204,"reason":null}`. Report only this line, never the raw log.
+
 If the `notify` job itself fails before its first step (runner failure) or is skipped, there is no script output. The deploy job still runs; look at the job's status and reason in the run view.
 
 ---

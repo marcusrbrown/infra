@@ -68,7 +68,7 @@ bun run provision:broker
 The script will:
 
 1. Validate `doctl` auth
-2. Validate `BROKER_HOST` via `validateBrokerHost` before any SSH argv
+2. Validate `BROKER_DOMAIN` (defaults to `broker.fro.bot`) via `validateBrokerHost` before any SSH argv
 3. Reject if the `broker` droplet already exists (aborts; `--force` to override)
 4. Create the droplet (`docker-20-04`, `s-1vcpu-1gb`, `nyc1`), wait for running state
 5. Wait for SSH (`waitForSsh`)
@@ -84,7 +84,7 @@ After provisioning: commit the updated `.github/known_hosts` before the first CI
 
 1. Seed `BROKER_SSH_KEY`, `CLIPROXY_MANAGEMENT_KEY`, `BROKER_AUD` into `.env`
 2. `bun run provision:broker` — provisions the droplet and pins host keys
-3. Seed `BROKER_HOST` (the broker FQDN, e.g. `broker.fro.bot`) into `.env` + the `broker` GitHub Environment
+3. Seed `BROKER_HOST` into `.env` + the `broker` GitHub Environment, matching the `BROKER_DOMAIN` used during provisioning (defaults to `broker.fro.bot`). For a custom FQDN, set `BROKER_DOMAIN` in `.env` before step 2; provisioning does not read `BROKER_HOST`.
 4. Commit the updated `.github/known_hosts`
 5. First deploy: `bunx @marcusrbrown/infra broker deploy`
 

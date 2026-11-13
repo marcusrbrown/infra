@@ -93,7 +93,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **Git hooks**: `simple-git-hooks` + `lint-staged` → `eslint --fix` on commit.
 - **CI install**: `bun install --frozen-lockfile --ignore-scripts` (skip simple-git-hooks postinstall).
 - **Cross-org reusable workflows**: Pass secrets explicitly (never `secrets: inherit` with `bfra-me/.github`). (enforced)
-- **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root. Exception: `provision`/`deploy` need the repo-root `.env` (Bun loads `.env` from CWD only), so run them via the root wrappers `bun run provision:<app>` / `bun run deploy:<app>` (cliproxy, gateway, umami) instead of `--cwd`.
+- **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root. Exception: `provision`/`deploy` need the repo-root `.env` (Bun loads `.env` from CWD only), so run them via the root wrappers `bun run provision:<app>` / `bun run deploy:<app>` (broker, cliproxy, dashboard, gateway, umami, vpn) instead of `--cwd`. The operator-only agent storage provisioner likewise uses `bun run provision:agent`; there is no agent deploy wrapper.
 - **Changesets**: `@changesets/cli` for versioning. Renovate/dependency changes under `apps/**` (Docker image pins, runtime deps) are excluded from changeset generation in `.github/workflows/renovate-changesets.yaml` (`exclude-patterns` includes `apps/**`); releases track the published `@marcusrbrown/infra` CLI only, while app dependency bumps are deployment changes tracked in git history and deploy workflows.
 - **Tests**: Colocated `*.test.ts` alongside source. Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic snapshots. Mock at boundaries (fetch, Bun.spawn), not internals. CI runs `bun test --recursive` as a parallel job alongside lint/type-check.
 - **CI Node pin**: All workflows running `bun run lint` or `bunx tsc` must pin Node 26 via `actions/setup-node` — ESLint and TypeScript binary shebangs use system Node, so an explicit pin avoids relying on the ubuntu-latest default and ensures ES2024 APIs like `Object.groupBy` are available.
@@ -172,7 +172,7 @@ bunx @marcusrbrown/infra status                   # Unified status (all deployme
 bunx @marcusrbrown/infra status --json            # Schema-versioned typed observations per app
 bunx @marcusrbrown/infra mcp                      # Start MCP server
 bun run apps/keeweb/server/setup-deploy-user.ts # Provision deploy user on server
-bun run provision:umami                         # Provision umami droplet (loads root .env; also :cliproxy, :gateway)
+bun run provision:umami                         # Provision umami droplet (loads root .env; also :broker, :cliproxy, :dashboard, :gateway)
 bun run deploy:umami                            # Local umami deploy (loads root .env; also :cliproxy, :gateway)
 bun run provision:vpn                           # Provision VPN Lightsail instance (loads root .env; prints static IP)
 bun run deploy:vpn                              # Local VPN deploy (loads root .env)

@@ -984,6 +984,7 @@ jobs:
           model: ${{ vars.FRO_BOT_MODEL }}
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
           prompt: ${{ env.PROMPT }}
+          repo-skills: 'true'
           trusted-head-sha: ${{ steps.prehead.outputs.ref }}
           timeout: 0
           # Mirror upstream's `packages/*/src` convention; deploy-critical files under `apps/` remain intentionally excluded.
@@ -1129,6 +1130,7 @@ jobs:
           model: ${{ vars.FRO_BOT_MODEL }}
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
           prompt: ${{ env.PROMPT }}
+          repo-skills: 'true'
           timeout: 0
           output-mode: branch-pr
           skip-cache: ${{ steps.classify.outputs.mode == 'daily-equivalent' }}

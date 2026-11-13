@@ -15,7 +15,7 @@
   "dependencies": {
     "@astrojs/starlight": "0.42.10",
     "@marcusrbrown/infra-shared": "workspace:*",
-    "astro": "7.4.9"
+    "astro": "7.4.10"
   },
   "devDependencies": {
     "github-slugger": "2.0.0"

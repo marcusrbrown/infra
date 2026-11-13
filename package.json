@@ -40,7 +40,7 @@
   "prettier": "@bfra.me/prettier-config/120-proof",
   "overrides": {
     "katex": "0.18.11",
-    "minimatch": "11.0.5"
+    "minimatch": "11.0.6"
   },
   "dependencies": {
     "goke": "^6.8.0"

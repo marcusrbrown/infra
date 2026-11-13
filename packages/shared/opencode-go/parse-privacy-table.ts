@@ -273,7 +273,12 @@ function applyFootnotes(
           }
           target.qualified = true
         }
-      } else if (sentence.startsWith('Availability is limited to regions permitted by ')) {
+      } else if (
+        sentence.startsWith('Availability is limited to regions permitted by ') ||
+        // Any stated hosting location is a region statement, and gating is the fail-closed direction.
+        /^Hosted in \w.*\.$/.test(sentence) ||
+        sentence === 'Requires **Global** regions in your workspace privacy settings.'
+      ) {
         for (const target of targets) {
           target.regionGated = true
           target.qualified = true

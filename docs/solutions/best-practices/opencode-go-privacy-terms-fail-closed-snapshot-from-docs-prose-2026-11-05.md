@@ -32,6 +32,7 @@ The parser joins five places in the page: the Endpoints table (display name to m
 > It fails closed. A row, marker, footnote sentence or rule it cannot map throws `PrivacyTableError`, so a format change upstream stops the refresh instead of marking a model safe by accident.
 
 - `applyFootnotes` matches each footnote sentence against a fixed rule list. An unmatched sentence throws, and so does a footnote that contradicts the table.
+- Three footnote sentences set `regionGated`: `Availability is limited to regions permitted by …`, `Hosted in <place>.` and `Requires **Global** regions in your workspace privacy settings.`; the restricted-models bullets and the `(limited regions)` notes gate independently.
 - A `*` marker with no qualifying footnote throws in `parsePrivacyTable`.
 - Bullets are parsed strictly. `bulletsOf` requires this exact shape for every list item it sees:
 

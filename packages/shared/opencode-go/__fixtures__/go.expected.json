@@ -3,7 +3,7 @@
   "source": {
     "repo": "anomalyco/opencode",
     "path": "services/site/src/docs/content/console/go.mdx",
-    "commit": "5eeb906b27f993c26037196b6d4a2a95cb606f6b"
+    "commit": "2f886a2a5e0f22b813fe0c177105559b508abad5"
   },
   "models": {
     "beam-free": {
@@ -118,6 +118,12 @@
       "zeroRetention": true,
       "trainsOnData": false,
       "regionGated": false,
+      "agreementExpiry": null
+    },
+    "longcat-2.5-free": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": true,
       "agreementExpiry": null
     },
     "mimo-v2.5": {

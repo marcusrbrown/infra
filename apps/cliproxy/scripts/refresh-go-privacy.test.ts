@@ -20,7 +20,7 @@ const FIXTURES = new URL('../../../packages/shared/opencode-go/__fixtures__/', i
 const readFixture = (name: string): string => readFileSync(new URL(name, FIXTURES), 'utf8')
 
 const MDX = readFixture('go.mdx')
-const OLD_SHA = '5eeb906b27f993c26037196b6d4a2a95cb606f6b'
+const OLD_SHA = '2f886a2a5e0f22b813fe0c177105559b508abad5'
 const NEW_SHA = 'a'.repeat(40)
 
 const temps: string[] = []

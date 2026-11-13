@@ -186,7 +186,7 @@ A run that cannot parse the table fails and opens no PR. The deploy keeps the re
 ## Limitations
 
 - **Expiry:** the deploy enforces agreement expiry. Between deploys, the monitor flags an expired model as `privacy-noncompliant`.
-- **Region-gated models:** never exposed.
+- **Region-gated models:** never exposed. A Privacy footnote that states a hosting location (`Hosted in <place>.`) or requires Global regions gates the model, whether or not a restricted-models bullet also lists it.
 - **Plan limits:** a 429 or 402 alerts as dead with reason `quota-or-billing`. The Go issue closes on the next healthy probe.
 - **Credits fallback:** a 2xx with a present `billing_source` other than `go` is `unknown` / `billing-fallback`. The monitor prints `CLIProxy Go monitor billing: billing_source=<token>`, opens no issue and sends no alert. `cliproxy status` warns and exits 0. An open Go issue stays as it is until a healthy probe closes it.
 - **Probe allowance:** each probe is one `max_tokens: 1` request. The monitor sends 96 a day. The deploy sends one per run, and `cliproxy status` sends one per run.

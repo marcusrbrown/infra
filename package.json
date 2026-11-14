@@ -57,7 +57,7 @@
     "eslint-plugin-prettier": "5.5.7",
     "jiti": "2.7.0",
     "lint-staged": "17.6.0",
-    "prettier": "3.9.10",
+    "prettier": "3.10.0",
     "simple-git-hooks": "2.14.0",
     "typescript": "6.0.3"
   },

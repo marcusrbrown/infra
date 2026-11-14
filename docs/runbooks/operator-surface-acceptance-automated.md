@@ -837,13 +837,21 @@ The API shapes for a decision without the UI:
 - `POST /operator/runs/<runId>/questions/<requestID>/decision` takes `{decision: 'answer', answers: [{options: [0]}]}`.
 - Both POSTs need the `x-csrf-token` header from `/operator/session/csrf`. Keep the token inside the `eval`.
 
-**Question rows: no raw question input in the reply (G4e, G4f).** After the question run reaches `COMPLETED`, read its thread with the same `dget` call (`DISCORD_TOKEN`; no other credential) and count the messages whose content or embed text holds the raw input of the question tool. The agent once printed that input at the head of the final reply, as `(questions: [{"question":…`, so the patterns are `(questions:` and `"question":`. The scan covers every message in the thread: the final reply, the activity line and the question card. Run it for G4f as well as G4e, because the dashboard-answered run is where the leak was first seen (fro-bot/agent#2141).
+**Question rows: no raw question input in the reply (G4e, G4f).** After the question run reaches `COMPLETED`, read its thread with the same `dget` call (`DISCORD_TOKEN`; no other credential) and count the messages whose content or embed text holds the raw input of the question tool. The agent once printed that input at the head of the final reply, as `(questions: [{"question":…`, so the patterns are `(questions:` and `"question":`. Run it for G4f as well as G4e, because the dashboard-answered run is where the leak was first seen (fro-bot/agent#2141).
+
+The final reply is the bot message with non-empty text content, no embed and no attachment, that does not start with `⏳ Working…` and is not `_(no output)_`. The gateway keeps one editable status message that reads `⏳ Working…` (then counts) while the run works. At completion it edits that message into the answer, or deletes it and posts the answer as a new message. A long answer is posted as an attachment, and a card is an embed. The `raw` count covers every bot message that is still in the thread, including the final reply and the question card.
 
 ```bash
-dget "/channels/<thread_id>/messages?limit=50" | jq -c '{scanned: length, final: ([.[] | select(.author.bot == true and (.content | length) > 0)] | length), raw: [.[] | select(([.content] + [.embeds[] | .title, .description] | map(. // "") | join("\n")) | test("\\(questions:|\"question\":"))] | length}'
+dget "/channels/<thread_id>/messages?limit=50" | jq -c '
+  def bot: select(.author.bot == true);
+  {scanned: length,
+   final: [.[] | bot | select((.embeds | length) == 0 and (.attachments | length) == 0 and (.content | length) > 0 and (.content | startswith("⏳ Working…") | not) and .content != "_(no output)_")] | length,
+   raw: [.[] | bot | select(([.content] + [.embeds[] | .title, .description] | map(. // "") | join("\n")) | test("\\(questions:|\"question\":"))] | length}'
 ```
 
-Pass: `raw` is `0` and `final` is at least `1`. Fail: `raw` is `1` or more; record the count, not the message text. A `final` of `0` means no bot reply was read: record `not triggered`.
+Record the three counts, never message text. Pass: `raw` is `0`, `final` is `1` or more, and `scanned` is below 50. Fail: `raw` is `1` or more, whatever the other counts. `not triggered`: `final` is `0`, because no final reply was read (the thread holds only the activity line, the placeholder or an attachment), or `scanned` is `50`, because the page was full and older messages were not read (coverage incomplete).
+
+The scan identifies the final reply by exclusion. It cannot show that the reply is the model's own answer, it cannot read an attachment, and it cannot see the activity line after completion, because that message has become the answer or been deleted. To cover the activity line, run the same command once while the question is open and apply only the `raw` rule to that read.
 
 ### Gate 5: rejected command does not run
 
@@ -1067,7 +1075,7 @@ Mention intake and reply (DP.1): [PASS/FAIL/not run]
   <run <runId> COMPLETED, bot message in the thread contained <TAG>-OK, or "not run, last passed on <ref>">
 
 Gate 4, attribution rendering: [PASS/INCOMPLETE/FAIL/not run]
-  <Discord approve/deny/question: plain titles, <@id> descriptions, no mentions on the edits. Dashboard approve, deny and question: cards listed under the run ID, decided in the dashboard, Discord cards end `(dashboard)`, no mentions. Question rows G4e and G4f: no raw question input in the thread (raw 0, final reply read). Or "not run, last passed on <ref>">
+  <Discord approve/deny/question: plain titles, <@id> descriptions, no mentions on the edits. Dashboard approve, deny and question: cards listed under the run ID, decided in the dashboard, Discord cards end `(dashboard)`, no mentions. Question rows G4e and G4f: no raw question input in the thread (raw 0, final reply identified, scanned below 50). Or "not run, last passed on <ref>">
 
 Drift: <pin vs tracker differences, or none>
 

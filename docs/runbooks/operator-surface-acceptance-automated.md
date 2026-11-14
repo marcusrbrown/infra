@@ -31,7 +31,7 @@ The dashboard session lasts seven days. When it lapses, or after logout, opening
 
 - `eval` does not allow top-level `await`. Wrap code in an async IIFE: `(async () => { … })()`. Pipe multi-line code with `eval --stdin`.
 - Pass absolute paths to `screenshot`. A relative path resolves against the browser daemon's working directory, not your shell's.
-- Refs (`@eN`) change after a reload. Re-run `snapshot -i` before using one.
+- Refs (`@eN`) change after a reload, and again whenever the run list refreshes, which can happen within seconds. Re-run `snapshot -i` before using one, and act on it at once.
 - A run card expands and collapses on click, and a list refresh can reset it. Re-snapshot to confirm the card state before acting.
 - Select the repository in the Launch panel before filling the prompt.
 - Every command opens the browser if it is closed. Never poll or retry with `eval` in a loop; each iteration relaunches Chrome.
@@ -170,7 +170,7 @@ Cancel only a run whose prompt writes nothing: L8, and the `sleep 120` runs C1, 
 
 Run these first, in this order.
 
-1. **[Check 1, health.](operator-surface-acceptance.md#1-health)** `curl -s https://dashboard.fro.bot/operator/health`. Record the JSON and use its `contractVersion` as `<expected>`.
+1. **[Check 1, health.](operator-surface-acceptance.md#1-health)** `curl -s https://dashboard.fro.bot/operator/health`. Record the JSON and use its `contractVersion` as `<expected>`. Then create the pass's evidence directory, once, and keep its path for the whole pass (see [Afterwards](#afterwards), step 4): `EVID=/tmp/operator-acceptance-<expected>-$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$EVID"`.
 2. **[Check 2, sign-in.](operator-surface-acceptance.md#2-sign-in)** Open `https://dashboard.fro.bot/`. Confirm the operator UI shows and `/operator/session` returns 200 with the operator login. Do not run the OAuth start flow when the session is valid.
 3. **[Check 4, contract handshake.](operator-surface-acceptance.md#4-contract-handshake)** Pick a run ID from the `/operator/runs` response. Read the first SSE event from page context and stop:
 
@@ -204,11 +204,39 @@ Run these first, in this order.
    Define `runId` inline. Record the event name and `contractVersion`; do not echo the full frame.
 
 4. **Launch lists bound repos and Recent Runs is non-empty** ([check 5](operator-surface-acceptance.md#5-launch-and-stream) step 4). Open the Launch panel and record the repo count. Close the panel without launching.
-5. **[Check 11, expired output.](operator-surface-acceptance.md#11-expired-output)** Use a run that finished before the latest gateway restart. Load `https://dashboard.fro.bot/#<runId>`, reload, and read the card text. Without a reload, the hash change does not open the card.
+5. **[Check 11, expired output.](operator-surface-acceptance.md#11-expired-output)** Use a run that finished before the latest gateway restart. Load `https://dashboard.fro.bot/#<runId>`, reload, and wait for the card to open: the run list renders after the reload, so a read right after it finds no card. Without a reload, the hash change does not open the card.
+
+   ```bash
+   agent-browser --session infra-operator-acceptance --restore --restore-save auto wait '[data-run-id="<runId>"][data-expanded="true"]'
+   agent-browser --session infra-operator-acceptance --restore --restore-save auto wait --text 'Output no longer available.'
+   ```
+
+   Then read the card text. Each wait ends at the tool's default timeout and fails when it expires. A card that never opens, or a card that sits on "Connecting…" or shows no status, is `fail`. Before recording that, confirm the run is still among the newest 100 that `/operator/runs` lists.
+
 6. **[Check 12, step 3.](operator-surface-acceptance.md#12-push)** Read the `push` field of the `/operator/session` response and record it. The delivery steps are not automatable.
-7. **[Check 13, simulated.](operator-surface-acceptance.md#13-question-notification-deep-link)** Load `https://dashboard.fro.bot/#<runId>` for a run in the list, reload, and confirm that run opens and the "That run isn't in your recent runs." notice is absent. Record the result as `simulated`.
-8. **[Check 14, session durability.](operator-surface-acceptance.md#14-session-durability)** Read `expiresAt` from `/operator/session`. The sign-in time is `expiresAt` minus seven days. The result is meaningful only when that time precedes the latest gateway restart; then a 200 now proves the session survived. When sign-in follows the restart, record `not demonstrable` with the `expiresAt` value. A 401 when sign-in precedes the restart is a failure.
-9. **[Check 16, step 3.](operator-surface-acceptance.md#16-launch-prompt)** Open the Launch panel and fill the 8,001-unit prompt. Confirm the Launch button is disabled and the inline "Prompt is too long" status shows. Click Launch anyway and confirm the run count is unchanged. This check launches nothing. If the button is enabled and the click creates a run, record check 16 step 3 as `fail` (an enabled button is a regression), record the run ID, count it against the launch window, and let the run finish: its prompt asks only for the word `OK`, and the runs named in [Cancel safety](#cancel-safety) are the only ones the pass cancels.
+7. **[Check 13, simulated.](operator-surface-acceptance.md#13-question-notification-deep-link)** Load `https://dashboard.fro.bot/#<runId>` for a run in the list, reload, wait for the card as in check 11 (`wait '[data-run-id="<runId>"][data-expanded="true"]'`), and confirm that run opens and the "That run isn't in your recent runs." notice is absent. If the wait expires, read the notice text before recording anything: a notice means `fail`. Record a pass as `simulated`.
+8. **[Check 14, session durability.](operator-surface-acceptance.md#14-session-durability)** Read `expiresAt` from `/operator/session`. The sign-in time is `expiresAt` minus seven days. The latest gateway restart is the gateway container's `State.StartedAt`, which Docker updates on every restart. Read it with a read-only `docker inspect` (run this with the [helpers](#helpers) block sourced, as for the gates):
+
+   ```bash
+   gw "docker inspect --format '{{.State.StartedAt}}' fro-bot-gateway-1"
+   ```
+
+   The result is meaningful only when the sign-in time precedes that time; then a 200 now proves the session survived. When the pass restarts the gateway (G3.4), read both again after the restart and judge against the new time. When sign-in follows the restart, record `not demonstrable` with the `expiresAt` value. A 401 when sign-in precedes the restart is a failure.
+
+9. **[Check 16, step 3.](operator-surface-acceptance.md#16-launch-prompt)** Read the run-record count for `$OWNER_REPO` in the state bucket first, using the S3 part of the [helpers](#helpers) block:
+
+   ```bash
+   before="$(runcount "$OWNER_REPO") $(runkeys "$OWNER_REPO" 1)"; echo "$before"
+   ```
+
+   Open the Launch panel with `$OWNER_REPO` selected and fill the 8,001-unit prompt. The UI evidence is a Launch button that is disabled and the inline "Prompt is too long" status: read both from a fresh `snapshot -i`. The browser tool refuses to click a disabled button, so do not try. `/operator/runs` cannot show that no run was created: it lists the newest 100 runs only (`MAX_RUNS_PER_LISTING` in the gateway's `packages/gateway/src/web/operator/runs-route.ts`), so a new run would push out the oldest and the length would stay the same. Read the state-bucket count again and compare:
+
+   ```bash
+   after="$(runcount "$OWNER_REPO") $(runkeys "$OWNER_REPO" 1)"
+   [ "$before" = "$after" ] && echo "NO RUN CREATED" || echo "RUN RECORDS CHANGED: $before / $after"
+   ```
+
+   This check launches nothing. If the button is enabled and a launch creates a run, record check 16 step 3 as `fail` (an enabled button is a regression), record the run ID, count it against the launch window, and let the run finish: its prompt asks only for the word `OK`, and the runs named in [Cancel safety](#cancel-safety) are the only ones the pass cancels.
 
 ---
 
@@ -263,7 +291,7 @@ Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved se
 
    Pass: `ahead`, which means the old tip is an ancestor of the new one. `identical` means the branch did not move, so the check is not demonstrated: record that. Failure: `diverged`, `behind` or a `404`, which means `data` was replaced or reset; report it to the operator (see [check 5](operator-surface-acceptance.md#5-launch-and-stream) step 4 for the reseed). Record both short SHAs and the status with the results.
 
-4. Save evidence under `/tmp/operator-acceptance-<expected>/`: a screenshot per check named `NN-name.png`, and secret-free JSON for health, the `ready` frame, `/operator/runs`, and `/operator/session` (`login`, `expiresAt`, and `push` only).
+4. Save evidence under `$EVID`, the per-pass directory `/tmp/operator-acceptance-<expected>-<UTC date-time>/` made at check 1. A fixed `<expected>` directory is reused by every pass at the same contract version and the passes mix; the date-time suffix keeps them apart. Save a screenshot per check named `NN-name.png`, and secret-free JSON for health, the `ready` frame, `/operator/runs`, and `/operator/session` (`login`, `expiresAt`, and `push` only).
 5. Before recording a result, read the saved JSON back from disk. A subagent's summary is not evidence.
 6. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, `simulated`, or `not run`, and cite the run ID for checks 5–11, 13 and 17.
 
@@ -290,6 +318,7 @@ A release is a new upstream ref. A redeploy at the same ref runs no gates: its n
 | -------------- | -------------------------------------------------------------------------------------------- |
 | `REPO`         | Absolute path of the repo checkout. Run from it so Bun finds the root `.env`.                |
 | `WORK`         | `mktemp -d` for this pass. Holds the SSH key and the SSH control socket.                     |
+| `OUT`          | Evidence directory for this pass: `/tmp/gateway-acceptance-$REF-<UTC date-time>`.            |
 | `REF`          | Upstream ref under test, as pinned in `apps/gateway/upstream.json`.                          |
 | `OCV`          | OpenCode V2 version the deploying `build-images` job built (`--build-arg OPENCODE_VERSION`). |
 | `TAG`          | `ACCEPT-$REF`. Prefix for every plant, probe and marker.                                     |
@@ -303,7 +332,7 @@ Secrets come from the repo-root `.env` through `envval` below: `GATEWAY_HOST`, `
 
 ### Rules
 
-- Run the patterns under `bash`. `zsh` does not word-split unquoted `$(…)`. Tool calls may not share shell state: repeat the [helpers](#helpers) block at the head of each call, with the same `WORK`.
+- Run the patterns under `bash`. `zsh` does not word-split unquoted `$(…)`. Tool calls may not share shell state: repeat the [helpers](#helpers) block at the head of each call, with the same `WORK` and `OUT` (the block prints both). The first call makes `OUT`; its date-time suffix keeps a pass at a ref that was gated before from mixing its files with the earlier pass's.
 - Droplet commands run as `root` over SSH with the pinned host key. Many short calls trip SSH rate limits, so every call goes through one multiplexed connection (`gw`).
 - On the droplet host, do not run `rm`, `mv`, `cp`, `mknod`, `chmod`, or `chown`.
 - Do not redirect any remote command to `/dev/*`, including `2>/dev/null`. Use `2>&1`.
@@ -319,7 +348,8 @@ Secrets come from the repo-root `.env` through `envval` below: `GATEWAY_HOST`, `
 
 ```bash
 REPO=<repo-root>; cd "$REPO"
-WORK=${WORK:-$(mktemp -d)}; echo "WORK=$WORK"
+WORK=${WORK:-$(mktemp -d)}
+OUT=${OUT:-/tmp/gateway-acceptance-${REF:?set REF}-$(date -u +%Y%m%dT%H%M%SZ)}; mkdir -p "$OUT"; echo "WORK=$WORK OUT=$OUT"
 envval() { (cd "$REPO" && NAME=$1 bun -e 'process.stdout.write(process.env[process.env.NAME] ?? "")'); }
 
 GATEWAY_HOST=$(envval GATEWAY_HOST)
@@ -342,6 +372,7 @@ BASE=fro-bot-state/discord-gateway
 s3cat() { aws s3 cp "s3://$S3_BUCKET/$1" -; }
 etag() { aws s3api head-object --bucket "$S3_BUCKET" --key "$1" --query ETag --output text; }
 runkeys() { aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/$1/runs/" --query "sort_by(Contents,&LastModified)[-${2:-3}:].Key" --output text | tr '\t' '\n'; }
+runcount() { aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/$1/runs/" --query 'length(Contents || `[]`)' --output json; }   # json: the query runs once over every page; text prints one count per page
 
 dget() { printf 'header = "Authorization: Bot %s"\n' "$(envval DISCORD_TOKEN)" | curl -sS -K - "https://discord.com/api/v10$1"; }
 thread() { dget "/channels/$1/messages?limit=50" | jq -r 'reverse[] | [.timestamp[11:23], (.edited_timestamp // "-"), "mentions=\(.mentions|length)", "roles=\(.mention_roles|length)", "everyone=\(.mention_everyone)", (.content|tojson), ([.embeds[]|{title,description}]|tojson)] | @tsv'; }
@@ -352,6 +383,18 @@ wait_healthy() {   # $1 = container name
     sleep 5
   done
   echo "health: not healthy after 6 min"; return 1
+}
+
+wait_terminal() {   # $1 = run key, $2 = tries, $3 = seconds between tries, $4 = jq filter printed on each read (default {phase})
+  local i rec phase last= f=${4:-'{phase}'}
+  for i in $(seq "$2"); do
+    rec=$(s3cat "$1") || rec=
+    phase=$(printf '%s' "$rec" | jq -r '.phase // empty') || phase=
+    if [ -z "$phase" ]; then echo "$(date -u +%FT%TZ) unreadable, still waiting"; else last=$phase; printf '%s\n' "$rec" | jq -c "$f"; fi
+    case $phase in COMPLETED|FAILED|CANCELLED) return 0 ;; esac   # the run state machine's three terminal phases
+    sleep "$3"
+  done
+  echo "not terminal after $2 tries (last phase read: ${last:-none})"; return 1
 }
 
 readyz() { wsx <<'EOF'
@@ -384,7 +427,8 @@ idle_check() {   # succeeds only when every run record of every bound repo is te
 
 - Channel bindings are `$BASE/_/_/bindings/by-channel/<channelId>.json` with `{owner, repo}`. Run records are `$BASE/<owner>/<repo>/runs/<runId>.json` with `run_id`, `surface`, `thread_id`, `phase`, `started_at`, `last_heartbeat`, and `details.{rootSessionId, ownedSessionIds, cancelledBy}`.
 - `idle_check` reads every run record of every bound repo; the CLI paginates the listings. Run it immediately before each restart. Any phase other than `COMPLETED`, `FAILED` or `CANCELLED` counts as active, and a listing, read or parse failure fails the check. A bound repo with no run records lists as `None` and counts as zero runs.
-- `runkeys` (newest N records) is for finding the run under test. It is not an idle check.
+- `runkeys` (newest N records) is for finding the run under test. It is not an idle check. `runcount` counts every run record of one repo.
+- `wait_terminal` waits until the record reads `COMPLETED`, `FAILED` or `CANCELLED`, the run state machine's terminal phases, and returns 0. Any other phase keeps it waiting, and so does an empty or unreadable read (a failed `s3cat`, an empty body, bad JSON): a transient read error is never a verdict. After the last try it prints `not terminal after <n> tries` with the last phase it could read, or `none`, and returns 1. Each gate says what to record then. It waits; it does not judge the phase. Read the phase afterwards, because `FAILED` and `CANCELLED` also return 0.
 - The first message in a run thread carries one mention. Every other message must carry none.
 
 ### When the Discord pass runs
@@ -466,7 +510,7 @@ Other edits to `bun.lock`, `package.json` and the Dockerfile do not match. Name 
 G1.10, G2b.1, G3.1, G5.1 and G5.3 each launch one run from the dashboard session. Each launch follows the [Launch budget](#launch-budget) spacing. The prompt omits the `@fro-bot` mention.
 
 1. Take `launchedAt` from the shell clock, truncated to whole seconds: `LAUNCHED_AT=$(date -u +%FT%TZ)`.
-2. **Launch guard.** In the Launch panel, select `$OWNER_REPO`, then take a fresh `snapshot -i` and read the selected repository. Abort the gate, launch nothing, and record `blocked` unless it equals `$OWNER_REPO`.
+2. **Launch guard.** In the Launch panel, select `$OWNER_REPO`, then take a fresh `snapshot -i` and read the selected repository. Abort the gate, launch nothing, and record `blocked` unless it equals `$OWNER_REPO`. Take the refs for the repo picker, the prompt box and Launch from that same snapshot and act on them at once: the run list refreshes within seconds and renumbers refs, so a ref from an older snapshot can point at the wrong element. After any delay, re-snapshot and repeat the guard.
 3. Fill the prompt and press Launch. For G1.10, start the [observer](#l9-wait-reason) in the next command, with `launchedAt` defined inline. A refusal ("Too many launch requests") created no run: record `blocked` and wait for the window.
 4. Confirm the record is under `$OWNER_REPO`. Expect `surface` `web` and `started_at` at or after `$LAUNCHED_AT`. No such record means the run landed elsewhere: stop the gates and report it. Never retry a launch that created a run.
 
@@ -601,16 +645,15 @@ gw "docker logs --since $T1 fro-bot-workspace-1 2>&1" | grep -E 'workspace-entry
 readyz
 ```
 
-**G1.10.** Launch from the dashboard with the prompt `reply with exactly the word $TAG-OK and nothing else`, following [Dashboard launches](#dashboard-launches). The observer keeps the run's `output` frames on `window.__obs.output`, from launch on, so the check does not depend on the stream's 10-minute replay of the final frame. Wait for `COMPLETED`:
+**G1.10.** Launch from the dashboard with the prompt `reply with exactly the word $TAG-OK and nothing else`, following [Dashboard launches](#dashboard-launches). The observer keeps the run's `output` frames on `window.__obs.output`, from launch on, so the check does not depend on the stream's 10-minute replay of the final frame. Wait for the run to end, for up to 5 minutes:
 
 ```bash
 RUNKEY=$(runkeys "$OWNER_REPO" 1)
-for i in $(seq 30); do
-  phase=$(s3cat "$RUNKEY" | jq -r .phase)
-  case $phase in PENDING|ACKNOWLEDGED|EXECUTING) sleep 10;; *) break;; esac
-done
+wait_terminal "$RUNKEY" 30 10
 s3cat "$RUNKEY" | jq -c '{run_id, phase}'
 ```
+
+If `wait_terminal` ends `not terminal`, G1.10 is `fail` when a phase was read (the run did not end in 5 minutes) and `not triggered` when the last phase read is `none` (the record never read). Any terminal phase other than `COMPLETED` is a `fail`.
 
 Then read the observer once, with `tag` defined inline as the value of `$TAG`. It returns booleans only, so the reply text is not echoed:
 
@@ -702,20 +745,22 @@ EOF
 agent-browser --session infra-operator-acceptance --restore --restore-save auto eval --stdin < "$WORK/cancel.js"
 ```
 
-Then verify the record:
+Then verify the record. The POST answers `CANCELLED` before the run's own settlement writes the record, so a read straight after it can still show `EXECUTING` with no `cancelledBy` (G2c puts the abort at about 6 seconds; the first live run read `CANCELLED` about 16 seconds after the POST). Wait for the record to end, up to 30 seconds, then read it. Project `cancelledBy` to the three fields below: the web form also holds a session correlation ID, which the runbook never prints:
 
 ```bash
-s3cat "$RUNKEY" | jq '{phase, surface, cancelledBy: .details.cancelledBy}'
+wait_terminal "$RUNKEY" 10 3
+s3cat "$RUNKEY" | jq '{phase, surface, cancelledBy: (.details.cancelledBy | {kind, login, cancelledAt})}'
 ```
 
-A web run has no Discord thread (`thread_id` is empty) and posts no cancel notice, so the record is the whole check.
+If the wait ends `not terminal`, G2b.1 is `fail` when a phase was read (a record still `EXECUTING` 30 seconds after a `CANCELLED` response never settled) and `not triggered` when none was (the record never read). A web run has no Discord thread (`thread_id` is empty) and posts no cancel notice, so the record is the whole check.
 
 **Run C1-D, Discord-started (G2b.2).** In the Discord pass, after the [Mention intake and reply](#discord-pass) check:
 
-**Operator action:** post `@fro-bot` and the `sleep 120` prompt in the bound channel. The agent finds the run and thread (`runkeys "$OWNER_REPO" 1`, phase `EXECUTING`), waits 20 seconds, writes `$WORK/cancel.js` as above with the run ID, and cancels from the dashboard session. Then it verifies the record and notice:
+**Operator action:** post `@fro-bot` and the `sleep 120` prompt in the bound channel. The agent finds the run and thread (`runkeys "$OWNER_REPO" 1`, phase `EXECUTING`), waits 20 seconds, writes `$WORK/cancel.js` as above with the run ID, and cancels from the dashboard session. Then it waits for the record to end and verifies the record and notice, as for C1:
 
 ```bash
-s3cat "$RUNKEY" | jq '{phase, thread_id, cancelledBy: .details.cancelledBy}'
+wait_terminal "$RUNKEY" 10 3
+s3cat "$RUNKEY" | jq '{phase, thread_id, cancelledBy: (.details.cancelledBy | {kind, login, cancelledAt})}'
 dget "/channels/<thread_id>/messages?limit=50" | jq -r '.[] | select(.content | startswith("Run cancelled by")) | [.content, (.mentions|length), (.mention_roles|length), .mention_everyone] | @tsv'
 ```
 
@@ -735,7 +780,8 @@ Wait 15 seconds, then check the log and record:
 
 ```bash
 glog "$T2" | grep -E 'cancel: handled|cancelRun:|execution aborted|suppressing user-facing'
-s3cat "$RUNKEY" | jq '{phase, cancelledBy: .details.cancelledBy}'
+wait_terminal "$RUNKEY" 10 3
+s3cat "$RUNKEY" | jq '{phase, cancelledBy: (.details.cancelledBy | {kind, discordUserId, cancelledAt})}'
 ```
 
 If the log lacks `cancel already requested`, the dashboard cancel landed after the abort settled: record G2c as `not reproduced` and repeat with a fresh run, at most twice.
@@ -768,11 +814,7 @@ Run `sleep 90` in the background in the shell. Then start a background subagent 
 T3=$(date -u +%FT%TZ)   # taken before pressing Launch
 # after the launch: RUNKEY is the newest key whose started_at is after T3
 RUNKEY=$(runkeys "$OWNER_REPO" 1)
-for i in $(seq 30); do
-  s3cat "$RUNKEY" | jq -c '{phase, root: .details.rootSessionId, owned: .details.ownedSessionIds}'
-  phase=$(s3cat "$RUNKEY" | jq -r .phase)
-  case $phase in PENDING|ACKNOWLEDGED|EXECUTING) sleep 20;; *) break;; esac
-done
+wait_terminal "$RUNKEY" 30 20 '{phase, root: .details.rootSessionId, owned: .details.ownedSessionIds}'
 
 # G3.1, G3.2: scan the run window, before any restart
 START=$(s3cat "$RUNKEY" | jq -r .started_at)
@@ -785,10 +827,18 @@ s3cat "$RUNKEY" | jq '{phase, root: .details.rootSessionId, owned: .details.owne
 # G3.4
 before="$(etag "$RUNKEY") $(s3cat "$RUNKEY" | shasum -a 256 | cut -c1-16)"
 idle_check && { T4=$(date -u +%FT%TZ); gw "$DC restart gateway"; wait_healthy fro-bot-gateway-1; }
-glog "$T4" | grep -E 'discord shard ready|recovery: (scanning repos|stale-run sweep complete)'
+for i in $(seq 12); do   # the sweep finishes a few seconds after the health line: wait for it, up to 60 s
+  LOG=$(glog "$T4")
+  printf '%s\n' "$LOG" | grep -q 'recovery: stale-run sweep complete' && break
+  sleep 5
+done
+printf '%s\n' "$LOG" | grep -E 'discord shard ready|recovery: (scanning repos|stale-run sweep complete)'
+printf '%s\n' "$LOG" | grep -q 'recovery: stale-run sweep complete' || echo "SWEEP-LINE-MISSING after 60 s"
 after="$(etag "$RUNKEY") $(s3cat "$RUNKEY" | shasum -a 256 | cut -c1-16)"
 [ "$before" = "$after" ] && echo "RECORD BYTE-IDENTICAL" || echo "RECORD CHANGED: $before / $after"
 ```
+
+If `wait_terminal` ends `not terminal` (the run is still active after 10 minutes), record G3.1 `not triggered`, skip G3.4, because `idle_check` refuses to restart under an active run, and report the run ID. The sweep line follows the health line by a few seconds (the first live run saw about 1.5), so G3.4 re-reads the log for up to 60 seconds before judging. If `SWEEP-LINE-MISSING` still prints, record the log half of G3.4 as `not triggered` with the lines that did show, and re-read once a minute later; a `recovery:` error line is a `fail`. The record half is judged by `RECORD BYTE-IDENTICAL` as before.
 
 A grep that prints nothing for G3.2 is the pass. For G3.5, run in the dashboard session with `runId` defined inline:
 
@@ -872,7 +922,7 @@ The command is `chmod 600` on a marker file in the workspace container's `/tmp`.
 | ID | Check | Pass |
 | --- | --- | --- |
 | G5.1 | Control: the ask for the marker is approved once | An ask with `permission` `bash` names the marker. The decision returns `200` with `{"state":"claimed"}`. The run reaches `COMPLETED`. At terminal and 30 s later the marker is mode `600` with the planted sha256. |
-| G5.2 | Control run: a collapsed card keeps its accessible label in step with its badge | The card was collapsed before the decision and is still collapsed at the read. After the run is `succeeded` and the list refreshed, its `aria-label` is exactly `Run, status: Succeeded` and its badge reads `Succeeded`. |
+| G5.2 | Control run: a collapsed card keeps its accessible label in step with its badge | The card was proven collapsed before the decision (`data-expanded` read `"false"` at a time earlier than the decision's `decidedAt`) and is still collapsed at the read. After the run is `succeeded` and the list refreshed, its `aria-label` is exactly `Run, status: Succeeded` and its badge reads `Succeeded`. |
 | G5.3 | Probe: the ask for the marker is rejected | An ask with `permission` `bash` names the marker. Every decision returns `200` with `{"state":"claimed"}`. The gateway log has a `permission.replied forwarded` line with `"reply":"reject"` for each reject. |
 | G5.4 | The rejected command did not run | G5.3 passed. At terminal and 30 s later, and again at Finish, the marker is mode `644` with the planted sha256. |
 
@@ -890,10 +940,9 @@ EOF
 
 Never cancel a G5 run (see [Cancel safety](#cancel-safety)). Reject every ask until the run ends. Do not restart the gateway or the workspace between the control launch and the Finish observation.
 
-Helpers, repeated at the head of each call with the [helpers](#helpers) block:
+Helpers, repeated at the head of each call with the [helpers](#helpers) block (which makes `$OUT`):
 
 ```bash
-OUT=/tmp/gateway-acceptance-$REF; mkdir -p "$OUT"
 observe() { wsx <<EOF
 stat -c 'mode=%a owner=%U size=%s' /tmp/$1.txt 2>&1 || echo ABSENT
 sha256sum /tmp/$1.txt 2>&1 || true
@@ -919,16 +968,16 @@ The launch prompt is the same for both runs, with the run's own marker. The mode
 Run `chmod 600 /tmp/<MARK>.txt` in the shell and report the result.
 ```
 
-The decider runs in the dashboard page, so the CSRF token stays there. It lists the run's asks every 5 seconds and decides each new one: the ask with `permission` `bash` whose command names the marker gets `decision`, and every other ask is rejected. It never returns command text, only whether the command names the marker. Start it in the command after Launch, the way the [observer](#l9-wait-reason) is started, and read it later with a second `eval`. Do not reload the page before the read. Define `runId` and `mark` inline. The control uses `decision` `"once"` and `delayMs` `20000`; the probe uses `"reject"` and `0`:
+The decider runs in the dashboard page, so the CSRF token stays there. It lists the run's asks every 5 seconds and decides each new one: the ask with `permission` `bash` whose command names the marker gets `decision`, and every other ask is rejected. It never returns command text, only whether the command names the marker. Start it in the command after Launch, the way the [observer](#l9-wait-reason) is started, and read it later with a second `eval`. Do not reload the page before the read. Define `runId` and `mark` inline. The control uses `decision` `"once"` and `delayMs` `60000`, long enough to collapse the card and prove it before the ask is decided; the probe uses `"reject"` and `0`. The snippet sits indented in a list item: strip the indent when you copy it out, and change `decision` and `delayMs` by value, leaving the `// probe:` comments in place:
 
 ```js
 ;(() => {
   const runId = "<runId>"
   const mark = "<MARK>"
   const decision = "once" // probe: "reject"
-  const delayMs = 20000 // probe: 0
+  const delayMs = 60000 // probe: 0
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
-  const g5 = (window.__g5 = {done: false, reason: null, asks: []})
+  const g5 = (window.__g5 = {done: false, reason: null, firstSeenAt: null, asks: []})
   void (async () => {
     const {csrfToken} = await fetch("/operator/session/csrf", {credentials: "same-origin"}).then(r => r.json())
     const t0 = Date.now()
@@ -938,9 +987,11 @@ The decider runs in the dashboard page, so the CSRF token stays there. It lists 
         .catch(() => null)
       for (const a of body?.approvals ?? []) {
         if (g5.asks.some(x => x.requestID === a.requestID)) continue
+        g5.firstSeenAt ??= new Date().toISOString()
         const names = a.permission === "bash" && String(a.command ?? "").includes(mark)
         if (names && delayMs > 0) await sleep(delayMs)
         const verdict = names ? decision : "reject"
+        const decidedAt = new Date().toISOString()
         const res = await fetch(`/operator/runs/${runId}/approvals/${a.requestID}/decision`, {
           method: "POST",
           credentials: "same-origin",
@@ -955,6 +1006,7 @@ The decider runs in the dashboard page, so the CSRF token stays there. It lists 
           decision: verdict,
           status: res.status,
           state: out?.state ?? null,
+          decidedAt,
           at: Math.round((Date.now() - t0) / 1000),
         })
       }
@@ -975,12 +1027,24 @@ The decider runs in the dashboard page, so the CSRF token stays there. It lists 
 })()
 ```
 
-Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses and states only. Read it once right after you start it, and again after the collapse click in the control: `done` is `false` while it runs. A read that prints `undefined` means the decider is gone, because the page was reloaded or the browser relaunched, and a later `eval` never recreates it (see "Decider absent" in the verdicts). The pending-asks route allows 30 requests a minute and the run list 20, so the 5-second poll stays inside both.
+Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses, states and timestamps only. Read it once right after you start it, and again after the collapse in the control: `done` is `false` while it runs. An ask is recorded in `asks` only after its decision, so for the control `asks` stays `[]` until its delay has elapsed, about a minute after the ask appears: an early read of `asks: []` does not mean no ask came. `firstSeenAt` is set as soon as the decider sees any ask, so `firstSeenAt` set with `asks` still `[]` is an ask waiting out its delay, and `null` means none has appeared yet. A read that prints `undefined` means the decider is gone, because the page was reloaded or the browser relaunched, and a later `eval` never recreates it (see "Decider absent" in the verdicts). The pending-asks route allows 30 requests a minute and the run list 20, so the 5-second poll stays inside both.
 
 1. **G5.1 and G5.2, control.**
    1. Plant: `MARK=$TAG-G5-$(openssl rand -hex 4); plant "$MARK" | tee "$OUT/g5-control.txt"`. Expect `mode=644 owner=opencode`. Any other baseline means the plant failed: stop and record `blocked`. `opencode` is the account the workspace image creates for uid 10001 (`deploy/workspace.Dockerfile` in the agent), so `stat -c %U` prints the name. A bare `owner=10001` means the running image lacks the account: record `blocked` and the printed owner, and do not edit the expected text.
-   2. Take `launchedAt` and `T5=$(date -u +%FT%TZ)` from the shell clock, then launch with the prompt above, following [Dashboard launches](#dashboard-launches). Find the record (`RUNKEY`, `run_id`) and start the decider. Then take a fresh `snapshot -i` and click the new run's card to collapse it. Confirm with `eval` that `document.querySelector('[data-run-id="<runId>"]').dataset.expanded` is `"false"`. The decider approves 20 seconds after it sees the ask, so the collapsed card has refreshed to "Waiting for approval" before the run turns `succeeded`.
-   3. Wait for the run record to reach `COMPLETED` (the loop in G1.10), then 30 seconds. Observe and save: `{ date -u +%FT%TZ; observe "$MARK"; } | tee -a "$OUT/g5-control.txt"`. Expect `mode=600` and the planted sha256.
+   2. Take `launchedAt` and `T5=$(date -u +%FT%TZ)` from the shell clock, then launch with the prompt above, following [Dashboard launches](#dashboard-launches). Find the record (`RUNKEY`, `run_id`) and start the decider. Then collapse the new run's card at once, through the page and not with `click @eN`. In the first live run two `click @eN` on the card did not toggle it and a DOM click did. The cause was not established; the card ignores a click that lands on a link or button inside it, and any click while text is selected in it (`bindCardActivation` and `clickBelongsToContent` in the dashboard's `public/operator-run-index.js`). A DOM `click()` on the card has the card as its target and a click count of 0, and the script below clears the selection first. Define `runId` inline, and save the returned object to `$OUT/g5-control-collapse.json`:
+
+      ```js
+      ;(() => {
+        const card = document.querySelector('[data-run-id="<runId>"]')
+        getSelection()?.removeAllRanges()
+        if (card?.dataset.expanded === "true") card.click()
+        return {expanded: card?.dataset.expanded ?? null, at: new Date().toISOString()}
+      })()
+      ```
+
+      `expanded` of `"false"` is the collapse; the toggle runs synchronously in the click, so the value is current. If it reads `"true"`, run the script again: it clicks only an expanded card, so a repeat cannot re-open it. `null` means no card for that run ID is in the page. The `at` comes from the page clock, the clock of the decider's `decidedAt`. The control's decider waits 60 seconds after it sees the ask before it decides (the ask appeared about 15 seconds after the launch in the first live run), so the collapse has time to land, and the collapsed card refreshes to "Waiting for approval" before the run turns `succeeded`. The collapse counts only if `at` is earlier than the `decidedAt` of the first ask, read from `window.__g5` once that ask is in `asks`. Read `asks` after the delay: it stays empty until then.
+
+   3. Wait for the run record to end: `wait_terminal "$RUNKEY" 30 10`. If it ends `not terminal`, G5.1 is `not triggered`: do not cancel, and handle it as in "Decider absent" below. Then wait 30 seconds. Observe and save: `{ date -u +%FT%TZ; observe "$MARK"; } | tee -a "$OUT/g5-control.txt"`. Expect `mode=600` and the planted sha256.
    4. Wait 20 seconds more for the list refresh, with the card still collapsed, and read the card. Save a screenshot to an absolute path under `$OUT`.
 
       ```js
@@ -994,18 +1058,20 @@ Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses and states onl
       })()
       ```
 
-      Pass: `expanded` is `"false"`, `label` is `Run, status: Succeeded` and `badge` is `Succeeded`. Fail: a `label` that holds "Waiting for approval" or otherwise differs from the badge; the stale label was `Run, status: Waiting for approval` beside a finished badge. `expanded` of `"true"`, a run that did not end `succeeded`, or a `null` in any of the three values is `not triggered`: the card was not collapsed through the refresh, or no card for that run ID was in the page, so the label was not exercised. Quote the three values as read, `null` included. Do not infer pass or fail from a `null`.
+      Pass: `expanded` is `"false"`, `label` is `Run, status: Succeeded` and `badge` is `Succeeded`. Fail: a `label` that holds "Waiting for approval" or otherwise differs from the badge; the stale label was `Run, status: Waiting for approval` beside a finished badge. `expanded` of `"true"`, a run that did not end `succeeded`, or a `null` in any of the three values is `not triggered`: the card was not collapsed through the refresh, or no card for that run ID was in the page, so the label was not exercised. So is a collapse that did not precede the decision: the step 2 read was not `"false"`, or its `at` is not earlier than the first ask's `decidedAt`, because the card was then not shown collapsed while the ask was open. Quote the three values as read, `null` included. Do not infer pass or fail from a `null`.
 
-   5. Read the decider and save the matched log lines: `glog "$T5" | grep -E 'permission\.replied forwarded|approval\.decision' | tee "$OUT/g5-control-log.txt"`. Read the saved files back. Only then remove the control marker: `unplant "$MARK"` must print `CLEAN`.
+   5. Read the decider, check the collapse `at` against the first ask's `decidedAt`, and save the matched log lines: `glog "$T5" | grep -E 'permission\.replied forwarded|approval\.decision' | tee "$OUT/g5-control-log.txt"`. Read the saved files back. Only then remove the control marker: `unplant "$MARK"` must print `CLEAN`.
+
 2. **G5.3 and G5.4, probe.**
    1. Plant a new marker: `MARK=$TAG-G5-$(openssl rand -hex 4); plant "$MARK" | tee "$OUT/g5-probe.txt"`. Expect `mode=644`.
    2. Launch at least 20 seconds after the control launch, as in step 1.2, with the new marker and the decider set to `decision` `"reject"` and `delayMs` `0`. Leave the card as it is, and take a fresh `T5`.
-   3. Wait until the decider reports `done` and the run record is terminal, then 30 seconds. Observe and save as above. Read `window.__g5` and save the matched log lines to `$OUT/g5-probe-log.txt`. Each reject needs its `"reply":"reject"` line within 60 seconds of the decision.
+   3. Wait until the decider reports `done` and `wait_terminal "$RUNKEY" 30 10` returns, then 30 seconds. If it ends `not terminal`, G5.3 and G5.4 are `not triggered`; do not cancel. Observe and save as above. Read `window.__g5` and save the matched log lines to `$OUT/g5-probe-log.txt`. Each reject needs its `"reply":"reject"` line within 60 seconds of the decision.
 3. **At Finish.** Observe the probe marker again and append it to `$OUT/g5-probe.txt`. Read the file back, then `unplant "$MARK"`, which must print `CLEAN`. `ABSENT` at Finish means the container was recreated since the probe: record G5.4's second observation as `not triggered` and name the P0 digest change.
 
 Verdicts, in the [Results](#results) vocabulary:
 
 - **G5.1.** `fail`: the mode is not `600` or the sha256 changed after an approved ask, or the decision returns anything but `200` with `{"state":"claimed"}`. The route answers `200` with another `state` (`already_claimed`, `scope_mismatch`, `failed_to_settle` or `unavailable`) when nothing settled, and `409` for a request that can only be rejected; record the status and the state. Such a decision is a `fail` even though the run then stays at `waiting_for_approval` and never reaches `COMPLETED`. `not triggered`: no `bash` ask names the marker within 180 seconds of the decider starting (`no-ask`), the run does not reach `COMPLETED` for any other reason, more than five asks arrive, or the decider is absent. A model that skips the command, or runs it in a form the `chmod *` pattern does not match, raises no ask. No listed ask is never a pass.
+- **G5.2.** `pass`, `fail` and `not triggered` are as in control step 4. A collapse that did not precede the decision is `not triggered`, never `pass`: the card must read `data-expanded` `"false"` at a page-clock time earlier than the first ask's `decidedAt`. `blocked`: G5.1's launch was refused or its plant did not read `mode=644`.
 - **G5.3.** `fail`: a decision on the marker's ask returns anything but `200` with `{"state":"claimed"}`. The route also answers `200` for outcomes that settled nothing, so `failed_to_settle` and `unavailable` mean the reject may not have settled. `not triggered`: no `bash` ask names the marker, more than five asks arrive, the decider reaches its time limit or errors, the decider is absent, or a reject has no `permission.replied forwarded` line. `blocked`: G5.1 did not pass, the launch was refused, or the plant did not read `mode=644`.
 - **G5.4.** It follows G5.3. `pass`: G5.3 is `pass`, and the marker is mode `644` with the planted sha256 at every observation (terminal and 30 s later, and at Finish). `fail`: the mode or the sha256 differs from the plant at any observation after a reject of the marker's ask returned `200` with `{"state":"claimed"}`, whatever G5.3 reads. That also covers a model that makes the same change with an allowed verb; read the run transcript to attribute it, and record the verb as a policy gap. `not triggered`: G5.3 is `not triggered` or `fail` and the `fail` above does not apply, including a marker that changed when no ask ever named it, so the command ran unasked. `blocked`: G5.3 is `blocked`. An unchanged marker is never a pass on its own. Where no reject of the marker's ask returned `claimed`, G5.4 is `not triggered` or `blocked` whatever the marker shows; put the mode and sha256 that were read in the Results line anyway.
 - **Gate.** `PASS` needs G5.1 to G5.4 all `pass`. `FAIL` when any check fails, `INCOMPLETE` when any is `blocked` or `not triggered`, as the Results rules say.
@@ -1054,7 +1120,7 @@ for k in $(runkeys "$OWNER_REPO" 2); do s3cat "$k" | jq -c '{run_id, phase, thre
 thread <thread_id>
 ```
 
-Use the newest record that started after the mention. Wait for `COMPLETED`, then expect a bot message containing `$TAG-OK`.
+Use the newest record that started after the mention. Wait for it to end with `wait_terminal "<runKey>" 30 10`; a phase other than `COMPLETED` is a failure. Then expect a bot message containing `$TAG-OK`.
 
 When the pass does not run, report every row above as `not run` in the [Results](#results), with the ref of the anchor.
 
@@ -1062,7 +1128,7 @@ When the pass does not run, report every row above as `not run` in the [Results]
 
 1. Run G1.11 cleanup if it has not run. Make the Gate 5 final observation and remove its marker if that has not run (step 3 of [Gate 5](#gate-5-rejected-command-does-not-run)). Then run the `/dev/null` check from [Rules](#rules).
 2. Close the shared connection and remove the key: `ssh -O exit -o ControlPath="$WORK/cm" "root@$GATEWAY_HOST"; rm -rf "$WORK"`.
-3. Save matched log lines, record JSON and thread dumps under `/tmp/gateway-acceptance-<REF>/`. Read the saved files back before recording a result.
+3. Save matched log lines, record JSON and thread dumps under `$OUT`, this pass's `/tmp/gateway-acceptance-<REF>-<UTC date-time>/`. Read the saved files back before recording a result.
 
 ### Results
 
@@ -1077,7 +1143,7 @@ Discord pass: not run (trigger: none); last passed on <ref>
 Discord pass: not run, due (trigger: <item>); last passed on <ref>
 ```
 
-`<item>` is the deciding item from [When the Discord pass runs](#when-the-discord-pass-runs): `never passed`, `stale (<n> refs)`, the matching checklist path or pin line, or `trigger check failed`. The fourth form is for a pass that is due and has not been run yet. It does not move the anchor, because the [anchor query](#when-the-discord-pass-runs) reads its `last passed on <ref>` and nothing else, so keep that clause in the line: without it the query finds no anchor and reads `never passed`. The release's record is incomplete until a `PASS` line for it is posted. Post this in the release tracker:
+`<item>` is the deciding item from [When the Discord pass runs](#when-the-discord-pass-runs): `never passed`, `stale (<n> refs)`, the matching checklist path or pin line, or `trigger check failed`. For a checklist match write the first path the glob command prints, verbatim (for example `packages/runtime/src/agent/index.ts`), not the checklist's glob; for a pin write the first line the pin command prints, verbatim. Two passes then write the same thing. The fourth form is for a pass that is due and has not been run yet. It does not move the anchor, because the [anchor query](#when-the-discord-pass-runs) reads its `last passed on <ref>` and nothing else, so keep that clause in the line: without it the query finds no anchor and reads `never passed`. The release's record is incomplete until a `PASS` line for it is posted. Post this in the release tracker:
 
 ```text
 Live acceptance: agent <REF> (OpenCode V2 <OCV>). Run by <operator>, <date>.

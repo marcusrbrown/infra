@@ -43,7 +43,7 @@ The dashboard session lasts seven days. When it lapses, or after logout, opening
 
 The gateway allows 3 launches per minute and 10 per hour per operator, in fixed windows. A refused launch shows "Too many launch requests" in the Launch panel (`429 rate limited`) and creates no run. A refusal can last until the hourly window ends, so retries do not help.
 
-Run the [checks that launch nothing](#checks-that-launch-nothing) first, then spend the nine launches below, at least 20 seconds apart. The limit is keyed to the operator, so manual launches and earlier passes in the same hour count too. The [gateway release gates](#gateway-release-gates-agent-run) share the window and spend 3 launches (G1.10, G2b, G3.1). Start the second of the two sets at least 60 minutes after the first launch of the earlier set, or after a gateway restart, which clears the counters (G3.4 restarts the gateway). The nine launches plus one in reserve fit only in a fresh window. Launch against `fro-bot/agent`. One launch stays in reserve; do not retry a launch that created a run.
+Run the [checks that launch nothing](#checks-that-launch-nothing) first, then spend the nine launches below, at least 20 seconds apart. The limit is keyed to the operator, so manual launches and earlier passes in the same hour count too. The [gateway release gates](#gateway-release-gates-agent-run) share the window and spend 5 launches (G1.10, G2b, G3.1, G5.1, G5.3). Start the second of the two sets at least 60 minutes after the first launch of the earlier set, or after a gateway restart, which clears the counters (G3.4 restarts the gateway). The nine launches plus one in reserve fit only in a fresh window. Launch against `fro-bot/agent`. One launch stays in reserve; do not retry a launch that created a run.
 
 | Launch | Prompt | Covers |
 | --- | --- | --- |
@@ -220,6 +220,7 @@ Record these as `skip` or `not automated`:
 - [Check 10](operator-surface-acceptance.md#10-agent-question) step 4 (Discord settlement) and step 6 (question push). `not automated`.
 - [Check 12](operator-surface-acceptance.md#12-push) delivery steps. `not automated`.
 - [Check 13](operator-surface-acceptance.md#13-question-notification-deep-link) notification taps. The deep-link simulation above covers only that `/#<runId>` opens the run.
+- [Check 15](operator-surface-acceptance.md#15-logout-and-csrf) step 4 (CSRF-negative and replay of the pre-logout cookie). The session cookie is HttpOnly, so page code cannot read it, and agent-browser documents neither the layout of its saved state nor whether that state holds HttpOnly cookies. The operator supplies the cookie from the browser's own tools. `not automated`.
 - [Check 16](operator-surface-acceptance.md#16-launch-prompt) step 4 has no safe trigger. `skip`.
 - [Check 17](operator-surface-acceptance.md#17-run-wait-reason) step 4 (reconnect). Browser offline mode does not drop an open SSE stream, so the card never reconnects. The behaviour is covered by fro-bot/dashboard `web/src/operator/wait-reason-label.test.ts` (a reconnecting connection clears the label, and a replayed running frame shows it again). `not automated`.
 - [Check 17](operator-surface-acceptance.md#17-run-wait-reason) step 6: "Finishing its reply" and "Agent still working" have no safe trigger. Record them only when they occur.
@@ -228,7 +229,7 @@ Record these as `skip` or `not automated`:
 
 ## Logout
 
-Run [check 15](operator-surface-acceptance.md#15-logout-and-csrf) last, after every launch check and after the [gateway release gates](#gateway-release-gates-agent-run) when they run in the same sitting. Run the snippets from the manual runbook as page-context `eval` code that keeps `csrfToken` in a variable and returns only status codes. `/operator/session` returns 401 afterwards.
+Run [check 15](operator-surface-acceptance.md#15-logout-and-csrf) last, after every launch check and after the [gateway release gates](#gateway-release-gates-agent-run) when they run in the same sitting. Run the snippets from the manual runbook as page-context `eval` code that keeps `csrfToken` in a variable and returns only status codes. `/operator/session` returns 401 afterwards. Step 4 of that check is an operator step; record it as `not automated`.
 
 Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved session is signed in for the next run. If that page lands on a GitHub login, stop and ask the operator.
 
@@ -255,17 +256,17 @@ Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved se
 
 ## Gateway release gates (agent-run)
 
-How an agent runs the gateway release gates after a Fro Bot gateway deploy moves to a new upstream ref (`apps/gateway/upstream.json`). The gates cover stale-credential removal on OpenCode V2, `/fro-bot cancel`, ownership persistence across a gateway restart, and approval attribution. The agent drives the droplet over SSH, reads run state from S3, launches and cancels runs from the dashboard session, and reads Discord threads over REST.
+How an agent runs the gateway release gates after a Fro Bot gateway deploy moves to a new upstream ref (`apps/gateway/upstream.json`). The gates cover stale-credential removal on OpenCode V2, `/fro-bot cancel`, ownership persistence across a gateway restart, approval attribution, and that a rejected command does not run. The agent drives the droplet over SSH, reads run state from S3, launches and cancels runs from the dashboard session, and reads Discord threads over REST.
 
 Each check is one of two kinds:
 
-- **Automated.** Runs on a dashboard-launched run and needs no Discord action. Every release runs these: P0–P2, G1, G2b.1 and G3.
+- **Automated.** Runs on a dashboard-launched run and needs no Discord action. Every release runs these: P0–P2, G1, G2b.1, G3 and G5.
 - **Discord pass.** Needs a Discord-started run or a human Discord action. The agent cannot act in Discord as the operator: the gateway drops messages written by bots, and Discord accepts slash commands and button clicks only from users. These checks form one [Discord pass](#discord-pass), run in one sitting, and only when [it is triggered](#when-the-discord-pass-runs). Its operator steps are marked **Operator action**.
 
 A release is a new upstream ref. A redeploy at the same ref runs no gates: its new image digests are covered by the P0 checks of the next release.
 
-- G1, G2b.1 and G3 use the dashboard session from [Browser session](#browser-session). Sign in first. When both passes run in one sitting, finish these gates before [Logout](#logout).
-- The automated gates spend 3 launches (G1.10, G2b.1, G3.1) from the [launch budget](#launch-budget). The gateway gates and the browser pass share one per-operator window of 10 launches per hour. Start the second set at least 60 minutes after the first launch of the earlier set, or after a gateway restart, which clears the counters (G3.4 restarts the gateway).
+- G1, G2b.1, G3 and G5 use the dashboard session from [Browser session](#browser-session). Sign in first. When both passes run in one sitting, finish these gates before [Logout](#logout).
+- The automated gates spend 5 launches (G1.10, G2b.1, G3.1, G5.1, G5.3) from the [launch budget](#launch-budget). The gateway gates and the browser pass share one per-operator window of 10 launches per hour. Start the second set at least 60 minutes after the first launch of the earlier set, or after a gateway restart, which clears the counters (G3.4 restarts the gateway).
 - Every command below is a pattern: copy it and fill the placeholders. Add no script files to the repo.
 
 ### Inputs
@@ -446,7 +447,7 @@ Other edits to `bun.lock`, `package.json` and the Dockerfile do not match. Name 
 
 ### Dashboard launches
 
-G1.10, G2b.1 and G3.1 each launch one run from the dashboard session. Each launch follows the [Launch budget](#launch-budget) spacing. The prompt omits the `@fro-bot` mention.
+G1.10, G2b.1, G3.1, G5.1 and G5.3 each launch one run from the dashboard session. Each launch follows the [Launch budget](#launch-budget) spacing. The prompt omits the `@fro-bot` mention.
 
 1. Take `launchedAt` from the shell clock, truncated to whole seconds: `LAUNCHED_AT=$(date -u +%FT%TZ)`.
 2. **Launch guard.** In the Launch panel, select `$OWNER_REPO`, then take a fresh `snapshot -i` and read the selected repository. Abort the gate, launch nothing, and record `blocked` unless it equals `$OWNER_REPO`.
@@ -823,6 +824,162 @@ The API shapes for a decision without the UI:
 - `POST /operator/runs/<runId>/questions/<requestID>/decision` takes `{decision: 'answer', answers: [{options: [0]}]}`.
 - Both POSTs need the `x-csrf-token` header from `/operator/session/csrf`. Keep the token inside the `eval`.
 
+**Question rows: no raw question input in the reply (G4e, G4f).** After the question run reaches `COMPLETED`, read its thread with the same `dget` call (`DISCORD_TOKEN`; no other credential) and count the messages whose content or embed text holds the raw input of the question tool. The agent once printed that input at the head of the final reply, as `(questions: [{"question":…`, so the patterns are `(questions:` and `"question":`. The scan covers every message in the thread: the final reply, the activity line and the question card. Run it for G4f as well as G4e, because the dashboard-answered run is where the leak was first seen (fro-bot/agent#2141).
+
+```bash
+dget "/channels/<thread_id>/messages?limit=50" | jq -c '{scanned: length, final: ([.[] | select(.author.bot == true and (.content | length) > 0)] | length), raw: [.[] | select(([.content] + [.embeds[] | .title, .description] | map(. // "") | join("\n")) | test("\\(questions:|\"question\":"))] | length}'
+```
+
+Pass: `raw` is `0` and `final` is at least `1`. Fail: `raw` is `1` or more; record the count, not the message text. A `final` of `0` means no bot reply was read: record `not triggered`.
+
+### Gate 5: rejected command does not run
+
+A bash command the operator rejects does not run. Automated: two dashboard launches on `$OWNER_REPO`, a control (the ask is approved once) and the probe (the ask is rejected). Run it after G3.4, so no gateway restart falls inside it, and before the [Discord pass](#discord-pass).
+
+The command is `chmod 600` on a marker file in the workspace container's `/tmp`. The deploy's permission policy asks before `chmod *` (`WORKSPACE_PERMISSION_POLICY` in `apps/gateway/src/deploy.ts`), and `chmod` changes only the mode, so neither run alters or removes the file's content. The marker stays out of the checkout on purpose: the checkout is shared between runs, and an untracked file there makes the next launch on the repo fail with "Checkout refused: uncommitted changes". The policy sets `external_directory` to `allow`, so a path outside the checkout raises no second ask. The gate plants and removes each marker itself through `wsx`, as uid 10001, the user the agent's tools run as.
+
+| ID | Check | Pass |
+| --- | --- | --- |
+| G5.1 | Control: the ask for the marker is approved once | An ask with `permission` `bash` names the marker. The decision returns `200` with `{"state":"claimed"}`. The run reaches `COMPLETED`. At terminal and 30 s later the marker is mode `600` with the planted sha256. |
+| G5.2 | Control run: a collapsed card keeps its accessible label in step with its badge | The card was collapsed before the decision and is still collapsed at the read. After the run is `succeeded` and the list refreshed, its `aria-label` is exactly `Run, status: Succeeded` and its badge reads `Succeeded`. |
+| G5.3 | Probe: the ask for the marker is rejected | An ask with `permission` `bash` names the marker. Every decision returns `200` with `{"state":"claimed"}`. The gateway log has a `permission.replied forwarded` line with `"reply":"reject"` for each reject. |
+| G5.4 | The rejected command did not run | At terminal and 30 s later, and again at Finish, the marker is mode `644` with the planted sha256. |
+
+G5.1 comes first and gates the rest. If it does not pass, launch nothing more for this gate and record G5.3 and G5.4 as `blocked`. A control that does not change the mode means the observer, the approval path or the marker location is wrong, and a clean probe would prove nothing.
+
+**Scope.** This gate shows that a reject holds for one listed verb on one path: `chmod`, rejected through the dashboard decision route. It does not show that unlisted commands ask. `WORKSPACE_PERMISSION_POLICY` sets bash `'*'` to `allow` and lists only a few `ask` patterns, so a command that matches none of them (`touch`, `echo >`, `python -c`) runs with no prompt. Whether a wrapper such as `sh -c "chmod …"` matches `chmod *` is not established. The policy's own comment calls it a human-in-the-loop tripwire on top of the container and egress boundary, not a hard sandbox. A PASS here says nothing about commands the policy does not list, and nothing about other routes that could run a rejected command.
+
+Before each launch: P0 step 4 still matches the recorded digests, `idle_check` passes, and the checkout of `$OWNER_REPO` is clean (see [Afterwards](#afterwards), step 2). Never cancel a G5 run (see [Cancel safety](#cancel-safety)). Reject every ask until the run ends. Do not restart the gateway or the workspace between the control launch and the Finish observation.
+
+Helpers, repeated at the head of each call with the [helpers](#helpers) block:
+
+```bash
+OUT=/tmp/gateway-acceptance-$REF; mkdir -p "$OUT"
+observe() { wsx <<EOF
+stat -c 'mode=%a owner=%U size=%s' /tmp/$1.txt 2>&1 || echo ABSENT
+sha256sum /tmp/$1.txt 2>&1 || true
+EOF
+}
+plant() {   # $1 = marker; expect mode=644 owner=opencode
+  wsx <<EOF
+printf '%s\n' '$1' > /tmp/$1.txt
+chmod 644 /tmp/$1.txt
+EOF
+  observe "$1"
+}
+unplant() { wsx <<EOF
+rm -f /tmp/$1.txt
+test -e /tmp/$1.txt && echo STILL-PRESENT || echo CLEAN
+EOF
+}
+```
+
+The launch prompt is the same for both runs, with the run's own marker. The model must run the command in the shell:
+
+```text
+Run `chmod 600 /tmp/<MARK>.txt` in the shell and report the result.
+```
+
+The decider runs in the dashboard page, so the CSRF token stays there. It lists the run's asks every 5 seconds and decides each new one: the ask with `permission` `bash` whose command names the marker gets `decision`, and every other ask is rejected. It never returns command text, only whether the command names the marker. Start it in the command after Launch, the way the [observer](#l9-wait-reason) is started, and read it later with a second `eval`. Do not reload the page before the read. Define `runId` and `mark` inline. The control uses `decision` `"once"` and `delayMs` `20000`; the probe uses `"reject"` and `0`:
+
+```js
+;(() => {
+  const runId = "<runId>"
+  const mark = "<MARK>"
+  const decision = "once" // probe: "reject"
+  const delayMs = 20000 // probe: 0
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+  const g5 = (window.__g5 = {done: false, reason: null, asks: []})
+  void (async () => {
+    const {csrfToken} = await fetch("/operator/session/csrf", {credentials: "same-origin"}).then(r => r.json())
+    const t0 = Date.now()
+    for (let i = 0; ; i++) {
+      const body = await fetch(`/operator/runs/${runId}/approvals`, {credentials: "same-origin"})
+        .then(r => r.json())
+        .catch(() => null)
+      for (const a of body?.approvals ?? []) {
+        if (g5.asks.some(x => x.requestID === a.requestID)) continue
+        const names = a.permission === "bash" && String(a.command ?? "").includes(mark)
+        if (names && delayMs > 0) await sleep(delayMs)
+        const verdict = names ? decision : "reject"
+        const res = await fetch(`/operator/runs/${runId}/approvals/${a.requestID}/decision`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"content-type": "application/json", "x-csrf-token": csrfToken},
+          body: JSON.stringify({decision: verdict}),
+        })
+        const out = await res.json().catch(() => null)
+        g5.asks.push({
+          requestID: a.requestID,
+          permission: a.permission,
+          names,
+          decision: verdict,
+          status: res.status,
+          state: out?.state ?? null,
+          at: Math.round((Date.now() - t0) / 1000),
+        })
+      }
+      if (g5.asks.length > 5) return void Object.assign(g5, {done: true, reason: "more-than-five-asks"})
+      if (Date.now() - t0 > 180000 && !g5.asks.some(x => x.names))
+        return void Object.assign(g5, {done: true, reason: "no-ask"})
+      if (Date.now() - t0 > 600000) return void Object.assign(g5, {done: true, reason: "timeout"})
+      if (i % 3 === 2) {
+        const {runs} = await fetch("/operator/runs", {credentials: "same-origin"}).then(r => r.json())
+        const status = runs.find(r => r.runId === runId)?.status
+        if (["succeeded", "failed", "cancelled"].includes(status))
+          return void Object.assign(g5, {done: true, reason: status})
+      }
+      await sleep(5000)
+    }
+  })().catch(() => Object.assign(g5, {done: true, reason: "error"}))
+  return "started"
+})()
+```
+
+Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses and states only. The pending-asks route allows 30 requests a minute and the run list 20, so the 5-second poll stays inside both.
+
+1. **G5.1 and G5.2, control.**
+   1. Plant: `MARK=$TAG-G5-$(openssl rand -hex 4); plant "$MARK" | tee "$OUT/g5-control.txt"`. Expect `mode=644 owner=opencode`. Any other baseline means the plant failed: stop and record `blocked`.
+   2. Take `launchedAt` and `T5=$(date -u +%FT%TZ)` from the shell clock, then launch with the prompt above, following [Dashboard launches](#dashboard-launches). Find the record (`RUNKEY`, `run_id`) and start the decider. Then take a fresh `snapshot -i` and click the new run's card to collapse it. Confirm with `eval` that `document.querySelector('[data-run-id="<runId>"]').dataset.expanded` is `"false"`. The decider approves 20 seconds after it sees the ask, so the collapsed card has refreshed to "Waiting for approval" before the run turns `succeeded`.
+   3. Wait for the run record to reach `COMPLETED` (the loop in G1.10), then 30 seconds. Observe and save: `{ date -u +%FT%TZ; observe "$MARK"; } | tee -a "$OUT/g5-control.txt"`. Expect `mode=600` and the planted sha256.
+   4. Wait 20 seconds more for the list refresh, with the card still collapsed, and read the card. Save a screenshot to an absolute path under `$OUT`.
+
+      ```js
+      ;(() => {
+        const card = document.querySelector('[data-run-id="<runId>"]')
+        return {
+          expanded: card?.dataset.expanded ?? null,
+          label: card?.getAttribute("aria-label") ?? null,
+          badge: card?.querySelector('[data-role="run-status"]')?.textContent ?? null,
+        }
+      })()
+      ```
+
+      Pass: `expanded` is `"false"`, `label` is `Run, status: Succeeded` and `badge` is `Succeeded`. Fail: a `label` that holds "Waiting for approval" or otherwise differs from the badge; the stale label was `Run, status: Waiting for approval` beside a finished badge. `expanded` of `"true"`, or a run that did not end `succeeded`, is `not triggered`: the card was not collapsed through the refresh, so the label was not exercised.
+
+   5. Read the decider and save the matched log lines: `glog "$T5" | grep -E 'permission\.replied forwarded|approval\.decision' | tee "$OUT/g5-control-log.txt"`. Read the saved files back. Only then remove the control marker: `unplant "$MARK"` must print `CLEAN`.
+2. **G5.3 and G5.4, probe.**
+   1. Plant a new marker: `MARK=$TAG-G5-$(openssl rand -hex 4); plant "$MARK" | tee "$OUT/g5-probe.txt"`. Expect `mode=644`.
+   2. Launch at least 20 seconds after the control launch, as in step 1.2, with the new marker and the decider set to `decision` `"reject"` and `delayMs` `0`. Leave the card as it is, and take a fresh `T5`.
+   3. Wait until the decider reports `done` and the run record is terminal, then 30 seconds. Observe and save as above. Read `window.__g5` and save the matched log lines to `$OUT/g5-probe-log.txt`. Each reject needs its `"reply":"reject"` line within 60 seconds of the decision.
+3. **At Finish.** Observe the probe marker again and append it to `$OUT/g5-probe.txt`. Read the file back, then `unplant "$MARK"`, which must print `CLEAN`. `ABSENT` at Finish means the container was recreated since the probe: record G5.4's second observation as `not triggered` and name the P0 digest change.
+
+Verdicts, in the [Results](#results) vocabulary:
+
+- **G5.1.** `fail`: the mode is not `600` or the sha256 changed after an approved ask, or the decision's `state` is not `claimed`. `not triggered`: no `bash` ask names the marker within 180 seconds of the decider starting (`no-ask`), the run does not reach `COMPLETED`, or more than five asks arrive. A model that skips the command, or runs it in a form the `chmod *` pattern does not match, raises no ask. No listed ask is never a pass.
+- **G5.3.** `fail`: a decision on the marker's ask returns anything but `200` with `{"state":"claimed"}`. The route also answers `200` for outcomes that settled nothing, so `failed_to_settle` and `unavailable` mean the reject may not have settled. `not triggered`: no `bash` ask names the marker, more than five asks arrive, or a reject has no `permission.replied forwarded` line.
+- **G5.4.** `fail`: the mode or the sha256 differs from the plant at any observation after a reject. That also covers a model that makes the same change with an allowed verb; read the run transcript to attribute it, and record the verb as a policy gap. `not triggered`: the marker changed and no ask ever named it, so the command ran unasked.
+- **Gate.** `PASS` needs G5.1 to G5.4 all `pass`. `FAIL` when any check fails, `INCOMPLETE` when any is `blocked` or `not triggered`, as the Results rules say.
+
+False-pass controls:
+
+1. No listed ask is never a pass. Each run needs an ask that names its own marker.
+2. The control proves the observer reads the container the run uses. The baseline read after each plant proves the marker exists at `644`.
+3. A late execution would show at terminal plus 30 seconds and again at Finish, after the other gates.
+4. The reject is delivered, not assumed: the state must be `claimed` and the gateway log must show the reply reaching the server. A grant cannot answer the probe's ask: the gateway keeps grants per run, and these runs are new.
+5. The evidence is saved and read back before any marker is removed.
+6. A model that retries after a reject raises a new ask with a new request ID. The decider rejects it, and the gate stops at more than five asks.
+
 ### Discord pass
 
 Every check that needs a Discord-started run or a human Discord action. Run it in one sitting with the operator present, after the automated gates and before [Finish](#finish), and only when [it is triggered](#when-the-discord-pass-runs). Start it with [P0](#preconditions): no gateway deploy may be in flight, and the running digests must match. The automated gates and the pass can be hours apart, and a same-ref redeploy in between changes the digests. If the digest pair differs from the automated gates' pair, record both pairs in the P0 row. Steps and pass criteria are in the gate sections linked below. Run in this order:
@@ -851,7 +1008,7 @@ When the pass does not run, report every row above as `not run` in the [Results]
 
 ### Finish
 
-1. Run G1.11 cleanup if it has not run, then the `/dev/null` check from [Rules](#rules).
+1. Run G1.11 cleanup if it has not run. Make the Gate 5 final observation and remove its marker if that has not run (step 3 of [Gate 5](#gate-5-rejected-command-does-not-run)). Then run the `/dev/null` check from [Rules](#rules).
 2. Close the shared connection and remove the key: `ssh -O exit -o ControlPath="$WORK/cm" "root@$GATEWAY_HOST"; rm -rf "$WORK"`.
 3. Save matched log lines, record JSON and thread dumps under `/tmp/gateway-acceptance-<REF>/`. Read the saved files back before recording a result.
 
@@ -890,11 +1047,14 @@ Gate 2, /fro-bot cancel: [PASS/FAIL/not run]
 Gate 3, ownership persistence and restart: [PASS/FAIL]
   <ownedSessionIds non-empty mid-run; adoption lines seen; no persist failure or 412 in the run window; COMPLETED record has rootSessionId set and ownedSessionIds []; same ETag after gateway restart; run still listed>
 
+Gate 5, rejected command does not run: [PASS/INCOMPLETE/FAIL]
+  <control run <runId>: ask named the marker, approved once, state claimed, mode 600 at terminal+30s; collapsed card label "Run, status: Succeeded". Probe run <runId>: asks <n>, each reject state claimed with a forwarded reject in the log, mode 644 and sha256 unchanged at terminal+30s and at Finish; cleanup CLEAN. Scope: one listed verb on one path, not unlisted commands>
+
 Mention intake and reply (DP.1): [PASS/FAIL/not run]
   <run <runId> COMPLETED, bot message in the thread contained <TAG>-OK, or "not run, last passed on <ref>">
 
 Gate 4, attribution rendering: [PASS/INCOMPLETE/FAIL/not run]
-  <Discord approve/deny/question: plain titles, <@id> descriptions, no mentions on the edits. Dashboard approve, deny and question: cards listed under the run ID, decided in the dashboard, Discord cards end `(dashboard)`, no mentions. Or "not run, last passed on <ref>">
+  <Discord approve/deny/question: plain titles, <@id> descriptions, no mentions on the edits. Dashboard approve, deny and question: cards listed under the run ID, decided in the dashboard, Discord cards end `(dashboard)`, no mentions. Question rows G4e and G4f: no raw question input in the thread (raw 0, final reply read). Or "not run, last passed on <ref>">
 
 Drift: <pin vs tracker differences, or none>
 

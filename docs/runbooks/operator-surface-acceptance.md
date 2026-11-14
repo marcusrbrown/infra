@@ -140,7 +140,7 @@ Subscribe first if needed; see [`operator-push-enablement.md`](operator-push-ena
 
 1. Question delivery: covered by [check 10, step 6](#10-agent-question); tapping the notification is covered by [check 13](#13-question-notification-deep-link).
 2. Approval-pending and run-failed delivery: trigger one of each and expect a notification to arrive in the browser. These are regression spot checks.
-3. Push health: while signed in, run `(await fetch('/operator/session', { credentials: 'same-origin' }).then(r => r.json())).push` in the DevTools Console. Expect: `{status: "ready"}` after the deliveries above. `degraded` or `unknown` is a failure to investigate; see [`operator-push-enablement.md`](operator-push-enablement.md#post-boot-push-health). An absent field means push is not configured.
+3. Push health: while signed in, run `(await fetch('/operator/session', { credentials: 'same-origin' }).then(r => r.json())).push` in the DevTools Console. Expect: `{status: "ready"}` after the deliveries above. `degraded` is a failure to investigate; see [`operator-push-enablement.md`](operator-push-enablement.md#post-boot-push-health). `unknown` means no recent push evidence: repeat the deliveries and re-read until it is `ready`. An absent field means push is not configured.
 4. Failure: no notification arrives. A `401` from the push routes proves only that they are mounted, not that delivery works; see the caveats in [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats).
 
 ### 13. Question notification deep link
@@ -177,7 +177,7 @@ Operator sessions live in the gateway's object store and survive restarts. Run t
 
 ### 15. Logout and CSRF
 
-Do this last. All snippets run in the DevTools Console on `https://dashboard.fro.bot`; the token stays in a page variable and is never printed.
+Do this last. All snippets run in the DevTools Console on `https://dashboard.fro.bot`, except the shell command in step 4; the token stays in a page variable and is never printed.
 
 1. Trigger: fetch the CSRF token.
 
@@ -208,6 +208,41 @@ Do this last. All snippets run in the DevTools Console on `https://dashboard.fro
 
    Expect: `401`. Failure: any 2xx, which means the session survived logout.
 
+4. **CSRF-negative and replay of the pre-logout cookie.** This ends a second session, and logout is global for push: it deactivates every push subscription for this operator on every device (see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats)). Run it after every other check, push checks included. Steps 1–3 ended the session you were using, so sign in again at `/operator/auth/github/start` first.
+
+   1. CSRF-negative. In the DevTools Console, POST the decision route for a run and a request that do not exist, once with no `x-csrf-token` header and once with the token `0`:
+
+      ```js
+      const url = "/operator/runs/no-such-run/approvals/no-such-request/decision"
+      const post = headers =>
+        fetch(url, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {"content-type": "application/json", ...headers},
+          body: JSON.stringify({decision: "reject"}),
+        })
+      ;[(await post({})).status, (await post({"x-csrf-token": "0"})).status]
+      ```
+
+      Expect: `[400, 400]` (`{"error":"bad request"}` each time), and the gateway log shows `browser guard: missing CSRF token` and then `browser guard: CSRF token invalid`. Failure: `404`, which means the request got past the guard to the route (the IDs are made up, so nothing settles either way), or any `2xx`.
+
+   2. Replay. The session cookie is `__Host-session` and it is HttpOnly, so the Console cannot read it. Copy its value from the browser's own cookie tools (DevTools → Application → Cookies in Chrome, Storage → Cookies in Firefox). Do not take it from agent-browser's saved state: that file's layout, and whether it holds HttpOnly cookies, are not documented. Then run this once in a terminal under `bash` and paste the value at the silent prompt. The subshell keeps the cookie and the CSRF token in shell variables only: nothing echoes them, and nothing writes them to a file. They are not in any command line, because `printf` is a shell builtin and `curl -K -` reads its headers from stdin. Only status codes print.
+
+      ```bash
+      (
+        read -rs -p "Paste the __Host-session value, then press Enter: " c; echo
+        base=https://dashboard.fro.bot/operator
+        ck() { printf 'header = "Cookie: __Host-session=%s"\n' "$c"; }
+        code() { curl -sS -o /dev/null -w '%{http_code}' -K - "$@"; }
+        t=$(ck | curl -sS -K - "$base/session/csrf" | jq -r .csrfToken)
+        echo "before logout: $(ck | code "$base/session")"
+        echo "logout:        $({ ck; printf 'header = "x-csrf-token: %s"\nheader = "Origin: https://dashboard.fro.bot"\n' "$t"; } | code -X POST "$base/auth/logout")"
+        echo "replay:        $(ck | code "$base/session")"
+      )
+      ```
+
+      Expect: `200`, `200`, `401`. The `Origin` header is needed because the gateway rejects a mutating request that has neither a matching `Origin` nor same-origin fetch metadata. Failure: a replay of `200`, which means the revoked session still works. If the first line is not `200`, the pasted value is wrong and the replay proves nothing: stop and run it again. If the logout line is not `200`, nothing was revoked: log out with the snippet in step 2 and record this step as not run. Clear the clipboard afterwards. The session ends here; sign in again before the next run.
+
 Logout deletes only that session: a separate browser signed in earlier stays signed in, and a gateway restart ends none of them: sessions are durable and last a fixed seven days from sign-in. For what logout does to push subscriptions, see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats).
 
 ### 16. Launch prompt
@@ -228,7 +263,7 @@ Trigger prompt (practical, not guaranteed): "Use the task tool in background mod
 1. **Label while draining.** Expand the card as soon as the run starts. Expect: the line reads "Waiting on a background task" while the subagent sleeps, goes blank once it finishes, then briefly reads "Confirming it has finished" before the run ends. In DevTools, the run's `status` frames carry `waitReason` `awaiting-background-task`, then `confirming-completion`. Failure: the subagent was adopted but no "Waiting on a background task" line appears by about 45 seconds after launch, or the card shows a raw value such as `awaiting-background-task`.
 2. **Collapsed card.** Collapse the card while the line shows and let the run list refresh. Expect: the badge reads "Running" and no reason line shows. Failure: a reason line on the collapsed card.
 3. **Re-expand.** Expand the card again while a reason is current. Expect: the current reason shows again within a few seconds. The gateway replays the latest status, reason included, to a new stream. Failure: no line while a reason is current.
-4. **Reconnect.** With the line showing, set DevTools → Network to Offline for about 5 seconds, then back to No throttling. Expect: the line goes blank while the card reconnects, then shows the current reason again. Failure: the line stays blank after the card reconnects while a reason is current.
+4. **Reconnect.** With the line showing, set DevTools → Network to Offline for about 5 seconds, then back to No throttling. Expect: the line goes blank while the card reconnects, then shows the current reason again. Failure: the line stays blank after the card reconnects while a reason is current. If the line stays visible throughout, the stream did not drop (Offline mode does not always close an open event stream; the [automated runbook](operator-surface-acceptance-automated.md#not-automatable) records the same), so nothing reconnected and the step did not run. In Network, a dropped stream shows as a finished `/operator/runs/<runId>/stream` request followed by a new one; if the original request stays open, record the step as skipped (`stream did not drop`, with the run ID), not as a pass.
 5. **Finished.** Expect: the line clears when the run reaches a terminal status, and stays clear after a run-list reload. Failure: a reason line on a finished run.
 6. **Rare reasons.** "Finishing its reply" (`awaiting-reply`) and "Agent still working" (`agent-working`) appear only in short windows and have no safe trigger. Record them only when they occur.
 
@@ -241,6 +276,14 @@ Not covered by the checks above. Tracked at [fro-bot/.github#3512](https://githu
 - Production-shaped redaction and denylist verification, with public and denylisted repos together.
 - Post-merge dashboard and infrastructure security review.
 - Privacy runtime confirmation.
+- Data branch preservation through a production promotion. The `data` branch of fro-bot/.github must survive a `Merge Data Branch` promotion: the tip before the promotion must be an ancestor of the tip after it. Run it around the next promotion, scheduled or dispatched. Both commands are read-only and need only the `gh` login the automated runbook already uses. Run the first just before the promotion starts and again after it finishes, and record both SHAs. Then run the second with the old SHA first:
+
+  ```bash
+  gh api repos/fro-bot/.github/git/ref/heads/data --jq .object.sha
+  gh api repos/fro-bot/.github/compare/<old-sha>...<new-sha> --jq .status
+  ```
+
+  Expect: `ahead`, which means the old tip is an ancestor of the new one. `identical` means the branch did not move, so the check is not demonstrated: record that. Failure: `diverged`, `behind` or a `404`, which means `data` was replaced or reset; see [check 5](#5-launch-and-stream) step 4 for the reseed.
 
 ---
 

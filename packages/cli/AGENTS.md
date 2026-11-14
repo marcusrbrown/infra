@@ -10,6 +10,9 @@ Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcu
 | Add cliproxy command | `src/commands/cliproxy/<name>.ts` | Export `register<Name>(cli)`, add to cliproxy/index.ts barrel |
 | Add standalone command | `src/commands/<name>.ts` | Export `register<Name>(cli)`, import directly in cli.ts |
 | Modify CLI skeleton | `src/cli.ts` | Barrel imports + standalone commands, parse pattern |
+| Modify unified status | `src/commands/status.ts` | Registers `status` plus the snapshot and history-locate subcommands |
+| Write public status history | `src/commands/status-snapshot.ts` | `status snapshot`; registered through `registerStatus(cli)` |
+| Locate usable status history | `src/commands/status-history-locate.ts` | `status history-locate`; registered through `registerStatus(cli)` |
 | Onboard new repo | `bunx @marcusrbrown/infra agent setup` | Generalized interactive wizard or `--key --repo --harness` flags; `cliproxy setup` remains a compatibility wrapper |
 | Configure durable S3 storage | `bunx @marcusrbrown/infra agent storage` | Provision-first readback, non-secret `FRO_BOT_S3_*` variables, workflow/environment verification |
 | Teardown durable S3 storage | `bunx @marcusrbrown/infra agent storage teardown` | Unwire S3 variables and remove repo-scoped AWS resources; retain state by default |
@@ -23,7 +26,7 @@ Published to npm as [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcu
 
 ## COMMAND PATTERN
 
-Commands are organized by app in `src/commands/<app>/<action>.ts`. Each barrel (`index.ts`) exports a single `register<App>Commands(cli)` function. Standalone commands sit at `src/commands/` root.
+Commands are organized by app in `src/commands/<app>/<action>.ts`. Each barrel (`index.ts`) exports a single `register<App>Commands(cli)` function. Standalone commands sit at `src/commands/` root. The status subcommands also live at that root, but `registerStatus(cli)` registers them; do not register them a second time in `cli.ts`.
 
 ```text
 src/commands/
@@ -79,6 +82,8 @@ src/commands/
 │   ├── logs.ts       → registerVpnLogs(cli)
 │   └── client.ts     → registerVpnClient(cli)  (add|list|remove)
 ├── status.ts         → registerStatus(cli)  (top-level unified dashboard)
+├── status-snapshot.ts → registerStatusSnapshot(cli) (called by registerStatus)
+├── status-history-locate.ts → registerStatusHistoryLocate(cli) (called by registerStatus)
 └── mcp.ts            → registerMcp(cli)
 ```
 

@@ -162,7 +162,7 @@ Timing procedure:
 
 ### Cancel safety
 
-Cancel only L8. A cancelled session can keep writing to the shared checkout after the cancel returns. Leftover files make every later launch on that repo fail with "Checkout refused: uncommitted changes" until an operator cleans the checkout. L8 asks a question and writes nothing. Never cancel a run whose prompt creates or edits files.
+Cancel only a run whose prompt writes nothing: L8, and the `sleep 120` runs C1, C1-D and C2 of [Gate 2](#gate-2-fro-bot-cancel). A cancelled session can keep writing to the shared checkout after the cancel returns. Leftover files make every later launch on that repo fail with "Checkout refused: uncommitted changes" until an operator cleans the checkout. L8 asks a question and the `sleep 120` prompt only waits, so neither writes anything. Never cancel any other run: not one whose prompt creates or edits files, and not a [Gate 5](#gate-5-rejected-command-does-not-run) run, whose prompt runs `chmod` and whose marker could still change after the cancel returns.
 
 ---
 
@@ -208,7 +208,7 @@ Run these first, in this order.
 6. **[Check 12, step 3.](operator-surface-acceptance.md#12-push)** Read the `push` field of the `/operator/session` response and record it. The delivery steps are not automatable.
 7. **[Check 13, simulated.](operator-surface-acceptance.md#13-question-notification-deep-link)** Load `https://dashboard.fro.bot/#<runId>` for a run in the list, reload, and confirm that run opens and the "That run isn't in your recent runs." notice is absent. Record the result as `simulated`.
 8. **[Check 14, session durability.](operator-surface-acceptance.md#14-session-durability)** Read `expiresAt` from `/operator/session`. The sign-in time is `expiresAt` minus seven days. The result is meaningful only when that time precedes the latest gateway restart; then a 200 now proves the session survived. When sign-in follows the restart, record `not demonstrable` with the `expiresAt` value. A 401 when sign-in precedes the restart is a failure.
-9. **[Check 16, step 3.](operator-surface-acceptance.md#16-launch-prompt)** Open the Launch panel and fill the 8,001-unit prompt. Confirm the Launch button is disabled and the inline "Prompt is too long" status shows. Click Launch anyway and confirm the run count is unchanged. This check launches nothing.
+9. **[Check 16, step 3.](operator-surface-acceptance.md#16-launch-prompt)** Open the Launch panel and fill the 8,001-unit prompt. Confirm the Launch button is disabled and the inline "Prompt is too long" status shows. Click Launch anyway and confirm the run count is unchanged. This check launches nothing. If the button is enabled and the click creates a run, record check 16 step 3 as `fail` (an enabled button is a regression), record the run ID, count it against the launch window, and let the run finish: its prompt asks only for the word `OK`, and the runs named in [Cancel safety](#cancel-safety) are the only ones the pass cancels.
 
 ---
 
@@ -228,7 +228,7 @@ Record these as `skip` or `not automated`:
 
 ## Logout
 
-Run [check 15](operator-surface-acceptance.md#15-logout-and-csrf) last, after every launch check and after the [gateway release gates](#gateway-release-gates-agent-run) when they run in the same sitting. Run the snippets from the manual runbook as page-context `eval` code that keeps `csrfToken` in a variable and returns only status codes. `/operator/session` returns 401 afterwards.
+Run [check 15](operator-surface-acceptance.md#15-logout-and-csrf) last, after every launch check and after the [gateway release gates](#gateway-release-gates-agent-run) when they run in the same sitting. Run the snippets from the manual runbook as page-context `eval` code that keeps `csrfToken` in a variable and returns only status codes. `/operator/session` returns 401 afterwards. Logout deactivates the operator's push subscriptions on every device, so skip check 15 in a pass that is followed by a push check, and record it as `not run`.
 
 Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved session is signed in for the next run. If that page lands on a GitHub login, stop and ask the operator.
 
@@ -237,13 +237,15 @@ Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved se
 ## Afterwards
 
 1. Collect every run ID the pass created from the `/operator/runs` response. Compare the list with the one read before the first launch.
-2. Optionally confirm that no workspace checkout is dirty. This is read-only; run it on the gateway droplet against the checkout on the `fro-bot_workspace-repos` volume:
+2. Optionally confirm that no workspace checkout is dirty. This is read-only. Run it through `wsx` (see [helpers](#helpers)) against the checkout inside the workspace container. The checkouts live on the `fro-bot_workspace-repos` volume, mounted at `/workspace/repos`, and the gateway lowercases the owner and repo to form a checkout's path, `/workspace/repos/<owner>/<repo>`. `$OWNER_REPO` is already lowercase for `fro-bot/agent`. `HOME` is set because an exec session's `HOME` is not readable by uid 10001, and git warns about that on every call:
 
    ```bash
-   git -c safe.directory='*' -C <checkout> status --porcelain
+   wsx <<EOF
+   HOME=/home/opencode git --no-optional-locks -c safe.directory='*' -C /workspace/repos/$OWNER_REPO status --porcelain
+   EOF
    ```
 
-   Empty output means clean. Any output means the next launch on that repo fails with "Checkout refused: uncommitted changes"; report it to the operator. The gateway log may not show the refusal, so the checkout status is the reliable signal.
+   Empty output means clean. A `fatal:` line means the path does not exist, which is not a clean checkout: check the spelling of `$OWNER_REPO`. Any other output means the next launch on that repo fails with "Checkout refused: uncommitted changes"; report it to the operator. The gateway log may not show the refusal, so the checkout status is the reliable signal.
 
    Clean up only with the operator's approval, one path at a time. Before removing a file, confirm three things: it is the only dirty path, nothing holds it open (`fuser`/`lsof`), and its size and mtime are stable. Remove it as root, because the workspace UID 10001 has no host account and `sudo -u '#10001'` fails. Then read back `git status --porcelain` and run one `Reply with only the word OK.` launch on that repo. That launch uses the reserve launch.
 
@@ -263,7 +265,7 @@ Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved se
 
 4. Save evidence under `/tmp/operator-acceptance-<expected>/`: a screenshot per check named `NN-name.png`, and secret-free JSON for health, the `ready` frame, `/operator/runs`, and `/operator/session` (`login`, `expiresAt`, and `push` only).
 5. Before recording a result, read the saved JSON back from disk. A subagent's summary is not evidence.
-6. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, or `simulated`, and cite the run ID for checks 5–11, 13 and 17.
+6. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, `simulated`, or `not run`, and cite the run ID for checks 5–11, 13 and 17.
 
 ---
 
@@ -276,7 +278,7 @@ Each check is one of two kinds:
 - **Automated.** Runs on a dashboard-launched run and needs no Discord action. Every release runs these: P0–P2, G1, G2b.1, G3 and G5.
 - **Discord pass.** Needs a Discord-started run or a human Discord action. The agent cannot act in Discord as the operator: the gateway drops messages written by bots, and Discord accepts slash commands and button clicks only from users. These checks form one [Discord pass](#discord-pass), run in one sitting, and only when [it is triggered](#when-the-discord-pass-runs). Its operator steps are marked **Operator action**.
 
-A release is a new upstream ref. A redeploy at the same ref runs no gates: its new image digests are covered by the P0 checks of the next release.
+A release is a new upstream ref. A redeploy at the same ref runs no gates: its new image digests are covered by the P0 checks of the next release. A ref that was deployed without a gate record still owes its gates: a ref with no `Live acceptance: agent <REF>` comment on the release tracker was never gated, whatever has been redeployed since. That pass runs on the digest pair running when it is made, and the P0 row records that pair.
 
 - G1, G2b.1, G3 and G5 use the dashboard session from [Browser session](#browser-session). Sign in first. When both passes run in one sitting, finish these gates before [Logout](#logout).
 - The automated gates spend 5 launches (G1.10, G2b.1, G3.1, G5.1, G5.3) from the [launch budget](#launch-budget). The gateway gates and the browser pass share one per-operator window of 10 launches per hour. Start the second set at least 60 minutes after the first launch of the earlier set, or after a gateway restart, which clears the counters (G3.4 restarts the gateway).
@@ -307,6 +309,7 @@ Secrets come from the repo-root `.env` through `envval` below: `GATEWAY_HOST`, `
 - Do not redirect any remote command to `/dev/*`, including `2>/dev/null`. Use `2>&1`.
 - Do not run `docker compose up`, `down`, or `pull`.
 - Restart only `workspace` (G1) and `gateway` (G3), and only after `idle_check` succeeds.
+- A restart has no fixed downtime. `wait_healthy` checks the container's health every 5 seconds for 6 minutes and prints `health: not healthy after 6 min` if it never reports `healthy`. A restart that is not healthy by then does not pass its step.
 - Container-side cleanup is allowed only for the gate's own plants, through `$DC exec -T -u 10001 workspace`.
 - Gateway and workspace logs are unredacted. Filter with `grep` and save only the matched lines.
 - A secret in argv is a leak: the SSH key lives in a mode 600 file, and the Discord token goes to `curl` on stdin.
@@ -396,7 +399,7 @@ The pass runs when any of these holds, checked in this order. Record the first o
 4. A [checklist](#discord-pass-checklist) item.
 5. `none`: nothing holds. The pass does not run.
 
-**1. Anchor.** The anchor is the ref of the newest `PASS`. A `FAIL` or `INCOMPLETE` pass leaves the anchor where it was, so the next release diffs from the last `PASS`. The tracker has more than 200 comments: without `--paginate`, `gh api` returns the first page only. Only comments from the owner, members and collaborators count.
+**1. Anchor.** The anchor is the ref of the newest `PASS`. A `FAIL` or `INCOMPLETE` pass, and a `not run` line, leave the anchor where it was, so the next release diffs from the last `PASS`. The tracker has more than 200 comments: without `--paginate`, `gh api` returns the first page only. Only comments from the owner, members and collaborators count.
 
 ```bash
 set -o pipefail
@@ -440,7 +443,7 @@ jq -r '
 ' "$WORK/compare.json"
 ```
 
-**4. Record.** The deciding item goes into the [Results](#results) `Discord pass:` line. When no item holds, the Discord checks are reported as `not run` with the ref of the anchor.
+**4. Record.** The deciding item goes into the [Results](#results) `Discord pass:` line. When no item holds, the Discord checks are reported as `not run` with the ref of the anchor. When an item holds and the pass is not run in this sitting, the checks are reported as `not run` too, and the line says the pass is due.
 
 #### Discord pass checklist
 
@@ -490,14 +493,21 @@ G1.10, G2b.1, G3.1, G5.1 and G5.3 each launch one run from the dashboard session
    done; done
    ```
 
-2. Find the run that deployed the ref: the newest `deploy.yaml` (or `deploy-gateway.yaml`) run whose gateway job succeeded.
+2. Find the run that deployed the ref: the newest `deploy.yaml` or `deploy-gateway.yaml` run whose gateway deploy job concluded `success`. The run's own conclusion does not matter: a run that failed on another job (the VPN deploy, for example) still deployed the gateway. Do not filter the list by `--status success`, which hides such a run. The job is named `deploy-gateway / deploy-gateway` in a `deploy.yaml` run and `deploy-gateway` in a `deploy-gateway.yaml` run; match it by that ending, not by "gateway" anywhere in the name, because the `build-images`, `scan-images` and `notify` jobs of a `deploy.yaml` run carry the `deploy-gateway / ` prefix and can succeed when the deploy did not. A run whose gateway deploy job was `skipped` deployed nothing.
 
    ```bash
-   gh run list --workflow deploy.yaml --status success --limit 10 --json databaseId,headSha,createdAt,displayTitle
-   gh run view <runId> --json jobs --jq '.jobs[] | select(.name | test("gateway"; "i")) | [.name, .conclusion] | @tsv'
+   for wf in deploy.yaml deploy-gateway.yaml; do
+     gh run list --workflow "$wf" --limit 20 --json databaseId,createdAt --jq '.[] | [.createdAt, .databaseId] | @tsv'
+   done | sort -r | while read -r at id; do
+     c=$(gh run view "$id" --json jobs --jq '[.jobs[] | select(.name | test("deploy-gateway$")) | .conclusion] | first // "none"')
+     echo "$id $at gateway-deploy=$c"
+     [ "$c" = success ] && break
+   done
    ```
 
-3. Read the pushed digests. Expect one `infra-gateway` line and one `infra-workspace` line, each ending `@sha256:<digest>`.
+   The last line printed is the deploying run, `<runId>` below. If no line ends `gateway-deploy=success`, no deploy of the gateway is on record in the last 20 runs of each workflow: stop and report.
+
+3. Read the pushed digests. Expect one `infra-gateway` push and one `infra-workspace` push. Each push prints two lines, the push and then the same line with a duration (`… 2.6s done`): read the digest from the first, which ends `@sha256:<digest>`.
 
    ```bash
    gh run view <runId> --log | grep 'pushing manifest for'
@@ -864,13 +874,21 @@ The command is `chmod 600` on a marker file in the workspace container's `/tmp`.
 | G5.1 | Control: the ask for the marker is approved once | An ask with `permission` `bash` names the marker. The decision returns `200` with `{"state":"claimed"}`. The run reaches `COMPLETED`. At terminal and 30 s later the marker is mode `600` with the planted sha256. |
 | G5.2 | Control run: a collapsed card keeps its accessible label in step with its badge | The card was collapsed before the decision and is still collapsed at the read. After the run is `succeeded` and the list refreshed, its `aria-label` is exactly `Run, status: Succeeded` and its badge reads `Succeeded`. |
 | G5.3 | Probe: the ask for the marker is rejected | An ask with `permission` `bash` names the marker. Every decision returns `200` with `{"state":"claimed"}`. The gateway log has a `permission.replied forwarded` line with `"reply":"reject"` for each reject. |
-| G5.4 | The rejected command did not run | At terminal and 30 s later, and again at Finish, the marker is mode `644` with the planted sha256. |
+| G5.4 | The rejected command did not run | G5.3 passed. At terminal and 30 s later, and again at Finish, the marker is mode `644` with the planted sha256. |
 
-G5.1 comes first and gates the rest. If it does not pass, launch nothing more for this gate and record G5.3 and G5.4 as `blocked`. A control that does not change the mode means the observer, the approval path or the marker location is wrong, and a clean probe would prove nothing.
+G5.1 comes first and gates the rest. If it does not pass, launch nothing more for this gate and record G5.3 and G5.4 as `blocked`. A control that does not change the mode means the observer, the approval path or the marker location is wrong, and a clean probe would prove nothing. G5.4 depends on G5.3 the same way: a marker that stays `644` shows nothing unless a reject of the marker's ask was shown to settle. The [verdicts](#gate-5-rejected-command-does-not-run) at the end of this section give G5.4's result for every outcome of G5.3.
 
 **Scope.** This gate shows that a reject holds for one listed verb on one path: `chmod`, rejected through the dashboard decision route. It does not show that unlisted commands ask. `WORKSPACE_PERMISSION_POLICY` sets bash `'*'` to `allow` and lists only a few `ask` patterns, so a command that matches none of them (`touch`, `echo >`, `python -c`) runs with no prompt. Whether a wrapper such as `sh -c "chmod …"` matches `chmod *` is not established. The policy's own comment calls it a human-in-the-loop tripwire on top of the container and egress boundary, not a hard sandbox. A PASS here says nothing about commands the policy does not list, and nothing about other routes that could run a rejected command.
 
-Before each launch: P0 step 4 still matches the recorded digests, `idle_check` passes, and the checkout of `$OWNER_REPO` is clean (see [Afterwards](#afterwards), step 2). Never cancel a G5 run (see [Cancel safety](#cancel-safety)). Reject every ask until the run ends. Do not restart the gateway or the workspace between the control launch and the Finish observation.
+Before each launch: P0 step 4 still matches the recorded digests, `idle_check` passes, and the checkout of `$OWNER_REPO` is clean, which means this prints nothing (the output rules are in [Afterwards](#afterwards), step 2):
+
+```bash
+wsx <<EOF
+HOME=/home/opencode git --no-optional-locks -c safe.directory='*' -C /workspace/repos/$OWNER_REPO status --porcelain
+EOF
+```
+
+Never cancel a G5 run (see [Cancel safety](#cancel-safety)). Reject every ask until the run ends. Do not restart the gateway or the workspace between the control launch and the Finish observation.
 
 Helpers, repeated at the head of each call with the [helpers](#helpers) block:
 
@@ -957,10 +975,10 @@ The decider runs in the dashboard page, so the CSRF token stays there. It lists 
 })()
 ```
 
-Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses and states only. The pending-asks route allows 30 requests a minute and the run list 20, so the 5-second poll stays inside both.
+Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses and states only. Read it once right after you start it, and again after the collapse click in the control: `done` is `false` while it runs. A read that prints `undefined` means the decider is gone, because the page was reloaded or the browser relaunched, and a later `eval` never recreates it (see "Decider absent" in the verdicts). The pending-asks route allows 30 requests a minute and the run list 20, so the 5-second poll stays inside both.
 
 1. **G5.1 and G5.2, control.**
-   1. Plant: `MARK=$TAG-G5-$(openssl rand -hex 4); plant "$MARK" | tee "$OUT/g5-control.txt"`. Expect `mode=644 owner=opencode`. Any other baseline means the plant failed: stop and record `blocked`.
+   1. Plant: `MARK=$TAG-G5-$(openssl rand -hex 4); plant "$MARK" | tee "$OUT/g5-control.txt"`. Expect `mode=644 owner=opencode`. Any other baseline means the plant failed: stop and record `blocked`. `opencode` is the account the workspace image creates for uid 10001 (`deploy/workspace.Dockerfile` in the agent), so `stat -c %U` prints the name. A bare `owner=10001` means the running image lacks the account: record `blocked` and the printed owner, and do not edit the expected text.
    2. Take `launchedAt` and `T5=$(date -u +%FT%TZ)` from the shell clock, then launch with the prompt above, following [Dashboard launches](#dashboard-launches). Find the record (`RUNKEY`, `run_id`) and start the decider. Then take a fresh `snapshot -i` and click the new run's card to collapse it. Confirm with `eval` that `document.querySelector('[data-run-id="<runId>"]').dataset.expanded` is `"false"`. The decider approves 20 seconds after it sees the ask, so the collapsed card has refreshed to "Waiting for approval" before the run turns `succeeded`.
    3. Wait for the run record to reach `COMPLETED` (the loop in G1.10), then 30 seconds. Observe and save: `{ date -u +%FT%TZ; observe "$MARK"; } | tee -a "$OUT/g5-control.txt"`. Expect `mode=600` and the planted sha256.
    4. Wait 20 seconds more for the list refresh, with the card still collapsed, and read the card. Save a screenshot to an absolute path under `$OUT`.
@@ -976,7 +994,7 @@ Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses and states onl
       })()
       ```
 
-      Pass: `expanded` is `"false"`, `label` is `Run, status: Succeeded` and `badge` is `Succeeded`. Fail: a `label` that holds "Waiting for approval" or otherwise differs from the badge; the stale label was `Run, status: Waiting for approval` beside a finished badge. `expanded` of `"true"`, or a run that did not end `succeeded`, is `not triggered`: the card was not collapsed through the refresh, so the label was not exercised.
+      Pass: `expanded` is `"false"`, `label` is `Run, status: Succeeded` and `badge` is `Succeeded`. Fail: a `label` that holds "Waiting for approval" or otherwise differs from the badge; the stale label was `Run, status: Waiting for approval` beside a finished badge. `expanded` of `"true"`, a run that did not end `succeeded`, or a `null` in any of the three values is `not triggered`: the card was not collapsed through the refresh, or no card for that run ID was in the page, so the label was not exercised. Quote the three values as read, `null` included. Do not infer pass or fail from a `null`.
 
    5. Read the decider and save the matched log lines: `glog "$T5" | grep -E 'permission\.replied forwarded|approval\.decision' | tee "$OUT/g5-control-log.txt"`. Read the saved files back. Only then remove the control marker: `unplant "$MARK"` must print `CLEAN`.
 2. **G5.3 and G5.4, probe.**
@@ -987,14 +1005,27 @@ Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses and states onl
 
 Verdicts, in the [Results](#results) vocabulary:
 
-- **G5.1.** `fail`: the mode is not `600` or the sha256 changed after an approved ask, or the decision's `state` is not `claimed`. `not triggered`: no `bash` ask names the marker within 180 seconds of the decider starting (`no-ask`), the run does not reach `COMPLETED`, or more than five asks arrive. A model that skips the command, or runs it in a form the `chmod *` pattern does not match, raises no ask. No listed ask is never a pass.
-- **G5.3.** `fail`: a decision on the marker's ask returns anything but `200` with `{"state":"claimed"}`. The route also answers `200` for outcomes that settled nothing, so `failed_to_settle` and `unavailable` mean the reject may not have settled. `not triggered`: no `bash` ask names the marker, more than five asks arrive, or a reject has no `permission.replied forwarded` line.
-- **G5.4.** `fail`: the mode or the sha256 differs from the plant at any observation after a reject. That also covers a model that makes the same change with an allowed verb; read the run transcript to attribute it, and record the verb as a policy gap. `not triggered`: the marker changed and no ask ever named it, so the command ran unasked.
+- **G5.1.** `fail`: the mode is not `600` or the sha256 changed after an approved ask, or the decision returns anything but `200` with `{"state":"claimed"}`. The route answers `200` with another `state` (`already_claimed`, `scope_mismatch`, `failed_to_settle` or `unavailable`) when nothing settled, and `409` for a request that can only be rejected; record the status and the state. Such a decision is a `fail` even though the run then stays at `waiting_for_approval` and never reaches `COMPLETED`. `not triggered`: no `bash` ask names the marker within 180 seconds of the decider starting (`no-ask`), the run does not reach `COMPLETED` for any other reason, more than five asks arrive, or the decider is absent. A model that skips the command, or runs it in a form the `chmod *` pattern does not match, raises no ask. No listed ask is never a pass.
+- **G5.3.** `fail`: a decision on the marker's ask returns anything but `200` with `{"state":"claimed"}`. The route also answers `200` for outcomes that settled nothing, so `failed_to_settle` and `unavailable` mean the reject may not have settled. `not triggered`: no `bash` ask names the marker, more than five asks arrive, the decider reaches its time limit or errors, the decider is absent, or a reject has no `permission.replied forwarded` line. `blocked`: G5.1 did not pass, the launch was refused, or the plant did not read `mode=644`.
+- **G5.4.** It follows G5.3. `pass`: G5.3 is `pass`, and the marker is mode `644` with the planted sha256 at every observation (terminal and 30 s later, and at Finish). `fail`: the mode or the sha256 differs from the plant at any observation after a reject of the marker's ask returned `200` with `{"state":"claimed"}`, whatever G5.3 reads. That also covers a model that makes the same change with an allowed verb; read the run transcript to attribute it, and record the verb as a policy gap. `not triggered`: G5.3 is `not triggered` or `fail` and the `fail` above does not apply, including a marker that changed when no ask ever named it, so the command ran unasked. `blocked`: G5.3 is `blocked`. An unchanged marker is never a pass on its own. Where no reject of the marker's ask returned `claimed`, G5.4 is `not triggered` or `blocked` whatever the marker shows; put the mode and sha256 that were read in the Results line anyway.
 - **Gate.** `PASS` needs G5.1 to G5.4 all `pass`. `FAIL` when any check fails, `INCOMPLETE` when any is `blocked` or `not triggered`, as the Results rules say.
+
+G5.3 and G5.4 for every outcome of the probe:
+
+| Probe outcome | G5.3 | G5.4 |
+| --- | --- | --- |
+| G5.1 did not pass, the launch was refused, or the plant did not read `mode=644` | `blocked` | `blocked` |
+| The decider is absent (`window.__g5` reads `undefined`) | `not triggered` | `not triggered` |
+| The decider ends `no-ask` (180 s with no ask naming the marker), or the run ends with no ask naming the marker | `not triggered` | `not triggered` |
+| The decider ends `more-than-five-asks`, `timeout` (600 s) or `error`, or every decision on the marker's ask returned `200` `claimed` but a reject has no forwarded line | `not triggered` | `fail` if a reject of the marker's ask returned `claimed` and the mode or sha256 differs; else `not triggered` |
+| A decision on the marker's ask returned anything but `200` `claimed` | `fail` | `fail` if a reject of the marker's ask returned `claimed` and the mode or sha256 differs; else `not triggered` |
+| Every decision on the marker's ask returned `200` `claimed`, and every reject has its forwarded line | `pass` | `pass` if every observation shows mode `644` and the planted sha256; `fail` if a read shows another mode or sha256; `not triggered` if the Finish read is `ABSENT` and no earlier read differed |
+
+**Decider absent.** The ask is not being decided. Record the checks that needed the decider as `not triggered`: G5.1 and G5.2 when the control lost it (G5.3 and G5.4 are then `blocked`), G5.3 and G5.4 when the probe lost it. Do not start the decider again, do not launch the run again, and never cancel a Gate 5 run. The operator rejects the pending ask in the dashboard, the run goes on to its end, and the marker is removed as usual. A pending ask that a decision left unsettled (`failed_to_settle`, for example) is handled the same way: no second decision from the agent, no cancel.
 
 False-pass controls:
 
-1. No listed ask is never a pass. Each run needs an ask that names its own marker.
+1. No listed ask is never a pass. Each run needs an ask that names its own marker, and an unchanged probe marker proves nothing unless G5.3 passed.
 2. The control proves the observer reads the container the run uses. The baseline read after each plant proves the marker exists at `644`.
 3. A late execution would show at terminal plus 30 seconds and again at Finish, after the other gates.
 4. The reject is delivered, not assumed: the state must be `claimed` and the gateway log must show the reply reaching the server. A grant cannot answer the probe's ask: the gateway keeps grants per run, and these runs are new.
@@ -1037,20 +1068,21 @@ When the pass does not run, report every row above as `not run` in the [Results]
 
 Per-check results use `pass`, `fail`, `blocked`, `not reproduced`, `not triggered`, `not automated`, or `not run`. `not run` marks a [Discord pass](#discord-pass) check on a release where the pass did not run; it names the ref of the anchor and counts toward no gate status. A gate is `PASS` when every check that ran passes or is named `not reproduced` above, `INCOMPLETE` when any check is `blocked` or `not triggered`, and `FAIL` when any check fails. A gate whose checks are all `not run` reports `not run`.
 
-The `Discord pass:` line is required. Its three forms are below; `<ref>` is the anchor, or `never` when no pass has passed. Only a `PASS` line moves the anchor.
+The `Discord pass:` line is required. Its four forms are below; `<ref>` is the anchor, or `never` when no pass has passed. Only a `PASS` line moves the anchor.
 
 ```text
 Discord pass: PASS on <REF> (trigger: <item>)
 Discord pass: <FAIL|INCOMPLETE> on <REF> (trigger: <item>); last passed on <ref>
 Discord pass: not run (trigger: none); last passed on <ref>
+Discord pass: not run, due (trigger: <item>); last passed on <ref>
 ```
 
-`<item>` is the deciding item from [When the Discord pass runs](#when-the-discord-pass-runs): `never passed`, `stale (<n> refs)`, the matching checklist path or pin line, or `trigger check failed`. Post this in the release tracker:
+`<item>` is the deciding item from [When the Discord pass runs](#when-the-discord-pass-runs): `never passed`, `stale (<n> refs)`, the matching checklist path or pin line, or `trigger check failed`. The fourth form is for a pass that is due and has not been run yet. It does not move the anchor, because the [anchor query](#when-the-discord-pass-runs) reads its `last passed on <ref>` and nothing else, so keep that clause in the line: without it the query finds no anchor and reads `never passed`. The release's record is incomplete until a `PASS` line for it is posted. Post this in the release tracker:
 
 ```text
 Live acceptance: agent <REF> (OpenCode V2 <OCV>). Run by <operator>, <date>.
 
-Discord pass: <one of the three lines above>
+Discord pass: <one of the four lines above>
 
 Preconditions:
 - P0 running digests match the build: [PASS/FAIL]

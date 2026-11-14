@@ -220,7 +220,6 @@ Record these as `skip` or `not automated`:
 - [Check 10](operator-surface-acceptance.md#10-agent-question) step 4 (Discord settlement) and step 6 (question push). `not automated`.
 - [Check 12](operator-surface-acceptance.md#12-push) delivery steps. `not automated`.
 - [Check 13](operator-surface-acceptance.md#13-question-notification-deep-link) notification taps. The deep-link simulation above covers only that `/#<runId>` opens the run.
-- [Check 15](operator-surface-acceptance.md#15-logout-and-csrf) step 4 (CSRF-negative and replay of the pre-logout cookie). The session cookie is HttpOnly, so page code cannot read it, and agent-browser documents neither the layout of its saved state nor whether that state holds HttpOnly cookies. The operator supplies the cookie from the browser's own tools. `not automated`.
 - [Check 16](operator-surface-acceptance.md#16-launch-prompt) step 4 has no safe trigger. `skip`.
 - [Check 17](operator-surface-acceptance.md#17-run-wait-reason) step 4 (reconnect). Browser offline mode does not drop an open SSE stream, so the card never reconnects. The behaviour is covered by fro-bot/dashboard `web/src/operator/wait-reason-label.test.ts` (a reconnecting connection clears the label, and a replayed running frame shows it again). `not automated`.
 - [Check 17](operator-surface-acceptance.md#17-run-wait-reason) step 6: "Finishing its reply" and "Agent still working" have no safe trigger. Record them only when they occur.
@@ -229,7 +228,7 @@ Record these as `skip` or `not automated`:
 
 ## Logout
 
-Run [check 15](operator-surface-acceptance.md#15-logout-and-csrf) last, after every launch check and after the [gateway release gates](#gateway-release-gates-agent-run) when they run in the same sitting. Run the snippets from the manual runbook as page-context `eval` code that keeps `csrfToken` in a variable and returns only status codes. `/operator/session` returns 401 afterwards. Step 4 of that check is an operator step; record it as `not automated`.
+Run [check 15](operator-surface-acceptance.md#15-logout-and-csrf) last, after every launch check and after the [gateway release gates](#gateway-release-gates-agent-run) when they run in the same sitting. Run the snippets from the manual runbook as page-context `eval` code that keeps `csrfToken` in a variable and returns only status codes. `/operator/session` returns 401 afterwards.
 
 Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved session is signed in for the next run. If that page lands on a GitHub login, stop and ask the operator.
 
@@ -248,9 +247,23 @@ Then open `https://dashboard.fro.bot/operator/auth/github/start` so the saved se
 
    Clean up only with the operator's approval, one path at a time. Before removing a file, confirm three things: it is the only dirty path, nothing holds it open (`fuser`/`lsof`), and its size and mtime are stable. Remove it as root, because the workspace UID 10001 has no host account and `sudo -u '#10001'` fails. Then read back `git status --porcelain` and run one `Reply with only the word OK.` launch on that repo. That launch uses the reserve launch.
 
-3. Save evidence under `/tmp/operator-acceptance-<expected>/`: a screenshot per check named `NN-name.png`, and secret-free JSON for health, the `ready` frame, `/operator/runs`, and `/operator/session` (`login`, `expiresAt`, and `push` only).
-4. Before recording a result, read the saved JSON back from disk. A subagent's summary is not evidence.
-5. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, or `simulated`, and cite the run ID for checks 5–11, 13 and 17.
+3. Confirm the `fro-bot/.github` `data` branch survived a promotion. Run it only when a `Merge Data Branch` promotion ran during the pass or the operator dispatched one for this purpose; otherwise record `not demonstrated`. Both commands are read-only and need only the `gh` login the gateway gates already use. Read the branch tip before the promotion starts (at the start of the pass, alongside the run list in step 1, or just before the dispatch) and again after it finishes:
+
+   ```bash
+   gh api repos/fro-bot/.github/git/ref/heads/data --jq .object.sha
+   ```
+
+   Then compare the two, old tip first:
+
+   ```bash
+   gh api repos/fro-bot/.github/compare/<old-sha>...<new-sha> --jq .status
+   ```
+
+   Pass: `ahead`, which means the old tip is an ancestor of the new one. `identical` means the branch did not move, so the check is not demonstrated: record that. Failure: `diverged`, `behind` or a `404`, which means `data` was replaced or reset; report it to the operator (see [check 5](operator-surface-acceptance.md#5-launch-and-stream) step 4 for the reseed). Record both short SHAs and the status with the results.
+
+4. Save evidence under `/tmp/operator-acceptance-<expected>/`: a screenshot per check named `NN-name.png`, and secret-free JSON for health, the `ready` frame, `/operator/runs`, and `/operator/session` (`login`, `expiresAt`, and `push` only).
+5. Before recording a result, read the saved JSON back from disk. A subagent's summary is not evidence.
+6. Record results as [Record results](operator-surface-acceptance.md#record-results) describes. Add a result column to the per-check list with one of `pass`, `fail`, `skip`, `not automated`, or `simulated`, and cite the run ID for checks 5–11, 13 and 17.
 
 ---
 

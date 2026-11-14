@@ -108,7 +108,7 @@ Run each of the following on a separate run:
 
 1. Send the trigger prompt. Expect: the card shows a waiting-for-approval status, "Tool action" followed by the command awaiting approval, and buttons "Once", "Always", and "Reject". Failure: the card shows no command text.
 2. **Once:** press "Once". Expect: the request clears from the card and the run proceeds. Failure: the request stays pending or the run stalls.
-3. **Reject:** on a new run, press "Reject". Expect: the request clears from the card, the run continues, the transcript notes that the command was rejected, and the run ends `succeeded`; on V1 the run instead ends within about a second. A plain run launched right afterwards starts at once. Failure: the request stays pending, the run fails, or the next launch on the repo is held. Whether the rejected `rm` was skipped is not visible here.
+3. **Reject:** on a new run, press "Reject". Expect: the request clears from the card, the run continues, the transcript notes that the command was rejected, and the run ends `succeeded`; on V1 the run instead ends within about a second. A plain run launched right afterwards starts at once. Failure: the request stays pending, the run fails, or the next launch on the repo is held. Whether the rejected `rm` was skipped is not visible here; [Gate 5](operator-surface-acceptance-automated.md#gate-5-rejected-command-does-not-run) of the automated runbook reads that effect from outside the model, for a rejected `chmod` on a marker file.
 4. **Collapsed status.** While a request is pending, collapse the card and let the run list refresh. Expect: the card's status badge reads "Waiting for approval". Failure: the collapsed card still reads "Running".
 5. **Always:** on a new run, press "Always". Expect: a second control, "Confirm always", appears and nothing is applied until you press it. After confirming, matching requests for the rest of that run no longer prompt (a second `rm` in the same run goes through without a prompt); a new run prompts again. Failure: "Always" applies without confirmation, or applies beyond that run (fro-bot/agent#1990).
 
@@ -177,7 +177,7 @@ Operator sessions live in the gateway's object store and survive restarts. Run t
 
 ### 15. Logout and CSRF
 
-Do this last. All snippets run in the DevTools Console on `https://dashboard.fro.bot`, except the shell command in step 4; the token stays in a page variable and is never printed.
+Do this last. It ends your session, and logout is global for push: it deactivates every push subscription for this operator on every device (see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats)). Run it after every other check, push checks included, and sign in again before the next run. The snippets run in the DevTools Console on `https://dashboard.fro.bot`, except the shell command in step 3. Tokens stay in variables and are never printed.
 
 1. Trigger: fetch the CSRF token.
 
@@ -187,61 +187,66 @@ Do this last. All snippets run in the DevTools Console on `https://dashboard.fro
 
    Expect: the request returns `{"csrfToken": "..."}`. Failure: 401 while signed in, or no `csrfToken` field.
 
-2. Trigger: log out with the token in the `x-csrf-token` header.
+2. Trigger: CSRF-negative. POST the decision route for a run and a request that do not exist, with no `x-csrf-token` header, with the token `0`, and with the valid token from step 1:
 
    ```js
-   const res = await fetch("/operator/auth/logout", {
-     method: "POST",
-     credentials: "same-origin",
-     headers: {"x-csrf-token": csrfToken},
-   })
-   res.status
+   const url = "/operator/runs/no-such-run/approvals/no-such-request/decision"
+   const post = headers =>
+     fetch(url, {
+       method: "POST",
+       credentials: "same-origin",
+       headers: {"content-type": "application/json", ...headers},
+       body: JSON.stringify({decision: "reject"}),
+     })
+   ;[
+     (await post({})).status,
+     (await post({"x-csrf-token": "0"})).status,
+     (await post({"x-csrf-token": csrfToken})).status,
+   ]
    ```
 
-   Record the status code. Step 3 is the proof that logout worked. Failure: a 403 with a freshly fetched token, or a 5xx.
+   Expect: `[400, 400, 404]`. The first two answer `{"error":"bad request"}`, and the gateway log shows `browser guard: missing CSRF token` and then `browser guard: CSRF token invalid`. The third passes the guard and finds no such run, which shows the first two failed on the token. Failure: `404` for either of the first two, which means the request got past the guard to the route; a `400` for the third; or any `2xx`. The IDs are made up, so nothing settles in any case.
 
-3. Trigger: check the old session.
+3. Trigger: log out and replay the session cookie, in one shell command. The session cookie is `__Host-session` and it is HttpOnly, so the Console cannot read it. Copy its value from the browser's own cookie tools (DevTools → Application → Cookies in Chrome, Storage → Cookies in Firefox). Do not take it from agent-browser's saved state: that file's layout, and whether it holds HttpOnly cookies, are not documented. Run this once in a terminal under `bash` and paste the value at the silent prompt. The subshell keeps the cookie and the CSRF token in shell variables only: nothing echoes them, and nothing writes them to a file. They are not in any command line, because `printf` is a shell builtin and `curl -K -` reads its headers from stdin. Only status codes print.
+
+   ```bash
+   (
+     read -rs -p "Paste the __Host-session value, then press Enter: " c; echo
+     base=https://dashboard.fro.bot/operator
+     ck() { printf 'header = "Cookie: __Host-session=%s"\n' "$c"; }
+     code() { curl -sS -o /dev/null -w '%{http_code}' -K - "$@"; }
+     t=$(ck | curl -sS -K - "$base/session/csrf" | jq -r .csrfToken)
+     echo "before logout: $(ck | code "$base/session")"
+     echo "logout:        $({ ck; printf 'header = "x-csrf-token: %s"\nheader = "Origin: https://dashboard.fro.bot"\n' "$t"; } | code -X POST "$base/auth/logout")"
+     echo "replay:        $(ck | code "$base/session")"
+   )
+   ```
+
+   Expect: `200`, `200`, `401`. The first line is the session before logout. The second is logout with a freshly fetched token in the `x-csrf-token` header; the `Origin` header is there because the gateway rejects a mutating request that has neither a matching `Origin` nor same-origin fetch metadata. The third is the replay of the same cookie, and it is the proof that logout worked: the session is revoked on the server, not just cleared in the browser. Failure:
+
+   - A first line that is not `200`. The pasted value is wrong and the replay proves nothing: stop and run it again.
+   - A logout line of `400` with a freshly fetched token (the guard rejected the token or the `Origin`), `403` (the account is not on the allowlist), `429` (rate limited), `503` (the revoke was not stored and the session stays valid), or any other `5xx`. Nothing was revoked. Log out from the Console instead, record the shell result as the failure, and skip the replay:
+
+     ```js
+     const res = await fetch("/operator/auth/logout", {
+       method: "POST",
+       credentials: "same-origin",
+       headers: {"x-csrf-token": csrfToken},
+     })
+     res.status
+     ```
+
+   - A replay of `200`, which means the session survived logout.
+
+   Clear the clipboard afterwards.
+
+4. Trigger: check the session in the browser. The shell command does not touch the browser's cookie, so the browser still holds the revoked one.
 
    ```js
    ;(await fetch("/operator/session", {credentials: "same-origin"})).status
    ```
 
    Expect: `401`. Failure: any 2xx, which means the session survived logout.
-
-4. **CSRF-negative and replay of the pre-logout cookie.** This ends a second session, and logout is global for push: it deactivates every push subscription for this operator on every device (see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats)). Run it after every other check, push checks included. Steps 1–3 ended the session you were using, so sign in again at `/operator/auth/github/start` first.
-
-   1. CSRF-negative. In the DevTools Console, POST the decision route for a run and a request that do not exist, once with no `x-csrf-token` header and once with the token `0`:
-
-      ```js
-      const url = "/operator/runs/no-such-run/approvals/no-such-request/decision"
-      const post = headers =>
-        fetch(url, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {"content-type": "application/json", ...headers},
-          body: JSON.stringify({decision: "reject"}),
-        })
-      ;[(await post({})).status, (await post({"x-csrf-token": "0"})).status]
-      ```
-
-      Expect: `[400, 400]` (`{"error":"bad request"}` each time), and the gateway log shows `browser guard: missing CSRF token` and then `browser guard: CSRF token invalid`. Failure: `404`, which means the request got past the guard to the route (the IDs are made up, so nothing settles either way), or any `2xx`.
-
-   2. Replay. The session cookie is `__Host-session` and it is HttpOnly, so the Console cannot read it. Copy its value from the browser's own cookie tools (DevTools → Application → Cookies in Chrome, Storage → Cookies in Firefox). Do not take it from agent-browser's saved state: that file's layout, and whether it holds HttpOnly cookies, are not documented. Then run this once in a terminal under `bash` and paste the value at the silent prompt. The subshell keeps the cookie and the CSRF token in shell variables only: nothing echoes them, and nothing writes them to a file. They are not in any command line, because `printf` is a shell builtin and `curl -K -` reads its headers from stdin. Only status codes print.
-
-      ```bash
-      (
-        read -rs -p "Paste the __Host-session value, then press Enter: " c; echo
-        base=https://dashboard.fro.bot/operator
-        ck() { printf 'header = "Cookie: __Host-session=%s"\n' "$c"; }
-        code() { curl -sS -o /dev/null -w '%{http_code}' -K - "$@"; }
-        t=$(ck | curl -sS -K - "$base/session/csrf" | jq -r .csrfToken)
-        echo "before logout: $(ck | code "$base/session")"
-        echo "logout:        $({ ck; printf 'header = "x-csrf-token: %s"\nheader = "Origin: https://dashboard.fro.bot"\n' "$t"; } | code -X POST "$base/auth/logout")"
-        echo "replay:        $(ck | code "$base/session")"
-      )
-      ```
-
-      Expect: `200`, `200`, `401`. The `Origin` header is needed because the gateway rejects a mutating request that has neither a matching `Origin` nor same-origin fetch metadata. Failure: a replay of `200`, which means the revoked session still works. If the first line is not `200`, the pasted value is wrong and the replay proves nothing: stop and run it again. If the logout line is not `200`, nothing was revoked: log out with the snippet in step 2 and record this step as not run. Clear the clipboard afterwards. The session ends here; sign in again before the next run.
 
 Logout deletes only that session: a separate browser signed in earlier stays signed in, and a gateway restart ends none of them: sessions are durable and last a fixed seven days from sign-in. For what logout does to push subscriptions, see [`operator-push-enablement.md`](operator-push-enablement.md#critical-operational-caveats).
 
@@ -276,14 +281,6 @@ Not covered by the checks above. Tracked at [fro-bot/.github#3512](https://githu
 - Production-shaped redaction and denylist verification, with public and denylisted repos together.
 - Post-merge dashboard and infrastructure security review.
 - Privacy runtime confirmation.
-- Data branch preservation through a production promotion. The `data` branch of fro-bot/.github must survive a `Merge Data Branch` promotion: the tip before the promotion must be an ancestor of the tip after it. Run it around the next promotion, scheduled or dispatched. Both commands are read-only and need only the `gh` login the automated runbook already uses. Run the first just before the promotion starts and again after it finishes, and record both SHAs. Then run the second with the old SHA first:
-
-  ```bash
-  gh api repos/fro-bot/.github/git/ref/heads/data --jq .object.sha
-  gh api repos/fro-bot/.github/compare/<old-sha>...<new-sha> --jq .status
-  ```
-
-  Expect: `ahead`, which means the old tip is an ancestor of the new one. `identical` means the branch did not move, so the check is not demonstrated: record that. Failure: `diverged`, `behind` or a `404`, which means `data` was replaced or reset; see [check 5](#5-launch-and-stream) step 4 for the reseed.
 
 ---
 

@@ -372,7 +372,7 @@ BASE=fro-bot-state/discord-gateway
 s3cat() { aws s3 cp "s3://$S3_BUCKET/$1" -; }
 etag() { aws s3api head-object --bucket "$S3_BUCKET" --key "$1" --query ETag --output text; }
 runkeys() { aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/$1/runs/" --query "sort_by(Contents,&LastModified)[-${2:-3}:].Key" --output text | tr '\t' '\n'; }
-runcount() { aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/$1/runs/" --query 'length(Contents || `[]`)' --output text; }
+runcount() { aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$BASE/$1/runs/" --query 'length(Contents || `[]`)' --output json; }   # json: the query runs once over every page; text prints one count per page
 
 dget() { printf 'header = "Authorization: Bot %s"\n' "$(envval DISCORD_TOKEN)" | curl -sS -K - "https://discord.com/api/v10$1"; }
 thread() { dget "/channels/$1/messages?limit=50" | jq -r 'reverse[] | [.timestamp[11:23], (.edited_timestamp // "-"), "mentions=\(.mentions|length)", "roles=\(.mention_roles|length)", "everyone=\(.mention_everyone)", (.content|tojson), ([.embeds[]|{title,description}]|tojson)] | @tsv'; }

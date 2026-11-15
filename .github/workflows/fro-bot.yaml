@@ -971,7 +971,7 @@ jobs:
         run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Run Fro Bot
-        uses: fro-bot/agent@95b0fbf4e39ff2d1c8431050c51260de7bbd34ed # v0.144.1
+        uses: fro-bot/agent@4e394905b7eafda2d7424816eb7846d3f09c40df # v0.144.2
         env:
           OPENCODE_PROMPT_ARTIFACT: 'true'
           PROMPT: >-
@@ -985,6 +985,7 @@ jobs:
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
           prompt: ${{ env.PROMPT }}
           repo-skills: 'true'
+          isolate-agent: 'true'
           trusted-head-sha: ${{ steps.prehead.outputs.ref }}
           timeout: 0
           # Mirror upstream's `packages/*/src` convention; deploy-critical files under `apps/` remain intentionally excluded.
@@ -1029,20 +1030,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           token: ${{ secrets.FRO_BOT_PAT }}
-
-      # fro-bot/agent scrubs GH_TOKEN/GITHUB_TOKEN from its child env, so the
-      # push credential must be on disk. Safe here because this job's runs are
-      # always classified `provision` (schedule/workflow_dispatch), and the
-      # action's fail-closed on-disk-credential check only fires for
-      # `withhold`-classified (mention) runs — do not add this to fro-bot-content.
-      - name: Enable authenticated git push
-        env:
-          FRO_BOT_PAT: ${{ secrets.FRO_BOT_PAT }}
-        run: |
-          set -euo pipefail
-          auth="$(printf '%s' "x-access-token:${FRO_BOT_PAT}" | base64 | tr -d '\n')"
-          echo "::add-mask::${auth}"
-          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic ${auth}"
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -1115,7 +1102,7 @@ jobs:
           role-session-name: fro-bot-${{ github.run_id }}
 
       - name: Run Fro Bot
-        uses: fro-bot/agent@95b0fbf4e39ff2d1c8431050c51260de7bbd34ed # v0.144.1
+        uses: fro-bot/agent@4e394905b7eafda2d7424816eb7846d3f09c40df # v0.144.2
         env:
           OPENCODE_PROMPT_ARTIFACT: 'true'
           PROMPT: >-
@@ -1131,6 +1118,7 @@ jobs:
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
           prompt: ${{ env.PROMPT }}
           repo-skills: 'true'
+          isolate-agent: 'true'
           timeout: 0
           output-mode: branch-pr
           skip-cache: ${{ steps.classify.outputs.mode == 'daily-equivalent' }}

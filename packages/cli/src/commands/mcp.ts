@@ -31,9 +31,9 @@ import {createMcpAction} from '@goke/mcp'
  * - `cliproxy reset-quota` — mutating: resets quota for a live auth record; CLI-only
  * - `vpn deploy`           — mutating: deploys WireGuard config to live VPN box; CLI-only
  * - `vpn logs`             — sensitive: streams journalctl logs that may reveal peer IPs/traffic; CLI-only
- * - `vpn client add`       — mutating: generates keypair + appends peer + triggers redeploy; CLI-only
+ * - `vpn client add`       — mutating: generates keypair + appends peer + syncs roster; requires explicit `vpn deploy`; CLI-only
  * - `vpn client list`      — sensitive: lists peer public keys and tunnel IPs; CLI-only
- * - `vpn client remove`    — mutating: removes peer + triggers redeploy; CLI-only
+ * - `vpn client remove`    — mutating: removes peer + syncs roster; requires explicit `vpn deploy` to revoke access; CLI-only
  * - `broker deploy`         — mutating: deploys the credential broker to a live droplet; CLI-only
  * - `broker logs`           — sensitive: streams logs that may reveal run identities and minted key prefixes; CLI-only
  * - `cliproxy monitor`      — mutating: reconciles GitHub issue and Discord alert state; CLI-only

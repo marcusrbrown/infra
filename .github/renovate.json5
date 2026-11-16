@@ -1,6 +1,6 @@
 {
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
-  extends: ['github>marcusrbrown/renovate-config#5.2.16'],
+  extends: ['github>marcusrbrown/renovate-config#5.2.17'],
   packageRules: [
     {
       description: ['Vendored agent skills are updated by their installer (skills-lock.json), not Renovate'],

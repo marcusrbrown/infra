@@ -207,7 +207,7 @@ aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-confi
 
 Or invoke `ensureRunStateLifecycleRule(env)` directly with a privileged credential — it already performs this read-check-write-readback sequence correctly and merges rather than replaces.
 
-**This repo does not verify these grants.** No code here manages or checks the `fro-bot-gateway` identity's IAM policy — it is maintained out-of-band in AWS. A redeploy against a new bucket or a new identity can silently reproduce a missing-tagging outage. Verify with a tagged write, since an untagged write succeeds while tagging fails silently:
+**IAM policy management is out-of-band; tagged-write capability is checked at deploy time.** No code here manages or inspects the `fro-bot-gateway` identity's IAM policy. The gateway deploy verifies the runtime identity's tagged-write and probe-cleanup capabilities through the fail-closed preflight described below; it does not audit every grant in the tables above. For a manual capability check, use a tagged write, since an untagged write does not exercise `s3:PutObjectTagging`:
 
 ```bash
 aws s3api put-object --bucket <bucket> --key <prefix>/_iam-probe/<uuid>.json \

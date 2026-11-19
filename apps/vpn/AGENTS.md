@@ -21,12 +21,19 @@ Deploy is SSH-only. No Docker, no Compose. The box runs native `wg-quick@wg0` un
 
 1. **Validate env + host** — `VPN_HOST` and SSH context (`SSH_AUTH_SOCK` local or `VPN_SSH_KEY` in CI) are required. `validateVpnHost` rejects `-`-prefixed values and characters outside the allowed alphabet before any SSH argv is constructed.
 2. **Materialize SSH key** (CI only) — `VPN_SSH_KEY` is written to a `0600` temp file via `materializeIdentityFile`; cleaned up after.
-3. **Ensure server key** — `ssh "umask 077; test -f /etc/wireguard/server.key || (wg genkey | tee /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub)"`. Atomic; preserved on redeploy unless `--force-server-key`. The server PRIVATE key never leaves the box.
-4. **Read back server.pub** — only the public key is read back for status/diagnosis. The private key is never transmitted.
-5. **Render wg0.conf server-side** — the peer roster (from `VPN_PEERS` env var in CI, or local `peers.json` for local deploys) is used to render the config; the box assembles `/etc/wireguard/wg0.conf` referencing its local `/etc/wireguard/server.key`. Config bytes go through SSH stdin, never argv.
-6. **Write ip_forward snippet** — `wg-forwarding.conf` is written to `/etc/sysctl.d/`; `sysctl --system` applies it.
-7. **Control wg-quick@wg0** — `systemctl enable --now wg-quick@wg0` then `systemctl restart wg-quick@wg0` to pick up the new config.
-8. **Health gate** — `wg show wg0` confirms the interface is up and the expected peer count is present. Freshness, not just liveness.
+3. **Harden memory** — after the wipe guard, before any WireGuard change: masks `fwupd-refresh.timer`, `fwupd-refresh.service` and `fwupd.service`, and creates a 1 GiB `/swapfile` only if no swap is active, then reconciles its `/etc/fstab` entry. Runs every deploy; a failed or unrecognised probe aborts before the box changes (see [Memory hardening](#memory-hardening)).
+4. **Ensure server key** — `ssh "umask 077; test -f /etc/wireguard/server.key || (wg genkey | tee /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub)"`. Atomic; preserved on redeploy unless `--force-server-key`. The server PRIVATE key never leaves the box.
+5. **Read back server.pub** — only the public key is read back for status/diagnosis. The private key is never transmitted.
+6. **Render wg0.conf server-side** — the peer roster (from `VPN_PEERS` env var in CI, or local `peers.json` for local deploys) is used to render the config; the box assembles `/etc/wireguard/wg0.conf` referencing its local `/etc/wireguard/server.key`. Config bytes go through SSH stdin, never argv.
+7. **Write ip_forward snippet** — `wg-forwarding.conf` is written to `/etc/sysctl.d/`; `sysctl --system` applies it.
+8. **Control wg-quick@wg0** — `systemctl enable --now wg-quick@wg0` then `systemctl restart wg-quick@wg0` to pick up the new config.
+9. **Health gate** — `wg show wg0` confirms the interface is up and the expected peer count is present. Freshness, not just liveness.
+
+### Memory hardening
+
+The box is a Lightsail nano: ~412 MB usable RAM, no swap by default. The stock daily `fwupd-refresh` job (firmware metadata; useless on a cloud VM) pushed it into memory pressure, `systemd-networkd` dropped `ens5`, and the box sat off the network while Lightsail still showed it running. Masking is reversible and installs nothing; `fwupd` is not removed.
+
+Swap is a 1 GiB `/swapfile` (~2.5x RAM, 5% of the 20 GB disk; more only prolongs thrashing before the OOM killer acts), root-owned `0600`, added to `/etc/fstab` once. If any swap is already active the step creates nothing. The fstab entry is reconciled on every deploy while our `/swapfile` is active or being created, so a run interrupted after `swapon` self-heals; when only unrelated swap is active, the step leaves swap and fstab alone (if both are active, `/swapfile` wins and its entry is reconciled). The step touches nothing under `/etc/wireguard` and nothing network-related. Recognition and recovery: `docs/runbooks/vpn-egress-box.md`.
 
 ### Server-key preservation invariant
 
@@ -159,6 +166,7 @@ The runbook in `docs/runbooks/vpn-egress-box.md` covers the full reprovision seq
 - **Never read the server private key to the local machine or CI runner** — deploy reads back only `server.pub`. The private key stays on the box.
 - **Never hardcode `blueprintId` or `bundleId`** — resolve live via `GetBlueprintsCommand`/`GetBundlesCommand`. Hardcoded IDs risk a non-existent-ID failure.
 - **Never omit SSH 22 from `PutInstancePublicPortsCommand`** — the command replaces the entire ruleset; omitting SSH 22 locks out the operator. The firewall ruleset always includes both SSH 22 (tcp) and UDP 51820.
+- **Never read a failed remote probe as an answer** — a non-zero exit is not proof of "no swap" or "no fstab line". Probes print a sentinel, and deploy requires exit 0 plus a recognised sentinel, or it throws. A failed probe read as "none" creates a second swap file or a duplicate fstab line.
 - **Never use Docker for the VPN runtime** — native `wg-quick@wg0` + systemd is the correct pattern for a single-box WireGuard setup.
 - **Never use AWS credentials in the deploy or status paths** — AWS creds are provisioning-only. Deploy and status reach the box over SSH; the MCP runtime needs no AWS credentials.
 

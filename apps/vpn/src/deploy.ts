@@ -60,6 +60,11 @@ const WG_CONFIG_PATH = '/etc/wireguard/wg0.conf'
 const SERVER_KEY_PATH = '/etc/wireguard/server.key'
 const SERVER_PUB_PATH = '/etc/wireguard/server.pub'
 const SYSCTL_CONF_PATH = '/etc/sysctl.d/99-wg-forwarding.conf'
+const SWAP_FILE_PATH = '/swapfile'
+// 1 GiB: ~2.5x the nano's RAM and 5% of its 20 GB disk; larger only prolongs thrashing before the OOM killer acts.
+const SWAP_FILE_SIZE = '1G'
+const FSTAB_SWAP_LINE = `${SWAP_FILE_PATH} none swap sw 0 0`
+const FWUPD_UNITS = ['fwupd-refresh.timer', 'fwupd-refresh.service', 'fwupd.service'] as const
 
 // ─── Env validation ───────────────────────────────────────────────────────────
 
@@ -426,6 +431,149 @@ async function renderWgConfServerSide(
 }
 
 /**
+ * Runs a read-only remote probe that must answer with exactly one of `sentinels` and exit 0.
+ * Anything else (non-zero exit, empty or unrecognised output) is inconclusive and throws —
+ * a failed probe is never read as proof of a particular remote state.
+ */
+async function probeRemote<Sentinel extends string>(
+  what: string,
+  command: string,
+  sentinels: readonly Sentinel[],
+  host: string,
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  keyPath?: string,
+  controlPath?: string,
+): Promise<Sentinel> {
+  console.warn(`\u001B[1;34m==>\u001B[0m Probing ${what}`)
+
+  const proc = spawnFn(sshCommand(host, command, keyPath, controlPath), {
+    env: deployEnv,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  const stdout = await new Response(proc.stdout).text()
+  const stderr = await new Response(proc.stderr).text()
+  const exitCode = await proc.exited
+
+  const answer = stdout.trim()
+  const recognised = sentinels.find(sentinel => sentinel === answer)
+  if (exitCode !== 0 || recognised === undefined) {
+    const stderrDetail = stderr.trim() === '' ? 'none' : stderr.trim()
+    throw new Error(
+      `Memory hardening: could not determine ${what} — '${command}' exited ${exitCode} with output ` +
+        `${JSON.stringify(answer)} (expected one of ${sentinels.join(', ')}). stderr: ${stderrDetail}. ` +
+        'Refusing to change the box on an inconclusive probe.',
+    )
+  }
+
+  return recognised
+}
+
+// `swapon` failing must abort rather than read as an empty list, hence the explicit `|| exit 1`.
+// Our swap file being active wins over any other active swap: it is the one this step owns and persists.
+const SWAP_PROBE_COMMAND =
+  'active=$(swapon --noheadings --show=NAME) || exit 1; ours=0; set -f; ' +
+  `for name in $active; do [ "$name" = ${SWAP_FILE_PATH} ] && ours=1; done; ` +
+  'if [ "$ours" = 1 ]; then echo SWAP_OURS; elif [ -n "$active" ]; then echo SWAP_OTHER; else echo SWAP_NONE; fi'
+
+// grep exits 1 for "no match" and >1 for errors; only 0 and 1 are answers.
+const FSTAB_PROBE_COMMAND =
+  `grep -Eq '^[[:space:]]*${SWAP_FILE_PATH}[[:space:]]' /etc/fstab; rc=$?; ` +
+  'case $rc in 0) echo FSTAB_PRESENT;; 1) echo FSTAB_ABSENT;; *) exit $rc;; esac'
+
+// Masking works for units that do not exist; stop is best-effort, the confirmed `masked` state is what counts.
+const MASK_FWUPD_COMMAND =
+  `sudo systemctl mask ${FWUPD_UNITS.join(' ')} && ` +
+  `{ sudo systemctl stop ${FWUPD_UNITS.join(' ')} || true; } && ` +
+  `for unit in ${FWUPD_UNITS.join(' ')}; do [ "$(systemctl is-enabled "$unit")" = masked ] || exit 1; done && ` +
+  'echo FWUPD_MASKED'
+
+/**
+ * Masks the fwupd refresh timer and fwupd services and ensures a persistent swap file.
+ *
+ * Both probes run before the first change. The swap file is only created when no swap is active. Its fstab entry
+ * is appended on any deploy that finds /swapfile active or creates it and finds no /swapfile entry in /etc/fstab,
+ * so a run interrupted after activation self-heals. When only other swap is active, nothing is changed. Touches
+ * nothing under /etc/wireguard or the network.
+ */
+async function hardenMemory(
+  host: string,
+  deployEnv: DeployEnv,
+  spawnFn: SpawnFn,
+  keyPath?: string,
+  controlPath?: string,
+): Promise<void> {
+  const swapState = await probeRemote(
+    'whether swap is active (swapon --show)',
+    SWAP_PROBE_COMMAND,
+    ['SWAP_NONE', 'SWAP_OURS', 'SWAP_OTHER'],
+    host,
+    deployEnv,
+    spawnFn,
+    keyPath,
+    controlPath,
+  )
+
+  const fstabState =
+    swapState === 'SWAP_OTHER'
+      ? undefined
+      : await probeRemote(
+          `whether /etc/fstab has a ${SWAP_FILE_PATH} entry`,
+          FSTAB_PROBE_COMMAND,
+          ['FSTAB_PRESENT', 'FSTAB_ABSENT'],
+          host,
+          deployEnv,
+          spawnFn,
+          keyPath,
+          controlPath,
+        )
+
+  const fwupdMask = await runCommand(
+    'Masking fwupd refresh timer and fwupd services',
+    sshCommand(host, MASK_FWUPD_COMMAND, keyPath, controlPath),
+    deployEnv,
+    spawnFn,
+  )
+  if (fwupdMask.stdout.trim() !== 'FWUPD_MASKED') {
+    throw new Error(
+      `Memory hardening: masking fwupd was not confirmed — expected FWUPD_MASKED, got ${JSON.stringify(fwupdMask.stdout.trim())}.`,
+    )
+  }
+
+  if (swapState === 'SWAP_OTHER') {
+    console.warn('\u001B[1;32m✓\u001B[0m unrelated swap already active, leaving it alone')
+    return
+  }
+
+  const steps: [label: string, command: string][] = []
+  if (swapState === 'SWAP_NONE') {
+    steps.push(
+      [
+        `Allocating ${SWAP_FILE_SIZE} swap file at ${SWAP_FILE_PATH}`,
+        // No swap is active, so a leftover file from an interrupted run is safe to replace.
+        `sudo sh -c 'rm -f ${SWAP_FILE_PATH} && fallocate -l ${SWAP_FILE_SIZE} ${SWAP_FILE_PATH}'`,
+      ],
+      [
+        'Restricting swap file to root, mode 0600',
+        `sudo sh -c 'chown root:root ${SWAP_FILE_PATH} && chmod 600 ${SWAP_FILE_PATH}'`,
+      ],
+      ['Formatting swap file', `sudo mkswap ${SWAP_FILE_PATH}`],
+      ['Activating swap file', `sudo swapon ${SWAP_FILE_PATH}`],
+    )
+  }
+  // Last, and for both NONE and OURS: persistence is reconciled even when an earlier run stopped after swapon.
+  if (fstabState === 'FSTAB_ABSENT') {
+    steps.push(['Persisting swap file in /etc/fstab', `sudo sh -c 'echo "${FSTAB_SWAP_LINE}" >> /etc/fstab'`])
+  }
+
+  for (const [label, command] of steps) {
+    await runCommand(label, sshCommand(host, command, keyPath, controlPath), deployEnv, spawnFn)
+  }
+}
+
+/**
  * Parses `wg show wg0` output and returns the peer count.
  * Counts lines starting with "peer:" in the output.
  */
@@ -494,6 +642,8 @@ async function healthGate(
  * Order of operations:
  *   1. Validate env (throws before any SSH on failure)
  *   2. Materialize SSH key (CI mode only)
+ *   2b. Harden memory: probe swap, mask fwupd, create a swap file if none is active (after the
+ *       wipe guard, before any WireGuard change)
  *   3. Ensure server keypair (atomic, preserved unless --force-server-key)
  *   4. Read back server.pub (public key only)
  *   5. Render wg0.conf server-side (peers via stdin, key stays on box)
@@ -630,6 +780,10 @@ export async function deploy(opts: DeployOpts = {}): Promise<void> {
         )
       }
     }
+
+    // Phase 2b: Memory hardening. First mutation of the deploy: runs after the wipe guard (so a refused
+    // roster changes nothing) and before any WireGuard change (so a failure here leaves WireGuard as it was).
+    await hardenMemory(host, deployEnv, spawnFn, keyPath, controlPath)
 
     // Phase 3: Ensure server keypair (atomic, preserved)
     if (forceServerKey) {

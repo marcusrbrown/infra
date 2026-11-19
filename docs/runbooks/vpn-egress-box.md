@@ -174,6 +174,27 @@ gh secret set VPN_PEERS --env vpn --repo marcusrbrown/infra < apps/vpn/config/pe
 
 ---
 
+## Box Unreachable: Memory Pressure
+
+The box is a Lightsail nano (~412 MB RAM). Under memory pressure `systemd-networkd` can lose the interface and the box stays off the network while still "running".
+
+**Recognise it:**
+
+1. `vpn status` and `vpn deploy` fail with SSH connect timeouts, while the Lightsail console shows the instance as running and the static IP still attached.
+2. Reboot the instance from the Lightsail console, then SSH in and check the previous boot:
+
+   ```bash
+   journalctl -b -1 | grep -E 'Under memory pressure|Could not set route|ens5: Failed|Out of memory'
+   ```
+
+   "Under memory pressure" followed by `ens5: Could not set route: Connection timed out` and `ens5: Failed` is this failure. `journalctl -b -1 -k | grep -i 'killed process'` shows the OOM kills.
+
+**Recover:** the reboot restores networking. Run `vpn deploy` — it masks `fwupd-refresh.timer`/`fwupd.service` and creates a 1 GiB swap file if no swap is active, so the trigger does not return. Verify with `swapon --show` and `systemctl is-enabled fwupd-refresh.timer` (expect `masked`) over SSH.
+
+**Cause and fix (2026-11-12):** the stock daily `fwupd-refresh` job pushed the box into memory pressure; the kernel had OOM-killed `fwupd` repeatedly before that. The deploy now runs a memory-hardening step on every run (see [`apps/vpn/AGENTS.md`](../../apps/vpn/AGENTS.md#memory-hardening)). If the box goes unreachable again with those in place, something else is consuming memory — check `journalctl -b -1 -k` for the process the OOM killer named.
+
+---
+
 ## Reprovision Recovery
 
 Reprovisioning creates a fresh disk, which destroys the server private key at `/etc/wireguard/server.key`. The static IP is re-attached (endpoint unchanged), but all clients fail the cryptographic handshake — a silent break. `vpn status` surfaces the server public key so a key mismatch is diagnosable (the new public key differs from what clients have).

@@ -425,8 +425,6 @@ const AVAILABILITY_WORDS =
 /** The one recognised form. A single character-class run, so the long place list cannot backtrack. */
 const NOT_AVAILABLE_SENTENCE = /^Not available in ([A-Za-z ,()]+)\.$/
 const PLACE_WORDS: ReadonlySet<string> = new Set(['the', 'of', 'and', 'or', 'including', 'regions'])
-const NOTICE_START = /^\*\*([^*:]+):\*\* (.*)$/
-
 /** A place list is proper nouns and a few connectives, so no clause (such as a training statement) can ride in it. */
 const isPlaceList = (list: string): boolean =>
   list
@@ -434,23 +432,73 @@ const isPlaceList = (list: string): boolean =>
     .filter(word => word !== '')
     .every(word => /^[A-Z][A-Za-z]*$/.test(word) || PLACE_WORDS.has(word))
 
-/** The `**Label:** text` paragraphs of a section; a paragraph runs to the next blank line or heading. */
-function noticesOf(lines: readonly string[]): {label: string; text: string}[] {
-  const notices: {label: string; text: string}[] = []
-  let current: {label: string; parts: string[]} | undefined
+const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+/
+const EMPHASIS_RUN = /^[*_]{1,3}/
+
+/**
+ * Read a notice label off the start of a line: an emphasised phrase followed by a colon, with the colon inside or
+ * outside the emphasis. Accepted: `**Beam Free:**`, `**Beam Free**:`, `__Beam Free:__`, `*Beam Free:*`,
+ * `_Beam Free:_`, `***Beam Free:***`, spaces inside the emphasis, a link inside the label, and a list marker in
+ * front. Anything else is not a label, and the caller's net decides whether that matters. No regex runs over the
+ * label itself: the line is cut with `indexOf`-style searches so there is nothing to backtrack.
+ */
+function parseNoticeLabel(raw: string): {label: string; body: string} | undefined {
+  const text = stripLinks(raw.replace(LIST_MARKER, '')).trimStart()
+  const open = EMPHASIS_RUN.exec(text)?.[0]
+  if (open === undefined) return undefined
+  const rest = text.slice(open.length)
+  const closeAt = rest.search(/[*_]/)
+  if (closeAt <= 0) return undefined
+  const inner = rest.slice(0, closeAt).trim()
+  const closer = EMPHASIS_RUN.exec(rest.slice(closeAt))?.[0] ?? ''
+  const after = rest.slice(closeAt + closer.length)
+  const colonInside = inner.endsWith(':')
+  const colonOutside = after.trimStart().startsWith(':')
+  if (!colonInside && !colonOutside) return undefined
+  const label = (colonInside ? inner.slice(0, -1) : inner).trim()
+  if (label === '' || label.includes(':')) return undefined
+  const body = colonOutside ? after.trimStart().slice(1) : after
+  return {label, body: body.trim()}
+}
+
+interface Notice {
+  /** The model label, or null when the block has no label this parser can read. */
+  label: string | null
+  text: string
+}
+
+/**
+ * The blocks of a section outside fenced code: a paragraph runs to the next blank line or heading, and a list
+ * item or a line that starts with a readable label starts a block of its own. Each block is a notice, labelled
+ * when its first line carries a label, unlabelled otherwise.
+ */
+function noticesOf(lines: readonly string[]): Notice[] {
+  const notices: Notice[] = []
+  let current: {label: string | null; parts: string[]} | undefined
+  let inFence = false
   const flush = (): void => {
     if (current !== undefined) notices.push({label: current.label, text: current.parts.join(' ')})
     current = undefined
   }
   for (const line of lines) {
-    const start = NOTICE_START.exec(line)
-    if (line.trim() === '' || line.startsWith('#') || LIST_ITEM.test(line)) flush()
-    else if (start === null) {
-      current?.parts.push(line.trim())
-    } else {
+    if (line.trimStart().startsWith('```')) {
       flush()
-      current = {label: start[1] ?? '', parts: [start[2] ?? '']}
+      inFence = !inFence
+      continue
     }
+    if (inFence) continue
+    if (line.trim() === '' || line.startsWith('#')) {
+      flush()
+      continue
+    }
+    const labelled = parseNoticeLabel(line)
+    if (labelled !== undefined) {
+      flush()
+      current = {label: labelled.label, parts: [labelled.body]}
+    } else if (LIST_ITEM.test(line) || current === undefined) {
+      flush()
+      current = {label: null, parts: [line.replace(LIST_MARKER, '').trim()]}
+    } else current.parts.push(line.trim())
   }
   flush()
   return notices
@@ -461,6 +509,10 @@ function noticesOf(lines: readonly string[]): {label: string; text: string}[] {
  * statement of a model's region limit. Everything else in a notice is pricing and limits, which change weekly, so
  * full recognition is not required here: only a sentence that looks like an availability statement must match.
  * This is the only place on the page where unrecognised sentences are tolerated.
+ *
+ * The safety net: a block with no readable label that contains an availability word or the recognised form would
+ * be a restriction attributed to nobody, so it throws instead of being skipped. An unfamiliar label markup
+ * therefore fails loudly and never drops a model's restriction.
  */
 function applyUsageNotices(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): void {
   for (const {label, text} of noticesOf(sectionLines(lines, '## Usage limits'))) {
@@ -470,7 +522,14 @@ function applyUsageNotices(lines: readonly string[], accumulators: ReadonlyMap<s
       .map(sentence => sentence.trim())
     for (const sentence of sentences) {
       const places = NOT_AVAILABLE_SENTENCE.exec(sentence)?.[1]
-      if (places !== undefined && isPlaceList(places)) limited = true
+      if (label === null) {
+        // `AVAILABILITY_WORDS` includes "not available", so this also catches the recognised form.
+        if (AVAILABILITY_WORDS.test(sentence)) {
+          throw new PrivacyTableError(
+            `usage limits: availability sentence not attributed to a model ${quoted(sentence)}`,
+          )
+        }
+      } else if (places !== undefined && isPlaceList(places)) limited = true
       else if (AVAILABILITY_WORDS.test(sentence)) {
         throw new PrivacyTableError(
           `usage notice for ${quoted(label)}: unrecognised availability sentence ${quoted(sentence)}`,
@@ -478,7 +537,8 @@ function applyUsageNotices(lines: readonly string[], accumulators: ReadonlyMap<s
       }
     }
     // A pricing-only notice never resolves its label, so a notice for a model with no Privacy row cannot block.
-    if (limited) for (const target of resolveLabel(label, accumulators)) target.availabilityLimited = true
+    if (limited && label !== null)
+      for (const target of resolveLabel(label, accumulators)) target.availabilityLimited = true
   }
 }
 

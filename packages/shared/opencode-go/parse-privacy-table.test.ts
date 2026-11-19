@@ -746,3 +746,160 @@ describe('parsePrivacyDocs on per-model usage notices', () => {
     expect(message.length).toBeLessThan(300)
   })
 })
+
+describe('parsePrivacyDocs on usage-notice label markup', () => {
+  const BEAM = noticeLine('Beam Free')
+  const ARGON = noticeLine('Gemini 4 Argon')
+  const BODY = BEAM.slice('**Beam Free:** '.length)
+  /** The Beam Free notice with its label written as `label` (and the same body). */
+  const beamAs = (label: string): string => mutate(BEAM, `${label} ${BODY}`)
+  const beamLimited = (source: string): boolean | undefined => rowsByName(source).get('Beam Free')?.availabilityLimited
+
+  test.each([
+    ['colon inside the bold', '**Beam Free:**'],
+    ['colon outside the bold', '**Beam Free**:'],
+    ['underscore bold', '__Beam Free:__'],
+    ['underscore bold, colon outside', '__Beam Free__:'],
+    ['a trailing space inside the bold', '**Beam Free: **'],
+    ['a space before the colon', '**Beam Free :**'],
+    ['a leading space inside the bold', '** Beam Free:**'],
+    ['italic', '*Beam Free:*'],
+    ['underscore italic', '_Beam Free:_'],
+    ['bold italic', '***Beam Free:***'],
+    ['a link inside the label', '**[Beam Free](https://example.com/beam):**'],
+    ['a link inside the label, colon outside', '**[Beam Free](https://example.com/beam)**:'],
+    ['a list item', '- **Beam Free:**'],
+    ['a list item, colon outside', '- **Beam Free**:'],
+    ['a starred list item', '* **Beam Free:**'],
+    ['a numbered list item', '1. **Beam Free:**'],
+    ['an indented list item', '  - **Beam Free:**'],
+  ])('accepts %s and the restriction still gates the model', (_label, label) => {
+    expect(beamLimited(beamAs(label))).toBe(true)
+  })
+
+  test.each([
+    ['no markup', 'Beam Free:'],
+    ['an HTML label', '<strong>Beam Free:</strong>'],
+    ['a code-span label', '`Beam Free`:'],
+    ['a sentence about the model', 'Beam Free is'],
+    ['no label at all', ''],
+  ])('fails on %s, because an unfamiliar label would drop the restriction', (_label, label) => {
+    const source = beamAs(label).replace(/\s+Free for a limited time\./, ' Free for a limited time.')
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/not attributed to a model/)
+  })
+
+  test('fails on a heading that carries the model name above an unlabelled paragraph', () => {
+    const source = mutate(BEAM, `#### Beam Free\n\n${BODY}`)
+    expect(() => parsePrivacyDocs(source)).toThrow(/not attributed to a model/)
+  })
+
+  test('fails on a table row that carries the restriction', () => {
+    const source = mutate(BEAM, `| Beam Free | ${BODY} |`)
+    expect(() => parsePrivacyDocs(source)).toThrow(/not attributed to a model/)
+  })
+
+  test('fails on a recognised "Not available in <places>." sentence in a paragraph with no label', () => {
+    expect(() => parsePrivacyDocs(mutate(ARGON, `${ARGON}\n\nNot available in Angola, Belarus.`))).toThrow(
+      /not attributed to a model/,
+    )
+  })
+
+  test.each([
+    ['a trigger word', 'Some regions are refused.'],
+    ['an availability word', 'Availability varies by plan.'],
+    ['a list item', '- This model is restricted to Europe.'],
+  ])('fails on an unlabelled sentence with %s', (_label, sentence) => {
+    expect(() => parsePrivacyDocs(mutate(ARGON, `${ARGON}\n\n${sentence}`))).toThrow(/not attributed to a model/)
+  })
+
+  test('the failure names a bounded excerpt of the unattributed text', () => {
+    let message = ''
+    try {
+      parsePrivacyDocs(mutate(ARGON, `${ARGON}\n\nNot available in ${'Angola, '.repeat(500)}Belarus.`))
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain('Not available in Angola')
+    expect(message).toContain('…')
+    expect(message.length).toBeLessThan(300)
+  })
+
+  test('an unattributed long place list fails quickly', () => {
+    const started = performance.now()
+    expect(() => parsePrivacyDocs(mutate(ARGON, `${ARGON}\n\nNot available in ${'A'.repeat(5000)}!`))).toThrow(
+      /not attributed/,
+    )
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test.each([
+    ['colon inside', '**Gemini 4 Argon:**'],
+    ['colon outside', '**Gemini 4 Argon**:'],
+    ['a list item', '- **Gemini 4 Argon:**'],
+    ['an italic label', '*Gemini 4 Argon:*'],
+    ['a label for a model with no Privacy row, colon outside', '**Mystery Model**:'],
+  ])('a pricing notice with %s changes nothing and never throws', (_label, label) => {
+    expect(parsePrivacyDocs(mutate(ARGON, `${label} The 50% discount applies through November 30, 2026.`))).toEqual(
+      parsePrivacyDocs(mdx),
+    )
+  })
+
+  test('a notice whose label markup is accepted still has its availability sentence checked', () => {
+    expect(() => parsePrivacyDocs(beamAs('**Beam Free**:').replace('Not available in', 'Unavailable in'))).toThrow(
+      /unrecognised availability sentence/,
+    )
+  })
+
+  test('a label that resolves to no row still throws when the colon is outside the bold', () => {
+    expect(() => parsePrivacyDocs(mutate(ARGON, `**Mystery Model**: Not available in Angola.\n\n${ARGON}`))).toThrow(
+      /"Mystery Model" does not name a model/,
+    )
+  })
+
+  test('the general prose of the Usage limits section contains no availability word, so the net stays quiet', () => {
+    expect(() => parsePrivacyDocs(mdx)).not.toThrow()
+    expect(rowsByName(mdx).get('Beam Free')?.availabilityLimited).toBe(true)
+  })
+
+  test('a fenced code block in the section is not read as a notice', () => {
+    const fenced = mutate(ARGON, `${ARGON}\n\n\`\`\`text\nNot available in the countries of the region.\n\`\`\``)
+    expect(parsePrivacyDocs(fenced)).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('wrapped continuation lines starting with bold text are not new notices', () => {
+    const wrapped = mutate(BEAM, `${BEAM}\n**Go** page.`)
+    expect(parsePrivacyDocs(wrapped)).toEqual(parsePrivacyDocs(mdx))
+  })
+})
+
+describe('parsePrivacyDocs on the other label readers, with the colon outside the bold', () => {
+  test.each([
+    ['the colon outside the bold', '- **Grok 4.7**: ZDR agreement is renewed monthly.'],
+    ['underscore bold', '- __Grok 4.7:__ ZDR agreement is renewed monthly.'],
+    ['an asterisk marker', '* **Grok 4.7:** ZDR agreement is renewed monthly.'],
+    ['an indented bullet', '  - **Grok 4.7:** ZDR agreement is renewed monthly.'],
+    ['no markup', '- Grok 4.7: ZDR agreement is renewed monthly.'],
+  ])('a Privacy footnote with %s throws instead of being skipped', (_label, bullet) => {
+    expect(() => parsePrivacyDocs(mutate('- **Grok 4.7:**', `${bullet}\n- **Grok 4.7:**`))).toThrow(
+      /Privacy footnotes: unmapped line/,
+    )
+  })
+
+  test.each([
+    ['underscore bold', '- __LongCat 2.5 Free:__ select **Global** under **Regions**.'],
+    ['an indented bullet', '  - **LongCat 2.5 Free:** select **Global** under **Regions**.'],
+    ['a numbered item', '1. **LongCat 2.5 Free:** select **Global** under **Regions**.'],
+  ])('a restricted-models bullet with %s throws instead of being skipped', (_label, bullet) => {
+    const original = '- **LongCat 2.5 Free:** select **Global** under **Regions**.'
+    expect(() => parsePrivacyDocs(mutate(original, bullet))).toThrow(/Enable restricted models: unmapped line/)
+  })
+
+  test('a restricted-models paragraph with the colon outside the bold names its model and throws', () => {
+    const source = mutate(
+      '- **LongCat 2.5 Free:** select **Global** under **Regions**.',
+      '**LongCat 2.5 Free**: select **Global** under **Regions**.',
+    )
+    expect(() => parsePrivacyDocs(source)).toThrow(/prose names "LongCat 2.5 Free"/)
+  })
+})

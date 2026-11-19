@@ -180,8 +180,12 @@ The box is a Lightsail nano (~412 MB RAM). Under memory pressure `systemd-networ
 
 **Recognise it:**
 
-1. `vpn status` and `vpn deploy` fail with SSH connect timeouts, while the Lightsail console shows the instance as running and the static IP still attached.
-2. Reboot the instance from the Lightsail console, then SSH in and check the previous boot:
+1. From outside, before touching anything:
+   - `vpn status` and `vpn deploy` fail with SSH connect timeouts, while the Lightsail console shows the instance as running and the static IP still attached.
+   - A later deploy can wait at its `vpn` approval gate and never run. The public status page then shows the VPN's deploy state as `unknown`: it reads only the newest `main` deployment, so one waiting at its gate hides the earlier failure, and it does not measure reachability.
+   - An SSH-timeout deploy failure or report for this box warrants a Lightsail console check the same day.
+2. Reboot the instance from the Lightsail console. The provisioning credentials hold a minimal action set (see the [IAM note](../../apps/vpn/AGENTS.md#iam-note)): in the 2026-11 operator session a reboot attempted with them was denied and they could not read instance metrics or state. The cause can be confirmed only after the reboot.
+3. SSH in and check the previous boot:
 
    ```bash
    journalctl -b -1 | grep -E 'Under memory pressure|Could not set route|ens5: Failed|Out of memory'
@@ -189,7 +193,20 @@ The box is a Lightsail nano (~412 MB RAM). Under memory pressure `systemd-networ
 
    "Under memory pressure" followed by `ens5: Could not set route: Connection timed out` and `ens5: Failed` is this failure. `journalctl -b -1 -k | grep -i 'killed process'` shows the OOM kills.
 
-**Recover:** the reboot restores networking. Run `vpn deploy` — it masks `fwupd-refresh.timer`/`fwupd.service` and creates a 1 GiB swap file if no swap is active, so the trigger does not return. Verify with `swapon --show` and `systemctl is-enabled fwupd-refresh.timer` (expect `masked`) over SSH.
+**Recover:** the reboot restores networking. Run `vpn deploy` — it masks `fwupd-refresh.timer`/`fwupd.service` and creates a 1 GiB swap file if no swap is active, so the trigger does not return. Do not run `vpn deploy --local` while a CI VPN deploy is running: the two are not serialized.
+
+Verify over SSH after the first deploy on a rebooted or new box:
+
+- `swapon --show` lists active swap.
+- If the deploy created `/swapfile`, `grep swapfile /etc/fstab` shows its line. Activation is not persistence. When other swap was already active the deploy creates no `/swapfile`.
+- `systemctl is-enabled fwupd-refresh.timer` prints `masked`. In the 2026-11 session the timer read `failed` (`Unit to trigger vanished`) after masking and had no next run; that state is expected.
+
+**A hardening failure stops the deploy.** It shows in one of two ways:
+
+- An inconclusive probe throws an error beginning `Memory hardening:` that carries the probe command, its output and stderr. A mask result other than the expected one throws `Memory hardening: masking fwupd was not confirmed`.
+- A failed mask or swap command prints `FAILED: <step>` with that step's output and stderr, then throws `Command failed with exit code <n>: <command>`.
+
+Either way the deploy stops before any WireGuard change, including a deploy that only removes a peer. There is no override. Fix the box state the output describes, then run `vpn deploy` again.
 
 **Cause and fix (2026-11-12):** the stock daily `fwupd-refresh` job pushed the box into memory pressure; the kernel had OOM-killed `fwupd` repeatedly before that. The deploy now runs a memory-hardening step on every run (see [`apps/vpn/AGENTS.md`](../../apps/vpn/AGENTS.md#memory-hardening)). If the box goes unreachable again with those in place, something else is consuming memory — check `journalctl -b -1 -k` for the process the OOM killer named.
 

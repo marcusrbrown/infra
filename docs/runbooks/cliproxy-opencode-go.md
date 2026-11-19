@@ -1,6 +1,6 @@
 # CLIProxyAPI OpenCode Go Upstream
 
-CLIProxyAPI serves OpenCode Go models next to Claude and GPT. The cliproxy deploy owns one upstream entry, `opencode-go`, in the `openai-compatibility` section. A reviewed privacy snapshot decides which models the entry exposes. This runbook covers enablement, key rotation, emergency disable, re-enable, recovery from a failed deploy, snapshot PR review and limits. For the deploy flow, guards and monitor reasons, see [`apps/cliproxy/AGENTS.md`](../../apps/cliproxy/AGENTS.md#opencode-go-upstream).
+CLIProxyAPI serves OpenCode Go models next to Claude and GPT. The cliproxy deploy owns one upstream entry, `opencode-go`, in the `openai-compatibility` section. A reviewed privacy snapshot decides which models the entry exposes. This runbook covers enablement, key rotation, emergency disable, re-enable, recovery from a failed deploy, snapshot PR review, a failing scheduled refresh and limits. For the deploy flow, guards and monitor reasons, see [`apps/cliproxy/AGENTS.md`](../../apps/cliproxy/AGENTS.md#opencode-go-upstream).
 
 The tracked policy is in `packages/shared/opencode-go/`: `settings.json` (`enabled`, `defaultProbeModel`) and `privacy-snapshot.json`.
 
@@ -184,7 +184,52 @@ Merge rules:
 
 If upstream reverts the change before you merge, the next daily run finds that the terms match `main` again. It closes the open PR with a comment, then deletes the `opencode-go-privacy` branch. A PR on that branch from a fork is left alone. Do not merge a PR that the workflow closed. A later change to the terms opens a new PR. If the run cannot reach the PR list or the close step fails, the run fails: close the PR by hand and delete the branch.
 
-A run that cannot build the snapshot fails and opens no PR. The deploy keeps the reviewed snapshot. The run fails on: a docs page that no longer parses (unknown column, row, footnote sentence, label or rule, or prose in the restricted-models section or before the Privacy table that names a model, or an availability sentence in the Usage limits section that is not the recognised `Not available in <places>.` form, or whose paragraph names no Privacy model or more than one: put each restriction in its own paragraph, or update the parser); a live models entry with no `go` object or a missing or non-boolean `training`, `zdr` or `limited_regions`; and an ambiguous join (one Privacy row fits several live models, two rows resolve to one model, or two live names normalise alike). A model that only one source knows does not fail the run; it is left out and reported (see the PR review above). Known limits: a restriction written as prose that names no model, or prose elsewhere on the page, is not detected, so read the page diff in the compare link for new sentences. A failed run changes nothing, so the reviewed snapshot goes stale until upstream settles or the parser or the alias map in `packages/shared/opencode-go/build-snapshot.ts` is fixed: do not leave a failed run unread. Add an alias only after confirming that the page name and the API name are the same model.
+A run that cannot build the snapshot fails and opens no PR. The run fails on: a docs page that no longer parses (unknown column, row, footnote sentence, label or rule, or prose in the restricted-models section or before the Privacy table that names a model, or an availability sentence in the Usage limits section that is not the recognised `Not available in <places>.` form, or whose paragraph names no Privacy model or more than one: put each restriction in its own paragraph, or update the parser); a live models entry with no `go` object or a missing or non-boolean `training`, `zdr` or `limited_regions`; and an ambiguous join (one Privacy row fits several live models, two rows resolve to one model, or two live names normalise alike). A model that only one source knows does not fail the run; it is left out and reported (see the PR review above). Known limits: a restriction written as prose that names no model, or prose elsewhere on the page, is not detected, so read the page diff in the compare link for new sentences. Do not leave a failed run unread: see [The scheduled refresh is failing](#the-scheduled-refresh-is-failing). Add an alias to `DOCS_NAME_ALIASES` in `packages/shared/opencode-go/model-names.ts` only after confirming that the page name and the API name are the same model.
+
+---
+
+## The scheduled refresh is failing
+
+The `OpenCode Go Privacy` workflow has no failure notification of its own. A failed run shows in the Actions run list and in Fro Bot's daily report. While runs fail, the deploy keeps applying the last committed `privacy-snapshot.json`. That snapshot can be wrong in the unsafe direction: a model upstream now restricts can still be exposed.
+
+1. Read the failure line in the `Refresh privacy snapshot` step:
+
+   ```bash
+   gh run list --workflow opencode-go-privacy.yaml --limit 5
+   gh run view <run-id> --log-failed
+   ```
+
+2. Compare both upstream sources in full with `privacy-snapshot.json`. A restriction can appear in any of these places:
+   - The Privacy table on the docs page: a retention other than `0 days`, or `Not ZDR`.
+   - The Privacy footnotes: retention periods, permission to train, `Availability is limited to regions permitted by …`, `Hosted in <place>.`, the Global-region rule, and agreement expiry dates (`The current agreement is valid through <date>.`).
+   - The "Enable restricted models" bullets: the Global-region rule and the training opt-in.
+   - The Usage limits notices: `Not available in <places>.` One model's region limit can appear only here.
+   - The public Go model list: each model's `go` object (`training`, `zdr`, `limited_regions`). Fetch the URL in `GO_LIVE_MODELS_URL` in `packages/shared/opencode-go/live-models.ts`.
+
+   The docs page is the file named by `source.repo` and `source.path` in `privacy-snapshot.json`, read at the head of its `dev` branch. List every model that either source restricts and the snapshot still clears (`zeroRetention: true`, `trainsOnData: false` or `regionGated: false`), and every model whose agreement date differs from `agreementExpiry`. If the current terms for a model cannot be determined with confidence, use [Emergency disable](#emergency-disable-without-a-deploy) instead of concluding there is no exposure.
+
+3. Contain first. Open one PR that changes only `privacy-snapshot.json`, setting each affected boolean to its restrictive value (`zeroRetention: false`, `trainsOnData: true` or `regionGated: true`). It takes effect when the gated cliproxy deploy is approved and applied, not at merge. Merge it, approve the gate, then confirm the affected models are no longer listed:
+
+   ```bash
+   bunx @marcusrbrown/infra cliproxy models opencode-go
+   ```
+
+   Use [Emergency disable](#emergency-disable-without-a-deploy) instead of this PR in two cases:
+   - The deploy cannot happen promptly.
+   - The containment would leave no eligible model. The deploy preflight then fails with `no eligible OpenCode Go models` before it writes anything, so the old list stays live.
+
+   An `agreementExpiry` date does not remove a model by itself. The expiry day still counts as valid, and a model is excluded only by a deploy that runs after that UTC day. To record an earlier date, change `agreementExpiry` in the same PR. To remove the model now, set `zeroRetention: false` as well.
+
+4. Fix the parser or the alias map, add the failing case to the fixtures, and merge.
+5. Dispatch the workflow from `main` and confirm the workflow run succeeds, not only one step:
+
+   ```bash
+   gh workflow run opencode-go-privacy.yaml --ref main
+   ```
+
+   If the run opens or updates a PR, follow [Snapshot refresh PR review](#snapshot-refresh-pr-review), then the deploy.
+
+6. Review the next refresh PR against each manual containment from step 3. `refreshGoPrivacy` rebuilds every entry from upstream and proposes any difference from the committed snapshot, including a reversal of a hand-set restrictive value that the repaired parser or the inputs do not reproduce. Do not merge a relaxation unless the upstream evidence supports it. If the parser still misses the restriction, leave that PR unmerged, so the hand-set value stays in force, and fix the parser.
 
 ---
 

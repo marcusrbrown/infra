@@ -1,6 +1,6 @@
 import type {DeployOpts, SpawnFn, SpawnResult} from './deploy'
 
-import {mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {chmodSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -23,18 +23,40 @@ interface SpawnCall {
   stdin?: string
 }
 
+interface MockResult {
+  stdout?: string
+  stderr?: string
+  exitCode?: number
+}
+
+/** Answers memory-hardening commands by their text; return undefined to fall through to the result queue. */
+type HardeningResponder = (command: string) => MockResult | undefined
+
+/** Commands owned by the memory-hardening step. They never consume the positional `results` queue. */
+const HARDENING_COMMAND = /swapon|swapfile|mkswap|fwupd|fstab/
+
+/** A box that already has swap and masked fwupd — the steady state on every deploy after the first. */
+const settledBox: HardeningResponder = command => {
+  if (command.includes('swapon --noheadings')) return {stdout: 'SWAP_ACTIVE\n'}
+  if (command.includes('systemctl mask')) return {stdout: 'FWUPD_MASKED\n'}
+  return {stdout: ''}
+}
+
 /**
  * Builds a mock SpawnFn that records all calls and returns configurable results.
- * Each call pops from `results`; if exhausted, returns exit 0 with empty output.
+ * Each non-hardening call pops from `results`; if exhausted, returns exit 0 with empty output.
+ * Hardening commands are answered by `hardening` so the positional queues of the
+ * wipe-guard / key / config tests stay independent of the hardening step.
  */
 function makeMockSpawn(
   calls: SpawnCall[],
-  results: {stdout?: string; stderr?: string; exitCode?: number}[] = [],
+  results: MockResult[] = [],
+  hardening: HardeningResponder = settledBox,
 ): SpawnFn {
   let callIndex = 0
   return (cmd, opts) => {
-    const result = results[callIndex] ?? {stdout: '', stderr: '', exitCode: 0}
-    callIndex++
+    const hardeningResult = HARDENING_COMMAND.test(cmd.join(' ')) ? hardening(cmd.join(' ')) : undefined
+    const result = hardeningResult ?? results[callIndex++] ?? {stdout: '', stderr: '', exitCode: 0}
 
     let stdinContent = ''
     const stdinPipe =
@@ -968,8 +990,8 @@ describe('deploy', () => {
     let callIndex = 0
     const capturingSpawn: SpawnFn = (cmd, opts) => {
       capturedEnvs.push(opts.env)
-      const result = results[callIndex] ?? {stdout: '', stderr: '', exitCode: 0}
-      callIndex++
+      const hardeningResult = HARDENING_COMMAND.test(cmd.join(' ')) ? settledBox(cmd.join(' ')) : undefined
+      const result = hardeningResult ?? results[callIndex++] ?? {stdout: '', stderr: '', exitCode: 0}
 
       let stdinContent = ''
       const stdinPipe =
@@ -1389,5 +1411,409 @@ describe('deploy', () => {
     } finally {
       rmSync(dir, {recursive: true, force: true})
     }
+  })
+})
+
+// ─── Memory hardening ─────────────────────────────────────────────────────────
+
+interface BoxState {
+  swap?: MockResult
+  fstab?: MockResult
+  mask?: MockResult
+}
+
+/** Scripts the box's answers to the hardening probes; every other hardening command succeeds silently. */
+function box(state: BoxState = {}): HardeningResponder {
+  return command => {
+    if (command.includes('swapon --noheadings')) return state.swap ?? {stdout: 'SWAP_ACTIVE\n'}
+    if (command.includes('grep') && command.includes('/etc/fstab')) return state.fstab ?? {stdout: 'FSTAB_ABSENT\n'}
+    if (command.includes('systemctl mask')) return state.mask ?? {stdout: 'FWUPD_MASKED\n'}
+    return {stdout: ''}
+  }
+}
+
+/** Results for a full 0-peer deploy, excluding hardening commands (those use the responder). */
+function zeroPeerResults(): MockResult[] {
+  return [
+    {stdout: 'server-line\n'}, // wipe guard dump
+    {stdout: ''}, // ensure server key
+    {stdout: 'PUBKEY==\n'}, // read server.pub
+    {stdout: 'default via 172.26.0.1 dev ens5 proto dhcp\n'}, // ip route show default
+    {stdout: ''}, // ship placeholder wg0.conf
+    {stdout: ''}, // awk substitution
+    {stdout: ''}, // write wg-forwarding.conf
+    {stdout: ''}, // sysctl --system
+    {stdout: ''}, // enable --now
+    {stdout: ''}, // restart
+    {stdout: 'interface: wg0\n  public key: PUBKEY==\n  peers: 0\n'}, // wg show
+  ]
+}
+
+async function runWithBox(
+  state: BoxState,
+  options: {results?: MockResult[]; forceServerKey?: boolean} = {},
+): Promise<{calls: SpawnCall[]; error: unknown}> {
+  const calls: SpawnCall[] = []
+  const {dir, peersJsonPath} = makeTempPeersDir([])
+  try {
+    await deploy({
+      env: BASE_ENV,
+      spawn: makeMockSpawn(calls, options.results ?? zeroPeerResults(), box(state)),
+      peersJsonPath,
+      forceServerKey: options.forceServerKey ?? false,
+    })
+    return {calls, error: undefined}
+  } catch (error) {
+    return {calls, error}
+  } finally {
+    rmSync(dir, {recursive: true, force: true})
+  }
+}
+
+/** The remote command string of each recorded call (last argv element for ssh). */
+function remoteCommands(calls: SpawnCall[]): string[] {
+  return calls.map(c => c.cmd.at(-1) ?? '')
+}
+
+function indexOfCommand(calls: SpawnCall[], pattern: RegExp): number {
+  return remoteCommands(calls).findIndex(command => pattern.test(command))
+}
+
+function commandMatching(calls: SpawnCall[], pattern: RegExp): string {
+  const command = remoteCommands(calls).find(candidate => pattern.test(candidate))
+  if (command === undefined) {
+    throw new Error(`no recorded command matches ${pattern}`)
+  }
+  return command
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : ''
+}
+
+const SWAP_PROBE = /swapon --noheadings/
+const FSTAB_PROBE = /grep.*\/etc\/fstab/
+const MASK_FWUPD = /systemctl mask/
+const SWAP_STEPS = {
+  allocate: /fallocate/,
+  permissions: /chmod 600 \/swapfile/,
+  format: /mkswap/,
+  activate: /swapon \/swapfile/,
+  persist: />>\s*\/etc\/fstab/,
+} as const
+const ANY_SWAP_STEP = new RegExp(
+  Object.values(SWAP_STEPS)
+    .map(pattern => pattern.source)
+    .join('|'),
+)
+// Anything that reads or changes WireGuard state; the read-only wipe-guard probe (`wg show wg0 dump`) is not one.
+const WIREGUARD_CONTROL =
+  /\/etc\/wireguard|server\.key|server\.pub|__SERVER_PRIVATE_KEY__|wg-quick|wg0\.conf|ip_forward/
+
+// The mocked spawn cannot tell whether the shell inside a command does the right thing,
+// so the decision-bearing commands are executed under `sh` with stubbed binaries.
+function runRemote(command: string, stubs: Record<string, string>): {exitCode: number; stdout: string} {
+  const dir = mkdtempSync(join(tmpdir(), 'vpn-deploy-stub-'))
+  try {
+    for (const [name, body] of Object.entries({sudo: 'exec "$@"', ...stubs})) {
+      const path = join(dir, name)
+      writeFileSync(path, `#!/bin/sh\n${body}\n`)
+      chmodSync(path, 0o755)
+    }
+    const proc = Bun.spawnSync(['sh', '-c', command], {
+      env: {PATH: `${dir}:/usr/bin:/bin`},
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    return {exitCode: proc.exitCode, stdout: proc.stdout.toString().trim()}
+  } finally {
+    rmSync(dir, {recursive: true, force: true})
+  }
+}
+
+async function probeCommand(pattern: RegExp, state: BoxState): Promise<string> {
+  const {calls} = await runWithBox(state)
+  return commandMatching(calls, pattern)
+}
+
+function systemctlStub(options: {mask?: number; stop?: number; enabled?: string} = {}): string {
+  const {mask = 0, stop = 0, enabled = 'masked'} = options
+  return [
+    'case "$1" in',
+    `  mask) exit ${mask};;`,
+    `  stop) exit ${stop};;`,
+    `  is-enabled) echo ${enabled}; exit 1;;`,
+    'esac',
+    'exit 99',
+  ].join('\n')
+}
+
+describe('deploy: memory hardening', () => {
+  describe('swap', () => {
+    it('swap already active → probes, then sends no swap-creating command', async () => {
+      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_ACTIVE\n'}})
+
+      expect(error).toBeUndefined()
+      expect(indexOfCommand(calls, SWAP_PROBE)).toBeGreaterThanOrEqual(0)
+      expect(remoteCommands(calls).filter(command => ANY_SWAP_STEP.test(command))).toEqual([])
+      // fstab is only inspected on the create path
+      expect(indexOfCommand(calls, FSTAB_PROBE)).toBe(-1)
+    })
+
+    it('no swap active → allocates, locks down permissions, formats, activates, then persists — in that order', async () => {
+      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_NONE\n'}, fstab: {stdout: 'FSTAB_ABSENT\n'}})
+
+      expect(error).toBeUndefined()
+      const order = [
+        indexOfCommand(calls, SWAP_STEPS.allocate),
+        indexOfCommand(calls, SWAP_STEPS.permissions),
+        indexOfCommand(calls, SWAP_STEPS.format),
+        indexOfCommand(calls, SWAP_STEPS.activate),
+        indexOfCommand(calls, SWAP_STEPS.persist),
+      ]
+      expect(order.every(index => index >= 0)).toBe(true)
+      expect(order).toEqual([...order].sort((a, b) => a - b))
+
+      // every create step runs privileged, and the persisted line is the one fstab expects
+      for (const step of Object.values(SWAP_STEPS)) {
+        expect(commandMatching(calls, step)).toMatch(/sudo/)
+      }
+      expect(commandMatching(calls, SWAP_STEPS.persist)).toContain('/swapfile none swap sw 0 0')
+    })
+
+    it('swap file is root-owned with mode 0600 before it is formatted', async () => {
+      const {calls} = await runWithBox({swap: {stdout: 'SWAP_NONE\n'}})
+
+      const permissions = commandMatching(calls, SWAP_STEPS.permissions)
+      expect(permissions).toMatch(/chown root:root \/swapfile/)
+      expect(indexOfCommand(calls, SWAP_STEPS.permissions)).toBeLessThan(indexOfCommand(calls, SWAP_STEPS.format))
+    })
+
+    it('fstab entry already present → still creates swap but never appends a second fstab line', async () => {
+      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_NONE\n'}, fstab: {stdout: 'FSTAB_PRESENT\n'}})
+
+      expect(error).toBeUndefined()
+      expect(indexOfCommand(calls, FSTAB_PROBE)).toBeGreaterThanOrEqual(0)
+      expect(indexOfCommand(calls, SWAP_STEPS.activate)).toBeGreaterThanOrEqual(0)
+      expect(indexOfCommand(calls, SWAP_STEPS.persist)).toBe(-1)
+    })
+
+    it('probes both swap and fstab before the first change to the box', async () => {
+      const {calls} = await runWithBox({swap: {stdout: 'SWAP_NONE\n'}})
+
+      const firstChange = Math.min(indexOfCommand(calls, MASK_FWUPD), indexOfCommand(calls, SWAP_STEPS.allocate))
+      expect(indexOfCommand(calls, SWAP_PROBE)).toBeLessThan(firstChange)
+      expect(indexOfCommand(calls, FSTAB_PROBE)).toBeLessThan(firstChange)
+    })
+  })
+
+  describe('fails closed on an inconclusive probe', () => {
+    const inconclusiveSwapProbes: [string, MockResult][] = [
+      ['non-zero exit with stderr', {stdout: '', stderr: 'swapon: permission denied\n', exitCode: 1}],
+      ['non-zero exit that still printed a sentinel', {stdout: 'SWAP_NONE\n', stderr: 'boom\n', exitCode: 2}],
+      ['exit 0 with empty output', {stdout: '', exitCode: 0}],
+      ['exit 0 with an unrecognised answer', {stdout: 'SWAP_MAYBE\n', exitCode: 0}],
+    ]
+
+    for (const [name, swap] of inconclusiveSwapProbes) {
+      it(`swap probe: ${name} → throws naming the probe, before any change`, async () => {
+        const {calls, error} = await runWithBox({swap})
+
+        expect(error).toBeInstanceOf(Error)
+        expect(errorMessage(error)).toMatch(/whether swap is active/)
+        expect(errorMessage(error)).toContain(`exited ${swap.exitCode ?? 0}`)
+        if (swap.stderr) {
+          expect(errorMessage(error)).toContain(swap.stderr.trim())
+        }
+        expect(indexOfCommand(calls, MASK_FWUPD)).toBe(-1)
+        expect(remoteCommands(calls).filter(command => ANY_SWAP_STEP.test(command))).toEqual([])
+        expect(calls.some(c => WIREGUARD_CONTROL.test(c.cmd.at(-1) ?? ''))).toBe(false)
+      })
+    }
+
+    const inconclusiveFstabProbes: [string, MockResult][] = [
+      ['non-zero exit with stderr', {stdout: '', stderr: 'grep: /etc/fstab: No such file\n', exitCode: 2}],
+      ['non-zero exit that still printed a sentinel', {stdout: 'FSTAB_ABSENT\n', exitCode: 2}],
+      ['exit 0 with empty output', {stdout: '', exitCode: 0}],
+      ['exit 0 with an unrecognised answer', {stdout: 'FSTAB_UNKNOWN\n', exitCode: 0}],
+    ]
+
+    for (const [name, fstab] of inconclusiveFstabProbes) {
+      it(`fstab probe: ${name} → throws naming /etc/fstab, before any change`, async () => {
+        const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_NONE\n'}, fstab})
+
+        expect(error).toBeInstanceOf(Error)
+        expect(errorMessage(error)).toMatch(/\/etc\/fstab/)
+        expect(errorMessage(error)).toContain(`exited ${fstab.exitCode ?? 0}`)
+        expect(indexOfCommand(calls, MASK_FWUPD)).toBe(-1)
+        expect(remoteCommands(calls).filter(command => ANY_SWAP_STEP.test(command))).toEqual([])
+      })
+    }
+
+    it('a failing create step stops the sequence — later steps are never sent', async () => {
+      const calls: SpawnCall[] = []
+      const failingFormat: HardeningResponder = command => {
+        if (/mkswap/.test(command)) return {stdout: '', stderr: 'mkswap: failed\n', exitCode: 1}
+        return box({swap: {stdout: 'SWAP_NONE\n'}})(command)
+      }
+      const {dir, peersJsonPath} = makeTempPeersDir([])
+      try {
+        await expect(
+          deploy({env: BASE_ENV, spawn: makeMockSpawn(calls, zeroPeerResults(), failingFormat), peersJsonPath}),
+        ).rejects.toThrow(/mkswap/)
+      } finally {
+        rmSync(dir, {recursive: true, force: true})
+      }
+
+      expect(indexOfCommand(calls, SWAP_STEPS.activate)).toBe(-1)
+      expect(indexOfCommand(calls, SWAP_STEPS.persist)).toBe(-1)
+    })
+  })
+
+  describe('fwupd', () => {
+    it('masks the refresh timer and fwupd services on every run, even when swap is already active', async () => {
+      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_ACTIVE\n'}})
+
+      expect(error).toBeUndefined()
+      const mask = commandMatching(calls, MASK_FWUPD)
+      expect(mask).toMatch(/^sudo systemctl mask /)
+      for (const unit of ['fwupd-refresh.timer', 'fwupd-refresh.service', 'fwupd.service']) {
+        expect(mask).toContain(unit)
+      }
+      expect(mask).toMatch(/systemctl stop/)
+      expect(remoteCommands(calls).filter(command => MASK_FWUPD.test(command))).toHaveLength(1)
+    })
+
+    it('masking fails → deploy throws and WireGuard is never touched', async () => {
+      const {calls, error} = await runWithBox({mask: {stdout: '', stderr: 'Failed to mask\n', exitCode: 1}})
+
+      expect(errorMessage(error)).toMatch(/fwupd/)
+      expect(calls.some(c => WIREGUARD_CONTROL.test(c.cmd.at(-1) ?? ''))).toBe(false)
+    })
+
+    it('masking exits 0 without confirming the units are masked → deploy throws', async () => {
+      const {error} = await runWithBox({mask: {stdout: '', exitCode: 0}})
+
+      expect(errorMessage(error)).toMatch(/fwupd/)
+    })
+  })
+
+  describe('placement', () => {
+    it('runs after the wipe guard and before the server key, config apply and restart', async () => {
+      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_NONE\n'}})
+
+      expect(error).toBeUndefined()
+      const wipeGuard = indexOfCommand(calls, /wg show wg0 dump/)
+      const hardening = [
+        indexOfCommand(calls, SWAP_PROBE),
+        indexOfCommand(calls, FSTAB_PROBE),
+        indexOfCommand(calls, MASK_FWUPD),
+        indexOfCommand(calls, SWAP_STEPS.persist),
+      ]
+      const serverKey = indexOfCommand(calls, /test -f .*server\.key/)
+      const configShip = calls.findIndex(c => c.stdin?.includes('__SERVER_PRIVATE_KEY__') === true)
+      const restart = indexOfCommand(calls, /restart wg-quick@wg0/)
+
+      expect(wipeGuard).toBeGreaterThanOrEqual(0)
+      for (const index of hardening) {
+        expect(index).toBeGreaterThan(wipeGuard)
+        expect(index).toBeLessThan(serverKey)
+        expect(index).toBeLessThan(configShip)
+        expect(index).toBeLessThan(restart)
+      }
+    })
+
+    it('with --force-server-key it still runs before the key is regenerated', async () => {
+      const {calls, error} = await runWithBox({}, {forceServerKey: true})
+
+      expect(error).toBeUndefined()
+      const mask = indexOfCommand(calls, MASK_FWUPD)
+      expect(mask).toBeGreaterThanOrEqual(0)
+      expect(mask).toBeLessThan(indexOfCommand(calls, /wg genkey/))
+    })
+
+    it('a tripped wipe guard aborts before the box is changed', async () => {
+      const {calls, error} = await runWithBox({}, {results: [{stdout: 'server-line\npeer-line\n'}]})
+
+      expect(errorMessage(error)).toMatch(/Wipe guard/)
+      expect(indexOfCommand(calls, MASK_FWUPD)).toBe(-1)
+      expect(indexOfCommand(calls, SWAP_PROBE)).toBe(-1)
+    })
+
+    it('never touches WireGuard, the roster, networking, packages or power state', async () => {
+      const {calls} = await runWithBox({swap: {stdout: 'SWAP_NONE\n'}})
+
+      const hardeningCommands = remoteCommands(calls).filter(command => HARDENING_COMMAND.test(command))
+      expect(hardeningCommands.length).toBeGreaterThanOrEqual(7)
+      for (const command of hardeningCommands) {
+        expect(command).not.toMatch(WIREGUARD_CONTROL)
+        expect(command).not.toMatch(/\bwg\b|sysctl|ip route|\bapt(-get)?\b|dpkg|reboot|shutdown|networkctl/)
+      }
+    })
+
+    it('hardening commands carry no stdin payload', async () => {
+      const {calls} = await runWithBox({swap: {stdout: 'SWAP_NONE\n'}})
+
+      const hardeningCalls = calls.filter(c => HARDENING_COMMAND.test(c.cmd.at(-1) ?? ''))
+      expect(hardeningCalls.length).toBeGreaterThan(0)
+      expect(hardeningCalls.every(c => c.stdin === undefined)).toBe(true)
+    })
+  })
+
+  // The mocked spawn cannot tell whether the shell inside a command does the right thing,
+  // so the decision-bearing commands are executed here under `sh` with stubbed binaries.
+  describe('remote command semantics (executed under sh with stubbed binaries)', () => {
+    it('swap probe: active swap → SWAP_ACTIVE, none → SWAP_NONE', async () => {
+      const command = await probeCommand(SWAP_PROBE, {swap: {stdout: 'SWAP_NONE\n'}})
+
+      expect(runRemote(command, {swapon: 'echo /swapfile'})).toEqual({exitCode: 0, stdout: 'SWAP_ACTIVE'})
+      expect(runRemote(command, {swapon: 'exit 0'})).toEqual({exitCode: 0, stdout: 'SWAP_NONE'})
+    })
+
+    it('swap probe: a failing swapon is a failed probe, never "no swap"', async () => {
+      const command = await probeCommand(SWAP_PROBE, {swap: {stdout: 'SWAP_NONE\n'}})
+
+      const result = runRemote(command, {swapon: 'exit 2'})
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).not.toMatch(/SWAP_/)
+
+      const printedThenFailed = runRemote(command, {swapon: 'echo /swapfile; exit 2'})
+      expect(printedThenFailed.exitCode).not.toBe(0)
+      expect(printedThenFailed.stdout).not.toMatch(/SWAP_/)
+    })
+
+    it('fstab probe: grep 0 → FSTAB_PRESENT, 1 → FSTAB_ABSENT, anything else is a failed probe', async () => {
+      const command = await probeCommand(FSTAB_PROBE, {swap: {stdout: 'SWAP_NONE\n'}})
+
+      expect(runRemote(command, {grep: 'exit 0'})).toEqual({exitCode: 0, stdout: 'FSTAB_PRESENT'})
+      expect(runRemote(command, {grep: 'exit 1'})).toEqual({exitCode: 0, stdout: 'FSTAB_ABSENT'})
+      for (const rc of [2, 127]) {
+        const result = runRemote(command, {grep: `exit ${rc}`})
+        expect(result.exitCode).toBe(rc)
+        expect(result.stdout).not.toMatch(/FSTAB_/)
+      }
+    })
+
+    it('mask command: succeeds and confirms when units are masked', async () => {
+      const command = await probeCommand(MASK_FWUPD, {})
+
+      expect(runRemote(command, {systemctl: systemctlStub()})).toEqual({exitCode: 0, stdout: 'FWUPD_MASKED'})
+    })
+
+    it('mask command: units that are absent or not loaded (stop fails) do not fail the run', async () => {
+      const command = await probeCommand(MASK_FWUPD, {})
+
+      expect(runRemote(command, {systemctl: systemctlStub({stop: 5})})).toEqual({exitCode: 0, stdout: 'FWUPD_MASKED'})
+    })
+
+    it('mask command: a failed mask, or units that do not report masked, never confirm', async () => {
+      const command = await probeCommand(MASK_FWUPD, {})
+
+      for (const stub of [systemctlStub({mask: 1}), systemctlStub({enabled: 'enabled'})]) {
+        const result = runRemote(command, {systemctl: stub})
+        expect(result.exitCode).not.toBe(0)
+        expect(result.stdout).not.toContain('FWUPD_MASKED')
+      }
+    })
   })
 })

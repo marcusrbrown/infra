@@ -20,7 +20,7 @@ The gateway pin moved from fro-bot/agent v0.138.0 to v0.146.0 in one step: about
 
 ## Guidance
 
-1. **Do not use the compare file list to claim that a file is unchanged.** A file that is missing from a truncated list proves nothing. Compare each named path's blob SHA at both tags, from `git/trees/<tag>?recursive=1` or a blobless clone. A recursive tree response can be truncated too, so check its `truncated` field. Equal SHAs mean the file is unchanged. Read the patch of every file whose SHA differs, and look for a rename when a path is missing at one tag.
+1. **Do not use the compare file list to claim that a file is unchanged.** A file that is missing from a truncated list proves nothing. Compare each named path's blob SHA at both tags, from `git/trees/<tag>?recursive=1` or a blobless clone. A recursive tree response can be truncated too, so check its `truncated` field. Equal SHAs mean the contents are unchanged. Compare the entry's mode as well, because an executable bit can change with the contents equal. Read the patch of every file whose SHA differs, and look for a rename when a path is missing at one tag.
 2. **Name the paths that decide "pin-only" before you look.** For the gateway these are:
    - `deploy/compose.yaml`, both Dockerfiles and `deploy/workspace-entrypoint.sh`;
    - `packages/gateway/src/config.ts` and the other files that read the environment at boot;

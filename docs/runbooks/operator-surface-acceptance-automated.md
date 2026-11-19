@@ -1064,8 +1064,8 @@ Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses, states and ti
 2. **G5.3 and G5.4, probe.**
    1. Plant a new marker: `MARK=$TAG-G5-$(openssl rand -hex 4); plant "$MARK" | tee "$OUT/g5-probe.txt"`. Expect `mode=644`.
    2. Launch at least 20 seconds after the control launch, as in step 1.2, with the new marker and the decider set to `decision` `"reject"` and `delayMs` `0`. Leave the card as it is, and take a fresh `T5`.
-   3. Wait until the decider reports `done` and `wait_terminal "$RUNKEY" 30 10` returns, then 30 seconds. If it ends `not terminal`, G5.3 and G5.4 are `not triggered`; do not cancel. Observe and save as above. Read `window.__g5` and save the matched log lines to `$OUT/g5-probe-log.txt`. Each reject needs its `"reply":"reject"` line within 60 seconds of the decision.
-3. **At Finish.** Observe the probe marker again and append it to `$OUT/g5-probe.txt`. Read the file back, then `unplant "$MARK"`, which must print `CLEAN`. `ABSENT` at Finish means the container was recreated since the probe: record G5.4's second observation as `not triggered` and name the P0 digest change.
+   3. Wait until the decider reports `done` and `wait_terminal "$RUNKEY" 30 10` returns, then 30 seconds. If it ends `not terminal`, do not cancel: handle it as in "Decider absent" below, which waits for the run to end before anything is observed. G5.3 and G5.4 are then `not triggered`, or `fail` where a decision was already recorded with anything but `200` `claimed`. Observe and save as above. Read `window.__g5` and save the matched log lines to `$OUT/g5-probe-log.txt`. Each reject needs its `"reply":"reject"` line within 60 seconds of the decision.
+3. **At Finish.** If a Gate 5 run was never confirmed terminal, skip this step: leave its marker in place and report the run ID. Otherwise observe the probe marker again and append it to `$OUT/g5-probe.txt`. Read the file back, then `unplant "$MARK"`, which must print `CLEAN`. `ABSENT` at Finish means the container was recreated since the probe: record G5.4's second observation as `not triggered` and name the P0 digest change.
 
 Verdicts, in the [Results](#results) vocabulary:
 
@@ -1125,7 +1125,7 @@ When the pass does not run, report every row above as `not run` in the [Results]
 
 ### Finish
 
-1. Run G1.11 cleanup if it has not run. Make the Gate 5 final observation and remove its marker if that has not run (step 3 of [Gate 5](#gate-5-rejected-command-does-not-run)). Then run the `/dev/null` check from [Rules](#rules).
+1. Run G1.11 cleanup if it has not run. Make the Gate 5 final observation and remove its marker if that has not run (step 3 of [Gate 5](#gate-5-rejected-command-does-not-run)); skip both when a Gate 5 run was never confirmed terminal. Then run the `/dev/null` check from [Rules](#rules).
 2. Close the shared connection and remove the key: `ssh -O exit -o ControlPath="$WORK/cm" "root@$GATEWAY_HOST"; rm -rf "$WORK"`.
 3. Save matched log lines, record JSON and thread dumps under `$OUT`, this pass's `/tmp/gateway-acceptance-<REF>-<UTC date-time>/`. Read the saved files back before recording a result.
 

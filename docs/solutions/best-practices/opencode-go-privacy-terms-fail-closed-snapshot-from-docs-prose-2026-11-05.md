@@ -1,6 +1,7 @@
 ---
 title: "Privacy terms that exist only as docs prose: a fail-closed snapshot, a review PR and fixture-pinned tests"
 date: 2026-11-05
+last_updated: 2026-11-19
 module: packages/shared/opencode-go
 problem_type: architecture_pattern
 component: tooling
@@ -19,9 +20,23 @@ related_components:
 
 ## Context
 
-The OpenCode Go model list endpoint carries no retention, training or region fields. The only source is a hand-written table in the upstream repository's `console/go.mdx`. The cliproxy deploy must expose only models that keep no data, never train on it and need no restricted region. That decision therefore rests on a reviewed snapshot parsed from the page, refreshed by a pull request, and applied by both the deploy and the monitor.
+(As of 2026-11-05; see the update below.) The OpenCode Go model list endpoint carried no retention, training or region fields. The only source was a hand-written table in the upstream repository's `console/go.mdx`. The cliproxy deploy must expose only models that keep no data, never train on it and need no restricted region. That decision therefore rests on a reviewed snapshot parsed from the page, refreshed by a pull request, and applied by both the deploy and the monitor.
 
 The policy lives in `packages/shared/opencode-go/`: `parse-privacy-table.ts`, `eligibility.ts`, `privacy-snapshot.json` and `settings.json`. It sits outside `packages/shared/cliproxy/**`, so a refresh triggers the cliproxy deploy filter in `.github/workflows/deploy.yaml` and not the broker's.
+
+## Update 2026-11-19: two sources, most restrictive wins
+
+The premise above no longer holds, and the page format it describes is gone. Upstream restructured `console/go.mdx`: the Endpoints table, the model list and the training column were removed, and the refresh failed with `Endpoints: no table found` (infra#1973) while the committed snapshot kept a model eligible that upstream now retained for 55 days. Upstream also published privacy booleans on the models list: every entry has a `go` object with `training`, `zdr` and `limited_regions`. The page still has what the API lacks: retention days, the zero-retention agreement expiry and the workspace Global-region requirement. The API's `limited_regions` means "some countries are refused", which is not the same fact as the workspace rule.
+
+The snapshot is now built from both sources, and the rule stays fail-closed:
+
+- `zeroRetention` needs `zdr: true` **and** a `0 days` row. `trainsOnData` is true when either source says so. `regionGated` is true when either source says so. `agreementExpiry` comes from the page.
+- The join is by normalized name (case, whitespace, hyphens) plus a reviewed alias map, never by prefix: `Hy4` is a prefix of `Hy4 preview` and `Hy4 flash Free`.
+- The refresh throws, writes nothing and opens no PR when the evidence is incomplete: an entry without `go` or with a non-boolean field (upstream says the object can be absent when its data source is down), a Privacy row with no or several live matches, a live model with no row, or an unknown footnote, rule, column or `*` marker. A missing `go` is never read as all-false.
+- Facts only one source can state are not disagreements. Facts both can state, where they differ, are listed in the PR body per model and fact, and the snapshot keeps the restrictive value.
+- Tests use pinned copies of both sources (`__fixtures__/go.mdx`, `__fixtures__/live-models.json`) and the snapshot they build (`go.expected.json`); the temporary per-model pin on the committed snapshot (#1976) became a fixture test.
+
+The guidance below describes the page-only parser; where it names the Endpoints table, the model list or the training column, it predates this update. The fail-closed contract, the single eligibility function, the refresh-by-PR flow and the fixture rule still apply.
 
 ## Guidance
 

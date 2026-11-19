@@ -1,10 +1,9 @@
+import type {DocsPrivacyRow} from './parse-privacy-table'
 import {readFileSync} from 'node:fs'
+
 import {describe, expect, test} from 'bun:test'
 
-import {parseSnapshot} from './eligibility'
-import {parsePrivacyTable, PrivacyTableError} from './parse-privacy-table'
-
-const FIXTURE_COMMIT = '2f886a2a5e0f22b813fe0c177105559b508abad5'
+import {parsePrivacyDocs, PrivacyTableError} from './parse-privacy-table'
 
 const readFixture = (name: string) => readFileSync(new URL(`__fixtures__/${name}`, import.meta.url), 'utf8')
 
@@ -16,82 +15,106 @@ const mutate = (from: string, to: string): string => {
   return mdx.replace(from, () => to)
 }
 
-const parse = (source: string) => parsePrivacyTable(source, FIXTURE_COMMIT)
+const rowsByName = (source: string): Map<string, DocsPrivacyRow> =>
+  new Map(parsePrivacyDocs(source).map(row => [row.name, row]))
 
-describe('parsePrivacyTable on the pinned go.mdx', () => {
-  test('parses to exactly go.expected.json', () => {
-    expect(parse(mdx)).toEqual(JSON.parse(readFixture('go.expected.json')))
+const plain = {
+  trainingGranted: false,
+  regionRequirement: false,
+  availabilityLimited: false,
+  agreementExpiry: null,
+} as const
+
+describe('parsePrivacyDocs on the pinned go.mdx', () => {
+  const rows = rowsByName(mdx)
+
+  test('reads one row per Privacy table line, in page order', () => {
+    const parsed = parsePrivacyDocs(mdx)
+    expect(parsed).toHaveLength(31)
+    expect(parsed[0]?.name).toBe('Grok 4.7')
+    expect(parsed.at(-1)?.name).toBe('Hy4 flash Free')
   })
 
-  test('the output satisfies the snapshot schema with no invalid entries', () => {
-    const parsed = parseSnapshot(parse(mdx))
-    expect(parsed.invalid).toEqual([])
-    expect(parsed.source).toEqual({
-      repo: 'anomalyco/opencode',
-      path: 'services/site/src/docs/content/console/go.mdx',
-      commit: FIXTURE_COMMIT,
-    })
-  })
-
-  test('keys models by endpoint id, sorted', () => {
-    const ids = Object.keys(parse(mdx).models)
-    expect(ids).toEqual([...ids].sort())
-    expect(ids).toContain('claude-haiku-5-5')
-    expect(ids).toContain('glm-5.3')
-  })
-
-  test('maps each footnote and marker to the field it qualifies', () => {
-    const {models} = parse(mdx)
-    // Marker `*` + "valid through" footnote -> agreement expiry, plus the Global-region requirement.
-    expect(models['deepseek-v4.1-flash']).toEqual({
-      zeroRetention: true,
-      trainsOnData: false,
-      regionGated: true,
+  test('maps each footnote and marker to the fact it qualifies', () => {
+    // Marker + "valid through" footnote -> expiry; restricted-models bullet -> workspace Global requirement.
+    expect(rows.get('DeepSeek V4.1 Flash')).toEqual({
+      name: 'DeepSeek V4.1 Flash',
+      retentionDays: 0,
+      ...plain,
+      regionRequirement: true,
       agreementExpiry: '2026-11-30',
     })
-    expect(models['deepseek-v4-pro']).toEqual(models['deepseek-v4.1-flash'])
-    // Retention footnote: 30 days is not zero retention.
-    expect(models['claude-haiku-5-5']).toEqual({
-      zeroRetention: false,
-      trainsOnData: false,
-      regionGated: false,
-      agreementExpiry: null,
+    expect(rows.get('DeepSeek V4 Pro')).toEqual({
+      name: 'DeepSeek V4 Pro',
+      retentionDays: 0,
+      ...plain,
+      regionRequirement: true,
+      agreementExpiry: '2026-11-30',
     })
-    expect(models['gpt-6-luna']?.zeroRetention).toBe(false)
-    expect(models['gpt-5.6-luna']?.zeroRetention).toBe(false)
-    expect(models['grok-4.7']?.zeroRetention).toBe(false)
-    // Training flag + region footnote.
-    expect(models['muse-spark-1.3-contributor']).toEqual({
-      zeroRetention: false,
-      trainsOnData: true,
-      regionGated: true,
-      agreementExpiry: null,
+    // Retention footnotes agree with the table; none of them gates anything.
+    expect(rows.get('Gemini 4 Argon')).toEqual({name: 'Gemini 4 Argon', retentionDays: 55, ...plain})
+    expect(rows.get('Claude Haiku 5.5')).toEqual({name: 'Claude Haiku 5.5', retentionDays: 30, ...plain})
+    expect(rows.get('Grok 4.7')).toEqual({name: 'Grok 4.7', retentionDays: 30, ...plain})
+    // Training footnote + availability footnote + opt-in rule.
+    expect(rows.get('Muse Spark 1.3 Contributor')).toEqual({
+      name: 'Muse Spark 1.3 Contributor',
+      retentionDays: null,
+      ...plain,
+      trainingGranted: true,
+      availabilityLimited: true,
     })
-    expect(models['iceman-contributor-free']?.trainsOnData).toBe(true)
-    // Region from the model list ("limited regions").
-    expect(models['beam-free']?.regionGated).toBe(true)
-    // Hosting + region footnote and the restricted-models bullet: zero retention, no training, region-gated.
-    expect(models['longcat-2.5-free']).toEqual({
-      zeroRetention: true,
-      trainsOnData: false,
-      regionGated: true,
-      agreementExpiry: null,
+    expect(rows.get('Muse Spark 1.2 Contributor')?.trainingGranted).toBe(true)
+    // Training footnote alone.
+    expect(rows.get('Iceman Contributor Free')).toEqual({
+      name: 'Iceman Contributor Free',
+      retentionDays: null,
+      ...plain,
+      trainingGranted: true,
     })
-    expect(models['crouton-alpha-free']).toBeUndefined()
-    // Plain zero-retention row.
-    expect(models['glm-5.3']).toEqual({
-      zeroRetention: true,
-      trainsOnData: false,
-      regionGated: false,
-      agreementExpiry: null,
+    // Hosting + Global sentences.
+    expect(rows.get('LongCat 2.5 Free')).toEqual({
+      name: 'LongCat 2.5 Free',
+      retentionDays: 0,
+      ...plain,
+      regionRequirement: true,
     })
+    // The page no longer says anything about Beam Free's region; that now lives in the API only.
+    expect(rows.get('Beam Free')).toEqual({name: 'Beam Free', retentionDays: 30, ...plain})
+    expect(rows.get('Hy4 flash Free')).toEqual({name: 'Hy4 flash Free', retentionDays: 0, ...plain})
+    expect(rows.get('GLM-5.3')).toEqual({name: 'GLM-5.3', retentionDays: 0, ...plain})
   })
 })
 
-describe('parsePrivacyTable fails closed', () => {
+describe('parsePrivacyDocs on the current page layout', () => {
+  test('parses a page with no Endpoints table, no model list and no training column (the pinned page)', () => {
+    expect(mdx).not.toContain('Model ID')
+    expect(mdx).not.toContain('The current list of models includes:')
+    expect(mdx).not.toContain('Model training')
+    expect(() => parsePrivacyDocs(mdx)).not.toThrow()
+  })
+
+  test('parses a page with no Endpoints heading at all', () => {
+    const lines = mdx.split('\n')
+    const start = lines.indexOf('## Endpoints')
+    const end = lines.indexOf('## Privacy')
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(parsePrivacyDocs([...lines.slice(0, start), ...lines.slice(end)].join('\n'))).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('on a reinstated training column, because a column it does not read could hide a fact', () => {
+    expect(() =>
+      parsePrivacyDocs(
+        mutate('| Model                      | Data retention |', '| Model | Model training | Data retention |'),
+      ),
+    ).toThrow(/columns/)
+  })
+})
+
+describe('parsePrivacyDocs fails closed', () => {
   test('on an unmapped footnote sentence', () => {
     expect(() =>
-      parse(
+      parsePrivacyDocs(
         mutate('- **Grok 4.7:** ZDR disables', '- **Grok 4.7:** Logs are mirrored to a cold archive. ZDR disables'),
       ),
     ).toThrow(PrivacyTableError)
@@ -99,7 +122,7 @@ describe('parsePrivacyTable fails closed', () => {
 
   test('on a footnote that names no model', () => {
     expect(() =>
-      parse(
+      parsePrivacyDocs(
         mutate(
           '- **DeepSeek:** ZDR agreement',
           '- **Mystery Model:** Data is retained for 7 days.\n- **DeepSeek:** ZDR agreement',
@@ -108,110 +131,76 @@ describe('parsePrivacyTable fails closed', () => {
     ).toThrow(/Mystery Model/)
   })
 
-  test('on a table marker that no footnote qualifies', () => {
+  test('on a retention marker that has no agreement footnote', () => {
     expect(() =>
-      parse(
-        mutate(
-          '| Hy3                        | Not used       | 0 days         |',
-          String.raw`| Hy3 | Not used | 0 days\* |`,
-        ),
-      ),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', String.raw`| Hy3 | 0 days\* |`)),
     ).toThrow(/marker/i)
+  })
+
+  test('on a retention marker that only a non-agreement footnote qualifies', () => {
+    const marked = mutate(
+      '| LongCat 2.5 Free           | 0 days         |',
+      String.raw`| LongCat 2.5 Free | 0 days\* |`,
+    )
+    expect(() => parsePrivacyDocs(marked)).toThrow(/marker/i)
   })
 
   test('on an unknown marker character', () => {
     expect(() =>
-      parse(
-        mutate(
-          '| Not used       | 0 days         |\n| Hy4 preview',
-          '| Not used       | 0 days†        |\n| Hy4 preview',
-        ),
-      ),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', '| Hy3 | 0 days† |')),
     ).toThrow(PrivacyTableError)
   })
 
   test('on a missing column', () => {
     expect(() =>
-      parse(
-        mutate(
-          '| Model                      | Model training | Data retention |',
-          '| Model                      | Model training |',
-        ),
-      ),
+      parsePrivacyDocs(mutate('| Model                      | Data retention |', '| Model                      |')),
     ).toThrow(PrivacyTableError)
   })
 
   test('on a row with the wrong cell count', () => {
     expect(() =>
-      parse(mutate('| Hy3                        | Not used       | 0 days         |', '| Hy3 | Not used |')),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', '| Hy3 | 0 days | extra |')),
     ).toThrow(PrivacyTableError)
   })
 
   test('on zero rows', () => {
     const lines = mdx.split('\n')
-    const start = lines.findIndex(l => l.startsWith('| Model                      | Model training'))
+    const start = lines.findIndex(l => l.startsWith('| Model                      | Data retention'))
     const end = lines.findIndex((l, i) => i > start && !l.startsWith('|'))
     const without = [...lines.slice(0, start + 2), ...lines.slice(end)].join('\n')
-    expect(() => parse(without)).toThrow(/no rows|zero rows/i)
+    expect(() => parsePrivacyDocs(without)).toThrow(/no rows/i)
   })
 
   test('on a missing Privacy section', () => {
-    expect(() => parse(mutate('## Privacy', '## Something else'))).toThrow(PrivacyTableError)
-  })
-
-  test('on an unrecognized training value', () => {
-    expect(() =>
-      parse(
-        mutate('| GLM-5.3                    | Not used       |', '| GLM-5.3                    | Maybe          |'),
-      ),
-    ).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(mutate('## Privacy', '## Something else'))).toThrow(PrivacyTableError)
   })
 
   test('on an unrecognized retention value', () => {
     expect(() =>
-      parse(mutate('| Hy3                        | Not used       | 0 days         |', '| Hy3 | Not used | a while |')),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', '| Hy3 | a while |')),
     ).toThrow(PrivacyTableError)
   })
 
-  test('on a privacy row with no endpoint id', () => {
+  test('on a footnote retention that contradicts the table', () => {
     expect(() =>
-      parse(
-        mutate(
-          '| Hy3                        | hy3                        |',
-          '| Hy3 Unlisted               | hy3                        |',
-        ),
-      ),
-    ).toThrow(/Hy3/)
-  })
-
-  test('on a footnote that contradicts the table', () => {
-    // Table says GLM-5.3 retains for 0 days; a footnote claiming 30 days must not be silently preferred.
-    expect(() =>
-      parse(
+      parsePrivacyDocs(
         mutate(
           '- **DeepSeek:** ZDR agreement',
           '- **GLM-5.3:** Requests are retained for 30 days.\n- **DeepSeek:** ZDR agreement',
         ),
       ),
     ).toThrow(PrivacyTableError)
-    // Table says Claude Haiku is not trained on; a training footnote contradicts it.
-    expect(() =>
-      parse(
-        mutate(
-          '- **DeepSeek:** ZDR agreement',
-          '- **Claude Haiku 5.5:** Free in exchange for permission to use your prompts and completions to train models.\n- **DeepSeek:** ZDR agreement',
-        ),
-      ),
-    ).toThrow(PrivacyTableError)
   })
 
-  test('on a missing restricted-models section, which carries the DeepSeek region rule', () => {
-    expect(() => parse(mutate('### Enable restricted models', '### Something else'))).toThrow(PrivacyTableError)
+  test('on a missing restricted-models section, which carries the Global-region rule', () => {
+    expect(() => parsePrivacyDocs(mutate('### Enable restricted models', '### Something else'))).toThrow(
+      PrivacyTableError,
+    )
   })
 
   test('on an unrecognized restricted-models rule', () => {
     expect(() =>
-      parse(
+      parsePrivacyDocs(
         mutate(
           '- **DeepSeek V4.1 Flash and V4 Pro:** select **Global** under **Regions**.',
           '- **DeepSeek V4.1 Flash and V4 Pro:** phone the support desk.',
@@ -226,51 +215,68 @@ describe('parsePrivacyTable fails closed', () => {
     ['no bold label', '- DeepSeek V4.1 Flash and V4 Pro: select **Global** under **Regions**.'],
   ])('on a reformatted restricted-models bullet with %s, which would drop a region rule', (_label, bullet) => {
     const original = '- **DeepSeek V4.1 Flash and V4 Pro:** select **Global** under **Regions**.'
-    expect(() => parse(mutate(original, bullet))).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(mutate(original, bullet))).toThrow(PrivacyTableError)
   })
 
   test('but not on prose inside the restricted-models section', () => {
     const intro = 'In **Settings › Privacy**, an owner or admin can enable:'
-    expect(parse(mutate(intro, `${intro}\n\nEvery change takes effect at once.`))).toEqual(
-      JSON.parse(readFixture('go.expected.json')),
+    expect(parsePrivacyDocs(mutate(intro, `${intro}\n\nEvery change takes effect at once.`))).toEqual(
+      parsePrivacyDocs(mdx),
     )
-  })
-
-  test('on an unrecognized parenthetical in the model list', () => {
-    expect(() =>
-      parse(
-        mutate(
-          '- **Iceman Contributor Free** (limited time)',
-          '- **Iceman Contributor Free** (limited time, invite only)',
-        ),
-      ),
-    ).toThrow(PrivacyTableError)
   })
 
   test('on a duplicate privacy row', () => {
     expect(() =>
-      parse(mutate('| Hy3                        | Not used       | 0 days         |', '| Hy4 | Not used | 0 days |')),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', '| Hy4 | 0 days |')),
     ).toThrow(/duplicate/i)
   })
 
-  test('on a malformed source commit', () => {
-    expect(() => parsePrivacyTable(mdx, 'dev')).toThrow(PrivacyTableError)
-  })
-
   test('on an unparseable agreement date', () => {
-    expect(() => parse(mutate('valid through November 30, 2026', 'valid through Smarch 40, 2026'))).toThrow(
+    expect(() => parsePrivacyDocs(mutate('valid through November 30, 2026', 'valid through Smarch 40, 2026'))).toThrow(
       PrivacyTableError,
     )
   })
+
+  test('on conflicting agreement dates for one model', () => {
+    expect(() =>
+      parsePrivacyDocs(
+        mutate(
+          '- **DeepSeek:** ZDR agreement',
+          '- **DeepSeek V4 Pro:** The current agreement is valid through December 31, 2026.\n- **DeepSeek:** ZDR agreement',
+        ),
+      ),
+    ).toThrow(/conflicting agreement dates/)
+  })
 })
 
-describe('parsePrivacyTable on region footnotes', () => {
+describe('parsePrivacyDocs on training statements', () => {
+  const GLM_ROW = '| GLM-5.3                    | 0 days         |'
+  const TRAINING = 'Free in exchange for permission to use your prompts and completions to improve the model.'
+  const addFootnote = (line: string) =>
+    mutate('- **DeepSeek:** ZDR agreement', `${line}\n- **DeepSeek:** ZDR agreement`)
+
+  test('a footnote that grants permission to use prompts marks its model as training', () => {
+    expect(mdx).toContain(GLM_ROW)
+    const rows = rowsByName(addFootnote(`- **GLM-5.3:** ${TRAINING}`))
+    expect(rows.get('GLM-5.3')?.trainingGranted).toBe(true)
+    expect(rows.get('GLM-5.3-Flash')?.trainingGranted).toBe(false)
+  })
+
+  test('the opt-in rule alone marks its models as training', () => {
+    const rule = '- **GLM-5.3:** turn on **Allow paid endpoints that train on request data**.'
+    const rows = rowsByName(mutate('- **LongCat 2.5 Free:** select', `${rule}\n- **LongCat 2.5 Free:** select`))
+    expect(rows.get('GLM-5.3')?.trainingGranted).toBe(true)
+  })
+})
+
+describe('parsePrivacyDocs on region footnotes', () => {
   const HOSTING = 'Hosted in China.'
   const REGION = 'Requires **Global** regions in your workspace privacy settings.'
+  const AVAILABILITY = "Availability is limited to regions permitted by Meta's Geographic Use Policy."
   const LONGCAT_FOOTNOTE = `- **LongCat 2.5 Free:** ${HOSTING} ${REGION}`
   const LONGCAT_RESTRICTED = '- **LongCat 2.5 Free:** select **Global** under **Regions**.\n'
-  const LONGCAT_ROW = '| LongCat 2.5 Free           | Not used       | 0 days         |'
-  const longcat = (source: string) => parse(source).models['longcat-2.5-free']
+  const LONGCAT_ROW = '| LongCat 2.5 Free           | 0 days         |'
+  const longcat = (source: string) => rowsByName(source).get('LongCat 2.5 Free')
 
   /** The LongCat footnote replaced by `sentences`, restricted-models bullet removed: only the footnote can gate. */
   const footnoteOnly = (sentences: string): string =>
@@ -284,51 +290,44 @@ describe('parsePrivacyTable on region footnotes', () => {
 
   test('the hosting sentence alone gates its target', () => {
     expect(longcat(footnoteOnly(HOSTING))).toEqual({
-      zeroRetention: true,
-      trainsOnData: false,
-      regionGated: true,
-      agreementExpiry: null,
+      name: 'LongCat 2.5 Free',
+      retentionDays: 0,
+      ...plain,
+      regionRequirement: true,
     })
   })
 
-  test('the region sentence alone gates its target', () => {
-    expect(longcat(footnoteOnly(REGION))?.regionGated).toBe(true)
+  test('the Global sentence alone gates its target', () => {
+    expect(longcat(footnoteOnly(REGION))?.regionRequirement).toBe(true)
   })
 
-  test('both sentences together gate their target', () => {
-    expect(longcat(footnoteOnly(`${HOSTING} ${REGION}`))?.regionGated).toBe(true)
-  })
-
-  test('a hosting footnote with no restricted-models bullet is still region-gated', () => {
+  test('a hosting footnote with no restricted-models bullet is still gated', () => {
     const withoutBullet = mutate(LONGCAT_RESTRICTED, '')
-    expect(withoutBullet).toContain(LONGCAT_FOOTNOTE)
-    expect(longcat(withoutBullet)?.regionGated).toBe(true)
+    expect(longcat(withoutBullet)?.regionRequirement).toBe(true)
     // Control: without the bullet and without the region sentences, nothing gates LongCat.
     const ungated = withoutBullet.replace(LONGCAT_FOOTNOTE, () => '- **LongCat 2.5 Free:** ZDR disables training.')
-    expect(longcat(ungated)?.regionGated).toBe(false)
+    expect(longcat(ungated)?.regionRequirement).toBe(false)
   })
 
-  test.each([
-    ['the hosting sentence', HOSTING],
-    ['the region sentence', REGION],
-  ])('%s qualifies a retention marker', (_label, sentence) => {
-    const marked = footnoteOnly(sentence).replace(
-      LONGCAT_ROW,
-      () => String.raw`| LongCat 2.5 Free | Not used | 0 days\* |`,
-    )
-    expect(marked).not.toBe(footnoteOnly(sentence))
-    expect(longcat(marked)?.regionGated).toBe(true)
+  test('the restricted-models bullet alone gates its target', () => {
+    const bulletOnly = mdx.replace(LONGCAT_FOOTNOTE, () => '- **LongCat 2.5 Free:** ZDR disables training.')
+    expect(longcat(bulletOnly)?.regionRequirement).toBe(true)
   })
 
   test('a hosting sentence names any place', () => {
-    expect(longcat(footnoteOnly('Hosted in Singapore and Hong Kong.'))?.regionGated).toBe(true)
+    expect(longcat(footnoteOnly('Hosted in Singapore and Hong Kong.'))?.regionRequirement).toBe(true)
+  })
+
+  test('an availability sentence is the one the API can confirm, and does not set the docs-only gate', () => {
+    const row = longcat(footnoteOnly(AVAILABILITY))
+    expect(row?.availabilityLimited).toBe(true)
+    expect(row?.regionRequirement).toBe(false)
   })
 
   test('an unknown sentence next to them still throws the unmapped-sentence error', () => {
     const source = mdx.replace(LONGCAT_FOOTNOTE, () => `${LONGCAT_FOOTNOTE} Logs are mirrored to a cold archive.`)
     expect(source).not.toBe(mdx)
-    expect(() => parse(source)).toThrow(PrivacyTableError)
-    expect(() => parse(source)).toThrow(
+    expect(() => parsePrivacyDocs(source)).toThrow(
       '"LongCat 2.5 Free": unmapped footnote sentence "Logs are mirrored to a cold archive."',
     )
   })
@@ -342,16 +341,6 @@ describe('parsePrivacyTable on region footnotes', () => {
     ['a region sentence with another region', 'Requires **Europe** regions in your workspace privacy settings.'],
     ['a region sentence with no closing period', 'Requires **Global** regions in your workspace privacy settings'],
   ])('a near miss (%s) still throws', (_label, sentence) => {
-    expect(() => parse(footnoteOnly(sentence))).toThrow(/unmapped footnote sentence/)
-  })
-})
-
-describe('parsePrivacyTable on changed upstream content', () => {
-  test('a row whose retention changes flips only that model', () => {
-    const changed = parse(
-      mutate('| GLM-5.3                    | Not used       | 0 days         |', '| GLM-5.3 | Not used | 30 days |'),
-    )
-    expect(changed.models['glm-5.3']?.zeroRetention).toBe(false)
-    expect(changed.models['glm-5.2']?.zeroRetention).toBe(true)
+    expect(() => parsePrivacyDocs(footnoteOnly(sentence))).toThrow(/unmapped footnote sentence/)
   })
 })

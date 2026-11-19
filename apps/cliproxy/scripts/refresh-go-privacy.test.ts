@@ -3,8 +3,10 @@ import {existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
+import {buildSnapshot} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
 import {parseSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
-import {parsePrivacyTable, PrivacyTableError} from '@marcusrbrown/infra-shared/opencode-go/parse-privacy-table'
+import {GO_LIVE_MODELS_URL, LiveModelsError, parseLiveModels} from '@marcusrbrown/infra-shared/opencode-go/live-models'
+import {parsePrivacyDocs, PrivacyTableError} from '@marcusrbrown/infra-shared/opencode-go/parse-privacy-table'
 import {afterEach, describe, expect, it} from 'bun:test'
 import {
   COMMIT_API_URL,
@@ -20,7 +22,8 @@ const FIXTURES = new URL('../../../packages/shared/opencode-go/__fixtures__/', i
 const readFixture = (name: string): string => readFileSync(new URL(name, FIXTURES), 'utf8')
 
 const MDX = readFixture('go.mdx')
-const OLD_SHA = '2f886a2a5e0f22b813fe0c177105559b508abad5'
+const LIVE_JSON = readFixture('live-models.json')
+const OLD_SHA = '011f9043e8a90dc9a1ac42fb1181486dd4d13b71'
 const NEW_SHA = 'a'.repeat(40)
 
 const temps: string[] = []
@@ -34,8 +37,18 @@ function tempDir(): string {
   return dir
 }
 
-/** The table the fixture parses to, stamped with `commit`. */
-const tableAt = (commit: string): PrivacySnapshot => parsePrivacyTable(MDX, commit)
+/** The snapshot the fixture page and API response build to, stamped with `commit`. */
+const tableAt = (commit: string): PrivacySnapshot =>
+  buildSnapshot(parsePrivacyDocs(MDX), parseLiveModels(JSON.parse(LIVE_JSON)), commit).snapshot
+
+/** The recorded live response with one model's entry changed by `change`. */
+function liveWith(id: string, change: (entry: Record<string, unknown>) => void): string {
+  const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
+  const entry = body.data.find(candidate => candidate.id === id)
+  if (entry === undefined) throw new Error(`fixture has no ${id}`)
+  change(entry)
+  return JSON.stringify(body)
+}
 
 interface Harness {
   readonly dir: string
@@ -46,12 +59,19 @@ interface Harness {
 }
 
 /**
- * A temp snapshot plus a fake fetch. The API answers with `sha`; the raw URL answers with `mdx`. Nothing touches
- * the network or the tracked snapshot.
+ * A temp snapshot plus a fake fetch. The commit API answers with `sha`, the raw URL with `mdx` and the Go models
+ * endpoint with `live`. Nothing touches the network or the tracked snapshot.
  */
 function harness(
   snapshot: PrivacySnapshot,
-  options: {sha?: string; mdx?: string; apiResponse?: () => Response; rawResponse?: () => Response} = {},
+  options: {
+    sha?: string
+    mdx?: string
+    live?: string
+    apiResponse?: () => Response
+    rawResponse?: () => Response
+    liveResponse?: () => Response
+  } = {},
 ): Harness {
   const dir = tempDir()
   const snapshotPath = join(dir, 'privacy-snapshot.json')
@@ -61,6 +81,9 @@ function harness(
   const fetch: FetchLike = (url, init) => {
     calls.push({url, init})
     if (url === COMMIT_API_URL) return Promise.resolve(options.apiResponse?.() ?? Response.json({sha}))
+    if (url === GO_LIVE_MODELS_URL) {
+      return Promise.resolve(options.liveResponse?.() ?? new Response(options.live ?? LIVE_JSON))
+    }
     return Promise.resolve(options.rawResponse?.() ?? new Response(options.mdx ?? MDX))
   }
   return {dir, snapshotPath, bodyPath: join(dir, 'pr-body.md'), calls, fetch}
@@ -190,7 +213,7 @@ describe('refreshGoPrivacy: changed table', () => {
 
     await run(h)
 
-    expect(h.calls.map(call => call.url)).toEqual([COMMIT_API_URL, goMdxUrl(NEW_SHA)])
+    expect(h.calls.map(call => call.url)).toEqual([COMMIT_API_URL, goMdxUrl(NEW_SHA), GO_LIVE_MODELS_URL])
     expect(goMdxUrl(NEW_SHA)).toBe(
       `https://raw.githubusercontent.com/anomalyco/opencode/${NEW_SHA}/services/site/src/docs/content/console/go.mdx`,
     )
@@ -200,18 +223,21 @@ describe('refreshGoPrivacy: changed table', () => {
     }
   })
 
-  it('sends GITHUB_TOKEN as a bearer on the API lookup only, never to raw.githubusercontent.com', async () => {
+  it('sends GITHUB_TOKEN as a bearer on the API lookup only, never to raw.githubusercontent.com or opencode.ai', async () => {
     const token = 'ghs_test-sentinel-token'
     const h = harness(staleSnapshot().snapshot)
 
     await refreshGoPrivacy({snapshotPath: h.snapshotPath, bodyPath: h.bodyPath, fetch: h.fetch, githubToken: token})
 
-    const [api, raw] = h.calls
+    const [api, raw, liveCall] = h.calls
     expect(api?.url).toBe(COMMIT_API_URL)
     expect(raw?.url).toBe(goMdxUrl(NEW_SHA))
+    expect(liveCall?.url).toBe(GO_LIVE_MODELS_URL)
     expect(api?.init?.headers).toMatchObject({Authorization: `Bearer ${token}`})
-    expect(JSON.stringify(raw?.init ?? {})).not.toContain(token)
-    expect(JSON.stringify(raw?.init?.headers ?? {}).toLowerCase()).not.toContain('authorization')
+    for (const call of [raw, liveCall]) {
+      expect(JSON.stringify(call?.init ?? {})).not.toContain(token)
+      expect(JSON.stringify(call?.init?.headers ?? {}).toLowerCase()).not.toContain('authorization')
+    }
   })
 
   it('treats an empty token as unset', async () => {
@@ -252,8 +278,51 @@ describe('refreshGoPrivacy: changed table', () => {
     expect(readFixture('go.mdx')).toBe(fixtureBefore.mdx)
     expect(readFixture('go.expected.json')).toBe(fixtureBefore.expected)
     expect(readFileSync(DEFAULT_SNAPSHOT_PATH, 'utf8')).toBe(trackedBefore)
-    expect(parsePrivacyTable(MDX, OLD_SHA)).toEqual(JSON.parse(fixtureBefore.expected))
+    expect(tableAt(OLD_SHA)).toEqual(JSON.parse(fixtureBefore.expected))
     expect(parseSnapshot(JSON.parse(readFileSync(h.snapshotPath, 'utf8'))).invalid).toEqual([])
+  })
+})
+
+describe('refreshGoPrivacy: the PR body reports where the sources differ', () => {
+  it('lists an API-only restriction in its own section, with both values and the snapshot value', async () => {
+    const h = harness(staleSnapshot().snapshot)
+
+    await run(h)
+
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('### Sources disagree (0)\n\nNone.')
+    expect(body).toContain('### API-only restrictions (1)')
+    expect(body).toContain(
+      '- `beam-free` (Beam Free), region-gated: API limited_regions: true; docs: no availability statement; snapshot: yes',
+    )
+  })
+
+  it('lists a retention conflict under "Sources disagree" and keeps the restrictive value', async () => {
+    const live = liveWith('glm-5.3', entry => {
+      ;(entry.go as Record<string, unknown>).zdr = false
+    })
+    const h = harness(staleSnapshot().snapshot, {live})
+
+    await run(h)
+
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('### Sources disagree (1)')
+    expect(body).toContain('- `glm-5.3` (GLM-5.3), zero retention: API zdr: false; docs: 0 days; snapshot: no')
+    expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models['glm-5.3'].zeroRetention).toBe(false)
+  })
+
+  it('does not report the docs-only Global rule', async () => {
+    const h = harness(staleSnapshot().snapshot)
+    await run(h)
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).not.toContain('deepseek')
+    expect(body).not.toContain('longcat')
+  })
+
+  it('names the live endpoint it read, so the reviewer can reproduce the input', async () => {
+    const h = harness(staleSnapshot().snapshot)
+    await run(h)
+    expect(readFileSync(h.bodyPath, 'utf8')).toContain(GO_LIVE_MODELS_URL)
   })
 })
 
@@ -301,13 +370,71 @@ describe('refreshGoPrivacy: failures leave the snapshot untouched', () => {
     expect(readFileSync(h.snapshotPath, 'utf8')).toBe(before)
   })
 
+  it('rejects when the live models endpoint answers non-2xx', async () => {
+    const h = harness(staleSnapshot().snapshot, {
+      liveResponse: () => new Response('down', {status: 503, statusText: 'Service Unavailable'}),
+    })
+    await expectUntouched(h, /models failed: 503 Service Unavailable/)
+  })
+
+  it('rejects when the live models endpoint fetch itself throws', async () => {
+    const h = harness(staleSnapshot().snapshot)
+    const failing: FetchLike = url =>
+      url === GO_LIVE_MODELS_URL ? Promise.reject(new Error('socket hang up')) : h.fetch(url)
+    const before = readFileSync(h.snapshotPath, 'utf8')
+
+    await expect(
+      refreshGoPrivacy({snapshotPath: h.snapshotPath, bodyPath: h.bodyPath, fetch: failing}),
+    ).rejects.toThrow('socket hang up')
+    expect(readFileSync(h.snapshotPath, 'utf8')).toBe(before)
+    expect(existsSync(h.bodyPath)).toBe(false)
+  })
+
+  it('rejects a live models body that is not JSON', async () => {
+    const h = harness(staleSnapshot().snapshot, {live: '<html>'})
+    await expectUntouched(h, /not JSON/)
+  })
+
+  it('rejects a live models response with an entry that has no go object', async () => {
+    const live = liveWith('glm-5.3', entry => {
+      delete entry.go
+    })
+    await expectUntouched(harness(staleSnapshot().snapshot, {live}), LiveModelsError)
+  })
+
+  it('rejects a live models response whose privacy field is not a boolean', async () => {
+    const live = liveWith('glm-5.3', entry => {
+      ;(entry.go as Record<string, unknown>).zdr = 'true'
+    })
+    await expectUntouched(harness(staleSnapshot().snapshot, {live}), LiveModelsError)
+  })
+
+  it('rejects when a live model has no Privacy row on the page', async () => {
+    const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
+    body.data.push({...body.data[0], id: 'brand-new', name: 'Brand New'})
+    await expectUntouched(harness(staleSnapshot().snapshot, {live: JSON.stringify(body)}), /brand-new.*no Privacy row/)
+  })
+
+  it('rejects when a Privacy row matches no live model', async () => {
+    const live = liveWith('glm-5.3', entry => {
+      entry.name = 'Something Else'
+    })
+    await expectUntouched(harness(staleSnapshot().snapshot, {live}), /no live model/)
+  })
+
+  it('writes nothing when only the live response is bad, even though the page parses', async () => {
+    const h = harness(staleSnapshot().snapshot, {live: JSON.stringify({object: 'list', data: []})})
+    await expectUntouched(h, LiveModelsError)
+    expect(h.calls.map(call => call.url)).toEqual([COMMIT_API_URL, goMdxUrl(NEW_SHA), GO_LIVE_MODELS_URL])
+  })
+
   it('rejects an empty body', async () => {
     const h = harness(staleSnapshot().snapshot, {mdx: '  \n'})
     await expectUntouched(h, /empty body/)
   })
 
   it('fails closed with PrivacyTableError when the table no longer parses', async () => {
-    const h = harness(staleSnapshot().snapshot, {mdx: MDX.replace('| Not used       |', '| Maybe          |')})
+    const h = harness(staleSnapshot().snapshot, {mdx: MDX.replace('| 0 days         |', '| Maybe          |')})
     await expectUntouched(h, PrivacyTableError)
   })
 

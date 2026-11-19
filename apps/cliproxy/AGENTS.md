@@ -11,7 +11,7 @@ Multi-provider proxy at `cliproxy.fro.bot`: Claude OAuth, Codex OAuth (OpenAI mo
 | Provision droplet | `server/provision-droplet.ts` | One-time. Refuses re-run on existing droplet without `--force` |
 | Deploy updates | `src/deploy.ts` | Preserves `config.yaml`, applies only field-scoped management changes |
 | CLI commands | `packages/cli/src/commands/cliproxy/` | See packages/cli/AGENTS.md for command pattern |
-| OpenCode Go policy | `packages/shared/opencode-go/` | `settings.json` and `privacy-snapshot.json`; eligibility logic in `eligibility.ts` |
+| OpenCode Go policy | `packages/shared/opencode-go/` | `settings.json` and `privacy-snapshot.json`; eligibility logic in `eligibility.ts`; snapshot build in `build-snapshot.ts` (docs page + live models list) |
 | OpenCode Go procedures | `docs/runbooks/cliproxy-opencode-go.md` | Enablement, rotation, emergency disable, re-enable, recovery, snapshot PR review |
 
 ## DEPLOY FLOW
@@ -98,13 +98,13 @@ Before a major bump, take a `cp -p` backup of `config/config.yaml`. To roll back
 
 ## OPENCODE GO UPSTREAM
 
-The `openai-compatibility` section holds one entry, `opencode-go`, and infra owns the section outright. The policy is tracked in `packages/shared/opencode-go/`: `settings.json` (`enabled`, optional `defaultProbeModel`) and `privacy-snapshot.json` (reviewed privacy terms per model, refreshed by PR). Procedures live in [`docs/runbooks/cliproxy-opencode-go.md`](../../docs/runbooks/cliproxy-opencode-go.md).
+The `openai-compatibility` section holds one entry, `opencode-go`, and infra owns the section outright. The policy is tracked in `packages/shared/opencode-go/`: `settings.json` (`enabled`, optional `defaultProbeModel`) and `privacy-snapshot.json` (reviewed privacy terms per model, refreshed by PR from two sources, below). Procedures live in [`docs/runbooks/cliproxy-opencode-go.md`](../../docs/runbooks/cliproxy-opencode-go.md).
 
 **Eligibility.** A model is exposed only when all of these hold:
 
 - The snapshot entry is valid and records zero retention and no training.
 - The model is in the live OpenCode Go model list.
-- It has no region requirement. Region-gated models are never exposed; the parser gates a model on a restricted-models bullet, a `(limited regions)` note, or a Privacy footnote that states a hosting location or a Global-region requirement.
+- It has no region requirement. Region-gated models are never exposed; the snapshot gates a model when the live models list says `limited_regions: true`, or the docs page has an availability footnote, a restricted-models bullet, or a Privacy footnote that states a hosting location or a Global-region requirement.
 - Any agreement expiry is on or after today (UTC; the expiry day counts).
 
 An invalid snapshot entry excludes only that model. These fail the deploy before any write: a snapshot that does not parse, a failed live-list fetch, and an empty eligible set. A live model missing from the snapshot is printed as excluded and the deploy carries on. The deploy excludes a model whose agreement has expired. Between deploys, the monitor flags an exposed model whose agreement has expired as `privacy-noncompliant`; it does not remove the model.
@@ -130,7 +130,7 @@ The entry maps `x-opencode-session: "$X-Opencode-Session"`, so the client's sess
 
 **Secrets.** `CLIPROXY_OPENCODE_GO_KEY` (new) and `CLIPROXY_API_KEY` (also used by the monitor) are repository secrets. The router's caller job has no environment, so it cannot read Environment secrets (actions/runner#4453). It passes both explicitly to `deploy-cliproxy.yaml`. Only the deploy's own HTTP calls use them; the environment given to `ssh` and `scp` never contains either.
 
-**Snapshot refresh.** `.github/workflows/opencode-go-privacy.yaml` opens one PR on the branch `opencode-go-privacy` when a model's privacy terms change. Auto-merge is off. A merged PR triggers the gated cliproxy deploy only. When upstream terms match `main` again, the next run closes the open PR with a comment and deletes the branch; the App token is minted for that case too.
+**Snapshot refresh.** `.github/workflows/opencode-go-privacy.yaml` opens one PR on the branch `opencode-go-privacy` when a model's privacy terms change. Auto-merge is off. The refresh builds each entry from two sources and the most restrictive value wins: the docs page `console/go.mdx` (retention days, agreement expiry, the workspace Global-region rule, training and availability footnotes) and the live Go models list (the unauthenticated `/inference/go/v1/models` path; `go.training`, `go.zdr`, `go.limited_regions`, fetched without a token). A model is zero-retention only when the API says `zdr: true` **and** the page row says `0 days`; it trains when either source says so; it is region-gated when either source says so. The refresh fails, writes nothing and opens no PR when an API entry lacks `go` or one of the three booleans, when a Privacy row matches no live model or more than one (names join after case, space and hyphen normalisation plus the reviewed alias map `DOCS_NAME_ALIASES` in `build-snapshot.ts`; never by prefix), when a live model has no Privacy row, or when a footnote, restricted-models rule, column or `*` marker is not recognised. The PR body lists where the sources differ. New models reach production only through this PR; the deploy never exposes a live model that is not in the committed snapshot. A merged PR triggers the gated cliproxy deploy only. When upstream terms match `main` again, the next run closes the open PR with a comment and deletes the branch; the App token is minted for that case too.
 
 ## OPENCODE_CONFIG AND OPENCODE_AUTH_JSON SHAPES
 

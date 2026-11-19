@@ -170,6 +170,10 @@ Review the PR before you merge:
 1. Open the compare link in the PR body. It spans the old and new source commits of the OpenCode docs repository.
 2. Check each added, removed and changed model against the privacy table in that diff. The table and its footnotes are the authority, not the parsed JSON.
 3. Check every new model for zero retention, no training, no region requirement and any agreement expiry.
+4. Read the two lists at the end of the PR body. Each entry is a model and a fact on which the two sources differ, and the snapshot already holds the restrictive value:
+   - **Sources disagree**: the docs page and the live models list both state the fact and contradict each other (for example the page says `30 days` and the API says `zdr: true`, or a page footnote grants training use and the API says `training: false`). Treat the model as not cleared. Open the compare link and the live list, find out which source is stale or wrong, and merge only when you can say why the restrictive value is right or when the model stays excluded anyway. An unexplained retention or training conflict is a reason to hold the PR and ask upstream.
+   - **API-only restrictions**: the API restricts the model (`training: true`, or `limited_regions: true`) and the page makes no statement about that fact. The restriction applies. Check that it is not new for a model you expected to be cleared. `beam-free` is on this list today because the page no longer states its region limit.
+   - Not listed by design: the workspace **Global** requirement (DeepSeek V4.1 Flash, DeepSeek V4 Pro, LongCat 2.5 Free) and agreement expiry dates. Only the page states them; the API's `limited_regions` means "some countries are refused", a different fact. Check these against the page table and footnotes as before.
 
 Merge rules:
 
@@ -179,14 +183,14 @@ Merge rules:
 
 If upstream reverts the change before you merge, the next daily run finds that the terms match `main` again. It closes the open PR with a comment, then deletes the `opencode-go-privacy` branch. A PR on that branch from a fork is left alone. Do not merge a PR that the workflow closed. A later change to the terms opens a new PR. If the run cannot reach the PR list or the close step fails, the run fails: close the PR by hand and delete the branch.
 
-A run that cannot parse the table fails and opens no PR. The deploy keeps the reviewed snapshot.
+A run that cannot build the snapshot fails and opens no PR. The deploy keeps the reviewed snapshot. The run fails on: a docs page that no longer parses (unknown column, row, footnote or rule); a live models entry with no `go` object or a missing or non-boolean `training`, `zdr` or `limited_regions`; a Privacy row that matches no live model or more than one; and a live model with no Privacy row. The last two usually mean the page and the API are briefly out of step after a model is added or retired. A failed run changes nothing, so the reviewed snapshot goes stale until upstream settles or the parser or the alias map in `packages/shared/opencode-go/build-snapshot.ts` is fixed: do not leave a failed run unread. Add an alias only after confirming that the page name and the API name are the same model.
 
 ---
 
 ## Limitations
 
 - **Expiry:** the deploy enforces agreement expiry. Between deploys, the monitor flags an expired model as `privacy-noncompliant`.
-- **Region-gated models:** never exposed. A Privacy footnote that states a hosting location (`Hosted in <place>.`) or requires Global regions gates the model, whether or not a restricted-models bullet also lists it.
+- **Region-gated models:** never exposed. A model is gated when the live models list says `limited_regions: true`, or when the docs page states a hosting location (`Hosted in <place>.`), requires Global regions or limits availability to permitted regions, whether or not a restricted-models bullet also lists it.
 - **Plan limits:** a 429 or 402 alerts as dead with reason `quota-or-billing`. The Go issue closes on the next healthy probe.
 - **Credits fallback:** a 2xx with a present `billing_source` other than `go` is `unknown` / `billing-fallback`. The monitor prints `CLIProxy Go monitor billing: billing_source=<token>`, opens no issue and sends no alert. `cliproxy status` warns and exits 0. An open Go issue stays as it is until a healthy probe closes it.
 - **Probe allowance:** each probe is one `max_tokens: 1` request. The monitor sends 96 a day. The deploy sends one per run, and `cliproxy status` sends one per run.

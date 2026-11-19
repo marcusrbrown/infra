@@ -4,17 +4,17 @@
     {
       "id": "deepseek-v4.1-flash",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
-      "name": "DeepSeek V4.1 Flash",
-      "canonical_id": "deepseek/deepseek-v4.1-flash",
+      "name": "DeepSeek V4.1 Flash 1017",
+      "canonical_id": "deepseek/deepseek-v4.1-flash-1017",
       "type": "chat",
-      "description": "DeepSeek V4.1 Flash model for reasoning and agentic coding",
+      "description": "October 17 update of DeepSeek V4.1 Flash with improved reasoning, coding, agentic tasks, and visual understanding",
       "family": "deepseek-flash",
       "open_weights": true,
       "knowledge": "2025-05",
-      "release_date": "2026-09-10",
-      "last_updated": "2026-09-10",
+      "release_date": "2026-10-17",
+      "last_updated": "2026-10-17",
       "modalities": {"input": ["text", "image/jpeg", "image/png", "image/gif", "image/webp"], "output": ["text"]},
       "capabilities": {
         "tools": {"supported": true},
@@ -47,14 +47,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"choice": ["auto", "none", "required", "tool"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto", "none", "required", "tool"], "updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 100, "go-plus": 200, "go-teams": 105},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": true
       }
     },
     {
       "id": "deepseek-v4-pro",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "DeepSeek V4 Pro",
       "canonical_id": "deepseek/deepseek-v4-pro",
@@ -97,49 +105,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"choice": ["auto", "none", "required", "tool"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto", "none", "required", "tool"], "updates": []}}
         }
-      }
-    },
-    {
-      "id": "glm-5.2",
-      "object": "model",
-      "created": 1793850033,
-      "owned_by": "opencode",
-      "name": "GLM-5.2",
-      "canonical_id": "zhipuai/glm-5.2",
-      "type": "chat",
-      "description": "Open flagship GLM for long-horizon coding agents and million-token context work",
-      "family": "glm",
-      "open_weights": true,
-      "release_date": "2026-06-13",
-      "last_updated": "2026-06-13",
-      "modalities": {"input": ["text"], "output": ["text"]},
-      "capabilities": {
-        "tools": {"supported": true},
-        "reasoning": {"supported": true, "effort": ["high", "max"]},
-        "structured_output": true,
-        "temperature": true,
-        "top_p": true,
-        "top_k": true,
-        "system_updates": true,
-        "effort_updates": false
       },
-      "limit": {"context": 1000000, "output": 131072},
-      "cost": {"text": {"input": {"price": 1.4, "cache": {"read": 0.26}}, "output": {"price": 4.4}}},
-      "api": {
-        "chat-completions": {
-          "base_url": "https://opencode.ai/inference/go/openai/v1",
-          "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
-          "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"choice": ["auto"], "updates": false}}
-        }
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "glm-5.3",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "GLM-5.3",
       "canonical_id": "zhipuai/glm-5.3",
@@ -167,14 +148,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"choice": ["auto"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto"], "updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 500, "go-plus": 1000, "go-teams": 505},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": true
       }
     },
     {
       "id": "grok-4.7",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Grok 4.7",
       "canonical_id": "xai/grok-4.7",
@@ -211,14 +200,22 @@
         "responses": {
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai", "opencodeai": "@opencode/ai/providers/openai/responses"},
-          "capabilities": {"tools": {"choice": ["auto", "none", "required", "tool"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto", "none", "required", "tool"], "updates": []}}
         }
+      },
+      "recommended_api": "responses",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": false,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "muse-spark-1.2-contributor",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Muse Spark 1.2 Contributor",
       "canonical_id": "meta/muse-spark-1.2",
@@ -258,14 +255,22 @@
         "responses": {
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai", "opencodeai": "@opencode/ai/providers/openai/responses"},
-          "capabilities": {"tools": {"updates": false}}
+          "capabilities": {"tools": {"updates": []}}
         }
+      },
+      "recommended_api": "responses",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 120, "go-teams": 65},
+        "training": true,
+        "zdr": false,
+        "limited_regions": true,
+        "featured": false
       }
     },
     {
       "id": "muse-spark-1.3-contributor",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Muse Spark 1.3 Contributor",
       "canonical_id": "meta/muse-spark-1.3",
@@ -305,14 +310,22 @@
         "responses": {
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai", "opencodeai": "@opencode/ai/providers/openai/responses"},
-          "capabilities": {"tools": {"updates": false}}
+          "capabilities": {"tools": {"updates": []}}
         }
+      },
+      "recommended_api": "responses",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 120, "go-teams": 65},
+        "training": true,
+        "zdr": false,
+        "limited_regions": true,
+        "featured": true
       }
     },
     {
       "id": "glm-5.3-flash",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "GLM-5.3-Flash",
       "canonical_id": "zhipuai/glm-5.3-flash",
@@ -343,14 +356,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"choice": ["auto"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto"], "updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 180, "go-teams": 65},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": true
       }
     },
     {
       "id": "gpt-5.6-luna",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "GPT-5.6 Luna",
       "canonical_id": "openai/gpt-5.6-luna",
@@ -369,8 +390,8 @@
         "tools": {"supported": true},
         "reasoning": {"supported": true, "effort": ["none", "low", "medium", "high", "xhigh", "max"]},
         "structured_output": true,
-        "temperature": false,
-        "top_p": false,
+        "temperature": true,
+        "top_p": true,
         "top_k": false,
         "system_updates": true,
         "effort_updates": true
@@ -380,8 +401,14 @@
         "text": {
           "input": {
             "price": 0.2,
-            "cache": {"read": 0.02, "write": 0.25},
-            "overrides": [{"when": {"context": {"gt": 272000}}, "price": 0.4, "cache": {"read": 0.04, "write": 0.5}}]
+            "cache": {"read": 0.02, "write": {"30m": 0.25, "12h": 0.5}},
+            "overrides": [
+              {
+                "when": {"context": {"gt": 272000}},
+                "price": 0.4,
+                "cache": {"read": 0.04, "write": {"30m": 0.5, "12h": 1}}
+              }
+            ]
           },
           "output": {"price": 1.2, "overrides": [{"when": {"context": {"gt": 272000}}, "price": 1.8}]}
         }
@@ -396,16 +423,24 @@
               "choice": ["auto", "none", "required", "tool"],
               "search": true,
               "freeform": ["text", "lark", "regex"],
-              "updates": true
+              "updates": ["add", "remove", "replace"]
             }
           }
         }
+      },
+      "recommended_api": "responses",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": false,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "gpt-6-luna",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "GPT-6 Luna",
       "canonical_id": "openai/gpt-6-luna",
@@ -424,8 +459,8 @@
         "tools": {"supported": true},
         "reasoning": {"supported": true, "effort": ["none", "low", "medium", "high", "xhigh", "max"]},
         "structured_output": true,
-        "temperature": false,
-        "top_p": false,
+        "temperature": true,
+        "top_p": true,
         "top_k": false,
         "system_updates": true,
         "effort_updates": true
@@ -435,8 +470,14 @@
         "text": {
           "input": {
             "price": 0.1,
-            "cache": {"read": 0.01, "write": 0.125},
-            "overrides": [{"when": {"context": {"gt": 272000}}, "price": 0.2, "cache": {"read": 0.02, "write": 0.25}}]
+            "cache": {"read": 0.01, "write": {"30m": 0.125, "12h": 0.25}},
+            "overrides": [
+              {
+                "when": {"context": {"gt": 272000}},
+                "price": 0.2,
+                "cache": {"read": 0.02, "write": {"30m": 0.25, "12h": 0.5}}
+              }
+            ]
           },
           "output": {"price": 0.5, "overrides": [{"when": {"context": {"gt": 272000}}, "price": 0.75}]}
         }
@@ -451,16 +492,24 @@
               "choice": ["auto", "none", "required", "tool"],
               "search": true,
               "freeform": ["text", "lark", "regex"],
-              "updates": true
+              "updates": ["add", "remove", "replace"]
             }
           }
         }
+      },
+      "recommended_api": "responses",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": false,
+        "limited_regions": false,
+        "featured": true
       }
     },
     {
       "id": "claude-haiku-5-5",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Claude Haiku 5.5",
       "canonical_id": "anthropic/claude-haiku-5-5",
@@ -501,15 +550,28 @@
           "base_url": "https://opencode.ai/inference/go/anthropic/v1",
           "sdk": {"aisdk": "@ai-sdk/anthropic", "opencodeai": "@opencode/ai/providers/anthropic"},
           "capabilities": {
-            "tools": {"strict": true, "choice": ["auto", "none", "required", "tool"], "search": true, "updates": true}
+            "tools": {
+              "strict": true,
+              "choice": ["auto", "none", "required", "tool"],
+              "search": true,
+              "updates": ["add", "remove", "replace"]
+            }
           }
         }
+      },
+      "recommended_api": "messages",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": false,
+        "limited_regions": false,
+        "featured": true
       }
     },
     {
       "id": "hy3",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Hy3",
       "canonical_id": "tencent/hy3",
@@ -535,14 +597,22 @@
         "chat-completions": {
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
-          "capabilities": {"tools": {"updates": false}}
+          "capabilities": {"tools": {"updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 240, "go-teams": 65},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "hy4-preview",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Hy4 preview",
       "canonical_id": "tencent/hy4-preview",
@@ -568,14 +638,22 @@
         "chat-completions": {
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
-          "capabilities": {"tools": {"updates": false}}
+          "capabilities": {"tools": {"updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 30, "go-plus": 120, "go-teams": 35},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "kimi-k2.7-code",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Kimi K2.7 Code",
       "canonical_id": "moonshotai/kimi-k2.7-code",
@@ -625,14 +703,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"strict": true, "choice": ["auto", "none"], "updates": false}}
+          "capabilities": {"tools": {"strict": true, "choice": ["auto", "none"], "updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 180, "go-teams": 65},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "kimi-k3",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Kimi K3",
       "canonical_id": "moonshotai/kimi-k3",
@@ -674,21 +760,29 @@
         "system_updates": true,
         "effort_updates": false
       },
-      "limit": {"context": 1048576, "output": 131072},
+      "limit": {"context": 1048576, "output": 1048576},
       "cost": {"text": {"input": {"price": 3, "cache": {"read": 0.3, "write": 3}}, "output": {"price": 15}}},
       "api": {
         "chat-completions": {
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"strict": true, "choice": ["auto", "none", "required"], "updates": true}}
+          "capabilities": {"tools": {"strict": true, "choice": ["auto", "none", "required"], "updates": ["add"]}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "mimo-v2.6-flash",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "MiMo-V2.6-Flash",
       "canonical_id": "xiaomi/mimo-v2.6-flash",
@@ -734,14 +828,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"strict": true, "choice": ["auto"], "updates": false}}
+          "capabilities": {"tools": {"strict": true, "choice": ["auto"], "updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 120, "go-teams": 65},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": true
       }
     },
     {
       "id": "mimo-v2.6-pro",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "MiMo-V2.6-Pro",
       "canonical_id": "xiaomi/mimo-v2.6-pro",
@@ -787,14 +889,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"strict": true, "choice": ["auto"], "updates": false}}
+          "capabilities": {"tools": {"strict": true, "choice": ["auto"], "updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "minimax-m3",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "MiniMax-M3",
       "canonical_id": "minimax/MiniMax-M3",
@@ -843,14 +953,22 @@
         "messages": {
           "base_url": "https://opencode.ai/inference/go/anthropic/v1",
           "sdk": {"aisdk": "@ai-sdk/anthropic", "opencodeai": "@opencode/ai/providers/anthropic"},
-          "capabilities": {"tools": {"choice": ["auto"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto"], "updates": []}}
         }
+      },
+      "recommended_api": "messages",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 180, "go-teams": 65},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "minimax-m3.1-flash",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "MiniMax M3.1 Flash",
       "canonical_id": "minimax/MiniMax-M3.1-Flash",
@@ -890,14 +1008,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"choice": ["auto"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto"], "updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 20, "go-plus": 80, "go-teams": 25},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "longcat-2.0",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "LongCat-2.0",
       "canonical_id": "meituan/longcat-2.0",
@@ -924,14 +1050,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"updates": false}}
+          "capabilities": {"tools": {"updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 240, "go-teams": 65},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "step-5-preview",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Step 5 Preview",
       "canonical_id": "stepfun/step-5-preview",
@@ -970,14 +1104,22 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"updates": false}}
+          "capabilities": {"tools": {"updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "beam-free",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Beam Free",
       "canonical_id": "reflection/beam-1.0-501b-a23b",
@@ -1006,14 +1148,16 @@
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"strict": true, "choice": ["auto", "none", "required", "tool"], "updates": false}}
+          "capabilities": {"tools": {"strict": true, "choice": ["auto", "none", "required", "tool"], "updates": []}}
         }
-      }
+      },
+      "recommended_api": "chat-completions",
+      "go": {"monthly_usage": null, "training": false, "zdr": false, "limited_regions": true, "featured": true}
     },
     {
       "id": "qwen3.8-max",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Qwen3.8 Max",
       "canonical_id": "alibaba/qwen3.8-max",
@@ -1062,14 +1206,22 @@
         "messages": {
           "base_url": "https://opencode.ai/inference/go/anthropic/v1",
           "sdk": {"aisdk": "@ai-sdk/anthropic", "opencodeai": "@opencode/ai/providers/anthropic"},
-          "capabilities": {"tools": {"choice": ["auto", "none", "tool"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto", "none", "tool"], "updates": []}}
         }
+      },
+      "recommended_api": "messages",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "qwen3.8-flash",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Qwen3.8 Flash",
       "canonical_id": "alibaba/qwen3.8-flash",
@@ -1113,14 +1265,22 @@
         "messages": {
           "base_url": "https://opencode.ai/inference/go/anthropic/v1",
           "sdk": {"aisdk": "@ai-sdk/anthropic", "opencodeai": "@opencode/ai/providers/anthropic"},
-          "capabilities": {"tools": {"choice": ["auto", "none", "tool"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto", "none", "tool"], "updates": []}}
         }
+      },
+      "recommended_api": "messages",
+      "go": {
+        "monthly_usage": {"go": 30, "go-plus": 90, "go-teams": 35},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": true
       }
     },
     {
       "id": "qwen3.7-plus",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Qwen3.7 Plus",
       "canonical_id": "alibaba/qwen3.7-plus",
@@ -1173,21 +1333,29 @@
         "messages": {
           "base_url": "https://opencode.ai/inference/go/anthropic/v1",
           "sdk": {"aisdk": "@ai-sdk/anthropic", "opencodeai": "@opencode/ai/providers/anthropic"},
-          "capabilities": {"tools": {"choice": ["auto", "none", "tool"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto", "none", "tool"], "updates": []}}
         }
+      },
+      "recommended_api": "messages",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 180, "go-teams": 65},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     },
     {
       "id": "kimi-k3.1-pro",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Kimi K3.1 Pro",
       "canonical_id": "moonshotai/kimi-k3.1-pro",
       "type": "chat",
-      "description": "Multimodal Kimi model with 1M context and always-on reasoning for coding, 3D creation, financial research, and agentic work",
+      "description": "Multimodal Kimi model with a 1M-token context window and always-on reasoning, for coding, 3D creation and financial research",
       "family": "kimi-k3",
-      "open_weights": false,
+      "open_weights": true,
       "release_date": "2026-10-23",
       "last_updated": "2026-10-23",
       "modalities": {
@@ -1226,21 +1394,29 @@
         "system_updates": false,
         "effort_updates": false
       },
-      "limit": {"context": 1048576, "output": 131072},
+      "limit": {"context": 1048576, "output": 1048576},
       "cost": {"text": {"input": {"price": 2, "cache": {"read": 0.2, "write": 2}}, "output": {"price": 10}}},
       "api": {
         "chat-completions": {
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
           "compatibility": {"reasoning_field": "reasoning_content"},
-          "capabilities": {"tools": {"strict": true, "choice": ["auto", "none", "required"], "updates": false}}
+          "capabilities": {"tools": {"strict": true, "choice": ["auto", "none", "required"], "updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": true
       }
     },
     {
       "id": "iceman-contributor-free",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Iceman Contributor Free",
       "type": "chat",
@@ -1261,14 +1437,16 @@
         "chat-completions": {
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
-          "capabilities": {"tools": {"updates": false}}
+          "capabilities": {"tools": {"updates": []}}
         }
-      }
+      },
+      "recommended_api": "chat-completions",
+      "go": {"monthly_usage": null, "training": true, "zdr": false, "limited_regions": false, "featured": false}
     },
     {
       "id": "gemini-4-argon",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Gemini 4 Argon",
       "canonical_id": "google/gemini-4-argon",
@@ -1334,14 +1512,22 @@
         "generate-content": {
           "base_url": "https://opencode.ai/inference/go/google/v1beta",
           "sdk": {"aisdk": "@ai-sdk/google", "opencodeai": "@opencode/ai/providers/google"},
-          "capabilities": {"tools": {"choice": ["auto", "none", "required", "tool"], "updates": false}}
+          "capabilities": {"tools": {"choice": ["auto", "none", "required", "tool"], "updates": []}}
         }
+      },
+      "recommended_api": "generate-content",
+      "go": {
+        "monthly_usage": {"go": 30, "go-plus": 120, "go-teams": 35},
+        "training": false,
+        "zdr": false,
+        "limited_regions": false,
+        "featured": true
       }
     },
     {
       "id": "hy4",
       "object": "model",
-      "created": 1793850033,
+      "created": 1795109442,
       "owned_by": "opencode",
       "name": "Hy4",
       "canonical_id": "tencent/hy4",
@@ -1367,8 +1553,152 @@
         "chat-completions": {
           "base_url": "https://opencode.ai/inference/go/openai/v1",
           "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
-          "capabilities": {"tools": {"updates": false}}
+          "capabilities": {"tools": {"updates": []}}
         }
+      },
+      "recommended_api": "chat-completions",
+      "go": {
+        "monthly_usage": {"go": 60, "go-plus": 240, "go-teams": 65},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
+      }
+    },
+    {
+      "id": "longcat-2.5-free",
+      "object": "model",
+      "created": 1795109442,
+      "owned_by": "opencode",
+      "name": "LongCat 2.5 Free",
+      "canonical_id": "meituan/longcat-2.5",
+      "type": "chat",
+      "description": "Meituan's multimodal reasoning model for long-horizon coding and agent tasks, with visual understanding and a 1M-token context window",
+      "family": "longcat",
+      "open_weights": false,
+      "release_date": "2026-11-02",
+      "last_updated": "2026-11-02",
+      "modalities": {"input": ["text", "image"], "output": ["text"]},
+      "capabilities": {
+        "tools": {"supported": true},
+        "reasoning": {"supported": true, "toggle": true},
+        "temperature": false,
+        "top_p": true,
+        "top_k": true,
+        "system_updates": false,
+        "effort_updates": false
+      },
+      "limit": {"context": 1000000, "output": 262144},
+      "cost": {"text": {"input": {"price": 0, "cache": {"read": 0}}, "output": {"price": 0}}},
+      "api": {
+        "chat-completions": {
+          "base_url": "https://opencode.ai/inference/go/openai/v1",
+          "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
+          "compatibility": {"reasoning_field": "reasoning_content"},
+          "capabilities": {"tools": {"updates": []}}
+        }
+      },
+      "recommended_api": "chat-completions",
+      "go": {"monthly_usage": null, "training": false, "zdr": true, "limited_regions": false, "featured": false}
+    },
+    {
+      "id": "hy4-flash-free",
+      "object": "model",
+      "created": 1795109442,
+      "owned_by": "opencode",
+      "name": "Hy4 flash Free",
+      "canonical_id": "tencent/hy4-flash",
+      "type": "chat",
+      "description": "Tencent's lower-cost Hy4 tier for everyday agent and productivity tasks, with image understanding and a 1M-token context window.",
+      "family": "Hy",
+      "open_weights": false,
+      "release_date": "2026-11-16",
+      "last_updated": "2026-11-16",
+      "modalities": {"input": ["text", "image/jpeg", "image/png", "image/webp", "image/gif"], "output": ["text"]},
+      "capabilities": {
+        "tools": {"supported": true},
+        "reasoning": {"supported": true, "effort": ["none", "high"]},
+        "temperature": true,
+        "top_p": true,
+        "top_k": true,
+        "system_updates": false,
+        "effort_updates": false
+      },
+      "limit": {"context": 1048576, "input": 983040, "output": 65536},
+      "cost": {"text": {"input": {"price": 0, "cache": {"read": 0}}, "output": {"price": 0}}},
+      "api": {
+        "chat-completions": {
+          "base_url": "https://opencode.ai/inference/go/openai/v1",
+          "sdk": {"aisdk": "@ai-sdk/openai-compatible", "opencodeai": "@opencode/ai/providers/openai-compatible"},
+          "capabilities": {"tools": {"updates": []}}
+        }
+      },
+      "recommended_api": "chat-completions",
+      "go": {"monthly_usage": null, "training": false, "zdr": true, "limited_regions": false, "featured": true}
+    },
+    {
+      "id": "qwen4-max",
+      "object": "model",
+      "created": 1795109442,
+      "owned_by": "opencode",
+      "name": "Qwen4 Max",
+      "canonical_id": "alibaba/qwen4-max",
+      "type": "chat",
+      "description": "Flagship multimodal model for coding, office productivity, frontend design, and complex agentic tasks",
+      "family": "qwen4-max",
+      "open_weights": false,
+      "release_date": "2026-11-16",
+      "last_updated": "2026-11-16",
+      "modalities": {
+        "input": [
+          "text",
+          "image/bmp",
+          "image/jpeg",
+          "image/png",
+          "image/tiff",
+          "image/webp",
+          "image/heic",
+          "video/mp4",
+          "video/x-msvideo",
+          "video/x-matroska",
+          "video/quicktime",
+          "video/x-flv",
+          "video/x-ms-wmv"
+        ],
+        "output": ["text"]
+      },
+      "capabilities": {
+        "tools": {"supported": true},
+        "reasoning": {"supported": true, "toggle": true, "effort": ["low", "high", "xhigh"], "budget": {"max": 262144}},
+        "cache": {"implicit": true, "explicit": {"ttl": ["5m", "1h"]}},
+        "structured_output": true,
+        "temperature": true,
+        "top_p": true,
+        "top_k": true,
+        "system_updates": true,
+        "effort_updates": false
+      },
+      "limit": {"context": 1000000, "output": 262144},
+      "cost": {
+        "text": {
+          "input": {"price": 1.5, "cache": {"read": 0.075, "write": {"5m": 1.875, "1h": 3}}},
+          "output": {"price": 4.5}
+        }
+      },
+      "api": {
+        "messages": {
+          "base_url": "https://opencode.ai/inference/go/anthropic/v1",
+          "sdk": {"aisdk": "@ai-sdk/anthropic", "opencodeai": "@opencode/ai/providers/anthropic"},
+          "capabilities": {"tools": {"choice": ["auto", "none", "tool"], "updates": []}}
+        }
+      },
+      "recommended_api": "messages",
+      "go": {
+        "monthly_usage": {"go": 15, "go-plus": 60, "go-teams": 20},
+        "training": false,
+        "zdr": true,
+        "limited_regions": false,
+        "featured": false
       }
     }
   ]

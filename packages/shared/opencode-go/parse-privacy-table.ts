@@ -1,22 +1,32 @@
-import type {PrivacySnapshot} from './eligibility'
-
-import {parseSnapshot, SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_SOURCE_PATH, SNAPSHOT_SOURCE_REPO} from './eligibility'
-
 /**
- * Parse the privacy terms out of anomalyco/opencode `console/go.mdx` into snapshot entries.
+ * Parse the privacy terms out of anomalyco/opencode `console/go.mdx` into one record per Privacy table row.
  *
- * The page spreads one model's terms across four places, and this parser joins them:
+ * The page says nothing about model ids, so this parser does not produce a snapshot: `build-snapshot.ts` joins
+ * these rows with the live models list, which is the other half of the evidence. What the page gives:
  *
- * - the Endpoints table maps a display name to the model id (the snapshot is keyed by id);
- * - the Privacy table gives training and retention, with `*` markers on some retention cells;
- * - the Privacy footnotes qualify models by name: retention periods, training permission, region limits and
+ * - the Privacy table gives each model's retention, with `*` markers on some retention cells;
+ * - the Privacy footnotes qualify models by name: retention periods, permission to train, region limits and
  *   agreement expiry dates;
- * - the "Enable restricted models" bullets and the model list's "(limited regions)" notes give region
- *   requirements, which the Privacy section does not repeat.
+ * - the "Enable restricted models" bullets give the workspace Global-region requirement and the training opt-in.
  *
- * It fails closed. A row, marker, footnote sentence or rule it cannot map throws `PrivacyTableError`, so a
- * format change upstream stops the refresh instead of marking a model safe by accident.
+ * It fails closed, and nothing it reads is discarded unaccounted for:
+ *
+ * - A row, marker, column, rule or footnote sentence it cannot map throws `PrivacyTableError`. A footnote sentence
+ *   must match one known sentence form from the first character to the last; there is no "starts with" or "contains"
+ *   branch, so a clause added to a known sentence is a new sentence and throws.
+ * - A footnote label names a row by exact normalized name, a list of exact names, or a label in `LABEL_GROUPS`.
+ *   Never by prefix or suffix.
+ * - The Usage limits section is read for region limits by paragraph, never by markup: a paragraph with an
+ *   availability word must hold only the recognised "Not available in <places>." form and must name exactly one
+ *   Privacy model. Pricing paragraphs churn weekly and are ignored.
+ * - Prose that names a Privacy model, in the restricted-models section or in front of the Privacy table, throws:
+ *   a restriction written as prose is not read, so it must not pass silently. Known limit: prose that restricts
+ *   models without naming one cannot be detected, and prose elsewhere on the page is not inspected.
+ *
+ * Every regex here is anchored and has no nested or overlapping quantifier, because it runs over public page text.
  */
+
+import {DOCS_NAME_ALIASES, normalizeModelName, quoted} from './model-names'
 
 export class PrivacyTableError extends Error {
   constructor(message: string) {
@@ -30,10 +40,30 @@ interface Table {
   rows: string[][]
 }
 
+/** One model's terms as the page states them. A flag is false when the page says nothing, not when it denies. */
+export interface DocsPrivacyRow {
+  /** The display name in the Privacy table; the page has no model ids. */
+  name: string
+  /** Days from a "N days" cell; null for "Not ZDR". */
+  retentionDays: number | null
+  /** A footnote or the restricted-models opt-in says the model uses prompts and completions for training. */
+  trainingGranted: boolean
+  /**
+   * The page requires a workspace region (Global) or names where the model is hosted. The API's `limited_regions`
+   * means something else (countries refused), so the API is silent on this by design.
+   */
+  regionRequirement: boolean
+  /**
+   * The page says availability is limited to permitted regions: a footnote, or a usage-limits notice of the form
+   * "Not available in <places>." The API's `limited_regions` states the same fact.
+   */
+  availabilityLimited: boolean
+  /** Last UTC day the zero-retention agreement is valid, inclusive; null when the page gives none. */
+  agreementExpiry: string | null
+}
+
 interface Row {
   name: string
-  id: string
-  trainsOnData: boolean
   /** Days from a "N days" cell; null for "Not ZDR". */
   retentionDays: number | null
   marker: boolean
@@ -41,13 +71,13 @@ interface Row {
 
 interface Accumulator {
   row: Row
-  regionGated: boolean
+  trainingGranted: boolean
+  regionRequirement: boolean
+  availabilityLimited: boolean
   agreementExpiry: string | null
-  /** A footnote set retention, training, region or expiry for this model (what a `*` marker points at). */
-  qualified: boolean
 }
 
-const MODEL_ID_RE = /^[a-z0-9][a-z0-9._-]*$/
+const PRIVACY_COLUMNS: readonly string[] = ['model', 'data retention']
 
 const MONTHS: readonly string[] = [
   'january',
@@ -91,8 +121,15 @@ function sectionLines(lines: readonly string[], heading: string): string[] {
   return body
 }
 
-/** The first pipe table in `lines`, and the index of the first line after it. */
-function readTable(lines: readonly string[], label: string): {table: Table; end: number} {
+/**
+ * The first pipe table in `lines`, and the index of the first line after it. The header must be exactly
+ * `expectedHeader`: a column this parser does not read could carry a fact it would then drop.
+ */
+function readTable(
+  lines: readonly string[],
+  label: string,
+  expectedHeader: readonly string[],
+): {table: Table; start: number; end: number} {
   const start = lines.findIndex(line => line.trimStart().startsWith('|'))
   if (start === -1) throw new PrivacyTableError(`${label}: no table found`)
   const separator = lines[start + 1]
@@ -100,6 +137,9 @@ function readTable(lines: readonly string[], label: string): {table: Table; end:
     throw new PrivacyTableError(`${label}: table has no separator row`)
   }
   const header = splitCells(lines[start] ?? '')
+  if (header.length !== expectedHeader.length || header.some((cell, i) => normalizeName(cell) !== expectedHeader[i])) {
+    throw new PrivacyTableError(`${label}: table has unexpected columns, expected ${expectedHeader.join(' | ')}`)
+  }
   const rows: string[][] = []
   let end = start + 2
   while (end < lines.length && (lines[end] ?? '').trimStart().startsWith('|')) {
@@ -112,66 +152,31 @@ function readTable(lines: readonly string[], label: string): {table: Table; end:
     rows.push(cells)
     end++
   }
-  return {table: {header, rows}, end}
+  return {table: {header, rows}, start, end}
 }
 
-function columnIndex(table: Table, label: string, column: string): number {
-  const index = table.header.findIndex(cell => normalizeName(cell) === column)
-  if (index === -1) throw new PrivacyTableError(`${label}: missing column "${column}"`)
-  return index
-}
-
-/** Display name -> model id, from the Endpoints table. */
-function readEndpointIds(lines: readonly string[]): Map<string, string> {
-  const {table} = readTable(sectionLines(lines, '## Endpoints'), 'Endpoints')
-  const nameCol = columnIndex(table, 'Endpoints', 'model')
-  const idCol = columnIndex(table, 'Endpoints', 'model id')
-  const ids = new Map<string, string>()
-  const seen = new Set<string>()
-  for (const cells of table.rows) {
-    const name = normalizeName(cells[nameCol] ?? '')
-    const id = (cells[idCol] ?? '').trim()
-    if (name === '' || !MODEL_ID_RE.test(id))
-      throw new PrivacyTableError(`Endpoints: unreadable row "${cells[nameCol]}"`)
-    if (ids.has(name) || seen.has(id)) throw new PrivacyTableError(`Endpoints: duplicate model "${cells[nameCol]}"`)
-    ids.set(name, id)
-    seen.add(id)
-  }
-  if (ids.size === 0) throw new PrivacyTableError('Endpoints: table has no rows')
-  return ids
-}
-
-function readRows(table: Table, endpointIds: ReadonlyMap<string, string>): Map<string, Row> {
-  const nameCol = columnIndex(table, 'Privacy', 'model')
-  const trainingCol = columnIndex(table, 'Privacy', 'model training')
-  const retentionCol = columnIndex(table, 'Privacy', 'data retention')
+/** The Privacy table rows, keyed by normalized display name in page order. */
+function readRows(table: Table): Map<string, Row> {
   if (table.rows.length === 0) throw new PrivacyTableError('Privacy: table has no rows')
 
   const rows = new Map<string, Row>()
   for (const cells of table.rows) {
-    const displayName = cells[nameCol] ?? ''
+    const displayName = cells[0] ?? ''
     const key = normalizeName(displayName)
-    if (rows.has(key)) throw new PrivacyTableError(`Privacy: duplicate row "${displayName}"`)
-    const id = endpointIds.get(key)
-    if (id === undefined)
-      throw new PrivacyTableError(`Privacy: "${displayName}" has no model id in the Endpoints table`)
+    if (key === '') throw new PrivacyTableError('Privacy: row with no model name')
+    if (rows.has(key)) throw new PrivacyTableError(`Privacy: duplicate row ${quoted(displayName)}`)
 
-    const training = cells[trainingCol] ?? ''
-    if (training !== 'Not used' && training !== 'Yes') {
-      throw new PrivacyTableError(`Privacy: "${displayName}" has an unrecognized training value "${training}"`)
-    }
-
-    const retentionCell = cells[retentionCol] ?? ''
+    const retentionCell = cells[1] ?? ''
     const marked = /^(.*?)(\\\*|\*)$/.exec(retentionCell)
     const retention = (marked?.[1] ?? retentionCell).trim()
     const days = /^(\d+) days?$/.exec(retention)
     if (days === null && retention !== 'Not ZDR') {
-      throw new PrivacyTableError(`Privacy: "${displayName}" has an unrecognized retention value "${retentionCell}"`)
+      throw new PrivacyTableError(
+        `Privacy: ${quoted(displayName)} has an unrecognized retention value ${quoted(retentionCell)}`,
+      )
     }
     rows.set(key, {
       name: displayName,
-      id,
-      trainsOnData: training === 'Yes',
       retentionDays: days === null ? null : Number(days[1]),
       marker: marked !== null,
     })
@@ -179,235 +184,436 @@ function readRows(table: Table, endpointIds: ReadonlyMap<string, string>): Map<s
   return rows
 }
 
-/** Resolve a footnote label ("A / B", "A and B", "DeepSeek") to the privacy rows it names. */
-function resolveLabel(label: string, rows: ReadonlyMap<string, Row>): Row[] {
-  const resolved = new Map<string, Row>()
+/**
+ * Labels that name several rows without spelling each one as a full name, keyed by normalized label and mapped to
+ * normalized row names. Reviewed by hand and as small as today's page needs; a target that is not a row throws.
+ */
+const LABEL_GROUPS: ReadonlyMap<string, readonly string[]> = new Map([
+  // "- **DeepSeek:** ZDR agreement is renewed monthly. The current agreement is valid through ..." covers the family.
+  ['deepseek', ['deepseek v4.1 flash', 'deepseek v4 pro']],
+  // "- **DeepSeek V4.1 Flash and V4 Pro:** select **Global** ..." abbreviates the second model to "V4 Pro".
+  ['deepseek v4.1 flash and v4 pro', ['deepseek v4.1 flash', 'deepseek v4 pro']],
+])
+
+/** One name or group label: an exact row, a reviewed group, or nothing. A name that is both is ambiguous. */
+function resolveToken(token: string, accumulators: ReadonlyMap<string, Accumulator>): Accumulator[] | undefined {
+  const exact = accumulators.get(token)
+  const group = LABEL_GROUPS.get(token)
+  if (exact !== undefined && group !== undefined) {
+    throw new PrivacyTableError(`label ${quoted(token)} is ambiguous: a Privacy row and a reviewed label mapping`)
+  }
+  if (exact !== undefined) return [exact]
+  if (group === undefined) return undefined
+  return group.map(name => {
+    const target = accumulators.get(name)
+    if (target === undefined) {
+      throw new PrivacyTableError(
+        `reviewed label mapping ${quoted(token)} names ${quoted(name)}, which is no longer a Privacy row`,
+      )
+    }
+    return target
+  })
+}
+
+/**
+ * Resolve a footnote or bullet label to the rows it names: the whole label as an exact name or reviewed group, or
+ * each part of "A / B" and "A and B" as one. Anything else throws. This module never matches by prefix or suffix.
+ */
+function resolveLabel(label: string, accumulators: ReadonlyMap<string, Accumulator>): Accumulator[] {
+  const whole = resolveToken(normalizeName(label), accumulators)
+  if (whole !== undefined) return whole
+  const resolved = new Set<Accumulator>()
   for (const part of normalizeName(label)
     .split('/')
     .flatMap(piece => piece.split(' and '))) {
     const token = normalizeName(part)
-    const exact = rows.get(token)
-    const matches =
-      exact === undefined
-        ? [...rows.entries()].filter(([name]) => name.startsWith(`${token} `) || name.endsWith(` ${token}`))
-        : [[token, exact] as const]
-    if (token === '' || matches.length === 0)
-      throw new PrivacyTableError(`"${label}" does not name a model in the Privacy table`)
-    for (const [name, row] of matches) resolved.set(name, row)
+    const found = token === '' ? undefined : resolveToken(token, accumulators)
+    if (found === undefined) {
+      throw new PrivacyTableError(`${quoted(label)} does not name a model in the Privacy table`)
+    }
+    for (const target of found) resolved.add(target)
   }
-  return [...resolved.values()]
+  return [...resolved]
 }
 
 const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s/
 
 /**
- * The `- **Label:** text` bullets of a section. `every-line` rejects any line that is not such a bullet;
- * `list-items` rejects only list items that are not, and lets prose between them pass.
+ * The `- **Label:** text` bullets of a section, and its prose. `every-line` rejects any line that is not such a
+ * bullet; `list-items` rejects only list items that are not, and returns the other lines as prose for the caller
+ * to inspect.
  */
 function bulletsOf(
   lines: readonly string[],
   label: string,
   unmatched: 'every-line' | 'list-items',
-): {label: string; text: string}[] {
+): {bullets: {label: string; text: string}[]; prose: string[]} {
   const bullets: {label: string; text: string}[] = []
+  const prose: string[] = []
   for (const line of lines) {
     if (line.trim() === '') continue
     const match = /^- \*\*([^*]+):\*\* (.+)$/.exec(line)
     if (match === null) {
       if (unmatched === 'every-line' || LIST_ITEM.test(line)) {
-        throw new PrivacyTableError(`${label}: unmapped line "${line.trim().slice(0, 60)}"`)
+        throw new PrivacyTableError(`${label}: unmapped line ${quoted(line.trim())}`)
       }
+      prose.push(line)
       continue
     }
     bullets.push({label: match[1] ?? '', text: match[2] ?? ''})
   }
-  return bullets
+  return {bullets, prose}
 }
 
-function parseAgreementDate(raw: string): string {
-  const match = /^([A-Z]+) (\d{1,2}), (\d{4})$/i.exec(raw)
-  const month = match === null ? -1 : MONTHS.indexOf((match[1] ?? '').toLowerCase())
-  if (match === null || month === -1) throw new PrivacyTableError(`unparseable agreement date "${raw}"`)
-  const iso = `${match[3]}-${String(month + 1).padStart(2, '0')}-${(match[2] ?? '').padStart(2, '0')}`
-  if (new Date(`${iso}T00:00:00Z`).toISOString().slice(0, 10) !== iso) {
-    throw new PrivacyTableError(`unparseable agreement date "${raw}"`)
+const isWordChar = (char: string | undefined): boolean => char !== undefined && /[\da-z]/.test(char)
+
+/** Start indexes where `name` occurs in `haystack` as whole words (both are already normalized). */
+function occurrences(haystack: string, name: string): number[] {
+  const starts: number[] = []
+  if (name === '') return starts
+  for (let from = haystack.indexOf(name); from !== -1; from = haystack.indexOf(name, from + 1)) {
+    if (!isWordChar(haystack[from - 1]) && !isWordChar(haystack[from + name.length])) starts.push(from)
   }
-  return iso
+  return starts
 }
 
-/** Apply the Privacy footnotes. Every sentence must match a rule; a contradiction with the table throws. */
-function applyFootnotes(
-  lines: readonly string[],
-  rows: ReadonlyMap<string, Row>,
+/**
+ * Throw when prose names a Privacy model, a reviewed label group or an alias. Prose restricts nothing the parser
+ * reads, so a sentence like "Kimi K3 requires Global regions" would otherwise leave the model looking unrestricted.
+ * Lines are joined first, so a name wrapped across lines is still found.
+ */
+function assertProseNamesNoModel(
+  prose: readonly string[],
+  where: string,
   accumulators: ReadonlyMap<string, Accumulator>,
 ): void {
-  for (const {label, text} of bulletsOf(lines, 'Privacy footnotes', 'every-line')) {
-    const targets = resolveLabel(label, rows).map(row => {
-      const accumulator = accumulators.get(row.id)
-      if (accumulator === undefined) throw new PrivacyTableError(`"${label}" has no accumulator`)
-      return accumulator
-    })
+  if (prose.length === 0) return
+  const haystack = normalizeModelName(stripLinks(prose.join(' ')).replaceAll(/[*_`]/g, ''))
+  const names: {shown: string; key: string}[] = [
+    ...[...accumulators.values()].map(({row}) => ({shown: row.name, key: normalizeModelName(row.name)})),
+    ...[...LABEL_GROUPS.keys()].map(label => ({shown: label, key: normalizeModelName(label)})),
+    ...Object.entries(DOCS_NAME_ALIASES).flatMap(([name, id]) => [
+      {shown: name, key: normalizeModelName(name)},
+      {shown: id, key: normalizeModelName(id)},
+    ]),
+  ]
+  for (const {shown, key} of names) {
+    if (occurrences(haystack, key).length > 0) {
+      throw new PrivacyTableError(
+        `${where}: prose names ${quoted(shown)}. Prose is not read as a restriction, so state it as a bullet in the form the section uses`,
+      )
+    }
+  }
+}
+
+function parseAgreementDate(raw: string, label: string): string {
+  const fail = (): PrivacyTableError =>
+    new PrivacyTableError(`${quoted(label)}: unparseable agreement date ${quoted(raw)}`)
+  const match = /^([A-Z]+) (\d{1,2}), (\d{4})$/i.exec(raw)
+  const month = match === null ? -1 : MONTHS.indexOf((match[1] ?? '').toLowerCase())
+  if (match === null || month === -1) throw fail()
+  const year = Number(match[3])
+  const day = Number(match[2])
+  // Check the calendar before formatting: `toISOString()` throws a bare RangeError on an impossible date.
+  const date = new Date(0)
+  date.setUTCFullYear(year, month, day)
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) throw fail()
+  return `${match[3]}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+/** A proper-noun phrase such as "Anthropic's Data Policies": capitalized words only, so no clause can hide in it. */
+const NAME = String.raw`[A-Z][A-Za-z\d]*(?:['’]s)?(?: [A-Z][A-Za-z\d]*(?:['’]s)?)*`
+
+/** Sentences that change no field. Exact text: reworded text is new text and throws. */
+const INFORMATIONAL_SENTENCES: ReadonlySet<string> = new Set([
+  'ZDR disables important API features that depend on stored data, including the stateful Responses API, Files and Collections, and the Batch API.',
+  'ZDR agreement is renewed monthly.',
+])
+/** Sentences that say the model's prompts and completions are used for training. Exact text. */
+const TRAINING_SENTENCES: ReadonlySet<string> = new Set([
+  'Heavily discounted token pricing in exchange for permission to use your prompts and completions to train future Meta models.',
+  'Free for a limited time in exchange for permission to use your prompts and completions to improve the model.',
+])
+const GLOBAL_REGION_SENTENCE = 'Requires **Global** regions in your workspace privacy settings.'
+
+const RETAINED_ABUSE_SENTENCE =
+  /^Abuse monitoring logs are generated for all API feature usage and retained for up to (\d+) days\.$/
+const RETAINED_REQUESTS_SENTENCE = new RegExp(
+  String.raw`^Requests are retained for (?:up to )?(\d+) days(?: for abuse monitoring)?(?: in accordance with ${NAME})?\.$`,
+)
+const AVAILABILITY_SENTENCE = new RegExp(String.raw`^Availability is limited to regions permitted by ${NAME}\.$`)
+const HOSTED_SENTENCE = new RegExp(String.raw`^Hosted in ${NAME}(?: and ${NAME})?\.$`)
+const EXPIRY_SENTENCE = /^The current agreement is valid through ([A-Z]+ \d{1,2}, \d{4})\.$/i
+
+/**
+ * Apply the Privacy footnotes. Each sentence must be wholly one known sentence form, or the refresh throws; a
+ * contradiction with the table throws too.
+ */
+function applyFootnotes(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): void {
+  for (const {label, text} of bulletsOf(lines, 'Privacy footnotes', 'every-line').bullets) {
+    const targets = resolveLabel(label, accumulators)
     const sentences = stripLinks(text)
       .split(/(?<=\.)\s+/)
       .map(sentence => sentence.trim())
       .filter(sentence => sentence !== '' && sentence !== 'Learn more.')
 
     for (const sentence of sentences) {
-      const retained = /retained for (?:up to )?(\d+) days/i.exec(sentence)
-      const expiry = /valid through (.+?)\.?$/.exec(sentence)
-      if (sentence.startsWith('ZDR disables ') || sentence === 'ZDR agreement is renewed monthly.') {
-        // Informational: feature limits and renewal cadence change no snapshot field.
+      const retained = RETAINED_ABUSE_SENTENCE.exec(sentence) ?? RETAINED_REQUESTS_SENTENCE.exec(sentence)
+      const expiry = EXPIRY_SENTENCE.exec(sentence)
+      if (INFORMATIONAL_SENTENCES.has(sentence)) {
+        // Informational: feature limits and renewal cadence change no field.
       } else if (retained !== null) {
         for (const target of targets) {
           if (target.row.retentionDays !== Number(retained[1])) {
-            throw new PrivacyTableError(`"${label}": footnote retention contradicts the table for "${target.row.name}"`)
-          }
-          target.qualified = true
-        }
-      } else if (/permission to use your prompts and completions/.test(sentence)) {
-        for (const target of targets) {
-          if (!target.row.trainsOnData) {
             throw new PrivacyTableError(
-              `"${label}": footnote says training, the table says not used ("${target.row.name}")`,
+              `${quoted(label)}: footnote retention contradicts the table for ${quoted(target.row.name)}`,
             )
           }
-          target.qualified = true
         }
-      } else if (
-        sentence.startsWith('Availability is limited to regions permitted by ') ||
+      } else if (TRAINING_SENTENCES.has(sentence)) {
+        for (const target of targets) target.trainingGranted = true
+      } else if (AVAILABILITY_SENTENCE.test(sentence)) {
+        for (const target of targets) target.availabilityLimited = true
+      } else if (HOSTED_SENTENCE.test(sentence) || sentence === GLOBAL_REGION_SENTENCE) {
         // Any stated hosting location is a region statement, and gating is the fail-closed direction.
-        /^Hosted in \w.*\.$/.test(sentence) ||
-        sentence === 'Requires **Global** regions in your workspace privacy settings.'
-      ) {
-        for (const target of targets) {
-          target.regionGated = true
-          target.qualified = true
-        }
-      } else if (expiry !== null && sentence.startsWith('The current agreement is valid through ')) {
-        const date = parseAgreementDate(expiry[1] ?? '')
+        for (const target of targets) target.regionRequirement = true
+      } else if (expiry === null) {
+        throw new PrivacyTableError(`${quoted(label)}: unmapped footnote sentence ${quoted(sentence)}`)
+      } else {
+        const date = parseAgreementDate(expiry[1] ?? '', label)
         for (const target of targets) {
           if (target.agreementExpiry !== null && target.agreementExpiry !== date) {
-            throw new PrivacyTableError(`"${label}": conflicting agreement dates for "${target.row.name}"`)
+            throw new PrivacyTableError(`${quoted(label)}: conflicting agreement dates for ${quoted(target.row.name)}`)
           }
           target.agreementExpiry = date
-          target.qualified = true
         }
-      } else {
-        throw new PrivacyTableError(`"${label}": unmapped footnote sentence "${sentence.slice(0, 80)}"`)
       }
     }
   }
 }
 
-/** The "Enable restricted models" bullets: the only place that names the Global-region requirement. */
-function applyRestrictedModels(
-  lines: readonly string[],
-  rows: ReadonlyMap<string, Row>,
-  accumulators: ReadonlyMap<string, Accumulator>,
-): void {
-  const bullets = bulletsOf(
+/** The "Enable restricted models" bullets: the Global-region requirement, and which models opt in to training. */
+function applyRestrictedModels(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): void {
+  const {bullets, prose} = bulletsOf(
     sectionLines(lines, '### Enable restricted models'),
     'Enable restricted models',
     'list-items',
   )
   if (bullets.length === 0) throw new PrivacyTableError('Enable restricted models: no bullets found')
+  assertProseNamesNoModel(prose, 'Enable restricted models', accumulators)
   for (const {label, text} of bullets) {
-    const targets = resolveLabel(label, rows).map(row => accumulators.get(row.id))
+    const targets = resolveLabel(label, accumulators)
     const rule = stripLinks(text).trim()
     if (rule === 'select **Global** under **Regions**.') {
-      for (const target of targets) if (target !== undefined) target.regionGated = true
+      for (const target of targets) target.regionRequirement = true
     } else if (rule === 'turn on **Allow paid endpoints that train on request data**.') {
-      for (const target of targets) {
-        if (target !== undefined && !target.row.trainsOnData) {
-          throw new PrivacyTableError(`"${label}": opt-in to training contradicts the table for "${target.row.name}"`)
-        }
-      }
+      // A model that needs this opt-in trains on requests; the page has no other training column any more.
+      for (const target of targets) target.trainingGranted = true
     } else {
-      throw new PrivacyTableError(`Enable restricted models: unmapped rule for "${label}"`)
+      throw new PrivacyTableError(`Enable restricted models: unmapped rule for ${quoted(label)}`)
     }
   }
-}
-
-/** The model list: every name must match a privacy row, and "(limited regions)" marks a region requirement. */
-function applyModelList(
-  lines: readonly string[],
-  rows: ReadonlyMap<string, Row>,
-  accumulators: ReadonlyMap<string, Accumulator>,
-): void {
-  const intro = lines.findIndex(line => line.trim() === 'The current list of models includes:')
-  if (intro === -1) throw new PrivacyTableError('model list not found')
-  const listed = new Set<string>()
-  let first = intro + 1
-  while ((lines[first] ?? '').trim() === '' && first < lines.length) first++
-  for (let index = first; index < lines.length && (lines[index] ?? '').startsWith('- '); index++) {
-    const line = stripLinks(lines[index] ?? '')
-    const match = /^- \*\*(.+?)\*\*(?: \((.*)\))?$/.exec(line)
-    if (match === null) throw new PrivacyTableError(`model list: unmapped line "${line.slice(0, 60)}"`)
-    const key = normalizeName(match[1] ?? '')
-    const row = rows.get(key)
-    const accumulator = row === undefined ? undefined : accumulators.get(row.id)
-    if (row === undefined || accumulator === undefined) {
-      throw new PrivacyTableError(`model list: "${match[1]}" is not in the Privacy table`)
-    }
-    if (listed.has(key)) throw new PrivacyTableError(`model list: duplicate "${match[1]}"`)
-    listed.add(key)
-    for (const note of (match[2] ?? '').split(',').map(part => part.trim().toLowerCase())) {
-      if (note === '' || note === 'limited time') continue
-      if (note === 'limited regions') accumulator.regionGated = true
-      else throw new PrivacyTableError(`model list: unmapped note "${note}" on "${match[1]}"`)
-    }
-  }
-  const missing = [...rows.keys()].filter(key => !listed.has(key))
-  if (missing.length > 0) throw new PrivacyTableError(`model list is missing Privacy rows: ${missing.join(', ')}`)
 }
 
 /**
- * Parse `go.mdx` into the snapshot the deploy reads. `sourceCommit` is the anomalyco/opencode commit the text
- * came from. Throws `PrivacyTableError` on anything it cannot map.
+ * Words that make a usage-notice sentence an availability or region statement. A sentence with none of them is
+ * pricing or limits and is ignored; a sentence with one must be the recognised form. Chosen by reading the page:
+ * the neighbouring notices say "Free for a limited time", "The 50% discount applies through ..." and "Higher usage
+ * limits apply through ...", none of which contain these.
  */
-export function parsePrivacyTable(mdx: string, sourceCommit: string): PrivacySnapshot {
-  if (!/^[0-9a-f]{40}$/.test(sourceCommit))
-    throw new PrivacyTableError('source commit must be 40 lowercase hex characters')
+const AVAILABILITY_WORDS =
+  /\b(?:not available|unavailable|available only|only available|availability|regions?|countr(?:y|ies)|restricted|limited to|blocked|refused|geograph\w*|territor(?:y|ies))\b/i
+/** The one recognised form. A single character-class run, so the long place list cannot backtrack. */
+const NOT_AVAILABLE_SENTENCE = /^Not available in ([A-Za-z ,()]+)\.$/
+const PLACE_WORDS: ReadonlySet<string> = new Set(['the', 'of', 'and', 'or', 'including', 'regions'])
+/** A place list is proper nouns and a few connectives, so no clause (such as a training statement) can ride in it. */
+const isPlaceList = (list: string): boolean =>
+  list
+    .split(/[\s,()]+/)
+    .filter(word => word !== '')
+    .every(word => /^[A-Z][A-Za-z]*$/.test(word) || PLACE_WORDS.has(word))
 
+/**
+ * True when the sentence is the recognised form, with at most a label in front of it: `**Beam Free:** Not available
+ * in Angola.` Whatever precedes `Not available in` must hold no availability word, so "Beam Free is not available in
+ * Angola." (a reworded restriction) is not recognised. The label itself is never parsed; names are read separately.
+ */
+function isRecognisedAvailability(sentence: string): boolean {
+  const at = sentence.indexOf('Not available in ')
+  if (at === -1 || AVAILABILITY_WORDS.test(sentence.slice(0, at))) return false
+  const places = NOT_AVAILABLE_SENTENCE.exec(sentence.slice(at))?.[1]
+  return places !== undefined && isPlaceList(places)
+}
+
+/**
+ * The paragraphs of a section, outside fenced code. Blank lines and headings are the only boundaries: a hard line
+ * break (two trailing spaces or a backslash), a list marker, emphasis or a colon is not one, so no markup decides
+ * where a notice starts or ends.
+ */
+function paragraphsOf(lines: readonly string[]): string[] {
+  const paragraphs: string[] = []
+  let current: string[] = []
+  let inFence = false
+  const flush = (): void => {
+    if (current.length > 0) paragraphs.push(current.join(' '))
+    current = []
+  }
+  for (const line of lines) {
+    if (line.trimStart().startsWith('```')) {
+      flush()
+      inFence = !inFence
+    } else if (inFence) continue
+    else if (line.trim() === '' || line.startsWith('#')) flush()
+    else current.push(line.replace(/\\$/, '').trim())
+  }
+  flush()
+  return paragraphs
+}
+
+interface NameEntry {
+  /** The name as the page writes it, for messages. */
+  shown: string
+  rows: Accumulator[]
+  /** Reviewed family labels that normalize to this name. Their targets are resolved only when the name is used. */
+  groups: string[]
+}
+
+/**
+ * Normalized name -> what it names: every row name and every reviewed family label. Family labels are indexed by
+ * name only: a mapping is resolved by `resolveEntry` when some text matched it, so a retired family member cannot
+ * block a refresh whose page no longer uses the label.
+ */
+function nameIndex(accumulators: ReadonlyMap<string, Accumulator>): Map<string, NameEntry> {
+  const index = new Map<string, NameEntry>()
+  const entryFor = (shown: string): NameEntry => {
+    const key = normalizeModelName(shown)
+    const entry = index.get(key) ?? {shown, rows: [], groups: []}
+    index.set(key, entry)
+    return entry
+  }
+  for (const accumulator of accumulators.values()) entryFor(accumulator.row.name).rows.push(accumulator)
+  for (const label of LABEL_GROUPS.keys()) entryFor(label).groups.push(label)
+  return index
+}
+
+/** The rows a matched name limits. A family label throws here, and only here, when its mapping names a retired row. */
+function resolveEntry(entry: NameEntry, accumulators: ReadonlyMap<string, Accumulator>): Accumulator[] {
+  if (entry.rows.length > 0 && entry.groups.length > 0) {
+    throw new PrivacyTableError(`label ${quoted(entry.shown)} is ambiguous: a Privacy row and a reviewed label mapping`)
+  }
+  return entry.rows.length > 0 ? entry.rows : entry.groups.flatMap(group => resolveToken(group, accumulators) ?? [])
+}
+
+/**
+ * The names a paragraph mentions, as whole words, longest match first: a mention that lies inside a strictly longer
+ * mention does not count ("Hy4 preview" is one name, not also "Hy4"). Mentions that merely overlap, or tie in
+ * length, all count, so an unclear text names more models and throws rather than picking one.
+ */
+function namesIn(text: string, index: ReadonlyMap<string, NameEntry>): string[] {
+  const haystack = normalizeModelName(stripLinks(text).replaceAll(/[*_`]/g, ''))
+  const mentions = [...index.keys()].flatMap(key =>
+    occurrences(haystack, key).map(start => ({key, start, end: start + key.length})),
+  )
+  const kept = mentions.filter(
+    inner =>
+      !mentions.some(
+        outer =>
+          outer.end - outer.start > inner.end - inner.start && outer.start <= inner.start && outer.end >= inner.end,
+      ),
+  )
+  return [...new Set(kept.map(mention => mention.key))]
+}
+
+/**
+ * The region limits stated in the Usage limits section, read for one fact: "Not available in <places>." is the
+ * page's statement of a model's region limit. The notices around it are pricing and limits, which change weekly, so
+ * this is the only place on the page where unrecognised sentences are tolerated, and only when they say nothing
+ * about availability. The rule, per paragraph (blank lines separate paragraphs):
+ *
+ * 1. A paragraph with no availability sentence (no `AVAILABILITY_WORDS` match) is ignored.
+ * 2. Every availability sentence in the other paragraphs must be the recognised form, or the refresh throws.
+ * 3. The paragraph names exactly one model, by name and not by markup, and that model is limited. A family label
+ *    counts as one name and limits all its rows. No model named, or more than one, throws.
+ *
+ * Known limit: a paragraph that names one model but carries a restriction meant for another, unnamed one, is
+ * attributed to the named model.
+ */
+function applyUsageNotices(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): void {
+  let index: Map<string, NameEntry> | undefined
+  for (const paragraph of paragraphsOf(sectionLines(lines, '## Usage limits'))) {
+    const sentences = stripLinks(paragraph)
+      .split(/(?<=\.)\s+/)
+      .map(sentence => sentence.trim())
+      .filter(sentence => AVAILABILITY_WORDS.test(sentence))
+    for (const sentence of sentences) {
+      if (!isRecognisedAvailability(sentence)) {
+        throw new PrivacyTableError(`usage notice: unrecognised availability sentence ${quoted(sentence)}`)
+      }
+    }
+    const [first] = sentences
+    if (first === undefined) continue
+
+    index ??= nameIndex(accumulators)
+    const names = namesIn(paragraph, index)
+    const [name] = names
+    if (name === undefined) {
+      throw new PrivacyTableError(`usage notice: availability sentence not attributed to a model ${quoted(first)}`)
+    }
+    if (names.length > 1) {
+      throw new PrivacyTableError(
+        `usage notice: availability sentence ${quoted(first)} sits in a paragraph that names more than one model (${names
+          .slice(0, 5)
+          .map(key => quoted(index?.get(key)?.shown ?? key))
+          .join(', ')})`,
+      )
+    }
+    const entry = index.get(name)
+    for (const target of entry === undefined ? [] : resolveEntry(entry, accumulators)) target.availabilityLimited = true
+  }
+}
+
+/**
+ * Parse `go.mdx` into one record per Privacy row, in page order. Throws `PrivacyTableError` on anything it
+ * cannot map.
+ */
+export function parsePrivacyDocs(mdx: string): DocsPrivacyRow[] {
   const lines = mdx.split('\n')
-  const endpointIds = readEndpointIds(lines)
   const privacy = sectionLines(lines, '## Privacy')
-  const {table, end} = readTable(privacy, 'Privacy')
-  const rows = readRows(table, endpointIds)
+  const {table, start, end} = readTable(privacy, 'Privacy', PRIVACY_COLUMNS)
 
   const accumulators = new Map<string, Accumulator>()
-  for (const row of rows.values()) {
-    accumulators.set(row.id, {row, regionGated: false, agreementExpiry: null, qualified: false})
+  for (const [key, row] of readRows(table)) {
+    accumulators.set(key, {
+      row,
+      trainingGranted: false,
+      regionRequirement: false,
+      availabilityLimited: false,
+      agreementExpiry: null,
+    })
   }
 
-  applyModelList(lines, rows, accumulators)
-  applyRestrictedModels(lines, rows, accumulators)
-  applyFootnotes(privacy.slice(end), rows, accumulators)
+  // The lines in front of the table are not a footnote or a rule, so nothing else reads them.
+  assertProseNamesNoModel(privacy.slice(0, start), 'Privacy', accumulators)
+  applyRestrictedModels(lines, accumulators)
+  applyFootnotes(privacy.slice(end), accumulators)
+  applyUsageNotices(lines, accumulators)
 
-  for (const {row, qualified} of accumulators.values()) {
-    if (row.marker && !qualified)
-      throw new PrivacyTableError(`Privacy: marker on "${row.name}" has no footnote that qualifies it`)
-  }
-
-  const models: PrivacySnapshot['models'] = {}
-  for (const {row, regionGated, agreementExpiry} of [...accumulators.values()].sort((a, b) =>
-    a.row.id.localeCompare(b.row.id),
-  )) {
-    models[row.id] = {
-      zeroRetention: row.retentionDays === 0,
-      trainsOnData: row.trainsOnData,
-      regionGated,
-      agreementExpiry,
-    }
-  }
-
-  const snapshot: PrivacySnapshot = {
-    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
-    source: {repo: SNAPSHOT_SOURCE_REPO, path: SNAPSHOT_SOURCE_PATH, commit: sourceCommit},
-    models,
-  }
-  // Self-check: whatever this wrote must pass the same two-stage parse the deploy applies.
-  if (parseSnapshot(snapshot).invalid.length > 0)
-    throw new PrivacyTableError('parsed an entry that fails the snapshot schema')
-  return snapshot
+  return [...accumulators.values()].map(
+    ({row, trainingGranted, regionRequirement, availabilityLimited, agreementExpiry}) => {
+      // `*` is the zero-retention agreement marker; without its expiry footnote the agreement date is unknown.
+      if (row.marker && agreementExpiry === null) {
+        throw new PrivacyTableError(
+          `Privacy: marker on ${quoted(row.name)} has no agreement footnote that qualifies it`,
+        )
+      }
+      return {
+        name: row.name,
+        retentionDays: row.retentionDays,
+        trainingGranted,
+        regionRequirement,
+        availabilityLimited,
+        agreementExpiry,
+      }
+    },
+  )
 }

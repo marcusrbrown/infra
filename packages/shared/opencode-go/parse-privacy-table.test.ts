@@ -1,10 +1,9 @@
+import type {DocsPrivacyRow} from './parse-privacy-table'
 import {readFileSync} from 'node:fs'
+
 import {describe, expect, test} from 'bun:test'
 
-import {parseSnapshot} from './eligibility'
-import {parsePrivacyTable, PrivacyTableError} from './parse-privacy-table'
-
-const FIXTURE_COMMIT = '2f886a2a5e0f22b813fe0c177105559b508abad5'
+import {parsePrivacyDocs, PrivacyTableError} from './parse-privacy-table'
 
 const readFixture = (name: string) => readFileSync(new URL(`__fixtures__/${name}`, import.meta.url), 'utf8')
 
@@ -16,82 +15,106 @@ const mutate = (from: string, to: string): string => {
   return mdx.replace(from, () => to)
 }
 
-const parse = (source: string) => parsePrivacyTable(source, FIXTURE_COMMIT)
+const rowsByName = (source: string): Map<string, DocsPrivacyRow> =>
+  new Map(parsePrivacyDocs(source).map(row => [row.name, row]))
 
-describe('parsePrivacyTable on the pinned go.mdx', () => {
-  test('parses to exactly go.expected.json', () => {
-    expect(parse(mdx)).toEqual(JSON.parse(readFixture('go.expected.json')))
+const plain = {
+  trainingGranted: false,
+  regionRequirement: false,
+  availabilityLimited: false,
+  agreementExpiry: null,
+} as const
+
+describe('parsePrivacyDocs on the pinned go.mdx', () => {
+  const rows = rowsByName(mdx)
+
+  test('reads one row per Privacy table line, in page order', () => {
+    const parsed = parsePrivacyDocs(mdx)
+    expect(parsed).toHaveLength(31)
+    expect(parsed[0]?.name).toBe('Grok 4.7')
+    expect(parsed.at(-1)?.name).toBe('Hy4 flash Free')
   })
 
-  test('the output satisfies the snapshot schema with no invalid entries', () => {
-    const parsed = parseSnapshot(parse(mdx))
-    expect(parsed.invalid).toEqual([])
-    expect(parsed.source).toEqual({
-      repo: 'anomalyco/opencode',
-      path: 'services/site/src/docs/content/console/go.mdx',
-      commit: FIXTURE_COMMIT,
-    })
-  })
-
-  test('keys models by endpoint id, sorted', () => {
-    const ids = Object.keys(parse(mdx).models)
-    expect(ids).toEqual([...ids].sort())
-    expect(ids).toContain('claude-haiku-5-5')
-    expect(ids).toContain('glm-5.3')
-  })
-
-  test('maps each footnote and marker to the field it qualifies', () => {
-    const {models} = parse(mdx)
-    // Marker `*` + "valid through" footnote -> agreement expiry, plus the Global-region requirement.
-    expect(models['deepseek-v4.1-flash']).toEqual({
-      zeroRetention: true,
-      trainsOnData: false,
-      regionGated: true,
+  test('maps each footnote and marker to the fact it qualifies', () => {
+    // Marker + "valid through" footnote -> expiry; restricted-models bullet -> workspace Global requirement.
+    expect(rows.get('DeepSeek V4.1 Flash')).toEqual({
+      name: 'DeepSeek V4.1 Flash',
+      retentionDays: 0,
+      ...plain,
+      regionRequirement: true,
       agreementExpiry: '2026-11-30',
     })
-    expect(models['deepseek-v4-pro']).toEqual(models['deepseek-v4.1-flash'])
-    // Retention footnote: 30 days is not zero retention.
-    expect(models['claude-haiku-5-5']).toEqual({
-      zeroRetention: false,
-      trainsOnData: false,
-      regionGated: false,
-      agreementExpiry: null,
+    expect(rows.get('DeepSeek V4 Pro')).toEqual({
+      name: 'DeepSeek V4 Pro',
+      retentionDays: 0,
+      ...plain,
+      regionRequirement: true,
+      agreementExpiry: '2026-11-30',
     })
-    expect(models['gpt-6-luna']?.zeroRetention).toBe(false)
-    expect(models['gpt-5.6-luna']?.zeroRetention).toBe(false)
-    expect(models['grok-4.7']?.zeroRetention).toBe(false)
-    // Training flag + region footnote.
-    expect(models['muse-spark-1.3-contributor']).toEqual({
-      zeroRetention: false,
-      trainsOnData: true,
-      regionGated: true,
-      agreementExpiry: null,
+    // Retention footnotes agree with the table; none of them gates anything.
+    expect(rows.get('Gemini 4 Argon')).toEqual({name: 'Gemini 4 Argon', retentionDays: 55, ...plain})
+    expect(rows.get('Claude Haiku 5.5')).toEqual({name: 'Claude Haiku 5.5', retentionDays: 30, ...plain})
+    expect(rows.get('Grok 4.7')).toEqual({name: 'Grok 4.7', retentionDays: 30, ...plain})
+    // Training footnote + availability footnote + opt-in rule.
+    expect(rows.get('Muse Spark 1.3 Contributor')).toEqual({
+      name: 'Muse Spark 1.3 Contributor',
+      retentionDays: null,
+      ...plain,
+      trainingGranted: true,
+      availabilityLimited: true,
     })
-    expect(models['iceman-contributor-free']?.trainsOnData).toBe(true)
-    // Region from the model list ("limited regions").
-    expect(models['beam-free']?.regionGated).toBe(true)
-    // Hosting + region footnote and the restricted-models bullet: zero retention, no training, region-gated.
-    expect(models['longcat-2.5-free']).toEqual({
-      zeroRetention: true,
-      trainsOnData: false,
-      regionGated: true,
-      agreementExpiry: null,
+    expect(rows.get('Muse Spark 1.2 Contributor')?.trainingGranted).toBe(true)
+    // Training footnote alone.
+    expect(rows.get('Iceman Contributor Free')).toEqual({
+      name: 'Iceman Contributor Free',
+      retentionDays: null,
+      ...plain,
+      trainingGranted: true,
     })
-    expect(models['crouton-alpha-free']).toBeUndefined()
-    // Plain zero-retention row.
-    expect(models['glm-5.3']).toEqual({
-      zeroRetention: true,
-      trainsOnData: false,
-      regionGated: false,
-      agreementExpiry: null,
+    // Hosting + Global sentences.
+    expect(rows.get('LongCat 2.5 Free')).toEqual({
+      name: 'LongCat 2.5 Free',
+      retentionDays: 0,
+      ...plain,
+      regionRequirement: true,
     })
+    // The usage-limits notice "Not available in <places>." is the page's statement of Beam Free's region limit.
+    expect(rows.get('Beam Free')).toEqual({name: 'Beam Free', retentionDays: 30, ...plain, availabilityLimited: true})
+    expect(rows.get('Hy4 flash Free')).toEqual({name: 'Hy4 flash Free', retentionDays: 0, ...plain})
+    expect(rows.get('GLM-5.3')).toEqual({name: 'GLM-5.3', retentionDays: 0, ...plain})
   })
 })
 
-describe('parsePrivacyTable fails closed', () => {
+describe('parsePrivacyDocs on the current page layout', () => {
+  test('parses a page with no Endpoints table, no model list and no training column (the pinned page)', () => {
+    expect(mdx).not.toContain('Model ID')
+    expect(mdx).not.toContain('The current list of models includes:')
+    expect(mdx).not.toContain('Model training')
+    expect(() => parsePrivacyDocs(mdx)).not.toThrow()
+  })
+
+  test('parses a page with no Endpoints heading at all', () => {
+    const lines = mdx.split('\n')
+    const start = lines.indexOf('## Endpoints')
+    const end = lines.indexOf('## Privacy')
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(parsePrivacyDocs([...lines.slice(0, start), ...lines.slice(end)].join('\n'))).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('on a reinstated training column, because a column it does not read could hide a fact', () => {
+    expect(() =>
+      parsePrivacyDocs(
+        mutate('| Model                      | Data retention |', '| Model | Model training | Data retention |'),
+      ),
+    ).toThrow(/columns/)
+  })
+})
+
+describe('parsePrivacyDocs fails closed', () => {
   test('on an unmapped footnote sentence', () => {
     expect(() =>
-      parse(
+      parsePrivacyDocs(
         mutate('- **Grok 4.7:** ZDR disables', '- **Grok 4.7:** Logs are mirrored to a cold archive. ZDR disables'),
       ),
     ).toThrow(PrivacyTableError)
@@ -99,7 +122,7 @@ describe('parsePrivacyTable fails closed', () => {
 
   test('on a footnote that names no model', () => {
     expect(() =>
-      parse(
+      parsePrivacyDocs(
         mutate(
           '- **DeepSeek:** ZDR agreement',
           '- **Mystery Model:** Data is retained for 7 days.\n- **DeepSeek:** ZDR agreement',
@@ -108,110 +131,76 @@ describe('parsePrivacyTable fails closed', () => {
     ).toThrow(/Mystery Model/)
   })
 
-  test('on a table marker that no footnote qualifies', () => {
+  test('on a retention marker that has no agreement footnote', () => {
     expect(() =>
-      parse(
-        mutate(
-          '| Hy3                        | Not used       | 0 days         |',
-          String.raw`| Hy3 | Not used | 0 days\* |`,
-        ),
-      ),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', String.raw`| Hy3 | 0 days\* |`)),
     ).toThrow(/marker/i)
+  })
+
+  test('on a retention marker that only a non-agreement footnote qualifies', () => {
+    const marked = mutate(
+      '| LongCat 2.5 Free           | 0 days         |',
+      String.raw`| LongCat 2.5 Free | 0 days\* |`,
+    )
+    expect(() => parsePrivacyDocs(marked)).toThrow(/marker/i)
   })
 
   test('on an unknown marker character', () => {
     expect(() =>
-      parse(
-        mutate(
-          '| Not used       | 0 days         |\n| Hy4 preview',
-          '| Not used       | 0 days†        |\n| Hy4 preview',
-        ),
-      ),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', '| Hy3 | 0 days† |')),
     ).toThrow(PrivacyTableError)
   })
 
   test('on a missing column', () => {
     expect(() =>
-      parse(
-        mutate(
-          '| Model                      | Model training | Data retention |',
-          '| Model                      | Model training |',
-        ),
-      ),
+      parsePrivacyDocs(mutate('| Model                      | Data retention |', '| Model                      |')),
     ).toThrow(PrivacyTableError)
   })
 
   test('on a row with the wrong cell count', () => {
     expect(() =>
-      parse(mutate('| Hy3                        | Not used       | 0 days         |', '| Hy3 | Not used |')),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', '| Hy3 | 0 days | extra |')),
     ).toThrow(PrivacyTableError)
   })
 
   test('on zero rows', () => {
     const lines = mdx.split('\n')
-    const start = lines.findIndex(l => l.startsWith('| Model                      | Model training'))
+    const start = lines.findIndex(l => l.startsWith('| Model                      | Data retention'))
     const end = lines.findIndex((l, i) => i > start && !l.startsWith('|'))
     const without = [...lines.slice(0, start + 2), ...lines.slice(end)].join('\n')
-    expect(() => parse(without)).toThrow(/no rows|zero rows/i)
+    expect(() => parsePrivacyDocs(without)).toThrow(/no rows/i)
   })
 
   test('on a missing Privacy section', () => {
-    expect(() => parse(mutate('## Privacy', '## Something else'))).toThrow(PrivacyTableError)
-  })
-
-  test('on an unrecognized training value', () => {
-    expect(() =>
-      parse(
-        mutate('| GLM-5.3                    | Not used       |', '| GLM-5.3                    | Maybe          |'),
-      ),
-    ).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(mutate('## Privacy', '## Something else'))).toThrow(PrivacyTableError)
   })
 
   test('on an unrecognized retention value', () => {
     expect(() =>
-      parse(mutate('| Hy3                        | Not used       | 0 days         |', '| Hy3 | Not used | a while |')),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', '| Hy3 | a while |')),
     ).toThrow(PrivacyTableError)
   })
 
-  test('on a privacy row with no endpoint id', () => {
+  test('on a footnote retention that contradicts the table', () => {
     expect(() =>
-      parse(
-        mutate(
-          '| Hy3                        | hy3                        |',
-          '| Hy3 Unlisted               | hy3                        |',
-        ),
-      ),
-    ).toThrow(/Hy3/)
-  })
-
-  test('on a footnote that contradicts the table', () => {
-    // Table says GLM-5.3 retains for 0 days; a footnote claiming 30 days must not be silently preferred.
-    expect(() =>
-      parse(
+      parsePrivacyDocs(
         mutate(
           '- **DeepSeek:** ZDR agreement',
           '- **GLM-5.3:** Requests are retained for 30 days.\n- **DeepSeek:** ZDR agreement',
         ),
       ),
     ).toThrow(PrivacyTableError)
-    // Table says Claude Haiku is not trained on; a training footnote contradicts it.
-    expect(() =>
-      parse(
-        mutate(
-          '- **DeepSeek:** ZDR agreement',
-          '- **Claude Haiku 5.5:** Free in exchange for permission to use your prompts and completions to train models.\n- **DeepSeek:** ZDR agreement',
-        ),
-      ),
-    ).toThrow(PrivacyTableError)
   })
 
-  test('on a missing restricted-models section, which carries the DeepSeek region rule', () => {
-    expect(() => parse(mutate('### Enable restricted models', '### Something else'))).toThrow(PrivacyTableError)
+  test('on a missing restricted-models section, which carries the Global-region rule', () => {
+    expect(() => parsePrivacyDocs(mutate('### Enable restricted models', '### Something else'))).toThrow(
+      PrivacyTableError,
+    )
   })
 
   test('on an unrecognized restricted-models rule', () => {
     expect(() =>
-      parse(
+      parsePrivacyDocs(
         mutate(
           '- **DeepSeek V4.1 Flash and V4 Pro:** select **Global** under **Regions**.',
           '- **DeepSeek V4.1 Flash and V4 Pro:** phone the support desk.',
@@ -226,51 +215,69 @@ describe('parsePrivacyTable fails closed', () => {
     ['no bold label', '- DeepSeek V4.1 Flash and V4 Pro: select **Global** under **Regions**.'],
   ])('on a reformatted restricted-models bullet with %s, which would drop a region rule', (_label, bullet) => {
     const original = '- **DeepSeek V4.1 Flash and V4 Pro:** select **Global** under **Regions**.'
-    expect(() => parse(mutate(original, bullet))).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(mutate(original, bullet))).toThrow(PrivacyTableError)
   })
 
   test('but not on prose inside the restricted-models section', () => {
     const intro = 'In **Settings › Privacy**, an owner or admin can enable:'
-    expect(parse(mutate(intro, `${intro}\n\nEvery change takes effect at once.`))).toEqual(
-      JSON.parse(readFixture('go.expected.json')),
+    expect(parsePrivacyDocs(mutate(intro, `${intro}\n\nEvery change takes effect at once.`))).toEqual(
+      parsePrivacyDocs(mdx),
     )
-  })
-
-  test('on an unrecognized parenthetical in the model list', () => {
-    expect(() =>
-      parse(
-        mutate(
-          '- **Iceman Contributor Free** (limited time)',
-          '- **Iceman Contributor Free** (limited time, invite only)',
-        ),
-      ),
-    ).toThrow(PrivacyTableError)
   })
 
   test('on a duplicate privacy row', () => {
     expect(() =>
-      parse(mutate('| Hy3                        | Not used       | 0 days         |', '| Hy4 | Not used | 0 days |')),
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', '| Hy4 | 0 days |')),
     ).toThrow(/duplicate/i)
   })
 
-  test('on a malformed source commit', () => {
-    expect(() => parsePrivacyTable(mdx, 'dev')).toThrow(PrivacyTableError)
-  })
-
   test('on an unparseable agreement date', () => {
-    expect(() => parse(mutate('valid through November 30, 2026', 'valid through Smarch 40, 2026'))).toThrow(
+    expect(() => parsePrivacyDocs(mutate('valid through November 30, 2026', 'valid through Smarch 40, 2026'))).toThrow(
       PrivacyTableError,
     )
   })
+
+  test('on conflicting agreement dates for one model', () => {
+    expect(() =>
+      parsePrivacyDocs(
+        mutate(
+          '- **DeepSeek:** ZDR agreement',
+          '- **DeepSeek V4 Pro:** The current agreement is valid through December 31, 2026.\n- **DeepSeek:** ZDR agreement',
+        ),
+      ),
+    ).toThrow(/conflicting agreement dates/)
+  })
 })
 
-describe('parsePrivacyTable on region footnotes', () => {
+describe('parsePrivacyDocs on training statements', () => {
+  const GLM_ROW = '| GLM-5.3                    | 0 days         |'
+  const TRAINING =
+    'Free for a limited time in exchange for permission to use your prompts and completions to improve the model.'
+  const addFootnote = (line: string) =>
+    mutate('- **DeepSeek:** ZDR agreement', `${line}\n- **DeepSeek:** ZDR agreement`)
+
+  test('a footnote that grants permission to use prompts marks its model as training', () => {
+    expect(mdx).toContain(GLM_ROW)
+    const rows = rowsByName(addFootnote(`- **GLM-5.3:** ${TRAINING}`))
+    expect(rows.get('GLM-5.3')?.trainingGranted).toBe(true)
+    expect(rows.get('GLM-5.3-Flash')?.trainingGranted).toBe(false)
+  })
+
+  test('the opt-in rule alone marks its models as training', () => {
+    const rule = '- **GLM-5.3:** turn on **Allow paid endpoints that train on request data**.'
+    const rows = rowsByName(mutate('- **LongCat 2.5 Free:** select', `${rule}\n- **LongCat 2.5 Free:** select`))
+    expect(rows.get('GLM-5.3')?.trainingGranted).toBe(true)
+  })
+})
+
+describe('parsePrivacyDocs on region footnotes', () => {
   const HOSTING = 'Hosted in China.'
   const REGION = 'Requires **Global** regions in your workspace privacy settings.'
+  const AVAILABILITY = "Availability is limited to regions permitted by Meta's Geographic Use Policy."
   const LONGCAT_FOOTNOTE = `- **LongCat 2.5 Free:** ${HOSTING} ${REGION}`
   const LONGCAT_RESTRICTED = '- **LongCat 2.5 Free:** select **Global** under **Regions**.\n'
-  const LONGCAT_ROW = '| LongCat 2.5 Free           | Not used       | 0 days         |'
-  const longcat = (source: string) => parse(source).models['longcat-2.5-free']
+  const LONGCAT_ROW = '| LongCat 2.5 Free           | 0 days         |'
+  const longcat = (source: string) => rowsByName(source).get('LongCat 2.5 Free')
 
   /** The LongCat footnote replaced by `sentences`, restricted-models bullet removed: only the footnote can gate. */
   const footnoteOnly = (sentences: string): string =>
@@ -284,51 +291,47 @@ describe('parsePrivacyTable on region footnotes', () => {
 
   test('the hosting sentence alone gates its target', () => {
     expect(longcat(footnoteOnly(HOSTING))).toEqual({
-      zeroRetention: true,
-      trainsOnData: false,
-      regionGated: true,
-      agreementExpiry: null,
+      name: 'LongCat 2.5 Free',
+      retentionDays: 0,
+      ...plain,
+      regionRequirement: true,
     })
   })
 
-  test('the region sentence alone gates its target', () => {
-    expect(longcat(footnoteOnly(REGION))?.regionGated).toBe(true)
+  test('the Global sentence alone gates its target', () => {
+    expect(longcat(footnoteOnly(REGION))?.regionRequirement).toBe(true)
   })
 
-  test('both sentences together gate their target', () => {
-    expect(longcat(footnoteOnly(`${HOSTING} ${REGION}`))?.regionGated).toBe(true)
-  })
-
-  test('a hosting footnote with no restricted-models bullet is still region-gated', () => {
+  test('a hosting footnote with no restricted-models bullet is still gated', () => {
     const withoutBullet = mutate(LONGCAT_RESTRICTED, '')
-    expect(withoutBullet).toContain(LONGCAT_FOOTNOTE)
-    expect(longcat(withoutBullet)?.regionGated).toBe(true)
+    expect(longcat(withoutBullet)?.regionRequirement).toBe(true)
     // Control: without the bullet and without the region sentences, nothing gates LongCat.
-    const ungated = withoutBullet.replace(LONGCAT_FOOTNOTE, () => '- **LongCat 2.5 Free:** ZDR disables training.')
-    expect(longcat(ungated)?.regionGated).toBe(false)
+    const ungated = withoutBullet.replace(
+      LONGCAT_FOOTNOTE,
+      () => '- **LongCat 2.5 Free:** ZDR agreement is renewed monthly.',
+    )
+    expect(longcat(ungated)?.regionRequirement).toBe(false)
   })
 
-  test.each([
-    ['the hosting sentence', HOSTING],
-    ['the region sentence', REGION],
-  ])('%s qualifies a retention marker', (_label, sentence) => {
-    const marked = footnoteOnly(sentence).replace(
-      LONGCAT_ROW,
-      () => String.raw`| LongCat 2.5 Free | Not used | 0 days\* |`,
-    )
-    expect(marked).not.toBe(footnoteOnly(sentence))
-    expect(longcat(marked)?.regionGated).toBe(true)
+  test('the restricted-models bullet alone gates its target', () => {
+    const bulletOnly = mdx.replace(LONGCAT_FOOTNOTE, () => '- **LongCat 2.5 Free:** ZDR agreement is renewed monthly.')
+    expect(longcat(bulletOnly)?.regionRequirement).toBe(true)
   })
 
   test('a hosting sentence names any place', () => {
-    expect(longcat(footnoteOnly('Hosted in Singapore and Hong Kong.'))?.regionGated).toBe(true)
+    expect(longcat(footnoteOnly('Hosted in Singapore and Hong Kong.'))?.regionRequirement).toBe(true)
+  })
+
+  test('an availability sentence is the one the API can confirm, and does not set the docs-only gate', () => {
+    const row = longcat(footnoteOnly(AVAILABILITY))
+    expect(row?.availabilityLimited).toBe(true)
+    expect(row?.regionRequirement).toBe(false)
   })
 
   test('an unknown sentence next to them still throws the unmapped-sentence error', () => {
     const source = mdx.replace(LONGCAT_FOOTNOTE, () => `${LONGCAT_FOOTNOTE} Logs are mirrored to a cold archive.`)
     expect(source).not.toBe(mdx)
-    expect(() => parse(source)).toThrow(PrivacyTableError)
-    expect(() => parse(source)).toThrow(
+    expect(() => parsePrivacyDocs(source)).toThrow(
       '"LongCat 2.5 Free": unmapped footnote sentence "Logs are mirrored to a cold archive."',
     )
   })
@@ -342,16 +345,716 @@ describe('parsePrivacyTable on region footnotes', () => {
     ['a region sentence with another region', 'Requires **Europe** regions in your workspace privacy settings.'],
     ['a region sentence with no closing period', 'Requires **Global** regions in your workspace privacy settings'],
   ])('a near miss (%s) still throws', (_label, sentence) => {
-    expect(() => parse(footnoteOnly(sentence))).toThrow(/unmapped footnote sentence/)
+    expect(() => parsePrivacyDocs(footnoteOnly(sentence))).toThrow(/unmapped footnote sentence/)
   })
 })
 
-describe('parsePrivacyTable on changed upstream content', () => {
-  test('a row whose retention changes flips only that model', () => {
-    const changed = parse(
-      mutate('| GLM-5.3                    | Not used       | 0 days         |', '| GLM-5.3 | Not used | 30 days |'),
+/** The Privacy footnote line that starts with `label`, as the pinned page writes it. */
+const footnoteLine = (label: string): string => {
+  const lines = mdx.split('\n')
+  const line = lines.slice(lines.indexOf('## Privacy')).find(candidate => candidate.startsWith(`- **${label}:**`))
+  if (line === undefined) throw new Error(`fixture has no footnote for ${label}`)
+  return line
+}
+
+describe('parsePrivacyDocs on prose in the restricted-models section', () => {
+  const NEXT = 'See [Privacy](#privacy) for each model'
+  const prose = (sentence: string): string => mutate(NEXT, `${sentence}\n\n${NEXT}`)
+
+  test('prose that names a Privacy model fails the refresh and says which model', () => {
+    const source = prose('Kimi K3 requires **Global** regions in your workspace privacy settings.')
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/prose names "Kimi K3"/)
+  })
+
+  test.each([
+    ['a lowercase, hyphenated spelling', 'kimi-k3 needs Global regions.'],
+    ['emphasis around the name', 'Models such as **Kimi K3** need Global regions.'],
+    ['a link around the name', 'Models such as [Kimi K3](https://example.com/k3) need Global regions.'],
+    ['a family name from the reviewed label mapping', 'DeepSeek needs Global regions.'],
+    ['a name at the end of a sentence', 'Global regions are needed for Hy3.'],
+  ])('also fails on %s', (_label, sentence) => {
+    expect(() => parsePrivacyDocs(prose(sentence))).toThrow(/prose names/)
+  })
+
+  test('also fails when the name is split across a wrapped line', () => {
+    expect(() => parsePrivacyDocs(prose('Kimi\nK3 requires Global regions.'))).toThrow(/prose names "Kimi K3"/)
+  })
+
+  test('a model name inside a longer word is not a mention', () => {
+    expect(() => parsePrivacyDocs(prose('The Hy3rid mode is not a model.'))).not.toThrow()
+  })
+
+  test('also fails on prose between the bullets', () => {
+    const bullet = '- **LongCat 2.5 Free:** select **Global** under **Regions**.'
+    expect(() => parsePrivacyDocs(mutate(bullet, `Grok 4.7 is unavailable.\n${bullet}`))).toThrow(
+      /prose names "Grok 4.7"/,
     )
-    expect(changed.models['glm-5.3']?.zeroRetention).toBe(false)
-    expect(changed.models['glm-5.2']?.zeroRetention).toBe(true)
+  })
+
+  test('also fails on prose in front of the Privacy table, which no other rule reads', () => {
+    const intro = 'See whether each model [trains on your data](https://opencode.ai/console/go#privacy).'
+    expect(() =>
+      parsePrivacyDocs(mutate(intro, `${intro}\n\nKimi K3 requires **Global** regions in your workspace.`)),
+    ).toThrow(/prose names "Kimi K3"/)
+  })
+
+  test('the general prose of the pinned page names no model and still passes', () => {
+    expect(() => parsePrivacyDocs(mdx)).not.toThrow()
+  })
+
+  test('truncates a long echoed model name', () => {
+    const longName = `${'M'.repeat(200)} Model`
+    const withRow = mutate('| Hy3                        | 0 days         |', `| ${longName} | 0 days |`)
+    const source = withRow.replace(NEXT, `${longName} needs Global regions.\n\n${NEXT}`)
+    let message = ''
+    try {
+      parsePrivacyDocs(source)
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain('prose names')
+    expect(message).toContain('…')
+    expect(message.length).toBeLessThan(300)
+  })
+})
+
+describe('parsePrivacyDocs accounts for every footnote sentence', () => {
+  const kimi = (sentence: string): string => mutate('- **Grok 4.7:**', `- **Kimi K3:** ${sentence}\n- **Grok 4.7:**`)
+
+  test('a retention clause cannot hide a training clause in the same sentence', () => {
+    const source = kimi(
+      'Requests are retained for 0 days, and permission to use your prompts and completions to train future models is granted.',
+    )
+    expect(() => parsePrivacyDocs(source)).toThrow(/unmapped footnote sentence/)
+  })
+
+  test('an informational sentence cannot swallow a retention clause', () => {
+    const source = kimi('ZDR disables file uploads, but requests are retained for 30 days.')
+    expect(() => parsePrivacyDocs(source)).toThrow(/unmapped footnote sentence/)
+  })
+
+  test.each([
+    ['Grok 4.7'],
+    ['GPT 6 Luna / GPT 5.6 Luna'],
+    ['Claude Haiku 5.5'],
+    ['Gemini 4 Argon'],
+    ['Muse Spark 1.3 Contributor'],
+    ['Iceman Contributor Free'],
+    ['LongCat 2.5 Free'],
+    ['DeepSeek'],
+  ])('a clause added to the first sentence of the %s footnote throws', label => {
+    const line = footnoteLine(label)
+    const end = line.search(/\.(?:\s|$)/)
+    expect(end).toBeGreaterThan(0)
+    const extended = `${line.slice(0, end)}, and the data is shared with partners${line.slice(end)}`
+    expect(() => parsePrivacyDocs(mutate(line, extended))).toThrow(/unmapped footnote sentence/)
+  })
+
+  test.each([
+    [
+      'the Grok informational sentence',
+      'Grok 4.7',
+      'ZDR disables important API features',
+      'ZDR disables some API features',
+    ],
+    [
+      'the GPT retention sentence',
+      'GPT 6 Luna / GPT 5.6 Luna',
+      'generated for all API feature usage',
+      'generated for some API feature usage',
+    ],
+    ['the Gemini retention sentence', 'Gemini 4 Argon', 'for abuse monitoring', 'for quality monitoring'],
+    ['the Muse training sentence', 'Muse Spark 1.3 Contributor', 'Heavily discounted', 'Discounted'],
+    ['the Iceman training sentence', 'Iceman Contributor Free', 'for a limited time', 'for a while'],
+    ['the DeepSeek renewal sentence', 'DeepSeek', 'renewed monthly', 'renewed yearly'],
+  ])('rewording %s throws instead of being read loosely', (_what, label, from, to) => {
+    const line = footnoteLine(label)
+    expect(line.split(from)).toHaveLength(2)
+    expect(() => parsePrivacyDocs(mutate(line, line.replace(from, to)))).toThrow(/unmapped footnote sentence/)
+  })
+
+  test('the two-sentence Muse footnote and the Grok informational footnote still parse', () => {
+    const rows = rowsByName(mdx)
+    expect(rows.get('Muse Spark 1.3 Contributor')).toMatchObject({trainingGranted: true, availabilityLimited: true})
+    expect(rows.get('Grok 4.7')).toMatchObject({retentionDays: 30, trainingGranted: false})
+  })
+
+  test('a name slot holds proper nouns only, so lowercase text there is not read as a name', () => {
+    const line = footnoteLine('Claude Haiku 5.5')
+    expect(line).toContain("Anthropic's Data Policies")
+    expect(() =>
+      parsePrivacyDocs(
+        mutate(line, line.replace("Anthropic's Data Policies", "Anthropic's policies and trains on it")),
+      ),
+    ).toThrow(/unmapped footnote sentence/)
+  })
+
+  test('a hosting sentence cannot carry lowercase text after the place', () => {
+    expect(() => parsePrivacyDocs(kimi('Hosted in China and trains on your data.'))).toThrow(
+      /unmapped footnote sentence/,
+    )
+  })
+})
+
+describe('parsePrivacyDocs resolves labels by exact name or a reviewed mapping', () => {
+  const HY4_ROW = '| Hy4                        | 0 days         |'
+  const withoutHy4 = (): string => mutate(`${HY4_ROW}\n`, '')
+  const hy4Footnote = '- **Hy4:** Hosted in China.\n'
+  const addHy4Footnote = (source: string): string =>
+    source.replace('- **Grok 4.7:**', () => `${hy4Footnote}- **Grok 4.7:**`)
+
+  test('a label does not attach to rows that merely start with it', () => {
+    const source = addHy4Footnote(withoutHy4())
+    expect(source).not.toContain(HY4_ROW)
+    expect(() => parsePrivacyDocs(source)).toThrow(/"Hy4" does not name a model/)
+  })
+
+  test('a label does not attach to rows that merely end with it', () => {
+    expect(() => parsePrivacyDocs(mutate('- **Grok 4.7:**', '- **Pro:** Hosted in China.\n- **Grok 4.7:**'))).toThrow(
+      /"Pro" does not name a model/,
+    )
+  })
+
+  test('with the Hy4 row present the same footnote reaches only that row', () => {
+    const rows = rowsByName(addHy4Footnote(mdx))
+    expect(rows.get('Hy4')?.regionRequirement).toBe(true)
+    expect(rows.get('Hy4 preview')?.regionRequirement).toBe(false)
+    expect(rows.get('Hy4 flash Free')?.regionRequirement).toBe(false)
+  })
+
+  test('the DeepSeek family label reaches both DeepSeek rows through the reviewed mapping', () => {
+    const rows = rowsByName(mdx)
+    expect(rows.get('DeepSeek V4.1 Flash')?.agreementExpiry).toBe('2026-11-30')
+    expect(rows.get('DeepSeek V4 Pro')?.agreementExpiry).toBe('2026-11-30')
+  })
+
+  test('a family label that is also an exact row name is ambiguous and throws', () => {
+    expect(() =>
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', '| DeepSeek | 0 days |')),
+    ).toThrow(/ambiguous/)
+  })
+
+  test('a reviewed mapping whose row has gone throws instead of dropping the restriction', () => {
+    expect(() => parsePrivacyDocs(mutate('| DeepSeek V4 Pro            | 0 days\\*       |\n', ''))).toThrow(
+      /deepseek.*no longer/,
+    )
+  })
+
+  test.each([
+    ['a slash-joined list of full names', 'GPT 6 Luna / GPT 5.6 Luna'],
+    ['an "and"-joined list of full names', 'Muse Spark 1.3 Contributor and Muse Spark 1.2 Contributor'],
+  ])('%s resolves each name exactly', (_label, label) => {
+    expect(() =>
+      parsePrivacyDocs(mutate('- **Grok 4.7:**', `- **${label}:** Hosted in China.\n- **Grok 4.7:**`)),
+    ).not.toThrow()
+  })
+
+  test('a list in which one name is not a row throws', () => {
+    expect(() =>
+      parsePrivacyDocs(mutate('- **Grok 4.7:**', '- **GPT 6 Luna / GPT 7 Luna:** Hosted in China.\n- **Grok 4.7:**')),
+    ).toThrow(/"GPT 6 Luna \/ GPT 7 Luna" does not name a model/)
+  })
+
+  test('a shorthand in a restricted-models bullet outside the mapping throws', () => {
+    expect(() =>
+      parsePrivacyDocs(
+        mutate('- **DeepSeek V4.1 Flash and V4 Pro:** select', '- **DeepSeek V4.1 Flash and V4 Pro and V5:** select'),
+      ),
+    ).toThrow(PrivacyTableError)
+  })
+})
+
+describe('parsePrivacyDocs on agreement dates and echoed text', () => {
+  test('an impossible calendar date throws the parser error naming the agreement, not a RangeError', () => {
+    const source = mutate('valid through November 30, 2026', 'valid through November 32, 2026')
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/"DeepSeek": unparseable agreement date "November 32, 2026"/)
+  })
+
+  test.each(['February 30, 2026', 'April 31, 2026', 'February 29, 2027', 'November 0, 2026'])('rejects %s', date => {
+    expect(() => parsePrivacyDocs(mutate('valid through November 30, 2026', `valid through ${date}`))).toThrow(
+      PrivacyTableError,
+    )
+  })
+
+  test('accepts a real leap day', () => {
+    const rows = rowsByName(mutate('valid through November 30, 2026', 'valid through February 29, 2028'))
+    expect(rows.get('DeepSeek V4 Pro')?.agreementExpiry).toBe('2028-02-29')
+  })
+
+  test('caps an echoed retention cell at a short length', () => {
+    const cell = 'x'.repeat(5000)
+    let message = ''
+    try {
+      parsePrivacyDocs(mutate('| Hy3                        | 0 days         |', `| Hy3 | ${cell} |`))
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain('unrecognized retention value')
+    expect(message).toContain('…')
+    expect(message.length).toBeLessThan(300)
+  })
+
+  test('caps an echoed footnote label at a short length', () => {
+    const label = `${'L'.repeat(5000)} Model`
+    let message = ''
+    try {
+      parsePrivacyDocs(mutate('- **Grok 4.7:**', `- **${label}:** Hosted in China.\n- **Grok 4.7:**`))
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain('does not name a model')
+    expect(message.length).toBeLessThan(300)
+  })
+})
+
+/** The Usage limits paragraph that starts with `**label:**`, as the pinned page writes it. */
+const noticeLine = (label: string): string => {
+  const line = mdx.split('\n').find(candidate => candidate.startsWith(`**${label}:**`))
+  if (line === undefined) throw new Error(`fixture has no usage notice for ${label}`)
+  return line
+}
+
+describe('parsePrivacyDocs on per-model usage notices', () => {
+  const BEAM = noticeLine('Beam Free')
+  const ARGON = noticeLine('Gemini 4 Argon')
+  const PLACES = 'Angola, Belarus, Cambodia'
+  const beam = (source: string) => rowsByName(source).get('Beam Free')
+  /** The Beam Free notice replaced by `text`, written as the page writes a notice. */
+  const withBeamNotice = (text: string): string => mutate(BEAM, `**Beam Free:** ${text}`)
+  /** A notice paragraph added in front of the Argon one. */
+  const withNotice = (line: string): string => mutate(ARGON, `${line}\n\n${ARGON}`)
+
+  test('the page states Beam Free’s region limit in the "Not available in <places>." form', () => {
+    expect(BEAM).toContain('Free for a limited time. Not available in Angola, Belarus')
+    expect(beam(mdx)?.availabilityLimited).toBe(true)
+    expect(beam(mdx)?.regionRequirement).toBe(false)
+  })
+
+  test('with the notice removed the page says nothing about Beam Free’s region', () => {
+    expect(beam(mutate(`${BEAM}\n\n`, ''))?.availabilityLimited).toBe(false)
+  })
+
+  test('a notice reaches only the model its label names', () => {
+    const rows = rowsByName(mdx)
+    expect(rows.get('Gemini 4 Argon')?.availabilityLimited).toBe(false)
+    expect(rows.get('GLM-5.3')?.availabilityLimited).toBe(false)
+  })
+
+  test.each([
+    ['Unavailable in', 'Unavailable in Angola.'],
+    ['Available only in', 'Available only in Europe.'],
+    ['Only available in', 'Only available in Europe.'],
+    ['Restricted to', 'Restricted to the United States.'],
+    ['Limited to', 'Limited to Europe.'],
+    ['Not available outside', 'Not available outside Europe.'],
+    ['a sentence about the country', 'This model is offered in a few countries.'],
+    ['a sentence about regions', 'Some regions are refused.'],
+    ['a blocked statement', 'Blocked in Russia.'],
+    ['an availability note', 'Availability varies.'],
+    ['a recognised sentence with a clause', 'Not available in Angola, and trains on your data.'],
+    ['a recognised sentence with a lowercase place word', 'Not available in some countries.'],
+    ['no closing period', 'Not available in Angola'],
+    ['a digit in the places', 'Not available in Angola 2.'],
+  ])('a reworded availability notice (%s) throws instead of being ignored', (_label, sentence) => {
+    const source = withBeamNotice(`Free for a limited time. ${sentence}`)
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/usage notice/)
+  })
+
+  test.each([
+    ['added', (): string => withNotice('**Beam Free:** Free through November 25, 2026.')],
+    [
+      'reworded',
+      (): string => mutate(ARGON, '**Gemini 4 Argon:** Half price on every plan until the end of the month.'),
+    ],
+    ['removed', (): string => mutate(`${noticeLine('GLM-5.3')}\n\n`, '')],
+    ['for a model with no Privacy row', (): string => withNotice('**Mystery Model:** 20% off until Friday.')],
+    ['with a long date', (): string => withNotice('**Hy4:** Higher usage limits apply through December 31, 2026.')],
+  ])('a pricing notice %s changes nothing and never throws', (_label, make) => {
+    expect(parsePrivacyDocs(make())).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('a pricing sentence next to the recognised one is ignored', () => {
+    const rows = rowsByName(withBeamNotice(`Free through November 25, 2026. Not available in ${PLACES}.`))
+    expect(rows.get('Beam Free')?.availabilityLimited).toBe(true)
+  })
+
+  test('an availability notice that names no Privacy model throws, because attribution is by name', () => {
+    const source = withNotice('**Mystery Model:** Not available in Angola.')
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/not attributed to a model/)
+  })
+
+  test('an unrecognised availability sentence for a label that matches no row throws too', () => {
+    expect(() => parsePrivacyDocs(withNotice('**Mystery Model:** Unavailable in Angola.'))).toThrow(/usage notice/)
+  })
+
+  test('a name is an exact row name or a reviewed family label: the DeepSeek family reaches both rows, a prefix reaches none', () => {
+    const family = rowsByName(withNotice(`**DeepSeek:** Not available in ${PLACES}.`))
+    expect(family.get('DeepSeek V4 Pro')?.availabilityLimited).toBe(true)
+    expect(family.get('DeepSeek V4.1 Flash')?.availabilityLimited).toBe(true)
+    expect(() => parsePrivacyDocs(withNotice(`**Hy:** Not available in ${PLACES}.`))).toThrow(
+      /not attributed to a model/,
+    )
+  })
+
+  test('a notice wrapped over several lines is read as one paragraph', () => {
+    const rows = rowsByName(withBeamNotice(`Free for a limited time. Not available in Angola,\nBelarus, Cambodia.`))
+    expect(rows.get('Beam Free')?.availabilityLimited).toBe(true)
+  })
+
+  test('a name in a notice is not "prose that names a model": only the two inspected sections are', () => {
+    expect(() => parsePrivacyDocs(mutate(ARGON, '**Gemini 4 Argon:** Kimi K3 costs less.'))).not.toThrow()
+  })
+
+  test('notices are read in the Usage limits section only', () => {
+    const elsewhere = mutate(
+      '## Where can I use it?',
+      '**Beam Free:** Unavailable in Angola.\n\n## Where can I use it?',
+    )
+    expect(parsePrivacyDocs(elsewhere)).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('a missing Usage limits section throws, because Beam Free’s notice would be lost', () => {
+    expect(() => parsePrivacyDocs(mutate('## Usage limits', '## Something else'))).toThrow(/Usage limits/)
+  })
+
+  test('a very long place list parses quickly', () => {
+    const places = `${'Angola, '.repeat(1000)}or Belarus`
+    const started = performance.now()
+    const rows = rowsByName(withBeamNotice(`Not available in ${places}.`))
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(rows.get('Beam Free')?.availabilityLimited).toBe(true)
+  })
+
+  test('a very long near-miss fails quickly instead of backtracking', () => {
+    const started = performance.now()
+    expect(() => parsePrivacyDocs(withBeamNotice(`Not available in ${'A'.repeat(5000)}!`))).toThrow(/usage notice/)
+    expect(() => parsePrivacyDocs(withBeamNotice(`Not available in ${'a, '.repeat(2000)}.`))).toThrow(/usage notice/)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test('an echoed notice sentence is capped', () => {
+    let message = ''
+    try {
+      parsePrivacyDocs(withBeamNotice(`Unavailable in ${'x'.repeat(5000)}.`))
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain('…')
+    expect(message.length).toBeLessThan(300)
+  })
+})
+
+describe('parsePrivacyDocs on usage-notice attribution', () => {
+  const BEAM = noticeLine('Beam Free')
+  const ARGON = noticeLine('Gemini 4 Argon')
+  const GLM = noticeLine('GLM-5.3')
+  const BODY = BEAM.slice('**Beam Free:** '.length)
+  const PLACES_SENTENCE = 'Not available in Angola, Belarus.'
+  const limitedRows = (source: string): string[] =>
+    parsePrivacyDocs(source)
+      .filter(row => row.availabilityLimited)
+      .map(row => row.name)
+      .sort()
+  /** The Beam Free notice with its label written as `label` (and the same body). */
+  const beamAs = (label: string): string => mutate(BEAM, `${label} ${BODY}`)
+  /** A paragraph put in front of the Argon notice, after a blank line. */
+  const withParagraph = (paragraph: string): string => mutate(ARGON, `${paragraph}\n\n${ARGON}`)
+
+  test('today’s page: the Beam Free notice is one paragraph that names only Beam Free', () => {
+    expect(limitedRows(mdx)).toEqual(['Beam Free', 'Muse Spark 1.2 Contributor', 'Muse Spark 1.3 Contributor'])
+  })
+
+  test.each([
+    ['colon inside the bold', '**Beam Free:**'],
+    ['colon outside the bold', '**Beam Free**:'],
+    ['underscore bold', '__Beam Free:__'],
+    ['underscore bold, colon outside', '__Beam Free__:'],
+    ['spaces inside the bold', '** Beam Free : **'],
+    ['italic', '*Beam Free:*'],
+    ['underscore italic', '_Beam Free:_'],
+    ['a link inside the label', '**[Beam Free](https://example.com/beam):**'],
+    ['no markup at all', 'Beam Free:'],
+    ['an HTML label', '<strong>Beam Free:</strong>'],
+    ['a code-span label', '`Beam Free`:'],
+    ['a sentence about the model', 'Beam Free is'],
+    ['a list item', '- **Beam Free:**'],
+    ['a numbered list item', '1. **Beam Free:**'],
+    ['a table row', '| Beam Free |'],
+    ['a lowercase, hyphenated spelling', '**beam-free:**'],
+  ])('markup does not matter: %s still attributes the notice to Beam Free', (_label, label) => {
+    const rows = rowsByName(beamAs(label))
+    expect(rows.get('Beam Free')?.availabilityLimited).toBe(true)
+    expect(rows.get('GLM-5.3')?.availabilityLimited).toBe(false)
+  })
+
+  test.each([
+    ['two trailing spaces', `${GLM}  \n${BEAM.replace('**Beam Free:**', 'Beam Free:')}`],
+    ['a trailing backslash', `${GLM}\\\n${BEAM.replace('**Beam Free:**', 'Beam Free:')}`],
+    ['no break marker at all', `${GLM}\n${BEAM}`],
+  ])('the hard-break case (%s) throws instead of limiting the wrong model', (_label, joined) => {
+    const source = mutate(`${BEAM}\n\n${ARGON}\n\n${GLM}`, `${joined}\n\n${ARGON}`)
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/more than one model/)
+    expect(() => parsePrivacyDocs(source)).toThrow(/GLM-5\.3/)
+  })
+
+  test('a paragraph that names two models and carries a recognised restriction throws, listing both', () => {
+    const source = withParagraph(`**Beam Free:** ${PLACES_SENTENCE} Same price as GLM-5.3.`)
+    expect(() => parsePrivacyDocs(source)).toThrow(
+      /more than one model \("Beam Free", "GLM-5.3"\)|more than one model \("GLM-5.3", "Beam Free"\)/,
+    )
+  })
+
+  test('"Beam Free is not available in X. Same price as GLM-5.3." throws, as an unrecognised availability sentence', () => {
+    const source = withParagraph('Beam Free is not available in Angola. Same price as GLM-5.3.')
+    expect(() => parsePrivacyDocs(source)).toThrow(/unrecognised availability sentence/)
+  })
+
+  test('notices as list items with no blank line between them are one paragraph and throw (blank lines are the only boundary)', () => {
+    const source = mutate(BEAM, `- ${BEAM}\n- ${GLM}`)
+    expect(() => parsePrivacyDocs(source)).toThrow(/more than one model/)
+  })
+
+  test('the same list items separated by blank lines attribute normally', () => {
+    expect(limitedRows(mutate(BEAM, `- ${BEAM}\n\n- ${GLM}`))).toContain('Beam Free')
+    expect(limitedRows(mutate(BEAM, `- ${BEAM}\n\n- ${GLM}`))).not.toContain('GLM-5.3')
+  })
+
+  test('an availability sentence in a paragraph that names no model throws, with a bounded excerpt', () => {
+    let message = ''
+    try {
+      parsePrivacyDocs(withParagraph(`Not available in ${'Angola, '.repeat(500)}Belarus.`))
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain('not attributed to a model')
+    expect(message).toContain('Not available in Angola')
+    expect(message).toContain('…')
+    expect(message.length).toBeLessThan(300)
+  })
+
+  test('a heading line ends a paragraph, so a name above it does not own the sentence below it', () => {
+    expect(() => parsePrivacyDocs(mutate(BEAM, `#### Beam Free\n\n${BODY}`))).toThrow(/not attributed to a model/)
+    expect(() => parsePrivacyDocs(mutate(BEAM, `Beam Free\n#### Notes\n${BODY}`))).toThrow(/not attributed/)
+  })
+
+  describe('overlapping names resolve to the longest name', () => {
+    const HY4_PREVIEW = '**Hy4 preview:**'
+
+    test('a name that contains another row’s name attributes to the longer row only', () => {
+      const rows = limitedRows(withParagraph(`${HY4_PREVIEW} ${PLACES_SENTENCE}`))
+      expect(rows).toContain('Hy4 preview')
+      expect(rows).not.toContain('Hy4')
+      expect(rows).not.toContain('Hy4 flash Free')
+    })
+
+    test('the shorter name alone attributes to the shorter row only', () => {
+      const rows = limitedRows(withParagraph(`**Hy4:** ${PLACES_SENTENCE}`))
+      expect(rows).toContain('Hy4')
+      expect(rows).not.toContain('Hy4 preview')
+      expect(rows).not.toContain('Hy4 flash Free')
+    })
+
+    test('both names written out are two models and throw', () => {
+      expect(() => parsePrivacyDocs(withParagraph(`**Hy4:** ${PLACES_SENTENCE} Same as Hy4 preview.`))).toThrow(
+        /more than one model/,
+      )
+    })
+
+    test('a prefix of a name is not a name', () => {
+      expect(() => parsePrivacyDocs(withParagraph(`**Hy:** ${PLACES_SENTENCE}`))).toThrow(/not attributed to a model/)
+    })
+
+    test('a name inside a longer word is not a name', () => {
+      expect(() => parsePrivacyDocs(withParagraph(`**Hy4x:** ${PLACES_SENTENCE}`))).toThrow(/not attributed to a model/)
+    })
+
+    test('the family label attributes to both DeepSeek rows, and a DeepSeek row name inside it does not add a second name', () => {
+      expect(limitedRows(withParagraph(`**DeepSeek:** ${PLACES_SENTENCE}`))).toEqual(
+        expect.arrayContaining(['DeepSeek V4 Pro', 'DeepSeek V4.1 Flash']),
+      )
+      expect(limitedRows(withParagraph(`**DeepSeek V4 Pro:** ${PLACES_SENTENCE}`))).toContain('DeepSeek V4 Pro')
+      expect(limitedRows(withParagraph(`**DeepSeek V4 Pro:** ${PLACES_SENTENCE}`))).not.toContain('DeepSeek V4.1 Flash')
+    })
+
+    test('the API’s longer display name still attributes to its row', () => {
+      expect(limitedRows(withParagraph(`**DeepSeek V4.1 Flash 1017:** ${PLACES_SENTENCE}`))).toContain(
+        'DeepSeek V4.1 Flash',
+      )
+    })
+  })
+
+  test('a place list wrapped over several lines within one paragraph parses', () => {
+    const wrapped = mutate(
+      BEAM,
+      '**Beam Free:** Free for a limited time. Not available in Angola,\nBelarus, Cambodia,\nChina (including Hong Kong\nand Macau).',
+    )
+    expect(limitedRows(wrapped)).toContain('Beam Free')
+  })
+
+  test.each([
+    ['colon inside', '**Gemini 4 Argon:**'],
+    ['colon outside', '**Gemini 4 Argon**:'],
+    ['a list item', '- **Gemini 4 Argon:**'],
+    ['an italic label', '*Gemini 4 Argon:*'],
+    ['plain text', 'Gemini 4 Argon:'],
+    ['a label for a model with no Privacy row', '**Mystery Model**:'],
+    ['a table row', '| Mystery Model |'],
+  ])('a pricing-only paragraph with %s is ignored', (_label, label) => {
+    expect(parsePrivacyDocs(mutate(ARGON, `${label} The 50% discount applies through November 30, 2026.`))).toEqual(
+      parsePrivacyDocs(mdx),
+    )
+  })
+
+  test('a pricing paragraph that names two models is ignored too, because it states no availability', () => {
+    expect(parsePrivacyDocs(withParagraph('**GLM-5.3** costs the same as **Beam Free** through November 30.'))).toEqual(
+      parsePrivacyDocs(mdx),
+    )
+  })
+
+  test('an accepted label markup still has its availability sentence checked', () => {
+    expect(() => parsePrivacyDocs(beamAs('**Beam Free**:').replace('Not available in', 'Unavailable in'))).toThrow(
+      /unrecognised availability sentence/,
+    )
+  })
+
+  test('a name in a pricing paragraph is not "prose that names a model": only the two inspected sections are', () => {
+    expect(() => parsePrivacyDocs(mutate(ARGON, '**Gemini 4 Argon:** Kimi K3 costs less.'))).not.toThrow()
+  })
+
+  test('the general prose of the Usage limits section contains no availability word, so no paragraph is relevant', () => {
+    expect(() => parsePrivacyDocs(mdx)).not.toThrow()
+  })
+
+  test('a fenced code block in the section is not read', () => {
+    const fenced = mutate(ARGON, `${ARGON}\n\n\`\`\`text\nNot available in the countries of the region.\n\`\`\``)
+    expect(parsePrivacyDocs(fenced)).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('a wrapped continuation line that starts with bold text stays in its paragraph', () => {
+    expect(parsePrivacyDocs(mutate(BEAM, `${BEAM}\n**Go** page.`))).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('a very long unattributable near-miss fails quickly', () => {
+    const started = performance.now()
+    expect(() => parsePrivacyDocs(withParagraph(`Beam Free: Not available in ${'A'.repeat(5000)}!`))).toThrow(
+      /unrecognised availability sentence/,
+    )
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+})
+
+describe('parsePrivacyDocs on the other label readers, with the colon outside the bold', () => {
+  test.each([
+    ['the colon outside the bold', '- **Grok 4.7**: ZDR agreement is renewed monthly.'],
+    ['underscore bold', '- __Grok 4.7:__ ZDR agreement is renewed monthly.'],
+    ['an asterisk marker', '* **Grok 4.7:** ZDR agreement is renewed monthly.'],
+    ['an indented bullet', '  - **Grok 4.7:** ZDR agreement is renewed monthly.'],
+    ['no markup', '- Grok 4.7: ZDR agreement is renewed monthly.'],
+  ])('a Privacy footnote with %s throws instead of being skipped', (_label, bullet) => {
+    expect(() => parsePrivacyDocs(mutate('- **Grok 4.7:**', `${bullet}\n- **Grok 4.7:**`))).toThrow(
+      /Privacy footnotes: unmapped line/,
+    )
+  })
+
+  test.each([
+    ['underscore bold', '- __LongCat 2.5 Free:__ select **Global** under **Regions**.'],
+    ['an indented bullet', '  - **LongCat 2.5 Free:** select **Global** under **Regions**.'],
+    ['a numbered item', '1. **LongCat 2.5 Free:** select **Global** under **Regions**.'],
+  ])('a restricted-models bullet with %s throws instead of being skipped', (_label, bullet) => {
+    const original = '- **LongCat 2.5 Free:** select **Global** under **Regions**.'
+    expect(() => parsePrivacyDocs(mutate(original, bullet))).toThrow(/Enable restricted models: unmapped line/)
+  })
+
+  test('a restricted-models paragraph with the colon outside the bold names its model and throws', () => {
+    const source = mutate(
+      '- **LongCat 2.5 Free:** select **Global** under **Regions**.',
+      '**LongCat 2.5 Free**: select **Global** under **Regions**.',
+    )
+    expect(() => parsePrivacyDocs(source)).toThrow(/prose names "LongCat 2.5 Free"/)
+  })
+})
+
+describe('parsePrivacyDocs resolves a family mapping only where the page uses it', () => {
+  const V4_PRO_ROW = '| DeepSeek V4 Pro            | 0 days\\*       |\n'
+  const FAMILY_FOOTNOTE = '- **DeepSeek:** ZDR agreement'
+  const FAMILY_BULLET = '- **DeepSeek V4.1 Flash and V4 Pro:** select'
+  const FLASH_FOOTNOTE = '- **DeepSeek V4.1 Flash:** ZDR agreement'
+  const FLASH_BULLET = '- **DeepSeek V4.1 Flash:** select'
+
+  /** V4 Pro has retired and the page names only the surviving model, by its exact name. */
+  const retiredAndRewritten = (): string =>
+    mutate(FAMILY_BULLET, FLASH_BULLET)
+      .replace(FAMILY_FOOTNOTE, () => FLASH_FOOTNOTE)
+      .replace(V4_PRO_ROW, () => '')
+  const beamAndFlash = (source: string) => {
+    const rows = rowsByName(source)
+    return {beam: rows.get('Beam Free'), flash: rows.get('DeepSeek V4.1 Flash'), pro: rows.get('DeepSeek V4 Pro')}
+  }
+
+  test('the setup is what the reviewer described: V4 Pro gone, no family label left in a rule', () => {
+    const source = retiredAndRewritten()
+    expect(source).not.toContain('DeepSeek V4 Pro')
+    expect(source).not.toContain(FAMILY_FOOTNOTE)
+    expect(source).not.toContain(FAMILY_BULLET)
+  })
+
+  test('a family member retiring does not block the refresh when no text uses the family label', () => {
+    const {beam, flash, pro} = beamAndFlash(retiredAndRewritten())
+    expect(pro).toBeUndefined()
+    expect(flash).toMatchObject({agreementExpiry: '2026-11-30', regionRequirement: true})
+    expect(beam?.availabilityLimited).toBe(true)
+  })
+
+  test('an exact-name usage notice for the surviving member still works with the other member gone', () => {
+    const source = retiredAndRewritten().replace(
+      '**Gemini 4 Argon:**',
+      () => '**DeepSeek V4.1 Flash:** Not available in Angola.\n\n**Gemini 4 Argon:**',
+    )
+    expect(beamAndFlash(source).flash?.availabilityLimited).toBe(true)
+  })
+
+  test('a family label used in a usage paragraph whose mapping points at a retired row throws', () => {
+    const source = retiredAndRewritten().replace(
+      '**Gemini 4 Argon:**',
+      () => '**DeepSeek:** Not available in Angola.\n\n**Gemini 4 Argon:**',
+    )
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/mapping "deepseek" names "deepseek v4 pro", which is no longer/)
+  })
+
+  test('a family label used in a footnote whose mapping points at a retired row throws, while the bullet is exact', () => {
+    const source = mutate(FAMILY_BULLET, FLASH_BULLET).replace(V4_PRO_ROW, () => '')
+    expect(source).toContain(FAMILY_FOOTNOTE)
+    expect(() => parsePrivacyDocs(source)).toThrow(/mapping "deepseek" names "deepseek v4 pro", which is no longer/)
+  })
+
+  test('a family label used in a restricted-models bullet whose mapping points at a retired row throws, while the footnote is exact', () => {
+    const source = mutate(FAMILY_FOOTNOTE, FLASH_FOOTNOTE).replace(V4_PRO_ROW, () => '')
+    expect(source).toContain(FAMILY_BULLET)
+    expect(() => parsePrivacyDocs(source)).toThrow(/names "deepseek v4 pro", which is no longer/)
+  })
+
+  test('the family label still reaches every surviving member when all of them are present', () => {
+    const rows = rowsByName(mdx)
+    expect(rows.get('DeepSeek V4.1 Flash')?.agreementExpiry).toBe('2026-11-30')
+    expect(rows.get('DeepSeek V4 Pro')?.agreementExpiry).toBe('2026-11-30')
+  })
+
+  test('a family label that is also an exact row name is ambiguous only where it is used', () => {
+    const renamed = mutate('| Hy3                        | 0 days         |', '| Deepseek | 0 days |').replace(
+      FAMILY_FOOTNOTE,
+      () => '- **DeepSeek V4.1 Flash / DeepSeek V4 Pro:** ZDR agreement',
+    )
+    expect(() => parsePrivacyDocs(renamed)).not.toThrow()
+    const used = renamed.replace(
+      '**Gemini 4 Argon:**',
+      () => '**Deepseek:** Not available in Angola.\n\n**Gemini 4 Argon:**',
+    )
+    expect(() => parsePrivacyDocs(used)).toThrow(/ambiguous/)
   })
 })

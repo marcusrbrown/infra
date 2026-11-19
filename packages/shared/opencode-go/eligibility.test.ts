@@ -218,6 +218,23 @@ describe('classification over the pinned fixtures', () => {
     expect(result.eligible).toContain('glm-5.3')
   })
 
+  // Infra#1973: upstream retains Gemini 4 Argon for 55 days, so the pinned page (docs row "55 days") and API
+  // (`zdr: false`) both exclude it. The containment pin on the committed snapshot (#1976) became this.
+  test('gemini-4-argon is excluded as not-zero-retention', () => {
+    expect(result.excluded).toContainEqual({id: 'gemini-4-argon', reason: 'not-zero-retention'})
+    expect(result.eligible).not.toContain('gemini-4-argon')
+  })
+
+  test('hy4-flash-free, live and cleared by both sources, is eligible', () => {
+    expect(result.eligible).toContain('hy4-flash-free')
+  })
+
+  test('beam-free and longcat-2.5-free stay out through their own gates', () => {
+    const reasons = new Map(result.excluded.map(e => [e.id, e.reason]))
+    expect(reasons.get('beam-free')).toBe('not-zero-retention')
+    expect(reasons.get('longcat-2.5-free')).toBe('region-gated')
+  })
+
   test.each([
     ['enabled', 'settings-enabled.json', true],
     ['disabled', 'settings-disabled.json', false],
@@ -245,14 +262,5 @@ describe('committed snapshot and settings', () => {
 
   test('the settings parse, whether Go is enabled or disabled', () => {
     expect(() => parseSettings(settingsJson)).not.toThrow()
-  })
-
-  // Containment pin (infra#1973): upstream console/go.mdx lists Gemini 4 Argon at 55 days of retention, and the
-  // privacy refresh cannot parse the page yet. This is the one per-model assertion on the committed file; drop it
-  // when the parser is fixed and a reviewed refresh owns the entry, or if upstream returns Argon to 0 days.
-  test('gemini-4-argon is excluded as not-zero-retention while upstream retains it for 55 days', () => {
-    const result = computeEligibility(snapshot, liveFixtureIds(), TODAY)
-    expect(result.excluded).toContainEqual({id: 'gemini-4-argon', reason: 'not-zero-retention'})
-    expect(result.eligible).not.toContain('gemini-4-argon')
   })
 })

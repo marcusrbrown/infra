@@ -1,21 +1,31 @@
+import type {Disagreement, Unmatched} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
 import type {ModelEntry, PrivacySnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 import {appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync} from 'node:fs'
 import {dirname, resolve} from 'node:path'
 import {isDeepStrictEqual} from 'node:util'
 
 import {
+  buildSnapshot,
+  describeDisagreement,
+  describeUnmatched,
+} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
+import {
   modelEntrySchema,
   parseSnapshot,
   SNAPSHOT_SOURCE_PATH,
   SNAPSHOT_SOURCE_REPO,
 } from '@marcusrbrown/infra-shared/opencode-go/eligibility'
-import {parsePrivacyTable, PrivacyTableError} from '@marcusrbrown/infra-shared/opencode-go/parse-privacy-table'
+import {GO_LIVE_MODELS_URL, parseLiveModels} from '@marcusrbrown/infra-shared/opencode-go/live-models'
+import {parsePrivacyDocs, PrivacyTableError} from '@marcusrbrown/infra-shared/opencode-go/parse-privacy-table'
 
-// Refreshes packages/shared/opencode-go/privacy-snapshot.json from anomalyco/opencode `console/go.mdx`.
+// Refreshes packages/shared/opencode-go/privacy-snapshot.json from two sources: anomalyco/opencode
+// `console/go.mdx` (retention days, agreement expiry, workspace Global rule) and the live Go models list
+// (`training`, `zdr`, `limited_regions` for every model).
 //
-// It resolves the `dev` head SHA (no token), fetches go.mdx at exactly that SHA, parses it with the shared parser
-// (which fails closed on any row or footnote it cannot map) and writes the snapshot only when a model's privacy terms
-// changed. The source commit alone moving is not a change: otherwise every upstream push would open a PR.
+// It resolves the `dev` head SHA (no token), fetches go.mdx at exactly that SHA and the live models list (no token),
+// builds the snapshot with the shared join (most restrictive source wins; fails closed on any row, footnote, model
+// or field it cannot account for) and writes the snapshot only when a model's privacy terms changed. The source
+// commit alone moving is not a change: otherwise every upstream push would open a PR.
 // .github/workflows/opencode-go-privacy.yaml runs this through `bun run refresh:go-privacy`, then opens the PR
 // from the body file this script writes.
 
@@ -49,6 +59,8 @@ export interface RefreshOptions {
    * api.github.com only, never to raw.githubusercontent.com. Unset means an unauthenticated request.
    */
   readonly githubToken?: string
+  /** Receives one line per model left out of the snapshot, whether or not a PR opens. Defaults to stdout. */
+  readonly log?: (line: string) => void
 }
 
 export interface RefreshResult {
@@ -75,6 +87,19 @@ async function getText(fetchImpl: FetchLike, url: string, headers: Record<string
   const response = await fetchImpl(url, {headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)})
   if (!response.ok) throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}`.trimEnd())
   return response.text()
+}
+
+/** The Go models list, tokenless. Parsing it strictly is `parseLiveModels`'s job; here it is only fetched and decoded. */
+async function fetchLiveModels(fetchImpl: FetchLike): Promise<unknown> {
+  const text = await getText(fetchImpl, GO_LIVE_MODELS_URL, {
+    Accept: 'application/json',
+    'User-Agent': 'marcusrbrown-infra-refresh-go-privacy',
+  })
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`GET ${GO_LIVE_MODELS_URL} returned a body that is not JSON`)
+  }
 }
 
 /** Resolves the current `dev` head. The SHA is validated before it reaches the raw-content URL. */
@@ -128,6 +153,8 @@ export function renderPrBody(
   next: PrivacySnapshot,
   diff: SnapshotDiff,
   before: Readonly<Record<string, unknown>>,
+  disagreements: readonly Disagreement[] = [],
+  unmatched: readonly Unmatched[] = [],
 ): string {
   const lines: string[] = [
     '## OpenCode Go privacy snapshot refresh',
@@ -135,6 +162,8 @@ export function renderPrBody(
     `Source: \`${SNAPSHOT_SOURCE_REPO}\` @ \`${next.source.commit}\` (\`${SNAPSHOT_SOURCE_PATH}\`)`,
     '',
     `Compare: ${COMPARE_BASE_URL}/${previousCommit}...${next.source.commit}`,
+    '',
+    `Live models: \`${GO_LIVE_MODELS_URL}\` (read at refresh time; not recorded in the snapshot)`,
     '',
     'Check each change below against the upstream table before merging. Merging triggers the gated cliproxy deploy; ' +
       'a model that is added here is exposed only after that deploy is approved.',
@@ -158,6 +187,32 @@ export function renderPrBody(
   section(
     'Changed',
     diff.changed.map(id => `- \`${id}\`: was ${describeBefore(before[id])}; now ${after(id)}`),
+  )
+
+  lines.push(
+    '',
+    'The snapshot takes the more restrictive value of the two sources for every fact. The two lists below are where ' +
+      'the sources differ, so you can check which one is right. The Global-region rule and agreement expiry are ' +
+      'stated on the page only (the API field means something else), so they are never listed here.',
+  )
+  section(
+    'Sources disagree',
+    disagreements.filter(d => d.kind === 'conflict').map(d => `- ${describeDisagreement(d)}`),
+  )
+  section(
+    'API-only restrictions',
+    disagreements.filter(d => d.kind === 'api-only').map(d => `- ${describeDisagreement(d)}`),
+  )
+
+  lines.push(
+    '',
+    'A model that only one source knows gets no entry, so it is not exposed. Each one below is either a model the ' +
+      'page has not caught up with (or the API has not), or a name the join could not match: if an entry here is a ' +
+      'model that is currently exposed, it drops out of the snapshot in this PR.',
+  )
+  section(
+    'Left out of the snapshot',
+    unmatched.map(item => `- ${describeUnmatched(item)}`),
   )
   return `${lines.join('\n')}\n`
 }
@@ -183,6 +238,7 @@ export async function refreshGoPrivacy({
   bodyPath,
   fetch: fetchImpl = globalThis.fetch,
   githubToken,
+  log = line => process.stdout.write(`${line}\n`),
 }: RefreshOptions = {}): Promise<RefreshResult> {
   let rawBefore: unknown
   try {
@@ -199,15 +255,24 @@ export async function refreshGoPrivacy({
   const mdx = await getText(fetchImpl, url, {'User-Agent': 'marcusrbrown-infra-refresh-go-privacy'})
   if (mdx.trim() === '') throw new Error(`GET ${url} returned an empty body`)
 
-  const next = parsePrivacyTable(mdx, sha)
-  if (Object.keys(next.models).length === 0) throw new PrivacyTableError('parsed zero models')
+  const livePayload = await fetchLiveModels(fetchImpl)
+
+  const {
+    snapshot: next,
+    disagreements,
+    unmatched,
+  } = buildSnapshot(parsePrivacyDocs(mdx), parseLiveModels(livePayload), sha)
+  if (Object.keys(next.models).length === 0) throw new PrivacyTableError('built zero models')
+  // Logged before the change test: a left-out model must show in the workflow log even when no PR opens.
+  for (const item of unmatched) log(`left out: ${describeUnmatched(item)}`)
 
   const diff = diffSnapshots(beforeModels, next.models)
   if (diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0) {
     return {changed: false, sourceCommit: sha}
   }
 
-  if (bodyPath !== undefined) writeAtomic(bodyPath, renderPrBody(previous.source.commit, next, diff, beforeModels))
+  if (bodyPath !== undefined)
+    writeAtomic(bodyPath, renderPrBody(previous.source.commit, next, diff, beforeModels, disagreements, unmatched))
   writeAtomic(snapshotPath, serializeSnapshot(next))
   return {changed: true, sourceCommit: sha}
 }

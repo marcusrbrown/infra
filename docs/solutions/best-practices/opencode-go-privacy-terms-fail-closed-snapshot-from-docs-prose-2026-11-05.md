@@ -1,6 +1,7 @@
 ---
 title: "Privacy terms that exist only as docs prose: a fail-closed snapshot, a review PR and fixture-pinned tests"
 date: 2026-11-05
+last_updated: 2026-11-19
 module: packages/shared/opencode-go
 problem_type: architecture_pattern
 component: tooling
@@ -19,9 +20,27 @@ related_components:
 
 ## Context
 
-The OpenCode Go model list endpoint carries no retention, training or region fields. The only source is a hand-written table in the upstream repository's `console/go.mdx`. The cliproxy deploy must expose only models that keep no data, never train on it and need no restricted region. That decision therefore rests on a reviewed snapshot parsed from the page, refreshed by a pull request, and applied by both the deploy and the monitor.
+(As of 2026-11-05; see the update below.) The OpenCode Go model list endpoint carried no retention, training or region fields. The only source was a hand-written table in the upstream repository's `console/go.mdx`. The cliproxy deploy must expose only models that keep no data, never train on it and need no restricted region. That decision therefore rests on a reviewed snapshot parsed from the page, refreshed by a pull request, and applied by both the deploy and the monitor.
 
 The policy lives in `packages/shared/opencode-go/`: `parse-privacy-table.ts`, `eligibility.ts`, `privacy-snapshot.json` and `settings.json`. It sits outside `packages/shared/cliproxy/**`, so a refresh triggers the cliproxy deploy filter in `.github/workflows/deploy.yaml` and not the broker's.
+
+## Update 2026-11-19: two sources, most restrictive wins
+
+The premise above no longer holds, and the page format it describes is gone. Upstream restructured `console/go.mdx`: the Endpoints table, the model list and the training column were removed, and the refresh failed with `Endpoints: no table found` (infra#1973) while the committed snapshot kept a model eligible that upstream now retained for 55 days. Upstream also published privacy booleans on the models list: every entry has a `go` object with `training`, `zdr` and `limited_regions`. The page still has what the API lacks: retention days, the zero-retention agreement expiry and the workspace Global-region requirement. The API's `limited_regions` means "some countries are refused", which is not the same fact as the workspace rule.
+
+The snapshot is now built from both sources, and the rule stays fail-closed:
+
+- `zeroRetention` needs `zdr: true` **and** a `0 days` row. `trainsOnData` is true when either source says so. `regionGated` is true when either source says so. `agreementExpiry` comes from the page.
+- The join is by normalized name (case, whitespace, hyphens) plus a reviewed alias map, never by prefix: `Hy4` is a prefix of `Hy4 preview` and `Hy4 flash Free`. The same holds inside the page parser: footnote labels resolve by exact name or a small reviewed group mapping, never by prefix or suffix.
+- Every footnote sentence must match one known sentence form from its first character to its last. A "starts with" or "contains" branch discards the rest of the sentence: `Requests are retained for 0 days, and permission to use your prompts … is granted.` read as plain retention, and `ZDR disables …, but requests are retained for 30 days.` read as informational. Prose in the restricted-models section that names a Privacy model also throws, because prose is not read as a restriction. Prose that restricts without naming a model is a known limit.
+- The refresh throws, writes nothing and opens no PR when the evidence is incomplete or the join is ambiguous: an entry without `go` or with a non-boolean field (upstream says the object can be absent when its data source is down), a row that fits several live models, or an unknown footnote sentence, label, rule, column or `*` marker. A missing `go` is never read as all-false.
+- A model only one source knows is left out, not an error: no entry (so `not-in-snapshot`), a log line and a PR-body section. A first version threw here, and a new API model with no page row, arriving in the same upstream change as a new restriction on an exposed model, then blocked the refresh and left the restricted model eligible under the old snapshot. The lesson: a refresh that throws on an ordinary event goes stale in the unsafe direction, so throw only when the join itself is wrong, and let missing evidence exclude by construction.
+- "Only the API states it" is a claim to check against the page, not an assumption. Beam Free's region limit was first treated as API-only because the old model list was deleted, but the page still states it in the usage-limits notices (`**Beam Free:** … Not available in <places>.`); with the API flipped to `limited_regions: false` the builder then wrote `regionGated: false` and reported nothing. The parser now reads that notice as docs evidence for the region fact. Those notices sit among pricing sentences that change weekly, so this is the one place where full sentence recognition is not required: a sentence with an availability or region word must be the recognised form or the refresh throws, and every other sentence is ignored as pricing. Attribution there does not depend on markup at all. Three review rounds each found Markdown that defeated a label or block parser (the wrong section, `**Beam Free**:` with the colon outside the bold, and a hard line break that glued an unreadable label line onto a `**GLM-5.3:**` paragraph, so the restriction landed on GLM-5.3 and Beam was cleared), and every fix added more markup rules. The reader now splits paragraphs by blank lines only, ignores paragraphs with no availability word, requires every availability sentence in the others to be the recognised form, and attributes the restriction to the one Privacy model the paragraph names (whole-word, longest name wins, so `Hy4 preview` is not also `Hy4`; no model or several throws). Known limit: a paragraph that names one model but carries a restriction meant for another, unnamed one, is attributed to the named model. The Privacy footnote and restricted-models bullet readers already throw on every other bullet form, because any list item or line that is not the exact bullet shape is an error there.
+- Facts only one source can state are not disagreements. Facts both can state, where they differ, are listed in the PR body per model and fact, and the snapshot keeps the restrictive value.
+- Report lines sanitise upstream-derived names (collapsed whitespace, no backticks, one code span, length cap), so a hostile name cannot distort the PR body or the log.
+- Tests use pinned copies of both sources (`__fixtures__/go.mdx`, `__fixtures__/live-models.json`) and the snapshot they build (`go.expected.json`); the temporary per-model pin on the committed snapshot (#1976) became a fixture test.
+
+The guidance below describes the page-only parser; where it names the Endpoints table, the model list or the training column, it predates this update. The fail-closed contract, the single eligibility function, the refresh-by-PR flow and the fixture rule still apply.
 
 ## Guidance
 

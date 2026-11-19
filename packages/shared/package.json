@@ -8,7 +8,9 @@
     "./cliproxy/management": "./cliproxy/management.ts",
     "./docs/frontmatter": "./docs/frontmatter.ts",
     "./status/history-schema": "./status/history-schema.ts",
+    "./opencode-go/build-snapshot": "./opencode-go/build-snapshot.ts",
     "./opencode-go/eligibility": "./opencode-go/eligibility.ts",
+    "./opencode-go/live-models": "./opencode-go/live-models.ts",
     "./opencode-go/parse-privacy-table": "./opencode-go/parse-privacy-table.ts",
     "./opencode-go/privacy-snapshot.json": "./opencode-go/privacy-snapshot.json",
     "./opencode-go/settings.json": "./opencode-go/settings.json"

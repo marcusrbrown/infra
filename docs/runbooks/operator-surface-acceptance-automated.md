@@ -481,7 +481,6 @@ jq -r '
   pin("packages/gateway/package.json"; "^[-+]\\s*\"discord\\.js\"\\s*:"),
   pin("packages/runtime/package.json"; "^[-+]\\s*\"@opencode-ai/sdk\"\\s*:"),
   pin("package.json"; "^[-+]\\s*\"@opencode-ai/sdk\"\\s*:"),
-  pin("deploy/workspace.Dockerfile"; "^[-+]ARG OPENCODE_VERSION="),
   pin("packages/runtime/src/shared/opencode-v2-pin.json"; "^[-+]\\s*\"version\"\\s*:"),
   pin("bun.lock"; "^[-+]\\s*\"(discord\\.js|@opencode-ai/sdk)\"\\s*:")
 ' "$WORK/compare.json"
@@ -501,7 +500,7 @@ A match on any line requires the pass. Test files under these paths count.
 | Shared run, cancel, approval and question code | `packages/gateway/src/{execute,approvals,web/operator}/**`, `packages/gateway/src/operator-contract/**` |
 | Runtime run state and agent code | `packages/runtime/src/{coordination,agent}/**` |
 | discord.js | the `discord.js` version line in `packages/gateway/package.json`, or in `bun.lock` |
-| OpenCode | the `@opencode-ai/sdk` version line in `packages/runtime/package.json`, root `package.json` or `bun.lock`; the `ARG OPENCODE_VERSION=` line in `deploy/workspace.Dockerfile`; the `version` line in `packages/runtime/src/shared/opencode-v2-pin.json` |
+| OpenCode | the `@opencode-ai/sdk` version line in `packages/runtime/package.json`, root `package.json` or `bun.lock`; the `version` line in `packages/runtime/src/shared/opencode-v2-pin.json` |
 
 Other edits to `bun.lock`, `package.json` and the Dockerfile do not match. Name the matching path or pin line as the trigger.
 
@@ -590,7 +589,7 @@ On V2 the entrypoint removes a stale `auth.json` at `/home/opencode/.local/share
 | G1.2 | Plant a regular file with a fake key | Listing shows `-rw-------` owned by `opencode`. |
 | G1.3 | Restart `workspace`, wait healthy | `health: healthy`. |
 | G1.4 | File removed | `ABSENT` and `NOT-SYMLINK`. |
-| G1.5 | Entrypoint log since the restart | `opencode config: model=set, provider-overlay=merged-into-config-file`; `auth: present (OpenCode V2: …)`; `opencode-server-v2: provider credentials provisioned { providers: […], count: N }` with N of at least 1; no `cannot remove stale auth.json`. |
+| G1.5 | Entrypoint log since the restart | `opencode config: model=set, provider-overlay=merged-into-config-file`; `auth: present (…)` (the text in parentheses differs between agent releases); `opencode-server-v2: provider credentials provisioned { providers: […], count: N }` with N of at least 1; no `cannot remove stale auth.json`. |
 | G1.6 | `/readyz` | `http=200`, `"ready":true`, `"opencodeVersion":"<OCV>"`. |
 | G1.7 | Plant a symlink to a marker, record the marker sha256 | Symlink listed. |
 | G1.8 | Restart `workspace`, wait healthy | `health: healthy`. |
@@ -968,7 +967,7 @@ The launch prompt is the same for both runs, with the run's own marker. The mode
 Run `chmod 600 /tmp/<MARK>.txt` in the shell and report the result.
 ```
 
-The decider runs in the dashboard page, so the CSRF token stays there. It lists the run's asks every 5 seconds and decides each new one: the ask with `permission` `bash` whose command names the marker gets `decision`, and every other ask is rejected. It never returns command text, only whether the command names the marker. Start it in the command after Launch, the way the [observer](#l9-wait-reason) is started, and read it later with a second `eval`. Do not reload the page before the read. Define `runId` and `mark` inline. The control uses `decision` `"once"` and `delayMs` `60000`, long enough to collapse the card and prove it before the ask is decided; the probe uses `"reject"` and `0`. The snippet sits indented in a list item: strip the indent when you copy it out, and change `decision` and `delayMs` by value, leaving the `// probe:` comments in place:
+The decider runs in the dashboard page, so the CSRF token stays there. It fetches a fresh token right before each decision: a token is valid for one 15-minute clock interval plus 30 seconds, so a token fetched before the control's 60-second delay can expire before it is used, and the decision then returns `400`. It lists the run's asks every 5 seconds and decides each new one: the ask with `permission` `bash` whose command names the marker gets `decision`, and every other ask is rejected. It never returns command text, only whether the command names the marker. Start it in the command after Launch, the way the [observer](#l9-wait-reason) is started, and read it later with a second `eval`. Do not reload the page before the read. Define `runId` and `mark` inline. The control uses `decision` `"once"` and `delayMs` `60000`, long enough to collapse the card and prove it before the ask is decided; the probe uses `"reject"` and `0`. The snippet sits indented in a list item: strip the indent when you copy it out, and change `decision` and `delayMs` by value, leaving the `// probe:` comments in place:
 
 ```js
 ;(() => {
@@ -979,7 +978,6 @@ The decider runs in the dashboard page, so the CSRF token stays there. It lists 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
   const g5 = (window.__g5 = {done: false, reason: null, firstSeenAt: null, asks: []})
   void (async () => {
-    const {csrfToken} = await fetch("/operator/session/csrf", {credentials: "same-origin"}).then(r => r.json())
     const t0 = Date.now()
     for (let i = 0; ; i++) {
       const body = await fetch(`/operator/runs/${runId}/approvals`, {credentials: "same-origin"})
@@ -991,6 +989,7 @@ The decider runs in the dashboard page, so the CSRF token stays there. It lists 
         const names = a.permission === "bash" && String(a.command ?? "").includes(mark)
         if (names && delayMs > 0) await sleep(delayMs)
         const verdict = names ? decision : "reject"
+        const {csrfToken} = await fetch("/operator/session/csrf", {credentials: "same-origin"}).then(r => r.json())
         const decidedAt = new Date().toISOString()
         const res = await fetch(`/operator/runs/${runId}/approvals/${a.requestID}/decision`, {
           method: "POST",

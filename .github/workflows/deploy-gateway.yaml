@@ -115,10 +115,10 @@ jobs:
           ref: ${{ steps.upstream.outputs.ref }}
           path: upstream-agent
 
-      # The workspace image runs OpenCode V2 when OPENCODE_VERSION has major >= 2; without the
-      # build-arg it falls back to the Dockerfile's V1 harness default. Read the version from the
-      # checked-out upstream pin so it can never disagree with the asset digests the Dockerfile
-      # verifies against that same file. The gateway image takes no OpenCode build-arg.
+      # The workspace image runs OpenCode V2 only, and its Dockerfile refuses any OPENCODE_VERSION
+      # other than the upstream pin. Read the version from the checked-out upstream pin so it can
+      # never disagree with the asset digests the Dockerfile verifies against that same file. The
+      # gateway image takes no OpenCode build-arg.
       - name: Read workspace OpenCode V2 pin
         id: opencode-v2
         run: |

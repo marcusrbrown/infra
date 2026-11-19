@@ -16,6 +16,9 @@
  *   branch, so a clause added to a known sentence is a new sentence and throws.
  * - A footnote label names a row by exact normalized name, a list of exact names, or a label in `LABEL_GROUPS`.
  *   Never by prefix or suffix.
+ * - The per-model notices in the Usage limits section (`**Beam Free:** Free for a limited time. Not available in
+ *   ...`) are read for the region limit only. Pricing sentences there churn weekly, so they are ignored; a sentence
+ *   that looks like an availability or region statement must match the one known form or the refresh throws.
  * - Prose that names a Privacy model, in the restricted-models section or in front of the Privacy table, throws:
  *   a restriction written as prose is not read, so it must not pass silently. Known limit: prose that restricts
  *   models without naming one cannot be detected, and prose elsewhere on the page is not inspected.
@@ -50,7 +53,10 @@ export interface DocsPrivacyRow {
    * means something else (countries refused), so the API is silent on this by design.
    */
   regionRequirement: boolean
-  /** A footnote says availability is limited to permitted regions. The API's `limited_regions` states the same fact. */
+  /**
+   * The page says availability is limited to permitted regions: a footnote, or a usage-limits notice of the form
+   * "Not available in <places>." The API's `limited_regions` states the same fact.
+   */
   availabilityLimited: boolean
   /** Last UTC day the zero-retention agreement is valid, inclusive; null when the page gives none. */
   agreementExpiry: string | null
@@ -409,6 +415,74 @@ function applyRestrictedModels(lines: readonly string[], accumulators: ReadonlyM
 }
 
 /**
+ * Words that make a usage-notice sentence an availability or region statement. A sentence with none of them is
+ * pricing or limits and is ignored; a sentence with one must be the recognised form. Chosen by reading the page:
+ * the neighbouring notices say "Free for a limited time", "The 50% discount applies through ..." and "Higher usage
+ * limits apply through ...", none of which contain these.
+ */
+const AVAILABILITY_WORDS =
+  /\b(?:not available|unavailable|available only|only available|availability|regions?|countr(?:y|ies)|restricted|limited to|blocked|refused|geograph\w*|territor(?:y|ies))\b/i
+/** The one recognised form. A single character-class run, so the long place list cannot backtrack. */
+const NOT_AVAILABLE_SENTENCE = /^Not available in ([A-Za-z ,()]+)\.$/
+const PLACE_WORDS: ReadonlySet<string> = new Set(['the', 'of', 'and', 'or', 'including', 'regions'])
+const NOTICE_START = /^\*\*([^*:]+):\*\* (.*)$/
+
+/** A place list is proper nouns and a few connectives, so no clause (such as a training statement) can ride in it. */
+const isPlaceList = (list: string): boolean =>
+  list
+    .split(/[\s,()]+/)
+    .filter(word => word !== '')
+    .every(word => /^[A-Z][A-Za-z]*$/.test(word) || PLACE_WORDS.has(word))
+
+/** The `**Label:** text` paragraphs of a section; a paragraph runs to the next blank line or heading. */
+function noticesOf(lines: readonly string[]): {label: string; text: string}[] {
+  const notices: {label: string; text: string}[] = []
+  let current: {label: string; parts: string[]} | undefined
+  const flush = (): void => {
+    if (current !== undefined) notices.push({label: current.label, text: current.parts.join(' ')})
+    current = undefined
+  }
+  for (const line of lines) {
+    const start = NOTICE_START.exec(line)
+    if (line.trim() === '' || line.startsWith('#') || LIST_ITEM.test(line)) flush()
+    else if (start === null) {
+      current?.parts.push(line.trim())
+    } else {
+      flush()
+      current = {label: start[1] ?? '', parts: [start[2] ?? '']}
+    }
+  }
+  flush()
+  return notices
+}
+
+/**
+ * The per-model notices in the Usage limits section, read for one fact: "Not available in <places>." is the page's
+ * statement of a model's region limit. Everything else in a notice is pricing and limits, which change weekly, so
+ * full recognition is not required here: only a sentence that looks like an availability statement must match.
+ * This is the only place on the page where unrecognised sentences are tolerated.
+ */
+function applyUsageNotices(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): void {
+  for (const {label, text} of noticesOf(sectionLines(lines, '## Usage limits'))) {
+    let limited = false
+    const sentences = stripLinks(text)
+      .split(/(?<=\.)\s+/)
+      .map(sentence => sentence.trim())
+    for (const sentence of sentences) {
+      const places = NOT_AVAILABLE_SENTENCE.exec(sentence)?.[1]
+      if (places !== undefined && isPlaceList(places)) limited = true
+      else if (AVAILABILITY_WORDS.test(sentence)) {
+        throw new PrivacyTableError(
+          `usage notice for ${quoted(label)}: unrecognised availability sentence ${quoted(sentence)}`,
+        )
+      }
+    }
+    // A pricing-only notice never resolves its label, so a notice for a model with no Privacy row cannot block.
+    if (limited) for (const target of resolveLabel(label, accumulators)) target.availabilityLimited = true
+  }
+}
+
+/**
  * Parse `go.mdx` into one record per Privacy row, in page order. Throws `PrivacyTableError` on anything it
  * cannot map.
  */
@@ -432,6 +506,7 @@ export function parsePrivacyDocs(mdx: string): DocsPrivacyRow[] {
   assertProseNamesNoModel(privacy.slice(0, start), 'Privacy', accumulators)
   applyRestrictedModels(lines, accumulators)
   applyFootnotes(privacy.slice(end), accumulators)
+  applyUsageNotices(lines, accumulators)
 
   return [...accumulators.values()].map(
     ({row, trainingGranted, regionRequirement, availabilityLimited, agreementExpiry}) => {

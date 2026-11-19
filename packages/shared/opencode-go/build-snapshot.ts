@@ -3,7 +3,7 @@ import type {LiveModel} from './live-models'
 import type {DocsPrivacyRow} from './parse-privacy-table'
 
 import {parseSnapshot, SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_SOURCE_PATH, SNAPSHOT_SOURCE_REPO} from './eligibility'
-import {DOCS_NAME_ALIASES, excerpt, normalizeModelName, quoted} from './model-names'
+import {DOCS_NAME_ALIASES, normalizeModelName, quoted, reportText} from './model-names'
 import {PrivacyTableError} from './parse-privacy-table'
 
 export {DOCS_NAME_ALIASES, normalizeModelName}
@@ -49,11 +49,21 @@ export interface Unmatched {
   name: string
 }
 
-/** One left-out model as a report line. The names come from public upstream text, so they are length-bounded. */
+/** One left-out model as a report line. The names come from public upstream text, so they are sanitised. */
 export const describeUnmatched = (item: Unmatched): string =>
   item.missing === 'docs'
-    ? `live model \`${item.id ?? ''}\` ("${excerpt(item.name)}"): no Privacy row on the page`
-    : `Privacy row "${excerpt(item.name)}": no live model`
+    ? `live model ${reportText(item.id ?? '')} named ${reportText(item.name)}: no Privacy row on the page`
+    : `Privacy row ${reportText(item.name)}: no live model`
+
+const FACT_LABELS: Readonly<Record<SnapshotFact, string>> = {
+  zeroRetention: 'zero retention',
+  trainsOnData: 'trains on data',
+  regionGated: 'region-gated',
+}
+
+/** One disagreement as a report line, with the upstream-derived name sanitised. */
+export const describeDisagreement = (d: Disagreement): string =>
+  `${reportText(d.id)} (${reportText(d.name)}), ${FACT_LABELS[d.fact]}: API ${d.api}; docs: ${d.docs}; snapshot: ${d.snapshot}`
 
 export interface BuiltSnapshot {
   snapshot: PrivacySnapshot

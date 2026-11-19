@@ -285,7 +285,10 @@ describe('refreshGoPrivacy: changed table', () => {
 
 describe('refreshGoPrivacy: the PR body reports where the sources differ', () => {
   it('lists an API-only restriction in its own section, with both values and the snapshot value', async () => {
-    const h = harness(staleSnapshot().snapshot)
+    const live = liveWith('glm-5.3', entry => {
+      ;(entry.go as Record<string, unknown>).limited_regions = true
+    })
+    const h = harness(staleSnapshot().snapshot, {live})
 
     await run(h)
 
@@ -293,7 +296,34 @@ describe('refreshGoPrivacy: the PR body reports where the sources differ', () =>
     expect(body).toContain('### Sources disagree (0)\n\nNone.')
     expect(body).toContain('### API-only restrictions (1)')
     expect(body).toContain(
-      '- `beam-free` (Beam Free), region-gated: API limited_regions: true; docs: no availability statement; snapshot: yes',
+      '- `glm-5.3` (`GLM-5.3`), region-gated: API limited_regions: true; docs: no availability statement; snapshot: yes',
+    )
+  })
+
+  it('on today’s inputs both report sections are empty, because the page and the API agree on Beam Free', async () => {
+    const h = harness(staleSnapshot().snapshot)
+
+    await run(h)
+
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('### Sources disagree (0)\n\nNone.')
+    expect(body).toContain('### API-only restrictions (0)\n\nNone.')
+    expect(body).toContain('### Left out of the snapshot (0)\n\nNone.')
+  })
+
+  it('Beam Free stays region-gated when only the API drops its limit, and the PR body says so', async () => {
+    const live = liveWith('beam-free', entry => {
+      ;(entry.go as Record<string, unknown>).limited_regions = false
+    })
+    const h = harness(staleSnapshot().snapshot, {live})
+
+    await run(h)
+
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models['beam-free'].regionGated).toBe(true)
+    expect(body).toContain('### Sources disagree (1)')
+    expect(body).toContain(
+      '- `beam-free` (`Beam Free`), region-gated: API limited_regions: false; docs: availability limited to permitted regions; snapshot: yes',
     )
   })
 
@@ -307,8 +337,38 @@ describe('refreshGoPrivacy: the PR body reports where the sources differ', () =>
 
     const body = readFileSync(h.bodyPath, 'utf8')
     expect(body).toContain('### Sources disagree (1)')
-    expect(body).toContain('- `glm-5.3` (GLM-5.3), zero retention: API zdr: false; docs: 0 days; snapshot: no')
+    expect(body).toContain('- `glm-5.3` (`GLM-5.3`), zero retention: API zdr: false; docs: 0 days; snapshot: no')
     expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models['glm-5.3'].zeroRetention).toBe(false)
+  })
+
+  it('renders upstream names as one bounded plain line in the disagreement and left-out sections', async () => {
+    const nasty = '# GLM `5.3`'
+    const live = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
+    const target = live.data.find(entry => entry.id === 'glm-5.3')
+    if (target === undefined) throw new Error('fixture has no glm-5.3')
+    target.name = nasty
+    ;(target.go as Record<string, unknown>).zdr = false
+    live.data.push({...live.data[0], id: 'brand-new', name: '# New\n- Model |x| <b>'})
+    const mdx = MDX.replace('| GLM-5.3                    | 0 days         |', `| ${nasty} | 0 days |`)
+    expect(mdx).not.toBe(MDX)
+    const h = harness(staleSnapshot().snapshot, {mdx, live: JSON.stringify(live)})
+    const lines: string[] = []
+
+    await refreshGoPrivacy({
+      snapshotPath: h.snapshotPath,
+      bodyPath: h.bodyPath,
+      fetch: h.fetch,
+      log: line => lines.push(line),
+    })
+
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('- `glm-5.3` (`# GLM 5.3`), zero retention: API zdr: false; docs: 0 days; snapshot: no')
+    expect(body).toContain('- live model `brand-new` named `# New - Model |x| <b>`: no Privacy row on the page')
+    expect(lines).toEqual([
+      'left out: live model `brand-new` named `# New - Model |x| <b>`: no Privacy row on the page',
+    ])
+    // The hostile names add no lines of their own: the report is one line per entry.
+    expect(body.split('\n').filter(line => line.includes('New') || line.includes('# GLM'))).toHaveLength(2)
   })
 
   it('does not report the docs-only Global rule', async () => {
@@ -358,8 +418,8 @@ describe('refreshGoPrivacy: a model one source does not know is left out and rep
 
     const body = readFileSync(h.bodyPath, 'utf8')
     expect(body).toContain('### Left out of the snapshot (1)')
-    expect(body).toContain('- live model `brand-new` ("Brand New"): no Privacy row on the page')
-    expect(lines).toEqual(['left out: live model `brand-new` ("Brand New"): no Privacy row on the page'])
+    expect(body).toContain('- live model `brand-new` named `Brand New`: no Privacy row on the page')
+    expect(lines).toEqual(['left out: live model `brand-new` named `Brand New`: no Privacy row on the page'])
     expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models['brand-new']).toBeUndefined()
   })
 
@@ -373,8 +433,8 @@ describe('refreshGoPrivacy: a model one source does not know is left out and rep
     await done
 
     const body = readFileSync(h.bodyPath, 'utf8')
-    expect(body).toContain('- Privacy row "GLM-5.3": no live model')
-    expect(body).toContain('- live model `glm-5.3` ("Something Else"): no Privacy row on the page')
+    expect(body).toContain('- Privacy row `GLM-5.3`: no live model')
+    expect(body).toContain('- live model `glm-5.3` named `Something Else`: no Privacy row on the page')
     expect(lines).toHaveLength(2)
   })
 
@@ -385,7 +445,7 @@ describe('refreshGoPrivacy: a model one source does not know is left out and rep
     const result = await done
 
     expect(result).toEqual({changed: false, sourceCommit: NEW_SHA})
-    expect(lines).toEqual(['left out: live model `brand-new` ("Brand New"): no Privacy row on the page'])
+    expect(lines).toEqual(['left out: live model `brand-new` named `Brand New`: no Privacy row on the page'])
     expect(existsSync(h.bodyPath)).toBe(false)
   })
 
@@ -430,8 +490,8 @@ describe('refreshGoPrivacy: a model one source does not know is left out and rep
     const body = readFileSync(h.bodyPath, 'utf8')
     expect(body).toContain('- `kimi-k3`: was zero retention: yes, trains on data: no, region-gated: no')
     expect(body).toContain('now zero retention: yes, trains on data: no, region-gated: yes')
-    expect(body).toContain('- live model `new-model` ("New Model"): no Privacy row on the page')
-    expect(lines).toEqual(['left out: live model `new-model` ("New Model"): no Privacy row on the page'])
+    expect(body).toContain('- live model `new-model` named `New Model`: no Privacy row on the page')
+    expect(lines).toEqual(['left out: live model `new-model` named `New Model`: no Privacy row on the page'])
   })
 
   it('still throws when the join is ambiguous, and writes nothing', async () => {

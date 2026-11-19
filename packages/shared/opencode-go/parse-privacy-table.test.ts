@@ -78,8 +78,8 @@ describe('parsePrivacyDocs on the pinned go.mdx', () => {
       ...plain,
       regionRequirement: true,
     })
-    // The page no longer says anything about Beam Free's region; that now lives in the API only.
-    expect(rows.get('Beam Free')).toEqual({name: 'Beam Free', retentionDays: 30, ...plain})
+    // The usage-limits notice "Not available in <places>." is the page's statement of Beam Free's region limit.
+    expect(rows.get('Beam Free')).toEqual({name: 'Beam Free', retentionDays: 30, ...plain, availabilityLimited: true})
     expect(rows.get('Hy4 flash Free')).toEqual({name: 'Hy4 flash Free', retentionDays: 0, ...plain})
     expect(rows.get('GLM-5.3')).toEqual({name: 'GLM-5.3', retentionDays: 0, ...plain})
   })
@@ -605,6 +605,144 @@ describe('parsePrivacyDocs on agreement dates and echoed text', () => {
       message = (error as Error).message
     }
     expect(message).toContain('does not name a model')
+    expect(message.length).toBeLessThan(300)
+  })
+})
+
+/** The Usage limits paragraph that starts with `**label:**`, as the pinned page writes it. */
+const noticeLine = (label: string): string => {
+  const line = mdx.split('\n').find(candidate => candidate.startsWith(`**${label}:**`))
+  if (line === undefined) throw new Error(`fixture has no usage notice for ${label}`)
+  return line
+}
+
+describe('parsePrivacyDocs on per-model usage notices', () => {
+  const BEAM = noticeLine('Beam Free')
+  const ARGON = noticeLine('Gemini 4 Argon')
+  const PLACES = 'Angola, Belarus, Cambodia'
+  const beam = (source: string) => rowsByName(source).get('Beam Free')
+  /** The Beam Free notice replaced by `text`, written as the page writes a notice. */
+  const withBeamNotice = (text: string): string => mutate(BEAM, `**Beam Free:** ${text}`)
+  /** A notice paragraph added in front of the Argon one. */
+  const withNotice = (line: string): string => mutate(ARGON, `${line}\n\n${ARGON}`)
+
+  test('the page states Beam Free’s region limit in the "Not available in <places>." form', () => {
+    expect(BEAM).toContain('Free for a limited time. Not available in Angola, Belarus')
+    expect(beam(mdx)?.availabilityLimited).toBe(true)
+    expect(beam(mdx)?.regionRequirement).toBe(false)
+  })
+
+  test('with the notice removed the page says nothing about Beam Free’s region', () => {
+    expect(beam(mutate(`${BEAM}\n\n`, ''))?.availabilityLimited).toBe(false)
+  })
+
+  test('a notice reaches only the model its label names', () => {
+    const rows = rowsByName(mdx)
+    expect(rows.get('Gemini 4 Argon')?.availabilityLimited).toBe(false)
+    expect(rows.get('GLM-5.3')?.availabilityLimited).toBe(false)
+  })
+
+  test.each([
+    ['Unavailable in', 'Unavailable in Angola.'],
+    ['Available only in', 'Available only in Europe.'],
+    ['Only available in', 'Only available in Europe.'],
+    ['Restricted to', 'Restricted to the United States.'],
+    ['Limited to', 'Limited to Europe.'],
+    ['Not available outside', 'Not available outside Europe.'],
+    ['a sentence about the country', 'This model is offered in a few countries.'],
+    ['a sentence about regions', 'Some regions are refused.'],
+    ['a blocked statement', 'Blocked in Russia.'],
+    ['an availability note', 'Availability varies.'],
+    ['a recognised sentence with a clause', 'Not available in Angola, and trains on your data.'],
+    ['a recognised sentence with a lowercase place word', 'Not available in some countries.'],
+    ['no closing period', 'Not available in Angola'],
+    ['a digit in the places', 'Not available in Angola 2.'],
+  ])('a reworded availability notice (%s) throws instead of being ignored', (_label, sentence) => {
+    const source = withBeamNotice(`Free for a limited time. ${sentence}`)
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/usage notice/)
+  })
+
+  test.each([
+    ['added', (): string => withNotice('**Beam Free:** Free through November 25, 2026.')],
+    [
+      'reworded',
+      (): string => mutate(ARGON, '**Gemini 4 Argon:** Half price on every plan until the end of the month.'),
+    ],
+    ['removed', (): string => mutate(`${noticeLine('GLM-5.3')}\n\n`, '')],
+    ['for a model with no Privacy row', (): string => withNotice('**Mystery Model:** 20% off until Friday.')],
+    ['with a long date', (): string => withNotice('**Hy4:** Higher usage limits apply through December 31, 2026.')],
+  ])('a pricing notice %s changes nothing and never throws', (_label, make) => {
+    expect(parsePrivacyDocs(make())).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('a pricing sentence next to the recognised one is ignored', () => {
+    const rows = rowsByName(withBeamNotice(`Free through November 25, 2026. Not available in ${PLACES}.`))
+    expect(rows.get('Beam Free')?.availabilityLimited).toBe(true)
+  })
+
+  test('an availability notice for a label that matches no row throws, naming the label', () => {
+    const source = withNotice('**Mystery Model:** Not available in Angola.')
+    expect(() => parsePrivacyDocs(source)).toThrow(/"Mystery Model" does not name a model/)
+  })
+
+  test('an unrecognised availability sentence for a label that matches no row throws too', () => {
+    expect(() => parsePrivacyDocs(withNotice('**Mystery Model:** Unavailable in Angola.'))).toThrow(/usage notice/)
+  })
+
+  test('a notice label resolves like every other label: the reviewed family mapping works, a prefix does not', () => {
+    const family = rowsByName(withNotice(`**DeepSeek:** Not available in ${PLACES}.`))
+    expect(family.get('DeepSeek V4 Pro')?.availabilityLimited).toBe(true)
+    expect(family.get('DeepSeek V4.1 Flash')?.availabilityLimited).toBe(true)
+    expect(() => parsePrivacyDocs(withNotice(`**Hy:** Not available in ${PLACES}.`))).toThrow(
+      /"Hy" does not name a model/,
+    )
+  })
+
+  test('a notice wrapped over several lines is read as one paragraph', () => {
+    const rows = rowsByName(withBeamNotice(`Free for a limited time. Not available in Angola,\nBelarus, Cambodia.`))
+    expect(rows.get('Beam Free')?.availabilityLimited).toBe(true)
+  })
+
+  test('a name in a notice is not "prose that names a model": only the two inspected sections are', () => {
+    expect(() => parsePrivacyDocs(mutate(ARGON, '**Gemini 4 Argon:** Kimi K3 costs less.'))).not.toThrow()
+  })
+
+  test('notices are read in the Usage limits section only', () => {
+    const elsewhere = mutate(
+      '## Where can I use it?',
+      '**Beam Free:** Unavailable in Angola.\n\n## Where can I use it?',
+    )
+    expect(parsePrivacyDocs(elsewhere)).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('a missing Usage limits section throws, because Beam Free’s notice would be lost', () => {
+    expect(() => parsePrivacyDocs(mutate('## Usage limits', '## Something else'))).toThrow(/Usage limits/)
+  })
+
+  test('a very long place list parses quickly', () => {
+    const places = `${'Angola, '.repeat(1000)}or Belarus`
+    const started = performance.now()
+    const rows = rowsByName(withBeamNotice(`Not available in ${places}.`))
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(rows.get('Beam Free')?.availabilityLimited).toBe(true)
+  })
+
+  test('a very long near-miss fails quickly instead of backtracking', () => {
+    const started = performance.now()
+    expect(() => parsePrivacyDocs(withBeamNotice(`Not available in ${'A'.repeat(5000)}!`))).toThrow(/usage notice/)
+    expect(() => parsePrivacyDocs(withBeamNotice(`Not available in ${'a, '.repeat(2000)}.`))).toThrow(/usage notice/)
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  test('an echoed notice sentence is capped', () => {
+    let message = ''
+    try {
+      parsePrivacyDocs(withBeamNotice(`Unavailable in ${'x'.repeat(5000)}.`))
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain('…')
     expect(message.length).toBeLessThan(300)
   })
 })

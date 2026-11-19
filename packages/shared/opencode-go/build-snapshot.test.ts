@@ -3,7 +3,13 @@ import {readFileSync} from 'node:fs'
 
 import {describe, expect, test} from 'bun:test'
 
-import {buildSnapshot, DOCS_NAME_ALIASES, normalizeModelName} from './build-snapshot'
+import {
+  buildSnapshot,
+  describeDisagreement,
+  describeUnmatched,
+  DOCS_NAME_ALIASES,
+  normalizeModelName,
+} from './build-snapshot'
 import {computeEligibility, parseSnapshot} from './eligibility'
 import {parseLiveModels, type LiveModel} from './live-models'
 import {parsePrivacyDocs, PrivacyTableError} from './parse-privacy-table'
@@ -90,11 +96,6 @@ describe('buildSnapshot on the pinned page and API response', () => {
     expect(entryOf('deepseek-v4-pro')?.agreementExpiry).toBe('2026-11-30')
     expect(entryOf('glm-5.3')?.agreementExpiry).toBeNull()
   })
-
-  test('reports no retention or training disagreement on today’s inputs', () => {
-    const {disagreements} = build()
-    expect(disagreements.filter(d => d.fact !== 'regionGated')).toEqual([])
-  })
 })
 
 describe('buildSnapshot combines retention with AND', () => {
@@ -139,11 +140,19 @@ describe('buildSnapshot combines training with OR', () => {
 })
 
 describe('buildSnapshot combines region with OR', () => {
-  test('Beam Free is region-gated by the API alone, because the page no longer says so', () => {
+  test('Beam Free is region-gated by the docs notice and the API together', () => {
     const beam = docs().find(row => row.name === 'Beam Free')
-    expect(beam?.availabilityLimited).toBe(false)
+    expect(beam?.availabilityLimited).toBe(true)
     expect(beam?.regionRequirement).toBe(false)
     expect(entryOf('beam-free')?.regionGated).toBe(true)
+  })
+
+  test('Beam Free stays region-gated from the docs notice alone when the API drops its limit', () => {
+    expect(entryOf('beam-free', build(docs(), patchLive('beam-free', {limitedRegions: false})))?.regionGated).toBe(true)
+  })
+
+  test('Beam Free stays region-gated from the API alone when the notice is gone from the page', () => {
+    expect(entryOf('beam-free', build(patchDocs('Beam Free', {availabilityLimited: false})))?.regionGated).toBe(true)
   })
 
   test.each([['deepseek-v4.1-flash'], ['deepseek-v4-pro'], ['longcat-2.5-free']])(
@@ -372,8 +381,24 @@ describe('buildSnapshot reports where the sources differ', () => {
     expect(report).toMatchObject({kind: 'conflict', api: 'limited_regions: false', snapshot: 'yes'})
   })
 
-  test('Beam Free is an API-only region restriction, which today’s page cannot confirm', () => {
-    expect(find(build(), 'beam-free', 'regionGated')).toEqual([
+  test('API limited_regions false against the Beam Free docs notice is a conflict, and the snapshot keeps the gate', () => {
+    const result = build(docs(), patchLive('beam-free', {limitedRegions: false}))
+    expect(find(result, 'beam-free', 'regionGated')).toEqual([
+      {
+        id: 'beam-free',
+        name: 'Beam Free',
+        fact: 'regionGated',
+        kind: 'conflict',
+        api: 'limited_regions: false',
+        docs: 'availability limited to permitted regions',
+        snapshot: 'yes',
+      },
+    ])
+  })
+
+  test('the notice gone from the page while the API still restricts Beam Free is an API-only restriction', () => {
+    const result = build(patchDocs('Beam Free', {availabilityLimited: false}))
+    expect(find(result, 'beam-free', 'regionGated')).toEqual([
       {
         id: 'beam-free',
         name: 'Beam Free',
@@ -400,7 +425,59 @@ describe('buildSnapshot reports where the sources differ', () => {
     expect(result.disagreements.filter(d => d.id === 'glm-5.3')).toEqual([])
   })
 
-  test('on today’s inputs the only report is Beam Free’s API-only region restriction', () => {
-    expect(build().disagreements.map(d => `${d.id}/${d.fact}/${d.kind}`)).toEqual(['beam-free/regionGated/api-only'])
+  test('on today’s inputs the sources agree on every compared fact, so there is no report at all', () => {
+    expect(build().disagreements).toEqual([])
+  })
+})
+
+describe('report lines render upstream names as bounded plain text', () => {
+  const NASTY = '# Heading\n- item |x| `code` [link](https://example.com) <b>bold</b>\r\n> quote'
+  const unmatchedLive = {missing: 'docs' as const, id: 'brand-new', name: NASTY}
+
+  const expectInert = (line: string): void => {
+    expect(line).not.toMatch(/[\n\r]/)
+    expect(line.startsWith('#')).toBe(false)
+    expect(line.startsWith('-')).toBe(false)
+    // One code span holds the name: the only backticks left delimit spans we wrote.
+    expect(line.split('`').length % 2).toBe(1)
+  }
+
+  test('a left-out live model name with newlines, backticks, a pipe and a leading # is one bounded line', () => {
+    const line = describeUnmatched(unmatchedLive)
+    expectInert(line)
+    expect(line).toContain('named `# Heading - item |x| code [link](https://example.com) <b>bold</b> > quote`')
+  })
+
+  test('a left-out Privacy row name is sanitised the same way', () => {
+    const line = describeUnmatched({missing: 'api', id: null, name: NASTY})
+    expectInert(line)
+    expect(line.startsWith('Privacy row `')).toBe(true)
+  })
+
+  test('a disagreement line sanitises the model name', () => {
+    const line = describeDisagreement({
+      id: 'glm-5.3',
+      name: NASTY,
+      fact: 'zeroRetention',
+      kind: 'conflict',
+      api: 'zdr: true',
+      docs: '30 days',
+      snapshot: 'no',
+    })
+    expectInert(line)
+    expect(line).toContain('(`# Heading')
+  })
+
+  test('a long name is capped and marked', () => {
+    const line = describeUnmatched({missing: 'api', id: null, name: 'n'.repeat(5000)})
+    expect(line).toContain('…')
+    expect(line.length).toBeLessThan(160)
+  })
+
+  test('control and bidirectional characters are removed, and a blank name stays visible', () => {
+    expect(describeUnmatched({missing: 'api', id: null, name: 'a\u0007b\u202Ec\u200Bd'})).toBe(
+      'Privacy row `abcd`: no live model',
+    )
+    expect(describeUnmatched({missing: 'api', id: null, name: ' \n '})).toBe('Privacy row `(blank)`: no live model')
   })
 })

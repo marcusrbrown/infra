@@ -4,7 +4,11 @@ import {appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSy
 import {dirname, resolve} from 'node:path'
 import {isDeepStrictEqual} from 'node:util'
 
-import {buildSnapshot, describeUnmatched} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
+import {
+  buildSnapshot,
+  describeDisagreement,
+  describeUnmatched,
+} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
 import {
   modelEntrySchema,
   parseSnapshot,
@@ -185,9 +189,6 @@ export function renderPrBody(
     diff.changed.map(id => `- \`${id}\`: was ${describeBefore(before[id])}; now ${after(id)}`),
   )
 
-  const factLabel = {zeroRetention: 'zero retention', trainsOnData: 'trains on data', regionGated: 'region-gated'}
-  const report = (d: Disagreement): string =>
-    `- \`${d.id}\` (${d.name}), ${factLabel[d.fact]}: API ${d.api}; docs: ${d.docs}; snapshot: ${d.snapshot}`
   lines.push(
     '',
     'The snapshot takes the more restrictive value of the two sources for every fact. The two lists below are where ' +
@@ -196,11 +197,11 @@ export function renderPrBody(
   )
   section(
     'Sources disagree',
-    disagreements.filter(d => d.kind === 'conflict').map(d => report(d)),
+    disagreements.filter(d => d.kind === 'conflict').map(d => `- ${describeDisagreement(d)}`),
   )
   section(
     'API-only restrictions',
-    disagreements.filter(d => d.kind === 'api-only').map(d => report(d)),
+    disagreements.filter(d => d.kind === 'api-only').map(d => `- ${describeDisagreement(d)}`),
   )
 
   lines.push(

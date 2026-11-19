@@ -3,7 +3,7 @@
   "source": {
     "repo": "anomalyco/opencode",
     "path": "services/site/src/docs/content/console/go.mdx",
-    "commit": "b75b1583962ddc9ad2a057d3a3641b770321aa9e"
+    "commit": "b9a2dc32cb6abb450960c78de4a09e57c8417469"
   },
   "models": {
     "beam-free": {
@@ -32,12 +32,6 @@
     },
     "gemini-4-argon": {
       "zeroRetention": false,
-      "trainsOnData": false,
-      "regionGated": false,
-      "agreementExpiry": null
-    },
-    "glm-5.2": {
-      "zeroRetention": true,
       "trainsOnData": false,
       "regionGated": false,
       "agreementExpiry": null
@@ -84,6 +78,12 @@
       "regionGated": false,
       "agreementExpiry": null
     },
+    "hy4-flash-free": {
+      "zeroRetention": true,
+      "trainsOnData": false,
+      "regionGated": false,
+      "agreementExpiry": null
+    },
     "hy4-preview": {
       "zeroRetention": true,
       "trainsOnData": false,
@@ -124,18 +124,6 @@
       "zeroRetention": true,
       "trainsOnData": false,
       "regionGated": true,
-      "agreementExpiry": null
-    },
-    "mimo-v2.5": {
-      "zeroRetention": true,
-      "trainsOnData": false,
-      "regionGated": false,
-      "agreementExpiry": null
-    },
-    "mimo-v2.5-pro": {
-      "zeroRetention": true,
-      "trainsOnData": false,
-      "regionGated": false,
       "agreementExpiry": null
     },
     "mimo-v2.6-flash": {

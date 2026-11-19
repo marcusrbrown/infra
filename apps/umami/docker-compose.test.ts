@@ -23,10 +23,8 @@ describe('umami docker compose', () => {
   })
 
   describe('db service (Postgres 18 layout)', () => {
-    it('pins the staging-validated Postgres image by digest', () => {
-      expect(db).toContain(
-        '    image: postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5\n',
-      )
+    it('pins the Postgres 18 image by tag and sha256 digest', () => {
+      expect(db).toMatch(/\n {4}image: postgres:18-alpine@sha256:[0-9a-f]{64}\n/)
     })
 
     it('mounts the new named volume at /var/lib/postgresql', () => {

@@ -1,3 +1,4 @@
+import {readFileSync} from 'node:fs'
 import {readFile} from 'node:fs/promises'
 import {describe, expect, it, setDefaultTimeout} from 'bun:test'
 
@@ -12,7 +13,18 @@ interface CommandResult {
 const appDirectory = new URL('.', import.meta.url).pathname
 const applySqlPath = `${appDirectory}/retention.sql`
 const checkSqlPath = `${appDirectory}/retention-check.sql`
-const postgresImage = 'postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5'
+
+// The image under test is whatever docker-compose.yaml pins, so a Renovate bump changes what this test pulls.
+function readComposePostgresImage(): string {
+  const compose = readFileSync(`${appDirectory}/docker-compose.yaml`, 'utf8')
+  const image = /^ {4}image: (postgres:\S+@sha256:[0-9a-f]{64})$/m.exec(compose)?.[1]
+  if (image === undefined) {
+    throw new Error('docker-compose.yaml does not pin a postgres image by tag and sha256 digest')
+  }
+  return image
+}
+
+const postgresImage = readComposePostgresImage()
 const dockerProbe = Bun.spawnSync(['docker', 'info'])
 const dockerAvailable = dockerProbe.exitCode === 0
 const imageProbe = dockerAvailable ? Bun.spawnSync(['docker', 'image', 'inspect', postgresImage]) : undefined

@@ -79,15 +79,13 @@ interface Violation {
 // Guard: forbid frozen exact-SHA/digest assertions against real repo files
 // ---------------------------------------------------------------------------
 //
-// PR #1337 (Renovate bump of fro-bot/agent v0.111.0 -> v0.112.0) failed CI
-// because a test hardcoded the previous commit SHA. PR #1339 fixed that one
-// test by converting the exact-SHA assertion into a shape assertion (see
-// `assertPinnedToRepo` / `FULL_COMMIT_SHA_RE` further down). An audit then
-// found two more instances of the same defect (fixed above, in the monitor
-// workflow test) and four more assertions that are deliberate, not
-// incidental (the Caddy image pin — see FROZEN_PIN_ALLOWLIST).
+// Tests assert a pin's format (a full 40-hex commit SHA, or a `sha256:` plus
+// 64-hex digest), never a copied tag or digest. Renovate rewrites pins
+// routinely, so a copied literal fails on every bump and proves nothing; the
+// platform check (e.g. linux/amd64) happens against the registry manifest when
+// a bump is reviewed.
 //
-// This guard makes the defect structurally hard to reintroduce: it scans
+// This guard enforces that rule: it scans
 // every *.test.ts file in the repo for a string literal that is a *direct
 // argument* to `.toContain(`, `.toBe(`, or `.toEqual(` and contains either a
 // full 40-hex git commit SHA pin (`@<40 hex>`) or a Docker image digest
@@ -102,23 +100,9 @@ interface FrozenPinAllowlistEntry {
   reason: string
 }
 
-// Deliberate, audited exceptions. Every entry here asserts the exact Caddy
-// image pin in the 'uses the last known linux/amd64-compatible Caddy image'
-// test. The pin is deliberate, not incidental: .github/renovate.json5 gates
-// `caddy` with `allowedVersions: '<2.12.0'`, `automerge: false`, and
-// `dependencyDashboardApproval: true` because this exact digest was manually
-// verified to have a linux/amd64 manifest on 2026-07-13. Renovate cannot
-// auto-bump it, and this test breaking when someone moves off 2.11.4-alpine
-// is the intended forcing function to re-verify the manifest before bumping.
-const CADDY_PIN_REASON =
-  "Deliberate Caddy digest pin, manually verified linux/amd64-compatible on 2026-07-13; gated in .github/renovate.json5 (allowedVersions '<2.12.0', automerge: false, dependencyDashboardApproval: true) so Renovate cannot silently move off it — the test breaking on an upgrade attempt is the intended forcing function to re-verify the manifest."
-
-const FROZEN_PIN_ALLOWLIST: readonly FrozenPinAllowlistEntry[] = [
-  {file: 'apps/cliproxy/docker-compose.test.ts', reason: CADDY_PIN_REASON},
-  {file: 'apps/dashboard/docker-compose.test.ts', reason: CADDY_PIN_REASON},
-  {file: 'apps/broker/docker-compose.test.ts', reason: CADDY_PIN_REASON},
-  {file: 'apps/umami/docker-compose.test.ts', reason: CADDY_PIN_REASON},
-]
+// Files exempt from the guard. Keep this empty: an entry needs a reason why
+// that file must assert an exact pin rather than its format.
+const FROZEN_PIN_ALLOWLIST: readonly FrozenPinAllowlistEntry[] = []
 
 // A run of a single repeated hex character (e.g. `aaaa…`, `bbbb…`, `cccc…`,
 // `dddd…`) is a synthetic fixture placeholder, never a real pin.

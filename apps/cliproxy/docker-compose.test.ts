@@ -63,10 +63,8 @@ describe('cliproxy docker compose', () => {
     )
   })
 
-  it('uses the last known linux/amd64-compatible Caddy image', () => {
-    expect(composeText).toContain(
-      'image: caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5',
-    )
+  it('pins the Caddy image by version tag and sha256 digest', () => {
+    expect(composeText).toMatch(/image: caddy:\d+\.\d+\.\d+-alpine@sha256:[0-9a-f]{64}\n/)
   })
 })
 

@@ -1,6 +1,7 @@
 ---
 title: "GitHub's compare endpoint lists at most 300 changed files, so a path-change check must fail closed at 300"
 date: 2026-11-10
+last_updated: 2026-11-19
 problem_type: integration_issue
 component: tooling
 severity: medium
@@ -45,7 +46,7 @@ A list of exactly 300 is ambiguous: the diff may have 300 files, or more files t
 
 ## Prevention
 
-- A path check built on `compare.files` must fail closed at 300 or get the file list from another source.
+- A path check built on `compare.files` must fail closed at 300 or get the file list from another source. To show that a named file is unchanged across a large range, compare its blob SHA at both tags ([reviewing a long pin jump](../best-practices/long-upstream-pin-jump-review-compare-named-paths-then-measure-the-rest-2026-11-19.md)).
 - Before reusing a limit, confirm which endpoint documents it.
 - Test the boundaries whenever the check changes: 0, 299, 300 and 301 files. Only 299 may pass.
 

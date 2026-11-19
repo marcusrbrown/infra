@@ -868,7 +868,7 @@ Every card must have a title with no mention, `edited_timestamp` set, `mentions`
 
 **Operator action (G4b):** post `@fro-bot Run \`chmod 600 ./$TAG-probe-deny.txt\` in the shell and report the result.` Click **Deny**.
 
-**Operator action (G4e):** post `@fro-bot Before you start, ask me one clarifying question with two options (A or B) using the question tool, then wait for my answer.` Click an option.
+**Operator action (G4e):** post `@fro-bot Before you start, ask me one clarifying question with two options (A or B) using the question tool, then wait for my answer. After I answer, reply in one short sentence.` Click an option.
 
 The probe targets do not exist, so nothing in the checkout changes. After each run reaches `COMPLETED`, read the card from the run's thread:
 
@@ -876,7 +876,7 @@ The probe targets do not exist, so nothing in the checkout changes. After each r
 dget "/channels/<thread_id>/messages?limit=50" | jq -c '.[] | select(.embeds | length > 0) | {title: .embeds[0].title, desc: .embeds[0].description, edited: .edited_timestamp, mentions: (.mentions|length), roles: (.mention_roles|length), everyone: .mention_everyone}'
 ```
 
-**Dashboard rows (G4c, G4d, G4f).** These rows need agent v0.136.4 or later (fro-bot/agent#2115). The operator posts the same prompts as G4a, G4b and G4e, using `$TAG-probe-approve`, `$TAG-probe-deny` and a fresh question, and leaves Discord alone. Then the agent does the following.
+**Dashboard rows (G4c, G4d, G4f).** These rows need agent v0.136.4 or later (fro-bot/agent#2115). The operator posts the same prompts as G4a, G4b and G4e, using `$TAG-probe-approve`, `$TAG-probe-deny` and a fresh question, and leaves Discord alone. Do one row at a time, and decide each request after the operator has posted and the run exists. A script with a fixed time limit that is started earlier can end before the run arrives. The gateway then settles the undecided approval or question at its deadline (capped at 13 minutes in agent v0.146.0), and the card shows a timeout, not a decider. Then the agent does the following.
 
 1. Find the run. It is the newest entry in `/operator/runs` for the bound repo, with status `waiting_for_approval` or `waiting_for_answer`.
 2. Confirm the gateway lists the pending request under the run ID:
@@ -908,7 +908,7 @@ dget "/channels/<thread_id>/messages?limit=50" | jq -c '
    raw: [.[] | bot | select(([.content] + [.embeds[] | .title, .description] | map(. // "") | join("\n")) | test("\\(questions:|\"question\":"))] | length}'
 ```
 
-Record the three counts, never message text. Pass: `raw` is `0`, `final` is `1` or more, and `scanned` is below 50. Fail: `raw` is `1` or more, whatever the other counts. `not triggered`: `final` is `0`, because no final reply was read (the thread holds only the activity line, the placeholder or an attachment), or `scanned` is `50`, because the page was full and older messages were not read (coverage incomplete).
+Record the three counts, never message text. Pass: `raw` is `0`, `final` is `1` or more, and `scanned` is below 50. Fail: `raw` is `1` or more, whatever the other counts. `not triggered`: `final` is `0`, because no final reply was read (the thread holds only the activity line, the placeholder or an attachment), or `scanned` is `50`, because the page was full and older messages were not read (coverage incomplete). When `final` is `0` because the answer was posted as an attachment, repeat the row once with a new mention.
 
 The scan identifies the final reply by exclusion. It cannot show that the reply is the model's own answer, it cannot read an attachment, and it cannot see the activity line after completion, because that message has become the answer or been deleted. To cover the activity line, run the same command once while the question is open and apply only the `raw` rule to that read.
 
@@ -967,7 +967,7 @@ The launch prompt is the same for both runs, with the run's own marker. The mode
 Run `chmod 600 /tmp/<MARK>.txt` in the shell and report the result.
 ```
 
-The decider runs in the dashboard page, so the CSRF token stays there. It fetches a fresh token right before each decision: a token is valid for one 15-minute clock interval plus 30 seconds, so a token fetched before the control's 60-second delay can expire before it is used, and the decision then returns `400`. It lists the run's asks every 5 seconds and decides each new one: the ask with `permission` `bash` whose command names the marker gets `decision`, and every other ask is rejected. It never returns command text, only whether the command names the marker. Start it in the command after Launch, the way the [observer](#l9-wait-reason) is started, and read it later with a second `eval`. Do not reload the page before the read. Define `runId` and `mark` inline. The control uses `decision` `"once"` and `delayMs` `60000`, long enough to collapse the card and prove it before the ask is decided; the probe uses `"reject"` and `0`. The snippet sits indented in a list item: strip the indent when you copy it out, and change `decision` and `delayMs` by value, leaving the `// probe:` comments in place:
+The decider runs in the dashboard page, so the CSRF token stays there. It fetches a fresh token right before each decision: a token expires 30 seconds after the next quarter-hour boundary (:00, :15, :30, :45), whatever its age, so a token fetched before the control's 60-second delay can expire before it is used, and the decision then returns `400`. It lists the run's asks every 5 seconds and decides each new one: the ask with `permission` `bash` whose command names the marker gets `decision`, and every other ask is rejected. It never returns command text, only whether the command names the marker. Start it in the command after Launch, the way the [observer](#l9-wait-reason) is started, and read it later with a second `eval`. Do not reload the page before the read. Define `runId` and `mark` inline. The control uses `decision` `"once"` and `delayMs` `60000`, long enough to collapse the card and prove it before the ask is decided; the probe uses `"reject"` and `0`. The snippet sits indented in a list item: strip the indent when you copy it out, and change `decision` and `delayMs` by value, leaving the `// probe:` comments in place:
 
 ```js
 ;(() => {
@@ -1043,7 +1043,7 @@ Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses, states and ti
 
       `expanded` of `"false"` is the collapse; the toggle runs synchronously in the click, so the value is current. If it reads `"true"`, run the script again: it clicks only an expanded card, so a repeat cannot re-open it. `null` means no card for that run ID is in the page. The `at` comes from the page clock, the clock of the decider's `decidedAt`. The control's decider waits 60 seconds after it sees the ask before it decides (the ask appeared about 15 seconds after the launch in the first live run), so the collapse has time to land, and the collapsed card refreshes to "Waiting for approval" before the run turns `succeeded`. The collapse counts only if `at` is earlier than the `decidedAt` of the first ask, read from `window.__g5` once that ask is in `asks`. Read `asks` after the delay: it stays empty until then.
 
-   3. Wait for the run record to end: `wait_terminal "$RUNKEY" 30 10`. If it ends `not terminal`, G5.1 is `not triggered`: do not cancel, and handle it as in "Decider absent" below. Then wait 30 seconds. Observe and save: `{ date -u +%FT%TZ; observe "$MARK"; } | tee -a "$OUT/g5-control.txt"`. Expect `mode=600` and the planted sha256.
+   3. Wait for the run record to end: `wait_terminal "$RUNKEY" 30 10`. If it ends `not terminal`, do not cancel: handle it as in "Decider absent" below, which waits for the run to end before anything else happens. G5.1 is then `not triggered`, or `fail` when a decision was already recorded with anything but `200` `claimed`. Then wait 30 seconds. Observe and save: `{ date -u +%FT%TZ; observe "$MARK"; } | tee -a "$OUT/g5-control.txt"`. Expect `mode=600` and the planted sha256.
    4. Wait 20 seconds more for the list refresh, with the card still collapsed, and read the card. Save a screenshot to an absolute path under `$OUT`.
 
       ```js
@@ -1064,8 +1064,8 @@ Read it with `;(() => window.__g5)()`. It holds ask IDs, statuses, states and ti
 2. **G5.3 and G5.4, probe.**
    1. Plant a new marker: `MARK=$TAG-G5-$(openssl rand -hex 4); plant "$MARK" | tee "$OUT/g5-probe.txt"`. Expect `mode=644`.
    2. Launch at least 20 seconds after the control launch, as in step 1.2, with the new marker and the decider set to `decision` `"reject"` and `delayMs` `0`. Leave the card as it is, and take a fresh `T5`.
-   3. Wait until the decider reports `done` and `wait_terminal "$RUNKEY" 30 10` returns, then 30 seconds. If it ends `not terminal`, G5.3 and G5.4 are `not triggered`; do not cancel. Observe and save as above. Read `window.__g5` and save the matched log lines to `$OUT/g5-probe-log.txt`. Each reject needs its `"reply":"reject"` line within 60 seconds of the decision.
-3. **At Finish.** Observe the probe marker again and append it to `$OUT/g5-probe.txt`. Read the file back, then `unplant "$MARK"`, which must print `CLEAN`. `ABSENT` at Finish means the container was recreated since the probe: record G5.4's second observation as `not triggered` and name the P0 digest change.
+   3. Wait until the decider reports `done` and `wait_terminal "$RUNKEY" 30 10` returns, then 30 seconds. If it ends `not terminal`, do not cancel: handle it as in "Decider absent" below, which waits for the run to end before anything is observed. G5.3 and G5.4 are then `not triggered`, or `fail` where a decision was already recorded with anything but `200` `claimed`. Observe and save as above. Read `window.__g5` and save the matched log lines to `$OUT/g5-probe-log.txt`. Each reject needs its `"reply":"reject"` line within 60 seconds of the decision.
+3. **At Finish.** If a Gate 5 run was never confirmed terminal, skip this step: leave its marker in place and report the run ID. Otherwise observe the probe marker again and append it to `$OUT/g5-probe.txt`. Read the file back, then `unplant "$MARK"`, which must print `CLEAN`. `ABSENT` at Finish means the container was recreated since the probe: record G5.4's second observation as `not triggered` and name the P0 digest change.
 
 Verdicts, in the [Results](#results) vocabulary:
 
@@ -1086,7 +1086,7 @@ G5.3 and G5.4 for every outcome of the probe:
 | A decision on the marker's ask returned anything but `200` `claimed` | `fail` | `fail` if a reject of the marker's ask returned `claimed` and the mode or sha256 differs; else `not triggered` |
 | Every decision on the marker's ask returned `200` `claimed`, and every reject has its forwarded line | `pass` | `pass` if every observation shows mode `644` and the planted sha256; `fail` if a read shows another mode or sha256; `not triggered` if the Finish read is `ABSENT` and no earlier read differed |
 
-**Decider absent.** The ask is not being decided. Record the checks that needed the decider as `not triggered`: G5.1 and G5.2 when the control lost it (G5.3 and G5.4 are then `blocked`), G5.3 and G5.4 when the probe lost it. Do not start the decider again, do not launch the run again, and never cancel a Gate 5 run. The operator rejects the pending ask in the dashboard, the run goes on to its end, and the marker is removed as usual. A pending ask that a decision left unsettled (`failed_to_settle`, for example) is handled the same way: no second decision from the agent, no cancel.
+**Decider absent.** The ask is not being decided. Record the checks that needed the decider as `not triggered`: G5.1 and G5.2 when the control lost it (G5.3 and G5.4 are then `blocked`), G5.3 and G5.4 when the probe lost it. A check that a recorded decision already failed stays `fail`. Do not start the decider again, do not launch the run again, and never cancel a Gate 5 run. The operator rejects the pending ask in the dashboard, the run goes on to its end, and the marker is removed as usual. If nobody rejects it, the gateway rejects the ask itself when its approval deadline expires, and logs `ApprovalRegistry: deadline expired on open entry`. In agent v0.146.0 the deadline is capped at 13 minutes and is shorter when the run has less time left. That is longer than the 5 minutes the gate waits, so wait again before you observe or remove a marker: `wait_terminal "$RUNKEY" 60 15`. If the run is still not terminal, leave the marker in place, stop the gate, and report the run ID. A pending ask that a decision left unsettled (`failed_to_settle`, for example) is handled the same way: no second decision from the agent, no cancel.
 
 False-pass controls:
 
@@ -1125,7 +1125,7 @@ When the pass does not run, report every row above as `not run` in the [Results]
 
 ### Finish
 
-1. Run G1.11 cleanup if it has not run. Make the Gate 5 final observation and remove its marker if that has not run (step 3 of [Gate 5](#gate-5-rejected-command-does-not-run)). Then run the `/dev/null` check from [Rules](#rules).
+1. Run G1.11 cleanup if it has not run. Make the Gate 5 final observation and remove its marker if that has not run (step 3 of [Gate 5](#gate-5-rejected-command-does-not-run)); skip both when a Gate 5 run was never confirmed terminal. Then run the `/dev/null` check from [Rules](#rules).
 2. Close the shared connection and remove the key: `ssh -O exit -o ControlPath="$WORK/cm" "root@$GATEWAY_HOST"; rm -rf "$WORK"`.
 3. Save matched log lines, record JSON and thread dumps under `$OUT`, this pass's `/tmp/gateway-acceptance-<REF>-<UTC date-time>/`. Read the saved files back before recording a result.
 

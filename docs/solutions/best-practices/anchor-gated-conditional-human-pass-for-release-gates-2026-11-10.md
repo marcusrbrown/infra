@@ -1,6 +1,7 @@
 ---
 title: "Gate a human-only release check on a last-pass anchor and a diff trigger, not on a passive ledger"
 date: 2026-11-10
+last_updated: 2026-11-19
 problem_type: best_practice
 component: development_workflow
 severity: medium
@@ -50,6 +51,7 @@ The anchored design adds no store, timer or schedule. It asks for a human only w
 
 - First use: agent v0.137.0. The trigger was `never passed`, the automated gates passed on 3 dashboard launches, and the Discord pass passed in one sitting, which set the first anchor.
 - A hand-made thread under an unbound channel answers `unbound-channel`, not `not-a-run-thread`. Make the G2d thread in the bound channel.
+- First fail-closed trigger: agent v0.146.0. The compare from the v0.137.0 anchor returned 300 files, so the deciding item was `trigger check failed`. The pass ran and passed, and the anchor moved to v0.146.0.
 
 ## Related
 

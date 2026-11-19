@@ -35,9 +35,10 @@ type HardeningResponder = (command: string) => MockResult | undefined
 /** Commands owned by the memory-hardening step. They never consume the positional `results` queue. */
 const HARDENING_COMMAND = /swapon|swapfile|mkswap|fwupd|fstab/
 
-/** A box that already has swap and masked fwupd — the steady state on every deploy after the first. */
+/** A box with our swap active and persisted, fwupd masked — the steady state on every deploy after the first. */
 const settledBox: HardeningResponder = command => {
-  if (command.includes('swapon --noheadings')) return {stdout: 'SWAP_ACTIVE\n'}
+  if (command.includes('swapon --noheadings')) return {stdout: 'SWAP_OURS\n'}
+  if (command.includes('grep') && command.includes('/etc/fstab')) return {stdout: 'FSTAB_PRESENT\n'}
   if (command.includes('systemctl mask')) return {stdout: 'FWUPD_MASKED\n'}
   return {stdout: ''}
 }
@@ -1420,14 +1421,17 @@ interface BoxState {
   swap?: MockResult
   fstab?: MockResult
   mask?: MockResult
+  /** The `>> /etc/fstab` append. */
+  persist?: MockResult
 }
 
 /** Scripts the box's answers to the hardening probes; every other hardening command succeeds silently. */
 function box(state: BoxState = {}): HardeningResponder {
   return command => {
-    if (command.includes('swapon --noheadings')) return state.swap ?? {stdout: 'SWAP_ACTIVE\n'}
+    if (command.includes('swapon --noheadings')) return state.swap ?? {stdout: 'SWAP_OTHER\n'}
     if (command.includes('grep') && command.includes('/etc/fstab')) return state.fstab ?? {stdout: 'FSTAB_ABSENT\n'}
     if (command.includes('systemctl mask')) return state.mask ?? {stdout: 'FWUPD_MASKED\n'}
+    if (command.includes('>> /etc/fstab')) return state.persist ?? {stdout: ''}
     return {stdout: ''}
   }
 }
@@ -1550,14 +1554,53 @@ function systemctlStub(options: {mask?: number; stop?: number; enabled?: string}
 
 describe('deploy: memory hardening', () => {
   describe('swap', () => {
-    it('swap already active → probes, then sends no swap-creating command', async () => {
-      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_ACTIVE\n'}})
+    it('only unrelated swap active → left alone: no create step, no fstab read or write', async () => {
+      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_OTHER\n'}})
 
       expect(error).toBeUndefined()
       expect(indexOfCommand(calls, SWAP_PROBE)).toBeGreaterThanOrEqual(0)
       expect(remoteCommands(calls).filter(command => ANY_SWAP_STEP.test(command))).toEqual([])
-      // fstab is only inspected on the create path
       expect(indexOfCommand(calls, FSTAB_PROBE)).toBe(-1)
+    })
+
+    it('our /swapfile active with the fstab entry present → nothing beyond the probes and the mask', async () => {
+      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_OURS\n'}, fstab: {stdout: 'FSTAB_PRESENT\n'}})
+
+      expect(error).toBeUndefined()
+      expect(indexOfCommand(calls, FSTAB_PROBE)).toBeGreaterThanOrEqual(0)
+      expect(remoteCommands(calls).filter(command => HARDENING_COMMAND.test(command))).toHaveLength(3)
+      expect(remoteCommands(calls).filter(command => ANY_SWAP_STEP.test(command))).toEqual([])
+    })
+
+    it('our /swapfile active but not in fstab → appends exactly one entry and never reallocates, reformats or re-activates', async () => {
+      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_OURS\n'}, fstab: {stdout: 'FSTAB_ABSENT\n'}})
+
+      expect(error).toBeUndefined()
+      expect(remoteCommands(calls).filter(command => SWAP_STEPS.persist.test(command))).toHaveLength(1)
+      expect(commandMatching(calls, SWAP_STEPS.persist)).toContain('/swapfile none swap sw 0 0')
+      for (const step of [SWAP_STEPS.allocate, SWAP_STEPS.permissions, SWAP_STEPS.format, SWAP_STEPS.activate]) {
+        expect(indexOfCommand(calls, step)).toBe(-1)
+      }
+    })
+
+    it('activation succeeded but the fstab write failed → the next deploy persists exactly one entry and sends no create step', async () => {
+      const first = await runWithBox({
+        swap: {stdout: 'SWAP_NONE\n'},
+        fstab: {stdout: 'FSTAB_ABSENT\n'},
+        persist: {stdout: '', stderr: 'tee: /etc/fstab: Read-only file system\n', exitCode: 1},
+      })
+
+      expect(errorMessage(first.error)).toMatch(/fstab/)
+      expect(indexOfCommand(first.calls, SWAP_STEPS.activate)).toBeGreaterThanOrEqual(0)
+
+      // Retry: the swap file is now active, the entry is still missing.
+      const retry = await runWithBox({swap: {stdout: 'SWAP_OURS\n'}, fstab: {stdout: 'FSTAB_ABSENT\n'}})
+
+      expect(retry.error).toBeUndefined()
+      expect(remoteCommands(retry.calls).filter(command => SWAP_STEPS.persist.test(command))).toHaveLength(1)
+      for (const step of [SWAP_STEPS.allocate, SWAP_STEPS.permissions, SWAP_STEPS.format, SWAP_STEPS.activate]) {
+        expect(indexOfCommand(retry.calls, step)).toBe(-1)
+      }
     })
 
     it('no swap active → allocates, locks down permissions, formats, activates, then persists — in that order', async () => {
@@ -1613,6 +1656,7 @@ describe('deploy: memory hardening', () => {
       ['non-zero exit that still printed a sentinel', {stdout: 'SWAP_NONE\n', stderr: 'boom\n', exitCode: 2}],
       ['exit 0 with empty output', {stdout: '', exitCode: 0}],
       ['exit 0 with an unrecognised answer', {stdout: 'SWAP_MAYBE\n', exitCode: 0}],
+      ['exit 0 with the retired SWAP_ACTIVE answer', {stdout: 'SWAP_ACTIVE\n', exitCode: 0}],
     ]
 
     for (const [name, swap] of inconclusiveSwapProbes) {
@@ -1671,8 +1715,8 @@ describe('deploy: memory hardening', () => {
   })
 
   describe('fwupd', () => {
-    it('masks the refresh timer and fwupd services on every run, even when swap is already active', async () => {
-      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_ACTIVE\n'}})
+    it('masks the refresh timer and fwupd services on every run, even when only unrelated swap is active', async () => {
+      const {calls, error} = await runWithBox({swap: {stdout: 'SWAP_OTHER\n'}})
 
       expect(error).toBeUndefined()
       const mask = commandMatching(calls, MASK_FWUPD)
@@ -1763,11 +1807,28 @@ describe('deploy: memory hardening', () => {
   // The mocked spawn cannot tell whether the shell inside a command does the right thing,
   // so the decision-bearing commands are executed here under `sh` with stubbed binaries.
   describe('remote command semantics (executed under sh with stubbed binaries)', () => {
-    it('swap probe: active swap → SWAP_ACTIVE, none → SWAP_NONE', async () => {
+    it('swap probe: nothing active → SWAP_NONE', async () => {
       const command = await probeCommand(SWAP_PROBE, {swap: {stdout: 'SWAP_NONE\n'}})
 
-      expect(runRemote(command, {swapon: 'echo /swapfile'})).toEqual({exitCode: 0, stdout: 'SWAP_ACTIVE'})
       expect(runRemote(command, {swapon: 'exit 0'})).toEqual({exitCode: 0, stdout: 'SWAP_NONE'})
+    })
+
+    it('swap probe: /swapfile active → SWAP_OURS, including when another swap device is active too', async () => {
+      const command = await probeCommand(SWAP_PROBE, {swap: {stdout: 'SWAP_NONE\n'}})
+
+      expect(runRemote(command, {swapon: 'echo /swapfile'})).toEqual({exitCode: 0, stdout: 'SWAP_OURS'})
+      expect(runRemote(command, {swapon: String.raw`printf '%s\n' /dev/zram0 /swapfile`})).toEqual({
+        exitCode: 0,
+        stdout: 'SWAP_OURS',
+      })
+    })
+
+    it('swap probe: only other swap active → SWAP_OTHER, even for look-alike names', async () => {
+      const command = await probeCommand(SWAP_PROBE, {swap: {stdout: 'SWAP_NONE\n'}})
+
+      for (const names of ['/swap.img', '/dev/zram0', '/swapfile2', '/mnt/swapfile']) {
+        expect(runRemote(command, {swapon: `echo ${names}`})).toEqual({exitCode: 0, stdout: 'SWAP_OTHER'})
+      }
     })
 
     it('swap probe: a failing swapon is a failed probe, never "no swap"', async () => {

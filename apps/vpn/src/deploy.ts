@@ -472,9 +472,11 @@ async function probeRemote<Sentinel extends string>(
 }
 
 // `swapon` failing must abort rather than read as an empty list, hence the explicit `|| exit 1`.
+// Our swap file being active wins over any other active swap: it is the one this step owns and persists.
 const SWAP_PROBE_COMMAND =
-  'active=$(swapon --noheadings --show=NAME) || exit 1; ' +
-  'if [ -n "$active" ]; then echo SWAP_ACTIVE; else echo SWAP_NONE; fi'
+  'active=$(swapon --noheadings --show=NAME) || exit 1; ours=0; set -f; ' +
+  `for name in $active; do [ "$name" = ${SWAP_FILE_PATH} ] && ours=1; done; ` +
+  'if [ "$ours" = 1 ]; then echo SWAP_OURS; elif [ -n "$active" ]; then echo SWAP_OTHER; else echo SWAP_NONE; fi'
 
 // grep exits 1 for "no match" and >1 for errors; only 0 and 1 are answers.
 const FSTAB_PROBE_COMMAND =
@@ -489,10 +491,12 @@ const MASK_FWUPD_COMMAND =
   'echo FWUPD_MASKED'
 
 /**
- * Masks the fwupd refresh timer and fwupd services and, when the box has no swap, creates a persistent swap file.
+ * Masks the fwupd refresh timer and fwupd services and ensures a persistent swap file.
  *
- * Both probes run before the first change. Swap is only created when none is active, and the fstab entry is
- * only appended when /etc/fstab has no /swapfile entry. Touches nothing under /etc/wireguard or the network.
+ * Both probes run before the first change. The swap file is only created when no swap is active. Its fstab entry
+ * is appended on any deploy that finds /swapfile active or creates it and finds no /swapfile entry in /etc/fstab,
+ * so a run interrupted after activation self-heals. When only other swap is active, nothing is changed. Touches
+ * nothing under /etc/wireguard or the network.
  */
 async function hardenMemory(
   host: string,
@@ -504,7 +508,7 @@ async function hardenMemory(
   const swapState = await probeRemote(
     'whether swap is active (swapon --show)',
     SWAP_PROBE_COMMAND,
-    ['SWAP_ACTIVE', 'SWAP_NONE'],
+    ['SWAP_NONE', 'SWAP_OURS', 'SWAP_OTHER'],
     host,
     deployEnv,
     spawnFn,
@@ -513,8 +517,9 @@ async function hardenMemory(
   )
 
   const fstabState =
-    swapState === 'SWAP_NONE'
-      ? await probeRemote(
+    swapState === 'SWAP_OTHER'
+      ? undefined
+      : await probeRemote(
           `whether /etc/fstab has a ${SWAP_FILE_PATH} entry`,
           FSTAB_PROBE_COMMAND,
           ['FSTAB_PRESENT', 'FSTAB_ABSENT'],
@@ -524,7 +529,6 @@ async function hardenMemory(
           keyPath,
           controlPath,
         )
-      : undefined
 
   const fwupdMask = await runCommand(
     'Masking fwupd refresh timer and fwupd services',
@@ -538,24 +542,28 @@ async function hardenMemory(
     )
   }
 
-  if (swapState === 'SWAP_ACTIVE') {
-    console.warn('\u001B[1;32m✓\u001B[0m swap already active, leaving it alone')
+  if (swapState === 'SWAP_OTHER') {
+    console.warn('\u001B[1;32m✓\u001B[0m unrelated swap already active, leaving it alone')
     return
   }
 
-  const steps: [label: string, command: string][] = [
-    [
-      `Allocating ${SWAP_FILE_SIZE} swap file at ${SWAP_FILE_PATH}`,
-      // No swap is active, so a leftover file from an interrupted run is safe to replace.
-      `sudo sh -c 'rm -f ${SWAP_FILE_PATH} && fallocate -l ${SWAP_FILE_SIZE} ${SWAP_FILE_PATH}'`,
-    ],
-    [
-      'Restricting swap file to root, mode 0600',
-      `sudo sh -c 'chown root:root ${SWAP_FILE_PATH} && chmod 600 ${SWAP_FILE_PATH}'`,
-    ],
-    ['Formatting swap file', `sudo mkswap ${SWAP_FILE_PATH}`],
-    ['Activating swap file', `sudo swapon ${SWAP_FILE_PATH}`],
-  ]
+  const steps: [label: string, command: string][] = []
+  if (swapState === 'SWAP_NONE') {
+    steps.push(
+      [
+        `Allocating ${SWAP_FILE_SIZE} swap file at ${SWAP_FILE_PATH}`,
+        // No swap is active, so a leftover file from an interrupted run is safe to replace.
+        `sudo sh -c 'rm -f ${SWAP_FILE_PATH} && fallocate -l ${SWAP_FILE_SIZE} ${SWAP_FILE_PATH}'`,
+      ],
+      [
+        'Restricting swap file to root, mode 0600',
+        `sudo sh -c 'chown root:root ${SWAP_FILE_PATH} && chmod 600 ${SWAP_FILE_PATH}'`,
+      ],
+      ['Formatting swap file', `sudo mkswap ${SWAP_FILE_PATH}`],
+      ['Activating swap file', `sudo swapon ${SWAP_FILE_PATH}`],
+    )
+  }
+  // Last, and for both NONE and OURS: persistence is reconciled even when an earlier run stopped after swapon.
   if (fstabState === 'FSTAB_ABSENT') {
     steps.push(['Persisting swap file in /etc/fstab', `sudo sh -c 'echo "${FSTAB_SWAP_LINE}" >> /etc/fstab'`])
   }

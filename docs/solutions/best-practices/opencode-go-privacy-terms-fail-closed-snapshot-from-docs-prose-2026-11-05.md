@@ -20,9 +20,9 @@ related_components:
 
 ## Context
 
-The cliproxy deploy must expose only OpenCode Go models that keep no data, never train on it and need no restricted region. Two upstream sources carry those terms, and neither carries all of them:
+The cliproxy deploy must expose only OpenCode Go models that keep no data, never train on it and are not region-gated. A model is region-gated when either source says its availability depends on region: countries refused, availability limited to permitted regions, a stated hosting location, or a workspace Global-region requirement. Two upstream sources carry these terms, and neither carries all of them:
 
-- **The public Go model list** (`GO_LIVE_MODELS_URL` in `packages/shared/opencode-go/live-models.ts`): per model, a `go` object with three booleans, `training`, `zdr` and `limited_regions`. `limited_regions` means some countries are refused.
+- **The public Go model list** (`GO_LIVE_MODELS_URL` in `packages/shared/opencode-go/live-models.ts`): per model, a `go` object with three booleans: `training`, `zdr` (zero data retention) and `limited_regions` (some countries are refused).
 - **The docs page** `console/go.mdx` in the upstream repository: a Privacy table, footnotes, "Enable restricted models" bullets and Usage limits notices. It has no model ids.
 
 A reviewed snapshot built from both decides what the deploy exposes. A pull request refreshes it, and both the deploy and the monitor apply it.
@@ -50,17 +50,16 @@ const entry = {
 
 - **Retention:** `zeroRetention` needs the list's `zdr: true` and a `0 days` row on the page.
 - **Region:** the page supplies two signals. `availabilityLimited` comes from the footnote `Availability is limited to regions permitted by …` and from the usage-limits notice `Not available in <places>.`. `regionRequirement` comes from the workspace Global-region rule and from `Hosted in <place>.`.
-- **Page only:** retention days, the agreement expiry date and the Global-region rule. The list's `limited_regions` is a different fact (countries refused). A fact only one source can state is not a disagreement; where both state a fact and differ, the PR body lists the model and fact.
+- **Page only:** retention days, the agreement expiry date and the Global-region rule. The list's `limited_regions` is a different fact. A fact only one source can state is not a disagreement; where both state a fact and differ, the PR body lists the model and fact.
 - **Check the page before calling a fact API-only.** Beam Free's region limit was first treated as API-only, but the page states it in a usage notice. With the list flipped to `limited_regions: false`, the builder wrote `regionGated: false` and reported nothing. The parser now reads the notice.
-- **Join by normalized name** (case, whitespace, hyphens) plus the reviewed `DOCS_NAME_ALIASES` map in `model-names.ts`, never by prefix: `Hy4` is a prefix of `Hy4 preview` and `Hy4 flash Free`. A join that pairs nothing throws.
-- **Reports sanitise upstream names** (collapsed whitespace, no backticks, one code span, length cap).
+- **Join by normalized name** (case, whitespace, hyphens) plus the reviewed `DOCS_NAME_ALIASES` map in `model-names.ts`, never by prefix: `Hy4` is a prefix of `Hy4 preview` and `Hy4 flash Free`.
 
 ### Fail closed on anything unrecognised in the page
 
 A row, column, marker, footnote sentence, label or rule the parser cannot map throws `PrivacyTableError`. A format change upstream stops the refresh instead of marking a model safe by accident.
 
 - **Whole sentences and names.** A footnote sentence must match one known form from its first character to its last. A "starts with" or "contains" branch discards the rest of the sentence: `Requests are retained for 0 days, and permission to use your prompts … is granted.` read as plain retention. A label resolves by exact normalized name or a reviewed group, never by prefix or suffix.
-- **Prose is not read as a restriction.** Prose that names a Privacy model, in the restricted-models section or before the Privacy table, throws.
+- **Unstructured prose.** Prose that names a Privacy-table model, in the restricted-models section or before the table, throws. Prose that restricts a model without naming it cannot be detected.
 - **Bullets are strict.** `bulletsOf` requires this exact shape for every list item it sees:
 
   <!-- prettier-ignore -->
@@ -68,52 +67,38 @@ A row, column, marker, footnote sentence, label or rule the parser cannot map th
   const match = /^- \*\*([^*]+):\*\* (.+)$/.exec(line)
   ```
 
-  An item that does not match throws. `- **Label**: text` (colon outside the bold) is still a list item, so it throws instead of silently dropping a region gate. In the footnotes any stray line throws.
+  An item that does not match throws. `- **Label**: text` (colon outside the bold) is still a list item, so it throws instead of silently dropping a region gate.
 
-- **A `*` marker** with no agreement-expiry footnote throws.
-- **Self-check.** The built snapshot must pass the same two-stage `parseSnapshot` the deploy applies.
-- **Linear time.** Every regex is anchored with no nested or overlapping quantifier, because it runs over third-party text. CodeQL flagged three polynomial-backtracking patterns (`stripLinks`, `resolveLabel`, `bulletsOf`); they became linear patterns and plain string splits.
+- **Linear time.** CodeQL flagged three polynomial-backtracking patterns over page text. They were rewritten as linear patterns and plain string splits, and any new pattern over page text must be linear.
 
 ### A failed refresh is itself a failure mode
 
-A refresh that throws leaves the committed snapshot in place, and the deploy keeps applying it. If the same upstream change tightened a term, the snapshot is wrong in the unsafe direction until the parser is fixed. Throw only when the input as a whole is wrong: an unrecognised page structure, a changed response shape, an ambiguous join, a join that pairs nothing. Missing evidence for one model excludes that model (`not-in-snapshot`) and is reported in the workflow log and a PR-body section.
+A refresh that throws leaves the committed snapshot in place, and the deploy keeps applying it. If the same upstream change tightened a term, the snapshot is wrong in the unsafe direction until the parser is fixed. Throw only when the input as a whole is wrong: an unrecognised page structure, a changed response shape, an ambiguous join, a join that pairs nothing. Missing evidence for one model excludes that model (`not-in-snapshot`) and is reported in the workflow log and the PR body.
 
 A first version threw when only one source knew a model. A new list model with no page row, arriving with a new restriction on an exposed model, blocked the refresh and left the restricted model eligible.
 
-The refresh workflow has no failure notification of its own. The daily report surfaced infra#1973.
-
 ### Attribute by content when markup rules keep multiplying
 
-The Usage limits section holds pricing sentences that change weekly, so it is the one place where unrecognised sentences are tolerated. The usage-notice rule, per paragraph:
-
-1. Paragraphs are split on blank lines and headings only, outside code fences. Hard line breaks, list markers, emphasis and colons are not boundaries.
-2. A paragraph with no availability word is ignored.
-3. Every availability sentence in the others must be the recognised form `Not available in <places>.`, or the refresh throws.
-4. The paragraph must name exactly one Privacy model, as a whole word, longest name winning (`Hy4 preview` is not also `Hy4`). That model is region-limited. No model named, or several, throws.
+The Usage limits section holds pricing sentences that change weekly, so it is the one place where unrecognised sentences are tolerated. The rule: recognise availability statements (`Not available in <places>.`), fail on any other availability sentence, and attribute each statement to exactly one recognised name in its paragraph. A name is a Privacy row or a reviewed family label, which limits every row it maps to. A mention strictly inside a longer one is dropped (`Hy4 preview` is not also `Hy4`); overlapping or tied mentions each count, so unclear text fails. `applyUsageNotices` holds the exact paragraph and sentence boundaries.
 
 The rule replaced parsing the `**Model:**` label. Three review rounds each found Markdown that defeated it (the wrong section; `**Beam Free**:` with the colon outside the bold; a hard line break that glued an unreadable label line onto a `**GLM-5.3:**` paragraph, so the restriction landed on GLM-5.3 and Beam was cleared), and each fix added another markup rule. Attribution by the names in the text depends on no markup.
 
 ### Resolve reviewed family mappings only where the page uses the label
 
-`LABEL_GROUPS` maps a family label such as `DeepSeek` to several Privacy rows. Resolved eagerly, a mapping naming a retired family member blocked the refresh although no page text used the label: the fail-stale failure again, fixed before the redesign merged. `nameIndex` now indexes names only, and `resolveEntry` resolves a mapping when text matched it. A mapping that names a retired row throws only then.
+A reviewed mapping such as `DeepSeek` to several Privacy rows is resolved only when text uses its label. Resolved eagerly, a mapping that named a retired family member blocked the refresh although no page text used the label: the fail-stale failure again, fixed before the redesign merged. Building the name index now resolves nothing, so a retired member throws only when some text uses the label.
 
-### One pure eligibility function for the deploy, the monitor and the refresh
+### One eligibility function for the deploy, the monitor and the refresh
 
-`computeEligibility` in `eligibility.ts` takes the parsed snapshot, the live model ids and today's UTC date. Every exclusion has a named reason, from `EXCLUSION_REASONS`: `not-in-snapshot`, `not-live`, `trains-on-data`, `not-zero-retention`, `region-gated`, `agreement-expired`, `invalid-entry`.
-
-- `exclusionReason` returns the first reason that applies. Anything unknown, invalid, expired or not live is excluded, never assumed safe.
-- Region-gated models are never exposed; there is no override flag. An agreement that expires on `todayUtc` is still valid.
-- A malformed entry excludes only that model; a malformed envelope throws. Error text carries field paths and issue codes, never values.
-- `preflightOpenCodeGo` in `apps/cliproxy/src/deploy.ts` fetches the live list on each deploy and fails before any SSH when the eligible set is empty. The monitor probe in `packages/cli/src/commands/cliproxy/status.ts` recomputes eligibility on every run from the committed snapshot. It flags an exposed model that is no longer eligible, including one whose agreement has expired, as `privacy-noncompliant`.
+`computeEligibility` in `eligibility.ts` is the single function all three share. Every exclusion has a named reason, and anything unknown, invalid, expired or not live is excluded, never assumed safe. Region-gated models are never exposed and there is no override. The monitor detects an exposed model that has become ineligible between deploys, including one whose agreement has expired, and flags it `privacy-noncompliant`; it does not remove the model. The next deploy does.
 
 ### Refresh by pull request, never by deploy
 
-- **Source.** `refreshGoPrivacy` in `apps/cliproxy/scripts/refresh-go-privacy.ts` resolves the upstream `dev` head SHA on each run, fetches `go.mdx` at exactly that SHA through GitHub's raw-content endpoint (`goMdxUrl`), fetches the live model list, builds the snapshot and records the SHA. The SHA lookup on `api.github.com` carries the read-only workflow token to avoid the anonymous rate limit. The raw fetch is unauthenticated. The script does not scrape the website, because the docs site terms prohibit crawling.
-- **Change test.** `diffSnapshots` compares model terms only, so a new source commit alone opens no PR. Fetch, parse and comparison failures throw before the snapshot is replaced. On a change the script writes the PR body, then atomically replaces the snapshot.
-- **PR.** `.github/workflows/opencode-go-privacy.yaml` runs daily and opens or updates one stable branch, `opencode-go-privacy`. `renderPrBody` lists added, removed and changed models with their privacy fields, the disagreements, the models left out and an upstream compare link. Auto-merge stays off. Merging triggers the gated cliproxy deploy, and a model the PR adds is exposed only after that deploy is approved.
-- **Credentials.** Checkout persists none. The refresh step and the stale-PR lookup use only the read-only workflow token. A GitHub App token with `contents: write` and `pull-requests: write` is minted only after the parse succeeded and either the snapshot changed or a stale PR is open.
-- **Stale PR.** When upstream terms match `main` again, the run closes the open same-repository PR with a comment and then deletes the branch. A PR on that branch from a fork is left alone.
-- **Review rule.** The upstream page is the authority, not the parsed JSON (`docs/runbooks/cliproxy-opencode-go.md`, "Snapshot refresh PR review").
+- **Pin the source by commit.** The refresh resolves the upstream `dev` head, reads the page at exactly that commit and records it, so a change is reviewable through a compare link.
+- **Read the repository file, not the site.** The page comes from GitHub's raw-content endpoint, because the docs site terms prohibit crawling.
+- **A person reviews term changes.** The workflow opens or updates one PR and auto-merge stays off. The upstream page is the authority, not the parsed JSON.
+- **Production stays behind the deploy gate.** Merging triggers the gated cliproxy deploy, and a model the PR adds is exposed only after that deploy is approved. The refresh never deploys.
+
+Mechanics: [`.github/workflows/opencode-go-privacy.yaml`](../../../.github/workflows/opencode-go-privacy.yaml) and [Snapshot refresh PR review](../../runbooks/cliproxy-opencode-go.md#snapshot-refresh-pr-review).
 
 ### Test against pinned fixtures, never against the file the refresh rewrites
 
@@ -124,8 +109,8 @@ The rule replaced parsing the `**Model:**` label. Three review rounds each found
 ## Evidence: the snapshot went stale twice in ten days
 
 - **2026-11-10 to 11-12:** the scheduled refresh failed on an unmapped footnote (fixed by #1901).
-- **2026-11-17:** upstream removed the page's Endpoints table (00:30Z) and restored the Privacy table without its training column (00:34Z). At 13:13Z it changed Gemini 4 Argon from 0 to 55 days retention. The scheduled refreshes failed on 11-17, 11-18 and 11-19 (#1973), so the committed snapshot still marked Argon zero-retention.
-- **2026-11-19:** the cliproxy deploy at 00:50Z applied 20 eligible models, Argon among them. #1976 marked Argon not zero-retention. The deploy that followed (06:16Z) applied 19. The proxy offered Argon for about 41 hours after the upstream page said 55 days. Containment took effect at the gated deploy, not at the merge of #1976.
+- **2026-11-17 to 11-19:** on 11-17 upstream removed the page's Endpoints table and its training column, then changed Gemini 4 Argon from 0 to 55 days retention. The scheduled refresh failed from 11-17 to 11-19 (`Endpoints: no table found`, #1973), so the committed snapshot still marked Argon zero-retention and the proxy kept offering it.
+- **Exposure:** the proxy offered Argon for about 41 hours after the upstream page said 55 days. #1976 marked Argon not zero-retention; containment took effect at the gated deploy that followed, not at the merge.
 - **Not established:** whether any request used Argon in that window. The proxy's container log does not record model names, and the container was recreated later that day. The authoritative record is the provider's usage view for the account.
 
 ## Known limits
@@ -139,10 +124,8 @@ The rule replaced parsing the `**Model:**` label. Three review rounds each found
 ## Why This Matters
 
 - Prose has no schema. Without fail-closed parsing, a reworded sentence makes a model look safe by omission.
-- A failed refresh keeps serving the last reviewed snapshot, which is wrong exactly when upstream has tightened a term.
 - Without pinned fixtures, every legitimate refresh breaks CI, or the tests quietly stop checking anything.
 - Without a PR, a privacy change reaches production with no human reading the upstream table.
-- An agreement that expires between deploys keeps the model served until the next deploy. The monitor's eligibility check is what tells the operator; it does not remove the model.
 
 ## When to Apply
 
@@ -152,12 +135,12 @@ The rule replaced parsing the `**Model:**` label. Three review rounds each found
 
 ## Examples
 
-- Reviewing a refresh PR: open the compare link, check each Added, Removed and Changed model against the table in that diff, and check every new model for zero retention, no training, no region requirement and any agreement expiry.
-- Stopping exposure before a PR can merge: send the field-scoped PATCH from "Emergency disable without a deploy" in `docs/runbooks/cliproxy-opencode-go.md`, then set `enabled` to false in a PR.
+- Reviewing a refresh PR: [Snapshot refresh PR review](../../runbooks/cliproxy-opencode-go.md#snapshot-refresh-pr-review).
+- A failing scheduled refresh: [The scheduled refresh is failing](../../runbooks/cliproxy-opencode-go.md#the-scheduled-refresh-is-failing).
 
 ## Related
 
-- `docs/runbooks/cliproxy-opencode-go.md` — "Snapshot refresh PR review", "The scheduled refresh is failing" and "Limitations".
+- `docs/runbooks/cliproxy-opencode-go.md` — emergency disable and "Limitations".
 - `docs/solutions/integration-issues/opencode-go-through-cliproxy-session-header-billing-source-2026-11-05.md` — routing, billing signal and key scope for the same entry.
 - `docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md` — guards on the whole-section write that applies the eligible list.
 - `docs/solutions/best-practices/upstream-data-file-download-not-checkout-bun-test-discovery-2026-11-04.md` — the same download-one-file-not-checkout approach.

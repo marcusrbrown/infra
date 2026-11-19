@@ -95,7 +95,7 @@ A reviewed mapping such as `DeepSeek` to several Privacy rows is resolved only w
 
 - **Pin the source by commit.** The refresh resolves the upstream `dev` head, reads the page at exactly that commit and records it, so a change is reviewable through a compare link.
 - **Read the repository file, not the site.** The page comes from GitHub's raw-content endpoint, because the docs site terms prohibit crawling.
-- **A person reviews term changes.** The workflow opens or updates one PR and auto-merge stays off. The upstream page is the authority, not the parsed JSON.
+- **A person reviews term changes.** The workflow opens or updates one PR and auto-merge stays off. The two upstream sources are the evidence, not the parsed JSON, and the more restrictive value wins.
 - **Production stays behind the deploy gate.** Merging triggers the gated cliproxy deploy, and a model the PR adds is exposed only after that deploy is approved. The refresh never deploys.
 
 Mechanics: [`.github/workflows/opencode-go-privacy.yaml`](../../../.github/workflows/opencode-go-privacy.yaml) and [Snapshot refresh PR review](../../runbooks/cliproxy-opencode-go.md#snapshot-refresh-pr-review).

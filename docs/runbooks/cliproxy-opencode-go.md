@@ -208,13 +208,17 @@ The `OpenCode Go Privacy` workflow has no failure notification of its own. A fai
 
    The docs page is the file named by `source.repo` and `source.path` in `privacy-snapshot.json`, read at the head of its `dev` branch. List every model that either source restricts and the snapshot still clears (`zeroRetention: true`, `trainsOnData: false` or `regionGated: false`), and every model whose agreement date differs from `agreementExpiry`. If the current terms for a model cannot be determined with confidence, use [Emergency disable](#emergency-disable-without-a-deploy) instead of concluding there is no exposure.
 
-3. Contain first. Open one PR that changes only `privacy-snapshot.json`, setting every affected field to its restrictive value (`zeroRetention: false`, `trainsOnData: true`, `regionGated: true`, or the earlier agreement date). It takes effect when the gated cliproxy deploy is approved and applied, not at merge. Merge it, approve the gate, then confirm the affected models are no longer listed:
+3. Contain first. Open one PR that changes only `privacy-snapshot.json`, setting each affected boolean to its restrictive value (`zeroRetention: false`, `trainsOnData: true` or `regionGated: true`). It takes effect when the gated cliproxy deploy is approved and applied, not at merge. Merge it, approve the gate, then confirm the affected models are no longer listed:
 
    ```bash
    bunx @marcusrbrown/infra cliproxy models opencode-go
    ```
 
-   If that cannot happen promptly, use [Emergency disable](#emergency-disable-without-a-deploy).
+   Use [Emergency disable](#emergency-disable-without-a-deploy) instead of this PR in two cases:
+   - The deploy cannot happen promptly.
+   - The containment would leave no eligible model. The deploy preflight then fails with `no eligible OpenCode Go models` before it writes anything, so the old list stays live.
+
+   An `agreementExpiry` date does not remove a model by itself. The expiry day still counts as valid, and a model is excluded only by a deploy that runs after that UTC day. To record an earlier date, change `agreementExpiry` in the same PR. To remove the model now, set `zeroRetention: false` as well.
 
 4. Fix the parser or the alias map, add the failing case to the fixtures, and merge.
 5. Dispatch the workflow from `main` and confirm the workflow run succeeds, not only one step:

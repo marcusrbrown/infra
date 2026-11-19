@@ -10,6 +10,7 @@ import {
   describeUnmatched,
 } from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
 import {
+  computeEligibility,
   modelEntrySchema,
   parseSnapshot,
   SNAPSHOT_SOURCE_PATH,
@@ -59,6 +60,8 @@ export interface RefreshOptions {
    * api.github.com only, never to raw.githubusercontent.com. Unset means an unauthenticated request.
    */
   readonly githubToken?: string
+  /** Today for the eligibility check behind the PR warning (an agreement that has expired is not exposed). */
+  readonly now?: () => Date
   /** Receives one line per model left out of the snapshot, whether or not a PR opens. Defaults to stdout. */
   readonly log?: (line: string) => void
 }
@@ -155,10 +158,13 @@ export function renderPrBody(
   before: Readonly<Record<string, unknown>>,
   disagreements: readonly Disagreement[] = [],
   unmatched: readonly Unmatched[] = [],
+  previouslyEligible: ReadonlySet<string> = new Set(),
 ): string {
-  // The snapshot currently exposes these, and upstream published no privacy fields for them: this PR removes them.
+  // Models the previous snapshot made eligible (listed, zero retention, no training, no region gate, agreement in
+  // date, live) and upstream published no privacy fields for: this PR takes a working model away. A model that was
+  // listed but already ineligible is only a snapshot tidy-up, so it gets no warning.
   const droppedExposed = unmatched
-    .filter(item => item.missing === 'privacy' && item.id !== null && item.id in before)
+    .filter(item => item.missing === 'privacy' && item.id !== null && previouslyEligible.has(item.id))
     .map(item => `\`${item.id}\``)
   const lines: string[] = [
     '## OpenCode Go privacy snapshot refresh',
@@ -166,7 +172,7 @@ export function renderPrBody(
     ...(droppedExposed.length === 0
       ? []
       : [
-          `**Warning: upstream published no privacy fields for ${droppedExposed.length} model(s) the snapshot currently exposes (${droppedExposed.join(', ')}), so this PR removes them. Check that the live models list is not degraded before merging: removing a model is the safe direction for privacy but takes it away from agents.**`,
+          `**Warning: upstream published no privacy fields for ${droppedExposed.length} model(s) that were eligible under the previous snapshot (${droppedExposed.join(', ')}), so this PR removes them. Check that the live models list is not degraded before merging: removing a model is the safe direction for privacy but takes it away from agents.**`,
           '',
         ]),
     `Source: \`${SNAPSHOT_SOURCE_REPO}\` @ \`${next.source.commit}\` (\`${SNAPSHOT_SOURCE_PATH}\`)`,
@@ -249,6 +255,7 @@ export async function refreshGoPrivacy({
   bodyPath,
   fetch: fetchImpl = globalThis.fetch,
   githubToken,
+  now = () => new Date(),
   log = line => process.stdout.write(`${line}\n`),
 }: RefreshOptions = {}): Promise<RefreshResult> {
   let rawBefore: unknown
@@ -279,8 +286,15 @@ export async function refreshGoPrivacy({
     return {changed: false, sourceCommit: sha}
   }
 
-  if (bodyPath !== undefined)
-    writeAtomic(bodyPath, renderPrBody(previous.source.commit, next, diff, beforeModels, disagreements, unmatched))
+  if (bodyPath !== undefined) {
+    // Real exposure: what the previous snapshot would serve today against the list upstream publishes now.
+    const liveIds = [...liveModels.map(model => model.id), ...noPrivacy.map(item => item.id)]
+    const previouslyEligible = new Set(computeEligibility(previous, liveIds, now().toISOString().slice(0, 10)).eligible)
+    writeAtomic(
+      bodyPath,
+      renderPrBody(previous.source.commit, next, diff, beforeModels, disagreements, unmatched, previouslyEligible),
+    )
+  }
   writeAtomic(snapshotPath, serializeSnapshot(next))
   return {changed: true, sourceCommit: sha}
 }

@@ -13,8 +13,8 @@ import {z} from 'zod'
  * in `noPrivacy`, never read as "all false", and the refresh leaves that model out instead of stopping for every
  * model. A response that is wrong as a whole still throws `LiveModelsError` and the refresh stops with the snapshot
  * untouched: a missing or changed envelope, a bad or duplicate id, a `go` that is present but not an object with
- * three booleans (the contract changed, so every entry is suspect), no entry with `go` at all, or more than half
- * the entries without it (a degraded list, not a gap). Fields it does not read are ignored, so upstream can add
+ * three booleans (the contract changed, so every entry is suspect), no entry has a `go` object, or more than half
+ * of the entries lack one (a degraded list, not a gap). Fields it does not read are ignored, so upstream can add
  * fields without breaking the refresh.
  */
 

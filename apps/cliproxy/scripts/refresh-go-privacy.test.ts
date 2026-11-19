@@ -453,6 +453,115 @@ describe('refreshGoPrivacy: a live model with no privacy fields is left out and 
     expect(body.indexOf(lead ?? '')).toBeLessThan(body.indexOf('### Added'))
   })
 
+  describe('the warning line is true: it names only models the previous snapshot made eligible', () => {
+    const TODAY = new Date('2026-11-19T00:00:00Z')
+    const runOn = (h: Harness, now = TODAY) =>
+      refreshGoPrivacy({snapshotPath: h.snapshotPath, bodyPath: h.bodyPath, fetch: h.fetch, now: () => now})
+    const warningOf = (body: string): string | undefined => body.split('\n').find(line => line.startsWith('**Warning'))
+
+    it('an eligible model that loses go gets the warning, and it says why the model was exposed', async () => {
+      const h = harness(tableAt(OLD_SHA), {live: withoutGo('glm-5.3')})
+      await runOn(h)
+      const warning = warningOf(readFileSync(h.bodyPath, 'utf8'))
+      expect(warning).toContain('`glm-5.3`')
+      expect(warning).toContain('eligible under the previous snapshot')
+      expect(warning).not.toContain('currently exposes')
+    })
+
+    it.each([
+      ['not zero retention', 'beam-free'],
+      ['region-gated', 'longcat-2.5-free'],
+      ['not zero retention (55 days)', 'gemini-4-argon'],
+      ['trains on data', 'iceman-contributor-free'],
+    ])(
+      'a listed model that was already ineligible (%s) gets no warning, but is still removed and reported',
+      async (_why, id) => {
+        const committed = tableAt(OLD_SHA)
+        expect(committed.models[id]).toBeDefined()
+        const h = harness(committed, {live: withoutGo(id)})
+
+        const result = await runOn(h)
+
+        expect(result.changed).toBe(true)
+        const body = readFileSync(h.bodyPath, 'utf8')
+        expect(warningOf(body)).toBeUndefined()
+        expect(body).toContain('### Removed (1)')
+        expect(body).toContain(`- \`${id}\`: was `)
+        expect(body).toContain('upstream published no privacy fields')
+        expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models[id]).toBeUndefined()
+      },
+    )
+
+    it('a model whose agreement had expired is ineligible under the previous snapshot, so no warning', async () => {
+      const committed = tableAt(OLD_SHA)
+      const glm = committed.models['glm-5.3']
+      if (glm === undefined) throw new Error('fixture has no glm-5.3')
+      const h = harness(
+        {...committed, models: {...committed.models, 'glm-5.3': {...glm, agreementExpiry: '2026-11-01'}}},
+        {live: withoutGo('glm-5.3')},
+      )
+      await runOn(h)
+      expect(warningOf(readFileSync(h.bodyPath, 'utf8'))).toBeUndefined()
+    })
+
+    it('with an eligible and an ineligible model both losing go, the warning names only the eligible one and counts it', async () => {
+      const h = harness(tableAt(OLD_SHA), {live: withoutGo('glm-5.3', 'beam-free')})
+      await runOn(h)
+      const warning = warningOf(readFileSync(h.bodyPath, 'utf8'))
+      expect(warning).toContain('`glm-5.3`')
+      expect(warning).not.toContain('beam-free')
+      expect(warning).toContain('1 model(s)')
+    })
+
+    it('a model that is eligible only because the live list says so: a model missing from the live list is not eligible', async () => {
+      // `glm-5.3` is in the snapshot, but upstream no longer lists it at all: it is not "dropped for want of go".
+      const body = JSON.parse(LIVE_JSON) as {data: {id: string}[]}
+      body.data = body.data.filter(entry => entry.id !== 'glm-5.3')
+      const h = harness(tableAt(OLD_SHA), {live: JSON.stringify(body)})
+      await runOn(h)
+      expect(warningOf(readFileSync(h.bodyPath, 'utf8'))).toBeUndefined()
+    })
+  })
+
+  it('a model without go and a restriction on another model arrive together: both land in one changed snapshot', async () => {
+    const committed = tableAt(OLD_SHA)
+    expect(committed.models['kimi-k3']).toMatchObject({zeroRetention: true, regionGated: false})
+    const body = JSON.parse(withoutGo('glm-5.3')) as {data: Record<string, unknown>[]}
+    const kimi = body.data.find(entry => entry.id === 'kimi-k3')
+    if (kimi === undefined) throw new Error('fixture has no kimi-k3')
+    ;(kimi.go as Record<string, unknown>).zdr = false
+    ;(kimi.go as Record<string, unknown>).limited_regions = true
+    const h = harness(committed, {live: JSON.stringify(body)})
+    const {lines, done} = (() => {
+      const captured: string[] = []
+      return {
+        lines: captured,
+        done: refreshGoPrivacy({
+          snapshotPath: h.snapshotPath,
+          bodyPath: h.bodyPath,
+          fetch: h.fetch,
+          log: line => captured.push(line),
+        }),
+      }
+    })()
+
+    const result = await done
+
+    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA})
+    const written = JSON.parse(readFileSync(h.snapshotPath, 'utf8')) as PrivacySnapshot
+    expect(written.models['glm-5.3']).toBeUndefined()
+    expect(written.models['kimi-k3']).toMatchObject({zeroRetention: false, regionGated: true})
+    const prBody = readFileSync(h.bodyPath, 'utf8')
+    expect(prBody).toContain('### Removed (1)')
+    expect(prBody).toContain('- `glm-5.3`: was zero retention: yes')
+    expect(prBody).toContain('- `kimi-k3`: was zero retention: yes, trains on data: no, region-gated: no')
+    expect(prBody).toContain('now zero retention: no, trains on data: no, region-gated: yes')
+    expect(prBody).toContain('### Left out of the snapshot (1)')
+    expect(prBody).toContain('upstream published no privacy fields')
+    expect(prBody).toContain('- `kimi-k3` (`Kimi K3`), zero retention: API zdr: false; docs: 0 days; snapshot: no')
+    expect(lines).toHaveLength(1)
+  })
+
   it('has no warning line when the model was not exposed anyway', async () => {
     const committed = tableAt(OLD_SHA)
     const {'glm-5.3': _dropped, ...rest} = committed.models

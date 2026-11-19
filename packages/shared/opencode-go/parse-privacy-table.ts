@@ -16,9 +16,9 @@
  *   branch, so a clause added to a known sentence is a new sentence and throws.
  * - A footnote label names a row by exact normalized name, a list of exact names, or a label in `LABEL_GROUPS`.
  *   Never by prefix or suffix.
- * - The per-model notices in the Usage limits section (`**Beam Free:** Free for a limited time. Not available in
- *   ...`) are read for the region limit only. Pricing sentences there churn weekly, so they are ignored; a sentence
- *   that looks like an availability or region statement must match the one known form or the refresh throws.
+ * - The Usage limits section is read for region limits by paragraph, never by markup: a paragraph with an
+ *   availability word must hold only the recognised "Not available in <places>." form and must name exactly one
+ *   Privacy model. Pricing paragraphs churn weekly and are ignored.
  * - Prose that names a Privacy model, in the restricted-models section or in front of the Privacy table, throws:
  *   a restriction written as prose is not read, so it must not pass silently. Known limit: prose that restricts
  *   models without naming one cannot be detected, and prose elsewhere on the page is not inspected.
@@ -267,13 +267,14 @@ function bulletsOf(
 
 const isWordChar = (char: string | undefined): boolean => char !== undefined && /[\da-z]/.test(char)
 
-/** True when `name` occurs in `haystack` as whole words (both are already normalized). */
-function mentions(haystack: string, name: string): boolean {
-  if (name === '') return false
+/** Start indexes where `name` occurs in `haystack` as whole words (both are already normalized). */
+function occurrences(haystack: string, name: string): number[] {
+  const starts: number[] = []
+  if (name === '') return starts
   for (let from = haystack.indexOf(name); from !== -1; from = haystack.indexOf(name, from + 1)) {
-    if (!isWordChar(haystack[from - 1]) && !isWordChar(haystack[from + name.length])) return true
+    if (!isWordChar(haystack[from - 1]) && !isWordChar(haystack[from + name.length])) starts.push(from)
   }
-  return false
+  return starts
 }
 
 /**
@@ -297,7 +298,7 @@ function assertProseNamesNoModel(
     ]),
   ]
   for (const {shown, key} of names) {
-    if (mentions(haystack, key)) {
+    if (occurrences(haystack, key).length > 0) {
       throw new PrivacyTableError(
         `${where}: prose names ${quoted(shown)}. Prose is not read as a restriction, so state it as a bullet in the form the section uses`,
       )
@@ -432,113 +433,125 @@ const isPlaceList = (list: string): boolean =>
     .filter(word => word !== '')
     .every(word => /^[A-Z][A-Za-z]*$/.test(word) || PLACE_WORDS.has(word))
 
-const LIST_MARKER = /^\s*(?:[-*+]|\d+[.)])\s+/
-const EMPHASIS_RUN = /^[*_]{1,3}/
-
 /**
- * Read a notice label off the start of a line: an emphasised phrase followed by a colon, with the colon inside or
- * outside the emphasis. Accepted: `**Beam Free:**`, `**Beam Free**:`, `__Beam Free:__`, `*Beam Free:*`,
- * `_Beam Free:_`, `***Beam Free:***`, spaces inside the emphasis, a link inside the label, and a list marker in
- * front. Anything else is not a label, and the caller's net decides whether that matters. No regex runs over the
- * label itself: the line is cut with `indexOf`-style searches so there is nothing to backtrack.
+ * True when the sentence is the recognised form, with at most a label in front of it: `**Beam Free:** Not available
+ * in Angola.` Whatever precedes `Not available in` must hold no availability word, so "Beam Free is not available in
+ * Angola." (a reworded restriction) is not recognised. The label itself is never parsed; names are read separately.
  */
-function parseNoticeLabel(raw: string): {label: string; body: string} | undefined {
-  const text = stripLinks(raw.replace(LIST_MARKER, '')).trimStart()
-  const open = EMPHASIS_RUN.exec(text)?.[0]
-  if (open === undefined) return undefined
-  const rest = text.slice(open.length)
-  const closeAt = rest.search(/[*_]/)
-  if (closeAt <= 0) return undefined
-  const inner = rest.slice(0, closeAt).trim()
-  const closer = EMPHASIS_RUN.exec(rest.slice(closeAt))?.[0] ?? ''
-  const after = rest.slice(closeAt + closer.length)
-  const colonInside = inner.endsWith(':')
-  const colonOutside = after.trimStart().startsWith(':')
-  if (!colonInside && !colonOutside) return undefined
-  const label = (colonInside ? inner.slice(0, -1) : inner).trim()
-  if (label === '' || label.includes(':')) return undefined
-  const body = colonOutside ? after.trimStart().slice(1) : after
-  return {label, body: body.trim()}
-}
-
-interface Notice {
-  /** The model label, or null when the block has no label this parser can read. */
-  label: string | null
-  text: string
+function isRecognisedAvailability(sentence: string): boolean {
+  const at = sentence.indexOf('Not available in ')
+  if (at === -1 || AVAILABILITY_WORDS.test(sentence.slice(0, at))) return false
+  const places = NOT_AVAILABLE_SENTENCE.exec(sentence.slice(at))?.[1]
+  return places !== undefined && isPlaceList(places)
 }
 
 /**
- * The blocks of a section outside fenced code: a paragraph runs to the next blank line or heading, and a list
- * item or a line that starts with a readable label starts a block of its own. Each block is a notice, labelled
- * when its first line carries a label, unlabelled otherwise.
+ * The paragraphs of a section, outside fenced code. Blank lines and headings are the only boundaries: a hard line
+ * break (two trailing spaces or a backslash), a list marker, emphasis or a colon is not one, so no markup decides
+ * where a notice starts or ends.
  */
-function noticesOf(lines: readonly string[]): Notice[] {
-  const notices: Notice[] = []
-  let current: {label: string | null; parts: string[]} | undefined
+function paragraphsOf(lines: readonly string[]): string[] {
+  const paragraphs: string[] = []
+  let current: string[] = []
   let inFence = false
   const flush = (): void => {
-    if (current !== undefined) notices.push({label: current.label, text: current.parts.join(' ')})
-    current = undefined
+    if (current.length > 0) paragraphs.push(current.join(' '))
+    current = []
   }
   for (const line of lines) {
     if (line.trimStart().startsWith('```')) {
       flush()
       inFence = !inFence
-      continue
-    }
-    if (inFence) continue
-    if (line.trim() === '' || line.startsWith('#')) {
-      flush()
-      continue
-    }
-    const labelled = parseNoticeLabel(line)
-    if (labelled !== undefined) {
-      flush()
-      current = {label: labelled.label, parts: [labelled.body]}
-    } else if (LIST_ITEM.test(line) || current === undefined) {
-      flush()
-      current = {label: null, parts: [line.replace(LIST_MARKER, '').trim()]}
-    } else current.parts.push(line.trim())
+    } else if (inFence) continue
+    else if (line.trim() === '' || line.startsWith('#')) flush()
+    else current.push(line.replace(/\\$/, '').trim())
   }
   flush()
-  return notices
+  return paragraphs
+}
+
+interface NameEntry {
+  /** The name as the page writes it, for messages. */
+  shown: string
+  targets: Accumulator[]
+}
+
+/** Normalized name -> the rows it names: every row name, and the reviewed family labels. */
+function nameIndex(accumulators: ReadonlyMap<string, Accumulator>): Map<string, NameEntry> {
+  const index = new Map<string, NameEntry>()
+  const add = (shown: string, targets: Accumulator[]): void => {
+    const key = normalizeModelName(shown)
+    index.set(key, {shown: index.get(key)?.shown ?? shown, targets: [...(index.get(key)?.targets ?? []), ...targets]})
+  }
+  for (const accumulator of accumulators.values()) add(accumulator.row.name, [accumulator])
+  for (const label of LABEL_GROUPS.keys()) add(label, resolveToken(label, accumulators) ?? [])
+  return index
 }
 
 /**
- * The per-model notices in the Usage limits section, read for one fact: "Not available in <places>." is the page's
- * statement of a model's region limit. Everything else in a notice is pricing and limits, which change weekly, so
- * full recognition is not required here: only a sentence that looks like an availability statement must match.
- * This is the only place on the page where unrecognised sentences are tolerated.
+ * The names a paragraph mentions, as whole words, longest match first: a mention that lies inside a strictly longer
+ * mention does not count ("Hy4 preview" is one name, not also "Hy4"). Mentions that merely overlap, or tie in
+ * length, all count, so an unclear text names more models and throws rather than picking one.
+ */
+function namesIn(text: string, index: ReadonlyMap<string, NameEntry>): string[] {
+  const haystack = normalizeModelName(stripLinks(text).replaceAll(/[*_`]/g, ''))
+  const mentions = [...index.keys()].flatMap(key =>
+    occurrences(haystack, key).map(start => ({key, start, end: start + key.length})),
+  )
+  const kept = mentions.filter(
+    inner =>
+      !mentions.some(
+        outer =>
+          outer.end - outer.start > inner.end - inner.start && outer.start <= inner.start && outer.end >= inner.end,
+      ),
+  )
+  return [...new Set(kept.map(mention => mention.key))]
+}
+
+/**
+ * The region limits stated in the Usage limits section, read for one fact: "Not available in <places>." is the
+ * page's statement of a model's region limit. The notices around it are pricing and limits, which change weekly, so
+ * this is the only place on the page where unrecognised sentences are tolerated, and only when they say nothing
+ * about availability. The rule, per paragraph (blank lines separate paragraphs):
  *
- * The safety net: a block with no readable label that contains an availability word or the recognised form would
- * be a restriction attributed to nobody, so it throws instead of being skipped. An unfamiliar label markup
- * therefore fails loudly and never drops a model's restriction.
+ * 1. A paragraph with no availability sentence (no `AVAILABILITY_WORDS` match) is ignored.
+ * 2. Every availability sentence in the other paragraphs must be the recognised form, or the refresh throws.
+ * 3. The paragraph names exactly one model, by name and not by markup, and that model is limited. A family label
+ *    counts as one name and limits all its rows. No model named, or more than one, throws.
+ *
+ * Known limit: a paragraph that names one model but carries a restriction meant for another, unnamed one, is
+ * attributed to the named model.
  */
 function applyUsageNotices(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): void {
-  for (const {label, text} of noticesOf(sectionLines(lines, '## Usage limits'))) {
-    let limited = false
-    const sentences = stripLinks(text)
+  let index: Map<string, NameEntry> | undefined
+  for (const paragraph of paragraphsOf(sectionLines(lines, '## Usage limits'))) {
+    const sentences = stripLinks(paragraph)
       .split(/(?<=\.)\s+/)
       .map(sentence => sentence.trim())
+      .filter(sentence => AVAILABILITY_WORDS.test(sentence))
     for (const sentence of sentences) {
-      const places = NOT_AVAILABLE_SENTENCE.exec(sentence)?.[1]
-      if (label === null) {
-        // `AVAILABILITY_WORDS` includes "not available", so this also catches the recognised form.
-        if (AVAILABILITY_WORDS.test(sentence)) {
-          throw new PrivacyTableError(
-            `usage limits: availability sentence not attributed to a model ${quoted(sentence)}`,
-          )
-        }
-      } else if (places !== undefined && isPlaceList(places)) limited = true
-      else if (AVAILABILITY_WORDS.test(sentence)) {
-        throw new PrivacyTableError(
-          `usage notice for ${quoted(label)}: unrecognised availability sentence ${quoted(sentence)}`,
-        )
+      if (!isRecognisedAvailability(sentence)) {
+        throw new PrivacyTableError(`usage notice: unrecognised availability sentence ${quoted(sentence)}`)
       }
     }
-    // A pricing-only notice never resolves its label, so a notice for a model with no Privacy row cannot block.
-    if (limited && label !== null)
-      for (const target of resolveLabel(label, accumulators)) target.availabilityLimited = true
+    const [first] = sentences
+    if (first === undefined) continue
+
+    index ??= nameIndex(accumulators)
+    const names = namesIn(paragraph, index)
+    const [name] = names
+    if (name === undefined) {
+      throw new PrivacyTableError(`usage notice: availability sentence not attributed to a model ${quoted(first)}`)
+    }
+    if (names.length > 1) {
+      throw new PrivacyTableError(
+        `usage notice: availability sentence ${quoted(first)} sits in a paragraph that names more than one model (${names
+          .slice(0, 5)
+          .map(key => quoted(index?.get(key)?.shown ?? key))
+          .join(', ')})`,
+      )
+    }
+    for (const target of index.get(name)?.targets ?? []) target.availabilityLimited = true
   }
 }
 

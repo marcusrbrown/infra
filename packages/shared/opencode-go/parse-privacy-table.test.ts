@@ -681,21 +681,22 @@ describe('parsePrivacyDocs on per-model usage notices', () => {
     expect(rows.get('Beam Free')?.availabilityLimited).toBe(true)
   })
 
-  test('an availability notice for a label that matches no row throws, naming the label', () => {
+  test('an availability notice that names no Privacy model throws, because attribution is by name', () => {
     const source = withNotice('**Mystery Model:** Not available in Angola.')
-    expect(() => parsePrivacyDocs(source)).toThrow(/"Mystery Model" does not name a model/)
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/not attributed to a model/)
   })
 
   test('an unrecognised availability sentence for a label that matches no row throws too', () => {
     expect(() => parsePrivacyDocs(withNotice('**Mystery Model:** Unavailable in Angola.'))).toThrow(/usage notice/)
   })
 
-  test('a notice label resolves like every other label: the reviewed family mapping works, a prefix does not', () => {
+  test('a name is an exact row name or a reviewed family label: the DeepSeek family reaches both rows, a prefix reaches none', () => {
     const family = rowsByName(withNotice(`**DeepSeek:** Not available in ${PLACES}.`))
     expect(family.get('DeepSeek V4 Pro')?.availabilityLimited).toBe(true)
     expect(family.get('DeepSeek V4.1 Flash')?.availabilityLimited).toBe(true)
     expect(() => parsePrivacyDocs(withNotice(`**Hy:** Not available in ${PLACES}.`))).toThrow(
-      /"Hy" does not name a model/,
+      /not attributed to a model/,
     )
   })
 
@@ -747,90 +748,152 @@ describe('parsePrivacyDocs on per-model usage notices', () => {
   })
 })
 
-describe('parsePrivacyDocs on usage-notice label markup', () => {
+describe('parsePrivacyDocs on usage-notice attribution', () => {
   const BEAM = noticeLine('Beam Free')
   const ARGON = noticeLine('Gemini 4 Argon')
+  const GLM = noticeLine('GLM-5.3')
   const BODY = BEAM.slice('**Beam Free:** '.length)
+  const PLACES_SENTENCE = 'Not available in Angola, Belarus.'
+  const limitedRows = (source: string): string[] =>
+    parsePrivacyDocs(source)
+      .filter(row => row.availabilityLimited)
+      .map(row => row.name)
+      .sort()
   /** The Beam Free notice with its label written as `label` (and the same body). */
   const beamAs = (label: string): string => mutate(BEAM, `${label} ${BODY}`)
-  const beamLimited = (source: string): boolean | undefined => rowsByName(source).get('Beam Free')?.availabilityLimited
+  /** A paragraph put in front of the Argon notice, after a blank line. */
+  const withParagraph = (paragraph: string): string => mutate(ARGON, `${paragraph}\n\n${ARGON}`)
+
+  test('today’s page: the Beam Free notice is one paragraph that names only Beam Free', () => {
+    expect(limitedRows(mdx)).toEqual(['Beam Free', 'Muse Spark 1.2 Contributor', 'Muse Spark 1.3 Contributor'])
+  })
 
   test.each([
     ['colon inside the bold', '**Beam Free:**'],
     ['colon outside the bold', '**Beam Free**:'],
     ['underscore bold', '__Beam Free:__'],
     ['underscore bold, colon outside', '__Beam Free__:'],
-    ['a trailing space inside the bold', '**Beam Free: **'],
-    ['a space before the colon', '**Beam Free :**'],
-    ['a leading space inside the bold', '** Beam Free:**'],
+    ['spaces inside the bold', '** Beam Free : **'],
     ['italic', '*Beam Free:*'],
     ['underscore italic', '_Beam Free:_'],
-    ['bold italic', '***Beam Free:***'],
     ['a link inside the label', '**[Beam Free](https://example.com/beam):**'],
-    ['a link inside the label, colon outside', '**[Beam Free](https://example.com/beam)**:'],
-    ['a list item', '- **Beam Free:**'],
-    ['a list item, colon outside', '- **Beam Free**:'],
-    ['a starred list item', '* **Beam Free:**'],
-    ['a numbered list item', '1. **Beam Free:**'],
-    ['an indented list item', '  - **Beam Free:**'],
-  ])('accepts %s and the restriction still gates the model', (_label, label) => {
-    expect(beamLimited(beamAs(label))).toBe(true)
-  })
-
-  test.each([
-    ['no markup', 'Beam Free:'],
+    ['no markup at all', 'Beam Free:'],
     ['an HTML label', '<strong>Beam Free:</strong>'],
     ['a code-span label', '`Beam Free`:'],
     ['a sentence about the model', 'Beam Free is'],
-    ['no label at all', ''],
-  ])('fails on %s, because an unfamiliar label would drop the restriction', (_label, label) => {
-    const source = beamAs(label).replace(/\s+Free for a limited time\./, ' Free for a limited time.')
-    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
-    expect(() => parsePrivacyDocs(source)).toThrow(/not attributed to a model/)
-  })
-
-  test('fails on a heading that carries the model name above an unlabelled paragraph', () => {
-    const source = mutate(BEAM, `#### Beam Free\n\n${BODY}`)
-    expect(() => parsePrivacyDocs(source)).toThrow(/not attributed to a model/)
-  })
-
-  test('fails on a table row that carries the restriction', () => {
-    const source = mutate(BEAM, `| Beam Free | ${BODY} |`)
-    expect(() => parsePrivacyDocs(source)).toThrow(/not attributed to a model/)
-  })
-
-  test('fails on a recognised "Not available in <places>." sentence in a paragraph with no label', () => {
-    expect(() => parsePrivacyDocs(mutate(ARGON, `${ARGON}\n\nNot available in Angola, Belarus.`))).toThrow(
-      /not attributed to a model/,
-    )
+    ['a list item', '- **Beam Free:**'],
+    ['a numbered list item', '1. **Beam Free:**'],
+    ['a table row', '| Beam Free |'],
+    ['a lowercase, hyphenated spelling', '**beam-free:**'],
+  ])('markup does not matter: %s still attributes the notice to Beam Free', (_label, label) => {
+    const rows = rowsByName(beamAs(label))
+    expect(rows.get('Beam Free')?.availabilityLimited).toBe(true)
+    expect(rows.get('GLM-5.3')?.availabilityLimited).toBe(false)
   })
 
   test.each([
-    ['a trigger word', 'Some regions are refused.'],
-    ['an availability word', 'Availability varies by plan.'],
-    ['a list item', '- This model is restricted to Europe.'],
-  ])('fails on an unlabelled sentence with %s', (_label, sentence) => {
-    expect(() => parsePrivacyDocs(mutate(ARGON, `${ARGON}\n\n${sentence}`))).toThrow(/not attributed to a model/)
+    ['two trailing spaces', `${GLM}  \n${BEAM.replace('**Beam Free:**', 'Beam Free:')}`],
+    ['a trailing backslash', `${GLM}\\\n${BEAM.replace('**Beam Free:**', 'Beam Free:')}`],
+    ['no break marker at all', `${GLM}\n${BEAM}`],
+  ])('the hard-break case (%s) throws instead of limiting the wrong model', (_label, joined) => {
+    const source = mutate(`${BEAM}\n\n${ARGON}\n\n${GLM}`, `${joined}\n\n${ARGON}`)
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/more than one model/)
+    expect(() => parsePrivacyDocs(source)).toThrow(/GLM-5\.3/)
   })
 
-  test('the failure names a bounded excerpt of the unattributed text', () => {
+  test('a paragraph that names two models and carries a recognised restriction throws, listing both', () => {
+    const source = withParagraph(`**Beam Free:** ${PLACES_SENTENCE} Same price as GLM-5.3.`)
+    expect(() => parsePrivacyDocs(source)).toThrow(
+      /more than one model \("Beam Free", "GLM-5.3"\)|more than one model \("GLM-5.3", "Beam Free"\)/,
+    )
+  })
+
+  test('"Beam Free is not available in X. Same price as GLM-5.3." throws, as an unrecognised availability sentence', () => {
+    const source = withParagraph('Beam Free is not available in Angola. Same price as GLM-5.3.')
+    expect(() => parsePrivacyDocs(source)).toThrow(/unrecognised availability sentence/)
+  })
+
+  test('notices as list items with no blank line between them are one paragraph and throw (blank lines are the only boundary)', () => {
+    const source = mutate(BEAM, `- ${BEAM}\n- ${GLM}`)
+    expect(() => parsePrivacyDocs(source)).toThrow(/more than one model/)
+  })
+
+  test('the same list items separated by blank lines attribute normally', () => {
+    expect(limitedRows(mutate(BEAM, `- ${BEAM}\n\n- ${GLM}`))).toContain('Beam Free')
+    expect(limitedRows(mutate(BEAM, `- ${BEAM}\n\n- ${GLM}`))).not.toContain('GLM-5.3')
+  })
+
+  test('an availability sentence in a paragraph that names no model throws, with a bounded excerpt', () => {
     let message = ''
     try {
-      parsePrivacyDocs(mutate(ARGON, `${ARGON}\n\nNot available in ${'Angola, '.repeat(500)}Belarus.`))
+      parsePrivacyDocs(withParagraph(`Not available in ${'Angola, '.repeat(500)}Belarus.`))
     } catch (error) {
       message = (error as Error).message
     }
+    expect(message).toContain('not attributed to a model')
     expect(message).toContain('Not available in Angola')
     expect(message).toContain('…')
     expect(message.length).toBeLessThan(300)
   })
 
-  test('an unattributed long place list fails quickly', () => {
-    const started = performance.now()
-    expect(() => parsePrivacyDocs(mutate(ARGON, `${ARGON}\n\nNot available in ${'A'.repeat(5000)}!`))).toThrow(
-      /not attributed/,
+  test('a heading line ends a paragraph, so a name above it does not own the sentence below it', () => {
+    expect(() => parsePrivacyDocs(mutate(BEAM, `#### Beam Free\n\n${BODY}`))).toThrow(/not attributed to a model/)
+    expect(() => parsePrivacyDocs(mutate(BEAM, `Beam Free\n#### Notes\n${BODY}`))).toThrow(/not attributed/)
+  })
+
+  describe('overlapping names resolve to the longest name', () => {
+    const HY4_PREVIEW = '**Hy4 preview:**'
+
+    test('a name that contains another row’s name attributes to the longer row only', () => {
+      const rows = limitedRows(withParagraph(`${HY4_PREVIEW} ${PLACES_SENTENCE}`))
+      expect(rows).toContain('Hy4 preview')
+      expect(rows).not.toContain('Hy4')
+      expect(rows).not.toContain('Hy4 flash Free')
+    })
+
+    test('the shorter name alone attributes to the shorter row only', () => {
+      const rows = limitedRows(withParagraph(`**Hy4:** ${PLACES_SENTENCE}`))
+      expect(rows).toContain('Hy4')
+      expect(rows).not.toContain('Hy4 preview')
+      expect(rows).not.toContain('Hy4 flash Free')
+    })
+
+    test('both names written out are two models and throw', () => {
+      expect(() => parsePrivacyDocs(withParagraph(`**Hy4:** ${PLACES_SENTENCE} Same as Hy4 preview.`))).toThrow(
+        /more than one model/,
+      )
+    })
+
+    test('a prefix of a name is not a name', () => {
+      expect(() => parsePrivacyDocs(withParagraph(`**Hy:** ${PLACES_SENTENCE}`))).toThrow(/not attributed to a model/)
+    })
+
+    test('a name inside a longer word is not a name', () => {
+      expect(() => parsePrivacyDocs(withParagraph(`**Hy4x:** ${PLACES_SENTENCE}`))).toThrow(/not attributed to a model/)
+    })
+
+    test('the family label attributes to both DeepSeek rows, and a DeepSeek row name inside it does not add a second name', () => {
+      expect(limitedRows(withParagraph(`**DeepSeek:** ${PLACES_SENTENCE}`))).toEqual(
+        expect.arrayContaining(['DeepSeek V4 Pro', 'DeepSeek V4.1 Flash']),
+      )
+      expect(limitedRows(withParagraph(`**DeepSeek V4 Pro:** ${PLACES_SENTENCE}`))).toContain('DeepSeek V4 Pro')
+      expect(limitedRows(withParagraph(`**DeepSeek V4 Pro:** ${PLACES_SENTENCE}`))).not.toContain('DeepSeek V4.1 Flash')
+    })
+
+    test('the API’s longer display name still attributes to its row', () => {
+      expect(limitedRows(withParagraph(`**DeepSeek V4.1 Flash 1017:** ${PLACES_SENTENCE}`))).toContain(
+        'DeepSeek V4.1 Flash',
+      )
+    })
+  })
+
+  test('a place list wrapped over several lines within one paragraph parses', () => {
+    const wrapped = mutate(
+      BEAM,
+      '**Beam Free:** Free for a limited time. Not available in Angola,\nBelarus, Cambodia,\nChina (including Hong Kong\nand Macau).',
     )
-    expect(performance.now() - started).toBeLessThan(1000)
+    expect(limitedRows(wrapped)).toContain('Beam Free')
   })
 
   test.each([
@@ -838,38 +901,50 @@ describe('parsePrivacyDocs on usage-notice label markup', () => {
     ['colon outside', '**Gemini 4 Argon**:'],
     ['a list item', '- **Gemini 4 Argon:**'],
     ['an italic label', '*Gemini 4 Argon:*'],
-    ['a label for a model with no Privacy row, colon outside', '**Mystery Model**:'],
-  ])('a pricing notice with %s changes nothing and never throws', (_label, label) => {
+    ['plain text', 'Gemini 4 Argon:'],
+    ['a label for a model with no Privacy row', '**Mystery Model**:'],
+    ['a table row', '| Mystery Model |'],
+  ])('a pricing-only paragraph with %s is ignored', (_label, label) => {
     expect(parsePrivacyDocs(mutate(ARGON, `${label} The 50% discount applies through November 30, 2026.`))).toEqual(
       parsePrivacyDocs(mdx),
     )
   })
 
-  test('a notice whose label markup is accepted still has its availability sentence checked', () => {
+  test('a pricing paragraph that names two models is ignored too, because it states no availability', () => {
+    expect(parsePrivacyDocs(withParagraph('**GLM-5.3** costs the same as **Beam Free** through November 30.'))).toEqual(
+      parsePrivacyDocs(mdx),
+    )
+  })
+
+  test('an accepted label markup still has its availability sentence checked', () => {
     expect(() => parsePrivacyDocs(beamAs('**Beam Free**:').replace('Not available in', 'Unavailable in'))).toThrow(
       /unrecognised availability sentence/,
     )
   })
 
-  test('a label that resolves to no row still throws when the colon is outside the bold', () => {
-    expect(() => parsePrivacyDocs(mutate(ARGON, `**Mystery Model**: Not available in Angola.\n\n${ARGON}`))).toThrow(
-      /"Mystery Model" does not name a model/,
-    )
+  test('a name in a pricing paragraph is not "prose that names a model": only the two inspected sections are', () => {
+    expect(() => parsePrivacyDocs(mutate(ARGON, '**Gemini 4 Argon:** Kimi K3 costs less.'))).not.toThrow()
   })
 
-  test('the general prose of the Usage limits section contains no availability word, so the net stays quiet', () => {
+  test('the general prose of the Usage limits section contains no availability word, so no paragraph is relevant', () => {
     expect(() => parsePrivacyDocs(mdx)).not.toThrow()
-    expect(rowsByName(mdx).get('Beam Free')?.availabilityLimited).toBe(true)
   })
 
-  test('a fenced code block in the section is not read as a notice', () => {
+  test('a fenced code block in the section is not read', () => {
     const fenced = mutate(ARGON, `${ARGON}\n\n\`\`\`text\nNot available in the countries of the region.\n\`\`\``)
     expect(parsePrivacyDocs(fenced)).toEqual(parsePrivacyDocs(mdx))
   })
 
-  test('wrapped continuation lines starting with bold text are not new notices', () => {
-    const wrapped = mutate(BEAM, `${BEAM}\n**Go** page.`)
-    expect(parsePrivacyDocs(wrapped)).toEqual(parsePrivacyDocs(mdx))
+  test('a wrapped continuation line that starts with bold text stays in its paragraph', () => {
+    expect(parsePrivacyDocs(mutate(BEAM, `${BEAM}\n**Go** page.`))).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('a very long unattributable near-miss fails quickly', () => {
+    const started = performance.now()
+    expect(() => parsePrivacyDocs(withParagraph(`Beam Free: Not available in ${'A'.repeat(5000)}!`))).toThrow(
+      /unrecognised availability sentence/,
+    )
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 })
 

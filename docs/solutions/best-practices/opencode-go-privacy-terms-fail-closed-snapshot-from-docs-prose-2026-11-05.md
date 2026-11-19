@@ -73,7 +73,7 @@ A row, column, marker, footnote sentence, label or rule the parser cannot map th
 
 ### A failed refresh is itself a failure mode
 
-A refresh that throws leaves the committed snapshot in place, and the deploy keeps applying it. If the same upstream change tightened a term, the snapshot is wrong in the unsafe direction until the parser is fixed. Throw only when the input as a whole is wrong: an unrecognised page structure, a changed response shape, an ambiguous join, a join that pairs nothing. Missing evidence for one model excludes that model (`not-in-snapshot`) and is reported in the workflow log and the PR body.
+A refresh that throws leaves the committed snapshot in place, and the deploy keeps applying it. If the same upstream change tightened a term, the snapshot is wrong in the unsafe direction until the parser is fixed. Throw only when the input as a whole is wrong: an unrecognised page structure, a changed response shape, an ambiguous join, a join that pairs nothing, a model list in which no entry has a `go` object, or more than half of the entries lack one. Missing evidence for one model excludes that model (`not-in-snapshot`) and is reported in the workflow log and the PR body. That covers a model only one source knows and a model the list returns with no `go` object. A missing `go` object is never read as three permissive values.
 
 A first version threw when only one source knew a model. A new list model with no page row, arriving with a new restriction on an exposed model, blocked the refresh and left the restricted model eligible.
 

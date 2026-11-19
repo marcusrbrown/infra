@@ -1,5 +1,5 @@
 import type {PrivacySnapshot} from './eligibility'
-import type {LiveModel} from './live-models'
+import type {LiveModel, NoPrivacyModel} from './live-models'
 import type {DocsPrivacyRow} from './parse-privacy-table'
 
 import {parseSnapshot, SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_SOURCE_PATH, SNAPSHOT_SOURCE_REPO} from './eligibility'
@@ -42,18 +42,26 @@ export interface Disagreement {
 
 /** A model one source knows and the other does not. It has no snapshot entry. */
 export interface Unmatched {
-  /** Which side lacks it: `docs` is a live model with no Privacy row, `api` is a Privacy row with no live model. */
-  missing: 'docs' | 'api'
+  /**
+   * What is missing: `docs` is a live model with no Privacy row, `api` is a Privacy row with no live model, and
+   * `privacy` is a live model upstream published no `go` privacy fields for (whatever the page says about it).
+   */
+  missing: 'docs' | 'api' | 'privacy'
   /** The live model id; null for a Privacy row, which has none. */
   id: string | null
   name: string
 }
 
 /** One left-out model as a report line. The names come from public upstream text, so they are sanitised. */
-export const describeUnmatched = (item: Unmatched): string =>
-  item.missing === 'docs'
-    ? `live model ${reportText(item.id ?? '')} named ${reportText(item.name)}: no Privacy row on the page`
+export function describeUnmatched(item: Unmatched): string {
+  const live = `live model ${reportText(item.id ?? '')} named ${reportText(item.name)}`
+  if (item.missing === 'privacy') {
+    return `${live}: upstream published no privacy fields (\`go\`) for it, so it has no entry`
+  }
+  return item.missing === 'docs'
+    ? `${live}: no Privacy row on the page`
     : `Privacy row ${reportText(item.name)}: no live model`
+}
 
 const FACT_LABELS: Readonly<Record<SnapshotFact, string>> = {
   zeroRetention: 'zero retention',
@@ -82,31 +90,45 @@ interface Joined {
   unmatched: Unmatched[]
 }
 
+/** A live entry the join can see: `model` is null when upstream published no privacy fields for it. */
+interface LiveRef {
+  id: string
+  name: string
+  model: LiveModel | null
+}
+
 /**
- * Pair each docs row with its live model. A row or model without a partner is reported, not paired; an ambiguous
- * pairing throws.
+ * Pair each docs row with its live model. A row or model without a partner is reported, not paired, and a live model
+ * with no privacy fields is reported and never paired; an ambiguous pairing throws. Models with no privacy fields
+ * take part in the name join so they cannot hide an ambiguity, and so their docs row is not misreported.
  */
 function joinSources(
   docs: readonly DocsPrivacyRow[],
   live: readonly LiveModel[],
+  noPrivacy: readonly NoPrivacyModel[],
   aliases: Readonly<Record<string, string>>,
 ): Joined {
-  const liveByName = new Map<string, LiveModel>()
-  const liveById = new Map<string, LiveModel>()
-  for (const model of live) {
-    const key = normalizeModelName(model.name)
-    const same = liveByName.get(key)
+  const refs: LiveRef[] = [
+    ...live.map(model => ({id: model.id, name: model.name, model})),
+    ...noPrivacy.map(item => ({...item, model: null})),
+  ]
+  const refByName = new Map<string, LiveRef>()
+  const refById = new Map<string, LiveRef>()
+  for (const ref of refs) {
+    const key = normalizeModelName(ref.name)
+    const same = refByName.get(key)
     if (same !== undefined) {
       throw new PrivacyTableError(
-        `join: live models ${quoted(same.id)} and ${quoted(model.id)} have the same name after normalization`,
+        `join: live models ${quoted(same.id)} and ${quoted(ref.id)} have the same name after normalization`,
       )
     }
-    liveByName.set(key, model)
-    liveById.set(model.id, model)
+    refByName.set(key, ref)
+    refById.set(ref.id, ref)
   }
 
   const aliasById = new Map(Object.entries(aliases))
   const matched: Joined['matched'] = new Map()
+  const claimed = new Map<string, string>()
   const unmatched: Unmatched[] = []
   const docsKeys = new Set<string>()
   for (const row of docs) {
@@ -114,11 +136,11 @@ function joinSources(
     if (docsKeys.has(key)) throw new PrivacyTableError(`join: duplicate Privacy row ${quoted(row.name)}`)
     docsKeys.add(key)
 
-    const candidates = new Map<string, LiveModel>()
-    const named = liveByName.get(key)
+    const candidates = new Map<string, LiveRef>()
+    const named = refByName.get(key)
     if (named !== undefined) candidates.set(named.id, named)
     const aliasId = aliasById.get(key)
-    const aliased = aliasId === undefined ? undefined : liveById.get(aliasId)
+    const aliased = aliasId === undefined ? undefined : refById.get(aliasId)
     if (aliased !== undefined) candidates.set(aliased.id, aliased)
 
     if (candidates.size > 1) {
@@ -126,22 +148,27 @@ function joinSources(
         `join: Privacy row ${quoted(row.name)} matches more than one live model (${[...candidates.keys()].sort().join(', ')})`,
       )
     }
-    const [model] = candidates.values()
-    if (model === undefined) {
+    const [ref] = candidates.values()
+    if (ref === undefined) {
       unmatched.push({missing: 'api', id: null, name: row.name})
       continue
     }
-    const taken = matched.get(model.id)
+    const taken = claimed.get(ref.id)
     if (taken !== undefined) {
       throw new PrivacyTableError(
-        `join: Privacy rows ${quoted(taken.row.name)} and ${quoted(row.name)} resolve to the same live model ${quoted(model.id)}`,
+        `join: Privacy rows ${quoted(taken)} and ${quoted(row.name)} resolve to the same live model ${quoted(ref.id)}`,
       )
     }
-    matched.set(model.id, {row, model})
+    claimed.set(ref.id, row.name)
+    // A model with no privacy fields has no evidence to pair with the row: it gets no entry (and is reported below).
+    if (ref.model !== null) matched.set(ref.id, {row, model: ref.model})
   }
 
+  for (const ref of refs) {
+    if (ref.model === null) unmatched.push({missing: 'privacy', id: ref.id, name: ref.name})
+  }
   for (const model of live) {
-    if (!matched.has(model.id)) unmatched.push({missing: 'docs', id: model.id, name: model.name})
+    if (!claimed.has(model.id)) unmatched.push({missing: 'docs', id: model.id, name: model.name})
   }
   // A join that pairs nothing is a join that is wrong (a format change), not a quiet day.
   if (matched.size === 0) throw new PrivacyTableError('join: no docs row matches any live model')
@@ -150,13 +177,14 @@ function joinSources(
 
 /**
  * Join the docs rows to the live models and merge their facts. `sourceCommit` is the anomalyco/opencode commit the
- * page came from. `aliases` defaults to the reviewed {@link DOCS_NAME_ALIASES}.
+ * page came from. `options.aliases` defaults to the reviewed {@link DOCS_NAME_ALIASES}; `options.noPrivacy` is the live
+ * entries that carry no privacy fields (from `parseLiveModels`), which get no entry.
  */
 export function buildSnapshot(
   docs: readonly DocsPrivacyRow[],
   live: readonly LiveModel[],
   sourceCommit: string,
-  aliases: Readonly<Record<string, string>> = DOCS_NAME_ALIASES,
+  options: {aliases?: Readonly<Record<string, string>>; noPrivacy?: readonly NoPrivacyModel[]} = {},
 ): BuiltSnapshot {
   if (!/^[0-9a-f]{40}$/.test(sourceCommit)) {
     throw new PrivacyTableError('source commit must be 40 lowercase hex characters')
@@ -164,7 +192,12 @@ export function buildSnapshot(
   if (docs.length === 0) throw new PrivacyTableError('join: the docs page has no Privacy rows')
   if (live.length === 0) throw new PrivacyTableError('join: the live models list is empty')
 
-  const {matched: joined, unmatched} = joinSources(docs, live, aliases)
+  const {matched: joined, unmatched} = joinSources(
+    docs,
+    live,
+    options.noPrivacy ?? [],
+    options.aliases ?? DOCS_NAME_ALIASES,
+  )
   const models: PrivacySnapshot['models'] = {}
   const disagreements: Disagreement[] = []
 

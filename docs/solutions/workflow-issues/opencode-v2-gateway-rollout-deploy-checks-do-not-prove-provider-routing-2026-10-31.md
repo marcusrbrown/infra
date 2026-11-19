@@ -1,7 +1,7 @@
 ---
 title: "OpenCode V2 gateway rollout: deploy checks passed while every model call failed"
 date: 2026-10-31
-last_updated: 2026-11-10
+last_updated: 2026-11-19
 module: apps/gateway
 problem_type: workflow_issue
 component: development_workflow
@@ -71,10 +71,10 @@ Before fro-bot/agent#2001, Reject on V2 could quarantine a repo until its 900-se
 
 ### 4. Rollback rules
 
-- Rollback between releases at or after v0.118.2 is a gateway pin reversal. Pair it with the dashboard pin only when the operator contract version differs. No volume restore. The V2 revert (v0.130.0 back to v0.129.0) was one.
+- Rollback between releases at or after v0.118.2 is a gateway pin reversal. Pair it with the dashboard pin only when the operator contract version differs. No volume restore. The 10-30 revert of v0.130.0 was one.
 - A rollback that crosses v0.118.2 needs the pre-upgrade `workspace-repos` volume snapshot, and the gateway and workspace images must roll back together. See [Rollback is not pin reversal](../../../apps/gateway/AGENTS.md#rollback-is-not-pin-reversal).
-- Never run V2 on v0.130.0: every model call fails with 401. Gateway and workspace switch together, because the gateway picks V1 or V2 per run from the workspace `/readyz` `opencodeVersion`. An old gateway (before v0.130.0) must never run behind a V2 workspace. A new gateway behind a V1 workspace is safe.
-- For the image-pair and break-glass revert steps, see [Revert from OpenCode V2](../../../apps/gateway/AGENTS.md#revert-from-opencode-v2).
+- The rollback floor is v0.130.1: v0.130.0 fails every model call with 401, and releases before it have no working V2 path. The stack runs OpenCode V2 only (the V1 path was removed in v0.139.0), so there is no V1 to fall back to. Gateway and workspace roll back together as a pair, and a gateway at v0.139.0 or later rejects a workspace that does not report an OpenCode V2 version.
+- For the image-pair and break-glass revert steps, see [Revert to a previous gateway and workspace pair](../../../apps/gateway/AGENTS.md#revert-to-a-previous-gateway-and-workspace-pair).
 
 ## Why This Matters
 
@@ -88,7 +88,7 @@ The deploy reported green while every model call failed. The deploy proves conta
 
 ## Related
 
-- [apps/gateway/AGENTS.md](../../../apps/gateway/AGENTS.md): [Revert from OpenCode V2](../../../apps/gateway/AGENTS.md#revert-from-opencode-v2) and [Rollback is not pin reversal](../../../apps/gateway/AGENTS.md#rollback-is-not-pin-reversal)
+- [apps/gateway/AGENTS.md](../../../apps/gateway/AGENTS.md): [Revert to a previous gateway and workspace pair](../../../apps/gateway/AGENTS.md#revert-to-a-previous-gateway-and-workspace-pair) and [Rollback is not pin reversal](../../../apps/gateway/AGENTS.md#rollback-is-not-pin-reversal)
 - [operator-surface-acceptance.md](../../runbooks/operator-surface-acceptance.md), [operator-surface-acceptance-automated.md](../../runbooks/operator-surface-acceptance-automated.md)
 - fro-bot/agent issues #1990, #1992, #2001, #2002, #2007
 - PRs [#1712](https://github.com/marcusrbrown/infra/pull/1712), [#1718](https://github.com/marcusrbrown/infra/pull/1718), [#1720](https://github.com/marcusrbrown/infra/pull/1720), [#1723](https://github.com/marcusrbrown/infra/pull/1723), [#1735](https://github.com/marcusrbrown/infra/pull/1735)

@@ -166,6 +166,15 @@ describe('buildSnapshot combines region with OR', () => {
 })
 
 describe('buildSnapshot joins by normalized name and a reviewed alias', () => {
+  const full = build()
+  const liveModel = (id: string, name: string): LiveModel => ({
+    id,
+    name,
+    training: false,
+    zdr: true,
+    limitedRegions: false,
+  })
+
   test('normalizes case, whitespace and hyphens, and nothing else', () => {
     expect(normalizeModelName('GPT-5.6  Luna')).toBe(normalizeModelName('gpt 5.6 luna'))
     expect(normalizeModelName('MiniMax-M3')).toBe(normalizeModelName('MiniMax M3'))
@@ -180,45 +189,24 @@ describe('buildSnapshot joins by normalized name and a reviewed alias', () => {
     expect(entryOf('deepseek-v4.1-flash')?.agreementExpiry).toBe('2026-11-30')
   })
 
-  test('without the alias, the DeepSeek V4.1 Flash row matches nothing and the build throws', () => {
-    expect(() => buildSnapshot(docs(), live(), FIXTURE_COMMIT, {})).toThrow(PrivacyTableError)
-    expect(() => buildSnapshot(docs(), live(), FIXTURE_COMMIT, {})).toThrow(/DeepSeek V4\.1 Flash/)
-  })
-
   test('the alias and the name join agreeing on one model is not ambiguous', () => {
     const models = patchLive('deepseek-v4.1-flash', {name: 'DeepSeek V4.1 Flash'})
     expect(entryOf('deepseek-v4.1-flash', build(docs(), models))?.agreementExpiry).toBe('2026-11-30')
   })
 
   test('an alias and a name join pointing at different models is ambiguous and throws', () => {
-    const models = [
-      ...live(),
-      {id: 'deepseek-flash-clone', name: 'DeepSeek V4.1 Flash', training: false, zdr: true, limitedRegions: false},
-    ]
+    const models = [...live(), liveModel('deepseek-flash-clone', 'DeepSeek V4.1 Flash')]
     expect(() => build(docs(), models)).toThrow(/more than one/)
   })
 
-  test('an alias whose target is not live is ignored, and the row then matches nothing', () => {
-    const models = live().filter(model => model.id !== 'deepseek-v4.1-flash')
-    expect(() => build(docs(), models)).toThrow(/DeepSeek V4\.1 Flash.*no live model/)
+  test('a live name that normalizes like another live name throws, so no docs row can match both', () => {
+    const models = [...live(), liveModel('glm-5.3-copy', 'GLM 5.3')]
+    expect(() => build(docs(), models)).toThrow(/glm-5\.3.*same name/)
   })
 
-  test('never joins by prefix: Hy4 does not borrow Hy4 preview or Hy4 flash Free', () => {
-    const models = live().filter(model => model.id !== 'hy4')
-    expect(() => build(docs(), models)).toThrow(/"Hy4".*no live model/)
-    // Reverse direction: a live name that only prefixes a docs name does not match it either.
-    const renamed = patchLive('hy4', {name: 'Hy'})
-    expect(() => build(docs(), renamed)).toThrow(PrivacyTableError)
-  })
-
-  test('a docs row that matches no live model throws', () => {
-    const rows = [...docs(), {...docs()[0], name: 'Mystery Model'} as DocsPrivacyRow]
-    expect(() => build(rows)).toThrow(/"Mystery Model".*no live model/)
-  })
-
-  test('a docs row that matches more than one live model throws', () => {
-    const models = [...live(), {id: 'glm-5.3-copy', name: 'GLM 5.3', training: false, zdr: true, limitedRegions: false}]
-    expect(() => build(docs(), models)).toThrow(/"GLM-5\.3".*more than one/)
+  test('two live models that normalize to one name throw even when no docs row names them', () => {
+    const models = [...live(), liveModel('new-a', 'Brand New'), liveModel('new-b', 'brand-new')]
+    expect(() => build(docs(), models)).toThrow(/same name/)
   })
 
   test('two docs rows that resolve to the same live model throw', () => {
@@ -226,18 +214,106 @@ describe('buildSnapshot joins by normalized name and a reviewed alias', () => {
     expect(() => build(rows)).toThrow(/duplicate|same live model/i)
   })
 
-  test('a live model with no docs row throws, so a model without retention or expiry evidence is never written', () => {
-    const models = [...live(), {id: 'brand-new', name: 'Brand New', training: false, zdr: true, limitedRegions: false}]
-    expect(() => build(docs(), models)).toThrow(/brand-new.*no Privacy row/)
-  })
-
   test('an empty docs table or live list throws', () => {
     expect(() => build([], live())).toThrow(PrivacyTableError)
     expect(() => build(docs(), [])).toThrow(PrivacyTableError)
   })
 
+  test('a join that matches nothing at all throws, because the join itself is then wrong', () => {
+    const models = live().map(model => ({...model, name: `Renamed ${model.id}`}))
+    expect(() => buildSnapshot(docs(), models, FIXTURE_COMMIT, {})).toThrow(/no docs row matches any live model/)
+  })
+
   test('a malformed source commit throws', () => {
     expect(() => buildSnapshot(docs(), live(), 'dev')).toThrow(PrivacyTableError)
+  })
+
+  describe('a model one source does not know is left out and reported', () => {
+    test('a live model with no docs row has no entry, and the report names its id, name and the missing side', () => {
+      const models = [...live(), liveModel('brand-new', 'Brand New')]
+      const result = build(docs(), models)
+      expect(result.snapshot.models['brand-new']).toBeUndefined()
+      expect(Object.keys(result.snapshot.models)).toEqual(Object.keys(full.snapshot.models))
+      expect(result.unmatched).toEqual([{missing: 'docs', id: 'brand-new', name: 'Brand New'}])
+    })
+
+    test('the left-out live model is excluded by the eligibility check as not-in-snapshot', () => {
+      const models = [...live(), liveModel('brand-new', 'Brand New')]
+      const result = computeEligibility(
+        parseSnapshot(build(docs(), models).snapshot),
+        models.map(model => model.id),
+        '2026-11-19',
+      )
+      expect(result.eligible).not.toContain('brand-new')
+      expect(result.excluded).toContainEqual({id: 'brand-new', reason: 'not-in-snapshot'})
+    })
+
+    test('a docs row with no live model has no entry, and the report names the row and the missing side', () => {
+      const rows = [
+        ...docs(),
+        {...(docs().find(row => row.name === 'GLM-5.3') as DocsPrivacyRow), name: 'Mystery Model'},
+      ]
+      const result = build(rows)
+      expect(Object.keys(result.snapshot.models)).toEqual(Object.keys(full.snapshot.models))
+      expect(result.unmatched).toEqual([{missing: 'api', id: null, name: 'Mystery Model'}])
+    })
+
+    test('without the alias, the DeepSeek V4.1 Flash pair is left out on both sides and the rest is unchanged', () => {
+      const result = buildSnapshot(docs(), live(), FIXTURE_COMMIT, {})
+      expect(result.snapshot.models['deepseek-v4.1-flash']).toBeUndefined()
+      expect(result.unmatched).toEqual([
+        {missing: 'api', id: null, name: 'DeepSeek V4.1 Flash'},
+        {missing: 'docs', id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash 1017'},
+      ])
+      expect(result.snapshot.models['deepseek-v4-pro']).toEqual(full.snapshot.models['deepseek-v4-pro'])
+    })
+
+    test('an alias whose target is not live is ignored, and the row is left out', () => {
+      const models = live().filter(model => model.id !== 'deepseek-v4.1-flash')
+      const result = build(docs(), models)
+      expect(result.snapshot.models['deepseek-v4.1-flash']).toBeUndefined()
+      expect(result.unmatched).toEqual([{missing: 'api', id: null, name: 'DeepSeek V4.1 Flash'}])
+    })
+
+    test('never joins by prefix: a missing Hy4 stays missing and Hy4 preview and Hy4 flash Free keep their own entries', () => {
+      const models = live().filter(model => model.id !== 'hy4')
+      const result = build(docs(), models)
+      expect(result.snapshot.models.hy4).toBeUndefined()
+      expect(result.unmatched).toEqual([{missing: 'api', id: null, name: 'Hy4'}])
+      expect(result.snapshot.models['hy4-preview']).toEqual(full.snapshot.models['hy4-preview'])
+      expect(result.snapshot.models['hy4-flash-free']).toEqual(full.snapshot.models['hy4-flash-free'])
+      // Reverse direction: a live name that only prefixes a docs name does not match it either.
+      const renamed = build(docs(), patchLive('hy4', {name: 'Hy'}))
+      expect(renamed.snapshot.models.hy4).toBeUndefined()
+      expect(renamed.unmatched.map(item => `${item.missing}:${item.name}`).sort()).toEqual(['api:Hy4', 'docs:Hy'])
+    })
+
+    test('missing evidence never becomes an entry with permissive defaults', () => {
+      const models = [...live(), liveModel('brand-new', 'Brand New')]
+      const rows = [
+        ...docs(),
+        {...(docs().find(row => row.name === 'GLM-5.3') as DocsPrivacyRow), name: 'Mystery Model'},
+      ]
+      const ids = Object.keys(build(rows, models).snapshot.models)
+      expect(ids).not.toContain('brand-new')
+      expect(ids).toHaveLength(31)
+    })
+
+    test('a new unmatched live model and a new Global restriction on an exposed model: the restriction lands', () => {
+      const rows = patchDocs('Kimi K3', {regionRequirement: true})
+      const models = [...live(), liveModel('new-model', 'New Model')]
+      const result = build(rows, models)
+      expect(result.snapshot.models['kimi-k3']?.regionGated).toBe(true)
+      expect(result.snapshot.models['new-model']).toBeUndefined()
+      expect(result.unmatched).toEqual([{missing: 'docs', id: 'new-model', name: 'New Model'}])
+      const eligibility = computeEligibility(
+        parseSnapshot(result.snapshot),
+        models.map(model => model.id),
+        '2026-11-19',
+      )
+      expect(eligibility.excluded).toContainEqual({id: 'kimi-k3', reason: 'region-gated'})
+      expect(eligibility.excluded).toContainEqual({id: 'new-model', reason: 'not-in-snapshot'})
+    })
   })
 })
 

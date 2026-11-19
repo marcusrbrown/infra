@@ -17,6 +17,7 @@ import {z} from 'zod'
 export const GO_LIVE_MODELS_URL = 'https://opencode.ai/inference/go/v1/models'
 
 const MODEL_ID_RE = /^[a-z0-9][a-z0-9._-]*$/
+const MAX_ID_LENGTH = 128
 
 export class LiveModelsError extends Error {
   constructor(message: string) {
@@ -42,7 +43,7 @@ const goSchema = z.object({
 })
 
 const entrySchema = z.object({
-  id: z.string().regex(MODEL_ID_RE).max(128),
+  id: z.string().regex(MODEL_ID_RE).max(MAX_ID_LENGTH),
   name: z.string().min(1),
   go: goSchema,
 })
@@ -64,7 +65,11 @@ export function parseLiveModels(payload: unknown): LiveModel[] {
   const seen = new Set<string>()
   const models: LiveModel[] = []
   for (const [index, item] of payload.data.entries()) {
-    const label = isRecord(item) && typeof item.id === 'string' && MODEL_ID_RE.test(item.id) ? item.id : `#${index}`
+    // The id is untrusted until it passes both checks, so it never reaches a message before then.
+    const label =
+      isRecord(item) && typeof item.id === 'string' && item.id.length <= MAX_ID_LENGTH && MODEL_ID_RE.test(item.id)
+        ? item.id
+        : `#${index}`
     if (isRecord(item) && !isRecord(item.go)) {
       throw new LiveModelsError(`live model ${label} has no go privacy object`)
     }

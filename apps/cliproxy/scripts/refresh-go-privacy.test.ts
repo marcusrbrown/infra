@@ -326,6 +326,121 @@ describe('refreshGoPrivacy: the PR body reports where the sources differ', () =>
   })
 })
 
+describe('refreshGoPrivacy: a model one source does not know is left out and reported', () => {
+  const addLive = (id: string, name: string): string => {
+    const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
+    body.data.push({...body.data[0], id, name})
+    return JSON.stringify(body)
+  }
+  const KIMI_BULLET = '- **LongCat 2.5 Free:** select'
+  const withKimiGlobal = MDX.replace(
+    KIMI_BULLET,
+    () => `- **Kimi K3:** select **Global** under **Regions**.\n${KIMI_BULLET}`,
+  )
+  const runLogged = (h: Harness) => {
+    const lines: string[] = []
+    return {
+      lines,
+      done: refreshGoPrivacy({
+        snapshotPath: h.snapshotPath,
+        bodyPath: h.bodyPath,
+        fetch: h.fetch,
+        log: line => lines.push(line),
+      }),
+    }
+  }
+
+  it('lists a live model with no Privacy row in the PR body and the log, and writes no entry for it', async () => {
+    const h = harness(staleSnapshot().snapshot, {live: addLive('brand-new', 'Brand New')})
+    const {lines, done} = runLogged(h)
+
+    await done
+
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('### Left out of the snapshot (1)')
+    expect(body).toContain('- live model `brand-new` ("Brand New"): no Privacy row on the page')
+    expect(lines).toEqual(['left out: live model `brand-new` ("Brand New"): no Privacy row on the page'])
+    expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models['brand-new']).toBeUndefined()
+  })
+
+  it('lists a Privacy row with no live model, naming the missing side', async () => {
+    const live = liveWith('glm-5.3', entry => {
+      entry.name = 'Something Else'
+    })
+    const h = harness(staleSnapshot().snapshot, {live})
+    const {lines, done} = runLogged(h)
+
+    await done
+
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('- Privacy row "GLM-5.3": no live model')
+    expect(body).toContain('- live model `glm-5.3` ("Something Else"): no Privacy row on the page')
+    expect(lines).toHaveLength(2)
+  })
+
+  it('prints the report even when nothing changed and no PR opens', async () => {
+    const h = harness(tableAt(OLD_SHA), {live: addLive('brand-new', 'Brand New')})
+    const {lines, done} = runLogged(h)
+
+    const result = await done
+
+    expect(result).toEqual({changed: false, sourceCommit: NEW_SHA})
+    expect(lines).toEqual(['left out: live model `brand-new` ("Brand New"): no Privacy row on the page'])
+    expect(existsSync(h.bodyPath)).toBe(false)
+  })
+
+  it('prints nothing when every model is matched', async () => {
+    const h = harness(staleSnapshot().snapshot)
+    const {lines, done} = runLogged(h)
+    await done
+    expect(lines).toEqual([])
+    expect(readFileSync(h.bodyPath, 'utf8')).toContain('### Left out of the snapshot (0)\n\nNone.')
+  })
+
+  it('an exposed model that becomes unmatched drops out of the snapshot, and that alone opens a PR with the removal', async () => {
+    const committed = tableAt(OLD_SHA)
+    expect(committed.models['glm-5.3']).toBeDefined()
+    const live = liveWith('glm-5.3', entry => {
+      entry.name = 'Something Else'
+    })
+    const h = harness(committed, {live})
+
+    const result = await run(h)
+
+    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA})
+    expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models['glm-5.3']).toBeUndefined()
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('### Removed (1)')
+    expect(body).toContain('- `glm-5.3`: was zero retention: yes')
+    expect(body).toContain('### Left out of the snapshot (2)')
+  })
+
+  it('a new unmatched model plus a new Global restriction on an exposed model: the restriction reaches the snapshot', async () => {
+    const committed = tableAt(OLD_SHA)
+    expect(committed.models['kimi-k3']?.regionGated).toBe(false)
+    const h = harness(committed, {mdx: withKimiGlobal, live: addLive('new-model', 'New Model')})
+    const {lines, done} = runLogged(h)
+
+    const result = await done
+
+    expect(result.changed).toBe(true)
+    const written = JSON.parse(readFileSync(h.snapshotPath, 'utf8')) as PrivacySnapshot
+    expect(written.models['kimi-k3']?.regionGated).toBe(true)
+    expect(written.models['new-model']).toBeUndefined()
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('- `kimi-k3`: was zero retention: yes, trains on data: no, region-gated: no')
+    expect(body).toContain('now zero retention: yes, trains on data: no, region-gated: yes')
+    expect(body).toContain('- live model `new-model` ("New Model"): no Privacy row on the page')
+    expect(lines).toEqual(['left out: live model `new-model` ("New Model"): no Privacy row on the page'])
+  })
+
+  it('still throws when the join is ambiguous, and writes nothing', async () => {
+    const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
+    body.data.push({...body.data[0], id: 'glm-5.3-copy', name: 'GLM 5.3'})
+    await expectUntouched(harness(staleSnapshot().snapshot, {live: JSON.stringify(body)}), /same name/)
+  })
+})
+
 async function expectUntouched(h: Harness, pattern: RegExp | typeof PrivacyTableError): Promise<void> {
   const before = readFileSync(h.snapshotPath, 'utf8')
   await expect(run(h)).rejects.toThrow(pattern)
@@ -407,19 +522,6 @@ describe('refreshGoPrivacy: failures leave the snapshot untouched', () => {
       ;(entry.go as Record<string, unknown>).zdr = 'true'
     })
     await expectUntouched(harness(staleSnapshot().snapshot, {live}), LiveModelsError)
-  })
-
-  it('rejects when a live model has no Privacy row on the page', async () => {
-    const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
-    body.data.push({...body.data[0], id: 'brand-new', name: 'Brand New'})
-    await expectUntouched(harness(staleSnapshot().snapshot, {live: JSON.stringify(body)}), /brand-new.*no Privacy row/)
-  })
-
-  it('rejects when a Privacy row matches no live model', async () => {
-    const live = liveWith('glm-5.3', entry => {
-      entry.name = 'Something Else'
-    })
-    await expectUntouched(harness(staleSnapshot().snapshot, {live}), /no live model/)
   })
 
   it('writes nothing when only the live response is bad, even though the page parses', async () => {

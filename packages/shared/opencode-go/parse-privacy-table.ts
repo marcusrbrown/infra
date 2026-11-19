@@ -9,9 +9,21 @@
  *   agreement expiry dates;
  * - the "Enable restricted models" bullets give the workspace Global-region requirement and the training opt-in.
  *
- * It fails closed. A row, marker, footnote sentence, rule or column it cannot map throws `PrivacyTableError`, so a
- * format change upstream stops the refresh instead of marking a model safe by accident.
+ * It fails closed, and nothing it reads is discarded unaccounted for:
+ *
+ * - A row, marker, column, rule or footnote sentence it cannot map throws `PrivacyTableError`. A footnote sentence
+ *   must match one known sentence form from the first character to the last; there is no "starts with" or "contains"
+ *   branch, so a clause added to a known sentence is a new sentence and throws.
+ * - A footnote label names a row by exact normalized name, a list of exact names, or a label in `LABEL_GROUPS`.
+ *   Never by prefix or suffix.
+ * - Prose that names a Privacy model, in the restricted-models section or in front of the Privacy table, throws:
+ *   a restriction written as prose is not read, so it must not pass silently. Known limit: prose that restricts
+ *   models without naming one cannot be detected, and prose elsewhere on the page is not inspected.
+ *
+ * Every regex here is anchored and has no nested or overlapping quantifier, because it runs over public page text.
  */
+
+import {DOCS_NAME_ALIASES, normalizeModelName, quoted} from './model-names'
 
 export class PrivacyTableError extends Error {
   constructor(message: string) {
@@ -111,7 +123,7 @@ function readTable(
   lines: readonly string[],
   label: string,
   expectedHeader: readonly string[],
-): {table: Table; end: number} {
+): {table: Table; start: number; end: number} {
   const start = lines.findIndex(line => line.trimStart().startsWith('|'))
   if (start === -1) throw new PrivacyTableError(`${label}: no table found`)
   const separator = lines[start + 1]
@@ -134,7 +146,7 @@ function readTable(
     rows.push(cells)
     end++
   }
-  return {table: {header, rows}, end}
+  return {table: {header, rows}, start, end}
 }
 
 /** The Privacy table rows, keyed by normalized display name in page order. */
@@ -146,14 +158,16 @@ function readRows(table: Table): Map<string, Row> {
     const displayName = cells[0] ?? ''
     const key = normalizeName(displayName)
     if (key === '') throw new PrivacyTableError('Privacy: row with no model name')
-    if (rows.has(key)) throw new PrivacyTableError(`Privacy: duplicate row "${displayName}"`)
+    if (rows.has(key)) throw new PrivacyTableError(`Privacy: duplicate row ${quoted(displayName)}`)
 
     const retentionCell = cells[1] ?? ''
     const marked = /^(.*?)(\\\*|\*)$/.exec(retentionCell)
     const retention = (marked?.[1] ?? retentionCell).trim()
     const days = /^(\d+) days?$/.exec(retention)
     if (days === null && retention !== 'Not ZDR') {
-      throw new PrivacyTableError(`Privacy: "${displayName}" has an unrecognized retention value "${retentionCell}"`)
+      throw new PrivacyTableError(
+        `Privacy: ${quoted(displayName)} has an unrecognized retention value ${quoted(retentionCell)}`,
+      )
     }
     rows.set(key, {
       name: displayName,
@@ -165,67 +179,171 @@ function readRows(table: Table): Map<string, Row> {
 }
 
 /**
- * Resolve a footnote label ("A / B", "A and B", "DeepSeek") to the rows it names. This reads only the page's own
- * labels; the page-to-API join in `build-snapshot.ts` never matches by prefix.
+ * Labels that name several rows without spelling each one as a full name, keyed by normalized label and mapped to
+ * normalized row names. Reviewed by hand and as small as today's page needs; a target that is not a row throws.
+ */
+const LABEL_GROUPS: ReadonlyMap<string, readonly string[]> = new Map([
+  // "- **DeepSeek:** ZDR agreement is renewed monthly. The current agreement is valid through ..." covers the family.
+  ['deepseek', ['deepseek v4.1 flash', 'deepseek v4 pro']],
+  // "- **DeepSeek V4.1 Flash and V4 Pro:** select **Global** ..." abbreviates the second model to "V4 Pro".
+  ['deepseek v4.1 flash and v4 pro', ['deepseek v4.1 flash', 'deepseek v4 pro']],
+])
+
+/** One name or group label: an exact row, a reviewed group, or nothing. A name that is both is ambiguous. */
+function resolveToken(token: string, accumulators: ReadonlyMap<string, Accumulator>): Accumulator[] | undefined {
+  const exact = accumulators.get(token)
+  const group = LABEL_GROUPS.get(token)
+  if (exact !== undefined && group !== undefined) {
+    throw new PrivacyTableError(`label ${quoted(token)} is ambiguous: a Privacy row and a reviewed label mapping`)
+  }
+  if (exact !== undefined) return [exact]
+  if (group === undefined) return undefined
+  return group.map(name => {
+    const target = accumulators.get(name)
+    if (target === undefined) {
+      throw new PrivacyTableError(
+        `reviewed label mapping ${quoted(token)} names ${quoted(name)}, which is no longer a Privacy row`,
+      )
+    }
+    return target
+  })
+}
+
+/**
+ * Resolve a footnote or bullet label to the rows it names: the whole label as an exact name or reviewed group, or
+ * each part of "A / B" and "A and B" as one. Anything else throws. This module never matches by prefix or suffix.
  */
 function resolveLabel(label: string, accumulators: ReadonlyMap<string, Accumulator>): Accumulator[] {
-  const resolved = new Map<string, Accumulator>()
+  const whole = resolveToken(normalizeName(label), accumulators)
+  if (whole !== undefined) return whole
+  const resolved = new Set<Accumulator>()
   for (const part of normalizeName(label)
     .split('/')
     .flatMap(piece => piece.split(' and '))) {
     const token = normalizeName(part)
-    const exact = accumulators.get(token)
-    const matches =
-      exact === undefined
-        ? [...accumulators.entries()].filter(([name]) => name.startsWith(`${token} `) || name.endsWith(` ${token}`))
-        : [[token, exact] as const]
-    if (token === '' || matches.length === 0)
-      throw new PrivacyTableError(`"${label}" does not name a model in the Privacy table`)
-    for (const [name, accumulator] of matches) resolved.set(name, accumulator)
+    const found = token === '' ? undefined : resolveToken(token, accumulators)
+    if (found === undefined) {
+      throw new PrivacyTableError(`${quoted(label)} does not name a model in the Privacy table`)
+    }
+    for (const target of found) resolved.add(target)
   }
-  return [...resolved.values()]
+  return [...resolved]
 }
 
 const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s/
 
 /**
- * The `- **Label:** text` bullets of a section. `every-line` rejects any line that is not such a bullet;
- * `list-items` rejects only list items that are not, and lets prose between them pass.
+ * The `- **Label:** text` bullets of a section, and its prose. `every-line` rejects any line that is not such a
+ * bullet; `list-items` rejects only list items that are not, and returns the other lines as prose for the caller
+ * to inspect.
  */
 function bulletsOf(
   lines: readonly string[],
   label: string,
   unmatched: 'every-line' | 'list-items',
-): {label: string; text: string}[] {
+): {bullets: {label: string; text: string}[]; prose: string[]} {
   const bullets: {label: string; text: string}[] = []
+  const prose: string[] = []
   for (const line of lines) {
     if (line.trim() === '') continue
     const match = /^- \*\*([^*]+):\*\* (.+)$/.exec(line)
     if (match === null) {
       if (unmatched === 'every-line' || LIST_ITEM.test(line)) {
-        throw new PrivacyTableError(`${label}: unmapped line "${line.trim().slice(0, 60)}"`)
+        throw new PrivacyTableError(`${label}: unmapped line ${quoted(line.trim())}`)
       }
+      prose.push(line)
       continue
     }
     bullets.push({label: match[1] ?? '', text: match[2] ?? ''})
   }
-  return bullets
+  return {bullets, prose}
 }
 
-function parseAgreementDate(raw: string): string {
+const isWordChar = (char: string | undefined): boolean => char !== undefined && /[\da-z]/.test(char)
+
+/** True when `name` occurs in `haystack` as whole words (both are already normalized). */
+function mentions(haystack: string, name: string): boolean {
+  if (name === '') return false
+  for (let from = haystack.indexOf(name); from !== -1; from = haystack.indexOf(name, from + 1)) {
+    if (!isWordChar(haystack[from - 1]) && !isWordChar(haystack[from + name.length])) return true
+  }
+  return false
+}
+
+/**
+ * Throw when prose names a Privacy model, a reviewed label group or an alias. Prose restricts nothing the parser
+ * reads, so a sentence like "Kimi K3 requires Global regions" would otherwise leave the model looking unrestricted.
+ * Lines are joined first, so a name wrapped across lines is still found.
+ */
+function assertProseNamesNoModel(
+  prose: readonly string[],
+  where: string,
+  accumulators: ReadonlyMap<string, Accumulator>,
+): void {
+  if (prose.length === 0) return
+  const haystack = normalizeModelName(stripLinks(prose.join(' ')).replaceAll(/[*_`]/g, ''))
+  const names: {shown: string; key: string}[] = [
+    ...[...accumulators.values()].map(({row}) => ({shown: row.name, key: normalizeModelName(row.name)})),
+    ...[...LABEL_GROUPS.keys()].map(label => ({shown: label, key: normalizeModelName(label)})),
+    ...Object.entries(DOCS_NAME_ALIASES).flatMap(([name, id]) => [
+      {shown: name, key: normalizeModelName(name)},
+      {shown: id, key: normalizeModelName(id)},
+    ]),
+  ]
+  for (const {shown, key} of names) {
+    if (mentions(haystack, key)) {
+      throw new PrivacyTableError(
+        `${where}: prose names ${quoted(shown)}. Prose is not read as a restriction, so state it as a bullet in the form the section uses`,
+      )
+    }
+  }
+}
+
+function parseAgreementDate(raw: string, label: string): string {
+  const fail = (): PrivacyTableError =>
+    new PrivacyTableError(`${quoted(label)}: unparseable agreement date ${quoted(raw)}`)
   const match = /^([A-Z]+) (\d{1,2}), (\d{4})$/i.exec(raw)
   const month = match === null ? -1 : MONTHS.indexOf((match[1] ?? '').toLowerCase())
-  if (match === null || month === -1) throw new PrivacyTableError(`unparseable agreement date "${raw}"`)
-  const iso = `${match[3]}-${String(month + 1).padStart(2, '0')}-${(match[2] ?? '').padStart(2, '0')}`
-  if (new Date(`${iso}T00:00:00Z`).toISOString().slice(0, 10) !== iso) {
-    throw new PrivacyTableError(`unparseable agreement date "${raw}"`)
-  }
-  return iso
+  if (match === null || month === -1) throw fail()
+  const year = Number(match[3])
+  const day = Number(match[2])
+  // Check the calendar before formatting: `toISOString()` throws a bare RangeError on an impossible date.
+  const date = new Date(0)
+  date.setUTCFullYear(year, month, day)
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) throw fail()
+  return `${match[3]}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
-/** Apply the Privacy footnotes. Every sentence must match a rule; a contradiction with the table throws. */
+/** A proper-noun phrase such as "Anthropic's Data Policies": capitalized words only, so no clause can hide in it. */
+const NAME = String.raw`[A-Z][A-Za-z\d]*(?:['’]s)?(?: [A-Z][A-Za-z\d]*(?:['’]s)?)*`
+
+/** Sentences that change no field. Exact text: reworded text is new text and throws. */
+const INFORMATIONAL_SENTENCES: ReadonlySet<string> = new Set([
+  'ZDR disables important API features that depend on stored data, including the stateful Responses API, Files and Collections, and the Batch API.',
+  'ZDR agreement is renewed monthly.',
+])
+/** Sentences that say the model's prompts and completions are used for training. Exact text. */
+const TRAINING_SENTENCES: ReadonlySet<string> = new Set([
+  'Heavily discounted token pricing in exchange for permission to use your prompts and completions to train future Meta models.',
+  'Free for a limited time in exchange for permission to use your prompts and completions to improve the model.',
+])
+const GLOBAL_REGION_SENTENCE = 'Requires **Global** regions in your workspace privacy settings.'
+
+const RETAINED_ABUSE_SENTENCE =
+  /^Abuse monitoring logs are generated for all API feature usage and retained for up to (\d+) days\.$/
+const RETAINED_REQUESTS_SENTENCE = new RegExp(
+  String.raw`^Requests are retained for (?:up to )?(\d+) days(?: for abuse monitoring)?(?: in accordance with ${NAME})?\.$`,
+)
+const AVAILABILITY_SENTENCE = new RegExp(String.raw`^Availability is limited to regions permitted by ${NAME}\.$`)
+const HOSTED_SENTENCE = new RegExp(String.raw`^Hosted in ${NAME}(?: and ${NAME})?\.$`)
+const EXPIRY_SENTENCE = /^The current agreement is valid through ([A-Z]+ \d{1,2}, \d{4})\.$/i
+
+/**
+ * Apply the Privacy footnotes. Each sentence must be wholly one known sentence form, or the refresh throws; a
+ * contradiction with the table throws too.
+ */
 function applyFootnotes(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): void {
-  for (const {label, text} of bulletsOf(lines, 'Privacy footnotes', 'every-line')) {
+  for (const {label, text} of bulletsOf(lines, 'Privacy footnotes', 'every-line').bullets) {
     const targets = resolveLabel(label, accumulators)
     const sentences = stripLinks(text)
       .split(/(?<=\.)\s+/)
@@ -233,36 +351,35 @@ function applyFootnotes(lines: readonly string[], accumulators: ReadonlyMap<stri
       .filter(sentence => sentence !== '' && sentence !== 'Learn more.')
 
     for (const sentence of sentences) {
-      const retained = /retained for (?:up to )?(\d+) days/i.exec(sentence)
-      const expiry = /valid through (.+?)\.?$/.exec(sentence)
-      if (sentence.startsWith('ZDR disables ') || sentence === 'ZDR agreement is renewed monthly.') {
+      const retained = RETAINED_ABUSE_SENTENCE.exec(sentence) ?? RETAINED_REQUESTS_SENTENCE.exec(sentence)
+      const expiry = EXPIRY_SENTENCE.exec(sentence)
+      if (INFORMATIONAL_SENTENCES.has(sentence)) {
         // Informational: feature limits and renewal cadence change no field.
       } else if (retained !== null) {
         for (const target of targets) {
           if (target.row.retentionDays !== Number(retained[1])) {
-            throw new PrivacyTableError(`"${label}": footnote retention contradicts the table for "${target.row.name}"`)
+            throw new PrivacyTableError(
+              `${quoted(label)}: footnote retention contradicts the table for ${quoted(target.row.name)}`,
+            )
           }
         }
-      } else if (/permission to use your prompts and completions/.test(sentence)) {
+      } else if (TRAINING_SENTENCES.has(sentence)) {
         for (const target of targets) target.trainingGranted = true
-      } else if (sentence.startsWith('Availability is limited to regions permitted by ')) {
+      } else if (AVAILABILITY_SENTENCE.test(sentence)) {
         for (const target of targets) target.availabilityLimited = true
-      } else if (
+      } else if (HOSTED_SENTENCE.test(sentence) || sentence === GLOBAL_REGION_SENTENCE) {
         // Any stated hosting location is a region statement, and gating is the fail-closed direction.
-        /^Hosted in \w.*\.$/.test(sentence) ||
-        sentence === 'Requires **Global** regions in your workspace privacy settings.'
-      ) {
         for (const target of targets) target.regionRequirement = true
-      } else if (expiry !== null && sentence.startsWith('The current agreement is valid through ')) {
-        const date = parseAgreementDate(expiry[1] ?? '')
+      } else if (expiry === null) {
+        throw new PrivacyTableError(`${quoted(label)}: unmapped footnote sentence ${quoted(sentence)}`)
+      } else {
+        const date = parseAgreementDate(expiry[1] ?? '', label)
         for (const target of targets) {
           if (target.agreementExpiry !== null && target.agreementExpiry !== date) {
-            throw new PrivacyTableError(`"${label}": conflicting agreement dates for "${target.row.name}"`)
+            throw new PrivacyTableError(`${quoted(label)}: conflicting agreement dates for ${quoted(target.row.name)}`)
           }
           target.agreementExpiry = date
         }
-      } else {
-        throw new PrivacyTableError(`"${label}": unmapped footnote sentence "${sentence.slice(0, 80)}"`)
       }
     }
   }
@@ -270,12 +387,13 @@ function applyFootnotes(lines: readonly string[], accumulators: ReadonlyMap<stri
 
 /** The "Enable restricted models" bullets: the Global-region requirement, and which models opt in to training. */
 function applyRestrictedModels(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): void {
-  const bullets = bulletsOf(
+  const {bullets, prose} = bulletsOf(
     sectionLines(lines, '### Enable restricted models'),
     'Enable restricted models',
     'list-items',
   )
   if (bullets.length === 0) throw new PrivacyTableError('Enable restricted models: no bullets found')
+  assertProseNamesNoModel(prose, 'Enable restricted models', accumulators)
   for (const {label, text} of bullets) {
     const targets = resolveLabel(label, accumulators)
     const rule = stripLinks(text).trim()
@@ -285,7 +403,7 @@ function applyRestrictedModels(lines: readonly string[], accumulators: ReadonlyM
       // A model that needs this opt-in trains on requests; the page has no other training column any more.
       for (const target of targets) target.trainingGranted = true
     } else {
-      throw new PrivacyTableError(`Enable restricted models: unmapped rule for "${label}"`)
+      throw new PrivacyTableError(`Enable restricted models: unmapped rule for ${quoted(label)}`)
     }
   }
 }
@@ -297,7 +415,7 @@ function applyRestrictedModels(lines: readonly string[], accumulators: ReadonlyM
 export function parsePrivacyDocs(mdx: string): DocsPrivacyRow[] {
   const lines = mdx.split('\n')
   const privacy = sectionLines(lines, '## Privacy')
-  const {table, end} = readTable(privacy, 'Privacy', PRIVACY_COLUMNS)
+  const {table, start, end} = readTable(privacy, 'Privacy', PRIVACY_COLUMNS)
 
   const accumulators = new Map<string, Accumulator>()
   for (const [key, row] of readRows(table)) {
@@ -310,6 +428,8 @@ export function parsePrivacyDocs(mdx: string): DocsPrivacyRow[] {
     })
   }
 
+  // The lines in front of the table are not a footnote or a rule, so nothing else reads them.
+  assertProseNamesNoModel(privacy.slice(0, start), 'Privacy', accumulators)
   applyRestrictedModels(lines, accumulators)
   applyFootnotes(privacy.slice(end), accumulators)
 
@@ -317,7 +437,9 @@ export function parsePrivacyDocs(mdx: string): DocsPrivacyRow[] {
     ({row, trainingGranted, regionRequirement, availabilityLimited, agreementExpiry}) => {
       // `*` is the zero-retention agreement marker; without its expiry footnote the agreement date is unknown.
       if (row.marker && agreementExpiry === null) {
-        throw new PrivacyTableError(`Privacy: marker on "${row.name}" has no agreement footnote that qualifies it`)
+        throw new PrivacyTableError(
+          `Privacy: marker on ${quoted(row.name)} has no agreement footnote that qualifies it`,
+        )
       }
       return {
         name: row.name,

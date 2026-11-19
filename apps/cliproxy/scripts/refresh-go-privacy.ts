@@ -1,10 +1,10 @@
-import type {Disagreement} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
+import type {Disagreement, Unmatched} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
 import type {ModelEntry, PrivacySnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 import {appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync} from 'node:fs'
 import {dirname, resolve} from 'node:path'
 import {isDeepStrictEqual} from 'node:util'
 
-import {buildSnapshot} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
+import {buildSnapshot, describeUnmatched} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
 import {
   modelEntrySchema,
   parseSnapshot,
@@ -55,6 +55,8 @@ export interface RefreshOptions {
    * api.github.com only, never to raw.githubusercontent.com. Unset means an unauthenticated request.
    */
   readonly githubToken?: string
+  /** Receives one line per model left out of the snapshot, whether or not a PR opens. Defaults to stdout. */
+  readonly log?: (line: string) => void
 }
 
 export interface RefreshResult {
@@ -148,6 +150,7 @@ export function renderPrBody(
   diff: SnapshotDiff,
   before: Readonly<Record<string, unknown>>,
   disagreements: readonly Disagreement[] = [],
+  unmatched: readonly Unmatched[] = [],
 ): string {
   const lines: string[] = [
     '## OpenCode Go privacy snapshot refresh',
@@ -199,6 +202,17 @@ export function renderPrBody(
     'API-only restrictions',
     disagreements.filter(d => d.kind === 'api-only').map(d => report(d)),
   )
+
+  lines.push(
+    '',
+    'A model that only one source knows gets no entry, so it is not exposed. Each one below is either a model the ' +
+      'page has not caught up with (or the API has not), or a name the join could not match: if an entry here is a ' +
+      'model that is currently exposed, it drops out of the snapshot in this PR.',
+  )
+  section(
+    'Left out of the snapshot',
+    unmatched.map(item => `- ${describeUnmatched(item)}`),
+  )
   return `${lines.join('\n')}\n`
 }
 
@@ -223,6 +237,7 @@ export async function refreshGoPrivacy({
   bodyPath,
   fetch: fetchImpl = globalThis.fetch,
   githubToken,
+  log = line => process.stdout.write(`${line}\n`),
 }: RefreshOptions = {}): Promise<RefreshResult> {
   let rawBefore: unknown
   try {
@@ -241,8 +256,14 @@ export async function refreshGoPrivacy({
 
   const livePayload = await fetchLiveModels(fetchImpl)
 
-  const {snapshot: next, disagreements} = buildSnapshot(parsePrivacyDocs(mdx), parseLiveModels(livePayload), sha)
+  const {
+    snapshot: next,
+    disagreements,
+    unmatched,
+  } = buildSnapshot(parsePrivacyDocs(mdx), parseLiveModels(livePayload), sha)
   if (Object.keys(next.models).length === 0) throw new PrivacyTableError('built zero models')
+  // Logged before the change test: a left-out model must show in the workflow log even when no PR opens.
+  for (const item of unmatched) log(`left out: ${describeUnmatched(item)}`)
 
   const diff = diffSnapshots(beforeModels, next.models)
   if (diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0) {
@@ -250,7 +271,7 @@ export async function refreshGoPrivacy({
   }
 
   if (bodyPath !== undefined)
-    writeAtomic(bodyPath, renderPrBody(previous.source.commit, next, diff, beforeModels, disagreements))
+    writeAtomic(bodyPath, renderPrBody(previous.source.commit, next, diff, beforeModels, disagreements, unmatched))
   writeAtomic(snapshotPath, serializeSnapshot(next))
   return {changed: true, sourceCommit: sha}
 }

@@ -3,7 +3,10 @@ import type {LiveModel} from './live-models'
 import type {DocsPrivacyRow} from './parse-privacy-table'
 
 import {parseSnapshot, SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_SOURCE_PATH, SNAPSHOT_SOURCE_REPO} from './eligibility'
+import {DOCS_NAME_ALIASES, excerpt, normalizeModelName, quoted} from './model-names'
 import {PrivacyTableError} from './parse-privacy-table'
+
+export {DOCS_NAME_ALIASES, normalizeModelName}
 
 /**
  * Build the privacy snapshot from the two sources, with the most restrictive value winning:
@@ -11,23 +14,13 @@ import {PrivacyTableError} from './parse-privacy-table'
  * - the docs page (`console/go.mdx`) has retention days, the agreement expiry and the workspace Global rule;
  * - the live models list has `training`, `zdr` and `limited_regions` for every model.
  *
- * A model is cleared only when neither source objects. Anything the two sources cannot jointly account for throws
- * `PrivacyTableError`, so the refresh stops instead of writing a snapshot that reads "unknown" as "fine". Both
+ * A model is cleared only when neither source objects, and only a model both sources know gets an entry. A model
+ * one source does not know is left out of the snapshot (so eligibility excludes it as `not-in-snapshot`) and
+ * reported in `unmatched`: a new model reaching the API before the docs is ordinary, and a refresh that stopped
+ * for it would leave every other restriction stale. A join that is itself wrong (one name fitting several models,
+ * two rows resolving to one model) throws `PrivacyTableError`, so the refresh stops instead of guessing. Both
  * inputs are passed in; this module does no I/O.
  */
-
-/**
- * Docs display names that do not normalize to the API's `name`, mapped to the API id they mean. Reviewed by hand:
- * add an entry only after checking that the two names are the same model. The docs page calls the model
- * "DeepSeek V4.1 Flash"; the API names it "DeepSeek V4.1 Flash 1017".
- */
-export const DOCS_NAME_ALIASES: Readonly<Record<string, string>> = {
-  'deepseek v4.1 flash': 'deepseek-v4.1-flash',
-}
-
-/** Case, whitespace and hyphen/space differences are not differences between names. Nothing else is. */
-export const normalizeModelName = (name: string): string =>
-  name.toLowerCase().replaceAll('-', ' ').replaceAll(/\s+/g, ' ').trim()
 
 export type SnapshotFact = 'zeroRetention' | 'trainsOnData' | 'regionGated'
 
@@ -47,9 +40,26 @@ export interface Disagreement {
   snapshot: 'yes' | 'no'
 }
 
+/** A model one source knows and the other does not. It has no snapshot entry. */
+export interface Unmatched {
+  /** Which side lacks it: `docs` is a live model with no Privacy row, `api` is a Privacy row with no live model. */
+  missing: 'docs' | 'api'
+  /** The live model id; null for a Privacy row, which has none. */
+  id: string | null
+  name: string
+}
+
+/** One left-out model as a report line. The names come from public upstream text, so they are length-bounded. */
+export const describeUnmatched = (item: Unmatched): string =>
+  item.missing === 'docs'
+    ? `live model \`${item.id ?? ''}\` ("${excerpt(item.name)}"): no Privacy row on the page`
+    : `Privacy row "${excerpt(item.name)}": no live model`
+
 export interface BuiltSnapshot {
   snapshot: PrivacySnapshot
   disagreements: Disagreement[]
+  /** Docs rows with no live model first, in page order, then live models with no docs row, in list order. */
+  unmatched: Unmatched[]
 }
 
 const yesNo = (value: boolean): 'yes' | 'no' => (value ? 'yes' : 'no')
@@ -57,61 +67,75 @@ const yesNo = (value: boolean): 'yes' | 'no' => (value ? 'yes' : 'no')
 const docsRetention = (row: DocsPrivacyRow): string =>
   row.retentionDays === null ? 'Not ZDR' : `${row.retentionDays} ${row.retentionDays === 1 ? 'day' : 'days'}`
 
-/** The docs row each live model maps to; throws when any row or model is left without exactly one partner. */
+interface Joined {
+  matched: Map<string, {row: DocsPrivacyRow; model: LiveModel}>
+  unmatched: Unmatched[]
+}
+
+/**
+ * Pair each docs row with its live model. A row or model without a partner is reported, not paired; an ambiguous
+ * pairing throws.
+ */
 function joinSources(
   docs: readonly DocsPrivacyRow[],
   live: readonly LiveModel[],
   aliases: Readonly<Record<string, string>>,
-): Map<string, {row: DocsPrivacyRow; model: LiveModel}> {
-  const liveByName = new Map<string, LiveModel[]>()
+): Joined {
+  const liveByName = new Map<string, LiveModel>()
   const liveById = new Map<string, LiveModel>()
   for (const model of live) {
     const key = normalizeModelName(model.name)
-    liveByName.set(key, [...(liveByName.get(key) ?? []), model])
+    const same = liveByName.get(key)
+    if (same !== undefined) {
+      throw new PrivacyTableError(
+        `join: live models ${quoted(same.id)} and ${quoted(model.id)} have the same name after normalization`,
+      )
+    }
+    liveByName.set(key, model)
     liveById.set(model.id, model)
   }
 
   const aliasById = new Map(Object.entries(aliases))
-  const joined = new Map<string, {row: DocsPrivacyRow; model: LiveModel}>()
+  const matched: Joined['matched'] = new Map()
+  const unmatched: Unmatched[] = []
   const docsKeys = new Set<string>()
   for (const row of docs) {
     const key = normalizeModelName(row.name)
-    if (docsKeys.has(key)) throw new PrivacyTableError(`join: duplicate Privacy row "${row.name}"`)
+    if (docsKeys.has(key)) throw new PrivacyTableError(`join: duplicate Privacy row ${quoted(row.name)}`)
     docsKeys.add(key)
 
     const candidates = new Map<string, LiveModel>()
-    for (const model of liveByName.get(key) ?? []) candidates.set(model.id, model)
+    const named = liveByName.get(key)
+    if (named !== undefined) candidates.set(named.id, named)
     const aliasId = aliasById.get(key)
     const aliased = aliasId === undefined ? undefined : liveById.get(aliasId)
     if (aliased !== undefined) candidates.set(aliased.id, aliased)
 
-    if (candidates.size === 0) {
-      throw new PrivacyTableError(`join: Privacy row "${row.name}" matches no live model`)
-    }
     if (candidates.size > 1) {
       throw new PrivacyTableError(
-        `join: Privacy row "${row.name}" matches more than one live model (${[...candidates.keys()].sort().join(', ')})`,
+        `join: Privacy row ${quoted(row.name)} matches more than one live model (${[...candidates.keys()].sort().join(', ')})`,
       )
     }
     const [model] = candidates.values()
-    if (model === undefined) throw new PrivacyTableError(`join: Privacy row "${row.name}" matches no live model`)
-    const taken = joined.get(model.id)
+    if (model === undefined) {
+      unmatched.push({missing: 'api', id: null, name: row.name})
+      continue
+    }
+    const taken = matched.get(model.id)
     if (taken !== undefined) {
       throw new PrivacyTableError(
-        `join: Privacy rows "${taken.row.name}" and "${row.name}" resolve to the same live model ${model.id}`,
+        `join: Privacy rows ${quoted(taken.row.name)} and ${quoted(row.name)} resolve to the same live model ${quoted(model.id)}`,
       )
     }
-    joined.set(model.id, {row, model})
+    matched.set(model.id, {row, model})
   }
 
   for (const model of live) {
-    if (!joined.has(model.id)) {
-      throw new PrivacyTableError(
-        `join: live model ${model.id} ("${model.name}") has no Privacy row, so it has no retention or agreement evidence`,
-      )
-    }
+    if (!matched.has(model.id)) unmatched.push({missing: 'docs', id: model.id, name: model.name})
   }
-  return joined
+  // A join that pairs nothing is a join that is wrong (a format change), not a quiet day.
+  if (matched.size === 0) throw new PrivacyTableError('join: no docs row matches any live model')
+  return {matched, unmatched}
 }
 
 /**
@@ -130,7 +154,7 @@ export function buildSnapshot(
   if (docs.length === 0) throw new PrivacyTableError('join: the docs page has no Privacy rows')
   if (live.length === 0) throw new PrivacyTableError('join: the live models list is empty')
 
-  const joined = joinSources(docs, live, aliases)
+  const {matched: joined, unmatched} = joinSources(docs, live, aliases)
   const models: PrivacySnapshot['models'] = {}
   const disagreements: Disagreement[] = []
 
@@ -177,5 +201,5 @@ export function buildSnapshot(
   if (parseSnapshot(snapshot).invalid.length > 0) {
     throw new PrivacyTableError('built an entry that fails the snapshot schema')
   }
-  return {snapshot, disagreements}
+  return {snapshot, disagreements, unmatched}
 }

@@ -119,6 +119,22 @@ describe('parseLiveModels fails closed', () => {
     ).toThrow(LiveModelsError)
   })
 
+  test('without echoing an over-long id, which is checked for length before it is used in a message', () => {
+    const body = withEntry(entry => {
+      entry.id = 'a'.repeat(5000)
+      delete entry.go
+    })
+    let message = ''
+    try {
+      parseLiveModels(body)
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain('no go privacy object')
+    expect(message).not.toContain('aaaaaaaaaa')
+    expect(message.length).toBeLessThan(200)
+  })
+
   test('on a duplicate id', () => {
     const body = payload()
     body.data.push(structuredClone(body.data[0] ?? {}))

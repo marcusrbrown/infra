@@ -978,3 +978,83 @@ describe('parsePrivacyDocs on the other label readers, with the colon outside th
     expect(() => parsePrivacyDocs(source)).toThrow(/prose names "LongCat 2.5 Free"/)
   })
 })
+
+describe('parsePrivacyDocs resolves a family mapping only where the page uses it', () => {
+  const V4_PRO_ROW = '| DeepSeek V4 Pro            | 0 days\\*       |\n'
+  const FAMILY_FOOTNOTE = '- **DeepSeek:** ZDR agreement'
+  const FAMILY_BULLET = '- **DeepSeek V4.1 Flash and V4 Pro:** select'
+  const FLASH_FOOTNOTE = '- **DeepSeek V4.1 Flash:** ZDR agreement'
+  const FLASH_BULLET = '- **DeepSeek V4.1 Flash:** select'
+
+  /** V4 Pro has retired and the page names only the surviving model, by its exact name. */
+  const retiredAndRewritten = (): string =>
+    mutate(FAMILY_BULLET, FLASH_BULLET)
+      .replace(FAMILY_FOOTNOTE, () => FLASH_FOOTNOTE)
+      .replace(V4_PRO_ROW, () => '')
+  const beamAndFlash = (source: string) => {
+    const rows = rowsByName(source)
+    return {beam: rows.get('Beam Free'), flash: rows.get('DeepSeek V4.1 Flash'), pro: rows.get('DeepSeek V4 Pro')}
+  }
+
+  test('the setup is what the reviewer described: V4 Pro gone, no family label left in a rule', () => {
+    const source = retiredAndRewritten()
+    expect(source).not.toContain('DeepSeek V4 Pro')
+    expect(source).not.toContain(FAMILY_FOOTNOTE)
+    expect(source).not.toContain(FAMILY_BULLET)
+  })
+
+  test('a family member retiring does not block the refresh when no text uses the family label', () => {
+    const {beam, flash, pro} = beamAndFlash(retiredAndRewritten())
+    expect(pro).toBeUndefined()
+    expect(flash).toMatchObject({agreementExpiry: '2026-11-30', regionRequirement: true})
+    expect(beam?.availabilityLimited).toBe(true)
+  })
+
+  test('an exact-name usage notice for the surviving member still works with the other member gone', () => {
+    const source = retiredAndRewritten().replace(
+      '**Gemini 4 Argon:**',
+      () => '**DeepSeek V4.1 Flash:** Not available in Angola.\n\n**Gemini 4 Argon:**',
+    )
+    expect(beamAndFlash(source).flash?.availabilityLimited).toBe(true)
+  })
+
+  test('a family label used in a usage paragraph whose mapping points at a retired row throws', () => {
+    const source = retiredAndRewritten().replace(
+      '**Gemini 4 Argon:**',
+      () => '**DeepSeek:** Not available in Angola.\n\n**Gemini 4 Argon:**',
+    )
+    expect(() => parsePrivacyDocs(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocs(source)).toThrow(/mapping "deepseek" names "deepseek v4 pro", which is no longer/)
+  })
+
+  test('a family label used in a footnote whose mapping points at a retired row throws, while the bullet is exact', () => {
+    const source = mutate(FAMILY_BULLET, FLASH_BULLET).replace(V4_PRO_ROW, () => '')
+    expect(source).toContain(FAMILY_FOOTNOTE)
+    expect(() => parsePrivacyDocs(source)).toThrow(/mapping "deepseek" names "deepseek v4 pro", which is no longer/)
+  })
+
+  test('a family label used in a restricted-models bullet whose mapping points at a retired row throws, while the footnote is exact', () => {
+    const source = mutate(FAMILY_FOOTNOTE, FLASH_FOOTNOTE).replace(V4_PRO_ROW, () => '')
+    expect(source).toContain(FAMILY_BULLET)
+    expect(() => parsePrivacyDocs(source)).toThrow(/names "deepseek v4 pro", which is no longer/)
+  })
+
+  test('the family label still reaches every surviving member when all of them are present', () => {
+    const rows = rowsByName(mdx)
+    expect(rows.get('DeepSeek V4.1 Flash')?.agreementExpiry).toBe('2026-11-30')
+    expect(rows.get('DeepSeek V4 Pro')?.agreementExpiry).toBe('2026-11-30')
+  })
+
+  test('a family label that is also an exact row name is ambiguous only where it is used', () => {
+    const renamed = mutate('| Hy3                        | 0 days         |', '| Deepseek | 0 days |').replace(
+      FAMILY_FOOTNOTE,
+      () => '- **DeepSeek V4.1 Flash / DeepSeek V4 Pro:** ZDR agreement',
+    )
+    expect(() => parsePrivacyDocs(renamed)).not.toThrow()
+    const used = renamed.replace(
+      '**Gemini 4 Argon:**',
+      () => '**Deepseek:** Not available in Angola.\n\n**Gemini 4 Argon:**',
+    )
+    expect(() => parsePrivacyDocs(used)).toThrow(/ambiguous/)
+  })
+})

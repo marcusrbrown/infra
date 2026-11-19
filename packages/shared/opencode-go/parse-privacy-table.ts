@@ -473,19 +473,35 @@ function paragraphsOf(lines: readonly string[]): string[] {
 interface NameEntry {
   /** The name as the page writes it, for messages. */
   shown: string
-  targets: Accumulator[]
+  rows: Accumulator[]
+  /** Reviewed family labels that normalize to this name. Their targets are resolved only when the name is used. */
+  groups: string[]
 }
 
-/** Normalized name -> the rows it names: every row name, and the reviewed family labels. */
+/**
+ * Normalized name -> what it names: every row name and every reviewed family label. Family labels are indexed by
+ * name only: a mapping is resolved by `resolveEntry` when some text matched it, so a retired family member cannot
+ * block a refresh whose page no longer uses the label.
+ */
 function nameIndex(accumulators: ReadonlyMap<string, Accumulator>): Map<string, NameEntry> {
   const index = new Map<string, NameEntry>()
-  const add = (shown: string, targets: Accumulator[]): void => {
+  const entryFor = (shown: string): NameEntry => {
     const key = normalizeModelName(shown)
-    index.set(key, {shown: index.get(key)?.shown ?? shown, targets: [...(index.get(key)?.targets ?? []), ...targets]})
+    const entry = index.get(key) ?? {shown, rows: [], groups: []}
+    index.set(key, entry)
+    return entry
   }
-  for (const accumulator of accumulators.values()) add(accumulator.row.name, [accumulator])
-  for (const label of LABEL_GROUPS.keys()) add(label, resolveToken(label, accumulators) ?? [])
+  for (const accumulator of accumulators.values()) entryFor(accumulator.row.name).rows.push(accumulator)
+  for (const label of LABEL_GROUPS.keys()) entryFor(label).groups.push(label)
   return index
+}
+
+/** The rows a matched name limits. A family label throws here, and only here, when its mapping names a retired row. */
+function resolveEntry(entry: NameEntry, accumulators: ReadonlyMap<string, Accumulator>): Accumulator[] {
+  if (entry.rows.length > 0 && entry.groups.length > 0) {
+    throw new PrivacyTableError(`label ${quoted(entry.shown)} is ambiguous: a Privacy row and a reviewed label mapping`)
+  }
+  return entry.rows.length > 0 ? entry.rows : entry.groups.flatMap(group => resolveToken(group, accumulators) ?? [])
 }
 
 /**
@@ -551,7 +567,8 @@ function applyUsageNotices(lines: readonly string[], accumulators: ReadonlyMap<s
           .join(', ')})`,
       )
     }
-    for (const target of index.get(name)?.targets ?? []) target.availabilityLimited = true
+    const entry = index.get(name)
+    for (const target of entry === undefined ? [] : resolveEntry(entry, accumulators)) target.availabilityLimited = true
   }
 }
 

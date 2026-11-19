@@ -39,7 +39,7 @@ function tempDir(): string {
 
 /** The snapshot the fixture page and API response build to, stamped with `commit`. */
 const tableAt = (commit: string): PrivacySnapshot =>
-  buildSnapshot(parsePrivacyDocs(MDX), parseLiveModels(JSON.parse(LIVE_JSON)), commit).snapshot
+  buildSnapshot(parsePrivacyDocs(MDX), parseLiveModels(JSON.parse(LIVE_JSON)).models, commit).snapshot
 
 /** The recorded live response with one model's entry changed by `change`. */
 function liveWith(id: string, change: (entry: Record<string, unknown>) => void): string {
@@ -386,6 +386,102 @@ describe('refreshGoPrivacy: the PR body reports where the sources differ', () =>
   })
 })
 
+describe('refreshGoPrivacy: a live model with no privacy fields is left out and reported', () => {
+  const NO_PRIVACY_LINE =
+    'live model `glm-5.3` named `GLM-5.3`: upstream published no privacy fields (`go`) for it, so it has no entry'
+  const withoutGo = (...ids: string[]): string => {
+    const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
+    for (const entry of body.data) if (ids.includes(String(entry.id))) delete entry.go
+    return JSON.stringify(body)
+  }
+  const runLogged = (h: Harness) => {
+    const lines: string[] = []
+    return {
+      lines,
+      done: refreshGoPrivacy({
+        snapshotPath: h.snapshotPath,
+        bodyPath: h.bodyPath,
+        fetch: h.fetch,
+        log: line => lines.push(line),
+      }),
+    }
+  }
+
+  it('succeeds with one model without go: no entry for it, and the body and the log report it in their own words', async () => {
+    const h = harness(staleSnapshot().snapshot, {live: withoutGo('glm-5.3')})
+    const {lines, done} = runLogged(h)
+
+    await done
+
+    const written = JSON.parse(readFileSync(h.snapshotPath, 'utf8')) as PrivacySnapshot
+    expect(written.models['glm-5.3']).toBeUndefined()
+    expect(Object.keys(written.models)).toHaveLength(30)
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('### Left out of the snapshot (1)')
+    expect(body).toContain(`- ${NO_PRIVACY_LINE}`)
+    expect(lines).toEqual([`left out: ${NO_PRIVACY_LINE}`])
+  })
+
+  it('does not report its Privacy row as a row with no live model', async () => {
+    const h = harness(staleSnapshot().snapshot, {live: withoutGo('glm-5.3')})
+    await run(h)
+    expect(readFileSync(h.bodyPath, 'utf8')).not.toContain('Privacy row `GLM-5.3`')
+  })
+
+  it('a model that is in the committed snapshot drops out, and that alone opens a PR with the removal', async () => {
+    const committed = tableAt(OLD_SHA)
+    expect(committed.models['glm-5.3']).toBeDefined()
+    const h = harness(committed, {live: withoutGo('glm-5.3')})
+
+    const result = await run(h)
+
+    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA})
+    expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models['glm-5.3']).toBeUndefined()
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('### Removed (1)')
+    expect(body).toContain('- `glm-5.3`: was zero retention: yes')
+    expect(body).toContain(`- ${NO_PRIVACY_LINE}`)
+  })
+
+  it('leads the PR body with a loud line when an exposed model drops out for want of privacy fields', async () => {
+    const h = harness(tableAt(OLD_SHA), {live: withoutGo('glm-5.3')})
+    await run(h)
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body.indexOf('upstream published no privacy fields')).toBeGreaterThan(-1)
+    const lead = body.split('\n').find(line => line.startsWith('**Warning'))
+    expect(lead).toContain('`glm-5.3`')
+    expect(body.indexOf(lead ?? '')).toBeLessThan(body.indexOf('### Added'))
+  })
+
+  it('has no warning line when the model was not exposed anyway', async () => {
+    const committed = tableAt(OLD_SHA)
+    const {'glm-5.3': _dropped, ...rest} = committed.models
+    const h = harness({...committed, models: rest}, {live: withoutGo('glm-5.3')})
+    const {lines, done} = runLogged(h)
+    const result = await done
+    expect(result.changed).toBe(false)
+    expect(lines).toEqual([`left out: ${NO_PRIVACY_LINE}`])
+    expect(existsSync(h.bodyPath)).toBe(false)
+  })
+
+  it('throws and leaves the snapshot untouched when more than half of the entries have no go object', async () => {
+    const ids = (JSON.parse(LIVE_JSON) as {data: {id: string}[]}).data.slice(0, 16).map(entry => entry.id)
+    const h = harness(staleSnapshot().snapshot, {live: withoutGo(...ids)})
+    await expectUntouched(h, /more than half/)
+  })
+
+  it('throws when no entry has a go object', async () => {
+    const ids = (JSON.parse(LIVE_JSON) as {data: {id: string}[]}).data.map(entry => entry.id)
+    await expectUntouched(harness(staleSnapshot().snapshot, {live: withoutGo(...ids)}), /no entry has a go object/)
+  })
+
+  it('still throws on a go object that is present but malformed', async () => {
+    const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
+    ;(body.data[0]?.go as Record<string, unknown>).zdr = 'yes'
+    await expectUntouched(harness(staleSnapshot().snapshot, {live: JSON.stringify(body)}), LiveModelsError)
+  })
+})
+
 describe('refreshGoPrivacy: a model one source does not know is left out and reported', () => {
   const addLive = (id: string, name: string): string => {
     const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
@@ -568,13 +664,6 @@ describe('refreshGoPrivacy: failures leave the snapshot untouched', () => {
   it('rejects a live models body that is not JSON', async () => {
     const h = harness(staleSnapshot().snapshot, {live: '<html>'})
     await expectUntouched(h, /not JSON/)
-  })
-
-  it('rejects a live models response with an entry that has no go object', async () => {
-    const live = liveWith('glm-5.3', entry => {
-      delete entry.go
-    })
-    await expectUntouched(harness(staleSnapshot().snapshot, {live}), LiveModelsError)
   })
 
   it('rejects a live models response whose privacy field is not a boolean', async () => {

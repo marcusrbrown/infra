@@ -9,6 +9,7 @@ import {
   describeUnmatched,
   DOCS_NAME_ALIASES,
   normalizeModelName,
+  type Unmatched,
 } from './build-snapshot'
 import {computeEligibility, parseSnapshot} from './eligibility'
 import {parseLiveModels, type LiveModel} from './live-models'
@@ -18,7 +19,7 @@ const FIXTURE_COMMIT = '011f9043e8a90dc9a1ac42fb1181486dd4d13b71'
 
 const readFixture = (name: string) => readFileSync(new URL(`__fixtures__/${name}`, import.meta.url), 'utf8')
 const docs = (): DocsPrivacyRow[] => parsePrivacyDocs(readFixture('go.mdx'))
-const live = (): LiveModel[] => parseLiveModels(JSON.parse(readFixture('live-models.json')))
+const live = (): LiveModel[] => parseLiveModels(JSON.parse(readFixture('live-models.json'))).models
 
 const build = (rows = docs(), models = live()) => buildSnapshot(rows, models, FIXTURE_COMMIT)
 
@@ -230,7 +231,9 @@ describe('buildSnapshot joins by normalized name and a reviewed alias', () => {
 
   test('a join that matches nothing at all throws, because the join itself is then wrong', () => {
     const models = live().map(model => ({...model, name: `Renamed ${model.id}`}))
-    expect(() => buildSnapshot(docs(), models, FIXTURE_COMMIT, {})).toThrow(/no docs row matches any live model/)
+    expect(() => buildSnapshot(docs(), models, FIXTURE_COMMIT, {aliases: {}})).toThrow(
+      /no docs row matches any live model/,
+    )
   })
 
   test('a malformed source commit throws', () => {
@@ -268,7 +271,7 @@ describe('buildSnapshot joins by normalized name and a reviewed alias', () => {
     })
 
     test('without the alias, the DeepSeek V4.1 Flash pair is left out on both sides and the rest is unchanged', () => {
-      const result = buildSnapshot(docs(), live(), FIXTURE_COMMIT, {})
+      const result = buildSnapshot(docs(), live(), FIXTURE_COMMIT, {aliases: {}})
       expect(result.snapshot.models['deepseek-v4.1-flash']).toBeUndefined()
       expect(result.unmatched).toEqual([
         {missing: 'api', id: null, name: 'DeepSeek V4.1 Flash'},
@@ -479,5 +482,72 @@ describe('report lines render upstream names as bounded plain text', () => {
       'Privacy row `abcd`: no live model',
     )
     expect(describeUnmatched({missing: 'api', id: null, name: ' \n '})).toBe('Privacy row `(blank)`: no live model')
+  })
+})
+
+describe('buildSnapshot on live models upstream published no privacy fields for', () => {
+  const noPrivacyFor = (id: string): {models: LiveModel[]; noPrivacy: {id: string; name: string}[]} => {
+    const gone = live().find(model => model.id === id)
+    if (gone === undefined) throw new Error(`fixture has no ${id}`)
+    return {models: live().filter(model => model.id !== id), noPrivacy: [{id, name: gone.name}]}
+  }
+  const buildWithout = (id: string) => {
+    const {models, noPrivacy} = noPrivacyFor(id)
+    return buildSnapshot(docs(), models, FIXTURE_COMMIT, {noPrivacy})
+  }
+
+  test('the model has no entry, and every other entry is unchanged', () => {
+    const result = buildWithout('glm-5.3')
+    expect(result.snapshot.models['glm-5.3']).toBeUndefined()
+    const {'glm-5.3': _gone, ...rest} = build().snapshot.models
+    expect(result.snapshot.models).toEqual(rest)
+  })
+
+  test('the report names it with its own wording, and its docs row is not reported as missing from the API', () => {
+    const {unmatched} = buildWithout('glm-5.3')
+    expect(unmatched).toEqual([{missing: 'privacy', id: 'glm-5.3', name: 'GLM-5.3'}])
+    expect(describeUnmatched(unmatched[0] as Unmatched)).toBe(
+      'live model `glm-5.3` named `GLM-5.3`: upstream published no privacy fields (`go`) for it, so it has no entry',
+    )
+  })
+
+  test('it is excluded by the eligibility check as not-in-snapshot', () => {
+    const {models, noPrivacy} = noPrivacyFor('glm-5.3')
+    const result = buildSnapshot(docs(), models, FIXTURE_COMMIT, {noPrivacy})
+    const ids = [...models.map(model => model.id), 'glm-5.3']
+    const eligibility = computeEligibility(parseSnapshot(result.snapshot), ids, '2026-11-19')
+    expect(eligibility.excluded).toContainEqual({id: 'glm-5.3', reason: 'not-in-snapshot'})
+    expect(eligibility.eligible).not.toContain('glm-5.3')
+  })
+
+  test('a model with no privacy fields and no docs row is reported once', () => {
+    const {models} = noPrivacyFor('glm-5.3')
+    const result = buildSnapshot(docs(), models, FIXTURE_COMMIT, {noPrivacy: [{id: 'brand-new', name: 'Brand New'}]})
+    expect(result.unmatched.filter(item => item.id === 'brand-new')).toEqual([
+      {missing: 'privacy', id: 'brand-new', name: 'Brand New'},
+    ])
+  })
+
+  test('the alias still pairs a docs row with a model that has no privacy fields', () => {
+    const {models} = noPrivacyFor('deepseek-v4.1-flash')
+    const result = buildSnapshot(docs(), models, FIXTURE_COMMIT, {
+      noPrivacy: [{id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash 1017'}],
+    })
+    expect(result.unmatched).toEqual([
+      {missing: 'privacy', id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash 1017'},
+    ])
+  })
+
+  test('a name shared with another live model is an ambiguous join and throws', () => {
+    const {models} = noPrivacyFor('glm-5.3')
+    expect(() =>
+      buildSnapshot(docs(), models, FIXTURE_COMMIT, {noPrivacy: [{id: 'glm-5.3-b', name: 'GLM 5.3 Flash'}]}),
+    ).toThrow(/same name/)
+  })
+
+  test('the report line sanitises the upstream name like the other left-out lines', () => {
+    const line = describeUnmatched({missing: 'privacy', id: 'x', name: '# A\n`b` |c|'})
+    expect(line).not.toMatch(/\n/)
+    expect(line).toContain('named `# A b |c|`')
   })
 })

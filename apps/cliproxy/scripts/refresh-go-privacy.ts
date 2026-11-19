@@ -156,9 +156,19 @@ export function renderPrBody(
   disagreements: readonly Disagreement[] = [],
   unmatched: readonly Unmatched[] = [],
 ): string {
+  // The snapshot currently exposes these, and upstream published no privacy fields for them: this PR removes them.
+  const droppedExposed = unmatched
+    .filter(item => item.missing === 'privacy' && item.id !== null && item.id in before)
+    .map(item => `\`${item.id}\``)
   const lines: string[] = [
     '## OpenCode Go privacy snapshot refresh',
     '',
+    ...(droppedExposed.length === 0
+      ? []
+      : [
+          `**Warning: upstream published no privacy fields for ${droppedExposed.length} model(s) the snapshot currently exposes (${droppedExposed.join(', ')}), so this PR removes them. Check that the live models list is not degraded before merging: removing a model is the safe direction for privacy but takes it away from agents.**`,
+          '',
+        ]),
     `Source: \`${SNAPSHOT_SOURCE_REPO}\` @ \`${next.source.commit}\` (\`${SNAPSHOT_SOURCE_PATH}\`)`,
     '',
     `Compare: ${COMPARE_BASE_URL}/${previousCommit}...${next.source.commit}`,
@@ -206,9 +216,10 @@ export function renderPrBody(
 
   lines.push(
     '',
-    'A model that only one source knows gets no entry, so it is not exposed. Each one below is either a model the ' +
-      'page has not caught up with (or the API has not), or a name the join could not match: if an entry here is a ' +
-      'model that is currently exposed, it drops out of the snapshot in this PR.',
+    'A model that only one source knows, or that has no privacy fields upstream, gets no entry, so it is not exposed. ' +
+      'Each one below is either a model the page has not caught up with (or the API has not), a name the join could ' +
+      'not match, or a model the API listed without its `go` privacy object: if an entry here is a model that is ' +
+      'currently exposed, it drops out of the snapshot in this PR.',
   )
   section(
     'Left out of the snapshot',
@@ -257,11 +268,8 @@ export async function refreshGoPrivacy({
 
   const livePayload = await fetchLiveModels(fetchImpl)
 
-  const {
-    snapshot: next,
-    disagreements,
-    unmatched,
-  } = buildSnapshot(parsePrivacyDocs(mdx), parseLiveModels(livePayload), sha)
+  const {models: liveModels, noPrivacy} = parseLiveModels(livePayload)
+  const {snapshot: next, disagreements, unmatched} = buildSnapshot(parsePrivacyDocs(mdx), liveModels, sha, {noPrivacy})
   if (Object.keys(next.models).length === 0) throw new PrivacyTableError('built zero models')
   // Logged before the change test: a left-out model must show in the workflow log even when no PR opens.
   for (const item of unmatched) log(`left out: ${describeUnmatched(item)}`)

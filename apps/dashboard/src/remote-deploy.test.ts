@@ -98,6 +98,19 @@ const assertFailureDetailAllowlistHasNoDrift = (): void => {
   }
 }
 
+// mkdirSync's mode is masked by the umask, and the remote program rejects group- or world-writable parents, so
+// fixtures that must be safe set their mode explicitly.
+const makeDirectoryWithMode = (path: string, mode: number): void => {
+  mkdirSync(path, {recursive: true})
+  chmodSync(path, mode)
+}
+
+const seedDashboardDirectories = (dashboardRoot: string): void => {
+  makeDirectoryWithMode(dashboardRoot, 0o755)
+  makeDirectoryWithMode(join(dashboardRoot, 'config'), 0o755)
+  makeDirectoryWithMode(join(dashboardRoot, 'data'), 0o755)
+}
+
 class ManualTimers {
   private nextHandle = 1
   private readonly callbacks = new Map<number, () => void>()
@@ -1433,8 +1446,7 @@ describe('remote transaction process boundary', () => {
     const root = realpathSync(parent)
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
@@ -1470,8 +1482,7 @@ describe('remote transaction process boundary', () => {
     const priorRepoDigest = `ghcr.io/fro-bot/dashboard@${priorDigest}`
     const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:previous@${priorDigest}\n`
 
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
 
     try {
@@ -1661,8 +1672,7 @@ describe('remote transaction process boundary', () => {
     const priorDigest = `sha256:${'b'.repeat(64)}`
     const priorRepoDigest = `ghcr.io/fro-bot/dashboard@${priorDigest}`
 
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:previous@${priorDigest}\n`,
@@ -1702,8 +1712,7 @@ describe('remote transaction process boundary', () => {
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
 
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ${DASHBOARD_IMAGE}\n`,
@@ -1805,8 +1814,7 @@ describe('remote transaction process boundary', () => {
     const dashboardRoot = `${runtimeRoot}-dashboard`
     const dockerLogPath = join(root, 'docker.log')
 
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ${DASHBOARD_IMAGE}\n`,
@@ -1871,8 +1879,7 @@ describe('remote transaction process boundary', () => {
       )
       const runtimeRoot = join(realpathSync(parent), 'dashboard-deploy')
       const dashboardRoot = `${runtimeRoot}-dashboard`
-      mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-      mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+      seedDashboardDirectories(dashboardRoot)
       writeFileSync(
         join(dashboardRoot, 'docker-compose.yaml'),
         `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
@@ -2117,6 +2124,47 @@ describe('remote transaction process boundary', () => {
       rmSync(parent, {recursive: true, force: true})
     }
   })
+
+  // Each validated parent directory is made unsafe on purpose and must be rejected before any active-state mutation.
+  for (const [name, label, unsafeMode] of [
+    ['group-writable dashboard parent', 'dashboard-parent', 0o775],
+    ['group-writable dashboard root', 'root', 0o775],
+    ['world-writable dashboard root', 'root', 0o757],
+    ['group-writable dashboard config', 'config', 0o775],
+    ['world-writable dashboard config', 'config', 0o757],
+  ] as const) {
+    it(`rejects a ${name} before mutating active state`, async () => {
+      const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-writable-parent-'))
+      const root = realpathSync(parent)
+      const runtimeRoot = join(root, 'dashboard-deploy')
+      const dashboardRoot = `${runtimeRoot}-dashboard`
+      const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
+      seedDashboardDirectories(dashboardRoot)
+      writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
+      const unsafePath = {
+        'dashboard-parent': root,
+        root: dashboardRoot,
+        config: join(dashboardRoot, 'config'),
+      }[label]
+      chmodSync(unsafePath, unsafeMode)
+
+      try {
+        const result = await runShellProgram(
+          adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot),
+          encodeRemotePayload(fixture),
+        )
+
+        expect(result.exitCode).not.toBe(0)
+        expect(result.stdout).toContain('failure=unsafe-path')
+        expect(result.stdout).not.toContain('stage=active-state-mutation')
+        expect(result.stderr).toContain(`${label} parent directory is writable by group or world`)
+        expect(readFileSync(join(dashboardRoot, 'docker-compose.yaml'), 'utf8')).toBe(oldCompose)
+        expect(existsSync(join(dashboardRoot, '.env'))).toBe(false)
+      } finally {
+        rmSync(parent, {recursive: true, force: true})
+      }
+    })
+  }
 
   for (const [name, payload] of [
     ['malformed header', new TextEncoder().encode('not-dashboard-payload\n')],
@@ -2692,8 +2740,7 @@ describe('staged image acquisition and publication ordering', () => {
     const composeLogPath = join(root, 'compose.log')
     const pruneLogPath = join(root, 'prune.log')
     const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
 
     try {
@@ -2743,8 +2790,7 @@ describe('staged image acquisition and publication ordering', () => {
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
     const composeLogPath = join(root, 'compose.log')
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
@@ -2771,8 +2817,7 @@ describe('staged image acquisition and publication ordering', () => {
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
     const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
     const tagOnly = 'ghcr.io/fro-bot/dashboard:latest'
 
@@ -2812,8 +2857,7 @@ describe('staged image acquisition and publication ordering', () => {
       const runtimeRoot = join(root, 'dashboard-deploy')
       const dashboardRoot = `${runtimeRoot}-dashboard`
       const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
-      mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-      mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+      seedDashboardDirectories(dashboardRoot)
       writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
 
       try {
@@ -2836,8 +2880,7 @@ describe('staged image acquisition and publication ordering', () => {
     const root = realpathSync(parent)
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
@@ -2903,8 +2946,7 @@ describe('staged image acquisition and publication ordering', () => {
       const runtimeRoot = join(root, 'dashboard-deploy')
       const dashboardRoot = `${runtimeRoot}-dashboard`
       const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
-      mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-      mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+      seedDashboardDirectories(dashboardRoot)
       writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
 
       try {
@@ -2939,8 +2981,7 @@ describe('staged image acquisition and publication ordering', () => {
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
     const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
 
     try {
@@ -2973,8 +3014,7 @@ describe('staged image acquisition and publication ordering', () => {
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
     const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
 
     try {
@@ -3038,8 +3078,7 @@ describe('staged image acquisition and publication ordering', () => {
       const runtimeRoot = join(root, 'dashboard-deploy')
       const dashboardRoot = `${runtimeRoot}-dashboard`
       const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
-      mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-      mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+      seedDashboardDirectories(dashboardRoot)
       writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
       const path = {
         env: join(dashboardRoot, '.env'),
@@ -3075,8 +3114,7 @@ describe('staged image acquisition and publication ordering', () => {
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
     const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
 
     try {
@@ -3101,8 +3139,7 @@ describe('staged image acquisition and publication ordering', () => {
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
     const froBotKeyPath = join(dashboardRoot, 'config', 'fro-bot-app.pem')
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
@@ -3130,8 +3167,7 @@ describe('staged image acquisition and publication ordering', () => {
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
     const oldCompose = `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(join(dashboardRoot, 'docker-compose.yaml'), oldCompose)
 
     try {
@@ -3160,8 +3196,7 @@ describe('staged image acquisition and publication ordering', () => {
     const dataPath = join(dashboardRoot, 'data')
     const appKeyPath = join(dashboardRoot, 'config', 'github-app.pem')
     const legacyOverridePath = join(dashboardRoot, 'docker-compose.override.yaml')
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(dataPath, {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,
@@ -3198,8 +3233,7 @@ describe('staged image acquisition and publication ordering', () => {
       const runtimeRoot = join(root, 'dashboard-deploy')
       const dashboardRoot = `${runtimeRoot}-dashboard`
       const dockerLogPath = join(root, 'docker.log')
-      mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-      mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+      seedDashboardDirectories(dashboardRoot)
 
       try {
         const result = await runShellProgram(
@@ -3241,8 +3275,7 @@ describe('dashboard is always force-recreated after the keys are published', () 
     const runtimeRoot = join(root, 'dashboard-deploy')
     const dashboardRoot = `${runtimeRoot}-dashboard`
     const composeLogPath = join(root, 'compose.log')
-    mkdirSync(join(dashboardRoot, 'config'), {recursive: true})
-    mkdirSync(join(dashboardRoot, 'data'), {recursive: true})
+    seedDashboardDirectories(dashboardRoot)
     writeFileSync(
       join(dashboardRoot, 'docker-compose.yaml'),
       `services:\n  dashboard:\n    image: ghcr.io/fro-bot/dashboard:old@${fixture.expectedDashboardDigest}\n`,

@@ -1546,6 +1546,38 @@ describe('retention deployment integration', () => {
     expect(commandGraph(calls)).toContain('timeout 60s systemctl daemon-reload')
   })
 
+  it('requests explicit root-owned modes for staged retention artifacts and verifies them with stat', async () => {
+    const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
+    const responses = Array.from<SpawnResult | undefined>({length: 30})
+    responses[1] = makeSpawnResult(matchingFingerprint)
+    const {spawnFn, calls} = makeFakeSpawn(responses)
+
+    await deploy({
+      env: VALID_ENV,
+      spawn: spawnFn,
+      resolve: resolvesOk,
+      fetch: fetchHeartbeatOk,
+    })
+
+    const commands = calls.map(call => call.cmd.join(' '))
+    const chmodCommand = commands.find(command => command.includes('chmod 0755'))
+    const verifyCommand = commands.find(command => command.includes('bash -n'))
+    const releaseHash = /\/opt\/umami\/retention\/staging\/([0-9a-f]{64})/.exec(chmodCommand ?? '')?.[1]
+    expect(releaseHash).toBeDefined()
+    const release = `/opt/umami/retention/staging/${releaseHash}`
+    const units = `/opt/umami/retention/systemd-staging/${releaseHash}`
+
+    expect(chmodCommand).toContain(`chmod 0755 '${release}' '${release}/retention.sh'`)
+    expect(chmodCommand).toContain(
+      `chmod 0644 '${release}/retention-check.sql' '${release}/retention.sql' '${units}/umami-retention.service' '${units}/umami-retention.timer'`,
+    )
+    expect(verifyCommand).toContain(`test "$(stat -c '%a' '${release}/retention.sh')" = 755`)
+    expect(verifyCommand).toContain(`test "$(stat -c '%a' '${release}/retention-check.sql')" = 644`)
+    expect(verifyCommand).toContain(`test "$(stat -c '%a' '${release}/retention.sql')" = 644`)
+    expect(verifyCommand).toContain(`test "$(stat -c '%a' '${units}/umami-retention.service')" = 644`)
+    expect(verifyCommand).toContain(`test "$(stat -c '%a' '${units}/umami-retention.timer')" = 644`)
+  })
+
   it('does not touch current when a runtime upload is interrupted', async () => {
     const matchingFingerprint = computeDbPasswordFingerprint(VALID_ENV.UMAMI_DB_PASSWORD)
     const responses = Array.from<SpawnResult | undefined>({length: 40})

@@ -63,19 +63,20 @@ describe('Umami retention systemd timer contract', () => {
 })
 
 describe('Umami retention deployment artifact modes', () => {
-  it('keeps the runner executable and data/unit files 0644-equivalent', async () => {
-    const expectedModes = [
-      {mode: 0o755, path: runnerPath},
-      {mode: 0o644, path: checkSqlPath},
-      {mode: 0o644, path: applySqlPath},
-      {mode: 0o644, path: servicePath},
-      {mode: 0o644, path: timerPath},
-    ] as const
+  // Git tracks only the executable bit; the other bits depend on the umask at checkout. The deploy sets the
+  // server-side modes explicitly, and src/deploy.test.ts pins them.
+  it('keeps the runner executable and data/unit files non-executable', async () => {
+    const ownerExecutable = 0o100
+    const anyExecutable = 0o111
+    const dataArtifacts = [checkSqlPath, applySqlPath, servicePath, timerPath] as const
+
+    const runner = await stat(runnerPath)
+    expect(runner.mode & ownerExecutable).toBe(ownerExecutable)
 
     await Promise.all(
-      expectedModes.map(async ({mode, path}) => {
+      dataArtifacts.map(async path => {
         const file = await stat(path)
-        expect(file.mode & 0o777).toBe(mode)
+        expect(file.mode & anyExecutable, path).toBe(0)
       }),
     )
   })

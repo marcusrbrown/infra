@@ -10,7 +10,7 @@ export const HISTORY_SCHEMA_VERSION = 1 as const
 export const HISTORY_WINDOW_DAYS = 90
 export const HISTORY_WINDOW_MS = HISTORY_WINDOW_DAYS * 24 * 60 * 60_000
 
-export const APP_IDS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker'] as const
+export const APP_IDS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker', 'traces'] as const
 export type AppId = (typeof APP_IDS)[number]
 
 export const OBSERVATION_KINDS = ['reachability', 'container-health', 'deploy-state', 'end-to-end', 'resource'] as const
@@ -116,4 +116,5 @@ export const OBSERVATION_KINDS_BY_ID: Record<AppId, Readonly<Record<string, Obse
     'egress-route': 'end-to-end',
   },
   broker: {'public-reachability': 'reachability', 'deploy-state': 'deploy-state'},
+  traces: {'public-reachability': 'reachability', 'deploy-state': 'deploy-state'},
 }

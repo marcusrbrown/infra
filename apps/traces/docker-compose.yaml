@@ -9,17 +9,17 @@
 #   - secrets are interpolated from the host `.env` or read from files, never written here
 #
 # Networks:
-#   edge     Caddy, the collector, Langfuse web, Tempo (and the health reporter, added with it). The
-#            internet-facing, custom-built collector can reach nothing else.
-#   backend  Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo.
+#   edge     Caddy, the collector, Langfuse web, Tempo, the health reporter. The internet-facing,
+#            custom-built collector can reach nothing else.
+#   backend  Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo, the health reporter.
+#            The reporter bridges both: it reads the collector and Tempo on edge, and ClickHouse, MinIO and the
+#            Langfuse worker on backend.
 #
 # No ClickHouse memory limit, on purpose: capping it near 7 GB lost spans after the sender got 200.
 #
 # Config files are bind-mounted from ./config. Deploy recreates a service after it uploads one, so a
 # single-file mount never serves a stale inode. Secret and token directories are mounted as
 # directories, so an atomic replace is seen at once.
-#
-# The health reporter service (Unit 7) is added to this file with its own pinned runtime image.
 name: traces
 
 x-logging: &logging
@@ -180,11 +180,16 @@ services:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?}
+      # Password of the read-only user the health reporter reads the trace tables with (see the mount below).
+      CLICKHOUSE_READER_PASSWORD: ${CLICKHOUSE_READER_PASSWORD:?}
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
       # System log TTLs. No memory settings in here, by design.
       - ./config/clickhouse:/etc/clickhouse-server/config.d:ro
+      # The read-only reporter user. One file, not the users.d directory: the image's entrypoint writes
+      # its own user file into that directory at start.
+      - ./config/clickhouse-users/traces-reader.xml:/etc/clickhouse-server/users.d/traces-reader.xml:ro
     networks: [backend]
     healthcheck:
       test: [CMD-SHELL, 'wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1']
@@ -308,6 +313,46 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+    logging: *logging
+
+  # Reads every dependency and runs a canary through the collector's private receiver; Caddy proxies only
+  # /healthz to it. A small Bun script from a pinned image, with its source mounted read-only: no build step,
+  # no dependencies, no Docker socket, no published port, no root. It starts without waiting for the stack, so a
+  # stack that is down is reported instead of leaving the reporter unstarted.
+  health-reporter:
+    image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
+    restart: unless-stopped
+    user: '10010:10010'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    command: [bun, run, --no-install, /app/health-report.ts]
+    environment:
+      # Nothing to write to: the runtime's transpiler cache is off and /tmp is a tmpfs.
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0'
+    tmpfs:
+      - /tmp
+    volumes:
+      # The reporter's source, uploaded by deploy as one directory.
+      - ./health-reporter:/app:ro
+      # Two password files, owned by the reporter's user and mode 0400: clickhouse-password (the read-only
+      # `traces_reader` user) and minio-password (the object store's root user, to list batch ages).
+      - ./secrets/reporter:/run/secrets/reporter:ro
+      # Tempo's blocks, for the age of its oldest data.
+      - tempo_data:/var/tempo:ro
+      # Two files and a directory that only say how full each disk is: the volume (through its sentinel file,
+      # which also proves it is the right volume) and the root filesystem.
+      - /mnt/traces/.traces-volume:/host/volume-sentinel:ro
+      - /srv:/host/root:ro
+    networks: [edge, backend]
+    # No depends_on: it must start when a service is down and say so.
+    healthcheck:
+      # The loopback listener answers while the process is up, whatever the verdict says.
+      test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:8081/live || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     logging: *logging
 
 networks:

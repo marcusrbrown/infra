@@ -24,6 +24,7 @@ export const CLIPROXY_ORIGIN = 'https://cliproxy.fro.bot'
 export const BROKER_ORIGIN = 'https://broker.fro.bot'
 export const UMAMI_ORIGIN = 'https://metrics.fro.bot'
 export const DASHBOARD_ORIGIN = 'https://dashboard.fro.bot'
+export const TRACES_ORIGIN = 'https://traces.fro.bot'
 
 /** Observation id used by every public probe. */
 export const PUBLIC_REACHABILITY_ID = 'public-reachability'
@@ -194,6 +195,15 @@ function parseJsonObject(body: string): Record<string, unknown> | undefined {
   return parsed as Record<string, unknown>
 }
 
+/**
+ * Traces health path: `{ok: true, at: <string>}`. The body is exactly a boolean and a timestamp by design (the
+ * path is public), so only the boolean is read. A 503 is a failing verdict and is a `fail` through the status
+ * code before the body is ever looked at.
+ */
+function checkTracesHealth(body: string): BodyVerdict {
+  return parseJsonObject(body)?.ok === true ? {ok: true} : {ok: false}
+}
+
 /** Umami heartbeat: `{ok: true}`. */
 function checkUmamiHeartbeat(body: string): BodyVerdict {
   return parseJsonObject(body)?.ok === true ? {ok: true} : {ok: false}
@@ -291,6 +301,14 @@ export function probeDashboard(options?: ProbeOptions): Promise<Observation> {
   return runProbe({origin: DASHBOARD_ORIGIN, path: '/api/healthz', unreachableReason: 'network-error'}, options)
 }
 
+/** Traces: `/healthz` answers 200 with `{ok: true}`. Unauthenticated; the reporter's cached verdict, never a probe. */
+export function probeTraces(options?: ProbeOptions): Promise<Observation> {
+  return runProbe(
+    {origin: TRACES_ORIGIN, path: '/healthz', checkBody: checkTracesHealth, unreachableReason: 'network-error'},
+    options,
+  )
+}
+
 /**
  * Gateway, observed through the dashboard's same-origin operator route (the gateway has no public listener of
  * its own): 200 with a non-empty string `contractVersion`. If the dashboard cannot be reached the gateway's
@@ -316,4 +334,5 @@ export const PUBLIC_PROBES = {
   umami: probeUmami,
   dashboard: probeDashboard,
   broker: probeBroker,
+  traces: probeTraces,
 } as const satisfies Partial<Record<AppId, (options?: ProbeOptions) => Promise<Observation>>>

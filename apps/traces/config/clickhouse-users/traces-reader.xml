@@ -1,0 +1,27 @@
+<clickhouse>
+    <!--
+        Read-only user for the health reporter. It reads Langfuse's two trace tables and nothing else: the age of the
+        oldest span (retention proof) and the canary trace (the proof that Langfuse stored every marker).
+        This user can read trace content. It exists only on the host, and its password reaches ClickHouse through
+        the environment (CLICKHOUSE_READER_PASSWORD), never through this file.
+    -->
+    <users>
+        <traces_reader>
+            <password from_env="CLICKHOUSE_READER_PASSWORD"/>
+            <profile>traces_reader</profile>
+            <quota>default</quota>
+            <grants>
+                <query>GRANT SELECT ON default.events_full</query>
+                <query>GRANT SELECT ON default.events_core</query>
+            </grants>
+        </traces_reader>
+    </users>
+    <profiles>
+        <traces_reader>
+            <readonly>1</readonly>
+            <max_execution_time>30</max_execution_time>
+            <max_result_bytes>4194304</max_result_bytes>
+            <max_rows_to_read>100000000</max_rows_to_read>
+        </traces_reader>
+    </profiles>
+</clickhouse>

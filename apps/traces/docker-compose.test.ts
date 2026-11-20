@@ -2,6 +2,9 @@ import {readdirSync} from 'node:fs'
 
 import {describe, expect, it} from 'bun:test'
 
+import {ENDPOINTS, PATHS, PORTS} from './src/health-report'
+import {TRACES_SENTINEL_PATH} from './src/host'
+
 // Reads the real compose file and the service configs beside it. Image tags and digests are
 // Renovate-managed, so these tests assert their format and never copy a value.
 
@@ -130,9 +133,9 @@ describe('traces compose: networks', () => {
     }
   })
 
-  it('bridges the two networks only through Langfuse web and Tempo', () => {
+  it('bridges the two networks only through Langfuse web, Tempo and the health reporter', () => {
     const bridges = names.filter(name => networksOf(name).length === 2).sort()
-    expect(bridges).toEqual(['langfuse-web', 'tempo'])
+    expect(bridges).toEqual(['health-reporter', 'langfuse-web', 'tempo'])
   })
 })
 
@@ -204,6 +207,106 @@ describe('traces compose: operations', () => {
     )
     for (const volume of used) expect(declared).toContain(volume)
     for (const volume of declared) expect(used).toContain(volume)
+  })
+})
+
+describe('traces compose: health reporter', () => {
+  const reporter = (): Rec => service('health-reporter')
+  const volumes = (): string[] => strings(reporter().volumes, 'health-reporter.volumes')
+
+  it('runs as a non-root user on a read-only root filesystem with no capabilities', () => {
+    expect(String(reporter().user)).toMatch(/^[1-9]\d*:[1-9]\d*$/)
+    expect(reporter().read_only).toBe(true)
+    expect(strings(reporter().cap_drop, 'cap_drop')).toEqual(['ALL'])
+    expect(strings(reporter().security_opt, 'security_opt')).toContain('no-new-privileges:true')
+  })
+
+  it('publishes no port and shares no host namespace', () => {
+    expect(reporter().ports).toBeUndefined()
+    expect(reporter().network_mode).toBeUndefined()
+    expect(reporter().pid).toBeUndefined()
+  })
+
+  it('is on both networks and does not wait for the stack it reports on', () => {
+    expect(networksOf('health-reporter')).toEqual(['backend', 'edge'])
+    expect(reporter().depends_on).toBeUndefined()
+  })
+
+  it('runs its source from a read-only bind mount without installing anything', () => {
+    expect(volumes()).toContain('./health-reporter:/app:ro')
+    const command = strings(reporter().command, 'command')
+    expect(command).toContain('--no-install')
+    expect(command.at(-1)).toBe('/app/health-report.ts')
+  })
+
+  it('mounts every host path read-only', () => {
+    for (const volume of volumes()) expect(volume.endsWith(':ro')).toBe(true)
+  })
+
+  it('reads the volume through its sentinel file, mounted where the reporter looks for it', () => {
+    expect(volumes()).toContain(`${TRACES_SENTINEL_PATH}:${PATHS.volumeSentinel}:ro`)
+    expect(volumes().some(volume => volume.endsWith(`:${PATHS.rootProbe}:ro`))).toBe(true)
+  })
+
+  it('reads Tempo blocks and its two secret files from the paths the reporter uses', () => {
+    expect(volumes()).toContain('tempo_data:/var/tempo:ro')
+    expect(PATHS.tempoBlocks.startsWith('/var/tempo/')).toBe(true)
+    const secretMount = volumes().find(volume => volume.startsWith('./secrets/reporter:'))
+    expect(secretMount).toBeDefined()
+    const target = String(secretMount).split(':')[1] ?? ''
+    expect(PATHS.clickhousePasswordFile.startsWith(`${target}/`)).toBe(true)
+    expect(PATHS.objectStorePasswordFile.startsWith(`${target}/`)).toBe(true)
+  })
+
+  it('never mounts sender tokens, the collector secrets, the Docker socket or a store directory', () => {
+    for (const volume of volumes()) {
+      expect(volume).not.toMatch(
+        /tokens|secrets\/collector|secrets\/grafana|docker\.sock|clickhouse_data|postgres_data|minio_data|redis_data/,
+      )
+    }
+  })
+
+  it('has no secret in its environment', () => {
+    expect(Object.keys(environment('health-reporter'))).toEqual(['BUN_RUNTIME_TRANSPILER_CACHE_PATH'])
+  })
+
+  it('is the upstream Caddy proxies /healthz to, on the port the reporter listens on', async () => {
+    const caddyfile = await read('config/Caddyfile')
+    expect(caddyfile).toContain(`reverse_proxy health-reporter:${PORTS.public}`)
+  })
+
+  it('has a liveness healthcheck on the loopback listener, which the verdict cannot turn unhealthy', () => {
+    const test = strings(record(reporter().healthcheck, 'healthcheck').test, 'healthcheck.test').join(' ')
+    expect(test).toContain(`http://127.0.0.1:${PORTS.detail}/live`)
+    expect(test).not.toContain('healthz')
+  })
+
+  it('reaches every dependency by a service name and port that exist in this file', () => {
+    const published: Record<string, number[]> = {
+      collector: [13133, 8888, 4414],
+      tempo: [3200],
+      'langfuse-web': [3000],
+      'langfuse-worker': [3030],
+      clickhouse: [8123],
+      minio: [9000],
+    }
+    const urls = Object.values(ENDPOINTS).map(url => new URL(url))
+    for (const url of urls) {
+      expect(names).toContain(url.hostname)
+      expect(published[url.hostname]).toContain(Number(url.port))
+    }
+    // Everything the reporter talks to is reachable from a network it joins.
+    for (const url of urls) {
+      const shared = networksOf(url.hostname).filter(network => networksOf('health-reporter').includes(network))
+      expect(shared.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('passes ClickHouse the reader password as a required variable and mounts the reader user file', () => {
+    expect(environment('clickhouse').CLICKHOUSE_READER_PASSWORD).toBe(interpolation('CLICKHOUSE_READER_PASSWORD:?'))
+    expect(strings(service('clickhouse').volumes, 'clickhouse.volumes')).toContain(
+      './config/clickhouse-users/traces-reader.xml:/etc/clickhouse-server/users.d/traces-reader.xml:ro',
+    )
   })
 })
 

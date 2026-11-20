@@ -113,6 +113,7 @@ export function recordByApp<T>(build: (app: AppId) => T): Record<AppId, T> {
     dashboard: build('dashboard'),
     vpn: build('vpn'),
     broker: build('broker'),
+    traces: build('traces'),
   }
 }
 

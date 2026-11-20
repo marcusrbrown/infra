@@ -168,14 +168,14 @@ describe('readDeployStates', () => {
     })
   })
 
-  it('reads all seven apps in 2 calls each, within the stated budget', async () => {
+  it('reads all eight apps in 2 calls each, within the stated budget', async () => {
     const {fetchFn, calls} = fakeGitHubByApp({})
     const observations = await readDeployStates({token: TOKEN, fetch: fetchFn, now: NOW})
 
     expect(Object.keys(observations).toSorted()).toEqual([...APP_IDS].toSorted())
     expect(DEPLOY_STATE_CALLS_PER_APP).toBe(2)
-    expect(DEPLOY_STATE_CALL_BUDGET).toBe(14)
-    expect(calls).toHaveLength(14)
+    expect(DEPLOY_STATE_CALL_BUDGET).toBe(16)
+    expect(calls).toHaveLength(16)
     for (const app of APP_IDS) {
       expect(observationSchema.safeParse(observations[app]).success).toBe(true)
       expect(observations[app].result).toBe('pass')

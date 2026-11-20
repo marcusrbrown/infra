@@ -29,6 +29,7 @@ import {getGatewayStatusSummary} from './gateway'
 import {getKeewebStatusSummary} from './keeweb/status'
 import {registerStatusHistoryLocate} from './status-history-locate'
 import {registerStatusSnapshot} from './status-snapshot'
+import {getTracesStatusSummary} from './traces/status'
 import {getUmamiStatusSummary} from './umami'
 import {getVpnStatusSummary} from './vpn'
 
@@ -49,6 +50,7 @@ export interface StatusDependencies extends GithubReaders {
   getUmamiStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
   getDashboardStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
   getVpnStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
+  getTracesStatusSummary: (host: string, signal?: AbortSignal) => Promise<AppCollection>
   publicProbes: PublicProbeMap
   /** Transport for the GitHub readers; defaults to the global `fetch`. */
   fetch?: FetchLike
@@ -67,6 +69,7 @@ const defaultDependencies: StatusDependencies = {
   getUmamiStatusSummary: (host, signal) => getUmamiStatusSummary(host, undefined, signal),
   getDashboardStatusSummary: (host, signal) => getDashboardStatusSummary(host, undefined, signal),
   getVpnStatusSummary: (host, signal) => getVpnStatusSummary(host, undefined, signal),
+  getTracesStatusSummary: (host, signal) => getTracesStatusSummary(host, undefined, signal),
   publicProbes: PUBLIC_PROBES,
   readDeployStates,
   readMonitorState,
@@ -213,6 +216,7 @@ export async function unifiedStatusAction(
   const umamiHost = process.env.UMAMI_DOMAIN ?? ''
   const dashboardHost = process.env.DASHBOARD_DOMAIN ?? ''
   const vpnHost = process.env.VPN_HOST ?? ''
+  const tracesHost = process.env.TRACES_HOST ?? ''
 
   const collectors: Record<AppId, Collector> = {
     keeweb: {kind: 'run', run: signal => dependencies.getKeewebStatusSummary(signal)},
@@ -225,6 +229,7 @@ export async function unifiedStatusAction(
     dashboard: hostCollector(dashboardHost, dependencies.getDashboardStatusSummary),
     vpn: hostCollector(vpnHost, dependencies.getVpnStatusSummary),
     broker: {kind: 'none'},
+    traces: hostCollector(tracesHost, dependencies.getTracesStatusSummary),
   }
 
   // The cliproxy URL can be overridden for the SSH and management checks, so its probe follows it.

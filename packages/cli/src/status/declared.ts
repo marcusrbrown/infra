@@ -67,6 +67,9 @@ export const DECLARED_OBSERVATIONS: Record<AppId, readonly DeclaredObservation[]
     {id: 'egress-route', kind: 'end-to-end', source: 'config', owner: 'not-applicable'},
   ],
   broker: [publicReachability, deployState],
+  // The public page shows the health path's result and the deploy state only. What SSH sees (compose services,
+  // the reporter's checks) is `facts`, never an observation, so it never reaches the public history.
+  traces: [publicReachability, deployState],
 }
 
 /** The declaration for one of an app's observations; collectors build their observations from it. */

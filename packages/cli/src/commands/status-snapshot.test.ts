@@ -87,8 +87,10 @@ describe('status snapshot', () => {
     expect(captured.exit).toBeNull()
     expect(captured.stderr).toEqual([])
     expect(captured.stdout).toHaveLength(4)
-    expect(captured.stdout[0]).toBe('samples: keeweb=1 cliproxy=1 gateway=1 umami=1 dashboard=1 vpn=1 broker=1')
-    expect(captured.stdout[1]).toBe('added: 7')
+    expect(captured.stdout[0]).toBe(
+      'samples: keeweb=1 cliproxy=1 gateway=1 umami=1 dashboard=1 vpn=1 broker=1 traces=1',
+    )
+    expect(captured.stdout[1]).toBe('added: 8')
     expect(captured.stdout[2]).toBe('trimmed: 0')
     expect(captured.stdout[3]).toMatch(/^bytes: \d+$/)
 
@@ -130,7 +132,7 @@ describe('status snapshot', () => {
     const second = await run({}, {env: runEnv('1002')})
 
     expect(second.exit).toBeNull()
-    expect(second.stdout[0]).toBe('samples: keeweb=2 cliproxy=2 gateway=2 umami=2 dashboard=2 vpn=2 broker=2')
+    expect(second.stdout[0]).toBe('samples: keeweb=2 cliproxy=2 gateway=2 umami=2 dashboard=2 vpn=2 broker=2 traces=2')
     const meta = historyMetaSchema.parse(JSON.parse(await readFile(join(history, 'meta.json'), 'utf8')))
     expect(meta.lastSampleAt).toBe(FIXED_NOW.toISOString())
   })
@@ -150,7 +152,7 @@ describe('status snapshot', () => {
     await run({bootstrap: true}, {env: runEnv('1001', '1')})
     const retry = await run({}, {env: runEnv('1001', '2')})
 
-    expect(retry.stdout[1]).toBe('added: 7')
+    expect(retry.stdout[1]).toBe('added: 8')
   })
 
   it('identifies a local run by its own timestamp and keeps the stable id for a GitHub run', async () => {
@@ -175,8 +177,10 @@ describe('status snapshot', () => {
     const captured = await run({now: second.toISOString()}, {env: {}})
 
     expect(captured.exit).toBeNull()
-    expect(captured.stdout[0]).toBe('samples: keeweb=2 cliproxy=2 gateway=2 umami=2 dashboard=2 vpn=2 broker=2')
-    expect(captured.stdout[1]).toBe('added: 7')
+    expect(captured.stdout[0]).toBe(
+      'samples: keeweb=2 cliproxy=2 gateway=2 umami=2 dashboard=2 vpn=2 broker=2 traces=2',
+    )
+    expect(captured.stdout[1]).toBe('added: 8')
     const loaded = await loadHistory(history, 'existing')
     expect(loaded?.apps.keeweb.map(entry => entry.run)).toEqual([
       `local-${first.toISOString()}`,
@@ -192,9 +196,11 @@ describe('status snapshot', () => {
 
     expect(captured.exit).toBeNull()
     expect(captured.stderr).toEqual([])
-    expect(captured.stdout[0]).toBe('samples: keeweb=1 cliproxy=1 gateway=1 umami=1 dashboard=1 vpn=1 broker=1')
-    expect(captured.stdout[1]).toBe('added: 7')
-    expect(captured.stdout[2]).toBe('trimmed: 7')
+    expect(captured.stdout[0]).toBe(
+      'samples: keeweb=1 cliproxy=1 gateway=1 umami=1 dashboard=1 vpn=1 broker=1 traces=1',
+    )
+    expect(captured.stdout[1]).toBe('added: 8')
+    expect(captured.stdout[2]).toBe('trimmed: 8')
     const loaded = await loadHistory(history, 'existing')
     expect(loaded?.apps.keeweb[0]).toMatchObject({t: FIXED_NOW.toISOString(), run: `local-${FIXED_NOW.toISOString()}`})
   })
@@ -304,8 +310,10 @@ describe('status snapshot', () => {
     const captured = await run({now: FIXED_NOW.toISOString()}, {env: runEnv('1002')})
 
     expect(captured.exit).toBeNull()
-    expect(captured.stdout[0]).toBe('samples: keeweb=2 cliproxy=2 gateway=2 umami=2 dashboard=2 vpn=2 broker=2')
-    expect(captured.stdout[2]).toBe('trimmed: 7')
+    expect(captured.stdout[0]).toBe(
+      'samples: keeweb=2 cliproxy=2 gateway=2 umami=2 dashboard=2 vpn=2 broker=2 traces=2',
+    )
+    expect(captured.stdout[2]).toBe('trimmed: 8')
   })
 
   it('uses --now as the sample time', async () => {

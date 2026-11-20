@@ -1,5 +1,4 @@
 import type {ModelEntry, PrivacySnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
-import {createHash} from 'node:crypto'
 import {existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
@@ -17,6 +16,7 @@ import {
   goMdxUrl,
   refreshGoPrivacy,
   renderChangeset,
+  runIdentityFromEnv,
   serializeSnapshot,
   workflowOutputs,
   type FetchLike,
@@ -289,26 +289,39 @@ describe('refreshGoPrivacy: changed table', () => {
 
 describe('refreshGoPrivacy: the release changeset', () => {
   const NEWER_SHA = 'b'.repeat(40)
-  const NAME_SHAPE = /^opencode-go-privacy-[0-9a-f]{7}-[0-9a-f]{8}\.md$/
+  const NAME_SHAPE = /^opencode-go-privacy-[0-9a-f]{7}-\d{1,20}-\d{1,4}\.md$/
   /** `readdirSync` order is not specified, so every listing is sorted before it is compared. */
   const listing = (dir: string): string[] => readdirSync(dir).sort()
   const changesetsIn = (dir: string): string[] => listing(dir).filter(name => name.endsWith('.md'))
-  const digest8 = (content: string): string => createHash('sha256').update(content).digest('hex').slice(0, 8)
-  const withChangeset = (h: Harness, dir: string) =>
-    refreshGoPrivacy({snapshotPath: h.snapshotPath, bodyPath: h.bodyPath, changesetDir: dir, fetch: h.fetch})
+  const runAt = (n: number, attempt = '1') => ({runId: String(n), runAttempt: attempt})
+  const withChangeset = (h: Harness, dir: string, run = runAt(1001)) =>
+    refreshGoPrivacy({
+      snapshotPath: h.snapshotPath,
+      bodyPath: h.bodyPath,
+      changeset: {dir, ...run},
+      fetch: h.fetch,
+    })
+  /** The live list with `glm-5.3` region-restricted: a different snapshot at the same docs commit. */
+  const restrictedLive = () =>
+    liveWith('glm-5.3', entry => {
+      ;(entry.go as Record<string, unknown>).limited_regions = true
+    })
+  const snapshotOf = (h: Harness): PrivacySnapshot => JSON.parse(readFileSync(h.snapshotPath, 'utf8'))
 
-  it('writes exactly one patch changeset for @marcusrbrown/infra, named after the commit and the snapshot, when the snapshot changed', async () => {
+  it('writes exactly one patch changeset for @marcusrbrown/infra, named after the commit and the run, when the snapshot changed', async () => {
     const h = harness(staleSnapshot().snapshot)
     const dir = tempDir()
 
     const result = await withChangeset(h, dir)
 
-    // The name carries the first 7 hex of the docs commit and 8 hex of the sha256 of the exact bytes written.
-    const name = `opencode-go-privacy-aaaaaaa-${digest8(readFileSync(h.snapshotPath, 'utf8'))}.md`
-    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA, changesetFile: name})
-    expect(listing(dir)).toEqual([name])
-    expect(readFileSync(join(dir, name), 'utf8')).toBe(
-      "---\n'@marcusrbrown/infra': patch\n---\n\nRefresh the bundled OpenCode Go privacy snapshot to upstream commit `aaaaaaa` of `anomalyco/opencode` and the public model list read at refresh time.\n",
+    expect(result).toEqual({
+      changed: true,
+      sourceCommit: NEW_SHA,
+      changesetFile: 'opencode-go-privacy-aaaaaaa-1001-1.md',
+    })
+    expect(listing(dir)).toEqual(['opencode-go-privacy-aaaaaaa-1001-1.md'])
+    expect(readFileSync(join(dir, 'opencode-go-privacy-aaaaaaa-1001-1.md'), 'utf8')).toBe(
+      "---\n'@marcusrbrown/infra': patch\n---\n\nRefresh the bundled OpenCode Go privacy snapshot to upstream commit `aaaaaaa` of `anomalyco/opencode`.\n",
     )
     expect(leftovers(dir)).toEqual([])
   })
@@ -336,7 +349,7 @@ describe('refreshGoPrivacy: the release changeset', () => {
     expect(listing(dir)).toEqual([])
   })
 
-  it('writes no changeset unless a directory is given', async () => {
+  it('writes no changeset unless a target is given', async () => {
     const h = harness(staleSnapshot().snapshot)
 
     const result = await run(h)
@@ -346,58 +359,90 @@ describe('refreshGoPrivacy: the release changeset', () => {
     expect(listing(h.dir)).toEqual(['pr-body.md', 'privacy-snapshot.json'])
   })
 
-  it('is deterministic: a re-run for the same commit and the same snapshot rewrites the same file', async () => {
+  it('names the file after the run, so identical inputs under different run identities get different files', async () => {
     const dir = tempDir()
 
-    const first = await withChangeset(harness(staleSnapshot().snapshot), dir)
-    const before = readFileSync(join(dir, first.changesetFile ?? ''), 'utf8')
-    const second = await withChangeset(harness(staleSnapshot().snapshot), dir)
+    const first = await withChangeset(harness(staleSnapshot().snapshot), dir, runAt(1001, '1'))
+    const rerun = await withChangeset(harness(staleSnapshot().snapshot), dir, runAt(1001, '2'))
+    const later = await withChangeset(harness(staleSnapshot().snapshot), dir, runAt(1002, '1'))
 
-    expect(second.changesetFile).toBe(first.changesetFile)
-    expect(changesetsIn(dir)).toEqual([first.changesetFile ?? ''])
-    expect(readFileSync(join(dir, second.changesetFile ?? ''), 'utf8')).toBe(before)
+    expect([first.changesetFile, rerun.changesetFile, later.changesetFile]).toEqual([
+      'opencode-go-privacy-aaaaaaa-1001-1.md',
+      'opencode-go-privacy-aaaaaaa-1001-2.md',
+      'opencode-go-privacy-aaaaaaa-1002-1.md',
+    ])
+    expect(changesetsIn(dir)).toHaveLength(3)
   })
 
-  it('a refresh for a newer upstream commit names a different file and leaves an earlier pending one alone', async () => {
+  it('a refresh for a newer upstream commit adds its own file and leaves an earlier pending one alone', async () => {
     const dir = tempDir()
 
-    const first = await withChangeset(harness(staleSnapshot().snapshot, {sha: NEW_SHA}), dir)
+    const first = await withChangeset(harness(staleSnapshot().snapshot, {sha: NEW_SHA}), dir, runAt(1001))
     const before = readFileSync(join(dir, first.changesetFile ?? ''), 'utf8')
-    const second = await withChangeset(harness(staleSnapshot().snapshot, {sha: NEWER_SHA}), dir)
+    const second = await withChangeset(harness(staleSnapshot().snapshot, {sha: NEWER_SHA}), dir, runAt(1002))
 
-    expect(first.changesetFile).toMatch(/^opencode-go-privacy-aaaaaaa-[0-9a-f]{8}\.md$/)
-    expect(second.changesetFile).toMatch(/^opencode-go-privacy-bbbbbbb-[0-9a-f]{8}\.md$/)
-    expect(changesetsIn(dir)).toEqual([first.changesetFile ?? '', second.changesetFile ?? ''].sort())
+    expect(first.changesetFile).toBe('opencode-go-privacy-aaaaaaa-1001-1.md')
+    expect(second.changesetFile).toBe('opencode-go-privacy-bbbbbbb-1002-1.md')
+    expect(changesetsIn(dir)).toEqual([first.changesetFile ?? '', second.changesetFile ?? ''])
     expect(readFileSync(join(dir, first.changesetFile ?? ''), 'utf8')).toBe(before)
     expect(readFileSync(join(dir, second.changesetFile ?? ''), 'utf8')).toContain('`bbbbbbb`')
   })
 
-  it('two refreshes at the same docs commit with different live lists add distinct changesets, and the first is untouched', async () => {
+  it('at one docs commit the snapshot goes A, then B, then A again: every run adds a new file and earlier ones stay byte-identical', async () => {
     const dir = tempDir()
+    const read = (name: string) => readFileSync(join(dir, name), 'utf8')
+
+    // Run 1 proposes A: the stale snapshot refreshed against the recorded live list.
     const h1 = harness(staleSnapshot().snapshot)
-    const first = await withChangeset(h1, dir)
-    const firstName = first.changesetFile ?? ''
-    const firstText = readFileSync(join(dir, firstName), 'utf8')
+    const r1 = await withChangeset(h1, dir, runAt(2001))
+    const name1 = r1.changesetFile ?? ''
+    const text1 = read(name1)
 
-    // The second refresh starts from the first one's snapshot, with its changeset still pending beside it. The docs
-    // page and commit are the same; the live list now restricts one more model.
-    const merged: PrivacySnapshot = JSON.parse(readFileSync(h1.snapshotPath, 'utf8'))
-    const live = liveWith('glm-5.3', entry => {
-      ;(entry.go as Record<string, unknown>).limited_regions = true
-    })
-    const h2 = harness(merged, {live})
-    const second = await withChangeset(h2, dir)
-    const secondName = second.changesetFile ?? ''
+    // Run 2 starts from A (merged) with the first changeset still pending, and proposes B: the live list now restricts
+    // one more model at the same docs commit.
+    const h2 = harness(snapshotOf(h1), {live: restrictedLive()})
+    const r2 = await withChangeset(h2, dir, runAt(2002))
+    const name2 = r2.changesetFile ?? ''
+    const text2 = read(name2)
 
-    expect(second.changed).toBe(true)
-    expect(second.sourceCommit).toBe(first.sourceCommit)
-    expect(secondName).toMatch(NAME_SHAPE)
-    expect(secondName).not.toBe(firstName)
-    expect(secondName.startsWith('opencode-go-privacy-aaaaaaa-')).toBe(true)
-    expect(secondName).toBe(`opencode-go-privacy-aaaaaaa-${digest8(readFileSync(h2.snapshotPath, 'utf8'))}.md`)
-    expect(changesetsIn(dir)).toEqual([firstName, secondName].sort())
-    expect(readFileSync(join(dir, firstName), 'utf8')).toBe(firstText)
-    expect(workflowOutputs(second)).toBe(`changed=true\nchangeset=${secondName}\n`)
+    // Run 3 starts from B with both earlier changesets pending, and proposes A again: byte-for-byte the snapshot
+    // run 1 proposed.
+    const h3 = harness(snapshotOf(h2))
+    const r3 = await withChangeset(h3, dir, runAt(2003))
+    const name3 = r3.changesetFile ?? ''
+
+    expect(readFileSync(h3.snapshotPath, 'utf8')).toBe(readFileSync(h1.snapshotPath, 'utf8'))
+    expect([r1, r2, r3].map(result => result.sourceCommit)).toEqual([NEW_SHA, NEW_SHA, NEW_SHA])
+    expect(new Set([name1, name2, name3]).size).toBe(3)
+    expect(changesetsIn(dir)).toEqual([name1, name2, name3])
+    expect(read(name1)).toBe(text1)
+    expect(read(name2)).toBe(text2)
+    expect(workflowOutputs(r3)).toBe(`changed=true\nchangeset=${name3}\n`)
+  })
+
+  describe('a run identity that could reach a path wrongly is refused before anything is written or fetched', () => {
+    const badIds = ['', 'abc', '12a', '../1', '1/2', '1 2', ' 1', '1\n', '1\n2', '-1', '1.0', '9'.repeat(21)]
+    const badAttempts = ['', 'x', '1.0', '-1', '../1', '1/1', '12345', '1\n']
+
+    for (const [field, values] of [
+      ['runId', badIds],
+      ['runAttempt', badAttempts],
+    ] as const) {
+      for (const bad of values) {
+        it(`${field} ${JSON.stringify(bad)}`, async () => {
+          const h = harness(staleSnapshot().snapshot)
+          const dir = tempDir()
+          const before = readFileSync(h.snapshotPath, 'utf8')
+
+          await expect(withChangeset(h, dir, {...runAt(1001), [field]: bad})).rejects.toThrow(/run identity/)
+
+          expect(h.calls).toEqual([])
+          expect(listing(dir)).toEqual([])
+          expect(existsSync(h.bodyPath)).toBe(false)
+          expect(readFileSync(h.snapshotPath, 'utf8')).toBe(before)
+        })
+      }
+    }
   })
 
   it('writes nothing when the refresh fails before the compare', async () => {
@@ -420,20 +465,36 @@ describe('refreshGoPrivacy: the release changeset', () => {
     expect(readFileSync(h.snapshotPath, 'utf8')).toBe(before)
   })
 
-  it('names the file from the commit and a digest of the snapshot bytes alone, and refuses a bad commit before a path', () => {
-    const name = changesetFileName(NEW_SHA, 'one')
-    expect(name).toBe(`opencode-go-privacy-aaaaaaa-${digest8('one')}.md`)
+  it('builds the file name from the commit and the run identity alone, and refuses a bad commit', () => {
+    const name = changesetFileName(NEW_SHA, runAt(123456789, '2'))
+    expect(name).toBe('opencode-go-privacy-aaaaaaa-123456789-2.md')
     expect(name).toMatch(NAME_SHAPE)
-    expect(changesetFileName(NEW_SHA, 'one')).toBe(name)
-    expect(changesetFileName(NEW_SHA, 'two')).not.toBe(name)
-    expect(changesetFileName(NEWER_SHA, 'one')).not.toBe(name)
-    expect(() => changesetFileName('../../etc/passwd', 'one')).toThrow()
-    expect(() => changesetFileName('A'.repeat(40), 'one')).toThrow()
+    expect(() => changesetFileName('../../etc/passwd', runAt(1))).toThrow()
+    expect(() => changesetFileName('A'.repeat(40), runAt(1))).toThrow()
     expect(() => renderChangeset('abc')).toThrow()
   })
 
+  it('takes the run identity from the CI environment, and falls back to a UTC timestamp to the second off CI', () => {
+    expect(runIdentityFromEnv({GITHUB_RUN_ID: '44608849873', GITHUB_RUN_ATTEMPT: '2'}, new Date())).toEqual({
+      runId: '44608849873',
+      runAttempt: '2',
+    })
+    // Off CI: digits only, so it passes the same pattern as a run id, and 14 digits cannot equal a real run id.
+    expect(runIdentityFromEnv({}, new Date('2026-11-19T22:02:24.999Z'))).toEqual({
+      runId: '20261119220224',
+      runAttempt: '1',
+    })
+    expect(runIdentityFromEnv({GITHUB_RUN_ID: '', GITHUB_RUN_ATTEMPT: ''}, new Date('2026-01-02T03:04:05Z'))).toEqual({
+      runId: '20260102030405',
+      runAttempt: '1',
+    })
+    // A half-set CI environment is a mistake, not a local run.
+    expect(() => runIdentityFromEnv({GITHUB_RUN_ID: '1'}, new Date())).toThrow(/run identity/)
+    expect(() => runIdentityFromEnv({GITHUB_RUN_ATTEMPT: '1'}, new Date())).toThrow(/run identity/)
+  })
+
   it('reports the changeset to the workflow as a bare file name, and only when one was written', () => {
-    const name = changesetFileName(NEW_SHA, 'one')
+    const name = changesetFileName(NEW_SHA, runAt(1))
     expect(workflowOutputs({changed: false, sourceCommit: NEW_SHA})).toBe('changed=false\n')
     expect(workflowOutputs({changed: true, sourceCommit: NEW_SHA})).toBe('changed=true\n')
     expect(workflowOutputs({changed: true, sourceCommit: NEW_SHA, changesetFile: name})).toBe(

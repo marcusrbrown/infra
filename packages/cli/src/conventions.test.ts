@@ -4,7 +4,7 @@ import {join, relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 import {parse as parseYaml} from 'yaml'
-import {changesetFileName} from '../../../apps/cliproxy/scripts/refresh-go-privacy'
+import {changesetFileName, runIdentityFromEnv} from '../../../apps/cliproxy/scripts/refresh-go-privacy'
 import {MANAGED_MARKER, REQUIRED_HEADINGS, runMarker} from '../scripts/reconcile-autoheal-reports'
 import {registerAgentCommands} from './commands/agent'
 import {MCP_ALLOWLIST} from './commands/mcp'
@@ -5855,18 +5855,26 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     const shape = /\[\[ ! "\$\{CHANGESET_FILE\}" =~ (\S+) \]\]/.exec(script)
     expect(shape, 'no name check on CHANGESET_FILE').not.toBeNull()
     const pattern = new RegExp(shape?.[1] ?? '')
-    expect(pattern.test(changesetFileName('a'.repeat(40), 'snapshot bytes'))).toBe(true)
-    expect(pattern.test(changesetFileName('0123456789abcdef'.repeat(3).slice(0, 40), '{}\n'))).toBe(true)
+    // What the script writes in CI, and off CI, passes.
+    const ci = {runId: '44608849873', runAttempt: '2'}
+    const local = runIdentityFromEnv({}, new Date('2026-11-19T22:02:24Z'))
+    for (const run of [ci, local, {runId: '1', runAttempt: '1'}]) {
+      expect(pattern.test(changesetFileName('a'.repeat(40), run)), JSON.stringify(run)).toBe(true)
+    }
     for (const bad of [
       '',
       '../x.md',
       'opencode-go-privacy-abc.md',
-      'renovate-abcdef0-12345678.md',
-      // The old shape, from the docs commit alone, no longer passes: it could collide across snapshots.
+      'renovate-abcdef0-1-1.md',
+      // The two earlier shapes no longer pass: the docs commit alone, and the commit with a snapshot digest.
       'opencode-go-privacy-abcdef0.md',
-      'opencode-go-privacy-abcdef0-1234567.md',
-      'opencode-go-privacy-abcdef0-1234567G.md',
-      'opencode-go-privacy-abcdef0-12345678.md\n.x',
+      'opencode-go-privacy-abcdef0-12345678.md',
+      'opencode-go-privacy-abcdef0-1234abcd.md',
+      'opencode-go-privacy-abcdef0-1G-1.md',
+      'opencode-go-privacy-abcdef0-1-.md',
+      'opencode-go-privacy-abcdef0-1-12345.md',
+      `opencode-go-privacy-abcdef0-${'9'.repeat(21)}-1.md`,
+      'opencode-go-privacy-abcdef0-1-1.md\n.x',
     ]) {
       expect(pattern.test(bad), `accepted ${JSON.stringify(bad)}`).toBe(false)
     }
@@ -5907,6 +5915,31 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     expect(script.slice(check, exit)).not.toMatch(/gh pr (?:close|edit)|gh api/)
     const lookup = steps.find(step => step.id === 'stale-pr')
     expect(lookup?.if).toBe("steps.refresh.outputs.changed != 'true'")
+  })
+
+  it('fails the run when a proposed snapshot change does not add its changeset, after the snapshot check and before any commit', async () => {
+    const {steps} = await load()
+    const script = String(steps.find(step => step.name === 'Open snapshot PR')?.run)
+    const add = script.indexOf('git add --')
+    const snapshotCheck = script.indexOf(`if git diff --cached --quiet -- "${'$'}{snapshot}"; then`)
+    const addedCheck = script.indexOf(
+      `if [[ -z "$(git diff --cached --diff-filter=A --name-only -- "${'$'}{changeset}")" ]]; then`,
+    )
+    const fail = script.indexOf('exit 1', addedCheck)
+    const commit = script.indexOf('git commit')
+
+    // Order: stage, snapshot check, added-changeset check, commit. A changeset that main already holds is not an
+    // addition, so the check turns a naming mistake into a failed run instead of a PR that queues no release.
+    expect(add).toBeGreaterThan(-1)
+    expect(snapshotCheck).toBeGreaterThan(add)
+    expect(addedCheck).toBeGreaterThan(snapshotCheck)
+    expect(fail).toBeGreaterThan(addedCheck)
+    expect(script.slice(addedCheck, fail)).toMatch(/do not add \$\{changeset\}[^\n]*queues no release/)
+    expect(script.slice(addedCheck, fail)).toContain('>&2')
+    expect(commit).toBeGreaterThan(fail)
+    for (const call of ['git push', 'gh pr create', 'gh pr edit']) {
+      expect(script.indexOf(call), call).toBeGreaterThan(fail)
+    }
   })
 
   it('does not let renovate-changesets act on the snapshot PR, whose branch lacks the renovate/ prefix', async () => {

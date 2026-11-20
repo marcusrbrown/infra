@@ -4,7 +4,8 @@
 # Resolves the anomalyco/opencode `dev` head, builds the snapshot from its Go docs page and the public Go model list
 # and, when a model's privacy terms changed, opens or updates ONE stable PR for review. The PR carries the snapshot and
 # one patch changeset for the published CLI, which inlines the snapshot: merging it queues a CLI release through the
-# Version Packages PR. When upstream terms match main again, an open stable PR is stale: the run closes it and deletes
+# Version Packages PR. The branch is rebuilt from main on every run, and every run names its changeset after its own
+# run id and attempt, so the file is never one main already holds. When upstream terms match main again, an open stable PR is stale: the run closes it and deletes
 # its branch. Nothing here deploys or merges: a merged snapshot PR reaches the gated cliproxy deploy through the
 # router's paths-filter, and auto-merge stays off.
 #
@@ -116,10 +117,10 @@ jobs:
           new_snapshot="${RUNNER_TEMP}/privacy-snapshot.json"
           title="chore(cliproxy): refresh OpenCode Go privacy snapshot"
 
-          # The refresh wrote one changeset named after the upstream commit and a digest of the snapshot. A changed
+          # The refresh wrote one changeset named after the upstream commit, the run id and the attempt. A changed
           # snapshot without one fails the run rather than opening a PR that would not queue a release; any other name
           # never reaches a path or git add.
-          if [[ ! "${CHANGESET_FILE}" =~ ^opencode-go-privacy-[0-9a-f]{7}-[0-9a-f]{8}\.md$ ]]; then
+          if [[ ! "${CHANGESET_FILE}" =~ ^opencode-go-privacy-[0-9a-f]{7}-[0-9]{1,20}-[0-9]{1,4}\.md$ ]]; then
             echo "The refresh did not report a valid changeset file name." >&2
             exit 1
           fi
@@ -160,6 +161,12 @@ jobs:
           if git diff --cached --quiet -- "${snapshot}"; then
             echo "main already carries this snapshot; nothing to propose. Any open snapshot PR is closed by the next run."
             exit 0
+          fi
+          # A snapshot change must travel with a changeset that main does not have. This should never fire, since each
+          # run names its own file; if it does, fail instead of opening a PR that queues no release.
+          if [[ -z "$(git diff --cached --diff-filter=A --name-only -- "${changeset}")" ]]; then
+            echo "The staged changes do not add ${changeset}; refusing to open a PR that queues no release." >&2
+            exit 1
           fi
 
           git commit -m "${title}"

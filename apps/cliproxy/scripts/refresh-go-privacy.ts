@@ -1,6 +1,5 @@
 import type {Disagreement, Unmatched} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
 import type {ModelEntry, PrivacySnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
-import {createHash} from 'node:crypto'
 import {appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync} from 'node:fs'
 import {dirname, resolve} from 'node:path'
 import {isDeepStrictEqual} from 'node:util'
@@ -31,9 +30,8 @@ import {parsePrivacyDocs, PrivacyTableError} from '@marcusrbrown/infra-shared/op
 // .github/workflows/opencode-go-privacy.yaml runs this through `bun run refresh:go-privacy`, then opens the PR
 // from the body file this script writes. A changed snapshot also gets one patch changeset for the published CLI,
 // which inlines the snapshot at build time: merging the PR queues a release through the Version Packages PR.
-// The file is named after the upstream commit and a digest of the snapshot bytes: a re-run for the same snapshot
-// rewrites it, and a different snapshot, even at the same docs commit, gets its own name beside any earlier changeset
-// that is still pending on `main`.
+// Each run names its file after the upstream commit and the workflow run, so it never equals a changeset already
+// pending on `main`, whatever snapshot the run proposes.
 
 export const UPSTREAM_BRANCH = 'dev'
 export const COMMIT_API_URL = `https://api.github.com/repos/${SNAPSHOT_SOURCE_REPO}/commits/${UPSTREAM_BRANCH}`
@@ -56,13 +54,18 @@ export function goMdxUrl(sha: string): string {
 /** The part of `fetch` this script uses, so a test can pass a fake. */
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
 
+/** Where the changeset goes and the run that writes it. Both parts are digits only, checked before any write. */
+export interface ChangesetTarget extends RunIdentity {
+  readonly dir: string
+}
+
 export interface RefreshOptions {
   /** The snapshot to compare against and rewrite. Defaults to the tracked file. */
   readonly snapshotPath?: string
   /** Written only when the snapshot changed. */
   readonly bodyPath?: string
   /** Receives one release changeset, only when the snapshot changed. Unset writes none. */
-  readonly changesetDir?: string
+  readonly changeset?: ChangesetTarget
   /** Injectable for tests; defaults to the global `fetch`. */
   readonly fetch?: FetchLike
   /**
@@ -76,10 +79,17 @@ export interface RefreshOptions {
   readonly log?: (line: string) => void
 }
 
+export interface RunIdentity {
+  /** `GITHUB_RUN_ID` in CI. */
+  readonly runId: string
+  /** `GITHUB_RUN_ATTEMPT` in CI: a re-run of the same run id gets the next attempt. */
+  readonly runAttempt: string
+}
+
 export interface RefreshResult {
   readonly changed: boolean
   readonly sourceCommit: string
-  /** The bare name of the changeset written into `changesetDir`; absent when none was written. */
+  /** The bare name of the changeset written into the target directory; absent when none was written. */
   readonly changesetFile?: string
 }
 
@@ -97,22 +107,47 @@ function assertCommitSha(sha: string): void {
   if (!COMMIT_SHA_PATTERN.test(sha)) throw new Error('a changeset needs a 40-hex upstream commit SHA')
 }
 
+const RUN_ID_PATTERN = /^\d{1,20}$/
+const RUN_ATTEMPT_PATTERN = /^\d{1,4}$/
+
+function assertRunIdentity({runId, runAttempt}: RunIdentity): void {
+  if (!RUN_ID_PATTERN.test(runId) || !RUN_ATTEMPT_PATTERN.test(runAttempt)) {
+    throw new Error('the changeset run identity must be a run id and an attempt number, digits only')
+  }
+}
+
 /**
- * One file per proposed snapshot: the docs commit (for the eye) plus 8 hex of the sha256 of the exact bytes the
- * refresh writes. The commit alone is not enough: the live models list moves on its own, so two different snapshots
- * can share a docs commit, and an equal name would leave the later PR with no changeset of its own. The name is safe
- * in a path: it holds only hex from a validated SHA and a digest.
+ * The identity of this run: `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` in CI, unique per run and per re-run without a
+ * clock. Off CI (neither set) it is the UTC time to the second as 14 digits plus attempt 1: digits only, so it passes
+ * the same check, and unique enough for a person running the script by hand (a real run id has fewer digits). One set
+ * without the other is a broken environment and throws.
  */
-export function changesetFileName(sha: string, snapshotContent: string): string {
+export function runIdentityFromEnv(env: Readonly<Record<string, string | undefined>>, now: Date): RunIdentity {
+  const runId = env.GITHUB_RUN_ID || undefined
+  const runAttempt = env.GITHUB_RUN_ATTEMPT || undefined
+  if (runId === undefined && runAttempt === undefined) {
+    return {runId: now.toISOString().replaceAll(/\D/g, '').slice(0, 14), runAttempt: '1'}
+  }
+  if (runId === undefined || runAttempt === undefined) {
+    throw new Error('the changeset run identity needs both GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT, or neither')
+  }
+  return {runId, runAttempt}
+}
+
+/**
+ * A new name for every run, so a run's changeset is never a file `main` already holds. The docs commit is only for
+ * the eye. The name is safe in a path: it holds hex from a validated SHA and digits that passed the pattern checks.
+ */
+export function changesetFileName(sha: string, run: RunIdentity): string {
   assertCommitSha(sha)
-  const digest = createHash('sha256').update(snapshotContent).digest('hex').slice(0, 8)
-  return `opencode-go-privacy-${sha.slice(0, 7)}-${digest}.md`
+  assertRunIdentity(run)
+  return `opencode-go-privacy-${sha.slice(0, 7)}-${run.runId}-${run.runAttempt}.md`
 }
 
 /** A patch bump for the CLI and one plain sentence for its release notes. */
 export function renderChangeset(sha: string): string {
   assertCommitSha(sha)
-  return `---\n'${CHANGESET_PACKAGE}': patch\n---\n\nRefresh the bundled OpenCode Go privacy snapshot to upstream commit \`${sha.slice(0, 7)}\` of \`${SNAPSHOT_SOURCE_REPO}\` and the public model list read at refresh time.\n`
+  return `---\n'${CHANGESET_PACKAGE}': patch\n---\n\nRefresh the bundled OpenCode Go privacy snapshot to upstream commit \`${sha.slice(0, 7)}\` of \`${SNAPSHOT_SOURCE_REPO}\`.\n`
 }
 
 /** The `$GITHUB_OUTPUT` lines for one run. `changeset` is a bare file name, present only when one was written. */
@@ -287,18 +322,20 @@ function writeAtomic(target: string, content: string): void {
 
 /**
  * Fetches, parses and compares. Writes the snapshot (and the PR body when `bodyPath` is set, and the release
- * changeset when `changesetDir` is set) only when a model's privacy terms changed. Any failure throws before the
+ * changeset when `changeset` is set) only when a model's privacy terms changed. Any failure throws before the
  * snapshot is written, so the existing snapshot stays untouched.
  */
 export async function refreshGoPrivacy({
   snapshotPath = DEFAULT_SNAPSHOT_PATH,
   bodyPath,
-  changesetDir,
+  changeset,
   fetch: fetchImpl = globalThis.fetch,
   githubToken,
   now = () => new Date(),
   log = line => process.stdout.write(`${line}\n`),
 }: RefreshOptions = {}): Promise<RefreshResult> {
+  // First, so a bad identity stops the run before any request or write.
+  if (changeset !== undefined) assertRunIdentity(changeset)
   let rawBefore: unknown
   try {
     rawBefore = JSON.parse(readFileSync(snapshotPath, 'utf8'))
@@ -339,9 +376,9 @@ export async function refreshGoPrivacy({
   // Before the snapshot, so a failed changeset write leaves the snapshot as it was.
   const content = serializeSnapshot(next)
   let changesetFile: string | undefined
-  if (changesetDir !== undefined) {
-    changesetFile = changesetFileName(sha, content)
-    writeAtomic(resolve(changesetDir, changesetFile), renderChangeset(sha))
+  if (changeset !== undefined) {
+    changesetFile = changesetFileName(sha, changeset)
+    writeAtomic(resolve(changeset.dir, changesetFile), renderChangeset(sha))
   }
   writeAtomic(snapshotPath, content)
   return changesetFile === undefined
@@ -354,7 +391,10 @@ if (import.meta.main) {
     const result = await refreshGoPrivacy({
       snapshotPath: process.env.GO_PRIVACY_SNAPSHOT_PATH || undefined,
       bodyPath: process.argv[2] ?? (process.env.GO_PRIVACY_PR_BODY_PATH || undefined),
-      changesetDir: process.env.GO_PRIVACY_CHANGESET_DIR || DEFAULT_CHANGESET_DIR,
+      changeset: {
+        dir: process.env.GO_PRIVACY_CHANGESET_DIR || DEFAULT_CHANGESET_DIR,
+        ...runIdentityFromEnv(process.env, new Date()),
+      },
       githubToken: process.env.GITHUB_TOKEN || undefined,
     })
     const outputFile = process.env.GITHUB_OUTPUT

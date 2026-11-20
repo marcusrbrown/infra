@@ -1,0 +1,135 @@
+---
+# Every 15 minutes: one unauthenticated probe of the trace collection stack's health path and its certificate.
+#
+# The probe needs no secret, no SSH and no Environment: it asks https://<TRACES_DOMAIN>/healthz for a small JSON verdict,
+# reads the certificate the host serves, and POSTs an empty JSON body, with no token, to one ingest path. Healthy means a
+# 200 with `ok: true`, a timestamp under 10 minutes old, at least 14 days left on the certificate, and the ingest path
+# answering as the ingest state says it should. Anything else, a 503, a timeout, a TLS error, an unparsable body or a
+# stale timestamp (a frozen reporter), is unhealthy, and the probe job fails.
+#
+# Variables (repository variables): TRACES_DOMAIN, documented value `traces.fro.bot`. While it is unset the probe job
+# exits green with a notice and the alert job does nothing: this workflow merges before the host exists.
+# TRACES_INGEST_OPEN says whether ingest is meant to be open; exactly `true` means open, unset or anything else means
+# not open. Open: the ingest path must answer 401. Not open: it must answer 404 (off) or 503 (held).
+#
+# Alert: the `alert` job runs after `probe` whatever its result. It opens ONE issue labelled `traces-unhealthy` after
+# TWO unhealthy runs in a row, and posts to Discord once, when it opens the issue. One case does not wait: the ingest
+# path answering 401 or a 2xx while ingest is not meant to be open alerts at once. If an issue is already open it is
+# annotated once, and no second issue is opened. The first healthy run closes the
+# issue and posts once more. "The run before" is this workflow's own last completed run, read through the read-only
+# workflow token (`actions: read`): the conclusion of its `probe` job. Nothing from the endpoint reaches the issue or
+# Discord. A re-run never updates the alert. The `rehearse-alert` dispatch input exercises the alert under a separate
+# marker and skips the probe.
+#
+# The alert job's two steps keep the credentials apart: the issue step holds the workflow token and no webhook, the
+# Discord step holds the webhook and no token.
+name: Traces Monitor
+
+on:
+  schedule:
+    - cron: '3,18,33,48 * * * *'
+  workflow_dispatch:
+    inputs:
+      rehearse-alert:
+        description: 'Owner only. fail: open a marked rehearsal issue and post to Discord. clear: close it. The probe does not run.'
+        required: true
+        type: choice
+        options:
+          - none
+          - fail
+          - clear
+        default: none
+
+permissions:
+  contents: read
+
+concurrency:
+  group: traces-monitor
+  cancel-in-progress: false
+
+jobs:
+  # The job `name` is what the alert job's previous-run lookup reads; packages/cli/scripts/traces-monitor.ts pins it.
+  probe:
+    name: Probe trace collection
+    # The run history this workflow reads is the main branch's: a dispatch from any other ref would pollute it. An alert
+    # rehearsal skips the probe, so a real result is never mixed into it. Scheduled runs carry no input, read as none.
+    if: github.ref == 'refs/heads/main' && (inputs.rehearse-alert || 'none') == 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      deployed: ${{ steps.probe.outputs.deployed }}
+      urgent: ${{ steps.probe.outputs.urgent }}
+      categories: ${{ steps.probe.outputs.categories }}
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      # The script imports no package, so there is no install step. It exits 1 when the stack is unhealthy, which makes
+      # this job's conclusion the verdict of the run.
+      - name: Probe health path and certificate
+        id: probe
+        env:
+          TRACES_DOMAIN: ${{ vars.TRACES_DOMAIN }}
+          TRACES_INGEST_OPEN: ${{ vars.TRACES_INGEST_OPEN }}
+        run: bun run packages/cli/scripts/traces-monitor.ts probe
+
+  # Runs after probe whatever its result (always()), on main only like probe. Two steps keep the credentials apart. Every
+  # value reaches the script through env, never the script body.
+  alert:
+    name: Alert on trace collection failure
+    needs: probe
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      # Any API failure fails this step: a broken alert path must show as a red run. A re-run (attempt above 1) replays an
+      # old probe result, so the script then makes no API call and changes nothing: wait for the next scheduled probe.
+      - name: Update alert issue
+        id: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_PROBE_RESULT: ${{ needs.probe.result }}
+          ALERT_PROBE_DEPLOYED: ${{ needs.probe.outputs.deployed }}
+          ALERT_PROBE_URGENT: ${{ needs.probe.outputs.urgent }}
+          ALERT_PROBE_CATEGORIES: ${{ needs.probe.outputs.categories }}
+          ALERT_REHEARSE: ${{ inputs.rehearse-alert }}
+          ALERT_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: bun run packages/cli/scripts/traces-monitor.ts issue
+
+      # Only when the issue step created the issue (second unhealthy run of an outage, or at once for an urgent one) or closed it on recovery. The
+      # script always exits 0: a Discord failure never fails the job or undoes the issue.
+      - name: Notify Discord
+        if: steps.issue.outputs.notify == 'created' || steps.issue.outputs.notify == 'recovered'
+        env:
+          ALERT_PROBE_RESULT: ${{ needs.probe.result }}
+          ALERT_PROBE_DEPLOYED: ${{ needs.probe.outputs.deployed }}
+          ALERT_PROBE_URGENT: ${{ needs.probe.outputs.urgent }}
+          ALERT_PROBE_CATEGORIES: ${{ needs.probe.outputs.categories }}
+          ALERT_REHEARSE: ${{ inputs.rehearse-alert }}
+          ALERT_NOTIFY: ${{ steps.issue.outputs.notify }}
+          ALERT_ISSUE_NUMBER: ${{ steps.issue.outputs.issue-number }}
+          CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK: ${{ secrets.CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK }}
+        run: bun run packages/cli/scripts/traces-monitor.ts notify

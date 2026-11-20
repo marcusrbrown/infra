@@ -20,6 +20,12 @@ labels:
   - name: opencode-go-privacy-failure
     color: '#b60205'
     description: OpenCode Go privacy refresh failures
+  - name: traces-unhealthy
+    color: '#b60205'
+    description: Trace collection stack health monitor
+  - name: traces-backup-failure
+    color: '#b60205'
+    description: Trace data snapshot backup failures
 
 branches:
   - name: main

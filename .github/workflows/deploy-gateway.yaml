@@ -230,7 +230,7 @@ jobs:
       - name: Upload gateway SARIF to code scanning
         if: ${{ github.ref == 'refs/heads/main' && steps.gateway-sarif.outputs.ready == 'true' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: ${{ steps.gateway-sarif.outputs.path }}
           category: trivy-gateway
@@ -289,7 +289,7 @@ jobs:
       - name: Upload workspace SARIF to code scanning
         if: ${{ github.ref == 'refs/heads/main' && steps.workspace-sarif.outputs.ready == 'true' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: ${{ steps.workspace-sarif.outputs.path }}
           category: trivy-workspace

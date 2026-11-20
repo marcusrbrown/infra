@@ -104,6 +104,23 @@
       dependencyDashboardApproval: true,
       allowedVersions: '<0.147.0',
     },
+    {
+      // The traces collector is built from apps/traces/collector/builder-config.yaml: the collector
+      // core, the contrib components and Elastic's ratelimit processor are separate Go modules that
+      // must move as one set, and the builder in the Dockerfile must match the core. One group puts
+      // them on one branch, so a bump can never move the core without the limiter or the reverse.
+      // Approval-gated and never automerged: a new set is rebuilt and checked before it ships, and
+      // the Elastic processor's required core version is read from its go.mod when the PR is reviewed.
+      // matchManagers keeps the stack's other image pins (Dockerfile FROM lines, compose files) out of
+      // this group; those have their own rules.
+      description: ['Group the traces collector core, contrib components, Elastic ratelimit processor and builder'],
+      matchManagers: ['custom.regex'],
+      matchFileNames: ['apps/traces/collector/**'],
+      groupName: 'traces collector',
+      groupSlug: 'traces-collector',
+      automerge: false,
+      dependencyDashboardApproval: true,
+    },
   ],
   // Track the upstream daemon source pin (`ref`) in apps/gateway/upstream.json so new
   // releases of the named `repo` surface as PRs. This is independent of the fro-bot/agent
@@ -147,6 +164,24 @@
         "const CADDY_IMAGE = '(?<depName>caddy):(?<currentValue>[^@']+)@(?<currentDigest>sha256:[a-f0-9]{64})'",
       ],
       datasourceTemplate: 'docker',
+    },
+    {
+      customType: 'regex',
+      // Every `- gomod: <module> v<semver>` line in the collector builder manifest is a Go module pin.
+      // The module path is the depName and the go datasource resolves its versions, so no per-line
+      // annotation is needed.
+      managerFilePatterns: ['/^apps/traces/collector/builder-config\\.yaml$/'],
+      matchStrings: ['-\\s+gomod:\\s+(?<depName>\\S+)\\s+(?<currentValue>v\\d+\\.\\d+\\.\\d+)\\s*\\n'],
+      datasourceTemplate: 'go',
+    },
+    {
+      customType: 'regex',
+      // The builder version lives in the Dockerfile and uses the `# renovate:` annotation convention
+      // from apps/broker/docker-compose.yaml.
+      managerFilePatterns: ['/^apps/traces/collector/Dockerfile$/'],
+      matchStrings: [
+        '#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\nARG OCB_VERSION=(?<currentValue>v\\d+\\.\\d+\\.\\d+)',
+      ],
     },
   ],
   // postUpgradeTasks run after Renovate applies file changes but before the commit.

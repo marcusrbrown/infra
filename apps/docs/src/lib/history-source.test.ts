@@ -98,11 +98,11 @@ describe('readHistoryDir', () => {
     expect(history.apps).toEqual({...before.apps, traces: []})
   })
 
-  it('reads a missing file for any known app as empty, the same rule as the snapshot command', () => {
+  it('rejects a missing file for an app that existed before: a lost file is damage, not an app added later', () => {
     const dir = copyFixture()
-    rmSync(join(dir, 'apps/vpn.json'))
+    rmSync(join(dir, 'apps/keeweb.json'))
 
-    expect(readHistoryDir(dir).apps.vpn).toEqual([])
+    expect(() => readHistoryDir(dir)).toThrow(/apps\/keeweb\.json is missing/)
   })
 
   it('does not read an app file that fails for any reason other than ENOENT as empty', () => {

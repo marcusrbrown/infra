@@ -3,7 +3,12 @@ import type {History, HistorySample} from '@marcusrbrown/infra-shared/status/his
 import {existsSync, readdirSync, readFileSync} from 'node:fs'
 import {join, resolve} from 'node:path'
 
-import {APP_IDS, historyAppFileSchema, historyMetaSchema} from '@marcusrbrown/infra-shared/status/history-schema'
+import {
+  APP_IDS,
+  APPS_ADDED_AFTER_V1,
+  historyAppFileSchema,
+  historyMetaSchema,
+} from '@marcusrbrown/infra-shared/status/history-schema'
 
 export type HistorySourceKind = 'fixture' | 'artifact'
 
@@ -64,9 +69,9 @@ export function readHistoryDir(dir: string): History {
   const apps = {} as Record<(typeof APP_IDS)[number], HistorySample[]>
   let total = 0
   for (const app of APP_IDS) {
-    // A known app with no file yet (an app added after the history was created) has no samples. The snapshot
-    // command creates the file on its next write; until then the page shows it with no data.
-    const raw = readJson(join(appsDir, `${app}.json`), `apps/${app}.json`, true)
+    // An app added after the history was created has no file yet and no samples. The snapshot command creates the
+    // file on its next write; until then the page shows it with no data. A missing file for any other app is damage.
+    const raw = readJson(join(appsDir, `${app}.json`), `apps/${app}.json`, APPS_ADDED_AFTER_V1.includes(app))
     const parsed = historyAppFileSchema.safeParse(raw === MISSING ? [] : raw)
     if (!parsed.success) throw new StatusHistoryError(`apps/${app}.json does not match the history schema`)
     const keys = new Set(parsed.data.map(sample => `${sample.run}:${sample.att}`))

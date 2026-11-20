@@ -12,6 +12,7 @@ import {join} from 'node:path'
 
 import {
   APP_IDS,
+  APPS_ADDED_AFTER_V1,
   HISTORY_SCHEMA_VERSION,
   HISTORY_WINDOW_DAYS,
   HISTORY_WINDOW_MS,
@@ -390,9 +391,12 @@ export async function loadHistory(
 
   const apps = {} as Record<AppId, HistorySample[]>
   for (const app of APP_IDS) {
-    // A known app with no file yet (an app added after the history was created) has no samples. The next write
-    // creates its file; the other apps' files are read and written as before.
-    const text = await readBounded(join(appsDir, `${app}.json`), budget, app, 'empty')
+    // An app added after the history was created has no file yet and no samples; the next write creates it. A
+    // missing file for any other app is damage and is rejected.
+    const path = join(appsDir, `${app}.json`)
+    const text = APPS_ADDED_AFTER_V1.includes(app)
+      ? await readBounded(path, budget, app, 'empty')
+      : await readBounded(path, budget, app)
     if (text === undefined) {
       apps[app] = []
       continue

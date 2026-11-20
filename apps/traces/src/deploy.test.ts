@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os'
 import {basename, join} from 'node:path'
 
 import {describe, expect, it} from 'bun:test'
+import * as deployModule from './deploy'
 import {
   AppliedButUnverifiedError,
   beginDeployScript,
@@ -17,15 +18,19 @@ import {
   compareFileScript,
   createCollectorScript,
   deploy,
+  DEPLOY_OVERTAKEN_SENTINEL,
+  DeployOvertakenError,
   diskScript,
   driftScript,
   evaluateGates,
   failedSafetyGates,
   GATED_SERVICES,
+  generateDeployId,
   generateVoidTokenLine,
   hygieneScript,
   langfuseBasicValue,
   mayOpen,
+  ownershipPrelude,
   parseDrift,
   parseHostState,
   parseIngestProbe,
@@ -54,7 +59,16 @@ import {
   upScript,
   writeFileScript,
 } from './deploy'
-import {baseEnv, FakeHost, OTHER_DIGEST, PLACEHOLDER_DIGEST, secretValues, testDeps} from './deploy.fixture'
+import {
+  baseEnv,
+  FakeHost,
+  isReadOnlyStep,
+  OTHER_DIGEST,
+  PLACEHOLDER_DIGEST,
+  secretValues,
+  stepOf,
+  testDeps,
+} from './deploy.fixture'
 import {PATHS} from './health-report'
 import {
   SENDER_GROUPS,
@@ -65,11 +79,17 @@ import {
   TRACES_PENDING_RESTARTS,
   TRACES_VOID_TOKEN_PREFIX,
 } from './host'
+import * as retentionModule from './retention'
+import {addLifecycleScript, applyTtlScript, OBJECT_STORE_PREFIXES} from './retention'
 
 const ok = (stdout: string): RunResult => ({exitCode: 0, stdout, stderr: ''})
 
 const HERE = new URL('.', import.meta.url).pathname
 const APP = join(HERE, '..')
+
+/** Two deploy ids (32 hex characters each) for the tests that need to tell deploys apart. */
+const ID_A = 'a1'.repeat(16)
+const ID_B = 'b2'.repeat(16)
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -406,39 +426,39 @@ describe('what lands on the host', () => {
 
 describe('remote scripts', () => {
   const scripts: Record<string, string> = {
-    begin: beginDeployScript(),
+    begin: beginDeployScript(ID_A),
     drift: driftScript(),
     ingestState: readIngestStateScript(),
-    removeMarker: removeOwnFileScript('.deploy-in-progress'),
-    prepareDirs: prepareDirsScript(),
+    removeMarker: removeOwnFileScript(ID_A, '.deploy-in-progress'),
+    prepareDirs: prepareDirsScript(ID_A),
     tokenDirs: tokenDirsScript(),
     comparePlain: compareFileScript('config/otelcol.yaml', 'plain'),
     compareEnv: compareFileScript('.env', 'env'),
-    writePlain: writeFileScript({
+    writePlain: writeFileScript(ID_A, {
       path: 'secrets/grafana/admin-password',
       owner: '472:472',
       mode: '0400',
       kind: 'plain',
     }),
-    writeEnv: writeFileScript({path: '.env', owner: 'root:root', mode: '0600', kind: 'env'}, 'held'),
-    removeRestarts: removeOwnFileScript('.pending-restarts'),
-    removePending: removeOwnFileScript('secrets/bootstrap-pending'),
+    writeEnv: writeFileScript(ID_A, {path: '.env', owner: 'root:root', mode: '0600', kind: 'env'}, 'held'),
+    removeRestarts: removeOwnFileScript(ID_A, '.pending-restarts'),
+    removePending: removeOwnFileScript(ID_A, 'secrets/bootstrap-pending'),
     probeIngest: probeIngestScript('traces.fro.bot'),
     disk: diskScript(),
-    prune: pruneScript(),
-    pull: pullScript(),
-    upPrivate: upScript('up-private', ['postgres', 'redis']),
-    upForced: upScript('up-stale', ['collector'], {force: true}),
-    create: createCollectorScript(),
-    queue: queueVolumeScript(),
+    prune: pruneScript(ID_A),
+    pull: pullScript(ID_A),
+    upPrivate: upScript(ID_A, 'up-private', ['postgres', 'redis']),
+    upForced: upScript(ID_A, 'up-stale', ['collector'], {force: true}),
+    create: createCollectorScript(ID_A),
+    queue: queueVolumeScript(ID_A),
     digest: runningDigestScript('collector'),
     bootstrap: bootstrapProbeScript(),
     hygiene: hygieneScript(),
-    ...Object.fromEntries(SENDER_GROUPS.map(group => [`token-${group}`, tokenFileScript(group)])),
+    ...Object.fromEntries(SENDER_GROUPS.map(group => [`token-${group}`, tokenFileScript(group, ID_A)])),
   }
 
   it('parse as bash', () => {
-    for (const [name, script] of Object.entries({...scripts, setState: setIngestStateCommand('held')})) {
+    for (const [name, script] of Object.entries({...scripts, setState: setIngestStateCommand('held', ID_A)})) {
       const parsed = Bun.spawnSync(['bash', '-n', '-c', script])
       expect({name, exit: parsed.exitCode, stderr: parsed.stderr.toString()}).toEqual({name, exit: 0, stderr: ''})
     }
@@ -453,7 +473,7 @@ describe('remote scripts', () => {
   })
 
   it('never redirect to the null device and never delete outside the app directory or /tmp', () => {
-    const everything = {...scripts, setState: setIngestStateCommand('held'), detail: REPORTER_DETAIL_COMMAND}
+    const everything = {...scripts, setState: setIngestStateCommand('held', ID_A), detail: REPORTER_DETAIL_COMMAND}
     for (const [name, script] of Object.entries(everything)) {
       expect({name, nullDevice: script.includes('/dev/null')}).toEqual({name, nullDevice: false})
       for (const line of script.split('\n')) {
@@ -471,15 +491,18 @@ describe('remote scripts', () => {
   })
 
   it('refuse a service or path they were not built for', () => {
-    expect(() => upScript('up-x', ['not-a-service'])).toThrow('Unknown service')
-    expect(() => upScript('up-x', [])).toThrow('at least one service')
+    expect(() => upScript(ID_A, 'up-x', ['not-a-service'])).toThrow('Unknown service')
+    expect(() => upScript(ID_A, 'up-x', [])).toThrow('at least one service')
     expect(() => runningDigestScript('nope' as never)).toThrow('Unknown service')
-    expect(() => tokenFileScript('stranger' as never)).toThrow('Unknown sender group')
+    expect(() => tokenFileScript('stranger' as never, ID_A)).toThrow('Unknown sender group')
     expect(() => probeIngestScript('bad domain; id')).toThrow('Unsafe domain')
-    expect(() => writeFileScript({path: 'a/../b', owner: 'root:root', mode: '0600', kind: 'plain'})).toThrow('Unsafe')
-    expect(() => writeFileScript({path: 'x', owner: 'root:root; id', mode: '0600', kind: 'plain'})).toThrow('owner')
-    expect(() => writeFileScript({path: 'x', owner: 'root:root', mode: '600', kind: 'plain'})).toThrow('mode')
-    expect(() => writeFileScript({path: '.env', owner: 'root:root', mode: '0600', kind: 'env'})).toThrow('ingest state')
+    const plain = {path: 'x', owner: 'root:root', mode: '0600', kind: 'plain'} as const
+    expect(() => writeFileScript(ID_A, {...plain, path: 'a/../b'})).toThrow('Unsafe')
+    expect(() => writeFileScript(ID_A, {...plain, owner: 'root:root; id'})).toThrow('owner')
+    expect(() => writeFileScript(ID_A, {...plain, mode: '600'})).toThrow('mode')
+    expect(() => writeFileScript(ID_A, {...plain, path: '.env', kind: 'env'})).toThrow('ingest state')
+    expect(() => writeFileScript('not-an-id', plain)).toThrow('deploy id')
+    expect(() => beginDeployScript('not-an-id')).toThrow('deploy id')
   })
 
   it('writes through a temporary file in the same directory and an atomic rename, owner and mode first', () => {
@@ -569,6 +592,8 @@ describe('remote scripts', () => {
       writeFileSync(join(shim, 'chown'), '#!/bin/sh\nexit 0\n')
       chmodSync(join(shim, 'chown'), 0o755)
 
+      // The deploy owns the host: its marker holds its id.
+      writeFileSync(join(root, '.deploy-in-progress'), `${ID_A} 2023-11-14T22:13:20.000Z\n`)
       for (const group of SENDER_GROUPS) mkdirSync(join(root, 'tokens', group), {recursive: true})
       const existing = join(root, 'tokens', 'fro-bot', 'token')
       const bytes = Buffer.from('first-placeholder-token\nsecond-placeholder-token extra column\n')
@@ -579,7 +604,7 @@ describe('remote scripts', () => {
       const voidLine = generateVoidTokenLine()
 
       const runScript = (group: (typeof SENDER_GROUPS)[number], stdin: string): {out: string; code: number} => {
-        const result = Bun.spawnSync(['bash', '-o', 'pipefail', '-c', tokenFileScript(group, root)], {
+        const result = Bun.spawnSync(['bash', '-o', 'pipefail', '-c', tokenFileScript(group, ID_A, root)], {
           env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
           stdin: new TextEncoder().encode(stdin),
         })
@@ -616,7 +641,7 @@ describe('remote scripts', () => {
 
   it('uses the same on-host mechanism as `traces ingest` and `traces status`', () => {
     const remote = readFileSync(join(APP, '..', '..', 'packages/cli/src/commands/traces/remote.ts'), 'utf8')
-    const command = setIngestStateCommand('held')
+    const command = setIngestStateCommand('held', ID_A)
     // Parts of the state-change command. Each is in the CLI's source and in this deploy's command.
     for (const fragment of [
       'set -e',
@@ -1333,7 +1358,7 @@ describe('holding the route', () => {
 
 // ─── The host's truth, the marker and drift ───────────────────────────────────
 
-const MARKER_FORMAT = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\n$/
+const MARKER_FORMAT = /^[\da-f]{32} \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\n$/
 
 /** An override that fails one step when it is reached (something going wrong after the first change). */
 function failAt(step: string): (current: string) => RunResult | undefined {
@@ -1344,16 +1369,16 @@ describe('host contract', () => {
   it('keeps the four paths in host.ts and uses them', () => {
     expect(TRACES_DEPLOY_MARKER).toBe(`${TRACES_APP_DIR}/.deploy-in-progress`)
     expect(TRACES_PENDING_RESTARTS).toBe(`${TRACES_APP_DIR}/.pending-restarts`)
-    expect(beginDeployScript()).toContain(TRACES_DEPLOY_MARKER)
-    expect(beginDeployScript()).toContain(TRACES_PENDING_RESTARTS)
-    expect(removeOwnFileScript('.deploy-in-progress')).toContain(TRACES_DEPLOY_MARKER)
-    expect(removeOwnFileScript('.pending-restarts')).toContain(TRACES_PENDING_RESTARTS)
-    expect(() => removeOwnFileScript('.env' as never)).toThrow('not a file this deploy owns')
+    expect(beginDeployScript(ID_A)).toContain(TRACES_DEPLOY_MARKER)
+    expect(beginDeployScript(ID_A)).toContain(TRACES_PENDING_RESTARTS)
+    expect(removeOwnFileScript(ID_A, '.deploy-in-progress')).toContain(TRACES_DEPLOY_MARKER)
+    expect(removeOwnFileScript(ID_A, '.pending-restarts')).toContain(TRACES_PENDING_RESTARTS)
+    expect(() => removeOwnFileScript(ID_A, '.env' as never)).toThrow('not a file this deploy owns')
   })
 
   it('runs every ingest state change under flock on the ingest lock, and says LOCK_BUSY when it cannot take it', () => {
     for (const state of ['off', 'held', 'open'] as const) {
-      const command = setIngestStateCommand(state)
+      const command = setIngestStateCommand(state, ID_A)
       expect(command).toContain(TRACES_INGEST_LOCK)
       expect(command).toContain('flock -w 30')
       expect(command).toContain(TRACES_LOCK_BUSY_SENTINEL)
@@ -1640,7 +1665,7 @@ function holdsBeforeAnyChange(after: string[]): void {
 
 describe('the route state deploy acts on cannot go stale', () => {
   it('reads the route and writes the marker in one script, under the ingest lock, in that order', () => {
-    const script = beginDeployScript()
+    const script = beginDeployScript(ID_A)
     const lock = script.indexOf('flock -w 30')
     const read = script.indexOf('s/^TRACES_INGEST_STATE=//p')
     const marker = script.indexOf(`mv -f "$t" ${TRACES_DEPLOY_MARKER}`)
@@ -1739,7 +1764,8 @@ describe('the route state deploy acts on cannot go stale', () => {
       const {root, shim, cleanup} = scratchHost()
       try {
         if (onHost !== undefined) writeFileSync(join(root, '.env'), `OLD=1\nTRACES_INGEST_STATE=${onHost}\n`)
-        const script = writeFileScript({path: '.env', owner: 'root:root', mode: '0600', kind: 'env'}, planned)
+        writeFileSync(join(root, '.deploy-in-progress'), `${ID_A} 2023-11-14T22:13:20.000Z\n`)
+        const script = writeFileScript(ID_A, {path: '.env', owner: 'root:root', mode: '0600', kind: 'env'}, planned)
         const result = runLocally(script, root, shim, 'NEW=2\n')
         expect({onHost, planned, code: result.code}).toEqual({onHost, planned, code: 0})
         expect(readFileSync(join(root, '.env'), 'utf8')).toBe(`NEW=2\nTRACES_INGEST_STATE=${written}\n`)
@@ -1976,21 +2002,25 @@ describe('scripts run for real against a scratch app directory', () => {
     const {root, shim, cleanup} = scratchHost()
     try {
       writeFileSync(join(root, '.env'), 'TRACES_INGEST_STATE=open\n')
-      const clean = runLocally(beginDeployScript(), root, shim)
+      const clean = runLocally(beginDeployScript(ID_A), root, shim)
       expect(parseHostState(clean.out)).toMatchObject({
         hasEnv: true,
         marker: false,
         ingest: 'open',
         pendingRestarts: [],
       })
-      // The marker is there now: one UTC timestamp on one line.
+      // The marker is there now: this deploy's id and one UTC timestamp on one line.
       expect(readFileSync(join(root, '.deploy-in-progress'), 'utf8')).toMatch(MARKER_FORMAT)
+      expect(readFileSync(join(root, '.deploy-in-progress'), 'utf8').startsWith(`${ID_A} `)).toBe(true)
 
+      // A marker a failed deploy left (here in the old, timestamp-only form) is reported and then replaced: it never refuses.
       writeFileSync(join(root, '.deploy-in-progress'), '2023-11-14T22:13:20.000Z\n')
       writeFileSync(join(root, '.pending-restarts'), 'collector\ncompose\n')
-      const dirty = runLocally(beginDeployScript(), root, shim)
+      const dirty = runLocally(beginDeployScript(ID_B), root, shim)
+      expect(dirty.code).toBe(0)
       expect(parseHostState(dirty.out)).toMatchObject({marker: true, pendingRestarts: ['collector', 'compose']})
-      expect(readFileSync(join(root, '.deploy-in-progress'), 'utf8')).not.toBe('2023-11-14T22:13:20.000Z\n')
+      expect(readFileSync(join(root, '.deploy-in-progress'), 'utf8')).toMatch(MARKER_FORMAT)
+      expect(readFileSync(join(root, '.deploy-in-progress'), 'utf8').startsWith(`${ID_B} `)).toBe(true)
     } finally {
       cleanup()
     }
@@ -2293,5 +2323,595 @@ describe('resuming after a failed deploy', () => {
     const calls = host.calls.length
     await run(host)
     expect(host.calls.slice(calls).map(call => call.step)).toContain('raw:set-state:held')
+  })
+})
+
+// ─── Overlapping deploys: the newest one owns the host ───────────────────────
+
+interface Latch {
+  promise: Promise<void>
+  open: () => void
+}
+
+function latch(): Latch {
+  let open: () => void = () => {}
+  const promise = new Promise<void>(done => {
+    open = done
+  })
+  return {promise, open}
+}
+
+interface Overlap {
+  /** What deploy A failed with. */
+  aError: Error
+  aSteps: string[]
+  /** Lets deploy B carry on from where it paused (right after its first host script) and returns its result. */
+  finishB: () => Promise<DeployResult>
+}
+
+/**
+ * Two real deploys against one simulated host. Deploy A runs; the first time `startB` says so about one of A's
+ * commands, deploy B starts and runs through its first host script (the one that takes the marker). Then A's
+ * command carries on. B waits there (or, with `bFinishesFirst`, runs to its end) until the test lets it go.
+ */
+async function overlap(
+  host: FakeHost,
+  startB: (step: string, command: string, stdin: string | undefined) => boolean,
+  options: {bFinishesFirst?: boolean} = {},
+): Promise<Overlap> {
+  const aSteps: string[] = []
+  const began = latch()
+  const release = latch()
+  let b: Promise<DeployResult> | undefined
+
+  const depsB = testDeps(host, {
+    deployId: () => ID_B,
+    run: async (argv, runOptions) => {
+      const answer = await host.run(argv, runOptions)
+      if (stepOf(argv.at(-1) ?? '') === 'host-state') {
+        began.open()
+        if (options.bFinishesFirst !== true) await release.promise
+      }
+      return answer
+    },
+  })
+  const depsA = testDeps(host, {
+    deployId: () => ID_A,
+    run: async (argv, runOptions) => {
+      const command = argv.at(-1) ?? ''
+      const step = stepOf(command)
+      aSteps.push(step)
+      if (b === undefined && startB(step, command, runOptions?.stdin)) {
+        b = deploy({env: baseEnv(), deps: depsB.deps})
+        await began.promise
+        if (options.bFinishesFirst === true) await b
+      }
+      return host.run(argv, runOptions)
+    },
+  })
+
+  let aError: Error | undefined
+  try {
+    await deploy({env: baseEnv(), deps: depsA.deps})
+  } catch (error) {
+    aError = error instanceof Error ? error : new Error(String(error))
+  }
+  if (aError === undefined) throw new Error('deploy A was expected to be overtaken and it succeeded')
+  return {
+    aError,
+    aSteps,
+    finishB: async () => {
+      release.open()
+      if (b === undefined) throw new Error('deploy B never started')
+      return b
+    },
+  }
+}
+
+/** Everything deploy A ran after the given step, apart from closing the ssh connection. */
+function afterStep(o: Overlap, step: string): string[] {
+  return o.aSteps.slice(o.aSteps.indexOf(step) + 1).filter(entry => entry !== 'unknown')
+}
+
+const isOpenAttempt = (step: string, _command: string, stdin: string | undefined): boolean =>
+  step === 'raw:set-state' && (stdin ?? '').includes('TRACES_INGEST_STATE=open')
+
+describe('overlapping deploys: the newest one owns the host', () => {
+  it('names the deploy in the marker: its random id, then the UTC timestamp, on one line', async () => {
+    let seen: string | undefined
+    const host: FakeHost = new FakeHost({
+      override: step => {
+        if (step === 'pull') seen = host.marker
+        return undefined
+      },
+    })
+    await run(host, baseEnv(), {deployId: () => ID_A})
+    expect(seen).toBe(`${ID_A} ${new Date(host.clock * 1000).toISOString()}\n`)
+    expect(seen).toMatch(MARKER_FORMAT)
+  })
+
+  it('generates 16 random bytes as hex for each deploy, and refuses an id it cannot put in a script', async () => {
+    expect(generateDeployId(() => new Uint8Array(16).fill(0xab))).toBe('ab'.repeat(16))
+    expect(generateDeployId()).toMatch(/^[\da-f]{32}$/)
+    expect(generateDeployId()).not.toBe(generateDeployId())
+
+    const first = new FakeHost({override: failAt('pull')})
+    await failure(first)
+    const second = new FakeHost({override: failAt('pull')})
+    await failure(second)
+    expect(first.markerOwner()).toMatch(/^[\da-f]{32}$/)
+    expect(first.markerOwner()).not.toBe(second.markerOwner())
+
+    for (const bad of ['', 'short', 'A1'.repeat(16), `${ID_A}; id`, 'a1'.repeat(65)]) {
+      const host = new FakeHost()
+      await expect(run(host, baseEnv(), {deployId: () => bad})).rejects.toThrow('deploy id')
+      expect(nonSshSteps(host)).toEqual([])
+    }
+  })
+
+  it('a single deploy is unaffected: it opens, removes its own marker, and is never refused', async () => {
+    const host = new FakeHost()
+    const {result} = await run(host, baseEnv(), {deployId: () => ID_A})
+    expect(result.ingest).toBe('open')
+    expect(host.served).toBe('open')
+    expect(host.marker).toBeUndefined()
+    expect(host.refused).toEqual([])
+    expect(host.unguarded).toEqual([])
+  })
+
+  it("a failed deploy's leftover marker never blocks the next deploy: it overwrites it, opens and removes it", async () => {
+    const host = new FakeHost({override: failAt('pull')})
+    await failure(host, baseEnv(), {deployId: () => ID_A})
+    expect(host.markerOwner()).toBe(ID_A)
+    delete host.options.override
+    const {result} = await run(host, baseEnv(), {deployId: () => ID_B})
+    expect(result.ingest).toBe('open')
+    expect(host.marker).toBeUndefined()
+    expect(host.refused).toEqual([])
+  })
+
+  it('refuses the overtaken deploy at its next mutating step, with the sentinel, and it changes nothing', async () => {
+    const host = new FakeHost()
+    const o = await overlap(host, step => step === 'prepare-dirs')
+    expect(o.aError).toBeInstanceOf(DeployOvertakenError)
+    expect(o.aError.message).toContain(
+      'ther deploy started on this host and took over; this one stopped without opening',
+    )
+    expect(host.refused).toEqual(['prepare-dirs'])
+    expect(host.markerOwner()).toBe(ID_B)
+    // It never opened, held, probed, read the route again or removed the marker, and wrote nothing.
+    expect(afterStep(o, 'prepare-dirs')).toEqual([])
+    expect(host.setStates()).toEqual([])
+    expect(host.writes()).toEqual([])
+    expect(host.served).toBe('none')
+
+    // The newest deploy then carries on, opens (its gates pass) and removes the marker.
+    const result = await o.finishB()
+    expect(result.ingest).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.served).toBe('open')
+    expect(host.marker).toBeUndefined()
+    expect(host.refused).toEqual(['prepare-dirs'])
+    expect(host.unguarded).toEqual([])
+  })
+
+  it('overtaken exactly at its open step: the route is not opened, and the newest deploy opens it', async () => {
+    const host = new FakeHost()
+    const o = await overlap(host, isOpenAttempt)
+    expect(o.aError).toBeInstanceOf(DeployOvertakenError)
+    expect(o.aError.message).toContain('stopped without opening ingest')
+    expect(host.refused).toEqual(['raw:set-state'])
+    expect(host.served).toBe('off')
+    expect(host.envState).toBe('off')
+    expect(host.setStates()).toEqual([])
+    expect(host.markerOwner()).toBe(ID_B)
+    expect(afterStep(o, 'raw:set-state')).toEqual([])
+
+    const result = await o.finishB()
+    expect(result.ingest).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.marker).toBeUndefined()
+  })
+
+  it("overtaken just before it removes the marker: it leaves the newest deploy's marker, and says it had opened", async () => {
+    const host = new FakeHost()
+    const o = await overlap(host, step => step === 'remove:.deploy-in-progress')
+    expect(o.aError).toBeInstanceOf(DeployOvertakenError)
+    expect(o.aError.message).toContain('stopped after it had opened ingest')
+    expect(host.refused).toEqual(['remove:.deploy-in-progress'])
+    expect(host.markerOwner()).toBe(ID_B)
+    expect(afterStep(o, 'remove:.deploy-in-progress')).toEqual([])
+
+    // B met an open route and a marker it did not write: it holds, updates, and opens when its gates pass.
+    const result = await o.finishB()
+    expect(result.ingest).toBe('open')
+    expect(host.setStates()).toEqual(['open', 'held', 'open'])
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('a deploy that finished first leaves no marker behind, and the older one is refused too', async () => {
+    const host = new FakeHost()
+    const o = await overlap(host, step => step === 'pull', {bFinishesFirst: true})
+    expect(o.aError).toBeInstanceOf(DeployOvertakenError)
+    expect(host.refused).toEqual(['pull'])
+    expect(host.marker).toBeUndefined()
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.served).toBe('open')
+    expect(afterStep(o, 'pull')).toEqual([])
+    expect((await o.finishB()).ingest).toBe('open')
+  })
+
+  it('does not hold, probe, read the route or touch the marker after it is overtaken, even on an open route', async () => {
+    const host = await openStack()
+    const o = await overlap(host, step => step === 'prepare-dirs')
+    expect(o.aError).toBeInstanceOf(DeployOvertakenError)
+    // The route A found open is still open: it belongs to the newest deploy now.
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    expect(afterStep(o, 'prepare-dirs')).toEqual([])
+    expect(host.markerOwner()).toBe(ID_B)
+
+    const result = await o.finishB()
+    expect(host.setStates()).toEqual(['open', 'held', 'open'])
+    expect(result.heldForUpdate).toBe(true)
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('a failing deploy that finds out it was overtaken while it closes the route leaves the route alone', async () => {
+    const host = await openStack()
+    host.options.override = failAt('prepare-dirs')
+    // Deploy B begins just as A starts to close the route after its failure.
+    const o = await overlap(host, step => step === 'ingest-state')
+    expect(o.aError).toBeInstanceOf(DeployOvertakenError)
+    expect(o.aError.message).toContain('prepare-dirs failed')
+    expect(host.refused).toEqual(['raw:set-state'])
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.markerOwner()).toBe(ID_B)
+
+    delete host.options.override
+    expect((await o.finishB()).ingest).toBe('open')
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('does not swallow being overtaken at the image prune, a step whose own failure is tolerated', async () => {
+    const host = new FakeHost()
+    const o = await overlap(host, step => step === 'prune-images')
+    expect(o.aError).toBeInstanceOf(DeployOvertakenError)
+    expect(host.refused).toEqual(['prune-images'])
+    expect(afterStep(o, 'prune-images')).toEqual([])
+    await o.finishB()
+  })
+
+  it('every step a deploy makes that changes the host carries the check, across first, update, resume and failure paths', async () => {
+    const host = new FakeHost()
+    await run(host, baseEnv({...withoutKey, ...bootstrap}))
+    // The operator deletes the bootstrap key in the Langfuse UI, supplies the Application key and opens ingest.
+    host.bootstrapKeyLive = false
+    await run(host)
+    // Every uploaded file changes too: the stores and the public services are recreated.
+    await run(host, baseEnv({TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${OTHER_DIGEST}`}), {
+      readFile: async relative => `# ${relative} v2\n`,
+    })
+    host.options.override = failAt('up-public')
+    await failure(
+      host,
+      baseEnv({TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${PLACEHOLDER_DIGEST}`}),
+    )
+
+    expect(host.unguarded).toEqual([])
+    expect(host.refused).toEqual([])
+    const changing = new Set(host.steps.filter(step => !isReadOnlyStep(step)))
+    for (const expected of [
+      'prepare-dirs',
+      'token-file:fro-bot',
+      'write:docker-compose.yaml',
+      'write:.env',
+      'write:.pending-restarts',
+      'remove:.pending-restarts',
+      'write:secrets/bootstrap-pending',
+      'remove:secrets/bootstrap-pending',
+      'prune-images',
+      'pull',
+      'create-collector',
+      'queue-volume',
+      'up-private',
+      'up-stale-private',
+      'up-public',
+      'up-reporter',
+      'up-caddy',
+      'retention-apply-ttl',
+      'retention-add-lifecycle',
+      'raw:set-state:open',
+      'raw:set-state:held',
+      'remove:.deploy-in-progress',
+    ]) {
+      expect({expected, ran: changing.has(expected)}).toEqual({expected, ran: true})
+    }
+  })
+})
+
+// ─── The ownership check in every script that changes the host ────────────────
+
+const SENDER_GROUP = SENDER_GROUPS[0]
+const PLAIN_FILE = {path: 'secrets/grafana/admin-password', owner: '472:472', mode: '0400', kind: 'plain'} as const
+const ENV_FILE = {path: '.env', owner: 'root:root', mode: '0600', kind: 'env'} as const
+
+/** Every script builder that changes the host, by export name, with the scripts each can emit. */
+const MUTATING_SCRIPTS: Record<string, string[]> = {
+  prepareDirsScript: [prepareDirsScript(ID_A)],
+  tokenFileScript: SENDER_GROUPS.map(group => tokenFileScript(group, ID_A)),
+  writeFileScript: [writeFileScript(ID_A, PLAIN_FILE), writeFileScript(ID_A, ENV_FILE, 'held')],
+  removeOwnFileScript: ['.pending-restarts', 'secrets/bootstrap-pending'].map(path => removeOwnFileScript(ID_A, path)),
+  pruneScript: [pruneScript(ID_A)],
+  pullScript: [pullScript(ID_A)],
+  upScript: [upScript(ID_A, 'up-private', ['postgres', 'redis']), upScript(ID_A, 'up-x', ['collector'], {force: true})],
+  createCollectorScript: [createCollectorScript(ID_A)],
+  queueVolumeScript: [queueVolumeScript(ID_A)],
+  setIngestStateCommand: (['off', 'held', 'open'] as const).map(state => setIngestStateCommand(state, ID_A)),
+  applyTtlScript: [applyTtlScript(ownershipPrelude(ID_A))],
+  addLifecycleScript: OBJECT_STORE_PREFIXES.map(prefix => addLifecycleScript(prefix, ownershipPrelude(ID_A))),
+}
+
+/** Builders that change nothing on the host (a probe, a comparison against stdin, a read). */
+const READ_ONLY_SCRIPTS: readonly string[] = [
+  'compareFileScript',
+  'tokenDirsScript',
+  'readIngestStateScript',
+  'driftScript',
+  'probeIngestScript',
+  'diskScript',
+  'runningDigestScript',
+  'bootstrapProbeScript',
+  'hygieneScript',
+  'readTtlScript',
+  'readLifecycleScript',
+]
+
+/** The builders that take ownership instead of checking it. */
+const TAKEOVER_SCRIPTS: readonly string[] = ['beginDeployScript']
+
+/** What a script can do to the host. Each of these must come after the check. */
+const CHANGES = [
+  /\bmktemp\b/,
+  /\binstall\b/,
+  /\bchown\b/,
+  /\bchmod\b/,
+  /\bmv\b/,
+  /\brm\b/,
+  /\bln\b/,
+  /\bdocker\b/,
+  /\bexec -T\b/,
+  /\bcat > /,
+  /\bprintf [^\n]*> /,
+]
+
+describe('the ownership check: a script that changes the host cannot lack it', () => {
+  const prelude = ownershipPrelude(ID_A)
+
+  it('refuses a deploy id that is not hex, and a marker path that is not safe', () => {
+    expect(() => ownershipPrelude('abc')).toThrow('deploy id')
+    expect(() => ownershipPrelude(`${ID_A}'; id #`)).toThrow('deploy id')
+    expect(() => ownershipPrelude(ID_A, '/mnt/../etc/x')).toThrow('marker')
+  })
+
+  it('compares the marker with this deploy and prints the sentinel and exits non-zero otherwise', () => {
+    expect(prelude).toContain(`[ -f ${TRACES_DEPLOY_MARKER} ]`)
+    expect(prelude).toContain(`read -r traces_owner traces_rest < ${TRACES_DEPLOY_MARKER}`)
+    expect(prelude).toContain(`[ "$traces_owner" = ${ID_A} ]`)
+    expect(prelude).toContain(`echo ${DEPLOY_OVERTAKEN_SENTINEL}; exit 1`)
+    expect(prelude).not.toContain('/dev/null')
+    expect(prelude.split('\n')).toHaveLength(1)
+  })
+
+  it('classifies every script builder the deploy and retention modules export', () => {
+    const exported = [...Object.entries(deployModule), ...Object.entries(retentionModule)]
+      .filter(([name, value]) => typeof value === 'function' && /(?:Script|Command)$/.test(name))
+      .map(([name]) => name)
+    const known = new Set([...Object.keys(MUTATING_SCRIPTS), ...READ_ONLY_SCRIPTS, ...TAKEOVER_SCRIPTS])
+    // A new builder fails here until someone decides whether it changes the host, and gives it the prelude if it does.
+    expect(exported.filter(name => !known.has(name))).toEqual([])
+    expect([...known].filter(name => !exported.includes(name))).toEqual([])
+  })
+
+  it('puts the check in every script that changes the host, before anything it changes', () => {
+    for (const [builder, scripts] of Object.entries(MUTATING_SCRIPTS)) {
+      expect({builder, scripts: scripts.length > 0}).toEqual({builder, scripts: true})
+      for (const script of scripts) {
+        const at = script.indexOf(prelude)
+        expect({builder, has: at !== -1}).toEqual({builder, has: true})
+        const rest = script.replace(prelude, '')
+        expect({builder, once: rest.includes(prelude)}).toEqual({builder, once: false})
+        for (const change of CHANGES) {
+          const found = change.exec(script.slice(0, at))
+          expect({builder, change: change.source, before: found?.[0]}).toEqual({
+            builder,
+            change: change.source,
+            before: undefined,
+          })
+        }
+      }
+    }
+  })
+
+  it('takes the ingest lock first when it changes the route or removes the marker, so there is no gap between check and act', () => {
+    const open = setIngestStateCommand('open', ID_A)
+    expect(open.indexOf('flock -w 30')).toBeGreaterThan(0)
+    expect(open.indexOf('flock -w 30')).toBeLessThan(open.indexOf(prelude))
+    expect(open.indexOf(prelude)).toBeLessThan(open.indexOf('mktemp'))
+    expect(open.indexOf(prelude)).toBeLessThan(open.indexOf('--force-recreate'))
+
+    const env = writeFileScript(ID_A, ENV_FILE, 'held')
+    expect(env.indexOf('flock -w 30')).toBeLessThan(env.indexOf(prelude))
+
+    const remove = removeOwnFileScript(ID_A, '.deploy-in-progress')
+    expect(remove).toContain(prelude)
+    expect(remove.indexOf('flock -w 30')).toBeGreaterThan(0)
+    expect(remove.indexOf('flock -w 30')).toBeLessThan(remove.indexOf(prelude))
+    expect(remove.indexOf(prelude)).toBeLessThan(remove.indexOf('rm -f'))
+    expect(remove).toContain(TRACES_LOCK_BUSY_SENTINEL)
+  })
+
+  it('keeps the retention scripts free of ownership knowledge unless the deploy hands them the check', () => {
+    expect(applyTtlScript()).not.toContain('traces_owner')
+    expect(addLifecycleScript('events/')).not.toContain('traces_owner')
+    expect(applyTtlScript(prelude)).toContain(prelude)
+    expect(addLifecycleScript('events/', prelude)).toContain(prelude)
+  })
+})
+
+describe('the ownership check, run for real against a scratch app directory', () => {
+  const marker = (root: string): string => join(root, '.deploy-in-progress')
+  const stamp = '2023-11-14T22:13:20.000Z'
+
+  it('lets the owner write, and refuses everyone else without writing anything', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      const script = writeFileScript(ID_A, {path: 'out.txt', owner: 'root:root', mode: '0600', kind: 'plain'})
+      const attempt = (): {out: string; code: number} => runLocally(script, root, shim, 'content\n')
+
+      writeFileSync(marker(root), `${ID_A} ${stamp}\n`)
+      expect(attempt()).toEqual({out: 'TRACES_FILE_WRITTEN\n', code: 0})
+      expect(readFileSync(join(root, 'out.txt'), 'utf8')).toBe('content\n')
+      rmSync(join(root, 'out.txt'))
+
+      const refused: [string, () => void][] = [
+        ['another deploy', () => writeFileSync(marker(root), `${ID_B} ${stamp}\n`)],
+        ['no marker', () => rmSync(marker(root))],
+        ['an empty marker', () => writeFileSync(marker(root), '')],
+        ['a marker with no id', () => writeFileSync(marker(root), `${stamp}\n`)],
+        ['an id that only starts the same', () => writeFileSync(marker(root), `${ID_A}0 ${stamp}\n`)],
+        ['an id that only ends the same', () => writeFileSync(marker(root), `0${ID_A} ${stamp}\n`)],
+        ['the id on a later line', () => writeFileSync(marker(root), `x\n${ID_A} ${stamp}\n`)],
+      ]
+      for (const [label, arrange] of refused) {
+        arrange()
+        expect({label, ...attempt()}).toEqual({label, out: 'DEPLOY_OVERTAKEN\n', code: 1})
+        expect({
+          label,
+          files: readdirSync(root).filter(name => name === 'out.txt' || name.startsWith('.traces-tmp')),
+        }).toEqual({
+          label,
+          files: [],
+        })
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('rewrites .env only for the owner', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      writeFileSync(join(root, '.env'), 'OLD=1\nTRACES_INGEST_STATE=held\n')
+      const script = writeFileScript(ID_A, ENV_FILE, 'open')
+      writeFileSync(marker(root), `${ID_B} ${stamp}\n`)
+      expect(runLocally(script, root, shim, 'NEW=2\n')).toEqual({out: 'DEPLOY_OVERTAKEN\n', code: 1})
+      expect(readFileSync(join(root, '.env'), 'utf8')).toBe('OLD=1\nTRACES_INGEST_STATE=held\n')
+      writeFileSync(marker(root), `${ID_A} ${stamp}\n`)
+      expect(runLocally(script, root, shim, 'NEW=2\n').code).toBe(0)
+      expect(readFileSync(join(root, '.env'), 'utf8')).toBe('NEW=2\nTRACES_INGEST_STATE=held\n')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('removes the marker only when it still holds this deploy (compare and delete), and refuses when it is gone', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      const script = removeOwnFileScript(ID_A, '.deploy-in-progress')
+
+      writeFileSync(marker(root), `${ID_B} ${stamp}\n`)
+      expect(runLocally(script, root, shim)).toEqual({out: 'DEPLOY_OVERTAKEN\n', code: 1})
+      expect(readFileSync(marker(root), 'utf8')).toBe(`${ID_B} ${stamp}\n`)
+
+      rmSync(marker(root))
+      expect(runLocally(script, root, shim)).toEqual({out: 'DEPLOY_OVERTAKEN\n', code: 1})
+
+      writeFileSync(marker(root), `${ID_A} ${stamp}\n`)
+      expect(runLocally(script, root, shim)).toEqual({out: 'TRACES_REMOVED\n', code: 0})
+      expect(readdirSync(root)).not.toContain('.deploy-in-progress')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('does not touch the pending-restart record or the bootstrap record for a deploy that was overtaken', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      mkdirSync(join(root, 'secrets'))
+      writeFileSync(join(root, '.pending-restarts'), 'collector\n')
+      writeFileSync(join(root, 'secrets', 'bootstrap-pending'), 'pk:sk')
+      writeFileSync(marker(root), `${ID_B} ${stamp}\n`)
+      for (const path of ['.pending-restarts', 'secrets/bootstrap-pending']) {
+        expect(runLocally(removeOwnFileScript(ID_A, path), root, shim)).toEqual({out: 'DEPLOY_OVERTAKEN\n', code: 1})
+      }
+      expect(readFileSync(join(root, '.pending-restarts'), 'utf8')).toBe('collector\n')
+      expect(readFileSync(join(root, 'secrets', 'bootstrap-pending'), 'utf8')).toBe('pk:sk')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('changes the route only for the owner: an overtaken open writes no state and recreates nothing', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      // A docker that records every call, replacing the drift shim.
+      writeFileSync(join(shim, 'docker'), `#!/bin/sh\necho "$@" >> ${join(root, 'docker.log')}\nexit 0\n`)
+      chmodSync(join(shim, 'docker'), 0o755)
+      writeFileSync(join(root, '.env'), 'A=1\nTRACES_INGEST_STATE=off\n')
+      const command = setIngestStateCommand('open', ID_A)
+
+      writeFileSync(marker(root), `${ID_B} ${stamp}\n`)
+      const refused = runLocally(command, root, shim, 'TRACES_INGEST_STATE=open\n')
+      expect(refused).toEqual({out: 'DEPLOY_OVERTAKEN\n', code: 1})
+      expect(readFileSync(join(root, '.env'), 'utf8')).toBe('A=1\nTRACES_INGEST_STATE=off\n')
+      expect(readdirSync(root)).not.toContain('docker.log')
+      expect(readdirSync(root).filter(name => name.startsWith('.env.'))).toEqual([])
+
+      writeFileSync(marker(root), `${ID_A} ${stamp}\n`)
+      const opened = runLocally(command, root, shim, 'TRACES_INGEST_STATE=open\n')
+      expect(opened).toEqual({out: 'TRACES_INGEST_STATE_SET=open\n', code: 0})
+      expect(readFileSync(join(root, '.env'), 'utf8')).toBe('A=1\nTRACES_INGEST_STATE=open\n')
+      expect(readFileSync(join(root, 'docker.log'), 'utf8')).toContain('--force-recreate --no-deps caddy')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('creates a token file only for the owner', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      mkdirSync(join(root, 'tokens', SENDER_GROUP), {recursive: true})
+      const run = (): {out: string; code: number} => {
+        const result = Bun.spawnSync(['bash', '-o', 'pipefail', '-c', tokenFileScript(SENDER_GROUP, ID_A, root)], {
+          env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
+          stdin: new TextEncoder().encode(`${generateVoidTokenLine()}\n`),
+        })
+        return {out: result.stdout.toString(), code: result.exitCode}
+      }
+      writeFileSync(marker(root), `${ID_B} ${stamp}\n`)
+      expect(run()).toEqual({out: 'DEPLOY_OVERTAKEN\n', code: 1})
+      expect(readdirSync(join(root, 'tokens', SENDER_GROUP))).toEqual([])
+      writeFileSync(marker(root), `${ID_A} ${stamp}\n`)
+      expect(run()).toEqual({out: 'TRACES_TOKEN_CREATED\n', code: 0})
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writes the deploy id and a timestamp into the marker as the first thing it takes from the host', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      writeFileSync(join(root, '.env'), 'TRACES_INGEST_STATE=open\n')
+      writeFileSync(marker(root), `${ID_B} ${stamp}\n`)
+      const taken = runLocally(beginDeployScript(ID_A), root, shim)
+      // The previous deploy's marker is reported, then replaced by this deploy's own.
+      expect(parseHostState(taken.out)).toMatchObject({marker: true, ingest: 'open'})
+      expect(readFileSync(marker(root), 'utf8')).toMatch(MARKER_FORMAT)
+      expect(readFileSync(marker(root), 'utf8').startsWith(`${ID_A} `)).toBe(true)
+    } finally {
+      cleanup()
+    }
   })
 })

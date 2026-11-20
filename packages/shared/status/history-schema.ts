@@ -13,6 +13,12 @@ export const HISTORY_WINDOW_MS = HISTORY_WINDOW_DAYS * 24 * 60 * 60_000
 export const APP_IDS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker', 'traces'] as const
 export type AppId = (typeof APP_IDS)[number]
 
+/**
+ * Apps added to `APP_IDS` after schema v1 shipped: an artifact written before one existed has no file for it, which
+ * reads as no samples; every other app's file is required. Add a new app here in the same change that adds it above.
+ */
+export const APPS_ADDED_AFTER_V1: readonly AppId[] = ['traces']
+
 export const OBSERVATION_KINDS = ['reachability', 'container-health', 'deploy-state', 'end-to-end', 'resource'] as const
 export type ObservationKind = (typeof OBSERVATION_KINDS)[number]
 

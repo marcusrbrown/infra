@@ -565,11 +565,11 @@ describe('history on disk', () => {
       }
     })
 
-    it('is the same for any known app: a missing file is an empty list, not data loss to be reported', async () => {
+    it('is rejected for an app that existed before: a lost file is damage, not an app added later', async () => {
       await seed()
-      await rm(join(dir, 'apps', 'vpn.json'))
+      await rm(join(dir, 'apps', 'keeweb.json'))
 
-      expect((await loadHistory(dir, 'existing'))?.apps.vpn).toEqual([])
+      expect(await errorCodeAsync(() => loadHistory(dir, 'existing'))).toBe('malformed')
     })
 
     it('still rejects an unknown app file next to the missing one', async () => {

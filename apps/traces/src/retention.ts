@@ -137,6 +137,10 @@ export function parseTableStates(stdout: string): TableState[] {
  */
 const CLICKHOUSE_CLIENT = `${RETENTION_COMPOSE} exec -T clickhouse sh -c 'exec clickhouse-client --user clickhouse --password "$CLICKHOUSE_PASSWORD" --multiquery'`
 
+function guardLine(guard: string): string {
+  return guard === '' ? '' : `${guard}\n`
+}
+
 export function readTtlScript(): string {
   return `set -eu
 # traces-step:retention-read-ttl
@@ -150,10 +154,14 @@ export function readTtlSql(): string {
   return `SELECT name, create_table_query FROM system.tables WHERE database = '${CLICKHOUSE_DATABASE}' AND name IN (${names}) ORDER BY name FORMAT JSONEachRow;\n`
 }
 
-export function applyTtlScript(): string {
+/**
+ * `guard` is a shell fragment that runs first and may stop the script before it changes anything. The deploy passes
+ * its ownership check (an overtaken deploy must not alter a table); with none, the script runs as it always did.
+ */
+export function applyTtlScript(guard = ''): string {
   return `set -eu
 # traces-step:retention-apply-ttl
-${CLICKHOUSE_CLIENT}
+${guardLine(guard)}${CLICKHOUSE_CLIENT}
 echo ${TTL_APPLIED_SENTINEL}`
 }
 
@@ -197,13 +205,14 @@ else
 fi`
 }
 
-export function addLifecycleScript(prefix: string): string {
+/** `guard` as for `applyTtlScript`. */
+export function addLifecycleScript(prefix: string, guard = ''): string {
   if (!(OBJECT_STORE_PREFIXES as readonly string[]).includes(prefix)) {
     throw new Error(`Retention: refusing a lifecycle rule for an unknown prefix: ${prefix}`)
   }
   return `set -eu
 # traces-step:retention-add-lifecycle
-${mc(`ilm rule add --prefix ${shellQuote(prefix)} --expire-days ${RETENTION_DAYS} ${ALIAS_BUCKET}`)}
+${guardLine(guard)}${mc(`ilm rule add --prefix ${shellQuote(prefix)} --expire-days ${RETENTION_DAYS} ${ALIAS_BUCKET}`)}
 echo ${ILM_ADDED_SENTINEL}`
 }
 
@@ -338,8 +347,11 @@ export class RetentionError extends Error {
 /**
  * Assert the TTL on the trace tables and the lifecycle rules on the object store, then read both back.
  * Throws a `RetentionError` when a table cannot be altered, a read-back differs, or a rule conflicts.
+ *
+ * `guard` goes at the start of every script that changes something (the TTL `ALTER`s and the lifecycle rules); the
+ * reads never carry it.
  */
-export async function assertRetention(exec: RemoteExec): Promise<RetentionOutcome> {
+export async function assertRetention(exec: RemoteExec, guard = ''): Promise<RetentionOutcome> {
   const states = await readTables(exec)
   const byName = new Map(states.map(state => [state.name, state]))
 
@@ -352,7 +364,7 @@ export async function assertRetention(exec: RemoteExec): Promise<RetentionOutcom
 
   if (needing.length > 0) {
     try {
-      await step(exec, 'Apply table TTLs', applyTtlScript(), [TTL_APPLIED_SENTINEL], applyTtlSql(needing))
+      await step(exec, 'Apply table TTLs', applyTtlScript(guard), [TTL_APPLIED_SENTINEL], applyTtlSql(needing))
     } catch (error) {
       throw new RetentionError(
         `Could not set the 30-day TTL on ${needing.map(table => table.name).join(', ')}: ${error instanceof Error ? error.message : String(error)}`,
@@ -377,7 +389,7 @@ export async function assertRetention(exec: RemoteExec): Promise<RetentionOutcom
       )
     }
     if (state === 'absent') {
-      await step(exec, `Add lifecycle rule for ${prefix}`, addLifecycleScript(prefix), [ILM_ADDED_SENTINEL])
+      await step(exec, `Add lifecycle rule for ${prefix}`, addLifecycleScript(prefix, guard), [ILM_ADDED_SENTINEL])
       prefixesAdded.push(prefix)
     }
   }

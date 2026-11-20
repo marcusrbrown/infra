@@ -18,6 +18,11 @@
 //   9. run the gates, then set the route: open only when every gate passes AND TRACES_INGEST_OPEN is exactly
 //      `true`; otherwise off (first bring-up) or held (it was open before)
 //
+// Overlapping deploys: the last deploy to start owns the host. Each deploy writes a random id into the deploy marker
+// in its first host script; every later script that changes the host checks, in the same script, that the marker
+// still holds that id (`ownershipPrelude`) and otherwise prints `DEPLOY_OVERTAKEN` and changes nothing. An overtaken
+// deploy stops at its next step and never opens the route or removes the marker.
+//
 // Everything a host does goes through one injected `Runner`, so tests assert on every argv and every stdin
 // byte and nothing here reaches a network in a test.
 //
@@ -498,6 +503,46 @@ function step(name: string, body: string): string {
   return `set -eu\n# traces-step:${name}\n${body}`
 }
 
+// ─── Ownership: the last deploy to start owns the host ────────────────────────
+//
+// A deploy is many separate SSH commands, so no lock can span it. Ownership does instead: the first host script
+// writes this deploy's random id into the marker, and every script that changes the host begins by checking that
+// the marker still holds that id. A newer deploy overwrites the marker, which makes every later script of the
+// older one refuse itself. A step of the older deploy that was already running when it was overtaken still
+// completes: overlapping deploys remain something to avoid.
+
+/** Printed (exit 1, nothing changed) by a script whose deploy no longer owns the marker. */
+export const DEPLOY_OVERTAKEN_SENTINEL = 'DEPLOY_OVERTAKEN'
+
+const DEPLOY_ID = /^[\da-f]{32,128}$/
+
+/** 16 random bytes as hex. Injectable so a test can fix it. */
+export function generateDeployId(random: (size: number) => Uint8Array = size => randomBytes(size)): string {
+  return Buffer.from(random(16)).toString('hex')
+}
+
+function assertDeployId(id: string): string {
+  // The id is spliced into scripts: only lower-case hex of a length that cannot be guessed is accepted.
+  if (!DEPLOY_ID.test(id)) throw new Error('The deploy id must be 32 to 128 lower-case hex characters')
+  return id
+}
+
+/**
+ * The check every script that changes the host starts with (after the ingest lock, in the scripts that take it): the
+ * marker must exist and its first field must be this deploy's id. Otherwise the script prints the sentinel and exits
+ * non-zero before it has changed anything. One line, so it also fits the `; `-joined state-change command.
+ */
+export function ownershipPrelude(id: string, marker: string = TRACES_DEPLOY_MARKER): string {
+  assertDeployId(id)
+  if (!SAFE_PATH.test(marker) || marker.includes('..')) throw new Error(`Unsafe marker path: ${marker}`)
+  return `if [ -f ${marker} ] && read -r traces_owner traces_rest < ${marker} && [ "$traces_owner" = ${id} ]; then :; else echo ${DEPLOY_OVERTAKEN_SENTINEL}; exit 1; fi`
+}
+
+/** A script that changes the host: the ownership check comes before anything else it does. */
+function guardedStep(name: string, id: string, body: string, marker?: string): string {
+  return step(name, `${ownershipPrelude(id, marker)}\n${body}`)
+}
+
 export const HOST_STATE_SENTINEL = 'TRACES_HOST_STATE_READ'
 
 /**
@@ -507,10 +552,15 @@ export const HOST_STATE_SENTINEL = 'TRACES_HOST_STATE_READ'
  * before this script ran (and is in what it reads) or is refused from this instant on: the route state the deploy
  * acts on cannot go stale. The previous marker, if any, is reported before it is replaced.
  *
+ * The marker holds this deploy's id and the UTC time on one line (`<id> <timestamp>`). Writing it is how a deploy
+ * takes the host: whichever deploy wrote it last owns the host, and an older one is refused at its next step. This
+ * script never refuses: a marker a failed deploy left behind never blocks the next deploy.
+ *
  * Prints `key=value` lines. The bootstrap values are secrets printed to stdout; they are parsed in memory and never
  * logged.
  */
-export function beginDeployScript(): string {
+export function beginDeployScript(id: string): string {
+  assertDeployId(id)
   return step(
     'host-state',
     `cd ${TRACES_APP_DIR}
@@ -542,7 +592,7 @@ fi
 printf 'epoch=%s\\n' "$(date -u +%s)"
 t=$(mktemp ${TRACES_APP_DIR}/.traces-tmp.XXXXXX)
 trap 'rm -f "$t"' EXIT
-date -u +%Y-%m-%dT%H:%M:%S.000Z > "$t"
+printf '%s %s\\n' ${id} "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$t"
 chmod 0644 "$t"
 mv -f "$t" ${TRACES_DEPLOY_MARKER}
 echo ${HOST_STATE_SENTINEL}`,
@@ -631,7 +681,7 @@ export function parseHostState(stdout: string): HostState {
 export const DIRS_SENTINEL = 'TRACES_DIRS_READY'
 
 /** Directories and their owners. Created or corrected; nothing inside a token directory is touched. */
-export function prepareDirsScript(): string {
+export function prepareDirsScript(id: string): string {
   const dir = (relative: string): string => remotePath(relative)
   const plain = [
     'config',
@@ -644,8 +694,9 @@ export function prepareDirsScript(): string {
     'secrets',
   ].map(dir)
   const collector = [dir('secrets/collector'), dir('tokens'), ...SENDER_GROUPS.map(group => dir(`tokens/${group}`))]
-  return step(
+  return guardedStep(
     'prepare-dirs',
+    id,
     `mountpoint -q ${TRACES_VOLUME_MOUNT}
 grep -qx ${TRACES_SENTINEL_CONTENT} ${TRACES_SENTINEL_PATH}
 install -d -o root -g root -m 0755 ${plain.join(' ')}
@@ -668,13 +719,14 @@ export const TOKEN_SENTINELS = ['TRACES_TOKEN_CREATED', 'TRACES_TOKEN_PRESENT'] 
  * in between is never replaced. The temporary name is removed on exit. This script never writes, replaces, truncates
  * or removes an existing token file. `appDir` exists so a test can run the real script against a scratch directory.
  */
-export function tokenFileScript(group: SenderGroup, appDir: string = TRACES_APP_DIR): string {
+export function tokenFileScript(group: SenderGroup, id: string, appDir: string = TRACES_APP_DIR): string {
   if (!(SENDER_GROUPS as readonly string[]).includes(group)) throw new Error(`Unknown sender group: ${group}`)
   const file = `${appDir}/tokens/${group}/token`
   const directory = `${appDir}/tokens/${group}`
   if (!SAFE_PATH.test(file) || file.includes('..')) throw new Error('Unsafe token path')
-  return step(
+  return guardedStep(
     `token-file:${group}`,
+    id,
     String.raw`f=${file}
 line=$(cat)
 t=$(mktemp ${directory}/.void.XXXXXX)
@@ -697,6 +749,7 @@ else
   echo "token path could not be created" >&2
   exit 1
 fi`,
+    `${appDir}/${MARKER_FILE}`,
   )
 }
 
@@ -781,11 +834,15 @@ const MODE = /^0[0-7]{3}$/
  * `traces ingest hold` run during the deploy is never undone by a cached state; a state of `open` on the host becomes
  * the planned one; a host with no `.env` gets the planned one. It prints `TRACES_ENV_STATE=<state written>` so the
  * deploy knows what the host has. Only the deploy's own gated open step (`setIngestStateCommand`) ever opens.
+ *
+ * It begins with the ownership check (after the lock, for `.env`): a deploy that was overtaken writes nothing.
  */
 export function writeFileScript(
+  id: string,
   file: Pick<RemoteFile, 'path' | 'owner' | 'mode' | 'kind'>,
   state?: IngestState,
 ): string {
+  const prelude = ownershipPrelude(id)
   if (!OWNER.test(file.owner)) throw new Error(`Unsafe owner: ${file.owner}`)
   if (!MODE.test(file.mode)) throw new Error(`Unsafe mode: ${file.mode}`)
   const target = remotePath(file.path)
@@ -816,7 +873,8 @@ printf 'TRACES_INGEST_STATE=%s\\n' "$state" >> "$t"
   return step(
     `write:${file.path}`,
     `umask 077
-${lock}t=$(mktemp ${directory}/.traces-tmp.XXXXXX)
+${lock}${prelude}
+t=$(mktemp ${directory}/.traces-tmp.XXXXXX)
 trap 'rm -f "$t"' EXIT
 cat > "$t"
 ${decide}chown ${file.owner} "$t"
@@ -828,10 +886,24 @@ ${report}echo ${FILE_WRITTEN_SENTINEL}`,
 
 export const REMOVED_SENTINEL = 'TRACES_REMOVED'
 
-/** Remove one file the deploy itself owns, inside the app directory. */
-export function removeOwnFileScript(path: string): string {
+/**
+ * Remove one file the deploy itself owns, inside the app directory, only while this deploy still owns the host.
+ *
+ * The marker is removed by compare-and-delete: under the ingest lock (the one a manual `traces ingest open` and the
+ * deploy's own open take), in the same script, it is removed only if it still holds this deploy's id. A deploy that
+ * was overtaken, or whose marker is already gone, prints `DEPLOY_OVERTAKEN` and removes nothing.
+ */
+export function removeOwnFileScript(id: string, path: string): string {
   if (!OWN_FILES.includes(path)) throw new Error(`${path} is not a file this deploy owns`)
-  return step(`remove:${path}`, `rm -f ${remotePath(path)}\necho ${REMOVED_SENTINEL}`)
+  const body = `rm -f ${remotePath(path)}\necho ${REMOVED_SENTINEL}`
+  if (path !== MARKER_FILE) return guardedStep(`remove:${path}`, id, body)
+  return step(
+    `remove:${path}`,
+    `exec 9>>${TRACES_INGEST_LOCK}
+if ! flock -w 30 9; then echo ${TRACES_LOCK_BUSY_SENTINEL}; exit 1; fi
+${ownershipPrelude(id)}
+${body}`,
+  )
 }
 
 /**
@@ -841,13 +913,18 @@ export function removeOwnFileScript(path: string): string {
  * A lock that cannot be taken in 30 seconds prints `LOCK_BUSY` and fails; it is never skipped. The compose
  * command gets descriptor 9 closed, so nothing it starts can outlive the lock. The new line travels on stdin.
  * A test compares this with the CLI's text.
+ *
+ * The deploy's version adds one thing the CLI's lacks: under the lock, before anything is written, it checks that
+ * the marker still holds this deploy's id. The check and the write share the lock, so a deploy that was overtaken
+ * can neither open nor hold the route after the newer deploy took the host, and nothing falls between them.
  */
-export function setIngestStateCommand(state: IngestState): string {
+export function setIngestStateCommand(state: IngestState, id: string): string {
   return [
     'set -e',
     `cd ${TRACES_APP_DIR}`,
     `exec 9>>${TRACES_INGEST_LOCK}`,
     `if ! flock -w 30 9; then echo ${TRACES_LOCK_BUSY_SENTINEL}; exit 1; fi`,
+    ownershipPrelude(id),
     'test -f .env',
     't=$(mktemp ./.env.XXXXXX)',
     `{ grep -v '^TRACES_INGEST_STATE=' .env || true; cat; } > "$t"`,
@@ -993,20 +1070,21 @@ export const MIN_FREE_BYTES = 5 * 1024 ** 3
 
 export const STEP_SENTINEL = (name: string): string => `TRACES_STEP_OK:${name}`
 
-function composeStep(name: string, command: string): string {
+function composeStep(name: string, id: string, command: string): string {
+  // The ownership check comes first: an overtaken deploy runs nothing and reads no clock.
   // The host's clock is read before the command runs: a verdict produced by a restarted service is newer than this.
   return step(
     name,
-    `cd ${TRACES_APP_DIR}\nprintf 'epoch=%s\\n' "$(date -u +%s)"\n${command}\necho ${STEP_SENTINEL(name)}`,
+    `cd ${TRACES_APP_DIR}\n${ownershipPrelude(id)}\nprintf 'epoch=%s\\n' "$(date -u +%s)"\n${command}\necho ${STEP_SENTINEL(name)}`,
   )
 }
 
-export function pruneScript(): string {
-  return composeStep('prune-images', 'docker image prune -af')
+export function pruneScript(id: string): string {
+  return composeStep('prune-images', id, 'docker image prune -af')
 }
 
-export function pullScript(): string {
-  return composeStep('pull', `timeout 1800 ${COMPOSE} pull`)
+export function pullScript(id: string): string {
+  return composeStep('pull', id, `timeout 1800 ${COMPOSE} pull`)
 }
 
 export interface UpOptions {
@@ -1015,16 +1093,16 @@ export interface UpOptions {
 }
 
 /** `up -d --wait` for named services only; compose recreates exactly those whose configuration changed. */
-export function upScript(name: string, services: readonly string[], options: UpOptions = {}): string {
+export function upScript(id: string, name: string, services: readonly string[], options: UpOptions = {}): string {
   for (const service of services) assertService(service)
   if (services.length === 0) throw new Error('upScript needs at least one service')
   const flags = options.force === true ? '--force-recreate --no-deps ' : ''
-  return composeStep(name, `timeout 1200 ${COMPOSE} up -d --wait --wait-timeout 600 ${flags}${services.join(' ')}`)
+  return composeStep(name, id, `timeout 1200 ${COMPOSE} up -d --wait --wait-timeout 600 ${flags}${services.join(' ')}`)
 }
 
 /** Create (never recreate) the collector container, which also creates its queue volume. */
-export function createCollectorScript(): string {
-  return composeStep('create-collector', `${COMPOSE} create --no-recreate collector`)
+export function createCollectorScript(id: string): string {
+  return composeStep('create-collector', id, `${COMPOSE} create --no-recreate collector`)
 }
 
 export const QUEUE_SENTINEL = 'TRACES_QUEUE_VOLUME_READY'
@@ -1036,9 +1114,10 @@ export const QUEUE_SENTINEL = 'TRACES_QUEUE_VOLUME_READY'
  * containerd store, where that copy is the least-tested path, and a volume created root-owned by any earlier
  * start would never inherit it.
  */
-export function queueVolumeScript(): string {
-  return step(
+export function queueVolumeScript(id: string): string {
+  return guardedStep(
     'queue-volume',
+    id,
     `mp=$(docker volume inspect ${COMPOSE_PROJECT_VOLUME} --format '{{.Mountpoint}}')
 case "$mp" in
   ${TRACES_DOCKER_ROOT}/volumes/*/_data) ;;
@@ -1558,6 +1637,8 @@ export interface DeployDeps {
   limits: Limits
   /** A fresh void token line for each token file created. Never logged or kept. */
   voidTokenLine: () => string
+  /** This deploy's id, written into the marker: 16 or more random bytes as hex. Injectable so a test can fix it. */
+  deployId: () => string
 }
 
 const APP_ROOT = resolve(import.meta.dir, '..')
@@ -1582,6 +1663,7 @@ export function defaultDeps(env: EnvLike): DeployDeps {
     log: message => console.warn(message),
     limits: DEFAULT_LIMITS,
     voidTokenLine: () => generateVoidTokenLine(),
+    deployId: () => generateDeployId(),
   }
 }
 
@@ -1620,6 +1702,25 @@ export class AppliedButUnverifiedError extends Error {
   }
 }
 
+/**
+ * Another deploy started on this host after this one and took it over (it wrote its own id into the marker). This
+ * deploy stopped at its next step. It is the one failure that leaves the route and the marker alone: the host now
+ * belongs to the newer deploy, and a hold, an open or a marker removal from here could undo what that deploy did.
+ * Steps of this deploy that were already running when it was overtaken still completed.
+ */
+export class DeployOvertakenError extends Error {
+  constructor(options: {opened?: boolean; failure?: string} = {}) {
+    const stopped =
+      options.opened === true
+        ? 'this one stopped after it had opened ingest'
+        : 'this one stopped without opening ingest'
+    super(
+      `Another deploy started on this host and took over; ${stopped}. It left the ingest route and the deploy marker to the newer deploy${options.opened === true ? ', whose gates decide whether the route stays open' : ''}.${options.failure === undefined ? '' : ` Before that this deploy had failed: ${options.failure}.`}`,
+    )
+    this.name = 'DeployOvertakenError'
+  }
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -1646,8 +1747,8 @@ function digestOf(image: string): string {
   return at === -1 ? '' : image.slice(at + 1)
 }
 
-async function setIngestState(exec: RemoteExec, state: IngestState): Promise<void> {
-  const result = await exec(setIngestStateCommand(state), INGEST_STATE_STDIN(state))
+async function setIngestState(exec: RemoteExec, state: IngestState, id: string): Promise<void> {
+  const result = await exec(setIngestStateCommand(state, id), INGEST_STATE_STDIN(state))
   if (lastLine(result) === TRACES_LOCK_BUSY_SENTINEL) {
     throw new Error(
       `Could not set the ingest state to ${state}: the ingest lock was busy for 30 seconds (another ingest change is in progress)`,
@@ -1717,8 +1818,30 @@ function pairToStdin(pair: KeyPair): string {
  * The deploy proper, over an `exec` that already speaks to the host. Exported for tests; `deploy` is the entry
  * point that builds the ssh transport.
  */
-export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps: DeployDeps): Promise<DeployResult> {
+export async function performDeploy(
+  inputs: DeployInputs,
+  rawExec: RemoteExec,
+  deps: DeployDeps,
+): Promise<DeployResult> {
   const {log} = deps
+  const deployId = assertDeployId(deps.deployId())
+
+  // Whether another deploy took the host over, and whether this one's last route change left it open. An object, not
+  // bare variables: both are set from inside `exec` and read in the catch below.
+  const ownership = {overtaken: false, opened: false}
+  /**
+   * Every remote command goes through here. A script that was refused because this deploy no longer owns the marker
+   * exits non-zero and prints the sentinel; that becomes `DeployOvertakenError` wherever it happened, and the flag
+   * survives any `catch` between here and the handler at the bottom that wraps or swallows the error.
+   */
+  const exec: RemoteExec = async (command, stdin) => {
+    const result = await rawExec(command, stdin)
+    if (result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === DEPLOY_OVERTAKEN_SENTINEL)) {
+      ownership.overtaken = true
+      throw new DeployOvertakenError({opened: ownership.opened})
+    }
+    return result
+  }
   const sh = <T extends string>(
     label: string,
     script: string,
@@ -1731,8 +1854,10 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
   await checkTracesStorage(exec)
 
   // 4. What the host says about itself.
-  log('==> Reading the host state and taking the deploy marker (under the ingest lock)')
-  const host = parseHostState((await sh('Read host state', beginDeployScript(), [HOST_STATE_SENTINEL])).result.stdout)
+  log(`==> Reading the host state and taking the deploy marker (under the ingest lock; deploy ${deployId.slice(0, 8)})`)
+  const host = parseHostState(
+    (await sh('Read host state', beginDeployScript(deployId), [HOST_STATE_SENTINEL])).result.stdout,
+  )
 
   // 5. Compare every file, so the decision to hold is made before anything changes.
   log('==> Comparing files with the host')
@@ -1788,8 +1913,9 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
   const setState = async (state: IngestState): Promise<void> => {
     // An open that was attempted counts as open from before the remote call: a lost reply says nothing about the host.
     if (state === 'open') route = 'open'
-    await setIngestState(exec, state)
+    await setIngestState(exec, state, deployId)
     route = state
+    ownership.opened = state === 'open'
   }
   const prove = (state: IngestState): ReturnType<typeof proveState> => proveState(exec, deps, inputs.domain, state)
 
@@ -1821,7 +1947,8 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
 
   /** The very last step of a deploy that evaluated every gate and left the route in its final state. */
   const finish = async (result: DeployResult): Promise<DeployResult> => {
-    await sh('Remove the deploy marker', removeOwnFileScript(MARKER_FILE), [REMOVED_SENTINEL])
+    // Compare-and-delete under the ingest lock: only the deploy that owns the marker removes it.
+    await sh('Remove the deploy marker', removeOwnFileScript(deployId, MARKER_FILE), [REMOVED_SENTINEL])
     return result
   }
 
@@ -1846,11 +1973,11 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
 
     // 6. Directories, empty token files (only when absent), restart record, secret files, configs.
     log('==> Preparing directories and token files')
-    await sh('Prepare directories', prepareDirsScript(), [DIRS_SENTINEL])
+    await sh('Prepare directories', prepareDirsScript(deployId), [DIRS_SENTINEL])
     for (const group of SENDER_GROUPS) {
       const {sentinel} = await sh(
         `Token file for ${group}`,
-        tokenFileScript(group),
+        tokenFileScript(group, deployId),
         TOKEN_SENTINELS,
         `${deps.voidTokenLine()}\n`,
       )
@@ -1863,7 +1990,12 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
     if (recorded !== undefined && host.pendingBootstrap === undefined) {
       await sh(
         'Set the bootstrap pair aside',
-        writeFileScript({path: 'secrets/bootstrap-pending', owner: 'root:root', mode: '0400', kind: 'plain'}),
+        writeFileScript(deployId, {
+          path: 'secrets/bootstrap-pending',
+          owner: 'root:root',
+          mode: '0400',
+          kind: 'plain',
+        }),
         [FILE_WRITTEN_SENTINEL],
         pairToStdin(recorded),
       )
@@ -1873,7 +2005,7 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
     if (changed.length > 0) {
       await sh(
         'Record the pending restarts',
-        writeFileScript({path: PENDING_RESTARTS_FILE, owner: 'root:root', mode: '0600', kind: 'plain'}),
+        writeFileScript(deployId, {path: PENDING_RESTARTS_FILE, owner: 'root:root', mode: '0600', kind: 'plain'}),
         [FILE_WRITTEN_SENTINEL],
         `${changed.join('\n')}\n`,
       )
@@ -1888,7 +2020,7 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
       if (status === 'TRACES_FILE_SAME') continue
       const written = await sh(
         `Write ${file.path}`,
-        writeFileScript(file, file.kind === 'env' ? planned : undefined),
+        writeFileScript(deployId, file, file.kind === 'env' ? planned : undefined),
         [FILE_WRITTEN_SENTINEL],
         file.content,
       )
@@ -1905,8 +2037,10 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
     // 7. Reclaim disk, check there is room, pull.
     log('==> Pruning unused images, checking free space, pulling images')
     try {
-      await sh('Prune unused images', pruneScript(), [STEP_SENTINEL('prune-images')])
+      await sh('Prune unused images', pruneScript(deployId), [STEP_SENTINEL('prune-images')])
     } catch (error) {
+      // A failed prune is tolerated; being overtaken is not.
+      if (ownership.overtaken) throw error
       log(`  image prune failed (continuing): ${errorMessage(error)}`)
     }
     const disk = await sh('Check free space', diskScript(), [DISK_SENTINEL])
@@ -1917,7 +2051,7 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
         `Only ${(free / 1024 ** 3).toFixed(1)} GiB are free on the volume; at least ${(MIN_FREE_BYTES / 1024 ** 3).toFixed(0)} GiB are needed to pull images`,
       )
     }
-    await sh('Pull images', pullScript(), [STEP_SENTINEL('pull')])
+    await sh('Pull images', pullScript(deployId), [STEP_SENTINEL('pull')])
 
     // 8. From here on a failure leaves a partly updated host.
     phase = 'apply'
@@ -1925,23 +2059,25 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
       host.hasEnv ? services.filter(service => restarts.has(service)) : []
 
     log('==> Starting the collector container and its queue volume')
-    await sh('Create the collector container', createCollectorScript(), [STEP_SENTINEL('create-collector')])
-    await sh('Prepare the collector queue volume', queueVolumeScript(), [QUEUE_SENTINEL])
+    await sh('Create the collector container', createCollectorScript(deployId), [STEP_SENTINEL('create-collector')])
+    await sh('Prepare the collector queue volume', queueVolumeScript(deployId), [QUEUE_SENTINEL])
 
     const privateServices: Service[] = ['postgres', 'redis', 'minio', 'clickhouse', 'langfuse-web', 'langfuse-worker']
     log('==> Starting the stores and Langfuse')
     const staleStores = stale(privateServices)
     if (staleStores.length > 0) {
-      await sh('Recreate changed stores', upScript('up-stale-private', staleStores, {force: true}), [
+      await sh('Recreate changed stores', upScript(deployId, 'up-stale-private', staleStores, {force: true}), [
         STEP_SENTINEL('up-stale-private'),
       ])
     }
-    await sh('Start the stores and Langfuse', upScript('up-private', privateServices), [STEP_SENTINEL('up-private')])
+    await sh('Start the stores and Langfuse', upScript(deployId, 'up-private', privateServices), [
+      STEP_SENTINEL('up-private'),
+    ])
 
     log('==> Asserting retention')
     let retention: RetentionReport | undefined
     for (let attempt = 1; retention === undefined; attempt += 1) {
-      const outcome = await assertRetention(exec)
+      const outcome = await assertRetention(exec, ownershipPrelude(deployId))
       if (outcome.status === 'ready') {
         retention = outcome.report
       } else if (attempt >= deps.limits.retentionAttempts) {
@@ -1957,11 +2093,11 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
     const publicServices: Service[] = ['tempo', 'grafana', 'collector']
     const staleOthers = stale(publicServices)
     if (staleOthers.length > 0) {
-      await sh('Recreate changed services', upScript('up-stale-public', staleOthers, {force: true}), [
+      await sh('Recreate changed services', upScript(deployId, 'up-stale-public', staleOthers, {force: true}), [
         STEP_SENTINEL('up-stale-public'),
       ])
     }
-    await sh('Start Tempo, Grafana and the collector', upScript('up-public', publicServices), [
+    await sh('Start Tempo, Grafana and the collector', upScript(deployId, 'up-public', publicServices), [
       STEP_SENTINEL('up-public'),
     ])
 
@@ -1969,7 +2105,7 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
     // than every change above, and the gates below never read a verdict from before the update.
     const restarted = await sh(
       'Restart the health reporter',
-      upScript('up-reporter', ['health-reporter'], {force: true}),
+      upScript(deployId, 'up-reporter', ['health-reporter'], {force: true}),
       [STEP_SENTINEL('up-reporter')],
     )
     const sinceEpoch = parseEpoch(restarted.result)
@@ -1986,13 +2122,13 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
 
     log('==> Starting Caddy')
     const caddyStale = host.hasEnv && restarts.has('caddy')
-    await sh('Start Caddy', upScript('up-caddy', ['caddy'], caddyStale ? {force: true} : {}), [
+    await sh('Start Caddy', upScript(deployId, 'up-caddy', ['caddy'], caddyStale ? {force: true} : {}), [
       STEP_SENTINEL('up-caddy'),
     ])
 
     // Every restart this deploy owed has happened, Caddy's included.
     if (changed.length > 0 || host.pendingRestarts.length > 0) {
-      await sh('Clear the pending restarts', removeOwnFileScript(PENDING_RESTARTS_FILE), [REMOVED_SENTINEL])
+      await sh('Clear the pending restarts', removeOwnFileScript(deployId, PENDING_RESTARTS_FILE), [REMOVED_SENTINEL])
     }
 
     // 9. Gates.
@@ -2019,7 +2155,9 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
         probe = code === '401' ? 'dead' : code === '200' ? 'live' : 'inconclusive'
         // The record is dropped only once the key is proven dead, and only when it is not still being supplied.
         if (probe === 'dead' && inputs.bootstrapKey === undefined && recorded !== undefined) {
-          await sh('Drop the bootstrap record', removeOwnFileScript('secrets/bootstrap-pending'), [REMOVED_SENTINEL])
+          await sh('Drop the bootstrap record', removeOwnFileScript(deployId, 'secrets/bootstrap-pending'), [
+            REMOVED_SENTINEL,
+          ])
         }
       }
 
@@ -2079,9 +2217,16 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
     for (const line of unmet) log(`  - ${line}`)
     return await finish({ingest: final, gates, unmet, retention, changed, drifted, heldForUpdate})
   } catch (error) {
-    // Whatever failed, and wherever: the route is closed from the host's own answer before this deploy gives up.
+    // The one failure that deliberately leaves the route and the marker alone. The host belongs to the newer deploy
+    // now: a hold from here could undo what it did, and it will close or open the route from what it finds. Nothing
+    // is read, held, probed or removed.
+    if (ownership.overtaken) throw new DeployOvertakenError({opened: ownership.opened})
+    // Whatever else failed, and wherever: the route is closed from the host's own answer before this deploy gives up.
     const closed = await secureRoute()
     const cause = errorMessage(error)
+    // The hold is checked like every other change. If it finds this deploy was overtaken meanwhile, it changed nothing,
+    // and the failure that brought us here is reported next to it.
+    if (ownership.overtaken) throw new DeployOvertakenError({opened: ownership.opened, failure: cause})
     if (phase === 'apply') throw new AppliedButUnverifiedError(cause, closed)
     if (closed === 'unknown') {
       throw new Error(

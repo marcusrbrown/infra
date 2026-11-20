@@ -12,6 +12,36 @@ import {OBJECT_STORE_PREFIXES, RETENTION_TABLES} from './retention'
 
 export const EPOCH = 1_700_000_000
 
+/**
+ * What the simulation reads out of a script's text, so that it behaves as the script would: the owner id in the
+ * ownership prelude, and the id the first script writes into the marker.
+ */
+const OWNER_CHECK = /\[ "\$traces_owner" = ([\da-f]{32,128}) \]/
+const HEX_ID = /\b([\da-f]{32,128})\b/
+
+/** Steps that change nothing on the host. Every other step must carry the ownership prelude (default-deny). */
+const READ_ONLY_STEPS: readonly RegExp[] = [
+  /^ssh-exit$/,
+  /^storage-probe$/,
+  /^host-state$/,
+  /^compare:/,
+  /^token-dirs$/,
+  /^ingest-state$/,
+  /^drift-check$/,
+  /^disk-free$/,
+  /^digest:/,
+  /^bootstrap-probe$/,
+  /^bootstrap-hygiene$/,
+  /^probe-ingest$/,
+  /^retention-read-/,
+  /^raw:reporter-detail$/,
+]
+
+/** True for a step that changes nothing on the host. Everything else must carry the ownership prelude. */
+export function isReadOnlyStep(step: string): boolean {
+  return READ_ONLY_STEPS.some(pattern => pattern.test(step))
+}
+
 const ok = (stdout: string): RunResult => ({exitCode: 0, stdout, stderr: ''})
 const fail = (stderr: string, exitCode = 1): RunResult => ({exitCode, stdout: '', stderr})
 
@@ -73,6 +103,10 @@ export class FakeHost {
   marker: string | undefined
   /** The marker was written by a script that did not take the ingest lock. */
   unlockedMarker = false
+  /** Steps refused because the marker no longer held the id in their prelude (they changed nothing). */
+  refused: string[] = []
+  /** Steps that change the host and carried no ownership prelude. A correct deploy leaves this empty. */
+  unguarded: string[] = []
   /** What each compose service is running: whether it runs, and its `config-hash` label. */
   running = new Map<string, {running: boolean; hash: string}>()
   private replyLost = false
@@ -101,9 +135,23 @@ export class FakeHost {
       step: argv.includes('-O') && argv.includes('exit') ? 'ssh-exit' : stepOf(command),
     }
     this.calls.push(call)
+    // What the script's own ownership check does: the marker must still hold this deploy's id.
+    const owner = OWNER_CHECK.exec(command)?.[1]
+    if (owner === undefined && !isReadOnlyStep(call.step)) {
+      this.unguarded.push(call.step)
+    }
+    if (owner !== undefined && this.markerOwner() !== owner) {
+      this.refused.push(call.step)
+      return {exitCode: 1, stdout: 'DEPLOY_OVERTAKEN\n', stderr: ''}
+    }
     const overridden = this.options.override?.(call.step, call)
     if (overridden !== undefined) return overridden
     return this.handle(call)
+  }
+
+  /** The id the marker holds: its first field. */
+  markerOwner(): string | undefined {
+    return this.marker?.split(' ')[0]
   }
 
   get steps(): string[] {
@@ -193,7 +241,7 @@ export class FakeHost {
         )
         // The script writes the marker only if its text says so, and under the lock only if its text says so.
         if (command.includes('mv -f') && command.includes(TRACES_DEPLOY_MARKER)) {
-          this.marker = `${new Date(this.clock * 1000).toISOString()}\n`
+          this.marker = `${HEX_ID.exec(command)?.[1] ?? 'no-id'} ${new Date(this.clock * 1000).toISOString()}\n`
           if (!command.includes('flock -w 30')) this.unlockedMarker = true
         }
         return reply

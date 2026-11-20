@@ -1834,7 +1834,8 @@ describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
     await runMonitor({validation: 'live'}, ctx)
 
     expect(world.recorded.some(request => request.url === GO_SNAPSHOT_URL)).toBe(false)
-    expect(world.recorded.some(request => request.url.includes('raw.githubusercontent.com'))).toBe(false)
+    const snapshotHost = new URL(GO_SNAPSHOT_URL).hostname
+    expect(world.recorded.some(request => new URL(request.url).hostname === snapshotHost)).toBe(false)
   })
 
   it('never fetches the privacy snapshot with the production runtime either (no injected snapshot or settings)', async () => {

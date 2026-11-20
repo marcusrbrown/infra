@@ -31,30 +31,48 @@ export type GoSnapshotFailureReason =
 
 export type GoSnapshotFetch = {ok: true; snapshot: ParsedSnapshot} | {ok: false; reason: GoSnapshotFailureReason}
 
+/**
+ * Settle with `promise`, or reject with the signal's reason once it aborts. A fetch implementation that does not wire
+ * the signal into a response body (or into the request itself) would otherwise leave the read hanging.
+ */
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason)
+      return
+    }
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, {once: true})
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
 /** The body as text, or `undefined` when it is larger than the cap (checked on the declared length and while reading). */
-async function readCappedText(response: Response): Promise<string | undefined> {
+async function readCappedText(response: Response, signal: AbortSignal): Promise<string | undefined> {
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > GO_SNAPSHOT_MAX_BYTES) {
-    await response.body?.cancel().catch(() => undefined)
+    response.body?.cancel().catch(() => undefined)
     return undefined
   }
 
   const reader = response.body?.getReader()
   if (reader === undefined) return ''
 
-  const chunks: Uint8Array[] = []
-  let total = 0
-  for (;;) {
-    const {done, value} = await reader.read()
-    if (done) break
-    total += value.byteLength
-    if (total > GO_SNAPSHOT_MAX_BYTES) {
-      await reader.cancel().catch(() => undefined)
-      return undefined
+  try {
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for (;;) {
+      const {done, value} = await abortable(reader.read(), signal)
+      if (done) break
+      total += value.byteLength
+      if (total > GO_SNAPSHOT_MAX_BYTES) return undefined
+      chunks.push(value)
     }
-    chunks.push(value)
+    return await abortable(new Blob(chunks).text(), signal)
+  } finally {
+    // Not awaited: a stalled source may never settle its cancel.
+    reader.cancel().catch(() => undefined)
   }
-  return new Blob(chunks).text()
 }
 
 function isTimeout(error: unknown): boolean {
@@ -67,16 +85,15 @@ export async function fetchCurrentGoSnapshot(
   timeoutMs: number = GO_SNAPSHOT_TIMEOUT_MS,
 ): Promise<GoSnapshotFetch> {
   try {
-    const response = await fetchFn(GO_SNAPSHOT_URL, {
-      redirect: 'error',
-      signal: AbortSignal.timeout(timeoutMs),
-    })
+    const signal = AbortSignal.timeout(timeoutMs)
+    const response = await abortable(fetchFn(GO_SNAPSHOT_URL, {redirect: 'error', signal}), signal)
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined)
+      // Not awaited: a stalled body must not hold the read past its timeout.
+      response.body?.cancel().catch(() => undefined)
       return {ok: false, reason: `http-${response.status}`}
     }
 
-    const text = await readCappedText(response)
+    const text = await readCappedText(response, signal)
     if (text === undefined) return {ok: false, reason: 'oversize'}
 
     let raw: unknown

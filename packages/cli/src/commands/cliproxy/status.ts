@@ -713,7 +713,7 @@ function annotatePolicy(result: GoRouteProbeResult, use: PrivacyPolicyUse): GoRo
   const details = [...(human.details ?? [])]
 
   if (use.kind === 'current') {
-    details.push(`Privacy snapshot: ${shortCommit(use.commit)} (current, main)`)
+    details.push(`Privacy snapshot: ${shortCommit(use.commit)} (from main)`)
     return {...result, human: {...human, details}}
   }
 

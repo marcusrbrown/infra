@@ -225,6 +225,34 @@ describe('fetchCurrentGoSnapshot', () => {
       expect(await failureOf(fetchFn, 25)).toBe('timeout')
     })
 
+    it('a body that starts and then stalls is aborted at the timeout, even when the fetch does not wire the signal into it', async () => {
+      const fetchFn = async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"schemaVersion":'))
+              // never closes, never errors
+            },
+          }),
+        )
+
+      const started = performance.now()
+      expect(await failureOf(fetchFn, 50)).toBe('timeout')
+      expect(performance.now() - started).toBeLessThan(2000)
+    }, 3000)
+
+    it('a body that never produces a chunk is aborted at the timeout too', async () => {
+      const fetchFn = async () => new Response(new ReadableStream<Uint8Array>({}))
+
+      expect(await failureOf(fetchFn, 50)).toBe('timeout')
+    }, 3000)
+
+    it('a non-2xx answer with a stalled body is still reported by status, without waiting on the body', async () => {
+      const fetchFn = async () => new Response(new ReadableStream<Uint8Array>({}), {status: 502})
+
+      expect(await failureOf(fetchFn, 50)).toBe('http-502')
+    }, 3000)
+
     it('never puts the response body or an error message into the failure', async () => {
       const result = await fetchCurrentGoSnapshot(
         recordingFetch(() => new Response('SECRET-BODY-TEXT', {status: 500})).fetchFn,

@@ -2285,7 +2285,7 @@ describe('checkGoRoute — current privacy snapshot with bundled fallback', () =
 
       expect(human.level).toBe('ok')
       expect(human.summary).toBe('opencode-go route OK (glm-5.3)')
-      expect(human.details).toEqual(['Privacy snapshot: ccccccc (current, main)'])
+      expect(human.details).toEqual(['Privacy snapshot: ccccccc (from main)'])
       const state = await checkGoRouteState(BASE, KEY, {
         snapshot: GO_SNAPSHOT,
         settings: GO_SETTINGS,
@@ -2305,7 +2305,7 @@ describe('checkGoRoute — current privacy snapshot with bundled fallback', () =
       expect(human.summary).toBe(
         `Exposed model(s) not eligible under the privacy snapshot: kimi-k3 — disable the entry, see ${RUNBOOK}`,
       )
-      expect(human.details).toEqual(['Privacy snapshot: ccccccc (current, main)'])
+      expect(human.details).toEqual(['Privacy snapshot: ccccccc (from main)'])
       expect(chatModels).toEqual([])
       const state = await checkGoRouteState(BASE, KEY, {
         snapshot: GO_SNAPSHOT,
@@ -2606,7 +2606,7 @@ describe('cliproxyStatusAction — Go privacy policy source', () => {
     const {output, stderr, exit} = await runStatus({apiKey: 'my-api-key'})
 
     expect(output).toContain(
-      '[OK] OpenCode Go route\n  opencode-go route OK (glm-5.3)\n  - Privacy snapshot: ccccccc (current, main)',
+      '[OK] OpenCode Go route\n  opencode-go route OK (glm-5.3)\n  - Privacy snapshot: ccccccc (from main)',
     )
     expect(output).toContain('0 errors')
     expect(exit).toBeNull()
@@ -2626,7 +2626,7 @@ describe('cliproxyStatusAction — Go privacy policy source', () => {
     expect(output).toContain(
       'Exposed model(s) not eligible under the privacy snapshot: kimi-k3 — disable the entry, see docs/runbooks/cliproxy-opencode-go.md',
     )
-    expect(output).toContain('- Privacy snapshot: ccccccc (current, main)')
+    expect(output).toContain('- Privacy snapshot: ccccccc (from main)')
     expect(exit?.code).toBe(1)
     expect(stderr).toBe('')
   })

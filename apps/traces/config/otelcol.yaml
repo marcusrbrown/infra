@@ -1,0 +1,313 @@
+# Collector: three sender groups plus a private canary, fanned out to Langfuse and Tempo.
+#
+#   receiver (one port, one path, one token file per group)
+#     -> intake pipeline: byte limiter, then the sender.group stamp
+#          -> that group's Langfuse exporter (the whole trace, no processor, own persistent queue)
+#          -> forward connector -> one shared Tempo pipeline: keep-list -> Tempo exporter
+#
+# No `batch` or `transform` processor anywhere, and nothing alters data on the Langfuse side after the
+# stamp. A 200 means queued, not stored by both backends. Tokens are read from files; backend
+# credentials are read from files at start. Nothing secret is written here.
+#
+# Limits stated here:
+#   request body       8 MiB after decompression (Caddy caps the received body at 4.5 MiB)
+#   per-group allowance 1 GiB, refilled at 32 KiB/s (the `ratelimit` processors below)
+#   Langfuse queue     1 GiB per group; 64 MiB for the canary
+#   Tempo queue        256 MiB, shared
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  file_storage/queue:
+    directory: /var/lib/otelcol/queue
+    create_directory: true
+    timeout: 10s
+    # Compact at start: a bbolt queue file never shrinks otherwise.
+    compaction:
+      on_start: true
+      directory: /var/lib/otelcol/compact
+      max_transaction_size: 65536
+  # One token per line, extra columns ignored. Several lines let two tokens overlap during rotation.
+  # The file is re-read within about a second; no restart is needed. An empty file refuses everything.
+  bearertokenauth/marcusrbrown:
+    filename: /etc/otelcol/tokens/marcusrbrown/token
+  # One token per line, extra columns ignored. Several lines let two tokens overlap during rotation.
+  # The file is re-read within about a second; no restart is needed. An empty file refuses everything.
+  bearertokenauth/fro-bot:
+    filename: /etc/otelcol/tokens/fro-bot/token
+  # One token per line, extra columns ignored. Several lines let two tokens overlap during rotation.
+  # The file is re-read within about a second; no restart is needed. An empty file refuses everything.
+  bearertokenauth/workstation:
+    filename: /etc/otelcol/tokens/workstation/token
+
+receivers:
+  otlp/marcusrbrown:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4411
+        traces_url_path: /marcusrbrown/v1/traces
+        max_request_body_size: 8388608
+        read_header_timeout: 5s
+        read_timeout: 8s
+        auth:
+          authenticator: bearertokenauth/marcusrbrown
+  otlp/fro-bot:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4412
+        traces_url_path: /fro-bot/v1/traces
+        max_request_body_size: 8388608
+        read_header_timeout: 5s
+        read_timeout: 8s
+        auth:
+          authenticator: bearertokenauth/fro-bot
+  otlp/workstation:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4413
+        traces_url_path: /workstation/v1/traces
+        max_request_body_size: 8388608
+        read_header_timeout: 5s
+        read_timeout: 8s
+        auth:
+          authenticator: bearertokenauth/workstation
+  # Private canary receiver for the health reporter. No auth, never routed by Caddy, no limiter.
+  otlp/canary:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4414
+        traces_url_path: /canary/v1/traces
+        max_request_body_size: 8388608
+        read_header_timeout: 5s
+        read_timeout: 8s
+
+processors:
+  # Bytes, not requests: one request can be 4 MB. The limiter counts the OTLP protobuf size of each
+  # batch after the receiver has decompressed it. A full bucket answers 429 at once. Each group has its
+  # own processor id, so each group has its own bucket.
+  ratelimit/marcusrbrown:
+    strategy: bytes
+    rate: 32768 # 32 KiB/s refill
+    burst: 1073741824 # 1 GiB allowance
+    throttle_behavior: error
+    retry_delay: 5s
+  # `upsert` overwrites a sender.group the sender supplied itself.
+  resource/marcusrbrown:
+    attributes:
+      - key: sender.group
+        value: marcusrbrown
+        action: upsert
+  # Bytes, not requests: one request can be 4 MB. The limiter counts the OTLP protobuf size of each
+  # batch after the receiver has decompressed it. A full bucket answers 429 at once. Each group has its
+  # own processor id, so each group has its own bucket.
+  ratelimit/fro-bot:
+    strategy: bytes
+    rate: 32768 # 32 KiB/s refill
+    burst: 1073741824 # 1 GiB allowance
+    throttle_behavior: error
+    retry_delay: 5s
+  # `upsert` overwrites a sender.group the sender supplied itself.
+  resource/fro-bot:
+    attributes:
+      - key: sender.group
+        value: fro-bot
+        action: upsert
+  # Bytes, not requests: one request can be 4 MB. The limiter counts the OTLP protobuf size of each
+  # batch after the receiver has decompressed it. A full bucket answers 429 at once. Each group has its
+  # own processor id, so each group has its own bucket.
+  ratelimit/workstation:
+    strategy: bytes
+    rate: 32768 # 32 KiB/s refill
+    burst: 1073741824 # 1 GiB allowance
+    throttle_behavior: error
+    retry_delay: 5s
+  # `upsert` overwrites a sender.group the sender supplied itself.
+  resource/workstation:
+    attributes:
+      - key: sender.group
+        value: workstation
+        action: upsert
+  resource/canary:
+    attributes:
+      - key: sender.group
+        value: canary
+        action: upsert
+  # Keep-list. Everything not listed is removed, so a new content key fails closed.
+  redaction/tempo:
+    allow_all_keys: false
+    summary: silent
+    allowed_keys:
+      # Structural keys only. A key that is not listed here is dropped from spans, span events, scopes and
+      # resources; a new key is invisible in Tempo until someone adds it. Span names, status messages and
+      # event names are not attributes and are kept. Span link attributes are NOT covered by this processor.
+      #
+      # Operation, provider, model
+      - gen_ai.operation.name
+      - gen_ai.provider.name
+      - gen_ai.system
+      - gen_ai.request.model
+      - gen_ai.response.model
+      # Token counts
+      - gen_ai.usage.input_tokens
+      - gen_ai.usage.output_tokens
+      - gen_ai.usage.total_tokens
+      - gen_ai.usage.cache_read.input_tokens
+      - gen_ai.usage.cache_creation.input_tokens
+      - gen_ai.usage.reasoning.output_tokens
+      - gen_ai.usage.prompt_tokens
+      - gen_ai.usage.completion_tokens
+      # Finish reasons
+      - gen_ai.response.finish_reasons
+      # Tool name and call id
+      - gen_ai.tool.name
+      - gen_ai.tool.call.id
+      - gen_ai.tool.type
+      # Agent name
+      - gen_ai.agent.name
+      - gen_ai.agent.id
+      # Session id, under each name Langfuse and the GenAI conventions use
+      - langfuse.session.id
+      - session.id
+      - gen_ai.conversation.id
+      # Run identity fields
+      - langfuse.trace.metadata.repository
+      - langfuse.trace.metadata.run_id
+      - langfuse.trace.metadata.run_attempt
+      - langfuse.trace.metadata.job
+      - langfuse.trace.metadata.trigger
+      # Error type, and the exception event's type and message (free text, kept at the owner's request)
+      - error.type
+      - exception.type
+      - exception.message
+      # Resource attributes
+      - sender.group
+      - service.name
+
+connectors:
+  forward/tempo: {}
+
+exporters:
+  otlp_http/langfuse-marcusrbrown:
+    endpoint: http://langfuse-web:3000/api/public/otel
+    headers:
+      Authorization: Basic ${file:/etc/otelcol/secrets/langfuse-basic}
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+      sizer: bytes
+      queue_size: 1073741824
+      num_consumers: 4
+      block_on_overflow: false
+    retry_on_failure:
+      enabled: true
+      initial_interval: 2s
+      max_interval: 10s
+      max_elapsed_time: 0
+    timeout: 30s
+  otlp_http/langfuse-fro-bot:
+    endpoint: http://langfuse-web:3000/api/public/otel
+    headers:
+      Authorization: Basic ${file:/etc/otelcol/secrets/langfuse-basic}
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+      sizer: bytes
+      queue_size: 1073741824
+      num_consumers: 4
+      block_on_overflow: false
+    retry_on_failure:
+      enabled: true
+      initial_interval: 2s
+      max_interval: 10s
+      max_elapsed_time: 0
+    timeout: 30s
+  otlp_http/langfuse-workstation:
+    endpoint: http://langfuse-web:3000/api/public/otel
+    headers:
+      Authorization: Basic ${file:/etc/otelcol/secrets/langfuse-basic}
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+      sizer: bytes
+      queue_size: 1073741824
+      num_consumers: 4
+      block_on_overflow: false
+    retry_on_failure:
+      enabled: true
+      initial_interval: 2s
+      max_interval: 10s
+      max_elapsed_time: 0
+    timeout: 30s
+  otlp_http/langfuse-canary:
+    endpoint: http://langfuse-web:3000/api/public/otel
+    headers:
+      Authorization: Basic ${file:/etc/otelcol/secrets/langfuse-basic}
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+      sizer: bytes
+      queue_size: 67108864
+      num_consumers: 4
+      block_on_overflow: false
+    retry_on_failure:
+      enabled: true
+      initial_interval: 2s
+      max_interval: 10s
+      max_elapsed_time: 0
+    timeout: 30s
+  otlp_http/tempo:
+    endpoint: http://tempo:4318
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+      sizer: bytes
+      queue_size: 268435456
+      num_consumers: 4
+      block_on_overflow: false
+    retry_on_failure:
+      enabled: true
+      initial_interval: 2s
+      max_interval: 10s
+      max_elapsed_time: 0
+    timeout: 30s
+
+service:
+  extensions:
+    - health_check
+    - file_storage/queue
+    - bearertokenauth/marcusrbrown
+    - bearertokenauth/fro-bot
+    - bearertokenauth/workstation
+  telemetry:
+    logs:
+      level: info
+    # Self-metrics, reachable only on the stack's edge network. Nothing publishes this port.
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces/intake-marcusrbrown:
+      receivers: [otlp/marcusrbrown]
+      processors: [ratelimit/marcusrbrown, resource/marcusrbrown]
+      exporters: [otlp_http/langfuse-marcusrbrown, forward/tempo]
+    traces/intake-fro-bot:
+      receivers: [otlp/fro-bot]
+      processors: [ratelimit/fro-bot, resource/fro-bot]
+      exporters: [otlp_http/langfuse-fro-bot, forward/tempo]
+    traces/intake-workstation:
+      receivers: [otlp/workstation]
+      processors: [ratelimit/workstation, resource/workstation]
+      exporters: [otlp_http/langfuse-workstation, forward/tempo]
+    traces/intake-canary:
+      receivers: [otlp/canary]
+      processors: [resource/canary]
+      exporters: [otlp_http/langfuse-canary, forward/tempo]
+    traces/tempo:
+      receivers: [forward/tempo]
+      processors: [redaction/tempo]
+      exporters: [otlp_http/tempo]

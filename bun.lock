@@ -73,6 +73,12 @@
     "apps/keeweb": {
       "name": "@marcusrbrown/infra-keeweb",
     },
+    "apps/traces": {
+      "name": "@marcusrbrown/infra-traces",
+      "dependencies": {
+        "@marcusrbrown/infra-shared": "workspace:*",
+      },
+    },
     "apps/umami": {
       "name": "@marcusrbrown/infra-umami",
       "dependencies": {
@@ -429,6 +435,8 @@
     "@marcusrbrown/infra-keeweb": ["@marcusrbrown/infra-keeweb@workspace:apps/keeweb"],
 
     "@marcusrbrown/infra-shared": ["@marcusrbrown/infra-shared@workspace:packages/shared"],
+
+    "@marcusrbrown/infra-traces": ["@marcusrbrown/infra-traces@workspace:apps/traces"],
 
     "@marcusrbrown/infra-umami": ["@marcusrbrown/infra-umami@workspace:apps/umami"],
 

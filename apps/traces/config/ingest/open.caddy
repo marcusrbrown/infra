@@ -1,0 +1,29 @@
+# Ingest is open. Each group's path reaches that group's collector receiver, which checks the token.
+# The receiver serves exactly this path, so a token presented anywhere else reads nothing.
+handle /marcusrbrown/v1/traces {
+	reverse_proxy collector:4411 {
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 5s
+			keepalive 30s
+		}
+	}
+}
+handle /fro-bot/v1/traces {
+	reverse_proxy collector:4412 {
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 5s
+			keepalive 30s
+		}
+	}
+}
+handle /workstation/v1/traces {
+	reverse_proxy collector:4413 {
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 5s
+			keepalive 30s
+		}
+	}
+}

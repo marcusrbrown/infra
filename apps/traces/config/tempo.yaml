@@ -1,0 +1,52 @@
+# Tempo 3.1 monolithic (target: all), local disk under /var/tempo (the tempo_data volume).
+#
+# Tempo holds the collector's keep-listed attributes plus span names and status/exception messages,
+# never the content attributes. Local storage is documented for development; this is a single node
+# with structural data only, snapshotted daily with the volume.
+#
+# Limits stated here:
+#   retention        720 h (30 days), set on both the scheduler and the worker; the worker enforces
+#   trace size       20 MB; over-limit spans are dropped and Tempo still answers 200
+#                    (tempo_discarded_spans_total{reason="trace_too_large"})
+#   attribute size   Tempo's default (2,048 bytes, cut without a marker). Deliberately not set here.
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+overrides:
+  defaults:
+    global:
+      max_bytes_per_trace: 20000000
+
+# No usage reporting to Grafana Labs.
+usage_report:
+  reporting_enabled: false
+
+backend_scheduler:
+  provider:
+    retention:
+      interval: 1h
+    compaction:
+      compaction:
+        block_retention: 720h
+
+backend_worker:
+  compaction:
+    block_retention: 720h

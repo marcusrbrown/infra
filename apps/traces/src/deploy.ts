@@ -46,7 +46,11 @@ import {bashCommand, checkTracesStorage, shellQuote} from '../server/provision'
 import {
   SENDER_GROUPS,
   TRACES_APP_DIR,
+  TRACES_DEPLOY_MARKER,
   TRACES_DOCKER_ROOT,
+  TRACES_INGEST_LOCK,
+  TRACES_LOCK_BUSY_SENTINEL,
+  TRACES_PENDING_RESTARTS,
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
   TRACES_VOLUME_MOUNT,
@@ -469,6 +473,17 @@ function remotePath(relative: string): string {
 /** The same compose prefix `traces status`/`logs`/`ingest` use. */
 export const COMPOSE = `docker compose --project-directory ${TRACES_APP_DIR}`
 
+function relativeToApp(absolute: string): string {
+  if (!absolute.startsWith(`${TRACES_APP_DIR}/`)) throw new Error(`Not under the app directory: ${absolute}`)
+  return absolute.slice(TRACES_APP_DIR.length + 1)
+}
+
+/** The deploy marker and the pending-restart record, relative to the app directory (their paths live in `host.ts`). */
+const MARKER_FILE = relativeToApp(TRACES_DEPLOY_MARKER)
+const PENDING_RESTARTS_FILE = relativeToApp(TRACES_PENDING_RESTARTS)
+/** The only files `removeOwnFileScript` will delete. */
+const OWN_FILES: readonly string[] = [MARKER_FILE, PENDING_RESTARTS_FILE, 'secrets/bootstrap-pending']
+
 const TOKEN_FILE_OWNER = `root:${COLLECTOR_GID}`
 const TOKEN_FILE_MODE = '0640'
 const SECRET_DIR_MODE = '0750'
@@ -504,10 +519,15 @@ if [ -f secrets/bootstrap-pending ]; then
 else
   printf 'pending=\\n'
 fi
-if [ -f .pending-restarts ]; then
-  printf 'restarts=%s\\n' "$(tr '\\n' ' ' < .pending-restarts)"
+if [ -f ${TRACES_PENDING_RESTARTS} ]; then
+  printf 'restarts=%s\\n' "$(tr '\\n' ' ' < ${TRACES_PENDING_RESTARTS})"
 else
   printf 'restarts=\\n'
+fi
+if [ -f ${TRACES_DEPLOY_MARKER} ]; then
+  printf 'marker=1\\n'
+else
+  printf 'marker=0\\n'
 fi
 printf 'epoch=%s\\n' "$(date -u +%s)"
 echo ${HOST_STATE_SENTINEL}`,
@@ -516,6 +536,8 @@ echo ${HOST_STATE_SENTINEL}`,
 
 export interface HostState {
   hasEnv: boolean
+  /** A previous deploy did not finish: the marker file exists. */
+  marker: boolean
   /** `none` when there is no `.env` yet. */
   ingest: IngestState | 'none'
   /** The bootstrap pair as the host's `.env` holds it. */
@@ -554,6 +576,8 @@ export function parseHostState(stdout: string): HostState {
   }
   const hasEnv = values.get('has_env')
   if (hasEnv !== '0' && hasEnv !== '1') throw new Error('The host did not report whether it has a .env')
+  const marker = values.get('marker')
+  if (marker !== '0' && marker !== '1') throw new Error('The host did not report whether a deploy marker exists')
   const epoch = Number(values.get('epoch'))
   if (!Number.isInteger(epoch) || epoch <= 0) throw new Error('The host did not report its clock')
 
@@ -576,6 +600,7 @@ export function parseHostState(stdout: string): HostState {
 
   return {
     hasEnv: hasEnv === '1',
+    marker: marker === '1',
     ingest,
     envBootstrap: parsePair(
       values.get('env_bootstrap_public') ?? '',
@@ -714,29 +739,109 @@ echo ${FILE_WRITTEN_SENTINEL}`,
 export const REMOVED_SENTINEL = 'TRACES_REMOVED'
 
 /** Remove one file the deploy itself owns, inside the app directory. */
-export function removeOwnFileScript(path: '.pending-restarts' | 'secrets/bootstrap-pending'): string {
+export function removeOwnFileScript(path: string): string {
+  if (!OWN_FILES.includes(path)) throw new Error(`${path} is not a file this deploy owns`)
   return step(`remove:${path}`, `rm -f ${remotePath(path)}\necho ${REMOVED_SENTINEL}`)
 }
 
 /**
- * The state line and the Caddy recreate, exactly as `traces ingest hold|open` does them
- * (`REMOTE_COMMANDS.writeIngestState`). The new line travels on stdin. A test compares this with the CLI's text.
+ * The state line and the Caddy recreate, as `traces ingest hold|open` does them (`REMOTE_COMMANDS.writeIngestState`),
+ * inside `flock -w 30` on the ingest lock so that two transitions never interleave. The lock is taken on file
+ * descriptor 9 before the state is read and is held until the command ends, which is after Caddy was recreated.
+ * A lock that cannot be taken in 30 seconds prints `LOCK_BUSY` and fails; it is never skipped. The compose
+ * command gets descriptor 9 closed, so nothing it starts can outlive the lock. The new line travels on stdin.
+ * A test compares this with the CLI's text.
  */
 export function setIngestStateCommand(state: IngestState): string {
   return [
     'set -e',
     `cd ${TRACES_APP_DIR}`,
+    `exec 9>>${TRACES_INGEST_LOCK}`,
+    `if ! flock -w 30 9; then echo ${TRACES_LOCK_BUSY_SENTINEL}; exit 1; fi`,
     'test -f .env',
     't=$(mktemp ./.env.XXXXXX)',
     `{ grep -v '^TRACES_INGEST_STATE=' .env || true; cat; } > "$t"`,
     'chmod 600 "$t"',
     'mv "$t" .env',
-    `${COMPOSE} up -d --force-recreate --no-deps caddy`,
+    `${COMPOSE} up -d --force-recreate --no-deps caddy 9>&-`,
     `echo TRACES_INGEST_STATE_SET=${state}`,
   ].join('; ')
 }
 
 export const INGEST_STATE_STDIN = (state: IngestState): string => `TRACES_INGEST_STATE=${state}\n`
+
+export const INGEST_STATE_READ_SENTINEL = 'TRACES_INGEST_STATE_READ'
+
+/** What the host's `.env` says the route is now: `off`, `held`, `open`, or `none` when there is no `.env`. Read only. */
+export function readIngestStateScript(): string {
+  return step(
+    'ingest-state',
+    `cd ${TRACES_APP_DIR}
+if [ -f .env ]; then
+  state=$(sed -n 's/^TRACES_INGEST_STATE=//p' .env | tail -n 1)
+  printf 'ingest=%s\\n' "\${state:-off}"
+else
+  printf 'ingest=none\\n'
+fi
+echo ${INGEST_STATE_READ_SENTINEL}`,
+  )
+}
+
+export const DRIFT_SENTINEL = 'TRACES_DRIFT_CHECKED'
+
+/**
+ * For each gated service: is a container there, is it running, and does its `com.docker.compose.config-hash` label
+ * equal what `docker compose config --hash <service>` computes from the files on disk now? Changes nothing.
+ *
+ * It is run only when the compose file and `.env` are byte-identical to the host's (apart from the state line), so
+ * "the files on disk now" are also the files a `compose up` this deploy runs would read: a hash that differs means
+ * `up` would recreate that service, and a service that is not running is one `up` would start.
+ */
+export function driftScript(): string {
+  return step(
+    'drift-check',
+    `cd ${TRACES_APP_DIR}
+for svc in ${GATED_SERVICES.join(' ')}; do
+  expected=$(${COMPOSE} config --hash "$svc" | sed -n "s/^$svc //p" | head -n 1)
+  cid=$(${COMPOSE} ps -a -q "$svc" | head -n 1)
+  if [ -z "$cid" ]; then
+    echo "drift $svc missing"
+    continue
+  fi
+  running=$(docker inspect --format '{{.State.Running}}' "$cid")
+  actual=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$cid")
+  if [ "$running" != true ]; then
+    echo "drift $svc stopped"
+  elif [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+    echo "drift $svc hash"
+  else
+    echo "same $svc"
+  fi
+done
+echo ${DRIFT_SENTINEL}`,
+  )
+}
+
+/**
+ * The gated services the drift probe says are not running what the files say. `undefined` is an answer that cannot
+ * be trusted (no sentinel, a service missing, a word that is not `same` or `drift`): the caller treats it as drift.
+ */
+export function parseDrift(stdout: string): Service[] | undefined {
+  const lines = stdout
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '')
+  if (lines.at(-1) !== DRIFT_SENTINEL) return undefined
+  const seen = new Map<string, 'same' | 'drift'>()
+  for (const line of lines.slice(0, -1)) {
+    const match = /^(same|drift) ([\w-]+)(?: (?:missing|stopped|hash))?$/.exec(line)
+    if (match?.[1] === undefined || match[2] === undefined) return undefined
+    if (!(GATED_SERVICES as readonly string[]).includes(match[2]) || seen.has(match[2])) return undefined
+    seen.set(match[2], match[1] === 'same' ? 'same' : 'drift')
+  }
+  if (GATED_SERVICES.some(service => !seen.has(service))) return undefined
+  return GATED_SERVICES.filter(service => seen.get(service) === 'drift')
+}
 
 /** The reporter's loopback listener, reached by exec exactly as `traces status` does. */
 export const REPORTER_DETAIL_SENTINEL = 'TRACES_DETAIL_END'
@@ -1388,6 +1493,8 @@ export interface DeployResult {
   retention: RetentionReport
   /** Services recreated or restarted by changed files; empty when nothing changed. */
   changed: Touch[]
+  /** Gated services that were not running what the files say when the deploy began (an open route is held for these). */
+  drifted: Service[]
   heldForUpdate: boolean
 }
 
@@ -1403,7 +1510,7 @@ export class AppliedButUnverifiedError extends Error {
         ? 'Ingest is held (every ingest path answers 503, which senders retry).'
         : ingest === 'off'
           ? 'Ingest is off (no ingest route).'
-          : 'The ingest route could not be confirmed closed: run `traces ingest hold` now.'
+          : 'Ingest may be open: the deploy could not confirm the route closed. Run `traces ingest hold` now.'
     super(
       `Applied but unverified: the host was updated and the update did not verify. ${cause}. ${where} Fix the cause and deploy again; only a deploy that passes every gate reopens ingest.`,
     )
@@ -1440,6 +1547,11 @@ function digestOf(image: string): string {
 
 async function setIngestState(exec: RemoteExec, state: IngestState): Promise<void> {
   const result = await exec(setIngestStateCommand(state), INGEST_STATE_STDIN(state))
+  if (lastLine(result) === TRACES_LOCK_BUSY_SENTINEL) {
+    throw new Error(
+      `Could not set the ingest state to ${state}: the ingest lock was busy for 30 seconds (another ingest change is in progress)`,
+    )
+  }
   if (result.exitCode !== 0 || lastLine(result) !== `TRACES_INGEST_STATE_SET=${state}`) {
     throw new Error(
       `Could not set the ingest state to ${state} on the host (exit ${result.exitCode}): ${clip(result.stderr) || 'no confirmation'}`,
@@ -1453,15 +1565,16 @@ async function proveState(
   deps: DeployDeps,
   domain: string,
   state: IngestState,
+  attempts: number = deps.limits.proofAttempts,
 ): Promise<{proven: boolean; statuses: Record<string, PathStatus>}> {
   let statuses: Record<string, PathStatus> = {}
-  for (let attempt = 1; attempt <= deps.limits.proofAttempts; attempt += 1) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const result = await exec(bashCommand(probeIngestScript(domain)))
     if (result.exitCode === 0 && lastLine(result) === INGEST_PROBE_SENTINEL) {
       statuses = parseIngestProbe(result.stdout)
       if (provesState(statuses, state)) return {proven: true, statuses}
     }
-    if (attempt < deps.limits.proofAttempts) await deps.sleep(deps.limits.proofIntervalMs)
+    if (attempt < attempts) await deps.sleep(deps.limits.proofIntervalMs)
   }
   return {proven: false, statuses}
 }
@@ -1545,44 +1658,99 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
   const changed = [...restarts]
   const gatedChange = changed.some(touch => touch === 'compose' || (GATED_SERVICES as readonly Touch[]).includes(touch))
 
-  // The route as the host has it. It changes only through `setState`, so this is always what was last set.
+  // Is what runs what the files say? Asked only on an open route whose files are all unchanged: then "the files on
+  // disk" are also what a `compose up` below would read, and a hash that differs, or a service that is not running,
+  // is a change `up` would make with senders connected. A probe that cannot be trusted counts as drift.
+  let drifted: Service[] = []
+  let driftUnverified = false
+  if (host.ingest === 'open' && host.hasEnv && !gatedChange && !host.marker) {
+    try {
+      const answer = await sh('Compare the running services with the files', driftScript(), [DRIFT_SENTINEL])
+      const parsed = parseDrift(answer.result.stdout)
+      if (parsed === undefined) driftUnverified = true
+      else drifted = parsed
+    } catch {
+      driftUnverified = true
+    }
+  }
+
+  const holdReasons: string[] = []
+  if (gatedChange) holdReasons.push('a gated service is about to change')
+  if (host.marker) holdReasons.push('a previous deploy did not finish')
+  if (drifted.length > 0) holdReasons.push(`${drifted.join(', ')} not running what the files say`)
+  if (driftUnverified) holdReasons.push('the running services could not be compared with the files')
+
+  // The route as this deploy believes it to be. It is only ever a plan: after a failure the host is asked.
   let route: IngestState | 'none' = host.ingest
-  /** True between setting a state and proving it from inside the host. */
-  let unconfirmed = false
   let heldForUpdate = false
 
   const setState = async (state: IngestState): Promise<void> => {
-    unconfirmed = true
+    // An open that was attempted counts as open from before the remote call: a lost reply says nothing about the host.
+    if (state === 'open') route = 'open'
     await setIngestState(exec, state)
     route = state
   }
-  const prove = async (state: IngestState): Promise<{proven: boolean; statuses: Record<string, PathStatus>}> => {
-    const proof = await proveState(exec, deps, inputs.domain, state)
-    if (proof.proven) unconfirmed = false
-    return proof
-  }
+  const prove = (state: IngestState): ReturnType<typeof proveState> => proveState(exec, deps, inputs.domain, state)
 
-  // A gated change on an open route: hold first, and prove it before anything else happens.
-  if (route === 'open' && gatedChange) {
-    log('==> Holding the ingest route before the update (a gated service is about to change)')
+  /**
+   * After a failure: make sure the route is closed, from what the host says and not from what this deploy last
+   * wrote (a reply can be lost after the host acted, and another operator can open the route meanwhile). Off or
+   * held is accepted only when the host's `.env` says so and Caddy answers every path as that state does; a host
+   * with no `.env` runs nothing. Anything else is held and proven 503. `unknown` means that could not be done.
+   */
+  const secureRoute = async (): Promise<'held' | 'off' | 'unknown'> => {
+    try {
+      const read = await exec(bashCommand(readIngestStateScript()))
+      if (read.exitCode === 0 && lastLine(read) === INGEST_STATE_READ_SENTINEL) {
+        const state = /^ingest=(off|held|open|none)$/m.exec(read.stdout)?.[1]
+        if (state === 'none') return 'off'
+        if ((state === 'off' || state === 'held') && (await proveState(exec, deps, inputs.domain, state, 1)).proven)
+          return state
+      }
+    } catch {
+      // Not read: treated as not confirmed.
+    }
     try {
       await setState('held')
-      const proof = await prove('held')
-      if (!proof.proven) {
-        throw new Error(`the route did not answer 503 on every ingest path (${describeStatuses(proof.statuses)})`)
-      }
-    } catch (error) {
-      throw new Error(
-        `Could not hold the ingest route before the update: ${errorMessage(error)}. Nothing was changed, but the route may still be open: run \`traces ingest hold\`.`,
-      )
+      return (await prove('held')).proven ? 'held' : 'unknown'
+    } catch {
+      return 'unknown'
     }
-    heldForUpdate = true
   }
 
-  const planned: IngestState = route === 'none' ? 'off' : route
+  // The first change to the host is the marker. From here a failed or interrupted deploy is visible to everyone.
+  await sh(
+    'Write the deploy marker',
+    writeFileScript({path: MARKER_FILE, owner: 'root:root', mode: '0644', kind: 'plain'}),
+    [FILE_WRITTEN_SENTINEL],
+    `${new Date(host.epoch * 1000).toISOString()}\n`,
+  )
+
+  /** The very last step of a deploy that evaluated every gate and left the route in its final state. */
+  const finish = async (result: DeployResult): Promise<DeployResult> => {
+    await sh('Remove the deploy marker', removeOwnFileScript(MARKER_FILE), [REMOVED_SENTINEL])
+    return result
+  }
 
   let phase: 'stage' | 'apply' = 'stage'
   try {
+    // A gated change on an open route: hold first, and prove it before anything else happens.
+    if (route === 'open' && holdReasons.length > 0) {
+      log(`==> Holding the ingest route before the update (${holdReasons.join('; ')})`)
+      try {
+        await setState('held')
+        const proof = await prove('held')
+        if (!proof.proven) {
+          throw new Error(`the route did not answer 503 on every ingest path (${describeStatuses(proof.statuses)})`)
+        }
+      } catch (error) {
+        throw new Error(`Could not hold the ingest route before the update: ${errorMessage(error)}`)
+      }
+      heldForUpdate = true
+    }
+
+    const planned: IngestState = route === 'none' ? 'off' : route
+
     // 6. Directories, empty token files (only when absent), restart record, secret files, configs.
     log('==> Preparing directories and token files')
     await sh('Prepare directories', prepareDirsScript(), [DIRS_SENTINEL])
@@ -1607,7 +1775,7 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
     if (changed.length > 0) {
       await sh(
         'Record the pending restarts',
-        writeFileScript({path: '.pending-restarts', owner: 'root:root', mode: '0600', kind: 'plain'}),
+        writeFileScript({path: PENDING_RESTARTS_FILE, owner: 'root:root', mode: '0600', kind: 'plain'}),
         [FILE_WRITTEN_SENTINEL],
         `${changed.join('\n')}\n`,
       )
@@ -1718,7 +1886,7 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
 
     // Every restart this deploy owed has happened, Caddy's included.
     if (changed.length > 0 || host.pendingRestarts.length > 0) {
-      await sh('Clear the pending restarts', removeOwnFileScript('.pending-restarts'), [REMOVED_SENTINEL])
+      await sh('Clear the pending restarts', removeOwnFileScript(PENDING_RESTARTS_FILE), [REMOVED_SENTINEL])
     }
 
     // 9. Gates.
@@ -1786,7 +1954,7 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
       log(
         `Ingest is open: every ingest path reached the collector and asked for a token (${describeStatuses(proof.statuses)}).`,
       )
-      return {ingest: 'open', gates, unmet: [], retention, changed, heldForUpdate}
+      return await finish({ingest: 'open', gates, unmet: [], retention, changed, drifted, heldForUpdate})
     }
 
     // Not openable. An open route is held; a held or off route stays as it is.
@@ -1806,31 +1974,24 @@ export async function performDeploy(inputs: DeployInputs, exec: RemoteExec, deps
     const final: IngestState = route === 'none' ? 'off' : route
     log(`Ingest is ${final.toUpperCase()}. Gates not met:`)
     for (const line of unmet) log(`  - ${line}`)
-    return {ingest: final, gates, unmet, retention, changed, heldForUpdate}
+    return await finish({ingest: final, gates, unmet, retention, changed, drifted, heldForUpdate})
   } catch (error) {
-    if (phase === 'apply') {
-      let ingest: 'held' | 'off' | 'unknown' = unconfirmed
-        ? 'unknown'
-        : route === 'held'
-          ? 'held'
-          : route === 'off' || route === 'none'
-            ? 'off'
-            : 'unknown'
-      if (route === 'open') {
-        // Held again, and proven again: "held" is only claimed for a route that answered 503 on every path.
-        try {
-          await setState('held')
-          ingest = (await prove('held')).proven ? 'held' : 'unknown'
-        } catch {
-          ingest = 'unknown'
-        }
-      }
-      throw new AppliedButUnverifiedError(errorMessage(error), ingest)
+    // Whatever failed, and wherever: the route is closed from the host's own answer before this deploy gives up.
+    const closed = await secureRoute()
+    const cause = errorMessage(error)
+    if (phase === 'apply') throw new AppliedButUnverifiedError(cause, closed)
+    if (closed === 'unknown') {
+      throw new Error(
+        `${cause}. Ingest may be open: the deploy could not confirm the route closed. Run \`traces ingest hold\` now.`,
+      )
     }
     if (heldForUpdate) {
       throw new Error(
-        `${errorMessage(error)}. Ingest was held for this update and stays held; a deploy that passes every gate reopens it.`,
+        `${cause}. Ingest was held for this update and stays held; a deploy that passes every gate reopens it.`,
       )
+    }
+    if (closed === 'held') {
+      throw new Error(`${cause}. Ingest is held because the deploy failed; a deploy that passes every gate reopens it.`)
     }
     throw error
   }

@@ -207,7 +207,7 @@ Commands:
   traces ingest hold                          Emergency close: hold the ingest route (every ingest path answers 503) and prove it from outside the host.
     --key [key]                               Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
-  traces ingest open                          Open the ingest route. Refuses unless the health reporter verdict is passing; proves the route is live from outside.
+  traces ingest open                          Open the ingest route. Refuses unless the health reporter verdict is passing and no deploy is running or unfinished; proves the route is live from outside.
     --key [key]                               Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
   traces ingest status                        Show the configured ingest state, the state seen from outside the host, and the health verdict.

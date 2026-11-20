@@ -450,6 +450,75 @@ describe('issue step: failure', () => {
     expect(garbage.exitCode).toBe(1)
   })
 
+  // A listing entry that is not exactly what the script reads must fail the whole lookup: an empty-array guess for a
+  // missing `labels` would hide an open alert issue, and the run would open a duplicate.
+  describe('a malformed issue listing takes no action', () => {
+    const valid = toApiIssue(realIssue()) as Record<string, unknown>
+    const without = (field: string): Record<string, unknown> => {
+      const {[field]: _removed, ...rest} = valid
+      return rest
+    }
+    const listing = (entry: unknown) =>
+      fakeGh([], {
+        labels: [ALERT_LABEL],
+        fail: call =>
+          call.args.includes('--paginate') ? {code: 0, stdout: JSON.stringify([[entry]]), stderr: ''} : undefined,
+      })
+
+    it.each([
+      ['labels missing', without('labels')],
+      ['labels null', {...valid, labels: null}],
+      ['labels a string', {...valid, labels: ALERT_LABEL}],
+      ['labels an object', {...valid, labels: {name: ALERT_LABEL}}],
+      ['a label entry without a name', {...valid, labels: [{}]}],
+      ['a label entry that is a bare string', {...valid, labels: [ALERT_LABEL]}],
+      ['a label name that is not a string', {...valid, labels: [{name: 5}]}],
+      ['a label entry that is null', {...valid, labels: [null]}],
+      ['number missing', without('number')],
+      ['number a string', {...valid, number: '7'}],
+      ['number a fraction', {...valid, number: 7.5}],
+      ['state missing', without('state')],
+      ['state a number', {...valid, state: 1}],
+      ['body missing', without('body')],
+      ['body a number', {...valid, body: 5}],
+      ['pull_request a string', {...valid, pull_request: 'x'}],
+      ['an entry that is not an object', 42],
+      ['an entry that is null', null],
+    ])('fails the lookup and writes nothing when %s', async (_name, entry) => {
+      for (const result of ['failure', 'success']) {
+        const fake = listing(entry)
+        const run = await issueStep({ALERT_REFRESH_RESULT: result}, fake)
+
+        expect(run.exitCode).toBe(1)
+        expect(run.outputs).toEqual({notify: 'none'})
+        expect(fake.writes()).toEqual([])
+        // The list call is the only call: no label probe either.
+        expect(fake.calls).toHaveLength(1)
+        expect(run.logs.join('\n')).toContain('github-api:list-issues-malformed')
+      }
+    })
+
+    it('still reads what GitHub really sends: a null body and a null pull_request', async () => {
+      const fake = listing({...valid, body: null, pull_request: null})
+      const run = await issueStep({}, fake)
+
+      expect(run.exitCode).toBe(0)
+      // A null body has no marker, so the entry is not ours and ours is created beside it.
+      expect(run.outputs.notify).toBe('created')
+    })
+  })
+
+  it('writes notify=none when any step fails, so the Discord step has an explicit value', async () => {
+    const run = await issueStep(
+      {},
+      fakeGh([], {
+        fail: call => (call.args.includes('--paginate') ? {code: 1, stdout: '', stderr: 'boom'} : undefined),
+      }),
+    )
+    expect(run.exitCode).toBe(1)
+    expect(run.outputs).toEqual({notify: 'none'})
+  })
+
   it('fails the job when the create response lacks an issue number', async () => {
     const fake = fakeGh([], {
       labels: [ALERT_LABEL],

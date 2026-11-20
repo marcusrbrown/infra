@@ -10,8 +10,9 @@
 # daily snapshot is older than 36 hours, and prunes only this job's snapshots older than 8 days, and only behind a fresh
 # snapshot. See packages/cli/scripts/traces-backup.ts for the exact rules.
 #
-# Not deployed yet: while the repository secret TRACES_SNAPSHOT_DO_TOKEN or the repository variable TRACES_DOMAIN (documented value
-# `traces.fro.bot`) is unset, the backup job exits green with a notice and the alert job does nothing.
+# Not deployed yet: while the repository variable TRACES_DOMAIN (documented value `traces.fro.bot`) is unset, the backup
+# job exits green with a notice and the alert job does nothing. Once TRACES_DOMAIN is set, a missing repository secret
+# TRACES_SNAPSHOT_DO_TOKEN fails the run and opens the alert like any other failure.
 #
 # Alert: the `alert` job runs after `backup` whatever its result. A failed or cancelled backup (a job killed by its
 # timeout reports as cancelled) opens ONE issue labelled `traces-backup-failure`, or comments on the open one, and posts

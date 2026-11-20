@@ -79,3 +79,28 @@ export const TRACES_TOKEN_ROOT = `${TRACES_APP_DIR}/tokens`
 export function tracesTokenDir(group: SenderGroup): string {
   return `${TRACES_TOKEN_ROOT}/${group}`
 }
+
+// ─── Deploy state and locks ───────────────────────────────────────────────────
+//
+// These four paths are a contract between the deploy, the sender-token commands and the ingest command. The CLI
+// never imports from `apps/`, so it keeps copies of its own and a test pins each copy to the value here.
+
+/**
+ * A regular file. Deploy writes it (a UTC timestamp on one line) before its first change to the host and removes
+ * it only as the last step of a deploy that ended with every gate evaluated and the route in its final state. A
+ * failed or interrupted deploy leaves it, and the next deploy overwrites it. While it exists, opening ingest is
+ * refused; holding never is.
+ */
+export const TRACES_DEPLOY_MARKER = `${TRACES_APP_DIR}/.deploy-in-progress`
+
+/** Services a deploy has changed on disk and not yet restarted. Written before any file changes, removed after Caddy restarts. */
+export const TRACES_PENDING_RESTARTS = `${TRACES_APP_DIR}/.pending-restarts`
+
+/** `flock` lock file. Every script that reads then writes the ingest state and recreates Caddy runs inside `flock -w 30` on it. */
+export const TRACES_INGEST_LOCK = `${TRACES_APP_DIR}/.ingest.lock`
+
+/** `flock` lock file. Every script that reads then replaces a token file runs inside `flock -w 30` on it. */
+export const TRACES_TOKENS_LOCK = `${TRACES_TOKEN_ROOT}/.lock`
+
+/** What a locked script prints when it could not take its lock in 30 seconds. Never a silent skip. */
+export const TRACES_LOCK_BUSY_SENTINEL = 'LOCK_BUSY'

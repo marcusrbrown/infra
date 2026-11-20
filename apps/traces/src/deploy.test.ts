@@ -17,6 +17,7 @@ import {
   createCollectorScript,
   deploy,
   diskScript,
+  driftScript,
   evaluateGates,
   failedSafetyGates,
   GATED_SERVICES,
@@ -24,6 +25,7 @@ import {
   hygieneScript,
   langfuseBasicValue,
   mayOpen,
+  parseDrift,
   parseHostState,
   parseIngestProbe,
   parseReporterDetail,
@@ -33,6 +35,7 @@ import {
   pruneScript,
   pullScript,
   queueVolumeScript,
+  readIngestStateScript,
   readInputs,
   removeOwnFileScript,
   REPORTER_DETAIL_COMMAND,
@@ -52,7 +55,14 @@ import {
 } from './deploy'
 import {baseEnv, FakeHost, OTHER_DIGEST, PLACEHOLDER_DIGEST, secretValues, testDeps} from './deploy.fixture'
 import {PATHS} from './health-report'
-import {SENDER_GROUPS, TRACES_APP_DIR} from './host'
+import {
+  SENDER_GROUPS,
+  TRACES_APP_DIR,
+  TRACES_DEPLOY_MARKER,
+  TRACES_INGEST_LOCK,
+  TRACES_LOCK_BUSY_SENTINEL,
+  TRACES_PENDING_RESTARTS,
+} from './host'
 
 const ok = (stdout: string): RunResult => ({exitCode: 0, stdout, stderr: ''})
 
@@ -395,6 +405,10 @@ describe('what lands on the host', () => {
 describe('remote scripts', () => {
   const scripts: Record<string, string> = {
     hostState: hostStateScript(),
+    drift: driftScript(),
+    ingestState: readIngestStateScript(),
+    removeMarker: removeOwnFileScript('.deploy-in-progress'),
+    writeMarker: writeFileScript({path: '.deploy-in-progress', owner: 'root:root', mode: '0644', kind: 'plain'}),
     prepareDirs: prepareDirsScript(),
     tokenDirs: tokenDirsScript(),
     comparePlain: compareFileScript('config/otelcol.yaml', 'plain'),
@@ -666,20 +680,26 @@ describe('ssh', () => {
 // ─── Parsers ──────────────────────────────────────────────────────────────────
 
 describe('host state', () => {
-  const answer = (lines: string[]): string => `${lines.join('\n')}\nTRACES_HOST_STATE_READ\n`
-  const base = [
-    'has_env=1',
-    'ingest=open',
-    'env_bootstrap_public=',
-    'env_bootstrap_secret=',
-    'pending=',
-    'restarts=',
-    'epoch=1700000000',
-  ]
+  const answer = (overrides: Record<string, string> = {}): string => {
+    const values: Record<string, string> = {
+      has_env: '1',
+      marker: '0',
+      ingest: 'open',
+      env_bootstrap_public: '',
+      env_bootstrap_secret: '',
+      pending: '',
+      restarts: '',
+      epoch: '1700000000',
+      ...overrides,
+    }
+    const lines = Object.entries(values).map(([key, value]) => `${key}=${value}`)
+    return `${lines.join('\n')}\nTRACES_HOST_STATE_READ\n`
+  }
 
   it('reads a normal answer', () => {
-    expect(parseHostState(answer(base))).toEqual({
+    expect(parseHostState(answer())).toEqual({
       hasEnv: true,
+      marker: false,
       ingest: 'open',
       envBootstrap: undefined,
       pendingBootstrap: undefined,
@@ -690,46 +710,34 @@ describe('host state', () => {
 
   it('reads the bootstrap pair from the env file or the pending record, and pending restarts', () => {
     const state = parseHostState(
-      answer([
-        'has_env=1',
-        'ingest=held',
-        'env_bootstrap_public=pk-lf-aaaaaaaa',
-        'env_bootstrap_secret=sk-lf-bbbbbbbb',
-        'pending=pk-lf-cccccccc:sk-lf-dddddddd',
-        'restarts=collector compose',
-        'epoch=1700000000',
-      ]),
+      answer({
+        ingest: 'held',
+        env_bootstrap_public: 'pk-lf-aaaaaaaa',
+        env_bootstrap_secret: 'sk-lf-bbbbbbbb',
+        pending: 'pk-lf-cccccccc:sk-lf-dddddddd',
+        restarts: 'collector compose',
+      }),
     )
     expect(state.envBootstrap).toEqual({publicKey: 'pk-lf-aaaaaaaa', secretKey: 'sk-lf-bbbbbbbb'})
     expect(state.pendingBootstrap).toEqual({publicKey: 'pk-lf-cccccccc', secretKey: 'sk-lf-dddddddd'})
     expect(state.pendingRestarts).toEqual(['collector', 'compose'])
   })
 
-  it('treats a host with no .env as having no ingest state', () => {
-    expect(parseHostState(answer([...base.slice(2), 'has_env=0', 'ingest=none'])).ingest).toBe('none')
+  it('reads the deploy marker', () => {
+    expect(parseHostState(answer({marker: '1'})).marker).toBe(true)
   })
 
-  it('fails closed on an ingest state it does not know, half a key pair or an unknown restart', () => {
-    expect(() => parseHostState(answer(['has_env=1', 'ingest=wide-open', ...base.slice(2)]))).toThrow(
-      'does not recognise',
-    )
-    expect(() =>
-      parseHostState(
-        answer([
-          'has_env=1',
-          'ingest=off',
-          'env_bootstrap_public=pk-lf-aaaaaaaa',
-          'env_bootstrap_secret=',
-          'pending=',
-          'restarts=',
-          'epoch=1700000000',
-        ]),
-      ),
-    ).toThrow('complete key pair')
-    expect(() => parseHostState(answer([...base.slice(0, 5), 'restarts=rm-rf', 'epoch=1700000000']))).toThrow(
-      'pending-restart',
-    )
-    expect(() => parseHostState(answer([...base.slice(0, 6), 'epoch=0']))).toThrow('clock')
+  it('treats a host with no .env as having no ingest state', () => {
+    expect(parseHostState(answer({has_env: '0', ingest: 'none'})).ingest).toBe('none')
+  })
+
+  it('fails closed on an ingest state it does not know, half a key pair, an unknown restart or a missing marker answer', () => {
+    expect(() => parseHostState(answer({ingest: 'wide-open'}))).toThrow('does not recognise')
+    expect(() => parseHostState(answer({env_bootstrap_public: 'pk-lf-aaaaaaaa'}))).toThrow('complete key pair')
+    expect(() => parseHostState(answer({restarts: 'rm-rf'}))).toThrow('pending-restart')
+    expect(() => parseHostState(answer({epoch: '0'}))).toThrow('clock')
+    expect(() => parseHostState(answer({marker: 'maybe'}))).toThrow('deploy marker')
+    expect(() => parseHostState(answer().replace('marker=0\n', ''))).toThrow('deploy marker')
   })
 })
 
@@ -931,6 +939,7 @@ describe('first deploy', () => {
       'storage-probe',
       'host-state',
       'compare:docker-compose.yaml',
+      'write:.deploy-in-progress',
       'prepare-dirs',
       'token-file:marcusrbrown',
       'write:docker-compose.yaml',
@@ -950,6 +959,7 @@ describe('first deploy', () => {
       'raw:reporter-detail',
       'bootstrap-hygiene',
       'raw:set-state:open',
+      'remove:.deploy-in-progress',
     ]
     const positions = order.map(step => host.indexOf(step))
     expect(positions.every(position => position >= 0)).toBe(true)
@@ -1041,7 +1051,7 @@ describe('gates keep the route closed', () => {
   })
 
   it('a token directory is missing: ingest stays off', async () => {
-    const host = new FakeHost({
+    const host: FakeHost = new FakeHost({
       override: step => (step.startsWith('token-file:') ? ok('TRACES_TOKEN_PRESENT\n') : undefined),
     })
     const error = await failure(host)
@@ -1072,7 +1082,7 @@ describe('gates keep the route closed', () => {
   })
 
   it('the bootstrap variables are still in a running container: ingest stays closed', async () => {
-    const host = new FakeHost({
+    const host: FakeHost = new FakeHost({
       override: step =>
         step === 'bootstrap-hygiene' ? ok('TRACES_HYGIENE env_file=0 running=2\nTRACES_HYGIENE_CHECKED\n') : undefined,
     })
@@ -1082,7 +1092,7 @@ describe('gates keep the route closed', () => {
   })
 
   it('the bootstrap variables are still in the host .env: ingest stays closed', async () => {
-    const host = new FakeHost({
+    const host: FakeHost = new FakeHost({
       override: step =>
         step === 'bootstrap-hygiene' ? ok('TRACES_HYGIENE env_file=2 running=0\nTRACES_HYGIENE_CHECKED\n') : undefined,
     })
@@ -1163,7 +1173,11 @@ describe('holding the route', () => {
     const held = after.indexOf('raw:set-state:held')
     expect(held).toBeGreaterThanOrEqual(0)
     const firstChange = after.findIndex(
-      step => step.startsWith('write:') || step.startsWith('up-') || step === 'pull' || step === 'prepare-dirs',
+      step =>
+        (step.startsWith('write:') && step !== 'write:.deploy-in-progress') ||
+        step.startsWith('up-') ||
+        step === 'pull' ||
+        step === 'prepare-dirs',
     )
     expect(held).toBeLessThan(firstChange)
     expect(after.indexOf('probe-ingest')).toBeGreaterThan(held)
@@ -1232,7 +1246,8 @@ describe('holding the route', () => {
     const error = await failure(host, baseEnv(newImage))
     expect(error.message).toContain('Could not hold the ingest route')
     expect(error.message).toContain('traces ingest hold')
-    expect(host.writes().length).toBe(writesBefore)
+    // Only the deploy marker was written: nothing about the stack changed.
+    expect(host.writes().slice(writesBefore)).toEqual(['.deploy-in-progress'])
     expect(host.count('pull')).toBe(1)
     expect(host.count('up-private')).toBe(1)
   })
@@ -1296,6 +1311,519 @@ describe('holding the route', () => {
     expect(result.ingest).toBe('held')
     expect(host.served).toBe('held')
     expect(logs.join('\n')).toContain('langfuse-key')
+  })
+})
+
+// ─── The host's truth, the marker and drift ───────────────────────────────────
+
+const MARKER_FORMAT = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\n$/
+
+/** An override that fails one step when it is reached (something going wrong after the first change). */
+function failAt(step: string): (current: string) => RunResult | undefined {
+  return current => (current === step ? {exitCode: 1, stdout: '', stderr: `${step} failed`} : undefined)
+}
+
+describe('host contract', () => {
+  it('keeps the four paths in host.ts and uses them', () => {
+    expect(TRACES_DEPLOY_MARKER).toBe(`${TRACES_APP_DIR}/.deploy-in-progress`)
+    expect(TRACES_PENDING_RESTARTS).toBe(`${TRACES_APP_DIR}/.pending-restarts`)
+    expect(hostStateScript()).toContain(TRACES_DEPLOY_MARKER)
+    expect(hostStateScript()).toContain(TRACES_PENDING_RESTARTS)
+    expect(removeOwnFileScript('.deploy-in-progress')).toContain(TRACES_DEPLOY_MARKER)
+    expect(removeOwnFileScript('.pending-restarts')).toContain(TRACES_PENDING_RESTARTS)
+    expect(() => removeOwnFileScript('.env' as never)).toThrow('not a file this deploy owns')
+  })
+
+  it('runs every ingest state change under flock on the ingest lock, and says LOCK_BUSY when it cannot take it', () => {
+    for (const state of ['off', 'held', 'open'] as const) {
+      const command = setIngestStateCommand(state)
+      expect(command).toContain(TRACES_INGEST_LOCK)
+      expect(command).toContain('flock -w 30')
+      expect(command).toContain(TRACES_LOCK_BUSY_SENTINEL)
+      // The lock is taken before the state is read, and held through the Caddy recreate.
+      expect(command.indexOf('flock -w 30')).toBeLessThan(command.indexOf('grep -v'))
+      expect(command.indexOf('grep -v')).toBeLessThan(command.indexOf('--force-recreate'))
+      expect(command).not.toContain('/dev/null')
+    }
+  })
+
+  it('reports a busy lock as its own failure, not as a missing confirmation', async () => {
+    const host = new FakeHost({
+      override: (step, call) =>
+        step === 'raw:set-state' || call.command.includes('TRACES_INGEST_STATE_SET=')
+          ? {exitCode: 1, stdout: 'LOCK_BUSY\n', stderr: ''}
+          : undefined,
+    })
+    const error = await failure(host, baseEnv({TRACES_INGEST_OPEN: 'true'}))
+    expect(error.message).toContain('ingest lock')
+    expect(error.message).toContain('30 seconds')
+  })
+
+  it('every state change deploy makes goes through that command, in a full open and hold cycle', async () => {
+    const host = await openStack()
+    await run(host, baseEnv({TRACES_INGEST_OPEN: undefined}))
+    const sets = host.calls.filter(call => call.step.startsWith('raw:set-state:'))
+    expect(sets.length).toBeGreaterThanOrEqual(2)
+    for (const call of sets) expect(call.command).toContain('flock -w 30')
+  })
+})
+
+describe('deploy marker', () => {
+  it('is written after the storage check and the host state, before the first change, and removed last', async () => {
+    const host = new FakeHost()
+    await run(host)
+    const steps = nonSshSteps(host)
+    expect(host.indexOf('write:.deploy-in-progress')).toBeGreaterThan(host.indexOf('storage-probe'))
+    expect(host.indexOf('write:.deploy-in-progress')).toBeGreaterThan(host.indexOf('host-state'))
+    expect(host.indexOf('write:.deploy-in-progress')).toBeLessThan(host.indexOf('prepare-dirs'))
+    expect(host.indexOf('write:.deploy-in-progress')).toBeLessThan(host.indexOf('write:docker-compose.yaml'))
+    expect(steps.at(-1)).toBe('remove:.deploy-in-progress')
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('is written before the hold, which is already a change to the host', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    await run(host, baseEnv({TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${OTHER_DIGEST}`}))
+    const after = host.calls.slice(start).map(call => call.step)
+    expect(after.indexOf('write:.deploy-in-progress')).toBeGreaterThanOrEqual(0)
+    expect(after.indexOf('write:.deploy-in-progress')).toBeLessThan(after.indexOf('raw:set-state:held'))
+  })
+
+  it('holds one UTC timestamp on one line', async () => {
+    const host = new FakeHost({override: failAt('pull')})
+    await failure(host)
+    expect(host.marker).toMatch(MARKER_FORMAT)
+  })
+
+  it('is still there after a failed deploy, whatever failed and wherever', async () => {
+    const failures: [string, string][] = [
+      ['a file write', 'write:docker-compose.yaml'],
+      ['the pull', 'pull'],
+      ['starting the stores', 'up-private'],
+      ['starting the collector', 'up-public'],
+      ['the digest check', 'digest:collector'],
+      ['starting Caddy', 'up-caddy'],
+      ['the gate read', 'token-dirs'],
+    ]
+    for (const [label, step] of failures) {
+      const host = new FakeHost({override: failAt(step)})
+      await failure(host)
+      expect({label, marker: host.marker === undefined}).toEqual({label, marker: false})
+    }
+  })
+
+  it('is still there when a gate fails after everything is up', async () => {
+    const host = new FakeHost({checkStatus: {'canary-langfuse': 'fail'}})
+    await failure(host)
+    expect(host.marker).toMatch(MARKER_FORMAT)
+    expect(host.steps).not.toContain('remove:.deploy-in-progress')
+  })
+
+  it('is still there when the hold before an update cannot be proven', async () => {
+    const host = await openStack()
+    host.options.stateIgnored = true
+    await failure(host, baseEnv({TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${OTHER_DIGEST}`}))
+    expect(host.marker).toMatch(MARKER_FORMAT)
+  })
+
+  it('is absent after a successful deploy that opened ingest', async () => {
+    const host = new FakeHost()
+    const {result} = await run(host)
+    expect(result.ingest).toBe('open')
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('is absent after the legitimate "completed with ingest off, key pair unset" outcome', async () => {
+    const host = new FakeHost()
+    const {result} = await run(host, baseEnv(withoutKey))
+    expect(result.ingest).toBe('off')
+    expect(host.marker).toBeUndefined()
+    expect(host.steps.at(-2)).toBe('remove:.deploy-in-progress')
+  })
+
+  it('is absent after a completed deploy that left the route off because TRACES_INGEST_OPEN is not true, or held an open route', async () => {
+    const off = new FakeHost()
+    expect((await run(off, baseEnv({TRACES_INGEST_OPEN: undefined}))).result.ingest).toBe('off')
+    expect(off.marker).toBeUndefined()
+
+    const held = await openStack()
+    expect((await run(held, baseEnv({TRACES_INGEST_OPEN: undefined}))).result.ingest).toBe('held')
+    expect(held.marker).toBeUndefined()
+  })
+
+  it('is removed only after the route is in its final state', async () => {
+    const host = await openStack()
+    await run(host, baseEnv({TRACES_INGEST_OPEN: undefined}))
+    expect(host.calls.findLastIndex(call => call.step === 'remove:.deploy-in-progress')).toBeGreaterThan(
+      host.calls.findLastIndex(call => call.step === 'raw:set-state:held'),
+    )
+  })
+
+  it('is overwritten by the next deploy, which then removes it', async () => {
+    const host = new FakeHost({override: failAt('pull')})
+    await failure(host)
+    expect(host.marker).toBeDefined()
+    delete host.options.override
+    host.clock += 3600
+    await run(host)
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('makes a deploy treat an open route with a leftover marker as a change: hold first', async () => {
+    const host = await openStack()
+    host.marker = '2023-11-14T22:13:20.000Z\n'
+    const {result} = await run(host)
+    expect(result.heldForUpdate).toBe(true)
+    expect(host.setStates()).toEqual(['open', 'held', 'open'])
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('is not written when the deploy stops before any change (storage, DNS, input)', async () => {
+    const host = new FakeHost({storageAnswer: ok('nope\n')})
+    await failure(host)
+    expect(host.marker).toBeUndefined()
+    expect(host.steps).not.toContain('write:.deploy-in-progress')
+  })
+})
+
+describe("the route after a failure follows the host, not this deploy's last write", () => {
+  it('lost reply after a successful remote open: the route ends held and proven 503', async () => {
+    const host = new FakeHost({loseReplyOn: 'open'})
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(AppliedButUnverifiedError)
+    expect((error as AppliedButUnverifiedError).ingest).toBe('held')
+    expect(error.message).toContain('Ingest is held')
+    expect(host.served).toBe('held')
+    expect(host.envState).toBe('held')
+    expect(host.setStates()).toEqual(['open', 'held'])
+    // The 503 was proven from inside the host after the hold.
+    const lastHold = host.calls.findLastIndex(call => call.step === 'raw:set-state:held')
+    expect(host.calls.slice(lastHold).some(call => call.step === 'probe-ingest')).toBe(true)
+    expect(host.marker).toMatch(MARKER_FORMAT)
+  })
+
+  it('a manual open during the deploy, then a deploy failure: the route ends held', async () => {
+    const host: FakeHost = new FakeHost({
+      override: step => {
+        if (step === 'pull') {
+          // `traces ingest open` by another operator, while this deploy is running.
+          host.envState = 'open'
+          host.served = 'open'
+          return undefined
+        }
+        return step === 'up-public' ? {exitCode: 1, stdout: '', stderr: 'unhealthy'} : undefined
+      },
+    })
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(AppliedButUnverifiedError)
+    expect((error as AppliedButUnverifiedError).ingest).toBe('held')
+    expect(host.served).toBe('held')
+    expect(host.setStates()).toEqual(['held'])
+  })
+
+  it('a manual open during a stage-phase failure ends held too', async () => {
+    const host = new FakeHost()
+    await run(host, baseEnv(withoutKey))
+    host.options.override = step => {
+      if (step === 'prepare-dirs') {
+        host.envState = 'open'
+        host.served = 'open'
+        return undefined
+      }
+      return step === 'token-file:marcusrbrown' ? {exitCode: 1, stdout: '', stderr: 'disk error'} : undefined
+    }
+    const error = await failure(host)
+    expect(error).not.toBeInstanceOf(AppliedButUnverifiedError)
+    expect(host.served).toBe('held')
+  })
+
+  it('does not touch the route when the host says it is off and Caddy answers 404', async () => {
+    const host = new FakeHost({override: failAt('up-public')})
+    const error = await failure(host)
+    expect((error as AppliedButUnverifiedError).ingest).toBe('off')
+    expect(host.setStates()).toEqual([])
+  })
+
+  it('does not trust a .env that says held while Caddy still serves the open route', async () => {
+    const host = await openStack()
+    // `.env` says held, the container was never recreated: Caddy still answers as open.
+    host.envState = 'held'
+    host.options.override = failAt('pull')
+    await failure(host)
+    expect(host.served).toBe('held')
+    expect(host.setStates().at(-1)).toBe('held')
+  })
+
+  it('says plainly that ingest may be open, and names the hold command, when the hold cannot be confirmed', async () => {
+    const host = new FakeHost({loseReplyOn: 'open', probeOverride: () => ({})})
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(AppliedButUnverifiedError)
+    expect((error as AppliedButUnverifiedError).ingest).toBe('unknown')
+    expect(error.message).toContain('may be open')
+    expect(error.message).toContain('traces ingest hold')
+  })
+
+  it('says the same when the host cannot be read at all after the failure', async () => {
+    const host = new FakeHost({
+      override: (step, call) => {
+        if (step === 'up-public') return {exitCode: 1, stdout: '', stderr: 'unhealthy'}
+        if (step === 'ingest-state' || call.command.includes('TRACES_INGEST_STATE_SET=')) {
+          return {exitCode: 255, stdout: '', stderr: 'ssh: connection lost'}
+        }
+        return undefined
+      },
+    })
+    const first = await failure(host)
+    expect(first.message).toContain('may be open')
+  })
+
+  it('a stage failure after a successful hold stays held and says why', async () => {
+    const host = await openStack()
+    host.options.override = failAt('prepare-dirs')
+    const error = await failure(
+      host,
+      baseEnv({TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${OTHER_DIGEST}`}),
+    )
+    expect(error).not.toBeInstanceOf(AppliedButUnverifiedError)
+    expect(error.message).toContain('stays held')
+    expect(host.served).toBe('held')
+  })
+
+  it('holds an open route when a stage failure happens with nothing gated changing', async () => {
+    const host = await openStack()
+    host.options.override = failAt('prepare-dirs')
+    const error = await failure(host)
+    expect(error.message).toContain('Ingest is held')
+    expect(host.served).toBe('held')
+  })
+})
+
+async function holdsFor(
+  change: (host: FakeHost) => void,
+): Promise<{host: FakeHost; result: DeployResult; after: string[]}> {
+  const host = await openStack()
+  change(host)
+  const start = host.calls.length
+  const {result} = await run(host)
+  return {host, result, after: host.calls.slice(start).map(call => call.step)}
+}
+
+function holdsBeforeAnyChange(after: string[]): void {
+  const held = after.indexOf('raw:set-state:held')
+  expect(held).toBeGreaterThanOrEqual(0)
+  const firstChange = after.findIndex(
+    step => step.startsWith('write:docker') || step === 'prepare-dirs' || step === 'pull' || step.startsWith('up-'),
+  )
+  expect(held).toBeLessThan(firstChange)
+  expect(after.indexOf('probe-ingest')).toBeGreaterThan(held)
+  expect(after.indexOf('probe-ingest')).toBeLessThan(firstChange)
+  expect(after.indexOf('drift-check')).toBeLessThan(held)
+}
+
+describe('drift between the running stack and the files', () => {
+  it('a running service whose config hash differs holds the route first, then reopens it', async () => {
+    const {host, result, after} = await holdsFor(current =>
+      current.running.set('tempo', {running: true, hash: 'stale'}),
+    )
+    holdsBeforeAnyChange(after)
+    expect(result.heldForUpdate).toBe(true)
+    expect(result.ingest).toBe('open')
+    expect(result.drifted).toEqual(['tempo'])
+    expect(host.setStates()).toEqual(['open', 'held', 'open'])
+  })
+
+  it('a stopped gated service holds the route first', async () => {
+    const {result, after} = await holdsFor(current => {
+      const entry = current.running.get('minio')
+      current.running.set('minio', {running: false, hash: entry?.hash ?? ''})
+    })
+    holdsBeforeAnyChange(after)
+    expect(result.drifted).toEqual(['minio'])
+  })
+
+  it('a gated service with no container holds the route first', async () => {
+    const {result, after} = await holdsFor(current => current.running.delete('collector'))
+    holdsBeforeAnyChange(after)
+    expect(result.drifted).toEqual(['collector'])
+  })
+
+  it('Caddy running an old configuration holds the route first', async () => {
+    const {result, after} = await holdsFor(current => current.running.set('caddy', {running: true, hash: 'old'}))
+    holdsBeforeAnyChange(after)
+    expect(result.drifted).toEqual(['caddy'])
+  })
+
+  it('an ungated service that drifted does not hold the route', async () => {
+    const {result, after} = await holdsFor(current => current.running.set('grafana', {running: true, hash: 'stale'}))
+    expect(after).not.toContain('raw:set-state:held')
+    expect(result.heldForUpdate).toBe(false)
+  })
+
+  it('files match, hashes match and everything runs: the route is not held (the plan requires it)', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    const {result} = await run(host)
+    const after = host.calls.slice(start).map(call => call.step)
+    expect(after).toContain('drift-check')
+    expect(after).not.toContain('raw:set-state:held')
+    expect(after).not.toContain('raw:set-state:open')
+    expect(result.heldForUpdate).toBe(false)
+    expect(result.drifted).toEqual([])
+    expect(result.ingest).toBe('open')
+    expect(host.served).toBe('open')
+    // Never answered 503 to a sender: the route was not touched after it opened.
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('cannot verify the hashes: holds (fail closed)', async () => {
+    const answers: [string, RunResult][] = [
+      ['a failed command', {exitCode: 1, stdout: '', stderr: 'docker: unknown command'}],
+      ['no sentinel', ok('same tempo\n')],
+      ['a service missing from the answer', ok('same caddy\nTRACES_DRIFT_CHECKED\n')],
+      ['an unknown word', ok(`${GATED_SERVICES.map(service => `fine ${service}`).join('\n')}\nTRACES_DRIFT_CHECKED\n`)],
+    ]
+    for (const [label, answer] of answers) {
+      const host = await openStack()
+      host.options.override = step => (step === 'drift-check' ? answer : undefined)
+      const {result} = await run(host)
+      expect({label, held: result.heldForUpdate}).toEqual({label, held: true})
+    }
+  })
+
+  it('is not asked when it cannot matter: a first deploy, a route that is not open, or a change that already holds', async () => {
+    const first = new FakeHost()
+    await run(first)
+    expect(first.count('drift-check')).toBe(0)
+
+    const held = await openStack()
+    held.envState = 'held'
+    held.served = 'held'
+    const start = held.calls.length
+    await run(held)
+    expect(held.calls.slice(start).map(call => call.step)).not.toContain('drift-check')
+
+    const changed = await openStack()
+    const before = changed.calls.length
+    await run(changed, baseEnv({TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${OTHER_DIGEST}`}))
+    expect(changed.calls.slice(before).map(call => call.step)).not.toContain('drift-check')
+  })
+
+  it('compares the running container with `docker compose config --hash`, for every gated service, and changes nothing', () => {
+    const script = driftScript()
+    for (const service of GATED_SERVICES) expect(script).toContain(service)
+    expect(script).toContain('config --hash')
+    expect(script).toContain('com.docker.compose.config-hash')
+    expect(script).toContain('ps -a -q')
+    expect(script).not.toMatch(/\bup\b|\bstart\b|\brestart\b|\bcreate\b|\brm\b/)
+  })
+
+  it('parses only a complete answer', () => {
+    const complete = `${GATED_SERVICES.map(service => `same ${service}`).join('\n')}\nTRACES_DRIFT_CHECKED\n`
+    expect(parseDrift(complete)).toEqual([])
+    expect(parseDrift(complete.replace('same tempo', 'drift tempo hash'))).toEqual(['tempo'])
+    expect(parseDrift(complete.replace('same tempo', 'drift tempo stopped'))).toEqual(['tempo'])
+    expect(parseDrift(complete.replace('same tempo', 'drift tempo missing'))).toEqual(['tempo'])
+    expect(parseDrift(complete.replace('same tempo\n', ''))).toBeUndefined()
+    expect(parseDrift(complete.replace('TRACES_DRIFT_CHECKED\n', ''))).toBeUndefined()
+    expect(parseDrift(complete.replace('same tempo', 'same stranger'))).toBeUndefined()
+  })
+
+  it('reads the ingest state without changing anything', () => {
+    const script = readIngestStateScript()
+    expect(script).toContain('TRACES_INGEST_STATE_READ')
+    expect(script).toContain('.env')
+    expect(script).not.toMatch(/\bmv\b|\brm\b|>>?\s*\S/)
+  })
+})
+
+/** Runs a script with the app directory swapped for a scratch one and `docker` replaced by a shim. */
+function runLocally(script: string, root: string, shim?: string): {out: string; code: number} {
+  const result = Bun.spawnSync(['bash', '-o', 'pipefail', '-c', script.replaceAll(TRACES_APP_DIR, root)], {
+    env: {PATH: `${shim ?? ''}:${process.env.PATH ?? ''}`},
+  })
+  return {out: result.stdout.toString(), code: result.exitCode}
+}
+
+function scratchHost(): {root: string; shim: string; cleanup: () => void} {
+  const root = mkdtempSync(join(tmpdir(), 'traces-script-test-'))
+  const shim = join(root, 'shim')
+  mkdirSync(shim)
+  writeFileSync(
+    join(shim, 'docker'),
+    `#!/bin/bash
+case "$1" in
+compose)
+  shift
+  while [ "$1" != config ] && [ "$1" != ps ]; do shift; done
+  if [ "$1" = config ]; then
+    [ -f "${shim}/no-hash" ] && exit 1
+    echo "$3 hash-$3"
+  else
+    [ -f "${shim}/missing-$4" ] || echo "cid-$4"
+  fi ;;
+inspect)
+  svc="\${4#cid-}"
+  case "$3" in
+    *Running*) if [ -f "${shim}/stopped-$svc" ]; then echo false; else echo true; fi ;;
+    *) if [ -f "${shim}/stale-$svc" ]; then echo old-hash; else echo "hash-$svc"; fi ;;
+  esac ;;
+esac
+`,
+  )
+  chmodSync(join(shim, 'docker'), 0o755)
+  return {root, shim, cleanup: () => rmSync(root, {recursive: true, force: true})}
+}
+
+describe('scripts run for real against a scratch app directory', () => {
+  it('the drift probe reports same, hash, stopped and missing from what docker says, and fails when it cannot ask', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      const probe = (): ReturnType<typeof parseDrift> | 'failed' => {
+        const result = runLocally(driftScript(), root, shim)
+        return result.code === 0 ? parseDrift(result.out) : 'failed'
+      }
+      expect(probe()).toEqual([])
+
+      writeFileSync(join(shim, 'stale-tempo'), '')
+      writeFileSync(join(shim, 'stopped-minio'), '')
+      writeFileSync(join(shim, 'missing-collector'), '')
+      expect(probe()).toEqual(['collector', 'minio', 'tempo'])
+
+      writeFileSync(join(shim, 'no-hash'), '')
+      expect(probe()).toBe('failed')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('reads the ingest state out of .env, and none when there is no .env', () => {
+    const {root, cleanup} = scratchHost()
+    try {
+      expect(runLocally(readIngestStateScript(), root).out).toBe('ingest=none\nTRACES_INGEST_STATE_READ\n')
+      writeFileSync(join(root, '.env'), 'A=1\nTRACES_INGEST_STATE=held\n')
+      expect(runLocally(readIngestStateScript(), root).out).toBe('ingest=held\nTRACES_INGEST_STATE_READ\n')
+      writeFileSync(join(root, '.env'), 'A=1\n')
+      expect(runLocally(readIngestStateScript(), root).out).toBe('ingest=off\nTRACES_INGEST_STATE_READ\n')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('the host-state probe reports the marker and the pending restarts from the contract paths', () => {
+    const {root, cleanup} = scratchHost()
+    try {
+      writeFileSync(join(root, '.env'), 'TRACES_INGEST_STATE=open\n')
+      const clean = parseHostState(runLocally(hostStateScript(), root).out)
+      expect(clean).toMatchObject({hasEnv: true, marker: false, ingest: 'open', pendingRestarts: []})
+
+      writeFileSync(join(root, '.deploy-in-progress'), '2023-11-14T22:13:20.000Z\n')
+      writeFileSync(join(root, '.pending-restarts'), 'collector\ncompose\n')
+      const dirty = parseHostState(runLocally(hostStateScript(), root).out)
+      expect(dirty).toMatchObject({marker: true, pendingRestarts: ['collector', 'compose']})
+    } finally {
+      cleanup()
+    }
   })
 })
 
@@ -1371,7 +1899,7 @@ describe('the collector image and the host', () => {
   })
 
   it('carries on when the image prune fails', async () => {
-    const host = new FakeHost({
+    const host: FakeHost = new FakeHost({
       override: step => (step === 'prune-images' ? {exitCode: 1, stdout: '', stderr: 'busy'} : undefined),
     })
     const {result, logs} = await run(host)

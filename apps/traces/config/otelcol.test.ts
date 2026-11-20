@@ -220,41 +220,55 @@ describe('collector Tempo branch', () => {
     for (const key of CONTENT_KEYS) expect(allowedKeys).not.toContain(key)
   })
 
-  it('lists only plain keys: no duplicates, no patterns, nothing from Langfuse content', () => {
+  // Deliberately a copy of the YAML list: changing what reaches Tempo takes a second, deliberate edit here.
+  const APPROVED_KEYS = [
+    // Operation, provider, model
+    'gen_ai.operation.name',
+    'gen_ai.provider.name',
+    'gen_ai.system',
+    'gen_ai.request.model',
+    'gen_ai.response.model',
+    // Token counts
+    'gen_ai.usage.input_tokens',
+    'gen_ai.usage.output_tokens',
+    'gen_ai.usage.total_tokens',
+    'gen_ai.usage.cache_read.input_tokens',
+    'gen_ai.usage.cache_creation.input_tokens',
+    'gen_ai.usage.reasoning.output_tokens',
+    'gen_ai.usage.prompt_tokens',
+    'gen_ai.usage.completion_tokens',
+    // Finish reasons
+    'gen_ai.response.finish_reasons',
+    // Tool name and call id
+    'gen_ai.tool.name',
+    'gen_ai.tool.call.id',
+    'gen_ai.tool.type',
+    // Agent name
+    'gen_ai.agent.name',
+    'gen_ai.agent.id',
+    // Session id, under each name Langfuse and the GenAI conventions use
+    'langfuse.session.id',
+    'session.id',
+    'gen_ai.conversation.id',
+    // Run identity fields
+    'langfuse.trace.metadata.repository',
+    'langfuse.trace.metadata.run_id',
+    'langfuse.trace.metadata.run_attempt',
+    'langfuse.trace.metadata.job',
+    'langfuse.trace.metadata.trigger',
+    // Error type, and the exception event's type and message
+    'error.type',
+    'exception.type',
+    'exception.message',
+    // Resource attributes
+    'sender.group',
+    'service.name',
+  ]
+
+  it('allows exactly the approved keys: no extras, none missing, no duplicates', () => {
+    expect(new Set(APPROVED_KEYS).size).toBe(APPROVED_KEYS.length)
     expect(new Set(allowedKeys).size).toBe(allowedKeys.length)
-    for (const key of allowedKeys) {
-      expect(key).toMatch(/^[a-z][a-z0-9_.]*$/)
-      expect(key).not.toMatch(/\.(input|output)$/)
-      expect(key).not.toMatch(/^langfuse\.observation\./)
-    }
-  })
-
-  it('keeps the resource attributes Grafana and the sender stamp need', () => {
-    // The processor covers resource, scope, span and span-event attributes, so these must be listed.
-    expect(allowedKeys).toContain('sender.group')
-    expect(allowedKeys).toContain('service.name')
-  })
-
-  it('keeps the structural keys the plan names', () => {
-    for (const key of [
-      'gen_ai.operation.name',
-      'gen_ai.provider.name',
-      'gen_ai.request.model',
-      'gen_ai.usage.input_tokens',
-      'gen_ai.usage.output_tokens',
-      'gen_ai.response.finish_reasons',
-      'gen_ai.tool.name',
-      'gen_ai.tool.call.id',
-      'gen_ai.agent.name',
-      'langfuse.session.id',
-      'langfuse.trace.metadata.repository',
-      'langfuse.trace.metadata.run_id',
-      'error.type',
-      'exception.type',
-      'exception.message',
-    ]) {
-      expect(allowedKeys).toContain(key)
-    }
+    expect([...allowedKeys].sort()).toEqual([...APPROVED_KEYS].sort())
   })
 
   it('does not sanitize span names or attribute values', () => {

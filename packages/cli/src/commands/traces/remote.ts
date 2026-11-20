@@ -174,6 +174,41 @@ const COMPOSE = `docker compose --project-directory ${TRACES_APP_DIR}`
 
 export const DETAIL_SENTINEL = 'TRACES_DETAIL_END'
 
+// The host's deploy and ingest-state files. Repeated from `apps/traces/src/host.ts` (`packages/` never imports
+// `apps/`); a test pins each value to that file.
+
+/** Written by a deploy before its first change and removed as its last step. A failed deploy leaves it. */
+export const TRACES_DEPLOY_MARKER = `${TRACES_APP_DIR}/.deploy-in-progress`
+
+/** Restarts a failed deploy left undone. */
+export const TRACES_PENDING_RESTARTS = `${TRACES_APP_DIR}/.pending-restarts`
+
+/** `flock` file taken by every script that reads-then-writes the ingest state and recreates Caddy. */
+export const TRACES_INGEST_LOCK = `${TRACES_APP_DIR}/.ingest.lock`
+
+/** Printed, with exit 1 and nothing changed, when the ingest lock was not free within 30 seconds. */
+export const LOCK_BUSY_SENTINEL = 'TRACES_INGEST_LOCK_BUSY'
+
+/** Printed (exit 0) by the open script when a deploy is running or did not finish. Nothing was changed. */
+export const OPEN_REFUSED_SENTINEL = 'TRACES_INGEST_OPEN_REFUSED'
+
+export const DEPLOY_FINISHED_SENTINEL = 'TRACES_DEPLOY=finished'
+export const DEPLOY_UNFINISHED_SENTINEL = 'TRACES_DEPLOY=unfinished'
+
+const DEPLOY_UNFINISHED_TEST = `[ -e ${TRACES_DEPLOY_MARKER} ] || [ -e ${TRACES_PENDING_RESTARTS} ]`
+
+/**
+ * The ingest lock, taken before anything is read or written and held until the script exits. Descriptor 9 holds
+ * the lock file open and `flock -w 30` takes the lock on it, so the lock is released by the shell ending, however
+ * it ends. A lock not free in 30 seconds prints the busy sentinel, exits 1 and has changed nothing. The only
+ * thing ever redirected to is the lock file: a regular file under the app directory.
+ */
+const LOCK_INGEST = [
+  `l=${TRACES_INGEST_LOCK}`,
+  'exec 9>>"$l"',
+  `flock -w 30 9 || { echo ${LOCK_BUSY_SENTINEL}; exit 1; }`,
+]
+
 export const REMOTE_COMMANDS = {
   composePs: `${COMPOSE} ps --all --format json`,
   /** The reporter's loopback listener, reached by exec because nothing publishes it. */
@@ -182,13 +217,25 @@ export const REMOTE_COMMANDS = {
   /** The ingest state as the host's `.env` says it. Prints `TRACES_INGEST_STATE=<state>` or fails. */
   readIngestState: `test -f ${TRACES_APP_DIR}/.env && s=$(sed -n 's/^TRACES_INGEST_STATE=//p' ${TRACES_APP_DIR}/.env | tail -n 1) && echo "TRACES_INGEST_STATE=\${s:-off}"`,
   /**
+   * Whether a deploy is running or did not finish: the marker or the pending-restarts file exists. Prints
+   * `TRACES_DEPLOY=unfinished` or `TRACES_DEPLOY=finished`. Reads only; takes no lock.
+   */
+  readDeployState: `if ${DEPLOY_UNFINISHED_TEST}; then echo ${DEPLOY_UNFINISHED_SENTINEL}; else echo ${DEPLOY_FINISHED_SENTINEL}; fi`,
+  /**
    * Replace the TRACES_INGEST_STATE line of `.env` with the line on stdin, atomically, and recreate only
    * the Caddy container, which reads the state when it starts. Prints the sentinel only after both steps.
+   *
+   * It runs under `flock -w 30` on the ingest lock, so no other transition (a deploy's hold, another command)
+   * interleaves. Only opening is restricted: inside that same locked script, opening prints
+   * `TRACES_INGEST_OPEN_REFUSED` and changes nothing when the deploy marker or the pending-restarts file
+   * exists, so there is no gap between the check and the write. Holding is never refused.
    */
   writeIngestState: (state: IngestState): string =>
     [
       'set -e',
       `cd ${TRACES_APP_DIR}`,
+      ...LOCK_INGEST,
+      ...(state === 'open' ? [`if ${DEPLOY_UNFINISHED_TEST}; then echo ${OPEN_REFUSED_SENTINEL}; exit 0; fi`] : []),
       'test -f .env',
       't=$(mktemp ./.env.XXXXXX)',
       `{ grep -v '^TRACES_INGEST_STATE=' .env || true; cat; } > "$t"`,

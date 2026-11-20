@@ -6,7 +6,7 @@
 import type {Runner, RunResult} from '../server/provision'
 import type {DeployDeps, DeployInputs, IngestState} from './deploy'
 
-import {REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
+import {GATED_SERVICES, REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
 import {SENDER_GROUPS} from './host'
 import {OBJECT_STORE_PREFIXES, RETENTION_TABLES} from './retention'
 
@@ -36,6 +36,11 @@ export interface FakeOptions {
   bootstrapStatus?: string
   /** Setting the ingest state succeeds but Caddy keeps serving what it served. */
   stateIgnored?: boolean
+  /**
+   * The remote command that sets this state runs and takes effect, but its reply is lost (ssh drops): the caller
+   * sees a failed command. Fires once.
+   */
+  loseReplyOn?: IngestState
   /** Mutations of the reporter's verdict. */
   checkStatus?: Record<string, 'pass' | 'warn' | 'fail' | 'unknown'>
   /** Seconds the reporter's verdict is dated after the restart (negative: older than the restart). */
@@ -64,6 +69,11 @@ export class FakeHost {
   /** Token files, by group. `undefined` is absent. */
   tokens = new Map<string, string | undefined>()
   pendingRestarts: string[] = []
+  /** The deploy marker's content, when it exists. */
+  marker: string | undefined
+  /** What each compose service is running: whether it runs, and its `config-hash` label. */
+  running = new Map<string, {running: boolean; hash: string}>()
+  private replyLost = false
   bootstrapPending: string | undefined
   /** Langfuse holds a live full-access bootstrap key. */
   bootstrapKeyLive = false
@@ -127,9 +137,16 @@ export class FakeHost {
     if (step === 'raw:set-state') {
       const state = /^TRACES_INGEST_STATE=(off|held|open)$/m.exec(stdin)?.[1] as IngestState | undefined
       if (state === undefined) return fail('bad state line')
-      this.envState = state
-      if (!this.options.stateIgnored) this.served = state
       call.step = `raw:set-state:${state}`
+      this.envState = state
+      if (!this.options.stateIgnored) {
+        this.served = state
+        this.running.set('caddy', {running: true, hash: this.expectedHash('caddy')})
+      }
+      if (this.options.loseReplyOn === state && !this.replyLost) {
+        this.replyLost = true
+        return {exitCode: 255, stdout: '', stderr: 'client_loop: send disconnect: Broken pipe'}
+      }
       return ok(`TRACES_INGEST_STATE_SET=${state}\n`)
     }
     if (step === 'raw:reporter-detail') {
@@ -161,6 +178,7 @@ export class FakeHost {
         return ok(
           [
             `has_env=${this.env === undefined ? 0 : 1}`,
+            `marker=${this.marker === undefined ? 0 : 1}`,
             `ingest=${this.envState ?? 'none'}`,
             `env_bootstrap_public=${pair?.[0] ?? ''}`,
             `env_bootstrap_secret=${pair?.[1] ?? ''}`,
@@ -200,6 +218,8 @@ export class FakeHost {
         if (path === '.env') {
           this.env = stdin
           this.envState = /TRACES_INGEST_STATE=%s.*? (off|held|open) >>/.exec(command)?.[1] as IngestState
+        } else if (path === '.deploy-in-progress') {
+          this.marker = stdin
         } else if (path === '.pending-restarts') {
           this.pendingRestarts = stdin.split('\n').filter(line => line !== '')
         } else if (path === 'secrets/bootstrap-pending') {
@@ -208,6 +228,22 @@ export class FakeHost {
           this.files.set(path, stdin)
         }
         return ok('TRACES_FILE_WRITTEN\n')
+      }
+      case step === 'remove:.deploy-in-progress': {
+        this.marker = undefined
+        return ok('TRACES_REMOVED\n')
+      }
+      case step === 'ingest-state': {
+        return ok(`ingest=${this.envState ?? 'none'}\nTRACES_INGEST_STATE_READ\n`)
+      }
+      case step === 'drift-check': {
+        const lines = GATED_SERVICES.map(service => {
+          const entry = this.running.get(service)
+          if (entry === undefined) return `drift ${service} missing`
+          if (!entry.running) return `drift ${service} stopped`
+          return entry.hash === this.expectedHash(service) ? `same ${service}` : `drift ${service} hash`
+        })
+        return ok(`${lines.join('\n')}\nTRACES_DRIFT_CHECKED\n`)
       }
       case step === 'remove:.pending-restarts': {
         this.pendingRestarts = []
@@ -261,6 +297,15 @@ export class FakeHost {
     }
   }
 
+  /** What `docker compose config --hash <service>` would answer for the files on the host now. */
+  expectedHash(service: string): string {
+    const env = (this.env ?? '')
+      .split('\n')
+      .filter(line => !line.startsWith('TRACES_INGEST_STATE='))
+      .join('\n')
+    return `${service}:${Bun.hash(`${this.files.get('docker-compose.yaml') ?? ''}\u0000${env}`).toString(16)}`
+  }
+
   private envBootstrapPair(): [string, string] | undefined {
     const publicKey = /^LANGFUSE_INIT_PROJECT_PUBLIC_KEY=(.+)$/m.exec(this.env ?? '')?.[1]
     const secretKey = /^LANGFUSE_INIT_PROJECT_SECRET_KEY=(.+)$/m.exec(this.env ?? '')?.[1]
@@ -288,6 +333,8 @@ export class FakeHost {
     }
     if (services.includes('health-reporter')) this.reporterAt = this.clock + (this.options.verdictOffset ?? 10)
     if (services.includes('caddy') && this.envState !== undefined) this.served = this.envState
+    // Compose converges what it is asked to start: every named service runs what the files now say.
+    for (const service of services) this.running.set(service, {running: true, hash: this.expectedHash(service)})
     return ok(`epoch=${this.clock}\nTRACES_STEP_OK:${step}\n`)
   }
 

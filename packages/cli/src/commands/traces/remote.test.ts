@@ -1,14 +1,21 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {recordingSpawn} from './__fixtures__/remote-fixture'
+import {CAN_LOCK, createScratchHost, recordingSpawn} from './__fixtures__/remote-fixture'
 import {TRACES_APP_DIR} from './host'
 import {
   buildRemoteArgv,
   buildTunnelArgv,
+  DEPLOY_FINISHED_SENTINEL,
+  DEPLOY_UNFINISHED_SENTINEL,
   hasSentinel,
   ingestStateSentinel,
+  LOCK_BUSY_SENTINEL,
+  OPEN_REFUSED_SENTINEL,
   REMOTE_COMMANDS,
   runRemote,
+  TRACES_DEPLOY_MARKER,
+  TRACES_INGEST_LOCK,
+  TRACES_PENDING_RESTARTS,
   type IngestState,
 } from './remote'
 
@@ -29,16 +36,21 @@ const commands: [string, string][] = [
   ['composePs', REMOTE_COMMANDS.composePs],
   ['reporterDetail', REMOTE_COMMANDS.reporterDetail],
   ['readIngestState', REMOTE_COMMANDS.readIngestState],
+  ['readDeployState', REMOTE_COMMANDS.readDeployState],
   ['logs', REMOTE_COMMANDS.logs('collector', 100)],
   ['write held', REMOTE_COMMANDS.writeIngestState('held')],
   ['write open', REMOTE_COMMANDS.writeIngestState('open')],
 ]
 
+/** The one descriptor redirect the ingest scripts make: descriptor 9 onto the lock file. */
+const LOCK_REDIRECT = 'exec 9>>"$l"'
+const withoutLockRedirect = (command: string): string => command.replace(LOCK_REDIRECT, '')
+
 describe('remote command hygiene', () => {
   it.each(commands)('%s: no redirect to the null device or any device file, no deletion', (_name, command) => {
     expect(command).not.toContain('/dev/')
     expect(command).not.toMatch(/\d?>&?\s*\/dev/)
-    expect(command).not.toMatch(/(^|[\s;&|])\d>/)
+    expect(withoutLockRedirect(command)).not.toMatch(/(^|[\s;&|])\d>/)
     expect(command).not.toContain('&>')
     expect(command).not.toMatch(/\brm\b/)
   })
@@ -49,11 +61,13 @@ describe('remote command hygiene', () => {
     expect(command).not.toContain('`')
   })
 
-  it('only the state write redirects at all, and only into its temporary file', () => {
+  it('only the state write redirects at all: into its temporary file, and descriptor 9 onto the lock file', () => {
     for (const [name, command] of commands) {
-      const redirects = [...command.matchAll(/>/g)].length
+      const redirects = [...withoutLockRedirect(command).matchAll(/>/g)].length
       if (name.startsWith('write ')) {
         expect(command).toContain('> "$t"')
+        expect(command).toContain(LOCK_REDIRECT)
+        expect(command).toContain(`l=${TRACES_INGEST_LOCK}`)
         expect(redirects).toBe(1)
       } else {
         expect(redirects).toBe(0)
@@ -100,6 +114,194 @@ describe('remote command hygiene', () => {
       'exec -T health-reporter wget -q -O - http://127.0.0.1:8081/detail',
     )
     expect(REMOTE_COMMANDS.reporterDetail.endsWith('echo TRACES_DETAIL_END')).toBe(true)
+  })
+})
+
+// ─── The ingest lock and the deploy hold ──────────────────────────────────────────────────────
+
+describe('the ingest state scripts take the ingest lock', () => {
+  const open = REMOTE_COMMANDS.writeIngestState('open')
+  const hold = REMOTE_COMMANDS.writeIngestState('held')
+  const take = `flock -w 30 9 || { echo ${LOCK_BUSY_SENTINEL}; exit 1; }`
+  const refusal = `if [ -e ${TRACES_DEPLOY_MARKER} ] || [ -e ${TRACES_PENDING_RESTARTS} ]; then echo ${OPEN_REFUSED_SENTINEL}; exit 0; fi`
+
+  it.each([
+    ['open', open],
+    ['hold', hold],
+  ])(
+    '%s takes the lock for 30 s before it reads or writes anything, and a busy lock has its own sentinel',
+    (_n, command) => {
+      expect(command).toContain(`l=${TRACES_INGEST_LOCK}`)
+      expect(command).toContain(take)
+      expect(command.indexOf(take)).toBeLessThan(command.indexOf('test -f .env'))
+      expect(command.indexOf(take)).toBeLessThan(command.indexOf('mktemp'))
+      expect(command.indexOf(take)).toBeLessThan(command.indexOf('mv "$t" .env'))
+      expect(command).not.toContain('flock -u')
+      expect(command).not.toContain('flock -n')
+    },
+  )
+
+  it('open refuses on the host, inside the same locked script, after the lock and before any write', () => {
+    expect(open).toContain(refusal)
+    expect(open.indexOf(take)).toBeLessThan(open.indexOf(refusal))
+    expect(open.indexOf(refusal)).toBeLessThan(open.indexOf('mktemp'))
+    expect(open.indexOf(refusal)).toBeLessThan(open.indexOf('mv "$t" .env'))
+    expect(open.indexOf(refusal)).toBeLessThan(open.indexOf(' up -d '))
+    // One script: the check and the write are not two ssh calls.
+    expect(open).toContain(`echo ${ingestStateSentinel('open')}`)
+  })
+
+  it('hold never looks at the deploy files', () => {
+    expect(hold).not.toContain(TRACES_DEPLOY_MARKER)
+    expect(hold).not.toContain(TRACES_PENDING_RESTARTS)
+    expect(hold).not.toContain(OPEN_REFUSED_SENTINEL)
+  })
+
+  it('the deploy-state probe reads only: no lock, no write', () => {
+    const probe = REMOTE_COMMANDS.readDeployState
+    expect(probe).toContain(TRACES_DEPLOY_MARKER)
+    expect(probe).toContain(TRACES_PENDING_RESTARTS)
+    expect(probe).not.toContain('flock')
+    expect(probe).toContain(DEPLOY_UNFINISHED_SENTINEL)
+    expect(probe).toContain(DEPLOY_FINISHED_SENTINEL)
+  })
+
+  it('the sentinels are distinct from each other and from the state sentinels', () => {
+    const all = [
+      LOCK_BUSY_SENTINEL,
+      OPEN_REFUSED_SENTINEL,
+      DEPLOY_FINISHED_SENTINEL,
+      DEPLOY_UNFINISHED_SENTINEL,
+      ingestStateSentinel('held'),
+      ingestStateSentinel('open'),
+    ]
+    expect(new Set(all).size).toBe(all.length)
+  })
+})
+
+describe('the ingest state scripts, run for real on a scratch host', () => {
+  const OPEN_STDIN = 'TRACES_INGEST_STATE=open\n'
+  const HELD_STDIN = 'TRACES_INGEST_STATE=held\n'
+  const cleanups: (() => void)[] = []
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
+  function scratch() {
+    const host = createScratchHost()
+    cleanups.push(host.cleanup)
+    return host
+  }
+
+  const requiresLock = CAN_LOCK ? it : it.skip
+
+  requiresLock('open with neither file present writes the line and recreates only Caddy', () => {
+    const host = scratch()
+    const result = host.run(REMOTE_COMMANDS.writeIngestState('open'), OPEN_STDIN)
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain(ingestStateSentinel('open'))
+    expect(host.env()).toBe('FOO=bar\nTRACES_INGEST_STATE=open\n')
+    expect(host.dockerCalls()).toEqual([
+      `compose --project-directory ${host.dir} up -d --force-recreate --no-deps caddy`,
+    ])
+    expect(host.strays()).toEqual([])
+  })
+
+  requiresLock.each([
+    ['the deploy marker', '.deploy-in-progress'],
+    ['the pending-restarts file', '.pending-restarts'],
+  ])('open with %s present is refused, exit 0, and changes nothing', (_label, file) => {
+    const host = scratch()
+    host.touch(file)
+    const result = host.run(REMOTE_COMMANDS.writeIngestState('open'), OPEN_STDIN)
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain(OPEN_REFUSED_SENTINEL)
+    expect(result.stdout).not.toContain(ingestStateSentinel('open'))
+    expect(host.env()).toBe('FOO=bar\nTRACES_INGEST_STATE=held\n')
+    expect(host.dockerCalls()).toEqual([])
+    expect(host.strays()).toEqual([])
+  })
+
+  requiresLock('open with both files present is refused too', () => {
+    const host = scratch()
+    host.touch('.deploy-in-progress')
+    host.touch('.pending-restarts')
+    expect(host.run(REMOTE_COMMANDS.writeIngestState('open'), OPEN_STDIN).stdout).toContain(OPEN_REFUSED_SENTINEL)
+    expect(host.dockerCalls()).toEqual([])
+  })
+
+  requiresLock.each([
+    ['the deploy marker', ['.deploy-in-progress']],
+    ['the pending-restarts file', ['.pending-restarts']],
+    ['both', ['.deploy-in-progress', '.pending-restarts']],
+    ['neither', []],
+  ])('hold with %s present is never refused', (_label, files) => {
+    const host = scratch()
+    for (const file of files) host.touch(file)
+    const result = host.run(REMOTE_COMMANDS.writeIngestState('held'), HELD_STDIN)
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain(ingestStateSentinel('held'))
+    expect(result.stdout).not.toContain(OPEN_REFUSED_SENTINEL)
+    expect(host.dockerCalls()).toHaveLength(1)
+  })
+
+  requiresLock('a lock another process holds makes open fail with its own sentinel and change nothing', async () => {
+    const host = scratch()
+    const release = await host.holdLock(TRACES_INGEST_LOCK)
+    try {
+      // The script waits 30 s; the test shortens the wait. The text assertions above pin the real value.
+      const command = REMOTE_COMMANDS.writeIngestState('open').replace('flock -w 30 9', 'flock -w 1 9')
+      const result = host.run(command, OPEN_STDIN)
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toContain(LOCK_BUSY_SENTINEL)
+      expect(host.env()).toBe('FOO=bar\nTRACES_INGEST_STATE=held\n')
+      expect(host.dockerCalls()).toEqual([])
+    } finally {
+      release()
+    }
+  })
+
+  requiresLock('a lock another process holds makes hold fail the same way, not silently', async () => {
+    const host = scratch()
+    const release = await host.holdLock(TRACES_INGEST_LOCK)
+    try {
+      const command = REMOTE_COMMANDS.writeIngestState('held').replace('flock -w 30 9', 'flock -w 1 9')
+      const result = host.run(command, HELD_STDIN)
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toContain(LOCK_BUSY_SENTINEL)
+      expect(host.dockerCalls()).toEqual([])
+    } finally {
+      release()
+    }
+  })
+
+  it.each([
+    ['neither file', [], DEPLOY_FINISHED_SENTINEL],
+    ['the marker', ['.deploy-in-progress'], DEPLOY_UNFINISHED_SENTINEL],
+    ['the pending restarts', ['.pending-restarts'], DEPLOY_UNFINISHED_SENTINEL],
+  ] as const)('the deploy-state probe with %s prints the matching sentinel', (_label, files, sentinel) => {
+    const host = scratch()
+    for (const file of files) host.touch(file)
+    const result = host.run(REMOTE_COMMANDS.readDeployState)
+    expect(hasSentinel(result, sentinel)).toBe(true)
+    expect(result.stdout.trim().split('\n')).toHaveLength(1)
+  })
+})
+
+describe('constants match the app', async () => {
+  const hostSource = await Bun.file(new URL('../../../../../apps/traces/src/host.ts', import.meta.url)).text()
+  const expand = (value: string): string => value.replaceAll(['$', '{TRACES_APP_DIR}'].join(''), TRACES_APP_DIR)
+  const valueOf = (name: string): string | undefined => {
+    const match = new RegExp(`${name}\\s*=\\s*(['"\`])(.*?)\\1`).exec(hostSource)
+    return match?.[2] === undefined ? undefined : expand(match[2])
+  }
+
+  it.each([
+    ['TRACES_DEPLOY_MARKER', TRACES_DEPLOY_MARKER, '/mnt/traces/app/.deploy-in-progress'],
+    ['TRACES_PENDING_RESTARTS', TRACES_PENDING_RESTARTS, '/mnt/traces/app/.pending-restarts'],
+    ['TRACES_INGEST_LOCK', TRACES_INGEST_LOCK, '/mnt/traces/app/.ingest.lock'],
+  ])('%s is the path apps/traces names', (name, copy, contract) => {
+    expect(copy).toBe(contract)
+    expect(valueOf(name)).toBe(copy)
   })
 })
 

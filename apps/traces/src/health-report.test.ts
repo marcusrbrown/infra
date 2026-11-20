@@ -857,6 +857,164 @@ describe('every probe fails closed', () => {
   })
 })
 
+// ─── Deadlines ────────────────────────────────────────────────────────────────
+
+// A promise that never settles stands for a dependency that accepted the connection and went silent. It ignores
+// the abort signal on purpose: a deadline that relies on the dependency honouring a signal is not a deadline.
+const NEVER: Promise<never> = new Promise<never>(() => undefined)
+
+const SMALL = {probeTimeoutMs: 15, runDeadlineMs: 4000} as const
+
+describe('every probe has a deadline', () => {
+  it('the run deadline is shorter than the interval, so a stuck run cannot hold the guard past the next tick', () => {
+    expect(THRESHOLDS.runDeadlineMs).toBeLessThan(THRESHOLDS.intervalMs)
+    expect(THRESHOLDS.probeTimeoutMs).toBeLessThan(THRESHOLDS.runDeadlineMs)
+  })
+
+  it('an object-store listing that never settles fails that check within the bound and nothing else', async () => {
+    const world = harness()
+    const deps: ReporterDeps = {
+      ...world.deps,
+      limits: SMALL,
+      objectStore: () => ({childPrefixes: () => NEVER, firstKey: () => NEVER}),
+    }
+    const reporter = createReporter(deps)
+    const started = performance.now()
+    await reporter.runOnce()
+    expect(performance.now() - started).toBeLessThan(2000)
+
+    const entry = check(reporter.detail(), 'data-age-object-store')
+    expect(entry.status).not.toBe('pass')
+    expect(entry.detail).toContain('timeout')
+    expect(check(reporter.detail(), 'data-age-clickhouse').status).toBe('pass')
+    expect(reporter.health().status).toBe(503)
+  })
+
+  it('a first-key read that never settles is bounded too', async () => {
+    const world = harness()
+    const deps: ReporterDeps = {
+      ...world.deps,
+      limits: SMALL,
+      objectStore: () => ({childPrefixes: async () => ['events/otel/project-a/'], firstKey: () => NEVER}),
+    }
+    const reporter = createReporter(deps)
+    await reporter.runOnce()
+    const entry = check(reporter.detail(), 'data-age-object-store')
+    expect(entry.status).not.toBe('pass')
+    expect(entry.detail).toContain('timeout')
+  })
+
+  // Each row hangs one dependency and names the checks that must not be passing afterwards.
+  const hangs: [string, (url: string, body: string) => boolean, string[]][] = [
+    ['the collector health read', url => url === ENDPOINTS.collectorHealth, ['collector-health']],
+    ['the collector metrics read', url => url === ENDPOINTS.collectorMetrics, ['collector-queues']],
+    ['the Tempo readiness read', url => url === ENDPOINTS.tempoReady, ['tempo-ready']],
+    ['the Langfuse web read', url => url === ENDPOINTS.langfuseWeb, ['langfuse-web']],
+    ['the Langfuse worker read', url => url === ENDPOINTS.langfuseWorker, ['langfuse-worker']],
+    ['the canary post', url => url === ENDPOINTS.canaryReceiver, ['canary-send']],
+    [
+      'the ClickHouse age query',
+      (url, body) => url.startsWith(ENDPOINTS.clickhouse) && body.includes('count() AS n'),
+      ['data-age-clickhouse'],
+    ],
+    [
+      'the ClickHouse canary read',
+      (url, body) => url.startsWith(ENDPOINTS.clickhouse) && body.includes('SELECT * FROM'),
+      ['canary-langfuse'],
+    ],
+    ['the Tempo trace read', url => url.startsWith(ENDPOINTS.tempoTraceBase), ['canary-tempo']],
+  ]
+
+  it.each(hangs)('%s that never settles fails its check within the bound', async (_label, matches, ids) => {
+    const world = harness()
+    const deps: ReporterDeps = {
+      ...world.deps,
+      limits: SMALL,
+      fetch: (url, init) =>
+        matches(url, typeof init?.body === 'string' ? init.body : '') ? NEVER : world.deps.fetch(url, init),
+    }
+    const reporter = createReporter(deps)
+    const started = performance.now()
+    await reporter.runOnce()
+    expect(performance.now() - started).toBeLessThan(3500)
+    for (const id of ids) {
+      const entry = check(reporter.detail(), id)
+      expect(entry.status).not.toBe('pass')
+      expect(entry.detail).toContain('timeout')
+    }
+    expect(reporter.health().status).toBe(503)
+  })
+
+  it('a response whose body never arrives is bounded too', async () => {
+    const world = harness()
+    const stalled = new Response(new ReadableStream({start: () => undefined}), {status: 200})
+    const deps: ReporterDeps = {
+      ...world.deps,
+      limits: SMALL,
+      fetch: (url, init) => (url === ENDPOINTS.tempoReady ? Promise.resolve(stalled) : world.deps.fetch(url, init)),
+    }
+    const reporter = createReporter(deps)
+    await reporter.runOnce()
+    expect(check(reporter.detail(), 'tempo-ready').status).not.toBe('pass')
+    expect(check(reporter.detail(), 'tempo-ready').detail).toContain('timeout')
+  })
+
+  it.each([
+    ['a secret file read', {readText: () => NEVER}, 'data-age-clickhouse'],
+    ['the volume statfs', {statfs: () => NEVER}, 'volume-space'],
+    ['the Tempo block listing', {readTempoBlockMetas: () => NEVER}, 'data-age-tempo'],
+  ] as const)('%s that never settles fails its check', async (_label, override, id) => {
+    const world = harness()
+    const deps: ReporterDeps = {...world.deps, limits: SMALL, ...override}
+    const reporter = createReporter(deps)
+    await reporter.runOnce()
+    expect(check(reporter.detail(), id).status).not.toBe('pass')
+    expect(reporter.health().status).toBe(503)
+  })
+})
+
+describe('a run has an overall deadline', () => {
+  it('a stuck run is cut off with a failing verdict, and the next scheduled run starts and recovers', async () => {
+    const world = harness({tempoPlaces: 'none'})
+    let stuck = true
+    // The canary waits on `sleep` while Tempo has no trace. No per-probe deadline covers a hung sleep, so only
+    // the run deadline can free the single-flight guard.
+    const deps: ReporterDeps = {
+      ...world.deps,
+      limits: {probeTimeoutMs: 1000, runDeadlineMs: 60},
+      sleep: ms => (stuck ? NEVER : world.deps.sleep(ms)),
+    }
+    const reporter = createReporter(deps)
+
+    const started = performance.now()
+    await reporter.runOnce()
+    expect(performance.now() - started).toBeLessThan(1500)
+    expect(reporter.health().status).toBe(503)
+    const verdict = record(JSON.parse(reporter.detail()), 'detail')
+    expect(verdict.ran).toBe(true)
+    expect(verdict.ok).toBe(false)
+    expect(check(reporter.detail(), 'run-deadline').status).toBe('fail')
+
+    // The guard is free: the next run starts a fresh probe round and the verdict recovers.
+    const before = world.requests.length
+    stuck = false
+    world.behaviour.tempoPlaces = TEMPO_KEPT_PLACES
+    await reporter.runOnce()
+    expect(world.requests.length).toBeGreaterThan(before)
+    expect(reporter.health().status).toBe(200)
+    expect(reporter.detail()).not.toContain('run-deadline')
+  })
+
+  it('overlapping callers still share one run while it is in flight', async () => {
+    const world = harness()
+    const reporter = createReporter({...world.deps, limits: SMALL})
+    const first = reporter.runOnce()
+    const second = reporter.runOnce()
+    expect(second).toBe(first)
+    await first
+  })
+})
+
 // ─── Counters across runs ─────────────────────────────────────────────────────
 
 describe('counters across runs', () => {

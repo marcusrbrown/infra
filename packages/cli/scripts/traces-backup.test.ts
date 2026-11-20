@@ -777,14 +777,15 @@ describe('backup: API failures name the stage and the status, nothing else', () 
 })
 
 describe('backup: not deployed yet', () => {
-  // Mutation target: letting the unset secret or variable fall through to the API (or to a failure) fails these.
+  // Only an unset TRACES_DOMAIN means "not deployed". Mutation target: reading a missing token as not deployed passes
+  // the green case below and fails the red one.
   it.each([
-    [{TRACES_SNAPSHOT_DO_TOKEN: undefined, TRACES_DOMAIN: 'traces.fro.bot'}, 'TRACES_SNAPSHOT_DO_TOKEN'],
-    [{TRACES_SNAPSHOT_DO_TOKEN: '  ', TRACES_DOMAIN: 'traces.fro.bot'}, 'TRACES_SNAPSHOT_DO_TOKEN'],
-    [{TRACES_SNAPSHOT_DO_TOKEN: TOKEN, TRACES_DOMAIN: ''}, 'TRACES_DOMAIN'],
-    [{TRACES_SNAPSHOT_DO_TOKEN: TOKEN, TRACES_DOMAIN: undefined}, 'TRACES_DOMAIN'],
-    [{}, 'TRACES_SNAPSHOT_DO_TOKEN and TRACES_DOMAIN'],
-  ])('exits green with a notice and calls nothing for %j', async (environment, named) => {
+    [{TRACES_SNAPSHOT_DO_TOKEN: TOKEN, TRACES_DOMAIN: ''}],
+    [{TRACES_SNAPSHOT_DO_TOKEN: TOKEN, TRACES_DOMAIN: '  '}],
+    [{TRACES_SNAPSHOT_DO_TOKEN: TOKEN, TRACES_DOMAIN: undefined}],
+    [{TRACES_SNAPSHOT_DO_TOKEN: undefined, TRACES_DOMAIN: undefined}],
+    [{}],
+  ])('exits green with a notice and calls nothing when the domain is unset: %j', async environment => {
     const fake = fakeDo({snapshots: [daily(40)]})
     const run = await backup(fake, environment)
 
@@ -792,9 +793,45 @@ describe('backup: not deployed yet', () => {
     expect(run.outputs).toEqual({deployed: 'false'})
     expect(fake.requests).toEqual([])
     expect(
-      run.logs.some(line => line.startsWith('::notice::') && line.includes(named) && line.includes('not deployed')),
+      run.logs.some(
+        line => line.startsWith('::notice::') && line.includes('TRACES_DOMAIN') && line.includes('not deployed'),
+      ),
     ).toBe(true)
     expect(run.logs.some(line => line.includes('::error::'))).toBe(false)
+  })
+})
+
+describe('backup: the snapshot token is missing after deployment', () => {
+  it.each([
+    [{TRACES_SNAPSHOT_DO_TOKEN: undefined, TRACES_DOMAIN: 'traces.fro.bot'}],
+    [{TRACES_SNAPSHOT_DO_TOKEN: '', TRACES_DOMAIN: 'traces.fro.bot'}],
+    [{TRACES_SNAPSHOT_DO_TOKEN: '  ', TRACES_DOMAIN: 'traces.fro.bot'}],
+  ])('fails with a fixed reason, calls nothing and says the stack is deployed: %j', async environment => {
+    const fake = fakeDo({snapshots: [daily(40)]})
+    const run = await backup(fake, environment)
+
+    expect(run.outcome).toMatchObject({
+      exitCode: 1,
+      deployed: true,
+      failures: ['snapshot-token-missing'],
+      created: false,
+      deleted: 0,
+    })
+    expect(run.outputs).toEqual({deployed: 'true'})
+    expect(fake.requests).toEqual([])
+    expect(run.logs.some(line => line.startsWith('::error::') && line.includes('TRACES_SNAPSHOT_DO_TOKEN'))).toBe(true)
+    expect(run.logs.some(line => line.includes('::notice::'))).toBe(false)
+  })
+
+  it('opens the alert: the failed result of this run maps to a real alert, not to nothing', async () => {
+    const run = await backup(fakeDo({}), {TRACES_SNAPSHOT_DO_TOKEN: undefined, TRACES_DOMAIN: 'traces.fro.bot'})
+    const result = run.outcome.exitCode === 0 ? 'success' : 'failure'
+    const deployed = run.outputs.deployed === 'true' ? 'true' : 'false'
+
+    expect(planBackupAlert({backupResult: result, deployed, rehearse: 'none'})).toEqual({
+      kind: 'alert',
+      identity: 'real',
+    })
   })
 })
 
@@ -1103,7 +1140,7 @@ describe('issue step', () => {
     expect(run.outputs).toEqual({notify: 'none'})
   })
 
-  // Mutation target: treating the unset secret or variable as a failure makes this alert every day.
+  // Mutation target: treating `deployed=false` (the domain is unset) as a failure makes this alert every day.
   it('does nothing at all when the backup reports the stack is not deployed yet', async () => {
     const fake = fakeGh([realIssue()], {labels: [ALERT_LABEL]})
     const run = await issueStep({ALERT_BACKUP_RESULT: 'success', ALERT_BACKUP_DEPLOYED: 'false'}, fake)
@@ -1134,6 +1171,27 @@ describe('issue step', () => {
 
     expect(run.outputs.notify).toBe('created')
     expect(fake.comments()).toEqual([])
+  })
+
+  // Mutation target: reading a missing or malformed `labels` as an empty list hides the open issue, and a duplicate is
+  // opened. The shared parse is covered field by field in go-privacy-alert.test.ts.
+  it.each([
+    ['labels missing', {number: 7, state: 'open', body: REAL_MARKER}],
+    ['labels not an array', {number: 7, state: 'open', body: REAL_MARKER, labels: ALERT_LABEL}],
+    ['a label without a string name', {number: 7, state: 'open', body: REAL_MARKER, labels: [{name: 5}]}],
+  ])('fails the lookup and takes no action when the listing has %s', async (_name, entry) => {
+    for (const result of ['failure', 'success']) {
+      const fake = fakeGh([], {
+        labels: [ALERT_LABEL],
+        fail: call =>
+          call.args.includes('--paginate') ? {code: 0, stdout: JSON.stringify([[entry]]), stderr: ''} : undefined,
+      })
+      const run = await issueStep({ALERT_BACKUP_RESULT: result}, fake)
+
+      expect(run.exitCode).toBe(1)
+      expect(run.outputs).toEqual({notify: 'none'})
+      expect(fake.writes()).toEqual([])
+    }
   })
 
   it('creates the label on first use', async () => {

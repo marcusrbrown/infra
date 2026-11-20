@@ -32,8 +32,13 @@ export const THRESHOLDS = {
   intervalMs: 300_000,
   /** A verdict older than this many intervals reads as failing. */
   staleAfterIntervals: 2,
-  /** Per request. */
+  /** Per request, and per read of a file, a filesystem or the object store. */
   probeTimeoutMs: 10_000,
+  /**
+   * Per run, from the first probe to the verdict. It is shorter than the interval, so a run that a probe's
+   * own deadline did not catch still frees the single-flight guard before the next tick.
+   */
+  runDeadlineMs: 240_000,
   /** An exporter queue at or above this fraction of its byte capacity fails: it is close to answering 503. */
   queueFullFraction: 0.8,
   /** Used share of a filesystem, in percent. At or above `warn` the check warns; at or above `fail` it fails. */
@@ -182,16 +187,64 @@ function percent(value: number): string {
 
 const DAY_MS = 86_400_000
 
-/** A short slug for a failed probe; never the error text, which can echo a URL or a header. */
-function failureReason(error: unknown): string {
-  if (
+function isTimeout(error: unknown): boolean {
+  return (
     typeof error === 'object' &&
     error !== null &&
     'name' in error &&
     (error.name === 'TimeoutError' || error.name === 'AbortError')
   )
-    return 'timeout'
-  return 'unreachable'
+}
+
+/** A short slug for a failed probe; never the error text, which can echo a URL or a header. */
+function failureReason(error: unknown): string {
+  return isTimeout(error) ? 'timeout' : 'unreachable'
+}
+
+// ─── Deadlines ─────────────────────────────────────────────────────────────────
+//
+// A dependency that accepts a connection and never answers leaves its promise pending forever, and an abort
+// signal only helps when the dependency honours it. `bounded` stops waiting for the promise itself, so every
+// probe ends within its limit whatever the dependency does.
+
+class DeadlineError extends Error {
+  constructor() {
+    super('deadline exceeded')
+    this.name = 'TimeoutError'
+  }
+}
+
+/** Settle with `work`, or reject with a `TimeoutError` after `ms`. The late result of `work` is discarded. */
+function bounded<T>(work: () => Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new DeadlineError()), ms)
+    let pending: Promise<T>
+    try {
+      pending = work()
+    } catch (error) {
+      clearTimeout(timer)
+      reject(error)
+      return
+    }
+    pending.then(
+      value => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
+function probeLimit(deps: ReporterDeps): number {
+  return deps.limits?.probeTimeoutMs ?? THRESHOLDS.probeTimeoutMs
+}
+
+function runLimit(deps: ReporterDeps): number {
+  return deps.limits?.runDeadlineMs ?? THRESHOLDS.runDeadlineMs
 }
 
 // ─── Prometheus text ──────────────────────────────────────────────────────────
@@ -735,6 +788,8 @@ export interface ReporterDeps {
   /** The `meta.json` contents of every completed Tempo block. */
   readTempoBlockMetas: () => Promise<string[]>
   objectStore: (password: string) => ObjectStoreReader
+  /** Deadlines in milliseconds; the defaults are in `THRESHOLDS`. A test shortens them. */
+  limits?: {probeTimeoutMs?: number; runDeadlineMs?: number}
 }
 
 async function probeText(
@@ -742,13 +797,16 @@ async function probeText(
   url: string,
   init: RequestInit = {},
 ): Promise<Probe<{status: number; text: string}>> {
+  const limit = probeLimit(deps)
   try {
-    const response = await deps.fetch(url, {...init, signal: AbortSignal.timeout(THRESHOLDS.probeTimeoutMs)})
-    if (!response.ok) {
-      response.body?.cancel().catch(() => undefined)
-      return {ok: false, reason: `http-${response.status}`}
-    }
-    return {ok: true, value: {status: response.status, text: await response.text()}}
+    return await bounded(async () => {
+      const response = await deps.fetch(url, {...init, signal: AbortSignal.timeout(limit)})
+      if (!response.ok) {
+        response.body?.cancel().catch(() => undefined)
+        return {ok: false, reason: `http-${response.status}`} as const
+      }
+      return {ok: true, value: {status: response.status, text: await response.text()}} as const
+    }, limit)
   } catch (error) {
     return {ok: false, reason: failureReason(error)}
   }
@@ -765,10 +823,10 @@ function isJsonObject(text: string): boolean {
 
 async function readSecret(deps: ReporterDeps, path: string): Promise<Probe<string>> {
   try {
-    const value = (await deps.readText(path)).trim()
+    const value = (await bounded(() => deps.readText(path), probeLimit(deps))).trim()
     return value === '' ? {ok: false, reason: 'empty-secret'} : {ok: true, value}
-  } catch {
-    return {ok: false, reason: 'secret-unreadable'}
+  } catch (error) {
+    return {ok: false, reason: isTimeout(error) ? 'timeout' : 'secret-unreadable'}
   }
 }
 
@@ -874,26 +932,27 @@ async function readLangfuseCanary(deps: ReporterDeps, canary: Canary): Promise<P
 export async function oldestObjectBatch(deps: ReporterDeps): Promise<Probe<number | undefined>> {
   const password = await readSecret(deps, PATHS.objectStorePasswordFile)
   if (!password.ok) return password
+  const limit = probeLimit(deps)
   try {
     const store = deps.objectStore(password.value)
-    const projects = await store.childPrefixes(OBJECT_STORE.prefix)
+    const projects = await bounded(() => store.childPrefixes(OBJECT_STORE.prefix), limit)
     let oldest: number | undefined
     for (const project of projects) {
-      const key = await store.firstKey(project)
+      const key = await bounded(() => store.firstKey(project), limit)
       if (key === undefined) continue
       const time = objectKeyTime(key)
       if (time === undefined) return {ok: false, reason: 'unrecognised-key'}
       oldest = oldest === undefined ? time : Math.min(oldest, time)
     }
     return {ok: true, value: oldest}
-  } catch {
-    return {ok: false, reason: 'object-store-unreachable'}
+  } catch (error) {
+    return {ok: false, reason: isTimeout(error) ? 'object-store-timeout' : 'object-store-unreachable'}
   }
 }
 
 export async function oldestTempoBlock(deps: ReporterDeps): Promise<Probe<number | undefined>> {
   try {
-    const metas = await deps.readTempoBlockMetas()
+    const metas = await bounded(() => deps.readTempoBlockMetas(), probeLimit(deps))
     let oldest: number | undefined
     for (const text of metas) {
       const end = blockEndMs(text)
@@ -901,29 +960,32 @@ export async function oldestTempoBlock(deps: ReporterDeps): Promise<Probe<number
       oldest = oldest === undefined ? end : Math.min(oldest, end)
     }
     return {ok: true, value: oldest}
-  } catch {
-    return {ok: false, reason: 'blocks-unreadable'}
+  } catch (error) {
+    return {ok: false, reason: isTimeout(error) ? 'blocks-timeout' : 'blocks-unreadable'}
   }
 }
 
 // ─── Canary run ───────────────────────────────────────────────────────────────
 
 async function readTempoCanary(deps: ReporterDeps, canary: Canary): Promise<Probe<string | undefined>> {
+  const limit = probeLimit(deps)
   try {
-    const response = await deps.fetch(`${ENDPOINTS.tempoTraceBase}${canary.traceId}`, {
-      headers: {accept: 'application/json'},
-      signal: AbortSignal.timeout(THRESHOLDS.probeTimeoutMs),
-    })
-    if (response.status === 404) {
-      response.body?.cancel().catch(() => undefined)
-      return {ok: true, value: undefined}
-    }
-    if (!response.ok) {
-      response.body?.cancel().catch(() => undefined)
-      return {ok: false, reason: `http-${response.status}`}
-    }
-    const text = await response.text()
-    return isJsonObject(text) ? {ok: true, value: text} : {ok: false, reason: 'unparsable'}
+    return await bounded(async (): Promise<Probe<string | undefined>> => {
+      const response = await deps.fetch(`${ENDPOINTS.tempoTraceBase}${canary.traceId}`, {
+        headers: {accept: 'application/json'},
+        signal: AbortSignal.timeout(limit),
+      })
+      if (response.status === 404) {
+        response.body?.cancel().catch(() => undefined)
+        return {ok: true, value: undefined}
+      }
+      if (!response.ok) {
+        response.body?.cancel().catch(() => undefined)
+        return {ok: false, reason: `http-${response.status}`}
+      }
+      const text = await response.text()
+      return isJsonObject(text) ? {ok: true, value: text} : {ok: false, reason: 'unparsable'}
+    }, limit)
   } catch (error) {
     return {ok: false, reason: failureReason(error)}
   }
@@ -1044,9 +1106,9 @@ function mergeCounters(base: CounterState, collector: CounterState, tempo: Count
 
 async function probeFs(deps: ReporterDeps, path: string): Promise<Probe<FsStats>> {
   try {
-    return {ok: true, value: await deps.statfs(path)}
-  } catch {
-    return {ok: false, reason: 'statfs-failed'}
+    return {ok: true, value: await bounded(() => deps.statfs(path), probeLimit(deps))}
+  } catch (error) {
+    return {ok: false, reason: isTimeout(error) ? 'timeout' : 'statfs-failed'}
   }
 }
 
@@ -1123,9 +1185,9 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
 
 async function readFileText(deps: ReporterDeps, path: string): Promise<Probe<string>> {
   try {
-    return {ok: true, value: await deps.readText(path)}
-  } catch {
-    return {ok: false, reason: 'unreadable'}
+    return {ok: true, value: await bounded(() => deps.readText(path), probeLimit(deps))}
+  } catch (error) {
+    return {ok: false, reason: isTimeout(error) ? 'timeout' : 'unreadable'}
   }
 }
 
@@ -1157,11 +1219,19 @@ export function createReporter(deps: ReporterDeps): Reporter {
   const runOnce = (): Promise<void> => {
     running ??= (async () => {
       try {
-        const outcome = await runChecks(deps, counters)
+        const outcome = await bounded(() => runChecks(deps, counters), runLimit(deps))
         counters = outcome.counters
         verdict = outcome.verdict
-      } catch {
-        // A run that dies leaves the old verdict to go stale; it never turns into a pass.
+      } catch (error) {
+        // A run that dies leaves the old verdict to go stale; it never turns into a pass. A run that overran its
+        // deadline publishes a failing verdict now, instead of letting the old one age out: its late result is
+        // discarded, the single-flight guard is freed below, and the next run starts on schedule.
+        if (isTimeout(error)) {
+          verdict = assembleVerdict(
+            [result('run-deadline', 'fail', `the run did not finish within ${Math.round(runLimit(deps) / 1000)} s`)],
+            deps.now(),
+          )
+        }
       } finally {
         running = undefined
       }

@@ -30,7 +30,9 @@ declare const process: {
 //     back, into memory, to prove the removed token is now refused.
 //
 // Every change to a file is a new file written in the same directory and renamed over the old one, so the
-// collector never sees a partial file, and the file keeps its mode and owner. A change is "done" only when a
+// collector never sees a partial file, and the file keeps its mode and owner. The whole read-copy-rename runs
+// under one `flock` on the token lock, so two token commands never interleave and a stale copy can never undo a
+// revoke. A change is "done" only when a
 // request with the token has been seen to behave as the file now says.
 
 export type TracesGroup = (typeof TRACES_GROUPS)[number]
@@ -80,6 +82,9 @@ const COMPOSE = `docker compose --project-directory ${TRACES_APP_DIR}`
 /** The token directories, repeated from the app's host layout; a test pins them to apps/traces. */
 const TOKEN_ROOT = `${TRACES_APP_DIR}/tokens`
 
+/** The lock every read-then-replace of a token file holds; a test pins it to apps/traces. */
+export const TRACES_TOKENS_LOCK = `${TOKEN_ROOT}/.lock`
+
 /** Each group's receiver port in the collector config; a test pins them to otelcol.yaml. */
 const RECEIVER_PORTS: Record<TracesGroup, number> = {marcusrbrown: 4411, 'fro-bot': 4412, workstation: 4413}
 
@@ -88,6 +93,12 @@ type TokenOp = 'list' | 'lines' | 'append' | 'remove' | 'empty'
 export function senderSentinel(op: TokenOp, group: string): string {
   assertGroup(group)
   return `TRACES_SENDER_${op.toUpperCase()}_DONE=${group}`
+}
+
+/** What a token script prints, and exits non-zero, when the token lock was not free within 30 seconds. */
+export function lockBusySentinel(group: string): string {
+  assertGroup(group)
+  return `TRACES_SENDER_LOCK_BUSY=${group}`
 }
 
 const REMOVED_PREFIX = 'TRACES_TOKEN_REMOVED='
@@ -99,6 +110,18 @@ const script = (...steps: string[]): string => steps.join('; ')
 function locate(group: string): string[] {
   assertGroup(group)
   return [`d=${TOKEN_ROOT}/${group}`, 'f="$d/token"', 'test -d "$d"', 'test ! -d "$f"']
+}
+
+/**
+ * The token lock, taken before the file is read or copied and held until the script exits, which is after the
+ * rename. Descriptor 9 holds the lock file open and `flock` takes the lock on it, so the lock is released by the
+ * shell ending, however it ends. Without it, an append could copy the file, a revoke could finish, and the
+ * append's rename would put the revoked token back. A lock not free in 30 seconds is a failure with its own
+ * sentinel and the file untouched. The only thing ever redirected to is the lock file: a regular file under the
+ * app directory.
+ */
+function lockTokens(group: string): string[] {
+  return [`l=${TRACES_TOKENS_LOCK}`, 'exec 9>>"$l"', `flock -w 30 9 || { echo ${lockBusySentinel(group)}; exit 1; }`]
 }
 
 /**
@@ -142,6 +165,7 @@ export const SENDER_REMOTE = {
   append: (group: string): string =>
     script(
       'set -e',
+      ...lockTokens(group),
       ...locate(group),
       ...TEMP_FILE,
       COPY_ATTRIBUTES,
@@ -158,6 +182,7 @@ export const SENDER_REMOTE = {
       'set -e',
       'read -r fp',
       'case "$fp" in ????????????) ;; *) exit 1 ;; esac',
+      ...lockTokens(group),
       ...locate(group),
       'test -f "$f"',
       ...TEMP_FILE,
@@ -172,6 +197,7 @@ export const SENDER_REMOTE = {
   empty: (group: string): string =>
     script(
       'set -e',
+      ...lockTokens(group),
       ...locate(group),
       ...TEMP_FILE,
       COPY_ATTRIBUTES,
@@ -263,6 +289,16 @@ async function guarded(
     return false
   }
 }
+
+// ─── A busy token lock ────────────────────────────────────────────────────────
+
+/** The script found the token lock held for 30 seconds and changed nothing. Exit non-zero, sentinel on its own line. */
+function isLockBusy(result: Awaited<ReturnType<typeof runRemote>>, group: TracesGroup): boolean {
+  return result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === lockBusySentinel(group))
+}
+
+const lockBusyMessage = (group: TracesGroup): string =>
+  `The ${group} token lock is busy: another token command was still running on the host after 30 seconds. Nothing was changed. Run this again in a minute.`
 
 // ─── Reading the host ─────────────────────────────────────────────────────────
 
@@ -616,9 +652,14 @@ async function addFlow(
     stdin: formatTokenLine(token, fingerprint, createdAt),
     ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
   })
+  if (isLockBusy(written, group)) {
+    out.error(lockBusyMessage(group))
+    return false
+  }
   if (!hasSentinel(written, senderSentinel('append', group))) {
+    // The write may have landed with only the reply lost, so name the token (by fingerprint) and both ways to settle it.
     out.error(
-      `The host did not confirm the write (exit ${written.exitCode}: ${written.stderr || 'no confirmation'}). The token was not delivered. Check with \`infra traces sender list\`.`,
+      `The host did not confirm the write (exit ${written.exitCode}: ${written.stderr || 'no confirmation'}). The ${group} token ${fingerprint} may or may not be in the token file, and it was not delivered anywhere. To see whether it landed, run: infra traces sender list. If it did, remove it with: infra traces sender revoke ${group} ${fingerprint}`,
     )
     return false
   }
@@ -793,6 +834,10 @@ async function revokeOne(
     stdin: `${fingerprint}\n`,
     ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
   })
+  if (isLockBusy(removed, group)) {
+    out.error(lockBusyMessage(group))
+    return false
+  }
   if (!hasSentinel(removed, senderSentinel('remove', group))) {
     out.error(
       `The host did not confirm the removal (exit ${removed.exitCode}: ${removed.stderr || 'no confirmation'}). The token may still be in the file. Check with \`infra traces sender list\`.`,
@@ -853,6 +898,11 @@ async function revokeAll(options: RevokeOptions, out: Out, secrets: string[], de
       SENDER_REMOTE.empty(group),
       deps.spawn === undefined ? {} : {spawn: deps.spawn},
     )
+    if (isLockBusy(emptied, group)) {
+      out.error(`${group}: ${lockBusyMessage(group)} It was not emptied.`)
+      ok = false
+      continue
+    }
     if (!hasSentinel(emptied, senderSentinel('empty', group))) {
       out.error(
         `${group}: the host did not confirm the file was emptied (exit ${emptied.exitCode}: ${emptied.stderr || 'no confirmation'}). Tokens may still be accepted.`,

@@ -44,8 +44,10 @@
  * 4. Prune only when step 3 passed: a broken backup must not also erase history. Delete our snapshots older than 8 days,
  *    oldest first, at most 10 a run, so a wrong clock or a long backlog cannot wipe the history in one run.
  *
- * Not deployed yet: when `TRACES_SNAPSHOT_DO_TOKEN` or `TRACES_DOMAIN` is unset the job exits green with a notice and the
- * alert job does nothing. The workflow merges before the host exists.
+ * Not deployed yet: when `TRACES_DOMAIN` is unset the job exits green with a notice and the alert job does nothing. The
+ * workflow merges before the host exists. Only the domain says "not deployed": with the domain set, a missing
+ * `TRACES_SNAPSHOT_DO_TOKEN` fails the run (`snapshot-token-missing`) and opens the alert like any other failure, so a
+ * deleted or renamed secret cannot silently disable the backups.
  *
  * Safety contract:
  * - ZERO package imports (`node:fs`, the sibling `alert-issue.ts` and `deploy-gate-notify.ts`).
@@ -54,9 +56,10 @@
  * - A re-run (`github.run_attempt` above 1) makes no alert API call: it would replay an old backup result.
  *
  * Environment inputs (names are this script's contract):
- * - `TRACES_SNAPSHOT_DO_TOKEN`      `backup` only: a repository secret, scoped to volume and snapshot actions.
- * - `TRACES_DOMAIN`                 `backup`: repository variable, documented value `traces.fro.bot`. It only says that the
- *                                   stack exists; the droplet is found by name.
+ * - `TRACES_SNAPSHOT_DO_TOKEN`      `backup` only: a repository secret, scoped to volume and snapshot actions. Required once
+ *                                   `TRACES_DOMAIN` is set.
+ * - `TRACES_DOMAIN`                 `backup`: repository variable, documented value `traces.fro.bot`. Unset means the stack
+ *                                   is not deployed yet; set means it exists (the droplet is found by name).
  * - `ALERT_BACKUP_RESULT`           `issue`, `notify`: `needs.backup.result` (`success|failure|cancelled|skipped`).
  * - `ALERT_BACKUP_DEPLOYED`         `issue`, `notify`: `needs.backup.outputs.deployed` (`true|false`, empty if unset).
  * - `ALERT_REHEARSE`                `none` | `fail` | `clear`; empty (a scheduled run) reads as `none`.
@@ -422,20 +425,28 @@ export async function runBackup(
   environment: Readonly<Record<string, string | undefined>>,
   deps: BackupDeps,
 ): Promise<BackupOutcome> {
-  const token = environment.TRACES_SNAPSHOT_DO_TOKEN?.trim() ?? ''
   const domain = environment.TRACES_DOMAIN?.trim() ?? ''
-  if (token === '' || domain === '') {
-    const unset = [token === '' ? 'TRACES_SNAPSHOT_DO_TOKEN' : null, domain === '' ? 'TRACES_DOMAIN' : null].filter(
-      (name): name is string => name !== null,
-    )
+  // Only an unset domain means "not deployed". A token that is missing once the domain is set is a fault, not a pause:
+  // reading it as not deployed would leave every run green while the snapshots age out.
+  if (domain === '') {
     deps.writeOutput('deployed', 'false')
     deps.log(
-      `::notice::${unset.join(' and ')} not set, so the trace stack is treated as not deployed yet. No snapshot was taken.`,
+      '::notice::TRACES_DOMAIN not set, so the trace stack is treated as not deployed yet. No snapshot was taken.',
     )
-    deps.appendSummary('- Trace snapshot backup: not deployed yet (a required value is not set)')
+    deps.appendSummary('- Trace snapshot backup: not deployed yet (TRACES_DOMAIN is not set)')
     return {exitCode: 0, deployed: false, failures: [], created: false, deleted: 0, newestAgeHours: null}
   }
   deps.writeOutput('deployed', 'true')
+
+  const token = environment.TRACES_SNAPSHOT_DO_TOKEN?.trim() ?? ''
+  if (token === '') {
+    const failures = ['snapshot-token-missing']
+    deps.log('::error::Trace snapshot backup failed: TRACES_SNAPSHOT_DO_TOKEN is not set. No snapshot was taken.')
+    deps.appendSummary(
+      '- Trace snapshot backup: no snapshot created, the snapshot token is missing (snapshot-token-missing)',
+    )
+    return {exitCode: 1, deployed: true, failures, created: false, deleted: 0, newestAgeHours: null}
+  }
 
   const api: DoDeps = {fetch: deps.fetch, token, timeoutMs: deps.timeoutMs}
   const failures: string[] = []

@@ -195,7 +195,15 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** Parses `gh api --paginate --slurp` output (an array of pages) strictly; anything else is a failure. */
+/**
+ * Parses `gh api --paginate --slurp` output (an array of pages) strictly: an entry that lacks a field read below, or has
+ * one of the wrong type, fails the whole lookup. A guessed default (an empty list for a missing `labels`) would hide an
+ * open alert issue and open a duplicate; a failed lookup takes no action instead.
+ *
+ * Hand-written rather than Zod on purpose: these scripts import no package, so the alert jobs run without `bun install`.
+ * It validates exactly the fields read: `number`, `state`, `body` (a string, or null for an empty body), `labels` (an
+ * array of objects with a string `name`) and `pull_request` (absent, null or an object).
+ */
 function parseIssuePages(stdout: string): OpenIssue[] {
   let parsed: unknown
   try {
@@ -206,12 +214,15 @@ function parseIssuePages(stdout: string): OpenIssue[] {
   if (!Array.isArray(parsed)) throw new AlertFailure('github-api:list-issues-malformed')
   const items: unknown[] = parsed.flatMap((page: unknown) => (Array.isArray(page) ? page : [page]))
   return items.map(item => {
-    if (!isRecord(item) || !Number.isInteger(item.number) || typeof item.state !== 'string') {
-      throw new AlertFailure('github-api:list-issues-malformed')
-    }
-    const labels = Array.isArray(item.labels)
-      ? item.labels.flatMap((label: unknown) => (isRecord(label) && typeof label.name === 'string' ? [label.name] : []))
-      : []
+    const malformed = (): AlertFailure => new AlertFailure('github-api:list-issues-malformed')
+    if (!isRecord(item) || !Number.isInteger(item.number) || typeof item.state !== 'string') throw malformed()
+    if (item.body !== null && typeof item.body !== 'string') throw malformed()
+    if (item.pull_request !== undefined && item.pull_request !== null && !isRecord(item.pull_request)) throw malformed()
+    if (!Array.isArray(item.labels)) throw malformed()
+    const labels = (item.labels as unknown[]).map(label => {
+      if (!isRecord(label) || typeof label.name !== 'string') throw malformed()
+      return label.name
+    })
     return {
       number: item.number as number,
       body: typeof item.body === 'string' ? item.body : '',
@@ -444,6 +455,8 @@ export async function runIssueStepWith<Env extends {readonly attempt: Attempt}>(
   } catch (error) {
     const reason = error instanceof AlertFailure ? error.reason : 'internal-error'
     deps.log(`::error::Alert issue step failed: ${reason}`)
+    // Said explicitly, so the Discord step never reads an absent output as a transition.
+    safely(() => deps.writeOutput('notify', 'none'))
     return {exitCode: 1, outcome: null}
   }
 }

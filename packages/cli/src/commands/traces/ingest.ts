@@ -5,7 +5,16 @@ import type {IngestState, SpawnFn} from './remote'
 import {z} from 'zod'
 
 import {resolveTracesHost, resolveTracesOrigin, TRACES_GROUPS} from './host'
-import {hasSentinel, ingestStateSentinel, REMOTE_COMMANDS, runRemote} from './remote'
+import {
+  DEPLOY_FINISHED_SENTINEL,
+  DEPLOY_UNFINISHED_SENTINEL,
+  hasSentinel,
+  ingestStateSentinel,
+  LOCK_BUSY_SENTINEL,
+  OPEN_REFUSED_SENTINEL,
+  REMOTE_COMMANDS,
+  runRemote,
+} from './remote'
 import {failingLines, getReporterDetail, isPassing} from './status'
 
 declare const process: {
@@ -97,11 +106,24 @@ async function waitForState(
 
 // ─── Changing the state on the host ───────────────────────────────────────────
 
-type SetResult = {ok: true} | {ok: false; error: string}
+type SetResult =
+  | {ok: true}
+  /** Opening only: a deploy is running or did not finish. The host changed nothing. */
+  | {ok: false; reason: 'deploy-unfinished'}
+  /** The ingest lock was not free in 30 seconds. The host changed nothing. */
+  | {ok: false; reason: 'lock-busy'}
+  | {ok: false; reason: 'failed'; error: string}
+
+function hasLine(stdout: string, line: string): boolean {
+  return stdout.split('\n').some(entry => entry.trim() === line)
+}
 
 /**
  * Write the state into the host's `.env` and recreate only the Caddy container. The new state line travels
  * on stdin; the remote command is fixed. Success needs exit 0 and the sentinel the command prints last.
+ *
+ * The command runs under the ingest lock. Opening is refused, inside that same locked script, while a deploy
+ * is running or did not finish; holding never is.
  */
 async function setIngestState(host: string, state: 'held' | 'open', deps: IngestDeps): Promise<SetResult> {
   const result = await runRemote(host, REMOTE_COMMANDS.writeIngestState(state), {
@@ -109,11 +131,20 @@ async function setIngestState(host: string, state: 'held' | 'open', deps: Ingest
     ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
   })
 
-  if (!hasSentinel(result, ingestStateSentinel(state))) {
-    return {ok: false, error: `exit ${result.exitCode}: ${result.stderr || 'no confirmation from the host'}`}
+  if (hasSentinel(result, ingestStateSentinel(state))) return {ok: true}
+  if (state === 'open' && result.exitCode === 0 && hasLine(result.stdout, OPEN_REFUSED_SENTINEL)) {
+    return {ok: false, reason: 'deploy-unfinished'}
   }
-  return {ok: true}
+  if (hasLine(result.stdout, LOCK_BUSY_SENTINEL)) return {ok: false, reason: 'lock-busy'}
+  return {
+    ok: false,
+    reason: 'failed',
+    error: `exit ${result.exitCode}: ${result.stderr || 'no confirmation from the host'}`,
+  }
 }
+
+const LOCK_BUSY_MESSAGE =
+  'another ingest change holds the host lock (a deploy, or another `traces ingest` command); it was not free within 30 seconds'
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
 
@@ -145,7 +176,10 @@ export async function tracesIngestHoldAction(
 
   const set = await setIngestState(targets.host, 'held', deps)
   if (!set.ok) {
-    ctx.console.error(`Could not set the ingest state on the host (${set.error}). Ingest may still be open.`)
+    // A hold is never refused for a deploy. Only the lock or the host command can stop it.
+    const why =
+      set.reason === 'lock-busy' ? LOCK_BUSY_MESSAGE : set.reason === 'failed' ? set.error : 'unexpected answer'
+    ctx.console.error(`Could not set the ingest state on the host (${why}). Ingest may still be open.`)
     ctx.process.exit(1)
     return
   }
@@ -162,13 +196,17 @@ export async function tracesIngestHoldAction(
   ctx.console.log(
     `Ingest is held: every ingest path answered 503 from outside the host (${describeStatuses(proof.statuses)}).`,
   )
-  ctx.console.log('Only a deploy, or `traces ingest open` with a passing health verdict, reopens it.')
+  ctx.console.log(
+    'Only a deploy, or `traces ingest open` with a passing health verdict and no unfinished deploy, reopens it.',
+  )
 }
 
 /**
  * Open the ingest route. It refuses unless the health reporter's latest verdict is fresh and passing, and
- * says which checks are not. It says "open" only after an unauthenticated request from outside has been
- * answered 401 on every ingest path (routed to the collector, which wants a token).
+ * says which checks are not. It also refuses while a deploy is running or did not finish: that check is made
+ * on the host, inside the same locked script that writes the state, so a deploy that starts between the
+ * verdict and the write cannot be undone. It says "open" only after an unauthenticated request from outside
+ * has been answered 401 on every ingest path (routed to the collector, which wants a token).
  */
 export async function tracesIngestOpenAction(
   options: {key?: string | undefined},
@@ -195,7 +233,15 @@ export async function tracesIngestOpenAction(
 
   const set = await setIngestState(targets.host, 'open', deps)
   if (!set.ok) {
-    ctx.console.error(`Could not set the ingest state on the host (${set.error}).`)
+    if (set.reason === 'deploy-unfinished') {
+      ctx.console.error(
+        'Refusing to open ingest: a deploy is running or did not finish (the deploy marker or its pending restarts exist on the host), so the services may have changed and not been verified. Nothing was changed. Run the deploy to completion with `infra traces deploy`; it opens ingest itself once every gate passes.',
+      )
+    } else if (set.reason === 'lock-busy') {
+      ctx.console.error(`Could not open ingest: ${LOCK_BUSY_MESSAGE}. Nothing was changed. Try again.`)
+    } else {
+      ctx.console.error(`Could not set the ingest state on the host (${set.error}).`)
+    }
     ctx.process.exit(1)
     return
   }
@@ -223,8 +269,10 @@ export async function tracesIngestStatusAction(
   const targets = resolveTargets(options, ctx)
   if (targets === undefined) return
 
-  const [configured, statuses, detail] = await Promise.all([
-    runRemote(targets.host, REMOTE_COMMANDS.readIngestState, deps.spawn === undefined ? {} : {spawn: deps.spawn}),
+  const spawnOption = deps.spawn === undefined ? {} : {spawn: deps.spawn}
+  const [configured, deployState, statuses, detail] = await Promise.all([
+    runRemote(targets.host, REMOTE_COMMANDS.readIngestState, spawnOption),
+    runRemote(targets.host, REMOTE_COMMANDS.readDeployState, spawnOption),
     probeIngestPaths(targets.origin, deps.fetch),
     getReporterDetail(targets.host, deps.spawn),
   ])
@@ -238,6 +286,15 @@ export async function tracesIngestStatusAction(
   ctx.console.log(
     `Health verdict:         ${detail.ok ? (isPassing(detail.detail) ? 'passing' : 'not passing') : 'unreadable'}`,
   )
+  if (hasSentinel(deployState, DEPLOY_UNFINISHED_SENTINEL)) {
+    ctx.console.log(
+      'Deploy:                 unfinished (a deploy is running or did not finish; run it to completion. `ingest open` is refused until it does)',
+    )
+  } else if (hasSentinel(deployState, DEPLOY_FINISHED_SENTINEL)) {
+    ctx.console.log('Deploy:                 finished')
+  } else {
+    ctx.console.log('Deploy:                 unknown (the host did not answer)')
+  }
 
   if (configuredState === undefined || observed === undefined || configuredState !== observed) {
     ctx.console.error('The configured state and the state seen from outside do not match, or one could not be read.')
@@ -264,7 +321,7 @@ export function registerTracesIngest(cli: ReturnType<typeof goke>): void {
   cli
     .command(
       'traces ingest open',
-      'Open the ingest route. Refuses unless the health reporter verdict is passing; proves the route is live from outside.',
+      'Open the ingest route. Refuses unless the health reporter verdict is passing and no deploy is running or unfinished; proves the route is live from outside.',
     )
     .option('--key [key]', keyOption)
     .action((options, ctx) => tracesIngestOpenAction(options, ctx))

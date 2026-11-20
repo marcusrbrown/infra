@@ -24,9 +24,11 @@ import {
   fingerprintOf,
   formatTokenLine,
   generateToken,
+  lockBusySentinel,
   SENDER_REMOTE,
   senderSentinel,
   TOKEN_PREFIX,
+  TRACES_TOKENS_LOCK,
   tracesSenderAddAction,
   tracesSenderListAction,
   tracesSenderRevokeAction,
@@ -73,6 +75,26 @@ const oldLine = (token: string, date = '2026-10-01T00:00:00.000Z'): string => `$
 let sandbox = ''
 let shimDir = ''
 
+/**
+ * The host has util-linux `flock`. macOS has none. Where it is missing, a shim over the system `perl` stands in:
+ * it takes the same `flock -w SECONDS FD` call and takes a real, kernel-level `flock(2)` on the descriptor, so two
+ * shells holding the same file really do exclude each other. The two concurrency cases are skipped only where
+ * neither `flock` nor `perl` exists.
+ */
+const HAS_REAL_FLOCK = Bun.which('flock') !== null
+const CAN_LOCK = HAS_REAL_FLOCK || Bun.which('perl') !== null
+const FLOCK_SHIM = [
+  '#!/usr/bin/perl',
+  'use Fcntl qw(:flock);',
+  'use Time::HiRes qw(time sleep);',
+  'my ($wait, $fd) = (0, undef);',
+  'while (@ARGV) { my $arg = shift @ARGV; if ($arg eq "-w") { $wait = shift @ARGV } else { $fd = $arg } }',
+  'open(my $fh, ">&=", $fd) or exit 1;',
+  'my $deadline = time + $wait;',
+  'while (1) { if (flock($fh, LOCK_EX | LOCK_NB)) { exit 0 } if (time >= $deadline) { exit 1 } sleep(0.05) }',
+  '',
+].join('\n')
+
 beforeAll(() => {
   sandbox = mkdtempSync(join(tmpdir(), 'traces-sender-'))
   // The host has GNU `sha256sum`. Where the machine running the tests lacks it, a one-line shim stands in.
@@ -81,6 +103,11 @@ beforeAll(() => {
   if (Bun.which('sha256sum') === null) {
     const shim = join(shimDir, 'sha256sum')
     writeFileSync(shim, '#!/bin/sh\nexec shasum -a 256 "$@"\n')
+    chmodSync(shim, 0o755)
+  }
+  if (!HAS_REAL_FLOCK && CAN_LOCK) {
+    const shim = join(shimDir, 'flock')
+    writeFileSync(shim, FLOCK_SHIM)
     chmodSync(shim, 0o755)
   }
 })
@@ -102,6 +129,34 @@ function execOnHost(
     stderr: 'pipe',
   })
   return {exitCode: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString()}
+}
+
+/** The same, without waiting: for a script a test holds paused while another one runs. */
+function startOnHost(dir: string, command: string, stdin: string | undefined) {
+  const child = Bun.spawn(['sh', '-c', command.replaceAll(TRACES_APP_DIR, dir)], {
+    stdin: new TextEncoder().encode(stdin ?? ''),
+    env: {PATH: `${shimDir}:${process.env.PATH ?? ''}`, HOME: dir},
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  return {
+    finished: async (): Promise<{exitCode: number; stdout: string; stderr: string}> => {
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ])
+      return {exitCode, stdout, stderr}
+    },
+  }
+}
+
+async function until(condition: () => boolean, what: string): Promise<void> {
+  for (let waited = 0; waited < 10_000; waited += 25) {
+    if (condition()) return
+    await Bun.sleep(25)
+  }
+  throw new Error(`timed out waiting for ${what}`)
 }
 
 interface WorldOptions {
@@ -132,6 +187,10 @@ interface World {
   forced: (number | 'down')[]
   /** Remote operations that fail, by name (`append`, `lines`, `list:<group>`). */
   failing: Set<string>
+  /** Remote operations that run on the host and change it, but whose reply is lost (ssh drops after the work). */
+  dropReply: Set<string>
+  /** Remote operations that find the token lock held and change nothing. */
+  busy: Set<string>
   gh: {exitCode: number; stderr: string; failOnCall?: number}
   file: (group: Group) => string
   path: (group: Group) => string
@@ -159,6 +218,8 @@ function createWorld(options: WorldOptions = {}): World {
   const stubborn = new Set<string>()
   const forced: (number | 'down')[] = []
   const failing = new Set<string>()
+  const dropReply = new Set<string>()
+  const busy = new Set<string>()
   const gh = {exitCode: 0, stderr: '', failOnCall: undefined as number | undefined}
   let ghCount = 0
 
@@ -199,7 +260,10 @@ function createWorld(options: WorldOptions = {}): World {
       for (const name of ['list', 'lines', 'append', 'remove', 'empty'] as const) {
         if (call.command === SENDER_REMOTE[name](group)) {
           if (failing.has(name)) return {exitCode: 1, stderr: `${name} failed on the host`}
-          return runShell(call.command, call.stdin)
+          if (busy.has(name)) return {exitCode: 1, stdout: `${lockBusySentinel(group)}\n`}
+          const reply = runShell(call.command, call.stdin)
+          if (dropReply.has(name)) return {exitCode: 255, stderr: 'ssh: connection reset by peer'}
+          return reply
         }
       }
     }
@@ -231,6 +295,8 @@ function createWorld(options: WorldOptions = {}): World {
     stubborn,
     forced,
     failing,
+    dropReply,
+    busy,
     gh,
     file,
     path,
@@ -370,7 +436,8 @@ describe('remote command hygiene', () => {
     (_name, command) => {
       expect(command).not.toContain('/dev/')
       expect(command).not.toMatch(/\d?>&?\s*\/dev/)
-      expect(command).not.toMatch(/(^|[\s;&|])\d>/)
+      // Standard output and error are never redirected. Descriptor 9 is the lock and is the only other one.
+      expect(command).not.toMatch(/(^|[\s;&|])[0-8]>/)
       expect(command).not.toContain('&>')
       expect(command).not.toContain('eval')
       expect(command).not.toContain('`')
@@ -404,6 +471,35 @@ describe('remote command hygiene', () => {
     }
   })
 
+  it('every command that reads a token file and replaces it holds the token lock across the whole of it', () => {
+    for (const group of TRACES_GROUPS) {
+      for (const name of ['append', 'remove', 'empty'] as const) {
+        const command = SENDER_REMOTE[name](group)
+        const lock = command.indexOf(`l=${TRACES_TOKENS_LOCK}`)
+        const take = command.indexOf('flock -w 30 9')
+        // `mktemp` comes before the first copy of the file in every one of them.
+        const copy = command.indexOf('mktemp')
+        const rename = command.indexOf('mv -f "$t" "$f"')
+        expect(lock).toBeGreaterThanOrEqual(0)
+        expect(command).toContain('exec 9>>"$l"')
+        expect(take).toBeGreaterThan(lock)
+        // Taken before the first read or copy of the file, held until after the rename, never released early.
+        expect(take).toBeLessThan(copy)
+        expect(take).toBeLessThan(rename)
+        expect(command).not.toContain('flock -u')
+        expect(command).not.toContain('flock -n')
+        // A lock that cannot be taken is its own failure, never a silent skip.
+        expect(command).toContain(`flock -w 30 9 || { echo ${lockBusySentinel(group)}; exit 1; }`)
+      }
+    }
+  })
+
+  it('the read-only commands take no lock: a rename is atomic, so a read sees a whole file', () => {
+    for (const group of TRACES_GROUPS) {
+      for (const name of ['list', 'lines'] as const) expect(SENDER_REMOTE[name](group)).not.toContain('flock')
+    }
+  })
+
   it('every writing command writes a temporary file in the token directory and renames it over the token file', () => {
     for (const group of TRACES_GROUPS) {
       for (const name of ['append', 'remove', 'empty'] as const) {
@@ -430,6 +526,16 @@ describe('constants match the app', async () => {
     for (const group of TRACES_GROUPS) {
       expect(SENDER_REMOTE.list(group)).toContain(`d=${TRACES_APP_DIR}/tokens/${group}`)
     }
+  })
+
+  it('the token lock is the file apps/traces names, under the token directory', () => {
+    expect(TRACES_TOKENS_LOCK).toBe(`${TRACES_APP_DIR}/tokens/.lock`)
+    const line = /TRACES_TOKENS_LOCK\s*=\s*(.+)/.exec(hostSource)?.[1] ?? ''
+    // The same path however host.ts spells it: from the app directory, from the token root, or in full.
+    expect(line).toMatch(
+      /^(`\$\{TRACES_APP_DIR\}\/tokens\/\.lock`|`\$\{TRACES_TOKEN_ROOT\}\/\.lock`|'\/mnt\/traces\/app\/tokens\/\.lock')/,
+    )
+    expect(hostSource).toContain(['TRACES_TOKEN_ROOT = `$', '{TRACES_APP_DIR}/tokens`'].join(''))
   })
 
   it('the private probe reaches each group receiver on its port and path', () => {
@@ -580,6 +686,88 @@ describe('host scripts, run under a real sh', () => {
       expect(statSync(world.path('workstation')).ino).not.toBe(before.ino)
       expect(statSync(world.path('workstation')).mode & 0o777).toBe(0o640)
       expect(tempFiles(world, 'workstation')).toEqual([])
+    })
+  })
+
+  describe('the token lock', () => {
+    const NEW_LINE = formatTokenLine(NEXT_TOKEN, NEXT_FINGERPRINT, CREATED)
+
+    /** The append, held between its copy and its rename until the test creates `go`. */
+    const pausedAppend = (world: World) => {
+      const paused = join(world.dir, 'paused')
+      const go = join(world.dir, 'go')
+      const command = SENDER_REMOTE.append('marcusrbrown').replace(
+        'mv -f "$t" "$f"',
+        `: > ${paused}; while [ ! -e ${go} ]; do sleep 0.05; done; mv -f "$t" "$f"`,
+      )
+      expect(command).toContain(paused)
+      return {
+        started: () => startOnHost(world.dir, command, NEW_LINE),
+        waitUntilPaused: () => until(() => existsSync(paused), 'the append to reach its rename'),
+        release: () => writeFileSync(go, ''),
+      }
+    }
+
+    it.skipIf(!CAN_LOCK)(
+      'a revoke that runs while an append sits between its copy and its rename is not undone by it',
+      async () => {
+        const world = createWorld({files: {marcusrbrown: oldLine(OLD_A)}})
+        const append = pausedAppend(world)
+        const running = append.started()
+        await append.waitUntilPaused()
+
+        // The revoke starts now, while the append holds a copy that still has the token in it.
+        const revoking = startOnHost(world.dir, SENDER_REMOTE.remove('marcusrbrown'), `${sha12(OLD_A)}\n`)
+        await Bun.sleep(300)
+        append.release()
+        const [appended, revoked] = await Promise.all([running.finished(), revoking.finished()])
+
+        expect(appended.exitCode).toBe(0)
+        expect(appended.stdout).toContain(senderSentinel('append', 'marcusrbrown'))
+        expect(revoked.exitCode).toBe(0)
+        expect(revoked.stdout).toContain(senderSentinel('remove', 'marcusrbrown'))
+        // The revoked token stays revoked, and the appended one is there.
+        expect(world.file('marcusrbrown')).toBe(NEW_LINE)
+        expect(world.file('marcusrbrown')).not.toContain(OLD_A)
+      },
+    )
+
+    it.skipIf(!CAN_LOCK)(
+      'a held lock makes the second command fail with the busy sentinel, change nothing and leave no temp file',
+      async () => {
+        const world = createWorld({files: {marcusrbrown: oldLine(OLD_A)}})
+        const append = pausedAppend(world)
+        const running = append.started()
+        await append.waitUntilPaused()
+
+        // The same script, with the wait cut from 30 s to 1 s so the test does not stand about.
+        const impatient = SENDER_REMOTE.remove('marcusrbrown').replace('flock -w 30', 'flock -w 1')
+        expect(impatient).not.toBe(SENDER_REMOTE.remove('marcusrbrown'))
+        const second = execOnHost(world.dir, impatient, `${sha12(OLD_A)}\n`)
+
+        expect(second.exitCode).not.toBe(0)
+        expect(second.stdout).toContain(lockBusySentinel('marcusrbrown'))
+        expect(second.stdout).not.toContain(senderSentinel('remove', 'marcusrbrown'))
+        expect(second.stdout).not.toContain('TRACES_TOKEN_REMOVED')
+        expect(world.file('marcusrbrown')).toBe(oldLine(OLD_A))
+
+        append.release()
+        expect((await running.finished()).exitCode).toBe(0)
+        expect(world.file('marcusrbrown')).toBe(oldLine(OLD_A) + NEW_LINE)
+        expect(tempFiles(world, 'marcusrbrown').filter(name => name.startsWith('.token.'))).toEqual([])
+      },
+    )
+
+    it('creates the lock file when it is absent, and takes it for the append, remove and empty', () => {
+      for (const name of ['append', 'remove', 'empty'] as const) {
+        const world = createWorld({files: {workstation: oldLine(OLD_A)}})
+        const stdin = name === 'append' ? NEW_LINE : name === 'remove' ? `${sha12(OLD_A)}\n` : undefined
+        const lock = join(world.dir, 'tokens', '.lock')
+        expect(existsSync(lock)).toBe(false)
+        const result = run1(world, SENDER_REMOTE[name]('workstation'), stdin)
+        expect(result.exitCode).toBe(0)
+        expect(statSync(lock).isFile()).toBe(true)
+      }
     })
   })
 
@@ -952,6 +1140,51 @@ describe('traces sender add', () => {
       expect(world.ghCalls()).toHaveLength(0)
     })
 
+    it('when the reply to the write is lost, names the group, the fingerprint and both commands to find out, never the token', async () => {
+      const world = createWorld()
+      // The write landed; only the reply was lost.
+      world.dropReply.add('append')
+      const result = await run(world, ctx => tracesSenderAddAction('marcusrbrown', github(), ctx, makeDeps(world)), {
+        secrets: [NEXT_TOKEN],
+      })
+      expect(world.file('marcusrbrown')).toContain(NEXT_TOKEN)
+      expect(result.exit).toBe(1)
+      expect(result.stderr).toContain('did not confirm')
+      expect(result.stderr).toContain('marcusrbrown')
+      expect(result.stderr).toContain(NEXT_FINGERPRINT)
+      expect(result.stderr).toContain('infra traces sender list')
+      expect(result.stderr).toContain(`infra traces sender revoke marcusrbrown ${NEXT_FINGERPRINT}`)
+      expect(result.stderr).not.toContain(NEXT_TOKEN)
+      expect(world.remoteCalls(SENDER_REMOTE.probe('marcusrbrown'))).toHaveLength(0)
+      expect(world.ghCalls()).toHaveLength(0)
+    })
+
+    it('names the fingerprint when the write fails outright too, since the host may have done part of it', async () => {
+      const world = createWorld()
+      world.failing.add('append')
+      const result = await run(world, ctx => tracesSenderAddAction('fro-bot', github(), ctx, makeDeps(world)), {
+        secrets: [NEXT_TOKEN],
+      })
+      expect(result.stderr).toContain(`infra traces sender revoke fro-bot ${NEXT_FINGERPRINT}`)
+      expect(result.stderr).toContain('infra traces sender list')
+    })
+
+    it('a busy token lock stops the add with its own message: nothing written, nothing to revoke, nothing delivered', async () => {
+      const world = createWorld()
+      world.busy.add('append')
+      const result = await run(world, ctx => tracesSenderAddAction('marcusrbrown', github(), ctx, makeDeps(world)), {
+        secrets: [NEXT_TOKEN],
+      })
+      expect(result.exit).toBe(1)
+      expect(result.stderr).toContain('busy')
+      expect(result.stderr).toContain('Nothing was changed')
+      expect(result.stderr).not.toContain('did not confirm')
+      expect(result.stderr).not.toContain('revoke')
+      expect(world.file('marcusrbrown')).toBe('')
+      expect(world.remoteCalls(SENDER_REMOTE.probe('marcusrbrown'))).toHaveLength(0)
+      expect(world.ghCalls()).toHaveLength(0)
+    })
+
     it('stops before writing when the existing token file cannot be read', async () => {
       const world = createWorld()
       world.failing.add('list:marcusrbrown')
@@ -1199,6 +1432,23 @@ describe('traces sender revoke', () => {
     expect(world.file('marcusrbrown')).toBe(oldLine(OLD_A) + oldLine(OLD_C))
   })
 
+  it('a busy token lock stops the revoke with its own message and proves nothing', async () => {
+    const world = seeded()
+    world.busy.add('remove')
+    const result = await run(
+      world,
+      ctx => tracesSenderRevokeAction('marcusrbrown', sha12(OLD_B), {}, ctx, makeDeps(world)),
+      {secrets: [OLD_A, OLD_B, OLD_C]},
+    )
+    expect(result.exit).toBe(1)
+    expect(result.stderr).toContain('busy')
+    expect(result.stderr).toContain('Nothing was changed')
+    expect(result.stderr).not.toContain('did not confirm')
+    expect(world.file('marcusrbrown')).toBe(oldLine(OLD_A) + oldLine(OLD_B) + oldLine(OLD_C))
+    expect(world.remoteCalls(SENDER_REMOTE.probe('marcusrbrown'))).toHaveLength(0)
+    expect(result.stdout.toLowerCase()).not.toContain('revoked')
+  })
+
   it('fails and proves nothing when the host does not confirm the removal', async () => {
     const world = seeded()
     world.failing.add('remove')
@@ -1280,6 +1530,21 @@ describe('traces sender revoke --all', () => {
     expect(result.stdout.toLowerCase()).not.toContain('revoked')
     // The other groups were still emptied and proven.
     expect(world.file('marcusrbrown')).toBe('')
+  })
+
+  it('a busy token lock leaves every group alone, says so for each, and exits non-zero', async () => {
+    const world = createWorld({configured: 'held', files})
+    world.busy.add('empty')
+    const result = await run(
+      world,
+      ctx => tracesSenderRevokeAction(undefined, undefined, {all: true}, ctx, makeDeps(world)),
+      {secrets: [OLD_A, OLD_B, OLD_C]},
+    )
+    expect(result.exit).toBe(1)
+    expect(result.stderr).toContain('busy')
+    expect(result.stderr).not.toContain('did not confirm')
+    expect(world.file('marcusrbrown')).toBe(files.marcusrbrown)
+    expect(result.stdout.toLowerCase()).not.toContain('revoked')
   })
 
   it('empties no group it could not read first, and exits non-zero', async () => {

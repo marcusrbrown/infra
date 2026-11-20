@@ -5,9 +5,14 @@ import {
   SENDER_GROUPS,
   TRACES_APP_DIR,
   TRACES_CONTAINERD_ROOT,
+  TRACES_DEPLOY_MARKER,
   TRACES_DOCKER_ROOT,
+  TRACES_INGEST_LOCK,
+  TRACES_LOCK_BUSY_SENTINEL,
+  TRACES_PENDING_RESTARTS,
   TRACES_SENTINEL_PATH,
   TRACES_TOKEN_ROOT,
+  TRACES_TOKENS_LOCK,
   TRACES_VOLUME_MOUNT,
   tracesTokenDir,
   validateTracesHost,
@@ -81,5 +86,26 @@ describe('host layout', () => {
       expect(dir.startsWith(`${TRACES_TOKEN_ROOT}/`)).toBe(true)
     }
     expect(tracesTokenDir('fro-bot')).toBe(`${TRACES_TOKEN_ROOT}/fro-bot`)
+  })
+})
+
+describe('deploy state and locks', () => {
+  it('pins the four contract paths to their exact values', () => {
+    expect(TRACES_DEPLOY_MARKER).toBe('/mnt/traces/app/.deploy-in-progress')
+    expect(TRACES_PENDING_RESTARTS).toBe('/mnt/traces/app/.pending-restarts')
+    expect(TRACES_INGEST_LOCK).toBe('/mnt/traces/app/.ingest.lock')
+    expect(TRACES_TOKENS_LOCK).toBe('/mnt/traces/app/tokens/.lock')
+    expect(TRACES_LOCK_BUSY_SENTINEL).toBe('LOCK_BUSY')
+  })
+
+  it('keeps them on the volume, under the app directory', () => {
+    for (const path of [TRACES_DEPLOY_MARKER, TRACES_PENDING_RESTARTS, TRACES_INGEST_LOCK, TRACES_TOKENS_LOCK]) {
+      expect(path.startsWith(`${TRACES_APP_DIR}/`)).toBe(true)
+    }
+    // The tokens lock sits inside the token root, where only the sender-token commands write.
+    expect(TRACES_TOKENS_LOCK.startsWith(`${TRACES_TOKEN_ROOT}/`)).toBe(true)
+    expect(new Set([TRACES_DEPLOY_MARKER, TRACES_PENDING_RESTARTS, TRACES_INGEST_LOCK, TRACES_TOKENS_LOCK]).size).toBe(
+      4,
+    )
   })
 })

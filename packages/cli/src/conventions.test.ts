@@ -5,6 +5,7 @@ import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 import {parse as parseYaml} from 'yaml'
 import {changesetFileName, runIdentityFromEnv} from '../../../apps/cliproxy/scripts/refresh-go-privacy'
+import {ALERT_LABEL} from '../scripts/go-privacy-alert'
 import {MANAGED_MARKER, REQUIRED_HEADINGS, runMarker} from '../scripts/reconcile-autoheal-reports'
 import {registerAgentCommands} from './commands/agent'
 import {MCP_ALLOWLIST} from './commands/mcp'
@@ -5667,6 +5668,16 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     return {text, workflow, steps: stepsOf(workflowJob(workflow, 'refresh'))}
   }
 
+  async function loadAlert(): Promise<{
+    job: Record<string, unknown>
+    steps: Record<string, unknown>[]
+    workflow: Record<string, unknown>
+  }> {
+    const workflow = await loadWorkflowYaml(WORKFLOW_FILE)
+    const job = workflowJob(workflow, 'alert')
+    return {job, steps: stepsOf(job), workflow}
+  }
+
   const stepIndex = (steps: Record<string, unknown>[], id: string): number => steps.findIndex(step => step.id === id)
 
   it('triggers daily and on dispatch only, with workflow-scoped concurrency and read-only permissions', async () => {
@@ -5799,18 +5810,24 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
   })
 
   it('passes the read-only workflow token to the refresh step, and no write-capable token appears elsewhere', async () => {
-    const {steps, text} = await load()
+    const {steps, workflow} = await load()
     const refresh = steps[stepIndex(steps, 'refresh')]
     const env = isRecord(refresh?.env) ? refresh.env : {}
     expect(env).toEqual({GITHUB_TOKEN: ghaExpression('github.token')})
 
-    // Secrets (the App credentials) are read by the token step alone; the refresh step never sees them.
+    // Secrets (the App credentials) are read by the token step alone; the refresh step never sees them. `steps` is
+    // the refresh job's, so the alert job's own webhook secret is pinned separately below.
     const secretReaders = steps.filter(step => JSON.stringify(step).includes('secrets.'))
     expect(secretReaders.map(step => step.id)).toEqual(['get-app-token'])
     expect(JSON.stringify(refresh)).not.toContain('get-app-token')
     expect(JSON.stringify(steps[stepIndex(steps, 'stale-pr')])).not.toContain('get-app-token')
-    // The job-level and workflow-level grants stay read-only, so github.token cannot write.
-    expect(text).not.toMatch(/^\s+(?:contents|pull-requests|issues): write/m)
+    // The refresh job's and the workflow's grants stay read-only, so github.token cannot write there. The alert job
+    // holds the one write grant (issues), declared on that job alone.
+    const refreshJob = workflowJob(workflow, 'refresh')
+    for (const grants of [workflow.permissions, refreshJob.permissions]) {
+      expect(Object.values(isRecord(grants) ? grants : {})).not.toContain('write')
+    }
+    expect(JSON.stringify(refreshJob)).not.toMatch(/"(?:contents|pull-requests|issues)":"write"/)
   })
 
   it('pushes a single fixed branch with --force-with-lease and never a bare force', async () => {
@@ -5965,9 +5982,13 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     expect(executable).not.toMatch(/auto-?merge|--auto\b|gh pr merge|enablePullRequestAutoMerge/i)
   })
 
-  it('is main-only, so the PR branch is never cut from another ref', async () => {
+  it('is main-only, so the PR branch is never cut from another ref, and skips an alert rehearsal', async () => {
     const {workflow} = await load()
-    expect(workflowJob(workflow, 'refresh').if).toBe("github.ref == 'refs/heads/main'")
+    // A rehearsal dispatch exercises the alert path alone: no refresh runs, so no PR, no token and no real result
+    // can be mixed into the rehearsal. Scheduled runs carry no input, which reads as `none`.
+    expect(workflowJob(workflow, 'refresh').if).toBe(
+      "github.ref == 'refs/heads/main' && (inputs.rehearse-alert || 'none') == 'none'",
+    )
   })
 
   it('keeps the snapshot path under the renovate-changesets exclude patterns', async () => {
@@ -5992,5 +6013,161 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     const pkg: unknown = JSON.parse(await Bun.file(resolve(REPO_ROOT, 'package.json')).text())
     const scripts = isRecord(pkg) && isRecord(pkg.scripts) ? pkg.scripts : {}
     expect(scripts['refresh:go-privacy']).toBe('bun run apps/cliproxy/scripts/refresh-go-privacy.ts')
+  })
+
+  describe('failure alert job', () => {
+    const WEBHOOK_SECRET = 'CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK'
+    const ALERT_SCRIPT = 'packages/cli/scripts/go-privacy-alert.ts'
+
+    const stepNamed = (steps: Record<string, unknown>[], name: string): Record<string, unknown> | undefined =>
+      steps.find(step => step.name === name)
+
+    it('is the second job, runs after refresh whatever its result, and only on main', async () => {
+      const {job, workflow} = await loadAlert()
+
+      expect(Object.keys(isRecord(workflow.jobs) ? workflow.jobs : {}).sort()).toEqual(['alert', 'refresh'])
+      expect(job.needs).toBe('refresh')
+      expect(String(job.if)).toContain('always()')
+      expect(job.if).toBe("always() && github.ref == 'refs/heads/main'")
+      expect(typeof job['timeout-minutes']).toBe('number')
+      expect(job['timeout-minutes'] as number).toBeLessThanOrEqual(10)
+    })
+
+    it('acts on the refresh result through the environment, never on a result it was not given', async () => {
+      const {steps} = await loadAlert()
+      const issue = stepNamed(steps, 'Update alert issue')
+      const env = isRecord(issue?.env) ? issue.env : {}
+
+      expect(env.ALERT_REFRESH_RESULT).toBe(ghaExpression('needs.refresh.result'))
+      expect(env.ALERT_REHEARSE).toBe(ghaExpression('inputs.rehearse-alert'))
+      // A re-run replays the first attempt's result, so the script must know the attempt and then does nothing.
+      expect(env.ALERT_RUN_ATTEMPT).toBe(ghaExpression('github.run_attempt'))
+      expect(issue?.run).toBe(`bun run ${ALERT_SCRIPT} issue`)
+      // A broken alert path must be a red run: no swallowed failure on the issue step.
+      expect(issue?.['continue-on-error']).toBeUndefined()
+    })
+
+    it('grants exactly contents: read and issues: write, on the job, and leaves the workflow read-only', async () => {
+      const {job, workflow} = await loadAlert()
+
+      expect(job.permissions).toEqual({contents: 'read', issues: 'write'})
+      expect(workflow.permissions).toEqual({contents: 'read'})
+      expect(Object.keys(isRecord(job.permissions) ? job.permissions : {}).sort()).toEqual(['contents', 'issues'])
+    })
+
+    it('reads the webhook secret in the Discord step alone, through env, never in a script body', async () => {
+      const {steps} = await loadAlert()
+      const readers = steps.filter(step => JSON.stringify(step).includes('secrets.'))
+
+      expect(readers.map(step => step.name)).toEqual(['Notify Discord'])
+      const env = isRecord(readers[0]?.env) ? readers[0].env : {}
+      expect(env[WEBHOOK_SECRET]).toBe(ghaExpression(`secrets.${WEBHOOK_SECRET}`))
+      expect(Object.values(env).filter(value => String(value).includes('secrets.'))).toHaveLength(1)
+      expect(String(readers[0]?.run)).not.toContain('${{')
+      expect(String(readers[0]?.run)).toBe(`bun run ${ALERT_SCRIPT} notify`)
+    })
+
+    it('keeps the write-capable workflow token out of the Discord step and the webhook out of the issue step', async () => {
+      const {steps} = await loadAlert()
+      const issue = stepNamed(steps, 'Update alert issue')
+      const notify = stepNamed(steps, 'Notify Discord')
+
+      expect(isRecord(issue?.env) ? issue.env.GH_TOKEN : undefined).toBe(ghaExpression('github.token'))
+      expect(JSON.stringify(issue)).not.toContain(WEBHOOK_SECRET)
+      expect(JSON.stringify(notify)).not.toContain('github.token')
+      expect(JSON.stringify(notify)).not.toContain('GH_TOKEN')
+      // The Discord step runs only when the issue step asked for a message, and only after it succeeded.
+      expect(notify?.if).toBe("steps.issue.outputs.notify == 'created' || steps.issue.outputs.notify == 'recovered'")
+      expect(notify?.['continue-on-error']).toBeUndefined()
+      expect(steps.indexOf(notify ?? {})).toBeGreaterThan(steps.indexOf(issue ?? {}))
+      expect(issue?.id).toBe('issue')
+    })
+
+    it('never receives the App token or the App credentials', async () => {
+      const {job} = await loadAlert()
+      const text = JSON.stringify(job)
+
+      expect(text).not.toContain('get-app-token')
+      expect(text).not.toContain('create-github-app-token')
+      expect(text).not.toContain('APPLICATION_ID')
+      expect(text).not.toContain('APPLICATION_PRIVATE_KEY')
+    })
+
+    it('interpolates only an allowlist of expressions, none of them pull-request or upstream controlled', async () => {
+      const {job} = await loadAlert()
+      const text = JSON.stringify(job)
+      const expressions = [...text.matchAll(/\$\{\{([^}]*)\}\}/g)].map(match => match[1]?.trim())
+
+      expect(new Set(expressions)).toEqual(
+        new Set([
+          'github.token',
+          'github.run_attempt',
+          'needs.refresh.result',
+          'inputs.rehearse-alert',
+          'steps.issue.outputs.notify',
+          'steps.issue.outputs.issue-number',
+          `secrets.${WEBHOOK_SECRET}`,
+        ]),
+      )
+      expect(text).not.toMatch(/github\.event|head_ref|pull_request|steps\.refresh|outputs\.(?:changed|changeset)/)
+      // Script bodies carry no expression at all: every value reaches the script through env.
+      for (const step of stepsOf(job)) expect(String(step.run ?? '')).not.toContain('${{')
+    })
+
+    it('cannot push, open or edit a pull request, or touch the repository', async () => {
+      const {job, steps} = await loadAlert()
+      const scripts = steps.map(step => String(step.run ?? '')).join('\n')
+
+      expect(scripts).not.toMatch(/git push|git commit|git add|gh pr\b|gh api|--force/)
+      expect(JSON.stringify(job.permissions)).not.toContain('pull-requests')
+      expect(JSON.stringify(job)).not.toMatch(/pull-requests|"contents":"write"/)
+    })
+
+    it('checks out without persisting credentials, and installs nothing: the script imports no package', async () => {
+      const {steps} = await loadAlert()
+      const checkouts = steps.filter(step => typeof step.uses === 'string' && step.uses.startsWith('actions/checkout@'))
+
+      expect(checkouts).toHaveLength(1)
+      const withBlock = isRecord(checkouts[0]?.with) ? checkouts[0].with : {}
+      expect(withBlock['persist-credentials']).toBe(false)
+      expect(withBlock.token).toBeUndefined()
+      expect(steps.some(step => String(step.run ?? '').includes('bun install'))).toBe(false)
+
+      const source = await Bun.file(resolve(REPO_ROOT, ALERT_SCRIPT)).text()
+      const specifiers = [...source.matchAll(/(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]/g)].map(
+        match => match[1],
+      )
+      expect(specifiers.filter(specifier => !specifier?.startsWith('node:') && !specifier?.startsWith('.'))).toEqual([])
+    })
+
+    it('exposes a rehearsal input on dispatch only, defaulting to none, and keeps the two triggers', async () => {
+      const {workflow} = await loadAlert()
+      const on = isRecord(workflow.on) ? workflow.on : {}
+      const dispatch = isRecord(on.workflow_dispatch) ? on.workflow_dispatch : {}
+      const inputs = isRecord(dispatch.inputs) ? dispatch.inputs : {}
+
+      expect(Object.keys(on).sort()).toEqual(['schedule', 'workflow_dispatch'])
+      expect(Object.keys(inputs)).toEqual(['rehearse-alert'])
+      expect(inputs['rehearse-alert']).toMatchObject({
+        type: 'choice',
+        default: 'none',
+        options: ['none', 'fail', 'clear'],
+      })
+    })
+
+    it('passes the owner and actor to the script, which refuses a non-owner rehearsal before any API call', async () => {
+      const source = await Bun.file(resolve(REPO_ROOT, ALERT_SCRIPT)).text()
+
+      expect(source).toContain('GITHUB_ACTOR')
+      expect(source).toContain('GITHUB_REPOSITORY_OWNER')
+    })
+
+    it('declares its label in settings.yml, so the settings sync does not strip it from an open alert issue', async () => {
+      const settings: unknown = parseYaml(await Bun.file(resolve(REPO_ROOT, '.github/settings.yml')).text())
+      const labels = isRecord(settings) && Array.isArray(settings.labels) ? settings.labels : []
+      const names = labels.map(label => (isRecord(label) ? label.name : undefined))
+
+      expect(names).toContain(ALERT_LABEL)
+    })
   })
 })

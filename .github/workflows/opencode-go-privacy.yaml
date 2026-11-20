@@ -15,12 +15,29 @@
 # Credentials: checkout persists none. The refresh step and the stale-PR lookup carry only the read-only workflow
 # token. A scoped GitHub App token is minted only after the parse succeeded and either the snapshot changed or a stale
 # PR is open, and reaches git and gh inside the PR step and the close step alone.
+#
+# Alert: the `alert` job runs after `refresh` whatever its result. A failed or cancelled refresh (a job killed by its
+# timeout reports as cancelled) opens ONE issue labelled `opencode-go-privacy-failure`, or comments on the open one, and
+# posts to Discord once, when it opens the issue. The next successful refresh comments on and closes the issue and posts
+# once more. Nothing from the refresh log or upstream reaches the issue or Discord. The alert job has `issues: write` and
+# the workflow token only; the App token is never available to it. The `rehearse-alert` dispatch input exercises the
+# alert under a separate marker and skips the refresh. A refresh that never starts (a disabled schedule) is not alerted.
 name: OpenCode Go Privacy
 
 on:
   schedule:
     - cron: '17 5 * * *'
   workflow_dispatch:
+    inputs:
+      rehearse-alert:
+        description: 'Owner only. fail: open a marked rehearsal issue and post to Discord. clear: close it. The refresh does not run.'
+        required: true
+        type: choice
+        options:
+          - none
+          - fail
+          - clear
+        default: none
 
 permissions:
   contents: read
@@ -32,8 +49,9 @@ concurrency:
 jobs:
   refresh:
     name: Refresh privacy snapshot
-    # The PR branch is cut from main; a dispatch from any other ref would compare against the wrong snapshot.
-    if: github.ref == 'refs/heads/main'
+    # The PR branch is cut from main; a dispatch from any other ref would compare against the wrong snapshot. An alert
+    # rehearsal skips the refresh, so a real result is never mixed into it. Scheduled runs carry no input, read as none.
+    if: github.ref == 'refs/heads/main' && (inputs.rehearse-alert || 'none') == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The stale-PR lookup lists pull requests with the read-only workflow token.
@@ -196,3 +214,51 @@ jobs:
 
           gh pr close "${PR_NUMBER}" --comment "Closing: the upstream OpenCode Go privacy terms now match main, so this refresh is obsolete. A later change to the terms opens a new PR."
           gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}"
+
+  # Runs after refresh whatever its result (always()), on main only like refresh. It acts on the refresh result:
+  # failure or cancelled alerts, success clears, skipped (a rehearsal, which skips the refresh) does nothing unless
+  # rehearsing. Two steps keep the credentials apart: the issue step holds the workflow token and no webhook, the
+  # Discord step holds the webhook and no token. Every value reaches the script through env, never the script body.
+  alert:
+    name: Alert on refresh failure
+    needs: refresh
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      # The script imports no package, so there is no install step. Any API failure fails this step: a broken alert
+      # path must show as a red run. A re-run (attempt above 1) replays an old refresh result, so the script then makes
+      # no API call and changes nothing: dispatch a fresh refresh instead.
+      - name: Update alert issue
+        id: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_REFRESH_RESULT: ${{ needs.refresh.result }}
+          ALERT_REHEARSE: ${{ inputs.rehearse-alert }}
+          ALERT_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: bun run packages/cli/scripts/go-privacy-alert.ts issue
+
+      # Only when the issue step created the issue (first failing run of an outage) or closed it on recovery. The
+      # script always exits 0: a Discord failure never fails the job or undoes the issue.
+      - name: Notify Discord
+        if: steps.issue.outputs.notify == 'created' || steps.issue.outputs.notify == 'recovered'
+        env:
+          ALERT_REFRESH_RESULT: ${{ needs.refresh.result }}
+          ALERT_REHEARSE: ${{ inputs.rehearse-alert }}
+          ALERT_NOTIFY: ${{ steps.issue.outputs.notify }}
+          ALERT_ISSUE_NUMBER: ${{ steps.issue.outputs.issue-number }}
+          CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK: ${{ secrets.CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK }}
+        run: bun run packages/cli/scripts/go-privacy-alert.ts notify

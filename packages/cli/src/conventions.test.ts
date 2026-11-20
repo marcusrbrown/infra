@@ -5855,14 +5855,18 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     const shape = /\[\[ ! "\$\{CHANGESET_FILE\}" =~ (\S+) \]\]/.exec(script)
     expect(shape, 'no name check on CHANGESET_FILE').not.toBeNull()
     const pattern = new RegExp(shape?.[1] ?? '')
-    expect(pattern.test(changesetFileName('a'.repeat(40)))).toBe(true)
-    expect(pattern.test(changesetFileName('0123456789abcdef'.repeat(3).slice(0, 40)))).toBe(true)
+    expect(pattern.test(changesetFileName('a'.repeat(40), 'snapshot bytes'))).toBe(true)
+    expect(pattern.test(changesetFileName('0123456789abcdef'.repeat(3).slice(0, 40), '{}\n'))).toBe(true)
     for (const bad of [
       '',
       '../x.md',
       'opencode-go-privacy-abc.md',
-      'renovate-abcdef0.md',
-      'opencode-go-privacy-abcdef0.md\n.x',
+      'renovate-abcdef0-12345678.md',
+      // The old shape, from the docs commit alone, no longer passes: it could collide across snapshots.
+      'opencode-go-privacy-abcdef0.md',
+      'opencode-go-privacy-abcdef0-1234567.md',
+      'opencode-go-privacy-abcdef0-1234567G.md',
+      'opencode-go-privacy-abcdef0-12345678.md\n.x',
     ]) {
       expect(pattern.test(bad), `accepted ${JSON.stringify(bad)}`).toBe(false)
     }
@@ -5880,6 +5884,29 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
 
     // The refresh step itself stays read-only and tokenless beyond github.token.
     expect(JSON.stringify(refresh)).not.toContain('CHANGESET')
+  })
+
+  it('proposes nothing when the snapshot itself does not differ from main, whatever else is staged', async () => {
+    const {steps} = await load()
+    const script = String(steps.find(step => step.name === 'Open snapshot PR')?.run)
+    const add = script.indexOf('git add --')
+    const check = script.indexOf(`if git diff --cached --quiet -- "${'$'}{snapshot}"; then`)
+    const exit = script.indexOf('exit 0', check)
+    const commit = script.indexOf('git commit')
+
+    // The check names the snapshot path: an index holding only a changeset must not open a PR.
+    expect(check).toBeGreaterThan(add)
+    expect(script).not.toMatch(/git diff --cached --quiet\s*(?:;|$|\n)/)
+    // The branch exits successfully before any commit, push or PR call, and says why.
+    expect(exit).toBeGreaterThan(check)
+    expect(script.slice(check, exit)).toContain('main already carries this snapshot')
+    expect(commit).toBeGreaterThan(exit)
+    expect(script.indexOf('git push')).toBeGreaterThan(exit)
+    expect(script.indexOf('gh pr create')).toBeGreaterThan(exit)
+    // It only stops. Stale-PR cleanup stays with the next run's lookup, which is gated on an unchanged refresh.
+    expect(script.slice(check, exit)).not.toMatch(/gh pr (?:close|edit)|gh api/)
+    const lookup = steps.find(step => step.id === 'stale-pr')
+    expect(lookup?.if).toBe("steps.refresh.outputs.changed != 'true'")
   })
 
   it('does not let renovate-changesets act on the snapshot PR, whose branch lacks the renovate/ prefix', async () => {

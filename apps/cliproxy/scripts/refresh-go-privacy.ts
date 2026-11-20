@@ -1,5 +1,6 @@
 import type {Disagreement, Unmatched} from '@marcusrbrown/infra-shared/opencode-go/build-snapshot'
 import type {ModelEntry, PrivacySnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
+import {createHash} from 'node:crypto'
 import {appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync} from 'node:fs'
 import {dirname, resolve} from 'node:path'
 import {isDeepStrictEqual} from 'node:util'
@@ -30,8 +31,9 @@ import {parsePrivacyDocs, PrivacyTableError} from '@marcusrbrown/infra-shared/op
 // .github/workflows/opencode-go-privacy.yaml runs this through `bun run refresh:go-privacy`, then opens the PR
 // from the body file this script writes. A changed snapshot also gets one patch changeset for the published CLI,
 // which inlines the snapshot at build time: merging the PR queues a release through the Version Packages PR.
-// The file is named after the upstream commit, so a re-run for the same commit rewrites it and a refresh for a
-// newer commit adds a second pending changeset next to an earlier one that is still on `main`.
+// The file is named after the upstream commit and a digest of the snapshot bytes: a re-run for the same snapshot
+// rewrites it, and a different snapshot, even at the same docs commit, gets its own name beside any earlier changeset
+// that is still pending on `main`.
 
 export const UPSTREAM_BRANCH = 'dev'
 export const COMMIT_API_URL = `https://api.github.com/repos/${SNAPSHOT_SOURCE_REPO}/commits/${UPSTREAM_BRANCH}`
@@ -95,16 +97,22 @@ function assertCommitSha(sha: string): void {
   if (!COMMIT_SHA_PATTERN.test(sha)) throw new Error('a changeset needs a 40-hex upstream commit SHA')
 }
 
-/** One file per upstream commit. The name is safe in a path: it comes from a validated SHA alone. */
-export function changesetFileName(sha: string): string {
+/**
+ * One file per proposed snapshot: the docs commit (for the eye) plus 8 hex of the sha256 of the exact bytes the
+ * refresh writes. The commit alone is not enough: the live models list moves on its own, so two different snapshots
+ * can share a docs commit, and an equal name would leave the later PR with no changeset of its own. The name is safe
+ * in a path: it holds only hex from a validated SHA and a digest.
+ */
+export function changesetFileName(sha: string, snapshotContent: string): string {
   assertCommitSha(sha)
-  return `opencode-go-privacy-${sha.slice(0, 7)}.md`
+  const digest = createHash('sha256').update(snapshotContent).digest('hex').slice(0, 8)
+  return `opencode-go-privacy-${sha.slice(0, 7)}-${digest}.md`
 }
 
 /** A patch bump for the CLI and one plain sentence for its release notes. */
 export function renderChangeset(sha: string): string {
   assertCommitSha(sha)
-  return `---\n'${CHANGESET_PACKAGE}': patch\n---\n\nRefresh the bundled OpenCode Go privacy snapshot to upstream commit \`${sha.slice(0, 7)}\` of \`${SNAPSHOT_SOURCE_REPO}\`.\n`
+  return `---\n'${CHANGESET_PACKAGE}': patch\n---\n\nRefresh the bundled OpenCode Go privacy snapshot to upstream commit \`${sha.slice(0, 7)}\` of \`${SNAPSHOT_SOURCE_REPO}\` and the public model list read at refresh time.\n`
 }
 
 /** The `$GITHUB_OUTPUT` lines for one run. `changeset` is a bare file name, present only when one was written. */
@@ -329,12 +337,13 @@ export async function refreshGoPrivacy({
     )
   }
   // Before the snapshot, so a failed changeset write leaves the snapshot as it was.
+  const content = serializeSnapshot(next)
   let changesetFile: string | undefined
   if (changesetDir !== undefined) {
-    changesetFile = changesetFileName(sha)
+    changesetFile = changesetFileName(sha, content)
     writeAtomic(resolve(changesetDir, changesetFile), renderChangeset(sha))
   }
-  writeAtomic(snapshotPath, serializeSnapshot(next))
+  writeAtomic(snapshotPath, content)
   return changesetFile === undefined
     ? {changed: true, sourceCommit: sha}
     : {changed: true, sourceCommit: sha, changesetFile}

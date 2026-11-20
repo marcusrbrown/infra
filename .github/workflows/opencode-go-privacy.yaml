@@ -116,9 +116,10 @@ jobs:
           new_snapshot="${RUNNER_TEMP}/privacy-snapshot.json"
           title="chore(cliproxy): refresh OpenCode Go privacy snapshot"
 
-          # The refresh wrote one changeset named after the upstream commit. A changed snapshot without one fails the run
-          # rather than opening a PR that would not queue a release; any other name never reaches a path or git add.
-          if [[ ! "${CHANGESET_FILE}" =~ ^opencode-go-privacy-[0-9a-f]{7}\.md$ ]]; then
+          # The refresh wrote one changeset named after the upstream commit and a digest of the snapshot. A changed
+          # snapshot without one fails the run rather than opening a PR that would not queue a release; any other name
+          # never reaches a path or git add.
+          if [[ ! "${CHANGESET_FILE}" =~ ^opencode-go-privacy-[0-9a-f]{7}-[0-9a-f]{8}\.md$ ]]; then
             echo "The refresh did not report a valid changeset file name." >&2
             exit 1
           fi
@@ -153,8 +154,11 @@ jobs:
 
           # Only the snapshot and its changeset are committed, whatever else the worktree holds.
           git add -- "${snapshot}" "${changeset}"
-          if git diff --cached --quiet; then
-            echo "main already carries this snapshot; nothing to open."
+          # The snapshot itself must differ from main. A staged changeset alone proves nothing: main may have taken
+          # this snapshot since the refresh ran (a hand-merged copy, a rerun), and a PR of only a changeset is wrong.
+          # An open snapshot PR is left for the next run, whose refresh then reports unchanged and closes it.
+          if git diff --cached --quiet -- "${snapshot}"; then
+            echo "main already carries this snapshot; nothing to propose. Any open snapshot PR is closed by the next run."
             exit 0
           fi
 

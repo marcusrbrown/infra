@@ -55,6 +55,7 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): Record<str
     GITHUB_REPOSITORY_OWNER: 'marcusrbrown',
     ALERT_REFRESH_RESULT: 'failure',
     ALERT_REHEARSE: 'none',
+    ALERT_RUN_ATTEMPT: '1',
     ...overrides,
   }
 }
@@ -295,6 +296,15 @@ describe('readAlertEnv', () => {
     expect(() => readAlertEnv(baseEnv({ALERT_REHEARSE: 'maybe'}))).toThrow()
   })
 
+  it('reads the first attempt only from the exact value 1, and anything else as a re-run', () => {
+    expect(readAlertEnv(baseEnv({ALERT_RUN_ATTEMPT: '1'})).attempt).toBe('first')
+    expect(readAlertEnv(baseEnv({ALERT_RUN_ATTEMPT: '2'})).attempt).toBe('rerun')
+    expect(readAlertEnv(baseEnv({ALERT_RUN_ATTEMPT: '12'})).attempt).toBe('rerun')
+    for (const bad of [undefined, '', 'x', '0', '-1', '1.0', '2x']) {
+      expect(readAlertEnv(baseEnv({ALERT_RUN_ATTEMPT: bad})).attempt).toBe('invalid')
+    }
+  })
+
   it('requires the repository and run id, since an alert without a run link is no use', () => {
     expect(() => readAlertEnv(baseEnv({GITHUB_RUN_ID: ''}))).toThrow()
     expect(() => readAlertEnv(baseEnv({GITHUB_REPOSITORY: ''}))).toThrow()
@@ -509,12 +519,23 @@ describe('issue step: success', () => {
     expect(run.outputs['issue-number']).toBe('7')
   })
 
-  it('also closes an open rehearsal issue, quietly: no Discord message for a rehearsal alone', async () => {
+  it('leaves an open rehearsal issue alone: only the explicit clear closes it', async () => {
     const fake = fakeGh([rehearsalIssue()], {labels: [ALERT_LABEL]})
     const run = await issueStep({ALERT_REFRESH_RESULT: 'success'}, fake)
 
-    expect(fake.issues[0]?.state).toBe('closed')
+    expect(fake.issues[0]?.state).toBe('open')
+    expect(fake.writes()).toEqual([])
     expect(run.outputs.notify).toBe('none')
+  })
+
+  it('still emits the recovery request when it closes a real issue beside an open rehearsal issue', async () => {
+    const fake = fakeGh([rehearsalIssue(), realIssue()], {labels: [ALERT_LABEL]})
+    const run = await issueStep({ALERT_REFRESH_RESULT: 'success'}, fake)
+
+    expect(fake.issues.find(issue => issue.number === 7)?.state).toBe('closed')
+    expect(fake.issues.find(issue => issue.number === 8)?.state).toBe('open')
+    expect(fake.comments().map(comment => comment.issue)).toEqual([7])
+    expect(run.outputs).toEqual({notify: 'recovered', 'issue-number': '7'})
   })
 
   it('fails the job when the close is not confirmed by the response', async () => {
@@ -525,6 +546,77 @@ describe('issue step: success', () => {
     })
     expect((await issueStep({ALERT_REFRESH_RESULT: 'success'}, fake)).exitCode).toBe(1)
   })
+})
+
+// A re-run replays the first attempt's `needs.refresh.result`, which can be older than the current outage. A re-run
+// therefore never reconciles anything: the capability is deleted, not guarded by a freshness check.
+describe('issue step: a re-run never updates the alert', () => {
+  const LOG_LINE = '::notice::A re-run does not update the OpenCode Go privacy alert. Dispatch a fresh refresh instead.'
+
+  it('does not close a newer outage on a replayed success, makes no API call and requests no notification', async () => {
+    // Monday's refresh succeeded but its alert job failed. Tuesday's refresh failed and opened this issue. Someone
+    // re-runs Monday's failed job: attempt 2, still reading Monday's success.
+    const fake = fakeGh([realIssue()], {labels: [ALERT_LABEL]})
+    const run = await issueStep({ALERT_REFRESH_RESULT: 'success', ALERT_RUN_ATTEMPT: '2'}, fake)
+
+    expect(run.exitCode).toBe(0)
+    expect(fake.calls).toEqual([])
+    expect(fake.issues[0]?.state).toBe('open')
+    expect(run.outputs).toEqual({notify: 'none'})
+    expect(run.logs).toContain(LOG_LINE)
+  })
+
+  it.each(['failure', 'cancelled'] as const)(
+    'neither opens nor comments on a replayed %s, in either direction',
+    async result => {
+      const empty = fakeGh([], {labels: [ALERT_LABEL]})
+      const created = await issueStep({ALERT_REFRESH_RESULT: result, ALERT_RUN_ATTEMPT: '2'}, empty)
+      expect(empty.calls).toEqual([])
+      expect(empty.issues).toEqual([])
+      expect(created.outputs).toEqual({notify: 'none'})
+
+      const open = fakeGh([realIssue()], {labels: [ALERT_LABEL]})
+      await issueStep({ALERT_REFRESH_RESULT: result, ALERT_RUN_ATTEMPT: '3'}, open)
+      expect(open.calls).toEqual([])
+    },
+  )
+
+  it('applies to rehearsals too: a replayed rehearsal dispatch makes no API call', async () => {
+    for (const rehearse of ['fail', 'clear']) {
+      const fake = fakeGh([rehearsalIssue()], {labels: [ALERT_LABEL]})
+      const run = await issueStep({ALERT_REHEARSE: rehearse, ALERT_RUN_ATTEMPT: '2'}, fake)
+
+      expect(run.exitCode).toBe(0)
+      expect(fake.calls).toEqual([])
+      expect(run.outputs).toEqual({notify: 'none'})
+    }
+  })
+
+  it('leaves the first attempt unchanged', async () => {
+    const failing = fakeGh([], {labels: [ALERT_LABEL]})
+    expect((await issueStep({ALERT_RUN_ATTEMPT: '1'}, failing)).outputs.notify).toBe('created')
+
+    const recovering = fakeGh([realIssue()], {labels: [ALERT_LABEL]})
+    const run = await issueStep({ALERT_REFRESH_RESULT: 'success', ALERT_RUN_ATTEMPT: '1'}, recovering)
+    expect(run.outputs.notify).toBe('recovered')
+    expect(recovering.issues[0]?.state).toBe('closed')
+    expect(run.logs.join('\n')).not.toContain('re-run')
+  })
+
+  it.each([undefined, '', '  ', 'two', '1.5', '-1', '0', '1e3', '01x', '99999'])(
+    'treats the attempt value %j as a re-run: it does nothing and says so',
+    async attempt => {
+      const fake = fakeGh([realIssue()], {labels: [ALERT_LABEL]})
+      const run = await issueStep({ALERT_REFRESH_RESULT: 'success', ALERT_RUN_ATTEMPT: attempt}, fake)
+
+      expect(run.exitCode).toBe(0)
+      expect(fake.calls).toEqual([])
+      expect(run.outputs).toEqual({notify: 'none'})
+      expect(run.logs.some(line => line.startsWith('::warning::The run attempt value is missing or invalid'))).toBe(
+        true,
+      )
+    },
+  )
 })
 
 describe('issue step: skipped', () => {

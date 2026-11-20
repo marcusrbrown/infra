@@ -26,13 +26,21 @@
  * - Issue lookups need the label AND the hidden marker in the body, on a real issue (not a pull request). A labelled
  *   issue without the marker is not ours: it is ignored, and ours is created beside it. A closed issue is never reopened.
  *
+ * A re-run never updates the alert. A re-run (`github.run_attempt` above 1) replays the first attempt's
+ * `needs.refresh.result`, which can be older than the current outage: a replayed success would close a newer outage's
+ * issue and post a false recovery. So `issue` makes no API call at all, writes `notify=none` and exits 0 for any
+ * attempt that is not exactly 1, including a missing or malformed value (fail safe: do nothing). To update the alert,
+ * dispatch a fresh refresh or wait for the next scheduled run. This covers rehearsals too, which are dispatches.
+ *
  * Rehearsal (`ALERT_REHEARSE` = `fail` | `clear`, from the dispatch input): the same paths under a separate marker, with
  * every write marked as a rehearsal, so a rehearsal can never absorb a real failure and a real failure never lands on
- * a rehearsal issue. It is owner-only and the workflow skips the real refresh for it.
+ * a rehearsal issue. It is owner-only and the workflow skips the real refresh for it. Only the explicit `clear`
+ * closes a rehearsal issue; a real success never touches one.
  *
  * Environment inputs (names are this script's contract):
  * - `ALERT_REFRESH_RESULT`  `needs.refresh.result`: `success` | `failure` | `cancelled` | `skipped`.
  * - `ALERT_REHEARSE`        `none` | `fail` | `clear`; empty (a scheduled run) reads as `none`.
+ * - `ALERT_RUN_ATTEMPT`     `issue` only: `github.run_attempt`. Anything but exactly `1` is a re-run.
  * - `ALERT_NOTIFY`          `notify` only: the previous step's `notify` output.
  * - `ALERT_ISSUE_NUMBER`    `notify` only: the previous step's `issue-number` output.
  * - `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK`  `notify` only. Missing or blank => skipped.
@@ -88,6 +96,8 @@ export interface AlertEnv {
   readonly owner: string
   readonly refreshResult: RefreshResult
   readonly rehearse: Rehearse
+  /** `first` only for the exact attempt `1`; `rerun` for a later attempt; `invalid` for a missing or malformed value. */
+  readonly attempt: 'first' | 'rerun' | 'invalid'
 }
 
 export type Plan = {readonly kind: 'none'} | {readonly kind: 'alert' | 'clear'; readonly identity: Identity}
@@ -140,6 +150,12 @@ function oneOf<T extends string>(values: readonly T[], value: string, reason: st
   return found
 }
 
+/** Parse, don't guess: only a positive integer is an attempt number, and only 1 is the first attempt. */
+function parseAttempt(value: string): AlertEnv['attempt'] {
+  if (!/^[1-9]\d{0,3}$/.test(value)) return 'invalid'
+  return Number(value) === 1 ? 'first' : 'rerun'
+}
+
 export function readAlertEnv(environment: Readonly<Record<string, string | undefined>>): AlertEnv {
   const read = (name: string): string => environment[name]?.trim() ?? ''
 
@@ -164,6 +180,7 @@ export function readAlertEnv(environment: Readonly<Record<string, string | undef
     owner: read('GITHUB_REPOSITORY_OWNER'),
     refreshResult: oneOf(REFRESH_RESULTS, read('ALERT_REFRESH_RESULT'), 'invalid-refresh-result'),
     rehearse: oneOf(REHEARSALS, read('ALERT_REHEARSE') || 'none', 'invalid-rehearsal'),
+    attempt: parseAttempt(read('ALERT_RUN_ATTEMPT')),
   }
 }
 
@@ -232,7 +249,7 @@ function issueBody(env: AlertEnv, identity: Identity): string {
   if (identity === 'rehearsal') {
     return [
       REHEARSAL_MARKER,
-      '**Rehearsal.** This tests the refresh alert. No refresh ran and nothing is wrong. It closes when the workflow is dispatched again with `rehearse-alert` set to `clear`, or when a scheduled refresh succeeds.',
+      '**Rehearsal.** This tests the refresh alert. No refresh ran and nothing is wrong. It closes when the workflow is dispatched again with `rehearse-alert` set to `clear`.',
       '',
       ...detailLines(env, '- '),
     ].join('\n')
@@ -254,7 +271,7 @@ function failureComment(env: AlertEnv, identity: Identity): string {
 
 function recoveryComment(env: AlertEnv, identity: Identity): string {
   const lead =
-    identity === 'rehearsal' && env.rehearse === 'clear'
+    identity === 'rehearsal'
       ? '**Rehearsal.** Cleared by a rehearsal dispatch, so this issue is closed.'
       : 'The refresh succeeded, so this issue is closed.'
   return [lead, '', ...detailLines(env, '- ')].join('\n')
@@ -443,19 +460,14 @@ export async function reconcileIssue(env: AlertEnv, gh: GhRunner): Promise<Issue
     return {action: 'created', notify: 'created', issueNumber: number}
   }
 
-  // A successful scheduled refresh also closes an open rehearsal issue, quietly: a rehearsal alone never asks for Discord.
-  const swept = plan.identity === 'real' ? ownIssues(open, 'rehearsal') : []
+  // Only this identity's issues close: a real success never touches a rehearsal issue, and `clear` never a real one.
   for (const issue of own) {
     await addComment(env, gh, issue.number, recoveryComment(env, plan.identity))
     await closeIssue(env, gh, issue.number)
   }
-  for (const issue of swept) {
-    await addComment(env, gh, issue.number, recoveryComment(env, 'rehearsal'))
-    await closeIssue(env, gh, issue.number)
-  }
-  const first = own[0] ?? swept[0]
+  const first = own[0]
   if (first === undefined) return NOTHING
-  return {action: 'closed', notify: own.length > 0 ? 'recovered' : 'none', issueNumber: first.number}
+  return {action: 'closed', notify: 'recovered', issueNumber: first.number}
 }
 
 /** Never throws. A failure exits 1 with a fixed reason code; no GitHub response text is logged. */
@@ -465,6 +477,17 @@ export async function runIssueStep(
 ): Promise<{readonly exitCode: 0 | 1; readonly outcome: IssueOutcome | null}> {
   try {
     const env = readAlertEnv(environment)
+    if (env.attempt !== 'first') {
+      // Checked before any API call, so a replayed result can neither close nor open anything.
+      deps.log(
+        env.attempt === 'rerun'
+          ? '::notice::A re-run does not update the OpenCode Go privacy alert. Dispatch a fresh refresh instead.'
+          : '::warning::The run attempt value is missing or invalid, so the OpenCode Go privacy alert is left unchanged (treated as a re-run). Dispatch a fresh refresh instead.',
+      )
+      deps.writeOutput('notify', 'none')
+      deps.appendSummary('- OpenCode Go privacy alert: unchanged (re-run)')
+      return {exitCode: 0, outcome: NOTHING}
+    }
     const outcome = await reconcileIssue(env, deps.gh)
     deps.writeOutput('notify', outcome.notify)
     if (outcome.issueNumber !== null) deps.writeOutput('issue-number', String(outcome.issueNumber))

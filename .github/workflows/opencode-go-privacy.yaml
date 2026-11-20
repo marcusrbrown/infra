@@ -240,13 +240,15 @@ jobs:
           bun-version: 1.4.4
 
       # The script imports no package, so there is no install step. Any API failure fails this step: a broken alert
-      # path must show as a red run.
+      # path must show as a red run. A re-run (attempt above 1) replays an old refresh result, so the script then makes
+      # no API call and changes nothing: dispatch a fresh refresh instead.
       - name: Update alert issue
         id: issue
         env:
           GH_TOKEN: ${{ github.token }}
           ALERT_REFRESH_RESULT: ${{ needs.refresh.result }}
           ALERT_REHEARSE: ${{ inputs.rehearse-alert }}
+          ALERT_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: bun run packages/cli/scripts/go-privacy-alert.ts issue
 
       # Only when the issue step created the issue (first failing run of an outage) or closed it on recovery. The

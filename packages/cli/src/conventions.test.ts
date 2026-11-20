@@ -6040,6 +6040,8 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
 
       expect(env.ALERT_REFRESH_RESULT).toBe(ghaExpression('needs.refresh.result'))
       expect(env.ALERT_REHEARSE).toBe(ghaExpression('inputs.rehearse-alert'))
+      // A re-run replays the first attempt's result, so the script must know the attempt and then does nothing.
+      expect(env.ALERT_RUN_ATTEMPT).toBe(ghaExpression('github.run_attempt'))
       expect(issue?.run).toBe(`bun run ${ALERT_SCRIPT} issue`)
       // A broken alert path must be a red run: no swallowed failure on the issue step.
       expect(issue?.['continue-on-error']).toBeUndefined()
@@ -6099,6 +6101,7 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
       expect(new Set(expressions)).toEqual(
         new Set([
           'github.token',
+          'github.run_attempt',
           'needs.refresh.result',
           'inputs.rehearse-alert',
           'steps.issue.outputs.notify',

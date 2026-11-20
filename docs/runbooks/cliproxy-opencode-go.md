@@ -191,7 +191,9 @@ A run that cannot build the snapshot fails and opens no PR. The run fails on: a 
 
 ## The scheduled refresh is failing
 
-The `OpenCode Go Privacy` workflow has no failure notification of its own. A failed run shows in the Actions run list and in Fro Bot's daily report. While runs fail, the deploy keeps applying the last committed `privacy-snapshot.json`. That snapshot can be wrong in the unsafe direction: a model upstream now restricts can still be exposed.
+A failed `OpenCode Go Privacy` run raises an alert. The `alert` job runs after the refresh whatever its result. A failed or cancelled refresh (a run that hits its 10-minute timeout reports as cancelled) opens one issue labelled `opencode-go-privacy-failure`, titled `OpenCode Go privacy refresh is failing`, and posts one message to the Discord webhook in the repository secret `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK`. Each later failing run adds a comment to that issue and posts nothing more. The next successful run comments, closes the issue and posts one recovery message. A Discord failure only logs a warning; the issue is the record. If the `alert` job itself fails, the issue API failed: read the run and check the Actions run list by hand. The alert cannot see a refresh that never starts, such as a disabled schedule: if no run appears for two days, check the run list.
+
+While runs fail, the deploy keeps applying the last committed `privacy-snapshot.json`. That snapshot can be wrong in the unsafe direction: a model upstream now restricts can still be exposed.
 
 1. Read the failure line in the `Refresh privacy snapshot` step:
 
@@ -231,6 +233,14 @@ The `OpenCode Go Privacy` workflow has no failure notification of its own. A fai
    If the run opens or updates a PR, follow [Snapshot refresh PR review](#snapshot-refresh-pr-review), then the deploy.
 
 6. Review the next refresh PR against each manual containment from step 3. `refreshGoPrivacy` rebuilds every entry from upstream and proposes any difference from the committed snapshot, including a reversal of a hand-set restrictive value that the repaired parser or the inputs do not reproduce. Do not merge a relaxation unless the upstream evidence supports it. If the parser still misses the restriction, leave that PR unmerged, so the hand-set value stays in force, and fix the parser.
+
+To rehearse the alert without a real failure, dispatch from `main` as the repository owner. Any other actor makes the `alert` job fail before it writes anything. The refresh does not run during a rehearsal.
+
+```bash
+gh workflow run opencode-go-privacy.yaml --ref main -f rehearse-alert=fail
+```
+
+The run opens one issue titled `[Rehearsal] OpenCode Go privacy refresh alert`, with the label `opencode-go-privacy-failure`, and posts one Discord message that starts with `[REHEARSAL]`. The rehearsal issue has its own marker, so it never absorbs a real failure. Dispatching `fail` again adds a comment and posts nothing. Close the rehearsal with `-f rehearse-alert=clear` (one more Discord message). The next successful scheduled refresh also closes it, without a message.
 
 ---
 

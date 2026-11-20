@@ -7,6 +7,7 @@ import Diagram from '../../components/Diagram.astro'
 import LastSample from '../../components/LastSample.astro'
 import StatusNotes from '../../components/StatusNotes.astro'
 import {cliStatusCommand, DASHBOARD_URL, SERVICES} from '../../data/services'
+import {NOT_YET_DEPLOYED_TEXT} from '../../lib/history-view'
 import {resolveRunbooks} from '../../lib/runbook-links'
 import {loadStatusData} from '../../lib/status-data'
 
@@ -36,7 +37,16 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/')
 
   <StatusNotes fixture={source === 'fixture'} />
 
-  <AppStatus view={views[app]} />
+  {
+    views[app].verdict === 'not_deployed' ? (
+      <section>
+        <h2 id="current-status">Current status</h2>
+        <p>{NOT_YET_DEPLOYED_TEXT}</p>
+      </section>
+    ) : (
+      <AppStatus view={views[app]} />
+    )
+  }
 
   <section>
     <h2 id="architecture">Architecture</h2>

@@ -1,3 +1,4 @@
+import type {DeployStateReadOptions} from './deploy-state'
 import type {GitHubReadOptions} from './github-api'
 import type {AppId, Observation} from './observation'
 
@@ -7,7 +8,7 @@ import {GO_MONITOR_OBSERVATION_ID, MONITOR_OBSERVATION_ID} from './monitor-state
 
 /** The two GitHub-backed readers, shared by unified `status` and `status snapshot`. */
 export interface GithubReaders {
-  readDeployStates: (options: GitHubReadOptions) => Promise<Partial<Record<AppId, Observation>>>
+  readDeployStates: (options: DeployStateReadOptions) => Promise<Partial<Record<AppId, Observation>>>
   /** One observation per cliproxy route: `provider-route` and `provider-route-go`. */
   readMonitorState: (options: GitHubReadOptions) => Promise<Observation[]>
 }
@@ -18,7 +19,7 @@ export interface GithubReads {
 }
 
 /** Run both readers concurrently. Never rejects: a throwing reader is recorded and becomes `unknown` later. */
-export async function runGithubReads(readers: GithubReaders, options: GitHubReadOptions): Promise<GithubReads> {
+export async function runGithubReads(readers: GithubReaders, options: DeployStateReadOptions): Promise<GithubReads> {
   const [deploy, monitor] = await Promise.allSettled([
     readers.readDeployStates(options),
     readers.readMonitorState(options),

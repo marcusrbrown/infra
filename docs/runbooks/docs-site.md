@@ -124,6 +124,14 @@ If snapshots were off for more than 7 days, the history has expired; follow the 
 
 ---
 
+## An app that is not yet deployed
+
+`APPS_NOT_YET_DEPLOYED` in `packages/shared/status/history-schema.ts` names apps whose host does not exist yet (`traces` today). While an app is on it, `status snapshot` does not probe it, does not read its deployments, and writes no sample for it. The site ignores any sample the history already holds for it, so its service page and its `/status/` row say "Not yet deployed" and show no verdict. `infra status` is not public and still reports the app from its real observations.
+
+Take the app off the list in the same change that first deploys it. Old samples stay in the history and age out after 90 days. Until the first snapshot after the change lands, the page reads them as the newest samples, so it can show the old failure for up to 30 minutes: dispatch `Status Snapshot` as soon as the change is on `main`. The page then lists one gap, from the last old sample to the first new one, and counts the old failures with the other samples. That is accurate but looks like an outage. If it is not acceptable, drop the app's old samples from the artifact before the change merges; there is no tool for that today.
+
+---
+
 ## Gap threshold
 
 A gap is a spacing between samples of more than 75 minutes (`GAP_THRESHOLD_MS` in `apps/docs/src/lib/history-view.ts`). The cron runs every 30 minutes, but scheduled runs start late. Over the first week no run was skipped, yet the daily 00:11Z run landed up to 56 minutes after the one before. In that period a gap would have meant a missed run, though a longer delay can still produce one. The coverage count ("N of M samples") is approximate and can hide a single missed slot. Gaps are shown, never interpolated. The end-to-end probe has its own 45-minute staleness limit (`PROBE_STALE_MS`), because the monitor runs every 15 minutes.

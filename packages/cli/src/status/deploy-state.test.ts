@@ -182,6 +182,30 @@ describe('readDeployStates', () => {
     }
   })
 
+  it('reads only the apps it is asked for: no request, and no entry, for the rest', async () => {
+    const {fetchFn, calls} = fakeGitHubByApp({})
+    const observations = await readDeployStates({
+      token: TOKEN,
+      fetch: fetchFn,
+      now: NOW,
+      apps: ['keeweb', 'broker'],
+    })
+
+    expect(Object.keys(observations).toSorted()).toEqual(['broker', 'keeweb'])
+    expect(calls).toHaveLength(2 * DEPLOY_STATE_CALLS_PER_APP)
+    const environments = calls.flatMap(call => call.url.searchParams.get('environment') ?? [])
+    expect(environments.toSorted()).toEqual(['broker', 'keeweb'])
+  })
+
+  it('reports a missing token as not measured for the requested apps only', async () => {
+    const {fetchFn, calls} = fakeGitHubByApp({})
+    const observations = await readDeployStates({token: undefined, fetch: fetchFn, now: NOW, apps: ['vpn']})
+
+    expect(calls).toHaveLength(0)
+    expect(Object.keys(observations)).toEqual(['vpn'])
+    expect(observations.vpn?.result).toBe('not_measured')
+  })
+
   it('asks for exactly the newest main deployment and the newest status', async () => {
     const {calls} = await readOne('gateway', fixture('broker-success'))
     const own = calls.filter(call => call.url.searchParams.get('environment') === 'gateway')

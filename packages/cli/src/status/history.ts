@@ -245,12 +245,13 @@ export interface MergeResult {
 }
 
 /**
- * Append one sample per app (dropping any whose run and attempt are already present), trim to the 90-day
- * window using the single `now`, and verify the invariants against the history that was read.
+ * Append one sample per app in `incoming` (dropping any whose run and attempt are already present), trim to the
+ * 90-day window using the single `now`, and verify the invariants against the history that was read. An app with
+ * no incoming sample keeps the samples it has and gains none.
  */
 export function mergeHistory(input: {
   previous: History | undefined
-  incoming: Record<AppId, HistorySample>
+  incoming: Partial<Record<AppId, HistorySample>>
   now: Date
   maxBytes?: number
 }): MergeResult {
@@ -266,7 +267,7 @@ export function mergeHistory(input: {
     const existing = previous?.apps[app] ?? []
     const known = new Set(existing.map(sampleKey))
     const fresh = incoming[app]
-    const appended = known.has(sampleKey(fresh)) ? [] : [fresh]
+    const appended = fresh === undefined || known.has(sampleKey(fresh)) ? [] : [fresh]
     const candidates = [...existing, ...appended]
     const kept = candidates.filter(sample => sampleTime(sample) >= cutoff).sort((a, b) => sampleTime(a) - sampleTime(b))
 

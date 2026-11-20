@@ -2,10 +2,11 @@ import type {goke} from 'goke'
 
 import type {ActionCtx} from '../lib/action-ctx'
 import type {ProbeOutcome} from '../status/declared'
-import type {RunIdentity} from '../status/history'
+import type {HistorySample, RunIdentity} from '../status/history'
 import type {AppId, Observation} from '../status/observation'
 import type {StatusDependencies} from './status'
 
+import {APPS_NOT_YET_DEPLOYED} from '@marcusrbrown/infra-shared/status/history-schema'
 import {z} from 'zod'
 import {assembleAppStatus, DECLARED_OBSERVATIONS} from '../status/declared'
 import {resolveGithubToken} from '../status/github-api'
@@ -76,19 +77,20 @@ async function runProbe(probe: ((options?: undefined) => Promise<Observation>) |
   }
 }
 
+/** One entry per app in `apps`: an app left out is not probed and its deploy state is not read. */
 async function collectObservations(
   deps: SnapshotDependencies,
   token: string | undefined,
   now: Date,
-): Promise<Record<AppId, Observation[]>> {
-  const reads = runGithubReads(deps, {token, now, ...(deps.fetch === undefined ? {} : {fetch: deps.fetch})})
-  const probes = await Promise.all(APP_IDS.map(async app => [app, await runProbe(deps.publicProbes[app])] as const))
+  apps: readonly AppId[],
+): Promise<(readonly [AppId, Observation[]])[]> {
+  const reads = runGithubReads(deps, {token, now, apps, ...(deps.fetch === undefined ? {} : {fetch: deps.fetch})})
+  const probes = await Promise.all(apps.map(async app => [app, await runProbe(deps.publicProbes[app])] as const))
   const settled = await reads
 
-  return recordByApp(app => {
-    const probe = probes.find(([candidate]) => candidate === app)?.[1] ?? ({kind: 'none'} as const)
+  return probes.map(([app, probe]) => {
     const status = assembleAppStatus(app, probe, {kind: 'none'}, now, githubObservationsFor(app, settled, now))
-    return status.observations.filter(observation => SNAPSHOT_IDS[app].has(observation.id))
+    return [app, status.observations.filter(observation => SNAPSHOT_IDS[app].has(observation.id))] as const
   })
 }
 
@@ -107,6 +109,7 @@ export async function statusSnapshotAction(
   ctx: ActionCtx,
   deps: SnapshotDependencies,
   env: Env = process.env,
+  notYetDeployed: readonly AppId[] = APPS_NOT_YET_DEPLOYED,
 ): Promise<void> {
   try {
     const now = resolveNow(options.now, deps.now)
@@ -114,8 +117,12 @@ export async function statusSnapshotAction(
     // Fail before any network call when the history is missing, already there, or unreadable.
     const previous = await loadHistory(options.history, options.bootstrap === true ? 'bootstrap' : 'existing')
 
-    const observations = await collectObservations(deps, resolveGithubToken(env), now)
-    const incoming = recordByApp(app => compactSample(observations[app], identity, now))
+    // An app that is not yet deployed has no host to probe and no deployment to read: it gets no sample at all.
+    const apps = APP_IDS.filter(app => !notYetDeployed.includes(app))
+    const observations = await collectObservations(deps, resolveGithubToken(env), now, apps)
+    const incoming: Partial<Record<AppId, HistorySample>> = Object.fromEntries(
+      observations.map(([app, observed]) => [app, compactSample(observed, identity, now)]),
+    )
     const merged = mergeHistory({previous, incoming, now})
 
     // A rerun of the same run and attempt changes nothing, so it writes nothing.

@@ -19,6 +19,13 @@ export type AppId = (typeof APP_IDS)[number]
  */
 export const APPS_ADDED_AFTER_V1: readonly AppId[] = ['traces']
 
+/**
+ * Apps whose host is not deployed yet. The public status pages show them as "Not yet deployed" and the status
+ * snapshot neither probes nor records them, so a missing host never reads as an outage. Take an app off this list in
+ * the same change that first deploys it.
+ */
+export const APPS_NOT_YET_DEPLOYED: readonly AppId[] = ['traces']
+
 export const OBSERVATION_KINDS = ['reachability', 'container-health', 'deploy-state', 'end-to-end', 'resource'] as const
 export type ObservationKind = (typeof OBSERVATION_KINDS)[number]
 

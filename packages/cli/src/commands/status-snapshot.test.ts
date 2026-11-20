@@ -1,9 +1,11 @@
+import type {AppId} from '../status/observation'
 import type {SnapshotDependencies} from './status-snapshot'
 import {chmod, mkdtemp, readdir, readFile, rm, stat, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {stripVTControlCharacters} from 'node:util'
 
+import {APPS_NOT_YET_DEPLOYED} from '@marcusrbrown/infra-shared/status/history-schema'
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 import {goke} from 'goke'
 
@@ -74,6 +76,8 @@ describe('status snapshot', () => {
         ctx,
         config.deps ?? snapshotDeps(),
         config.env ?? runEnv('1001'),
+        // These tests are about the sampling mechanism, so no app is hidden; the hidden-app tests are further down.
+        [],
       )
     } catch (error) {
       if (captured.exit === null) throw error
@@ -509,7 +513,7 @@ describe('status snapshot with the real GitHub readers and a mocked fetch (integ
       fetch: github.fetchFn,
     }
 
-    await statusSnapshotAction({history, bootstrap: true}, ctx, deps, runEnv('2002', '1', {GH_TOKEN: TOKEN}))
+    await statusSnapshotAction({history, bootstrap: true}, ctx, deps, runEnv('2002', '1', {GH_TOKEN: TOKEN}), [])
 
     expect(captured.exit).toBeNull()
     expect(captured.stderr).toEqual([])
@@ -556,6 +560,7 @@ describe('status snapshot with the real GitHub readers and a mocked fetch (integ
       ctx,
       {...snapshotDeps(), readDeployStates, readMonitorState, fetch: github.fetchFn},
       runEnv('2003'),
+      [],
     )
 
     const files = await readFiles(history)
@@ -611,5 +616,142 @@ describe('status snapshot registration', () => {
     expect(MCP_ALLOWLIST.has('status snapshot')).toBe(false)
     expect(MCP_ALLOWLIST.has('status')).toBe(true)
     expect([...MCP_ALLOWLIST].some(name => name.includes('snapshot'))).toBe(false)
+  })
+})
+
+describe('status snapshot for an app that is not yet deployed', () => {
+  let dir: string
+  let history: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'status-snapshot-hidden-'))
+    history = join(dir, 'history')
+  })
+
+  afterEach(async () => {
+    await rm(dir, {recursive: true, force: true})
+  })
+
+  const HIDDEN: readonly AppId[] = ['traces']
+  const DEPLOYED = APP_IDS.filter(app => !HIDDEN.includes(app))
+
+  /** What the fakes were asked, by app. */
+  function spies() {
+    const probed: string[] = []
+    const deployReadsFor: (readonly AppId[] | undefined)[] = []
+    const probe = (app: string) => async () => {
+      probed.push(app)
+      return probeObservation()
+    }
+    const base = makeStatusDependencies()
+    const deps: SnapshotDependencies = {
+      ...snapshotDeps(),
+      publicProbes: Object.fromEntries(APP_IDS.map(app => [app, probe(app)])),
+      readDeployStates: async options => {
+        deployReadsFor.push(options.apps)
+        const wanted = options.apps ?? APP_IDS
+        return Object.fromEntries(wanted.map(app => [app, deployObservation()]))
+      },
+      readMonitorState: base.readMonitorState,
+    }
+    return {deps, probed, deployReadsFor}
+  }
+
+  async function snapshot(
+    deps: SnapshotDependencies,
+    run: string,
+    options: {bootstrap?: boolean},
+    notYetDeployed?: readonly AppId[],
+  ) {
+    const {ctx, captured} = createCapturedCtx()
+    await statusSnapshotAction({history, ...options}, ctx, deps, runEnv(run), notYetDeployed)
+    return captured
+  }
+
+  it('makes no public probe and no deploy-state read for it, and records no sample', async () => {
+    const {deps, probed, deployReadsFor} = spies()
+
+    const captured = await snapshot(deps, '1', {bootstrap: true}, HIDDEN)
+
+    expect(captured.exit).toBeNull()
+    expect(probed.toSorted()).toEqual([...DEPLOYED].toSorted())
+    expect(deployReadsFor).toEqual([DEPLOYED])
+    expect(captured.stdout[0]).toBe(
+      'samples: keeweb=1 cliproxy=1 gateway=1 umami=1 dashboard=1 vpn=1 broker=1 traces=0',
+    )
+    expect(captured.stdout[1]).toBe('added: 7')
+    const loaded = await loadHistory(history, 'existing')
+    expect(loaded?.apps.traces).toEqual([])
+    for (const app of DEPLOYED) expect(loaded?.apps[app]).toHaveLength(1)
+  })
+
+  it('writes no observation of it even when the readers would have answered', async () => {
+    const {deps} = spies()
+
+    await snapshot(deps, '1', {bootstrap: true}, HIDDEN)
+
+    const files = await readFiles(history)
+    expect(JSON.parse(files['apps/traces.json'] ?? 'null')).toEqual([])
+    expect(files['apps/keeweb.json']).toContain('deploy-state')
+  })
+
+  it('leaves the samples it already holds for the app exactly as they were', async () => {
+    const {deps} = spies()
+    await snapshot(deps, '1', {bootstrap: true}, [])
+    const before = await loadHistory(history, 'existing')
+    if (before === undefined) throw new Error('expected history')
+    const kept = before.apps.traces
+
+    await snapshot(deps, '2', {}, HIDDEN)
+
+    const after = await loadHistory(history, 'existing')
+    expect(after?.apps.traces).toEqual(kept)
+    expect(after?.apps.keeweb).toHaveLength(2)
+  })
+
+  it('records every app again once the list is empty', async () => {
+    const {deps, probed, deployReadsFor} = spies()
+
+    const captured = await snapshot(deps, '1', {bootstrap: true}, [])
+
+    expect(probed.toSorted()).toEqual([...APP_IDS].toSorted())
+    expect(deployReadsFor).toEqual([APP_IDS])
+    expect(captured.stdout[1]).toBe('added: 8')
+  })
+
+  it('asks GitHub about no deployment environment of it, with the real deploy-state reader', async () => {
+    const calls: string[] = []
+    const fetchFn = async (input: string): Promise<Response> => {
+      calls.push(input)
+      const url = new URL(input)
+      if (url.pathname.endsWith('/deployments')) return Response.json([{id: 7, ref: 'main'}])
+      return Response.json([{state: 'success', created_at: '2026-11-01T11:00:00Z'}])
+    }
+    const {ctx} = createCapturedCtx()
+
+    await statusSnapshotAction(
+      {history, bootstrap: true},
+      ctx,
+      {...snapshotDeps(), readDeployStates, fetch: fetchFn},
+      runEnv('3001', '1', {GH_TOKEN: TOKEN}),
+      HIDDEN,
+    )
+
+    const environments = calls.flatMap(call => new URL(call).searchParams.get('environment') ?? [])
+    expect(environments.toSorted()).toEqual([...DEPLOYED].toSorted())
+    expect(calls.some(call => call.includes('environment=traces'))).toBe(false)
+  })
+
+  // Wiring with the real list, no injection. Delete with the other traces tripwire when traces is deployed.
+  it('applies the real not-yet-deployed list when none is injected', async () => {
+    expect(APPS_NOT_YET_DEPLOYED).toContain('traces')
+    const {deps, probed} = spies()
+
+    await snapshot(deps, '1', {bootstrap: true})
+
+    expect(probed).not.toContain('traces')
+    const loaded = await loadHistory(history, 'existing')
+    expect(loaded?.apps.traces).toEqual([])
+    expect(loaded?.apps.keeweb).toHaveLength(1)
   })
 })

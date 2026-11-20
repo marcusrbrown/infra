@@ -9,7 +9,7 @@ date: 2026-11-20
 
 ## Overview
 
-Add a new app, `apps/traces`, on its own droplet. A collector accepts OTLP over HTTP on one public hostname, tells three sender groups apart by bearer token, limits each group by bytes, and sends every trace two ways: whole to self-hosted Langfuse, and reduced to a named list of attributes to Tempo. Grafana reads Tempo on a public hostname limited to one GitHub account. Langfuse is reached through an SSH tunnel only. Nothing is built until this plan is approved.
+Add a new app, `apps/traces`, on its own droplet. A collector accepts OTLP over HTTP on one public hostname, tells three sender groups apart by bearer token, limits each group by bytes, and sends every trace two ways: whole to self-hosted Langfuse, and reduced to a named list of attributes to Tempo. Langfuse and Grafana have no public hostname; both are reached through an SSH tunnel. Ingest is the only public route. Nothing is built until this plan is approved.
 
 ## Problem Frame
 
@@ -35,11 +35,10 @@ Add a new app, `apps/traces`, on its own droplet. A collector accepts OTLP over 
 
 - AE1. A test sender posts one trace of 20 spans, each with a 500 KB JSON-string content attribute, using a sender token. All 20 spans are readable in Langfuse with the attribute intact, and the trace is found in Grafana by id with 20 spans.
 - AE2. The same request with no token, a revoked token, another group's token, or a body over the cap is refused (401, 401, 401, 413).
-- AE3. A sender token presented to Langfuse, Grafana and Tempo reads nothing. Tempo and every store port are unreachable from outside.
-- AE4. A GitHub account other than the operator's completes sign-in to Grafana and gets no session.
-- AE5. A trace carries a unique marker in each place OTLP can hold text: a content key, an unlisted span attribute, a resource attribute, a scope attribute, a span-event attribute, a link attribute, the status message, an exception message and the span name. Langfuse has all of them. Tempo has only the status message, exception message and span-name markers.
-- AE7. A redeploy that changes the collector or Grafana and then fails a gate leaves that service's public route answering 503, checked from outside the host.
-- AE6. A volume restored from a snapshot onto a scratch host starts the stack and serves a trace that existed when the snapshot was taken.
+- AE3. A sender token presented to the ingest hostname on any path other than its own group's reads nothing and reaches nothing. Langfuse, Grafana, Tempo and every store port are unreachable from outside.
+- AE4. A trace carries a unique marker in each place OTLP can hold text: a content key, an unlisted span attribute, a resource attribute, a scope attribute, a span-event attribute, a link attribute, the status message, an exception message and the span name. Langfuse has all of them. Tempo has only the status message, exception message and span-name markers.
+- AE5. A volume restored from a snapshot onto a scratch host starts the stack and serves a trace that existed when the snapshot was taken.
+- AE6. A redeploy that changes the collector and then fails a gate leaves the ingest route answering 503, checked from outside the host.
 
 ## Scope Boundaries
 
@@ -62,7 +61,6 @@ Add a new app, `apps/traces`, on its own droplet. A collector accepts OTLP over 
 - `apps/umami`: the closest stack (several stateful services, one host). Its deploy starts private services, rotates the default credential, then opens Caddy. Follow that ordering.
 - `apps/broker/config/Caddyfile`: path-scoped public routes with a catch-all 404.
 - `packages/cli/src/commands/cliproxy/keys.ts` and `cliproxy open`: runtime keys managed over the wire, and an SSH session opened by a CLI command.
-- `packages/cli/src/commands/vpn/client.ts`: a named roster synced to an Environment secret over stdin.
 - `.github/workflows/deploy-gateway.yaml` `build-images`: images built in CI, pushed to GHCR, passed to deploy by digest. On-host builds are banned.
 - `packages/cli/scripts/go-privacy-alert.ts` and `.github/workflows/cliproxy-auth-monitor.yaml`: one issue plus Discord on state transitions, from a scheduled workflow with repository-level secrets and no SSH.
 - `ARCHITECTURE.md` "Where to Add New Code" and invariant 14 (fail-closed probes with sentinels).
@@ -104,7 +102,6 @@ Versions planned: Langfuse 4.83.0, OpenTelemetry Collector 0.165.0 with contrib 
 
 **Read from source at the release tags, not run:**
 
-- Grafana can deny every GitHub account but one with a strict role rule on the numeric GitHub user id.
 - Langfuse has no allowlist by GitHub user. Its open-source build has no API or sign-in rate limiting.
 - The collector's `forward` connector lets one pipeline feed another, so a step can run on one branch only. Its `redaction` processor keeps a named list of attribute keys and drops the rest.
 - DigitalOcean encrypts attached volumes and their snapshots at rest, with keys it holds. It does not encrypt droplet root disks.
@@ -161,7 +158,7 @@ Versions planned: Langfuse 4.83.0, OpenTelemetry Collector 0.165.0 with contrib 
       "path_or_symbol": "apps/vpn (packages/cli/src/commands/vpn/peers.ts)",
       "description": "Named per-peer credentials with a roster and revoke on redeploy",
       "disposition": "insufficient",
-      "insufficiency_reason": "Protects a UDP tunnel, not HTTP ingest, and revocation waits for a gated deploy. Its sync of a roster to an Environment secret is followed as a pattern."
+      "insufficiency_reason": "Protects a UDP tunnel, not HTTP ingest, and revocation waits for a gated deploy. Nothing is reused."
     },
     {
       "path_or_symbol": "apps/*/config/Caddyfile",
@@ -188,9 +185,9 @@ Versions planned: Langfuse 4.83.0, OpenTelemetry Collector 0.165.0 with contrib 
 **Topology**
 
 - One new droplet, `s-4vcpu-16gb-amd` in `nyc1`, default VPC, with a 100 GB attached volume. About $94 a month ($84 plus $10), plus a few dollars for snapshots. Rationale: the measured stack peaks at 5.25 GiB and loses data silently when capped near 7 GB; no existing droplet exceeds 2 GB.
-- Public ports are 22, 80 and 443, set by a cloud firewall created in provisioning. SSH is key-only. Caddy is the only container that publishes to all interfaces. Langfuse web publishes to `127.0.0.1` only. No store port is published; Docker publishing bypasses the host firewall.
-- Two container networks. Caddy and the collector share an edge network with Langfuse web, Tempo, Grafana and the health reporter, and nothing else. ClickHouse, PostgreSQL, Redis and the object store are on a second network the collector is not on. Rationale: the collector is internet-facing and custom-built; this bounds what a compromise of it can reach.
-- Hostnames: `traces.fro.bot` (ingest and a health path) and `grafana.fro.bot`. Langfuse has no hostname.
+- Public ports are 22, 80 and 443, set by a cloud firewall created in provisioning. SSH is key-only. Caddy is the only container that publishes to all interfaces. Langfuse web and Grafana publish to `127.0.0.1` only. No store port is published; Docker publishing bypasses the host firewall.
+- Two container networks. Caddy and the collector share an edge network with Langfuse web, Tempo and the health reporter, and nothing else. Grafana, ClickHouse, PostgreSQL, Redis and the object store are on a second network, which Tempo also joins, the collector is not on. Rationale: the collector is internet-facing and custom-built; this bounds what a compromise of it can reach.
+- One hostname: `traces.fro.bot`, for ingest and a health path. Langfuse and Grafana have none.
 - Ingest URL: `https://traces.fro.bot/<group>/v1/traces` with `<group>` one of `marcusrbrown`, `fro-bot`, `workstation`. Caddy routes each path to that group's receiver and answers 404 for everything else.
 
 **Collector**
@@ -225,20 +222,19 @@ Versions planned: Langfuse 4.83.0, OpenTelemetry Collector 0.165.0 with contrib 
 **Backends**
 
 - Langfuse: one project. The collector holds one "Application" key. The sender group, repository and run id are filterable fields. Rationale: the open-source build creates projects only in the UI, has no cross-project view, and separate projects add no isolation because the collector is the only key holder.
-- Langfuse is reached only through an SSH tunnel opened by a CLI command, with one password user and sign-up disabled. Rationale: it holds the full content, has no allowlist by GitHub user and no rate limiting.
-- Tempo holds the kept attributes and the free-text fields above, with default attribute truncation. Repository, run id, session, model and tool names, timing and error text are what an outsider would see if Grafana's sign-in rule failed. The owner accepts that exposure.
-- Grafana is public at `grafana.fro.bot` with GitHub sign-in limited to the operator's numeric GitHub id by a strict role rule. The login form, basic auth, anonymous access, public dashboards, snapshots, the metrics endpoint, Gravatar, the news feed and the plugin pre-installer are off. The built-in admin gets a random password that is never used.
+- Langfuse is reached only through an SSH tunnel opened by a CLI command, with one password user and sign-up disabled. Anyone who can open the tunnel holds the host's SSH key and already controls the host. Rationale: it holds the full content, has no allowlist by GitHub user and no rate limiting.
+- Tempo holds the kept attributes and the free-text fields above, with default attribute truncation.
+- Grafana is reached through the same tunnel, with its built-in admin user and a password from a secret file. Anonymous access, sign-up, public dashboards, snapshots, the metrics endpoint, Gravatar, the news feed and the plugin pre-installer are off. Rationale: a public Grafana needed an OAuth app, a sign-in test with a second account after every change, and route approval logic, to protect the lesser of the two views.
 - Telemetry and update checks are off wherever a setting exists. Langfuse's update check on UI load has no setting and is recorded as a known outbound call, with the two badge and asset hosts the browser fetches.
 
 **Credentials**
 
-- Sender tokens live in the collector's token directory on the encrypted volume and, as a copy, in one `traces` Environment secret. A CLI command group adds, lists and revokes them: it changes the host first, proves the result against the live endpoint, then updates the copy. Rationale: revocation takes effect in seconds without a gated deploy; the copy lets a rebuilt host accept the same tokens.
-- Environment secrets cannot be read back, so only a deploy can apply the copy. Deploy writes tokens to the host when the host's token directory is empty, or when the operator dispatches it with an explicit reseed input after a snapshot restore. Otherwise it never replaces or removes a token.
-- If the copy cannot be updated after a change on the host, the CLI exits non-zero and leaves a marker on the host. While the marker exists the health verdict fails, so an alert opens, and deploy refuses to seed or reseed. `sender sync` rewrites the copy from the host and clears the marker.
-- Residual: if the host is lost while the copy is known to be stale, the copy is not replayed. All three tokens are reissued instead. The runbook says so.
+- Sender tokens live only in the collector's token directory on the encrypted volume and at the senders. A CLI command group adds, lists and revokes them over SSH and proves each change against the live endpoint. Rationale: revocation takes effect in seconds without a gated deploy, and with no second copy a revoked token cannot return.
+- Deploy creates the token directories and never writes, replaces or removes a token.
+- After a rebuild or a snapshot restore, every token file is emptied before ingest opens and all three tokens are reissued. A restore would otherwise bring back whatever the snapshot held, including a token revoked since.
 - `list` shows group, fingerprint and creation date, never a token. `add` hands the token to its destination once: piped to `gh secret set` for a repository, or for the organisation with selected-repository visibility, or printed once for the workstation.
 - Metadata inside a group is untrusted. A token read by an agent in one run can write spans that claim any repository or run.
-- The Langfuse key pair, the Grafana OAuth client, the store passwords and the long-lived application secrets (`NEXTAUTH_SECRET`, `SALT`, `ENCRYPTION_KEY`, Grafana's secret key) are `traces` Environment secrets, written to the host as files over SSH stdin. Deploy never generates or regenerates one.
+- The Langfuse key pair, the Grafana admin password, the store passwords and the long-lived application secrets (`NEXTAUTH_SECRET`, `SALT`, `ENCRYPTION_KEY`, Grafana's secret key) are `traces` Environment secrets, written to the host as files over SSH stdin. Deploy never generates or regenerates one.
 - The Langfuse bootstrap variables are removed from the host after bootstrap, so a restart cannot recreate the full-access key.
 
 **Storage, retention and encryption**
@@ -253,15 +249,14 @@ Versions planned: Langfuse 4.83.0, OpenTelemetry Collector 0.165.0 with contrib 
 - A scheduled workflow snapshots the volume daily with a DigitalOcean token scoped to volume snapshots, and alerts if the newest is older than 36 hours. One snapshot captures every store at the same instant.
 - Snapshots are pruned by age: any snapshot of this volume older than 8 days is deleted on every run, whether or not a new one was taken.
 - A snapshot is taken before any deploy that changes a stateful image.
-- Snapshots are encrypted at rest by the provider, have no public path, and stay in the same account and region. The target is that a trace exists for at most 30 days live and 8 more in snapshots. A copy can persist longer only if the backup workflow stops running, since nothing else prunes; the runbook's monthly check lists snapshots by age.
-- A restore is proven once on a scratch host (AE6) before the backup is relied on.
+- Snapshots are encrypted at rest by the provider, have no public path, and stay in the same account and region. The target is that a trace exists for at most 30 days live and 8 more in snapshots. These are targets, not guarantees: a delayed merge or a failed prune can keep data longer. The reporter's oldest-data check and the runbook's monthly listing of snapshots by age are how that is noticed.
+- A restore is proven once on a scratch host (AE5) before the backup is relied on.
 
 **Operations**
 
-- Order of opening: private services up and migrated; retention asserted; Langfuse key in place and the bootstrap key proven dead; the health canary passing in both backends; then the Grafana route; then AE4 with a second GitHub account; then the ingest route. No sender token exists until AE4 has passed, so Grafana is public only while Tempo holds nothing but canary traces.
+- Order of opening: private services up and migrated; retention asserted; Langfuse key in place and the bootstrap key proven dead; the health canary passing in both backends; then the ingest route; then sender tokens.
 - No sender token is issued before the privacy page is published.
-- A route has three states: off (no route, first bring-up), held (503, which senders retry) and open. A deploy that changes the collector, a backend or their configuration first holds the ingest route, updates, runs the gates, and reopens only if they pass. A failed deploy leaves it held.
-- A deploy that changes Grafana's image or sign-in settings holds the Grafana route and reopens it only when the operator has repeated AE4 and recorded the running image digest in a repository variable. The unauthenticated probes cannot prove the one-account rule; a second account can.
+- The ingest route has three states: off (no route, first bring-up), held (503, which senders retry) and open. A deploy that changes the collector, a backend or their configuration first holds the ingest route, updates, runs the gates, and reopens only if they pass. A failed deploy leaves it held.
 - `traces ingest hold` holds the ingest route over SSH at once, whatever the canary says. Only a deploy reopens it.
 - Whether ingest is meant to be open is a repository variable the monitor reads, so a held or off route alerts only when it should be open.
 - A deploy that restarts the collector can lose the last spans of a run that ends during it. Accepted by the owner; the runbook says to deploy when no run is active.
@@ -280,7 +275,7 @@ Versions planned: Langfuse 4.83.0, OpenTelemetry Collector 0.165.0 with contrib 
 
 ### Deferred to Implementation
 
-- Whether the `redaction` keep-list also covers span-event attributes and resource attributes at the pinned version. AE5 decides; if it does not, the Tempo branch drops events' attributes by another step and the plan's owner is told.
+- Whether the `redaction` keep-list also covers span-event attributes and resource attributes at the pinned version. AE4 decides; if it does not, the Tempo branch drops events' attributes by another step and the plan's owner is told.
 - Whether `LANGFUSE_INIT_*` can create the organisation, project and user without creating a key.
 - Whether Langfuse hashes API keys with `SALT`, which decides how strongly the "never regenerate" rule is worded in the runbook.
 - The limiter's exact settings for a 1 GiB allowance at the pinned version, and which bytes it counts.
@@ -289,18 +284,17 @@ Versions planned: Langfuse 4.83.0, OpenTelemetry Collector 0.165.0 with contrib 
 - The real sender's backoff schedule and what it counts as a failed batch, measured against an exhausted allowance and a full queue.
 - The Langfuse trace URL form through the tunnel, for the runbook and the sender side.
 - Cold first-boot time, to set the deploy wait.
-- Whether a volume snapshot of the running stores restores cleanly. AE6 decides.
+- Whether a volume snapshot of the running stores restores cleanly. AE5 decides.
 
 ### For the owner
 
-- A second GitHub account for AE4. The `fro-bot` account would do.
+- None open. The prerequisites below are actions, not decisions.
 
 ## Dependencies / Prerequisites
 
 From the owner, before the first deploy:
 
-- **DNS:** A records for `traces.fro.bot` and `grafana.fro.bot` pointing at the new droplet. DNS here is manual.
-- **GitHub OAuth app** for Grafana, with callback `https://grafana.fro.bot/login/github`. Its client id and secret become Environment secrets.
+- **DNS:** one A record for `traces.fro.bot` pointing at the new droplet. DNS here is manual.
 - **GitHub Environment** `traces` (required reviewer, main only), created before the workflows merge.
 - **A DigitalOcean token scoped to volume snapshots**, stored as a repository secret for the backup workflow. The existing account-wide token stays provisioning-only.
 - **Approval of the spend:** about $94 a month plus snapshots.
@@ -376,7 +370,7 @@ flowchart LR
   H -.->|canary| L
   H -.->|read back| ST & T
   C -->|/healthz| H
-  OP[Operator] -->|GitHub sign-in, grafana.fro.bot| C --> G
+  OP -->|SSH tunnel| G
   OP -->|SSH tunnel| LF
   MON[Scheduled monitor] -->|GET /healthz| C
   BK[Scheduled backup] -->|provider API| SNAP[(volume snapshots)]
@@ -428,7 +422,7 @@ flowchart TB
 **Approach:**
 
 - Start from the Langfuse compose file at the release tag and change only what must change: pin every image by tag and digest, drop the AI gateway service, publish nothing but Caddy and loopback Langfuse web, add healthchecks, set a log size limit on every service, split the two networks.
-- Caddy: the ingest hostname has three path routes, a health path proxied to the reporter, the body cap, and a 404 catch-all. The Grafana hostname is a second site. Each route is switched by an environment value so deploy can keep it closed.
+- Caddy: the ingest hostname has three path routes, a health path proxied to the reporter, the body cap, and a 404 catch-all. The ingest routes are switched by an environment value so deploy can keep them off or held.
 - Collector config follows the intake, Langfuse branch and Tempo branch shape in Key Technical Decisions. Tokens and backend credentials are read from files, never from tracked text.
 - ClickHouse system log tables get a short TTL so they cannot outlive the trace data.
 - No memory limit on ClickHouse. The measured loss came from capping it.
@@ -441,14 +435,15 @@ flowchart TB
 - Happy path: only Caddy publishes 80 and 443; Langfuse web publishes to `127.0.0.1`; no other service has a `ports` entry.
 - Happy path: the collector is on the edge network only; ClickHouse, PostgreSQL, Redis and the object store are not on it.
 - Happy path: the Caddyfile has exactly three ingest paths, the health path and the catch-all, sets the body cap on the ingest site, and has no route to the canary receiver.
-- Edge case: with ingest off, the rendered Caddyfile has no ingest route; with ingest held, every ingest path answers 503; with Grafana held, the Grafana site answers 503.
+- Edge case: with ingest off, the rendered Caddyfile has no ingest route; with ingest held, every ingest path answers 503.
 - Happy path: each group has one receiver with its own token file and one intake pipeline whose processors are exactly the group stamp and the limiter.
 - Happy path: the Langfuse branch pipelines have no processor.
 - Happy path: the Tempo pipeline's only processor is the keep-list, and the list contains none of the six content keys.
 - Error path: a config with a `batch` or `transform` processor in any pipeline fails the test.
 - Happy path: every exporter has a persistent queue sized in bytes.
 - Happy path: Tempo config sets the trace limit and 720-hour retention, leaves the attribute limit at its default, and disables usage reporting.
-- Happy path: Grafana environment disables the login form, basic auth, anonymous access, sign-up by form, public dashboards, snapshots, metrics, analytics, update checks, Gravatar, the news feed and the plugin pre-installer.
+- Happy path: Grafana publishes to `127.0.0.1` only, and its environment disables anonymous access, sign-up, public dashboards, snapshots, metrics, analytics, update checks, Gravatar, the news feed and the plugin pre-installer.
+- Happy path: the Caddyfile has one site and no route to Grafana or Langfuse.
 
 **Verification:** `docker compose config` accepts the file with dummy values, and the three test files pass.
 
@@ -535,12 +530,11 @@ flowchart TB
 **Approach:**
 
 - Order: validate inputs; DNS preflight; verify the volume mount, sentinel and storage paths; write secret files over SSH stdin; upload configs; prune images; pull; start the stores and Langfuse; wait for readiness; assert and read back retention; start Tempo, Grafana, the collector and the reporter; run the gates; render Caddy with the routes the gates allow.
-- Gates for both routes: the Langfuse key pair is set; the reporter's canary (Unit 7) passes in both backends, including the keep-list check; a request with the bootstrap key is refused and the bootstrap variables are absent from the host.
-- Extra gate for the Grafana route: an unauthenticated request matrix returns no data, and the built-in admin's default credentials are refused on the login and API paths.
-- Extra gate for the ingest route: the repository variable that says ingest should be open, set only after AE4, and a token directory per group. A group with no token refuses everything.
-- On a host that already serves traffic, the deploy holds each route whose service or configuration is about to change before it changes anything, and reopens it only after that route's gates pass. The Grafana route also needs the recorded digest to match the running image.
+- Gates for the ingest route: the Langfuse key pair is set; the reporter's canary (Unit 7) passes in both backends, including the keep-list check; a request with the bootstrap key is refused and the bootstrap variables are absent from the host.
+- Two more gates: the repository variable that says ingest should be open, and a token directory per group. A group with no token refuses everything.
+- On a host that already serves traffic, the deploy holds the ingest route before it changes the collector, a backend or their configuration, and reopens it only after the gates pass.
 - Retention: set the TTL on the known trace tables and the lifecycle rule on the object store, and read each back. Fail if a known table is missing.
-- Tokens: write the Environment copy to the host when the token directory is empty, or when the reseed input is set. Refuse both while the stale-copy marker exists. Otherwise leave the directory untouched.
+- Tokens: create the directories if absent. Never write, replace or remove a token.
 - Every remote probe prints a sentinel and requires exit 0 plus a recognised sentinel.
 - All SSH calls share one multiplexed connection.
 
@@ -551,32 +545,27 @@ flowchart TB
 **Test scenarios:**
 
 - Error path: the mount check returns an unrecognised answer; deploy stops before writing anything.
-- Error path: the Langfuse key pair is unset; deploy completes with both routes closed and says so.
-- Error path: the canary reaches Tempo but not Langfuse; both routes stay closed.
-- Error path: the canary's content marker is found in Tempo; both routes stay closed.
-- Error path: the bootstrap key still authenticates; both routes stay closed.
-- Error path: the bootstrap variables are still present on the host; both routes stay closed.
-- Happy path: all gates pass and the ingest variable is unset; the rendered Caddyfile has the Grafana site and no ingest route.
+- Error path: the Langfuse key pair is unset; deploy completes with ingest off and says so.
+- Error path: the canary reaches Tempo but not Langfuse; ingest stays closed.
+- Error path: the canary's content marker is found in Tempo; ingest stays closed.
+- Error path: the bootstrap key still authenticates; ingest stays closed.
+- Error path: the bootstrap variables are still present on the host; ingest stays closed.
+- Happy path: all gates pass and the ingest variable is unset; the rendered Caddyfile has the health path and no ingest route.
 - Happy path: all gates pass and the ingest variable is set; the rendered Caddyfile contains the ingest routes.
-- Error path: the default admin credentials are accepted by Grafana; the Grafana route stays closed.
 - Error path: the TTL readback differs from 30 days; deploy fails.
 - Error path: a known trace table is missing; deploy fails and names it.
 - Happy path: the lifecycle readback shows the 30-day rule on the batch prefix.
-- Edge case: a token directory holds a token; after deploy the file is byte-identical, whatever the Environment copy holds.
-- Happy path: the token directories are empty and the Environment copy holds three tokens; after deploy each group's file holds its token.
-- Happy path: with the reseed input set, a token on the host that the copy does not hold is gone after deploy.
-- Error path: the stale-copy marker exists; a deploy with the reseed input fails before touching the token directory.
+- Edge case: a token directory holds a token; after deploy the file is byte-identical.
 - Error path: on an open stack, the collector image changes and the canary then fails; the ingest route is left held and the deploy fails.
-- Error path: the Grafana image changes and the recorded digest does not match; the Grafana route is left held and the deploy succeeds with a notice.
-- Happy path: a deploy that changes no gated service does not hold any route.
+- Happy path: a deploy that changes no gated service does not hold the route.
 - Error path: the collector image digest on the host differs from the one built; deploy fails.
 - Happy path: secret bytes reach the host only through stdin; no SSH argument contains one.
 
-**Verification:** A deploy to an empty host ends with both routes off and a message naming the missing gates. A second deploy after bootstrap opens Grafana only. A deliberately failing redeploy of an open stack answers 503 on the ingest hostname from outside (AE7).
+**Verification:** A deploy to an empty host ends with ingest off and a message naming the missing gates. A deliberately failing redeploy of an open stack answers 503 on the ingest hostname from outside (AE6).
 
 - [ ] **Unit 5: Sender tokens**
 
-**Goal:** Issue, list, rotate and revoke a sender token in seconds, with the result proven against the live endpoint and the copy kept in step.
+**Goal:** Issue, list, rotate and revoke a sender token in seconds, with the result proven against the live endpoint.
 
 **Requirements:** R4, R11
 
@@ -590,25 +579,21 @@ flowchart TB
 
 **Approach:**
 
-- `add <group>` generates a high-entropy token locally, appends it to the group's file on the host by atomic replace, proves it with one authenticated request, then updates the Environment copy. It delivers the token once: to `gh secret set` over stdin, or to the terminal.
+- `add <group>` generates a high-entropy token locally, appends it to the group's file on the host by atomic replace, proves it with one authenticated request. It delivers the token once: to `gh secret set` over stdin, or to the terminal.
 - `list` prints group, fingerprint and creation date, read from the host.
-- `revoke <group> <fingerprint>` removes the line on the host, proves the token now gets 401, then updates the copy. It reports each of the three states. It says "revoked" after the proof, and says plainly if the copy could not be updated.
-- `sync` rewrites the Environment copy from the host and clears the stale-copy marker. The copy reaches a host only through a deploy.
-- If the copy update fails, the command writes the stale-copy marker on the host before it exits.
+- `revoke <group> <fingerprint>` removes the line on the host, then proves the token now gets 401. It says "revoked" only after that proof. `revoke --all` empties every group's file and proves each token is refused; it is the first step after a restore.
 - Rotation is `add`, update the sender, `revoke`. Two tokens overlap in one file.
 - The whole group is denied to MCP in both layers.
 
-**Patterns to follow:** `packages/cli/src/commands/cliproxy/keys.ts`, `packages/cli/src/commands/vpn/client.ts` (CLI-only, stdin to `gh secret set`, roster sync).
+**Patterns to follow:** `packages/cli/src/commands/cliproxy/keys.ts`, `packages/cli/src/commands/vpn/client.ts` (CLI-only, stdin to `gh secret set`).
 
 **Test scenarios:**
 
-- Happy path: `add` writes one new line to the right group's file, the proof request returns 200, and the copy gains the token.
+- Happy path: `add` writes one new line to the right group's file, and the proof request returns 200.
 - Error path: the proof request after `add` returns 401; the command fails and says the token is not live.
 - Happy path: `list` output contains fingerprints and no token.
-- Happy path: `revoke` removes exactly the matching line, the proof returns 401, and the copy loses the token.
+- Happy path: `revoke` removes exactly the matching line, and the proof returns 401.
 - Error path: the proof after `revoke` returns 200; the command fails and does not print "revoked".
-- Error path: the copy update fails after a proven revoke; the command exits non-zero, says the host is revoked and the copy is stale, names `sync`, and the marker exists on the host.
-- Happy path: `sync` after that failure updates the copy and removes the marker.
 - Edge case: `revoke` of the last token leaves an empty file and the group refuses every request.
 - Error path: `add` for a group that does not exist is refused before any SSH call.
 - Happy path: the token reaches the host and `gh secret set` on stdin and appears in no argument or log line.
@@ -633,8 +618,8 @@ flowchart TB
 
 - The callee has a `notify` job, a `build-images` job and an environment-gated deploy job. The router gains a path filter and a caller job that grants `packages: write` alongside `contents: read`.
 - Register the app in each hard-coded list: workflow concurrency, notify apps, daily-report sections and its count, brokered-push paths, `APP_IDS`, the docs services table, the topology diagram and drift table.
-- Renovate: stateful images (ClickHouse, PostgreSQL, Redis, the object store, Tempo) and Langfuse need dashboard approval and never automerge. PostgreSQL for this app is held at its current major. Grafana security releases are not held back.
-- Allowlist both hostnames for the docs gate.
+- Renovate: stateful images (ClickHouse, PostgreSQL, Redis, the object store, Tempo) and Langfuse need dashboard approval and never automerge. PostgreSQL for this app is held at its current major. Grafana follows the default rules.
+- Allowlist `traces.fro.bot` for the docs gate.
 - The privacy page says what a trace contains, that it can include other people's text, who can read it, where it is stored, that Langfuse holds full content and Tempo holds structure, the 30-day expiry and the 8 further days in snapshots as targets, that Tempo keeps error text and span names, the known outbound calls, and how to ask for earlier removal.
 - Regenerate the project docs with the `generating-project-docs` skill.
 
@@ -667,11 +652,11 @@ flowchart TB
 **Approach:**
 
 - The reporter is a small service in the stack on a pinned runtime image, with no Docker socket. On a timer it reads the collector's metrics, Tempo's metrics, the Langfuse web and worker health endpoints, the ingestion queue lengths in Redis, the retention readbacks, and free space on the volume and the root disk (mounted read-only).
-- On the same timer it runs a canary: one small trace through the collector's private receiver, carrying a unique marker in each place listed in AE5. It confirms the trace and all markers in Langfuse's store, and in Tempo confirms the trace and that only the status, exception and span-name markers are present.
+- On the same timer it runs a canary: one small trace through the collector's private receiver, carrying a unique marker in each place listed in AE4. It confirms the trace and all markers in Langfuse's store, and in Tempo confirms the trace and that only the status, exception and span-name markers are present.
 - The reporter reads Langfuse's store with a read-only ClickHouse user. That credential can read trace content and exists only on the host.
 - It serves the health path: 200 with one word when every check passed within the last interval, 503 otherwise. A reporter that has stopped also reads as 503. The detail never leaves the host by this path.
-- The verdict also fails while the stale-copy marker exists, and when the oldest data in any store is over 31 days old.
-- `traces status` asks the reporter for its detail over SSH and prints a table. `traces ingest hold` holds the ingest route. `traces open` opens the tunnel to Langfuse. `traces logs` streams a service's logs with the sensitive-data warning.
+- The verdict also fails when the oldest data in any store is over 31 days old.
+- `traces status` asks the reporter for its detail over SSH and prints a table. `traces ingest hold` holds the ingest route. `traces open` opens the tunnel to Langfuse and Grafana. `traces logs` streams a service's logs with the sensitive-data warning.
 - The public status page shows the health path's result and deploy state only.
 
 **Patterns to follow:** `packages/cli/src/commands/umami/status.ts`, `packages/cli/src/commands/cliproxy/open.ts`, the gateway `workspace-memory` resource observation.
@@ -683,14 +668,13 @@ flowchart TB
 - Error path: the worker health endpoint fails while web answers; the verdict fails and names the worker.
 - Error path: a marker from a content key, an unlisted span attribute, a resource, scope, event or link attribute is found in Tempo; the verdict fails and names the place.
 - Error path: the oldest span in a trace table is 32 days old; the verdict fails.
-- Error path: the stale-copy marker exists; the verdict fails.
 - Happy path: `traces ingest hold` re-renders the ingest routes to 503 without consulting the reporter.
 - Error path: a non-zero enqueue-failure or Tempo discard counter since the last run fails the verdict.
 - Edge case: free space below the threshold fails the verdict and gives the percentage in the detail.
 - Error path: a metrics endpoint that cannot be read makes that check "unknown", and the verdict fails.
 - Edge case: the last successful run is older than two intervals; the health path answers 503.
 - Happy path: the health path's body is one fixed word and contains nothing from the detail.
-- Happy path: `traces open` builds an SSH command that forwards only the Langfuse port from loopback.
+- Happy path: `traces open` builds an SSH command that forwards only the Langfuse and Grafana ports from loopback.
 - Error path: `traces status` with a host value starting with `-` is refused.
 
 **Verification:** Stopping the Langfuse worker on a test stack turns the health path to 503 within two reporter runs, and `traces status` names the worker.
@@ -755,16 +739,16 @@ flowchart TB
 **Approach:**
 
 1. Provision. Commit the pinned host keys. Reboot once with the volume detached and once attached, and confirm the mount guard.
-2. First deploy. Both routes stay closed.
+2. First deploy. Ingest stays off.
 3. Through the tunnel: sign in to Langfuse, create the "Application" key, set the key pair as Environment secrets, delete the bootstrap key if one exists.
-4. Redeploy. The gates pass and the Grafana route opens. Ingest stays closed and no sender token exists.
-5. Sign in to Grafana as the operator. Sign in with a second GitHub account and confirm no session (AE4). Record the running Grafana digest in the repository variable. If AE4 fails, hold the route and stop.
-6. Take a snapshot, restore it to a scratch host, and confirm a canary trace is served (AE6). Destroy the scratch host and its volume.
-7. Confirm the privacy page is live. Run AE5 through the private receiver. Set the ingest variable and redeploy.
+4. Redeploy. The gates pass. Ingest stays off because its variable is unset, and no sender token exists.
+5. Through the tunnel, sign in to Grafana and confirm the Tempo data source lists the canary traces.
+6. Take a snapshot, restore it to a scratch host, and confirm a canary trace is served (AE5). Destroy the scratch host and its volume.
+7. Confirm the privacy page is live. Run AE4 through the private receiver. Set the ingest variable and redeploy.
 8. Issue the three sender tokens.
 9. Rehearse the monitor and the backup alert.
 
-Each step leaves a safe state if the run stops there: nothing public before step 4, only an empty Grafana before step 7, and no accepted sender before step 8.
+Each step leaves a safe state if the run stops there: nothing but the health path is public before step 7, and no sender is accepted before step 8.
 
 **Test expectation:** none -- operational steps; each has its proof in Units 4, 5, 7 and 8, and the results are recorded in the runbook's first-deploy section.
 
@@ -774,7 +758,7 @@ Each step leaves a safe state if the run stops there: nothing public before step
 
 **Goal:** The owner's "done" list proven with saved evidence, and the documents the sender side and the operator need.
 
-**Requirements:** R11, AE1 to AE5, AE7
+**Requirements:** R11, AE1 to AE4, AE6
 
 **Dependencies:** Unit 9
 
@@ -789,10 +773,10 @@ Each step leaves a safe state if the run stops there: nothing public before step
 - The test sender builds one trace of 20 numbered spans, each with a 500,000-byte JSON string in `gen_ai.input.messages`, and posts it as several JSON requests under 4,000,000 bytes. It can also send the refusal cases and the marker trace.
 - AE1: read all 20 spans back from Langfuse with a read key created for the test and deleted afterwards, and compare length and hash; find the trace in Grafana by id and confirm 20 spans and no content attribute.
 - AE2: no token, a revoked token, another group's token, an over-cap body. Revocation is timed from the command's own proof.
-- AE3: present a sender token to Grafana's API and to Langfuse through the tunnel; scan the droplet's public address for every store, collector and reporter port.
-- AE5: the marker trace through the public endpoint, read back from both backends.
+- AE3: present a sender token on another group's path and on unknown paths; scan the droplet's public address for Langfuse, Grafana, Tempo and every store, collector and reporter port.
+- AE4: the marker trace through the public endpoint, read back from both backends.
 - With the real sender: run it against the `workstation` group, confirm full content in Langfuse and none in Tempo for the trace ids the owner supplies, list every attribute key seen, and add any missing structural key to the keep-list. Measure what an exhausted allowance and a full queue do to a run.
-- The runbook covers: issue, rotate and revoke a token; where the URL and token go for each sender kind; reading `traces status`; finding a run by repository and run id and following a session across traces; emergency close of ingest; deleting by sender group after a compromise; restore from a snapshot, ending with a reseed deploy, or with reissuing all tokens if the copy is stale; a restore rehearsal in which a revoke succeeded on the host and the copy update failed, showing the old token is never accepted on the restored host; the monthly check of snapshot ages; rotating the Langfuse key, the Grafana OAuth secret and the store passwords; repeating AE4 after a Grafana upgrade or sign-in change; upgrade notes for stateful images; teardown.
+- The runbook covers: issue, rotate and revoke a token; where the URL and token go for each sender kind; reading `traces status`; finding a run by repository and run id and following a session across traces; emergency close of ingest; deleting by sender group after a compromise; restore from a snapshot, which starts with ingest held and `revoke --all` and ends with reissuing all three tokens; a restore rehearsal from a snapshot taken before a revoke, showing the old token is never accepted on the restored host; the monthly check of snapshot ages; rotating the Langfuse key, the Grafana admin password and the store passwords; upgrade notes for stateful images; teardown.
 - The sender contract is a section of the runbook: URL form, headers, the limits table, what each status means for a run, the proxy and collector timeout values, the Langfuse trace URL form, and the attribute names below.
 
 **Sender contract (attribute names confirmed on the probe):**
@@ -821,9 +805,9 @@ Each step leaves a safe state if the run stops there: nothing public before step
 
 - **Interaction graph:** A new deploy job in the router; two new scheduled workflows; a new CLI command group; a new entry on the public status page and docs site; a new repository secret for snapshots.
 - **Error propagation:** Backend failures stay inside the collector's queues until they fill, then become 503 to the sender, which can end that run's tracing. Losses after a 200 never reach the sender and surface only through the canary and the reporter's counters.
-- **State lifecycle risks:** Sender tokens exist on the host and as a copy; the CLI is the only writer of both and reports when they differ. A snapshot restore brings back the token files as they were; ingest stays held until a reseed deploy or a reissue.
+- **State lifecycle risks:** Sender tokens exist only on the host and at the senders. A snapshot restore brings back the token files as they were, so a restore starts with ingest held and every token file emptied.
 - **API surface parity:** `traces status` joins the MCP allowlist. Deploy, logs, open and sender commands are denied in both MCP layers.
-- **Integration coverage:** The volume mount guard across reboot, token hot reload on the real mount, the Grafana one-account rule, the keep-list on real traces, a snapshot restore, and the 30-day expiry are proven on the host, not by unit tests. The expiry is proven by readback at deploy and by the first rows ageing out, which the reporter's retention check watches.
+- **Integration coverage:** The volume mount guard across reboot, token hot reload on the real mount, the keep-list on real traces, a snapshot restore, and the 30-day expiry are proven on the host, not by unit tests. The expiry is proven by readback at deploy and by the first rows ageing out, which the reporter's retention check watches.
 - **Unchanged invariants:** No existing app, droplet or workflow changes behaviour. The gateway's egress list is untouched until gateway tracing is planned. The account-wide DigitalOcean token stays out of scheduled workflows.
 
 ## Risks & Dependencies
@@ -834,16 +818,16 @@ Each step leaves a safe state if the run stops there: nothing public before step
 | A run meets the allowance or a full queue and stops tracing | Allowance sized as a quota far above normal use; 1 GiB Langfuse queues; measured with the real sender in Unit 10; values tuned after the first week |
 | A leaked token fills the volume | Byte allowance per group; disk in the health verdict at 70 percent; revoke in seconds; emergency close of ingest |
 | Content reaches Tempo under a key nobody listed | Keep-list fails closed; markers in every OTLP text position in every canary; default 2,048-byte attribute limit |
-| A failed redeploy leaves an open route in front of a changed service | Routes are held before a gated change and reopened only after their gates; AE7 |
-| A stale token copy brings back a revoked token | Marker fails the health verdict and blocks seeding; reissue instead of replay when the host is lost while stale |
+| A failed redeploy leaves an open route in front of a changed service | Routes are held before a gated change and reopened only after their gates; AE6 |
+| A restore brings back a revoked token | Restore starts with ingest held and `revoke --all`; all tokens are reissued; rehearsed once |
 | Expired data outlives its window | Reporter checks the oldest data in each store; snapshots pruned by age on every run |
-| Free text in status messages, exception messages and span names is visible in Grafana | Kept at the owner's request and stated on the privacy page; bounded by the attribute limit; the sender contract keeps free text out of span names; Grafana limited to one account |
+| Free text in status messages, exception messages and span names is stored in Tempo | Kept at the owner's request and stated on the privacy page; bounded by the attribute limit; Grafana is not public |
 | The volume is not mounted after a reboot | Docker requires the mount and sentinel; deploy verifies before writing; tested by detaching it |
 | A Langfuse upgrade renames trace tables or changes key roles | Renovate approval; snapshot before the deploy; deploy fails on a missing table; the canary reads back through the new version |
 | The custom collector's components drift apart | One Renovate group for the manifest; manifest test |
-| A snapshot of running databases does not restore | AE6 before the backup is relied on; if it fails, the backup step quiesces the stores first |
+| A snapshot of running databases does not restore | AE5 before the backup is relied on; if it fails, the backup step quiesces the stores first |
 | Local-disk Tempo is documented for development use | Single node, structural data only, snapshotted daily; revisit if it loses blocks |
-| First deploy needs several passes | Environment created first; both routes closed by default; each step leaves a safe state |
+| First deploy needs several passes | Environment created first; ingest off by default; each step leaves a safe state |
 | The monitor itself stops | The public status page still shows the health path and deploy state; noted as a limit |
 | A stolen workstation or SSH key reads everything | Accepted; the same key already administers the host |
 
@@ -855,7 +839,7 @@ Each step leaves a safe state if the run stops there: nothing public before step
 2. Hold ingest with `traces ingest hold`.
 3. Delete the sender tokens from the repository and organisation secrets and the workstation settings file.
 4. Destroy the droplet, the volume, its snapshots and the firewall with `doctl`, after a dry-run listing.
-5. Remove the two DNS records, the Grafana OAuth app and the snapshot token.
+5. Remove the DNS record and the snapshot token.
 6. Delete the Environment and the collector image from GHCR.
 7. Revert the registration commit: workflows, lists, Renovate rules, docs, CLI group, known hosts.
 
@@ -868,5 +852,5 @@ A deploy rollback short of teardown is a pin revert for stateless services. A st
 - Sender requirements and plan: `fro-bot/agent` `docs/brainstorms/2026-11-19-opencode-run-tracing-requirements.md` and `docs/plans/2026-11-19-001-feat-opencode-run-tracing-plan.md` (another repository).
 - Related code: `apps/umami`, `apps/broker/config/Caddyfile`, `packages/cli/src/commands/cliproxy/keys.ts`, `packages/cli/src/commands/vpn/client.ts`, `.github/workflows/deploy-gateway.yaml`, `packages/cli/scripts/go-privacy-alert.ts`.
 - Related past work: `docs/plans/2026-05-17-001-feat-gateway-deployment-plan.md`, recorded completed. It excluded an observability stack; this plan adds trace collection only.
-- External docs: Langfuse self-hosting and OpenTelemetry pages; OpenTelemetry Collector configuration, `forward` connector and `redaction` processor; Elastic `ratelimit` processor; Grafana Tempo 3.1 configuration; Grafana GitHub OAuth; DigitalOcean volume snapshots; OpenTelemetry GenAI semantic conventions.
+- External docs: Langfuse self-hosting and OpenTelemetry pages; OpenTelemetry Collector configuration, `forward` connector and `redaction` processor; Elastic `ratelimit` processor; Grafana Tempo 3.1 configuration; DigitalOcean volume snapshots; OpenTelemetry GenAI semantic conventions.
 - Probe evidence is kept outside the repository by the owner.

@@ -3,6 +3,7 @@ import type {ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligib
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../lib/mcp-ctx-fixture'
+import {GO_SNAPSHOT_URL, type GoSnapshotFailureReason, type GoSnapshotFetch} from './go-snapshot'
 import {
   checkGoRoute,
   checkGoRouteState,
@@ -2075,6 +2076,8 @@ describe('cliproxyStatusAction — Go route wiring', () => {
 
   it('adds a Go route check after the unchanged Claude check when a provider key is present', async () => {
     globalThis.fetch = createFetchImplementation(async url => {
+      if (url === GO_SNAPSHOT_URL)
+        return Response.json({schemaVersion: 1, source: GO_SNAPSHOT.source, models: GO_SNAPSHOT.models})
       if (url.includes('/healthz')) return new Response('ok', {status: 200})
       if (url.endsWith('/v1/models')) return Response.json({data: [{id: 'glm-5.3', owned_by: 'opencode-go'}]})
       if (url.includes('/v1/chat/completions'))
@@ -2209,5 +2212,478 @@ describe('Go route when the tracked settings turn it off', () => {
     expect(output).toContain('disabled by tracked settings')
     expect(urls.some(url => url.endsWith('/v1/models'))).toBe(false)
     expect(captured.exit).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Which privacy policy the Go check judges against: the current snapshot from main, or the bundled copy as a fallback.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const CURRENT_COMMIT = 'c'.repeat(40)
+const goSnapshotOf = (
+  models: ParsedSnapshot['models'],
+  commit = CURRENT_COMMIT,
+  invalid: string[] = [],
+): ParsedSnapshot => ({
+  source: {...GO_SNAPSHOT.source, commit},
+  models,
+  invalid,
+})
+const fetchedSnapshot =
+  (snapshot: ParsedSnapshot): (() => Promise<GoSnapshotFetch>) =>
+  async () => ({ok: true, snapshot})
+const failedFetch =
+  (reason: GoSnapshotFailureReason): (() => Promise<GoSnapshotFetch>) =>
+  async () => ({ok: false, reason})
+
+describe('checkGoRoute — current privacy snapshot with bundled fallback', () => {
+  const BASE = 'https://cliproxy.example.com'
+  const KEY = 'go-probe-secret-key'
+  const NOW = new Date('2026-11-04T12:00:00.000Z')
+  const RUNBOOK = 'docs/runbooks/cliproxy-opencode-go.md'
+  const goOk = () => Response.json({choices: [], usage: {opencode: {billing_source: 'go'}}})
+
+  let chatModels: string[]
+
+  function install(exposed: string[], chat: () => Response = goOk): void {
+    chatModels = []
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      if (url.endsWith('/v1/models')) {
+        return modelList(exposed)
+      }
+      if (url.endsWith('/v1/chat/completions')) {
+        chatModels.push((JSON.parse(String(init?.body)) as {model: string}).model)
+        return chat()
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+  }
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  function run(
+    fetchCurrentSnapshot: (() => Promise<GoSnapshotFetch>) | undefined,
+    extra: Record<string, unknown> = {},
+  ) {
+    return checkGoRoute(BASE, KEY, {
+      snapshot: GO_SNAPSHOT,
+      settings: GO_SETTINGS,
+      now: NOW,
+      fetchCurrentSnapshot,
+      ...extra,
+    })
+  }
+
+  describe('the fetched snapshot is the policy', () => {
+    it('clears a model the bundled copy has never heard of: OK, not privacy-noncompliant', async () => {
+      install(['glm-5.3', 'brand-new'])
+      const current = goSnapshotOf({'glm-5.3': goEntry(), 'brand-new': goEntry()})
+
+      const human = await run(fetchedSnapshot(current))
+
+      expect(human.level).toBe('ok')
+      expect(human.summary).toBe('opencode-go route OK (glm-5.3)')
+      expect(human.details).toEqual(['Privacy snapshot: ccccccc (current, main)'])
+      const state = await checkGoRouteState(BASE, KEY, {
+        snapshot: GO_SNAPSHOT,
+        settings: GO_SETTINGS,
+        now: NOW,
+        fetchCurrentSnapshot: fetchedSnapshot(current),
+      })
+      expect(state).toEqual({state: 'healthy', reason: 'ok'})
+    })
+
+    it('restricts a model the bundled copy still clears: the existing privacy-noncompliant error', async () => {
+      install(['glm-5.3', 'kimi-k3'])
+      const current = goSnapshotOf({'glm-5.3': goEntry(), 'kimi-k3': goEntry({zeroRetention: false})})
+
+      const human = await run(fetchedSnapshot(current))
+
+      expect(human.level).toBe('error')
+      expect(human.summary).toBe(
+        `Exposed model(s) not eligible under the privacy snapshot: kimi-k3 — disable the entry, see ${RUNBOOK}`,
+      )
+      expect(human.details).toEqual(['Privacy snapshot: ccccccc (current, main)'])
+      expect(chatModels).toEqual([])
+      const state = await checkGoRouteState(BASE, KEY, {
+        snapshot: GO_SNAPSHOT,
+        settings: GO_SETTINGS,
+        now: NOW,
+        fetchCurrentSnapshot: fetchedSnapshot(current),
+      })
+      expect(state).toEqual({state: 'dead', reason: 'privacy-noncompliant'})
+    })
+
+    it('treats an exposed model missing from the fetched snapshot as an error: the fetched policy is complete', async () => {
+      install(['glm-5.3', 'kimi-k3'])
+
+      const human = await run(fetchedSnapshot(goSnapshotOf({'glm-5.3': goEntry()})))
+
+      expect(human.level).toBe('error')
+      expect(human.summary).toContain('kimi-k3')
+    })
+
+    it('judges every exclusion reason as an error, including a lapsed agreement', async () => {
+      for (const entry of [
+        goEntry({trainsOnData: true}),
+        goEntry({zeroRetention: false}),
+        goEntry({regionGated: true}),
+        goEntry({agreementExpiry: '2026-11-03'}),
+      ]) {
+        install(['glm-5.3', 'kimi-k3'])
+        const human = await run(fetchedSnapshot(goSnapshotOf({'glm-5.3': goEntry(), 'kimi-k3': entry})))
+        expect(human.level).toBe('error')
+      }
+      install(['glm-5.3', 'kimi-k3'])
+      const invalid = await run(fetchedSnapshot(goSnapshotOf({'glm-5.3': goEntry()}, CURRENT_COMMIT, ['kimi-k3'])))
+      expect(invalid.level).toBe('error')
+    })
+
+    it('does not touch the bundled copy: the same fetch call is made once and the bundle is not consulted', async () => {
+      install(['glm-5.3'])
+      let calls = 0
+      const counting = async (): Promise<GoSnapshotFetch> => {
+        calls += 1
+        return {ok: true, snapshot: goSnapshotOf({'glm-5.3': goEntry()})}
+      }
+      // The bundled copy would exclude glm-5.3; a result of OK proves the fetched snapshot decided.
+      const bundledExcludesIt = goSnapshotOf({'glm-5.3': goEntry({trainsOnData: true})}, 'a'.repeat(40))
+
+      const human = await run(counting, {snapshot: bundledExcludesIt})
+
+      expect(calls).toBe(1)
+      expect(human.level).toBe('ok')
+    })
+  })
+
+  describe('the bundled snapshot is a fallback that is never a silent OK', () => {
+    const FAILURES: GoSnapshotFailureReason[] = [
+      'network',
+      'timeout',
+      'http-404',
+      'http-503',
+      'oversize',
+      'not-json',
+      'invalid-snapshot',
+    ]
+
+    it('warns, naming the bundled commit and why, for each failure kind', async () => {
+      for (const reason of FAILURES) {
+        install(['glm-5.3', 'kimi-k3'])
+
+        const human = await run(failedFetch(reason))
+
+        expect(human.level).toBe('warning')
+        expect(human.summary).toBe(
+          'opencode-go route OK (glm-5.3) — current privacy policy not checked: bundled snapshot aaaaaaa used',
+        )
+        expect(human.details).toEqual([`Privacy snapshot: bundled aaaaaaa used (fetch failed: ${reason})`])
+      }
+    })
+
+    it('keeps the route classification as probed: the fallback changes the human line, not the route state', async () => {
+      install(['glm-5.3'])
+
+      const state = await checkGoRouteState(BASE, KEY, {
+        snapshot: GO_SNAPSHOT,
+        settings: GO_SETTINGS,
+        now: NOW,
+        fetchCurrentSnapshot: failedFetch('network'),
+      })
+
+      expect(state).toEqual({state: 'healthy', reason: 'ok'})
+    })
+
+    it('still errors on a restriction the bundled copy records, and says the bundled copy was used', async () => {
+      for (const id of ['trains-on-data']) {
+        install(['glm-5.3', id])
+
+        const human = await run(failedFetch('timeout'))
+
+        expect(human.level).toBe('error')
+        expect(human.summary).toBe(
+          `Exposed model(s) not eligible under the privacy snapshot: ${id} — disable the entry, see ${RUNBOOK} (bundled snapshot aaaaaaa; current policy not checked)`,
+        )
+        expect(human.details).toEqual(['Privacy snapshot: bundled aaaaaaa used (fetch failed: timeout)'])
+        expect(chatModels).toEqual([])
+      }
+      for (const entry of [goEntry({zeroRetention: false}), goEntry({regionGated: true})]) {
+        install(['glm-5.3', 'kimi-k3'])
+        const human = await run(failedFetch('network'), {
+          snapshot: goSnapshotOf({'glm-5.3': goEntry(), 'kimi-k3': entry}, 'a'.repeat(40)),
+        })
+        expect(human.level).toBe('error')
+        expect(human.summary).toContain('kimi-k3')
+      }
+    })
+
+    it('warns, not errors, for an exposed model the bundle does not list, and names it', async () => {
+      install(['glm-5.3', 'brand-new'])
+
+      const human = await run(failedFetch('http-404'))
+
+      expect(human.level).toBe('warning')
+      expect(human.summary).toBe(
+        'opencode-go route OK (glm-5.3) — current privacy policy not checked: bundled snapshot aaaaaaa used; cannot vouch for: brand-new (not-in-snapshot)',
+      )
+    })
+
+    it('warns, not errors, for a bundled entry that failed validation, and for a bundled agreement date that has passed', async () => {
+      install(['glm-5.3', 'kimi-k3', 'expired-model'])
+
+      const human = await run(failedFetch('network'), {
+        snapshot: goSnapshotOf(
+          {'glm-5.3': goEntry(), 'expired-model': goEntry({agreementExpiry: '2026-11-03'})},
+          'a'.repeat(40),
+          ['kimi-k3'],
+        ),
+      })
+
+      expect(human.level).toBe('warning')
+      expect(human.summary).toContain('cannot vouch for: expired-model (agreement-expired), kimi-k3 (invalid-entry)')
+    })
+
+    it('an error from a bundled restriction wins over models it cannot vouch for, and lists those as detail', async () => {
+      install(['glm-5.3', 'trains-on-data', 'brand-new'])
+
+      const human = await run(failedFetch('network'))
+
+      expect(human.level).toBe('error')
+      expect(human.summary).toContain('trains-on-data')
+      expect(human.summary).not.toContain('brand-new')
+      expect(human.details).toEqual([
+        'Privacy snapshot: bundled aaaaaaa used (fetch failed: network)',
+        'Cannot vouch for: brand-new (not-in-snapshot)',
+      ])
+    })
+
+    it('sends the probe request to a model the bundle can vouch for, never to one it cannot', async () => {
+      install(['aaa-unknown', 'glm-5.3'])
+
+      await run(failedFetch('network'), {settings: {enabled: true, defaultProbeModel: 'aaa-unknown'}})
+
+      expect(chatModels).toEqual(['glm-5.3'])
+    })
+
+    it('sends no probe request at all when the bundle can vouch for none of the exposed models', async () => {
+      install(['brand-new', 'newer'])
+
+      const human = await run(failedFetch('network'))
+
+      expect(chatModels).toEqual([])
+      expect(human.level).toBe('warning')
+      expect(human.summary).toBe(
+        'OpenCode Go route not probed — current privacy policy not checked: bundled snapshot aaaaaaa used; cannot vouch for: brand-new (not-in-snapshot), newer (not-in-snapshot)',
+      )
+    })
+
+    it('stays a warning for a credits fallback and carries the snapshot line', async () => {
+      install(['glm-5.3'], () => Response.json({usage: {opencode: {billing_source: 'balance'}}}))
+
+      const human = await run(failedFetch('timeout'))
+
+      expect(human.level).toBe('warning')
+      expect(human.summary).toContain('"balance"')
+      expect(human.details).toEqual(['Privacy snapshot: bundled aaaaaaa used (fetch failed: timeout)'])
+    })
+
+    it('does not downgrade a dead route to a warning', async () => {
+      install(['glm-5.3'], () => new Response('no', {status: 429}))
+
+      const human = await run(failedFetch('network'))
+
+      expect(human.level).toBe('error')
+    })
+  })
+
+  describe('when the current policy is not asked for', () => {
+    it('judges against the injected snapshot, fetches nothing and adds no snapshot line (the monitor path)', async () => {
+      install(['glm-5.3', 'kimi-k3'])
+
+      const human = await run(undefined)
+
+      expect(human.level).toBe('ok')
+      expect(human.summary).toBe('opencode-go route OK (glm-5.3)')
+      expect(human.details).toBeUndefined()
+    })
+  })
+
+  describe('the fetch happens only when the snapshot is needed', () => {
+    it('is not called when the proxy key is rejected, the model list is empty or the route is disabled', async () => {
+      let calls = 0
+      const counting = async (): Promise<GoSnapshotFetch> => {
+        calls += 1
+        return {ok: true, snapshot: goSnapshotOf({})}
+      }
+
+      globalThis.fetch = createFetchImplementation(async () => new Response('no', {status: 401}))
+      await run(counting)
+      install([])
+      await run(counting)
+      await run(counting, {settings: {enabled: false}})
+
+      expect(calls).toBe(0)
+    })
+  })
+})
+
+describe('cliproxyStatusAction — Go privacy policy source', () => {
+  const BASE = 'https://cliproxy.example.com'
+  const goOk = () => Response.json({choices: [], usage: {opencode: {billing_source: 'go'}}})
+  const savedTokens: Record<string, string | undefined> = {}
+
+  interface RawReply {
+    kind: 'snapshot' | 'status' | 'throw' | 'text'
+    value?: unknown
+  }
+
+  interface Seen {
+    url: string
+    headers: Headers
+  }
+
+  function install(exposed: string[], raw: RawReply): Seen[] {
+    const seen: Seen[] = []
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      seen.push({url, headers: new Headers(init?.headers)})
+      if (url === GO_SNAPSHOT_URL) {
+        if (raw.kind === 'throw') throw new TypeError('connection refused')
+        if (raw.kind === 'status') return new Response('down', {status: Number(raw.value)})
+        if (raw.kind === 'text') return new Response(String(raw.value))
+        const snapshot = raw.value as ParsedSnapshot
+        return Response.json({schemaVersion: 1, source: snapshot.source, models: snapshot.models})
+      }
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.endsWith('/v1/models')) return modelList(exposed)
+      if (url.includes('/v1/chat/completions')) return goOk()
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+    return seen
+  }
+
+  async function runStatus(options: {apiKey?: string; settings?: typeof GO_SETTINGS | {enabled: false}} = {}) {
+    const {ctx, captured} = createCapturedCtx()
+    let exited = false
+    try {
+      await cliproxyStatusAction(
+        {url: BASE, ...(options.apiKey === undefined ? {} : {apiKey: options.apiKey})},
+        ctx,
+        makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+        options.settings ?? GO_SETTINGS,
+        GO_SNAPSHOT,
+      )
+    } catch (error) {
+      if (!(error instanceof MockProcessExit)) throw error
+      exited = true
+    }
+    return {output: captured.stdout.join('\n'), stderr: captured.stderr.join(''), exit: captured.exit, exited}
+  }
+
+  const snapshotRequests = (seen: Seen[]) => seen.filter(request => request.url === GO_SNAPSHOT_URL)
+
+  beforeEach(() => {
+    for (const name of ['GITHUB_TOKEN', 'GH_TOKEN']) savedTokens[name] = process.env[name]
+    process.env.GITHUB_TOKEN = 'ghs_must_never_be_sent'
+    process.env.GH_TOKEN = 'gho_must_never_be_sent'
+  })
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    for (const [name, value] of Object.entries(savedTokens)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  })
+
+  it('fetched snapshot, every exposed model eligible: OK, names the current commit, exit 0', async () => {
+    const seen = install(['glm-5.3', 'brand-new'], {
+      kind: 'snapshot',
+      value: goSnapshotOf({'glm-5.3': goEntry(), 'brand-new': goEntry()}),
+    })
+
+    const {output, stderr, exit} = await runStatus({apiKey: 'my-api-key'})
+
+    expect(output).toContain(
+      '[OK] OpenCode Go route\n  opencode-go route OK (glm-5.3)\n  - Privacy snapshot: ccccccc (current, main)',
+    )
+    expect(output).toContain('0 errors')
+    expect(exit).toBeNull()
+    expect(stderr).toBe('')
+    expect(snapshotRequests(seen)).toHaveLength(1)
+  })
+
+  it('fetched snapshot, an exposed model ineligible: the privacy-noncompliant error, exit 1', async () => {
+    install(['glm-5.3', 'kimi-k3'], {
+      kind: 'snapshot',
+      value: goSnapshotOf({'glm-5.3': goEntry(), 'kimi-k3': goEntry({trainsOnData: true})}),
+    })
+
+    const {output, exit, stderr} = await runStatus({apiKey: 'my-api-key'})
+
+    expect(output).toContain('[ERROR] OpenCode Go route')
+    expect(output).toContain(
+      'Exposed model(s) not eligible under the privacy snapshot: kimi-k3 — disable the entry, see docs/runbooks/cliproxy-opencode-go.md',
+    )
+    expect(output).toContain('- Privacy snapshot: ccccccc (current, main)')
+    expect(exit?.code).toBe(1)
+    expect(stderr).toBe('')
+  })
+
+  it('fetch failed, bundled copy finds a violation: still the error, bundled copy named, exit 1', async () => {
+    install(['glm-5.3', 'trains-on-data'], {kind: 'throw'})
+
+    const {output, exit} = await runStatus({apiKey: 'my-api-key'})
+
+    expect(output).toContain('[ERROR] OpenCode Go route')
+    expect(output).toContain('(bundled snapshot aaaaaaa; current policy not checked)')
+    expect(output).toContain('- Privacy snapshot: bundled aaaaaaa used (fetch failed: network)')
+    expect(exit?.code).toBe(1)
+  })
+
+  it('fetch failed, nothing the bundle can be sure about: a warning, exit 0, current policy not checked', async () => {
+    install(['glm-5.3', 'brand-new'], {kind: 'status', value: 503})
+
+    const {output, exit, stderr} = await runStatus({apiKey: 'my-api-key'})
+
+    expect(output).toContain(
+      '[WARN] OpenCode Go route\n  opencode-go route OK (glm-5.3) — current privacy policy not checked: bundled snapshot aaaaaaa used; cannot vouch for: brand-new (not-in-snapshot)\n  - Privacy snapshot: bundled aaaaaaa used (fetch failed: http-503)',
+    )
+    expect(output).toContain('0 errors')
+    expect(output).not.toContain('[ERROR] OpenCode Go route')
+    expect(exit).toBeNull()
+    expect(stderr).toBe('')
+  })
+
+  it('a response that is not a valid snapshot is a fetch failure, not a policy', async () => {
+    install(['glm-5.3', 'kimi-k3'], {kind: 'text', value: '{"schemaVersion":1,"source":{},"models":{}}'})
+
+    const {output, exit} = await runStatus({apiKey: 'my-api-key'})
+
+    expect(output).toContain('[WARN] OpenCode Go route')
+    expect(output).toContain('(fetch failed: invalid-snapshot)')
+    expect(exit).toBeNull()
+  })
+
+  it('reads the fixed URL with no Authorization header or any other credential', async () => {
+    const seen = install(['glm-5.3'], {kind: 'snapshot', value: goSnapshotOf({'glm-5.3': goEntry()})})
+
+    await runStatus({apiKey: 'my-api-key'})
+
+    const [request] = snapshotRequests(seen)
+    expect(request?.url).toBe(GO_SNAPSHOT_URL)
+    expect(request?.headers.has('authorization')).toBe(false)
+    expect([...(request?.headers.keys() ?? [])]).toEqual([])
+  })
+
+  it('makes no snapshot request without a provider key or when the tracked settings turn Go off', async () => {
+    const noKey = install(['glm-5.3'], {kind: 'snapshot', value: goSnapshotOf({'glm-5.3': goEntry()})})
+    await runStatus()
+    expect(snapshotRequests(noKey)).toHaveLength(0)
+
+    const disabled = install(['glm-5.3'], {kind: 'snapshot', value: goSnapshotOf({'glm-5.3': goEntry()})})
+    await runStatus({apiKey: 'my-api-key', settings: {enabled: false}})
+    expect(snapshotRequests(disabled)).toHaveLength(0)
   })
 })

@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.28.2
+
+### Patch Changes
+
+- `cliproxy status` now checks the OpenCode Go models against the current privacy snapshot on `main`, not the copy bundled when the CLI was released. If it cannot read that snapshot, it falls back to the bundled copy and warns that the current policy was not checked. ([#1997](https://github.com/marcusrbrown/infra/pull/1997))
+
 ## 0.28.1
 
 ### Patch Changes

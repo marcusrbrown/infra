@@ -1,5 +1,5 @@
 import type {RunResult} from '../server/provision'
-import type {DeployDeps, DeployResult, GateInputs} from './deploy'
+import type {DeployDeps, DeployResult, GateInputs, IngestState} from './deploy'
 
 import {Buffer} from 'node:buffer'
 import {chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
@@ -9,6 +9,7 @@ import {basename, join} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 import {
   AppliedButUnverifiedError,
+  beginDeployScript,
   bootstrapProbeScript,
   buildEnvFile,
   buildSecretFiles,
@@ -21,7 +22,7 @@ import {
   evaluateGates,
   failedSafetyGates,
   GATED_SERVICES,
-  hostStateScript,
+  generateVoidTokenLine,
   hygieneScript,
   langfuseBasicValue,
   mayOpen,
@@ -62,6 +63,7 @@ import {
   TRACES_INGEST_LOCK,
   TRACES_LOCK_BUSY_SENTINEL,
   TRACES_PENDING_RESTARTS,
+  TRACES_VOID_TOKEN_PREFIX,
 } from './host'
 
 const ok = (stdout: string): RunResult => ({exitCode: 0, stdout, stderr: ''})
@@ -404,11 +406,10 @@ describe('what lands on the host', () => {
 
 describe('remote scripts', () => {
   const scripts: Record<string, string> = {
-    hostState: hostStateScript(),
+    begin: beginDeployScript(),
     drift: driftScript(),
     ingestState: readIngestStateScript(),
     removeMarker: removeOwnFileScript('.deploy-in-progress'),
-    writeMarker: writeFileScript({path: '.deploy-in-progress', owner: 'root:root', mode: '0644', kind: 'plain'}),
     prepareDirs: prepareDirsScript(),
     tokenDirs: tokenDirsScript(),
     comparePlain: compareFileScript('config/otelcol.yaml', 'plain'),
@@ -492,7 +493,13 @@ describe('remote scripts', () => {
 
   it('compares and writes .env without its ingest-state line, and appends the state on the host', () => {
     expect(scripts.compareEnv).toContain("grep -v '^TRACES_INGEST_STATE='")
-    expect(scripts.writeEnv).toContain(String.raw`printf 'TRACES_INGEST_STATE=%s\n' held >> "$t"`)
+    const writeEnv = scripts.writeEnv ?? ''
+    expect(writeEnv).toContain('planned=held')
+    expect(writeEnv).toContain(String.raw`printf 'TRACES_INGEST_STATE=%s\n' "$state" >> "$t"`)
+    // The state on the host is re-read under the lock, in the script that replaces the file.
+    expect(writeEnv).toContain('flock -w 30')
+    expect(writeEnv.indexOf('flock -w 30')).toBeLessThan(writeEnv.indexOf('s/^TRACES_INGEST_STATE=//p'))
+    expect(writeEnv.indexOf('s/^TRACES_INGEST_STATE=//p')).toBeLessThan(writeEnv.indexOf('mv -f'))
   })
 
   it('compares and prints nothing but a sentinel for a secret file', () => {
@@ -531,23 +538,29 @@ describe('remote scripts', () => {
     expect(script).toContain("stat -c '%u:%g'")
   })
 
-  it('creates token files under noclobber and never writes, truncates or removes an existing one', () => {
+  it('creates a missing token file by an atomic no-clobber link and never writes, truncates or removes an existing one', () => {
     for (const group of SENDER_GROUPS) {
       const script = scripts[`token-${group}`] ?? ''
-      expect(script).toContain('set -C')
-      expect(script).not.toMatch(/\brm\b/)
+      expect(script).toContain('ln "$t" "$f"')
+      expect(script).not.toContain('set -C')
       expect(script).not.toMatch(/\bmv\b/)
       expect(script).not.toMatch(/\btruncate\b/)
       expect(script).not.toMatch(/\btee\b/)
       expect(script).toContain('chown root:65532')
       expect(script).toContain('chmod 0640')
-      // The only redirection that writes is the guarded, noclobber one.
-      const writes = script.split('\n').filter(line => /(?:^|[^>])>\s*"?\$f/.test(line) || />>/.test(line))
-      expect(writes).toEqual(['if (set -C; : > "$f"); then'])
+      // The only thing removed is the temporary file; the only write is into it, from stdin.
+      expect(script.split('\n').filter(line => /\brm\b/.test(line))).toEqual([`trap 'rm -f "$t"' EXIT`])
+      expect(script.split('\n').filter(line => />\s*"\$t"/.test(line))).toEqual([
+        String.raw`printf '%s\n' "$line" > "$t"`,
+      ])
+      // Nothing else is redirected anywhere but to stderr.
+      expect(script.split('\n').filter(line => />/.test(line) && !/>\s*"\$t"|>&2/.test(line))).toEqual([])
+      expect(script).toContain('line=$(cat)')
+      expect(script).not.toContain('trc_void_')
     }
   })
 
-  it('leaves token files alone when it runs for real: byte-identical, and an empty file is created only when absent', () => {
+  it('creates a missing token file as deny-all, and leaves an existing file alone, when it runs for real', () => {
     const root = mkdtempSync(join(tmpdir(), 'traces-token-test-'))
     try {
       const shim = join(root, 'shim')
@@ -563,32 +576,39 @@ describe('remote scripts', () => {
       chmodSync(existing, 0o600)
       const empty = join(root, 'tokens', 'workstation', 'token')
       writeFileSync(empty, '')
+      const voidLine = generateVoidTokenLine()
 
-      const runScript = (group: (typeof SENDER_GROUPS)[number]): {out: string; code: number} => {
+      const runScript = (group: (typeof SENDER_GROUPS)[number], stdin: string): {out: string; code: number} => {
         const result = Bun.spawnSync(['bash', '-o', 'pipefail', '-c', tokenFileScript(group, root)], {
           env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
+          stdin: new TextEncoder().encode(stdin),
         })
         return {out: result.stdout.toString().trim(), code: result.exitCode}
       }
 
       const before = statSync(existing)
-      expect(runScript('fro-bot')).toEqual({out: 'TRACES_TOKEN_PRESENT', code: 0})
+      expect(runScript('fro-bot', `${voidLine}\n`)).toEqual({out: 'TRACES_TOKEN_PRESENT', code: 0})
       expect(readFileSync(existing).equals(bytes)).toBe(true)
       const afterStat = statSync(existing)
       expect([afterStat.mtimeMs, afterStat.size, afterStat.mode]).toEqual([before.mtimeMs, before.size, before.mode])
 
-      expect(runScript('workstation')).toEqual({out: 'TRACES_TOKEN_PRESENT', code: 0})
+      // An existing empty file is not repaired here either: the gate reports it.
+      expect(runScript('workstation', `${voidLine}\n`)).toEqual({out: 'TRACES_TOKEN_PRESENT', code: 0})
       expect(readFileSync(empty).length).toBe(0)
 
-      expect(runScript('marcusrbrown')).toEqual({out: 'TRACES_TOKEN_CREATED', code: 0})
-      expect(readFileSync(join(root, 'tokens', 'marcusrbrown', 'token')).length).toBe(0)
-      // A second run is a no-op.
-      expect(runScript('marcusrbrown')).toEqual({out: 'TRACES_TOKEN_PRESENT', code: 0})
+      expect(runScript('marcusrbrown', `${voidLine}\n`)).toEqual({out: 'TRACES_TOKEN_CREATED', code: 0})
+      const created = join(root, 'tokens', 'marcusrbrown', 'token')
+      expect(readFileSync(created, 'utf8')).toBe(`${voidLine}\n`)
+      // A second run is a no-op, even with a different line.
+      expect(runScript('marcusrbrown', `${generateVoidTokenLine()}\n`)).toEqual({out: 'TRACES_TOKEN_PRESENT', code: 0})
+      expect(readFileSync(created, 'utf8')).toBe(`${voidLine}\n`)
+      // Nothing is left behind in the token directory but the token file.
+      expect(readdirSync(join(root, 'tokens', 'marcusrbrown'))).toEqual(['token'])
 
       // Something that is not a regular file in its place is an error, never "created".
-      rmSync(join(root, 'tokens', 'marcusrbrown', 'token'))
-      mkdirSync(join(root, 'tokens', 'marcusrbrown', 'token'))
-      expect(runScript('marcusrbrown').code).not.toBe(0)
+      rmSync(created)
+      mkdirSync(created)
+      expect(runScript('marcusrbrown', `${voidLine}\n`).code).not.toBe(0)
     } finally {
       rmSync(root, {recursive: true, force: true})
     }
@@ -775,7 +795,7 @@ describe('gates', () => {
     keyPairSet: true,
     ingestVariableTrue: true,
     retentionDetail: 'retention ok',
-    tokenFiles: {marcusrbrown: true, 'fro-bot': true, workstation: true},
+    tokenFiles: {marcusrbrown: 0, 'fro-bot': 1, workstation: 0},
     verdict: {
       state: 'fresh',
       detail: parseReporterDetail(ok(`${JSON.stringify(detail)}\nTRACES_DETAIL_END\n`)) as never,
@@ -794,10 +814,8 @@ describe('gates', () => {
     const cases: [string, (input: GateInputs) => GateInputs][] = [
       ['langfuse-key', input => ({...input, keyPairSet: false})],
       ['ingest-variable', input => ({...input, ingestVariableTrue: false})],
-      [
-        'token-directories',
-        input => ({...input, tokenFiles: {marcusrbrown: true, 'fro-bot': false, workstation: true}}),
-      ],
+      ['token-directories', input => ({...input, tokenFiles: {marcusrbrown: 0, 'fro-bot': 'absent', workstation: 0}})],
+      ['token-directories', input => ({...input, tokenFiles: {marcusrbrown: 0, 'fro-bot': 'empty', workstation: 0}})],
       ['token-directories', input => ({...input, tokenFiles: undefined})],
       ['reporter-verdict', input => ({...input, verdict: {state: 'unreadable'}})],
       ['reporter-verdict', input => ({...input, verdict: {state: 'timeout', detail: undefined}})],
@@ -939,7 +957,6 @@ describe('first deploy', () => {
       'storage-probe',
       'host-state',
       'compare:docker-compose.yaml',
-      'write:.deploy-in-progress',
       'prepare-dirs',
       'token-file:marcusrbrown',
       'write:docker-compose.yaml',
@@ -1246,8 +1263,8 @@ describe('holding the route', () => {
     const error = await failure(host, baseEnv(newImage))
     expect(error.message).toContain('Could not hold the ingest route')
     expect(error.message).toContain('traces ingest hold')
-    // Only the deploy marker was written: nothing about the stack changed.
-    expect(host.writes().slice(writesBefore)).toEqual(['.deploy-in-progress'])
+    // Nothing about the stack changed (the marker is written by the locked first read, not by a file write).
+    expect(host.writes().slice(writesBefore)).toEqual([])
     expect(host.count('pull')).toBe(1)
     expect(host.count('up-private')).toBe(1)
   })
@@ -1327,8 +1344,8 @@ describe('host contract', () => {
   it('keeps the four paths in host.ts and uses them', () => {
     expect(TRACES_DEPLOY_MARKER).toBe(`${TRACES_APP_DIR}/.deploy-in-progress`)
     expect(TRACES_PENDING_RESTARTS).toBe(`${TRACES_APP_DIR}/.pending-restarts`)
-    expect(hostStateScript()).toContain(TRACES_DEPLOY_MARKER)
-    expect(hostStateScript()).toContain(TRACES_PENDING_RESTARTS)
+    expect(beginDeployScript()).toContain(TRACES_DEPLOY_MARKER)
+    expect(beginDeployScript()).toContain(TRACES_PENDING_RESTARTS)
     expect(removeOwnFileScript('.deploy-in-progress')).toContain(TRACES_DEPLOY_MARKER)
     expect(removeOwnFileScript('.pending-restarts')).toContain(TRACES_PENDING_RESTARTS)
     expect(() => removeOwnFileScript('.env' as never)).toThrow('not a file this deploy owns')
@@ -1369,14 +1386,14 @@ describe('host contract', () => {
 })
 
 describe('deploy marker', () => {
-  it('is written after the storage check and the host state, before the first change, and removed last', async () => {
+  it('is written by the first read of the host, after the storage check and before any change, and removed last', async () => {
     const host = new FakeHost()
     await run(host)
     const steps = nonSshSteps(host)
-    expect(host.indexOf('write:.deploy-in-progress')).toBeGreaterThan(host.indexOf('storage-probe'))
-    expect(host.indexOf('write:.deploy-in-progress')).toBeGreaterThan(host.indexOf('host-state'))
-    expect(host.indexOf('write:.deploy-in-progress')).toBeLessThan(host.indexOf('prepare-dirs'))
-    expect(host.indexOf('write:.deploy-in-progress')).toBeLessThan(host.indexOf('write:docker-compose.yaml'))
+    expect(host.steps).not.toContain('write:.deploy-in-progress')
+    expect(host.indexOf('host-state')).toBeGreaterThan(host.indexOf('storage-probe'))
+    expect(host.indexOf('host-state')).toBeLessThan(host.indexOf('compare:docker-compose.yaml'))
+    expect(host.indexOf('host-state')).toBeLessThan(host.indexOf('prepare-dirs'))
     expect(steps.at(-1)).toBe('remove:.deploy-in-progress')
     expect(host.marker).toBeUndefined()
   })
@@ -1386,8 +1403,8 @@ describe('deploy marker', () => {
     const start = host.calls.length
     await run(host, baseEnv({TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${OTHER_DIGEST}`}))
     const after = host.calls.slice(start).map(call => call.step)
-    expect(after.indexOf('write:.deploy-in-progress')).toBeGreaterThanOrEqual(0)
-    expect(after.indexOf('write:.deploy-in-progress')).toBeLessThan(after.indexOf('raw:set-state:held'))
+    expect(after.indexOf('host-state')).toBeGreaterThanOrEqual(0)
+    expect(after.indexOf('host-state')).toBeLessThan(after.indexOf('raw:set-state:held'))
   })
 
   it('holds one UTC timestamp on one line', async () => {
@@ -1621,6 +1638,145 @@ function holdsBeforeAnyChange(after: string[]): void {
   expect(after.indexOf('drift-check')).toBeLessThan(held)
 }
 
+describe('the route state deploy acts on cannot go stale', () => {
+  it('reads the route and writes the marker in one script, under the ingest lock, in that order', () => {
+    const script = beginDeployScript()
+    const lock = script.indexOf('flock -w 30')
+    const read = script.indexOf('s/^TRACES_INGEST_STATE=//p')
+    const marker = script.indexOf(`mv -f "$t" ${TRACES_DEPLOY_MARKER}`)
+    expect(script).toContain(TRACES_INGEST_LOCK)
+    expect(script).toContain(TRACES_LOCK_BUSY_SENTINEL)
+    expect(lock).toBeGreaterThan(0)
+    expect(lock).toBeLessThan(read)
+    expect(read).toBeLessThan(marker)
+    // The previous marker is reported before it is replaced.
+    expect(script.indexOf("printf 'marker=1")).toBeLessThan(marker)
+    expect(script).not.toContain('/dev/null')
+  })
+
+  it('has no separate, unlocked read or marker write', async () => {
+    const host = new FakeHost()
+    await run(host)
+    expect(host.count('host-state')).toBe(1)
+    expect(host.steps).not.toContain('write:.deploy-in-progress')
+    expect(host.unlockedMarker).toBe(false)
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('refuses an open attempted at any point after the locked script, and the route stays as it was', async () => {
+    const attempts: {step: string; opened: boolean}[] = []
+    const host: FakeHost = new FakeHost({
+      override: step => {
+        // The point the old order left open: after the state was read and before the marker was written.
+        if (step.startsWith('compare:') || step === 'drift-check' || step === 'prepare-dirs') {
+          attempts.push({step, opened: host.manualOpen()})
+        }
+        return undefined
+      },
+    })
+    await run(host, baseEnv(withoutKey))
+    expect(attempts.length).toBeGreaterThan(5)
+    expect(attempts.filter(attempt => attempt.opened)).toEqual([])
+    expect(host.served).toBe('off')
+    // Once the deploy has finished the marker is gone and the same open succeeds.
+    expect(host.manualOpen()).toBe(true)
+  })
+
+  it('refuses an open between the read and the marker on a deploy of the collector configuration alone', async () => {
+    const host = await openStack()
+    host.manualHold()
+    let attempt: boolean | undefined
+    host.options.override = step => {
+      if (step === 'compare:config/otelcol.yaml') attempt = host.manualOpen()
+      return undefined
+    }
+    const t = testDeps(host, {
+      readFile: async relative => `# ${relative}${relative === 'config/otelcol.yaml' ? ' changed' : ''}\n`,
+    })
+    await deploy({env: baseEnv(), deps: t.deps})
+    expect(attempt).toBe(false)
+    // The route the deploy opened is the one its own gates allowed.
+    expect(host.setStates().at(-1)).toBe('open')
+  })
+
+  it('sees an open that completed before the locked script, and holds before it recreates the collector', async () => {
+    const host = new FakeHost()
+    await run(host, baseEnv(withoutKey))
+    expect(host.manualOpen()).toBe(true)
+    const start = host.calls.length
+    const t = testDeps(host, {
+      readFile: async relative => `# ${relative}${relative === 'config/otelcol.yaml' ? ' changed' : ''}\n`,
+    })
+    const result = await deploy({env: baseEnv(), deps: t.deps})
+    const after = host.calls.slice(start).map(call => call.step)
+    expect(result.heldForUpdate).toBe(true)
+    expect(after.indexOf('raw:set-state:held')).toBeGreaterThanOrEqual(0)
+    expect(after.indexOf('raw:set-state:held')).toBeLessThan(after.indexOf('up-stale-public'))
+  })
+
+  it('reports a busy ingest lock, in the first read, as its own failure', async () => {
+    const host = new FakeHost({
+      override: step => (step === 'host-state' ? {exitCode: 1, stdout: 'LOCK_BUSY\n', stderr: ''} : undefined),
+    })
+    const error = await failure(host)
+    expect(error.message).toContain('LOCK_BUSY')
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('keeps an on-host hold or off when it rewrites .env, whatever it planned', () => {
+    const cases: {onHost: string | undefined; planned: IngestState; written: string}[] = [
+      {onHost: 'held', planned: 'open', written: 'held'},
+      {onHost: 'off', planned: 'open', written: 'off'},
+      {onHost: 'held', planned: 'held', written: 'held'},
+      {onHost: 'off', planned: 'held', written: 'off'},
+      {onHost: 'open', planned: 'held', written: 'held'},
+      {onHost: 'open', planned: 'off', written: 'off'},
+      {onHost: 'open', planned: 'open', written: 'open'},
+      {onHost: undefined, planned: 'off', written: 'off'},
+      {onHost: undefined, planned: 'held', written: 'held'},
+    ]
+    for (const {onHost, planned, written} of cases) {
+      const {root, shim, cleanup} = scratchHost()
+      try {
+        if (onHost !== undefined) writeFileSync(join(root, '.env'), `OLD=1\nTRACES_INGEST_STATE=${onHost}\n`)
+        const script = writeFileScript({path: '.env', owner: 'root:root', mode: '0600', kind: 'env'}, planned)
+        const result = runLocally(script, root, shim, 'NEW=2\n')
+        expect({onHost, planned, code: result.code}).toEqual({onHost, planned, code: 0})
+        expect(readFileSync(join(root, '.env'), 'utf8')).toBe(`NEW=2\nTRACES_INGEST_STATE=${written}\n`)
+        expect(result.out).toContain(`TRACES_ENV_STATE=${written}`)
+      } finally {
+        cleanup()
+      }
+    }
+  }, 30_000)
+
+  it('a manual hold during the deploy survives the .env rewrite, and the deploy says what the host has', async () => {
+    const host: FakeHost = new FakeHost({
+      override: step => {
+        if (step === 'write:docker-compose.yaml') host.manualHold()
+        return undefined
+      },
+    })
+    const {result, logs} = await run(host, baseEnv(withoutKey))
+    expect(host.envState).toBe('held')
+    expect(host.served).toBe('held')
+    expect(result.ingest).toBe('held')
+    expect(logs.join('\n')).toContain('Ingest is HELD')
+  })
+
+  it('opens again from a manual hold only at its own gated open step', async () => {
+    const host: FakeHost = new FakeHost({
+      override: step => {
+        if (step === 'write:docker-compose.yaml') host.manualHold()
+        return undefined
+      },
+    })
+    const {result} = await run(host)
+    expect(result.ingest).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+  })
+})
+
 describe('drift between the running stack and the files', () => {
   it('a running service whose config hash differs holds the route first, then reopens it', async () => {
     const {host, result, after} = await holdsFor(current =>
@@ -1738,9 +1894,10 @@ describe('drift between the running stack and the files', () => {
 })
 
 /** Runs a script with the app directory swapped for a scratch one and `docker` replaced by a shim. */
-function runLocally(script: string, root: string, shim?: string): {out: string; code: number} {
+function runLocally(script: string, root: string, shim?: string, stdin?: string): {out: string; code: number} {
   const result = Bun.spawnSync(['bash', '-o', 'pipefail', '-c', script.replaceAll(TRACES_APP_DIR, root)], {
     env: {PATH: `${shim ?? ''}:${process.env.PATH ?? ''}`},
+    stdin: new TextEncoder().encode(stdin ?? ''),
   })
   return {out: result.stdout.toString(), code: result.exitCode}
 }
@@ -1749,6 +1906,11 @@ function scratchHost(): {root: string; shim: string; cleanup: () => void} {
   const root = mkdtempSync(join(tmpdir(), 'traces-script-test-'))
   const shim = join(root, 'shim')
   mkdirSync(shim)
+  // `chown` to another user needs root and there is no `flock` on every machine: both are no-ops here.
+  for (const name of ['chown', 'flock']) {
+    writeFileSync(join(shim, name), '#!/bin/sh\nexit 0\n')
+    chmodSync(join(shim, name), 0o755)
+  }
   writeFileSync(
     join(shim, 'docker'),
     `#!/bin/bash
@@ -1810,17 +1972,25 @@ describe('scripts run for real against a scratch app directory', () => {
     }
   })
 
-  it('the host-state probe reports the marker and the pending restarts from the contract paths', () => {
-    const {root, cleanup} = scratchHost()
+  it('the first read reports the previous marker and the pending restarts, then writes a new marker', () => {
+    const {root, shim, cleanup} = scratchHost()
     try {
       writeFileSync(join(root, '.env'), 'TRACES_INGEST_STATE=open\n')
-      const clean = parseHostState(runLocally(hostStateScript(), root).out)
-      expect(clean).toMatchObject({hasEnv: true, marker: false, ingest: 'open', pendingRestarts: []})
+      const clean = runLocally(beginDeployScript(), root, shim)
+      expect(parseHostState(clean.out)).toMatchObject({
+        hasEnv: true,
+        marker: false,
+        ingest: 'open',
+        pendingRestarts: [],
+      })
+      // The marker is there now: one UTC timestamp on one line.
+      expect(readFileSync(join(root, '.deploy-in-progress'), 'utf8')).toMatch(MARKER_FORMAT)
 
       writeFileSync(join(root, '.deploy-in-progress'), '2023-11-14T22:13:20.000Z\n')
       writeFileSync(join(root, '.pending-restarts'), 'collector\ncompose\n')
-      const dirty = parseHostState(runLocally(hostStateScript(), root).out)
-      expect(dirty).toMatchObject({marker: true, pendingRestarts: ['collector', 'compose']})
+      const dirty = runLocally(beginDeployScript(), root, shim)
+      expect(parseHostState(dirty.out)).toMatchObject({marker: true, pendingRestarts: ['collector', 'compose']})
+      expect(readFileSync(join(root, '.deploy-in-progress'), 'utf8')).not.toBe('2023-11-14T22:13:20.000Z\n')
     } finally {
       cleanup()
     }
@@ -1908,16 +2078,63 @@ describe('the collector image and the host', () => {
   })
 })
 
+const VOID_LINE_FORMAT = /^trc_void_[\w-]{43} void \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\n$/
+
 describe('tokens', () => {
-  it('creates empty token files only where they are absent and never writes inside tokens/', async () => {
+  it('creates a missing token file as deny-all: exactly one void line and no real token', async () => {
     const host = new FakeHost()
     host.tokens.set('fro-bot', 'existing-placeholder-token\n')
-    const {logs} = await run(host)
+    const t = testDeps(host)
+    await deploy({env: baseEnv(), deps: t.deps})
     expect(host.tokens.get('fro-bot')).toBe('existing-placeholder-token\n')
-    expect(host.tokens.get('marcusrbrown')).toBe('')
-    expect(host.tokens.get('workstation')).toBe('')
+    for (const group of ['marcusrbrown', 'workstation']) {
+      const content = host.tokens.get(group) ?? ''
+      expect({group, ok: VOID_LINE_FORMAT.test(content)}).toEqual({group, ok: true})
+      expect(content.split('\n').filter(line => line !== '')).toHaveLength(1)
+    }
+    expect(t.voidLines).toHaveLength(3)
     expect(host.writes().filter(path => path.startsWith('tokens/'))).toEqual([])
-    expect(logs.filter(line => line.includes('created an empty token file'))).toHaveLength(2)
+    expect(t.logs.filter(line => line.includes('created a deny-all token file'))).toHaveLength(2)
+  })
+
+  it('creates each file with a line of its own', async () => {
+    const host = new FakeHost()
+    await run(host)
+    const lines = SENDER_GROUPS.map(group => host.tokens.get(group))
+    expect(new Set(lines).size).toBe(SENDER_GROUPS.length)
+  })
+
+  it('never lets the void line reach argv, a command string or a log line, and sends it on stdin to the token step only', async () => {
+    const host = new FakeHost()
+    const t = testDeps(host)
+    await deploy({env: baseEnv(), deps: t.deps})
+    expect(t.voidLines.length).toBeGreaterThan(0)
+    const argvText = host.calls.map(call => call.argv.join('\u0000')).join('\u0000')
+    const commands = host.calls.map(call => call.command).join('\n')
+    const logText = t.logs.join('\n')
+    for (const line of t.voidLines) {
+      const secret = line.split(' ')[0] ?? line
+      expect({
+        inArgv: argvText.includes(secret),
+        inCommand: commands.includes(secret),
+        inLog: logText.includes(secret),
+      }).toEqual({
+        inArgv: false,
+        inCommand: false,
+        inLog: false,
+      })
+    }
+    for (const call of host.calls) {
+      if (call.step.startsWith('token-file:')) continue
+      expect({step: call.step, void: (call.stdin ?? '').includes(TRACES_VOID_TOKEN_PREFIX)}).toEqual({
+        step: call.step,
+        void: false,
+      })
+    }
+    for (const group of SENDER_GROUPS) {
+      const stdin = host.calls.find(call => call.step === `token-file:${group}`)?.stdin ?? ''
+      expect(stdin).toMatch(VOID_LINE_FORMAT)
+    }
   })
 
   it('leaves every token file byte-identical across repeated deploys', async () => {
@@ -1929,6 +2146,47 @@ describe('tokens', () => {
     await run(host)
     await run(host, baseEnv({TRACES_GRAFANA_SECRET_KEY: 'placeholder-grafana-secret-rotated'}))
     expect(JSON.stringify([...host.tokens.entries()])).toBe(snapshot)
+  })
+
+  it('an existing empty token file fails the gate and keeps ingest closed, saying how to repair it', async () => {
+    const host = new FakeHost()
+    host.tokens.set('fro-bot', '')
+    const error = await failure(host)
+    expect(error.message).toContain('token-directories')
+    expect(error.message).toContain('fro-bot')
+    expect(error.message).toContain('empty')
+    expect(error.message).toContain('traces sender revoke --all')
+    expect(host.setStates()).toEqual([])
+    // It is reported, not repaired: the file is untouched.
+    expect(host.tokens.get('fro-bot')).toBe('')
+  })
+
+  it('treats a file of only whitespace as empty, as the collector does', async () => {
+    const host = new FakeHost()
+    host.tokens.set('workstation', '  \n\t\n')
+    const error = await failure(host)
+    expect(error.message).toContain('workstation')
+    expect(error.message).toContain('empty')
+  })
+
+  it('accepts a deny-all file and counts only real tokens', async () => {
+    const host = new FakeHost()
+    host.tokens.set('marcusrbrown', `${generateVoidTokenLine()}\n`)
+    host.tokens.set('fro-bot', `${generateVoidTokenLine()}\nreal-placeholder-token created 2023-11-14\n\n`)
+    const {result} = await run(host)
+    expect(result.ingest).toBe('open')
+    const gate = result.gates.find(entry => entry.id === 'token-directories')
+    expect(gate?.status).toBe('pass')
+    expect(gate?.detail).toContain('marcusrbrown 0')
+    expect(gate?.detail).toContain('fro-bot 1')
+  })
+
+  it('generates the void line from 32 random bytes in the contract format', () => {
+    const line = generateVoidTokenLine(new Date('2023-11-14T22:13:20.000Z'), size => new Uint8Array(size).fill(255))
+    expect(line).toBe(`trc_void_${'_'.repeat(42)}8 void 2023-11-14T22:13:20.000Z`)
+    expect(`${generateVoidTokenLine()}\n`).toMatch(VOID_LINE_FORMAT)
+    expect(generateVoidTokenLine()).not.toBe(generateVoidTokenLine())
+    expect(generateVoidTokenLine().startsWith(TRACES_VOID_TOKEN_PREFIX)).toBe(true)
   })
 })
 

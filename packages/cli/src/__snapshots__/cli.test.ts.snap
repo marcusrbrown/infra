@@ -224,8 +224,8 @@ Commands:
   traces sender list                          List sender tokens per group: fingerprint and creation date. Never token text.
     --key [key]                               Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
-  traces sender revoke [group] [fingerprint]  Remove one sender token and prove it is now refused. With --all (no group, no fingerprint): empty every group file and prove every old token is refused on its private receiver.
-    --all                                     Empty every group token file. Proves over ssh only, never through the public hostname.
+  traces sender revoke [group] [fingerprint]  Remove one sender token and prove it is now refused. With --all (no group, no fingerprint): make every group file deny-all (one void line, no real token) and prove every old token is refused on its private receiver.
+    --all                                     Make every group token file deny-all. Proves over ssh only, never through the public hostname.
     --key [key]                               Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
   status                                      Show status of all deployments

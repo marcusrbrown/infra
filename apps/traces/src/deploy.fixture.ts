@@ -6,8 +6,8 @@
 import type {Runner, RunResult} from '../server/provision'
 import type {DeployDeps, DeployInputs, IngestState} from './deploy'
 
-import {GATED_SERVICES, REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
-import {SENDER_GROUPS} from './host'
+import {GATED_SERVICES, generateVoidTokenLine, REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
+import {SENDER_GROUPS, TRACES_DEPLOY_MARKER, TRACES_VOID_TOKEN_PREFIX} from './host'
 import {OBJECT_STORE_PREFIXES, RETENTION_TABLES} from './retention'
 
 export const EPOCH = 1_700_000_000
@@ -71,6 +71,8 @@ export class FakeHost {
   pendingRestarts: string[] = []
   /** The deploy marker's content, when it exists. */
   marker: string | undefined
+  /** The marker was written by a script that did not take the ingest lock. */
+  unlockedMarker = false
   /** What each compose service is running: whether it runs, and its `config-hash` label. */
   running = new Map<string, {running: boolean; hash: string}>()
   private replyLost = false
@@ -175,7 +177,7 @@ export class FakeHost {
       }
       case step === 'host-state': {
         const pair = this.envBootstrapPair()
-        return ok(
+        const reply = ok(
           [
             `has_env=${this.env === undefined ? 0 : 1}`,
             `marker=${this.marker === undefined ? 0 : 1}`,
@@ -189,6 +191,12 @@ export class FakeHost {
             '',
           ].join('\n'),
         )
+        // The script writes the marker only if its text says so, and under the lock only if its text says so.
+        if (command.includes('mv -f') && command.includes(TRACES_DEPLOY_MARKER)) {
+          this.marker = `${new Date(this.clock * 1000).toISOString()}\n`
+          if (!command.includes('flock -w 30')) this.unlockedMarker = true
+        }
+        return reply
       }
       case step === 'prepare-dirs': {
         return ok('TRACES_DIRS_READY\n')
@@ -196,15 +204,25 @@ export class FakeHost {
       case step.startsWith('token-file:'): {
         const group = step.slice('token-file:'.length)
         if (this.tokens.get(group) === undefined) {
-          this.tokens.set(group, '')
+          // Created with exactly what arrived on stdin (the void line), or empty if the script sent nothing.
+          this.tokens.set(group, stdin === '' ? '' : `${stdin.trimEnd()}\n`)
           return ok('TRACES_TOKEN_CREATED\n')
         }
         return ok('TRACES_TOKEN_PRESENT\n')
       }
       case step === 'token-dirs': {
-        const lines = SENDER_GROUPS.map(
-          group => `token_file=${group}:${this.tokens.get(group) === undefined ? 'absent' : 'present'}`,
-        )
+        const counting = command.includes('awk')
+        const lines = SENDER_GROUPS.map(group => {
+          const content = this.tokens.get(group)
+          if (content === undefined) return `token_file=${group}:absent`
+          if (!counting) return `token_file=${group}:present`
+          if (content.trim() === '') return `token_file=${group}:empty`
+          const real = content
+            .split('\n')
+            .map(line => line.trim().split(/\s+/)[0] ?? '')
+            .filter(first => first !== '' && !first.startsWith(TRACES_VOID_TOKEN_PREFIX)).length
+          return `token_file=${group}:tokens:${real}`
+        })
         return ok(`${lines.join('\n')}\nTRACES_TOKEN_DIRS_CHECKED\n`)
       }
       case step.startsWith('compare:'): {
@@ -217,7 +235,14 @@ export class FakeHost {
         const path = step.slice('write:'.length)
         if (path === '.env') {
           this.env = stdin
-          this.envState = /TRACES_INGEST_STATE=%s.*? (off|held|open) >>/.exec(command)?.[1] as IngestState
+          const planned = /planned=(off|held|open)/.exec(command)?.[1] as IngestState | undefined
+          if (planned === undefined) {
+            this.envState = /TRACES_INGEST_STATE=%s.*? (off|held|open) >>/.exec(command)?.[1] as IngestState
+          } else if (command.includes('flock -w 30') && (this.envState === 'held' || this.envState === 'off')) {
+            // Re-read under the lock: never write a state more open than the one on the host.
+          } else {
+            this.envState = planned
+          }
         } else if (path === '.deploy-in-progress') {
           this.marker = stdin
         } else if (path === '.pending-restarts') {
@@ -227,7 +252,11 @@ export class FakeHost {
         } else {
           this.files.set(path, stdin)
         }
-        return ok('TRACES_FILE_WRITTEN\n')
+        return ok(
+          path === '.env' && this.envState !== undefined
+            ? `TRACES_ENV_STATE=${this.envState}\nTRACES_FILE_WRITTEN\n`
+            : 'TRACES_FILE_WRITTEN\n',
+        )
       }
       case step === 'remove:.deploy-in-progress': {
         this.marker = undefined
@@ -295,6 +324,23 @@ export class FakeHost {
         return fail(`unexpected step ${step}`)
       }
     }
+  }
+
+  /**
+   * `traces ingest open` by another operator. Like the CLI's script, it is refused while a deploy marker or a
+   * pending-restart record exists. Returns whether the route was opened.
+   */
+  manualOpen(): boolean {
+    if (this.marker !== undefined || this.pendingRestarts.length > 0) return false
+    this.envState = 'open'
+    this.served = 'open'
+    return true
+  }
+
+  /** `traces ingest hold` by another operator: always allowed. */
+  manualHold(): void {
+    this.envState = 'held'
+    this.served = 'held'
   }
 
   /** What `docker compose config --hash <service>` would answer for the files on the host now. */
@@ -483,12 +529,15 @@ export interface TestDeps {
   logs: string[]
   identityPaths: string[]
   cleaned: string[]
+  /** Every void token line the deploy generated, for "never in argv or logs" checks. */
+  voidLines: string[]
 }
 
 export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): TestDeps {
   const logs: string[] = []
   const identityPaths: string[] = []
   const cleaned: string[] = []
+  const voidLines: string[] = []
   const deps: Partial<DeployDeps> = {
     run: host.run,
     resolve: async () => ['198.51.100.7'],
@@ -496,6 +545,11 @@ export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): T
     materializeIdentity: () => {
       identityPaths.push('/scratch/id')
       return {path: '/scratch/id', cleanup: () => cleaned.push('identity')}
+    },
+    voidTokenLine: () => {
+      const line = generateVoidTokenLine()
+      voidLines.push(line)
+      return line
     },
     makeTempDir: () => ({path: '/scratch/deploy', cleanup: () => cleaned.push('temp')}),
     knownHostsFile: undefined,
@@ -511,7 +565,7 @@ export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): T
     },
     ...overrides,
   }
-  return {deps, logs, identityPaths, cleaned}
+  return {deps, logs, identityPaths, cleaned, voidLines}
 }
 
 export function requiredTableNames(): string[] {

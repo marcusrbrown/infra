@@ -23,7 +23,9 @@ import {
   DEFAULT_SECRET_NAME,
   fingerprintOf,
   formatTokenLine,
+  formatVoidLine,
   generateToken,
+  generateVoidToken,
   lockBusySentinel,
   SENDER_REMOTE,
   senderSentinel,
@@ -32,6 +34,7 @@ import {
   tracesSenderAddAction,
   tracesSenderListAction,
   tracesSenderRevokeAction,
+  VOID_TOKEN_PREFIX,
   type AddOptions,
   type RevokeOptions,
   type SenderDeps,
@@ -71,6 +74,14 @@ const OLD_C = `trc_${'C'.repeat(43)}`
 
 const sha12 = (value: string): string => createHash('sha256').update(value).digest('hex').slice(0, 12)
 const oldLine = (token: string, date = '2026-10-01T00:00:00.000Z'): string => `${token} ${sha12(token)} ${date}\n`
+
+/** A void line like the ones a deny-all file holds. `seed` makes each one different. */
+const voidLine = (seed: number, date = '2026-10-01T00:00:00.000Z'): string =>
+  formatVoidLine(generateVoidToken(randomFilledWith(seed)), date)
+const VOID_LINE_PATTERN = /^trc_void_[\w-]{43} void \S+\n$/
+
+/** What `revoke` sends the host on stdin: the fingerprint, then the void line to use if no real token is left. */
+const removeInput = (fingerprint: string, vline = voidLine(200, CREATED)): string => `${fingerprint}\n${vline}`
 
 let sandbox = ''
 let shimDir = ''
@@ -209,10 +220,24 @@ function createWorld(options: WorldOptions = {}): World {
   const outside = options.outside ?? configured
 
   const path = (group: Group): string => join(dir, 'tokens', group, 'token')
+  const file = (group: Group): string => readFileSync(path(group), 'utf8')
+
+  // The collector's credential watcher, as measured against the pinned build: it takes each new file it reads, but
+  // an EMPTY file is rejected and the previous credentials stay in force. So what it accepts is the last non-empty
+  // content the file had, not what the file says now. A test that empties a file to revoke sees the token still accepted.
+  const watched = new Map<Group, string>()
+  const reload = (group: Group): void => {
+    const content = file(group)
+    if (content.trim() !== '') watched.set(group, content)
+  }
+
   const seed = (group: Group, content: string): void => {
     writeFileSync(path(group), content)
     chmodSync(path(group), 0o640)
+    reload(group)
   }
+  // A file nothing has written yet is empty. Deploy creates real files as deny-all; the empty default keeps the
+  // scenarios that start from "no token yet" short, and `add`, `list` and `revoke` all cope with it.
   for (const group of TRACES_GROUPS) seed(group, options.files?.[group] ?? '')
 
   const stubborn = new Set<string>()
@@ -223,11 +248,10 @@ function createWorld(options: WorldOptions = {}): World {
   const gh = {exitCode: 0, stderr: '', failOnCall: undefined as number | undefined}
   let ghCount = 0
 
-  const file = (group: Group): string => readFileSync(path(group), 'utf8')
-
   const accepts = (group: Group, token: string): boolean => {
     if (stubborn.has(token)) return true
-    return file(group)
+    reload(group)
+    return (watched.get(group) ?? '')
       .split('\n')
       .some(line => line.trim().split(/\s+/)[0] === token && token.length > 0)
   }
@@ -236,6 +260,7 @@ function createWorld(options: WorldOptions = {}): World {
 
   const runShell = (command: string, stdin: string | undefined): Reply => {
     const result = execOnHost(dir, command, stdin)
+    for (const group of TRACES_GROUPS) reload(group)
     return {stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode}
   }
 
@@ -257,7 +282,7 @@ function createWorld(options: WorldOptions = {}): World {
       if (call.command === SENDER_REMOTE.list(group) && failing.has(`list:${group}`)) {
         return {exitCode: 255, stderr: 'ssh: connection reset'}
       }
-      for (const name of ['list', 'lines', 'append', 'remove', 'empty'] as const) {
+      for (const name of ['list', 'lines', 'append', 'remove', 'deny'] as const) {
         if (call.command === SENDER_REMOTE[name](group)) {
           if (failing.has(name)) return {exitCode: 1, stderr: `${name} failed on the host`}
           if (busy.has(name)) return {exitCode: 1, stdout: `${lockBusySentinel(group)}\n`}
@@ -335,6 +360,10 @@ function makeDeps(world: World, extra: Partial<SenderDeps> = {}): SenderDeps & {
 const NEXT_TOKEN = generateToken(randomFilledWith(7)).token
 const NEXT_FINGERPRINT = fingerprintOf(NEXT_TOKEN)
 
+/** The void token a `revoke` generates with the default fixed random source, and the line it sends. */
+const DEFAULT_VOID_TOKEN = generateVoidToken(randomFilledWith(7))
+const DEFAULT_VOID_LINE = formatVoidLine(DEFAULT_VOID_TOKEN, CREATED)
+
 interface Outcome {
   stdout: string
   stderr: string
@@ -367,7 +396,8 @@ async function run(
   const stdout = captured.stdout.join('\n')
   const stderr = captured.stderr.join('\n')
 
-  for (const secret of options.secrets) {
+  // The void token a revoke generates by default is as secret as a real one: it may travel on stdin and nowhere else.
+  for (const secret of [...options.secrets, DEFAULT_VOID_TOKEN]) {
     for (const call of world.calls) {
       expect(call.argv.join('\u0000')).not.toContain(secret)
       expect(JSON.stringify(call.options.env)).not.toContain(secret)
@@ -420,13 +450,48 @@ describe('token and fingerprint', () => {
     expect(line).toBe(`trc_x abcdef012345 ${CREATED}\n`)
     expect(line.split(' ')[0]).toBe('trc_x')
   })
+
+  it('a void token is the void prefix plus 32 random bytes in URL-safe base64, from the same CSPRNG source', () => {
+    const asked: number[] = []
+    const bytes = new Uint8Array(32).map((_, index) => index * 7 + 3)
+    const token = generateVoidToken(length => {
+      asked.push(length)
+      return bytes
+    })
+    expect(asked).toEqual([32])
+    expect(token).toBe(`${VOID_TOKEN_PREFIX}${Buffer.from(bytes).toString('base64url')}`)
+    expect(token).toMatch(/^trc_void_[\w-]{43}$/)
+    expect(() => generateVoidToken(() => new Uint8Array(8))).toThrow('32 bytes')
+    expect(generateVoidToken()).not.toBe(generateVoidToken())
+  })
+
+  it('a void line is the void token, the word void and the date: nothing a person would mistake for a credential', () => {
+    const line = formatVoidLine('trc_void_x', CREATED)
+    expect(line).toBe(`trc_void_x void ${CREATED}\n`)
+    expect(line.split(' ')[0]).toBe('trc_void_x')
+  })
+
+  it('a real token never starts with the void prefix, so it is never taken for a void line', () => {
+    // 'void_' in URL-safe base64 is the first 3.75 bytes: such a draw would hide a live token from `list` and `revoke`.
+    const colliding = Buffer.from(`void_${'A'.repeat(38)}`, 'base64url')
+    expect(colliding).toHaveLength(32)
+    let draws = 0
+    const {token} = generateToken(length => {
+      draws += 1
+      return draws === 1 ? new Uint8Array(colliding) : new Uint8Array(length).fill(9)
+    })
+    expect(draws).toBe(2)
+    expect(token.startsWith(VOID_TOKEN_PREFIX)).toBe(false)
+    // A source stuck on such a draw is an error, not a loop.
+    expect(() => generateToken(() => new Uint8Array(colliding))).toThrow('void prefix')
+  })
 })
 
 // ─── The remote scripts ───────────────────────────────────────────────────────
 
 describe('remote command hygiene', () => {
   const commands = TRACES_GROUPS.flatMap(group =>
-    (['list', 'lines', 'append', 'remove', 'empty', 'probe'] as const).map(
+    (['list', 'lines', 'append', 'remove', 'deny', 'probe'] as const).map(
       name => [`${name} ${group}`, SENDER_REMOTE[name](group)] as const,
     ),
   )
@@ -447,13 +512,15 @@ describe('remote command hygiene', () => {
   )
 
   it.each(commands)('%s: never carries a token marker or any generated value', (_name, command) => {
-    expect(command).not.toContain(TOKEN_PREFIX)
+    // The void prefix is the one token marker a host script may name: it has to tell void lines from real ones.
+    expect(command.replaceAll(VOID_TOKEN_PREFIX, '')).not.toContain(TOKEN_PREFIX)
     expect(command).not.toContain(NEXT_FINGERPRINT)
+    expect(command).not.toMatch(/trc_void_[\w-]{20,}/)
   })
 
   it('every command is built from the group alone and names only that group directory under the app directory', () => {
     for (const group of TRACES_GROUPS) {
-      for (const name of ['list', 'lines', 'append', 'remove', 'empty'] as const) {
+      for (const name of ['list', 'lines', 'append', 'remove', 'deny'] as const) {
         const command = SENDER_REMOTE[name](group)
         expect(command).toContain(`d=${TRACES_APP_DIR}/tokens/${group}`)
         for (const other of TRACES_GROUPS.filter(candidate => candidate !== group)) {
@@ -465,7 +532,7 @@ describe('remote command hygiene', () => {
   })
 
   it('refuses a group that is not one of the three, in every builder', () => {
-    for (const name of ['list', 'lines', 'append', 'remove', 'empty', 'probe'] as const) {
+    for (const name of ['list', 'lines', 'append', 'remove', 'deny', 'probe'] as const) {
       expect(() => SENDER_REMOTE[name]('../../etc')).toThrow('not a sender group')
       expect(() => SENDER_REMOTE[name]('a; id')).toThrow('not a sender group')
     }
@@ -473,7 +540,7 @@ describe('remote command hygiene', () => {
 
   it('every command that reads a token file and replaces it holds the token lock across the whole of it', () => {
     for (const group of TRACES_GROUPS) {
-      for (const name of ['append', 'remove', 'empty'] as const) {
+      for (const name of ['append', 'remove', 'deny'] as const) {
         const command = SENDER_REMOTE[name](group)
         const lock = command.indexOf(`l=${TRACES_TOKENS_LOCK}`)
         const take = command.indexOf('flock -w 30 9')
@@ -502,7 +569,7 @@ describe('remote command hygiene', () => {
 
   it('every writing command writes a temporary file in the token directory and renames it over the token file', () => {
     for (const group of TRACES_GROUPS) {
-      for (const name of ['append', 'remove', 'empty'] as const) {
+      for (const name of ['append', 'remove', 'deny'] as const) {
         const command = SENDER_REMOTE[name](group)
         expect(command).toContain('t=$(mktemp "$d/.token.XXXXXX")')
         expect(command).toContain('mv -f "$t" "$f"')
@@ -526,6 +593,14 @@ describe('constants match the app', async () => {
     for (const group of TRACES_GROUPS) {
       expect(SENDER_REMOTE.list(group)).toContain(`d=${TRACES_APP_DIR}/tokens/${group}`)
     }
+  })
+
+  it('the void token prefix is the one apps/traces names, and a real token prefix is not a void one', () => {
+    expect(VOID_TOKEN_PREFIX).toBe('trc_void_')
+    expect(hostSource).toContain(`TRACES_VOID_TOKEN_PREFIX = '${VOID_TOKEN_PREFIX}'`)
+    // The void prefix extends the real one, which is why the real generator must avoid it.
+    expect(VOID_TOKEN_PREFIX.startsWith(TOKEN_PREFIX)).toBe(true)
+    for (const group of TRACES_GROUPS) expect(SENDER_REMOTE.list(group)).toContain(VOID_TOKEN_PREFIX)
   })
 
   it('the token lock is the file apps/traces names, under the token directory', () => {
@@ -594,6 +669,15 @@ describe('host scripts, run under a real sh', () => {
       expect(world.file('workstation')).toBe(`${oldLine(OLD_A)}trc_new fp date\n`)
     })
 
+    it('adds to a deny-all file and keeps its void line, which is harmless', () => {
+      const deny = voidLine(5)
+      const world = createWorld({files: {'fro-bot': deny}})
+      const newLine = formatTokenLine(NEXT_TOKEN, NEXT_FINGERPRINT, CREATED)
+      const result = run1(world, SENDER_REMOTE.append('fro-bot'), newLine)
+      expect(result.exitCode).toBe(0)
+      expect(world.file('fro-bot')).toBe(deny + newLine)
+    })
+
     it('creates the file when only the directory exists, readable by its group but not by others', () => {
       const world = createWorld()
       rmSync(world.path('marcusrbrown'))
@@ -628,10 +712,11 @@ describe('host scripts, run under a real sh', () => {
       const world = createWorld({files: {marcusrbrown: lines}})
       const before = statSync(world.path('marcusrbrown'))
 
-      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), `${sha12(OLD_B)}\n`)
+      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), removeInput(sha12(OLD_B)))
 
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain('TRACES_TOKEN_REMOVED=1')
+      expect(result.stdout).toContain('TRACES_TOKENS_REAL=2')
       expect(result.stdout).toContain(senderSentinel('remove', 'marcusrbrown'))
       expect(world.file('marcusrbrown')).toBe(oldLine(OLD_A) + oldLine(OLD_C))
       expect(statSync(world.path('marcusrbrown')).ino).not.toBe(before.ino)
@@ -641,51 +726,132 @@ describe('host scripts, run under a real sh', () => {
 
     it('matches on the token, not on the fingerprint column a hand-edit may have got wrong', () => {
       const world = createWorld({files: {marcusrbrown: `${OLD_A} 000000000000 2026-10-01\n${oldLine(OLD_B)}`}})
-      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), `${sha12(OLD_A)}\n`)
+      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), removeInput(sha12(OLD_A)))
       expect(result.stdout).toContain('TRACES_TOKEN_REMOVED=1')
       expect(world.file('marcusrbrown')).toBe(oldLine(OLD_B))
     })
 
     it('keeps a line that has only a token, and drops blank lines', () => {
       const world = createWorld({files: {marcusrbrown: `\n${OLD_A}\n\n${oldLine(OLD_B)}`}})
-      run1(world, SENDER_REMOTE.remove('marcusrbrown'), `${sha12(OLD_B)}\n`)
+      run1(world, SENDER_REMOTE.remove('marcusrbrown'), removeInput(sha12(OLD_B)))
       expect(world.file('marcusrbrown')).toBe(`${OLD_A}\n`)
     })
 
     it('removes both lines when the same token appears twice, and says so', () => {
       const world = createWorld({files: {marcusrbrown: oldLine(OLD_A) + oldLine(OLD_B) + oldLine(OLD_A)}})
-      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), `${sha12(OLD_A)}\n`)
+      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), removeInput(sha12(OLD_A)))
       expect(result.stdout).toContain('TRACES_TOKEN_REMOVED=2')
       expect(world.file('marcusrbrown')).toBe(oldLine(OLD_B))
     })
 
     it('removes nothing, and says 0, for a fingerprint that matches no line', () => {
       const world = createWorld({files: {marcusrbrown: oldLine(OLD_A) + oldLine(OLD_B)}})
-      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), 'ffffffffffff\n')
+      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), removeInput('ffffffffffff'))
       expect(result.stdout).toContain('TRACES_TOKEN_REMOVED=0')
       expect(world.file('marcusrbrown')).toBe(oldLine(OLD_A) + oldLine(OLD_B))
     })
 
     it('refuses a fingerprint that is not 12 characters, so a prefix never matches', () => {
       const world = createWorld({files: {marcusrbrown: oldLine(OLD_A) + oldLine(OLD_B)}})
-      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), `${sha12(OLD_A).slice(0, 4)}\n`)
+      const result = run1(world, SENDER_REMOTE.remove('marcusrbrown'), removeInput(sha12(OLD_A).slice(0, 4)))
       expect(result.exitCode).not.toBe(0)
       expect(result.stdout).not.toContain('TRACES_TOKEN_REMOVED')
       expect(world.file('marcusrbrown')).toBe(oldLine(OLD_A) + oldLine(OLD_B))
     })
+
+    describe('the last real token', () => {
+      it('leaves exactly one void line, the one on stdin, and nothing else: never an empty file', () => {
+        const world = createWorld({files: {workstation: oldLine(OLD_A)}})
+        const before = statSync(world.path('workstation'))
+        const vline = voidLine(31, CREATED)
+
+        const result = run1(world, SENDER_REMOTE.remove('workstation'), removeInput(sha12(OLD_A), vline))
+
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('TRACES_TOKEN_REMOVED=1')
+        expect(result.stdout).toContain('TRACES_TOKENS_REAL=0')
+        expect(result.stdout).toContain(senderSentinel('remove', 'workstation'))
+        expect(world.file('workstation')).toBe(vline)
+        expect(world.file('workstation')).toMatch(VOID_LINE_PATTERN)
+        expect(world.file('workstation')).not.toContain(OLD_A)
+        // Written and renamed like every other change, so the collector sees a whole file and re-reads it.
+        expect(statSync(world.path('workstation')).ino).not.toBe(before.ino)
+        expect(statSync(world.path('workstation')).mode & 0o777).toBe(0o640)
+        expect(tempFiles(world, 'workstation')).toEqual([])
+      })
+
+      it('keeps an older void line while a real token is left, and drops it for the new one only when none is', () => {
+        const oldVoid = voidLine(5)
+        const world = createWorld({files: {workstation: oldVoid + oldLine(OLD_A) + oldLine(OLD_B)}})
+        const vline = voidLine(31, CREATED)
+        run1(world, SENDER_REMOTE.remove('workstation'), removeInput(sha12(OLD_A), vline))
+        // B is still there, so the file keeps its lines and the older void line stays; A goes.
+        expect(world.file('workstation')).toBe(oldVoid + oldLine(OLD_B))
+        const last = run1(world, SENDER_REMOTE.remove('workstation'), removeInput(sha12(OLD_B), vline))
+        expect(last.stdout).toContain('TRACES_TOKENS_REAL=0')
+        expect(world.file('workstation')).toBe(vline)
+      })
+
+      it('does not count a void line as a token to remove, and never lets a fingerprint empty a file through one', () => {
+        const oldVoid = voidLine(5)
+        const oldVoidToken = oldVoid.split(' ')[0] ?? ''
+        const world = createWorld({files: {workstation: oldVoid}})
+        const result = run1(world, SENDER_REMOTE.remove('workstation'), removeInput(sha12(oldVoidToken)))
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('TRACES_TOKEN_REMOVED=0')
+        expect(world.file('workstation')).not.toBe('')
+        expect(world.file('workstation')).toMatch(VOID_LINE_PATTERN)
+      })
+
+      it('fails, changing nothing, when stdin carries no valid void line', () => {
+        for (const bad of ['', 'trc_notvoid_x void d\n', 'plain text\n', 'trc_void_x\n', 'trc_void_short void d\n']) {
+          const world = createWorld({files: {workstation: oldLine(OLD_A)}})
+          const result = run1(world, SENDER_REMOTE.remove('workstation'), `${sha12(OLD_A)}\n${bad}`)
+          expect(result.exitCode).not.toBe(0)
+          expect(result.stdout).not.toContain(senderSentinel('remove', 'workstation'))
+          expect(world.file('workstation')).toBe(oldLine(OLD_A))
+          expect(tempFiles(world, 'workstation')).toEqual([])
+        }
+      })
+    })
   })
 
-  describe('empty', () => {
-    it('leaves a zero-length file, by rename, with the same mode', () => {
-      const world = createWorld({files: {workstation: oldLine(OLD_A) + oldLine(OLD_B)}})
+  describe('deny', () => {
+    it('leaves exactly the void line on stdin, by rename, with the same mode: never an empty file', () => {
+      const world = createWorld({files: {workstation: oldLine(OLD_A) + oldLine(OLD_B) + voidLine(5)}})
       const before = statSync(world.path('workstation'))
-      const result = run1(world, SENDER_REMOTE.empty('workstation'))
+      const vline = voidLine(31, CREATED)
+      const result = run1(world, SENDER_REMOTE.deny('workstation'), vline)
       expect(result.exitCode).toBe(0)
-      expect(result.stdout).toContain(senderSentinel('empty', 'workstation'))
-      expect(world.file('workstation')).toBe('')
+      expect(result.stdout).toContain(senderSentinel('deny', 'workstation'))
+      expect(world.file('workstation')).toBe(vline)
+      expect(world.file('workstation')).toMatch(VOID_LINE_PATTERN)
       expect(statSync(world.path('workstation')).ino).not.toBe(before.ino)
       expect(statSync(world.path('workstation')).mode & 0o777).toBe(0o640)
       expect(tempFiles(world, 'workstation')).toEqual([])
+    })
+
+    it('writes the file when it is empty or missing, so a group that has no real token ends up deny-all too', () => {
+      const vline = voidLine(31, CREATED)
+      const emptyWorld = createWorld()
+      expect(run1(emptyWorld, SENDER_REMOTE.deny('fro-bot'), vline).exitCode).toBe(0)
+      expect(emptyWorld.file('fro-bot')).toBe(vline)
+
+      const missingWorld = createWorld()
+      rmSync(missingWorld.path('fro-bot'))
+      expect(run1(missingWorld, SENDER_REMOTE.deny('fro-bot'), vline).exitCode).toBe(0)
+      expect(missingWorld.file('fro-bot')).toBe(vline)
+      expect(statSync(missingWorld.path('fro-bot')).mode & 0o777).toBe(0o640)
+    })
+
+    it('fails, changing nothing, when stdin carries no valid void line', () => {
+      for (const bad of ['', 'trc_notvoid_x void d\n', 'plain text\n', 'trc_void_short void d\n']) {
+        const world = createWorld({files: {workstation: oldLine(OLD_A)}})
+        const result = run1(world, SENDER_REMOTE.deny('workstation'), bad)
+        expect(result.exitCode).not.toBe(0)
+        expect(result.stdout).not.toContain(senderSentinel('deny', 'workstation'))
+        expect(world.file('workstation')).toBe(oldLine(OLD_A))
+      }
     })
   })
 
@@ -717,7 +883,7 @@ describe('host scripts, run under a real sh', () => {
         await append.waitUntilPaused()
 
         // The revoke starts now, while the append holds a copy that still has the token in it.
-        const revoking = startOnHost(world.dir, SENDER_REMOTE.remove('marcusrbrown'), `${sha12(OLD_A)}\n`)
+        const revoking = startOnHost(world.dir, SENDER_REMOTE.remove('marcusrbrown'), removeInput(sha12(OLD_A)))
         await Bun.sleep(300)
         append.release()
         const [appended, revoked] = await Promise.all([running.finished(), revoking.finished()])
@@ -727,6 +893,8 @@ describe('host scripts, run under a real sh', () => {
         expect(revoked.exitCode).toBe(0)
         expect(revoked.stdout).toContain(senderSentinel('remove', 'marcusrbrown'))
         // The revoked token stays revoked, and the appended one is there.
+        // A's line is gone and the appended line is there. The void line only appears if no real token is left,
+        // and this one is.
         expect(world.file('marcusrbrown')).toBe(NEW_LINE)
         expect(world.file('marcusrbrown')).not.toContain(OLD_A)
       },
@@ -743,7 +911,7 @@ describe('host scripts, run under a real sh', () => {
         // The same script, with the wait cut from 30 s to 1 s so the test does not stand about.
         const impatient = SENDER_REMOTE.remove('marcusrbrown').replace('flock -w 30', 'flock -w 1')
         expect(impatient).not.toBe(SENDER_REMOTE.remove('marcusrbrown'))
-        const second = execOnHost(world.dir, impatient, `${sha12(OLD_A)}\n`)
+        const second = execOnHost(world.dir, impatient, removeInput(sha12(OLD_A)))
 
         expect(second.exitCode).not.toBe(0)
         expect(second.stdout).toContain(lockBusySentinel('marcusrbrown'))
@@ -758,10 +926,10 @@ describe('host scripts, run under a real sh', () => {
       },
     )
 
-    it('creates the lock file when it is absent, and takes it for the append, remove and empty', () => {
-      for (const name of ['append', 'remove', 'empty'] as const) {
+    it('creates the lock file when it is absent, and takes it for the append, remove and deny', () => {
+      for (const name of ['append', 'remove', 'deny'] as const) {
         const world = createWorld({files: {workstation: oldLine(OLD_A)}})
-        const stdin = name === 'append' ? NEW_LINE : name === 'remove' ? `${sha12(OLD_A)}\n` : undefined
+        const stdin = name === 'append' ? NEW_LINE : name === 'remove' ? removeInput(sha12(OLD_A)) : voidLine(31)
         const lock = join(world.dir, 'tokens', '.lock')
         expect(existsSync(lock)).toBe(false)
         const result = run1(world, SENDER_REMOTE[name]('workstation'), stdin)
@@ -793,6 +961,34 @@ describe('host scripts, run under a real sh', () => {
       const result = run1(world, SENDER_REMOTE.lines('marcusrbrown'))
       expect(result.stdout).toContain(`TRACES_TOKEN ${sha12(OLD_A)} 2026-10-01T00:00:00.000Z ${OLD_A}`)
       expect(result.stdout).toContain(`TRACES_TOKEN ${sha12(OLD_B)} unknown ${OLD_B}`)
+    })
+
+    it('hides every void line from both commands: they are not tokens anyone holds', () => {
+      const first = voidLine(5)
+      const second = voidLine(6)
+      const firstToken = first.split(' ')[0] ?? ''
+      const world = createWorld({
+        files: {marcusrbrown: `${first}${oldLine(OLD_A)}${second}${OLD_B}\n${first.trimEnd()}`},
+      })
+      for (const name of ['list', 'lines'] as const) {
+        const result = run1(world, SENDER_REMOTE[name]('marcusrbrown'))
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout.match(/^TRACES_TOKEN /gm)).toHaveLength(2)
+        expect(result.stdout).toContain(`TRACES_TOKEN ${sha12(OLD_A)} `)
+        expect(result.stdout).toContain(`TRACES_TOKEN ${sha12(OLD_B)} `)
+        expect(result.stdout).not.toContain(sha12(firstToken))
+        expect(result.stdout).not.toContain(VOID_TOKEN_PREFIX)
+        expect(result.stdout).toContain(senderSentinel(name, 'marcusrbrown'))
+      }
+    })
+
+    it('a deny-all file prints only the sentinel', () => {
+      const world = createWorld({files: {'fro-bot': voidLine(5)}})
+      for (const name of ['list', 'lines'] as const) {
+        const result = run1(world, SENDER_REMOTE[name]('fro-bot'))
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout.trim()).toBe(senderSentinel(name, 'fro-bot'))
+      }
     })
 
     it('an empty file prints only the sentinel, and a missing directory fails', () => {
@@ -1118,6 +1314,20 @@ describe('traces sender add', () => {
       expect(world.file('marcusrbrown')).toBe(oldLine(OLD_A) + formatTokenLine(NEXT_TOKEN, NEXT_FINGERPRINT, CREATED))
     })
 
+    it('adds to a deny-all group: keeps the void line, proves the new token, and has no old token to revoke', async () => {
+      const deny = voidLine(5)
+      const world = createWorld({files: {marcusrbrown: deny}})
+      const result = await run(world, ctx => tracesSenderAddAction('marcusrbrown', github(), ctx, makeDeps(world)), {
+        secrets: [NEXT_TOKEN],
+      })
+      expect(result.exit).toBeNull()
+      expect(world.file('marcusrbrown')).toBe(deny + formatTokenLine(NEXT_TOKEN, NEXT_FINGERPRINT, CREATED))
+      expect(world.ghCalls()).toHaveLength(1)
+      // The void line is not a token the operator holds: nothing to rotate, nothing to revoke.
+      expect(result.stdout).not.toContain('already had')
+      expect(result.stdout).not.toContain('traces sender revoke')
+    })
+
     it('prints no rotation hint for a group that had no token', async () => {
       const world = createWorld()
       const result = await run(world, ctx => tracesSenderAddAction('marcusrbrown', github(), ctx, makeDeps(world)), {
@@ -1226,6 +1436,26 @@ describe('traces sender list', () => {
     for (const call of world.calls) expect(call.stdin).toBeUndefined()
   })
 
+  it('shows a deny-all group as having no tokens, and hides void lines beside real ones', async () => {
+    const voidA = voidLine(5)
+    const voidB = voidLine(6)
+    const world = createWorld({
+      files: {marcusrbrown: voidA, 'fro-bot': voidB + oldLine(OLD_C, '2026-11-10T00:00:00.000Z')},
+    })
+    const result = await run(world, ctx => tracesSenderListAction({}, ctx, makeDeps(world)), {secrets: [OLD_C]})
+    expect(result.exit).toBeNull()
+    // Two groups have no real token: the deny-all one, and the one nothing has written to.
+    expect(result.stdout.match(/\(no tokens\)/g)).toHaveLength(2)
+    expect(result.stdout).toContain(sha12(OLD_C))
+    for (const line of [voidA, voidB]) {
+      const token = line.split(' ')[0] ?? ''
+      expect(result.stdout).not.toContain(sha12(token))
+      expect(result.stdout).not.toContain(token)
+    }
+    expect(result.stdout).not.toContain(VOID_TOKEN_PREFIX)
+    expect(result.stdout).not.toContain('void')
+  })
+
   it('reports a group it could not read, still lists the others, and exits non-zero', async () => {
     const world = createWorld({files: {workstation: oldLine(OLD_A)}})
     world.failing.add('list:marcusrbrown')
@@ -1237,6 +1467,17 @@ describe('traces sender list', () => {
 })
 
 // ─── revoke <group> <fingerprint> ─────────────────────────────────────────────
+
+/** One authenticated request to a group's private receiver, as the proof makes it. */
+async function privateStatus(world: World, group: Group, token: string): Promise<string> {
+  const child = world.spawn(['ssh', SENDER_REMOTE.probe(group)], {
+    env: {},
+    stdout: 'pipe',
+    stderr: 'pipe',
+    stdin: new TextEncoder().encode(token),
+  })
+  return new Response(child.stdout).text()
+}
 
 describe('traces sender revoke', () => {
   const seeded = (): World =>
@@ -1254,8 +1495,12 @@ describe('traces sender revoke', () => {
     expect(result.exit).toBeNull()
     expect(world.file('marcusrbrown')).toBe(oldLine(OLD_A) + oldLine(OLD_C))
 
-    // The fingerprint goes on stdin of a fixed command; the token was read first, over ssh, for the proof.
-    expect(world.remoteCalls(SENDER_REMOTE.remove('marcusrbrown'))[0]?.stdin).toBe(`${sha12(OLD_B)}\n`)
+    // The fingerprint goes on stdin of a fixed command, then the void line for the case that no real token is
+    // left; the token was read first, over ssh, for the proof. Two real tokens are left here, so no void is written.
+    expect(world.remoteCalls(SENDER_REMOTE.remove('marcusrbrown'))[0]?.stdin).toBe(
+      removeInput(sha12(OLD_B), DEFAULT_VOID_LINE),
+    )
+    expect(result.stdout).not.toContain('no real token')
     expect(world.remoteCalls(SENDER_REMOTE.lines('marcusrbrown'))).toHaveLength(1)
     const probes = world.remoteCalls(SENDER_REMOTE.probe('marcusrbrown'))
     expect(probes).toHaveLength(1)
@@ -1335,7 +1580,17 @@ describe('traces sender revoke', () => {
     expect(result.stdout.toLowerCase()).not.toContain('revoked')
   })
 
-  it('revoking the last token leaves an empty file and the group refuses it', async () => {
+  it('the modelled collector keeps a token it already holds when its file is emptied: only a new file revokes it', async () => {
+    // The measured behaviour of the pinned collector, which the scenarios below depend on being modelled.
+    const world = createWorld({files: {workstation: oldLine(OLD_A)}})
+    expect(await privateStatus(world, 'workstation', OLD_A)).toContain('TRACES_PROBE_STATUS=200')
+    writeFileSync(world.path('workstation'), '')
+    expect(await privateStatus(world, 'workstation', OLD_A)).toContain('TRACES_PROBE_STATUS=200')
+    writeFileSync(world.path('workstation'), voidLine(5))
+    expect(await privateStatus(world, 'workstation', OLD_A)).toContain('TRACES_PROBE_STATUS=401')
+  })
+
+  it('revoking the last token leaves one void line, never an empty file, and the group refuses the token', async () => {
     const world = createWorld({files: {workstation: oldLine(OLD_A)}})
     const result = await run(
       world,
@@ -1345,16 +1600,17 @@ describe('traces sender revoke', () => {
       },
     )
     expect(result.exit).toBeNull()
-    expect(world.file('workstation')).toBe('')
+    expect(world.file('workstation')).toBe(DEFAULT_VOID_LINE)
+    expect(world.file('workstation')).toMatch(VOID_LINE_PATTERN)
     expect(result.stdout).toContain('revoked')
+    expect(result.stdout).toContain('no real token remains')
+    expect(result.stdout).toContain('workstation')
+    // The void token reached the host on stdin and nowhere else.
+    expect(world.remoteCalls(SENDER_REMOTE.remove('workstation'))[0]?.stdin).toBe(
+      removeInput(sha12(OLD_A), DEFAULT_VOID_LINE),
+    )
     // And the same token, tried again, is refused.
-    const again = world.spawn(['ssh', SENDER_REMOTE.probe('workstation')], {
-      env: {},
-      stdout: 'pipe',
-      stderr: 'pipe',
-      stdin: new TextEncoder().encode(OLD_A),
-    })
-    expect(await new Response(again.stdout).text()).toContain('TRACES_PROBE_STATUS=401')
+    expect(await privateStatus(world, 'workstation', OLD_A)).toContain('TRACES_PROBE_STATUS=401')
   })
 
   it('proves over the public route when it is open, with the removed token as the bearer', async () => {
@@ -1473,7 +1729,7 @@ describe('traces sender revoke --all', () => {
     'fro-bot': oldLine(OLD_C),
   }
 
-  it('with the public route open, empties every file and proves every old token on its private receiver, never touching the public hostname', async () => {
+  it('with the public route open, makes every file deny-all and proves every old token on its private receiver, never touching the public hostname', async () => {
     const world = createWorld({configured: 'open', outside: 'open', files})
     const result = await run(
       world,
@@ -1483,7 +1739,10 @@ describe('traces sender revoke --all', () => {
       },
     )
     expect(result.exit).toBeNull()
-    for (const group of TRACES_GROUPS) expect(world.file(group)).toBe('')
+    for (const group of TRACES_GROUPS) {
+      expect(world.file(group)).toBe(DEFAULT_VOID_LINE)
+      expect(world.file(group)).toMatch(VOID_LINE_PATTERN)
+    }
 
     // The public hostname is never used, and the host's ingest state is not even read.
     expect(world.fetchCalls).toHaveLength(0)
@@ -1498,7 +1757,7 @@ describe('traces sender revoke --all', () => {
     expect(result.stdout).toContain('GitHub secrets')
   })
 
-  it('works when the route is held or off, and leaves empty groups empty', async () => {
+  it('works when the route is held or off, and makes a group that had no token deny-all too, not empty', async () => {
     const world = createWorld({configured: 'off', files: {workstation: oldLine(OLD_A)}})
     const result = await run(
       world,
@@ -1509,7 +1768,112 @@ describe('traces sender revoke --all', () => {
     )
     expect(result.exit).toBeNull()
     expect(world.fetchCalls).toHaveLength(0)
-    for (const group of TRACES_GROUPS) expect(world.file(group)).toBe('')
+    for (const group of TRACES_GROUPS) expect(world.file(group)).toMatch(VOID_LINE_PATTERN)
+  })
+
+  describe('the void lines', () => {
+    /** Each call draws bytes filled with the next number, so each group gets its own void token. */
+    const sequence = (first: number): ((length: number) => Uint8Array) => {
+      let next = first
+      return length => new Uint8Array(length).fill(next++)
+    }
+    const seeded = {
+      marcusrbrown: voidLine(5) + oldLine(OLD_A) + oldLine(OLD_B),
+      'fro-bot': oldLine(OLD_C),
+      workstation: voidLine(6),
+    }
+    const expectedVoids = TRACES_GROUPS.map((_group, index) => generateVoidToken(randomFilledWith(11 + index)))
+
+    it('leaves each group deny-all with its own fresh void line, different from the one it had, and says no real token remains in each', async () => {
+      const world = createWorld({configured: 'held', files: seeded})
+      const before = Object.fromEntries(TRACES_GROUPS.map(group => [group, world.file(group)])) as Record<Group, string>
+      const result = await run(
+        world,
+        ctx =>
+          tracesSenderRevokeAction(
+            undefined,
+            undefined,
+            {all: true},
+            ctx,
+            makeDeps(world, {randomBytes: sequence(11)}),
+          ),
+        {secrets: [OLD_A, OLD_B, OLD_C, ...expectedVoids]},
+      )
+      expect(result.exit).toBeNull()
+
+      const after = TRACES_GROUPS.map(group => world.file(group))
+      TRACES_GROUPS.forEach((group, index) => {
+        // Exactly one line, the new void line: no older void line, no real token.
+        expect(world.file(group)).toBe(formatVoidLine(expectedVoids[index] ?? '', CREATED))
+        expect(world.file(group)).not.toBe(before[group])
+        expect(world.file(group).trim().split('\n')).toHaveLength(1)
+        // The old void lines are gone too: a revoke does not leave a credential nobody can account for.
+        expect(world.file(group)).not.toContain(voidLine(5).split(' ')[0] ?? 'x')
+        expect(world.file(group)).not.toContain(voidLine(6).split(' ')[0] ?? 'x')
+        expect(result.stdout).toContain(`${group}: no real token remains`)
+      })
+      // A void line each: the three files differ from each other.
+      expect(new Set(after).size).toBe(3)
+    })
+
+    it('sends each void line on stdin of the fixed deny command, and prints and logs none of them', async () => {
+      const world = createWorld({configured: 'held', files: seeded})
+      const result = await run(
+        world,
+        ctx =>
+          tracesSenderRevokeAction(
+            undefined,
+            undefined,
+            {all: true},
+            ctx,
+            makeDeps(world, {randomBytes: sequence(11)}),
+          ),
+        {secrets: [OLD_A, OLD_B, OLD_C, ...expectedVoids]},
+      )
+      expect(result.exit).toBeNull()
+      TRACES_GROUPS.forEach((group, index) => {
+        const calls = world.remoteCalls(SENDER_REMOTE.deny(group))
+        expect(calls).toHaveLength(1)
+        // Non-vacuous: the token is on stdin, which the scan in `run` allows and everything else it forbids.
+        expect(calls[0]?.stdin).toBe(formatVoidLine(expectedVoids[index] ?? '', CREATED))
+        expect(calls[0]?.command).not.toContain(expectedVoids[index] ?? 'x')
+      })
+      for (const voidToken of expectedVoids) {
+        expect(result.stdout).not.toContain(voidToken)
+        expect(result.stderr).not.toContain(voidToken)
+      }
+    })
+
+    it('never lists a group as having a token afterwards', async () => {
+      const world = createWorld({configured: 'held', files: seeded})
+      await run(
+        world,
+        ctx =>
+          tracesSenderRevokeAction(
+            undefined,
+            undefined,
+            {all: true},
+            ctx,
+            makeDeps(world, {randomBytes: sequence(11)}),
+          ),
+        {secrets: [OLD_A, OLD_B, OLD_C, ...expectedVoids]},
+      )
+      const listed = await run(world, ctx => tracesSenderListAction({}, ctx, makeDeps(world)), {secrets: []})
+      expect(listed.stdout.match(/\(no tokens\)/g)).toHaveLength(3)
+    })
+
+    it('does not claim a group has no real token when the proof that its token is refused failed', async () => {
+      const world = createWorld({configured: 'held', files})
+      world.stubborn.add(OLD_C)
+      const result = await run(
+        world,
+        ctx => tracesSenderRevokeAction(undefined, undefined, {all: true}, ctx, makeDeps(world)),
+        {secrets: [OLD_A, OLD_B, OLD_C]},
+      )
+      expect(result.exit).toBe(1)
+      expect(result.stdout).not.toContain('fro-bot: no real token remains')
+      expect(result.stdout).toContain('marcusrbrown: no real token remains')
+    })
   })
 
   it('names the group and fingerprint of a token that is still accepted, and says to hold ingest', async () => {
@@ -1528,13 +1892,13 @@ describe('traces sender revoke --all', () => {
     expect(result.stderr).toContain('removed from the file but still accepted')
     expect(result.stderr).toContain('traces ingest hold')
     expect(result.stdout.toLowerCase()).not.toContain('revoked')
-    // The other groups were still emptied and proven.
-    expect(world.file('marcusrbrown')).toBe('')
+    // The other groups were still made deny-all and proven.
+    expect(world.file('marcusrbrown')).toMatch(VOID_LINE_PATTERN)
   })
 
   it('a busy token lock leaves every group alone, says so for each, and exits non-zero', async () => {
     const world = createWorld({configured: 'held', files})
-    world.busy.add('empty')
+    world.busy.add('deny')
     const result = await run(
       world,
       ctx => tracesSenderRevokeAction(undefined, undefined, {all: true}, ctx, makeDeps(world)),
@@ -1547,7 +1911,7 @@ describe('traces sender revoke --all', () => {
     expect(result.stdout.toLowerCase()).not.toContain('revoked')
   })
 
-  it('empties no group it could not read first, and exits non-zero', async () => {
+  it('rewrites no group it could not read first, and exits non-zero', async () => {
     const world = createWorld({configured: 'held', files})
     world.failing.add('lines')
     const result = await run(
@@ -1559,7 +1923,7 @@ describe('traces sender revoke --all', () => {
     )
     expect(result.exit).toBe(1)
     expect(result.stderr).toContain('could not be read')
-    expect(world.remoteCalls(SENDER_REMOTE.empty('marcusrbrown'))).toHaveLength(0)
+    expect(world.remoteCalls(SENDER_REMOTE.deny('marcusrbrown'))).toHaveLength(0)
   })
 
   it('refuses a host that starts with - before any ssh call', async () => {

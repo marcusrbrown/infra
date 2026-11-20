@@ -24,7 +24,7 @@ A trace can therefore contain anything the agent read or produced during the run
 On one self-hosted host, in two stores:
 
 - **Langfuse** holds every trace in full, content included.
-- **Tempo** holds structure only: the operation, provider and model, token counts, finish reasons, tool names and call IDs, the agent and session names, the run identity fields, error types, the sender group, span names, status messages and exception messages. Span names and messages are free text. A tool's error can quote a command line, a path or part of a prompt, so Tempo is not content-free.
+- **Tempo** holds structure only: the operation, provider and model, token counts, finish reasons, tool names and call IDs, the agent and session names, the run identity fields, error types, the sender group, span names, status messages and exception messages. Span names and messages are free text. A tool's error can quote a command line, a path or part of a prompt, so Tempo is not content-free. Attributes on span links are kept as sent, up to Tempo's per-attribute size limit. If a sender puts content in a link attribute, Tempo holds that content.
 
 The data volume is encrypted at rest by the hosting provider. The provider holds the keys. That protects lost or reused disks. It does not protect against someone who has control of the running host.
 
@@ -40,7 +40,7 @@ These are targets, not guarantees. A delayed database merge or a failed snapshot
 
 ## Deleting data
 
-The operator can delete a trace, or wipe the stores, on request. A snapshot that contains the data ages out within 8 days of the deletion.
+The operator can delete a trace from Langfuse on request. Tempo has no way to delete one trace. Its copy (structure, names, error text and link attributes) expires with the 30-day retention, unless the operator wipes the whole Tempo store. A snapshot that contains the data ages out within 8 days of the deletion.
 
 ## Calls the software makes on its own
 

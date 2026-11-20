@@ -408,10 +408,48 @@ describe('Tempo config', async () => {
   })
 })
 
+/**
+ * The text of an XML document outside its comments, joined by newlines. It scans for the comment delimiters one
+ * at a time instead of stripping a pattern, so no input can leave a `<!--` behind, and an unterminated comment
+ * (which no XML parser accepts) throws instead of being skipped.
+ */
+function outsideComments(text: string): string {
+  const segments: string[] = []
+  let rest = text
+  for (;;) {
+    const open = rest.indexOf('<!--')
+    if (open === -1) {
+      segments.push(rest)
+      return segments.join('\n')
+    }
+    segments.push(rest.slice(0, open))
+    const close = rest.indexOf('-->', open + '<!--'.length)
+    if (close === -1) throw new Error('unterminated XML comment')
+    rest = rest.slice(close + '-->'.length)
+  }
+}
+
+describe('outsideComments', () => {
+  it('keeps what is outside comments and drops what is inside, however the delimiters are arranged', () => {
+    expect(outsideComments('<a/><!-- x --><b/>')).toBe('<a/>\n<b/>')
+    expect(outsideComments('<!-- a --><!-- b -->')).toBe('\n\n')
+    expect(outsideComments('<!-- <!-- x --> live <!-- y -->')).toBe('\n live \n')
+    expect(outsideComments('<!-<!-- x -->-->')).toBe('<!-\n-->')
+    expect(outsideComments('no comments')).toBe('no comments')
+  })
+
+  it('rejects an unterminated comment', () => {
+    expect(() => outsideComments('<a/><!-- never closed')).toThrow('unterminated XML comment')
+  })
+})
+
 describe('ClickHouse config', async () => {
   const dir = new URL('config/clickhouse/', import.meta.url)
   const files = readdirSync(dir).filter(name => name.endsWith('.xml'))
-  const xml = (await Promise.all(files.map(name => Bun.file(new URL(name, dir)).text()))).join('\n')
+  // Only what a server reads: a setting or table named inside a comment is neither present nor absent.
+  const xml = (
+    await Promise.all(files.map(async name => outsideComments(await Bun.file(new URL(name, dir)).text())))
+  ).join('\n')
 
   it('gives the system log tables that hold query text a short TTL', () => {
     for (const table of ['query_log', 'query_thread_log', 'text_log', 'part_log', 'trace_log']) {
@@ -424,7 +462,7 @@ describe('ClickHouse config', async () => {
   })
 
   it('sets nothing that caps memory', () => {
-    expect(xml.replaceAll(/<!--[\s\S]*?-->/g, '')).not.toMatch(/max_server_memory_usage|max_memory_usage|memory_ratio/i)
+    expect(xml).not.toMatch(/max_server_memory_usage|max_memory_usage|memory_ratio/i)
   })
 })
 

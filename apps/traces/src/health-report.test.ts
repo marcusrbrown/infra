@@ -12,13 +12,15 @@ import {
   CANARY_GROUP,
   CANARY_PLACES,
   CLICKHOUSE_READER_USER,
+  combineLangfuse,
   createReporter,
   emptyCounterState,
   ENDPOINTS,
   evaluateAge,
   evaluateCollectorMetrics,
   evaluateDisk,
-  evaluateLangfuseReadback,
+  evaluateLangfuseRaw,
+  evaluateLangfuseRow,
   evaluateQueues,
   evaluateTempoMetrics,
   evaluateTempoReadback,
@@ -27,9 +29,13 @@ import {
   GROUPS,
   handleDetail,
   handlePublic,
+  LANGFUSE_MARKER_LOCATIONS,
+  OBJECT_STORE,
   objectKeyTime,
   parsePrometheus,
   PATHS,
+  RAW_BATCH_LIMITS,
+  rawBatchKey,
   readTempoBlockMetasFrom,
   REQUIRED_CHECKS,
   SENTINEL_CONTENT,
@@ -37,8 +43,10 @@ import {
   TEMPO_KEPT_PLACES,
   THRESHOLDS,
   usedPercent,
+  type Canary,
   type CanaryPlace,
   type CheckResult,
+  type LangfuseColumn,
   type ObjectStoreReader,
   type ReporterDeps,
 } from './health-report'
@@ -51,6 +59,27 @@ const DAY = 86_400_000
 
 const CLICKHOUSE_PASSWORD = 'placeholder-clickhouse-password'
 const MINIO_PASSWORD = 'placeholder-minio-password'
+
+/**
+ * What Langfuse v4.83.0 writes to `events_full`, written out here on purpose and not read from the source under
+ * test: a change to the table in `health-report.ts` must make a test fail. The derivation is documented there.
+ */
+const ROW_COLUMNS: Partial<Record<CanaryPlace, LangfuseColumn>> = {
+  'span-name': 'name',
+  'status-message': 'status_message',
+  'content-key': 'input',
+  'resource-attribute': 'metadata_values',
+  'scope-attribute': 'metadata_values',
+  'unlisted-attribute': 'metadata_values',
+}
+const MATERIALISED = Object.keys(ROW_COLUMNS) as CanaryPlace[]
+/** Markers Langfuse reads and does not copy into a row: only the raw batch holds them. */
+const RAW_ONLY = CANARY_PLACES.filter(place => !MATERIALISED.includes(place))
+
+/** The size cap on a raw batch read; pinned to the exported limit in the tests. */
+const RAW_MAX_BYTES = 1_048_576
+
+const RAW_KEY = 'events/otel/project-a/2026/11/20/12/00/0d7c5b0e-3a52-4a56-9c3a-7a1f0e6f2b11.json'
 
 type Rec = Record<string, unknown>
 
@@ -66,6 +95,12 @@ function counter(): (bytes: number) => string {
     return next.toString(16).padStart(bytes * 2, '0')
   }
 }
+
+// A promise that never settles stands for a dependency that accepted the connection and went silent. It ignores
+// the abort signal on purpose: a deadline that relies on the dependency honouring a signal is not a deadline.
+const NEVER: Promise<never> = new Promise<never>(() => undefined)
+
+const SMALL = {probeTimeoutMs: 15, runDeadlineMs: 4000} as const
 
 function collectorPage(extra = '', queues: Record<string, [number, number]> = {}): string {
   const lines = ['# HELP otelcol_process_uptime_seconds_total Uptime', 'otelcol_process_uptime_seconds_total 1234']
@@ -98,8 +133,14 @@ interface Behaviour {
   langfuseWeb: number | 'throw'
   langfuseWorker: number | 'throw'
   canaryPost: number | 'throw'
-  /** Places Langfuse is missing, or `all` when the trace never arrives. */
-  langfuseMissing: readonly CanaryPlace[] | 'all'
+  /** Places absent from the ClickHouse row, or `all` when the trace never arrives. Only materialised places can be absent. */
+  rowMissing: readonly CanaryPlace[] | 'all'
+  /** Places absent from the raw OTLP batch in the object store. */
+  rawMissing: readonly CanaryPlace[]
+  /** What the row names as the raw batch's key. */
+  blobPath: 'valid' | 'empty' | 'malformed' | 'other-prefix'
+  /** What the object store returns for that key. */
+  rawObject: 'ok' | 'absent' | 'throw' | 'not-json' | 'not-array' | 'gzip' | 'oversize'
   /** Places present in Tempo, or `none` when the trace never arrives. */
   tempoPlaces: readonly CanaryPlace[] | 'none'
   tempoTrace: 'json' | 'garbage' | 500
@@ -122,7 +163,10 @@ function defaults(): Behaviour {
     langfuseWeb: 200,
     langfuseWorker: 200,
     canaryPost: 200,
-    langfuseMissing: [],
+    rowMissing: [],
+    rawMissing: [],
+    blobPath: 'valid',
+    rawObject: 'ok',
     tempoPlaces: TEMPO_KEPT_PLACES,
     tempoTrace: 'json',
     clickhouseOldestMs: NOW - 2 * DAY,
@@ -205,15 +249,56 @@ function harness(overrides: Partial<Behaviour> = {}) {
           {status: 200},
         )
       }
-      if (body.includes('SELECT * FROM')) {
-        if (state.posted === undefined || behaviour.langfuseMissing === 'all') return new Response('', {status: 200})
-        const places = CANARY_PLACES.filter(
-          place => !(behaviour.langfuseMissing as readonly CanaryPlace[]).includes(place),
-        )
-        return new Response(JSON.stringify({text: textFor(places)}), {status: 200})
+      if (body.includes('trace_id = {tid')) {
+        if (state.posted === undefined || behaviour.rowMissing === 'all') return new Response('', {status: 200})
+        return new Response(JSON.stringify(rowFor(behaviour.rowMissing)), {status: 200})
       }
     }
     throw new Error(`unexpected request ${url}`)
+  }
+
+  /** One `events_full` row as the JSONEachRow format prints it: only the markers that Langfuse materialises. */
+  function rowFor(missing: readonly CanaryPlace[]): Rec {
+    const markers = markersPosted()
+    const row: {[column: string]: unknown} = {
+      trace_id: 'canary-trace',
+      name: 'a span',
+      status_message: '',
+      input: '{"messages":[]}',
+      metadata_values: ['health-reporter-canary'],
+      blob_storage_file_path: {
+        valid: RAW_KEY,
+        empty: '',
+        malformed: '../../etc/passwd',
+        'other-prefix': 'media/x.json',
+      }[behaviour.blobPath],
+    }
+    for (const [place, column] of Object.entries(ROW_COLUMNS)) {
+      if (missing.includes(place as CanaryPlace)) continue
+      const marker = markers[place as CanaryPlace]
+      if (column === 'metadata_values') (row.metadata_values as string[]).push(marker)
+      else row[column] = `text around ${marker}`
+    }
+    return row
+  }
+
+  function markersPosted(): Record<CanaryPlace, string> {
+    const found = Object.fromEntries(
+      [...(state.posted ?? '').matchAll(/canary-([a-z-]+?)-[\da-f]{8}/g)].map(match => [match[1], match[0]]),
+    )
+    return found as Record<CanaryPlace, string>
+  }
+
+  /** The object Langfuse stored: a JSON array of resourceSpans, with the markers it still holds. */
+  function rawBytes(): Uint8Array {
+    const text = JSON.stringify([
+      {scopeSpans: [{spans: [{text: textFor(CANARY_PLACES.filter(place => !behaviour.rawMissing.includes(place)))}]}]},
+    ])
+    if (behaviour.rawObject === 'not-json') return new TextEncoder().encode('<html>no</html>')
+    if (behaviour.rawObject === 'not-array') return new TextEncoder().encode(JSON.stringify({text}))
+    if (behaviour.rawObject === 'gzip') return Uint8Array.from([0x1f, 0x8b, 8, 0, 0, 0, 0, 0])
+    if (behaviour.rawObject === 'oversize') return new Uint8Array(RAW_MAX_BYTES + 1).fill(32)
+    return new TextEncoder().encode(text)
   }
 
   const objectStore = (password: string): ObjectStoreReader => {
@@ -221,6 +306,12 @@ function harness(overrides: Partial<Behaviour> = {}) {
     return {
       childPrefixes: async () => (behaviour.objectKeys.length > 0 ? ['events/otel/project-a/'] : []),
       firstKey: async () => behaviour.objectKeys[0],
+      read: async (key, maxBytes) => {
+        requests.push({url: 'object-store-read', method: 'GET', headers: {key, maxBytes: String(maxBytes)}, body: ''})
+        if (behaviour.rawObject === 'throw') throw new Error('connect ECONNREFUSED minio-internal')
+        if (behaviour.rawObject === 'absent') return undefined
+        return rawBytes()
+      },
     }
   }
 
@@ -567,18 +658,6 @@ describe('canary readback evaluators', () => {
   const canary = buildCanary(NOW, counter())
   const textOf = (places: readonly CanaryPlace[]) => places.map(place => canary.markers[place]).join(' ')
 
-  it('Langfuse: passes with all nine, fails naming each missing place, fails when nothing is found', () => {
-    expect(evaluateLangfuseReadback(textOf(CANARY_PLACES), canary).status).toBe('pass')
-    for (const place of CANARY_PLACES) {
-      const without = CANARY_PLACES.filter(candidate => candidate !== place)
-      const out = evaluateLangfuseReadback(textOf(without), canary)
-      expect(out.status).toBe('fail')
-      expect(out.detail).toContain(place)
-    }
-    expect(evaluateLangfuseReadback(undefined, canary).status).toBe('fail')
-    expect(evaluateLangfuseReadback('   ', canary).status).toBe('fail')
-  })
-
   it('Tempo: passes with exactly the four kept places', () => {
     expect(evaluateTempoReadback(textOf(TEMPO_KEPT_PLACES), canary).status).toBe('pass')
   })
@@ -597,6 +676,176 @@ describe('canary readback evaluators', () => {
 
   it('Tempo: fails when the trace is not found', () => {
     expect(evaluateTempoReadback(undefined, canary).status).toBe('fail')
+  })
+})
+
+// ─── The Langfuse half of the canary ──────────────────────────────────────────
+
+/** One `events_full` row as the readback query returns it, holding the markers of the places not in `missing`. */
+function rowText(canary: Canary, missing: readonly CanaryPlace[] = [], overrides: Rec = {}): string {
+  const row: Rec = {
+    trace_id: canary.traceId,
+    name: 'a span',
+    status_message: '',
+    input: '',
+    metadata_values: ['health-reporter-canary'],
+    blob_storage_file_path: RAW_KEY,
+  }
+  for (const [place, column] of Object.entries(ROW_COLUMNS)) {
+    if (missing.includes(place as CanaryPlace)) continue
+    const marker = canary.markers[place as CanaryPlace]
+    if (column === 'metadata_values') (row.metadata_values as string[]).push(marker)
+    else row[column] = `text around ${marker}`
+  }
+  return JSON.stringify({...row, ...overrides})
+}
+
+/** The raw batch as Langfuse stores it: a JSON array of resourceSpans holding the markers of `places`. */
+function rawText(canary: Canary, places: readonly CanaryPlace[] = CANARY_PLACES): string {
+  return JSON.stringify([{scopeSpans: [{spans: [{text: places.map(place => canary.markers[place]).join(' ')}]}]}])
+}
+
+describe('the marker table (what Langfuse v4.83.0 keeps of each place)', () => {
+  it('names the ClickHouse column of exactly the six materialised places, and no other', () => {
+    const columns = Object.fromEntries(
+      CANARY_PLACES.flatMap(place => {
+        const column = LANGFUSE_MARKER_LOCATIONS[place].column
+        return column === undefined ? [] : [[place, column]]
+      }),
+    )
+    expect(columns).toEqual(ROW_COLUMNS)
+    expect(CANARY_PLACES.filter(place => LANGFUSE_MARKER_LOCATIONS[place].column === undefined).sort()).toEqual(
+      [...RAW_ONLY].sort(),
+    )
+    expect([...RAW_ONLY].sort()).toEqual(['event-attribute', 'exception-message', 'link-attribute'])
+  })
+
+  it('names the upstream file and tag it was derived from', async () => {
+    const source = await Bun.file(new URL('./health-report.ts', import.meta.url)).text()
+    expect(source).toContain('OtelIngestionProcessor.ts')
+    expect(source).toContain('v4.83.0')
+  })
+
+  it('pins the size cap on a raw batch read', () => {
+    expect(RAW_BATCH_LIMITS.maxBytes).toBe(RAW_MAX_BYTES)
+    expect(RAW_KEY.startsWith(OBJECT_STORE.prefix)).toBe(true)
+  })
+})
+
+describe('Langfuse part 1: delivery and materialisation (the ClickHouse row)', () => {
+  const canary = buildCanary(NOW, counter())
+
+  it('passes when the row holds exactly the materialised markers', () => {
+    const out = evaluateLangfuseRow(rowText(canary), canary)
+    expect(out.status).toBe('pass')
+    expect(out.detail).toContain('6')
+  })
+
+  it.each(MATERIALISED)('fails and names the place and the column when the %s marker is missing', place => {
+    const out = evaluateLangfuseRow(rowText(canary, [place]), canary)
+    expect(out.status).toBe('fail')
+    expect(out.detail).toContain(place)
+    expect(out.detail).toContain(ROW_COLUMNS[place] as string)
+  })
+
+  it.each(RAW_ONLY)('does not fail when the %s marker is absent from the row: Langfuse never copies it', place => {
+    const row = JSON.parse(rowText(canary)) as Rec
+    expect(JSON.stringify(row)).not.toContain(canary.markers[place])
+    expect(evaluateLangfuseRow(JSON.stringify(row), canary).status).toBe('pass')
+  })
+
+  it('requires a marker in the column Langfuse fills for it, not anywhere in the row', () => {
+    const misplaced = rowText(canary, ['status-message'], {name: canary.markers['status-message']})
+    const out = evaluateLangfuseRow(misplaced, canary)
+    expect(out.status).toBe('fail')
+    expect(out.detail).toContain('status-message')
+  })
+
+  it('reads a marker in any of several rows, and fails on a row it cannot parse', () => {
+    const split = [rowText(canary, ['span-name']), rowText(canary, MATERIALISED, {name: canary.markers['span-name']})]
+    expect(evaluateLangfuseRow(split.join('\n'), canary).status).toBe('pass')
+    expect(evaluateLangfuseRow(`${rowText(canary)}\nnot json`, canary).status).toBe('fail')
+  })
+
+  it('fails when no row is found', () => {
+    expect(evaluateLangfuseRow(undefined, canary).status).toBe('fail')
+    expect(evaluateLangfuseRow('  \n', canary).status).toBe('fail')
+  })
+})
+
+describe('Langfuse part 2: whole-trace fidelity (the raw batch in the object store)', () => {
+  const canary = buildCanary(NOW, counter())
+  const key = (value: string): string => rowText(canary, [], {blob_storage_file_path: value})
+
+  it('takes the key from the row when it is a Langfuse OTLP batch key, and the first one when there are several', () => {
+    expect(rawBatchKey(rowText(canary))).toEqual({ok: true, value: RAW_KEY})
+    expect(rawBatchKey(`${rowText(canary)}\n${rowText(canary)}`)).toEqual({ok: true, value: RAW_KEY})
+    const other = RAW_KEY.replace('0d7c5b0e', '00000001')
+    expect(rawBatchKey(`${rowText(canary)}\n${key(other)}`)).toEqual({ok: true, value: RAW_KEY})
+  })
+
+  it.each([
+    ['empty: the row was written by the dual-write path', ''],
+    ['a path outside the OTLP prefix', 'media/2026/11/20/12/00/0d7c5b0e-3a52-4a56-9c3a-7a1f0e6f2b11.json'],
+    ['a path with dot segments', 'events/otel/../../x/2026/11/20/12/00/0d7c5b0e-3a52-4a56-9c3a-7a1f0e6f2b11.json'],
+    ['no minute directory', 'events/otel/project-a/0d7c5b0e-3a52-4a56-9c3a-7a1f0e6f2b11.json'],
+    ['a query string', `${RAW_KEY}?versionId=1`],
+  ])('refuses a row that names %s', (_label, value) => {
+    expect(rawBatchKey(key(value)).ok).toBe(false)
+  })
+
+  it('refuses rows with no key at all, and rows it cannot parse', () => {
+    expect(rawBatchKey('').ok).toBe(false)
+    expect(rawBatchKey('not json').ok).toBe(false)
+  })
+
+  it('refuses a row set where any row names an unrecognised key, even if another names a good one', () => {
+    expect(rawBatchKey(`${rowText(canary)}\n${key('media/x.json')}`).ok).toBe(false)
+  })
+
+  it('passes with all nine markers in a JSON array', () => {
+    const out = evaluateLangfuseRaw(rawText(canary), canary)
+    expect(out.status).toBe('pass')
+    expect(out.detail).toContain('9')
+  })
+
+  it.each(CANARY_PLACES)('fails and names the place when the raw batch lacks the %s marker', place => {
+    const out = evaluateLangfuseRaw(
+      rawText(
+        canary,
+        CANARY_PLACES.filter(candidate => candidate !== place),
+      ),
+      canary,
+    )
+    expect(out.status).toBe('fail')
+    expect(out.detail).toContain(place)
+  })
+
+  it('fails when the object is missing, is not JSON, or is not an array of resourceSpans', () => {
+    expect(evaluateLangfuseRaw(undefined, canary).status).toBe('fail')
+    expect(evaluateLangfuseRaw('<html>nope</html>', canary).status).toBe('fail')
+    expect(evaluateLangfuseRaw(JSON.stringify({text: rawText(canary)}), canary).status).toBe('fail')
+  })
+
+  it('joins the two parts: it passes only when both pass, and a failure of either is named', () => {
+    const pass = evaluateLangfuseRow(rowText(canary), canary)
+    const rawPass = evaluateLangfuseRaw(rawText(canary), canary)
+    const rowFail = evaluateLangfuseRow(rowText(canary, ['span-name']), canary)
+    const rawFail = evaluateLangfuseRaw(rawText(canary, []), canary)
+    expect(combineLangfuse(pass, rawPass).status).toBe('pass')
+    const onlyRow = combineLangfuse(rowFail, rawPass)
+    expect(onlyRow.status).toBe('fail')
+    expect(onlyRow.detail).toContain('row')
+    expect(onlyRow.detail).not.toContain('raw batch')
+    const onlyRaw = combineLangfuse(pass, rawFail)
+    expect(onlyRaw.status).toBe('fail')
+    expect(onlyRaw.detail).toContain('raw batch')
+    const both = combineLangfuse(rowFail, rawFail)
+    expect(both.detail).toContain('row')
+    expect(both.detail).toContain('raw batch')
+    const unknown = combineLangfuse(pass, {id: 'canary-langfuse', status: 'unknown', detail: 'x'})
+    expect(unknown.status).toBe('unknown')
+    expect(combineLangfuse(rowFail, {id: 'canary-langfuse', status: 'unknown', detail: 'x'}).status).toBe('fail')
   })
 })
 
@@ -687,7 +936,8 @@ describe('a passing run', () => {
       expect(text).not.toContain(MINIO_PASSWORD)
     }
     const passwords = out.requests.filter(entry => entry.url === 'object-store').map(entry => entry.headers.password)
-    expect(passwords).toEqual([MINIO_PASSWORD])
+    expect(passwords.length).toBeGreaterThan(0)
+    for (const password of passwords) expect(password).toBe(MINIO_PASSWORD)
   })
 
   it('does not leak a probe error message into the detail', async () => {
@@ -699,7 +949,7 @@ describe('a passing run', () => {
 
 describe('error paths name the failing check and fail the verdict', () => {
   it('canary missing from Langfuse: the Langfuse branch fails, Tempo stays healthy', async () => {
-    const out = await runOnce({langfuseMissing: 'all'})
+    const out = await runOnce({rowMissing: 'all'})
     expect(check(out.detail, 'canary-langfuse')).toMatchObject({status: 'fail'})
     expect(check(out.detail, 'canary-langfuse').detail).toContain('Langfuse')
     expect(check(out.detail, 'canary-tempo').status).toBe('pass')
@@ -707,12 +957,14 @@ describe('error paths name the failing check and fail the verdict', () => {
     expect(out.reporter.health().status).toBe(503)
   })
 
-  it('canary markers partly missing from Langfuse: names them', async () => {
-    const out = await runOnce({langfuseMissing: ['link-attribute', 'scope-attribute']})
+  it('materialised markers missing from the Langfuse row: names them and the column', async () => {
+    const out = await runOnce({rowMissing: ['status-message', 'scope-attribute']})
     const entry = check(out.detail, 'canary-langfuse')
     expect(entry.status).toBe('fail')
-    expect(entry.detail).toContain('link-attribute')
+    expect(entry.detail).toContain('status-message')
+    expect(entry.detail).toContain('status_message')
     expect(entry.detail).toContain('scope-attribute')
+    expect(out.reporter.health().status).toBe(503)
   })
 
   it('worker health fails while web answers: the verdict fails and names the worker', async () => {
@@ -802,6 +1054,119 @@ describe('error paths name the failing check and fail the verdict', () => {
   })
 })
 
+describe('the Langfuse half of a whole run', () => {
+  it('a correctly delivered trace passes: the row holds only the materialised markers, the raw batch all nine', async () => {
+    const out = await runOnce()
+    expect(check(out.detail, 'canary-langfuse').status).toBe('pass')
+    expect(out.reporter.health().status).toBe(200)
+  })
+
+  it('reads exactly the object the row names, with a size cap, and never lists the bucket for it', async () => {
+    const world = harness({objectKeys: []})
+    const calls = {childPrefixes: 0, firstKey: 0}
+    const deps: ReporterDeps = {
+      ...world.deps,
+      objectStore: password => {
+        const store = world.deps.objectStore(password)
+        return {
+          ...store,
+          childPrefixes: prefix => {
+            calls.childPrefixes += 1
+            return store.childPrefixes(prefix)
+          },
+          firstKey: prefix => {
+            calls.firstKey += 1
+            return store.firstKey(prefix)
+          },
+        }
+      },
+    }
+    const reporter = createReporter(deps)
+    await reporter.runOnce()
+    const reads = world.requests.filter(entry => entry.url === 'object-store-read')
+    expect(reads.length).toBeGreaterThan(0)
+    for (const read of reads) {
+      expect(read.headers.key).toBe(RAW_KEY)
+      expect(Number(read.headers.maxBytes)).toBe(RAW_BATCH_LIMITS.maxBytes)
+    }
+    // The only listing is the age check's: one call for the project prefixes, none for a first key (no projects).
+    expect(calls).toEqual({childPrefixes: 1, firstKey: 0})
+    expect(check(reporter.detail(), 'canary-langfuse').status).toBe('pass')
+  })
+
+  it.each(CANARY_PLACES)('a raw batch without the %s marker fails the verdict and names the place', async place => {
+    const out = await runOnce({rawMissing: [place]})
+    const entry = check(out.detail, 'canary-langfuse')
+    expect(entry.status).toBe('fail')
+    expect(entry.detail).toContain(place)
+    expect(entry.detail).toContain('raw batch')
+    expect(check(out.detail, 'canary-tempo').status).toBe('pass')
+    expect(out.reporter.health().status).toBe(503)
+  })
+
+  it('link, event and exception markers that Langfuse never copies into a row do not fail the row part', async () => {
+    const out = await runOnce({rowMissing: [], rawMissing: []})
+    const entry = check(out.detail, 'canary-langfuse')
+    expect(entry.status).toBe('pass')
+    expect(entry.detail).not.toContain('link-attribute')
+  })
+
+  it('a raw batch that is not in the object store fails after the deadline, not at the first try', async () => {
+    const out = await runOnce({rawObject: 'absent'})
+    const entry = check(out.detail, 'canary-langfuse')
+    expect(entry.status).toBe('fail')
+    expect(entry.detail).toContain('raw batch')
+    expect(out.state.now - NOW).toBeGreaterThanOrEqual(THRESHOLDS.canaryDeadlineMs)
+    expect(out.reporter.health().status).toBe(503)
+  })
+
+  it.each(['not-json', 'not-array', 'gzip', 'oversize'] as const)(
+    'a raw batch that is %s fails closed and never passes',
+    async rawObject => {
+      const out = await runOnce({rawObject})
+      expect(check(out.detail, 'canary-langfuse').status).toBe('fail')
+      expect(out.reporter.health().status).toBe(503)
+    },
+  )
+
+  it('an object store that refuses the read is unknown, never a pass, and its error text stays out of the detail', async () => {
+    const out = await runOnce({rawObject: 'throw'})
+    expect(check(out.detail, 'canary-langfuse').status).toBe('unknown')
+    expect(out.detail).not.toContain('ECONNREFUSED')
+    expect(out.detail).not.toContain('minio-internal')
+    expect(out.reporter.health().status).toBe(503)
+  })
+
+  it.each(['empty', 'malformed', 'other-prefix'] as const)(
+    'a row whose raw batch key is %s fails without reading any object',
+    async blobPath => {
+      const out = await runOnce({blobPath})
+      const entry = check(out.detail, 'canary-langfuse')
+      expect(entry.status).toBe('fail')
+      expect(entry.detail).toContain('raw batch')
+      expect(out.requests.some(request => request.url === 'object-store-read')).toBe(false)
+      expect(out.reporter.health().status).toBe(503)
+    },
+  )
+
+  it('a raw batch read that never settles is bounded and fails the check', async () => {
+    const world = harness()
+    const deps: ReporterDeps = {
+      ...world.deps,
+      limits: SMALL,
+      objectStore: password => ({...world.deps.objectStore(password), read: () => NEVER}),
+    }
+    const reporter = createReporter(deps)
+    const started = performance.now()
+    await reporter.runOnce()
+    expect(performance.now() - started).toBeLessThan(3500)
+    const entry = check(reporter.detail(), 'canary-langfuse')
+    expect(entry.status).not.toBe('pass')
+    expect(entry.detail).toContain('timeout')
+    expect(reporter.health().status).toBe(503)
+  })
+})
+
 describe('every probe fails closed', () => {
   // Each dependency, broken three ways. A failed probe must never leave the verdict passing.
   const breakages: [string, Partial<Behaviour>][] = [
@@ -859,12 +1224,6 @@ describe('every probe fails closed', () => {
 
 // ─── Deadlines ────────────────────────────────────────────────────────────────
 
-// A promise that never settles stands for a dependency that accepted the connection and went silent. It ignores
-// the abort signal on purpose: a deadline that relies on the dependency honouring a signal is not a deadline.
-const NEVER: Promise<never> = new Promise<never>(() => undefined)
-
-const SMALL = {probeTimeoutMs: 15, runDeadlineMs: 4000} as const
-
 describe('every probe has a deadline', () => {
   it('the run deadline is shorter than the interval, so a stuck run cannot hold the guard past the next tick', () => {
     expect(THRESHOLDS.runDeadlineMs).toBeLessThan(THRESHOLDS.intervalMs)
@@ -876,7 +1235,7 @@ describe('every probe has a deadline', () => {
     const deps: ReporterDeps = {
       ...world.deps,
       limits: SMALL,
-      objectStore: () => ({childPrefixes: () => NEVER, firstKey: () => NEVER}),
+      objectStore: () => ({childPrefixes: () => NEVER, firstKey: () => NEVER, read: () => NEVER}),
     }
     const reporter = createReporter(deps)
     const started = performance.now()
@@ -895,7 +1254,11 @@ describe('every probe has a deadline', () => {
     const deps: ReporterDeps = {
       ...world.deps,
       limits: SMALL,
-      objectStore: () => ({childPrefixes: async () => ['events/otel/project-a/'], firstKey: () => NEVER}),
+      objectStore: () => ({
+        childPrefixes: async () => ['events/otel/project-a/'],
+        firstKey: () => NEVER,
+        read: () => NEVER,
+      }),
     }
     const reporter = createReporter(deps)
     await reporter.runOnce()
@@ -919,7 +1282,7 @@ describe('every probe has a deadline', () => {
     ],
     [
       'the ClickHouse canary read',
-      (url, body) => url.startsWith(ENDPOINTS.clickhouse) && body.includes('SELECT * FROM'),
+      (url, body) => url.startsWith(ENDPOINTS.clickhouse) && body.includes('trace_id = {tid'),
       ['canary-langfuse'],
     ],
     ['the Tempo trace read', url => url.startsWith(ENDPOINTS.tempoTraceBase), ['canary-tempo']],

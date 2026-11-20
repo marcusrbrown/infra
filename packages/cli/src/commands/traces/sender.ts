@@ -29,6 +29,11 @@ declare const process: {
 //   - `list` computes fingerprints on the host, so no token text leaves it. Only `revoke` reads token text
 //     back, into memory, to prove the removed token is now refused.
 //
+// A token file is never empty. The collector's credential watcher rejects an empty file (it keeps what it holds on
+// a reload, and a group whose file was empty at start stays dead until a restart), so "no token" is a deny-all
+// file: exactly one void line, a token nobody knows. `add` keeps the lines there are; revoking the last real token,
+// and `revoke --all`, write a fresh void line; `list` hides void lines.
+//
 // Every change to a file is a new file written in the same directory and renamed over the old one, so the
 // collector never sees a partial file, and the file keeps its mode and owner. The whole read-copy-rename runs
 // under one `flock` on the token lock, so two token commands never interleave and a stale copy can never undo a
@@ -63,16 +68,43 @@ export function fingerprintOf(token: string): string {
   return createHash('sha256').update(token).digest('hex').slice(0, FINGERPRINT_LENGTH)
 }
 
+/**
+ * A token file is never empty. The collector's credential watcher rejects an empty file at start (the group is then
+ * dead until a restart) and keeps the previous credentials when a reload finds one, so an empty file revokes
+ * nothing. A file with no real token holds one void line instead: a token nobody knows. A real token is any
+ * non-blank line whose first field does not start with this prefix. A test pins this copy to `apps/traces/src/host.ts`.
+ */
+export const VOID_TOKEN_PREFIX = 'trc_void_'
+
+/** A draw that starts with the void prefix would be taken for a void line (hidden from `list`, immune to `revoke`). */
+const TOKEN_DRAWS = 4
+
 export function generateToken(randomBytes: RandomBytes = platformRandomBytes): {token: string; fingerprint: string} {
-  const bytes = randomBytes(TOKEN_BYTES)
-  if (bytes.length !== TOKEN_BYTES) throw new Error(`the random source must return ${TOKEN_BYTES} bytes`)
-  const token = `${TOKEN_PREFIX}${Buffer.from(bytes).toString('base64url')}`
-  return {token, fingerprint: fingerprintOf(token)}
+  for (let draw = 0; draw < TOKEN_DRAWS; draw += 1) {
+    const bytes = randomBytes(TOKEN_BYTES)
+    if (bytes.length !== TOKEN_BYTES) throw new Error(`the random source must return ${TOKEN_BYTES} bytes`)
+    const token = `${TOKEN_PREFIX}${Buffer.from(bytes).toString('base64url')}`
+    // One draw in about a billion. A source stuck on such a draw is an error, not a loop.
+    if (!token.startsWith(VOID_TOKEN_PREFIX)) return {token, fingerprint: fingerprintOf(token)}
+  }
+  throw new Error('the random source kept returning a token that starts with the void prefix')
 }
 
 /** `<token> <fingerprint> <date>`: the collector reads the first field only. */
 export function formatTokenLine(token: string, fingerprint: string, createdAt: string): string {
   return `${token} ${fingerprint} ${createdAt}\n`
+}
+
+/** A fresh token nobody knows: generated here, sent on stdin, never printed, logged or kept. */
+export function generateVoidToken(randomBytes: RandomBytes = platformRandomBytes): string {
+  const bytes = randomBytes(TOKEN_BYTES)
+  if (bytes.length !== TOKEN_BYTES) throw new Error(`the random source must return ${TOKEN_BYTES} bytes`)
+  return `${VOID_TOKEN_PREFIX}${Buffer.from(bytes).toString('base64url')}`
+}
+
+/** `<void token> void <date>`: a deny-all file is exactly this one line. */
+export function formatVoidLine(voidToken: string, createdAt: string): string {
+  return `${voidToken} void ${createdAt}\n`
 }
 
 // ─── Remote commands ──────────────────────────────────────────────────────────
@@ -88,7 +120,7 @@ export const TRACES_TOKENS_LOCK = `${TOKEN_ROOT}/.lock`
 /** Each group's receiver port in the collector config; a test pins them to otelcol.yaml. */
 const RECEIVER_PORTS: Record<TracesGroup, number> = {marcusrbrown: 4411, 'fro-bot': 4412, workstation: 4413}
 
-type TokenOp = 'list' | 'lines' | 'append' | 'remove' | 'empty'
+type TokenOp = 'list' | 'lines' | 'append' | 'remove' | 'deny'
 
 export function senderSentinel(op: TokenOp, group: string): string {
   assertGroup(group)
@@ -102,6 +134,7 @@ export function lockBusySentinel(group: string): string {
 }
 
 const REMOVED_PREFIX = 'TRACES_TOKEN_REMOVED='
+const REAL_PREFIX = 'TRACES_TOKENS_REAL='
 const PROBE_PREFIX = 'TRACES_PROBE_STATUS='
 
 const script = (...steps: string[]): string => steps.join('; ')
@@ -137,8 +170,28 @@ const TEMP_FILE = ['t=$(mktemp "$d/.token.XXXXXX")', `trap 'rm -f "$t"' EXIT`]
 const COPY_ATTRIBUTES =
   'if [ -f "$f" ]; then cp -p "$f" "$t"; else chmod 0640 "$t"; chown "$(ls -ld "$d" | awk \'{print $3":"$4}\')" "$t"; fi'
 
-/** One `read` loop over the token file: `tok` is the first field, `date` the third. A last line with no newline counts. */
-const EACH_LINE = 'while read -r tok skip date rest || [ -n "$tok" ]; do if [ -z "$tok" ]; then continue; fi'
+/**
+ * One `read` loop over the token file: `tok` is the first field, `date` the third. A last line with no newline
+ * counts. Blank lines and void lines are skipped: a void line is not a token anyone holds.
+ */
+const EACH_LINE = `while read -r tok skip date rest || [ -n "$tok" ]; do if [ -z "$tok" ]; then continue; fi; case "$tok" in ${VOID_TOKEN_PREFIX}*) continue ;; esac`
+
+/** Base64url characters in 32 bytes, unpadded. */
+const VOID_TOKEN_BODY_LENGTH = Math.ceil((TOKEN_BYTES * 4) / 3)
+
+/**
+ * Read the void line from stdin into `vl` and refuse, before the lock is taken or anything is touched, one that is
+ * not `<void token> void <date>` with a token of exactly the right shape: a mistake here would be written over a
+ * token file. Nothing is printed: the line is a credential nobody is meant to know.
+ */
+const READ_VOID_LINE = [
+  'read -r vl',
+  "vt=$(printf '%s' \"$vl\" | cut -d ' ' -f 1)",
+  `case "$vt" in ${VOID_TOKEN_PREFIX}*) ;; *) exit 1 ;; esac`,
+  'case "$vt" in *[!A-Za-z0-9_-]*) exit 1 ;; esac',
+  `[ "\${#vt}" -eq ${VOID_TOKEN_PREFIX.length + VOID_TOKEN_BODY_LENGTH} ]`,
+  'case "$vl" in "$vt void "?*) ;; *) exit 1 ;; esac',
+]
 
 /** The host's fingerprint of a token, computed from the token itself and checked to be the right length. */
 const HASH_TOKEN = 'h=$(printf %s "$tok" | sha256sum | cut -c1-12); case "$h" in ????????????) ;; *) exit 1 ;; esac'
@@ -174,36 +227,47 @@ export const SENDER_REMOTE = {
       `echo ${senderSentinel('append', group)}`,
     ),
   /**
-   * Remove every line whose token has the fingerprint on stdin, and drop blank lines, by the same
-   * write-and-rename. Prints how many lines it removed.
+   * Remove every line whose token has the fingerprint on stdin (first line), and drop blank lines, by the same
+   * write-and-rename. A void line is never matched and never removed. The void line on stdin (second line) is
+   * written instead of everything else when no real token is left, so the file is never empty: the collector
+   * rejects an empty file and keeps what it already holds. Prints how many lines it removed and how many real
+   * tokens remain.
    */
   remove: (group: string): string =>
     script(
       'set -e',
       'read -r fp',
       'case "$fp" in ????????????) ;; *) exit 1 ;; esac',
+      ...READ_VOID_LINE,
       ...lockTokens(group),
       ...locate(group),
       'test -f "$f"',
       ...TEMP_FILE,
       'cp -p "$f" "$t"',
       'n=0',
-      String.raw`while read -r tok rest || [ -n "$tok" ]; do if [ -z "$tok" ]; then continue; fi; ${HASH_TOKEN}; if [ "$h" = "$fp" ]; then n=$((n+1)); elif [ -n "$rest" ]; then printf "%s %s\n" "$tok" "$rest"; else printf "%s\n" "$tok"; fi; done < "$f" > "$t"`,
+      'r=0',
+      String.raw`while read -r tok rest || [ -n "$tok" ]; do if [ -z "$tok" ]; then continue; fi; isv=0; case "$tok" in ${VOID_TOKEN_PREFIX}*) isv=1 ;; esac; if [ "$isv" = 0 ]; then ${HASH_TOKEN}; if [ "$h" = "$fp" ]; then n=$((n+1)); continue; fi; r=$((r+1)); fi; if [ -n "$rest" ]; then printf "%s %s\n" "$tok" "$rest"; else printf "%s\n" "$tok"; fi; done < "$f" > "$t"`,
+      String.raw`if [ "$r" -eq 0 ]; then printf "%s\n" "$vl" > "$t"; fi`,
       'mv -f "$t" "$f"',
       `echo ${REMOVED_PREFIX}$n`,
+      `echo ${REAL_PREFIX}$r`,
       `echo ${senderSentinel('remove', group)}`,
     ),
-  /** Replace the group's file with an empty one, by the same write-and-rename. */
-  empty: (group: string): string =>
+  /**
+   * Replace the group's file with the void line on stdin and nothing else (deny-all), by the same
+   * write-and-rename. Never an empty file.
+   */
+  deny: (group: string): string =>
     script(
       'set -e',
+      ...READ_VOID_LINE,
       ...lockTokens(group),
       ...locate(group),
       ...TEMP_FILE,
       COPY_ATTRIBUTES,
-      ': > "$t"',
+      String.raw`printf "%s\n" "$vl" > "$t"`,
       'mv -f "$t" "$f"',
-      `echo ${senderSentinel('empty', group)}`,
+      `echo ${senderSentinel('deny', group)}`,
     ),
   /**
    * One authenticated request to the group's private receiver, made from the health reporter container
@@ -830,8 +894,14 @@ async function revokeOne(
     return false
   }
 
+  // The void line travels with every removal: the host writes it, in place of everything else, only if this was
+  // the last real token. It is generated here, sent on stdin, never printed, and kept nowhere.
+  const voidToken = generateVoidToken(deps.randomBytes)
+  secrets.push(voidToken)
+  const voidLine = formatVoidLine(voidToken, (deps.now?.() ?? new Date()).toISOString())
+
   const removed = await runRemote(host, SENDER_REMOTE.remove(group), {
-    stdin: `${fingerprint}\n`,
+    stdin: `${fingerprint}\n${voidLine}`,
     ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
   })
   if (isLockBusy(removed, group)) {
@@ -845,6 +915,7 @@ async function revokeOne(
     return false
   }
   const count = Number(new RegExp(String.raw`^${REMOVED_PREFIX}(\d+)$`, 'm').exec(removed.stdout)?.[1])
+  const realRemaining = Number(new RegExp(String.raw`^${REAL_PREFIX}(\d+)$`, 'm').exec(removed.stdout)?.[1])
 
   const route = await chooseRoute(host, origin, group, deps)
   let ok = true
@@ -867,6 +938,9 @@ async function revokeOne(
     return false
   }
   out.log(`Token ${fingerprint} revoked from ${group}: ${route.label} answered 401 for it.`)
+  if (realRemaining === 0) {
+    out.log(`${group}: no real token remains. The file holds one void line, so the group accepts nothing.`)
+  }
   return true
 }
 
@@ -885,7 +959,7 @@ async function revokeAll(options: RevokeOptions, out: Out, secrets: string[], de
   for (const group of TRACES_GROUPS) {
     const current = await readEntries(host, group, 'lines', deps)
     if (!current.ok) {
-      out.error(`${group}: the token file could not be read (${current.error}); it was not emptied.`)
+      out.error(`${group}: the token file could not be read (${current.error}); it was not rewritten.`)
       ok = false
       continue
     }
@@ -893,25 +967,29 @@ async function revokeAll(options: RevokeOptions, out: Out, secrets: string[], de
       if (entry.token !== undefined) secrets.push(entry.token)
     }
 
-    const emptied = await runRemote(
-      host,
-      SENDER_REMOTE.empty(group),
-      deps.spawn === undefined ? {} : {spawn: deps.spawn},
-    )
-    if (isLockBusy(emptied, group)) {
-      out.error(`${group}: ${lockBusyMessage(group)} It was not emptied.`)
+    // A new void line for every group, every time, so the file always changes and is never empty: the collector
+    // rejects an empty file and keeps the tokens it already holds.
+    const voidToken = generateVoidToken(deps.randomBytes)
+    secrets.push(voidToken)
+    const denied = await runRemote(host, SENDER_REMOTE.deny(group), {
+      stdin: formatVoidLine(voidToken, (deps.now?.() ?? new Date()).toISOString()),
+      ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
+    })
+    if (isLockBusy(denied, group)) {
+      out.error(`${group}: ${lockBusyMessage(group)} It was not rewritten.`)
       ok = false
       continue
     }
-    if (!hasSentinel(emptied, senderSentinel('empty', group))) {
+    if (!hasSentinel(denied, senderSentinel('deny', group))) {
       out.error(
-        `${group}: the host did not confirm the file was emptied (exit ${emptied.exitCode}: ${emptied.stderr || 'no confirmation'}). Tokens may still be accepted.`,
+        `${group}: the host did not confirm the file was rewritten (exit ${denied.exitCode}: ${denied.stderr || 'no confirmation'}). Tokens may still be accepted.`,
       )
       ok = false
       continue
     }
 
     const route = privateRoute(host, group, deps)
+    let groupProven = true
     for (const entry of current.entries) {
       if (entry.token === undefined) continue
       const proof = await prove(route, entry.token, isRefused, deps)
@@ -921,20 +999,23 @@ async function revokeAll(options: RevokeOptions, out: Out, secrets: string[], de
         continue
       }
       ok = false
+      groupProven = false
       out.error(
         proof.last !== 'none' && isSuccess(proof.last)
           ? `${group}: token ${entry.fingerprint} was removed from the file but still accepted (${route.label} answered ${describeStatus(proof.last)}). ${HOLD_HINT}`
           : `${group}: token ${entry.fingerprint} was removed from the file, but its refusal could not be proven (${route.label} answered ${describeStatus(proof.last)}). If it may still be accepted, run \`infra traces ingest hold\`.`,
       )
     }
-    if (current.entries.length === 0) out.log(`${group}: the file was already empty.`)
+    if (groupProven) {
+      out.log(`${group}: no real token remains. The file holds one void line, so the group accepts nothing.`)
+    }
   }
 
   if (ok) {
     out.log(
       removedFingerprints.length === 0
-        ? 'Every token file is empty.'
-        : `Every token file is empty and every listed token is refused. Removed: ${removedFingerprints.join(', ')}.`,
+        ? 'No real token remains in any group: every token file is deny-all.'
+        : `No real token remains in any group: every token file is deny-all and every listed token is refused. Removed: ${removedFingerprints.join(', ')}.`,
     )
     out.log(
       'This command does not touch GitHub secrets: delete the matching ones yourself, and issue new tokens with `infra traces sender add`.',
@@ -999,9 +1080,9 @@ export function registerTracesSender(cli: ReturnType<typeof goke>): void {
   cli
     .command(
       'traces sender revoke [group] [fingerprint]',
-      'Remove one sender token and prove it is now refused. With --all (no group, no fingerprint): empty every group file and prove every old token is refused on its private receiver.',
+      'Remove one sender token and prove it is now refused. With --all (no group, no fingerprint): make every group file deny-all (one void line, no real token) and prove every old token is refused on its private receiver.',
     )
-    .option('--all', 'Empty every group token file. Proves over ssh only, never through the public hostname.')
+    .option('--all', 'Make every group token file deny-all. Proves over ssh only, never through the public hostname.')
     .option('--key [key]', keyOption)
     .action((group, fingerprint, options, ctx) => tracesSenderRevokeAction(group, fingerprint, options, ctx))
 }

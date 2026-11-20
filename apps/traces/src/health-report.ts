@@ -643,6 +643,68 @@ export const TEMPO_DROPPED_PLACES: readonly CanaryPlace[] = CANARY_PLACES.filter
   place => !TEMPO_KEPT_PLACES.includes(place),
 )
 
+// ─── Where Langfuse keeps each marker ─────────────────────────────────────────
+//
+// THE ONE PLACE TO RE-CHECK ON A LANGFUSE UPGRADE. Langfuse does not store a trace as it received it. It writes
+// the whole OTLP batch to the object store (the raw batch, below) and projects each span into one ClickHouse
+// row. Only some of what the canary sends survives the projection, so the readback is in two parts:
+//
+//   1. the ClickHouse row (`events_full`) holds each marker in the column named here, for the six places Langfuse
+//      materialises. It proves delivery to the worker and the projection;
+//   2. the raw batch holds all nine markers. It proves nothing was cut on the way in, including the places the
+//      projection drops.
+//
+// Derived from langfuse/langfuse at tag v4.83.0. Re-read these when the pinned Langfuse tag changes:
+//   - packages/shared/src/server/otel/OtelIngestionProcessor.ts, `processToEvent()` and `extractInputAndOutput()`
+//     (the direct-write path: the worker's defaults LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only and
+//     LANGFUSE_MIGRATION_V4_NATIVE_OTEL_BEHAVIOUR=direct send every batch down it; the compose sets neither);
+//   - worker/src/services/IngestionService/index.ts, `createEventRecord()` (the column mapping, and
+//     `blob_storage_file_path: fileKey`, the raw batch's key);
+//   - packages/shared/src/server/otel/OtelIngestionProcessor.ts, `publishToOtelIngestionQueue()` and
+//     web/src/server/otel/processOtelIngestion.ts (the raw batch: `JSON.stringify(resourceSpans)`, plain JSON,
+//     key `events/otel/<project>/YYYY/MM/DD/HH/MM/<uuid>.json`, no compression, no content encoding).
+//
+//   span-name           name             the span name (`extractName` falls back to it)
+//   status-message      status_message   `span.status.message`
+//   content-key         input            `gen_ai.input.messages` becomes the observation input, reshaped to
+//                                        {messages, tools}; the text is kept (measured byte-exact up to 4 MB)
+//   resource-attribute  metadata_values  metadata.resourceAttributes.* flattened into metadata_names/values
+//   scope-attribute     metadata_values  metadata.scope.attributes.*, the same way
+//   unlisted-attribute  metadata_values  metadata.attributes.* (span attributes not consumed as input/output)
+//   event-attribute     (none)           a span event is read only when its name is a recognised GenAI event
+//                                        (gen_ai.*.message, gen_ai.choice, gen_ai.content.*,
+//                                        gen_ai.client.inference.operation.details); `canary-event` is not
+//   exception-message   (none)           an `exception` span event is not a recognised GenAI event either
+//   link-attribute      (none)           `span.links` is never read
+//
+// Measured on the 2026-11-20 probe of this exact stack and version: name, input, metadata `attributes.*` and
+// `resourceAttributes.*` read back as above (through Langfuse's own observation API, which reads this table).
+// Not measured: status_message, `scope.attributes.*`, `blob_storage_file_path` row contents, and the absence of the
+// three unmaterialised places. Those come from the source and are first confirmed on the real host.
+export type LangfuseColumn = 'name' | 'status_message' | 'input' | 'metadata_values'
+
+export const LANGFUSE_MARKER_LOCATIONS: Readonly<Record<CanaryPlace, {readonly column: LangfuseColumn | undefined}>> = {
+  'content-key': {column: 'input'},
+  'unlisted-attribute': {column: 'metadata_values'},
+  'resource-attribute': {column: 'metadata_values'},
+  'scope-attribute': {column: 'metadata_values'},
+  'event-attribute': {column: undefined},
+  'link-attribute': {column: undefined},
+  'status-message': {column: 'status_message'},
+  'exception-message': {column: undefined},
+  'span-name': {column: 'name'},
+}
+
+/**
+ * Bounds on the raw batch read. The key comes from the ClickHouse row, so one object is read and nothing is
+ * listed. The canary is a few kilobytes, so the cap is far above any real canary batch; a larger object fails.
+ */
+export const RAW_BATCH_LIMITS = {maxBytes: 1_048_576} as const
+
+/** The key layout Langfuse writes (see the table above): nothing else is ever read as a raw batch. */
+export const RAW_BATCH_KEY =
+  /^events\/otel\/[\w-]+\/\d{4}\/\d{2}\/\d{2}\/\d{2}\/\d{2}\/[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\.json$/
+
 export interface Canary {
   traceId: string
   markers: Record<CanaryPlace, string>
@@ -738,15 +800,120 @@ function present(text: string, canary: Canary, places: readonly CanaryPlace[]): 
   return places.filter(place => text.includes(canary.markers[place]))
 }
 
-/** Langfuse stores every place: a marker missing from what its trace table holds is a failure naming the place. */
-export function evaluateLangfuseReadback(rows: string | undefined, canary: Canary): CheckResult {
+type Row = Record<string, unknown>
+
+/** The rows of a `JSONEachRow` answer, or undefined when any line is not a JSON object. */
+function parseRows(text: string): Row[] | undefined {
+  const rows: Row[] = []
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      return undefined
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+    rows.push(Object.fromEntries(Object.entries(parsed)))
+  }
+  return rows
+}
+
+function columnHolds(row: Row, column: LangfuseColumn, marker: string): boolean {
+  const value = row[column]
+  if (typeof value === 'string') return value.includes(marker)
+  return Array.isArray(value) && value.some(item => typeof item === 'string' && item.includes(marker))
+}
+
+/** Every place Langfuse materialises, with its column. The places it drops are not here. */
+function materialisedPlaces(): {place: CanaryPlace; column: LangfuseColumn}[] {
+  return CANARY_PLACES.flatMap(place => {
+    const {column} = LANGFUSE_MARKER_LOCATIONS[place]
+    return column === undefined ? [] : [{place, column}]
+  })
+}
+
+/** The columns the readback selects: the marker columns, the trace id and the raw batch's key. */
+const LANGFUSE_ROW_COLUMNS: readonly string[] = [
+  'trace_id',
+  ...new Set(materialisedPlaces().map(entry => entry.column)),
+  'blob_storage_file_path',
+]
+
+/**
+ * Part 1, delivery and materialisation. The canary's row is in ClickHouse and each place Langfuse materialises
+ * holds its marker in the column the table names. A marker Langfuse does not copy into a row is not required.
+ */
+export function evaluateLangfuseRow(rows: string | undefined, canary: Canary): CheckResult {
   if (rows === undefined || rows.trim() === '')
     return result('canary-langfuse', 'fail', 'canary trace not found in Langfuse')
-  const found = present(rows, canary, CANARY_PLACES)
-  const missing = CANARY_PLACES.filter(place => !found.includes(place))
+  const parsed = parseRows(rows)
+  if (parsed === undefined || parsed.length === 0) return result('canary-langfuse', 'fail', 'Langfuse row unreadable')
+  const required = materialisedPlaces()
+  const missing = required.filter(
+    ({place, column}) => !parsed.some(row => columnHolds(row, column, canary.markers[place])),
+  )
   return missing.length === 0
-    ? result('canary-langfuse', 'pass', 'canary trace and all 9 markers found in Langfuse')
-    : result('canary-langfuse', 'fail', `canary markers missing in Langfuse: ${missing.join(', ')}`)
+    ? result(
+        'canary-langfuse',
+        'pass',
+        `canary trace found with all ${required.length} materialised markers in ClickHouse`,
+      )
+    : result(
+        'canary-langfuse',
+        'fail',
+        `markers missing in the ClickHouse row: ${missing.map(entry => `${entry.place} (${entry.column})`).join(', ')}`,
+      )
+}
+
+/**
+ * The raw batch's key, from the canary's row. Langfuse writes it into `blob_storage_file_path`; an empty value
+ * (the dual-write path) or any value that is not the key layout fails closed, so nothing outside the batch
+ * prefix is ever read.
+ */
+export function rawBatchKey(rows: string): Probe<string> {
+  const parsed = parseRows(rows)
+  if (parsed === undefined) return {ok: false, reason: 'rows-unreadable'}
+  let key: string | undefined
+  for (const row of parsed) {
+    const path = row.blob_storage_file_path
+    if (typeof path !== 'string' || path === '') continue
+    if (!RAW_BATCH_KEY.test(path)) return {ok: false, reason: 'unrecognised-key'}
+    key ??= path
+  }
+  return key === undefined ? {ok: false, reason: 'no-key'} : {ok: true, value: key}
+}
+
+/**
+ * Part 2, whole-trace fidelity. The raw batch is a JSON array of `resourceSpans`, and it holds all nine markers:
+ * Langfuse's own copy of what the collector sent, before any projection.
+ */
+export function evaluateLangfuseRaw(text: string | undefined, canary: Canary): CheckResult {
+  if (text === undefined) return result('canary-langfuse', 'fail', 'batch not found in the object store')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return result('canary-langfuse', 'fail', 'batch is not JSON')
+  }
+  if (!Array.isArray(parsed)) return result('canary-langfuse', 'fail', 'batch is not a resourceSpans array')
+  const missing = CANARY_PLACES.filter(place => !text.includes(canary.markers[place]))
+  return missing.length === 0
+    ? result('canary-langfuse', 'pass', `all ${CANARY_PLACES.length} markers found`)
+    : result('canary-langfuse', 'fail', `markers missing: ${missing.join(', ')}`)
+}
+
+/** One answer from the two parts: it passes only when both do, and every part that did not pass is named. */
+export function combineLangfuse(row: CheckResult, raw: CheckResult): CheckResult {
+  if (row.status === 'pass' && raw.status === 'pass') {
+    return result('canary-langfuse', 'pass', `${row.detail}; raw batch: ${raw.detail}`)
+  }
+  const parts = [
+    ...(row.status === 'pass' ? [] : [`row: ${row.detail}`]),
+    ...(raw.status === 'pass' ? [] : [`raw batch: ${raw.detail}`]),
+  ]
+  const failed = row.status === 'fail' || raw.status === 'fail'
+  return result('canary-langfuse', failed ? 'fail' : 'unknown', parts.join('; '))
 }
 
 /**
@@ -771,6 +938,11 @@ export interface ObjectStoreReader {
   firstKey: (prefix: string) => Promise<string | undefined>
   /** The immediate sub-prefixes under a prefix. */
   childPrefixes: (prefix: string) => Promise<string[]>
+  /**
+   * The first `maxBytes + 1` bytes of one object, or undefined when it does not exist. One byte more than the
+   * cap tells the caller the object is too large without reading it all.
+   */
+  read: (key: string, maxBytes: number) => Promise<Uint8Array | undefined>
 }
 
 /** The only part of `fetch` the reporter uses, so a test can supply one function. */
@@ -913,18 +1085,61 @@ export async function oldestClickHouseSpan(deps: ReporterDeps): Promise<Probe<nu
   return {ok: true, value: oldest}
 }
 
-/** All rows Langfuse holds for the canary trace, as text, or undefined when there are none yet. */
-async function readLangfuseCanary(deps: ReporterDeps, canary: Canary): Promise<Probe<string | undefined>> {
+/** The canary trace's rows in `events_full`, as `JSONEachRow` text, or undefined when there are none yet. */
+async function readLangfuseRows(deps: ReporterDeps, canary: Canary): Promise<Probe<string | undefined>> {
   const password = await readSecret(deps, PATHS.clickhousePasswordFile)
   if (!password.ok) return password
   const answer = await queryClickHouse(
     deps,
     password.value,
-    `SELECT * FROM ${CLICKHOUSE_DATABASE}.events_full WHERE trace_id = {tid:String} LIMIT 20 FORMAT JSONEachRow`,
+    `SELECT ${LANGFUSE_ROW_COLUMNS.join(', ')} FROM ${CLICKHOUSE_DATABASE}.events_full WHERE trace_id = {tid:String} LIMIT 20 FORMAT JSONEachRow`,
     {tid: canary.traceId},
   )
   if (!answer.ok) return answer
   return {ok: true, value: answer.value.trim() === '' ? undefined : answer.value}
+}
+
+function decodeRawBatch(bytes: Uint8Array): Probe<string> {
+  if (bytes.length > RAW_BATCH_LIMITS.maxBytes) {
+    return {ok: false, reason: `larger than ${RAW_BATCH_LIMITS.maxBytes} bytes`}
+  }
+  // Langfuse v4.83.0 uploads plain JSON. A gzip header means an upgrade changed that: fail, and name it.
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b) return {ok: false, reason: 'compressed'}
+  try {
+    return {ok: true, value: new TextDecoder('utf-8', {fatal: true}).decode(bytes)}
+  } catch {
+    return {ok: false, reason: 'not UTF-8'}
+  }
+}
+
+/**
+ * Part 2: read the one object the canary's row names, and look for every marker in it. A read that cannot be done
+ * is `unknown`; an object that is missing or unusable is `fail`.
+ */
+async function checkRawBatch(deps: ReporterDeps, rows: string, canary: Canary): Promise<CheckResult> {
+  const key = rawBatchKey(rows)
+  if (!key.ok) return result('canary-langfuse', 'fail', `the row names no usable batch (${key.reason})`)
+  const password = await readSecret(deps, PATHS.objectStorePasswordFile)
+  if (!password.ok) return result('canary-langfuse', 'unknown', `object store could not be read (${password.reason})`)
+  let bytes: Uint8Array | undefined
+  try {
+    const store = deps.objectStore(password.value)
+    bytes = await bounded(() => store.read(key.value, RAW_BATCH_LIMITS.maxBytes), probeLimit(deps))
+  } catch (error) {
+    return result('canary-langfuse', 'unknown', `object store could not be read (${failureReason(error)})`)
+  }
+  if (bytes === undefined) return evaluateLangfuseRaw(undefined, canary)
+  const text = decodeRawBatch(bytes)
+  if (!text.ok) return result('canary-langfuse', 'fail', `batch unusable (${text.reason})`)
+  return evaluateLangfuseRaw(text.value, canary)
+}
+
+/** The Langfuse half of the canary: the ClickHouse row (part 1) and the raw batch it names (part 2). */
+async function checkLangfuseCanary(deps: ReporterDeps, canary: Canary): Promise<CheckResult> {
+  const rows = await readLangfuseRows(deps, canary)
+  if (!rows.ok) return result('canary-langfuse', 'unknown', `Langfuse could not be read (${rows.reason})`)
+  if (rows.value === undefined) return result('canary-langfuse', 'fail', 'canary trace not found in Langfuse')
+  return combineLangfuse(evaluateLangfuseRow(rows.value, canary), await checkRawBatch(deps, rows.value, canary))
 }
 
 // ─── Object store and Tempo age ───────────────────────────────────────────────
@@ -1021,13 +1236,8 @@ export async function runCanary(deps: ReporterDeps): Promise<CheckResult[]> {
 
   for (;;) {
     if (langfuse === undefined) {
-      const rows = await readLangfuseCanary(deps, canary)
-      if (rows.ok) {
-        langfuseLast = evaluateLangfuseReadback(rows.value, canary)
-        if (langfuseLast.status === 'pass') langfuse = langfuseLast
-      } else {
-        langfuseLast = result('canary-langfuse', 'unknown', `Langfuse could not be read (${rows.reason})`)
-      }
+      langfuseLast = await checkLangfuseCanary(deps, canary)
+      if (langfuseLast.status === 'pass') langfuse = langfuseLast
     }
     if (tempo === undefined) {
       const body = await readTempoCanary(deps, canary)
@@ -1327,6 +1537,12 @@ function realObjectStore(password: string): ObjectStoreReader {
     firstKey: async prefix => (await client.list({prefix, maxKeys: 1})).contents?.[0]?.key,
     childPrefixes: async prefix =>
       ((await client.list({prefix, delimiter: '/', maxKeys: 100})).commonPrefixes ?? []).map(entry => entry.prefix),
+    read: async (key, maxBytes) => {
+      const file = client.file(key)
+      if (!(await file.exists())) return undefined
+      // A range read: an object larger than the cap is never fetched whole.
+      return new Uint8Array(await file.slice(0, maxBytes + 1).arrayBuffer())
+    },
   }
 }
 

@@ -137,6 +137,25 @@ describe('status snapshot', () => {
     expect(meta.lastSampleAt).toBe(FIXED_NOW.toISOString())
   })
 
+  it('creates the file of an app the history does not know yet, keeping every other sample', async () => {
+    // The live artifact predates `traces`: it holds the other app files and no apps/traces.json.
+    await run({bootstrap: true}, {env: runEnv('1001')})
+    const before = await readFiles(history)
+    await rm(join(history, 'apps', 'traces.json'))
+
+    const second = await run({}, {env: runEnv('1002')})
+
+    expect(second.exit).toBeNull()
+    expect(second.stderr).toEqual([])
+    expect(second.stdout[0]).toBe('samples: keeweb=2 cliproxy=2 gateway=2 umami=2 dashboard=2 vpn=2 broker=2 traces=1')
+    const loaded = await loadHistory(history, 'existing')
+    expect(loaded?.apps.traces.map(entry => entry.run)).toEqual(['1002'])
+    for (const app of APP_IDS.filter(id => id !== 'traces')) {
+      const first = historyAppFileSchema.parse(JSON.parse(before[join('apps', `${app}.json`)] ?? '[]'))[0]
+      expect(loaded?.apps[app].map(entry => entry.run)).toContain(first?.run)
+    }
+  })
+
   it('is a no-op for a rerun of the same run and attempt, and leaves the files byte-identical', async () => {
     await run({bootstrap: true}, {env: runEnv('1001')})
     const before = await readFiles(history)

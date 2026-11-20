@@ -21,6 +21,8 @@ interface Props {
 const {view} = Astro.props
 const verdict = VERDICT_DISPLAY[view.verdict]
 const gapMinutes = GAP_THRESHOLD_MS / 60_000
+// A service added after the history began has no samples until the next snapshot: say so instead of "0 of 4321".
+const noData = view.latestSampleAt === undefined
 ---
 
 <section>
@@ -98,9 +100,15 @@ const gapMinutes = GAP_THRESHOLD_MS / 60_000
   }
 
   <h2 id="history">History</h2>
-  <p>
-    {coverageLabel(view.coverage)}, from <time datetime={view.coverage.windowStart}>{formatUtc(view.coverage.windowStart)}</time>.
-  </p>
+  {
+    noData ? (
+      <p>No data yet. No samples have been recorded for this service.</p>
+    ) : (
+      <p>
+        {coverageLabel(view.coverage)}, from <time datetime={view.coverage.windowStart}>{formatUtc(view.coverage.windowStart)}</time>.
+      </p>
+    )
+  }
   <div class="table-scroll">
     <table>
       <thead>
@@ -117,7 +125,7 @@ const gapMinutes = GAP_THRESHOLD_MS / 60_000
               <th scope="row">
                 <code>{observation.id}</code>
               </th>
-              <td>{observation.counts.total === 0 ? 'Not recorded in the public snapshot' : passLabel(observation.counts)}</td>
+              <td>{noData ? 'No data yet' : observation.counts.total === 0 ? 'Not recorded in the public snapshot' : passLabel(observation.counts)}</td>
               <td>{breakdownLabel(observation.counts) || 'None'}</td>
             </tr>
           ))
@@ -129,7 +137,7 @@ const gapMinutes = GAP_THRESHOLD_MS / 60_000
   <h2 id="gaps">Gaps</h2>
   {
     view.gaps.length === 0 ? (
-      <p>No gaps longer than {gapMinutes} minutes between samples.</p>
+      <p>{noData ? 'No data yet.' : `No gaps longer than ${gapMinutes} minutes between samples.`}</p>
     ) : (
       <>
         <p>

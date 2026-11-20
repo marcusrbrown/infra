@@ -13,6 +13,7 @@ import {
   TRACES_SENTINEL_PATH,
   TRACES_TOKEN_ROOT,
   TRACES_TOKENS_LOCK,
+  TRACES_VOID_TOKEN_PREFIX,
   TRACES_VOLUME_MOUNT,
   tracesTokenDir,
   validateTracesHost,
@@ -107,5 +108,11 @@ describe('deploy state and locks', () => {
     expect(new Set([TRACES_DEPLOY_MARKER, TRACES_PENDING_RESTARTS, TRACES_INGEST_LOCK, TRACES_TOKENS_LOCK]).size).toBe(
       4,
     )
+  })
+})
+
+describe('token files', () => {
+  it('pins the void token prefix', () => {
+    expect(TRACES_VOID_TOKEN_PREFIX).toBe('trc_void_')
   })
 })

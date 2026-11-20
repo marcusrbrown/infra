@@ -104,3 +104,13 @@ export const TRACES_TOKENS_LOCK = `${TRACES_TOKEN_ROOT}/.lock`
 
 /** What a locked script prints when it could not take its lock in 30 seconds. Never a silent skip. */
 export const TRACES_LOCK_BUSY_SENTINEL = 'LOCK_BUSY'
+
+// ─── Token files ──────────────────────────────────────────────────────────────
+
+/**
+ * A token file is never empty: the collector's credential file watcher rejects an empty file (it fails at start and
+ * keeps the previous credentials on reload), so emptying a file would not revoke anything. A file with no real
+ * token holds one void line instead: `trc_void_<43 base64url chars> void <ISO-8601 UTC timestamp>`, a token nobody
+ * knows. A real token is any non-blank line whose first field does not start with this prefix.
+ */
+export const TRACES_VOID_TOKEN_PREFIX = 'trc_void_'

@@ -11,7 +11,8 @@
  *   (default)                     create or repair the droplet, volume, firewall and host
  *   --check-exists                print whether the droplet exists
  *   --restore-snapshot NAME       close 80/443, then swap the volume for one made from a snapshot
- *   --reopen-ports                reopen 80/443, refused while any sender token file is non-empty
+ *   --reopen-ports                reopen 80/443, refused while any group holds a real token (a deny-all file, one
+ *                                 void line, is fine; a missing or empty token file is a fault)
  *
  * Image store decision: containerd's root is moved to the volume through
  * /etc/containerd/config.toml, and Docker's data root through daemon.json. The
@@ -37,6 +38,8 @@ import {
 } from '@marcusrbrown/infra-shared/server/droplet-helpers'
 
 import {
+  isSenderGroup,
+  SENDER_GROUPS,
   TRACES_APP_DIR,
   TRACES_CONTAINERD_ROOT,
   TRACES_DOCKER_ROOT,
@@ -44,6 +47,7 @@ import {
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
   TRACES_TOKEN_ROOT,
+  TRACES_VOID_TOKEN_PREFIX,
   TRACES_VOLUME_MOUNT,
   TRACES_VOLUME_NAME,
   validateTracesHost,
@@ -994,21 +998,57 @@ export async function checkTracesStorage(exec: RemoteExec): Promise<void> {
 // Token files (reopen guard)
 // ---------------------------------------------------------------------------
 
-const TOKEN_CHECK_SENTINELS = ['TRACES_TOKENS_EMPTY', 'TRACES_TOKENS_PRESENT'] as const
+const TOKEN_CHECK_SENTINELS = ['TRACES_TOKENS_DENY_ALL', 'TRACES_TOKENS_REAL'] as const
 
-/** Needs the volume mounted and the sentinel present; a missing token root is an error, not "empty". */
+const TOKEN_FILE_FAULT_RE = /^TRACES_TOKEN_FILE_(MISSING|EMPTY)=(\S+)$/m
+
+/**
+ * A token file is never empty (the collector's credential watcher rejects an empty file), so "no token" is a
+ * deny-all file: void lines only. A real token is a non-blank line whose first field does not start with the void
+ * prefix. The host counts lines by that prefix and prints nothing but a verdict, so no token text, void or real,
+ * leaves it. A group whose file is missing, or has no non-blank line, is a fault and not "no token": it exits
+ * non-zero with its own sentinel. Every group is checked before a verdict, so a fault is never hidden by a real
+ * token in an earlier group. Needs the volume mounted and the sentinel present; a missing token root is an error too.
+ */
 export function tokenCheckScript(): string {
   const mnt = safePath(TRACES_VOLUME_MOUNT)
   const file = safePath(TRACES_SENTINEL_PATH)
   const root = safePath(TRACES_TOKEN_ROOT)
+  if (!/^\w+$/.test(TRACES_VOID_TOKEN_PREFIX)) throw new Error('Unsafe void token prefix')
   return `set -eu
 # traces-step:token-check
 src=$(findmnt -n -o SOURCE --mountpoint ${mnt})
 if [ -z "$src" ]; then echo TRACES_NOT_MOUNTED; exit 1; fi
 grep -qx ${TRACES_SENTINEL_CONTENT} ${file}
 if [ ! -d ${root} ]; then echo TRACES_TOKEN_ROOT_MISSING; exit 1; fi
-found=$(find -L ${root} -type f -size +0c -print -quit)
-if [ -n "$found" ]; then echo TRACES_TOKENS_PRESENT; else echo TRACES_TOKENS_EMPTY; fi`
+real=0
+for g in ${SENDER_GROUPS.join(' ')}; do
+  f=${root}/$g/token
+  if [ ! -f "$f" ]; then echo "TRACES_TOKEN_FILE_MISSING=$g"; exit 1; fi
+  counts=$(awk -v p=${TRACES_VOID_TOKEN_PREFIX} 'NF > 0 { n++; if (index($1, p) != 1) r++ } END { print n + 0, r + 0 }' "$f")
+  set -- $counts
+  if [ "$1" -eq 0 ]; then echo "TRACES_TOKEN_FILE_EMPTY=$g"; exit 1; fi
+  if [ "$2" -gt 0 ]; then real=1; fi
+done
+if [ "$real" = 1 ]; then echo TRACES_TOKENS_REAL; else echo TRACES_TOKENS_DENY_ALL; fi`
+}
+
+/**
+ * Runs the token check. A missing or empty token file is thrown here, with its own message, before the generic
+ * sentinel check: it must never read as "no token" and must not be mistaken for a real token either.
+ */
+export async function checkTokenFiles(exec: RemoteExec): Promise<(typeof TOKEN_CHECK_SENTINELS)[number]> {
+  const result = await exec(bashCommand(tokenCheckScript()))
+  const fault = result.exitCode === 0 ? undefined : TOKEN_FILE_FAULT_RE.exec(result.stdout)
+  const group = fault?.[2]
+  if (fault && group !== undefined && isSenderGroup(group)) {
+    throw new Error(
+      fault[1] === 'MISSING'
+        ? `Refusing to reopen ports 80 and 443: the ${group} token file under ${TRACES_TOKEN_ROOT} is missing. A token file always exists and holds at least one line; a group with no file refuses nothing it should and may not start. Run a normal deploy (it creates a missing file as deny-all). Ports stay closed.`
+        : `Refusing to reopen ports 80 and 443: the ${group} token file under ${TRACES_TOKEN_ROOT} is empty. The collector rejects an empty file, and a collector that started with one refuses that group until it is restarted. Run traces sender revoke --all to rewrite every file as deny-all, and restart the collector if it started with the empty file. Ports stay closed.`,
+    )
+  }
+  return expectSentinel(result, TOKEN_CHECK_SENTINELS, 'check sender token files')
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,7 +1243,7 @@ async function findVolumeSnapshotId(run: Runner, snapshotName: string): Promise<
  * and stop there, with Docker stopped and the web ports closed. The old volume is
  * kept, detached. A snapshot holds the sender token files as they were, so the
  * ports stay closed at the cloud firewall (not on the volume) until every token
- * file is emptied and `--reopen-ports` is run.
+ * file is deny-all (`traces sender revoke --all`) and `--reopen-ports` is run.
  */
 export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Promise<void> {
   const {run, log} = deps
@@ -1278,7 +1318,7 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     `\n\u001B[1;32m✓\u001B[0m Volume ${newName} is attached and mounted in place of ${oldVolume.name} (kept, detached).`,
   )
   log('Docker is stopped and ports 80 and 443 are closed at the cloud firewall.')
-  log('Next: start Docker, empty every token file (traces sender revoke --all), run a normal deploy,')
+  log('Next: start Docker, make every token file deny-all (traces sender revoke --all), run a normal deploy,')
   log('then run this script with --reopen-ports and reissue all three tokens.')
   log(`The old volume ${oldVolume.name} still exists; delete it after the restore is proven.`)
 }
@@ -1288,7 +1328,10 @@ export interface ReopenInput {
   remoteUser: string
 }
 
-/** Reopens 80 and 443 only after the host reports every sender token file empty. Refuses on anything else. */
+/**
+ * Reopens 80 and 443 only after the host reports every sender token file deny-all (void lines only, no real token).
+ * Refuses on a real token, and faults on a missing or empty token file. Refuses on anything else.
+ */
 export async function runReopen(input: ReopenInput, deps: ProvisionDeps): Promise<void> {
   const {run, log} = deps
 
@@ -1301,12 +1344,12 @@ export async function runReopen(input: ReopenInput, deps: ProvisionDeps): Promis
   const dropletIp = await getDropletIp(run, deps)
   const verdict = await withRemote(deps, input, dropletIp, async (exec, identityFile) => {
     await deps.waitForSsh(dropletIp, input.remoteUser, {identityFile})
-    return runStep(exec, 'check sender token files', tokenCheckScript(), TOKEN_CHECK_SENTINELS)
+    return checkTokenFiles(exec)
   })
 
-  if (verdict !== 'TRACES_TOKENS_EMPTY') {
+  if (verdict !== 'TRACES_TOKENS_DENY_ALL') {
     throw new Error(
-      `Refusing to reopen ports 80 and 443: a sender token file under ${TRACES_TOKEN_ROOT} is not empty. Empty every token file first (traces sender revoke --all). Ports stay closed.`,
+      `Refusing to reopen ports 80 and 443: a sender token file under ${TRACES_TOKEN_ROOT} still holds a real token. Make every token file deny-all first (traces sender revoke --all). Ports stay closed.`,
     )
   }
 

@@ -28,15 +28,15 @@ extensions:
       directory: /var/lib/otelcol/compact
       max_transaction_size: 65536
   # One token per line, extra columns ignored. Several lines let two tokens overlap during rotation.
-  # The file is re-read within about a second; no restart is needed. An empty file refuses everything.
+  # The file is re-read within about a second; no restart is needed. The file is never empty: an empty or missing file at start is not watched, and an emptied file keeps the old tokens. "No tokens" is one void line.
   bearertokenauth/marcusrbrown:
     filename: /etc/otelcol/tokens/marcusrbrown/token
   # One token per line, extra columns ignored. Several lines let two tokens overlap during rotation.
-  # The file is re-read within about a second; no restart is needed. An empty file refuses everything.
+  # The file is re-read within about a second; no restart is needed. The file is never empty: an empty or missing file at start is not watched, and an emptied file keeps the old tokens. "No tokens" is one void line.
   bearertokenauth/fro-bot:
     filename: /etc/otelcol/tokens/fro-bot/token
   # One token per line, extra columns ignored. Several lines let two tokens overlap during rotation.
-  # The file is re-read within about a second; no restart is needed. An empty file refuses everything.
+  # The file is re-read within about a second; no restart is needed. The file is never empty: an empty or missing file at start is not watched, and an emptied file keeps the old tokens. "No tokens" is one void line.
   bearertokenauth/workstation:
     filename: /etc/otelcol/tokens/workstation/token
 

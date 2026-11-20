@@ -1,15 +1,17 @@
 import type {ProvisionDeps, ProvisionInput, Runner, RunResult} from './provision'
-import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
 import {describe, expect, it} from 'bun:test'
 import {
+  SENDER_GROUPS,
   TRACES_CONTAINERD_ROOT,
   TRACES_DOCKER_ROOT,
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
   TRACES_TOKEN_ROOT,
+  TRACES_VOID_TOKEN_PREFIX,
   TRACES_VOLUME_MOUNT,
   TRACES_VOLUME_NAME,
 } from '../src/host'
@@ -206,7 +208,7 @@ interface HostOptions {
   provisioned?: boolean
   fs?: 'none' | 'ext4' | 'other'
   dockerBusy?: boolean
-  tokens?: 'empty' | 'present' | 'missing-root'
+  tokens?: 'deny-all' | 'real' | 'missing-root' | 'file-missing' | 'file-empty'
   storage?: RunResult
 }
 
@@ -284,9 +286,11 @@ class Host {
         return ok('TRACES_QUIESCED')
       }
       case 'token-check': {
-        const tokens = this.options.tokens ?? 'empty'
+        const tokens = this.options.tokens ?? 'deny-all'
         if (tokens === 'missing-root') return {exitCode: 1, stdout: 'TRACES_TOKEN_ROOT_MISSING\n', stderr: ''}
-        return ok(tokens === 'present' ? 'TRACES_TOKENS_PRESENT' : 'TRACES_TOKENS_EMPTY')
+        if (tokens === 'file-missing') return {exitCode: 1, stdout: 'TRACES_TOKEN_FILE_MISSING=fro-bot\n', stderr: ''}
+        if (tokens === 'file-empty') return {exitCode: 1, stdout: 'TRACES_TOKEN_FILE_EMPTY=workstation\n', stderr: ''}
+        return ok(tokens === 'real' ? 'TRACES_TOKENS_REAL' : 'TRACES_TOKENS_DENY_ALL')
       }
       default: {
         throw new Error(`unexpected remote step: ${step}`)
@@ -1133,8 +1137,8 @@ describe('runReopen', () => {
       firewalls: [{id: 'fw-old', name: FIREWALL_NAME, inbound: [inboundRule(22)], droplets: [DROPLET_ID]}],
     })
 
-  it('reopens 80 and 443 after the host reports every token file empty, and reads them back', async () => {
-    const world = makeWorld(closedCloud(), {provisioned: true, tokens: 'empty'})
+  it('reopens 80 and 443 after the host reports every token file deny-all, and reads them back', async () => {
+    const world = makeWorld(closedCloud(), {provisioned: true, tokens: 'deny-all'})
     const {deps} = makeDeps(world.runner)
     await runReopen(REOPEN_INPUT, deps)
 
@@ -1150,13 +1154,34 @@ describe('runReopen', () => {
     expect(checkIndex).toBeLessThan(addIndex)
   })
 
-  it('refuses while a token file is non-empty, and the ports stay closed', async () => {
-    const world = makeWorld(closedCloud(), {provisioned: true, tokens: 'present'})
+  it('refuses while any group still has a real token, and the ports stay closed', async () => {
+    const world = makeWorld(closedCloud(), {provisioned: true, tokens: 'real'})
     const {deps} = makeDeps(world.runner)
-    await expect(runReopen(REOPEN_INPUT, deps)).rejects.toThrow(/Refusing to reopen ports 80 and 443/)
+    await expect(runReopen(REOPEN_INPUT, deps)).rejects.toThrow(/Refusing to reopen ports 80 and 443.*real token/)
     expect(world.doctlCalls().some(call => call.startsWith('compute firewall add-rules'))).toBe(false)
     expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
   })
+
+  it.each([
+    ['file-missing', /the fro-bot token file under \S+ is missing/],
+    ['file-empty', /the workstation token file under \S+ is empty/],
+  ] as const)(
+    'a token file that is %s is a fault with its own message, not "no token", and the ports stay closed',
+    async (tokens, message) => {
+      const world = makeWorld(closedCloud(), {provisioned: true, tokens})
+      const {deps} = makeDeps(world.runner)
+      const failure = await runReopen(REOPEN_INPUT, deps).then(
+        () => undefined,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      )
+      expect(failure).toMatch(message)
+      // Its own message: not the refusal for a real token, and not the generic step failure.
+      expect(failure).not.toMatch(/real token/)
+      expect(failure).not.toMatch(/check sender token files failed/)
+      expect(world.doctlCalls().some(call => call.startsWith('compute firewall add-rules'))).toBe(false)
+      expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
+    },
+  )
 
   it('refuses when the token root cannot be read (a missing directory is not "empty")', async () => {
     const world = makeWorld(closedCloud(), {provisioned: true, tokens: 'missing-root'})
@@ -1184,23 +1209,143 @@ describe('runReopen', () => {
           return undefined
         },
       },
-      {provisioned: true, tokens: 'empty'},
+      {provisioned: true, tokens: 'deny-all'},
     )
     // The override swallows the add call, so the read-back still shows SSH only.
     const {deps} = makeDeps(world.runner)
     await expect(runReopen(REOPEN_INPUT, deps)).rejects.toThrow(/does not show port\(s\) 80, 443/)
   })
 
-  it('checks token files without printing a token and never reads their contents', () => {
+  it('checks token files without printing a token: it counts lines by prefix on the host and prints counts only', () => {
     const script = tokenCheckScript()
-    expect(script).toContain('find -L')
     expect(script).toContain(`${TRACES_TOKEN_ROOT}`)
-    expect(script).toContain('-size +0c')
-    expect(script).not.toMatch(/\bcat\b.+tokens/)
+    expect(script).toContain(`index($1, p)`)
+    expect(script).toContain(`-v p=${TRACES_VOID_TOKEN_PREFIX}`)
+    for (const group of SENDER_GROUPS) expect(script).toContain(group)
+    expect(script).not.toMatch(/\bcat\b/)
+    expect(script).not.toMatch(/\bprint\b[^}]*\$[01]/)
+    expect(script).not.toContain('/dev/null')
     expect(script).toContain('TRACES_TOKEN_ROOT_MISSING')
+    expect(script).toContain('TRACES_TOKEN_FILE_MISSING')
+    expect(script).toContain('TRACES_TOKEN_FILE_EMPTY')
     // Needs the volume: the check refuses on a root filesystem that merely has the path.
     expect(script).toContain('findmnt')
     expect(script).toContain(TRACES_SENTINEL_PATH)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The reopen guard, run under a real shell against real token files
+// ---------------------------------------------------------------------------
+//
+// The guard's one job is to tell a deny-all file (one void line) from a file with a real token, and a fault (missing
+// or empty file) from both. It is shell, so it is proven by running it: the paths are moved into a temp directory and
+// `findmnt`, which a development machine may not have, is a shim that reports a mounted volume.
+
+const REAL = 'trc_PLACEHOLDERrealtoken00000000000000000000000'
+const REAL_LINE = `${REAL} 0123456789ab 2026-11-20T00:00:00.000Z\n`
+const voidLineFor = (fill: string): string =>
+  `${TRACES_VOID_TOKEN_PREFIX}${fill.repeat(43)} void 2026-11-20T00:00:00.000Z\n`
+
+type TokenFiles = Partial<Record<(typeof SENDER_GROUPS)[number], string | null>>
+
+/** Every group deny-all unless the scenario says otherwise. `null` leaves the file out. */
+async function runTokenCheck(files: TokenFiles, options: {rootMissing?: boolean} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'traces-guard-'))
+  try {
+    const root = join(dir, 'tokens')
+    const sentinel = join(dir, '.traces-volume')
+    writeFileSync(sentinel, `${TRACES_SENTINEL_CONTENT}\n`)
+    if (options.rootMissing !== true) {
+      for (const [index, group] of SENDER_GROUPS.entries()) {
+        mkdirSync(join(root, group), {recursive: true})
+        const content = group in files ? files[group] : voidLineFor('ABC'[index] ?? 'A')
+        if (content !== null && content !== undefined) writeFileSync(join(root, group, 'token'), content)
+      }
+    }
+    const shim = join(dir, 'shim')
+    mkdirSync(shim)
+    writeFileSync(join(shim, 'findmnt'), '#!/bin/sh\necho /dev/sda\n')
+    chmodSync(join(shim, 'findmnt'), 0o755)
+
+    // Longest paths first: the mount point is a prefix of the others.
+    const script = tokenCheckScript()
+      .replaceAll(TRACES_TOKEN_ROOT, root)
+      .replaceAll(TRACES_SENTINEL_PATH, sentinel)
+      .replaceAll(TRACES_VOLUME_MOUNT, dir)
+    const proc = Bun.spawn(['bash', '-o', 'pipefail', '-c', script], {
+      env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    return {stdout: stdout.trim(), stderr, exitCode}
+  } finally {
+    rmSync(dir, {recursive: true, force: true})
+  }
+}
+
+describe('the reopen guard, run against real token files', () => {
+  it('passes, and says deny-all, when every group holds only a void line', async () => {
+    expect(await runTokenCheck({})).toEqual({stdout: 'TRACES_TOKENS_DENY_ALL', stderr: '', exitCode: 0})
+  })
+
+  it('passes for a group with several void lines and no real one', async () => {
+    const result = await runTokenCheck({workstation: voidLineFor('x') + voidLineFor('y')})
+    expect(result.stdout).toBe('TRACES_TOKENS_DENY_ALL')
+  })
+
+  it.each(SENDER_GROUPS)('refuses with %s holding a real token beside a void line', async group => {
+    const result = await runTokenCheck({[group]: voidLineFor('x') + REAL_LINE})
+    expect(result).toEqual({stdout: 'TRACES_TOKENS_REAL', stderr: '', exitCode: 0})
+  })
+
+  it('refuses for a real token alone, and for a last line with no newline', async () => {
+    expect((await runTokenCheck({'fro-bot': REAL_LINE})).stdout).toBe('TRACES_TOKENS_REAL')
+    expect((await runTokenCheck({'fro-bot': REAL_LINE.trimEnd()})).stdout).toBe('TRACES_TOKENS_REAL')
+  })
+
+  it('counts a token that only resembles the void prefix as real', async () => {
+    const lookalike = `trc_voidish${'x'.repeat(40)} 0123456789ab 2026-11-20\n`
+    expect((await runTokenCheck({marcusrbrown: lookalike})).stdout).toBe('TRACES_TOKENS_REAL')
+  })
+
+  it('never prints a token, a void token or a fingerprint', async () => {
+    const result = await runTokenCheck({'fro-bot': voidLineFor('x') + REAL_LINE})
+    for (const text of [REAL, '0123456789ab', TRACES_VOID_TOKEN_PREFIX]) {
+      expect(result.stdout).not.toContain(text)
+      expect(result.stderr).not.toContain(text)
+    }
+  })
+
+  it.each(SENDER_GROUPS)('faults, naming the group, when the %s file is empty', async group => {
+    const result = await runTokenCheck({[group]: ''})
+    expect(result).toEqual({stdout: `TRACES_TOKEN_FILE_EMPTY=${group}`, stderr: '', exitCode: 1})
+  })
+
+  it('faults on a file with only blank lines, which the collector reads as empty', async () => {
+    const result = await runTokenCheck({workstation: '\n  \n\t\n'})
+    expect(result).toEqual({stdout: 'TRACES_TOKEN_FILE_EMPTY=workstation', stderr: '', exitCode: 1})
+  })
+
+  it.each(SENDER_GROUPS)('faults, naming the group, when the %s file is missing', async group => {
+    const result = await runTokenCheck({[group]: null})
+    expect(result).toEqual({stdout: `TRACES_TOKEN_FILE_MISSING=${group}`, stderr: '', exitCode: 1})
+  })
+
+  it('a fault in a later group wins over a real token in an earlier one: a real token is not the whole answer', async () => {
+    const result = await runTokenCheck({marcusrbrown: REAL_LINE, workstation: ''})
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toBe('TRACES_TOKEN_FILE_EMPTY=workstation')
+  })
+
+  it('faults when the token root is missing, not "no tokens"', async () => {
+    const result = await runTokenCheck({}, {rootMissing: true})
+    expect(result).toEqual({stdout: 'TRACES_TOKEN_ROOT_MISSING', stderr: '', exitCode: 1})
   })
 })
 

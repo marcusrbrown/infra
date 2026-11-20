@@ -535,13 +535,87 @@ describe('history on disk', () => {
     expect(await errorCodeAsync(() => loadHistory(dir, 'existing'))).toBe('malformed')
   })
 
-  it('rejects a missing app file and an unknown app file', async () => {
-    await seed()
-    await rm(join(dir, 'apps', 'vpn.json'))
-    expect(await errorCodeAsync(() => loadHistory(dir, 'existing'))).toBe('malformed')
+  describe('an app file that does not exist yet', () => {
+    // The live artifact predates `traces`: it holds every other app file and no `apps/traces.json`.
+    it('reads as an empty sample list and keeps every other app intact', async () => {
+      const history = await seed()
+      await rm(join(dir, 'apps', 'traces.json'))
 
-    await writeFile(join(dir, 'apps', 'vpn.json'), '[]')
+      const loaded = await loadHistory(dir, 'existing')
+
+      expect(loaded?.apps.traces).toEqual([])
+      expect(loaded).toEqual({...history, apps: {...history.apps, traces: []}})
+    })
+
+    it('is created by the next merge and write without discarding other apps', async () => {
+      const history = await seed()
+      await rm(join(dir, 'apps', 'traces.json'))
+
+      const previous = await loadHistory(dir, 'existing')
+      const merged = mergeHistory({previous, incoming: incomingFor('9001'), now: NOW})
+      await writeHistory(dir, merged.history)
+
+      expect(merged.added).toBe(APP_IDS.length)
+      const reloaded = await loadHistory(dir, 'existing')
+      expect(reloaded?.apps.traces.map(entry => entry.run)).toEqual(['9001'])
+      for (const app of APP_IDS.filter(id => id !== 'traces')) {
+        // The merge sorts by time; every stored sample is still there, plus the new one.
+        expect(reloaded?.apps[app]).toHaveLength(history.apps[app].length + 1)
+        for (const stored of history.apps[app]) expect(reloaded?.apps[app]).toContainEqual(stored)
+      }
+    })
+
+    it('is the same for any known app: a missing file is an empty list, not data loss to be reported', async () => {
+      await seed()
+      await rm(join(dir, 'apps', 'vpn.json'))
+
+      expect((await loadHistory(dir, 'existing'))?.apps.vpn).toEqual([])
+    })
+
+    it('still rejects an unknown app file next to the missing one', async () => {
+      await seed()
+      await rm(join(dir, 'apps', 'traces.json'))
+      await writeFile(join(dir, 'apps', 'bogus.json'), '[]')
+
+      expect(await errorCodeAsync(() => loadHistory(dir, 'existing'))).toBe('unknown-app')
+    })
+
+    it('still rejects a malformed file for that app', async () => {
+      await seed()
+      await writeFile(join(dir, 'apps', 'traces.json'), '{not json')
+      expect(await errorCodeAsync(() => loadHistory(dir, 'existing'))).toBe('malformed')
+
+      await writeFile(join(dir, 'apps', 'traces.json'), '{"not":"a list"}')
+      expect(await errorCodeAsync(() => loadHistory(dir, 'existing'))).toBe('malformed')
+    })
+
+    it('does not read an app file that fails for any reason other than ENOENT as empty', async () => {
+      await seed()
+      await rm(join(dir, 'apps', 'traces.json'))
+      await mkdir(join(dir, 'apps', 'traces.json'))
+
+      const failure = await loadHistory(dir, 'existing').then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+
+      expect(failure).toBeInstanceOf(Error)
+    })
+
+    it('still requires meta.json and the apps directory', async () => {
+      await seed()
+      await rm(join(dir, 'apps'), {recursive: true})
+      expect(await errorCodeAsync(() => loadHistory(dir, 'existing'))).toBe('malformed')
+
+      await rm(join(dir, 'meta.json'))
+      expect(await errorCodeAsync(() => loadHistory(dir, 'existing'))).toBe('missing-history')
+    })
+  })
+
+  it('rejects an unknown app file', async () => {
+    await seed()
     await writeFile(join(dir, 'apps', 'bogus.json'), '[]')
+
     expect(await errorCodeAsync(() => loadHistory(dir, 'existing'))).toBe('unknown-app')
   })
 

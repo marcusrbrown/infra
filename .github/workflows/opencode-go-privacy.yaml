@@ -1,10 +1,16 @@
 ---
 # Daily refresh of the OpenCode Go privacy snapshot (packages/shared/opencode-go/privacy-snapshot.json).
 #
-# Resolves the anomalyco/opencode `dev` head, parses its Go privacy table and, when a model's privacy terms
-# changed, opens or updates ONE stable PR for review. When upstream terms match main again, an open stable PR is
-# stale: the run closes it and deletes its branch. Nothing here deploys or merges: a merged snapshot PR reaches
-# the gated cliproxy deploy through the router's paths-filter, and auto-merge stays off.
+# Resolves the anomalyco/opencode `dev` head, builds the snapshot from its Go docs page and the public Go model list
+# and, when a model's privacy terms changed, opens or updates ONE stable PR for review. The PR carries the snapshot and
+# one patch changeset for the published CLI, which inlines the snapshot: merging it queues a CLI release through the
+# Version Packages PR. The branch is rebuilt from main on every run, and every run names its changeset after its own
+# run id and attempt, so the file is never one main already holds. When upstream terms match main again, an open stable PR is stale: the run closes it and deletes
+# its branch. Nothing here deploys or merges: a merged snapshot PR reaches the gated cliproxy deploy through the
+# router's paths-filter, and auto-merge stays off.
+#
+# renovate-changesets.yaml also fires on this PR (the App opens it) and skips it: the branch lacks the `renovate/`
+# prefix. That workflow must keep its prefix check, or it could rewrite the changeset this run adds.
 #
 # Credentials: checkout persists none. The refresh step and the stale-PR lookup carry only the read-only workflow
 # token. A scoped GitHub App token is minted only after the parse succeeded and either the snapshot changed or a stale
@@ -101,6 +107,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.get-app-token.outputs.token }}
           GIT_USER_NAME: ${{ format('{0}[bot]', steps.get-app-token.outputs.app-slug) }}
+          CHANGESET_FILE: ${{ steps.refresh.outputs.changeset }}
         run: |
           set -euo pipefail
 
@@ -109,6 +116,16 @@ jobs:
           body_file="${RUNNER_TEMP}/pr-body.md"
           new_snapshot="${RUNNER_TEMP}/privacy-snapshot.json"
           title="chore(cliproxy): refresh OpenCode Go privacy snapshot"
+
+          # The refresh wrote one changeset named after the upstream commit, the run id and the attempt. A changed
+          # snapshot without one fails the run rather than opening a PR that would not queue a release; any other name
+          # never reaches a path or git add.
+          if [[ ! "${CHANGESET_FILE}" =~ ^opencode-go-privacy-[0-9a-f]{7}-[0-9]{1,20}-[0-9]{1,4}\.md$ ]]; then
+            echo "The refresh did not report a valid changeset file name." >&2
+            exit 1
+          fi
+          changeset=".changeset/${CHANGESET_FILE}"
+          new_changeset="${RUNNER_TEMP}/${CHANGESET_FILE}"
 
           # Hand the token to git for this step only, through the environment so it never appears in argv.
           auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
@@ -121,8 +138,9 @@ jobs:
           git config user.name "${GIT_USER_NAME}"
           git config user.email "${USER_ID}+${GIT_USER_NAME}@users.noreply.github.com"
 
-          # Keep the refreshed file; the branch checkout below resets the worktree.
+          # Keep the refreshed files; the branch checkout below resets the worktree.
           cp "${snapshot}" "${new_snapshot}"
+          cp "${changeset}" "${new_changeset}"
 
           git fetch origin main
           if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
@@ -133,12 +151,22 @@ jobs:
           fi
           git checkout -f -B "${branch}" origin/main
           cp "${new_snapshot}" "${snapshot}"
+          cp "${new_changeset}" "${changeset}"
 
-          # Only the snapshot is committed, whatever else the worktree holds.
-          git add -- "${snapshot}"
-          if git diff --cached --quiet; then
-            echo "main already carries this snapshot; nothing to open."
+          # Only the snapshot and its changeset are committed, whatever else the worktree holds.
+          git add -- "${snapshot}" "${changeset}"
+          # The snapshot itself must differ from main. A staged changeset alone proves nothing: main may have taken
+          # this snapshot since the refresh ran (a hand-merged copy, a rerun), and a PR of only a changeset is wrong.
+          # An open snapshot PR is left for the next run, whose refresh then reports unchanged and closes it.
+          if git diff --cached --quiet -- "${snapshot}"; then
+            echo "main already carries this snapshot; nothing to propose. Any open snapshot PR is closed by the next run."
             exit 0
+          fi
+          # A snapshot change must travel with a changeset that main does not have. This should never fire, since each
+          # run names its own file; if it does, fail instead of opening a PR that queues no release.
+          if [[ -z "$(git diff --cached --diff-filter=A --name-only -- "${changeset}")" ]]; then
+            echo "The staged changes do not add ${changeset}; refusing to open a PR that queues no release." >&2
+            exit 1
           fi
 
           git commit -m "${title}"

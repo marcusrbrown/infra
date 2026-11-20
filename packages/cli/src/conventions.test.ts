@@ -36,6 +36,11 @@ const AGENT_MUTATING_COMMANDS = ['agent setup', 'agent storage', 'agent storage 
 //   vpn client add       — mutating: generates keypair + appends peer + triggers redeploy
 //   vpn client list      — sensitive: lists peer public keys and tunnel IPs
 //   vpn client remove    — mutating: removes peer + triggers redeploy
+//   traces deploy        — mutating: deploys the trace stack to a live droplet
+//   traces logs          — sensitive: service logs can quote trace content
+//   traces open          — sensitive: tunnel to the UIs that hold full trace content
+//   traces ingest *      — mutating / host-reading: holds or opens the public ingest route
+//   traces sender *      — secret-bearing: mints, lists and revokes live sender tokens
 //
 // Defense-in-depth (secondary layer — opencode.jsonc `permission: deny`):
 // Even if MCP_ALLOWLIST were mistakenly re-expanded, opencode's native tool
@@ -61,6 +66,16 @@ const SENSITIVE_MCP_COMMANDS: readonly string[] = [
   // Broker: mutating / sensitive — CLI-only
   'broker deploy',
   'broker logs',
+  // Traces: mutating / sensitive — CLI-only. Only `traces status` is in MCP_ALLOWLIST.
+  'traces deploy',
+  'traces logs',
+  'traces open',
+  'traces ingest hold',
+  'traces ingest open',
+  'traces ingest status',
+  'traces sender add',
+  'traces sender list',
+  'traces sender revoke',
   'cliproxy monitor',
   'cliproxy reset-quota',
 ]
@@ -2061,7 +2076,7 @@ describe('deploy.yaml: no aggregate-level concurrency (regression guard)', () =>
 })
 
 describe('per-app deploy workflows: each has its own workflow-level concurrency block', () => {
-  const APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard', 'broker'] as const
+  const APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard', 'broker', 'traces'] as const
 
   for (const app of APPS) {
     it(`deploy-${app}.yaml has workflow-level concurrency group deploy-${app}- with cancel-in-progress: false and no job-level concurrency`, async () => {
@@ -4078,6 +4093,15 @@ const DEPLOY_NOTIFY_APPS: readonly DeployNotifyAppSpec[] = [
     extraEnv: {},
   },
   {
+    app: 'traces',
+    gatedJob: 'deploy-traces',
+    notifyNeeds: ['build-collector'],
+    notifyIf: `!cancelled() && needs.build-collector.result == 'success' && ${DEPLOY_NOTIFY_MAIN_GUARD}`,
+    gatedNeeds: ['build-collector', 'notify'],
+    gatedIf: "!cancelled() && needs.build-collector.result == 'success'",
+    extraEnv: {},
+  },
+  {
     app: 'dashboard',
     gatedJob: 'deploy-dashboard',
     notifyNeeds: ['validate-inputs'],
@@ -4312,7 +4336,7 @@ describe('deploy gate notify: live workflow contract', () => {
     })
   }
 
-  it('covers all seven apps the router fans out to', async () => {
+  it('covers all eight apps the router fans out to', async () => {
     const routerText = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
     const router = parseYaml(routerText) as {jobs?: Record<string, {uses?: string}>}
     const calleeApps = Object.values(router.jobs ?? {})
@@ -4320,7 +4344,7 @@ describe('deploy gate notify: live workflow contract', () => {
       .filter((app): app is string => app !== undefined)
       .toSorted()
     expect(DEPLOY_NOTIFY_APPS.map(spec => spec.app).toSorted()).toEqual(calleeApps)
-    expect(calleeApps).toHaveLength(7)
+    expect(calleeApps).toHaveLength(8)
   })
 
   it('gateway notify depends on build-images and dashboard notify on validate-inputs', () => {
@@ -6580,5 +6604,166 @@ describe('traces monitor and backup workflows: alert contract', () => {
     for (const target of [MONITOR, BACKUP]) {
       expect(await Bun.file(resolve(REPO_ROOT, target.file)).text()).toContain(`secrets.${WEBHOOK_SECRET}`)
     }
+  })
+})
+
+const TRACES_CALLEE_FILE = '.github/workflows/deploy-traces.yaml'
+const TRACES_ROUTER_FILE = '.github/workflows/deploy.yaml'
+const GATE_WEBHOOK = 'DEPLOY_GATE_DISCORD_WEBHOOK'
+const IMAGE_NAME = 'TRACES_COLLECTOR_IMAGE'
+const ACCOUNT_DO_TOKEN = 'DIGITALOCEAN_ACCESS_TOKEN'
+const SNAPSHOT_DO_TOKEN = 'TRACES_SNAPSHOT_DO_TOKEN'
+
+/** The lists `apps/traces/src/deploy.ts` exports. Imported lazily so one missing file fails these tests only. */
+async function exportedInputs(): Promise<{
+  secrets: readonly string[]
+  vars: readonly string[]
+  build: readonly string[]
+}> {
+  const deploy: {
+    TRACES_DEPLOY_SECRETS: readonly string[]
+    TRACES_DEPLOY_VARS: readonly string[]
+    TRACES_DEPLOY_BUILD_INPUTS: readonly string[]
+  } = await import('../../../apps/traces/src/deploy')
+  return {
+    secrets: deploy.TRACES_DEPLOY_SECRETS,
+    vars: deploy.TRACES_DEPLOY_VARS,
+    build: deploy.TRACES_DEPLOY_BUILD_INPUTS,
+  }
+}
+
+async function loadTracesWorkflow(file: string): Promise<{text: string; workflow: Record<string, unknown>}> {
+  const text = await Bun.file(resolve(REPO_ROOT, file)).text()
+  return {text, workflow: await loadWorkflowYaml(resolve(REPO_ROOT, file))}
+}
+
+function deployStepEnv(workflow: Record<string, unknown>): Record<string, unknown> {
+  const step = stepsOf(workflowJob(workflow, 'deploy-traces')).find(candidate => candidate.name === 'Deploy traces')
+  if (step === undefined || !isRecord(step.env)) throw new Error('deploy-traces has no "Deploy traces" step with env')
+  return step.env
+}
+
+function routerCaller(workflow: Record<string, unknown>): Record<string, unknown> {
+  return workflowJob(workflow, 'deploy-traces')
+}
+
+describe('traces deploy: workflow inputs are one contract', () => {
+  it('passes the deploy step exactly the names deploy.ts exports: secrets from secrets.*, variables from vars.*, and the image', async () => {
+    const {secrets, vars, build} = await exportedInputs()
+    const {workflow} = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+
+    expect(build).toEqual([IMAGE_NAME])
+    const expected: Record<string, string> = {
+      ...Object.fromEntries(secrets.map(name => [name, ghaExpression(`secrets.${name}`)])),
+      ...Object.fromEntries(vars.map(name => [name, ghaExpression(`vars.${name}`)])),
+      [IMAGE_NAME]: `ghcr.io/${ghaExpression('github.repository')}/traces-collector@${ghaExpression('needs.build-collector.outputs.digest')}`,
+    }
+
+    expect(deployStepEnv(workflow)).toEqual(expected)
+  })
+
+  it('declares exactly the exported secrets, plus the gate webhook, under workflow_call.secrets', async () => {
+    const {secrets} = await exportedInputs()
+    const {workflow} = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+    const on = isRecord(workflow.on) ? workflow.on : {}
+    const declared = isRecord(on.workflow_call) && isRecord(on.workflow_call.secrets) ? on.workflow_call.secrets : {}
+
+    expect(Object.keys(declared).toSorted()).toEqual([...secrets, GATE_WEBHOOK].toSorted())
+  })
+
+  it('has the router caller pass exactly the exported secrets, plus the gate webhook, each as its own secret and never inherited', async () => {
+    const {secrets} = await exportedInputs()
+    const {workflow} = await loadTracesWorkflow(TRACES_ROUTER_FILE)
+    const caller = routerCaller(workflow)
+
+    expect(caller.uses).toBe('./.github/workflows/deploy-traces.yaml')
+    expect(caller.secrets).not.toBe('inherit')
+    expect(caller.secrets).toEqual(
+      Object.fromEntries([...secrets, GATE_WEBHOOK].map(name => [name, ghaExpression(`secrets.${name}`)])),
+    )
+    // No `with:` inputs: the variables are read from the repository variables inside the callee.
+    expect(caller.with).toBeUndefined()
+  })
+
+  it('never names a sender token, the snapshot token or the account-wide DigitalOcean token in either workflow', async () => {
+    const {secrets, vars} = await exportedInputs()
+    const callee = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+    const router = await loadTracesWorkflow(TRACES_ROUTER_FILE)
+    const routerCallerText = JSON.stringify(routerCaller(router.workflow))
+
+    for (const name of [...secrets, ...vars]) {
+      expect(name, `${name} reads like a token`).not.toMatch(/SENDER|_TOKEN$/)
+    }
+    for (const forbidden of [SNAPSHOT_DO_TOKEN, ACCOUNT_DO_TOKEN]) {
+      expect(callee.text, `${TRACES_CALLEE_FILE} must not name ${forbidden}`).not.toContain(forbidden)
+      expect(routerCallerText, `${TRACES_ROUTER_FILE} deploy-traces must not name ${forbidden}`).not.toContain(
+        forbidden,
+      )
+    }
+  })
+
+  it('builds the collector image on main only, with packages: write on that job only and a digest output', async () => {
+    const {workflow} = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+    const jobs = isRecord(workflow.jobs) ? workflow.jobs : {}
+    const build = workflowJob(workflow, 'build-collector')
+
+    expect(Object.keys(jobs).toSorted()).toEqual(['build-collector', 'deploy-traces', 'notify'])
+    expect(workflow.permissions).toEqual({contents: 'read'})
+    expect(normalizeExpression(build.if)).toBe(DEPLOY_NOTIFY_MAIN_GUARD)
+    expect(build.permissions).toEqual({contents: 'read', packages: 'write'})
+    expect(build.outputs).toEqual({digest: ghaExpression('steps.build.outputs.digest')})
+    for (const [id, job] of Object.entries(jobs)) {
+      if (id === 'build-collector' || !isRecord(job)) continue
+      expect(JSON.stringify(job.permissions ?? {}), `${id} must not write packages`).not.toContain('write')
+    }
+
+    const buildStep = stepsOf(build).find(step => step.id === 'build')
+    const withBlock = isRecord(buildStep?.with) ? buildStep.with : {}
+    expect(withBlock.platforms).toBe('linux/amd64')
+    expect(withBlock.context).toBe('apps/traces/collector')
+    expect(withBlock.tags).toBe(
+      `ghcr.io/${ghaExpression('github.repository')}/traces-collector:${ghaExpression('github.sha')}`,
+    )
+  })
+
+  it('gates the deploy on the traces Environment and the collector build, and never on a missing digest', async () => {
+    const {workflow} = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+    const deploy = workflowJob(workflow, 'deploy-traces')
+
+    expect(deploy.environment).toBe('traces')
+    expect(deploy.needs).toEqual(['build-collector', 'notify'])
+    expect(normalizeExpression(deploy.if)).toBe("!cancelled() && needs.build-collector.result == 'success'")
+    // The step that validates the digest runs before the deploy step.
+    const names = stepsOf(deploy).map(step => step.name)
+    expect(names.indexOf('Validate required secrets')).toBeLessThan(names.indexOf('Deploy traces'))
+    expect(names.indexOf('Configure SSH known_hosts')).toBeLessThan(names.indexOf('Deploy traces'))
+  })
+
+  it('grants the router caller exactly the permissions the callee jobs request', async () => {
+    const {workflow} = await loadTracesWorkflow(TRACES_ROUTER_FILE)
+    expect(routerCaller(workflow).permissions).toEqual({contents: 'read', packages: 'write'})
+  })
+
+  it('has the router path filter match apps/traces and leave out markdown, tests, fixtures and snapshots', async () => {
+    const {workflow} = await loadTracesWorkflow(TRACES_ROUTER_FILE)
+    const detect = workflowJob(workflow, 'detect-changes')
+    const filterStep = stepsOf(detect).find(step => step.id === 'filter')
+    const filters =
+      isRecord(filterStep?.with) && typeof filterStep.with.filters === 'string' ? filterStep.with.filters : ''
+    const parsed: unknown = parseYaml(filters)
+    const traces = isRecord(parsed) ? parsed.traces : undefined
+
+    expect(traces).toEqual([
+      'apps/traces/**',
+      '!apps/traces/**/*.md',
+      '!apps/traces/**/*.test.ts',
+      '!apps/traces/**/__fixtures__/**',
+      '!apps/traces/**/__snapshots__/**',
+    ])
+    const outputs = isRecord(detect.outputs) ? detect.outputs : {}
+    expect(outputs.traces).toBe(ghaExpression('steps.filter.outputs.traces'))
+    expect(normalizeExpression(routerCaller(workflow).if)).toBe(
+      "github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.traces == 'true'",
+    )
   })
 })

@@ -495,10 +495,19 @@ describe('generatedAt staleness', () => {
 
 describe('buildHistoryView', () => {
   it('builds a view for every app, with no samples reading as unknown', () => {
-    const empty = {keeweb: [], cliproxy: [], gateway: [], umami: [], dashboard: [], vpn: [], broker: []}
+    const empty = {keeweb: [], cliproxy: [], gateway: [], umami: [], dashboard: [], vpn: [], broker: [], traces: []}
     const views = buildHistoryView({meta: {schemaVersion: 1, lastSampleAt: at(0)}, apps: empty}, new Date(at(0)))
 
-    expect(Object.keys(views)).toEqual(['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker'])
+    expect(Object.keys(views)).toEqual([
+      'keeweb',
+      'cliproxy',
+      'gateway',
+      'umami',
+      'dashboard',
+      'vpn',
+      'broker',
+      'traces',
+    ])
     expect(views.keeweb.verdict).toBe('unknown')
     expect(views.keeweb.latestSampleAt).toBeUndefined()
   })

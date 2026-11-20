@@ -27,7 +27,7 @@ describe('loadStatusHistory', () => {
     const loaded = loadStatusHistory({}, DOCS_ROOT)
 
     expect(loaded.source).toBe('fixture')
-    expect(Object.keys(loaded.history.apps)).toHaveLength(7)
+    expect(Object.keys(loaded.history.apps)).toHaveLength(8)
   })
 
   it('reads STATUS_HISTORY_DIR when set', () => {

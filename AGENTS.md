@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude OAuth, Codex OAuth, and OpenCode Go proxy) management, Fro Bot gateway and operator dashboard deployment, Umami analytics, WireGuard VPN egress box, OIDC credential broker, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), `dashboard.fro.bot` (operator dashboard on DigitalOcean), `metrics.fro.bot` (Umami analytics on DigitalOcean), `broker.fro.bot` (credential broker on DigitalOcean), and a static IP on AWS Lightsail `eu-west-1` (WireGuard VPN).
+Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude OAuth, Codex OAuth, and OpenCode Go proxy) management, Fro Bot gateway and operator dashboard deployment, Umami analytics, WireGuard VPN egress box, OIDC credential broker, a self-hosted trace collection stack, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), `dashboard.fro.bot` (operator dashboard on DigitalOcean), `metrics.fro.bot` (Umami analytics on DigitalOcean), `broker.fro.bot` (credential broker on DigitalOcean), a static IP on AWS Lightsail `eu-west-1` (WireGuard VPN), and a planned host at `traces.fro.bot` (trace collection on DigitalOcean; not yet deployed).
 
 ## STRUCTURE
 
@@ -16,6 +16,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── apps/umami/         Umami analytics deploy package (see apps/umami/AGENTS.md)
 ├── apps/vpn/           WireGuard VPN egress box (see apps/vpn/AGENTS.md)
 ├── apps/broker/        OIDC credential broker (see apps/broker/AGENTS.md)
+├── apps/traces/        Trace collection stack, not yet deployed (see apps/traces/AGENTS.md)
 ├── apps/agent/         Operator-run AWS S3 durable-storage provisioner (see apps/agent/AGENTS.md)
 ├── apps/docs/          Public docs site, not deployable (see apps/docs/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)
@@ -60,6 +61,13 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Check broker health | `bunx @marcusrbrown/infra broker status` | HTTP reachability via /healthz |
 | Trigger broker deploy | `bunx @marcusrbrown/infra broker deploy` | Remote (default) or `--local` |
 | Broker operator docs | `apps/broker/AGENTS.md` | Deploy flow, mint/revoke lifecycle, sweeper, key-rotation, anti-patterns |
+| Check trace stack health | `bunx @marcusrbrown/infra traces status` | SSH, compose service states, health reporter verdict; `--json` for machine output. Not yet deployed |
+| Trigger traces deploy | `bunx @marcusrbrown/infra traces deploy` | Remote (default) or `--local`; the workflow builds the collector image first and needs the `traces` Environment |
+| Hold or open trace ingest | `bunx @marcusrbrown/infra traces ingest hold\|open\|status` | `hold` closes the public ingest route at once; `open` refuses unless the health verdict passes |
+| Manage trace sender tokens | `bunx @marcusrbrown/infra traces sender add\|list\|revoke` | Tokens live on the host and at the senders only; `list` never prints a token |
+| Open Langfuse and Grafana | `bunx @marcusrbrown/infra traces open` | SSH tunnel to loopback-only UIs; neither has a hostname |
+| Trace privacy page | `apps/docs/src/content/docs/trace-privacy.md` | Must be published before any sender token is issued |
+| Traces operator docs | `apps/traces/AGENTS.md` | Stack layout, networks, ingest states, deploy flow |
 | Provision agent storage | `bun run provision:agent` | Operator-local AWS OIDC/S3/IAM provisioner; prints the handoff manifest |
 | Agent operator docs | `apps/agent/AGENTS.md` | Dedicated AWS credentials, bucket/role policy, drift, teardown |
 | Agent storage runbook | `docs/runbooks/agent-s3-durable-storage.md` | Protected-environment rollout, workflow split, Go/No-Go, rollback, monitoring |
@@ -93,7 +101,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **Git hooks**: `simple-git-hooks` + `lint-staged` → `eslint --fix` on commit.
 - **CI install**: `bun install --frozen-lockfile --ignore-scripts` (skip simple-git-hooks postinstall).
 - **Cross-org reusable workflows**: Pass secrets explicitly (never `secrets: inherit` with `bfra-me/.github`). (enforced)
-- **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root. Exception: `provision`/`deploy` need the repo-root `.env` (Bun loads `.env` from CWD only), so run them via the root wrappers `bun run provision:<app>` / `bun run deploy:<app>` (broker, cliproxy, dashboard, gateway, umami, vpn) instead of `--cwd`. The operator-only agent storage provisioner likewise uses `bun run provision:agent`; there is no agent deploy wrapper.
+- **Workspace commands**: Run app scripts with `bun run --cwd apps/<name> <script>`, not from root. Exception: `provision`/`deploy` need the repo-root `.env` (Bun loads `.env` from CWD only), so run them via the root wrappers `bun run provision:<app>` / `bun run deploy:<app>` (broker, cliproxy, dashboard, gateway, traces, umami, vpn) instead of `--cwd`. The operator-only agent storage provisioner likewise uses `bun run provision:agent`; there is no agent deploy wrapper.
 - **Changesets**: `@changesets/cli` for versioning. Renovate/dependency changes under `apps/**` (Docker image pins, runtime deps) are excluded from changeset generation in `.github/workflows/renovate-changesets.yaml` (`exclude-patterns` includes `apps/**`); releases track the published `@marcusrbrown/infra` CLI only, while app dependency bumps are deployment changes tracked in git history and deploy workflows. The OpenCode Go privacy refresh PR (branch `opencode-go-privacy`) is the exception: `apps/cliproxy/scripts/refresh-go-privacy.ts` adds one patch changeset for `@marcusrbrown/infra` (`.changeset/opencode-go-privacy-<7-hex commit>-<run id>-<attempt>.md`, new for every run, so it never matches a file `main` holds) because the published CLI inlines `packages/shared/opencode-go/privacy-snapshot.json`. Merging that PR queues a CLI patch release through the Version Packages PR. `renovate-changesets.yaml` skips that branch (no `renovate/` prefix) and must keep doing so.
 - **Tests**: Colocated `*.test.ts` alongside source. Fixtures in `__fixtures__/`, snapshots in `__snapshots__/`. Use `NO_COLOR=1` in subprocess env for deterministic snapshots. Mock at boundaries (fetch, Bun.spawn), not internals. Do not duplicate a Renovate-managed image tag, version or digest in a test: assert its format, or read the value from the file that pins it. A platform claim such as `linux/amd64` is checked against the registry manifest when the bump is reviewed. CI runs `bun test --recursive` as a parallel job alongside lint/type-check.
 - **CI Node pin**: All workflows running `bun run lint` or `bunx tsc` must pin Node 26 via `actions/setup-node` — ESLint and TypeScript binary shebangs use system Node, so an explicit pin avoids relying on the ubuntu-latest default and ensures ES2024 APIs like `Object.groupBy` are available.
@@ -111,6 +119,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 - **Never use `bundledDependencies`** — Bun's `.bun/` symlink layout creates `../../` paths that npm rejects with E415. (enforced)
 - **Never pass gateway secret bytes via argv** — `writeRemoteFile` pipes bytes through SSH stdin only; `--body <value>` patterns are banned.
 - **Never skip `validateGatewayHost`** — it rejects `-`-prefixed values and characters outside the allowed alphabet. SSH treats `-`-prefixed hostnames as flags (including `-oProxyCommand=`).
+- **Never pass a sender token, `TRACES_SNAPSHOT_DO_TOKEN` or `DIGITALOCEAN_ACCESS_TOKEN` to the traces deploy** — sender tokens exist only on the host and at the senders; the deploy inputs are the names listed in `.github/workflows/deploy-traces.yaml`, and a conventions test compares them with the list `apps/traces/src/deploy.ts` exports. No sender token is issued before the trace privacy page is published.
 - **Never restart the gateway in-place to rotate the CA** — workspaces lose trust in the egress proxy. Restore from backup instead.
 
 ## UNIQUE STYLES
@@ -165,6 +174,12 @@ bunx @marcusrbrown/infra vpn client remove <name> # Remove peer and sync roster;
 bunx @marcusrbrown/infra broker status            # HTTP reachability via /healthz
 bunx @marcusrbrown/infra broker deploy            # Trigger broker deploy (GitHub Actions)
 bunx @marcusrbrown/infra broker logs              # Stream broker service logs (--tail N)
+bunx @marcusrbrown/infra traces status            # SSH, compose service states, health reporter verdict (--json)
+bunx @marcusrbrown/infra traces deploy            # Trigger trace stack deploy (GitHub Actions); --local runs apps/traces/src/deploy.ts
+bunx @marcusrbrown/infra traces logs [service]    # Stream a trace stack service's logs (--tail N); logs can contain trace content
+bunx @marcusrbrown/infra traces open              # SSH tunnel to Langfuse (localhost:3000) and Grafana (localhost:3001)
+bunx @marcusrbrown/infra traces ingest hold       # Emergency close of the public ingest route (also: open, status)
+bunx @marcusrbrown/infra traces sender add <group>  # Issue a sender token for a group (also: list, revoke)
 bunx @marcusrbrown/infra agent setup              # Generalized fro-bot/agent model-credential setup
 bunx @marcusrbrown/infra agent storage --repo OWNER/REPO --manifest FILE  # Wire non-secret S3 vars + verify workflow
 bunx @marcusrbrown/infra agent storage teardown --repo OWNER/REPO --manifest FILE  # Unwire + remove repo resources
@@ -177,6 +192,8 @@ bun run deploy:umami                            # Local umami deploy (loads root
 bun run provision:vpn                           # Provision VPN Lightsail instance (loads root .env; prints static IP)
 bun run deploy:vpn                              # Local VPN deploy (loads root .env)
 bun run provision:broker                        # Provision broker droplet (loads root .env)
+bun run provision:traces                        # Provision trace stack droplet, volume and firewall (loads root .env)
+bun run deploy:traces                           # Local trace stack deploy (loads root .env)
 bun run deploy:broker                           # Local broker deploy (loads root .env)
 bun run provision:agent                         # Provision agent OIDC/S3/IAM resources (loads root .env)
 bun run --cwd apps/docs build                   # Build the docs site (both redaction gates run; fixture history unless STATUS_HISTORY_DIR is set)
@@ -196,6 +213,7 @@ bunx @marcusrbrown/infra status snapshot --history <dir>  # Append one status sa
 - `DEPLOY_GATE_DISCORD_WEBHOOK` is a repository secret (not an environment secret: environment secrets are unreadable in workflows called through `uses:`, actions/runner#4453); `deploy.yaml` passes it explicitly to each callee, and each deploy workflow's ungated, main-only `notify` job reads it to post one Discord message when the deploy reaches its approval gate. Runbook: `docs/runbooks/deploy-gate-notifications.md`.
 - Agent storage uses dedicated operator-local provisioning inputs: `AGENT_AWS_ACCESS_KEY_ID`, `AGENT_AWS_SECRET_ACCESS_KEY`, optional `AGENT_AWS_SESSION_TOKEN` and `AGENT_AWS_REGION`, plus the `AGENT_S3_*` and `AGENT_REPOSITORY_*` values required by `apps/agent/server/provision.ts`. These values belong in the repo-root `.env` only; the provisioner ignores ambient `AWS_*` credentials and no static AWS credential is written to GitHub.
 - `FRO_BOT_S3_ROLE_TO_ASSUME`, `FRO_BOT_S3_BUCKET`, `FRO_BOT_S3_REGION`, `FRO_BOT_S3_PREFIX`, and `FRO_BOT_S3_EXPECTED_BUCKET_OWNER` are non-secret repository variables written by `agent storage` from the provisioner handoff manifest. The consumer repository must pre-create the `fro-bot-storage` GitHub Environment with the exact main-only deployment-branch policy before the workflow references it. It deliberately has no required reviewer because the scheduled daily run must run unattended; the boundary is main-only deployment plus the environment-pinned OIDC trust. The storage preflight requires the local `aws` CLI; the storage workflow uses GitHub OIDC → AWS STS and never static AWS keys.
+- `TRACES_SSH_KEY`, `TRACES_HOST`, `TRACES_POSTGRES_PASSWORD`, `TRACES_CLICKHOUSE_PASSWORD`, `TRACES_CLICKHOUSE_READER_PASSWORD`, `TRACES_REDIS_PASSWORD`, `TRACES_MINIO_PASSWORD`, `TRACES_NEXTAUTH_SECRET`, `TRACES_SALT`, `TRACES_ENCRYPTION_KEY`, `TRACES_GRAFANA_ADMIN_PASSWORD`, `TRACES_GRAFANA_SECRET_KEY`, `TRACES_LANGFUSE_USER_EMAIL`, and `TRACES_LANGFUSE_USER_PASSWORD` are scoped to the `traces` environment. `TRACES_LANGFUSE_PUBLIC_KEY` and `TRACES_LANGFUSE_SECRET_KEY` (the Application-role key the collector uses) are unset on the first deploy and set by the operator after creating the key in the Langfuse UI. `TRACES_LANGFUSE_BOOTSTRAP_PUBLIC_KEY` and `TRACES_LANGFUSE_BOOTSTRAP_SECRET_KEY` are first-deploy only: the operator deletes them after bootstrap, and the deploy then proves the key is dead and the variables are absent from the host. `TRACES_DOMAIN` and `TRACES_INGEST_OPEN` are repository variables (not secrets), also read by the monitor; exactly `true` in `TRACES_INGEST_OPEN` means ingest is meant to be open. `TRACES_SNAPSHOT_DO_TOKEN` is a repository secret read only by the volume snapshot workflow. The deploy workflow also passes `TRACES_COLLECTOR_IMAGE`, built from the digest its `build-collector` job pushes to `ghcr.io/marcusrbrown/infra/traces-collector`. The two alert labels `traces-unhealthy` and `traces-backup-failure` are declared in `.github/settings.yml`. Sender tokens are not stored in GitHub by this repo; they live on the host and at the senders. Not yet deployed: the host's pinned keys are added to `.github/known_hosts` and `packages/cli/src/resources/known_hosts` by provisioning. See `apps/traces/AGENTS.md`.
 - `OPENCODE_AUTH_JSON`, `OPENCODE_CONFIG`, `FRO_BOT_PAT` are repo-level secrets. `FRO_BOT_MODEL` is a repo variable.
 - `OPENCODE_CONFIG` must set `baseURL` with `/v1` suffix: `{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}`.
 - `APPLICATION_ID`, `APPLICATION_PRIVATE_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `NPM_TOKEN` are repo-level secrets. npm publishing uses tokenless OIDC trusted publishing (no `NODE_AUTH_TOKEN`, no `.npmrc`); `NPM_TOKEN` is retained only as a rollback path and is not referenced by any workflow.

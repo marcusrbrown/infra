@@ -15,6 +15,7 @@ export default defineConfig({
       social: [{icon: 'github', label: 'GitHub', href: 'https://github.com/marcusrbrown/infra'}],
       sidebar: [
         {label: 'Status', link: '/status/'},
+        {label: 'Trace privacy', link: '/trace-privacy/'},
         {
           label: 'Services',
           items: Object.entries(SERVICES).map(([app, info]) => ({label: info.title, link: `/services/${app}/`})),

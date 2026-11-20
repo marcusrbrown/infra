@@ -108,6 +108,30 @@ bunx @marcusrbrown/infra broker deploy
 bunx @marcusrbrown/infra broker logs --tail 100
 ```
 
+### Traces
+
+Manage the trace collection stack (planned host `traces.fro.bot`, not yet deployed). The service logs, the tunnel and the sender tokens reach trace content or live credentials, so only `traces status` is exposed over MCP.
+
+| Subcommand | Description |
+| --- | --- |
+| `traces status` | SSH health check: compose service states and the health reporter verdict (`--json` for machine output) |
+| `traces deploy` | Trigger deployment (GitHub Actions by default; `--local` for direct SSH) |
+| `traces logs [service]` | Stream a service's logs (`--tail N`); logs can contain trace content |
+| `traces open` | Open an SSH tunnel to Langfuse (`localhost:3000`) and Grafana (`localhost:3001`) |
+| `traces ingest hold` | Hold the public ingest route at once; every ingest path answers 503 |
+| `traces ingest open` | Open the ingest route; refuses unless the health verdict is passing |
+| `traces ingest status` | Show the configured and observed ingest state and the health verdict |
+| `traces sender add <group>` | Issue a sender token for a group and hand it over once |
+| `traces sender list` | List tokens per group by fingerprint and creation date, never the token |
+| `traces sender revoke [group] [fingerprint]` | Revoke one token, or every token with `--all`, and prove it is refused |
+
+```bash
+bunx @marcusrbrown/infra traces status
+bunx @marcusrbrown/infra traces deploy
+bunx @marcusrbrown/infra traces ingest hold
+bunx @marcusrbrown/infra traces sender list
+```
+
 ### Gateway
 
 Manage the Fro Bot gateway on `gateway.fro.bot`.
@@ -197,7 +221,7 @@ The table has one row per app and the columns `App | Reachability | Container | 
 
 ### MCP Bridge
 
-Starts a stdio MCP server exposing a read-only allowlist of exactly 9 status commands as tools: `gateway status`, `cliproxy status`, `cliproxy models`, `keeweb status`, `umami status`, `dashboard status`, `vpn status`, `broker status`, and unified `status`. Every mutating command is deliberately excluded from the allowlist.
+Starts a stdio MCP server exposing a read-only allowlist of exactly 10 status commands as tools: `gateway status`, `cliproxy status`, `cliproxy models`, `keeweb status`, `umami status`, `dashboard status`, `vpn status`, `broker status`, `traces status`, and unified `status`. Every mutating command is deliberately excluded from the allowlist.
 
 ```bash
 bunx @marcusrbrown/infra mcp

@@ -39,6 +39,7 @@ import {registerGatewayCommands} from './gateway'
 import {registerKeewebCommands} from './keeweb'
 import {MCP_ALLOWLIST, registerMcp} from './mcp'
 import {registerStatus, unifiedStatusAction} from './status'
+import {registerTracesCommands} from './traces'
 import {registerUmamiCommands} from './umami'
 import {registerVpnCommands} from './vpn'
 
@@ -47,7 +48,7 @@ import {registerVpnCommands} from './vpn'
 /**
  * The MCP tool surface, pinned as an INDEPENDENT literal (deliberately NOT
  * derived from MCP_ALLOWLIST) so allowlist drift surfaces as a test failure —
- * per the Tier-1 test bar in packages/cli/AGENTS.md. Seven read-only tools.
+ * per the Tier-1 test bar in packages/cli/AGENTS.md. Read-only tools only.
  */
 const EXPECTED_TOOLS = [
   'broker_status',
@@ -57,6 +58,7 @@ const EXPECTED_TOOLS = [
   'gateway_status',
   'keeweb_status',
   'status',
+  'traces_status',
   'umami_status',
   'vpn_status',
 ].sort()
@@ -98,6 +100,16 @@ const CLI_ONLY_TOOLS = [
   // Broker: mutating / sensitive — CLI-only
   'broker_deploy',
   'broker_logs',
+  // Traces: mutating / sensitive — CLI-only (only `traces status` is exposed)
+  'traces_deploy',
+  'traces_logs',
+  'traces_open',
+  'traces_ingest_hold',
+  'traces_ingest_open',
+  'traces_ingest_status',
+  'traces_sender_add',
+  'traces_sender_list',
+  'traces_sender_revoke',
   // Snapshot writes the public history directory: CLI-only, run by the status-snapshot workflow
   'status_snapshot',
 ].sort()
@@ -114,6 +126,7 @@ function buildTestCli(): ReturnType<typeof goke> {
   registerUmamiCommands(cli)
   registerDashboardCommands(cli)
   registerVpnCommands(cli)
+  registerTracesCommands(cli)
   registerStatus(cli)
   registerMcp(cli)
   return cli

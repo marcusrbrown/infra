@@ -21,7 +21,7 @@ const SHALLOW_CHECKOUT =
 const ARCHIFY = join(REPO_ROOT, '.agents/skills/archify')
 const ARCHIFY_BIN = join(ARCHIFY, 'bin/archify.mjs')
 
-const MONITORED_APPS = ['broker', 'cliproxy', 'dashboard', 'gateway', 'keeweb', 'umami', 'vpn']
+const MONITORED_APPS = ['broker', 'cliproxy', 'dashboard', 'gateway', 'keeweb', 'traces', 'umami', 'vpn']
 const RUNBOOK_MAPS = ['umami-pg-upgrade', 'vpn-key-rotation', 'dashboard-rollback']
 
 const temps: string[] = []
@@ -89,7 +89,7 @@ interface WorkflowNode {
 const specs = discoverSpecs(REPO_ROOT)
 
 describe('diagram specs', () => {
-  it('ships the v1 set of 14 diagrams', () => {
+  it('ships the v1 set of 15 diagrams', () => {
     expect(specs.map(spec => spec.name).toSorted()).toEqual(
       [
         'deploy-pipeline',

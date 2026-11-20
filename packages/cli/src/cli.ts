@@ -10,6 +10,7 @@ import {registerGatewayCommands} from './commands/gateway'
 import {registerKeewebCommands} from './commands/keeweb'
 import {registerMcp} from './commands/mcp'
 import {registerStatus} from './commands/status'
+import {registerTracesCommands} from './commands/traces'
 import {registerUmamiCommands} from './commands/umami'
 import {registerVpnCommands} from './commands/vpn'
 
@@ -30,6 +31,7 @@ registerGatewayCommands(cli)
 registerUmamiCommands(cli)
 registerDashboardCommands(cli)
 registerVpnCommands(cli)
+registerTracesCommands(cli)
 registerStatus(cli)
 registerMcp(cli)
 

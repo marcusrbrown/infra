@@ -66,6 +66,13 @@ export const SERVICES: Record<AppId, ServiceInfo> = {
     runbooks: [],
     dashboard: false,
   },
+  traces: {
+    title: 'Trace collection',
+    summary:
+      'Self-hosted collection of agent run traces. Public surface: the ingest hostname and a health path. Not yet deployed.',
+    runbooks: [],
+    dashboard: false,
+  },
 }
 
 export const cliStatusCommand = (app: AppId): string => `bunx @marcusrbrown/infra ${app} status`

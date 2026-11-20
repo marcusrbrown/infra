@@ -35,6 +35,16 @@
     "scope": ["**/*.md", "**/*.html"]
   },
   {
+    "host": "traces.fro.bot",
+    "reason": "Public trace collection ingest and health hostname: named in the architecture overview and the trace collection service pages; the Langfuse and Grafana UIs have no hostname",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
+    "host": "langfuse.com",
+    "reason": "Langfuse project site: the destination of the update check its web interface makes on load, named in the trace collection operator guide as a known outbound call",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
     "host": "box.heatvision.co",
     "reason": "KeeWeb deploy target (Mail-In-A-Box server), named in the KeeWeb guide and the architecture overview",
     "scope": ["**/*.md", "**/*.html"]

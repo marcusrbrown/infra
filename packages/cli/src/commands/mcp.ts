@@ -37,6 +37,15 @@ import {createMcpAction} from '@goke/mcp'
  * - `broker deploy`         — mutating: deploys the credential broker to a live droplet; CLI-only
  * - `broker logs`           — sensitive: streams logs that may reveal run identities and minted key prefixes; CLI-only
  * - `cliproxy monitor`      — mutating: reconciles GitHub issue and Discord alert state; CLI-only
+ * - `traces deploy`         — mutating: deploys the trace collection stack to a live droplet; CLI-only
+ * - `traces logs`           — sensitive: streams service logs that can quote trace content and sender identities; CLI-only
+ * - `traces open`           — sensitive: opens an SSH tunnel to Langfuse and Grafana, which hold full trace content; CLI-only
+ * - `traces ingest hold`    — mutating: closes the public ingest route on the live host; CLI-only
+ * - `traces ingest open`    — mutating: reopens the public ingest route; CLI-only
+ * - `traces ingest status`  — sensitive: reads the host's ingest state and health verdict over SSH; CLI-only
+ * - `traces sender add`     — mutating, secret-bearing: mints a live sender token and hands it over once; CLI-only
+ * - `traces sender list`    — sensitive: lists sender groups, token fingerprints and creation dates; CLI-only
+ * - `traces sender revoke`  — mutating: revokes live sender tokens; CLI-only
  *
  * A defense-in-depth backstop also denies these in opencode.jsonc `permission`
  * so that even if MCP_ALLOWLIST were mistakenly re-expanded, opencode's native
@@ -52,6 +61,7 @@ export const MCP_ALLOWLIST: ReadonlySet<string> = new Set([
   'dashboard status',
   'vpn status',
   'broker status',
+  'traces status',
   'status',
 ])
 

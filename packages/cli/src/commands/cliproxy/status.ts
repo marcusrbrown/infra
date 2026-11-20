@@ -8,6 +8,8 @@ import {
   computeEligibility,
   parseSettings,
   parseSnapshot,
+  type Exclusion,
+  type ExclusionReason,
   type OpenCodeGoSettings,
   type ParsedSnapshot,
 } from '@marcusrbrown/infra-shared/opencode-go/eligibility'
@@ -21,6 +23,7 @@ import {buildIdentityArgs} from '../../lib/ssh-identity'
 import {observe} from '../../status/collect'
 import {declaredObservation} from '../../status/declared'
 import {httpGet} from '../../status/public-probes'
+import {fetchCurrentGoSnapshot, type GoSnapshotFailureReason, type GoSnapshotFetch} from './go-snapshot'
 import {validateCliproxyHost} from './host'
 
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
@@ -568,12 +571,21 @@ export interface GoRouteClassification {
 
 export interface GoRouteOptions {
   verbose?: boolean
-  /** Parsed privacy snapshot. Defaults to the committed one; tests inject their own. */
+  /**
+   * Parsed privacy snapshot. Defaults to the committed one; tests inject their own. With `fetchCurrentSnapshot` set
+   * this is the fallback copy, used only when the current snapshot cannot be read.
+   */
   snapshot?: ParsedSnapshot
   /** Tracked settings. Defaults to the committed ones; tests inject their own. */
   settings?: OpenCodeGoSettings
   /** The clock used for agreement expiry. Defaults to now. */
   now?: Date
+  /**
+   * Reads the current snapshot from `main`. When set, the check judges against it and falls back to `snapshot`
+   * when the read fails, saying so. Only `cliproxy status` sets it. The monitor never does: it runs from source on
+   * `main` and must not gain a network dependency.
+   */
+  fetchCurrentSnapshot?: () => Promise<GoSnapshotFetch>
 }
 
 interface GoRouteProbeResult {
@@ -671,6 +683,51 @@ function goResult(
   }
 }
 
+/** Which privacy policy the eligibility check used. `pinned`: the injected or committed copy, nothing fetched. */
+type PrivacyPolicyUse =
+  | {kind: 'pinned'}
+  | {kind: 'current'; commit: string}
+  | {kind: 'bundled'; commit: string; failure: GoSnapshotFailureReason; unverified: Exclusion[]}
+
+const shortCommit = (commit: string): string => commit.slice(0, 7)
+
+/**
+ * Under the bundled fallback, the reasons a possibly stale copy can still prove. A restriction on a model's terms
+ * (trains on data, not zero retention, region-gated) holds in any copy we hold: a later snapshot could only relax
+ * one if upstream changed its terms, which is rare, and wrongly keeping the error is the safe direction. Everything
+ * else is something the bundle may simply not know yet: a model it has no entry for (the bundle is older than the
+ * proxy's config), an entry it could not validate, or an agreement date that has since been renewed. Those warn.
+ */
+function isFirmRestriction(reason: ExclusionReason): boolean {
+  return reason === 'trains-on-data' || reason === 'not-zero-retention' || reason === 'region-gated'
+}
+
+function describeUnverified(unverified: readonly Exclusion[]): string {
+  return unverified.map(({id, reason}) => `${id} (${reason})`).join(', ')
+}
+
+/** Add the policy provenance to a finished Go result. The fallback is never a silent OK: it turns `ok` into a warning. */
+function annotatePolicy(result: GoRouteProbeResult, use: PrivacyPolicyUse): GoRouteProbeResult {
+  if (use.kind === 'pinned') return result
+  const {human} = result
+  const details = [...(human.details ?? [])]
+
+  if (use.kind === 'current') {
+    details.push(`Privacy snapshot: ${shortCommit(use.commit)} (from main)`)
+    return {...result, human: {...human, details}}
+  }
+
+  details.push(`Privacy snapshot: bundled ${shortCommit(use.commit)} used (fetch failed: ${use.failure})`)
+  if (human.level === 'error') {
+    if (use.unverified.length > 0) details.push(`Cannot vouch for: ${describeUnverified(use.unverified)}`)
+    return {...result, human: {...human, details}}
+  }
+
+  const unvouched = use.unverified.length > 0 ? `; cannot vouch for: ${describeUnverified(use.unverified)}` : ''
+  const summary = `${human.summary} — current privacy policy not checked: bundled snapshot ${shortCommit(use.commit)} used${unvouched}`
+  return {...result, human: {...human, level: human.level === 'ok' ? 'warning' : human.level, summary, details}}
+}
+
 /** The preferred probe model when it is exposed; otherwise the first exposed id (the list is sorted). */
 function chooseGoProbeModel(exposed: readonly string[], preferred: string | undefined): string | undefined {
   if (preferred !== undefined && exposed.includes(preferred)) return preferred
@@ -688,8 +745,20 @@ function chooseGoProbeModel(exposed: readonly string[], preferred: string | unde
  * Neither the key, the session id, usage nor cost appears in the result.
  */
 async function runGoRouteProbe(baseUrl: string, apiKey: string, options?: GoRouteOptions): Promise<GoRouteProbeResult> {
+  const policy: {use: PrivacyPolicyUse} = {use: {kind: 'pinned'}}
+  const result = await probeGoRoutePolicy(baseUrl, apiKey, options, policy)
+  return annotatePolicy(result, policy.use)
+}
+
+/** The probe itself. Records in `policy` which privacy policy it judged against, once it has reached that step. */
+async function probeGoRoutePolicy(
+  baseUrl: string,
+  apiKey: string,
+  options: GoRouteOptions | undefined,
+  policy: {use: PrivacyPolicyUse},
+): Promise<GoRouteProbeResult> {
   const verbose = options?.verbose === true
-  const snapshot = options?.snapshot ?? parseSnapshot(privacySnapshotJson)
+  const bundled = options?.snapshot ?? parseSnapshot(privacySnapshotJson)
   const settings = options?.settings ?? parseSettings(openCodeGoSettingsJson)
   const today = (options?.now ?? new Date()).toISOString().slice(0, 10)
   const modelsEndpoint = `${baseUrl}/v1/models`
@@ -730,20 +799,49 @@ async function runGoRouteProbe(baseUrl: string, apiKey: string, options?: GoRout
       )
     }
 
-    const {eligible} = computeEligibility(snapshot, exposed, today)
-    const nonCompliant = exposed.filter(id => !eligible.includes(id))
+    let snapshot = bundled
+    if (options?.fetchCurrentSnapshot !== undefined) {
+      const current = await options.fetchCurrentSnapshot()
+      if (current.ok) {
+        snapshot = current.snapshot
+        policy.use = {kind: 'current', commit: current.snapshot.source.commit}
+      } else {
+        policy.use = {kind: 'bundled', commit: bundled.source.commit, failure: current.reason, unverified: []}
+      }
+    }
+
+    const {eligible, excluded} = computeEligibility(snapshot, exposed, today)
+    // Under the fallback only firm restrictions are violations; the rest cannot be judged from a possibly stale copy.
+    const unverified =
+      policy.use.kind === 'bundled'
+        ? excluded.filter(item => exposed.includes(item.id) && !isFirmRestriction(item.reason))
+        : []
+    if (policy.use.kind === 'bundled') policy.use.unverified = unverified
+    const nonCompliant = exposed.filter(id => !eligible.includes(id) && !unverified.some(item => item.id === id))
     if (nonCompliant.length > 0) {
+      const bundledNote =
+        policy.use.kind === 'bundled'
+          ? ` (bundled snapshot ${shortCommit(policy.use.commit)}; current policy not checked)`
+          : ''
       return goResult(
         'dead',
         'privacy-noncompliant',
         'error',
-        `Exposed model(s) not eligible under the privacy snapshot: ${nonCompliant.join(', ')} — disable the entry, see ${GO_RUNBOOK}`,
+        `Exposed model(s) not eligible under the privacy snapshot: ${nonCompliant.join(', ')} — disable the entry, see ${GO_RUNBOOK}${bundledNote}`,
         details,
       )
     }
 
-    const model = chooseGoProbeModel(exposed, settings.defaultProbeModel)
+    // Only a model the policy in use clears receives the probe request.
+    const model = chooseGoProbeModel(
+      exposed.filter(id => eligible.includes(id)),
+      settings.defaultProbeModel,
+    )
     if (model === undefined) {
+      if (unverified.length > 0) {
+        // Status-only path (the monitor never fetches): the classification is a placeholder for the human line.
+        return goResult('unknown', 'unrelated-http', 'warning', 'OpenCode Go route not probed', details)
+      }
       return goResult('dead', 'provider-missing', 'error', 'No eligible Go model is listed', details)
     }
     if (verbose) details.push(`Model: ${model}`)
@@ -1150,7 +1248,15 @@ export async function cliproxyStatusAction(
     // Upstream provider-auth probe — only when a downstream API key is available.
     if (providerKey) {
       results.push(await checkProviderAuth(baseUrl, providerKey, {verbose}))
-      results.push(await checkGoRoute(baseUrl, providerKey, {verbose, settings: goSettings, snapshot: goSnapshot}))
+      results.push(
+        await checkGoRoute(baseUrl, providerKey, {
+          verbose,
+          settings: goSettings,
+          snapshot: goSnapshot,
+          // Operator status judges against the current snapshot on main; the bundled copy is only the fallback.
+          fetchCurrentSnapshot: () => fetchCurrentGoSnapshot(),
+        }),
+      )
     } else {
       results.push({
         title: 'Upstream provider auth',

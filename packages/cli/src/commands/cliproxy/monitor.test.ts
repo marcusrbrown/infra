@@ -6,6 +6,7 @@ import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 
 import {createCapturedCtx, MockProcessExit} from '../../lib/mcp-ctx-fixture'
+import {GO_SNAPSHOT_URL} from './go-snapshot'
 import {
   cliproxyMonitorAction,
   createGhEnvironment,
@@ -1824,6 +1825,36 @@ describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
     ])
     expect(world.writes()).toHaveLength(0)
     expect(captured.exit).toBeNull()
+  })
+
+  it('never fetches the privacy snapshot: the Go probe judges against the committed snapshot, offline', async () => {
+    const world = installWorld()
+    const {ctx} = createCapturedCtx()
+
+    await runMonitor({validation: 'live'}, ctx)
+
+    expect(world.recorded.some(request => request.url === GO_SNAPSHOT_URL)).toBe(false)
+    const snapshotHost = new URL(GO_SNAPSHOT_URL).hostname
+    expect(world.recorded.some(request => new URL(request.url).hostname === snapshotHost)).toBe(false)
+  })
+
+  it('never fetches the privacy snapshot with the production runtime either (no injected snapshot or settings)', async () => {
+    const world = installWorld()
+    const {ctx} = createCapturedCtx()
+
+    await cliproxyMonitorAction({validation: 'live'}, ctx, {
+      fetch: globalThis.fetch,
+      sleep: async () => {},
+      ghApi: async (_token, path, method, body) => {
+        const response = await globalThis.fetch(`https://api.github.com${path}`, {method, body})
+        return {status: response.status, body: await response.text()}
+      },
+      setTimeout: originalSetTimeout,
+      clearTimeout: originalClearTimeout,
+    })
+
+    expect(world.recorded.some(request => request.url.includes('/v1/models'))).toBe(true)
+    expect(world.recorded.some(request => request.url === GO_SNAPSHOT_URL)).toBe(false)
   })
 
   it('prints both probe lines before reconciling, with one timestamp, and keeps the Claude lines as they were', async () => {

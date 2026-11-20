@@ -96,6 +96,7 @@ Space-separated subcommands: `cli.command('keeweb status', '...')`. Zod schemas 
 - Shell out to `gh` CLI for GitHub API (not octokit) — `Bun.spawn(['gh', ...])`
 - Parse `gh` JSON output through Zod schemas before use
 - Exception: the status readers (`src/status/github-api.ts`, `status snapshot`, `status history-locate`) call the GitHub REST API directly with `GITHUB_TOKEN`/`GH_TOKEN`, read-only, so the snapshot runs in Actions without depending on `gh`
+- Exception: `cliproxy status` also makes one tokenless read of the OpenCode Go privacy snapshot on `main` (`GO_SNAPSHOT_URL` in `src/commands/cliproxy/go-snapshot.ts`). It reads one fixed URL built from constants, never from input or environment, sends no `Authorization` header or any other credential, makes one attempt bounded in time and size, and passes the body through the strict `parseSnapshot` parser; a failed read falls back to the bundled copy and the output says so. `cliproxy monitor` does not make this read.
 - SHA-256 via `Bun.CryptoHasher('sha256')`, not crypto module
 - Resolve paths with `import.meta.dir` + `path.resolve()` — validate existence before use
 - **Management API**: Commands import shared helpers from `@marcusrbrown/infra-shared/cliproxy/management` (`managementHeaders`, `requestJson`, `HTTP_TIMEOUT_MS`, `parseManagementKeyList`, plus the `oauth-model-alias` helpers) for authenticated JSON requests against `/v0/management/*`. Auth header is `x-management-key` (not `Authorization: Bearer`). These primitives live in `packages/shared` so both the CLI commands and `apps/cliproxy` deploy share one source of truth (the published CLI inlines `infra-shared` at build time). Other per-file local helpers (e.g., `extractErrorMessage` 1-liners) stay local until they hit the same shared-use threshold.
@@ -219,5 +220,5 @@ The `gateway status`, `umami status`, and `vpn status` commands materialize the 
 - Never use `BatchMode=yes` without `-tt` when stdin forwarding is needed (login command).
 - Never inherit full parent env when spawning `deploy.sh` — use explicit env allowlist.
 - Never check for `DEPLOY_SSH_KEY` env var for local deploy — check `SSH_AUTH_SOCK`.
-- Never add `GITHUB_TOKEN` raw fetch fallback — require `gh` CLI (the read-only status readers are the one exception, see Conventions).
+- Never add `GITHUB_TOKEN` raw fetch fallback — require `gh` CLI (the read-only status readers and the tokenless Go snapshot read are the exceptions, see Conventions).
 - Never use `Authorization: Bearer` for cliproxy management endpoints — that header is for client API key auth, not management.

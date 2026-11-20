@@ -4,6 +4,7 @@ import {join, relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 import {parse as parseYaml} from 'yaml'
+import {changesetFileName} from '../../../apps/cliproxy/scripts/refresh-go-privacy'
 import {MANAGED_MARKER, REQUIRED_HEADINGS, runMarker} from '../scripts/reconcile-autoheal-reports'
 import {registerAgentCommands} from './commands/agent'
 import {MCP_ALLOWLIST} from './commands/mcp'
@@ -5824,17 +5825,77 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     expect(script).not.toMatch(/branch="[^"]*(\$|`)/)
   })
 
-  it('commits only the snapshot and opens or updates one PR against main', async () => {
+  it('commits only the snapshot and its changeset, and opens or updates one PR against main', async () => {
     const {steps} = await load()
     const script = String(steps.find(step => step.name === 'Open snapshot PR')?.run)
 
     expect(script).toContain(`snapshot="${SNAPSHOT_PATH}"`)
-    expect(script).toContain(`git add -- "${'$'}{snapshot}"`)
-    expect(script).not.toMatch(/git add (?!--)|git commit -a|git add -A|git add \./)
+    // The one staging command names both paths. Nothing else in `.changeset/` is staged, and nothing by glob or directory.
+    const adds = script.split('\n').filter(line => /^\s*git add\b/.test(line))
+    expect(adds.map(line => line.trim())).toEqual([`git add -- "${'$'}{snapshot}" "${'$'}{changeset}"`])
+    expect(script).not.toMatch(/git commit -a|git add -A|git add \./)
     expect(script).toContain('gh pr edit')
     expect(script).toContain('gh pr create')
     expect(script).toContain('--base main')
     expect(existsSync(resolve(REPO_ROOT, SNAPSHOT_PATH))).toBe(true)
+  })
+
+  it('stages the one changeset the refresh reported, validated by name, and keeps it across the branch reset', async () => {
+    const {steps} = await load()
+    const refresh = steps[stepIndex(steps, 'refresh')]
+    const pr = steps.find(step => step.name === 'Open snapshot PR')
+    const script = String(pr?.run)
+
+    // The name arrives through the environment, never interpolated into the script.
+    expect(isRecord(pr?.env) ? pr.env.CHANGESET_FILE : undefined).toBe(ghaExpression('steps.refresh.outputs.changeset'))
+    expect(script).not.toContain('steps.refresh.outputs')
+    expect(script).toContain(`changeset=".changeset/${'$'}{CHANGESET_FILE}"`)
+
+    // Only the shape the script writes passes; anything else fails the run before a path or git add is built.
+    const shape = /\[\[ ! "\$\{CHANGESET_FILE\}" =~ (\S+) \]\]/.exec(script)
+    expect(shape, 'no name check on CHANGESET_FILE').not.toBeNull()
+    const pattern = new RegExp(shape?.[1] ?? '')
+    expect(pattern.test(changesetFileName('a'.repeat(40)))).toBe(true)
+    expect(pattern.test(changesetFileName('0123456789abcdef'.repeat(3).slice(0, 40)))).toBe(true)
+    for (const bad of [
+      '',
+      '../x.md',
+      'opencode-go-privacy-abc.md',
+      'renovate-abcdef0.md',
+      'opencode-go-privacy-abcdef0.md\n.x',
+    ]) {
+      expect(pattern.test(bad), `accepted ${JSON.stringify(bad)}`).toBe(false)
+    }
+    expect(script.indexOf('CHANGESET_FILE}" =~')).toBeLessThan(script.indexOf('changeset=".changeset'))
+
+    // Saved before the checkout that resets the worktree, restored after it, staged last.
+    const save = script.indexOf(`cp "${'$'}{changeset}" "${'$'}{new_changeset}"`)
+    const checkout = script.indexOf('git checkout -f -B')
+    const restore = script.indexOf(`cp "${'$'}{new_changeset}" "${'$'}{changeset}"`)
+    const add = script.indexOf('git add --')
+    expect(save).toBeGreaterThan(-1)
+    expect(checkout).toBeGreaterThan(save)
+    expect(restore).toBeGreaterThan(checkout)
+    expect(add).toBeGreaterThan(restore)
+
+    // The refresh step itself stays read-only and tokenless beyond github.token.
+    expect(JSON.stringify(refresh)).not.toContain('CHANGESET')
+  })
+
+  it('does not let renovate-changesets act on the snapshot PR, whose branch lacks the renovate/ prefix', async () => {
+    const changesets = await loadWorkflowYaml(resolve(REPO_ROOT, '.github/workflows/renovate-changesets.yaml'))
+    const inputs = Object.values(isRecord(changesets.jobs) ? changesets.jobs : {})
+      .flatMap(job => stepsOf(job))
+      .map(step => (isRecord(step.with) ? step.with : undefined))
+      .find(withBlock => withBlock !== undefined && 'exclude-patterns' in withBlock)
+
+    expect(inputs).toBeDefined()
+    // The action skips a PR whose head branch does not start with the prefix. It would otherwise generate, dedupe and
+    // commit changesets of its own onto the branch this workflow force-pushes.
+    expect(inputs?.['skip-branch-prefix-check']).not.toBe(true)
+    expect(inputs?.['skip-branch-prefix-check']).not.toBe('true')
+    const prefix = typeof inputs?.['branch-prefix'] === 'string' ? inputs['branch-prefix'] : 'renovate/'
+    expect(BRANCH.startsWith(prefix)).toBe(false)
   })
 
   it('does not enable auto-merge', async () => {

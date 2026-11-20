@@ -9,12 +9,15 @@ import {GO_LIVE_MODELS_URL, LiveModelsError, parseLiveModels} from '@marcusrbrow
 import {parsePrivacyDocs, PrivacyTableError} from '@marcusrbrown/infra-shared/opencode-go/parse-privacy-table'
 import {afterEach, describe, expect, it} from 'bun:test'
 import {
+  changesetFileName,
   COMMIT_API_URL,
   DEFAULT_SNAPSHOT_PATH,
   diffSnapshots,
   goMdxUrl,
   refreshGoPrivacy,
+  renderChangeset,
   serializeSnapshot,
+  workflowOutputs,
   type FetchLike,
 } from './refresh-go-privacy'
 
@@ -280,6 +283,119 @@ describe('refreshGoPrivacy: changed table', () => {
     expect(readFileSync(DEFAULT_SNAPSHOT_PATH, 'utf8')).toBe(trackedBefore)
     expect(tableAt(OLD_SHA)).toEqual(JSON.parse(fixtureBefore.expected))
     expect(parseSnapshot(JSON.parse(readFileSync(h.snapshotPath, 'utf8'))).invalid).toEqual([])
+  })
+})
+
+describe('refreshGoPrivacy: the release changeset', () => {
+  const NEWER_SHA = 'b'.repeat(40)
+  const changesetsIn = (dir: string): string[] => readdirSync(dir).filter(name => name.endsWith('.md'))
+  const withChangeset = (h: Harness, dir: string) =>
+    refreshGoPrivacy({snapshotPath: h.snapshotPath, bodyPath: h.bodyPath, changesetDir: dir, fetch: h.fetch})
+
+  it('writes exactly one patch changeset for @marcusrbrown/infra, named after the source commit, when the snapshot changed', async () => {
+    const h = harness(staleSnapshot().snapshot)
+    const dir = tempDir()
+
+    const result = await withChangeset(h, dir)
+
+    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA, changesetFile: 'opencode-go-privacy-aaaaaaa.md'})
+    expect(readdirSync(dir)).toEqual(['opencode-go-privacy-aaaaaaa.md'])
+    expect(readFileSync(join(dir, 'opencode-go-privacy-aaaaaaa.md'), 'utf8')).toBe(
+      "---\n'@marcusrbrown/infra': patch\n---\n\nRefresh the bundled OpenCode Go privacy snapshot to upstream commit `aaaaaaa` of `anomalyco/opencode`.\n",
+    )
+    expect(leftovers(dir)).toEqual([])
+  })
+
+  it('the front matter has exactly one release line, naming one package with a patch bump', async () => {
+    const h = harness(staleSnapshot().snapshot)
+    const dir = tempDir()
+
+    await withChangeset(h, dir)
+
+    const text = readFileSync(join(dir, changesetsIn(dir)[0] ?? ''), 'utf8')
+    const match = /^---\n((?:[^\n]*\n)*?)---\n\n([^\n]+)\n$/.exec(text)
+    expect(match).not.toBeNull()
+    expect((match?.[1] ?? '').trimEnd().split('\n')).toEqual(["'@marcusrbrown/infra': patch"])
+    expect(match?.[2]).toMatch(/^Refresh the bundled OpenCode Go privacy snapshot/)
+  })
+
+  it('writes no changeset when the snapshot is unchanged, even though the dev commit moved', async () => {
+    const h = harness(tableAt(OLD_SHA))
+    const dir = tempDir()
+
+    const result = await withChangeset(h, dir)
+
+    expect(result).toEqual({changed: false, sourceCommit: NEW_SHA})
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  it('writes no changeset unless a directory is given', async () => {
+    const h = harness(staleSnapshot().snapshot)
+
+    const result = await run(h)
+
+    expect(result.changed).toBe(true)
+    expect(result.changesetFile).toBeUndefined()
+    expect(readdirSync(h.dir).sort()).toEqual(['pr-body.md', 'privacy-snapshot.json'])
+  })
+
+  it('names the file after the upstream commit alone, so a re-run for the same commit rewrites the same file', async () => {
+    const dir = tempDir()
+
+    const first = await withChangeset(harness(staleSnapshot().snapshot), dir)
+    const before = readFileSync(join(dir, first.changesetFile ?? ''), 'utf8')
+    const second = await withChangeset(harness(staleSnapshot().snapshot), dir)
+
+    expect(second.changesetFile).toBe(first.changesetFile)
+    expect(changesetsIn(dir)).toEqual(['opencode-go-privacy-aaaaaaa.md'])
+    expect(readFileSync(join(dir, second.changesetFile ?? ''), 'utf8')).toBe(before)
+  })
+
+  it('a refresh for a newer upstream commit names a different file and leaves an earlier pending one alone', async () => {
+    const dir = tempDir()
+
+    const first = await withChangeset(harness(staleSnapshot().snapshot, {sha: NEW_SHA}), dir)
+    const second = await withChangeset(harness(staleSnapshot().snapshot, {sha: NEWER_SHA}), dir)
+
+    expect(first.changesetFile).toBe('opencode-go-privacy-aaaaaaa.md')
+    expect(second.changesetFile).toBe('opencode-go-privacy-bbbbbbb.md')
+    expect(changesetsIn(dir)).toEqual(['opencode-go-privacy-aaaaaaa.md', 'opencode-go-privacy-bbbbbbb.md'])
+    expect(readFileSync(join(dir, 'opencode-go-privacy-bbbbbbb.md'), 'utf8')).toContain('`bbbbbbb`')
+  })
+
+  it('writes nothing when the refresh fails before the compare', async () => {
+    const h = harness(staleSnapshot().snapshot, {liveResponse: () => new Response('nope', {status: 503})})
+    const dir = tempDir()
+
+    await expect(withChangeset(h, dir)).rejects.toThrow()
+
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  it('leaves the snapshot untouched when the changeset cannot be written', async () => {
+    const h = harness(staleSnapshot().snapshot)
+    const before = readFileSync(h.snapshotPath, 'utf8')
+    const notADirectory = join(h.dir, 'blocker')
+    writeFileSync(notADirectory, '')
+
+    await expect(withChangeset(h, notADirectory)).rejects.toThrow()
+
+    expect(readFileSync(h.snapshotPath, 'utf8')).toBe(before)
+  })
+
+  it('refuses a commit that is not 40 lowercase hex before it reaches a path', () => {
+    expect(changesetFileName(NEW_SHA)).toBe('opencode-go-privacy-aaaaaaa.md')
+    expect(() => changesetFileName('../../etc/passwd')).toThrow()
+    expect(() => changesetFileName('A'.repeat(40))).toThrow()
+    expect(() => renderChangeset('abc')).toThrow()
+  })
+
+  it('reports the changeset to the workflow as a bare file name, and only when one was written', () => {
+    expect(workflowOutputs({changed: false, sourceCommit: NEW_SHA})).toBe('changed=false\n')
+    expect(workflowOutputs({changed: true, sourceCommit: NEW_SHA})).toBe('changed=true\n')
+    expect(
+      workflowOutputs({changed: true, sourceCommit: NEW_SHA, changesetFile: 'opencode-go-privacy-aaaaaaa.md'}),
+    ).toBe('changed=true\nchangeset=opencode-go-privacy-aaaaaaa.md\n')
   })
 })
 

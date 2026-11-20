@@ -28,7 +28,10 @@ import {parsePrivacyDocs, PrivacyTableError} from '@marcusrbrown/infra-shared/op
 // or field it cannot account for) and writes the snapshot only when a model's privacy terms changed. The source
 // commit alone moving is not a change: otherwise every upstream push would open a PR.
 // .github/workflows/opencode-go-privacy.yaml runs this through `bun run refresh:go-privacy`, then opens the PR
-// from the body file this script writes.
+// from the body file this script writes. A changed snapshot also gets one patch changeset for the published CLI,
+// which inlines the snapshot at build time: merging the PR queues a release through the Version Packages PR.
+// The file is named after the upstream commit, so a re-run for the same commit rewrites it and a refresh for a
+// newer commit adds a second pending changeset next to an earlier one that is still on `main`.
 
 export const UPSTREAM_BRANCH = 'dev'
 export const COMMIT_API_URL = `https://api.github.com/repos/${SNAPSHOT_SOURCE_REPO}/commits/${UPSTREAM_BRANCH}`
@@ -39,6 +42,9 @@ export const DEFAULT_SNAPSHOT_PATH = resolve(
   import.meta.dir,
   '../../../packages/shared/opencode-go/privacy-snapshot.json',
 )
+export const DEFAULT_CHANGESET_DIR = resolve(import.meta.dir, '../../../.changeset')
+/** The published package that inlines the snapshot. */
+export const CHANGESET_PACKAGE = '@marcusrbrown/infra'
 const FETCH_TIMEOUT_MS = 30_000
 
 export function goMdxUrl(sha: string): string {
@@ -53,6 +59,8 @@ export interface RefreshOptions {
   readonly snapshotPath?: string
   /** Written only when the snapshot changed. */
   readonly bodyPath?: string
+  /** Receives one release changeset, only when the snapshot changed. Unset writes none. */
+  readonly changesetDir?: string
   /** Injectable for tests; defaults to the global `fetch`. */
   readonly fetch?: FetchLike
   /**
@@ -69,6 +77,8 @@ export interface RefreshOptions {
 export interface RefreshResult {
   readonly changed: boolean
   readonly sourceCommit: string
+  /** The bare name of the changeset written into `changesetDir`; absent when none was written. */
+  readonly changesetFile?: string
 }
 
 export interface SnapshotDiff {
@@ -79,6 +89,27 @@ export interface SnapshotDiff {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function assertCommitSha(sha: string): void {
+  if (!COMMIT_SHA_PATTERN.test(sha)) throw new Error('a changeset needs a 40-hex upstream commit SHA')
+}
+
+/** One file per upstream commit. The name is safe in a path: it comes from a validated SHA alone. */
+export function changesetFileName(sha: string): string {
+  assertCommitSha(sha)
+  return `opencode-go-privacy-${sha.slice(0, 7)}.md`
+}
+
+/** A patch bump for the CLI and one plain sentence for its release notes. */
+export function renderChangeset(sha: string): string {
+  assertCommitSha(sha)
+  return `---\n'${CHANGESET_PACKAGE}': patch\n---\n\nRefresh the bundled OpenCode Go privacy snapshot to upstream commit \`${sha.slice(0, 7)}\` of \`${SNAPSHOT_SOURCE_REPO}\`.\n`
+}
+
+/** The `$GITHUB_OUTPUT` lines for one run. `changeset` is a bare file name, present only when one was written. */
+export function workflowOutputs(result: RefreshResult): string {
+  return `changed=${result.changed}\n${result.changesetFile === undefined ? '' : `changeset=${result.changesetFile}\n`}`
 }
 
 /** The exact bytes the file holds: two-space JSON, parser key order, one trailing newline. */
@@ -247,12 +278,14 @@ function writeAtomic(target: string, content: string): void {
 }
 
 /**
- * Fetches, parses and compares. Writes the snapshot (and the PR body when `bodyPath` is set) only when a model's
- * privacy terms changed. Any failure throws before anything is written, so the existing snapshot stays untouched.
+ * Fetches, parses and compares. Writes the snapshot (and the PR body when `bodyPath` is set, and the release
+ * changeset when `changesetDir` is set) only when a model's privacy terms changed. Any failure throws before the
+ * snapshot is written, so the existing snapshot stays untouched.
  */
 export async function refreshGoPrivacy({
   snapshotPath = DEFAULT_SNAPSHOT_PATH,
   bodyPath,
+  changesetDir,
   fetch: fetchImpl = globalThis.fetch,
   githubToken,
   now = () => new Date(),
@@ -295,8 +328,16 @@ export async function refreshGoPrivacy({
       renderPrBody(previous.source.commit, next, diff, beforeModels, disagreements, unmatched, previouslyEligible),
     )
   }
+  // Before the snapshot, so a failed changeset write leaves the snapshot as it was.
+  let changesetFile: string | undefined
+  if (changesetDir !== undefined) {
+    changesetFile = changesetFileName(sha)
+    writeAtomic(resolve(changesetDir, changesetFile), renderChangeset(sha))
+  }
   writeAtomic(snapshotPath, serializeSnapshot(next))
-  return {changed: true, sourceCommit: sha}
+  return changesetFile === undefined
+    ? {changed: true, sourceCommit: sha}
+    : {changed: true, sourceCommit: sha, changesetFile}
 }
 
 if (import.meta.main) {
@@ -304,10 +345,11 @@ if (import.meta.main) {
     const result = await refreshGoPrivacy({
       snapshotPath: process.env.GO_PRIVACY_SNAPSHOT_PATH || undefined,
       bodyPath: process.argv[2] ?? (process.env.GO_PRIVACY_PR_BODY_PATH || undefined),
+      changesetDir: process.env.GO_PRIVACY_CHANGESET_DIR || DEFAULT_CHANGESET_DIR,
       githubToken: process.env.GITHUB_TOKEN || undefined,
     })
     const outputFile = process.env.GITHUB_OUTPUT
-    if (outputFile) appendFileSync(outputFile, `changed=${result.changed}\n`)
+    if (outputFile) appendFileSync(outputFile, workflowOutputs(result))
     process.stdout.write(
       result.changed
         ? `snapshot changed (source ${result.sourceCommit})\n`

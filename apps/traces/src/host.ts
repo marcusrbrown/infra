@@ -82,8 +82,9 @@ export function tracesTokenDir(group: SenderGroup): string {
 
 // ─── Deploy state and locks ───────────────────────────────────────────────────
 //
-// These four paths are a contract between the deploy, the sender-token commands and the ingest command. The CLI
-// never imports from `apps/`, so it keeps copies of its own and a test pins each copy to the value here.
+// These paths are a contract between the deploy, the sender-token commands and the ingest command. The CLI
+// never imports from `apps/`, so it keeps copies of its own and a test pins each copy to the value here. The step
+// lock is deploy-internal: the CLI never takes it, so a manual `traces ingest hold` never waits on a deploy step.
 
 /**
  * A regular file. Deploy writes it (a UTC timestamp on one line) before its first change to the host and removes
@@ -98,6 +99,14 @@ export const TRACES_PENDING_RESTARTS = `${TRACES_APP_DIR}/.pending-restarts`
 
 /** `flock` lock file. Every script that reads then writes the ingest state and recreates Caddy runs inside `flock -w 30` on it. */
 export const TRACES_INGEST_LOCK = `${TRACES_APP_DIR}/.ingest.lock`
+
+/**
+ * `flock` lock file, taken on descriptor 8 by every deploy script that changes the host, before its ownership check
+ * and held until the script's shell exits (the whole step), and by the script that takes the host over before it
+ * writes the deploy marker. So a deploy cannot take ownership while another deploy's step is in flight. When a script
+ * takes both locks, this one comes first. Only the deploy takes it.
+ */
+export const TRACES_DEPLOY_STEP_LOCK = `${TRACES_APP_DIR}/.deploy-step.lock`
 
 /** `flock` lock file. Every script that reads then replaces a token file runs inside `flock -w 30` on it. */
 export const TRACES_TOKENS_LOCK = `${TRACES_TOKEN_ROOT}/.lock`

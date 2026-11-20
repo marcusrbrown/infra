@@ -156,7 +156,8 @@ export function readTtlSql(): string {
 
 /**
  * `guard` is a shell fragment that runs first and may stop the script before it changes anything. The deploy passes
- * its ownership check (an overtaken deploy must not alter a table); with none, the script runs as it always did.
+ * its ownership prelude (the deploy step lock, then the check: an overtaken deploy must not alter a table, and no
+ * newer deploy may take the host while this step runs); with none, the script runs as it always did.
  */
 export function applyTtlScript(guard = ''): string {
   return `set -eu

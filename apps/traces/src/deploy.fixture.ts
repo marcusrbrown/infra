@@ -6,6 +6,9 @@
 import type {Runner, RunResult} from '../server/provision'
 import type {DeployDeps, DeployInputs, IngestState} from './deploy'
 
+import {chmodSync, writeFileSync} from 'node:fs'
+import {join} from 'node:path'
+
 import {GATED_SERVICES, generateVoidTokenLine, REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
 import {SENDER_GROUPS, TRACES_DEPLOY_MARKER, TRACES_VOID_TOKEN_PREFIX} from './host'
 import {OBJECT_STORE_PREFIXES, RETENTION_TABLES} from './retention'
@@ -18,6 +21,13 @@ export const EPOCH = 1_700_000_000
  */
 const OWNER_CHECK = /\[ "\$traces_owner" = ([\da-f]{32,128}) \]/
 const HEX_ID = /\b([\da-f]{32,128})\b/
+
+/**
+ * The step lock as the script text takes it: `exec 8>>FILE; if ! flock -w SECONDS 8; then echo SENTINEL; exit 1; fi`.
+ * The simulation waits for the lock for that many seconds of simulated time (`FakeHost.elapse`), and answers with
+ * the script's own sentinel when the time runs out. A script without that text takes no lock.
+ */
+const STEP_LOCK = /exec 8>>(\S+); if ! flock -w (\d+) 8; then echo (\w+); exit 1; fi/
 
 /** Steps that change nothing on the host. Every other step must carry the ownership prelude (default-deny). */
 const READ_ONLY_STEPS: readonly RegExp[] = [
@@ -71,6 +81,11 @@ export interface FakeOptions {
    * sees a failed command. Fires once.
    */
   loseReplyOn?: IngestState
+  /**
+   * Called after a step has passed its ownership check, before it does its work. A promise keeps the step "in
+   * flight": it holds the step lock (if its script text takes one) until the promise settles.
+   */
+  inFlight?: (step: string, call: Call) => Promise<void> | undefined
   /** Mutations of the reporter's verdict. */
   checkStatus?: Record<string, 'pass' | 'warn' | 'fail' | 'unknown'>
   /** Seconds the reporter's verdict is dated after the restart (negative: older than the restart). */
@@ -107,6 +122,13 @@ export class FakeHost {
   refused: string[] = []
   /** Steps that change the host and carried no ownership prelude. A correct deploy leaves this empty. */
   unguarded: string[] = []
+  /** Steps that change the host, or take it over, and did not take the step lock. A correct deploy leaves this empty. */
+  unlocked: string[] = []
+  /** Who holds the step lock right now (the step's name), and who is waiting for it, in order. */
+  stepLockHolder: string | undefined
+  private stepWaiters: {step: string; remaining: number; resolve: (got: boolean) => void}[] = []
+  /** What happened, in order: `lock:<step>`, `marker:<id>`, `done:<step>` (the lock is released), `busy:<step>`. */
+  events: string[] = []
   /** What each compose service is running: whether it runs, and its `config-hash` label. */
   running = new Map<string, {running: boolean; hash: string}>()
   private replyLost = false
@@ -140,13 +162,65 @@ export class FakeHost {
     if (owner === undefined && !isReadOnlyStep(call.step)) {
       this.unguarded.push(call.step)
     }
-    if (owner !== undefined && this.markerOwner() !== owner) {
-      this.refused.push(call.step)
-      return {exitCode: 1, stdout: 'DEPLOY_OVERTAKEN\n', stderr: ''}
+    const lock = STEP_LOCK.exec(command)
+    if (lock === null && (owner !== undefined || call.step === 'host-state')) this.unlocked.push(call.step)
+    const step = call.step
+    if (lock?.[2] !== undefined && !(await this.takeStepLock(step, Number(lock[2])))) {
+      this.events.push(`busy:${step}`)
+      return {exitCode: 1, stdout: `${lock[3] ?? ''}\n`, stderr: ''}
     }
-    const overridden = this.options.override?.(call.step, call)
-    if (overridden !== undefined) return overridden
-    return this.handle(call)
+    try {
+      if (owner !== undefined && this.markerOwner() !== owner) {
+        this.refused.push(call.step)
+        return {exitCode: 1, stdout: 'DEPLOY_OVERTAKEN\n', stderr: ''}
+      }
+      if (lock !== null || owner !== undefined) await this.options.inFlight?.(call.step, call)
+      const overridden = this.options.override?.(call.step, call)
+      if (overridden !== undefined) return overridden
+      return this.handle(call)
+    } finally {
+      if (lock !== null) this.releaseStepLock(step)
+    }
+  }
+
+  private takeStepLock(step: string, waitSeconds: number): Promise<boolean> {
+    if (this.stepLockHolder === undefined) {
+      this.stepLockHolder = step
+      this.events.push(`lock:${step}`)
+      return Promise.resolve(true)
+    }
+    return new Promise<boolean>(resolve => {
+      this.stepWaiters.push({step, remaining: waitSeconds, resolve})
+    })
+  }
+
+  private releaseStepLock(step: string): void {
+    this.events.push(`done:${step}`)
+    const next = this.stepWaiters.shift()
+    if (next === undefined) {
+      this.stepLockHolder = undefined
+      return
+    }
+    // The lock goes to the first one waiting, before anything else can ask for it.
+    this.stepLockHolder = next.step
+    this.events.push(`lock:${next.step}`)
+    next.resolve(true)
+  }
+
+  /** The steps waiting for the step lock, in order. */
+  get waitingForStepLock(): string[] {
+    return this.stepWaiters.map(waiter => waiter.step)
+  }
+
+  /** Simulated seconds pass: a step whose `flock -w` has run out gives up, as the script does. */
+  elapse(seconds: number): void {
+    for (const waiter of [...this.stepWaiters]) {
+      waiter.remaining -= seconds
+      if (waiter.remaining <= 0) {
+        this.stepWaiters.splice(this.stepWaiters.indexOf(waiter), 1)
+        waiter.resolve(false)
+      }
+    }
   }
 
   /** The id the marker holds: its first field. */
@@ -242,6 +316,7 @@ export class FakeHost {
         // The script writes the marker only if its text says so, and under the lock only if its text says so.
         if (command.includes('mv -f') && command.includes(TRACES_DEPLOY_MARKER)) {
           this.marker = `${HEX_ID.exec(command)?.[1] ?? 'no-id'} ${new Date(this.clock * 1000).toISOString()}\n`
+          this.events.push(`marker:${this.markerOwner()}`)
           if (!command.includes('flock -w 30')) this.unlockedMarker = true
         }
         return reply
@@ -508,6 +583,38 @@ export class FakeHost {
     }
     return fail(`unexpected retention step ${step}`)
   }
+}
+
+// ─── A real `flock` for tests that run a script in bash ───────────────────────
+
+/**
+ * The host has util-linux `flock`. macOS has none. Where it is missing, a stand-in over the system `perl` takes the
+ * same `flock -w SECONDS FD` call and takes a real, kernel-level `flock(2)` on the descriptor, so two shells holding
+ * the same file really do exclude each other. (The technique of `packages/cli/src/commands/traces/sender.test.ts`.)
+ */
+export const HAS_REAL_FLOCK = Bun.which('flock') !== null
+export const CAN_LOCK = HAS_REAL_FLOCK || Bun.which('perl') !== null
+
+const FLOCK_STAND_IN = [
+  '#!/usr/bin/perl',
+  'use Fcntl qw(:flock);',
+  'use Time::HiRes qw(time sleep);',
+  'my ($wait, $fd) = (0, undef);',
+  'while (@ARGV) { my $arg = shift @ARGV; if ($arg eq "-w") { $wait = shift @ARGV } else { $fd = $arg } }',
+  'open(my $fh, ">&=", $fd) or exit 1;',
+  'my $deadline = time + $wait;',
+  'while (1) { if (flock($fh, LOCK_EX | LOCK_NB)) { exit 0 } if (time >= $deadline) { exit 1 } sleep(0.05) }',
+  '',
+].join('\n')
+
+/** Put a `flock` in `directory` when the machine has none. Returns whether scripts that lock can run here. */
+export function installFlockStandIn(directory: string): boolean {
+  if (HAS_REAL_FLOCK) return true
+  if (!CAN_LOCK) return false
+  const path = join(directory, 'flock')
+  writeFileSync(path, FLOCK_STAND_IN)
+  chmodSync(path, 0o755)
+  return true
 }
 
 export function stepOf(command: string): string {

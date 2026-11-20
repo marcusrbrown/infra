@@ -61,7 +61,9 @@ import {
 } from './deploy'
 import {
   baseEnv,
+  CAN_LOCK,
   FakeHost,
+  installFlockStandIn,
   isReadOnlyStep,
   OTHER_DIGEST,
   PLACEHOLDER_DIGEST,
@@ -74,6 +76,7 @@ import {
   SENDER_GROUPS,
   TRACES_APP_DIR,
   TRACES_DEPLOY_MARKER,
+  TRACES_DEPLOY_STEP_LOCK,
   TRACES_INGEST_LOCK,
   TRACES_LOCK_BUSY_SENTINEL,
   TRACES_PENDING_RESTARTS,
@@ -577,7 +580,12 @@ describe('remote scripts', () => {
         String.raw`printf '%s\n' "$line" > "$t"`,
       ])
       // Nothing else is redirected anywhere but to stderr.
-      expect(script.split('\n').filter(line => />/.test(line) && !/>\s*"\$t"|>&2/.test(line))).toEqual([])
+      // (and the step lock file, a regular file under the app directory, which the ownership check opens first).
+      expect(
+        script
+          .split('\n')
+          .filter(line => />/.test(line) && !/>\s*"\$t"|>&2/.test(line) && !line.startsWith('exec 8>>')),
+      ).toEqual([])
       expect(script).toContain('line=$(cat)')
       expect(script).not.toContain('trc_void_')
     }
@@ -588,9 +596,12 @@ describe('remote scripts', () => {
     try {
       const shim = join(root, 'shim')
       mkdirSync(shim)
-      // `chown` to another user needs root. The shim makes it a no-op so the real script runs unprivileged.
-      writeFileSync(join(shim, 'chown'), '#!/bin/sh\nexit 0\n')
-      chmodSync(join(shim, 'chown'), 0o755)
+      // `chown` to another user needs root, and macOS has no `flock`. The shims make both no-ops so the real script
+      // runs unprivileged (the step lock itself is exercised below, with a real lock).
+      for (const name of ['chown', 'flock']) {
+        writeFileSync(join(shim, name), '#!/bin/sh\nexit 0\n')
+        chmodSync(join(shim, name), 0o755)
+      }
 
       // The deploy owns the host: its marker holds its id.
       writeFileSync(join(root, '.deploy-in-progress'), `${ID_A} 2023-11-14T22:13:20.000Z\n`)
@@ -2734,21 +2745,23 @@ describe('the ownership check: a script that changes the host cannot lack it', (
     }
   })
 
-  it('takes the ingest lock first when it changes the route or removes the marker, so there is no gap between check and act', () => {
+  it('checks, under the step lock, before it takes the ingest lock and acts, when it changes the route or removes the marker', () => {
+    // Lock order is the step lock (inside the prelude), then the ingest lock. The step lock keeps the check true until
+    // the script ends: nobody can take the host over while it is held, so there is no gap between check and act.
     const open = setIngestStateCommand('open', ID_A)
-    expect(open.indexOf('flock -w 30')).toBeGreaterThan(0)
-    expect(open.indexOf('flock -w 30')).toBeLessThan(open.indexOf(prelude))
-    expect(open.indexOf(prelude)).toBeLessThan(open.indexOf('mktemp'))
-    expect(open.indexOf(prelude)).toBeLessThan(open.indexOf('--force-recreate'))
+    expect(open.indexOf(prelude)).toBeGreaterThan(0)
+    expect(open.indexOf(prelude)).toBeLessThan(open.indexOf('flock -w 30'))
+    expect(open.indexOf('flock -w 30')).toBeLessThan(open.indexOf('mktemp'))
+    expect(open.indexOf('flock -w 30')).toBeLessThan(open.indexOf('--force-recreate'))
 
     const env = writeFileScript(ID_A, ENV_FILE, 'held')
-    expect(env.indexOf('flock -w 30')).toBeLessThan(env.indexOf(prelude))
+    expect(env.indexOf(prelude)).toBeLessThan(env.indexOf('flock -w 30'))
+    expect(env.indexOf('flock -w 30')).toBeLessThan(env.indexOf('mktemp'))
 
     const remove = removeOwnFileScript(ID_A, '.deploy-in-progress')
     expect(remove).toContain(prelude)
-    expect(remove.indexOf('flock -w 30')).toBeGreaterThan(0)
-    expect(remove.indexOf('flock -w 30')).toBeLessThan(remove.indexOf(prelude))
-    expect(remove.indexOf(prelude)).toBeLessThan(remove.indexOf('rm -f'))
+    expect(remove.indexOf(prelude)).toBeLessThan(remove.indexOf('flock -w 30'))
+    expect(remove.indexOf('flock -w 30')).toBeLessThan(remove.indexOf('rm -f'))
     expect(remove).toContain(TRACES_LOCK_BUSY_SENTINEL)
   })
 
@@ -2910,6 +2923,403 @@ describe('the ownership check, run for real against a scratch app directory', ()
       expect(parseHostState(taken.out)).toMatchObject({marker: true, ingest: 'open'})
       expect(readFileSync(marker(root), 'utf8')).toMatch(MARKER_FORMAT)
       expect(readFileSync(marker(root), 'utf8').startsWith(`${ID_A} `)).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ─── The step lock: nothing of an older deploy runs once a newer one owns the host ────────────────────────────────
+
+type Settled = {ok: true; result: DeployResult} | {ok: false; error: Error}
+
+async function settled(promise: Promise<{result: DeployResult}>): Promise<Settled> {
+  try {
+    return {ok: true, result: (await promise).result}
+  } catch (error) {
+    return {ok: false, error: error instanceof Error ? error : new Error(String(error))}
+  }
+}
+
+/** Lets every pending microtask and the next timer run: whatever can progress has progressed. */
+async function quiesce(): Promise<void> {
+  for (let turn = 0; turn < 10; turn += 1) await new Promise(resolve => setTimeout(resolve, 0))
+}
+
+/**
+ * Deploy A passes the ownership check of one mutating step (`pauseAt`) and stays in flight inside it, holding the step
+ * lock. Deploy B then starts, and everything that can progress is let progress.
+ */
+async function startWhileStepInFlight(pauseAt: string): Promise<{
+  host: FakeHost
+  a: Promise<Settled>
+  b: Promise<Settled>
+  finishStep: () => void
+}> {
+  const reached = latch()
+  const release = latch()
+  let paused = false
+  const host = new FakeHost({
+    inFlight: step => {
+      if (step !== pauseAt || paused) return undefined
+      paused = true
+      reached.open()
+      return release.promise
+    },
+  })
+  const a = settled(run(host, baseEnv(), {deployId: () => ID_A}))
+  await reached.promise
+  const b = settled(run(host, baseEnv(), {deployId: () => ID_B}))
+  await quiesce()
+  return {host, a, b, finishStep: release.open}
+}
+
+describe('the step lock: a takeover waits for the older deploy’s step that is in flight', () => {
+  it('B cannot take the host, run gates or open ingest while A is inside a step; when the step ends B takes over and A is refused', async () => {
+    const {host, a, b, finishStep} = await startWhileStepInFlight('up-public')
+
+    // A passed its check and is inside `up-public` (it can restart the collector). B asked to take over and waits.
+    expect(host.stepLockHolder).toBe('up-public')
+    expect(host.waitingForStepLock).toEqual(['host-state'])
+    expect(host.markerOwner()).toBe(ID_A)
+    expect(host.events.some(event => event.startsWith('marker:') && event !== `marker:${ID_A}`)).toBe(false)
+    expect(host.setStates()).toEqual([])
+    expect(host.served).not.toBe('open')
+    // Everything the host has been asked since A entered the step is B's storage probe and its takeover, which waits.
+    expect(host.steps.slice(host.steps.lastIndexOf('up-public') + 1)).toEqual(['storage-probe', 'host-state'])
+
+    finishStep()
+    const [resultA, resultB] = await Promise.all([a, b])
+
+    // The takeover happened after A's step had finished, and A's next step was refused.
+    expect(host.events.indexOf('done:up-public')).toBeGreaterThan(-1)
+    expect(host.events.indexOf(`marker:${ID_B}`)).toBeGreaterThan(host.events.indexOf('done:up-public'))
+    expect(resultA.ok).toBe(false)
+    if (!resultA.ok) expect(resultA.error).toBeInstanceOf(DeployOvertakenError)
+    expect(host.refused).toEqual(['up-reporter'])
+
+    // B owned the host from its takeover on: it ran its gates and opened, and nothing of A ran after it began.
+    expect(resultB.ok).toBe(true)
+    if (resultB.ok) expect(resultB.result.ingest).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.served).toBe('open')
+    expect(host.marker).toBeUndefined()
+    expect(host.unlocked).toEqual([])
+    expect(host.stepLockHolder).toBeUndefined()
+    expect(host.waitingForStepLock).toEqual([])
+  })
+
+  it('a takeover that cannot get the lock in time fails cleanly: the marker is still A’s, nothing changed, and it says why', async () => {
+    const {host, a, b, finishStep} = await startWhileStepInFlight('up-public')
+
+    // Just inside the bound it is still waiting; at the bound it gives up.
+    host.elapse(899)
+    await quiesce()
+    expect(host.waitingForStepLock).toEqual(['host-state'])
+    host.elapse(1)
+    const resultB = await b
+
+    expect(resultB.ok).toBe(false)
+    if (!resultB.ok) {
+      expect(resultB.error.message).toMatch(/another deploy/i)
+      expect(resultB.error.message).toContain('still running')
+      expect(resultB.error.message).toContain('15 minutes')
+      expect(resultB.error.message).toContain('Nothing was changed')
+      expect(resultB.error.message).toContain('Retry')
+    }
+    expect(host.events).toContain('busy:host-state')
+    expect(host.markerOwner()).toBe(ID_A)
+    expect(host.waitingForStepLock).toEqual([])
+    // B asked the host two things (the storage probe and the takeover) and changed nothing, held nothing, opened nothing.
+    const afterA = host.steps.slice(host.steps.lastIndexOf('up-public') + 1).filter(step => step !== 'ssh-exit')
+    expect(afterA).toEqual(['storage-probe', 'host-state'])
+    expect(host.setStates()).toEqual([])
+
+    // A is unaffected: it finishes its step and the rest of its deploy, and opens.
+    finishStep()
+    const resultA = await a
+    expect(resultA.ok).toBe(true)
+    if (resultA.ok) expect(resultA.result.ingest).toBe('open')
+    expect(host.refused).toEqual([])
+    expect(host.marker).toBeUndefined()
+  })
+
+  it('a single deploy is unaffected: every step that changes the host takes the lock, never waits, and releases it', async () => {
+    const host = new FakeHost()
+    const {result} = await run(host, baseEnv(), {deployId: () => ID_A})
+    expect(result.ingest).toBe('open')
+    expect(host.refused).toEqual([])
+    expect(host.unguarded).toEqual([])
+    expect(host.unlocked).toEqual([])
+    expect(host.events.some(event => event.startsWith('busy:'))).toBe(false)
+    expect(host.stepLockHolder).toBeUndefined()
+    // One lock per step that changes the host, plus the takeover; each released.
+    const mutating = host.steps.filter(step => step !== 'ssh-exit' && !isReadOnlyStep(step)).length
+    expect(host.events.filter(event => event.startsWith('lock:'))).toHaveLength(mutating + 1)
+    expect(host.events.filter(event => event.startsWith('done:'))).toHaveLength(mutating + 1)
+    // The takeover is the first thing that takes it.
+    expect(host.events[0]).toBe('lock:host-state')
+  })
+
+  it('an ordinary step that cannot get the lock fails with its own message, and the deploy closes the route as for any failure', async () => {
+    const host = new FakeHost({
+      override: step => (step === 'pull' ? {exitCode: 1, stdout: 'DEPLOY_STEP_BUSY\n', stderr: ''} : undefined),
+    })
+    const error = await failure(host, baseEnv(), {deployId: () => ID_A})
+    expect(error.name).toBe('DeployStepBusyError')
+    expect(error.message).toContain('could not start')
+    expect(error.message).toContain('60 seconds')
+    expect(error.message).toContain('taking over')
+    // Not the takeover's message: this deploy owned the host when it asked.
+    expect(error.message).not.toContain('Retry when')
+    expect(host.markerOwner()).toBe(ID_A)
+    expect(host.setStates()).toEqual([])
+  })
+
+  it('a deploy refused as overtaken has already released the lock: the newer deploy is not kept waiting by it', async () => {
+    const host = new FakeHost()
+    const o = await overlap(host, step => step === 'prepare-dirs')
+    expect(o.aError).toBeInstanceOf(DeployOvertakenError)
+    expect(host.stepLockHolder).toBeUndefined()
+    await o.finishB()
+    expect(host.stepLockHolder).toBeUndefined()
+  })
+})
+
+describe('the step lock in the script text', () => {
+  const stepLock = `exec 8>>${TRACES_DEPLOY_STEP_LOCK}`
+  const waitOf = (script: string): number => Number(/flock -w (\d+) 8/.exec(script)?.[1])
+  const markerCheck = `[ -f ${TRACES_DEPLOY_MARKER} ]`
+  const ingestLock = 'flock -w 30 9'
+
+  const readOnly: Record<string, string> = {
+    compareFileScript: compareFileScript('config/otelcol.yaml', 'plain'),
+    tokenDirsScript: tokenDirsScript(),
+    readIngestStateScript: readIngestStateScript(),
+    driftScript: driftScript(),
+    probeIngestScript: probeIngestScript('traces.fro.bot'),
+    diskScript: diskScript(),
+    runningDigestScript: runningDigestScript('collector'),
+    bootstrapProbeScript: bootstrapProbeScript(),
+    hygieneScript: hygieneScript(),
+    readTtlScript: retentionModule.readTtlScript(),
+    readLifecycleScript: retentionModule.readLifecycleScript(),
+  }
+
+  const bothLocks: Record<string, string> = {
+    begin: beginDeployScript(ID_A),
+    setState: setIngestStateCommand('open', ID_A),
+    writeEnv: writeFileScript(ID_A, ENV_FILE, 'held'),
+    removeMarker: removeOwnFileScript(ID_A, '.deploy-in-progress'),
+  }
+
+  it('every script that changes the host takes it on descriptor 8 before its ownership check, and the ownership check is inside the prelude', () => {
+    for (const [builder, scripts] of Object.entries(MUTATING_SCRIPTS)) {
+      for (const script of scripts) {
+        const lock = script.indexOf(stepLock)
+        const check = script.indexOf(markerCheck)
+        expect({builder, lock: lock !== -1, before: lock < check}).toEqual({builder, lock: true, before: true})
+        expect({builder, prelude: script.includes(ownershipPrelude(ID_A))}).toEqual({builder, prelude: true})
+        expect({builder, busy: script.includes('DEPLOY_STEP_BUSY')}).toEqual({builder, busy: true})
+      }
+    }
+    expect(ownershipPrelude(ID_A)).toContain(stepLock)
+    expect(ownershipPrelude(ID_A).split('\n')).toHaveLength(1)
+  })
+
+  it('takes the step lock before the ingest lock in every script that takes both, never the reverse', () => {
+    for (const [name, script] of Object.entries(bothLocks)) {
+      expect({name, step: script.includes(stepLock), ingest: script.includes(ingestLock)}).toEqual({
+        name,
+        step: true,
+        ingest: true,
+      })
+      expect({name, order: script.indexOf(stepLock) < script.indexOf(ingestLock)}).toEqual({name, order: true})
+      // One lock per descriptor: the ingest lock stays on 9.
+      expect({name, ingestFd: script.includes(`exec 9>>${TRACES_INGEST_LOCK}`) || script.includes('exec 9>>')}).toEqual(
+        {
+          name,
+          ingestFd: true,
+        },
+      )
+    }
+    expect(TRACES_DEPLOY_STEP_LOCK).not.toBe(TRACES_INGEST_LOCK)
+  })
+
+  it('the takeover takes the step lock before it takes the ingest lock and before it writes the marker, and waits longer than an ordinary step', () => {
+    const begin = bothLocks.begin ?? ''
+    expect(begin.indexOf(stepLock)).toBeGreaterThan(-1)
+    expect(begin.indexOf(stepLock)).toBeLessThan(begin.indexOf(ingestLock))
+    expect(begin.indexOf(stepLock)).toBeLessThan(begin.indexOf(`mv -f "$t" ${TRACES_DEPLOY_MARKER}`))
+    // It takes the host; it never checks ownership, so it never refuses.
+    expect(begin).not.toContain(DEPLOY_OVERTAKEN_SENTINEL)
+    expect(begin).not.toContain('traces_owner')
+    // 15 minutes for the takeover (a step can be an image pull or a service start); one minute for an ordinary step,
+    // which only ever contends with a takeover, and that is brief.
+    expect(waitOf(begin)).toBe(900)
+    expect(waitOf(ownershipPrelude(ID_A))).toBe(60)
+    expect(waitOf(pullScript(ID_A))).toBe(60)
+  })
+
+  it('read-only probes take neither lock', () => {
+    for (const [name, script] of Object.entries(readOnly)) {
+      expect({name, flock: script.includes('flock')}).toEqual({name, flock: false})
+      expect({name, lock: script.includes('.lock')}).toEqual({name, lock: false})
+    }
+  })
+
+  it('holds the ingest lock only around the state read and write and the Caddy recreate, so a manual hold never waits on a long step', () => {
+    for (const [name, script] of Object.entries(bothLocks)) {
+      expect({name, long: /\bpull\b|\btimeout\b|--wait|image prune|\bsleep\b/.test(script)}).toEqual({
+        name,
+        long: false,
+      })
+    }
+    // The step-lock holders with long steps (a pull, a start) do not take the ingest lock at all.
+    for (const script of [pullScript(ID_A), pruneScript(ID_A), upScript(ID_A, 'up-x', ['collector'], {force: true})]) {
+      expect(script).not.toContain(ingestLock)
+    }
+  })
+
+  it('the manual ingest commands in the CLI never take the step lock', () => {
+    const remote = readFileSync(join(APP, '..', '..', 'packages/cli/src/commands/traces/remote.ts'), 'utf8')
+    expect(remote).not.toContain('deploy-step')
+    expect(remote).not.toContain('exec 8>>')
+    expect(remote).toContain('flock -w 30 9')
+  })
+})
+
+/** The scratch host with the no-op `flock` replaced by a real one. */
+function lockedHost(): ReturnType<typeof scratchHost> {
+  const host = scratchHost()
+  rmSync(join(host.shim, 'flock'), {force: true})
+  expect(installFlockStandIn(host.shim)).toBe(true)
+  return host
+}
+
+/** A process that holds the step lock until `release` is called. Resolves when it holds it. */
+async function holdStepLock(root: string, shim: string): Promise<{release: () => Promise<void>}> {
+  const holder = Bun.spawn(
+    [
+      'bash',
+      '-c',
+      // `exec sleep`: the descriptor lives in the one process that is killed on release, so nothing outlives it.
+      `exec 8>>${join(root, '.deploy-step.lock')}; flock -w 10 8 || exit 3; echo held; exec sleep 60`,
+    ],
+    {env: {PATH: `${shim}:${process.env.PATH ?? ''}`}, stdout: 'pipe', stderr: 'pipe'},
+  )
+  const first = await holder.stdout.getReader().read()
+  expect(new TextDecoder().decode(first.value)).toContain('held')
+  return {
+    release: async () => {
+      holder.kill()
+      await holder.exited
+    },
+  }
+}
+
+function start(script: string, root: string, shim: string, stdin = ''): ReturnType<typeof Bun.spawn> {
+  return Bun.spawn(['bash', '-o', 'pipefail', '-c', script.replaceAll(TRACES_APP_DIR, root)], {
+    env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
+    stdin: new TextEncoder().encode(stdin),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+}
+
+async function outcome(child: ReturnType<typeof Bun.spawn>): Promise<{out: string; code: number}> {
+  const out = await new Response(child.stdout as ReadableStream).text()
+  return {out, code: await child.exited}
+}
+
+describe.skipIf(!CAN_LOCK)('the step lock, run for real against a scratch directory', () => {
+  const stamp = '2023-11-14T22:13:20.000Z'
+  const marker = (root: string): string => join(root, '.deploy-in-progress')
+  const impatient = (script: string): string => script.replace(/flock -w \d+ 8/, 'flock -w 1 8')
+
+  it('the takeover waits while the step lock is held and, with a short bound, fails with the sentinel and leaves the marker untouched', async () => {
+    const {root, shim, cleanup} = lockedHost()
+    try {
+      writeFileSync(join(root, '.env'), 'A=1\nTRACES_INGEST_STATE=open\n')
+      writeFileSync(marker(root), `${ID_A} ${stamp}\n`)
+      const holder = await holdStepLock(root, shim)
+
+      const refused = await outcome(start(impatient(beginDeployScript(ID_B)), root, shim))
+      expect(refused).toEqual({out: 'DEPLOY_STEP_BUSY\n', code: 1})
+      expect(readFileSync(marker(root), 'utf8')).toBe(`${ID_A} ${stamp}\n`)
+      expect(readFileSync(join(root, '.env'), 'utf8')).toBe('A=1\nTRACES_INGEST_STATE=open\n')
+      expect(readdirSync(root).filter(name => name.startsWith('.traces-tmp'))).toEqual([])
+
+      // Released, the same takeover proceeds and takes the host.
+      await holder.release()
+      const taken = await outcome(start(impatient(beginDeployScript(ID_B)), root, shim))
+      expect(taken.code).toBe(0)
+      expect(parseHostState(taken.out)).toMatchObject({hasEnv: true, ingest: 'open'})
+      expect(readFileSync(marker(root), 'utf8').startsWith(`${ID_B} `)).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('the takeover does not complete until the step that holds the lock ends, and then takes the host', async () => {
+    const {root, shim, cleanup} = lockedHost()
+    try {
+      writeFileSync(marker(root), `${ID_A} ${stamp}\n`)
+      const holder = await holdStepLock(root, shim)
+
+      const takeover = start(beginDeployScript(ID_B), root, shim)
+      await new Promise(resolve => setTimeout(resolve, 600))
+      expect(takeover.exitCode).toBeNull()
+      expect(readFileSync(marker(root), 'utf8')).toBe(`${ID_A} ${stamp}\n`)
+
+      await holder.release()
+      const taken = await outcome(takeover)
+      expect(taken.code).toBe(0)
+      expect(readFileSync(marker(root), 'utf8').startsWith(`${ID_B} `)).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('an ordinary step waits for the lock too, and with a short bound changes nothing and says so', async () => {
+    const {root, shim, cleanup} = lockedHost()
+    try {
+      const script = writeFileScript(ID_A, {path: 'out.txt', owner: 'root:root', mode: '0600', kind: 'plain'})
+      writeFileSync(marker(root), `${ID_A} ${stamp}\n`)
+      const holder = await holdStepLock(root, shim)
+
+      const refused = await outcome(start(impatient(script), root, shim, 'content\n'))
+      expect(refused).toEqual({out: 'DEPLOY_STEP_BUSY\n', code: 1})
+      expect(readdirSync(root).filter(name => name === 'out.txt' || name.startsWith('.traces-tmp'))).toEqual([])
+
+      await holder.release()
+      expect(await outcome(start(impatient(script), root, shim, 'content\n'))).toEqual({
+        out: 'TRACES_FILE_WRITTEN\n',
+        code: 0,
+      })
+      expect(readFileSync(join(root, 'out.txt'), 'utf8')).toBe('content\n')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('a step that passed its check holds the lock to the end of its shell: the takeover cannot slip in between check and finish', async () => {
+    const {root, shim, cleanup} = lockedHost()
+    try {
+      writeFileSync(marker(root), `${ID_A} ${stamp}\n`)
+      // A step of deploy A: its real prelude (lock, then check), then a slow body.
+      const slowStep = `${ownershipPrelude(ID_A)}\nsleep 1.5\necho STEP_DONE`
+      const stepA = start(slowStep, root, shim)
+      await new Promise(resolve => setTimeout(resolve, 400))
+
+      const takeover = start(beginDeployScript(ID_B), root, shim)
+      await new Promise(resolve => setTimeout(resolve, 400))
+      expect(takeover.exitCode).toBeNull()
+      expect(readFileSync(marker(root), 'utf8')).toBe(`${ID_A} ${stamp}\n`)
+
+      expect((await outcome(stepA)).out).toBe('STEP_DONE\n')
+      expect((await outcome(takeover)).code).toBe(0)
+      expect(readFileSync(marker(root), 'utf8').startsWith(`${ID_B} `)).toBe(true)
     } finally {
       cleanup()
     }

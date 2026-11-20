@@ -21,7 +21,10 @@
 // Overlapping deploys: the last deploy to start owns the host. Each deploy writes a random id into the deploy marker
 // in its first host script; every later script that changes the host checks, in the same script, that the marker
 // still holds that id (`ownershipPrelude`) and otherwise prints `DEPLOY_OVERTAKEN` and changes nothing. An overtaken
-// deploy stops at its next step and never opens the route or removes the marker.
+// deploy stops at its next step and never opens the route or removes the marker. Every such step also holds the step
+// lock from before its check until its shell ends, and the takeover takes the same lock before it writes the marker:
+// a newer deploy cannot take the host while an older deploy's step is in flight, so from the moment it owns the host
+// no other deploy's step is running or can start.
 //
 // Everything a host does goes through one injected `Runner`, so tests assert on every argv and every stdin
 // byte and nothing here reaches a network in a test.
@@ -53,6 +56,7 @@ import {
   SENDER_GROUPS,
   TRACES_APP_DIR,
   TRACES_DEPLOY_MARKER,
+  TRACES_DEPLOY_STEP_LOCK,
   TRACES_DOCKER_ROOT,
   TRACES_INGEST_LOCK,
   TRACES_LOCK_BUSY_SENTINEL,
@@ -487,6 +491,7 @@ function relativeToApp(absolute: string): string {
 
 /** The deploy marker and the pending-restart record, relative to the app directory (their paths live in `host.ts`). */
 const MARKER_FILE = relativeToApp(TRACES_DEPLOY_MARKER)
+const STEP_LOCK_FILE = relativeToApp(TRACES_DEPLOY_STEP_LOCK)
 const PENDING_RESTARTS_FILE = relativeToApp(TRACES_PENDING_RESTARTS)
 /** The only files `removeOwnFileScript` will delete. */
 const OWN_FILES: readonly string[] = [MARKER_FILE, PENDING_RESTARTS_FILE, 'secrets/bootstrap-pending']
@@ -508,11 +513,44 @@ function step(name: string, body: string): string {
 // A deploy is many separate SSH commands, so no lock can span it. Ownership does instead: the first host script
 // writes this deploy's random id into the marker, and every script that changes the host begins by checking that
 // the marker still holds that id. A newer deploy overwrites the marker, which makes every later script of the
-// older one refuse itself. A step of the older deploy that was already running when it was overtaken still
-// completes: overlapping deploys remain something to avoid.
+// older one refuse itself.
+//
+// The check guards the start of a step, not its end, so a per-step lock closes the rest: every script that changes
+// the host takes `flock` on `TRACES_DEPLOY_STEP_LOCK` (descriptor 8) before the check and holds it until its shell
+// exits, and the takeover takes the same lock before it writes the marker. A step that passed its check therefore
+// finishes before any newer deploy can take the host, and once a deploy owns the host no other deploy's step is
+// running or can start. When a script takes both locks, the step lock comes first; the ingest lock (descriptor 9)
+// is held only around the state read and write and the Caddy recreate.
 
 /** Printed (exit 1, nothing changed) by a script whose deploy no longer owns the marker. */
 export const DEPLOY_OVERTAKEN_SENTINEL = 'DEPLOY_OVERTAKEN'
+
+/** Printed (exit 1, nothing changed) by a script that could not take the step lock within its wait. */
+export const DEPLOY_STEP_BUSY_SENTINEL = 'DEPLOY_STEP_BUSY'
+
+/**
+ * How long an ordinary step waits for the step lock. It only ever contends with a takeover, which holds the lock for
+ * the length of one read and one file write (plus up to 30 s for the ingest lock), so a minute is generous.
+ */
+export const STEP_LOCK_WAIT_SECONDS = 60
+
+/**
+ * How long the takeover waits for an older deploy's step that is in flight: 15 minutes. A step can be an image pull
+ * (bounded at 30 minutes) or a service start (20 minutes); most are seconds. Fifteen minutes rides out a slow pull
+ * or start without leaving a stuck deploy waiting for hours; a takeover that times out changes nothing and can simply
+ * be retried once the other deploy's step has finished.
+ */
+export const TAKEOVER_LOCK_WAIT_SECONDS = 900
+
+/**
+ * Opens the lock file on descriptor 8 and takes the lock, for at most `waitSeconds`. A lock not taken prints the
+ * sentinel and exits non-zero before anything has changed. The lock is released when the script's shell exits, however
+ * it ends, so it covers the whole step. One line, so it also fits the `; `-joined state-change command.
+ */
+function stepLockFragment(waitSeconds: number, lock: string = TRACES_DEPLOY_STEP_LOCK): string {
+  if (!SAFE_PATH.test(lock) || lock.includes('..')) throw new Error(`Unsafe lock path: ${lock}`)
+  return `exec 8>>${lock}; if ! flock -w ${waitSeconds} 8; then echo ${DEPLOY_STEP_BUSY_SENTINEL}; exit 1; fi`
+}
 
 const DEPLOY_ID = /^[\da-f]{32,128}$/
 
@@ -528,19 +566,26 @@ function assertDeployId(id: string): string {
 }
 
 /**
- * The check every script that changes the host starts with (after the ingest lock, in the scripts that take it): the
+ * What every script that changes the host starts with, in this order: the step lock (held to the end of the script,
+ * so the check below stays true for the whole step: nobody can take the host while it is held), then the check. The
  * marker must exist and its first field must be this deploy's id. Otherwise the script prints the sentinel and exits
- * non-zero before it has changed anything. One line, so it also fits the `; `-joined state-change command.
+ * non-zero before it has changed anything. In a script that also takes the ingest lock this comes before it (lock
+ * order: step lock, then ingest lock). One line, so it also fits the `; `-joined state-change command.
+ * `marker` and `lock` exist so a test can run a script against a scratch directory.
  */
-export function ownershipPrelude(id: string, marker: string = TRACES_DEPLOY_MARKER): string {
+export function ownershipPrelude(
+  id: string,
+  marker: string = TRACES_DEPLOY_MARKER,
+  lock: string = TRACES_DEPLOY_STEP_LOCK,
+): string {
   assertDeployId(id)
   if (!SAFE_PATH.test(marker) || marker.includes('..')) throw new Error(`Unsafe marker path: ${marker}`)
-  return `if [ -f ${marker} ] && read -r traces_owner traces_rest < ${marker} && [ "$traces_owner" = ${id} ]; then :; else echo ${DEPLOY_OVERTAKEN_SENTINEL}; exit 1; fi`
+  return `${stepLockFragment(STEP_LOCK_WAIT_SECONDS, lock)}; if [ -f ${marker} ] && read -r traces_owner traces_rest < ${marker} && [ "$traces_owner" = ${id} ]; then :; else echo ${DEPLOY_OVERTAKEN_SENTINEL}; exit 1; fi`
 }
 
-/** A script that changes the host: the ownership check comes before anything else it does. */
-function guardedStep(name: string, id: string, body: string, marker?: string): string {
-  return step(name, `${ownershipPrelude(id, marker)}\n${body}`)
+/** A script that changes the host: the step lock and the ownership check come before anything else it does. */
+function guardedStep(name: string, id: string, body: string, paths?: {marker: string; lock: string}): string {
+  return step(name, `${ownershipPrelude(id, paths?.marker, paths?.lock)}\n${body}`)
 }
 
 export const HOST_STATE_SENTINEL = 'TRACES_HOST_STATE_READ'
@@ -553,8 +598,12 @@ export const HOST_STATE_SENTINEL = 'TRACES_HOST_STATE_READ'
  * acts on cannot go stale. The previous marker, if any, is reported before it is replaced.
  *
  * The marker holds this deploy's id and the UTC time on one line (`<id> <timestamp>`). Writing it is how a deploy
- * takes the host: whichever deploy wrote it last owns the host, and an older one is refused at its next step. This
- * script never refuses: a marker a failed deploy left behind never blocks the next deploy.
+ * takes the host: whichever deploy wrote it last owns the host, and an older one is refused at its next step. The
+ * takeover first takes the step lock, which every other deploy script that changes the host holds for its whole
+ * step: it waits (up to `TAKEOVER_LOCK_WAIT_SECONDS`) for an older deploy's step that is in flight, so when it writes
+ * the marker no other deploy's step is running. Not obtaining the lock prints `DEPLOY_STEP_BUSY` and exits non-zero
+ * with nothing changed. The step lock comes before the ingest lock. Otherwise this script never refuses: a marker a
+ * failed deploy left behind never blocks the next deploy.
  *
  * Prints `key=value` lines. The bootstrap values are secrets printed to stdout; they are parsed in memory and never
  * logged.
@@ -564,6 +613,7 @@ export function beginDeployScript(id: string): string {
   return step(
     'host-state',
     `cd ${TRACES_APP_DIR}
+${stepLockFragment(TAKEOVER_LOCK_WAIT_SECONDS)}
 exec 9>>${TRACES_INGEST_LOCK}
 if ! flock -w 30 9; then echo ${TRACES_LOCK_BUSY_SENTINEL}; exit 1; fi
 if [ -f .env ]; then
@@ -749,7 +799,7 @@ else
   echo "token path could not be created" >&2
   exit 1
 fi`,
-    `${appDir}/${MARKER_FILE}`,
+    {marker: `${appDir}/${MARKER_FILE}`, lock: `${appDir}/${STEP_LOCK_FILE}`},
   )
 }
 
@@ -829,13 +879,13 @@ const MODE = /^0[0-7]{3}$/
  * Write stdin to a file: a temporary file in the same directory with its owner and mode set first, then an atomic
  * rename. A reader never sees a half-written secret or a file with the wrong owner.
  *
- * For `.env` the script runs under the ingest lock and re-reads the route state from the file it is about to replace.
+ * For `.env` the script takes the ingest lock (after the step lock and the check) and re-reads the route state from the file it is about to replace.
  * It appends the less open of the planned state and the one on the host: a hold or off that is there stays, so a
  * `traces ingest hold` run during the deploy is never undone by a cached state; a state of `open` on the host becomes
  * the planned one; a host with no `.env` gets the planned one. It prints `TRACES_ENV_STATE=<state written>` so the
  * deploy knows what the host has. Only the deploy's own gated open step (`setIngestStateCommand`) ever opens.
  *
- * It begins with the ownership check (after the lock, for `.env`): a deploy that was overtaken writes nothing.
+ * It begins with the step lock and the ownership check: a deploy that was overtaken writes nothing.
  */
 export function writeFileScript(
   id: string,
@@ -873,8 +923,8 @@ printf 'TRACES_INGEST_STATE=%s\\n' "$state" >> "$t"
   return step(
     `write:${file.path}`,
     `umask 077
-${lock}${prelude}
-t=$(mktemp ${directory}/.traces-tmp.XXXXXX)
+${prelude}
+${lock}t=$(mktemp ${directory}/.traces-tmp.XXXXXX)
 trap 'rm -f "$t"' EXIT
 cat > "$t"
 ${decide}chown ${file.owner} "$t"
@@ -889,9 +939,10 @@ export const REMOVED_SENTINEL = 'TRACES_REMOVED'
 /**
  * Remove one file the deploy itself owns, inside the app directory, only while this deploy still owns the host.
  *
- * The marker is removed by compare-and-delete: under the ingest lock (the one a manual `traces ingest open` and the
- * deploy's own open take), in the same script, it is removed only if it still holds this deploy's id. A deploy that
- * was overtaken, or whose marker is already gone, prints `DEPLOY_OVERTAKEN` and removes nothing.
+ * The marker is removed by compare-and-delete: in the same script, under the step lock (which keeps another deploy
+ * from taking the host between the check and the delete) and the ingest lock (the one a manual `traces ingest open`
+ * and the deploy's own open take), it is removed only if it still holds this deploy's id. A deploy that was
+ * overtaken, or whose marker is already gone, prints `DEPLOY_OVERTAKEN` and removes nothing.
  */
 export function removeOwnFileScript(id: string, path: string): string {
   if (!OWN_FILES.includes(path)) throw new Error(`${path} is not a file this deploy owns`)
@@ -899,9 +950,9 @@ export function removeOwnFileScript(id: string, path: string): string {
   if (path !== MARKER_FILE) return guardedStep(`remove:${path}`, id, body)
   return step(
     `remove:${path}`,
-    `exec 9>>${TRACES_INGEST_LOCK}
+    `${ownershipPrelude(id)}
+exec 9>>${TRACES_INGEST_LOCK}
 if ! flock -w 30 9; then echo ${TRACES_LOCK_BUSY_SENTINEL}; exit 1; fi
-${ownershipPrelude(id)}
 ${body}`,
   )
 }
@@ -911,26 +962,27 @@ ${body}`,
  * inside `flock -w 30` on the ingest lock so that two transitions never interleave. The lock is taken on file
  * descriptor 9 before the state is read and is held until the command ends, which is after Caddy was recreated.
  * A lock that cannot be taken in 30 seconds prints `LOCK_BUSY` and fails; it is never skipped. The compose
- * command gets descriptor 9 closed, so nothing it starts can outlive the lock. The new line travels on stdin.
- * A test compares this with the CLI's text.
+ * command gets descriptors 8 and 9 closed, so nothing it starts can outlive either lock. The new line travels on
+ * stdin. A test compares this with the CLI's text.
  *
- * The deploy's version adds one thing the CLI's lacks: under the lock, before anything is written, it checks that
- * the marker still holds this deploy's id. The check and the write share the lock, so a deploy that was overtaken
- * can neither open nor hold the route after the newer deploy took the host, and nothing falls between them.
+ * The deploy's version adds the step lock and the ownership check, first (lock order: step lock, then ingest lock):
+ * before anything is written it checks that the marker still holds this deploy's id, and the step lock keeps that
+ * true until the command ends. So a deploy that was overtaken can neither open nor hold the route after the newer
+ * deploy took the host, and nothing falls between the check and the write.
  */
 export function setIngestStateCommand(state: IngestState, id: string): string {
   return [
     'set -e',
     `cd ${TRACES_APP_DIR}`,
+    ownershipPrelude(id),
     `exec 9>>${TRACES_INGEST_LOCK}`,
     `if ! flock -w 30 9; then echo ${TRACES_LOCK_BUSY_SENTINEL}; exit 1; fi`,
-    ownershipPrelude(id),
     'test -f .env',
     't=$(mktemp ./.env.XXXXXX)',
     `{ grep -v '^TRACES_INGEST_STATE=' .env || true; cat; } > "$t"`,
     'chmod 600 "$t"',
     'mv "$t" .env',
-    `${COMPOSE} up -d --force-recreate --no-deps caddy 9>&-`,
+    `${COMPOSE} up -d --force-recreate --no-deps caddy 8>&- 9>&-`,
     `echo TRACES_INGEST_STATE_SET=${state}`,
   ].join('; ')
 }
@@ -1706,7 +1758,8 @@ export class AppliedButUnverifiedError extends Error {
  * Another deploy started on this host after this one and took it over (it wrote its own id into the marker). This
  * deploy stopped at its next step. It is the one failure that leaves the route and the marker alone: the host now
  * belongs to the newer deploy, and a hold, an open or a marker removal from here could undo what that deploy did.
- * Steps of this deploy that were already running when it was overtaken still completed.
+ * The takeover waited for any step of this deploy that was in flight (the step lock), so nothing of this deploy was
+ * running when the newer deploy took the host.
  */
 export class DeployOvertakenError extends Error {
   constructor(options: {opened?: boolean; failure?: string} = {}) {
@@ -1718,6 +1771,22 @@ export class DeployOvertakenError extends Error {
       `Another deploy started on this host and took over; ${stopped}. It left the ingest route and the deploy marker to the newer deploy${options.opened === true ? ', whose gates decide whether the route stays open' : ''}.${options.failure === undefined ? '' : ` Before that this deploy had failed: ${options.failure}.`}`,
     )
     this.name = 'DeployOvertakenError'
+  }
+}
+
+/**
+ * A script could not take the step lock in time, so it changed nothing. For the takeover (this deploy does not own
+ * the host yet) it means another deploy's step is still running after the whole wait; for an ordinary step it means a
+ * newer deploy is taking the host over right now.
+ */
+export class DeployStepBusyError extends Error {
+  constructor(options: {takeover: boolean}) {
+    super(
+      options.takeover
+        ? `Another deploy's step is still running on this host: this deploy waited ${TAKEOVER_LOCK_WAIT_SECONDS / 60} minutes for it and did not take the host. Nothing was changed. Retry when that deploy finishes.`
+        : `A step could not start: the deploy step lock stayed busy for ${STEP_LOCK_WAIT_SECONDS} seconds, because another deploy is taking over the host. The step changed nothing.`,
+    )
+    this.name = 'DeployStepBusyError'
   }
 }
 
@@ -1828,7 +1897,7 @@ export async function performDeploy(
 
   // Whether another deploy took the host over, and whether this one's last route change left it open. An object, not
   // bare variables: both are set from inside `exec` and read in the catch below.
-  const ownership = {overtaken: false, opened: false}
+  const ownership = {overtaken: false, opened: false, taken: false}
   /**
    * Every remote command goes through here. A script that was refused because this deploy no longer owns the marker
    * exits non-zero and prints the sentinel; that becomes `DeployOvertakenError` wherever it happened, and the flag
@@ -1839,6 +1908,10 @@ export async function performDeploy(
     if (result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === DEPLOY_OVERTAKEN_SENTINEL)) {
       ownership.overtaken = true
       throw new DeployOvertakenError({opened: ownership.opened})
+    }
+    // The step lock was not free in time: nothing ran. Before the takeover this deploy does not own the host yet.
+    if (result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === DEPLOY_STEP_BUSY_SENTINEL)) {
+      throw new DeployStepBusyError({takeover: !ownership.taken})
     }
     return result
   }
@@ -1854,10 +1927,14 @@ export async function performDeploy(
   await checkTracesStorage(exec)
 
   // 4. What the host says about itself.
-  log(`==> Reading the host state and taking the deploy marker (under the ingest lock; deploy ${deployId.slice(0, 8)})`)
+  log(
+    `==> Reading the host state and taking the deploy marker (waits for another deploy's running step; under the ingest lock; deploy ${deployId.slice(0, 8)})`,
+  )
   const host = parseHostState(
     (await sh('Read host state', beginDeployScript(deployId), [HOST_STATE_SENTINEL])).result.stdout,
   )
+  // The marker is this deploy's: it owns the host, and no other deploy's step is running.
+  ownership.taken = true
 
   // 5. Compare every file, so the decision to hold is made before anything changes.
   log('==> Comparing files with the host')

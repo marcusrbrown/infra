@@ -1,0 +1,52 @@
+# One public hostname. Caddy provisions and renews its certificate.
+#
+# Routes: the ingest paths (switched by TRACES_INGEST_STATE), /healthz, and a 404 for everything
+# else. Nothing here reaches Grafana, Langfuse, Tempo or the collector's private canary receiver.
+#
+# Ingest state is the environment value TRACES_INGEST_STATE, which selects one file under ingest/:
+#   off   no ingest route at all (first bring-up, and any deploy whose gates have not passed)
+#   held  every ingest path answers 503, which senders retry (a gated change is in progress)
+#   open  the three ingest paths reach their collector receivers
+# Caddy substitutes environment placeholders while it parses the file, so the state is read once at
+# start. Changing it means recreating the Caddy container, which keeps its certificates in the
+# caddy_data volume.
+#
+# Timeouts. A sender abandons a request after 10 seconds and retries 429/5xx, so every limit below
+# makes Caddy answer before then:
+#   read_header 5s, read_body 15s   a stuck or slow upload is cut loose (the sender gave up at 10s)
+#   dial_timeout 2s                 an absent collector answers 502 at once
+#   response_header_timeout 5s      a collector that does not acknowledge in 5s answers 504
+# The collector acknowledges once the batch is queued: p95 0.43 s, slowest 0.82 s for 4 MB bodies
+# measured on loopback.
+{
+	servers {
+		timeouts {
+			read_header 5s
+			read_body 15s
+			write 15s
+			idle 60s
+		}
+	}
+}
+
+{$TRACES_DOMAIN} {
+	# 4.5 MiB as received. A larger body is refused with 413 before it reaches the collector.
+	request_body {
+		max_size 4718592
+	}
+
+	import ingest/{$TRACES_INGEST_STATE}.caddy
+
+	handle /healthz {
+		reverse_proxy health-reporter:8080 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 3s
+			}
+		}
+	}
+
+	handle {
+		respond 404
+	}
+}

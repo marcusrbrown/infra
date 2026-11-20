@@ -15,7 +15,7 @@
       "sublabel": "gated deploy workflows",
       "tag": "environment gates",
       "pos": [40, 56],
-      "size": [170, 584]
+      "size": [170, 676]
     },
     {
       "id": "app-keeweb",
@@ -75,6 +75,14 @@
       "size": [190, 64]
     },
     {
+      "id": "app-traces",
+      "type": "security",
+      "label": "Trace collection",
+      "sublabel": "collector + Langfuse + Tempo",
+      "pos": [300, 684],
+      "size": [190, 64]
+    },
+    {
       "id": "operator-browser",
       "type": "external",
       "label": "Operator browser",
@@ -118,6 +126,7 @@
     {"id": "deploy-gateway", "from": "gh-actions", "to": "app-gateway", "label": "SSH", "variant": "emphasis"},
     {"id": "deploy-cliproxy", "from": "gh-actions", "to": "app-cliproxy", "label": "SSH", "variant": "emphasis"},
     {"id": "deploy-broker", "from": "gh-actions", "to": "app-broker", "label": "SSH", "variant": "emphasis"},
+    {"id": "deploy-traces", "from": "gh-actions", "to": "app-traces", "label": "SSH", "variant": "emphasis"},
     {"id": "browser-dashboard", "from": "operator-browser", "to": "app-dashboard", "label": "HTTPS"},
     {
       "id": "dashboard-gateway",
@@ -128,10 +137,12 @@
     },
     {"id": "ghcr-dashboard", "from": "ghcr", "to": "app-dashboard", "label": "pull", "variant": "dashed"},
     {"id": "ghcr-gateway", "from": "ghcr", "to": "app-gateway", "label": "pull", "variant": "dashed"},
+    {"id": "ghcr-traces", "from": "ghcr", "to": "app-traces", "label": "pull", "variant": "dashed"},
     {"id": "gateway-cliproxy", "from": "app-gateway", "to": "app-cliproxy", "label": "model calls"},
     {"id": "cliproxy-providers", "from": "app-cliproxy", "to": "providers", "label": "OAuth"},
     {"id": "consumers-cliproxy", "from": "consumers", "to": "app-cliproxy", "label": "API key"},
     {"id": "consumers-broker", "from": "consumers", "to": "app-broker", "label": "OIDC", "variant": "security"},
+    {"id": "consumers-traces", "from": "consumers", "to": "app-traces", "label": "OTLP", "variant": "security"},
     {
       "id": "broker-cliproxy",
       "from": "app-broker",
@@ -146,8 +157,8 @@
       "title": "Deploys",
       "items": [
         "Each app deploys from its own workflow behind a per-app approval gate",
-        "KeeWeb deploys by rsync; the other six by SSH",
-        "Gateway and dashboard images come from GHCR, pinned by digest"
+        "KeeWeb deploys by rsync; the other seven by SSH",
+        "Gateway, dashboard and trace collector images come from GHCR, pinned by digest"
       ]
     },
     {

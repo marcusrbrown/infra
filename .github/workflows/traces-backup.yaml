@@ -1,0 +1,125 @@
+---
+# Daily snapshot of the trace data volume, pruned at 8 days, with an alert when a backup is missing.
+#
+# The `backup` job calls the DigitalOcean API with `fetch` (no doctl, no install step) and a token that is a repository
+# secret, TRACES_SNAPSHOT_DO_TOKEN, scoped by the operator to volume and snapshot actions. The job declares no
+# Environment on purpose: an Environment with a required reviewer would hold the unattended daily run for approval, and
+# any Environment creates a Deployment record that the status page would read as the last deploy. It finds the live
+# volume (the one volume named `traces-data` or `traces-data-*` that is attached to the droplet named `traces`), creates
+# `traces-<yyyymmdd>-<hhmm>` with the tag `traces-backup`, confirms it from a read-back listing, fails when the newest
+# daily snapshot is older than 36 hours, and prunes only this job's snapshots older than 8 days, and only behind a fresh
+# snapshot. See packages/cli/scripts/traces-backup.ts for the exact rules.
+#
+# Not deployed yet: while the repository variable TRACES_DOMAIN (documented value `traces.fro.bot`) is unset, the backup
+# job exits green with a notice and the alert job does nothing. Once TRACES_DOMAIN is set, a missing repository secret
+# TRACES_SNAPSHOT_DO_TOKEN fails the run and opens the alert like any other failure.
+#
+# Alert: the `alert` job runs after `backup` whatever its result. A failed or cancelled backup (a job killed by its
+# timeout reports as cancelled) opens ONE issue labelled `traces-backup-failure`, or comments on the open one, and posts
+# to Discord once, when it opens the issue. The next successful backup comments on and closes the issue and posts once
+# more. Nothing from the API reaches the issue or Discord. The alert job never holds the DigitalOcean token and its two
+# steps keep the issue token and the webhook apart. A re-run never updates the alert. The `rehearse-alert` dispatch
+# input exercises the alert under a separate marker and skips the backup.
+name: Traces Backup
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      rehearse-alert:
+        description: 'Owner only. fail: open a marked rehearsal issue and post to Discord. clear: close it. The backup does not run.'
+        required: true
+        type: choice
+        options:
+          - none
+          - fail
+          - clear
+        default: none
+
+permissions:
+  contents: read
+
+concurrency:
+  group: traces-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Snapshot trace data
+    # An alert rehearsal skips the backup, so a real result is never mixed into it. Scheduled runs carry no input, read as
+    # none.
+    if: github.ref == 'refs/heads/main' && (inputs.rehearse-alert || 'none') == 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      deployed: ${{ steps.backup.outputs.deployed }}
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      # The script imports no package, so there is no install step. This is the only step that holds the DigitalOcean
+      # token, and it holds neither the issue token nor the webhook. It exits 1 on any failure.
+      - name: Create snapshot and prune
+        id: backup
+        env:
+          TRACES_SNAPSHOT_DO_TOKEN: ${{ secrets.TRACES_SNAPSHOT_DO_TOKEN }}
+          TRACES_DOMAIN: ${{ vars.TRACES_DOMAIN }}
+        run: bun run packages/cli/scripts/traces-backup.ts backup
+
+  # Runs after backup whatever its result (always()), on main only like backup. It declares no Environment and holds no
+  # DigitalOcean credential. Two steps keep the credentials apart. Every value reaches the script through env, never the
+  # script body.
+  alert:
+    name: Alert on backup failure
+    needs: backup
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      # Any API failure fails this step: a broken alert path must show as a red run. A re-run (attempt above 1) replays an
+      # old backup result, so the script then makes no API call and changes nothing: wait for the next scheduled backup.
+      - name: Update alert issue
+        id: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_BACKUP_RESULT: ${{ needs.backup.result }}
+          ALERT_BACKUP_DEPLOYED: ${{ needs.backup.outputs.deployed }}
+          ALERT_REHEARSE: ${{ inputs.rehearse-alert }}
+          ALERT_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: bun run packages/cli/scripts/traces-backup.ts issue
+
+      # Only when the issue step created the issue (first failing run of an outage) or closed it on recovery. The script
+      # always exits 0: a Discord failure never fails the job or undoes the issue.
+      - name: Notify Discord
+        if: steps.issue.outputs.notify == 'created' || steps.issue.outputs.notify == 'recovered'
+        env:
+          ALERT_BACKUP_RESULT: ${{ needs.backup.result }}
+          ALERT_BACKUP_DEPLOYED: ${{ needs.backup.outputs.deployed }}
+          ALERT_REHEARSE: ${{ inputs.rehearse-alert }}
+          ALERT_NOTIFY: ${{ steps.issue.outputs.notify }}
+          ALERT_ISSUE_NUMBER: ${{ steps.issue.outputs.issue-number }}
+          CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK: ${{ secrets.CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK }}
+        run: bun run packages/cli/scripts/traces-backup.ts notify

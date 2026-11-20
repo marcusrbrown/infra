@@ -36,7 +36,7 @@ Add a new app, `apps/traces`, on its own droplet. A collector accepts OTLP over 
 - AE1. A test sender posts one trace of 20 spans, each with a 500 KB JSON-string content attribute, using a sender token. All 20 spans are readable in Langfuse with the attribute intact, and the trace is found in Grafana by id with 20 spans.
 - AE2. The same request with no token, a revoked token, another group's token, or a body over the cap is refused (401, 401, 401, 413).
 - AE3. A sender token presented to the ingest hostname on any path other than its own group's reads nothing and reaches nothing. Langfuse, Grafana, Tempo and every store port are unreachable from outside.
-- AE4. A trace carries a unique marker in each place OTLP can hold text: a content key, an unlisted span attribute, a resource attribute, a scope attribute, a span-event attribute, a link attribute, the status message, an exception message and the span name. Langfuse has all of them. Tempo has only the status message, exception message and span-name markers.
+- AE4. A trace carries a unique marker in each place OTLP can hold text: a content key, an unlisted span attribute, a resource attribute, a scope attribute, a span-event attribute, a link attribute, the status message, an exception message and the span name. Langfuse has all of them in the raw batch it stores, and in its database row those it keeps as fields (it does not copy span links or span events there). Tempo has only the status message, exception message, span-name and link-attribute markers. The keep-list step does not reach link attributes; the sender contract keeps content out of them.
 - AE5. A volume restored from a snapshot onto a scratch host starts the stack and serves a trace that existed when the snapshot was taken.
 - AE6. A redeploy that changes the collector and then fails a gate leaves the ingest route answering 503, checked from outside the host.
 
@@ -122,7 +122,7 @@ Versions planned: Langfuse 4.83.0, OpenTelemetry Collector 0.165.0 with contrib 
   "verdict": "build-new-within-scope",
   "scope": "marcusrbrown/infra main: apps/*, packages/{cli,shared}, .github/workflows, docs/runbooks, docs/solutions",
   "freshness": {
-    "vcs_reference": "ac71c8a78edb5e277ce1a0d41b38050d81829656"
+    "vcs_reference": "eecf258"
   },
   "budget": {
     "max_search_passes": 8,
@@ -275,7 +275,7 @@ Versions planned: Langfuse 4.83.0, OpenTelemetry Collector 0.165.0 with contrib 
 
 ### Deferred to Implementation
 
-- Whether the `redaction` keep-list also covers span-event attributes and resource attributes at the pinned version. AE4 decides; if it does not, the Tempo branch drops events' attributes by another step and the plan's owner is told.
+- Resolved in Unit 1 by running the pinned processor: the keep-list covers span, span-event, scope and resource attributes, and does not cover span-link attributes. Link attributes pass through to Tempo, bounded by its 2,048-byte limit.
 - Whether `LANGFUSE_INIT_*` can create the organisation, project and user without creating a key.
 - Whether Langfuse hashes API keys with `SALT`, which decides how strongly the "never regenerate" rule is worded in the runbook.
 - The limiter's exact settings for a 1 GiB allowance at the pinned version, and which bytes it counts.
@@ -794,6 +794,7 @@ Each step leaves a safe state if the run stops there: nothing but the health pat
 | System instructions | `gen_ai.system_instructions` as an array of parts, each with `content` |
 | Follow-on trace | The first trace's id in `langfuse.trace.metadata.<key>`; Langfuse shows no span links |
 | Span names | Operation and a model, tool or agent name only; never free text |
+| Span links | No content in link attributes; Tempo keeps them as sent |
 | Request body | Under 4,000,000 bytes |
 
 **Test scenarios:**

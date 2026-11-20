@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Trace Collection Deploy",
+    "output": "apps/docs/.diagrams/apps-traces.html",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "components": [
+    {
+      "id": "senders",
+      "type": "external",
+      "label": "Sender groups",
+      "sublabel": "three groups, one token each",
+      "pos": [40, 160],
+      "size": [170, 60]
+    },
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "Operator",
+      "sublabel": "SSH tunnel only",
+      "pos": [40, 400],
+      "size": [170, 60]
+    },
+    {
+      "id": "caddy",
+      "type": "cloud",
+      "label": "Caddy",
+      "sublabel": "ingest routes + health path",
+      "pos": [290, 160],
+      "size": [170, 60]
+    },
+    {
+      "id": "collector",
+      "type": "security",
+      "label": "Collector",
+      "sublabel": "token auth, byte limit, queues",
+      "pos": [540, 160],
+      "size": [170, 60]
+    },
+    {
+      "id": "reporter",
+      "type": "backend",
+      "label": "Health reporter",
+      "sublabel": "canary + one verdict",
+      "pos": [540, 400],
+      "size": [170, 60]
+    },
+    {
+      "id": "web",
+      "type": "backend",
+      "label": "Langfuse web",
+      "sublabel": "whole traces, loopback only",
+      "pos": [790, 60],
+      "size": [170, 60]
+    },
+    {
+      "id": "tempo",
+      "type": "backend",
+      "label": "Tempo",
+      "sublabel": "kept attributes only",
+      "pos": [790, 260],
+      "size": [170, 60]
+    },
+    {
+      "id": "grafana",
+      "type": "frontend",
+      "label": "Grafana",
+      "sublabel": "loopback only",
+      "pos": [790, 400],
+      "size": [170, 60]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "Langfuse worker",
+      "sublabel": "ingestion queue consumer",
+      "pos": [1040, 60],
+      "size": [170, 60]
+    },
+    {
+      "id": "clickhouse",
+      "type": "database",
+      "label": "ClickHouse",
+      "sublabel": "trace rows, 30 day TTL",
+      "pos": [1040, 160],
+      "size": [170, 60]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "users and metadata",
+      "pos": [1040, 260],
+      "size": [170, 60]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis",
+      "sublabel": "ingestion queue",
+      "pos": [1040, 360],
+      "size": [170, 60]
+    },
+    {
+      "id": "minio",
+      "type": "database",
+      "label": "Object store",
+      "sublabel": "event batches, 30 day rule",
+      "pos": [1040, 460],
+      "size": [170, 60]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "One droplet, all data on an encrypted volume",
+      "wraps": [
+        "caddy",
+        "collector",
+        "reporter",
+        "web",
+        "tempo",
+        "grafana",
+        "worker",
+        "clickhouse",
+        "postgres",
+        "redis",
+        "minio"
+      ],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {"id": "otlp", "from": "senders", "to": "caddy", "label": "OTLP + token", "variant": "emphasis"},
+    {"id": "route", "from": "caddy", "to": "collector", "label": "per-group route", "variant": "emphasis"},
+    {"id": "full", "from": "collector", "to": "web", "label": "everything", "variant": "emphasis"},
+    {"id": "kept", "from": "collector", "to": "tempo", "label": "keep-list", "variant": "security"},
+    {"id": "events", "from": "web", "to": "minio", "label": "event batches"},
+    {"id": "queue", "from": "web", "to": "redis", "label": "enqueue"},
+    {"id": "dequeue", "from": "worker", "to": "redis", "label": "dequeue", "variant": "dashed"},
+    {"id": "rows", "from": "worker", "to": "clickhouse", "label": "rows"},
+    {"id": "meta", "from": "web", "to": "postgres", "label": "metadata"},
+    {"id": "traceql", "from": "grafana", "to": "tempo", "label": "TraceQL"},
+    {"id": "tunnel-web", "from": "operator", "to": "web", "label": "SSH tunnel", "variant": "security"},
+    {"id": "tunnel-grafana", "from": "operator", "to": "grafana", "label": "SSH tunnel", "variant": "security"},
+    {"id": "canary", "from": "reporter", "to": "collector", "label": "canary", "variant": "dashed"},
+    {"id": "readback", "from": "reporter", "to": "tempo", "label": "readback", "variant": "dashed"},
+    {"id": "verdict", "from": "caddy", "to": "reporter", "label": "health path", "variant": "dashed"}
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Sender path",
+      "items": [
+        "Caddy routes one path per sender group and answers 404 for everything else",
+        "Each group has its own token file, receiver and on-disk queues",
+        "A 200 means queued, not stored by both backends"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "What each store holds",
+      "items": [
+        "Langfuse holds whole traces, content included",
+        "Tempo holds a keep-list of attributes plus span names and error text",
+        "Only Caddy is published; Langfuse and Grafana are reached over SSH"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Retention and opening",
+      "items": [
+        "30 days live and up to 8 more in volume snapshots, as targets",
+        "Ingest stays off until the stores, retention and the canary pass",
+        "A deploy holds ingest while it changes a backend and reopens it only if the gates pass"
+      ]
+    }
+  ]
+}

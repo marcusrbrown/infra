@@ -20,6 +20,7 @@ jobs:
       vpn: ${{ steps.filter.outputs.vpn }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       broker: ${{ steps.filter.outputs.broker }}
+      traces: ${{ steps.filter.outputs.traces }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -76,6 +77,12 @@ jobs:
               - '!**/*.test.ts'
               - '!**/__fixtures__/**'
               - '!**/__snapshots__/**'
+            traces:
+              - 'apps/traces/**'
+              - '!apps/traces/**/*.md'
+              - '!apps/traces/**/*.test.ts'
+              - '!apps/traces/**/__fixtures__/**'
+              - '!apps/traces/**/__snapshots__/**'
 
   # Keep deploys independent by design: one app failing should not block the other.
   deploy-keeweb:
@@ -217,4 +224,35 @@ jobs:
       BROKER_SSH_KEY: ${{ secrets.BROKER_SSH_KEY }}
       BROKER_HOST: ${{ secrets.BROKER_HOST }}
       CLIPROXY_MANAGEMENT_KEY: ${{ secrets.CLIPROXY_MANAGEMENT_KEY }}
+      DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
+
+  deploy-traces:
+    needs: detect-changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.detect-changes.outputs.traces == 'true'
+    # The callee's build-collector job pushes the collector image to GHCR.
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/deploy-traces.yaml
+    secrets:
+      TRACES_SSH_KEY: ${{ secrets.TRACES_SSH_KEY }}
+      TRACES_HOST: ${{ secrets.TRACES_HOST }}
+      TRACES_POSTGRES_PASSWORD: ${{ secrets.TRACES_POSTGRES_PASSWORD }}
+      TRACES_CLICKHOUSE_PASSWORD: ${{ secrets.TRACES_CLICKHOUSE_PASSWORD }}
+      TRACES_CLICKHOUSE_READER_PASSWORD: ${{ secrets.TRACES_CLICKHOUSE_READER_PASSWORD }}
+      TRACES_REDIS_PASSWORD: ${{ secrets.TRACES_REDIS_PASSWORD }}
+      TRACES_MINIO_PASSWORD: ${{ secrets.TRACES_MINIO_PASSWORD }}
+      TRACES_NEXTAUTH_SECRET: ${{ secrets.TRACES_NEXTAUTH_SECRET }}
+      TRACES_SALT: ${{ secrets.TRACES_SALT }}
+      TRACES_ENCRYPTION_KEY: ${{ secrets.TRACES_ENCRYPTION_KEY }}
+      TRACES_GRAFANA_ADMIN_PASSWORD: ${{ secrets.TRACES_GRAFANA_ADMIN_PASSWORD }}
+      TRACES_GRAFANA_SECRET_KEY: ${{ secrets.TRACES_GRAFANA_SECRET_KEY }}
+      TRACES_LANGFUSE_USER_EMAIL: ${{ secrets.TRACES_LANGFUSE_USER_EMAIL }}
+      TRACES_LANGFUSE_USER_PASSWORD: ${{ secrets.TRACES_LANGFUSE_USER_PASSWORD }}
+      TRACES_LANGFUSE_PUBLIC_KEY: ${{ secrets.TRACES_LANGFUSE_PUBLIC_KEY }}
+      TRACES_LANGFUSE_SECRET_KEY: ${{ secrets.TRACES_LANGFUSE_SECRET_KEY }}
+      TRACES_LANGFUSE_BOOTSTRAP_PUBLIC_KEY: ${{ secrets.TRACES_LANGFUSE_BOOTSTRAP_PUBLIC_KEY }}
+      TRACES_LANGFUSE_BOOTSTRAP_SECRET_KEY: ${{ secrets.TRACES_LANGFUSE_BOOTSTRAP_SECRET_KEY }}
       DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}

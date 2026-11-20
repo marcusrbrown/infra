@@ -12,7 +12,7 @@ Personal infrastructure management — deploy automation, operational CLI, and t
 
 ## Overview
 
-Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, a Fro Bot monitoring dashboard, self-hosted Umami analytics, an OIDC credential broker for CI runs, a WireGuard VPN egress box on AWS Lightsail, an operator-run AWS provisioner for `fro-bot/agent` durable storage, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
+Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, a Fro Bot monitoring dashboard, self-hosted Umami analytics, an OIDC credential broker for CI runs, a self-hosted trace collection stack for agent runs (planned, not yet deployed), a WireGuard VPN egress box on AWS Lightsail, an operator-run AWS provisioner for `fro-bot/agent` durable storage, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
 
 | Package | Description |
 | --- | --- |
@@ -23,6 +23,7 @@ Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy
 | `apps/dashboard` | Fro Bot monitoring dashboard Docker Compose stack (`dashboard.fro.bot`) |
 | `apps/vpn` | WireGuard egress box on AWS Lightsail `eu-west-1` — native `wg-quick@wg0`, no Docker |
 | `apps/broker` | OIDC credential broker Docker Compose stack (`broker.fro.bot`) |
+| `apps/traces` | Trace collection Docker Compose stack for agent runs (planned host `traces.fro.bot`, not yet deployed) |
 | `apps/agent` | Operator-run AWS provisioner for `fro-bot/agent` S3 durable storage — not deployable |
 | `packages/cli` | [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI — health checks, deploy triggers, onboarding wizard, MCP bridge |
 
@@ -51,6 +52,7 @@ Each app is a self-contained deploy unit, except `apps/agent` — an operator-ru
 - **[Dashboard](apps/dashboard/README.md)** (`apps/dashboard`) — Fro Bot monitoring dashboard at [dashboard.fro.bot](https://dashboard.fro.bot); Docker Compose (dashboard + Caddy) on DigitalOcean; image built from `fro-bot/dashboard` (digest-pinned in `apps/dashboard/docker-compose.yaml`) and pushed to GHCR by CI before deploy. See [`apps/dashboard/AGENTS.md`](apps/dashboard/AGENTS.md) for the operator runbook.
 - **[VPN](apps/vpn/README.md)** (`apps/vpn`) — WireGuard egress box on AWS Lightsail (`eu-west-1`, Ireland); native `wg-quick@wg0` + systemd, no Docker; provisioned via `@aws-sdk/client-lightsail`, deployed over SSH.
 - **[Broker](apps/broker/README.md)** (`apps/broker`) — OIDC-authenticated credential broker at [broker.fro.bot](https://broker.fro.bot); exchanges a GitHub Actions OIDC token for a short-lived cliproxy API key so the durable provider key never lands on a CI runner; Docker Compose (Caddy + Bun) on DigitalOcean.
+- **[Traces](apps/traces/README.md)** (`apps/traces`) — self-hosted collection of agent-run traces at the planned host `traces.fro.bot` (not yet deployed); an OpenTelemetry collector with per-group bearer tokens in front of Langfuse and Tempo, on a dedicated DigitalOcean droplet with its data on an encrypted volume. Langfuse and Grafana are reached over an SSH tunnel and have no public hostname. The [privacy page](apps/docs/src/content/docs/trace-privacy.md) describes what is stored.
 - **[Agent](apps/agent/README.md)** (`apps/agent`) — operator-run AWS provisioner for `fro-bot/agent` S3 durable session storage: an account-level GitHub OIDC provider, a dedicated S3 bucket, and one least-privilege IAM role per consumer repository. Not deployable — no `src/deploy.ts`, `src/host.ts`, Docker Compose stack, deploy workflow, or GitHub Environment. Entry point: `bun run provision:agent`. See [`docs/runbooks/agent-s3-durable-storage.md`](docs/runbooks/agent-s3-durable-storage.md).
 
 ## CLI
@@ -81,6 +83,9 @@ bunx @marcusrbrown/infra mcp             # stdio MCP server for coding agents
 | **Deploy Dashboard** | Push to `main`, `workflow_dispatch` | Build dashboard image to GHCR and deploy (path-filtered) |
 | **Deploy VPN** | Push to `main`, `workflow_dispatch` | Deploy WireGuard VPN box (path-filtered) |
 | **Deploy Broker** | Push to `main`, `workflow_dispatch` | Deploy the credential broker stack (path-filtered) |
+| **Deploy Traces** | Push to `main`, `workflow_dispatch` | Build the collector image to GHCR and deploy the trace collection stack (path-filtered) |
+| **Traces Monitor** | Nominal 15-minute schedule, `workflow_dispatch` | Probe the trace stack's health path and certificate, and reconcile a GitHub issue/Discord alert |
+| **Traces Backup** | Daily schedule, `workflow_dispatch` | Snapshot the trace stack's data volume, prune snapshots by age, and reconcile an alert |
 | **Deploy** | Push to `main`, `workflow_dispatch` | Router that path-filters changes and dispatches the per-app deploy workflows |
 | **Release** | Push to `main` | Version and publish `@marcusrbrown/infra` via Changesets |
 | **Release Alert** | `Release` workflow completion, `workflow_dispatch` | Open a GitHub issue when `Release` fails |
@@ -104,6 +109,7 @@ The `Deploy` router uses `dorny/paths-filter` (`predicate-quantifier: every`) to
 - **Deploy Dashboard** runs in the `dashboard` environment.
 - **Deploy VPN** runs in the `vpn` environment.
 - **Deploy Broker** runs in the `broker` environment.
+- **Deploy Traces** runs in the `traces` environment; its `build-collector` job pushes the collector image to GHCR before the gate.
 
 `apps/agent` has no deploy workflow and no GitHub Environment — it is an operator-run provisioner triggered locally via `bun run provision:agent`.
 
@@ -204,28 +210,45 @@ AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are 
 
 See [`apps/broker/README.md`](apps/broker/README.md) and [`apps/broker/AGENTS.md`](apps/broker/AGENTS.md).
 
+**`traces` environment** (not yet created; the stack is not deployed):
+
+| Name | Kind | Required | Description |
+| --- | --- | --- | --- |
+| `TRACES_SSH_KEY` | secret | ✓ | Ed25519 private key for the trace stack droplet |
+| `TRACES_HOST` | secret | ✓ | FQDN of the trace stack droplet |
+| `TRACES_POSTGRES_PASSWORD`, `TRACES_CLICKHOUSE_PASSWORD`, `TRACES_CLICKHOUSE_READER_PASSWORD`, `TRACES_REDIS_PASSWORD`, `TRACES_MINIO_PASSWORD` | secret | ✓ | Store passwords; written to the host as files over SSH stdin |
+| `TRACES_NEXTAUTH_SECRET`, `TRACES_SALT`, `TRACES_ENCRYPTION_KEY`, `TRACES_GRAFANA_ADMIN_PASSWORD`, `TRACES_GRAFANA_SECRET_KEY` | secret | ✓ | Langfuse and Grafana application secrets; never regenerated by deploy |
+| `TRACES_LANGFUSE_USER_EMAIL`, `TRACES_LANGFUSE_USER_PASSWORD` | secret | ✓ | The one Langfuse UI user |
+| `TRACES_LANGFUSE_PUBLIC_KEY`, `TRACES_LANGFUSE_SECRET_KEY` | secret |  | The Application-role key the collector uses; unset on the first deploy |
+| `TRACES_LANGFUSE_BOOTSTRAP_PUBLIC_KEY`, `TRACES_LANGFUSE_BOOTSTRAP_SECRET_KEY` | secret |  | First deploy only; deleted after bootstrap |
+
+`TRACES_DOMAIN` and `TRACES_INGEST_OPEN` are repository variables, listed below. Sender tokens are not stored in this repository's GitHub settings. See [`apps/traces/README.md`](apps/traces/README.md) and [`apps/traces/AGENTS.md`](apps/traces/AGENTS.md).
+
 **`apps/agent` has no GitHub Environment or deploy secrets.** It is a local-only provisioner; its `AGENT_AWS_*`, `AGENT_S3_*` and `AGENT_REPOSITORY_*` inputs live in the operator's root `.env` only and are never written to GitHub. See [`apps/agent/AGENTS.md`](apps/agent/AGENTS.md).
 
 **Repository secrets:**
 
-| Secret                                  | Description                                                                |
-| --------------------------------------- | -------------------------------------------------------------------------- |
-| `APPLICATION_ID`                        | GitHub App ID for Renovate and repo settings sync                          |
-| `APPLICATION_PRIVATE_KEY`               | GitHub App private key                                                     |
-| `DIGITALOCEAN_ACCESS_TOKEN`             | DigitalOcean API token (used by cliproxy, gateway, and umami provisioning) |
-| `FRO_BOT_PAT`                           | PAT for the `fro-bot` user (agent identity for `@fro-bot` mentions)        |
-| `NPM_TOKEN`                             | npm publish token for `@marcusrbrown/infra` package                        |
-| `OPENCODE_AUTH_JSON`                    | LLM provider credentials JSON injected into Fro Bot runs                   |
-| `OPENCODE_CONFIG`                       | OpenCode provider config JSON (e.g. Anthropic `baseURL` override)          |
-| `CLIPROXY_API_KEY`                      | Downstream API key for the monitor probes and the deploy's Go checks       |
-| `CLIPROXY_OPENCODE_GO_KEY`              | OpenCode Go API key for the cliproxy `opencode-go` upstream                |
-| `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK` | Dedicated outbound Discord webhook for monitor transitions                 |
+| Secret | Description |
+| --- | --- |
+| `APPLICATION_ID` | GitHub App ID for Renovate and repo settings sync |
+| `APPLICATION_PRIVATE_KEY` | GitHub App private key |
+| `DIGITALOCEAN_ACCESS_TOKEN` | DigitalOcean API token (used by cliproxy, gateway, and umami provisioning) |
+| `FRO_BOT_PAT` | PAT for the `fro-bot` user (agent identity for `@fro-bot` mentions) |
+| `NPM_TOKEN` | npm publish token for `@marcusrbrown/infra` package |
+| `OPENCODE_AUTH_JSON` | LLM provider credentials JSON injected into Fro Bot runs |
+| `OPENCODE_CONFIG` | OpenCode provider config JSON (e.g. Anthropic `baseURL` override) |
+| `CLIPROXY_API_KEY` | Downstream API key for the monitor probes and the deploy's Go checks |
+| `CLIPROXY_OPENCODE_GO_KEY` | OpenCode Go API key for the cliproxy `opencode-go` upstream |
+| `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK` | Dedicated outbound Discord webhook for monitor transitions |
+| `TRACES_SNAPSHOT_DO_TOKEN` | DigitalOcean token scoped to volume snapshots; read only by `Traces Backup` |
 
 **Repository variables:**
 
-| Variable        | Description                                                   |
-| --------------- | ------------------------------------------------------------- |
+| Variable | Description |
+| --- | --- |
 | `FRO_BOT_MODEL` | LLM model ID for the Fro Bot agent (e.g. `claude-sonnet-4-6`) |
+| `TRACES_DOMAIN` | Hostname of the trace stack (documented value `traces.fro.bot`); read by deploy and the monitor |
+| `TRACES_INGEST_OPEN` | Exactly `true` when trace ingest is meant to be open; read by deploy and the monitor |
 
 ### Server Setup
 
@@ -235,7 +258,7 @@ The KeeWeb deploy target uses a dedicated `deploy-kw` user with scoped sudo for 
 bun run apps/keeweb/server/setup-deploy-user.ts
 ```
 
-Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, `gateway.fro.bot`, `dashboard.fro.bot`, `metrics.fro.bot`, `broker.fro.bot`, and the VPN static IP are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`.
+Host keys for `box.heatvision.co`, `cliproxy.fro.bot`, `gateway.fro.bot`, `dashboard.fro.bot`, `metrics.fro.bot`, `broker.fro.bot`, and the VPN static IP are pinned in `.github/known_hosts` — no runtime `ssh-keyscan`. The trace stack's host keys are added by its provisioning script when the host exists.
 
 ## Repository Structure
 

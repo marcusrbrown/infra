@@ -7,6 +7,8 @@ import {parse as parseYaml} from 'yaml'
 import {changesetFileName, runIdentityFromEnv} from '../../../apps/cliproxy/scripts/refresh-go-privacy'
 import {ALERT_LABEL} from '../scripts/go-privacy-alert'
 import {MANAGED_MARKER, REQUIRED_HEADINGS, runMarker} from '../scripts/reconcile-autoheal-reports'
+import {ALERT_LABEL as TRACES_BACKUP_LABEL} from '../scripts/traces-backup'
+import {PROBE_JOB_NAME, ALERT_LABEL as TRACES_MONITOR_LABEL, WORKFLOW_FILE} from '../scripts/traces-monitor'
 import {registerAgentCommands} from './commands/agent'
 import {MCP_ALLOWLIST} from './commands/mcp'
 
@@ -34,6 +36,11 @@ const AGENT_MUTATING_COMMANDS = ['agent setup', 'agent storage', 'agent storage 
 //   vpn client add       — mutating: generates keypair + appends peer + triggers redeploy
 //   vpn client list      — sensitive: lists peer public keys and tunnel IPs
 //   vpn client remove    — mutating: removes peer + triggers redeploy
+//   traces deploy        — mutating: deploys the trace stack to a live droplet
+//   traces logs          — sensitive: service logs can quote trace content
+//   traces open          — sensitive: tunnel to the UIs that hold full trace content
+//   traces ingest *      — mutating / host-reading: holds or opens the public ingest route
+//   traces sender *      — secret-bearing: mints, lists and revokes live sender tokens
 //
 // Defense-in-depth (secondary layer — opencode.jsonc `permission: deny`):
 // Even if MCP_ALLOWLIST were mistakenly re-expanded, opencode's native tool
@@ -59,6 +66,16 @@ const SENSITIVE_MCP_COMMANDS: readonly string[] = [
   // Broker: mutating / sensitive — CLI-only
   'broker deploy',
   'broker logs',
+  // Traces: mutating / sensitive — CLI-only. Only `traces status` is in MCP_ALLOWLIST.
+  'traces deploy',
+  'traces logs',
+  'traces open',
+  'traces ingest hold',
+  'traces ingest open',
+  'traces ingest status',
+  'traces sender add',
+  'traces sender list',
+  'traces sender revoke',
   'cliproxy monitor',
   'cliproxy reset-quota',
 ]
@@ -2059,7 +2076,7 @@ describe('deploy.yaml: no aggregate-level concurrency (regression guard)', () =>
 })
 
 describe('per-app deploy workflows: each has its own workflow-level concurrency block', () => {
-  const APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard', 'broker'] as const
+  const APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard', 'broker', 'traces'] as const
 
   for (const app of APPS) {
     it(`deploy-${app}.yaml has workflow-level concurrency group deploy-${app}- with cancel-in-progress: false and no job-level concurrency`, async () => {
@@ -4076,6 +4093,15 @@ const DEPLOY_NOTIFY_APPS: readonly DeployNotifyAppSpec[] = [
     extraEnv: {},
   },
   {
+    app: 'traces',
+    gatedJob: 'deploy-traces',
+    notifyNeeds: ['build-collector'],
+    notifyIf: `!cancelled() && needs.build-collector.result == 'success' && ${DEPLOY_NOTIFY_MAIN_GUARD}`,
+    gatedNeeds: ['build-collector', 'notify'],
+    gatedIf: "!cancelled() && needs.build-collector.result == 'success'",
+    extraEnv: {},
+  },
+  {
     app: 'dashboard',
     gatedJob: 'deploy-dashboard',
     notifyNeeds: ['validate-inputs'],
@@ -4310,7 +4336,7 @@ describe('deploy gate notify: live workflow contract', () => {
     })
   }
 
-  it('covers all seven apps the router fans out to', async () => {
+  it('covers all eight apps the router fans out to', async () => {
     const routerText = await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy.yaml')).text()
     const router = parseYaml(routerText) as {jobs?: Record<string, {uses?: string}>}
     const calleeApps = Object.values(router.jobs ?? {})
@@ -4318,7 +4344,7 @@ describe('deploy gate notify: live workflow contract', () => {
       .filter((app): app is string => app !== undefined)
       .toSorted()
     expect(DEPLOY_NOTIFY_APPS.map(spec => spec.app).toSorted()).toEqual(calleeApps)
-    expect(calleeApps).toHaveLength(7)
+    expect(calleeApps).toHaveLength(8)
   })
 
   it('gateway notify depends on build-images and dashboard notify on validate-inputs', () => {
@@ -6169,5 +6195,575 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
 
       expect(names).toContain(ALERT_LABEL)
     })
+  })
+})
+
+// The trace collection monitor and backup workflows share the privacy alert's shape: an alert job that runs after the
+// work job whatever its result, with the issue token and the webhook in separate steps. SHA pins, the `.yaml` extension
+// and `secrets: inherit` are enforced for every workflow by the global tests above; they are not repeated here.
+describe('traces monitor and backup workflows: alert contract', () => {
+  const WEBHOOK_SECRET = 'CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK'
+  const DO_TOKEN_SECRET = 'TRACES_SNAPSHOT_DO_TOKEN'
+
+  interface TracesWorkflow {
+    readonly name: string
+    readonly file: string
+    readonly script: string
+    readonly workJob: string
+    readonly workStepId: string
+    readonly workStepName: string
+    readonly workJobPermissions: Record<string, string>
+    readonly alertPermissions: Record<string, string>
+    readonly resultExpression: string
+    readonly expressions: readonly string[]
+    readonly cron: string
+  }
+
+  const MONITOR: TracesWorkflow = {
+    name: 'traces-monitor',
+    file: '.github/workflows/traces-monitor.yaml',
+    script: 'packages/cli/scripts/traces-monitor.ts',
+    workJob: 'probe',
+    workStepId: 'probe',
+    workStepName: 'Probe health path and certificate',
+    workJobPermissions: {contents: 'read'},
+    alertPermissions: {contents: 'read', issues: 'write', actions: 'read'},
+    resultExpression: 'needs.probe.result',
+    expressions: [
+      'github.token',
+      'github.run_attempt',
+      'needs.probe.result',
+      'needs.probe.outputs.deployed',
+      'needs.probe.outputs.urgent',
+      'needs.probe.outputs.categories',
+      'inputs.rehearse-alert',
+      'steps.issue.outputs.notify',
+      'steps.issue.outputs.issue-number',
+      `secrets.${WEBHOOK_SECRET}`,
+    ],
+    cron: '3,18,33,48 * * * *',
+  }
+
+  const BACKUP: TracesWorkflow = {
+    name: 'traces-backup',
+    file: '.github/workflows/traces-backup.yaml',
+    script: 'packages/cli/scripts/traces-backup.ts',
+    workJob: 'backup',
+    workStepId: 'backup',
+    workStepName: 'Create snapshot and prune',
+    workJobPermissions: {contents: 'read'},
+    alertPermissions: {contents: 'read', issues: 'write'},
+    resultExpression: 'needs.backup.result',
+    expressions: [
+      'github.token',
+      'github.run_attempt',
+      'needs.backup.result',
+      'needs.backup.outputs.deployed',
+      'inputs.rehearse-alert',
+      'steps.issue.outputs.notify',
+      'steps.issue.outputs.issue-number',
+      `secrets.${WEBHOOK_SECRET}`,
+    ],
+    cron: '23 4 * * *',
+  }
+
+  const stepNamed = (steps: Record<string, unknown>[], name: string): Record<string, unknown> | undefined =>
+    steps.find(step => step.name === name)
+
+  /** Every permission a job or the workflow grants beyond read, and every `pull-requests` key at all. */
+  function permissionViolations(workflow: Record<string, unknown>, alertJob: string): string[] {
+    const violations: string[] = []
+    const check = (scope: string, permissions: unknown): void => {
+      if (!isRecord(permissions)) return
+      for (const [key, value] of Object.entries(permissions)) {
+        if (key === 'pull-requests') violations.push(`${scope}: pull-requests`)
+        else if (key === 'contents' && value !== 'read') violations.push(`${scope}: contents ${String(value)}`)
+        else if (key === 'issues' && (scope !== alertJob || value !== 'write')) {
+          violations.push(`${scope}: issues ${String(value)}`)
+        } else if (!['contents', 'issues', 'actions'].includes(key)) violations.push(`${scope}: ${key}`)
+        else if (key === 'actions' && value !== 'read') violations.push(`${scope}: actions ${String(value)}`)
+      }
+    }
+    check('workflow', workflow.permissions)
+    const jobs = isRecord(workflow.jobs) ? workflow.jobs : {}
+    for (const [id, job] of Object.entries(jobs)) check(id, isRecord(job) ? job.permissions : undefined)
+    return violations
+  }
+
+  async function load(target: TracesWorkflow): Promise<{
+    text: string
+    workflow: Record<string, unknown>
+    work: Record<string, unknown>
+    alert: Record<string, unknown>
+  }> {
+    const path = resolve(REPO_ROOT, target.file)
+    const workflow = await loadWorkflowYaml(path)
+    return {
+      text: await Bun.file(path).text(),
+      workflow,
+      work: workflowJob(workflow, target.workJob),
+      alert: workflowJob(workflow, 'alert'),
+    }
+  }
+
+  for (const target of [MONITOR, BACKUP]) {
+    describe(target.name, () => {
+      it('has the .yaml extension, triggers on a schedule and on dispatch only, and runs one at a time', async () => {
+        const {workflow} = await load(target)
+        const on = isRecord(workflow.on) ? workflow.on : {}
+
+        expect(existsSync(resolve(REPO_ROOT, target.file.replace(/\.yaml$/, '.yml')))).toBe(false)
+        expect(Object.keys(on).sort()).toEqual(['schedule', 'workflow_dispatch'])
+        expect(on.schedule).toEqual([{cron: target.cron}])
+        expect(workflow.permissions).toEqual({contents: 'read'})
+        expect(workflow.concurrency).toEqual({group: target.name, 'cancel-in-progress': false})
+      })
+
+      it('exposes a rehearsal input on dispatch only, defaulting to none', async () => {
+        const {workflow} = await load(target)
+        const on = isRecord(workflow.on) ? workflow.on : {}
+        const dispatch = isRecord(on.workflow_dispatch) ? on.workflow_dispatch : {}
+        const inputs = isRecord(dispatch.inputs) ? dispatch.inputs : {}
+
+        expect(Object.keys(inputs)).toEqual(['rehearse-alert'])
+        expect(inputs['rehearse-alert']).toMatchObject({
+          type: 'choice',
+          default: 'none',
+          options: ['none', 'fail', 'clear'],
+        })
+      })
+
+      it('has two jobs: the work job, then an alert job that runs after it whatever its result, on main only', async () => {
+        const {workflow, work, alert} = await load(target)
+
+        expect(Object.keys(isRecord(workflow.jobs) ? workflow.jobs : {}).sort()).toEqual(
+          ['alert', target.workJob].sort(),
+        )
+        expect(alert.needs).toBe(target.workJob)
+        expect(alert.if).toBe("always() && github.ref == 'refs/heads/main'")
+        // A rehearsal skips the real work, and neither job ever runs off main.
+        expect(work.if).toBe("github.ref == 'refs/heads/main' && (inputs.rehearse-alert || 'none') == 'none'")
+        for (const job of [work, alert]) {
+          expect(typeof job['timeout-minutes']).toBe('number')
+          expect(job['timeout-minutes'] as number).toBeLessThanOrEqual(15)
+        }
+      })
+
+      it('grants exactly the permissions it needs on the jobs, and leaves the workflow read-only', async () => {
+        const {workflow, work, alert} = await load(target)
+
+        expect(work.permissions).toEqual(target.workJobPermissions)
+        expect(alert.permissions).toEqual(target.alertPermissions)
+        expect(workflow.permissions).toEqual({contents: 'read'})
+        expect(permissionViolations(workflow, 'alert')).toEqual([])
+      })
+
+      // The tests above must fail if a job gets more than it needs: prove the check bites.
+      it('flags a contents write, a pull-requests grant or an extra scope on either job', async () => {
+        const {workflow} = await load(target)
+        const mutate = (jobId: string, key: string, value: string): Record<string, unknown> => {
+          const copy = structuredClone(workflow)
+          const jobs = copy.jobs as Record<string, Record<string, unknown>>
+          jobs[jobId] = {...jobs[jobId], permissions: {...(jobs[jobId]?.permissions as object), [key]: value}}
+          return copy
+        }
+
+        for (const jobId of [target.workJob, 'alert']) {
+          expect(permissionViolations(mutate(jobId, 'contents', 'write'), 'alert')).not.toEqual([])
+          expect(permissionViolations(mutate(jobId, 'pull-requests', 'write'), 'alert')).not.toEqual([])
+          expect(permissionViolations(mutate(jobId, 'id-token', 'write'), 'alert')).not.toEqual([])
+        }
+        expect(permissionViolations(mutate(target.workJob, 'issues', 'write'), 'alert')).not.toEqual([])
+      })
+
+      it('acts on the work job result through the environment, never on a result it was not given', async () => {
+        const {alert} = await load(target)
+        const issue = stepNamed(stepsOf(alert), 'Update alert issue')
+        const env = isRecord(issue?.env) ? issue.env : {}
+
+        expect(issue?.id).toBe('issue')
+        expect(issue?.run).toBe(`bun run ${target.script} issue`)
+        expect(Object.values(env)).toContain(ghaExpression(target.resultExpression))
+        expect(env.ALERT_REHEARSE).toBe(ghaExpression('inputs.rehearse-alert'))
+        // A re-run replays the first attempt's result, so the script must know the attempt and then does nothing.
+        expect(env.ALERT_RUN_ATTEMPT).toBe(ghaExpression('github.run_attempt'))
+        // A broken alert path must be a red run: no swallowed failure on the issue step.
+        expect(issue?.['continue-on-error']).toBeUndefined()
+      })
+
+      it('reads the webhook secret in the Discord step alone, through env, never in a script body', async () => {
+        const {alert} = await load(target)
+        const steps = stepsOf(alert)
+        const readers = steps.filter(step => JSON.stringify(step).includes('secrets.'))
+
+        expect(readers.map(step => step.name)).toEqual(['Notify Discord'])
+        const env = isRecord(readers[0]?.env) ? readers[0].env : {}
+        expect(env[WEBHOOK_SECRET]).toBe(ghaExpression(`secrets.${WEBHOOK_SECRET}`))
+        expect(Object.values(env).filter(value => String(value).includes('secrets.'))).toHaveLength(1)
+        expect(readers[0]?.run).toBe(`bun run ${target.script} notify`)
+      })
+
+      it('keeps the workflow token out of the Discord step and the webhook out of the issue step', async () => {
+        const {alert} = await load(target)
+        const steps = stepsOf(alert)
+        const issue = stepNamed(steps, 'Update alert issue')
+        const notify = stepNamed(steps, 'Notify Discord')
+
+        expect(isRecord(issue?.env) ? issue.env.GH_TOKEN : undefined).toBe(ghaExpression('github.token'))
+        expect(JSON.stringify(issue)).not.toContain(WEBHOOK_SECRET)
+        expect(JSON.stringify(notify)).not.toContain('github.token')
+        expect(JSON.stringify(notify)).not.toContain('GH_TOKEN')
+        // The Discord step runs only when the issue step asked for a message, and only after it succeeded.
+        expect(notify?.if).toBe("steps.issue.outputs.notify == 'created' || steps.issue.outputs.notify == 'recovered'")
+        expect(notify?.['continue-on-error']).toBeUndefined()
+        expect(steps.indexOf(notify ?? {})).toBeGreaterThan(steps.indexOf(issue ?? {}))
+      })
+
+      it('interpolates only an allowlist of expressions in the alert job, none of them pull-request or upstream controlled', async () => {
+        const {alert} = await load(target)
+        const text = JSON.stringify(alert)
+        const expressions = [...text.matchAll(/\$\{\{([^}]*)\}\}/g)].map(match => match[1]?.trim())
+
+        expect(new Set(expressions)).toEqual(new Set(target.expressions))
+        expect(text).not.toMatch(/github\.event|head_ref|pull_request/)
+        // Script bodies carry no expression at all: every value reaches the script through env.
+        for (const step of stepsOf(alert)) expect(String(step.run ?? '')).not.toContain('${{')
+      })
+
+      it('never touches the repository, a pull request or the App credentials', async () => {
+        const {work, alert} = await load(target)
+        const scripts = [...stepsOf(work), ...stepsOf(alert)].map(step => String(step.run ?? '')).join('\n')
+        const text = JSON.stringify([work, alert])
+
+        expect(scripts).not.toMatch(/git push|git commit|git add|gh pr\b|gh api|--force/)
+        expect(text).not.toMatch(/get-app-token|create-github-app-token|APPLICATION_ID|APPLICATION_PRIVATE_KEY/)
+      })
+
+      it('checks out without persisting credentials and installs nothing: the scripts import no package', async () => {
+        const {work, alert} = await load(target)
+
+        for (const job of [work, alert]) {
+          const steps = stepsOf(job)
+          const checkouts = steps.filter(
+            step => typeof step.uses === 'string' && step.uses.startsWith('actions/checkout@'),
+          )
+          expect(checkouts).toHaveLength(1)
+          const withBlock = isRecord(checkouts[0]?.with) ? checkouts[0].with : {}
+          expect(withBlock['persist-credentials']).toBe(false)
+          expect(withBlock.token).toBeUndefined()
+          expect(steps.some(step => String(step.run ?? '').includes('bun install'))).toBe(false)
+        }
+      })
+
+      it('runs scripts whose imports are Bun built-ins and sibling scripts only', async () => {
+        for (const script of [
+          target.script,
+          'packages/cli/scripts/alert-issue.ts',
+          'packages/cli/scripts/deploy-gate-notify.ts',
+        ]) {
+          const source = await Bun.file(resolve(REPO_ROOT, script)).text()
+          const specifiers = [...source.matchAll(/(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]/g)].map(
+            match => match[1],
+          )
+          expect(
+            specifiers.filter(specifier => !specifier?.startsWith('node:') && !specifier?.startsWith('./')),
+            `${script} imports a package`,
+          ).toEqual([])
+        }
+      })
+
+      it('passes the owner and actor to the script, which refuses a non-owner rehearsal before any API call', async () => {
+        const source = await Bun.file(resolve(REPO_ROOT, 'packages/cli/scripts/alert-issue.ts')).text()
+
+        expect(source).toContain('GITHUB_ACTOR')
+        expect(source).toContain('GITHUB_REPOSITORY_OWNER')
+        expect(source).toContain("'rehearsal-not-owner'")
+      })
+    })
+  }
+
+  describe('traces-monitor: probe job', () => {
+    it('holds no secret and no Environment, and reads the hostname from a repository variable', async () => {
+      const {work} = await load(MONITOR)
+      const probe = stepNamed(stepsOf(work), MONITOR.workStepName)
+      const env = isRecord(probe?.env) ? probe.env : {}
+
+      expect(JSON.stringify(work)).not.toContain('secrets.')
+      expect(work.environment).toBeUndefined()
+      expect(env).toEqual({
+        TRACES_DOMAIN: ghaExpression('vars.TRACES_DOMAIN'),
+        TRACES_INGEST_OPEN: ghaExpression('vars.TRACES_INGEST_OPEN'),
+      })
+      expect(probe?.run).toBe(`bun run ${MONITOR.script} probe`)
+      expect(probe?.id).toBe('probe')
+      expect(probe?.['continue-on-error']).toBeUndefined()
+      expect(isRecord(work.outputs) ? work.outputs : {}).toEqual({
+        deployed: ghaExpression('steps.probe.outputs.deployed'),
+        urgent: ghaExpression('steps.probe.outputs.urgent'),
+        categories: ghaExpression('steps.probe.outputs.categories'),
+      })
+    })
+
+    it('passes the probe outputs the alert reads to both alert steps', async () => {
+      const {alert} = await load(MONITOR)
+
+      for (const name of ['Update alert issue', 'Notify Discord']) {
+        const step = stepNamed(stepsOf(alert), name)
+        expect(isRecord(step?.env) ? step.env : {}).toMatchObject({
+          ALERT_PROBE_URGENT: ghaExpression('needs.probe.outputs.urgent'),
+          ALERT_PROBE_CATEGORIES: ghaExpression('needs.probe.outputs.categories'),
+        })
+      }
+    })
+
+    it('names the probe job as the script reads it, and the workflow file as the script lists it', async () => {
+      const {work} = await load(MONITOR)
+
+      expect(work.name).toBe(PROBE_JOB_NAME)
+      expect(existsSync(resolve(REPO_ROOT, '.github/workflows', WORKFLOW_FILE))).toBe(true)
+      expect(MONITOR.file.endsWith(`/${WORKFLOW_FILE}`)).toBe(true)
+    })
+
+    it('needs the read-only actions scope on the alert job to read its own run history, and nothing that writes', async () => {
+      const {alert} = await load(MONITOR)
+
+      expect(alert.permissions).toEqual({contents: 'read', issues: 'write', actions: 'read'})
+    })
+  })
+
+  describe('traces-backup: backup job', () => {
+    // An Environment with a required reviewer would hold the unattended daily run for approval, and any Environment
+    // creates a Deployment record that the status page reads as the last deploy of that app.
+    const environmentDeclarations = (workflow: Record<string, unknown>): string[] =>
+      Object.entries(isRecord(workflow.jobs) ? workflow.jobs : {}).flatMap(([id, job]) =>
+        isRecord(job) && job.environment !== undefined ? [id] : [],
+      )
+
+    it('declares no Environment on any job, so it can never wait on a reviewer or create a Deployment record', async () => {
+      const {workflow, text} = await load(BACKUP)
+
+      expect(environmentDeclarations(workflow)).toEqual([])
+      expect(text).not.toMatch(/^\s*environment\s*:/m)
+      // The check bites: a job that declares one is caught, in either form.
+      for (const environment of ['traces', {name: 'traces'}]) {
+        const jobs = workflow.jobs as Record<string, Record<string, unknown>>
+        const mutated = {...workflow, jobs: {...jobs, backup: {...jobs.backup, environment}}}
+        expect(environmentDeclarations(mutated)).toEqual(['backup'])
+      }
+    })
+
+    it('holds the DigitalOcean token, a repository secret, in one step and nowhere else', async () => {
+      const {work, alert, text} = await load(BACKUP)
+      const backupStep = stepNamed(stepsOf(work), BACKUP.workStepName)
+      const env = isRecord(backupStep?.env) ? backupStep.env : {}
+
+      expect(work.environment).toBeUndefined()
+      expect(alert.environment).toBeUndefined()
+      expect(env).toEqual({
+        [DO_TOKEN_SECRET]: ghaExpression(`secrets.${DO_TOKEN_SECRET}`),
+        TRACES_DOMAIN: ghaExpression('vars.TRACES_DOMAIN'),
+      })
+      expect(backupStep?.run).toBe(`bun run ${BACKUP.script} backup`)
+      expect(backupStep?.id).toBe('backup')
+      expect(backupStep?.['continue-on-error']).toBeUndefined()
+      expect(isRecord(work.outputs) ? work.outputs.deployed : undefined).toBe(
+        ghaExpression('steps.backup.outputs.deployed'),
+      )
+
+      // Not the alert job, and not the webhook or the issue token beside it.
+      expect(JSON.stringify(alert)).not.toContain(DO_TOKEN_SECRET)
+      expect(JSON.stringify(work)).not.toContain(WEBHOOK_SECRET)
+      expect(JSON.stringify(work)).not.toContain('github.token')
+      expect(JSON.stringify(work)).not.toContain('GH_TOKEN')
+      expect(text.match(new RegExp(String.raw`secrets\.${DO_TOKEN_SECRET}`, 'g'))).toHaveLength(1)
+    })
+
+    it('reads no secret other than the DigitalOcean token in the backup job', async () => {
+      const {work} = await load(BACKUP)
+      const secrets = [...JSON.stringify(work).matchAll(/secrets\.(\w+)/g)].map(match => match[1])
+
+      expect(secrets).toEqual([DO_TOKEN_SECRET])
+    })
+  })
+
+  it('declares both alert labels in settings.yml, so the settings sync does not strip them from an open alert issue', async () => {
+    const settings: unknown = parseYaml(await Bun.file(resolve(REPO_ROOT, '.github/settings.yml')).text())
+    const labels = isRecord(settings) && Array.isArray(settings.labels) ? settings.labels : []
+    const names = labels.map(label => (isRecord(label) ? label.name : undefined))
+
+    expect(TRACES_MONITOR_LABEL).toBe('traces-unhealthy')
+    expect(TRACES_BACKUP_LABEL).toBe('traces-backup-failure')
+    expect(names).toContain(TRACES_MONITOR_LABEL)
+    expect(names).toContain(TRACES_BACKUP_LABEL)
+  })
+
+  it('uses the webhook secret the cliproxy monitor and the privacy alert use', async () => {
+    for (const file of ['.github/workflows/cliproxy-auth-monitor.yaml', '.github/workflows/opencode-go-privacy.yaml']) {
+      expect(await Bun.file(resolve(REPO_ROOT, file)).text()).toContain(`secrets.${WEBHOOK_SECRET}`)
+    }
+    for (const target of [MONITOR, BACKUP]) {
+      expect(await Bun.file(resolve(REPO_ROOT, target.file)).text()).toContain(`secrets.${WEBHOOK_SECRET}`)
+    }
+  })
+})
+
+const TRACES_CALLEE_FILE = '.github/workflows/deploy-traces.yaml'
+const TRACES_ROUTER_FILE = '.github/workflows/deploy.yaml'
+const GATE_WEBHOOK = 'DEPLOY_GATE_DISCORD_WEBHOOK'
+const IMAGE_NAME = 'TRACES_COLLECTOR_IMAGE'
+const ACCOUNT_DO_TOKEN = 'DIGITALOCEAN_ACCESS_TOKEN'
+const SNAPSHOT_DO_TOKEN = 'TRACES_SNAPSHOT_DO_TOKEN'
+
+/** The lists `apps/traces/src/deploy.ts` exports. Imported lazily so one missing file fails these tests only. */
+async function exportedInputs(): Promise<{
+  secrets: readonly string[]
+  vars: readonly string[]
+  build: readonly string[]
+}> {
+  const deploy: {
+    TRACES_DEPLOY_SECRETS: readonly string[]
+    TRACES_DEPLOY_VARS: readonly string[]
+    TRACES_DEPLOY_BUILD_INPUTS: readonly string[]
+  } = await import('../../../apps/traces/src/deploy')
+  return {
+    secrets: deploy.TRACES_DEPLOY_SECRETS,
+    vars: deploy.TRACES_DEPLOY_VARS,
+    build: deploy.TRACES_DEPLOY_BUILD_INPUTS,
+  }
+}
+
+async function loadTracesWorkflow(file: string): Promise<{text: string; workflow: Record<string, unknown>}> {
+  const text = await Bun.file(resolve(REPO_ROOT, file)).text()
+  return {text, workflow: await loadWorkflowYaml(resolve(REPO_ROOT, file))}
+}
+
+function deployStepEnv(workflow: Record<string, unknown>): Record<string, unknown> {
+  const step = stepsOf(workflowJob(workflow, 'deploy-traces')).find(candidate => candidate.name === 'Deploy traces')
+  if (step === undefined || !isRecord(step.env)) throw new Error('deploy-traces has no "Deploy traces" step with env')
+  return step.env
+}
+
+function routerCaller(workflow: Record<string, unknown>): Record<string, unknown> {
+  return workflowJob(workflow, 'deploy-traces')
+}
+
+describe('traces deploy: workflow inputs are one contract', () => {
+  it('passes the deploy step exactly the names deploy.ts exports: secrets from secrets.*, variables from vars.*, and the image', async () => {
+    const {secrets, vars, build} = await exportedInputs()
+    const {workflow} = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+
+    expect(build).toEqual([IMAGE_NAME])
+    const expected: Record<string, string> = {
+      ...Object.fromEntries(secrets.map(name => [name, ghaExpression(`secrets.${name}`)])),
+      ...Object.fromEntries(vars.map(name => [name, ghaExpression(`vars.${name}`)])),
+      [IMAGE_NAME]: `ghcr.io/${ghaExpression('github.repository')}/traces-collector@${ghaExpression('needs.build-collector.outputs.digest')}`,
+    }
+
+    expect(deployStepEnv(workflow)).toEqual(expected)
+  })
+
+  it('declares exactly the exported secrets, plus the gate webhook, under workflow_call.secrets', async () => {
+    const {secrets} = await exportedInputs()
+    const {workflow} = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+    const on = isRecord(workflow.on) ? workflow.on : {}
+    const declared = isRecord(on.workflow_call) && isRecord(on.workflow_call.secrets) ? on.workflow_call.secrets : {}
+
+    expect(Object.keys(declared).toSorted()).toEqual([...secrets, GATE_WEBHOOK].toSorted())
+  })
+
+  it('has the router caller pass exactly the exported secrets, plus the gate webhook, each as its own secret and never inherited', async () => {
+    const {secrets} = await exportedInputs()
+    const {workflow} = await loadTracesWorkflow(TRACES_ROUTER_FILE)
+    const caller = routerCaller(workflow)
+
+    expect(caller.uses).toBe('./.github/workflows/deploy-traces.yaml')
+    expect(caller.secrets).not.toBe('inherit')
+    expect(caller.secrets).toEqual(
+      Object.fromEntries([...secrets, GATE_WEBHOOK].map(name => [name, ghaExpression(`secrets.${name}`)])),
+    )
+    // No `with:` inputs: the variables are read from the repository variables inside the callee.
+    expect(caller.with).toBeUndefined()
+  })
+
+  it('never names a sender token, the snapshot token or the account-wide DigitalOcean token in either workflow', async () => {
+    const {secrets, vars} = await exportedInputs()
+    const callee = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+    const router = await loadTracesWorkflow(TRACES_ROUTER_FILE)
+    const routerCallerText = JSON.stringify(routerCaller(router.workflow))
+
+    for (const name of [...secrets, ...vars]) {
+      expect(name, `${name} reads like a token`).not.toMatch(/SENDER|_TOKEN$/)
+    }
+    for (const forbidden of [SNAPSHOT_DO_TOKEN, ACCOUNT_DO_TOKEN]) {
+      expect(callee.text, `${TRACES_CALLEE_FILE} must not name ${forbidden}`).not.toContain(forbidden)
+      expect(routerCallerText, `${TRACES_ROUTER_FILE} deploy-traces must not name ${forbidden}`).not.toContain(
+        forbidden,
+      )
+    }
+  })
+
+  it('builds the collector image on main only, with packages: write on that job only and a digest output', async () => {
+    const {workflow} = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+    const jobs = isRecord(workflow.jobs) ? workflow.jobs : {}
+    const build = workflowJob(workflow, 'build-collector')
+
+    expect(Object.keys(jobs).toSorted()).toEqual(['build-collector', 'deploy-traces', 'notify'])
+    expect(workflow.permissions).toEqual({contents: 'read'})
+    expect(normalizeExpression(build.if)).toBe(DEPLOY_NOTIFY_MAIN_GUARD)
+    expect(build.permissions).toEqual({contents: 'read', packages: 'write'})
+    expect(build.outputs).toEqual({digest: ghaExpression('steps.build.outputs.digest')})
+    for (const [id, job] of Object.entries(jobs)) {
+      if (id === 'build-collector' || !isRecord(job)) continue
+      expect(JSON.stringify(job.permissions ?? {}), `${id} must not write packages`).not.toContain('write')
+    }
+
+    const buildStep = stepsOf(build).find(step => step.id === 'build')
+    const withBlock = isRecord(buildStep?.with) ? buildStep.with : {}
+    expect(withBlock.platforms).toBe('linux/amd64')
+    expect(withBlock.context).toBe('apps/traces/collector')
+    expect(withBlock.tags).toBe(
+      `ghcr.io/${ghaExpression('github.repository')}/traces-collector:${ghaExpression('github.sha')}`,
+    )
+  })
+
+  it('gates the deploy on the traces Environment and the collector build, and never on a missing digest', async () => {
+    const {workflow} = await loadTracesWorkflow(TRACES_CALLEE_FILE)
+    const deploy = workflowJob(workflow, 'deploy-traces')
+
+    expect(deploy.environment).toBe('traces')
+    expect(deploy.needs).toEqual(['build-collector', 'notify'])
+    expect(normalizeExpression(deploy.if)).toBe("!cancelled() && needs.build-collector.result == 'success'")
+    // The step that validates the digest runs before the deploy step.
+    const names = stepsOf(deploy).map(step => step.name)
+    expect(names.indexOf('Validate required secrets')).toBeLessThan(names.indexOf('Deploy traces'))
+    expect(names.indexOf('Configure SSH known_hosts')).toBeLessThan(names.indexOf('Deploy traces'))
+  })
+
+  it('grants the router caller exactly the permissions the callee jobs request', async () => {
+    const {workflow} = await loadTracesWorkflow(TRACES_ROUTER_FILE)
+    expect(routerCaller(workflow).permissions).toEqual({contents: 'read', packages: 'write'})
+  })
+
+  it('has the router path filter match apps/traces and leave out markdown, tests, fixtures and snapshots', async () => {
+    const {workflow} = await loadTracesWorkflow(TRACES_ROUTER_FILE)
+    const detect = workflowJob(workflow, 'detect-changes')
+    const filterStep = stepsOf(detect).find(step => step.id === 'filter')
+    const filters =
+      isRecord(filterStep?.with) && typeof filterStep.with.filters === 'string' ? filterStep.with.filters : ''
+    const parsed: unknown = parseYaml(filters)
+    const traces = isRecord(parsed) ? parsed.traces : undefined
+
+    expect(traces).toEqual([
+      'apps/traces/**',
+      '!apps/traces/**/*.md',
+      '!apps/traces/**/*.test.ts',
+      '!apps/traces/**/__fixtures__/**',
+      '!apps/traces/**/__snapshots__/**',
+    ])
+    const outputs = isRecord(detect.outputs) ? detect.outputs : {}
+    expect(outputs.traces).toBe(ghaExpression('steps.filter.outputs.traces'))
+    expect(normalizeExpression(routerCaller(workflow).if)).toBe(
+      "github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.traces == 'true'",
+    )
   })
 })

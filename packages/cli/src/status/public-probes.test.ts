@@ -9,6 +9,7 @@ import {
   probeDashboard,
   probeGateway,
   probeKeeweb,
+  probeTraces,
   probeUmami,
   PUBLIC_PROBES,
   type ProbeOptions,
@@ -69,6 +70,12 @@ const probeCases: ProbeCase[] = [
   {name: 'umami', probe: probeUmami, url: 'https://metrics.fro.bot/api/heartbeat', okBody: '{"ok":true}'},
   {name: 'dashboard', probe: probeDashboard, url: 'https://dashboard.fro.bot/api/healthz', okBody: '{"ok":true}'},
   {
+    name: 'traces',
+    probe: probeTraces,
+    url: 'https://traces.fro.bot/healthz',
+    okBody: '{"ok":true,"at":"2026-11-01T11:58:00.000Z"}',
+  },
+  {
     name: 'gateway',
     probe: probeGateway,
     url: 'https://dashboard.fro.bot/operator/health',
@@ -84,6 +91,7 @@ describe('PUBLIC_PROBES', () => {
       'dashboard',
       'gateway',
       'keeweb',
+      'traces',
       'umami',
     ])
   })
@@ -544,5 +552,39 @@ describe('httpGet bounded body reads', () => {
     await httpGet('https://example.test/', {timeoutMs: 1000, retries: 1, readBody: true})
 
     expect(recorder.urls).toHaveLength(2)
+  })
+})
+
+describe('traces probe', () => {
+  const at = '2026-11-01T11:58:00.000Z'
+
+  it('passes only for a 2xx whose body says ok: true', async () => {
+    installFetch(async () => new Response(JSON.stringify({ok: true, at}), {status: 200}))
+    expect((await probeTraces(baseOptions)).result).toBe('pass')
+  })
+
+  it('fails a 503, which is the reporter saying the verdict is failing', async () => {
+    installFetch(async () => new Response(JSON.stringify({ok: false, at}), {status: 503}))
+    const observation = await probeTraces(baseOptions)
+    expect(observation.result).toBe('fail')
+    expect(observation.detail).toMatchObject({statusCode: 503})
+  })
+
+  it('fails a 200 whose body is not ok: true, or is not JSON', async () => {
+    for (const body of ['{"ok":false}', '{"ok":"true"}', 'ok', '', '[]']) {
+      installFetch(async () => new Response(body, {status: 200}))
+      expect((await probeTraces(baseOptions)).result).toBe('fail')
+    }
+  })
+
+  it('is unknown when the endpoint cannot be reached, and never carries the body', async () => {
+    installFetch(async () => {
+      throw new TypeError('connect failed')
+    })
+    const unreachable = await probeTraces(baseOptions)
+    expect(unreachable.result).toBe('unknown')
+
+    installFetch(async () => new Response(JSON.stringify({ok: true, at}), {status: 200}))
+    expect(JSON.stringify(await probeTraces(baseOptions))).not.toContain(at)
   })
 })

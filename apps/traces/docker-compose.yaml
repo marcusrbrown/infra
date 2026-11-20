@@ -1,0 +1,372 @@
+# Trace collection stack: collector -> Langfuse (whole traces) and Tempo (keep-listed attributes only).
+#
+# Derived from the Langfuse compose file at v4.83.0 (docker.langfuse.com). Changes from upstream:
+#   - every image is pinned by tag and digest
+#   - no AI gateway service
+#   - nothing is published except Caddy (80, 443) and, on 127.0.0.1 only, Langfuse web and Grafana
+#   - two networks (see below), healthchecks, a log size limit and `restart: unless-stopped` everywhere
+#   - telemetry and outbound update checks are off wherever a setting exists
+#   - secrets are interpolated from the host `.env` or read from files, never written here
+#
+# Networks:
+#   edge     Caddy, the collector, Langfuse web, Tempo, the health reporter. The internet-facing,
+#            custom-built collector can reach nothing else.
+#   backend  Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo, the health reporter.
+#            The reporter bridges both: it reads the collector and Tempo on edge, and ClickHouse, MinIO and the
+#            Langfuse worker on backend.
+#
+# No ClickHouse memory limit, on purpose: capping it near 7 GB lost spans after the sender got 200.
+#
+# Config files are bind-mounted from ./config. Deploy recreates a service after it uploads one, so a
+# single-file mount never serves a stale inode. Secret and token directories are mounted as
+# directories, so an atomic replace is seen at once.
+name: traces
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
+x-langfuse-env:
+  &langfuse-env # The UI is reached through an SSH tunnel, so its URL is loopback. Keep the tunnel's local port at 3000.
+  NEXTAUTH_URL: http://localhost:3000
+  DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?}@postgres:5432/postgres
+  SALT: ${SALT:?}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?}
+  TELEMETRY_ENABLED: 'false'
+  # One password user created by the bootstrap variables on the web service; nobody can sign up.
+  AUTH_DISABLE_SIGNUP: 'true'
+  # No AI gateway and no in-app agent: this instance only stores traces.
+  LANGFUSE_AI_GATEWAY_DEPLOYED: 'false'
+  LANGFUSE_IN_APP_AGENT_ENABLED: 'false'
+  # API keys carry a role. "Application" is the narrowest role that can ingest.
+  API_AUTH_MIGRATION: enforce
+  API_KEY_PROJECT_ROLES_ENABLE: 'true'
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?}
+  CLICKHOUSE_CLUSTER_ENABLED: 'false'
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: 'true'
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: 'true'
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  REDIS_HOST: redis
+  REDIS_PORT: '6379'
+  REDIS_AUTH: ${REDIS_AUTH:?}
+
+x-langfuse-depends-on: &langfuse-depends-on
+  postgres:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  clickhouse:
+    condition: service_healthy
+
+services:
+  caddy:
+    image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    restart: unless-stopped
+    # The only service published on all interfaces.
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      TRACES_DOMAIN: ${TRACES_DOMAIN:?}
+      # off (no ingest route), held (every ingest path answers 503) or open. Unset means off. The value
+      # selects config/ingest/<state>.caddy; any other value stops Caddy from starting.
+      TRACES_INGEST_STATE: ${TRACES_INGEST_STATE:-off}
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./config/ingest:/etc/caddy/ingest:ro
+    networks: [edge]
+    depends_on:
+      collector:
+        condition: service_started
+    healthcheck:
+      test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:2019/config/ || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *logging
+
+  # The image is built in CI and handed to deploy by digest, as name:tag@sha256:<digest>. It is a
+  # distroless image with no shell, so it has no compose healthcheck: the health_check extension
+  # (:13133) is read by the health reporter instead.
+  collector:
+    image: ${TRACES_COLLECTOR_IMAGE:?}
+    restart: unless-stopped
+    command: [--config=/etc/otelcol/config.yaml]
+    volumes:
+      - ./config/otelcol.yaml:/etc/otelcol/config.yaml:ro
+      # One directory per sender group, one token file inside it. Deploy creates the directories and
+      # never writes a token.
+      - ./tokens:/etc/otelcol/tokens:ro
+      # The Langfuse key pair as a ready-made Basic credential, read at start.
+      - ./secrets/collector:/etc/otelcol/secrets:ro
+      - collector_queue:/var/lib/otelcol
+    networks: [edge]
+    # No depends_on: the collector must be able to start while a backend is down and queue until it returns.
+    logging: *logging
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4.83.0@sha256:a91445265d1f5a13d666ef2f1491a437255fb9e5b7a76525d5543e4a4dc030f3
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    ports:
+      - 127.0.0.1:3000:3000
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?}
+      NEXT_PUBLIC_SIGN_UP_DISABLED: 'true'
+      # Media uploads are not used; this is upstream's browser-facing default.
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
+      # Bootstrap values. Deploy sets them for the first start and removes them afterwards.
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+    networks: [edge, backend]
+    healthcheck:
+      test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:3000/api/public/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    logging: *logging
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.83.0@sha256:a6eac4bb99df27dd01a090e63d1a54660ba14044ae5e4c1ef1c883cec5d68ee4
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    environment:
+      <<: *langfuse-env
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:3030/api/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *logging
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3.62.3@sha256:de3e47c64078aa196dae2349e048fc98ba81947f651f5c20e06e46baea8ae40a
+    restart: unless-stopped
+    user: '101:101'
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?}
+      # Password of the read-only user the health reporter reads the trace tables with (see the mount below).
+      CLICKHOUSE_READER_PASSWORD: ${CLICKHOUSE_READER_PASSWORD:?}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+      # System log TTLs. No memory settings in here, by design.
+      - ./config/clickhouse:/etc/clickhouse-server/config.d:ro
+      # The read-only reporter user. One file, not the users.d directory: the image's entrypoint writes
+      # its own user file into that directory at start.
+      - ./config/clickhouse-users/traces-reader.xml:/etc/clickhouse-server/users.d/traces-reader.xml:ro
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    logging: *logging
+
+  minio:
+    # Chainguard publishes only the `latest` tag of this image without a subscription; the digest is
+    # the real pin.
+    image: cgr.dev/chainguard/minio:latest@sha256:e9cf6b99c226e9539ed0f14b6f00e37b07da153c7ba1f4f8709c807574b471ec
+    restart: unless-stopped
+    entrypoint: sh
+    # Create the 'langfuse' bucket before starting the service. The console is not served.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
+    volumes:
+      - minio_data:/data
+    networks: [backend]
+    healthcheck:
+      test: [CMD, mc, ready, local]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    logging: *logging
+
+  redis:
+    image: redis:7@sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90
+    restart: unless-stopped
+    # The password reaches redis-server through the environment, not through the compose file.
+    command: [sh, -c, 'exec redis-server --requirepass "$$REDIS_AUTH" --maxmemory-policy noeviction']
+    environment:
+      REDIS_AUTH: ${REDIS_AUTH:?}
+      REDISCLI_AUTH: ${REDIS_AUTH:?}
+    volumes:
+      - redis_data:/data
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    logging: *logging
+
+  postgres:
+    # Held at this major. A major upgrade needs a dump and restore, not an image bump.
+    image: postgres:17@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  # Distroless image with no shell, so no compose healthcheck: the health reporter reads /ready.
+  tempo:
+    image: grafana/tempo:3.1.1@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044
+    restart: unless-stopped
+    command: [-config.file=/etc/tempo/tempo.yaml]
+    volumes:
+      - ./config/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    networks: [edge, backend]
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:3001:3000
+    environment:
+      # Reached through the SSH tunnel at http://localhost:3001. Keep the tunnel's local port at 3001.
+      GF_SERVER_ROOT_URL: http://localhost:3001/
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana/admin-password
+      GF_SECURITY_SECRET_KEY__FILE: /run/secrets/grafana/secret-key
+      # No anonymous access, no sign-up, no sharing of any kind.
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_USERS_ALLOW_ORG_CREATE: 'false'
+      GF_PUBLIC_DASHBOARDS_ENABLED: 'false'
+      GF_SNAPSHOTS_ENABLED: 'false'
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: 'false'
+      GF_METRICS_ENABLED: 'false'
+      # No outbound calls: analytics, update checks, Gravatar, the news feed, the plugin pre-installer.
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
+      GF_ANALYTICS_FEEDBACK_LINKS_ENABLED: 'false'
+      GF_SECURITY_DISABLE_GRAVATAR: 'true'
+      GF_NEWS_NEWS_FEED_ENABLED: 'false'
+      GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: 'false'
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: 'false'
+      GF_CLOUD_MIGRATION_ENABLED: 'false'
+    volumes:
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./secrets/grafana:/run/secrets/grafana:ro
+      - grafana_data:/var/lib/grafana
+    networks: [backend]
+    depends_on:
+      - tempo
+    healthcheck:
+      test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:3000/api/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *logging
+
+  # Reads every dependency and runs a canary through the collector's private receiver; Caddy proxies only
+  # /healthz to it. A small Bun script from a pinned image, with its source mounted read-only: no build step,
+  # no dependencies, no Docker socket, no published port, no root. It starts without waiting for the stack, so a
+  # stack that is down is reported instead of leaving the reporter unstarted.
+  health-reporter:
+    image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
+    restart: unless-stopped
+    user: '10010:10010'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    command: [bun, run, --no-install, /app/health-report.ts]
+    environment:
+      # Nothing to write to: the runtime's transpiler cache is off and /tmp is a tmpfs.
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0'
+    tmpfs:
+      - /tmp
+    volumes:
+      # The reporter's source, uploaded by deploy as one directory.
+      - ./health-reporter:/app:ro
+      # Two password files, owned by the reporter's user and mode 0400: clickhouse-password (the read-only
+      # `traces_reader` user) and minio-password (the object store's root user, to list batch ages).
+      - ./secrets/reporter:/run/secrets/reporter:ro
+      # Tempo's blocks, for the age of its oldest data.
+      - tempo_data:/var/tempo:ro
+      # Two files and a directory that only say how full each disk is: the volume (through its sentinel file,
+      # which also proves it is the right volume) and the root filesystem.
+      - /mnt/traces/.traces-volume:/host/volume-sentinel:ro
+      - /srv:/host/root:ro
+    networks: [edge, backend]
+    # No depends_on: it must start when a service is down and say so.
+    healthcheck:
+      # The loopback listener answers while the process is up, whatever the verdict says.
+      test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:8081/live || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *logging
+
+networks:
+  edge: {}
+  backend: {}
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
+  collector_queue: {}
+  clickhouse_data: {}
+  clickhouse_logs: {}
+  minio_data: {}
+  redis_data: {}
+  postgres_data: {}
+  tempo_data: {}
+  grafana_data: {}

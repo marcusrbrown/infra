@@ -1004,7 +1004,7 @@ const composeScopes = (app: string): DiagramEntry['covers'] => [
   {kind: 'volume', file: composePath(app)},
 ]
 
-const DEPLOYED_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard', 'broker'] as const
+const DEPLOYED_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'vpn', 'dashboard', 'broker', 'traces'] as const
 
 const ROUTER = workflowPath('deploy.yaml')
 const calleeOf = (app: string): string => workflowPath(`deploy-${app}.yaml`)
@@ -1064,6 +1064,10 @@ const PIPELINE_ENTRY: DiagramEntry = {
     },
     {
       fact: fact.job(calleeOf('gateway'), 'scan-images'),
+      reason: 'It is an app-specific pre-deploy job that the generic pipeline leaves out.',
+    },
+    {
+      fact: fact.job(calleeOf('traces'), 'build-collector'),
       reason: 'It is an app-specific pre-deploy job that the generic pipeline leaves out.',
     },
     {
@@ -1157,6 +1161,35 @@ const TABLE = {
       site: illustrative('The site directory lives on the host.'),
       activate: illustrative('The activation script is a host file.'),
       nginx: illustrative('The nginx config is a host file.'),
+    },
+  },
+
+  'apps-traces': {
+    covers: composeScopes('traces'),
+    nodes: {
+      senders: illustrative('Sender groups are external callers.'),
+      operator: illustrative('The operator is a person, not a service.'),
+      caddy: caddyOf('traces'),
+      collector: maps(
+        fact.service(composePath('traces'), 'collector'),
+        fact.volume(composePath('traces'), 'collector_queue'),
+      ),
+      reporter: maps(fact.service(composePath('traces'), 'health-reporter')),
+      web: maps(fact.service(composePath('traces'), 'langfuse-web')),
+      worker: maps(fact.service(composePath('traces'), 'langfuse-worker')),
+      clickhouse: maps(
+        fact.service(composePath('traces'), 'clickhouse'),
+        fact.volume(composePath('traces'), 'clickhouse_data'),
+        fact.volume(composePath('traces'), 'clickhouse_logs'),
+      ),
+      postgres: maps(
+        fact.service(composePath('traces'), 'postgres'),
+        fact.volume(composePath('traces'), 'postgres_data'),
+      ),
+      redis: maps(fact.service(composePath('traces'), 'redis'), fact.volume(composePath('traces'), 'redis_data')),
+      minio: maps(fact.service(composePath('traces'), 'minio'), fact.volume(composePath('traces'), 'minio_data')),
+      tempo: maps(fact.service(composePath('traces'), 'tempo'), fact.volume(composePath('traces'), 'tempo_data')),
+      grafana: maps(fact.service(composePath('traces'), 'grafana'), fact.volume(composePath('traces'), 'grafana_data')),
     },
   },
 

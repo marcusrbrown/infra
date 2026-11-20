@@ -127,6 +127,43 @@ describe('verifyStatusOutput: each required item', () => {
   })
 })
 
+describe('verifyStatusOutput: a service with no samples yet', () => {
+  // An app added after the history began has no samples until the next snapshot writes its file.
+  const NO_DATA = '<p>No data yet. No samples have been recorded for this service.</p><td>No data yet</td>'
+
+  it('passes with the no-data text instead of the coverage and passed-sample figures', () => {
+    const dist = buildDist({fixture: false, gateway: `<main>${LAST_SAMPLE}${NO_DATA}</main>`})
+
+    expect(verifyStatusOutput(dist, {expectFixture: false})).toEqual([])
+  })
+
+  it('still requires the last-sample time and the stale-warning hook', () => {
+    const dist = buildDist({fixture: false, gateway: `<main>${NO_DATA}</main>`})
+
+    expect(verifyStatusOutput(dist, {expectFixture: false})).toEqual([
+      'services/gateway: missing the last-sample time',
+      'services/gateway: missing the stale-warning hook',
+    ])
+  })
+
+  it('still reports a percentage', () => {
+    const dist = buildDist({fixture: false, gateway: `<main>${LAST_SAMPLE}${NO_DATA}<p>99%</p></main>`})
+
+    expect(verifyStatusOutput(dist, {expectFixture: false})).toEqual([
+      'services/gateway: shows a percentage next to a figure',
+    ])
+  })
+
+  it('does not excuse a page that shows neither the figures nor the no-data text', () => {
+    const dist = buildDist({fixture: false, gateway: `<main>${LAST_SAMPLE}</main>`})
+
+    expect(verifyStatusOutput(dist, {expectFixture: false})).toEqual([
+      'services/gateway: missing the coverage figure',
+      'services/gateway: missing "N of M samples passed"',
+    ])
+  })
+})
+
 describe('visibleText', () => {
   it('drops tags, scripts and styles', () => {
     expect(visibleText('<p class="a">hi <b>there</b></p><script>1 % 2</script>')).toContain('hi there')

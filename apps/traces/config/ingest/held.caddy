@@ -1,0 +1,10 @@
+# Ingest is held: every ingest path answers 503, which senders retry. Nothing reaches the collector.
+handle /marcusrbrown/v1/traces {
+	respond 503
+}
+handle /fro-bot/v1/traces {
+	respond 503
+}
+handle /workstation/v1/traces {
+	respond 503
+}

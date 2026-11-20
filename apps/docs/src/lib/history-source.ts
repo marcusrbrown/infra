@@ -3,7 +3,12 @@ import type {History, HistorySample} from '@marcusrbrown/infra-shared/status/his
 import {existsSync, readdirSync, readFileSync} from 'node:fs'
 import {join, resolve} from 'node:path'
 
-import {APP_IDS, historyAppFileSchema, historyMetaSchema} from '@marcusrbrown/infra-shared/status/history-schema'
+import {
+  APP_IDS,
+  APPS_ADDED_AFTER_V1,
+  historyAppFileSchema,
+  historyMetaSchema,
+} from '@marcusrbrown/infra-shared/status/history-schema'
 
 export type HistorySourceKind = 'fixture' | 'artifact'
 
@@ -20,10 +25,26 @@ export class StatusHistoryError extends Error {
   }
 }
 
-function readJson(path: string, what: string): unknown {
-  if (!existsSync(path)) throw new StatusHistoryError(`${what} is missing (${path})`)
+function isNotFound(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT'
+}
+
+const MISSING = Symbol('missing')
+
+/** Parsed JSON, or `MISSING` when the file does not exist and `optional` is set. Any other failure throws. */
+function readJson(path: string, what: string, optional = false): unknown {
+  let text: string
   try {
-    return JSON.parse(readFileSync(path, 'utf8'))
+    text = readFileSync(path, 'utf8')
+  } catch (error) {
+    if (isNotFound(error)) {
+      if (optional) return MISSING
+      throw new StatusHistoryError(`${what} is missing (${path})`)
+    }
+    throw new StatusHistoryError(`${what} is not valid JSON (${path})`)
+  }
+  try {
+    return JSON.parse(text)
   } catch {
     throw new StatusHistoryError(`${what} is not valid JSON (${path})`)
   }
@@ -48,7 +69,10 @@ export function readHistoryDir(dir: string): History {
   const apps = {} as Record<(typeof APP_IDS)[number], HistorySample[]>
   let total = 0
   for (const app of APP_IDS) {
-    const parsed = historyAppFileSchema.safeParse(readJson(join(appsDir, `${app}.json`), `apps/${app}.json`))
+    // An app added after the history was created has no file yet and no samples. The snapshot command creates the
+    // file on its next write; until then the page shows it with no data. A missing file for any other app is damage.
+    const raw = readJson(join(appsDir, `${app}.json`), `apps/${app}.json`, APPS_ADDED_AFTER_V1.includes(app))
+    const parsed = historyAppFileSchema.safeParse(raw === MISSING ? [] : raw)
     if (!parsed.success) throw new StatusHistoryError(`apps/${app}.json does not match the history schema`)
     const keys = new Set(parsed.data.map(sample => `${sample.run}:${sample.att}`))
     if (keys.size !== parsed.data.length)

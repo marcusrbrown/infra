@@ -1,4 +1,4 @@
-import {cpSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import {afterEach, describe, expect, it} from 'bun:test'
@@ -27,7 +27,7 @@ describe('loadStatusHistory', () => {
     const loaded = loadStatusHistory({}, DOCS_ROOT)
 
     expect(loaded.source).toBe('fixture')
-    expect(Object.keys(loaded.history.apps)).toHaveLength(7)
+    expect(Object.keys(loaded.history.apps)).toHaveLength(8)
   })
 
   it('reads STATUS_HISTORY_DIR when set', () => {
@@ -86,11 +86,47 @@ describe('readHistoryDir', () => {
     expect(() => readHistoryDir(dir)).toThrow(/apps\/gateway\.json does not match/)
   })
 
-  it('rejects a missing app file', () => {
+  it('reads a missing app file as an empty list and keeps every other app', () => {
+    // The live artifact predates `traces`: it has no apps/traces.json until the next snapshot writes one.
     const dir = copyFixture()
-    rmSync(join(dir, 'apps/vpn.json'))
+    const before = readHistoryDir(dir)
+    rmSync(join(dir, 'apps/traces.json'))
 
-    expect(() => readHistoryDir(dir)).toThrow(/apps\/vpn\.json is missing/)
+    const history = readHistoryDir(dir)
+
+    expect(history.apps.traces).toEqual([])
+    expect(history.apps).toEqual({...before.apps, traces: []})
+  })
+
+  it('rejects a missing file for an app that existed before: a lost file is damage, not an app added later', () => {
+    const dir = copyFixture()
+    rmSync(join(dir, 'apps/keeweb.json'))
+
+    expect(() => readHistoryDir(dir)).toThrow(/apps\/keeweb\.json is missing/)
+  })
+
+  it('does not read an app file that fails for any reason other than ENOENT as empty', () => {
+    const dir = copyFixture()
+    rmSync(join(dir, 'apps/traces.json'))
+    mkdirSync(join(dir, 'apps/traces.json'))
+
+    expect(() => readHistoryDir(dir)).toThrow(StatusHistoryError)
+  })
+
+  it('still rejects a malformed file for an app whose neighbour is missing', () => {
+    const dir = copyFixture()
+    rmSync(join(dir, 'apps/traces.json'))
+    writeFileSync(join(dir, 'apps/gateway.json'), '{')
+
+    expect(() => readHistoryDir(dir)).toThrow(/not valid JSON/)
+  })
+
+  it('still rejects an unknown app file next to a missing one', () => {
+    const dir = copyFixture()
+    rmSync(join(dir, 'apps/traces.json'))
+    writeFileSync(join(dir, 'apps/rogue.json'), '[]')
+
+    expect(() => readHistoryDir(dir)).toThrow(/unexpected file apps\/rogue\.json/)
   })
 
   it('rejects an unknown app file', () => {

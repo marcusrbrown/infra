@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    // Secrets (CLIPROXY_MANAGEMENT_KEY, CLIPROXY_DOMAIN, GATEWAY_HOST, UMAMI_DOMAIN)
+    // Secrets (CLIPROXY_MANAGEMENT_KEY, CLIPROXY_DOMAIN, GATEWAY_HOST, UMAMI_DOMAIN, TRACES_HOST)
     // are NOT set here. The MCP subprocess inherits them: Bun auto-loads repo-root
     // .env locally; CI/harness inherits the parent process env. No values in this file.
     "infra": {
@@ -62,6 +62,17 @@
     // broker deploy mutates a live droplet; broker logs may reveal run identities and minted key prefixes.
     "infra_broker_deploy": "deny",
     "infra_broker_logs": "deny",
+    // Traces: mutating / sensitive — CLI-only (defense-in-depth backstop). Only `traces status` is exposed over MCP.
+    // The logs, tunnel and sender commands reach trace content or live sender tokens; deploy and ingest mutate the live host.
+    "infra_traces_deploy": "deny",
+    "infra_traces_logs": "deny",
+    "infra_traces_open": "deny",
+    "infra_traces_ingest_hold": "deny",
+    "infra_traces_ingest_open": "deny",
+    "infra_traces_ingest_status": "deny",
+    "infra_traces_sender_add": "deny",
+    "infra_traces_sender_list": "deny",
+    "infra_traces_sender_revoke": "deny",
     "infra_cliproxy_monitor": "deny",
     "infra_cliproxy_reset-quota": "deny",
     // Discord MCP (saseq/discord-mcp) exposes 65 guild tools. opencode resolves

@@ -12,6 +12,7 @@ import {join} from 'node:path'
 
 import {
   APP_IDS,
+  APPS_ADDED_AFTER_V1,
   HISTORY_SCHEMA_VERSION,
   HISTORY_WINDOW_DAYS,
   HISTORY_WINDOW_MS,
@@ -113,6 +114,7 @@ export function recordByApp<T>(build: (app: AppId) => T): Record<AppId, T> {
     dashboard: build('dashboard'),
     vpn: build('vpn'),
     broker: build('broker'),
+    traces: build('traces'),
   }
 }
 
@@ -306,13 +308,32 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function readBounded(path: string, budget: {remaining: number}, app?: string): Promise<string> {
+/** `undefined` only when `path` does not exist and `missing` is `'empty'`; every other failure throws. */
+async function readBounded(
+  path: string,
+  budget: {remaining: number},
+  app?: string,
+  missing?: 'malformed',
+): Promise<string>
+async function readBounded(
+  path: string,
+  budget: {remaining: number},
+  app: string,
+  missing: 'empty',
+): Promise<string | undefined>
+async function readBounded(
+  path: string,
+  budget: {remaining: number},
+  app?: string,
+  missing: 'malformed' | 'empty' = 'malformed',
+): Promise<string | undefined> {
   let size: number
   try {
     size = (await stat(path)).size
   } catch (error) {
-    if (isNotFound(error)) throw new HistoryError('malformed', app)
-    throw error
+    if (!isNotFound(error)) throw error
+    if (missing === 'empty') return undefined
+    throw new HistoryError('malformed', app)
   }
   budget.remaining -= size
   if (budget.remaining < 0) throw new HistoryError('too-large')
@@ -370,9 +391,17 @@ export async function loadHistory(
 
   const apps = {} as Record<AppId, HistorySample[]>
   for (const app of APP_IDS) {
-    const parsed = historyAppFileSchema.safeParse(
-      parseJson(await readBounded(join(appsDir, `${app}.json`), budget, app), app),
-    )
+    // An app added after the history was created has no file yet and no samples; the next write creates it. A
+    // missing file for any other app is damage and is rejected.
+    const path = join(appsDir, `${app}.json`)
+    const text = APPS_ADDED_AFTER_V1.includes(app)
+      ? await readBounded(path, budget, app, 'empty')
+      : await readBounded(path, budget, app)
+    if (text === undefined) {
+      apps[app] = []
+      continue
+    }
+    const parsed = historyAppFileSchema.safeParse(parseJson(text, app))
     if (!parsed.success) throw new HistoryError('malformed', app)
     const keys = new Set(parsed.data.map(sampleKey))
     if (keys.size !== parsed.data.length) throw new HistoryError('duplicate-sample', app)

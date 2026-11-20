@@ -104,6 +104,79 @@
       dependencyDashboardApproval: true,
       allowedVersions: '<0.147.0',
     },
+    {
+      // The traces collector is built from apps/traces/collector/builder-config.yaml: the collector
+      // core, the contrib components and Elastic's ratelimit processor are separate Go modules that
+      // must move as one set, and the builder in the Dockerfile must match the core. One group puts
+      // them on one branch, so a bump can never move the core without the limiter or the reverse.
+      // Approval-gated and never automerged: a new set is rebuilt and checked before it ships, and
+      // the Elastic processor's required core version is read from its go.mod when the PR is reviewed.
+      // matchManagers keeps the stack's other image pins (Dockerfile FROM lines, compose files) out of
+      // this group; those have their own rules.
+      description: ['Group the traces collector core, contrib components, Elastic ratelimit processor and builder'],
+      matchManagers: ['custom.regex'],
+      matchFileNames: ['apps/traces/collector/**'],
+      groupName: 'traces collector',
+      groupSlug: 'traces-collector',
+      automerge: false,
+      dependencyDashboardApproval: true,
+    },
+    {
+      // The trace stack's stateful images hold trace content on a volume. A new version can migrate or
+      // rewrite that data in place, and the way back is a roll-forward or a volume snapshot, so no bump
+      // lands unattended: each needs a dashboard checkbox to open the PR and a manual merge. Caddy is not
+      // listed: the Caddy rule above already gates it, and Grafana and the Bun runtime image follow the
+      // default rules. The collector's Dockerfile base images are handled by the rule after the next one.
+      description: ['Require dashboard approval and never automerge the trace stack stateful images'],
+      matchFileNames: ['apps/traces/docker-compose.yaml'],
+      matchPackageNames: [
+        'cgr.dev/chainguard/minio',
+        'clickhouse/clickhouse-server',
+        'grafana/tempo',
+        'postgres',
+        'redis',
+      ],
+      automerge: false,
+      dependencyDashboardApproval: true,
+    },
+    {
+      // Langfuse web and worker must run the same version: the worker consumes what web enqueues, and a
+      // release can change the queue and ClickHouse schema. One group puts both pins on one branch, so a
+      // bump can never move one without the other.
+      description: ['Group Langfuse web and worker, with dashboard approval and no automerge'],
+      matchFileNames: ['apps/traces/docker-compose.yaml'],
+      matchPackageNames: ['docker.langfuse.com/langfuse/langfuse', 'docker.langfuse.com/langfuse/langfuse-worker'],
+      groupName: 'langfuse',
+      groupSlug: 'langfuse',
+      automerge: false,
+      dependencyDashboardApproval: true,
+    },
+    {
+      // The trace stack's PostgreSQL is held at its current major, like Umami's, for the same reason: a new
+      // major refuses to start against the previous major's data directory. Raise the ceiling only as part
+      // of an executed upgrade. This rule follows the Postgres rule above, so its ceiling wins for this file.
+      description: ['Hold the trace stack PostgreSQL at major 17'],
+      matchFileNames: ['apps/traces/docker-compose.yaml'],
+      matchPackageNames: ['postgres'],
+      allowedVersions: '<18',
+    },
+    {
+      // The object store is pinned as `latest@sha256:<digest>`: the tag is a moving label, and the digest is
+      // the pin. Only a new digest may be proposed; Renovate must never rewrite the tag to a version.
+      description: ['Update the trace stack object store by digest only'],
+      matchFileNames: ['apps/traces/docker-compose.yaml'],
+      matchPackageNames: ['cgr.dev/chainguard/minio'],
+      matchUpdateTypes: ['major', 'minor', 'patch'],
+      enabled: false,
+    },
+    {
+      // The collector is internet-facing and built from these two base images. A bump changes what ships on
+      // the next deploy, so it is a reviewed PR rather than an automerge.
+      description: ['Never automerge the traces collector Dockerfile base images'],
+      matchFileNames: ['apps/traces/collector/Dockerfile'],
+      matchManagers: ['dockerfile'],
+      automerge: false,
+    },
   ],
   // Track the upstream daemon source pin (`ref`) in apps/gateway/upstream.json so new
   // releases of the named `repo` surface as PRs. This is independent of the fro-bot/agent
@@ -147,6 +220,24 @@
         "const CADDY_IMAGE = '(?<depName>caddy):(?<currentValue>[^@']+)@(?<currentDigest>sha256:[a-f0-9]{64})'",
       ],
       datasourceTemplate: 'docker',
+    },
+    {
+      customType: 'regex',
+      // Every `- gomod: <module> v<semver>` line in the collector builder manifest is a Go module pin.
+      // The module path is the depName and the go datasource resolves its versions, so no per-line
+      // annotation is needed.
+      managerFilePatterns: ['/^apps/traces/collector/builder-config\\.yaml$/'],
+      matchStrings: ['-\\s+gomod:\\s+(?<depName>\\S+)\\s+(?<currentValue>v\\d+\\.\\d+\\.\\d+)\\s*\\n'],
+      datasourceTemplate: 'go',
+    },
+    {
+      customType: 'regex',
+      // The builder version lives in the Dockerfile and uses the `# renovate:` annotation convention
+      // from apps/broker/docker-compose.yaml.
+      managerFilePatterns: ['/^apps/traces/collector/Dockerfile$/'],
+      matchStrings: [
+        '#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\nARG OCB_VERSION=(?<currentValue>v\\d+\\.\\d+\\.\\d+)',
+      ],
     },
   ],
   // postUpgradeTasks run after Renovate applies file changes but before the commit.

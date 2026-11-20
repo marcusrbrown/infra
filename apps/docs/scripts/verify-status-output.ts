@@ -15,6 +15,9 @@ export const FIXTURE_MARKER = 'data-history-source="fixture"'
 /** The hidden stale warning that the shared last-sample client script reveals. */
 export const STALE_HOOK = 'id="status-stale"'
 
+/** What a service page says when the history holds no sample for it (see `AppStatus.astro`). */
+export const NO_DATA_TEXT = 'No data yet. No samples have been recorded for this service.'
+
 /** Visible text only: tags (and so inline styles and attributes), scripts and styles are removed. */
 export function visibleText(html: string): string {
   return html
@@ -43,7 +46,8 @@ export function verifyStatusOutput(distDir: string, options: {expectFixture: boo
     if (/\d\s*%/.test(text)) problems.push(`${page}: shows a percentage next to a figure`)
     if (!text.includes('Last sample')) problems.push(`${page}: missing the last-sample time`)
     if (!html.includes(STALE_HOOK)) problems.push(`${page}: missing the stale-warning hook`)
-    if (page.startsWith('services/')) {
+    // A service with no samples yet says so; it has no coverage or passed-sample figure to show.
+    if (page.startsWith('services/') && !text.includes(NO_DATA_TEXT)) {
       if (!/samples? recorded of about \d+ expected/.test(text)) problems.push(`${page}: missing the coverage figure`)
       if (!/\d+ of \d+ samples? passed/.test(text)) problems.push(`${page}: missing "N of M samples passed"`)
     }

@@ -13,6 +13,7 @@ Where things live and where to put new code. For system shape, data flow, and in
 │   ├── dashboard/              Fro Bot monitoring dashboard (DigitalOcean + Docker Compose)
 │   ├── vpn/                    WireGuard egress box (AWS Lightsail eu-west-1, native wg-quick@wg0)
 │   ├── broker/                 OIDC credential broker (DigitalOcean + Docker Compose)
+│   ├── traces/                 Trace collection stack, not yet deployed (DigitalOcean + Docker Compose, encrypted data volume)
 │   └── agent/                  Operator-run AWS provisioner for fro-bot/agent S3 durable storage (no deploy step)
 ├── packages/                   Reusable libraries (never import from apps/)
 │   ├── cli/                    @marcusrbrown/infra goke CLI + MCP bridge + VPN peer model + repo-local workflow scripts
@@ -27,7 +28,7 @@ Where things live and where to put new code. For system shape, data flow, and in
 
 ### `apps/`
 
-One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (except keeweb — `server/provision-droplet.ts` for the DigitalOcean Docker apps including dashboard and broker, `server/provision.ts` for the `@aws-sdk/client-lightsail` VPN box), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`, and the VPN peer model is published from `packages/cli`. `apps/agent` is the non-deployable exception: a `private: true` operator-run AWS provisioner with no `src/deploy.ts`, no `src/host.ts`, and no deploy workflow — just `server/provision.ts` (IAM + S3 convergence) and `src/key-layout.ts` (S3 key layout the Action uses).
+One subdirectory per deployable. Each app owns its Compose/build config (or native systemd config for VPN), a TypeScript deploy script (`src/deploy.ts`; KeeWeb uses `src/build.ts` + `deploy.sh`), a provisioning script (except keeweb — `server/provision-droplet.ts` for the DigitalOcean Docker apps including dashboard and broker, `server/provision.ts` for the `@aws-sdk/client-lightsail` VPN box and for the trace stack's droplet and volume), a deploy-side host validator (`src/host.ts` where the deploy spawns SSH), and an `AGENTS.md` runbook. Apps never share code by importing each other — shared logic lives in `packages/shared`, and the VPN peer model is published from `packages/cli`. `apps/agent` is the non-deployable exception: a `private: true` operator-run AWS provisioner with no `src/deploy.ts`, no `src/host.ts`, and no deploy workflow — just `server/provision.ts` (IAM + S3 convergence) and `src/key-layout.ts` (S3 key layout the Action uses).
 
 ### `packages/`
 
@@ -67,6 +68,9 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | --- | --- |
 | `apps/<name>/server/provision-droplet.ts` | DigitalOcean droplet provisioning (cliproxy, gateway, umami, dashboard, broker) |
 | `apps/vpn/server/provision.ts` | Lightsail provisioning (`@aws-sdk/client-lightsail`) |
+| `apps/traces/server/provision.ts` | Trace stack droplet, encrypted data volume and cloud firewall provisioning |
+| `apps/traces/collector/` | Builder manifest and Dockerfile for the collector image; CI builds and pushes it to GHCR, the host never builds it |
+| `apps/traces/config/ingest/` | The three ingest route states (`off.caddy`, `held.caddy`, `open.caddy`) |
 | `apps/agent/server/provision.ts` | Operator-run AWS IAM + S3 convergence for `fro-bot/agent` durable storage; no deploy step |
 | `apps/agent/src/key-layout.ts` | S3 session/coordination-lock key layout the Action uses, independent of the Action version |
 | `apps/<name>/src/host.ts` | Deploy-side host validator (rejects `-`-prefixed / invalid hosts) |
@@ -105,6 +109,8 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | `packages/cli/scripts/prune-untagged-packages.test.ts` | Colocated behavior tests (fake `fetch` boundary, pagination, manifest-child gates, abort codes) |
 | `packages/cli/scripts/deploy-gate-notify.ts` | Repo-local deploy-gate Discord notifier; zero-dependency, always exits 0, invoked only by the `notify` job of each `deploy-<app>.yaml`, never published |
 | `packages/cli/scripts/deploy-gate-notify.test.ts` | Colocated behavior tests (fake `fetch` boundary, message rendering, retry and failure paths) |
+| `packages/cli/scripts/traces-monitor.ts` | Repo-local trace stack health probe and alert reconciler; invoked only by `traces-monitor.yaml`, never published |
+| `packages/cli/scripts/traces-backup.ts` | Repo-local daily volume snapshot, age-based prune and alert reconciler; invoked only by `traces-backup.yaml`, never published |
 | `packages/cli/scripts/build.ts` | CLI bundle build (public deps external, `@marcusrbrown/infra-shared` inlined, `known_hosts` asset) |
 
 **Tests / CI**

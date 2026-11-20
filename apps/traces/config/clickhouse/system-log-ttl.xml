@@ -1,0 +1,74 @@
+<!--
+  ClickHouse system log tables hold query text, so they must not outlive the trace data. Each one
+  expires 3 days after its event date. There is no memory setting in this directory on purpose:
+  capping ClickHouse near 7 GB made the Langfuse worker drop rows after the sender got 200.
+
+  Checked against clickhouse-server 26.3: all 20 tables below take this TTL. Three are left out on
+  purpose. aggregated_zookeeper_log and zookeeper_connection_log declare their own engine, and
+  ClickHouse then refuses to start if a ttl element is added (they keep their built-in 30 days and
+  hold no query text). opentelemetry_span_log is empty unless server tracing is switched on. A
+  table name added here that ClickHouse does not accept the same way stops the server: re-check on
+  every ClickHouse upgrade.
+-->
+<clickhouse>
+    <query_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_log>
+    <query_thread_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_thread_log>
+    <query_views_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_views_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </part_log>
+    <trace_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </trace_log>
+    <text_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </text_log>
+    <metric_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </metric_log>
+    <asynchronous_metric_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+    <session_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </session_log>
+    <crash_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </crash_log>
+    <processors_profile_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </processors_profile_log>
+    <asynchronous_insert_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </asynchronous_insert_log>
+    <error_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </error_log>
+    <query_metric_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_metric_log>
+    <blob_storage_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </blob_storage_log>
+    <background_schedule_pool_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </background_schedule_pool_log>
+    <backup_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </backup_log>
+    <s3queue_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </s3queue_log>
+    <delta_lake_metadata_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </delta_lake_metadata_log>
+    <iceberg_metadata_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </iceberg_metadata_log>
+</clickhouse>

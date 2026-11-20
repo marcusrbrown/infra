@@ -998,6 +998,7 @@ jobs:
             apps/dashboard/src, apps/dashboard/AGENTS.md,
             apps/gateway/src, apps/gateway/AGENTS.md,
             apps/keeweb/src, apps/keeweb/AGENTS.md,
+            apps/traces/src, apps/traces/AGENTS.md,
             apps/umami/src, apps/umami/AGENTS.md,
             apps/vpn/src, apps/vpn/AGENTS.md
   fro-bot-storage:

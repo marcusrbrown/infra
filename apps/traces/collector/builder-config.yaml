@@ -1,0 +1,36 @@
+# OpenTelemetry Collector Builder manifest for the traces collector.
+#
+# Lists only the components apps/traces/config/otelcol.yaml uses. Every `gomod` line is one pin that
+# Renovate reads (see .github/renovate.json5, "traces collector"): the collector core, the contrib
+# components and Elastic's ratelimit processor move in ONE approval-gated branch, so the core and
+# the limiter cannot drift apart. The builder version is the `OCB_VERSION` ARG in the Dockerfile.
+#
+# Version rule: every go.opentelemetry.io/collector/* and contrib component shares one version, and
+# that version is the builder's. builder-config.test.ts enforces it. The Elastic processor has its
+# own version line; v0.81.0 requires core v0.165.0 / v1.71.0.
+#
+# `dist.version` is this distribution's own label, not a dependency pin. Nothing reads it.
+dist:
+  name: otelcol-traces
+  description: Fro Bot traces collector (OTLP intake, byte limiter, keep-list, Langfuse and Tempo fan-out)
+  output_path: /out
+  version: 0.1.0
+
+receivers:
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.165.0
+
+exporters:
+  - gomod: go.opentelemetry.io/collector/exporter/otlphttpexporter v0.165.0
+
+connectors:
+  - gomod: go.opentelemetry.io/collector/connector/forwardconnector v0.165.0
+
+extensions:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/bearertokenauthextension v0.165.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.165.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/filestorage v0.165.0
+
+processors:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/redactionprocessor v0.165.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourceprocessor v0.165.0
+  - gomod: github.com/elastic/opentelemetry-collector-components/processor/ratelimitprocessor v0.81.0

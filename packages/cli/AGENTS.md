@@ -58,6 +58,14 @@ src/commands/
 │   ├── status.ts     → registerBrokerStatus(cli)
 │   ├── deploy.ts     → registerBrokerDeploy(cli)
 │   └── logs.ts       → registerBrokerLogs(cli)
+├── traces/
+│   ├── index.ts      → registerTracesCommands(cli)
+│   ├── status.ts     → registerTracesStatus(cli)
+│   ├── deploy.ts     → registerTracesDeploy(cli)
+│   ├── logs.ts       → registerTracesLogs(cli)
+│   ├── open.ts       → registerTracesOpen(cli)
+│   ├── ingest.ts     → registerTracesIngest(cli)  (traces ingest hold|open|status)
+│   └── sender.ts     → registerTracesSender(cli)  (traces sender add|list|revoke)
 ├── gateway/
 │   ├── index.ts      → registerGatewayCommands(cli)
 │   ├── status.ts     → registerGatewayStatus(cli)
@@ -134,7 +142,7 @@ The MCP server (`mcp.ts`) exposes a curated subset of commands as MCP tools via 
 
 Use the shared `ActionCtx` type from `src/lib/action-ctx.ts` — a structural subtype of `GokeExecutionContext` that captures exactly the surface actions consume. `createCapturedCtx()`, `expectCapturedToInclude()`, and `MockProcessExit` remain in `src/lib/mcp-ctx-fixture.ts` for test use only. Action bodies are exported as named functions (e.g., `gatewayStatusAction`, `cliproxyKeysListAction`) and the `.action(...)` callback delegates to them, so Tier-2 tests invoke actions directly with `createCapturedCtx()`.
 
-**Current MCP surface = 9 read-only tools (all Mode A): the app status tools, the unified `status` tool, plus `cliproxy models`.** The `agent setup`, `agent storage`, and `agent storage teardown` commands are **source-gated out of `MCP_ALLOWLIST`** because they mutate GitHub/AWS configuration and require operator-controlled files, credentials, or environment approval. They are available through the direct CLI only. The existing mutating/secret-disclosing commands remain source-gated as well. The Mode B/C and mutation-verification guidance below documents the capture _contract_ and remains the bar for any future capturable command.
+**Current MCP surface = 10 read-only tools (all Mode A): the app status tools, the unified `status` tool, plus `cliproxy models`.** The `agent setup`, `agent storage`, and `agent storage teardown` commands are **source-gated out of `MCP_ALLOWLIST`** because they mutate GitHub/AWS configuration and require operator-controlled files, credentials, or environment approval. They are available through the direct CLI only. The existing mutating/secret-disclosing commands remain source-gated as well. The Mode B/C and mutation-verification guidance below documents the capture _contract_ and remains the bar for any future capturable command.
 
 **Mode C (structured-return commands).** The structured-return contract: a command returns structured data alongside ctx-printed text so MCP consumers get both formatted output AND parseable JSON in the `CallToolResult`. Two commands were designed for it before being source-gated to CLI-only:
 

@@ -1,0 +1,217 @@
+name: Deploy Traces
+
+permissions:
+  contents: read
+
+# The deploy inputs are exactly the names exported by apps/traces/src/deploy.ts as TRACES_DEPLOY_SECRETS and
+# TRACES_DEPLOY_VARS; packages/cli/src/conventions.test.ts compares them with this file and with the caller in
+# deploy.yaml, so a name can never be added to one place and forgotten in another.
+#
+# Never passed here, by design: a sender token (tokens exist only on the host and at the senders), the snapshot
+# workflow's DigitalOcean token (read by that workflow only) and the account-wide DigitalOcean token.
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      TRACES_SSH_KEY:
+        required: true
+      TRACES_HOST:
+        required: true
+      TRACES_POSTGRES_PASSWORD:
+        required: true
+      TRACES_CLICKHOUSE_PASSWORD:
+        required: true
+      TRACES_CLICKHOUSE_READER_PASSWORD:
+        required: true
+      TRACES_REDIS_PASSWORD:
+        required: true
+      TRACES_MINIO_PASSWORD:
+        required: true
+      TRACES_NEXTAUTH_SECRET:
+        required: true
+      TRACES_SALT:
+        required: true
+      TRACES_ENCRYPTION_KEY:
+        required: true
+      TRACES_GRAFANA_ADMIN_PASSWORD:
+        required: true
+      TRACES_GRAFANA_SECRET_KEY:
+        required: true
+      TRACES_LANGFUSE_USER_EMAIL:
+        required: true
+      TRACES_LANGFUSE_USER_PASSWORD:
+        required: true
+      # Unset on the very first deploy: the operator creates the Application-role key in the Langfuse UI, then sets them.
+      TRACES_LANGFUSE_PUBLIC_KEY:
+        required: false
+      TRACES_LANGFUSE_SECRET_KEY:
+        required: false
+      # First deploy only. The operator deletes these secrets after bootstrap; the deploy then proves the key is dead.
+      TRACES_LANGFUSE_BOOTSTRAP_PUBLIC_KEY:
+        required: false
+      TRACES_LANGFUSE_BOOTSTRAP_SECRET_KEY:
+        required: false
+      DEPLOY_GATE_DISCORD_WEBHOOK:
+        required: false
+
+concurrency:
+  group: deploy-traces-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # Main only: a collector image is built from the commit being deployed, and the deploy refuses to run without its digest.
+  build-collector:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 20
+    env:
+      # Fixed constant (not commit-derived) so the build arg never changes and cache hits are preserved; the exporter's
+      # rewrite-timestamp option applies it to layer entries too.
+      SOURCE_DATE_EPOCH: '0'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Pin the BuildKit image itself: the preinstalled buildx on ubuntu-latest is an uncontrolled input otherwise.
+          # >= v0.13 is required for rewrite-timestamp.
+          driver-opts: |
+            image=moby/buildkit:v0.33.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push collector image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: apps/traces/collector
+          file: apps/traces/collector/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}/traces-collector:${{ github.sha }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          # type=registry is shorthand for type=image,push=true: the export declares the push itself.
+          outputs: type=registry,rewrite-timestamp=true
+
+  notify:
+    needs: build-collector
+    if: ${{ !cancelled() && needs.build-collector.result == 'success' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Post deploy gate notification
+        env:
+          DEPLOY_GATE_DISCORD_WEBHOOK: ${{ secrets.DEPLOY_GATE_DISCORD_WEBHOOK }}
+          DEPLOY_GATE_APP: traces
+          DEPLOY_GATE_COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+        run: bun run packages/cli/scripts/deploy-gate-notify.ts
+
+  deploy-traces:
+    needs: [build-collector, notify]
+    if: ${{ !cancelled() && needs.build-collector.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: traces
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Validate required secrets
+        env:
+          TRACES_SSH_KEY: ${{ secrets.TRACES_SSH_KEY }}
+          TRACES_HOST: ${{ secrets.TRACES_HOST }}
+          TRACES_POSTGRES_PASSWORD: ${{ secrets.TRACES_POSTGRES_PASSWORD }}
+          TRACES_CLICKHOUSE_PASSWORD: ${{ secrets.TRACES_CLICKHOUSE_PASSWORD }}
+          TRACES_CLICKHOUSE_READER_PASSWORD: ${{ secrets.TRACES_CLICKHOUSE_READER_PASSWORD }}
+          TRACES_REDIS_PASSWORD: ${{ secrets.TRACES_REDIS_PASSWORD }}
+          TRACES_MINIO_PASSWORD: ${{ secrets.TRACES_MINIO_PASSWORD }}
+          TRACES_NEXTAUTH_SECRET: ${{ secrets.TRACES_NEXTAUTH_SECRET }}
+          TRACES_SALT: ${{ secrets.TRACES_SALT }}
+          TRACES_ENCRYPTION_KEY: ${{ secrets.TRACES_ENCRYPTION_KEY }}
+          TRACES_GRAFANA_ADMIN_PASSWORD: ${{ secrets.TRACES_GRAFANA_ADMIN_PASSWORD }}
+          TRACES_GRAFANA_SECRET_KEY: ${{ secrets.TRACES_GRAFANA_SECRET_KEY }}
+          TRACES_LANGFUSE_USER_EMAIL: ${{ secrets.TRACES_LANGFUSE_USER_EMAIL }}
+          TRACES_LANGFUSE_USER_PASSWORD: ${{ secrets.TRACES_LANGFUSE_USER_PASSWORD }}
+          COLLECTOR_DIGEST: ${{ needs.build-collector.outputs.digest }}
+        run: |
+          missing=()
+          [[ -n "${TRACES_SSH_KEY}" ]] || missing+=("TRACES_SSH_KEY")
+          [[ -n "${TRACES_HOST}" ]] || missing+=("TRACES_HOST")
+          [[ -n "${TRACES_POSTGRES_PASSWORD}" ]] || missing+=("TRACES_POSTGRES_PASSWORD")
+          [[ -n "${TRACES_CLICKHOUSE_PASSWORD}" ]] || missing+=("TRACES_CLICKHOUSE_PASSWORD")
+          [[ -n "${TRACES_CLICKHOUSE_READER_PASSWORD}" ]] || missing+=("TRACES_CLICKHOUSE_READER_PASSWORD")
+          [[ -n "${TRACES_REDIS_PASSWORD}" ]] || missing+=("TRACES_REDIS_PASSWORD")
+          [[ -n "${TRACES_MINIO_PASSWORD}" ]] || missing+=("TRACES_MINIO_PASSWORD")
+          [[ -n "${TRACES_NEXTAUTH_SECRET}" ]] || missing+=("TRACES_NEXTAUTH_SECRET")
+          [[ -n "${TRACES_SALT}" ]] || missing+=("TRACES_SALT")
+          [[ -n "${TRACES_ENCRYPTION_KEY}" ]] || missing+=("TRACES_ENCRYPTION_KEY")
+          [[ -n "${TRACES_GRAFANA_ADMIN_PASSWORD}" ]] || missing+=("TRACES_GRAFANA_ADMIN_PASSWORD")
+          [[ -n "${TRACES_GRAFANA_SECRET_KEY}" ]] || missing+=("TRACES_GRAFANA_SECRET_KEY")
+          [[ -n "${TRACES_LANGFUSE_USER_EMAIL}" ]] || missing+=("TRACES_LANGFUSE_USER_EMAIL")
+          [[ -n "${TRACES_LANGFUSE_USER_PASSWORD}" ]] || missing+=("TRACES_LANGFUSE_USER_PASSWORD")
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required secret(s): ${missing[*]}"
+            exit 1
+          fi
+          if [[ ! "${COLLECTOR_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "The collector build did not output a sha256 digest"
+            exit 1
+          fi
+
+      - name: Configure SSH known_hosts
+        run: mkdir -p ~/.ssh && cp .github/known_hosts ~/.ssh/known_hosts
+
+      - name: Deploy traces
+        run: bun run apps/traces/src/deploy.ts
+        env:
+          TRACES_SSH_KEY: ${{ secrets.TRACES_SSH_KEY }}
+          TRACES_HOST: ${{ secrets.TRACES_HOST }}
+          TRACES_POSTGRES_PASSWORD: ${{ secrets.TRACES_POSTGRES_PASSWORD }}
+          TRACES_CLICKHOUSE_PASSWORD: ${{ secrets.TRACES_CLICKHOUSE_PASSWORD }}
+          TRACES_CLICKHOUSE_READER_PASSWORD: ${{ secrets.TRACES_CLICKHOUSE_READER_PASSWORD }}
+          TRACES_REDIS_PASSWORD: ${{ secrets.TRACES_REDIS_PASSWORD }}
+          TRACES_MINIO_PASSWORD: ${{ secrets.TRACES_MINIO_PASSWORD }}
+          TRACES_NEXTAUTH_SECRET: ${{ secrets.TRACES_NEXTAUTH_SECRET }}
+          TRACES_SALT: ${{ secrets.TRACES_SALT }}
+          TRACES_ENCRYPTION_KEY: ${{ secrets.TRACES_ENCRYPTION_KEY }}
+          TRACES_GRAFANA_ADMIN_PASSWORD: ${{ secrets.TRACES_GRAFANA_ADMIN_PASSWORD }}
+          TRACES_GRAFANA_SECRET_KEY: ${{ secrets.TRACES_GRAFANA_SECRET_KEY }}
+          TRACES_LANGFUSE_USER_EMAIL: ${{ secrets.TRACES_LANGFUSE_USER_EMAIL }}
+          TRACES_LANGFUSE_USER_PASSWORD: ${{ secrets.TRACES_LANGFUSE_USER_PASSWORD }}
+          TRACES_LANGFUSE_PUBLIC_KEY: ${{ secrets.TRACES_LANGFUSE_PUBLIC_KEY }}
+          TRACES_LANGFUSE_SECRET_KEY: ${{ secrets.TRACES_LANGFUSE_SECRET_KEY }}
+          TRACES_LANGFUSE_BOOTSTRAP_PUBLIC_KEY: ${{ secrets.TRACES_LANGFUSE_BOOTSTRAP_PUBLIC_KEY }}
+          TRACES_LANGFUSE_BOOTSTRAP_SECRET_KEY: ${{ secrets.TRACES_LANGFUSE_BOOTSTRAP_SECRET_KEY }}
+          TRACES_DOMAIN: ${{ vars.TRACES_DOMAIN }}
+          TRACES_INGEST_OPEN: ${{ vars.TRACES_INGEST_OPEN }}
+          TRACES_COLLECTOR_IMAGE: ghcr.io/${{ github.repository }}/traces-collector@${{ needs.build-collector.outputs.digest }}

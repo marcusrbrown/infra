@@ -25,7 +25,7 @@ import {registerStatus, unifiedStatusAction} from './status'
 
 // NOTE: dashboard is included in the unified status table alongside the other apps.
 
-const APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker'] as const
+const APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker', 'traces'] as const
 
 function proc(stdout: string, exitCode = 0): ReturnType<SpawnFn> {
   const encoder = new TextEncoder()
@@ -95,7 +95,7 @@ function result(gateway: ReturnType<typeof appOf>, id: string) {
 }
 
 describe('top-level status --json (typed contract)', () => {
-  it('emits the versioned envelope with all 7 apps and their declared observation ids', async () => {
+  it('emits the versioned envelope with all 8 apps and their declared observation ids', async () => {
     const {envelope, captured} = await runJson()
 
     expect(envelope.schemaVersion).toBe(STATUS_SCHEMA_VERSION)
@@ -133,6 +133,11 @@ describe('top-level status --json (typed contract)', () => {
     })
     expect(appOf(envelope, 'keeweb').facts).toEqual({lastDeploy: '2026-04-12T10:00:00Z', contentHash: 'match'})
     expect(appOf(envelope, 'vpn').facts).toEqual({peerCount: 1, serverPublicKey: 'TESTKEY=='})
+    // Traces: what SSH sees is facts only, so none of it reaches the public history.
+    expect(appOf(envelope, 'traces').facts).toEqual({
+      services: [{service: 'app', state: 'running', health: 'healthy'}],
+      health: {ok: true, stale: false, at: '2026-11-01T11:58:00.000Z', failing: []},
+    })
     expect(appOf(envelope, 'broker').facts).toEqual({})
   })
 
@@ -751,6 +756,52 @@ describe('top-level status --json (typed contract)', () => {
   })
 })
 
+describe('top-level status for traces', () => {
+  it('runs the SSH collector only when TRACES_HOST is set, and passes it the validated-by-the-collector host', async () => {
+    const hosts: string[] = []
+    await runJson({
+      getTracesStatusSummary: async host => {
+        hosts.push(host)
+        return {observations: [], facts: {}}
+      },
+    })
+    expect(hosts).toEqual(['traces.example.com'])
+  })
+
+  it('declares only the public probe and the deploy state, so SSH detail cannot reach the public history', async () => {
+    const {envelope} = await runJson({
+      // A collector that tries to add an observation of its own: it is dropped, because the app did not declare it.
+      getTracesStatusSummary: async () => ({
+        observations: [
+          {
+            id: 'compose-services',
+            kind: 'container-health',
+            source: 'ssh',
+            result: 'pass',
+            observedAt: '2026-11-01T12:00:00.000Z',
+          },
+        ],
+        facts: {},
+      }),
+    })
+    expect(appOf(envelope, 'traces').observations.map(entry => entry.id)).toEqual([
+      'public-reachability',
+      'deploy-state',
+    ])
+  })
+
+  it('still reports the public observations, with no facts, when the host is not set', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    await withStatusEnv(async () => {
+      delete process.env.TRACES_HOST
+      await unifiedStatusAction({json: true}, ctx, makeStatusDependencies())
+    })
+    const envelope = statusEnvelopeSchema.parse(JSON.parse(captured.stdout[0] ?? ''))
+    expect(appOf(envelope, 'traces').facts).toEqual({})
+    expect(appOf(envelope, 'traces').observations.map(entry => entry.result)).toEqual(['pass', 'pass'])
+  })
+})
+
 describe('top-level status table (rendered from observations)', () => {
   it('pins the whole table for a healthy fleet', async () => {
     const captured = await runTable()
@@ -765,6 +816,7 @@ describe('top-level status table (rendered from observations)', () => {
         '| dashboard | ✅ pass | ✅ pass | ✅ pass | — | — |',
         '| vpn | ⚪ not measured | ✅ pass | ✅ pass | ⚪ not measured | — |',
         '| broker | ✅ pass | — | ✅ pass | — | — |',
+        '| traces | ✅ pass | — | ✅ pass | — | — |',
       ].join('\n'),
     )
     expect(captured.exit).toBeNull()
@@ -832,7 +884,7 @@ describe('top-level status table (rendered from observations)', () => {
   it('has the same number of cells in every row and never prints the structured workspace', async () => {
     const captured = await runTable()
 
-    expect(captured.stdout).toHaveLength(8)
+    expect(captured.stdout).toHaveLength(9)
     expect(captured.stdout.every(line => line.startsWith('| ') && line.endsWith(' |'))).toBe(true)
     expect(captured.stdout.every(line => line.split(' | ').length === 6)).toBe(true)
     expect(captured.stdout.join('\n')).not.toContain('limitBytes')

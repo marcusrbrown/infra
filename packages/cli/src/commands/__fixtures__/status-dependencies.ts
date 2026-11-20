@@ -58,6 +58,11 @@ export const healthyDashboard: AppCollection = {
   facts: {services: [runningService]},
 }
 
+export const healthyTraces: AppCollection = {
+  observations: [],
+  facts: {services: [runningService], health: {ok: true, stale: false, at: '2026-11-01T11:58:00.000Z', failing: []}},
+}
+
 export const healthyVpn: AppCollection = {
   observations: [observe(declaredObservation('vpn', 'wireguard-interface'), 'pass', {now: FIXED_NOW})],
   facts: {peerCount: 1, serverPublicKey: 'TESTKEY=='},
@@ -109,6 +114,7 @@ export function makeStatusDependencies(overrides: Partial<StatusDependencies> = 
     umami: probe,
     dashboard: probe,
     broker: probe,
+    traces: probe,
   }
 
   return {
@@ -118,6 +124,7 @@ export function makeStatusDependencies(overrides: Partial<StatusDependencies> = 
     getUmamiStatusSummary: async () => healthyUmami,
     getDashboardStatusSummary: async () => healthyDashboard,
     getVpnStatusSummary: async () => healthyVpn,
+    getTracesStatusSummary: async () => healthyTraces,
     publicProbes,
     readDeployStates: async () => Object.fromEntries(APP_IDS.map(app => [app, deployObservation()])),
     readMonitorState: async () => [routeObservation(), goRouteObservation()],
@@ -134,6 +141,7 @@ export const STATUS_ENV_KEYS = [
   'UMAMI_DOMAIN',
   'DASHBOARD_DOMAIN',
   'VPN_HOST',
+  'TRACES_HOST',
   'CLIPROXY_URL',
   'BROKER_DOMAIN',
   'BROKER_HOST',
@@ -146,6 +154,7 @@ export function withStatusEnv<T>(run: () => Promise<T>): Promise<T> {
   process.env.UMAMI_DOMAIN = 'umami.example.com'
   process.env.DASHBOARD_DOMAIN = 'dashboard.example.com'
   process.env.VPN_HOST = 'vpn.example.com'
+  process.env.TRACES_HOST = 'traces.example.com'
   delete process.env.GITHUB_TOKEN
   delete process.env.GH_TOKEN
   delete process.env.CLIPROXY_URL
@@ -168,4 +177,5 @@ export const EXPECTED_OBSERVATION_IDS: Record<AppId, string[]> = {
   dashboard: ['public-reachability', 'compose-services', 'deploy-state'],
   vpn: ['public-reachability', 'wireguard-interface', 'deploy-state', 'egress-route'],
   broker: ['public-reachability', 'deploy-state'],
+  traces: ['public-reachability', 'deploy-state'],
 }

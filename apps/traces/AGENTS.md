@@ -2,31 +2,36 @@
 
 Collector, Langfuse, Tempo and Grafana for agent-run traces, on a dedicated DigitalOcean droplet at `traces.fro.bot`. A collector accepts OTLP over HTTP on that one public hostname, tells three sender groups apart by bearer token, limits each group by bytes, and sends every trace two ways: whole to Langfuse, and reduced to a named list of attributes to Tempo. Langfuse and Grafana have no public hostname; both are reached through an SSH tunnel. Ingest and a health path are the only public routes.
 
-The decision record is `docs/plans/2026-11-20-001-feat-trace-collection-stack-plan.md`. This file covers what is built so far: the stack definition. Deploy, provisioning, the sender-token commands, the health reporter, the CI image build and the monitors arrive in later units and are marked below.
+The decision record is `docs/plans/2026-11-20-001-feat-trace-collection-stack-plan.md`. This file covers the stack definition, the gated deploy and the health reporter. Provisioning is `server/provision.ts` (`docs/runbooks/trace-collection.md` is the operator runbook once it lands); the CLI group (`traces status|logs|open|ingest|sender`) is in `packages/cli/src/commands/traces/`.
 
 ## Structure
 
 ```text
-├── docker-compose.yaml       Stack: Caddy, collector, Langfuse web + worker, ClickHouse, PostgreSQL, Redis, MinIO, Tempo, Grafana
+├── docker-compose.yaml       Stack: Caddy, collector, Langfuse web + worker, ClickHouse, PostgreSQL, Redis, MinIO, Tempo, Grafana, health reporter
 ├── config/
 │   ├── Caddyfile             One site; /healthz; 404 for everything else; imports one ingest state file
 │   ├── ingest/               off.caddy, held.caddy, open.caddy: the three ingest states
 │   ├── otelcol.yaml          Receivers, byte limiter, group stamp, Langfuse exporters, keep-list, Tempo exporter
 │   ├── tempo.yaml            Monolithic, local disk, 720 h retention, 20 MB trace limit
 │   ├── clickhouse/           System-log TTLs (config.d). No memory settings
+│   ├── clickhouse-users/     The read-only `traces_reader` user for the health reporter
 │   └── grafana/datasources/  Provisioned Tempo data source
 ├── collector/                Builder manifest and Dockerfile for the collector image
-├── server/provision.ts       (later unit) Droplet, volume, firewall
-├── src/deploy.ts, host.ts    (later units) Gated deploy and host checks
-└── src/health-report.ts      (later unit) Health reporter service
+├── server/provision.ts       Droplet, volume, firewall; exports `checkTracesStorage`, `createRemoteExec`, `Runner`, `RemoteExec`
+└── src/
+    ├── deploy.ts             Gated deploy (below). Exports the input lists TRACES_DEPLOY_SECRETS / _VARS / _BUILD_INPUTS
+    ├── retention.ts          30-day TTL on the ClickHouse trace tables, 30-day expiry on the object store, with read-back
+    ├── host.ts               Host layout constants and host validation (shared by provisioning and deploy)
+    ├── health-report.ts      Health reporter (a Bun script; deploy uploads it to `health-reporter/`)
+    └── deploy.fixture.ts     A simulated host for the deploy tests (not a test file)
 ```
 
 ## Networks and exposure
 
 | Network   | Members                                                                       |
 | --------- | ----------------------------------------------------------------------------- |
-| `edge`    | Caddy, collector, Langfuse web, Tempo (and the health reporter)               |
-| `backend` | Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo |
+| `edge`    | Caddy, collector, Langfuse web, Tempo, health reporter                        |
+| `backend` | Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo, health reporter |
 
 Only Caddy publishes `80` and `443`. Langfuse web (`127.0.0.1:3000`) and Grafana (`127.0.0.1:3001`) publish to loopback for the SSH tunnel; keep the tunnel's local ports equal to these (Langfuse's `NEXTAUTH_URL` and Grafana's root URL are loopback URLs). No store port is ever published: Docker publishing bypasses the host firewall.
 
@@ -55,34 +60,98 @@ The keep-list covers resource, scope, span and span-event attributes. It does **
 
 A 200 from the collector means queued, not stored by both backends. Delivery is at-least-once and the two backends can differ.
 
+## Health reporter
+
+`src/health-report.ts` runs in the `health-reporter` service (`oven/bun`, no install step, read-only root, UID 10010, no Docker socket) and produces one verdict every five minutes: the collector, Tempo, both Langfuse services, disk, the age of the oldest data in each store, and a canary trace sent through the collector's private receiver and read back from both backends (every marker in Langfuse; only the span name, status message, exception message and link attribute in Tempo, which is the keep-list check). It has two listeners:
+
+- `0.0.0.0:8080` `GET /healthz`: `{ok, at}` and nothing else. Caddy routes this path publicly.
+- `127.0.0.1:8081` (the container's own loopback; nothing publishes it) `GET /detail` and `/live`. `traces status`, `traces ingest open` and the deploy read `/detail` with `docker compose exec -T health-reporter wget -q -O - http://127.0.0.1:8081/detail`, followed by a sentinel line.
+
+A verdict older than two intervals reads as failing. Two files carry the reporter's passwords, read on every run (so a change needs no restart): `secrets/reporter/clickhouse-password` (the read-only `traces_reader` user) and `secrets/reporter/minio-password`, both owned by UID 10010, mode 0400.
+
+## Deploy
+
+`bun run deploy:traces` (root wrapper; loads the root `.env`) or the `deploy-traces` workflow. The inputs are exactly `TRACES_DEPLOY_SECRETS`, `TRACES_DEPLOY_VARS` (`TRACES_DOMAIN`, `TRACES_INGEST_OPEN`) and `TRACES_DEPLOY_BUILD_INPUTS` (`TRACES_COLLECTOR_IMAGE`, from the workflow's build job) in `src/deploy.ts`; a conventions test compares them with the workflow. A sender token, the snapshot token and the DigitalOcean token are never read.
+
+Order: validate every input; DNS preflight; verify the volume mount, sentinel and storage paths (`checkTracesStorage`, fail closed); read the host's state; compare every file with the host; hold the route if it is open and a gated service is about to change; write directories, empty token files, secret files, configs and the reporter source; prune images, check free space, pull; create the collector container and fix its queue volume's owner; start the stores and Langfuse; assert and read back retention; start Tempo, Grafana and the collector; restart the reporter; verify the collector's running image digest; start Caddy; run the gates; set the route.
+
+Everything goes over one multiplexed SSH connection with pinned host keys (`StrictHostKeyChecking=yes`). The ssh child's environment is `PATH`, `HOME` and `SSH_AUTH_SOCK` and nothing else; a secret reaches the host on stdin only, written to a temporary file in the destination directory with its owner and mode set first, then renamed over the target.
+
+| File | Owner and mode | Written when |
+| --- | --- | --- |
+| `.env` | root, 0600 | content (without the ingest-state line) differs; the state line is appended on the host |
+| `secrets/collector/langfuse-basic` | root:65532, 0440 | differs. `base64(public:secret)`, no trailing newline; a placeholder the collector can start with and Langfuse refuses when the key pair is unset |
+| `secrets/grafana/{admin-password,secret-key}` | 472:472, 0400 | differs |
+| `secrets/reporter/{clickhouse-password,minio-password}` | 10010:10010, 0400 | differs |
+| `config/**`, `docker-compose.yaml` | root, 0644 | differs |
+| `health-reporter/health-report.ts` | root, 0644 | differs. Mounted read-only at `/app` |
+| `tokens/<group>/token` | root:65532, 0640 | **never**, once it exists. Created empty (under `noclobber`) only when absent |
+
+A changed config file recreates only the service that mounts it; compose recreates what a changed image or environment touches. The collector's queue volume is root-owned when Docker creates it, so deploy creates the container, sets the volume directory's owner to 65532 (only a path under Docker's data root on the volume) and reads it back, instead of relying on Docker copying ownership from the image (the host keeps images in the containerd store, where that copy is the least-tested path).
+
+### Holding, gates and the route
+
+A gated service is the collector, a backend (Langfuse, ClickHouse, MinIO, Redis, PostgreSQL, Tempo) or Caddy, and the compose file or `.env` count as changes to them. On an open route, a deploy that is about to change one holds the route first (the same on-host command as `traces ingest hold`: the state line in `.env`, then `up -d --force-recreate --no-deps caddy`) and proves 503 on all three paths from inside the host before anything else changes. A deploy that changes nothing gated does not hold. If the hold cannot be proven, the deploy stops with nothing changed. Restarts a failed deploy left undone are recorded in `.pending-restarts` before any file is written, so the next deploy acts on them even though every file now matches, and treats them as a change.
+
+After the stack is up the deploy evaluates the gates (`evaluateGates`; every gate has a failing test):
+
+| Gate | Passes when |
+| --- | --- |
+| `langfuse-key` (config) | the Application-role key pair is set |
+| `ingest-variable` (config) | `TRACES_INGEST_OPEN` is exactly `true` |
+| `retention` | the TTLs and the lifecycle rules were asserted and read back |
+| `token-directories` | every group has a token file |
+| `reporter-verdict` | a verdict produced after the reporter restart is fresh and passing |
+| `canary` | `canary-send`, `canary-langfuse` and `canary-tempo` each pass |
+| `bootstrap-key` | the bootstrap pair is not supplied, and Langfuse answers 401 to it (or no pair is on record) |
+| `bootstrap-variables` | no `LANGFUSE_INIT_PROJECT_*KEY` has a value in the host `.env` or in any running container |
+
+The route opens only if every gate passes. With no key pair, everything that needs a delivering stack is skipped, the route stays `off` (or is held if it was open) and the deploy completes saying which gates are missing. With the key pair set, any failing safety gate fails the deploy: an open route is held first, and the error is `AppliedButUnverifiedError`, which says the host was updated and not verified, and whether ingest is held, off, or could not be confirmed closed. After opening, the deploy proves 401 on all three paths from inside the host (`curl --resolve`, the real certificate and route) and holds again if it cannot.
+
+### Retention
+
+`src/retention.ts` asserts on every deploy: a 30-day TTL (`toDateTime(start_time) + INTERVAL 30 DAY`) on `events_full` and `events_core` (required; Langfuse creates them, so missing is "not ready" and retried, then a failure that names them), and on `traces`, `observations`, `observations_pid_tid_sorting` and `scores` where they exist; and 30-day lifecycle rules on the object store's `events/` (every OTLP batch, kept until something deletes it) and `media/` (attachments Langfuse extracts from trace content, so content can sit there) prefixes. A rule already on a prefix that is not a 30-day expiry is a conflict, not something the deploy edits. Everything is read back; no `ALTER` runs when a TTL already matches.
+
+### The first deploys
+
+1. **Deploy 1**: store and Langfuse-user secrets, the bootstrap pair, no key pair, `TRACES_INGEST_OPEN` unset. Stack up, retention asserted, `ingest off`, a message that the key pair is not set. Langfuse creates the organisation, project, user and the full-access bootstrap key from `LANGFUSE_INIT_*`.
+2. Operator: open the tunnel, create the Application-role key in the Langfuse UI, delete the bootstrap key there, set `TRACES_LANGFUSE_PUBLIC_KEY`/`SECRET_KEY`, delete the `TRACES_LANGFUSE_BOOTSTRAP_*` secrets, publish the privacy page, set `TRACES_INGEST_OPEN=true`.
+3. **Deploy 2**: `.env` is rewritten without the bootstrap key variables and Langfuse web is recreated; the pair that was in the old `.env` is set aside in `secrets/bootstrap-pending` (root, 0400, mounted nowhere) and used to probe Langfuse. 401: the key is dead, the record is removed, and if every other gate passes the route opens. 200: the deploy fails with ingest off and says to delete the key in the UI; **deploy 3** (any run, same inputs) probes the record again.
+4. Sender tokens are issued afterwards, with `traces sender add`.
+
+### Langfuse `LANGFUSE_INIT_*` at v4.83.0
+
+`web/src/initialize.ts` at the `v4.83.0` tag: the organisation and the project are `upsert`s with `update: {}`; the user is created only when no user with that email exists, so a later boot never resets the password and rotating `TRACES_LANGFUSE_USER_PASSWORD` changes nothing after the first boot; the organisation membership is re-asserted as `OWNER`. The API key is created only when `LANGFUSE_INIT_PROJECT_ID`, `..._PUBLIC_KEY` and `..._SECRET_KEY` are all set and no key with that public key exists, so **a key deleted in the UI comes back on the next boot while the key variables are present**, as a `LEGACY_PROJECT_API_KEY` with full access. With the two key variables absent and the organisation, project and user variables still set, a boot creates no key and changes no password. That is the design: the key variables are written only when the bootstrap pair is supplied, never otherwise.
+
 ## Secrets and tokens
 
-Nothing secret is in a tracked file. The stack reads `.env` from the app directory (`POSTGRES_PASSWORD`, `CLICKHOUSE_PASSWORD`, `MINIO_ROOT_PASSWORD`, `REDIS_AUTH`, `SALT`, `ENCRYPTION_KEY`, `NEXTAUTH_SECRET`, `TRACES_DOMAIN`, `TRACES_COLLECTOR_IMAGE`, and the optional `LANGFUSE_INIT_*` bootstrap values), and files from two directories mounted read-only:
+Nothing secret is in a tracked file. The stack reads `.env` from the app directory (`POSTGRES_PASSWORD`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_READER_PASSWORD`, `MINIO_ROOT_PASSWORD`, `REDIS_AUTH`, `SALT`, `ENCRYPTION_KEY`, `NEXTAUTH_SECRET`, `TRACES_DOMAIN`, `TRACES_COLLECTOR_IMAGE`, `TRACES_INGEST_STATE`, and the `LANGFUSE_INIT_*` bootstrap values), and files from directories mounted read-only, owned as the table under "Deploy" says. Passwords go inside connection URLs, so each is URL-safe (letters, digits, `. _ ~ -`) and at least 24 characters; the encryption key is 64 hex.
 
-| Path | Holds |
-| --- | --- |
-| `tokens/<group>/token` | One sender token per line, extra columns ignored. Owned by the operator command, not deploy |
-| `secrets/collector/langfuse-basic` | `base64(public:secret)` of the Langfuse key, no trailing newline |
-| `secrets/grafana/` | `admin-password`, `secret-key` |
-
-The collector runs as UID 65532. Its token directories must be readable and its queue volume writable by that user.
+The collector runs as UID 65532. Its token directories must be readable and its queue volume writable by that user. Sender tokens belong to the operator command (`traces sender`); a token file it replaces should keep `root:65532` and mode 0640.
 
 ## Anti-patterns
 
 - **Never publish a store port.** ClickHouse, PostgreSQL, Redis, MinIO and Tempo stay off the host. Only Caddy, Langfuse web (loopback) and Grafana (loopback) have a `ports` entry; a test enforces it.
 - **Never add a processor to the Langfuse branch.** Langfuse gets the whole trace. A processor there (`batch`, `transform`, anything) changes what is stored. No `batch` or `transform` processor anywhere.
 - **Never put a content key in the keep-list.** The six `gen_ai` content keys stay out; a test enforces it.
-- **Never copy a token off the host.** Sender tokens live in `tokens/` on the encrypted volume and at the senders; `list` shows fingerprints only.
-- **Never `docker compose down -v`.** The volumes hold the traces. Deploy only ever runs `up -d`.
+- **Never copy a token off the host, and never let deploy touch one.** Sender tokens live in `tokens/` on the encrypted volume and at the senders; `list` shows fingerprints only. Deploy creates an empty file when none exists and never writes, replaces, truncates or removes an existing one.
+- **Never pass a secret on a command line.** Secret bytes go over SSH stdin; the SSH argv and the SSH child's environment carry none, and the remote scripts read passwords from the container's own environment.
+- **Never write the `LANGFUSE_INIT_PROJECT_*KEY` variables unless the bootstrap pair is being supplied.** Langfuse recreates a deleted key from them on the next boot.
+- **Never open the route without every gate.** Open means all gates pass and `TRACES_INGEST_OPEN` is exactly `true`; `mayOpen` is the only decision and a skipped gate is not a pass.
+- **Never change a gated service on an open route without holding it first.** The hold comes before the first write.
+- **Never `docker compose down -v`.** The volumes hold the traces. Deploy only ever runs `up -d` (and `create --no-recreate` for the collector container).
 - **Never cap ClickHouse memory.** Capping it near 7 GB made the Langfuse worker drop rows after the sender got 200.
 - **Never add a compose healthcheck to the collector or Tempo.** Both are distroless images with no shell; the health reporter probes them.
 - **Never leave `TRACES_INGEST_STATE=open` unless every gate has passed.**
-- **Never regenerate a long-lived secret** (`SALT`, `ENCRYPTION_KEY`, `NEXTAUTH_SECRET`, store passwords). A volume holds data keyed to them.
+- **Never regenerate a long-lived secret** (`SALT`, `ENCRYPTION_KEY`, `NEXTAUTH_SECRET`, store passwords). A volume holds data keyed to them; deploy never generates one.
+- **No remote command redirects to the null device or deletes outside the app directory and `/tmp`**, and every probe prints a sentinel and needs exit 0 plus a recognised sentinel; a test checks every script.
 
 ## Known outbound calls
 
 Telemetry is off wherever a setting exists. Langfuse web contacts `langfuse.com` for an update check when the UI loads (no setting), and the browser fetches two badge and asset hosts. Grafana makes no outbound call with the plugin pre-installer, update checks, Gravatar and the news feed off.
 
-## Not built yet
+## Proven only on the real host
 
-Deploy (`src/deploy.ts`), provisioning (`server/provision.ts`), the CLI group (`traces deploy|status|open|logs|ingest|sender`), the health reporter, the monitor and backup workflows, and the runbook (`docs/runbooks/trace-collection.md`) arrive in later units of the plan. Until then this directory is not deployable.
+The deploy tests run the generated scripts through a simulated host and parse every one with `bash -n`; the token script also runs for real against a scratch directory. These behaviours can only be proven on the host, so the first deploy is where they are checked: the `mc ilm rule export|add` spellings and output shape inside the Chainguard MinIO image, `clickhouse-client` with `CLICKHOUSE_PASSWORD` from the container's environment, the TTL read-back text ClickHouse prints (`toIntervalDay(30)`), the bootstrap probe (a `node -e` fetch inside the Langfuse web container), `curl --resolve` to Caddy on the host's own loopback with a real certificate, `docker compose create --no-recreate` and the queue-volume owner, the repo-digest read-back under the containerd image store, and compose's recreate decisions for the forced and native restarts.
+
+The sender-token commands, the monitor and backup workflows, the runbook (`docs/runbooks/trace-collection.md`) and the privacy page belong to other units of the plan.

@@ -1,6 +1,16 @@
 import type {PinHostKeysOptions} from '../../../packages/shared/server/droplet-helpers'
 import type {ProvisionDeps, ProvisionInput, Runner, RunResult} from './provision'
-import {chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -11,6 +21,8 @@ import {
   TRACES_DOCKER_ROOT,
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
+  TRACES_TEMPO_DATA_DIR,
+  TRACES_TEMPO_QUARANTINE_ROOT,
   TRACES_TOKEN_ROOT,
   TRACES_VOID_TOKEN_PREFIX,
   TRACES_VOLUME_MOUNT,
@@ -43,6 +55,7 @@ import {
   shellQuote,
   SSH_CONTROL_PERSIST,
   SSH_SCAN_PAUSE_MS,
+  tempoQuarantineScript,
   tokenCheckScript,
   validateRequiredEnv,
   VOLUME_LIST_ATTEMPTS,
@@ -251,6 +264,10 @@ interface HostOptions {
   dockerBusy?: boolean
   tokens?: 'deny-all' | 'real' | 'missing-root' | 'file-missing' | 'file-empty'
   storage?: RunResult
+  /** `<tenant>/<block-uuid>` entries the Tempo quarantine step reports as moved. */
+  tornBlocks?: string[]
+  /** Replaces the quarantine step's whole answer. */
+  quarantine?: RunResult
 }
 
 class Host {
@@ -325,6 +342,16 @@ class Host {
       case 'restore-quiesce': {
         this.mounted = false
         return ok('TRACES_QUIESCED')
+      }
+      case 'tempo-quarantine': {
+        if (this.options.quarantine) return this.options.quarantine
+        const torn = this.options.tornBlocks ?? []
+        return ok(
+          [
+            ...torn.map(block => `TRACES_TEMPO_QUARANTINED ${block}`),
+            `TRACES_TEMPO_QUARANTINE_DONE ${torn.length}`,
+          ].join('\n'),
+        )
       }
       case 'token-check': {
         const tokens = this.options.tokens ?? 'deny-all'
@@ -849,7 +876,8 @@ describe('SSH connection multiplexing', () => {
     await runRestore(RESTORE_RUN, deps)
     expect(controlDirs).toHaveLength(1)
     expect(new Set(controlPathsOf(world.sshCalls()))).toEqual(new Set([`ControlPath=${controlDirs[0]}/cm`]))
-    expect(world.sshCalls()).toHaveLength(4)
+    // quiesce, probe, mount, verify the sentinel, quarantine torn Tempo blocks
+    expect(world.sshCalls()).toHaveLength(5)
     expect(world.closeCalls()).toHaveLength(1)
     expect(removedControlDirs).toEqual(controlDirs)
   })
@@ -1196,6 +1224,211 @@ describe('managed file script, run against real files in a temp directory', () =
   })
 })
 
+// ---------------------------------------------------------------------------
+// Tempo block quarantine, run against real files
+// ---------------------------------------------------------------------------
+
+function block(data: string, tenant: string, id: string, files: Record<string, string>): string {
+  const dir = join(data, 'blocks', tenant, id)
+  mkdirSync(dir, {recursive: true})
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content)
+  return dir
+}
+
+describe('tempoQuarantineScript, run against real files in a temp directory', () => {
+  const STAMP = '20261120-1530'
+  const TENANT = 'single-tenant'
+  const A = '280241d8-1111-4222-8333-444455556666'
+  const B = '3b0c5a77-aaaa-4bbb-8ccc-ddddeeeeffff'
+  const C = '4c1d6b88-0000-4111-8222-333344445555'
+  const HEALTHY = '{"format":"vParquet4","blockID":"x","totalObjects":7}\n'
+
+  async function withScratch(test: (paths: {data: string; quarantine: string; script: () => string}) => Promise<void>) {
+    const dir = mkdtempSync(join(tmpdir(), 'traces-tempo-'))
+    const data = join(dir, 'data')
+    const quarantine = join(dir, 'tempo-quarantine')
+    mkdirSync(data, {recursive: true})
+    try {
+      await test({
+        data,
+        quarantine,
+        script: () => tempoQuarantineScript({dataDir: data, quarantineRoot: quarantine, stamp: STAMP}),
+      })
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  }
+
+  const lines = (stdout: string) => stdout.split('\n').filter(Boolean)
+  const moved = (tenant: string, id: string) => `TRACES_TEMPO_QUARANTINED ${tenant}/${id}`
+  const done = (count: number) => `TRACES_TEMPO_QUARANTINE_DONE ${count}`
+
+  // Mutation target: a torn check that is always false moves nothing and fails these.
+  it.each([
+    ['an empty meta.json', {'meta.json': '', 'data.parquet': '', index: '', 'bloom-0': ''}],
+    ['a meta.json holding garbage', {'meta.json': 'not json at all', 'data.parquet': 'PAR1'}],
+    ['a meta.json cut off mid-object', {'meta.json': '{"blockID":"x","totalObje'}],
+    ['a meta.json of only whitespace', {'meta.json': ' \n\t\n'}],
+    ['an empty meta.compacted.json', {'meta.compacted.json': '', 'data.parquet': ''}],
+    ['a meta.compacted.json holding garbage', {'meta.compacted.json': '<html>'}],
+    ['a healthy meta.json beside an empty meta.compacted.json', {'meta.json': HEALTHY, 'meta.compacted.json': ''}],
+    ['a JSON array instead of an object', {'meta.json': '[1,2]'}],
+  ])('moves a block with %s into the quarantine, files intact', async (_label, files) => {
+    await withScratch(async ({data, quarantine, script}) => {
+      const source = block(data, TENANT, A, files)
+      const result = await runLocal(script(), '')
+
+      expect(result.exitCode).toBe(0)
+      expect(lines(result.stdout)).toEqual([moved(TENANT, A), done(1)])
+      expect(existsSync(source)).toBe(false)
+      const target = join(quarantine, STAMP, TENANT, A)
+      for (const [name, content] of Object.entries(files))
+        expect(readFileSync(join(target, name), 'utf8')).toBe(content)
+      // The directories the step makes are private; the block keeps whatever it had.
+      for (const dir of [quarantine, join(quarantine, STAMP), join(quarantine, STAMP, TENANT)]) {
+        expect(statSync(dir).mode & 0o777).toBe(0o700)
+      }
+    })
+  })
+
+  it('leaves a healthy meta.json and a healthy meta.compacted.json, and makes no quarantine directory', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      const live = block(data, TENANT, A, {'meta.json': HEALTHY, 'data.parquet': 'PAR1'})
+      const compacted = block(data, TENANT, B, {'meta.compacted.json': `  {\n  "blockID": "y"\n}\n\n`})
+      const result = await runLocal(script(), '')
+
+      expect(result).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(live)).toBe(true)
+      expect(existsSync(compacted)).toBe(true)
+      expect(existsSync(quarantine)).toBe(false)
+    })
+  })
+
+  it('leaves a block directory with neither metadata file: Tempo is writing it or has cleared it', async () => {
+    await withScratch(async ({data, script}) => {
+      const empty = block(data, TENANT, A, {})
+      const partial = block(data, TENANT, B, {'data.parquet': '', 'bloom-0': ''})
+      const result = await runLocal(script(), '')
+
+      expect(result).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(empty)).toBe(true)
+      expect(existsSync(partial)).toBe(true)
+    })
+  })
+
+  it('ignores files beside and inside the tenant directory, and any entry that is not a block uuid', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      mkdirSync(join(data, 'blocks', TENANT), {recursive: true})
+      writeFileSync(join(data, 'blocks', 'work.json'), '')
+      writeFileSync(join(data, 'blocks', TENANT, 'index.json.gz'), '')
+      writeFileSync(join(data, 'blocks', TENANT, 'index.pb.zst'), '')
+      // A file named like a block, and directories that are not named like one, each holding an empty meta.json.
+      writeFileSync(join(data, 'blocks', TENANT, A), '')
+      const notUuid = block(data, TENANT, 'not-a-block', {'meta.json': ''})
+      const nearly = block(data, TENANT, A.slice(0, -1), {'meta.json': ''})
+      const result = await runLocal(script(), '')
+
+      expect(result).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(notUuid)).toBe(true)
+      expect(existsSync(nearly)).toBe(true)
+      expect(existsSync(join(data, 'blocks', 'work.json'))).toBe(true)
+      expect(existsSync(join(data, 'blocks', TENANT, 'index.json.gz'))).toBe(true)
+      expect(existsSync(quarantine)).toBe(false)
+    })
+  })
+
+  it('handles two tenants, keeping the tenant in the quarantine path and in the report', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      block(data, 'single-tenant', A, {'meta.json': ''})
+      block(data, 'single-tenant', B, {'meta.json': HEALTHY})
+      block(data, 'other-tenant', C, {'meta.compacted.json': ''})
+      const result = await runLocal(script(), '')
+
+      expect(result.exitCode).toBe(0)
+      expect(lines(result.stdout)).toEqual([moved('other-tenant', C), moved('single-tenant', A), done(2)])
+      expect(existsSync(join(quarantine, STAMP, 'other-tenant', C))).toBe(true)
+      expect(existsSync(join(quarantine, STAMP, 'single-tenant', A))).toBe(true)
+      expect(existsSync(join(data, 'blocks', 'single-tenant', B))).toBe(true)
+    })
+  })
+
+  it('is idempotent: a second run moves nothing and leaves the first run in place', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      block(data, TENANT, A, {'meta.json': ''})
+      expect((await runLocal(script(), '')).stdout).toContain(done(1))
+      const second = await runLocal(script(), '')
+
+      expect(second).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(join(quarantine, STAMP, TENANT, A, 'meta.json'))).toBe(true)
+    })
+  })
+
+  it('treats a missing data directory or a missing blocks directory as nothing to do, not an error', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      expect(await runLocal(script(), '')).toEqual({stdout: done(0), exitCode: 0})
+      mkdirSync(join(data, 'wal'), {recursive: true})
+      expect(await runLocal(script(), '')).toEqual({stdout: done(0), exitCode: 0})
+      rmSync(data, {recursive: true, force: true})
+      expect(await runLocal(script(), '')).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(quarantine)).toBe(false)
+    })
+  })
+
+  it('refuses to overwrite, and leaves the block where it is, when the quarantine already holds that block', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      const source = block(data, TENANT, A, {'meta.json': ''})
+      mkdirSync(join(quarantine, STAMP, TENANT, A), {recursive: true})
+      const result = await runLocal(script(), '')
+
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toContain('TRACES_TEMPO_QUARANTINE_EXISTS')
+      expect(result.stdout).not.toContain('TRACES_TEMPO_QUARANTINE_DONE')
+      expect(existsSync(source)).toBe(true)
+    })
+  })
+
+  it('does not follow a symlink standing in for a block directory', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      const real = block(data, 'elsewhere', A, {'meta.json': ''})
+      mkdirSync(join(data, 'blocks', TENANT), {recursive: true})
+      symlinkSync(real, join(data, 'blocks', TENANT, B))
+      // `elsewhere` is a tenant too, so the real directory is moved once, by its own name.
+      const result = await runLocal(script(), '')
+
+      expect(result.exitCode).toBe(0)
+      expect(lines(result.stdout)).toEqual([moved('elsewhere', A), done(1)])
+      expect(existsSync(join(quarantine, STAMP, TENANT))).toBe(false)
+    })
+  })
+
+  // A known limit, pinned so nobody reads the check as a JSON parser: it looks at the first and last non-space byte.
+  it('does not look inside the braces: text that starts with { and ends with } passes', async () => {
+    await withScratch(async ({data, script}) => {
+      const odd = block(data, TENANT, A, {'meta.json': '{ this is not json }'})
+      expect(await runLocal(script(), '')).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(odd)).toBe(true)
+    })
+  })
+
+  it('is a safe step: it parses, never redirects to the null device, never deletes, and uses no python', async () => {
+    const script = tempoQuarantineScript({stamp: STAMP})
+    expect(script).toContain('# traces-step:tempo-quarantine')
+    expect(script).toContain('set -eu')
+    expect(script).toContain(TRACES_TEMPO_DATA_DIR)
+    expect(script).toContain(TRACES_TEMPO_QUARANTINE_ROOT)
+    expect(script).not.toContain('/dev/null')
+    expect(script).not.toMatch(/\brm\b|\bcp\b|python/)
+    const parse = await runLocal(`bash -n -c ${shellQuote(script)}; echo $?`, '')
+    expect(parse.stdout).toBe('0')
+  })
+
+  it('refuses a stamp or a path that could carry shell syntax', () => {
+    expect(() => tempoQuarantineScript({stamp: '2026; reboot'})).toThrow()
+    expect(() => tempoQuarantineScript({stamp: STAMP, dataDir: '/tmp/x y'})).toThrow()
+    expect(() => tempoQuarantineScript({stamp: STAMP, quarantineRoot: '/tmp/../etc'})).toThrow()
+  })
+})
+
 describe('containerd config guard, run against real files in a temp directory', () => {
   it('accepts the stock file and a file we wrote earlier, and refuses a foreign one', async () => {
     const containerd = dockerConfigFiles()[1]
@@ -1469,7 +1702,7 @@ describe('runRestore', () => {
     expect(detach).toBeGreaterThan(-1)
     expect(attach).toBeGreaterThan(detach)
 
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
     const quiesceCall = world.calls.findIndex(c => c.argv.at(-1)?.includes('restore-quiesce'))
     const detachCall = world.calls.findIndex(c => c.argv.slice(1, 4).join(' ') === 'compute volume-action detach')
     expect(quiesceCall).toBeLessThan(detachCall)
@@ -1517,7 +1750,7 @@ describe('runRestore', () => {
       expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(3)
       expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
       expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
-      expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+      expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
     })
 
     it('does not sleep when the first listing already shows the volume', async () => {
@@ -1581,7 +1814,7 @@ describe('runRestore: the volume swap when the listing lags the completed action
     expect(pauses(sleeps)).toHaveLength(3)
     expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
     expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
   })
 
   it('keeps reading until the listing shows the new volume attached, and completes the restore', async () => {
@@ -1591,7 +1824,7 @@ describe('runRestore: the volume swap when the listing lags the completed action
 
     expect(pauses(sleeps)).toHaveLength(3)
     expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
   })
 
   it('does not sleep on the normal path, where the first reads are right', async () => {
@@ -1684,7 +1917,7 @@ describe('runRestore: resuming an interrupted restore', () => {
     expect(doctl.some(call => call.startsWith('compute volume-action detach'))).toBe(false)
     expect(doctl).toContain(`compute volume-action attach vol-restore ${DROPLET_ID} --wait`)
     // Quiesce is repeated first, then the restored volume is probed, mounted and its sentinel verified.
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
     const probe = world.sshCommands().find(c => c.includes('traces-step:fs-probe')) ?? ''
     expect(probe).toContain(volumeDevicePath(RESTORE_NAME))
     expect(world.cloud.volumes.find(v => v.id === 'vol-restore')?.dropletIds).toEqual([DROPLET_ID])
@@ -1837,6 +2070,107 @@ describe('runRestore: resuming an interrupted restore', () => {
       'Volume traces-data-restore-20261120-1530 is attached and mounted in place of traces-data (kept, detached).',
     )
     expect(logs.join('\n')).toContain('The old volume traces-data still exists; delete it after the restore is proven.')
+  })
+})
+
+describe('runRestore: quarantining torn Tempo blocks on the restored volume', () => {
+  const RESTORE_INPUT = {snapshotName: 'traces-data-snap', privateKey: 'placeholder', remoteUser: 'root'}
+  const TORN = [
+    'single-tenant/280241d8-1111-4222-8333-444455556666',
+    'other-tenant/3b0c5a77-aaaa-4bbb-8ccc-ddddeeeeffff',
+  ]
+  const QUARANTINE_DIR = `${TRACES_TEMPO_QUARANTINE_ROOT}/20261120-1530`
+  const quarantineCommand = (world: ReturnType<typeof makeWorld>) =>
+    world.sshCommands().find(command => command.includes('traces-step:tempo-quarantine')) ?? ''
+  const failureOf = (promise: Promise<unknown>) =>
+    promise.then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+
+  // Mutation target: dropping the step from either path fails these.
+  it('runs one more host step after the sentinel is verified, with Docker still stopped, on a first run', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(world.host.dockerRestarts).toBe(0)
+    const command = quarantineCommand(world)
+    expect(command).toContain(TRACES_TEMPO_DATA_DIR)
+    // The stamp is the restore's own UTC time, the same one the restore volume's name carries.
+    expect(command).toContain(QUARANTINE_DIR.slice(TRACES_TEMPO_QUARANTINE_ROOT.length + 1))
+    expect(logs.join('\n')).toContain('No torn Tempo blocks')
+    expect(logs.join('\n')).not.toContain('Quarantined')
+  })
+
+  it('runs it on the resume path too', async () => {
+    const world = makeWorld(interruptedRestoreCloud(), {provisioned: true, tornBlocks: TORN})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(logs.join('\n')).toContain('Quarantined 2 Tempo blocks')
+  })
+
+  it('reports what it moved: the count, every block with its tenant, the limit, and where they are', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, tornBlocks: TORN})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    const text = logs.join('\n')
+    expect(text).toContain('Quarantined 2 Tempo blocks with torn metadata')
+    for (const block of TORN) expect(text).toContain(block)
+    expect(text).toContain(QUARANTINE_DIR)
+    expect(text).toContain('moved, not deleted')
+    expect(text).toMatch(/Tempo may be missing the traces of its most recent compaction/)
+    expect(text).toContain('Langfuse is the complete record')
+    expect(text).toMatch(/not covered by retention/)
+  })
+
+  it('says "1 Tempo block" for one', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, tornBlocks: [TORN[0] ?? '']})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+    expect(logs.join('\n')).toContain('Quarantined 1 Tempo block with torn metadata')
+  })
+
+  // Mutation target: a step whose answer is not checked lets a restore end green over a failed scan.
+  it.each([
+    ['a non-zero exit', {exitCode: 1, stdout: 'TRACES_TEMPO_QUARANTINE_EXISTS\n', stderr: 'mv: boom'}],
+    [
+      'a non-zero exit after a clean-looking answer',
+      {exitCode: 1, stdout: 'TRACES_TEMPO_QUARANTINE_DONE 0\n', stderr: ''},
+    ],
+    ['no final sentinel', ok('TRACES_TEMPO_QUARANTINED single-tenant/280241d8-1111-4222-8333-444455556666\n')],
+    ['an unrecognised answer', ok('all good')],
+    ['a count that disagrees with the lines', ok('TRACES_TEMPO_QUARANTINE_DONE 2')],
+    ['a line that is not a tenant and block', ok('TRACES_TEMPO_QUARANTINED ../../etc\nTRACES_TEMPO_QUARANTINE_DONE 1')],
+  ])(
+    'stops the restore when the scan answers with %s, saying the ports stay closed and Docker is stopped',
+    async (_label, answer) => {
+      const world = makeWorld(provisionedCloud(), {provisioned: true, quarantine: answer})
+      const {deps, logs} = makeDeps(world.runner)
+      const failure = await failureOf(runRestore(RESTORE_INPUT, deps))
+
+      expect(failure).toContain('Tempo block quarantine')
+      expect(failure).toContain('Docker is stopped')
+      expect(failure).toContain('Ports 80 and 443 stay closed')
+      expect(failure).toContain('traces-data-restore-20261120-1530 is attached and mounted')
+      expect(failure).toContain('do not run the restore again')
+      expect(logs.join('\n')).not.toContain('✓')
+      expect(world.host.dockerRestarts).toBe(0)
+    },
+  )
+
+  it('does not run before the sentinel is verified', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const originalHandle = world.host.handle.bind(world.host)
+    world.host.handle = (command, stdin) =>
+      command.includes('verify-sentinel') ? fail('TRACES_SENTINEL_UNRECOGNISED') : originalHandle(command, stdin)
+    const {deps} = makeDeps(world.runner)
+    await expect(runRestore(RESTORE_INPUT, deps)).rejects.toThrow(/verify sentinel on restored volume failed/)
+    expect(world.host.steps).not.toContain('tempo-quarantine')
   })
 })
 

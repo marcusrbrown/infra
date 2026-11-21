@@ -52,6 +52,8 @@ import {
   TRACES_DROPLET_NAME,
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
+  TRACES_TEMPO_DATA_DIR,
+  TRACES_TEMPO_QUARANTINE_ROOT,
   TRACES_TOKEN_ROOT,
   TRACES_VOID_TOKEN_PREFIX,
   TRACES_VOLUME_MOUNT,
@@ -1325,8 +1327,125 @@ echo TRACES_QUIESCED`
 }
 
 export function restoreVolumeName(now: Date): string {
+  return `${TRACES_VOLUME_NAME}-restore-${restoreStamp(now)}`
+}
+
+/** `YYYYMMDD-HHMM` in UTC: the restore volume's name and the quarantine directory carry the same stamp. */
+export function restoreStamp(now: Date): string {
   const iso = now.toISOString()
-  return `${TRACES_VOLUME_NAME}-restore-${iso.slice(0, 10).replaceAll('-', '')}-${iso.slice(11, 16).replace(':', '')}`
+  return `${iso.slice(0, 10).replaceAll('-', '')}-${iso.slice(11, 16).replace(':', '')}`
+}
+
+const BLOCK_UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+export const TEMPO_QUARANTINE_DONE_PREFIX = 'TRACES_TEMPO_QUARANTINE_DONE'
+export const TEMPO_QUARANTINED_PREFIX = 'TRACES_TEMPO_QUARANTINED'
+
+export interface TempoQuarantineOptions {
+  /** Tempo's data directory (holds `blocks/`). The default is the Docker volume on the encrypted volume. */
+  dataDir?: string
+  quarantineRoot?: string
+  /** `YYYYMMDD-HHMM` (UTC) of the restore. */
+  stamp: string
+}
+
+/**
+ * Moves every Tempo block with torn metadata out of `blocks/` so Tempo can build its tenant index.
+ *
+ * A volume snapshot is taken while Tempo runs, so it can catch a block directory whose files were created but whose
+ * data had not reached the disk: every file zero bytes. One empty `meta.json` fails the tenant index, and Tempo then
+ * serves nothing from stored blocks.
+ *
+ * Torn, narrowly: a block directory (its name is a UUID) that has a `meta.json`, or a `meta.compacted.json`, that is
+ * empty or is not a JSON object. A directory with neither file is left alone: Tempo treats it as mid-write or cleared.
+ * Plain files (`work.json`, `index.json.gz`, `index.pb.zst`), non-UUID entries and symlinks are never touched.
+ *
+ * "Not a JSON object" is the first and the last non-space byte being `{` and `}`, not a parse. No script in this repo
+ * relies on `python3`, and the host image's coreutils are the only tools certain to be there. The check therefore
+ * catches the real failure (empty, cut off, garbage) and not text that happens to be braced; a test pins that limit.
+ *
+ * A torn block is moved with `mv` to `<quarantineRoot>/<stamp>/<tenant>/<block>`, on the same filesystem (a rename:
+ * the step refuses when it is not, and refuses to overwrite). It is never copied or deleted, and the step makes the
+ * directories it creates mode 0700 (root, since the step runs as root). Idempotent: a second run finds nothing.
+ * A missing data or `blocks` directory (a snapshot from before Tempo wrote) is nothing to do. Prints one
+ * `TRACES_TEMPO_QUARANTINED <tenant>/<block>` line per move and ends with `TRACES_TEMPO_QUARANTINE_DONE <count>`.
+ */
+export function tempoQuarantineScript(options: TempoQuarantineOptions): string {
+  if (!/^\d{8}-\d{4}$/.test(options.stamp)) throw new Error(`Unsafe quarantine stamp: ${options.stamp}`)
+  const data = safePath(options.dataDir ?? TRACES_TEMPO_DATA_DIR)
+  const quarantine = safePath(options.quarantineRoot ?? TRACES_TEMPO_QUARANTINE_ROOT)
+  return String.raw`set -eu
+# traces-step:tempo-quarantine
+shopt -s nullglob
+data=${data}
+quarantine=${quarantine}
+stamp=${options.stamp}
+count=0
+is_object() {
+  [ -s "$1" ] || return 1
+  first=$(tr -d '[:space:]' < "$1" | head -c 1 || true)
+  last=$(tr -d '[:space:]' < "$1" | tail -c 1 || true)
+  [ "$first" = '{' ] && [ "$last" = '}' ]
+}
+torn() {
+  local f
+  for f in "$1/meta.json" "$1/meta.compacted.json"; do
+    if [ -e "$f" ] && ! is_object "$f"; then return 0; fi
+  done
+  return 1
+}
+dev_of() { stat -c %d "$1" || stat -f %d "$1"; }
+if [ -d "$data/blocks" ] && [ ! -L "$data/blocks" ]; then
+  for tenant_dir in "$data"/blocks/*; do
+    if [ ! -d "$tenant_dir" ] || [ -L "$tenant_dir" ]; then continue; fi
+    tenant=$(basename "$tenant_dir")
+    for block_dir in "$tenant_dir"/*; do
+      if [ ! -d "$block_dir" ] || [ -L "$block_dir" ]; then continue; fi
+      block=$(basename "$block_dir")
+      if ! [[ $block =~ ${BLOCK_UUID_PATTERN} ]]; then continue; fi
+      if ! torn "$block_dir"; then continue; fi
+      dest=$quarantine/$stamp/$tenant
+      install -d -m 0700 "$quarantine" "$quarantine/$stamp" "$dest"
+      if [ "$(dev_of "$block_dir")" != "$(dev_of "$dest")" ]; then echo TRACES_TEMPO_QUARANTINE_CROSS_DEVICE; exit 1; fi
+      if [ -e "$dest/$block" ]; then echo TRACES_TEMPO_QUARANTINE_EXISTS; exit 1; fi
+      mv -- "$block_dir" "$dest/$block"
+      printf '%s %s/%s\n' ${TEMPO_QUARANTINED_PREFIX} "$tenant" "$block"
+      count=$((count + 1))
+    done
+  done
+fi
+echo "${TEMPO_QUARANTINE_DONE_PREFIX} $count"`
+}
+
+const QUARANTINED_LINE = new RegExp(String.raw`^${TEMPO_QUARANTINED_PREFIX} ([\w.-]+)/([0-9a-fA-F-]{36})$`)
+const QUARANTINE_DONE_LINE = new RegExp(String.raw`^${TEMPO_QUARANTINE_DONE_PREFIX} (\d+)$`)
+
+/** The `<tenant>/<block>` entries the quarantine step moved. Exit 0, well-formed lines and a matching count, or it throws. */
+export function parseTempoQuarantine(result: RunResult): string[] {
+  const label = 'Tempo block quarantine'
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `${label} failed (exit ${result.exitCode}): ${excerpt(result.stderr) || excerpt(result.stdout) || 'no output'}`,
+    )
+  }
+  const lines = nonEmptyLines(result.stdout)
+  const done = QUARANTINE_DONE_LINE.exec(lines.at(-1) ?? '')
+  const moved = lines.slice(0, -1).map(line => QUARANTINED_LINE.exec(line))
+  if (!done || moved.includes(null) || Number(done[1]) !== moved.length) {
+    throw new Error(`${label}: unrecognised answer from the host (expected a count that matches the moved blocks)`)
+  }
+  return moved.flatMap(match => (match ? [`${match[1]}/${match[2]}`] : []))
+}
+
+function reportQuarantine(log: ProvisionDeps['log'], moved: readonly string[], stamp: string): void {
+  if (moved.length === 0) {
+    log('No torn Tempo blocks were found on the restored volume.')
+    return
+  }
+  const noun = moved.length === 1 ? 'block' : 'blocks'
+  log(`Quarantined ${moved.length} Tempo ${noun} with torn metadata (tenant/block): ${moved.join(', ')}.`)
+  log(
+    `They were moved, not deleted, to ${TRACES_TEMPO_QUARANTINE_ROOT}/${stamp}/<tenant>/<block>. The snapshot caught Tempo mid-write, so Tempo may be missing the traces of its most recent compaction for each quarantined block; Langfuse is the complete record. Nothing prunes the quarantine and it is not covered by retention: delete it once you have looked.`,
+  )
 }
 
 /** `traces-data-restore-<YYYYMMDD>-<HHMM>`: the shape `restoreVolumeName` makes. */
@@ -1376,7 +1495,9 @@ async function findVolumeSnapshotId(run: Runner, snapshotName: string): Promise<
  * `traces-data*` volume attached and exactly one detached `traces-data-restore-*`
  * volume, that volume is reused (none is created) and the run continues from the
  * quiesce step. Any other shape is refused with the volumes listed by name.
- * The run stops there, with Docker stopped and the web ports closed. The old volume is
+ * Once the restored volume is mounted and its sentinel verified, with Docker still stopped, Tempo blocks whose
+ * metadata is torn (a snapshot taken mid-write) are moved to a quarantine directory (`tempoQuarantineScript`) and
+ * reported. The run stops there, with Docker stopped and the web ports closed. The old volume is
  * kept, detached. A snapshot holds the sender token files as they were, so the
  * ports stay closed at the cloud firewall (not on the volume) until every token
  * file is deny-all (`traces sender revoke --all`) and `--reopen-ports` is run.
@@ -1460,6 +1581,7 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
   const swapFailure = (error: unknown, state: string): Error =>
     new Error(`${causeOf(error)}. Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ${state}`)
 
+  let quarantined: string[] = []
   const dropletIp = await getDropletIp(run, deps)
   await withRemote(deps, input, dropletIp, async (exec, identityFile) => {
     await deps.waitForSsh(dropletIp, input.remoteUser, {identityFile})
@@ -1488,6 +1610,17 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     await runStep(exec, 'probe restored volume', fsProbeScript(device), ['TRACES_FS_EXT4'])
     await runStep(exec, 'mount restored volume', mountScript(device), MOUNT_SENTINELS)
     await runStep(exec, 'verify sentinel on restored volume', verifySentinelScript(), ['TRACES_SENTINEL_PRESENT'])
+
+    // Docker is still stopped, so Tempo is not writing. A torn block would stop it serving any stored block.
+    try {
+      quarantined = parseTempoQuarantine(
+        await exec(bashCommand(tempoQuarantineScript({stamp: restoreStamp(deps.now())}))),
+      )
+    } catch (error) {
+      throw new Error(
+        `${causeOf(error)}. Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ${newName} is attached and mounted and the Tempo block check did not finish. Look at ${TRACES_TEMPO_DATA_DIR}/blocks by hand and do not run the restore again: it would start another restore from this volume.`,
+      )
+    }
   })
 
   if (!previous) {
@@ -1509,6 +1642,7 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
         `${candidates.length} detached non-restore volumes exist (${candidates.map(row => row.name).join(', ')}), so the previous data is not named here; none was touched.`,
       )
     }
+    reportQuarantine(log, quarantined, restoreStamp(deps.now()))
     return
   }
 
@@ -1519,6 +1653,7 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
   log('Next: start Docker, make every token file deny-all (traces sender revoke --all), run a normal deploy,')
   log('then run this script with --reopen-ports and reissue all three tokens.')
   log(`The old volume ${previous.name} still exists; delete it after the restore is proven.`)
+  reportQuarantine(log, quarantined, restoreStamp(deps.now()))
 }
 
 export interface ReopenInput {

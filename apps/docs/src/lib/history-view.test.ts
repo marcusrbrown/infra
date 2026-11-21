@@ -1,5 +1,6 @@
-import type {HistorySample} from '@marcusrbrown/infra-shared/status/history-schema'
+import type {History, HistorySample} from '@marcusrbrown/infra-shared/status/history-schema'
 
+import {APP_IDS, APPS_NOT_YET_DEPLOYED} from '@marcusrbrown/infra-shared/status/history-schema'
 import {describe, expect, it} from 'bun:test'
 
 import {
@@ -8,9 +9,11 @@ import {
   coverageLabel,
   GAP_THRESHOLD_MS,
   isStale,
+  NOT_YET_DEPLOYED_LABEL,
   passLabel,
   PROBE_STALE_MS,
   STALE_THRESHOLD_MS,
+  VERDICT_DISPLAY,
 } from './history-view'
 
 const T0 = Date.parse('2026-11-01T10:00:00.000Z')
@@ -510,5 +513,84 @@ describe('buildHistoryView', () => {
     ])
     expect(views.keeweb.verdict).toBe('unknown')
     expect(views.keeweb.latestSampleAt).toBeUndefined()
+  })
+})
+
+describe('an app that is not yet deployed', () => {
+  // The two samples the live artifact held for `traces` before the snapshot stopped recording it: the deploy
+  // state read a cancelled first run (fail) and the probe could not resolve the host (unknown).
+  const incidentSamples = (): HistorySample[] =>
+    [-90, -60].map(minutes =>
+      sample(
+        minutes,
+        {'public-reachability': 'u', 'deploy-state': 'f'},
+        {'public-reachability': {reason: 'network-error'}, 'deploy-state': {since: at(-120)}},
+      ),
+    )
+  const now = new Date(at(0))
+
+  it('ignores every existing sample: no verdict, no figures, no observations', () => {
+    const view = buildAppView('traces', incidentSamples(), now, ['traces'])
+
+    expect(view.verdict).toBe('not_deployed')
+    expect(view.verdictLabel).toBe(NOT_YET_DEPLOYED_LABEL)
+    expect(view.latestSampleAt).toBeUndefined()
+    expect(view.observations).toEqual([])
+    expect(view.coverage.recorded).toBe(0)
+    expect(view.gaps).toEqual([])
+    expect(view.deploy.state).toBe('not_measured')
+    expect(view.endToEnd.measured).toBe(false)
+    for (const cell of Object.values(view.cells)) expect(cell.result).toBe('not_measured')
+  })
+
+  it('reads the same samples as a failure once the app is off the list', () => {
+    const view = buildAppView('traces', incidentSamples(), now, [])
+
+    expect(view.verdict).toBe('fail')
+    expect(view.verdictLabel).toBe('Failing: Deploy state')
+  })
+
+  it('leaves every other app alone', () => {
+    const view = buildAppView('keeweb', [sample(0, reachability('p'))], new Date(at(0)), ['traces'])
+
+    expect(view.verdict).toBe('pass')
+  })
+
+  it('stays apart from "No data yet": a deployed app with no samples is still unknown', () => {
+    const view = buildAppView('broker', [], now, ['traces'])
+
+    expect(view.verdict).toBe('unknown')
+    expect(view.verdictLabel).toBe('No samples recorded')
+  })
+
+  it('has its own display word, so it is never drawn as a failure', () => {
+    expect(VERDICT_DISPLAY.not_deployed.word).toBe(NOT_YET_DEPLOYED_LABEL)
+    expect(VERDICT_DISPLAY.not_deployed.symbol).not.toBe(VERDICT_DISPLAY.fail.symbol)
+  })
+
+  it('keeps a failing listed app out of every aggregate of the other apps', () => {
+    const apps = Object.fromEntries(APP_IDS.map(app => [app, [sample(-30, reachability('p'))]])) as History['apps']
+    apps.traces = incidentSamples()
+    const views = buildHistoryView({meta: {schemaVersion: 1, lastSampleAt: at(-30)}, apps}, now, ['traces'])
+
+    expect(Object.values(views).filter(view => view.verdict === 'fail')).toEqual([])
+    expect(
+      Object.values(views)
+        .filter(view => view.verdict === 'not_deployed')
+        .map(view => view.app),
+    ).toEqual(['traces'])
+    expect(views.keeweb.verdict).toBe('pass')
+  })
+
+  // Wiring with the real list, no injection. Delete with the other traces tripwire when traces is deployed.
+  it('hides traces from the real list of not-yet-deployed apps', () => {
+    expect(APPS_NOT_YET_DEPLOYED).toContain('traces')
+    const apps = Object.fromEntries(APP_IDS.map(app => [app, [sample(-30, reachability('p'))]])) as History['apps']
+    apps.traces = incidentSamples()
+
+    const views = buildHistoryView({meta: {schemaVersion: 1, lastSampleAt: at(-30)}, apps}, now)
+
+    expect(views.traces.verdict).toBe('not_deployed')
+    expect(views.traces.latestSampleAt).toBeUndefined()
   })
 })

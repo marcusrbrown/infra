@@ -6,7 +6,12 @@ import type {
   SampleDetail,
 } from '@marcusrbrown/infra-shared/status/history-schema'
 
-import {APP_IDS, HISTORY_WINDOW_MS, OBSERVATION_KINDS_BY_ID} from '@marcusrbrown/infra-shared/status/history-schema'
+import {
+  APP_IDS,
+  APPS_NOT_YET_DEPLOYED,
+  HISTORY_WINDOW_MS,
+  OBSERVATION_KINDS_BY_ID,
+} from '@marcusrbrown/infra-shared/status/history-schema'
 
 /**
  * Pure view model for the status pages: what the latest sample proves, how many samples passed, how much of
@@ -116,7 +121,13 @@ export interface Cell {
   note: string | undefined
 }
 
-export type Verdict = 'fail' | 'unknown' | 'partial' | 'pass'
+/** `not_deployed` is no health claim at all: the app is on `APPS_NOT_YET_DEPLOYED`, so its samples are ignored. */
+export type Verdict = 'fail' | 'unknown' | 'partial' | 'pass' | 'not_deployed'
+
+export const NOT_YET_DEPLOYED_LABEL = 'Not yet deployed'
+/** The one statement a not-yet-deployed service page makes; the build check looks for it. */
+export const NOT_YET_DEPLOYED_TEXT =
+  'Not yet deployed. No checks run and no status is shown for this service until it is deployed.'
 
 export interface AppView {
   app: AppId
@@ -303,8 +314,18 @@ function verdictFor(
   return {verdict: 'pass', label: 'Reachable; last deploy succeeded'}
 }
 
-/** One app's view at `now`. Only samples inside the 90-day window count. */
-export function buildAppView(app: AppId, samples: readonly HistorySample[], now: Date): AppView {
+/**
+ * One app's view at `now`. Only samples inside the 90-day window count. An app in `notYetDeployed` gets a view with no
+ * samples, however many the history holds: an earlier snapshot may have recorded a failure for a host that never existed.
+ */
+export function buildAppView(
+  app: AppId,
+  allSamples: readonly HistorySample[],
+  now: Date,
+  notYetDeployed: readonly AppId[] = APPS_NOT_YET_DEPLOYED,
+): AppView {
+  const hidden = notYetDeployed.includes(app)
+  const samples = hidden ? [] : allSamples
   const floor = now.getTime() - HISTORY_WINDOW_MS
   const inWindow = samples.filter(sample => sampleMs(sample) >= floor).toSorted((a, b) => sampleMs(a) - sampleMs(b))
   const latest = inWindow.at(-1)
@@ -338,12 +359,16 @@ export function buildAppView(app: AppId, samples: readonly HistorySample[], now:
   const first = inWindow[0]
   const windowStart = Math.max(first === undefined ? floor : sampleMs(first), floor)
   const windowEnd = Math.max(now.getTime(), windowStart)
-  const {verdict, label} = verdictFor(app, cells, deploy, endToEnd, latest !== undefined)
+  const computed = verdictFor(app, cells, deploy, endToEnd, latest !== undefined)
+  const {verdict, label}: {verdict: Verdict; label: string} = hidden
+    ? {verdict: 'not_deployed', label: NOT_YET_DEPLOYED_LABEL}
+    : computed
 
   return {
     app,
     latestSampleAt: latest?.t,
-    observations,
+    // A hidden app declares observations, but none is shown for it.
+    observations: hidden ? [] : observations,
     cells,
     coverage: {
       recorded: inWindow.length,
@@ -362,11 +387,14 @@ export function buildAppView(app: AppId, samples: readonly HistorySample[], now:
   }
 }
 
-export function buildHistoryView(history: History, now: Date): Record<AppId, AppView> {
-  return Object.fromEntries(APP_IDS.map(app => [app, buildAppView(app, history.apps[app], now)])) as Record<
-    AppId,
-    AppView
-  >
+export function buildHistoryView(
+  history: History,
+  now: Date,
+  notYetDeployed: readonly AppId[] = APPS_NOT_YET_DEPLOYED,
+): Record<AppId, AppView> {
+  return Object.fromEntries(
+    APP_IDS.map(app => [app, buildAppView(app, history.apps[app], now, notYetDeployed)]),
+  ) as Record<AppId, AppView>
 }
 
 export const VERDICT_DISPLAY: Record<Verdict, {symbol: string; word: string}> = {
@@ -374,6 +402,7 @@ export const VERDICT_DISPLAY: Record<Verdict, {symbol: string; word: string}> = 
   partial: {symbol: '⚠️', word: 'Partly measured'},
   unknown: {symbol: '❓', word: 'Unknown'},
   fail: {symbol: '❌', word: 'Failing'},
+  not_deployed: {symbol: '⚪', word: NOT_YET_DEPLOYED_LABEL},
 }
 
 /** Bounded detail as short text: only the closed set of scalar fields a sample can carry. */

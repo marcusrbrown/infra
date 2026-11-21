@@ -1,9 +1,12 @@
+import type {AppId} from '@marcusrbrown/infra-shared/status/history-schema'
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {dirname, join} from 'node:path'
-import {APP_IDS} from '@marcusrbrown/infra-shared/status/history-schema'
+
+import {APP_IDS, APPS_NOT_YET_DEPLOYED} from '@marcusrbrown/infra-shared/status/history-schema'
 import {afterEach, describe, expect, it} from 'bun:test'
 
+import {NOT_YET_DEPLOYED_LABEL, NOT_YET_DEPLOYED_TEXT} from '../src/lib/history-view'
 import {FIXTURE_MARKER, STALE_HOOK, verifyStatusOutput, visibleText} from './verify-status-output'
 
 const scratch: string[] = []
@@ -15,8 +18,16 @@ const LAST_SAMPLE = `<p>Last sample <time>2026-11-01 10:00 UTC</time></p><p ${ST
 const COVERAGE = '<p>3 samples recorded of about 3 expected</p>'
 const PASSED = '<td>3 of 3 samples passed</td>'
 
-const STATUS = `<main>${LAST_SAMPLE}</main>`
 const SERVICE = `<main>${LAST_SAMPLE}${COVERAGE}${PASSED}</main>`
+/** What `AppStatus.astro` renders for an app that is not yet deployed. */
+const NOT_DEPLOYED_SERVICE = `<main>${LAST_SAMPLE}<h2>Current status</h2><p>${NOT_YET_DEPLOYED_TEXT}</p></main>`
+/** What `status.astro` renders for its row. */
+const notDeployedRow = (app: AppId): string =>
+  `<tr><th scope="row"><a href="/infra/services/${app}/">${app}</a></th><td colspan="3">${NOT_YET_DEPLOYED_LABEL}</td><td>${NOT_YET_DEPLOYED_LABEL}</td></tr>`
+
+/** A status page body that holds `inner` and a table row for every app on the real list. */
+const statusBody = (inner: string): string =>
+  `<main>${inner}<table><tbody>${APPS_NOT_YET_DEPLOYED.map(notDeployedRow).join('')}</tbody></table></main>`
 
 interface DistOptions {
   fixture: boolean
@@ -26,6 +37,12 @@ interface DistOptions {
   status?: string
   /** Replaces the gateway service page body; every other service page keeps the full body. */
   gateway?: string
+  /** The apps that are not yet deployed; their pages and status rows are built as such. Defaults to the real list. */
+  notYetDeployed?: readonly AppId[]
+  /** Replaces one app's service page body. */
+  bodies?: Partial<Record<AppId, string>>
+  /** Replaces one app's row on the status page. */
+  rows?: Partial<Record<AppId, string>>
 }
 
 function buildDist(options: DistOptions): string {
@@ -38,8 +55,13 @@ function buildDist(options: DistOptions): string {
     mkdirSync(dirname(path), {recursive: true})
     writeFileSync(path, `<html><body>${marker}${body}${options.extra ?? ''}</body></html>`)
   }
-  write('status', options.status ?? STATUS)
-  for (const app of APP_IDS) write(`services/${app}`, app === 'gateway' ? (options.gateway ?? SERVICE) : SERVICE)
+  const hidden = options.notYetDeployed ?? APPS_NOT_YET_DEPLOYED
+  const rows = hidden.map(app => options.rows?.[app] ?? notDeployedRow(app)).join('')
+  write('status', options.status ?? `<main>${LAST_SAMPLE}<table><tbody>${rows}</tbody></table></main>`)
+  for (const app of APP_IDS) {
+    const normal = app === 'gateway' ? (options.gateway ?? SERVICE) : SERVICE
+    write(`services/${app}`, options.bodies?.[app] ?? (hidden.includes(app) ? NOT_DEPLOYED_SERVICE : normal))
+  }
   return dist
 }
 
@@ -98,7 +120,7 @@ describe('verifyStatusOutput: each required item', () => {
   })
 
   it('reports a status page with no "Last sample"', () => {
-    const dist = buildDist({fixture: false, status: `<main><p ${STALE_HOOK} hidden>stale</p></main>`})
+    const dist = buildDist({fixture: false, status: statusBody(`<p ${STALE_HOOK} hidden>stale</p>`)})
 
     expect(verifyStatusOutput(dist, {expectFixture: false})).toEqual(['status: missing the last-sample time'])
   })
@@ -121,7 +143,7 @@ describe('verifyStatusOutput: each required item', () => {
   })
 
   it('reports a status page with no stale-warning hook', () => {
-    const dist = buildDist({fixture: false, status: '<main><p>Last sample <time>x</time></p></main>'})
+    const dist = buildDist({fixture: false, status: statusBody('<p>Last sample <time>x</time></p>')})
 
     expect(verifyStatusOutput(dist, {expectFixture: false})).toEqual(['status: missing the stale-warning hook'])
   })
@@ -161,6 +183,108 @@ describe('verifyStatusOutput: a service with no samples yet', () => {
       'services/gateway: missing the coverage figure',
       'services/gateway: missing "N of M samples passed"',
     ])
+  })
+})
+
+describe('verifyStatusOutput: a service that is not yet deployed', () => {
+  const HIDDEN: readonly AppId[] = ['traces']
+  const check = (dist: string) => verifyStatusOutput(dist, {expectFixture: false, notYetDeployed: HIDDEN})
+  const dist = (options: Partial<DistOptions> = {}) => buildDist({fixture: false, notYetDeployed: HIDDEN, ...options})
+
+  it('passes for the statement, with no coverage or passed-sample figure', () => {
+    expect(check(dist())).toEqual([])
+  })
+
+  it('reports a page that shows its health instead of the statement', () => {
+    const problems = check(dist({bodies: {traces: SERVICE}}))
+
+    expect(problems).toContain('services/traces: missing the not-yet-deployed statement')
+    expect(problems).toContain('services/traces: shows a coverage figure for an app that is not yet deployed')
+    expect(problems).toContain('services/traces: shows a passed-sample count for an app that is not yet deployed')
+  })
+
+  it.each(['Failing: Deploy state', 'Checks passed', 'Partly measured', 'Unknown: Reachability'])(
+    'reports the verdict text "%s" on it',
+    verdict => {
+      const body = `<main>${LAST_SAMPLE}<p>${NOT_YET_DEPLOYED_TEXT}</p><p>${verdict}</p></main>`
+
+      expect(check(dist({bodies: {traces: body}}))).toEqual([
+        'services/traces: shows a verdict for an app that is not yet deployed',
+      ])
+    },
+  )
+
+  it('reports the "No data yet" text on it: that state belongs to a deployed app', () => {
+    const body = `<main>${LAST_SAMPLE}<p>${NOT_YET_DEPLOYED_TEXT}</p><p>No data yet. No samples have been recorded for this service.</p></main>`
+
+    expect(check(dist({bodies: {traces: body}}))).toEqual([
+      'services/traces: shows "No data yet" for an app that is not yet deployed',
+    ])
+  })
+
+  it('still requires the last-sample time and the stale-warning hook, and still reports a percentage', () => {
+    const body = `<main><p>${NOT_YET_DEPLOYED_TEXT}</p><p>99%</p></main>`
+
+    expect(check(dist({bodies: {traces: body}}))).toEqual([
+      'services/traces: shows a percentage next to a figure',
+      'services/traces: missing the last-sample time',
+      'services/traces: missing the stale-warning hook',
+    ])
+  })
+
+  it('reports a status row that shows results instead of the statement', () => {
+    const row =
+      '<tr><th scope="row"><a href="/infra/services/traces/">traces</a></th><td>❌ Fail</td><td>❓ Unknown</td><td>⚪ Not measured</td><td>❌ Failing: Deploy state</td></tr>'
+
+    expect(check(dist({rows: {traces: row}}))).toEqual([
+      'status: the traces row does not say it is not yet deployed',
+      'status: the traces row shows a result or verdict for an app that is not yet deployed',
+    ])
+  })
+
+  it('reports a status page that has no row for it', () => {
+    const status = `<main>${LAST_SAMPLE}<table><tbody></tbody></table></main>`
+
+    expect(check(dist({status}))).toEqual(['status: no row for traces'])
+  })
+
+  it('still holds every other service to the coverage and passed-sample figures', () => {
+    const body = `<main>${LAST_SAMPLE}</main>`
+
+    expect(check(dist({bodies: {gateway: body}}))).toEqual([
+      'services/gateway: missing the coverage figure',
+      'services/gateway: missing "N of M samples passed"',
+    ])
+  })
+
+  it('expects a normal page for the app once the list is empty', () => {
+    const normal = verifyStatusOutput(buildDist({fixture: false, notYetDeployed: []}), {
+      expectFixture: false,
+      notYetDeployed: [],
+    })
+    const staleStatement = verifyStatusOutput(
+      buildDist({fixture: false, notYetDeployed: [], bodies: {traces: NOT_DEPLOYED_SERVICE}}),
+      {
+        expectFixture: false,
+        notYetDeployed: [],
+      },
+    )
+
+    expect(normal).toEqual([])
+    expect(staleStatement).toEqual([
+      'services/traces: missing the coverage figure',
+      'services/traces: missing "N of M samples passed"',
+    ])
+  })
+
+  // Wiring with the real list, no injection. Delete with the other traces tripwire when traces is deployed.
+  it('applies the real not-yet-deployed list when none is injected', () => {
+    expect(APPS_NOT_YET_DEPLOYED).toContain('traces')
+    const built = buildDist({fixture: false, bodies: {traces: SERVICE}})
+
+    expect(verifyStatusOutput(built, {expectFixture: false})).toContain(
+      'services/traces: missing the not-yet-deployed statement',
+    )
   })
 })
 

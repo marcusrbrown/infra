@@ -101,24 +101,31 @@ async function readAppDeployState(app: AppId, fetchFn: FetchLike, token: string,
   return observe(SPEC, mapping.result, {detail, now})
 }
 
+export interface DeployStateReadOptions extends GitHubReadOptions {
+  /** Read only these apps. Absent means every app; an app left out is not requested and has no entry in the result. */
+  apps?: readonly AppId[] | undefined
+}
+
 /**
- * One `deploy-state` observation per app. Without a token nothing is requested and every app is
- * `not_measured`. A failure for one app never affects another.
+ * One `deploy-state` observation per app, or per app in `options.apps`. Without a token nothing is requested and
+ * every app read is `not_measured`. A failure for one app never affects another.
  */
-export async function readDeployStates(options: GitHubReadOptions): Promise<Record<AppId, Observation>> {
+export async function readDeployStates(
+  options: GitHubReadOptions & {apps?: undefined},
+): Promise<Record<AppId, Observation>>
+export async function readDeployStates(options: DeployStateReadOptions): Promise<Partial<Record<AppId, Observation>>>
+export async function readDeployStates(options: DeployStateReadOptions): Promise<Partial<Record<AppId, Observation>>> {
   const now = options.now ?? new Date()
   const {token} = options
+  const apps = options.apps ?? APP_IDS
   if (!hasToken(token)) {
-    return Object.fromEntries(APP_IDS.map(app => [app, notMeasured(SPEC, 'missing-config')])) as Record<
-      AppId,
-      Observation
-    >
+    return Object.fromEntries(apps.map(app => [app, notMeasured(SPEC, 'missing-config')]))
   }
 
   const fetchFn: FetchLike = options.fetch ?? fetch
   const entries = await Promise.all(
-    APP_IDS.map(async app => [app, await readAppDeployState(app, fetchFn, token, now)] as const),
+    apps.map(async app => [app, await readAppDeployState(app, fetchFn, token, now)] as const),
   )
 
-  return Object.fromEntries(entries) as Record<AppId, Observation>
+  return Object.fromEntries(entries)
 }

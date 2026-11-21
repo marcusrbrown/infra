@@ -5,7 +5,13 @@ import {APP_IDS} from '@marcusrbrown/infra-shared/status/history-schema'
 import LastSample from '../components/LastSample.astro'
 import StatusNotes from '../components/StatusNotes.astro'
 import {SERVICES} from '../data/services'
-import {PROOF_KINDS, PROOF_LABELS, RESULT_DISPLAY, VERDICT_DISPLAY} from '../lib/history-view'
+import {
+  NOT_YET_DEPLOYED_LABEL,
+  PROOF_KINDS,
+  PROOF_LABELS,
+  RESULT_DISPLAY,
+  VERDICT_DISPLAY,
+} from '../lib/history-view'
 import {loadStatusData} from '../lib/status-data'
 
 const {source, meta, views} = loadStatusData()
@@ -37,6 +43,18 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/')
           APP_IDS.map(app => {
             const view = views[app]
             const verdict = VERDICT_DISPLAY[view.verdict]
+            // An app that is not yet deployed has no results to show: one statement across the proof columns.
+            if (view.verdict === 'not_deployed') {
+              return (
+                <tr>
+                  <th scope="row">
+                    <a href={`${base}services/${app}/`}>{SERVICES[app].title}</a>
+                  </th>
+                  <td colspan={PROOF_KINDS.length}>{NOT_YET_DEPLOYED_LABEL}</td>
+                  <td>{verdict.symbol} {verdict.word}</td>
+                </tr>
+              )
+            }
             return (
               <tr>
                 <th scope="row">

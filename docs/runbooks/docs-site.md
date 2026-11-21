@@ -128,7 +128,13 @@ If snapshots were off for more than 7 days, the history has expired; follow the 
 
 `APPS_NOT_YET_DEPLOYED` in `packages/shared/status/history-schema.ts` names apps whose host does not exist yet (`traces` today). While an app is on it, `status snapshot` does not probe it, does not read its deployments, and writes no sample for it. The site ignores any sample the history already holds for it, so its service page and its `/status/` row say "Not yet deployed" and show no verdict. `infra status` is not public and still reports the app from its real observations.
 
-Take the app off the list in the same change that first deploys it. Old samples stay in the history and age out after 90 days. Until the first snapshot after the change lands, the page reads them as the newest samples, so it can show the old failure for up to 30 minutes: dispatch `Status Snapshot` as soon as the change is on `main`. The page then lists one gap, from the last old sample to the first new one, and counts the old failures with the other samples. That is accurate but looks like an outage. If it is not acceptable, drop the app's old samples from the artifact before the change merges; there is no tool for that today.
+Take the app off the list in this order. The status snapshot and the Site publish do not wait for the gated deploy, so removing the app in the deploying change would record failures until the deploy finishes.
+
+1. Deploy the app and confirm the deploy succeeded.
+2. In a follow-up change, remove its id from `APPS_NOT_YET_DEPLOYED`, delete the tests marked for deletion at that point, and remove "Not yet deployed" from its entry in `apps/docs/src/data/services.ts`.
+3. After that change merges, dispatch `Status Snapshot` so the page gets a fresh sample at once.
+
+Old samples stay in the history and age out after 90 days. Until the first snapshot after the change lands, the page reads them as the newest samples, so it can show the old failure for up to 30 minutes; step 3 shortens that. The page then lists one gap, from the last old sample to the first new one, and counts the old failures with the other samples. That is accurate but looks like an outage. If it is not acceptable, drop the app's old samples from the artifact before the change merges; there is no tool for that today.
 
 ---
 

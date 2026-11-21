@@ -1,4 +1,4 @@
-import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
+import {chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -1496,6 +1496,14 @@ describe('the detail listener', () => {
 
 // ─── Real file readers ────────────────────────────────────────────────────────
 
+/** The Tempo age check of a whole run whose block listing reads a real directory. */
+async function tempoAge(root: string): Promise<CheckResult> {
+  const world = harness()
+  const reporter = createReporter({...world.deps, readTempoBlockMetas: () => readTempoBlockMetasFrom(root)})
+  await reporter.runOnce()
+  return check(reporter.detail(), 'data-age-tempo')
+}
+
 describe('Tempo block files', () => {
   it('reads meta.json under blocks/<tenant>/<block>, skipping a block with none', async () => {
     const root = mkdtempSync(join(tmpdir(), 'traces-blocks-'))
@@ -1507,6 +1515,89 @@ describe('Tempo block files', () => {
     } finally {
       rmSync(root, {recursive: true, force: true})
     }
+  })
+
+  // The layout seen on the host: `work.json` beside the tenant directory, a compacted block with only
+  // `meta.compacted.json`, and stray files inside the tenant directory.
+  it('ignores files beside the tenant and block directories', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'traces-blocks-'))
+    try {
+      mkdirSync(join(root, 'single-tenant', 'live'), {recursive: true})
+      mkdirSync(join(root, 'single-tenant', 'compacted'), {recursive: true})
+      writeFileSync(join(root, 'work.json'), '{}')
+      writeFileSync(join(root, 'single-tenant', 'index.json.gz'), 'x')
+      writeFileSync(join(root, 'single-tenant', 'live', 'meta.json'), '{"endTime":"2026-11-02T00:00:00Z"}')
+      writeFileSync(
+        join(root, 'single-tenant', 'compacted', 'meta.compacted.json'),
+        '{"endTime":"2026-10-01T00:00:00Z"}',
+      )
+      expect(await readTempoBlockMetasFrom(root)).toEqual(['{"endTime":"2026-11-02T00:00:00Z"}'])
+    } finally {
+      rmSync(root, {recursive: true, force: true})
+    }
+  })
+
+  // A new host has no blocks: Tempo has not flushed one yet. The age check is then a pass, as it is for an empty ClickHouse
+  // or object store, never `unknown`: an unknown check fails the verdict and ingest could never open.
+  describe('on a new host', () => {
+    it.each([
+      ['blocks/ exists and is empty', (_root: string) => undefined],
+      ['blocks/ does not exist yet', (root: string) => rmSync(root, {recursive: true})],
+      ['blocks/<tenant>/ is empty', (root: string) => mkdirSync(join(root, 'single-tenant'))],
+      [
+        'blocks/<tenant>/ holds only the tenant index, which is a file and not a block',
+        (root: string) => {
+          mkdirSync(join(root, 'single-tenant'))
+          writeFileSync(join(root, 'single-tenant', 'index.json.gz'), 'x')
+        },
+      ],
+      [
+        'blocks/<tenant>/ holds a block with no meta.json yet',
+        (root: string) => mkdirSync(join(root, 'single-tenant', 'block-a'), {recursive: true}),
+      ],
+    ])('passes as "Tempo is empty" when %s', async (_name, arrange) => {
+      const root = mkdtempSync(join(tmpdir(), 'traces-blocks-'))
+      try {
+        arrange(root)
+        expect(await tempoAge(root)).toMatchObject({status: 'pass', detail: 'Tempo is empty'})
+      } finally {
+        rmSync(root, {recursive: true, force: true})
+      }
+    })
+
+    it('reports the age of the oldest block when blocks are there', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'traces-blocks-'))
+      try {
+        for (const [block, days] of [
+          ['block-a', 3],
+          ['block-b', 1],
+        ] as const) {
+          mkdirSync(join(root, 'single-tenant', block), {recursive: true})
+          writeFileSync(
+            join(root, 'single-tenant', block, 'meta.json'),
+            JSON.stringify({endTime: new Date(NOW - days * DAY).toISOString()}),
+          )
+        }
+        expect(await tempoAge(root)).toMatchObject({status: 'pass', detail: 'Tempo oldest data is 3.0 days old'})
+      } finally {
+        rmSync(root, {recursive: true, force: true})
+      }
+    })
+
+    // The failure seen on the first deploy: Tempo's directories are 0700, so another user cannot list them.
+    it.skipIf(process.getuid?.() === 0)('is unknown, never a pass, when blocks/ cannot be listed', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'traces-blocks-'))
+      try {
+        mkdirSync(join(root, 'blocks'), {mode: 0o000})
+        expect(await tempoAge(join(root, 'blocks'))).toMatchObject({
+          status: 'unknown',
+          detail: 'Tempo age unreadable (blocks-unreadable)',
+        })
+      } finally {
+        chmodSync(join(root, 'blocks'), 0o700)
+        rmSync(root, {recursive: true, force: true})
+      }
+    })
   })
 
   it('treats a directory that does not exist yet as empty, and any other failure as an error', async () => {

@@ -74,6 +74,7 @@ import {
 import {PATHS} from './health-report'
 import {
   SENDER_GROUPS,
+  TEMPO_USER_ID,
   TRACES_APP_DIR,
   TRACES_DEPLOY_MARKER,
   TRACES_DEPLOY_STEP_LOCK,
@@ -360,8 +361,15 @@ describe('what lands on the host', () => {
     expect(byPath['secrets/collector/langfuse-basic']).toMatchObject({owner: 'root:65532', mode: '0440'})
     expect(byPath['secrets/grafana/admin-password']).toMatchObject({owner: '472:472', mode: '0400'})
     expect(byPath['secrets/grafana/secret-key']).toMatchObject({owner: '472:472', mode: '0400'})
-    expect(byPath['secrets/reporter/clickhouse-password']).toMatchObject({owner: '10010:10010', mode: '0400'})
-    expect(byPath['secrets/reporter/minio-password']).toMatchObject({owner: '10010:10010', mode: '0400'})
+    // The reporter runs as Tempo's user (Tempo's directories are 0700), so its files belong to that user.
+    const reporter = `${TEMPO_USER_ID}:${TEMPO_USER_ID}`
+    expect(byPath['secrets/reporter/clickhouse-password']).toMatchObject({owner: reporter, mode: '0400'})
+    expect(byPath['secrets/reporter/minio-password']).toMatchObject({owner: reporter, mode: '0400'})
+  })
+
+  it("gives the reporter's secret directory to the reporter's group", () => {
+    const script = prepareDirsScript(ID_A)
+    expect(script).toContain(`-g ${TEMPO_USER_ID} -m 0750 ${TRACES_APP_DIR}/secrets/reporter`)
   })
 
   it('puts each secret where the consumer reads it', () => {
@@ -435,8 +443,8 @@ describe('remote scripts', () => {
     removeMarker: removeOwnFileScript(ID_A, '.deploy-in-progress'),
     prepareDirs: prepareDirsScript(ID_A),
     tokenDirs: tokenDirsScript(),
-    comparePlain: compareFileScript('config/otelcol.yaml', 'plain'),
-    compareEnv: compareFileScript('.env', 'env'),
+    comparePlain: compareFileScript('config/otelcol.yaml', 'plain', {owner: 'root:root', mode: '0644'}),
+    compareEnv: compareFileScript('.env', 'env', {owner: 'root:root', mode: '0600'}),
     writePlain: writeFileScript(ID_A, {
       path: 'secrets/grafana/admin-password',
       owner: '472:472',
@@ -533,6 +541,20 @@ describe('remote scripts', () => {
     expect(scripts.comparePlain).toContain('cmp -s')
   })
 
+  it('compares the numeric owner and the mode too, naming the pair the file should have', () => {
+    expect(scripts.comparePlain).toContain("stat -c '%u:%g %a'")
+    expect(scripts.comparePlain).toContain(`[ "$attr" = '0:0 644' ]`)
+    expect(scripts.compareEnv).toContain(`[ "$attr" = '0:0 600' ]`)
+    const attrs = (owner: string, mode: string): string => compareFileScript('x', 'plain', {owner, mode})
+    expect(attrs('root:65532', '0440')).toContain(`[ "$attr" = '0:65532 440' ]`)
+    expect(attrs('472:472', '0400')).toContain(`[ "$attr" = '472:472 400' ]`)
+    expect(attrs(`${TEMPO_USER_ID}:${TEMPO_USER_ID}`, '0400')).toContain(
+      `[ "$attr" = '${TEMPO_USER_ID}:${TEMPO_USER_ID} 400' ]`,
+    )
+    expect(() => attrs('root:root; id', '0644')).toThrow('owner')
+    expect(() => attrs('root:root', '644')).toThrow('mode')
+  })
+
   it('probe ingest from inside the host, through the real route, printing no body', () => {
     const script = scripts.probeIngest ?? ''
     expect(script).toContain('--resolve traces.fro.bot:443:127.0.0.1')
@@ -627,6 +649,16 @@ describe('remote scripts', () => {
       expect(readFileSync(existing).equals(bytes)).toBe(true)
       const afterStat = statSync(existing)
       expect([afterStat.mtimeMs, afterStat.size, afterStat.mode]).toEqual([before.mtimeMs, before.size, before.mode])
+
+      // Whatever mode an existing token file has, it is left as it is: not compared, not corrected, not rewritten.
+      for (const mode of [0o644, 0o400, 0o666, 0o000]) {
+        chmodSync(existing, mode)
+        const modeBefore = statSync(existing).mode
+        expect(runScript('fro-bot', `${voidLine}\n`)).toEqual({out: 'TRACES_TOKEN_PRESENT', code: 0})
+        expect(statSync(existing).mode).toBe(modeBefore)
+      }
+      chmodSync(existing, 0o600)
+      expect(readFileSync(existing).equals(bytes)).toBe(true)
 
       // An existing empty file is not repaired here either: the gate reports it.
       expect(runScript('workstation', `${voidLine}\n`)).toEqual({out: 'TRACES_TOKEN_PRESENT', code: 0})
@@ -1652,6 +1684,134 @@ describe("the route after a failure follows the host, not this deploy's last wri
   })
 })
 
+// The comparison runs after the deploy took its marker. A step of it that fails (a lost reply, or `stat` failing on the host)
+// used to leave the deploy with the marker, an open route still open, and no word about the route.
+describe('a failure while the files are compared with the host', () => {
+  const compareFails = failAt('compare:config/otelcol.yaml')
+  const changing = (step: string): boolean =>
+    step.startsWith('write:') ||
+    step.startsWith('up-') ||
+    step.startsWith('token-file:') ||
+    ['pull', 'prune-images', 'prepare-dirs', 'create-collector', 'queue-volume'].includes(step)
+
+  function expectNothingChanged(host: FakeHost, start: number): void {
+    expect(host.calls.slice(start).filter(call => changing(call.step))).toEqual([])
+    expect(host.pendingRestarts).toEqual([])
+  }
+
+  it('holds an open route, proves it, keeps the marker and says nothing was changed', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    host.options.override = compareFails
+    const error = await failure(host)
+
+    expect(error.name).toBe('FilesNotComparedError')
+    expect((error as Error & {ingest?: string}).ingest).toBe('held')
+    expect(error).not.toBeInstanceOf(AppliedButUnverifiedError)
+    expect(error.message).toContain('could not be compared')
+    expect(error.message).toContain('compare:config/otelcol.yaml failed')
+    expect(error.message).toContain('Nothing was updated')
+    expect(error.message).toContain('Ingest is held')
+    expect(error.message).toContain('marker')
+    // Nothing claims the host was updated.
+    expect(error.message).not.toMatch(/host was updated|Applied but unverified/)
+
+    // The route: held, from the host's own answer, and proven on every ingest path.
+    expect(host.served).toBe('held')
+    expect(host.envState).toBe('held')
+    expect(host.setStates()).toEqual(['open', 'held'])
+    const lastHold = host.calls.findLastIndex(call => call.step === 'raw:set-state:held')
+    expect(host.calls.slice(lastHold).some(call => call.step === 'probe-ingest')).toBe(true)
+    // The marker stays, so the next deploy holds first.
+    expect(host.marker).toMatch(MARKER_FORMAT)
+    expectNothingChanged(host, start)
+  })
+
+  it('says so, and to hold by hand, when the route cannot be secured either', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    host.options.override = (step, call) => {
+      if (step === 'ingest-state' || call.command.includes('TRACES_INGEST_STATE_SET=')) {
+        return {exitCode: 255, stdout: '', stderr: 'ssh: connection lost'}
+      }
+      return compareFails(step)
+    }
+    const error = await failure(host)
+
+    expect(error.name).toBe('FilesNotComparedError')
+    expect((error as Error & {ingest?: string}).ingest).toBe('unknown')
+    expect(error.message).toContain('could not be compared')
+    expect(error.message).toContain('Nothing was updated')
+    expect(error.message).toContain('may be open')
+    expect(error.message).toContain('traces ingest hold')
+    expect(error.message).not.toMatch(/host was updated|Applied but unverified/)
+    expect(host.marker).toMatch(MARKER_FORMAT)
+    expectNothingChanged(host, start)
+  })
+
+  it('keeps a held route held: nothing is set again, the marker stays', async () => {
+    const host = await openStack()
+    host.envState = 'held'
+    host.served = 'held'
+    const start = host.calls.length
+    host.options.override = compareFails
+    const error = await failure(host)
+
+    expect(error.name).toBe('FilesNotComparedError')
+    expect((error as Error & {ingest?: string}).ingest).toBe('held')
+    expect(error.message).toContain('Ingest is held')
+    expect(host.served).toBe('held')
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.marker).toMatch(MARKER_FORMAT)
+    expectNothingChanged(host, start)
+  })
+
+  it('leaves a host with no route as it is: ingest is off, nothing is set, the marker stays', async () => {
+    const host = new FakeHost({override: compareFails})
+    const error = await failure(host)
+
+    expect(error.name).toBe('FilesNotComparedError')
+    expect((error as Error & {ingest?: string}).ingest).toBe('off')
+    expect(error.message).toContain('Ingest is off')
+    expect(host.setStates()).toEqual([])
+    expect(host.marker).toMatch(MARKER_FORMAT)
+    expectNothingChanged(host, 0)
+  })
+
+  it('does not hold, probe or read the route when the deploy was overtaken meanwhile', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    host.options.override = step =>
+      step === 'compare:config/otelcol.yaml' ? {exitCode: 1, stdout: 'DEPLOY_OVERTAKEN\n', stderr: ''} : undefined
+    const error = await failure(host)
+
+    expect(error).toBeInstanceOf(DeployOvertakenError)
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    const steps = host.calls.slice(start).map(call => call.step)
+    expect(steps).not.toContain('ingest-state')
+    expect(steps).not.toContain('probe-ingest')
+    expectNothingChanged(host, start)
+  })
+
+  it('does not touch the route when a step reports the deploy step lock busy: its own error, as before', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    host.options.override = step =>
+      step === 'compare:config/otelcol.yaml' ? {exitCode: 1, stdout: 'DEPLOY_STEP_BUSY\n', stderr: ''} : undefined
+    const error = await failure(host)
+
+    expect(error.name).toBe('DeployStepBusyError')
+    expect(error.message).not.toContain('could not be compared')
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    const steps = host.calls.slice(start).map(call => call.step)
+    expect(steps).not.toContain('ingest-state')
+    expect(steps).not.toContain('probe-ingest')
+    expectNothingChanged(host, start)
+  })
+})
+
 async function holdsFor(
   change: (host: FakeHost) => void,
 ): Promise<{host: FakeHost; result: DeployResult; after: string[]}> {
@@ -1939,10 +2099,20 @@ function runLocally(script: string, root: string, shim?: string, stdin?: string)
   return {out: result.stdout.toString(), code: result.exitCode}
 }
 
+/** The host is Ubuntu (GNU coreutils). macOS `stat` has no `-c`, so a shim stands in for the one form the scripts use. */
+const HAS_GNU_STAT = Bun.spawnSync(['stat', '-c', '%u', '/']).exitCode === 0
+
 function scratchHost(): {root: string; shim: string; cleanup: () => void} {
   const root = mkdtempSync(join(tmpdir(), 'traces-script-test-'))
   const shim = join(root, 'shim')
   mkdirSync(shim)
+  if (!HAS_GNU_STAT) {
+    writeFileSync(
+      join(shim, 'stat'),
+      `#!/bin/sh\nif [ "$1" = -c ] && [ "$2" = '%u:%g %a' ]; then exec /usr/bin/stat -f '%u:%g %Lp' "$3"; fi\nexec /usr/bin/stat "$@"\n`,
+    )
+    chmodSync(join(shim, 'stat'), 0o755)
+  }
   // `chown` to another user needs root and there is no `flock` on every machine: both are no-ops here.
   for (const name of ['chown', 'flock']) {
     writeFileSync(join(shim, name), '#!/bin/sh\nexit 0\n')
@@ -2038,6 +2208,160 @@ describe('scripts run for real against a scratch app directory', () => {
   })
 })
 
+/** A scratch host and the owner (numeric, this user's) and mode a file in it can really have. */
+function compareHost(): ReturnType<typeof scratchHost> & {
+  file: string
+  mine: string
+  compare: (
+    path: string,
+    kind: 'plain' | 'env',
+    attrs: {owner: string; mode: string},
+    stdin: string,
+    shimPath?: string,
+  ) => {out: string; code: number}
+} {
+  const host = scratchHost()
+  const {uid, gid} = statSync(host.root)
+  const file = join(host.root, 'config.txt')
+  return {
+    ...host,
+    file,
+    mine: `${uid}:${gid}`,
+    compare: (path, kind, attrs, stdin, shimPath) =>
+      runLocally(compareFileScript(path, kind, attrs), host.root, shimPath ?? host.shim, stdin),
+  }
+}
+
+describe('the file comparison, run for real against a scratch app directory', () => {
+  const PLAIN = {owner: 'root:root', mode: '0644'} as const
+
+  it('says absent, different, and same, from the content', () => {
+    const host = compareHost()
+    try {
+      const attrs = {owner: host.mine, mode: '0644'}
+      expect(host.compare('config.txt', 'plain', attrs, 'a\n')).toEqual({out: 'TRACES_FILE_ABSENT\n', code: 0})
+      writeFileSync(host.file, 'a\n')
+      chmodSync(host.file, 0o644)
+      expect(host.compare('config.txt', 'plain', attrs, 'a\n')).toEqual({out: 'TRACES_FILE_SAME\n', code: 0})
+      expect(host.compare('config.txt', 'plain', attrs, 'b\n')).toEqual({out: 'TRACES_FILE_DIFFERENT\n', code: 0})
+    } finally {
+      host.cleanup()
+    }
+  })
+
+  it('says different, not same, when the content matches and the mode does not', () => {
+    const host = compareHost()
+    try {
+      writeFileSync(host.file, 'a\n')
+      chmodSync(host.file, 0o600)
+      expect(host.compare('config.txt', 'plain', {owner: host.mine, mode: '0644'}, 'a\n').out).toBe(
+        'TRACES_FILE_DIFFERENT\n',
+      )
+      expect(host.compare('config.txt', 'plain', {owner: host.mine, mode: '0600'}, 'a\n').out).toBe(
+        'TRACES_FILE_SAME\n',
+      )
+    } finally {
+      host.cleanup()
+    }
+  })
+
+  it('says different, not same, when the content matches and the owner does not', () => {
+    const host = compareHost()
+    try {
+      writeFileSync(host.file, 'a\n')
+      chmodSync(host.file, 0o644)
+      const [uid = '0', gid = '0'] = host.mine.split(':')
+      for (const other of [`${Number(uid) + 1}:${gid}`, `${uid}:${Number(gid) + 1}`]) {
+        expect(host.compare('config.txt', 'plain', {owner: other, mode: '0644'}, 'a\n').out).toBe(
+          'TRACES_FILE_DIFFERENT\n',
+        )
+      }
+      expect(host.compare('config.txt', 'plain', {owner: host.mine, mode: '0644'}, 'a\n').out).toBe(
+        'TRACES_FILE_SAME\n',
+      )
+    } finally {
+      host.cleanup()
+    }
+  })
+
+  it('reads root as 0, so a file the deploy would give to root is compared as 0:0', () => {
+    const host = compareHost()
+    try {
+      writeFileSync(host.file, 'a\n')
+      chmodSync(host.file, 0o644)
+      // Run unprivileged, the file belongs to this user: it can never match root:root unless this user is root.
+      const expected = host.mine === '0:0' ? 'TRACES_FILE_SAME\n' : 'TRACES_FILE_DIFFERENT\n'
+      expect(host.compare('config.txt', 'plain', PLAIN, 'a\n').out).toBe(expected)
+    } finally {
+      host.cleanup()
+    }
+  })
+
+  it('compares .env without its ingest-state line, and its owner and mode too', () => {
+    const host = compareHost()
+    try {
+      const env = join(host.root, '.env')
+      writeFileSync(env, 'A=1\nTRACES_INGEST_STATE=open\n')
+      chmodSync(env, 0o600)
+      const attrs = {owner: host.mine, mode: '0600'}
+      expect(host.compare('.env', 'env', attrs, 'A=1\n').out).toBe('TRACES_FILE_SAME\n')
+      expect(host.compare('.env', 'env', {...attrs, mode: '0640'}, 'A=1\n').out).toBe('TRACES_FILE_DIFFERENT\n')
+      expect(host.compare('.env', 'env', attrs, 'A=2\n').out).toBe('TRACES_FILE_DIFFERENT\n')
+    } finally {
+      host.cleanup()
+    }
+  })
+
+  it('writes nothing, and leaves no temporary file behind', () => {
+    const host = compareHost()
+    try {
+      writeFileSync(host.file, 'a\n')
+      chmodSync(host.file, 0o600)
+      const before = statSync(host.file)
+      const entries = readdirSync(host.root).sort()
+      const temporaries = (): string[] => readdirSync(tmpdir()).filter(name => name.startsWith('traces-cmp.'))
+      const left = temporaries()
+      host.compare('config.txt', 'plain', {owner: host.mine, mode: '0644'}, 'b\n')
+      host.compare('config.txt', 'plain', {owner: host.mine, mode: '0600'}, 'a\n')
+      const after = statSync(host.file)
+      expect([after.mtimeMs, after.size, after.mode, after.uid]).toEqual([
+        before.mtimeMs,
+        before.size,
+        before.mode,
+        before.uid,
+      ])
+      expect(readFileSync(host.file, 'utf8')).toBe('a\n')
+      expect(readdirSync(host.root).sort()).toEqual(entries)
+      expect(temporaries()).toEqual(left)
+    } finally {
+      host.cleanup()
+    }
+  })
+
+  it('fails, printing no sentinel, when the host cannot report the owner and mode (never counts it as same)', () => {
+    const host = compareHost()
+    try {
+      writeFileSync(host.file, 'a\n')
+      chmodSync(host.file, 0o644)
+      const broken = join(host.root, 'broken-shim')
+      mkdirSync(broken)
+      writeFileSync(join(broken, 'stat'), '#!/bin/sh\nexit 1\n')
+      chmodSync(join(broken, 'stat'), 0o755)
+      const answer = host.compare(
+        'config.txt',
+        'plain',
+        {owner: host.mine, mode: '0644'},
+        'a\n',
+        `${broken}:${host.shim}`,
+      )
+      expect(answer.code).not.toBe(0)
+      expect(answer.out).not.toContain('TRACES_FILE_')
+    } finally {
+      host.cleanup()
+    }
+  })
+})
+
 describe('retention', () => {
   it('asserts the TTL and the lifecycle rules after the stores are up and before Tempo and the collector start', async () => {
     const host = new FakeHost()
@@ -2120,6 +2444,113 @@ describe('the collector image and the host', () => {
 })
 
 const VOID_LINE_FORMAT = /^trc_void_[\w-]{43} void \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\n$/
+
+// The deploy rewrote a file only when its content differed. A file whose content matched but whose owner had to change (the
+// reporter's secrets, when the reporter's user changed) was left as it was, and the container could not read it.
+describe('a managed file whose content matches but whose owner or mode differs', () => {
+  const reporterOwner = `${TEMPO_USER_ID}:${TEMPO_USER_ID} 400`
+  const stepsSince = (host: FakeHost, start: number): string[] => host.calls.slice(start).map(call => call.step)
+
+  it('is left alone when content, owner and mode all match: no write, no hold, no recreate', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    const {result} = await run(host)
+    expect(result.changed).toEqual([])
+    expect(result.heldForUpdate).toBe(false)
+    expect(host.setStates()).toEqual(['open'])
+    expect(stepsSince(host, start).filter(step => step.startsWith('write:'))).toEqual([])
+    expect(stepsSince(host, start).filter(step => step.startsWith('up-stale'))).toEqual([])
+  })
+
+  it('is rewritten, and the service that mounts it recreated, when its owner differs', async () => {
+    const host = await openStack()
+    host.fileAttrs.set('secrets/grafana/admin-password', '0:0 400')
+    const start = host.calls.length
+    const {result} = await run(host)
+    expect(result.changed).toEqual(['grafana'])
+    expect(stepsSince(host, start)).toContain('write:secrets/grafana/admin-password')
+    expect(host.fileAttrs.get('secrets/grafana/admin-password')).toBe('472:472 400')
+    const stale = host.calls.slice(start).find(call => call.step === 'up-stale-public')
+    expect(stale?.command).toContain('--force-recreate --no-deps grafana')
+    // Grafana is not gated: the open route stays open.
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('is rewritten, and the service that mounts it recreated, when its mode differs', async () => {
+    const host = await openStack()
+    host.fileAttrs.set('secrets/grafana/secret-key', '472:472 644')
+    const start = host.calls.length
+    const {result} = await run(host)
+    expect(result.changed).toEqual(['grafana'])
+    expect(stepsSince(host, start)).toContain('write:secrets/grafana/secret-key')
+    expect(host.fileAttrs.get('secrets/grafana/secret-key')).toBe('472:472 400')
+    const stale = host.calls.slice(start).find(call => call.step === 'up-stale-public')
+    expect(stale?.command).toContain('--force-recreate --no-deps grafana')
+  })
+
+  it("puts the reporter's two secret files under the reporter's user when an older user owns them", async () => {
+    const host = await openStack()
+    for (const file of ['clickhouse-password', 'minio-password']) {
+      expect(host.fileAttrs.get(`secrets/reporter/${file}`)).toBe(reporterOwner)
+      host.fileAttrs.set(`secrets/reporter/${file}`, '10010:10010 400')
+    }
+    const start = host.calls.length
+    const {result} = await run(host)
+    const written = stepsSince(host, start).filter(step => step.startsWith('write:secrets/reporter/'))
+    expect(written.sort()).toEqual([
+      'write:secrets/reporter/clickhouse-password',
+      'write:secrets/reporter/minio-password',
+    ])
+    for (const file of ['clickhouse-password', 'minio-password']) {
+      expect(host.fileAttrs.get(`secrets/reporter/${file}`)).toBe(reporterOwner)
+    }
+    // The reporter reads both files on every run, so they restart nothing and the route is not held for them.
+    expect(result.changed).toEqual([])
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it("holds the route first when the file is a gated service's, as it does for a content change", async () => {
+    const host = await openStack()
+    host.fileAttrs.set('config/otelcol.yaml', '0:0 600')
+    const start = host.calls.length
+    const {result} = await run(host)
+    expect(result.changed).toContain('collector')
+    expect(result.heldForUpdate).toBe(true)
+    expect(host.setStates()).toEqual(['open', 'held', 'open'])
+    const steps = stepsSince(host, start)
+    expect(steps.indexOf('raw:set-state:held')).toBeLessThan(steps.indexOf('write:config/otelcol.yaml'))
+    const stale = host.calls.findLast(call => call.step === 'up-stale-public')
+    expect(stale?.command).toContain('--force-recreate --no-deps collector')
+    expect(host.fileAttrs.get('config/otelcol.yaml')).toBe('0:0 644')
+  })
+
+  it('counts .env as changed when its mode differs', async () => {
+    const host = await openStack()
+    host.fileAttrs.set('.env', '0:0 644')
+    const start = host.calls.length
+    const {result} = await run(host)
+    expect(result.changed).toContain('compose')
+    expect(stepsSince(host, start)).toContain('write:.env')
+    expect(host.fileAttrs.get('.env')).toBe('0:0 600')
+  })
+
+  it('is never a token file: whatever owner or mode a token file has, deploy neither compares nor rewrites it', async () => {
+    const host = await openStack()
+    const odd = ['1234:5678 777', '0:0 0', '65532:65532 4755']
+    for (const [index, group] of SENDER_GROUPS.entries()) host.tokenAttrs.set(group, odd[index] ?? '0:0 0')
+    const snapshot = JSON.stringify([...host.tokens.entries(), ...host.tokenAttrs.entries()])
+    const start = host.calls.length
+    await run(host)
+    await run(host, baseEnv({TRACES_GRAFANA_SECRET_KEY: 'placeholder-grafana-secret-rotated'}))
+    expect(JSON.stringify([...host.tokens.entries(), ...host.tokenAttrs.entries()])).toBe(snapshot)
+    const touching = stepsSince(host, start).filter(
+      step => (step.startsWith('compare:') || step.startsWith('write:')) && step.includes('tokens/'),
+    )
+    expect(touching).toEqual([])
+    expect(buildSecretFiles(readInputs(baseEnv())).some(file => file.path.startsWith('tokens/'))).toBe(false)
+    expect(UPLOADED_FILES.some(file => file.remote.startsWith('tokens/'))).toBe(false)
+  })
+})
 
 describe('tokens', () => {
   it('creates a missing token file as deny-all: exactly one void line and no real token', async () => {
@@ -3093,7 +3524,7 @@ describe('the step lock in the script text', () => {
   const ingestLock = 'flock -w 30 9'
 
   const readOnly: Record<string, string> = {
-    compareFileScript: compareFileScript('config/otelcol.yaml', 'plain'),
+    compareFileScript: compareFileScript('config/otelcol.yaml', 'plain', {owner: 'root:root', mode: '0644'}),
     tokenDirsScript: tokenDirsScript(),
     readIngestStateScript: readIngestStateScript(),
     driftScript: driftScript(),

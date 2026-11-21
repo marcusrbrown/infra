@@ -1508,21 +1508,34 @@ async function realStatfs(path: string): Promise<FsStats> {
  */
 export async function readTempoBlockMetasFrom(root: string): Promise<string[]> {
   const metas: string[] = []
-  let tenants: string[]
-  try {
-    tenants = await readdir(root)
-  } catch (error) {
-    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') return []
-    throw error
+  // Tempo keeps files beside the tenant directories (`work.json`), and its compactor removes block directories
+  // while this runs. Only directories are entered, and one that has gone since it was listed is skipped. Any
+  // other failure (for example no permission) still throws, and the caller reports the store as unreadable.
+  const directories = async (path: string): Promise<string[]> => {
+    try {
+      const entries = await readdir(path, {withFileTypes: true})
+      return entries.filter(entry => entry.isDirectory()).map(entry => entry.name)
+    } catch (error) {
+      if (isGone(error)) return []
+      throw error
+    }
   }
-  for (const tenant of tenants) {
-    for (const block of await readdir(`${root}/${tenant}`)) {
+  for (const tenant of await directories(root)) {
+    for (const block of await directories(`${root}/${tenant}`)) {
       const file = Bun.file(`${root}/${tenant}/${block}/meta.json`)
-      // A block directory without meta.json is mid-write or compacted away.
-      if (await file.exists()) metas.push(await file.text())
+      try {
+        // A block directory without meta.json is mid-write or compacted away.
+        if (await file.exists()) metas.push(await file.text())
+      } catch (error) {
+        if (!isGone(error)) throw error
+      }
     }
   }
   return metas
+}
+
+function isGone(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
 }
 
 function realObjectStore(password: string): ObjectStoreReader {

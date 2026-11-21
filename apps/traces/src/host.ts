@@ -80,6 +80,21 @@ export function tracesTokenDir(group: SenderGroup): string {
   return `${TRACES_TOKEN_ROOT}/${group}`
 }
 
+// ─── Container users ──────────────────────────────────────────────────────────
+
+/**
+ * The uid and gid Tempo runs as (the user its image declares; the compose file gives Tempo no `user`), and the
+ * uid and gid the health reporter runs as. The two must match: Tempo creates its data directories (`blocks`,
+ * `wal`, `live-store`) with mode 0700, so only its own user can list them, and the reporter lists `blocks` to
+ * read the age of the oldest block. Another user gets "Permission denied" and the check is `unknown`, which
+ * fails the verdict and keeps ingest from ever opening. Deploy owns `secrets/reporter/*` by this id so the
+ * reporter can read its two password files as that user.
+ *
+ * A change of Tempo's image user is a change of this constant; `docker-compose.test.ts` pins the reporter's
+ * `user` to it and pins that Tempo has no `user` of its own.
+ */
+export const TEMPO_USER_ID = 10_001
+
 // ─── Deploy state and locks ───────────────────────────────────────────────────
 //
 // These paths are a contract between the deploy, the sender-token commands and the ingest command. The CLI

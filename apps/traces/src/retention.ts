@@ -85,13 +85,66 @@ export function ttlMatches(column: string, found: string | undefined): boolean {
   return found !== undefined && canonicalTtl(found) === canonicalTtl(ttlExpression(column))
 }
 
-/** The TTL clause in a `CREATE TABLE` statement as ClickHouse echoes it, or undefined for a table with none. */
-export function extractTtl(createStatement: string): string | undefined {
-  for (const line of createStatement.split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed.startsWith('TTL ')) return trimmed.slice(4).trim()
+/**
+ * `text` with the inside of every single-quoted string and every backtick-quoted identifier replaced by `_`, so that a
+ * search over the result cannot land in quoted text, and its parentheses cannot move a depth count. The quotes stay and
+ * the length is unchanged, so an index into the result is an index into `text`. A quote inside a quoted run is escaped
+ * as a backslash and the quote (`\'`) or as the quote doubled (`''`); a backslash escapes any character. A scanner for
+ * this one job, not a SQL parser: no comments, no dollar quoting. A quote left open masks the rest.
+ */
+function maskQuoted(text: string): string {
+  let masked = ''
+  let quote: string | undefined
+  for (let index = 0; index < text.length; index++) {
+    const char = text.charAt(index)
+    if (quote === undefined) {
+      if (char === "'" || char === '`') quote = char
+      masked += char
+    } else if (char === '\\') {
+      masked += index + 1 < text.length ? '__' : '_'
+      index++
+    } else if (char === quote && text.charAt(index + 1) === quote) {
+      masked += '__'
+      index++
+    } else if (char === quote) {
+      masked += char
+      quote = undefined
+    } else {
+      masked += '_'
+    }
   }
-  return undefined
+  return masked
+}
+
+/** The indexes at which `needle` starts outside every parenthesis, in a text already masked by `maskQuoted`. */
+function topLevelIndexes(masked: string, needle: string): number[] {
+  const found: number[] = []
+  let depth = 0
+  for (let index = 0; index < masked.length; index++) {
+    const char = masked.charAt(index)
+    if (char === '(') depth++
+    else if (char === ')') depth = Math.max(0, depth - 1)
+    else if (depth === 0 && masked.startsWith(needle, index)) found.push(index)
+  }
+  return found
+}
+
+/**
+ * The table TTL clause in a `CREATE TABLE` statement as ClickHouse echoes it, or undefined for a table with none. Only a
+ * ` TTL ` outside every parenthesis counts (a column's TTL sits inside the column list), and nothing inside a quoted
+ * string or identifier does (a COMMENT can say anything).
+ */
+export function extractTtl(createStatement: string): string | undefined {
+  // `system.tables.create_table_query` is one line, with the table TTL between the sorting key and SETTINGS:
+  // `... ORDER BY (...) TTL toDateTime(start_time) + toIntervalDay(30) SETTINGS index_granularity = 8192`.
+  // `SHOW CREATE TABLE` prints the same clauses on separate lines. Both are handled by flattening first.
+  const flat = createStatement.replaceAll(/\s+/g, ' ').trim()
+  const masked = maskQuoted(flat)
+  const start = topLevelIndexes(masked, ' TTL ').at(-1)
+  if (start === undefined) return undefined
+  const from = start + ' TTL '.length
+  const end = topLevelIndexes(masked, ' SETTINGS ').find(index => index >= from - 1)
+  return flat.slice(from, end).trim()
 }
 
 export interface TableState {

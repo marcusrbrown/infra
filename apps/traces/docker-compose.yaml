@@ -31,6 +31,9 @@ x-logging: &logging
 x-langfuse-env:
   &langfuse-env # The UI is reached through an SSH tunnel, so its URL is loopback. Keep the tunnel's local port at 3000.
   NEXTAUTH_URL: http://localhost:3000
+  # Both services listen on the address in HOSTNAME, which Docker sets to the container's own name. Without
+  # this they refuse loopback, and the healthchecks and the deploy's in-container probe both use loopback.
+  HOSTNAME: 0.0.0.0
   DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?}@postgres:5432/postgres
   SALT: ${SALT:?}
   ENCRYPTION_KEY: ${ENCRYPTION_KEY:?}
@@ -185,8 +188,10 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
-      # System log TTLs. No memory settings in here, by design.
-      - ./config/clickhouse:/etc/clickhouse-server/config.d:ro
+      # System log TTLs. No memory settings in here, by design. One file, not the config.d directory: the
+      # image keeps its own file there that makes the server listen beyond localhost, and a directory
+      # mount hides it (the healthcheck still passes, and every other container is refused).
+      - ./config/clickhouse/system-log-ttl.xml:/etc/clickhouse-server/config.d/system-log-ttl.xml:ro
       # The read-only reporter user. One file, not the users.d directory: the image's entrypoint writes
       # its own user file into that directory at start.
       - ./config/clickhouse-users/traces-reader.xml:/etc/clickhouse-server/users.d/traces-reader.xml:ro
@@ -322,7 +327,10 @@ services:
   health-reporter:
     image: oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
     restart: unless-stopped
-    user: '10010:10010'
+    # Tempo's own user (`TEMPO_USER_ID` in src/host.ts). Tempo creates its data directories with mode 0700, so no
+    # other user can list `blocks`, and the Tempo age check would stay unknown and keep ingest closed. A test pins
+    # this value to that constant.
+    user: '10001:10001'
     read_only: true
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
@@ -335,10 +343,10 @@ services:
     volumes:
       # The reporter's source, uploaded by deploy as one directory.
       - ./health-reporter:/app:ro
-      # Two password files, owned by the reporter's user and mode 0400: clickhouse-password (the read-only
-      # `traces_reader` user) and minio-password (the object store's root user, to list batch ages).
+      # Two password files, owned by the reporter's user (Tempo's) and mode 0400: clickhouse-password (the
+      # read-only `traces_reader` user) and minio-password (the object store's root user, to list batch ages).
       - ./secrets/reporter:/run/secrets/reporter:ro
-      # Tempo's blocks, for the age of its oldest data.
+      # Tempo's blocks, for the age of its oldest data. Read-only; readable only because the reporter runs as Tempo's user.
       - tempo_data:/var/tempo:ro
       # Two files and a directory that only say how full each disk is: the volume (through its sentinel file,
       # which also proves it is the right volume) and the root filesystem.

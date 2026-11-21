@@ -1767,7 +1767,7 @@ export class AppliedButUnverifiedError extends Error {
   constructor(cause: string, ingest: 'held' | 'off' | 'unknown') {
     const where =
       ingest === 'held'
-        ? 'Ingest is held (every ingest path answers 503, which senders retry).'
+        ? 'Ingest is held (every ingest path answers 503, which senders retry); if the route was open, holding it rewrote the ingest state and restarted Caddy.'
         : ingest === 'off'
           ? 'Ingest is off (no ingest route).'
           : 'Ingest may be open: the deploy could not confirm the route closed. Run `traces ingest hold` now.'
@@ -1789,12 +1789,12 @@ export class FilesNotComparedError extends Error {
   constructor(cause: string, ingest: 'held' | 'off' | 'unknown') {
     const where =
       ingest === 'held'
-        ? 'Ingest is held (every ingest path answers 503, which senders retry).'
+        ? 'Ingest is held (every ingest path answers 503, which senders retry); if the route was open, holding it rewrote the ingest state and restarted Caddy.'
         : ingest === 'off'
           ? 'Ingest is off (no ingest route).'
           : 'Ingest may be open: the deploy could not confirm the route closed. Run `traces ingest hold` now.'
     super(
-      `The files could not be compared with the host: ${cause}. Nothing was updated: no file was written and no service was started or recreated. ${where} The deploy marker stays, so the next deploy holds an open route before it changes anything. Deploy again once the host answers.`,
+      `The files could not be compared with the host: ${cause}. The update was not applied: no file of the stack was written and no service was updated. ${where} The deploy marker stays, so the next deploy holds an open route before it changes anything. Deploy again once the host answers.`,
     )
     this.name = 'FilesNotComparedError'
     this.ingest = ingest

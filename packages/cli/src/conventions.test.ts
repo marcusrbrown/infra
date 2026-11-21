@@ -6720,6 +6720,10 @@ describe('traces deploy: workflow inputs are one contract', () => {
     const buildStep = stepsOf(build).find(step => step.id === 'build')
     const withBlock = isRecord(buildStep?.with) ? buildStep.with : {}
     expect(withBlock.platforms).toBe('linux/amd64')
+    // An attestation differs on every build, so the pushed digest would change for an unchanged image and every
+    // deploy would restart the collector.
+    expect(withBlock.provenance).toBe(false)
+    expect(withBlock.sbom).toBeUndefined()
     expect(withBlock.context).toBe('apps/traces/collector')
     expect(withBlock.tags).toBe(
       `ghcr.io/${ghaExpression('github.repository')}/traces-collector:${ghaExpression('github.sha')}`,

@@ -77,6 +77,8 @@ Order: validate every input; DNS preflight; verify the volume mount, sentinel an
 
 Everything goes over one multiplexed SSH connection with pinned host keys (`StrictHostKeyChecking=yes`). The ssh child's environment is `PATH`, `HOME` and `SSH_AUTH_SOCK` and nothing else; a secret reaches the host on stdin only, written to a temporary file in the destination directory with its owner and mode set first, then renamed over the target.
 
+The CLI follows the same rule. The host rate-limits new SSH connections (`ufw limit 22/tcp`: six from one source within 30 seconds refuses the next for about 30 seconds), so every multi-step `infra traces` command (`status`, `ingest hold|open|status`, `sender add|list|revoke`) uses one multiplexed connection (`withRemoteSession` in `packages/cli/src/commands/traces/remote.ts`). `traces open` and `traces logs` are single long-lived connections and use a plain one.
+
 | File | Owner and mode | Written when |
 | --- | --- | --- |
 | `.env` | root, 0600 | content (without the ingest-state line) differs; the state line is appended on the host |

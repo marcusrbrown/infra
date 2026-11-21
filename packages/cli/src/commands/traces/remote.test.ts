@@ -1,10 +1,14 @@
+import {Buffer} from 'node:buffer'
+import {existsSync, statSync} from 'node:fs'
+import {dirname} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {CAN_LOCK, createScratchHost, recordingSpawn} from './__fixtures__/remote-fixture'
+import {CAN_LOCK, controlPathOf, controlPaths, createScratchHost, recordingSpawn} from './__fixtures__/remote-fixture'
 import {TRACES_APP_DIR} from './host'
 import {
   buildRemoteArgv,
   buildTunnelArgv,
+  CONTROL_PERSIST,
   DEPLOY_FINISHED_SENTINEL,
   DEPLOY_UNFINISHED_SENTINEL,
   hasSentinel,
@@ -16,7 +20,9 @@ import {
   TRACES_DEPLOY_MARKER,
   TRACES_INGEST_LOCK,
   TRACES_PENDING_RESTARTS,
+  withRemoteSession,
   type IngestState,
+  type SpawnFn,
 } from './remote'
 
 let savedKey: string | undefined
@@ -356,6 +362,388 @@ describe('runRemote', () => {
     await runRemote('traces.example.invalid', 'true', {spawn})
     const keys = Object.keys(calls[0]?.options.env ?? {})
     for (const key of keys) expect(['PATH', 'HOME', 'SSH_AUTH_SOCK']).toContain(key)
+  })
+})
+
+// ─── One multiplexed connection per command ───────────────────────────────────────────────────
+//
+// The host rate-limits new ssh connections (`ufw limit 22/tcp`: six from one source in 30 seconds and the
+// seventh is refused for about 30 seconds), so a command that makes several calls must make them over one.
+
+const HOST = 'traces.example.invalid'
+const CONTROL_OPTIONS = ['ControlMaster=auto', 'ControlPersist=']
+
+describe('the control options on the ssh argv', () => {
+  it('a call with a control path carries ControlMaster=auto, that ControlPath and a short ControlPersist', () => {
+    const {argv, cleanup} = buildRemoteArgv(HOST, 'true', '/tmp/tr-abc123/cm')
+    cleanup()
+    expect(argv).toContain('ControlMaster=auto')
+    expect(argv).toContain('ControlPath=/tmp/tr-abc123/cm')
+    expect(argv).toContain(`ControlPersist=${CONTROL_PERSIST}`)
+    // Each option is the value of its own -o, never glued into another argument.
+    for (const value of ['ControlMaster=auto', 'ControlPath=/tmp/tr-abc123/cm', `ControlPersist=${CONTROL_PERSIST}`]) {
+      expect(argv[argv.indexOf(value) - 1]).toBe('-o')
+    }
+  })
+
+  it('keeps host-key checking, the pinned keys and the command last when it multiplexes', () => {
+    const {argv, cleanup} = buildRemoteArgv(HOST, 'true', '/tmp/tr-abc123/cm')
+    cleanup()
+    expect(argv).toContain('StrictHostKeyChecking=yes')
+    expect(argv).toContain('BatchMode=yes')
+    expect(argv.some(arg => arg.startsWith('UserKnownHostsFile='))).toBe(true)
+    expect(argv.at(-2)).toBe(`root@${HOST}`)
+    expect(argv.at(-1)).toBe('true')
+  })
+
+  it('a call without a control path carries none of the three options', () => {
+    const {argv, cleanup} = buildRemoteArgv(HOST, 'true')
+    cleanup()
+    for (const option of CONTROL_OPTIONS) expect(argv.some(arg => arg.startsWith(option))).toBe(false)
+    expect(argv.some(arg => arg.startsWith('ControlPath='))).toBe(false)
+  })
+
+  it('the tunnel carries none of them: a tunnel on a shared master would die with it', () => {
+    const {argv, cleanup} = buildTunnelArgv(HOST, {langfuse: 3000, grafana: 3001})
+    cleanup()
+    for (const option of [...CONTROL_OPTIONS, 'ControlPath=']) {
+      expect(argv.some(arg => arg.startsWith(option))).toBe(false)
+    }
+  })
+
+  it('ControlPersist is short: long enough to bridge the gaps in one command, short enough not to outlive it', () => {
+    expect(CONTROL_PERSIST).toBe('30s')
+  })
+})
+
+/**
+ * An ssh spawner whose calls stay running until `release(name, exitCode)`, and that counts how many run at once.
+ * `throwOn` names the calls whose spawn itself throws. A close (`ssh -O exit`) is counted and noted in the event order.
+ */
+function heldSpawn({throwOn = []}: {throwOn?: string[]} = {}) {
+  const events: string[] = []
+  const holds = new Map<string, (exitCode: number) => void>()
+  let running = 0
+  let maxRunning = 0
+  const spawn: SpawnFn = argv => {
+    if (argv.includes('-O')) {
+      events.push('close')
+      return {stdout: null, stderr: null, exited: Promise.resolve(0)}
+    }
+    const name = argv.at(-1) ?? ''
+    events.push(`start ${name}`)
+    if (throwOn.includes(name)) throw new Error('spawn ssh ENOENT')
+    running += 1
+    maxRunning = Math.max(maxRunning, running)
+    const exited = new Promise<number>(resolve => {
+      holds.set(name, exitCode => {
+        running -= 1
+        events.push(`end ${name}`)
+        resolve(exitCode)
+      })
+    })
+    return {stdout: null, stderr: null, exited}
+  }
+  return {
+    spawn,
+    release: (name: string, exitCode: number) => holds.get(name)?.(exitCode),
+    starts: () => events.filter(event => event.startsWith('start ')).map(event => event.slice('start '.length)),
+    running: () => running,
+    maxRunning: () => maxRunning,
+    closes: () => events.filter(event => event === 'close').length,
+    lastEvent: () => events.at(-1),
+  }
+}
+
+describe('withRemoteSession', () => {
+  it('every call in a session carries the same ControlPath, and no secret is in the argv', async () => {
+    const {spawn, calls} = recordingSpawn(() => ({}))
+    await withRemoteSession(spawn, async session => {
+      await runRemote(HOST, 'one', {spawn, session})
+      await runRemote(HOST, 'two', {spawn, session, stdin: 'SECRET-LINE-PLACEHOLDER\n'})
+      await runRemote(HOST, 'three', {spawn, session})
+    })
+    expect(calls).toHaveLength(3)
+    const paths = controlPaths(calls)
+    expect(paths).toHaveLength(1)
+    expect(paths[0]).toBeDefined()
+    for (const call of calls) expect(call.argv).toContain('ControlMaster=auto')
+    expect(calls.map(call => call.argv.join(' ')).join('\n')).not.toContain('SECRET-LINE-PLACEHOLDER')
+  })
+
+  it('two runs use different ControlPaths, each in its own private directory', async () => {
+    const first = recordingSpawn(() => ({}))
+    const second = recordingSpawn(() => ({}))
+    const modes: number[] = []
+    for (const {spawn} of [first, second]) {
+      await withRemoteSession(spawn, async session => {
+        await runRemote(HOST, 'true', {spawn, session})
+        modes.push(statSync(dirname(session.controlPath)).mode & 0o777)
+      })
+    }
+    const [one] = controlPaths(first.calls)
+    const [two] = controlPaths(second.calls)
+    expect(one).toBeDefined()
+    expect(two).toBeDefined()
+    expect(one).not.toBe(two)
+    expect(dirname(one ?? '')).not.toBe(dirname(two ?? ''))
+    expect(modes).toEqual([0o700, 0o700])
+  })
+
+  it('keeps the socket path short enough for a unix socket on macOS (about 104 bytes)', async () => {
+    await withRemoteSession(recordingSpawn(() => ({})).spawn, async session => {
+      expect(session.controlPath.startsWith('/tmp/')).toBe(true)
+      // ssh appends a random suffix of about 17 characters to the path while it binds the socket.
+      expect(Buffer.byteLength(session.controlPath) + 20).toBeLessThan(104)
+    })
+  })
+
+  it('closes the master once, on the same socket, then removes the directory', async () => {
+    const {spawn, calls, closes} = recordingSpawn(() => ({}))
+    let directory = ''
+    await withRemoteSession(spawn, async session => {
+      directory = dirname(session.controlPath)
+      await runRemote(HOST, 'a', {spawn, session})
+      await runRemote(HOST, 'b', {spawn, session})
+      expect(closes).toHaveLength(0)
+    })
+    expect(calls).toHaveLength(2)
+    expect(closes).toHaveLength(1)
+    expect(closes[0]?.controlPath).toBe(controlPathOf(calls[0]?.argv ?? []))
+    expect(closes[0]?.argv.slice(0, 1)).toEqual(['ssh'])
+    expect(closes[0]?.argv).toContain('exit')
+    expect(closes[0]?.argv.at(-1)).toBe(`root@${HOST}`)
+    // The socket was still there to name when the close was made; the directory goes after it.
+    expect(closes[0]?.directoryExisted).toBe(true)
+    expect(existsSync(directory)).toBe(false)
+  })
+
+  it('closes once and removes the directory when the body throws, and the error still propagates', async () => {
+    const {spawn, closes} = recordingSpawn(() => ({}))
+    let directory = ''
+    await expect(
+      withRemoteSession(spawn, async session => {
+        directory = dirname(session.controlPath)
+        await runRemote(HOST, 'a', {spawn, session})
+        throw new Error('the command failed')
+      }),
+    ).rejects.toThrow('the command failed')
+    expect(closes).toHaveLength(1)
+    expect(existsSync(directory)).toBe(false)
+  })
+
+  it('closes once when the spawner itself throws on a call', async () => {
+    const {spawn: inner, closes} = recordingSpawn(() => ({}))
+    const spawn: SpawnFn = (argv, options) => {
+      if (argv.at(-1) === 'boom') throw new Error('spawn ssh ENOENT')
+      return inner(argv, options)
+    }
+    let directory = ''
+    await expect(
+      withRemoteSession(spawn, async session => {
+        directory = dirname(session.controlPath)
+        await runRemote(HOST, 'boom', {spawn, session})
+      }),
+    ).rejects.toThrow('spawn ssh ENOENT')
+    expect(closes).toHaveLength(1)
+    expect(existsSync(directory)).toBe(false)
+  })
+
+  it.each(['fail', 'throw'] as const)('a close that %ss is tolerated and the directory still goes', async behaviour => {
+    const {spawn, closes} = recordingSpawn(() => ({}), behaviour)
+    let directory = ''
+    const value = await withRemoteSession(spawn, async session => {
+      directory = dirname(session.controlPath)
+      await runRemote(HOST, 'a', {spawn, session})
+      return 'result'
+    })
+    expect(value).toBe('result')
+    expect(closes).toHaveLength(1)
+    expect(existsSync(directory)).toBe(false)
+  })
+
+  it('does not spend a close when no call went out, and still removes the directory', async () => {
+    const {spawn, closes} = recordingSpawn(() => ({}))
+    let directory = ''
+    await withRemoteSession(spawn, async session => {
+      directory = dirname(session.controlPath)
+      expect(existsSync(directory)).toBe(true)
+    })
+    expect(closes).toHaveLength(0)
+    expect(existsSync(directory)).toBe(false)
+  })
+
+  it('does not spend a close when the host was refused before any ssh was built', async () => {
+    const {spawn, closes} = recordingSpawn(() => ({}))
+    await expect(
+      withRemoteSession(spawn, session => runRemote('-oProxyCommand=evil', 'true', {spawn, session})),
+    ).rejects.toThrow('Invalid TRACES_HOST')
+    expect(closes).toHaveLength(0)
+  })
+
+  it('the first call runs alone, so concurrent callers share one master instead of each making a connection', async () => {
+    const events: string[] = []
+    const releases: (() => void)[] = []
+    const spawn: SpawnFn = (argv, options) => {
+      const name = argv.at(-1) ?? ''
+      if (argv.includes('-O')) return {stdout: null, stderr: null, exited: Promise.resolve(0)}
+      events.push(`start ${name}`)
+      const exited = new Promise<number>(resolve => {
+        releases.push(() => {
+          events.push(`end ${name}`)
+          resolve(0)
+        })
+      })
+      return {
+        stdout: options.stdout === 'pipe' ? new Response('').body : null,
+        stderr: options.stderr === 'pipe' ? new Response('').body : null,
+        exited,
+      }
+    }
+    const done = withRemoteSession(spawn, session =>
+      Promise.all([
+        runRemote(HOST, 'first', {spawn, session}),
+        runRemote(HOST, 'second', {spawn, session}),
+        runRemote(HOST, 'third', {spawn, session}),
+      ]),
+    )
+    await Bun.sleep(10)
+    // Only the first has started: the others wait for it, because only then does the master exist.
+    expect(events).toEqual(['start first'])
+    releases[0]?.()
+    await Bun.sleep(10)
+    expect(events.slice(0, 2)).toEqual(['start first', 'end first'])
+    expect(events.filter(event => event.startsWith('start'))).toEqual(['start first', 'start second', 'start third'])
+    for (const release of releases.slice(1)) release()
+    await done
+  })
+
+  describe('while no call has connected yet', () => {
+    const settle = () => Bun.sleep(10)
+    const names = ['first', 'second', 'third', 'fourth', 'fifth']
+    const runAll = (held: ReturnType<typeof heldSpawn>) =>
+      withRemoteSession(held.spawn, session =>
+        Promise.all(names.map(name => runRemote(HOST, name, {spawn: held.spawn, session}))),
+      )
+
+    it('a first call that exits 255 leaves the queued calls running one at a time until one connects, then all together', async () => {
+      const held = heldSpawn()
+      const done = runAll(held)
+      await settle()
+      expect(held.starts()).toEqual(['first'])
+
+      held.release('first', 255)
+      await settle()
+      expect(held.starts()).toEqual(['first', 'second'])
+      expect(held.running()).toBe(1)
+
+      held.release('second', 255)
+      await settle()
+      expect(held.starts()).toEqual(['first', 'second', 'third'])
+      expect(held.running()).toBe(1)
+
+      // The third connects and becomes the master: the rest now go out together on its socket.
+      held.release('third', 0)
+      await settle()
+      expect(held.starts()).toEqual(['first', 'second', 'third', 'fourth', 'fifth'])
+      expect(held.running()).toBe(2)
+      expect(held.maxRunning()).toBe(2)
+
+      held.release('fourth', 0)
+      held.release('fifth', 0)
+      const results = await done
+      expect(results.map(result => result.exitCode)).toEqual([255, 255, 0, 0, 0])
+    })
+
+    it('never runs two calls at once while every call fails to connect', async () => {
+      const held = heldSpawn()
+      const done = runAll(held)
+      for (const name of names) {
+        await settle()
+        expect(held.running()).toBe(1)
+        held.release(name, 255)
+      }
+      await done
+      expect(held.starts()).toEqual(names)
+      expect(held.maxRunning()).toBe(1)
+    })
+
+    it('a first call that exits non-zero but did connect (the remote command failed) frees the rest at once', async () => {
+      const held = heldSpawn()
+      const done = runAll(held)
+      await settle()
+      held.release('first', 1)
+      await settle()
+      expect(held.starts()).toEqual(names)
+      for (const name of names.slice(1)) held.release(name, 0)
+      await done
+    })
+
+    it('a first call that throws leaves the queued calls serial, and the close and clean-up wait for every one of them', async () => {
+      const held = heldSpawn({throwOn: ['first']})
+      let directory = ''
+      const done = withRemoteSession(held.spawn, session => {
+        directory = dirname(session.controlPath)
+        return Promise.all(names.map(name => runRemote(HOST, name, {spawn: held.spawn, session})))
+      })
+      // Collect the outcome without awaiting it: the body rejects as soon as the first call throws.
+      const outcome = done.then(
+        () => 'resolved',
+        (error: unknown) => (error instanceof Error ? error.message : 'rejected'),
+      )
+      await settle()
+      // The body has already failed, yet the queued calls are still going: nothing is closed or removed under them.
+      expect(held.starts()).toEqual(['first', 'second'])
+      expect(held.running()).toBe(1)
+      expect(held.closes()).toBe(0)
+      expect(existsSync(directory)).toBe(true)
+
+      held.release('second', 255)
+      await settle()
+      expect(held.starts()).toEqual(['first', 'second', 'third'])
+      expect(held.closes()).toBe(0)
+
+      held.release('third', 0)
+      await settle()
+      // Third connected, so the last two go together, and teardown is still waiting for them.
+      expect(held.starts()).toEqual(names)
+      expect(held.closes()).toBe(0)
+      expect(existsSync(directory)).toBe(true)
+
+      held.release('fourth', 0)
+      await settle()
+      expect(held.closes()).toBe(0)
+      held.release('fifth', 0)
+      expect(await outcome).toBe('spawn ssh ENOENT')
+      expect(held.closes()).toBe(1)
+      expect(held.lastEvent()).toBe('close')
+      expect(existsSync(directory)).toBe(false)
+    })
+  })
+
+  it('a first call that fails does not stop the others from running', async () => {
+    const {spawn, calls} = recordingSpawn(call => (call.command === 'first' ? {exitCode: 255} : {}))
+    const results = await withRemoteSession(spawn, session =>
+      Promise.all([runRemote(HOST, 'first', {spawn, session}), runRemote(HOST, 'second', {spawn, session})]),
+    )
+    expect(results.map(result => result.exitCode)).toEqual([255, 0])
+    expect(calls).toHaveLength(2)
+  })
+
+  it('refuses to share a session between two hosts', async () => {
+    const {spawn} = recordingSpawn(() => ({}))
+    await expect(
+      withRemoteSession(spawn, async session => {
+        await runRemote(HOST, 'a', {spawn, session})
+        await runRemote('other.example.invalid', 'b', {spawn, session})
+      }),
+    ).rejects.toThrow('one host')
+  })
+
+  it('runRemote without a session adds no control options', async () => {
+    const {spawn, calls} = recordingSpawn(() => ({}))
+    await runRemote(HOST, 'true', {spawn})
+    expect(controlPaths(calls)).toEqual([undefined])
   })
 })
 

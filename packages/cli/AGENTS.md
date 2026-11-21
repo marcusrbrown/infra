@@ -221,6 +221,8 @@ The reconciler receives the existing `FRO_BOT_PAT` only through its step-local `
 
 The `gateway status`, `umami status`, and `vpn status` commands materialize the app's SSH key (`GATEWAY_SSH_KEY`, `UMAMI_SSH_KEY`, `VPN_SSH_KEY`) to a 0600 temp file and pass `-i <path> -o IdentitiesOnly=yes` to SSH for deterministic auth. When the env var is unset or empty, the args are omitted and SSH falls back to the agent.
 
+The `traces` commands build every ssh argv in `traces/remote.ts`. The trace host rate-limits new SSH connections (`ufw limit 22/tcp`: six from one source within 30 seconds locks that source out for about 30 seconds), so every command that makes more than one call (`status`, `ingest`, `sender`) runs inside `withRemoteSession`: one multiplexed connection (`ControlMaster=auto`, a `ControlPath` in a private per-run directory under `/tmp`, `ControlPersist=30s`), closed with `ssh -O exit` and removed when the command ends. A command must not call `ctx.process.exit` inside the session, because an exit skips that clean-up. `traces open` and `traces logs` are single long-lived connections and stay on a plain one.
+
 ## ANTI-PATTERNS
 
 - Never use `bundledDependencies` — Bun's `.bun/` symlinks create `../../` paths that npm rejects with E415.

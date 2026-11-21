@@ -62,6 +62,16 @@ describe('traces open', () => {
     expect(argv).not.toContain('-c')
   })
 
+  it('stays on a plain connection: a tunnel through a shared master would die with it', async () => {
+    const {spawn, calls, closes} = recordingSpawn(() => ({}))
+    await openTracesTunnel('traces.example.invalid', spawn, () => undefined)
+    const argv = calls[0]?.argv ?? []
+    expect(argv.some(arg => arg.startsWith('Control'))).toBe(false)
+    expect(argv).not.toContain('-O')
+    expect(calls).toHaveLength(1)
+    expect(closes).toHaveLength(0)
+  })
+
   it('keeps the local ports equal to the host ports Langfuse and Grafana are configured for', () => {
     expect(TUNNEL_PORTS).toEqual({langfuse: 3000, grafana: 3001})
     expect(TUNNEL_URLS).toEqual({langfuse: 'http://localhost:3000', grafana: 'http://localhost:3001'})

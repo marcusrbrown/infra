@@ -1,13 +1,13 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 import type {AppCollection} from '../../status/collect'
-import type {RemoteResult, SpawnFn} from './remote'
+import type {RemoteDeps, RemoteResult, SpawnFn} from './remote'
 
 import {z} from 'zod'
 
 import {servicesFact} from '../../status/collect'
 import {resolveTracesHost} from './host'
-import {DETAIL_SENTINEL, REMOTE_COMMANDS, runRemote} from './remote'
+import {DETAIL_SENTINEL, REMOTE_COMMANDS, runRemote, withRemoteSession} from './remote'
 
 declare const process: {
   env: Record<string, string | undefined>
@@ -69,13 +69,10 @@ export function isAllRunning(rows: ServiceRow[]): boolean {
 
 export async function getTracesComposeStatus(
   host: string,
-  spawn?: SpawnFn,
+  remote: RemoteDeps = {},
   signal?: AbortSignal,
 ): Promise<TracesComposeResult> {
-  const result = await runRemote(host, REMOTE_COMMANDS.composePs, {
-    ...(spawn === undefined ? {} : {spawn}),
-    ...(signal === undefined ? {} : {signal}),
-  })
+  const result = await runRemote(host, REMOTE_COMMANDS.composePs, {...remote, signal})
 
   if (result.exitCode !== 0) {
     return {
@@ -142,11 +139,12 @@ export function parseDetailOutput(result: RemoteResult): DetailOutcome {
   return parsed.success ? {ok: true, detail: parsed.data} : {ok: false, reason: 'unreadable'}
 }
 
-export async function getReporterDetail(host: string, spawn?: SpawnFn, signal?: AbortSignal): Promise<DetailOutcome> {
-  const result = await runRemote(host, REMOTE_COMMANDS.reporterDetail, {
-    ...(spawn === undefined ? {} : {spawn}),
-    ...(signal === undefined ? {} : {signal}),
-  })
+export async function getReporterDetail(
+  host: string,
+  remote: RemoteDeps = {},
+  signal?: AbortSignal,
+): Promise<DetailOutcome> {
+  const result = await runRemote(host, REMOTE_COMMANDS.reporterDetail, {...remote, signal})
   return parseDetailOutput(result)
 }
 
@@ -167,6 +165,20 @@ export function failingLines(detail: ReporterDetail): string[] {
 
 // ─── Unified status aggregator export ────────────────────────────────────────
 
+/** The compose state and the reporter's verdict, read side by side over one connection. */
+function readBoth(
+  host: string,
+  spawn: SpawnFn | undefined,
+  signal?: AbortSignal,
+): Promise<[TracesComposeResult, DetailOutcome]> {
+  return withRemoteSession(spawn, session =>
+    Promise.all([
+      getTracesComposeStatus(host, {spawn, session}, signal),
+      getReporterDetail(host, {spawn, session}, signal),
+    ]),
+  )
+}
+
 /**
  * Facts for the unified `status` command: the compose services and a summary of the reporter's verdict.
  * The public observations for this app (the `/healthz` probe and the deploy state) come from the shared
@@ -178,10 +190,7 @@ export async function getTracesStatusSummary(
   spawn?: SpawnFn,
   signal?: AbortSignal,
 ): Promise<AppCollection> {
-  const [compose, detail] = await Promise.all([
-    getTracesComposeStatus(host, spawn, signal),
-    getReporterDetail(host, spawn, signal),
-  ])
+  const [compose, detail] = await readBoth(host, spawn, signal)
 
   return {
     observations: [],
@@ -219,7 +228,8 @@ export async function tracesStatusAction(
     return
   }
 
-  const [compose, detail] = await Promise.all([getTracesComposeStatus(host, spawn), getReporterDetail(host, spawn)])
+  // The connection is closed when the reads are done; the exits below come after it, because an exit skips clean-up.
+  const [compose, detail] = await readBoth(host, spawn)
 
   if (compose.services.length === 0 && !detail.ok) {
     ctx.console.error(`Error: ${compose.error ?? 'No services reported by docker compose ps'}`)

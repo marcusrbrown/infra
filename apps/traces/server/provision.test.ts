@@ -1,5 +1,6 @@
+import type {PinHostKeysOptions} from '../../../packages/shared/server/droplet-helpers'
 import type {ProvisionDeps, ProvisionInput, Runner, RunResult} from './provision'
-import {chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -19,6 +20,7 @@ import {
   bashCommand,
   checkDropletExistence,
   checkTracesStorage,
+  defaultDeps,
   dockerConfigFiles,
   evaluateStorageProbe,
   FIREWALL_INBOUND_RULES,
@@ -38,8 +40,12 @@ import {
   runReopen,
   runRestore,
   shellQuote,
+  SSH_CONTROL_PERSIST,
+  SSH_SCAN_PAUSE_MS,
   tokenCheckScript,
   validateRequiredEnv,
+  VOLUME_LIST_ATTEMPTS,
+  VOLUME_LIST_INTERVAL_MS,
   volumeDevicePath,
 } from './provision'
 
@@ -80,6 +86,8 @@ interface CloudOptions {
   removeRulesIgnored?: boolean
   /** `attach` answers success but changes nothing. */
   attachIgnored?: boolean
+  /** A volume created by `volume create` is absent from the next N `volume list` calls. */
+  newVolumeHiddenForLists?: number
 }
 
 function flag(args: readonly string[], name: string): string | undefined {
@@ -93,6 +101,8 @@ class Cloud {
   firewalls: SimFirewall[]
   snapshots: {id: string; name: string}[]
   private nextId = 1
+  private hiddenListsLeft = 0
+  private readonly hiddenVolumeIds = new Set<string>()
   constructor(private readonly options: CloudOptions = {}) {
     this.droplet = options.droplet ?? false
     this.volumes = options.volumes ?? []
@@ -117,11 +127,18 @@ class Cloud {
         return ok(flag(args, '--format') === 'ID' ? DROPLET_ID : DROPLET_HOST)
       }
       case 'compute volume list': {
-        return ok(this.volumes.map(v => `${v.id}   ${v.name}   [${v.dropletIds.join(' ')}]`).join('\n'))
+        const hide = this.hiddenListsLeft > 0
+        if (hide) this.hiddenListsLeft -= 1
+        const visible = this.volumes.filter(v => !(hide && this.hiddenVolumeIds.has(v.id)))
+        return ok(visible.map(v => `${v.id}   ${v.name}   [${v.dropletIds.join(' ')}]`).join('\n'))
       }
       case 'compute volume create': {
         const volume = {id: `vol-${this.nextId++}`, name: args[3] ?? '', dropletIds: []}
         this.volumes.push(volume)
+        if (this.options.newVolumeHiddenForLists) {
+          this.hiddenVolumeIds.add(volume.id)
+          this.hiddenListsLeft = this.options.newVolumeHiddenForLists
+        }
         return ok(flag(args, '--format') === 'ID' ? volume.id : '')
       }
       case 'compute volume-action attach': {
@@ -304,40 +321,72 @@ interface Call {
   stdin: string | undefined
 }
 
-function makeWorld(cloudOptions: CloudOptions = {}, hostOptions: HostOptions = {}) {
+/** What `ssh -O exit` does in the simulation: closes the master, finds none, or the runner itself throws. */
+type MasterClose = 'closes' | 'no-master' | 'throws'
+
+function isMasterClose(argv: readonly string[]): boolean {
+  return argv[0] === 'ssh' && argv.includes('-O')
+}
+
+function makeWorld(
+  cloudOptions: CloudOptions = {},
+  hostOptions: HostOptions = {},
+  masterClose: MasterClose = 'closes',
+) {
   const cloud = new Cloud(cloudOptions)
   const host = new Host(hostOptions)
   const calls: Call[] = []
   const runner: Runner = async (argv, options) => {
     calls.push({argv: [...argv], stdin: options?.stdin})
     if (argv[0] === 'doctl') return cloud.handle(argv.slice(1))
+    if (isMasterClose(argv)) {
+      if (masterClose === 'throws') throw new Error('spawn failed')
+      return masterClose === 'no-master'
+        ? fail('Control socket connect(/tmp/x/cm): No such file or directory', 255)
+        : ok()
+    }
     if (argv[0] === 'ssh') return host.handle(argv.at(-1) ?? '', options?.stdin)
     throw new Error(`unexpected command: ${argv[0]}`)
   }
   const doctlCalls = () => calls.filter(call => call.argv[0] === 'doctl').map(call => call.argv.slice(1).join(' '))
-  const sshCommands = () => calls.filter(call => call.argv[0] === 'ssh').map(call => call.argv.at(-1) ?? '')
-  return {cloud, host, calls, runner, doctlCalls, sshCommands}
+  const sshCalls = () => calls.filter(call => call.argv[0] === 'ssh' && !isMasterClose(call.argv))
+  const sshCommands = () => sshCalls().map(call => call.argv.at(-1) ?? '')
+  const closeCalls = () => calls.filter(call => isMasterClose(call.argv))
+  return {cloud, host, calls, runner, doctlCalls, sshCalls, sshCommands, closeCalls}
 }
 
-function makeDeps(runner: Runner) {
+function makeDeps(runner: Runner, {keysAlreadyPinned = false}: {keysAlreadyPinned?: boolean} = {}) {
   const logs: string[] = []
   const pins: string[][] = []
+  const pinOptions: PinHostKeysOptions[] = []
+  const sleeps: number[] = []
   const waits: string[] = []
+  const controlDirs: string[] = []
+  const removedControlDirs: string[] = []
   const deps: ProvisionDeps = {
     run: runner,
     getSshFingerprint: async keyName => `fingerprint-of-${keyName}`,
     waitForSsh: async host => {
       waits.push(host)
     },
+    hostKeysPinned: () => keysAlreadyPinned,
     pinHostKeys: async (domain, ip, path, opts) => {
       pins.push([domain, ip, path, opts.marker])
+      pinOptions.push(opts)
     },
     materializeIdentity: () => ({path: '/tmp/fake-identity', cleanup: () => {}}),
-    sleep: async () => {},
+    makeControlDir: () => {
+      const path = `/tmp/fake-control-${controlDirs.length + 1}`
+      controlDirs.push(path)
+      return {path, cleanup: () => removedControlDirs.push(path)}
+    },
+    sleep: async ms => {
+      sleeps.push(ms)
+    },
     now: () => new Date('2026-11-20T15:30:00Z'),
     log: message => logs.push(message),
   }
-  return {deps, logs, pins, waits}
+  return {deps, logs, pins, pinOptions, sleeps, waits, controlDirs, removedControlDirs}
 }
 
 const PROVISION_INPUT: ProvisionInput = {
@@ -568,6 +617,50 @@ describe('runProvision on an empty account', () => {
     expect(output).toContain('A record')
   })
 
+  it('asks the host-key pin to pause 35 seconds before each scan, for the image SSH rate limit', async () => {
+    const {pinOptions} = await runFirstProvision()
+    expect(SSH_SCAN_PAUSE_MS).toBe(35_000)
+    expect(pinOptions).toHaveLength(1)
+    expect(pinOptions[0]?.pauseBeforeScanMs).toBe(SSH_SCAN_PAUSE_MS)
+  })
+
+  it('waits again after a scan, before the first remote step, so the control master opens in a fresh window', async () => {
+    const world = makeWorld()
+    const order: string[] = []
+    const {deps} = makeDeps(async (argv, options) => {
+      if (argv[0] === 'ssh' && !isMasterClose(argv)) order.push('ssh')
+      return world.runner(argv, options)
+    })
+    deps.waitForSsh = async () => {
+      order.push('waitForSsh')
+    }
+    deps.pinHostKeys = async () => {
+      order.push('pin')
+    }
+    deps.sleep = async ms => {
+      if (ms === SSH_SCAN_PAUSE_MS) order.push(`sleep:${ms}`)
+    }
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(order.slice(0, 4)).toEqual(['waitForSsh', 'pin', `sleep:${SSH_SCAN_PAUSE_MS}`, 'ssh'])
+    expect(order.filter(entry => entry.startsWith('sleep:'))).toHaveLength(1)
+  })
+
+  it('does not wait after pinning when the keys were already pinned, so a re-run stays fast', async () => {
+    const world = makeWorld()
+    const {deps, sleeps} = makeDeps(world.runner, {keysAlreadyPinned: true})
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(sleeps.filter(ms => ms === SSH_SCAN_PAUSE_MS)).toEqual([])
+    expect(world.sshCalls().length).toBeGreaterThan(0)
+  })
+
+  it('lists TRACES_HOST under the secrets, not under variables', async () => {
+    const {logs} = await runFirstProvision()
+    const output = logs.join('\n')
+    expect(output).not.toContain('Required variables')
+    expect(output.indexOf('Required secrets:')).toBeGreaterThan(-1)
+    expect(output.indexOf('Required secrets:')).toBeLessThan(output.indexOf('TRACES_HOST '))
+  })
+
   it('refuses a host value that could be read as an ssh option', async () => {
     const world = makeWorld()
     const {deps} = makeDeps(world.runner)
@@ -575,6 +668,202 @@ describe('runProvision on an empty account', () => {
       /Invalid TRACES_HOST/,
     )
     expect(world.calls).toHaveLength(0)
+  })
+})
+
+describe('a new volume that is slow to appear in the listing', () => {
+  it('waits and lists again until the volume shows up, sleeping between listings only', async () => {
+    const world = makeWorld({newVolumeHiddenForLists: 3})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    const volumeSleeps = sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)
+    expect(volumeSleeps).toHaveLength(3)
+    expect(world.cloud.volumes[0]?.dropletIds).toEqual([DROPLET_ID])
+  })
+
+  it('does not sleep when the first listing already shows the volume', async () => {
+    const world = makeWorld()
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toEqual([])
+  })
+
+  it('succeeds when the volume appears on the last allowed attempt', async () => {
+    const world = makeWorld({newVolumeHiddenForLists: VOLUME_LIST_ATTEMPTS - 1})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+  })
+
+  it('fails with "not found after creation" when it never appears, before any attach or SSH step', async () => {
+    const world = makeWorld({newVolumeHiddenForLists: 1000})
+    const {deps, sleeps, waits} = makeDeps(world.runner)
+    await expect(runProvision(PROVISION_INPUT, false, deps)).rejects.toThrow(
+      `Volume "${TRACES_VOLUME_NAME}" not found after creation`,
+    )
+    expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+    expect(world.doctlCalls().some(call => call.startsWith('compute volume-action attach'))).toBe(false)
+    expect(world.sshCommands()).toEqual([])
+    expect(waits).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// One multiplexed SSH connection per run (the image's UFW limit is six connections per 30 seconds)
+// ---------------------------------------------------------------------------
+
+function controlPathsOf(calls: readonly Call[]): string[] {
+  return calls.map(call => call.argv.find(arg => arg.startsWith('ControlPath=')) ?? '')
+}
+
+describe('SSH connection multiplexing', () => {
+  const RESTORE_RUN = {snapshotName: 'traces-data-snap', privateKey: 'placeholder', remoteUser: 'root'}
+  const REOPEN_RUN = {privateKey: 'placeholder', remoteUser: 'root'}
+  const closedCloud = () =>
+    provisionedCloud({
+      firewalls: [{id: 'fw-old', name: FIREWALL_NAME, inbound: [inboundRule(22)], droplets: [DROPLET_ID]}],
+    })
+
+  it('sends every remote step through the same ControlPath, and no step without one', async () => {
+    const world = makeWorld()
+    const {deps, controlDirs} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+
+    expect(controlDirs).toHaveLength(1)
+    const calls = world.sshCalls()
+    expect(calls.length).toBeGreaterThan(10)
+    const expected = `ControlPath=${controlDirs[0]}/cm`
+    expect(controlPathsOf(calls).every(path => path === expected)).toBe(true)
+    for (const call of calls) {
+      expect(call.argv).toContain('ControlMaster=auto')
+      expect(call.argv).toContain(`ControlPersist=${SSH_CONTROL_PERSIST}`)
+    }
+  })
+
+  it('keeps the host-key and batch options exactly as before', async () => {
+    const world = makeWorld()
+    const {deps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+
+    for (const call of [...world.sshCalls(), ...world.closeCalls()]) {
+      expect(call.argv).toContain('StrictHostKeyChecking=accept-new')
+      expect(call.argv).toContain('BatchMode=yes')
+      expect(call.argv).toContain('ConnectTimeout=10')
+      expect(call.argv).toContain('IdentitiesOnly=yes')
+      expect(call.argv).toContain('/tmp/fake-identity')
+      expect(call.argv.join(' ')).not.toMatch(/StrictHostKeyChecking=(no|off)|UserKnownHostsFile/)
+    }
+  })
+
+  it('closes the master once, last, through the same socket and target, and removes the directory', async () => {
+    const world = makeWorld()
+    const {deps, controlDirs, removedControlDirs} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+
+    const closes = world.closeCalls()
+    expect(closes).toHaveLength(1)
+    expect(world.calls.at(-1)).toBe(closes[0])
+    const argv = closes[0]?.argv ?? []
+    expect(argv).toContain(`ControlPath=${controlDirs[0]}/cm`)
+    expect(argv.slice(-3)).toEqual(['-O', 'exit', `root@${DROPLET_HOST}`])
+    expect(removedControlDirs).toEqual(controlDirs)
+  })
+
+  it('closes the master once and removes the directory when a remote step fails', async () => {
+    const world = makeWorld({}, {fs: 'other'})
+    const {deps, controlDirs, removedControlDirs} = makeDeps(world.runner)
+    await expect(runProvision(PROVISION_INPUT, false, deps)).rejects.toThrow()
+
+    expect(world.sshCalls().length).toBeGreaterThan(0)
+    expect(world.closeCalls()).toHaveLength(1)
+    expect(removedControlDirs).toEqual(controlDirs)
+  })
+
+  it.each(['no-master', 'throws'] as const)('tolerates a close that finds no master or fails (%s)', async mode => {
+    const world = makeWorld({}, {}, mode)
+    const {deps, controlDirs, removedControlDirs} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(world.closeCalls()).toHaveLength(1)
+    expect(removedControlDirs).toEqual(controlDirs)
+  })
+
+  it('does not hide a remote failure behind a failing close', async () => {
+    const world = makeWorld({}, {fs: 'other'}, 'throws')
+    const {deps} = makeDeps(world.runner)
+    await expect(runProvision(PROVISION_INPUT, false, deps)).rejects.toThrow(/ext4|filesystem|refus/i)
+  })
+
+  it('uses a new socket for each run, never a shared one', async () => {
+    const first = makeWorld()
+    const second = makeWorld()
+    const one = makeDeps(first.runner)
+    const two = makeDeps(second.runner)
+    await runProvision(PROVISION_INPUT, false, one.deps)
+    await runProvision(PROVISION_INPUT, false, two.deps)
+    for (const world of [first, second]) {
+      const paths = new Set(controlPathsOf(world.sshCalls()))
+      expect(paths.size).toBe(1)
+      expect([...paths][0]).toMatch(/^ControlPath=\/tmp\/fake-control-\d+\/cm$/)
+    }
+  })
+
+  it('removes the directory even when the identity cannot be materialized', async () => {
+    const world = makeWorld()
+    const {deps, controlDirs, removedControlDirs} = makeDeps(world.runner)
+    deps.materializeIdentity = () => {
+      throw new Error('identity refused')
+    }
+    await expect(runProvision(PROVISION_INPUT, false, deps)).rejects.toThrow(/identity refused/)
+    expect(removedControlDirs).toEqual(controlDirs)
+    expect(world.sshCalls()).toEqual([])
+    expect(world.closeCalls()).toEqual([])
+  })
+
+  it('does the same in restore: one socket for every remote step, one close', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps, controlDirs, removedControlDirs} = makeDeps(world.runner)
+    await runRestore(RESTORE_RUN, deps)
+    expect(controlDirs).toHaveLength(1)
+    expect(new Set(controlPathsOf(world.sshCalls()))).toEqual(new Set([`ControlPath=${controlDirs[0]}/cm`]))
+    expect(world.sshCalls()).toHaveLength(4)
+    expect(world.closeCalls()).toHaveLength(1)
+    expect(removedControlDirs).toEqual(controlDirs)
+  })
+
+  it('does the same in reopen-ports: one socket, one close, also when the guard refuses', async () => {
+    const allowed = makeWorld(closedCloud(), {provisioned: true, tokens: 'deny-all'})
+    const one = makeDeps(allowed.runner)
+    await runReopen(REOPEN_RUN, one.deps)
+    expect(new Set(controlPathsOf(allowed.sshCalls()))).toEqual(new Set([`ControlPath=${one.controlDirs[0]}/cm`]))
+    expect(allowed.closeCalls()).toHaveLength(1)
+    expect(one.removedControlDirs).toEqual(one.controlDirs)
+
+    const refused = makeWorld(closedCloud(), {provisioned: true, tokens: 'real'})
+    const two = makeDeps(refused.runner)
+    await expect(runReopen(REOPEN_RUN, two.deps)).rejects.toThrow(/Refusing to reopen/)
+    expect(refused.closeCalls()).toHaveLength(1)
+    expect(two.removedControlDirs).toEqual(two.controlDirs)
+  })
+
+  it('names a short socket path, well under the macOS limit', async () => {
+    const world = makeWorld()
+    const {deps, controlDirs} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(`${controlDirs[0]}/cm`.length).toBeLessThan(60)
+  })
+})
+
+describe('defaultDeps control directory', () => {
+  it('is a private directory under /tmp with a short socket path, and cleanup removes it', () => {
+    const dir = defaultDeps().makeControlDir()
+    try {
+      expect(dir.path.startsWith('/tmp/')).toBe(true)
+      expect(statSync(dir.path).mode & 0o777).toBe(0o700)
+      expect(`${dir.path}/cm`.length).toBeLessThan(60)
+    } finally {
+      dir.cleanup()
+    }
+    expect(existsSync(dir.path)).toBe(false)
   })
 })
 
@@ -761,7 +1050,8 @@ describe('host configuration', () => {
     const [daemon, containerd] = dockerConfigFiles()
     expect(JSON.parse(daemon?.content ?? '{}')).toEqual({'data-root': TRACES_DOCKER_ROOT})
     expect(containerd?.content).toContain(`root = "${TRACES_CONTAINERD_ROOT}"`)
-    expect(containerd?.content).toContain('disabled_plugins = ["cri"]')
+    expect(containerd?.content).toContain('disabled_plugins = ["io.containerd.grpc.v1.cri"]')
+    expect(containerd?.content).not.toContain('disabled_plugins = ["cri"]')
     expect(TRACES_DOCKER_ROOT.startsWith(`${TRACES_VOLUME_MOUNT}/`)).toBe(true)
     expect(TRACES_CONTAINERD_ROOT.startsWith(`${TRACES_VOLUME_MOUNT}/`)).toBe(true)
   })
@@ -779,6 +1069,8 @@ describe('host configuration', () => {
   it('never replaces a foreign daemon.json or containerd config', () => {
     const [daemon, containerd] = dockerConfigFiles()
     expect(daemon?.guard?.stockActive).toEqual(['{}'])
+    // The image's stock containerd file (short plugin name, no version line) is the one we may replace.
+    expect(containerd?.guard?.stockActive).toEqual(['disabled_plugins = ["cri"]'])
     expect(containerd?.guard?.marker).toContain('managed by')
     expect(daemon ? managedFileScript(daemon) : '').toContain('TRACES_FILE_FOREIGN')
   })
@@ -835,6 +1127,34 @@ describe('managed file script, run against real files in a temp directory', () =
       )
       expect(refused.exitCode).toBe(1)
       expect(refused.stdout).toBe('TRACES_FILE_FOREIGN')
+      expect(readFileSync(path, 'utf8')).toBe(foreign)
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  })
+})
+
+describe('containerd config guard, run against real files in a temp directory', () => {
+  it('accepts the stock file and a file we wrote earlier, and refuses a foreign one', async () => {
+    const containerd = dockerConfigFiles()[1]
+    if (!containerd) throw new Error('missing containerd config')
+    const dir = mkdtempSync(join(tmpdir(), 'traces-test-'))
+    try {
+      const path = join(dir, 'config.toml')
+      const script = managedFileScript({...containerd, path})
+
+      // The replace step itself uses GNU `install -D`, so only the guard's verdict is asserted: it must not
+      // call these two files foreign (on macOS the step then stops at `install`, on the host it replaces them).
+      writeFileSync(path, '# stock\n\ndisabled_plugins = ["cri"]\n')
+      expect((await runLocal(script, containerd.content)).stdout).not.toBe('TRACES_FILE_FOREIGN')
+
+      writeFileSync(path, containerd.content.replace('io.containerd.grpc.v1.cri', 'cri'))
+      expect((await runLocal(script, containerd.content)).stdout).not.toBe('TRACES_FILE_FOREIGN')
+
+      const foreign = 'version = 2\n[plugins."io.containerd.grpc.v1.cri"]\n  sandbox_image = "x"\n'
+      writeFileSync(path, foreign)
+      const refused = await runLocal(script, containerd.content)
+      expect(refused).toEqual({stdout: 'TRACES_FILE_FOREIGN', exitCode: 1})
       expect(readFileSync(path, 'utf8')).toBe(foreign)
     } finally {
       rmSync(dir, {recursive: true, force: true})
@@ -1123,6 +1443,65 @@ describe('runRestore', () => {
       command.includes('verify-sentinel') ? fail('TRACES_SENTINEL_UNRECOGNISED') : originalHandle(command, stdin)
     const {deps} = makeDeps(world.runner)
     await expect(runRestore(RESTORE_INPUT, deps)).rejects.toThrow(/verify sentinel on restored volume failed/)
+  })
+
+  describe('when the new volume is slow to appear in the listing', () => {
+    const NEW_NAME = 'traces-data-restore-20261120-1530'
+
+    it('lists again, sleeping between listings only, and completes the restore', async () => {
+      const world = makeWorld(provisionedCloud({newVolumeHiddenForLists: 3}), {provisioned: true})
+      const {deps, sleeps} = makeDeps(world.runner)
+      await runRestore(RESTORE_INPUT, deps)
+      expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(3)
+      expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
+      expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
+      expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+    })
+
+    it('does not sleep when the first listing already shows the volume', async () => {
+      const world = makeWorld(provisionedCloud(), {provisioned: true})
+      const {deps, sleeps} = makeDeps(world.runner)
+      await runRestore(RESTORE_INPUT, deps)
+      expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toEqual([])
+    })
+
+    it('succeeds when the volume appears on the last allowed attempt', async () => {
+      const world = makeWorld(provisionedCloud({newVolumeHiddenForLists: VOLUME_LIST_ATTEMPTS - 1}), {
+        provisioned: true,
+      })
+      const {deps, sleeps} = makeDeps(world.runner)
+      await runRestore(RESTORE_INPUT, deps)
+      expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+    })
+
+    it('fails with a clear error when it never appears: ports stay closed, the old volume stays attached, the host is untouched', async () => {
+      const world = makeWorld(provisionedCloud({newVolumeHiddenForLists: 1000}), {provisioned: true})
+      const {deps, sleeps, waits} = makeDeps(world.runner)
+      await expect(runRestore(RESTORE_INPUT, deps)).rejects.toThrow(
+        `Volume "${NEW_NAME}" not found after creation. Ports 80 and 443 stay closed; the old volume is still attached and Docker was not touched.`,
+      )
+      expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+      // State left behind: web ports closed at the cloud firewall (closed before the volume was created)...
+      expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
+      // ...the old volume still attached, nothing detached or attached, Docker never stopped, no SSH at all...
+      expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([DROPLET_ID])
+      expect(world.doctlCalls().some(call => call.startsWith('compute volume-action'))).toBe(false)
+      expect(world.sshCommands()).toEqual([])
+      expect(waits).toEqual([])
+      // ...and the new volume exists at DigitalOcean, unattached, for the operator to delete or reuse.
+      expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([])
+    })
+
+    it('still refuses a listed volume whose id is not the one the create call returned', async () => {
+      const world = makeWorld(provisionedCloud(), {provisioned: true})
+      const {deps} = makeDeps(async (argv, options) => {
+        const result = await world.runner(argv, options)
+        return argv.slice(1, 4).join(' ') === 'compute volume create' ? ok('vol-someone-else') : result
+      })
+      await expect(runRestore(RESTORE_INPUT, deps)).rejects.toThrow(`Volume "${NEW_NAME}" not found after creation`)
+      expect(world.doctlCalls().some(call => call.startsWith('compute volume-action'))).toBe(false)
+      expect(world.sshCommands()).toEqual([])
+    })
   })
 })
 

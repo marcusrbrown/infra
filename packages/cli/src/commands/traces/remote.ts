@@ -8,6 +8,13 @@
 //   - a remote probe prints a sentinel; success needs exit 0 and a recognised sentinel
 //   - no remote command redirects to the null device, deletes outside the app directory and /tmp, or
 //     redirects a descriptor to a device file
+//   - one command, one connection. The host rate-limits new ssh connections (`ufw limit 22/tcp`: a source that
+//     opens six within 30 seconds is refused for about 30 seconds), so a command that makes several calls runs
+//     them all over one multiplexed connection (`withRemoteSession`). A command that is itself one long-lived
+//     connection, `traces open` and `traces logs`, stays on a plain one.
+
+import {mkdtempSync, rmSync} from 'node:fs'
+import {join} from 'node:path'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {redactHost} from '../../lib/redact'
@@ -59,20 +66,54 @@ function baseSshArgs(): string[] {
   return ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', ...buildKnownHostsArgs()]
 }
 
+/**
+ * How long the master connection outlives the last call that used it. The master is closed explicitly when the
+ * command ends, so this only matters when the command cannot get that far (the process is killed): then the
+ * master and its socket go away this long after the last call. It must bridge the longest gap between two calls
+ * of one command: a proof loop waits one second between attempts, and a route check can spend up to a 10 second
+ * request timeout before the next call. 30 seconds covers both with margin and is short enough to leave nothing
+ * behind that matters.
+ */
+export const CONTROL_PERSIST = '30s'
+
+/** The options that make a call share (or become) the master connection at `controlPath`. */
+function controlArgs(controlPath: string): string[] {
+  return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`, '-o', `ControlPersist=${CONTROL_PERSIST}`]
+}
+
 export interface SshArgv {
   argv: string[]
   /** Removes the temporary identity file, if one was written. */
   cleanup: () => void
 }
 
-/** `ssh ... root@host '<remote command>'`. The host is validated here, once, for every caller. */
-export function buildRemoteArgv(host: string, remoteCommand: string): SshArgv {
+/**
+ * `ssh ... root@host '<remote command>'`. The host is validated here, once, for every caller. With a
+ * `controlPath` the call is multiplexed over that socket; without one it is a plain connection.
+ */
+export function buildRemoteArgv(host: string, remoteCommand: string, controlPath?: string): SshArgv {
   validateTracesHost(host)
   const identity = buildIdentityArgs(process.env.TRACES_SSH_KEY)
   return {
-    argv: ['ssh', ...baseSshArgs(), ...identity.args, `${REMOTE_USER}@${host}`, remoteCommand],
+    argv: [
+      'ssh',
+      ...baseSshArgs(),
+      ...(controlPath === undefined ? [] : controlArgs(controlPath)),
+      ...identity.args,
+      `${REMOTE_USER}@${host}`,
+      remoteCommand,
+    ],
     cleanup: identity.cleanup,
   }
+}
+
+/**
+ * `ssh -O exit` on the socket: asks the master to leave. It makes no connection, so it needs neither the identity
+ * nor the host keys; the host only names the master to ssh. A missing master is an error the caller tolerates.
+ */
+export function buildCloseArgv(host: string, controlPath: string): string[] {
+  validateTracesHost(host)
+  return ['ssh', '-o', 'BatchMode=yes', '-o', `ControlPath=${controlPath}`, '-O', 'exit', `${REMOTE_USER}@${host}`]
 }
 
 export interface TunnelPorts {
@@ -116,44 +157,196 @@ export interface RemoteResult {
   stderr: string
 }
 
-export interface RunRemoteOptions {
-  spawn?: SpawnFn
-  signal?: AbortSignal
+// ─── One connection per command ─────────────────────────────────────────────────────────────────
+
+/** Short and under `/tmp`: a unix socket path is limited to about 104 bytes on macOS, and `os.tmpdir()` is long there. */
+const CONTROL_ROOT = '/tmp'
+
+/** The calls of one command share this: the socket they multiplex over, and the order that makes it exist. */
+export interface RemoteSession {
+  /** The master's socket, in a directory only this process can enter. */
+  readonly controlPath: string
+  /**
+   * Run one call's work through the session. Until a call has connected, calls run one at a time, because the one
+   * that connects becomes the master; the calls started beside it wait their turn. Once one has connected
+   * (`connected(value)`, true by default), the waiting calls run together over its socket. Without this, calls
+   * started at the same moment (`Promise.all`) would all find no master and each open a connection. A call that
+   * throws, or whose value is not `connected`, has not connected: the next one tries, so a master that could not be
+   * opened is not retried by every queued call at once.
+   */
+  run: <T>(host: string, call: () => Promise<T>, connected?: (value: T) => boolean) => Promise<T>
+  /** Whether any call has been started, so a master may exist. */
+  readonly used: () => boolean
+  /** The host the calls went to, once there has been one. */
+  readonly host: () => string | undefined
+  /** Resolves once every call started through `run` has settled, whether it returned or threw. Never rejects. */
+  readonly settled: () => Promise<void>
+}
+
+function createRemoteSession(controlPath: string): RemoteSession {
+  let started = false
+  let sessionHost: string | undefined
+  let masterUp = false
+  // Whether a call is trying to become the master, and the calls waiting for it to finish.
+  let probing = false
+  let waiting: (() => void)[] = []
+  const inFlight = new Set<Promise<void>>()
+
+  /** Resolves when this call may go: as the one trying to connect (true), or freely over a master (false). */
+  const takeTurn = async (): Promise<boolean> => {
+    for (;;) {
+      if (masterUp) return false
+      if (!probing) {
+        probing = true
+        return true
+      }
+      await new Promise<void>(resolve => waiting.push(resolve))
+    }
+  }
+
+  const runCall = async <T>(call: () => Promise<T>, connected: (value: T) => boolean): Promise<T> => {
+    if (!(await takeTurn())) return call()
+    try {
+      const value = await call()
+      if (connected(value)) masterUp = true
+      return value
+    } finally {
+      probing = false
+      const wake = waiting
+      waiting = []
+      for (const resolve of wake) resolve()
+    }
+  }
+
+  return {
+    controlPath,
+    used: () => started,
+    host: () => sessionHost,
+    settled: async () => {
+      while (inFlight.size > 0) await Promise.all([...inFlight])
+    },
+    run: (host, call, connected = () => true) => {
+      if (sessionHost !== undefined && sessionHost !== host) {
+        return Promise.reject(new Error('A remote session serves one host: a command made calls to two.'))
+      }
+      sessionHost = host
+      started = true
+      const result = runCall(call, connected)
+      // Settled (returned or threw) and gone from the set: `settled()` waiting on this resolves after that.
+      const done: Promise<void> = result
+        .then(
+          () => undefined,
+          () => undefined,
+        )
+        .then(() => {
+          inFlight.delete(done)
+        })
+      inFlight.add(done)
+      return result
+    },
+  }
+}
+
+/** The part of a command's dependencies that decides how ssh is reached. */
+export interface RemoteDeps {
+  spawn?: SpawnFn | undefined
+  session?: RemoteSession | undefined
+}
+
+/**
+ * Run `body` with one multiplexed ssh connection for every call it makes through the session. The master is
+ * closed (`ssh -O exit`) and its directory removed when `body` ends, by returning or by throwing. Nothing in
+ * `body` may end the process: `process.exit` skips this clean-up, so a caller exits after this returns.
+ */
+export async function withRemoteSession<T>(
+  spawn: SpawnFn | undefined,
+  body: (session: RemoteSession) => Promise<T>,
+): Promise<T> {
+  const directory = mkdtempSync(join(CONTROL_ROOT, 'tr-'))
+  const session = createRemoteSession(join(directory, 'cm'))
+  try {
+    return await body(session)
+  } finally {
+    try {
+      // A body that failed early (a `Promise.all` that rejected) can leave calls running or queued. They use the
+      // master and the directory, so neither goes until every one of them has settled.
+      await session.settled()
+      await closeMaster(session, spawn ?? defaultSpawn)
+    } finally {
+      rmSync(directory, {recursive: true, force: true})
+    }
+  }
+}
+
+/** Ask the master to exit. Only when a call went out, and a master that is already gone is not an error. */
+async function closeMaster(session: RemoteSession, spawn: SpawnFn): Promise<void> {
+  const host = session.host()
+  if (!session.used() || host === undefined) return
+  try {
+    const child = spawn(buildCloseArgv(host, session.controlPath), {
+      env: childEnv(),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      signal: AbortSignal.timeout(5000),
+    })
+    await Promise.all([
+      child.stdout === null ? Promise.resolve('') : new Response(child.stdout).text(),
+      child.stderr === null ? Promise.resolve('') : new Response(child.stderr).text(),
+      child.exited,
+    ])
+  } catch {
+    // The master also exits by itself, ControlPersist after the last call.
+  }
+}
+
+/** What ssh itself exits with when it could not connect or lost the connection, so no master came of the call. */
+const SSH_FAILURE = 255
+
+export interface RunRemoteOptions extends RemoteDeps {
+  signal?: AbortSignal | undefined
   /** Contents handed to the remote command on stdin. */
-  stdin?: string
+  stdin?: string | undefined
 }
 
 /**
  * Run one fixed remote command. Standard error comes back with the host name removed, so an error shown to
- * an MCP consumer or a log cannot carry a misdirected secret.
+ * an MCP consumer or a log cannot carry a misdirected secret. With a `session` the call multiplexes over the
+ * session's connection.
  */
 export async function runRemote(
   host: string,
   remoteCommand: string,
   options: RunRemoteOptions = {},
 ): Promise<RemoteResult> {
-  const {argv, cleanup} = buildRemoteArgv(host, remoteCommand)
-  const spawn = options.spawn ?? defaultSpawn
-  try {
-    const child = spawn(argv, {
-      env: childEnv(),
-      stdout: 'pipe',
-      stderr: 'pipe',
-      ...(options.stdin === undefined ? {} : {stdin: new TextEncoder().encode(options.stdin)}),
-      ...(options.signal === undefined ? {} : {signal: options.signal}),
-    })
-    const [stdout, stderr, exitCode] = await Promise.all([
-      child.stdout === null ? Promise.resolve('') : new Response(child.stdout).text(),
-      child.stderr === null ? Promise.resolve('') : new Response(child.stderr).text(),
-      child.exited,
-    ])
-    return {exitCode, stdout, stderr: redactHost(stderr.trim(), host)}
-  } finally {
-    cleanup()
+  const {session} = options
+  const execute = async (): Promise<RemoteResult> => {
+    const {argv, cleanup} = buildRemoteArgv(host, remoteCommand, session?.controlPath)
+    const spawn = options.spawn ?? defaultSpawn
+    try {
+      const child = spawn(argv, {
+        env: childEnv(),
+        stdout: 'pipe',
+        stderr: 'pipe',
+        ...(options.stdin === undefined ? {} : {stdin: new TextEncoder().encode(options.stdin)}),
+        ...(options.signal === undefined ? {} : {signal: options.signal}),
+      })
+      const [stdout, stderr, exitCode] = await Promise.all([
+        child.stdout === null ? Promise.resolve('') : new Response(child.stdout).text(),
+        child.stderr === null ? Promise.resolve('') : new Response(child.stderr).text(),
+        child.exited,
+      ])
+      return {exitCode, stdout, stderr: redactHost(stderr.trim(), host)}
+    } finally {
+      cleanup()
+    }
   }
+  return session === undefined ? execute() : session.run(host, execute, result => result.exitCode !== SSH_FAILURE)
 }
 
-/** Run a command attached to this terminal, for `traces logs` and the tunnel. */
+/**
+ * Run a command attached to this terminal, for `traces logs` and the tunnel. Each is one long-lived connection
+ * of its own, so it stays on a plain connection: a tunnel through a shared master would die with the master.
+ */
 export async function runAttached(argv: SshArgv, spawn: SpawnFn = defaultSpawn): Promise<number> {
   try {
     const child = spawn(argv.argv, {env: childEnv(), stdout: 'inherit', stderr: 'inherit'})

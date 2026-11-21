@@ -42,7 +42,7 @@ After a restore from a snapshot, any Tempo data block that was caught half-writt
 
 ## Deleting data
 
-The operator can delete a trace from Langfuse on request. Tempo has no way to delete one trace. Its copy (structure, names, error text and link attributes) expires with the 30-day retention, unless the operator wipes the whole Tempo store. A snapshot that contains the data ages out within 8 days of the deletion.
+The operator can delete a trace from Langfuse on request. Tempo has no way to delete one trace. Its copy (structure, names, error text and link attributes) expires with the 30-day retention, unless the operator wipes the whole Tempo store. A quarantined Tempo block (see above) does not expire by itself; the operator deletes it. A snapshot that contains the data ages out within 8 days of the deletion.
 
 ## Calls the software makes on its own
 

@@ -87,11 +87,15 @@ export function ttlMatches(column: string, found: string | undefined): boolean {
 
 /** The TTL clause in a `CREATE TABLE` statement as ClickHouse echoes it, or undefined for a table with none. */
 export function extractTtl(createStatement: string): string | undefined {
-  for (const line of createStatement.split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed.startsWith('TTL ')) return trimmed.slice(4).trim()
-  }
-  return undefined
+  // `system.tables.create_table_query` is one line, with the table TTL between the sorting key and SETTINGS:
+  // `... ORDER BY (...) TTL toDateTime(start_time) + toIntervalDay(30) SETTINGS index_granularity = 8192`.
+  // `SHOW CREATE TABLE` prints the same clauses on separate lines. Both are handled by flattening first.
+  const flat = createStatement.replaceAll(/\s+/g, ' ').trim()
+  const start = flat.lastIndexOf(' TTL ')
+  if (start === -1) return undefined
+  const clause = flat.slice(start + ' TTL '.length)
+  const end = clause.indexOf(' SETTINGS ')
+  return (end === -1 ? clause : clause.slice(0, end)).trim()
 }
 
 export interface TableState {

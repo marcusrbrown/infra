@@ -54,6 +54,7 @@ import {materializeIdentityFile} from '@marcusrbrown/infra-shared/server/droplet
 import {bashCommand, checkTracesStorage, shellQuote} from '../server/provision'
 import {
   SENDER_GROUPS,
+  TEMPO_USER_ID,
   TRACES_APP_DIR,
   TRACES_DEPLOY_MARKER,
   TRACES_DEPLOY_STEP_LOCK,
@@ -293,10 +294,10 @@ export type Touch = Service | 'compose'
 export type IngestState = 'off' | 'held' | 'open'
 
 // Container users. The collector image's built-in `nonroot` user, the Grafana image's user, and the reporter's
-// own UID from the compose file.
+// user, which is Tempo's (the reporter lists Tempo's 0700 directories; see `TEMPO_USER_ID` in `host.ts`).
 const COLLECTOR_GID = '65532'
 const GRAFANA_UID = '472'
-const REPORTER_UID = '10010'
+const REPORTER_UID = String(TEMPO_USER_ID)
 
 const COMPOSE_PROJECT_VOLUME = 'traces_collector_queue'
 
@@ -849,31 +850,55 @@ export function parseTokenFiles(stdout: string): Record<string, TokenFileState> 
 
 export const FILE_COMPARE_SENTINELS = ['TRACES_FILE_SAME', 'TRACES_FILE_DIFFERENT', 'TRACES_FILE_ABSENT'] as const
 
-/** Compares stdin with a file on the host. `.env` is compared without its ingest-state line. Writes nothing. */
-export function compareFileScript(path: string, kind: 'plain' | 'env'): string {
+const OWNER = /^(?:root|\d+):(?:root|\d+)$/
+const MODE = /^0[0-7]{3}$/
+
+/**
+ * An owner and mode as `stat -c '%u:%g %a'` prints them: the numeric user and group (`root` is 0) and the mode in
+ * octal without its leading zero, so `root:65532` and `0440` are `0:65532 440`.
+ */
+function statForm(file: Pick<RemoteFile, 'owner' | 'mode'>): string {
+  if (!OWNER.test(file.owner)) throw new Error(`Unsafe owner: ${file.owner}`)
+  if (!MODE.test(file.mode)) throw new Error(`Unsafe mode: ${file.mode}`)
+  const owner = file.owner.replaceAll('root', '0')
+  return `${owner} ${Number.parseInt(file.mode, 8).toString(8)}`
+}
+
+/**
+ * Compares stdin with a file on the host, and the file's owner and mode with the pair the deploy would give it. A file
+ * whose content matches but whose owner or mode differs is `DIFFERENT`: it is rewritten, so a service that mounts it
+ * is recreated as for a content change. (The reporter's secret files are the case that needs it: they sit on the host
+ * owned by the reporter's old user, with unchanged content.) `.env` is compared without its ingest-state line. Writes
+ * nothing. Token files are never compared: deploy creates one only when it is absent and never touches it after.
+ *
+ * `stat -c` is GNU coreutils, which the host (Ubuntu) has. A host that cannot answer fails the step (`set -e`): it
+ * is never read as "same".
+ */
+export function compareFileScript(
+  path: string,
+  kind: 'plain' | 'env',
+  attrs: Pick<RemoteFile, 'owner' | 'mode'>,
+): string {
   const target = remotePath(path)
   const same = kind === 'env' ? `grep -v '^TRACES_INGEST_STATE=' ${target} | cmp -s "$t" -` : `cmp -s "$t" ${target}`
   return step(
     `compare:${path}`,
     `t=$(mktemp /tmp/traces-cmp.XXXXXX)
+trap 'rm -f "$t"' EXIT
 cat > "$t"
 if [ ! -e ${target} ]; then
-  rm -f "$t"
-  echo ${FILE_COMPARE_SENTINELS[2]}
-elif ${same}; then
-  rm -f "$t"
-  echo ${FILE_COMPARE_SENTINELS[0]}
+  status=${FILE_COMPARE_SENTINELS[2]}
+elif ! ${same}; then
+  status=${FILE_COMPARE_SENTINELS[1]}
 else
-  rm -f "$t"
-  echo ${FILE_COMPARE_SENTINELS[1]}
-fi`,
+  attr=$(stat -c '%u:%g %a' ${target})
+  if [ "$attr" = '${statForm(attrs)}' ]; then status=${FILE_COMPARE_SENTINELS[0]}; else status=${FILE_COMPARE_SENTINELS[1]}; fi
+fi
+echo "$status"`,
   )
 }
 
 export const FILE_WRITTEN_SENTINEL = 'TRACES_FILE_WRITTEN'
-
-const OWNER = /^(?:root|\d+):(?:root|\d+)$/
-const MODE = /^0[0-7]{3}$/
 
 /**
  * Write stdin to a file: a temporary file in the same directory with its owner and mode set first, then an atomic
@@ -1947,7 +1972,7 @@ export async function performDeploy(
   for (const file of files) {
     const {sentinel} = await sh(
       `Compare ${file.path}`,
-      compareFileScript(file.path, file.kind),
+      compareFileScript(file.path, file.kind, file),
       FILE_COMPARE_SENTINELS,
       file.content,
     )

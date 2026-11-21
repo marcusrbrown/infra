@@ -143,6 +143,18 @@ describe('TTL text', () => {
     expect(extractTtl('CREATE TABLE default.t\n(\n  `a` String\n)\nENGINE = X\nSETTINGS a = 1')).toBeUndefined()
   })
 
+  // The shape `system.tables.create_table_query` has on the host: one line, TTL before SETTINGS.
+  it('reads the TTL out of a one-line table definition', () => {
+    const oneLine =
+      'CREATE TABLE default.events_core (`id` String, `start_time` DateTime64(6)) ENGINE = ReplacingMergeTree(event_ts, is_deleted) PARTITION BY toYYYYMM(start_time) ORDER BY (project_id, start_time) TTL toDateTime(start_time) + toIntervalDay(30) SETTINGS enable_block_number_column = 1, prewarm_mark_cache = 1'
+    expect(extractTtl(oneLine)).toBe('toDateTime(start_time) + toIntervalDay(30)')
+    expect(ttlMatches('start_time', extractTtl(oneLine))).toBe(true)
+    expect(extractTtl(oneLine.replace(/ TTL .* SETTINGS/, ' SETTINGS'))).toBeUndefined()
+    expect(extractTtl('CREATE TABLE default.t (`a` DateTime) ENGINE = X ORDER BY a TTL a + toIntervalDay(30)')).toBe(
+      'a + toIntervalDay(30)',
+    )
+  })
+
   it('covers the two proven tables as required and the older trace tables as optional', () => {
     const required = RETENTION_TABLES.filter(table => table.required).map(table => table.name)
     expect(required).toEqual(['events_full', 'events_core'])

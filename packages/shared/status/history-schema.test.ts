@@ -13,8 +13,8 @@ describe('APPS_NOT_YET_DEPLOYED', () => {
     for (const app of APPS_NOT_YET_DEPLOYED) expect(APP_IDS).toContain(app)
   })
 
-  // Tripwire, not a rule: the public status pages hide an app named here. Delete this test in the change that
-  // deploys `traces` for the first time and takes it off the list.
+  // Tripwire, not a rule: the public status pages hide an app named here. Delete this test in the follow-up
+  // change that takes `traces` off the list, after its first deploy has succeeded.
   it('holds traces until its first deploy', () => {
     expect(APPS_NOT_YET_DEPLOYED).toEqual(['traces'])
   })

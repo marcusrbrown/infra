@@ -416,6 +416,45 @@ describe('the control options on the ssh argv', () => {
   })
 })
 
+/**
+ * An ssh spawner whose calls stay running until `release(name, exitCode)`, and that counts how many run at once.
+ * `throwOn` names the calls whose spawn itself throws. A close (`ssh -O exit`) is counted and noted in the event order.
+ */
+function heldSpawn({throwOn = []}: {throwOn?: string[]} = {}) {
+  const events: string[] = []
+  const holds = new Map<string, (exitCode: number) => void>()
+  let running = 0
+  let maxRunning = 0
+  const spawn: SpawnFn = argv => {
+    if (argv.includes('-O')) {
+      events.push('close')
+      return {stdout: null, stderr: null, exited: Promise.resolve(0)}
+    }
+    const name = argv.at(-1) ?? ''
+    events.push(`start ${name}`)
+    if (throwOn.includes(name)) throw new Error('spawn ssh ENOENT')
+    running += 1
+    maxRunning = Math.max(maxRunning, running)
+    const exited = new Promise<number>(resolve => {
+      holds.set(name, exitCode => {
+        running -= 1
+        events.push(`end ${name}`)
+        resolve(exitCode)
+      })
+    })
+    return {stdout: null, stderr: null, exited}
+  }
+  return {
+    spawn,
+    release: (name: string, exitCode: number) => holds.get(name)?.(exitCode),
+    starts: () => events.filter(event => event.startsWith('start ')).map(event => event.slice('start '.length)),
+    running: () => running,
+    maxRunning: () => maxRunning,
+    closes: () => events.filter(event => event === 'close').length,
+    lastEvent: () => events.at(-1),
+  }
+}
+
 describe('withRemoteSession', () => {
   it('every call in a session carries the same ControlPath, and no secret is in the argv', async () => {
     const {spawn, calls} = recordingSpawn(() => ({}))
@@ -577,6 +616,109 @@ describe('withRemoteSession', () => {
     expect(events.filter(event => event.startsWith('start'))).toEqual(['start first', 'start second', 'start third'])
     for (const release of releases.slice(1)) release()
     await done
+  })
+
+  describe('while no call has connected yet', () => {
+    const settle = () => Bun.sleep(10)
+    const names = ['first', 'second', 'third', 'fourth', 'fifth']
+    const runAll = (held: ReturnType<typeof heldSpawn>) =>
+      withRemoteSession(held.spawn, session =>
+        Promise.all(names.map(name => runRemote(HOST, name, {spawn: held.spawn, session}))),
+      )
+
+    it('a first call that exits 255 leaves the queued calls running one at a time until one connects, then all together', async () => {
+      const held = heldSpawn()
+      const done = runAll(held)
+      await settle()
+      expect(held.starts()).toEqual(['first'])
+
+      held.release('first', 255)
+      await settle()
+      expect(held.starts()).toEqual(['first', 'second'])
+      expect(held.running()).toBe(1)
+
+      held.release('second', 255)
+      await settle()
+      expect(held.starts()).toEqual(['first', 'second', 'third'])
+      expect(held.running()).toBe(1)
+
+      // The third connects and becomes the master: the rest now go out together on its socket.
+      held.release('third', 0)
+      await settle()
+      expect(held.starts()).toEqual(['first', 'second', 'third', 'fourth', 'fifth'])
+      expect(held.running()).toBe(2)
+      expect(held.maxRunning()).toBe(2)
+
+      held.release('fourth', 0)
+      held.release('fifth', 0)
+      const results = await done
+      expect(results.map(result => result.exitCode)).toEqual([255, 255, 0, 0, 0])
+    })
+
+    it('never runs two calls at once while every call fails to connect', async () => {
+      const held = heldSpawn()
+      const done = runAll(held)
+      for (const name of names) {
+        await settle()
+        expect(held.running()).toBe(1)
+        held.release(name, 255)
+      }
+      await done
+      expect(held.starts()).toEqual(names)
+      expect(held.maxRunning()).toBe(1)
+    })
+
+    it('a first call that exits non-zero but did connect (the remote command failed) frees the rest at once', async () => {
+      const held = heldSpawn()
+      const done = runAll(held)
+      await settle()
+      held.release('first', 1)
+      await settle()
+      expect(held.starts()).toEqual(names)
+      for (const name of names.slice(1)) held.release(name, 0)
+      await done
+    })
+
+    it('a first call that throws leaves the queued calls serial, and the close and clean-up wait for every one of them', async () => {
+      const held = heldSpawn({throwOn: ['first']})
+      let directory = ''
+      const done = withRemoteSession(held.spawn, session => {
+        directory = dirname(session.controlPath)
+        return Promise.all(names.map(name => runRemote(HOST, name, {spawn: held.spawn, session})))
+      })
+      // Collect the outcome without awaiting it: the body rejects as soon as the first call throws.
+      const outcome = done.then(
+        () => 'resolved',
+        (error: unknown) => (error instanceof Error ? error.message : 'rejected'),
+      )
+      await settle()
+      // The body has already failed, yet the queued calls are still going: nothing is closed or removed under them.
+      expect(held.starts()).toEqual(['first', 'second'])
+      expect(held.running()).toBe(1)
+      expect(held.closes()).toBe(0)
+      expect(existsSync(directory)).toBe(true)
+
+      held.release('second', 255)
+      await settle()
+      expect(held.starts()).toEqual(['first', 'second', 'third'])
+      expect(held.closes()).toBe(0)
+
+      held.release('third', 0)
+      await settle()
+      // Third connected, so the last two go together, and teardown is still waiting for them.
+      expect(held.starts()).toEqual(names)
+      expect(held.closes()).toBe(0)
+      expect(existsSync(directory)).toBe(true)
+
+      held.release('fourth', 0)
+      await settle()
+      expect(held.closes()).toBe(0)
+      held.release('fifth', 0)
+      expect(await outcome).toBe('spawn ssh ENOENT')
+      expect(held.closes()).toBe(1)
+      expect(held.lastEvent()).toBe('close')
+      expect(existsSync(directory)).toBe(false)
+    })
   })
 
   it('a first call that fails does not stop the others from running', async () => {

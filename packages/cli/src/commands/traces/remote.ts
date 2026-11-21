@@ -167,39 +167,82 @@ export interface RemoteSession {
   /** The master's socket, in a directory only this process can enter. */
   readonly controlPath: string
   /**
-   * Run one call's work through the session. The first call runs alone, because it is the one that becomes the
-   * master; the calls that were started beside it wait for it to finish, then run together over the socket. Without
-   * this, calls started at the same moment (`Promise.all`) would all find no master and each open a connection.
+   * Run one call's work through the session. Until a call has connected, calls run one at a time, because the one
+   * that connects becomes the master; the calls started beside it wait their turn. Once one has connected
+   * (`connected(value)`, true by default), the waiting calls run together over its socket. Without this, calls
+   * started at the same moment (`Promise.all`) would all find no master and each open a connection. A call that
+   * throws, or whose value is not `connected`, has not connected: the next one tries, so a master that could not be
+   * opened is not retried by every queued call at once.
    */
-  run: <T>(host: string, call: () => Promise<T>) => Promise<T>
+  run: <T>(host: string, call: () => Promise<T>, connected?: (value: T) => boolean) => Promise<T>
   /** Whether any call has been started, so a master may exist. */
   readonly used: () => boolean
   /** The host the calls went to, once there has been one. */
   readonly host: () => string | undefined
+  /** Resolves once every call started through `run` has settled, whether it returned or threw. Never rejects. */
+  readonly settled: () => Promise<void>
 }
 
 function createRemoteSession(controlPath: string): RemoteSession {
-  let first: Promise<void> | undefined
+  let started = false
   let sessionHost: string | undefined
+  let masterUp = false
+  // Whether a call is trying to become the master, and the calls waiting for it to finish.
+  let probing = false
+  let waiting: (() => void)[] = []
+  const inFlight = new Set<Promise<void>>()
+
+  /** Resolves when this call may go: as the one trying to connect (true), or freely over a master (false). */
+  const takeTurn = async (): Promise<boolean> => {
+    for (;;) {
+      if (masterUp) return false
+      if (!probing) {
+        probing = true
+        return true
+      }
+      await new Promise<void>(resolve => waiting.push(resolve))
+    }
+  }
+
+  const runCall = async <T>(call: () => Promise<T>, connected: (value: T) => boolean): Promise<T> => {
+    if (!(await takeTurn())) return call()
+    try {
+      const value = await call()
+      if (connected(value)) masterUp = true
+      return value
+    } finally {
+      probing = false
+      const wake = waiting
+      waiting = []
+      for (const resolve of wake) resolve()
+    }
+  }
+
   return {
     controlPath,
-    used: () => first !== undefined,
+    used: () => started,
     host: () => sessionHost,
-    run: async (host, call) => {
+    settled: async () => {
+      while (inFlight.size > 0) await Promise.all([...inFlight])
+    },
+    run: (host, call, connected = () => true) => {
       if (sessionHost !== undefined && sessionHost !== host) {
-        throw new Error('A remote session serves one host: a command made calls to two.')
+        return Promise.reject(new Error('A remote session serves one host: a command made calls to two.'))
       }
       sessionHost = host
-      if (first === undefined) {
-        const started = call()
-        first = started.then(
+      started = true
+      const result = runCall(call, connected)
+      // Settled (returned or threw) and gone from the set: `settled()` waiting on this resolves after that.
+      const done: Promise<void> = result
+        .then(
           () => undefined,
           () => undefined,
         )
-        return started
-      }
-      await first
-      return call()
+        .then(() => {
+          inFlight.delete(done)
+        })
+      inFlight.add(done)
+      return result
     },
   }
 }
@@ -225,6 +268,9 @@ export async function withRemoteSession<T>(
     return await body(session)
   } finally {
     try {
+      // A body that failed early (a `Promise.all` that rejected) can leave calls running or queued. They use the
+      // master and the directory, so neither goes until every one of them has settled.
+      await session.settled()
       await closeMaster(session, spawn ?? defaultSpawn)
     } finally {
       rmSync(directory, {recursive: true, force: true})
@@ -252,6 +298,9 @@ async function closeMaster(session: RemoteSession, spawn: SpawnFn): Promise<void
     // The master also exits by itself, ControlPersist after the last call.
   }
 }
+
+/** What ssh itself exits with when it could not connect or lost the connection, so no master came of the call. */
+const SSH_FAILURE = 255
 
 export interface RunRemoteOptions extends RemoteDeps {
   signal?: AbortSignal | undefined
@@ -291,7 +340,7 @@ export async function runRemote(
       cleanup()
     }
   }
-  return session === undefined ? execute() : session.run(host, execute)
+  return session === undefined ? execute() : session.run(host, execute, result => result.exitCode !== SSH_FAILURE)
 }
 
 /**

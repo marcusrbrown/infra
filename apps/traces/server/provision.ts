@@ -357,6 +357,20 @@ async function listVolumes(run: Runner): Promise<VolumeRow[]> {
 }
 
 /**
+ * Lists volumes until one named `name` shows up, or `VOLUME_LIST_ATTEMPTS` listings have not shown it. A volume
+ * just created can be missing from the listing for a few seconds. The pause comes between listings only: none
+ * before the first, none after the last. `undefined` means it never appeared.
+ */
+async function waitForListedVolume(run: Runner, deps: ProvisionDeps, name: string): Promise<VolumeRow | undefined> {
+  let volume: VolumeRow | undefined
+  for (let attempt = 1; !volume && attempt <= VOLUME_LIST_ATTEMPTS; attempt++) {
+    if (attempt > 1) await deps.sleep(VOLUME_LIST_INTERVAL_MS)
+    volume = (await listVolumes(run)).find(row => row.name === name)
+  }
+  return volume
+}
+
+/**
  * Attaches a volume and proves it from a fresh listing. A successful attach call
  * is not enough: provisioning must not reach any Docker change on a volume that
  * is not attached.
@@ -1199,11 +1213,7 @@ export async function runProvision(input: ProvisionInput, force: boolean, deps: 
       '--size',
       VOLUME_SIZE,
     ])
-    // Poll with a pause between listings (none before the first, none after the last).
-    for (let attempt = 1; !volume && attempt <= VOLUME_LIST_ATTEMPTS; attempt++) {
-      if (attempt > 1) await deps.sleep(VOLUME_LIST_INTERVAL_MS)
-      volume = (await listVolumes(run)).find(row => row.name === TRACES_VOLUME_NAME)
-    }
+    volume = await waitForListedVolume(run, deps, TRACES_VOLUME_NAME)
     if (!volume) throw new Error(`Volume "${TRACES_VOLUME_NAME}" not found after creation`)
   }
   if (volume.dropletIds.length > 0 && !volume.dropletIds.includes(dropletId)) {
@@ -1372,9 +1382,12 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     'ID',
     '--no-header',
   ])
-  const newVolume = (await listVolumes(run)).find(row => row.name === newName)
+  const newVolume = await waitForListedVolume(run, deps, newName)
   if (!newVolume || (created && created !== newVolume.id)) {
-    throw new Error(`Volume "${newName}" not found after creation`)
+    // Reached after 80 and 443 were closed and before any volume was detached or any host step ran.
+    throw new Error(
+      `Volume "${newName}" not found after creation. Ports 80 and 443 stay closed; the old volume is still attached and Docker was not touched.`,
+    )
   }
 
   const dropletIp = await getDropletIp(run, deps)

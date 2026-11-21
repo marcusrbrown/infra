@@ -1444,6 +1444,65 @@ describe('runRestore', () => {
     const {deps} = makeDeps(world.runner)
     await expect(runRestore(RESTORE_INPUT, deps)).rejects.toThrow(/verify sentinel on restored volume failed/)
   })
+
+  describe('when the new volume is slow to appear in the listing', () => {
+    const NEW_NAME = 'traces-data-restore-20261120-1530'
+
+    it('lists again, sleeping between listings only, and completes the restore', async () => {
+      const world = makeWorld(provisionedCloud({newVolumeHiddenForLists: 3}), {provisioned: true})
+      const {deps, sleeps} = makeDeps(world.runner)
+      await runRestore(RESTORE_INPUT, deps)
+      expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(3)
+      expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
+      expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
+      expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+    })
+
+    it('does not sleep when the first listing already shows the volume', async () => {
+      const world = makeWorld(provisionedCloud(), {provisioned: true})
+      const {deps, sleeps} = makeDeps(world.runner)
+      await runRestore(RESTORE_INPUT, deps)
+      expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toEqual([])
+    })
+
+    it('succeeds when the volume appears on the last allowed attempt', async () => {
+      const world = makeWorld(provisionedCloud({newVolumeHiddenForLists: VOLUME_LIST_ATTEMPTS - 1}), {
+        provisioned: true,
+      })
+      const {deps, sleeps} = makeDeps(world.runner)
+      await runRestore(RESTORE_INPUT, deps)
+      expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+    })
+
+    it('fails with a clear error when it never appears: ports stay closed, the old volume stays attached, the host is untouched', async () => {
+      const world = makeWorld(provisionedCloud({newVolumeHiddenForLists: 1000}), {provisioned: true})
+      const {deps, sleeps, waits} = makeDeps(world.runner)
+      await expect(runRestore(RESTORE_INPUT, deps)).rejects.toThrow(
+        `Volume "${NEW_NAME}" not found after creation. Ports 80 and 443 stay closed; the old volume is still attached and Docker was not touched.`,
+      )
+      expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+      // State left behind: web ports closed at the cloud firewall (closed before the volume was created)...
+      expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
+      // ...the old volume still attached, nothing detached or attached, Docker never stopped, no SSH at all...
+      expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([DROPLET_ID])
+      expect(world.doctlCalls().some(call => call.startsWith('compute volume-action'))).toBe(false)
+      expect(world.sshCommands()).toEqual([])
+      expect(waits).toEqual([])
+      // ...and the new volume exists at DigitalOcean, unattached, for the operator to delete or reuse.
+      expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([])
+    })
+
+    it('still refuses a listed volume whose id is not the one the create call returned', async () => {
+      const world = makeWorld(provisionedCloud(), {provisioned: true})
+      const {deps} = makeDeps(async (argv, options) => {
+        const result = await world.runner(argv, options)
+        return argv.slice(1, 4).join(' ') === 'compute volume create' ? ok('vol-someone-else') : result
+      })
+      await expect(runRestore(RESTORE_INPUT, deps)).rejects.toThrow(`Volume "${NEW_NAME}" not found after creation`)
+      expect(world.doctlCalls().some(call => call.startsWith('compute volume-action'))).toBe(false)
+      expect(world.sshCommands()).toEqual([])
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

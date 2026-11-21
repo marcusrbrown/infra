@@ -15,6 +15,14 @@ import {OBJECT_STORE_PREFIXES, RETENTION_TABLES} from './retention'
 
 export const EPOCH = 1_700_000_000
 
+/** The owner and mode a script's own `chown` and `chmod` give its temporary file, as `stat -c '%u:%g %a'` prints them. */
+function attributesOf(command: string): string {
+  const owner = /\bchown (\S+) "\$t"/.exec(command)?.[1] ?? 'unset:unset'
+  const mode = /\bchmod (\d+) "\$t"/.exec(command)?.[1] ?? '0'
+  const numeric = owner.replaceAll('root', '0')
+  return `${numeric} ${Number.parseInt(mode, 8).toString(8)}`
+}
+
 /**
  * What the simulation reads out of a script's text, so that it behaves as the script would: the owner id in the
  * ownership prelude, and the id the first script writes into the marker.
@@ -111,8 +119,16 @@ export class FakeHost {
   envState: IngestState | undefined
   /** What Caddy is serving right now. */
   served: IngestState | 'none' = 'none'
+  /**
+   * Owner and mode of a plain file or `.env`, by path, in the form `stat -c '%u:%g %a'` prints (`472:472 400`).
+   * Set by a write from the script's own `chown` and `chmod`; a test sets one to simulate drift. A file with no
+   * entry has whatever the deploy would set, so that a seeded file is not drift.
+   */
+  fileAttrs = new Map<string, string>()
   /** Token files, by group. `undefined` is absent. */
   tokens = new Map<string, string | undefined>()
+  /** Owner and mode of a token file, by group, as `fileAttrs`. Only creating a token file ever sets one. */
+  tokenAttrs = new Map<string, string>()
   pendingRestarts: string[] = []
   /** The deploy marker's content, when it exists. */
   marker: string | undefined
@@ -329,6 +345,7 @@ export class FakeHost {
         if (this.tokens.get(group) === undefined) {
           // Created with exactly what arrived on stdin (the void line), or empty if the script sent nothing.
           this.tokens.set(group, stdin === '' ? '' : `${stdin.trimEnd()}\n`)
+          this.tokenAttrs.set(group, attributesOf(command))
           return ok('TRACES_TOKEN_CREATED\n')
         }
         return ok('TRACES_TOKEN_PRESENT\n')
@@ -352,7 +369,14 @@ export class FakeHost {
         const path = step.slice('compare:'.length)
         const current = path === '.env' ? this.env : this.files.get(path)
         if (current === undefined) return ok('TRACES_FILE_ABSENT\n')
-        return ok(current === stdin ? 'TRACES_FILE_SAME\n' : 'TRACES_FILE_DIFFERENT\n')
+        if (current !== stdin) return ok('TRACES_FILE_DIFFERENT\n')
+        // The script compares the file's owner and mode with the pair it names, if its text says to.
+        // (The command arrives shell-quoted, so each single quote of the script may be spelled `'\''`.)
+        const expected = /\[ "\$attr" = ['\\]+([^'\\]+)/.exec(command)?.[1]
+        if (expected !== undefined && (this.fileAttrs.get(path) ?? expected) !== expected) {
+          return ok('TRACES_FILE_DIFFERENT\n')
+        }
+        return ok('TRACES_FILE_SAME\n')
       }
       case step.startsWith('write:'): {
         const path = step.slice('write:'.length)
@@ -375,6 +399,7 @@ export class FakeHost {
         } else {
           this.files.set(path, stdin)
         }
+        if (path === '.env' || !path.startsWith('.')) this.fileAttrs.set(path, attributesOf(command))
         return ok(
           path === '.env' && this.envState !== undefined
             ? `TRACES_ENV_STATE=${this.envState}\nTRACES_FILE_WRITTEN\n`

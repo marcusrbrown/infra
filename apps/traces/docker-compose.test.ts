@@ -3,7 +3,7 @@ import {readdirSync} from 'node:fs'
 import {describe, expect, it} from 'bun:test'
 
 import {ENDPOINTS, PATHS, PORTS} from './src/health-report'
-import {TRACES_SENTINEL_PATH} from './src/host'
+import {TEMPO_USER_ID, TRACES_SENTINEL_PATH} from './src/host'
 
 // Reads the real compose file and the service configs beside it. Image tags and digests are
 // Renovate-managed, so these tests assert their format and never copy a value.
@@ -221,6 +221,21 @@ describe('traces compose: health reporter', () => {
     expect(strings(reporter().security_opt, 'security_opt')).toContain('no-new-privileges:true')
   })
 
+  // Tempo creates its data directories with mode 0700, so only its own user can list `blocks`. A reporter that
+  // runs as anyone else reads "Permission denied", reports the Tempo age check as unknown, and ingest never opens.
+  it("runs as Tempo's user, which Tempo gets from its image", () => {
+    expect(String(reporter().user)).toBe(`${TEMPO_USER_ID}:${TEMPO_USER_ID}`)
+    expect(service('tempo').user).toBeUndefined()
+  })
+
+  it("mounts Tempo's data read-only, from the same named volume Tempo writes", () => {
+    const tempoMount = strings(service('tempo').volumes, 'tempo.volumes').find(volume => volume.endsWith(':/var/tempo'))
+    expect(tempoMount).toBe('tempo_data:/var/tempo')
+    const reporterMounts = volumes().filter(volume => volume.startsWith('tempo_data:'))
+    expect(reporterMounts).toEqual(['tempo_data:/var/tempo:ro'])
+    expect(PATHS.tempoBlocks.startsWith('/var/tempo/')).toBe(true)
+  })
+
   it('publishes no port and shares no host namespace', () => {
     expect(reporter().ports).toBeUndefined()
     expect(reporter().network_mode).toBeUndefined()
@@ -307,6 +322,26 @@ describe('traces compose: health reporter', () => {
     expect(strings(service('clickhouse').volumes, 'clickhouse.volumes')).toContain(
       './config/clickhouse-users/traces-reader.xml:/etc/clickhouse-server/users.d/traces-reader.xml:ro',
     )
+  })
+
+  it('makes both Langfuse services listen on every interface, so loopback healthchecks can reach them', () => {
+    for (const name of ['langfuse-web', 'langfuse-worker']) {
+      expect(environment(name).HOSTNAME).toBe('0.0.0.0')
+      expect(JSON.stringify(service(name).healthcheck)).toContain('http://127.0.0.1:')
+    }
+  })
+
+  // The image keeps its own files in config.d and users.d (one makes the server listen beyond localhost).
+  // A directory mounted over either hides them: the healthcheck passes and other containers are refused.
+  it('mounts single files into the ClickHouse config directories, never a directory over them', () => {
+    const mounts = strings(service('clickhouse').volumes, 'clickhouse.volumes')
+    expect(mounts).toContain(
+      './config/clickhouse/system-log-ttl.xml:/etc/clickhouse-server/config.d/system-log-ttl.xml:ro',
+    )
+    for (const mount of mounts) {
+      const target = mount.split(':')[1] ?? ''
+      expect(target).not.toMatch(/^\/etc\/clickhouse-server(\/(config|users)\.d)?\/?$/)
+    }
   })
 })
 

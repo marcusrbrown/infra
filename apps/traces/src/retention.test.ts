@@ -171,6 +171,15 @@ describe('TTL text', () => {
       expect(extractTtl(`${head} COMMENT ${note} ORDER BY a TTL ${real} SETTINGS s = 1`)).toBe(real)
     })
 
+    it('cuts at a COMMENT that follows the TTL when there is no SETTINGS', () => {
+      const real = 'a + toIntervalDay(30)'
+      expect(extractTtl(`${head} ORDER BY a TTL ${real} COMMENT 'kept for a month'`)).toBe(real)
+      expect(extractTtl(`${head} ORDER BY a TTL ${real} COMMENT ${note}`)).toBe(real)
+      expect(ttlMatches('a', extractTtl(`${head} ORDER BY a TTL toDateTime(a) + toIntervalDay(30) COMMENT 'x'`))).toBe(
+        true,
+      )
+    })
+
     it('cuts at the first SETTINGS outside quotes', () => {
       const query = `${head} ORDER BY a TTL a + toIntervalDay(30) SETTINGS s = 'x SETTINGS y'`
       expect(extractTtl(query)).toBe('a + toIntervalDay(30)')

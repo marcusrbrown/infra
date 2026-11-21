@@ -143,7 +143,13 @@ export function extractTtl(createStatement: string): string | undefined {
   const start = topLevelIndexes(masked, ' TTL ').at(-1)
   if (start === undefined) return undefined
   const from = start + ' TTL '.length
-  const end = topLevelIndexes(masked, ' SETTINGS ').find(index => index >= from - 1)
+  // The clauses that can follow a table TTL. Without a SETTINGS clause a trailing COMMENT would otherwise be read as
+  // part of the rule, and a correct TTL would fail its read-back.
+  const end = [' SETTINGS ', ' COMMENT ']
+    .flatMap(clause => topLevelIndexes(masked, clause))
+    .filter(index => index >= from - 1)
+    .toSorted((left, right) => left - right)
+    .at(0)
   return flat.slice(from, end).trim()
 }
 

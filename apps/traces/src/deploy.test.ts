@@ -1710,7 +1710,7 @@ describe('a failure while the files are compared with the host', () => {
     expect(error).not.toBeInstanceOf(AppliedButUnverifiedError)
     expect(error.message).toContain('could not be compared')
     expect(error.message).toContain('compare:config/otelcol.yaml failed')
-    expect(error.message).toContain('Nothing was updated')
+    expect(error.message).toContain('The update was not applied')
     expect(error.message).toContain('Ingest is held')
     expect(error.message).toContain('marker')
     // Nothing claims the host was updated.
@@ -1741,7 +1741,7 @@ describe('a failure while the files are compared with the host', () => {
     expect(error.name).toBe('FilesNotComparedError')
     expect((error as Error & {ingest?: string}).ingest).toBe('unknown')
     expect(error.message).toContain('could not be compared')
-    expect(error.message).toContain('Nothing was updated')
+    expect(error.message).toContain('The update was not applied')
     expect(error.message).toContain('may be open')
     expect(error.message).toContain('traces ingest hold')
     expect(error.message).not.toMatch(/host was updated|Applied but unverified/)

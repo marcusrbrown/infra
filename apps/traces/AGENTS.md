@@ -177,6 +177,14 @@ So "no tokens" is one **void line**: `trc_void_<43 base64url characters> void <t
 - **Never regenerate a long-lived secret** (`SALT`, `ENCRYPTION_KEY`, `NEXTAUTH_SECRET`, store passwords). A volume holds data keyed to them; deploy never generates one.
 - **No remote command redirects to the null device or deletes outside the app directory and `/tmp`**, and every probe prints a sentinel and needs exit 0 plus a recognised sentinel; a test checks every script.
 
+## Restore
+
+`bun run provision:traces --restore-snapshot <name>` closes ports 80 and 443 at the cloud firewall (proved from the read-back), creates a volume `traces-data-restore-<YYYYMMDD>-<HHMM>` from the snapshot, stops Docker, detaches the old volume, attaches the new one, then probes, mounts and verifies the sentinel. It stops there with Docker stopped and the ports closed; the old volume is kept, detached.
+
+- **DigitalOcean's volume listing lags a completed action.** The first real restore failed because the single listing read right after `detach --wait` still showed the droplet. A new volume, an attach and a detach are all read back from the listing for up to `VOLUME_LIST_ATTEMPTS` reads, `VOLUME_LIST_INTERVAL_MS` apart (one shared poll, `pollVolumeListing`), before the step is called failed.
+- **An interrupted restore resumes on a second run of the same command.** With no `traces-data*` volume attached and exactly one detached `traces-data-restore-*` volume, the run logs that it is resuming, creates no volume, repeats the quiesce step and attaches, probes, mounts and verifies that volume. Its closing message lists the `traces-data*` volumes by name and names the detached previous data when exactly one is left. Any other shape (nothing attached and no or several detached restore volumes, or more than one attached) is refused, with the volumes listed by name, before any volume change. If a detach or attach failed only because the listing never caught up, check `doctl compute volume list` first: rerun only when the restore volume shows no droplet (rerunning while the old volume still shows the droplet would create a second restore volume).
+- **Not covered:** a restore that failed after the attach (probe, mount or sentinel) leaves the restore volume attached, so a rerun sees one attached `traces-data*` volume and starts a new restore from it as the "old" one. Verify by hand instead of rerunning.
+
 ## Known outbound calls
 
 Telemetry is off wherever a setting exists. Langfuse web contacts `langfuse.com` for an update check when the UI loads (no setting), and the browser fetches two badge and asset hosts. Grafana makes no outbound call with the plugin pre-installer, update checks, Gravatar and the news feed off.
@@ -189,6 +197,6 @@ The first deploy ran these on the real host and they held: the `mc ilm rule` com
 
 The first deploy also found five defects that no test had caught, each now pinned by a test: a directory mounted over ClickHouse's `config.d` hid the image's own listen file, so ClickHouse answered its healthcheck and refused every other container; Langfuse binds to `HOSTNAME`, which Docker sets to the container name, so loopback probes were refused until `HOSTNAME=0.0.0.0`; `system.tables.create_table_query` is one line, so a TTL parser that looked for a `TTL` line found none; Tempo creates its directories with mode 0700, so the reporter has to run as Tempo's user; and Tempo keeps `work.json` beside its tenant directories, so the block listing must enter directories only.
 
-Still unproven on the host: two deploys overlapping (the step lock's wait and the overtaken exit), a hold or open racing a deploy, whether `docker compose config --hash <service>` equals the container's `com.docker.compose.config-hash` label (if not, the deploy only ever holds more, never less), `traces ingest open`, the sender token add and revoke scripts, the byte limiter under load, and a restore.
+Still unproven on the host: two deploys overlapping (the step lock's wait and the overtaken exit), a hold or open racing a deploy, whether `docker compose config --hash <service>` equals the container's `com.docker.compose.config-hash` label (if not, the deploy only ever holds more, never less), `traces ingest open`, the sender token add and revoke scripts, the byte limiter under load, and a restore (the first attempt stopped on the lagging detach read-back, now polled; the resume path is tested against a simulation only).
 
 The runbook (`docs/runbooks/trace-collection.md`) is written when the stack is first deployed.

@@ -28,6 +28,7 @@ import {
   fsProbeScript,
   hardeningFiles,
   inboundRule,
+  isRestoreVolumeName,
   managedFileScript,
   mkfsScript,
   mountScript,
@@ -88,6 +89,10 @@ interface CloudOptions {
   attachIgnored?: boolean
   /** A volume created by `volume create` is absent from the next N `volume list` calls. */
   newVolumeHiddenForLists?: number
+  /** After a successful `attach`, the next N `volume list` calls still show the volume as it was before the action. */
+  attachLagLists?: number
+  /** After a successful `detach`, the next N `volume list` calls still show the volume as it was before the action. */
+  detachLagLists?: number
 }
 
 function flag(args: readonly string[], name: string): string | undefined {
@@ -103,11 +108,17 @@ class Cloud {
   private nextId = 1
   private hiddenListsLeft = 0
   private readonly hiddenVolumeIds = new Set<string>()
+  /** The pre-action attachment a lagging listing keeps showing, per volume id. */
+  private readonly staleViews = new Map<string, {dropletIds: string[]; left: number}>()
   constructor(private readonly options: CloudOptions = {}) {
     this.droplet = options.droplet ?? false
     this.volumes = options.volumes ?? []
     this.firewalls = options.firewalls ?? []
     this.snapshots = options.snapshots ?? []
+  }
+
+  private lagListing(volume: SimVolume, lists: number | undefined): void {
+    if (lists) this.staleViews.set(volume.id, {dropletIds: [...volume.dropletIds], left: lists})
   }
 
   handle(args: readonly string[]): RunResult {
@@ -130,7 +141,13 @@ class Cloud {
         const hide = this.hiddenListsLeft > 0
         if (hide) this.hiddenListsLeft -= 1
         const visible = this.volumes.filter(v => !(hide && this.hiddenVolumeIds.has(v.id)))
-        return ok(visible.map(v => `${v.id}   ${v.name}   [${v.dropletIds.join(' ')}]`).join('\n'))
+        const lines = visible.map(v => {
+          const stale = this.staleViews.get(v.id)
+          const shown = stale && stale.left > 0 ? stale.dropletIds : v.dropletIds
+          return `${v.id}   ${v.name}   [${shown.join(' ')}]`
+        })
+        for (const stale of this.staleViews.values()) if (stale.left > 0) stale.left -= 1
+        return ok(lines.join('\n'))
       }
       case 'compute volume create': {
         const volume = {id: `vol-${this.nextId++}`, name: args[3] ?? '', dropletIds: []}
@@ -142,12 +159,19 @@ class Cloud {
         return ok(flag(args, '--format') === 'ID' ? volume.id : '')
       }
       case 'compute volume-action attach': {
-        if (!this.options.attachIgnored) this.volumes.find(v => v.id === args[3])?.dropletIds.push(args[4] ?? '')
+        const volume = this.volumes.find(v => v.id === args[3])
+        if (volume && !this.options.attachIgnored) {
+          this.lagListing(volume, this.options.attachLagLists)
+          volume.dropletIds.push(args[4] ?? '')
+        }
         return ok()
       }
       case 'compute volume-action detach': {
         const volume = this.volumes.find(v => v.id === args[3])
-        if (volume) volume.dropletIds = volume.dropletIds.filter(id => id !== args[4])
+        if (volume) {
+          this.lagListing(volume, this.options.detachLagLists)
+          volume.dropletIds = volume.dropletIds.filter(id => id !== args[4])
+        }
         return ok()
       }
       case 'compute firewall list': {
@@ -899,6 +923,44 @@ describe('volume attach failure', () => {
   })
 })
 
+describe('a volume attach that the listing shows late', () => {
+  const pauses = (sleeps: number[]) => sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)
+
+  // Mutation target: a single read after the attach fails these.
+  it('keeps reading until the listing shows the attachment, sleeping between reads only', async () => {
+    const world = makeWorld({attachLagLists: 3})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(pauses(sleeps)).toHaveLength(3)
+    expect(world.cloud.volumes[0]?.dropletIds).toEqual([DROPLET_ID])
+  })
+
+  it('does not sleep when the first read already shows the attachment', async () => {
+    const world = makeWorld()
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(pauses(sleeps)).toEqual([])
+  })
+
+  it('succeeds when the attachment shows on the last allowed read', async () => {
+    const world = makeWorld({attachLagLists: VOLUME_LIST_ATTEMPTS - 1})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+  })
+
+  it('fails with the existing error when the attachment never shows within the budget, before any SSH step', async () => {
+    const world = makeWorld({attachLagLists: VOLUME_LIST_ATTEMPTS})
+    const {deps, sleeps, waits} = makeDeps(world.runner)
+    await expect(runProvision(PROVISION_INPUT, false, deps)).rejects.toThrow(
+      `Volume "${TRACES_VOLUME_NAME}" is not attached to droplet ${DROPLET_ID} after the attach call`,
+    )
+    expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+    expect(world.sshCommands()).toEqual([])
+    expect(waits).toEqual([])
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Second run
 // ---------------------------------------------------------------------------
@@ -1502,6 +1564,279 @@ describe('runRestore', () => {
       expect(world.doctlCalls().some(call => call.startsWith('compute volume-action'))).toBe(false)
       expect(world.sshCommands()).toEqual([])
     })
+  })
+})
+
+describe('runRestore: the volume swap when the listing lags the completed action', () => {
+  const RESTORE_INPUT = {snapshotName: 'traces-data-snap', privateKey: 'placeholder', remoteUser: 'root'}
+  const NEW_NAME = 'traces-data-restore-20261120-1530'
+  const pauses = (sleeps: number[]) => sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)
+
+  // Mutation target: a single read after the detach fails these. This is the production failure.
+  it('keeps reading until the listing shows the old volume detached, and completes the restore', async () => {
+    const world = makeWorld(provisionedCloud({detachLagLists: 3}), {provisioned: true})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    expect(pauses(sleeps)).toHaveLength(3)
+    expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
+    expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+  })
+
+  it('keeps reading until the listing shows the new volume attached, and completes the restore', async () => {
+    const world = makeWorld(provisionedCloud({attachLagLists: 3}), {provisioned: true})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    expect(pauses(sleeps)).toHaveLength(3)
+    expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+  })
+
+  it('does not sleep on the normal path, where the first reads are right', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps, sleeps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+    expect(pauses(sleeps)).toEqual([])
+    expect(logs.join('\n')).not.toMatch(/resum/i)
+  })
+
+  it('fails with the existing detach error when the listing lags beyond the budget, and says what state the host is in', async () => {
+    const world = makeWorld(provisionedCloud({detachLagLists: VOLUME_LIST_ATTEMPTS}), {provisioned: true})
+    const {deps, sleeps} = makeDeps(world.runner)
+    const failure = await runRestore(RESTORE_INPUT, deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+
+    expect(failure).toContain(
+      `Volume "${TRACES_VOLUME_NAME}" is still attached to droplet ${DROPLET_ID} after the detach call`,
+    )
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('Docker is stopped')
+    expect(failure).toContain(NEW_NAME)
+    expect(failure).toContain('run the same command again')
+    expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+    expect(world.doctlCalls().some(call => call.startsWith('compute volume-action attach'))).toBe(false)
+  })
+
+  it('fails with the existing attach error when the listing lags beyond the budget, and says what state the host is in', async () => {
+    const world = makeWorld(provisionedCloud({attachLagLists: VOLUME_LIST_ATTEMPTS}), {provisioned: true})
+    const {deps} = makeDeps(world.runner)
+    const failure = await runRestore(RESTORE_INPUT, deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+
+    expect(failure).toContain(`Volume "${NEW_NAME}" is not attached to droplet ${DROPLET_ID} after the attach call`)
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('Docker is stopped')
+    expect(failure).toContain(`${TRACES_VOLUME_NAME} is detached and kept`)
+    expect(failure).toContain('run the same command again')
+  })
+})
+
+// The state a restore leaves when it stops after the detach: Docker stopped, ports closed, the old volume detached, the
+// restore volume created and not attached. `attached` is the set of volumes still on the droplet.
+function interruptedRestoreCloud(extra: CloudOptions = {}): CloudOptions {
+  return provisionedCloud({
+    volumes: [
+      {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
+      {id: 'vol-restore', name: 'traces-data-restore-20261119-0900', dropletIds: []},
+    ],
+    firewalls: [{id: 'fw-old', name: FIREWALL_NAME, inbound: [inboundRule(22)], droplets: [DROPLET_ID]}],
+    ...extra,
+  })
+}
+
+describe('runRestore: resuming an interrupted restore', () => {
+  const RESTORE_INPUT = {snapshotName: 'traces-data-snap', privateKey: 'placeholder', remoteUser: 'root'}
+  const RESTORE_NAME = 'traces-data-restore-20261119-0900'
+  const expectNothingChanged = (world: ReturnType<typeof makeWorld>) => {
+    const doctl = world.doctlCalls()
+    expect(doctl.some(call => call.startsWith('compute volume create'))).toBe(false)
+    expect(doctl.some(call => call.startsWith('compute volume-action'))).toBe(false)
+    expect(world.sshCommands()).toEqual([])
+  }
+
+  it('recognises exactly the names restoreVolumeName makes', () => {
+    expect(isRestoreVolumeName(restoreVolumeName(new Date('2026-01-02T03:04:59Z')))).toBe(true)
+    for (const name of [
+      TRACES_VOLUME_NAME,
+      'traces-data-restore-20261119',
+      'traces-data-restore-20261119-0900-x',
+      'x-traces-data-restore-20261119-0900',
+      'traces-data-old',
+    ]) {
+      expect(isRestoreVolumeName(name)).toBe(false)
+    }
+  })
+
+  // Mutation target: removing the resume case fails this and the next ones.
+  it('from the production state (nothing attached, one detached traces-data, one detached restore volume) attaches the restore volume and verifies it', async () => {
+    const world = makeWorld(interruptedRestoreCloud(), {provisioned: true})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    const doctl = world.doctlCalls()
+    expect(doctl.some(call => call.startsWith('compute volume create'))).toBe(false)
+    expect(doctl.some(call => call.startsWith('compute volume-action detach'))).toBe(false)
+    expect(doctl).toContain(`compute volume-action attach vol-restore ${DROPLET_ID} --wait`)
+    // Quiesce is repeated first, then the restored volume is probed, mounted and its sentinel verified.
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+    const probe = world.sshCommands().find(c => c.includes('traces-step:fs-probe')) ?? ''
+    expect(probe).toContain(volumeDevicePath(RESTORE_NAME))
+    expect(world.cloud.volumes.find(v => v.id === 'vol-restore')?.dropletIds).toEqual([DROPLET_ID])
+    // The previous data is untouched; nothing is deleted or reopened, ports stay closed.
+    expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
+    expect(doctl.some(call => call.includes('delete'))).toBe(false)
+    expect(doctl.some(call => call.startsWith('compute firewall add-rules'))).toBe(false)
+    expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
+
+    const text = logs.join('\n')
+    expect(text).toMatch(/interrupted restore is being resumed/i)
+    expect(text).toContain(`Volume ${RESTORE_NAME} is attached and mounted`)
+    expect(text).toContain(
+      `${TRACES_VOLUME_NAME} (detached) is the previous data and was kept; delete it after the restore is proven.`,
+    )
+    expect(text).toContain('--reopen-ports')
+  })
+
+  it('still closes the ports first, and still needs the snapshot to exist', async () => {
+    const world = makeWorld(
+      interruptedRestoreCloud({
+        firewalls: [{id: 'fw-old', name: FIREWALL_NAME, inbound: [...FIREWALL_INBOUND_RULES], droplets: [DROPLET_ID]}],
+      }),
+      {provisioned: true},
+    )
+    const {deps} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+    expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
+    const doctl = world.doctlCalls()
+    expect(doctl.findIndex(call => call.startsWith('compute firewall remove-rules'))).toBeLessThan(
+      doctl.findIndex(call => call.startsWith('compute volume list')),
+    )
+
+    const noSnapshot = makeWorld(interruptedRestoreCloud({snapshots: []}), {provisioned: true})
+    await expect(runRestore(RESTORE_INPUT, makeDeps(noSnapshot.runner).deps)).rejects.toThrow(
+      /No volume snapshot named "traces-data-snap"/,
+    )
+    expectNothingChanged(noSnapshot)
+  })
+
+  it('polls the attach of the resumed volume like any other attach', async () => {
+    const world = makeWorld(interruptedRestoreCloud({attachLagLists: 2}), {provisioned: true})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+    expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(2)
+    expect(world.cloud.volumes.find(v => v.id === 'vol-restore')?.dropletIds).toEqual([DROPLET_ID])
+  })
+
+  it('names every traces-data* volume in the closing message, and the previous data only when exactly one exists', async () => {
+    const none = makeWorld(
+      interruptedRestoreCloud({volumes: [{id: 'vol-restore', name: RESTORE_NAME, dropletIds: []}]}),
+      {provisioned: true},
+    )
+    const noneRun = makeDeps(none.runner)
+    await runRestore(RESTORE_INPUT, noneRun.deps)
+    expect(noneRun.logs.join('\n')).toContain('detached previous-data volume was found')
+
+    const two = makeWorld(
+      interruptedRestoreCloud({
+        volumes: [
+          {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
+          {id: 'vol-older', name: 'traces-data-old', dropletIds: []},
+          {id: 'vol-restore', name: RESTORE_NAME, dropletIds: []},
+        ],
+      }),
+      {provisioned: true},
+    )
+    const twoRun = makeDeps(two.runner)
+    await runRestore(RESTORE_INPUT, twoRun.deps)
+    const text = twoRun.logs.join('\n')
+    expect(text).toContain('traces-data (detached)')
+    expect(text).toContain('traces-data-old (detached)')
+    expect(text).not.toContain('is the previous data and was kept')
+  })
+
+  it.each([
+    [
+      'two detached restore volumes',
+      [
+        {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
+        {id: 'vol-r1', name: 'traces-data-restore-20261118-0900', dropletIds: []},
+        {id: 'vol-r2', name: 'traces-data-restore-20261119-0900', dropletIds: []},
+      ],
+      ['traces-data-restore-20261118-0900', 'traces-data-restore-20261119-0900'],
+    ],
+    [
+      'no restore volume',
+      [{id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []}],
+      [`${TRACES_VOLUME_NAME} (detached)`],
+    ],
+    [
+      'a restore volume attached to another droplet',
+      [
+        {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
+        {id: 'vol-r1', name: 'traces-data-restore-20261119-0900', dropletIds: ['9999']},
+      ],
+      ['traces-data-restore-20261119-0900 (attached to droplet 9999)'],
+    ],
+    [
+      'a name that only looks like a restore volume',
+      [{id: 'vol-r1', name: 'traces-data-restore-20261119', dropletIds: []}],
+      ['traces-data-restore-20261119 (detached)'],
+    ],
+  ])('refuses with a list by name, and changes nothing, with %s', async (_label, volumes, names) => {
+    const world = makeWorld(interruptedRestoreCloud({volumes}), {provisioned: true})
+    const {deps} = makeDeps(world.runner)
+    const failure = await runRestore(RESTORE_INPUT, deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+
+    expect(failure).toContain(`Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found 0`)
+    expect(failure).toContain('Ports stay closed; no volume was changed')
+    for (const name of names) expect(failure).toContain(name)
+    expectNothingChanged(world)
+  })
+
+  it('still refuses more than one attached volume, listing both by name', async () => {
+    const world = makeWorld(
+      interruptedRestoreCloud({
+        volumes: [
+          {id: 'vol-a', name: TRACES_VOLUME_NAME, dropletIds: [DROPLET_ID]},
+          {id: 'vol-b', name: 'traces-data-restore-20261119-0900', dropletIds: [DROPLET_ID]},
+          {id: 'vol-c', name: 'traces-data-restore-20261118-0900', dropletIds: []},
+        ],
+      }),
+      {provisioned: true},
+    )
+    const {deps} = makeDeps(world.runner)
+    const failure = await runRestore(RESTORE_INPUT, deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+    expect(failure).toContain(`Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found 2`)
+    expect(failure).toContain(`${TRACES_VOLUME_NAME} (attached to droplet ${DROPLET_ID})`)
+    expect(failure).toContain(`traces-data-restore-20261119-0900 (attached to droplet ${DROPLET_ID})`)
+    expectNothingChanged(world)
+  })
+
+  it('the normal first run is unchanged: it creates the restore volume, detaches the old one, attaches the new one', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    const doctl = world.doctlCalls()
+    expect(doctl.filter(call => call.startsWith('compute volume create'))).toHaveLength(1)
+    expect(doctl.filter(call => call.startsWith('compute volume-action detach vol-old'))).toHaveLength(1)
+    expect(doctl.filter(call => call.startsWith('compute volume-action attach'))).toHaveLength(1)
+    expect(logs.join('\n')).toContain(
+      'Volume traces-data-restore-20261120-1530 is attached and mounted in place of traces-data (kept, detached).',
+    )
+    expect(logs.join('\n')).toContain('The old volume traces-data still exists; delete it after the restore is proven.')
   })
 })
 

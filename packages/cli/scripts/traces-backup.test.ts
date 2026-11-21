@@ -24,6 +24,8 @@ import {
   MAX_NEWEST_AGE_HOURS,
   planBackupAlert,
   readAlertEnv,
+  READBACK_ATTEMPTS,
+  READBACK_INTERVAL_MS,
   REAL_MARKER,
   REHEARSAL_MARKER,
   RETENTION_DAYS,
@@ -202,6 +204,8 @@ interface BackupRun {
   readonly outcome: Awaited<ReturnType<typeof runBackup>>
   readonly outputs: Record<string, string>
   readonly logs: string[]
+  /** Every pause the run asked for, in milliseconds. The fake sleep returns at once. */
+  readonly sleeps: number[]
 }
 
 async function backup(
@@ -211,9 +215,13 @@ async function backup(
 ): Promise<BackupRun> {
   const outputs: Record<string, string> = {}
   const logs: string[] = []
+  const sleeps: number[] = []
   const outcome = await runBackup(environment, {
     fetch: fake.fetch,
     now: () => NOW,
+    sleep: async milliseconds => {
+      sleeps.push(milliseconds)
+    },
     writeOutput: (name, value) => {
       outputs[name] = value
     },
@@ -221,7 +229,26 @@ async function backup(
     appendSummary: line => logs.push(line),
     timeoutMs,
   })
-  return {outcome, outputs, logs}
+  return {outcome, outputs, logs, sleeps}
+}
+
+/** Answers the first `count` snapshot listings (the unpaged request) with `respond`; later ones are the fake's own. */
+function firstListings(count: number, respond: () => Response): (request: DoRequest) => Response | undefined {
+  let seen = 0
+  return request => {
+    if (!isSnapshotListing(request)) return undefined
+    seen += 1
+    return seen <= count ? respond() : undefined
+  }
+}
+
+function isSnapshotListing(request: DoRequest): boolean {
+  return request.method === 'GET' && request.url.pathname === '/v2/snapshots' && !request.url.searchParams.has('page')
+}
+
+/** How many times the run listed snapshots from the first page. */
+function listingCount(fake: ReturnType<typeof fakeDo>): number {
+  return fake.requests.filter(isSnapshotListing).length
 }
 
 // ─── Backup ──────────────────────────────────────────────────────────────────
@@ -530,6 +557,227 @@ describe('backup: a broken backup never erases history', () => {
   })
 })
 
+const createFails = (request: DoRequest): Response | undefined =>
+  request.method === 'POST' ? Response.json({}, {status: 500}) : undefined
+
+describe('backup: the read-back after a create is retried while the listing catches up', () => {
+  it('pins the bounds: 6 attempts, 5 seconds apart', () => {
+    expect(READBACK_ATTEMPTS).toBe(6)
+    expect(READBACK_INTERVAL_MS).toBe(5000)
+  })
+
+  // Mutation target: removing the retry fails this and the next one.
+  it('succeeds when the created snapshot is missing from the first listing and present in the second', async () => {
+    const fake = fakeDo({
+      snapshots: [daily(30)],
+      override: firstListings(1, () => Response.json({snapshots: [], links: {}})),
+    })
+    const run = await backup(fake)
+
+    expect(run.outcome).toMatchObject({exitCode: 0, created: true, failures: []})
+    expect(listingCount(fake)).toBe(2)
+    expect(run.sleeps).toEqual([READBACK_INTERVAL_MS])
+    expect(fake.creates()).toHaveLength(1)
+  })
+
+  it('succeeds when the first listing is malformed and the second is well-formed, without a second create', async () => {
+    const fake = fakeDo({
+      snapshots: [daily(30)],
+      override: firstListings(1, () => Response.json({snapshots: [{id: 'x'}], links: {}})),
+    })
+    const run = await backup(fake)
+
+    expect(run.outcome).toMatchObject({exitCode: 0, created: true, failures: []})
+    expect(listingCount(fake)).toBe(2)
+    expect(run.sleeps).toEqual([READBACK_INTERVAL_MS])
+    expect(fake.creates()).toHaveLength(1)
+  })
+
+  it('keeps trying through several bad listings and succeeds on the last allowed attempt', async () => {
+    const fake = fakeDo({
+      override: firstListings(READBACK_ATTEMPTS - 1, () => new Response('<html>', {status: 200})),
+    })
+    const run = await backup(fake)
+
+    expect(run.outcome).toMatchObject({exitCode: 0, created: true, failures: []})
+    expect(listingCount(fake)).toBe(READBACK_ATTEMPTS)
+    expect(run.sleeps).toHaveLength(READBACK_ATTEMPTS - 1)
+  })
+
+  it('fails after the bounded attempts when the listing stays malformed, names the part, and deletes nothing', async () => {
+    const expired = snap(snapshotName(daysAgo(12)), daysAgo(12))
+    const fake = fakeDo({
+      snapshots: [daily(2), expired],
+      override: firstListings(100, () => Response.json({snapshots: [{id: 'x'}], links: {}})),
+    })
+    const run = await backup(fake)
+
+    expect(run.outcome).toMatchObject({exitCode: 1, created: true, deleted: 0})
+    expect(run.outcome.failures).toEqual(['do-api:list-snapshots:malformed:item.name'])
+    expect(listingCount(fake)).toBe(READBACK_ATTEMPTS)
+    expect(run.sleeps).toEqual(Array.from({length: READBACK_ATTEMPTS - 1}, () => READBACK_INTERVAL_MS))
+    expect(fake.deletes()).toEqual([])
+  })
+
+  it('fails after the bounded attempts when the created snapshot never appears, and prunes nothing behind a stale newest', async () => {
+    const fake = fakeDo({
+      snapshots: [daily(40), snap(snapshotName(daysAgo(12)), daysAgo(12))],
+      createLost: true,
+    })
+    const run = await backup(fake)
+
+    expect(run.outcome.exitCode).toBe(1)
+    expect(run.outcome.failures).toEqual(['created-snapshot-not-listed', 'newest-snapshot-too-old'])
+    expect(listingCount(fake)).toBe(READBACK_ATTEMPTS)
+    expect(run.sleeps).toHaveLength(READBACK_ATTEMPTS - 1)
+    expect(fake.deletes()).toEqual([])
+  })
+
+  it('makes no retry and no pause when nothing was created: one listing, as before', async () => {
+    const badListing = firstListings(100, () => new Response('<html>'))
+    const fake = fakeDo({
+      snapshots: [daily(20)],
+      override: request => createFails(request) ?? badListing(request),
+    })
+    const run = await backup(fake)
+
+    expect(run.outcome.failures).toEqual([
+      'do-api:create-snapshot:http-500',
+      'do-api:list-snapshots:malformed:not-json',
+    ])
+    expect(listingCount(fake)).toBe(1)
+    expect(run.sleeps).toEqual([])
+
+    const clean = fakeDo({snapshots: [daily(20)], override: createFails})
+    const cleanRun = await backup(clean)
+    expect(cleanRun.outcome.failures).toEqual(['do-api:create-snapshot:http-500'])
+    expect(listingCount(clean)).toBe(1)
+    expect(cleanRun.sleeps).toEqual([])
+  })
+
+  it('does not retry an HTTP or network failure of the read-back: those keep their existing handling', async () => {
+    const http = fakeDo({
+      override: request => (isSnapshotListing(request) ? Response.json({}, {status: 503}) : undefined),
+    })
+    const httpRun = await backup(http)
+    expect(httpRun.outcome.failures).toEqual(['do-api:list-snapshots:http-503'])
+    expect(listingCount(http)).toBe(1)
+    expect(httpRun.sleeps).toEqual([])
+
+    const inner = fakeDo()
+    let listings = 0
+    const flaky = {
+      ...inner,
+      fetch: (async (input, init) => {
+        if (new URL(String(input)).pathname === '/v2/snapshots') {
+          listings += 1
+          throw new TypeError(`connect ECONNREFUSED SECRET-${TOKEN}`)
+        }
+        return inner.fetch(input, init)
+      }) satisfies FetchLike,
+    }
+    const networkRun = await backup(flaky)
+    expect(networkRun.outcome.failures).toEqual(['do-api:list-snapshots:network'])
+    expect(listings).toBe(1)
+    expect(networkRun.sleeps).toEqual([])
+  })
+
+  it('never deletes anything behind a listing with a malformed item, when nothing was created either', async () => {
+    const expired = snap(snapshotName(daysAgo(12)), daysAgo(12))
+    const fake = fakeDo({
+      snapshots: [daily(2), expired],
+      override: request =>
+        createFails(request) ??
+        (isSnapshotListing(request)
+          ? Response.json({snapshots: [{...daily(2), id: 7}, expired], links: {}})
+          : undefined),
+    })
+    const run = await backup(fake)
+
+    expect(run.outcome.failures).toEqual(['do-api:create-snapshot:http-500', 'do-api:list-snapshots:malformed:item.id'])
+    expect(fake.deletes()).toEqual([])
+  })
+})
+
+describe('backup: a malformed response names the part that was wrong, from a closed set', () => {
+  const good = daily(2)
+  const without = (field: keyof FakeSnapshot): Record<string, unknown> => {
+    const {[field]: _omitted, ...rest} = good
+    return rest
+  }
+
+  // The create fails so the read-back is a single listing and the reason is the whole failure list.
+  it.each<[string, () => Response, string]>([
+    ['a body that is not JSON', () => new Response('<html>SECRET</html>'), 'not-json'],
+    ['an empty body', () => new Response(''), 'not-json'],
+    ['a JSON array', () => Response.json([good]), 'not-an-object'],
+    ['JSON null', () => Response.json(null), 'not-an-object'],
+    ['a snapshots key that is a string', () => Response.json({snapshots: 'SECRET'}), 'snapshots-not-a-list'],
+    ['a missing snapshots key', () => Response.json({links: {}}), 'snapshots-not-a-list'],
+    ['a snapshots key that is null', () => Response.json({snapshots: null}), 'snapshots-not-a-list'],
+    ['an item that is a string', () => Response.json({snapshots: ['SECRET']}), 'item-not-an-object'],
+    ['an item that is an array', () => Response.json({snapshots: [[]]}), 'item-not-an-object'],
+    ['an item without id', () => Response.json({snapshots: [without('id')]}), 'item.id'],
+    ['an item with a numeric id', () => Response.json({snapshots: [{...good, id: 7}]}), 'item.id'],
+    ['an item without name', () => Response.json({snapshots: [without('name')]}), 'item.name'],
+    ['an item without resource_id', () => Response.json({snapshots: [without('resource_id')]}), 'item.resource_id'],
+    [
+      'an item with a null resource_type',
+      () => Response.json({snapshots: [{...good, resource_type: null}]}),
+      'item.resource_type',
+    ],
+    ['an item without created_at', () => Response.json({snapshots: [without('created_at')]}), 'item.created_at'],
+    [
+      'an item with an unparseable created_at',
+      () => Response.json({snapshots: [{...good, created_at: 'SECRET-not-a-date'}]}),
+      'item.created_at',
+    ],
+    [
+      'an item with a numeric created_at',
+      () => Response.json({snapshots: [{...good, created_at: 1_700_000_000}]}),
+      'item.created_at',
+    ],
+  ])('reports %s as a fixed malformed code, with nothing of the body in it', async (_label, respond, part) => {
+    const fake = fakeDo({
+      snapshots: [good],
+      override: request => createFails(request) ?? (isSnapshotListing(request) ? respond() : undefined),
+    })
+    const run = await backup(fake)
+
+    expect(run.outcome.failures).toEqual(['do-api:create-snapshot:http-500', `do-api:list-snapshots:malformed:${part}`])
+    expect(JSON.stringify(run)).not.toContain('SECRET')
+    expect(fake.deletes()).toEqual([])
+  })
+
+  it('names the part for the other lists and for the create response too', async () => {
+    const volumes = (body: () => Response) =>
+      backup(fakeDo({override: r => (r.url.pathname === '/v2/volumes' ? body() : undefined)}))
+    expect((await volumes(() => Response.json({volumes: [{id: 1, name: 'x'}]}))).outcome.failures).toContain(
+      'do-api:list-volumes:malformed:item.id',
+    )
+    expect((await volumes(() => Response.json({volumes: [{id: 'x'}]}))).outcome.failures).toContain(
+      'do-api:list-volumes:malformed:item.name',
+    )
+    expect((await volumes(() => Response.json({volumes: ['x']}))).outcome.failures).toContain(
+      'do-api:list-volumes:malformed:item-not-an-object',
+    )
+
+    const droplets = await backup(
+      fakeDo({override: r => (r.url.pathname === '/v2/droplets' ? Response.json({droplets: 'x'}) : undefined)}),
+    )
+    expect(droplets.outcome.failures).toContain('do-api:list-droplets:malformed:droplets-not-a-list')
+
+    const noSnapshot = await backup(
+      fakeDo({override: r => (r.method === 'POST' ? Response.json({}, {status: 201}) : undefined)}),
+    )
+    expect(noSnapshot.outcome.failures).toContain('do-api:create-snapshot:malformed:snapshot')
+    const noId = await backup(
+      fakeDo({override: r => (r.method === 'POST' ? Response.json({snapshot: {}}, {status: 201}) : undefined)}),
+    )
+    expect(noId.outcome.failures).toContain('do-api:create-snapshot:malformed:snapshot.id')
+  })
+})
+
 describe('backup: finding the live volume', () => {
   // Mutation target: picking one of two candidates silently fails these.
   it('fails and takes no snapshot when two volumes of the family are attached to the droplet', async () => {
@@ -703,12 +951,12 @@ describe('backup: API failures name the stage and the status, nothing else', () 
     const malformed = await backup(
       fakeDo({override: r => (r.url.pathname === '/v2/volumes' ? new Response('<html>', {status: 200}) : undefined)}),
     )
-    expect(malformed.outcome.failures).toContain('do-api:list-volumes:malformed')
+    expect(malformed.outcome.failures).toContain('do-api:list-volumes:malformed:not-json')
 
     const wrongShape = await backup(
       fakeDo({override: r => (r.url.pathname === '/v2/volumes' ? Response.json({volumes: 'x'}) : undefined)}),
     )
-    expect(wrongShape.outcome.failures).toContain('do-api:list-volumes:malformed')
+    expect(wrongShape.outcome.failures).toContain('do-api:list-volumes:malformed:volumes-not-a-list')
 
     const down: FetchLike = async () => {
       throw new TypeError(`connect ECONNREFUSED api.digitalocean.com SECRET-${TOKEN}`)

@@ -1,5 +1,15 @@
 # @marcusrbrown/infra
 
+## 0.29.0
+
+### Minor Changes
+
+- Add the `traces` command group for the trace collection stack: `status`, `logs`, `open` (SSH tunnel to Langfuse and Grafana), `ingest hold|open|status`, `deploy`, and `sender add|list|revoke` for sender tokens. `infra status` gains a `traces` row. Only `traces status` is exposed as an MCP tool. ([#2007](https://github.com/marcusrbrown/infra/pull/2007))
+
+### Patch Changes
+
+- `status snapshot` no longer probes or records an app whose host is not deployed yet (`traces` today), so a missing host is not reported as an outage in the public status history. ([#2009](https://github.com/marcusrbrown/infra/pull/2009))
+
 ## 0.28.2
 
 ### Patch Changes

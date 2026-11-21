@@ -1344,29 +1344,21 @@ export function restoreVolumeName(now: Date): string {
   return `${TRACES_VOLUME_NAME}-restore-${restoreStamp(now)}`
 }
 
-const RESTORE_RECORD_PREFIX = 'restore-of:'
-/** A snapshot name the restore will record: what `--restore-snapshot` accepts, and short enough to store whole. */
-const RECORDABLE_SNAPSHOT_RE = /^[a-z\d][\w.-]{0,127}$/i
+/** A snapshot name the label can carry whole: what `--restore-snapshot` accepts, and short enough to store. */
+const LABELLABLE_SNAPSHOT_RE = /^[a-z\d][\w.-]{0,127}$/i
 
 /**
- * The description a restore volume is created with: `restore-of:<snapshot name>`, no spaces. A later run reads it back
- * to learn which snapshot the volume came from. A name that would not read back the same is refused, so the record is
- * never truncated or reshaped.
+ * The description a restore volume is created with: `restore-of:<snapshot name>`, no spaces. It is a label for a person
+ * reading `doctl compute volume list` and nothing more: no code reads it back to decide anything. A name that cannot
+ * be written whole is refused before any change, so the label is never truncated or reshaped.
  */
 export function restoreDescription(snapshotName: string): string {
-  if (!RECORDABLE_SNAPSHOT_RE.test(snapshotName)) {
+  if (!LABELLABLE_SNAPSHOT_RE.test(snapshotName)) {
     throw new Error(
-      `Snapshot name "${snapshotName.slice(0, 40)}" cannot be recorded on the restore volume: use 1 to 128 letters, digits, dots, dashes and underscores, not starting with a dash or an underscore. Nothing was changed.`,
+      `Snapshot name "${snapshotName.slice(0, 40)}" cannot be written on the restore volume's description: use 1 to 128 letters, digits, dots, dashes and underscores, not starting with a dash or an underscore. Nothing was changed.`,
     )
   }
-  return `${RESTORE_RECORD_PREFIX}${snapshotName}`
-}
-
-/** The snapshot a description records, or `undefined` when it is not exactly the form `restoreDescription` writes. */
-export function parseRestoreDescription(description: string | undefined): string | undefined {
-  if (description === undefined || !description.startsWith(RESTORE_RECORD_PREFIX)) return undefined
-  const name = description.slice(RESTORE_RECORD_PREFIX.length)
-  return RECORDABLE_SNAPSHOT_RE.test(name) ? name : undefined
+  return `restore-of:${snapshotName}`
 }
 
 /** `YYYYMMDD-HHMM` in UTC: the restore volume's name and the quarantine directory carry the same stamp. */
@@ -1487,16 +1479,10 @@ function reportQuarantine(log: ProvisionDeps['log'], moved: readonly string[], s
   )
 }
 
-/** `traces-data-restore-<YYYYMMDD>-<HHMM>`: the shape `restoreVolumeName` makes. */
-const RESTORE_VOLUME_PATTERN = new RegExp(String.raw`^${TRACES_VOLUME_NAME}-restore-\d{8}-\d{4}$`)
-
-export function isRestoreVolumeName(name: string): boolean {
-  return RESTORE_VOLUME_PATTERN.test(name)
-}
-
 /**
  * A volume by name and state: `name (detached)`, `name (attached to this droplet)` or `name (attached to droplet 9, not
- * this one)`, plus `, records snapshot "x"` when its description says which snapshot it was made from. Never by id.
+ * this one)`, plus `, label "x"` when it has a description. Never by id. The description is text from the cloud, so it
+ * is cut short and shown printable-ASCII only.
  */
 function describeVolume(row: VolumeRow, dropletId: string): string {
   const state =
@@ -1507,8 +1493,26 @@ function describeVolume(row: VolumeRow, dropletId: string): string {
         : row.dropletIds.includes(dropletId)
           ? `attached to this droplet and droplet ${row.dropletIds.filter(id => id !== dropletId).join(', ')}`
           : `attached to droplet ${row.dropletIds.join(', ')}, not this one`
-  const recorded = parseRestoreDescription(row.description)
-  return `${row.name} (${state}${recorded === undefined ? '' : `, records snapshot "${recorded}"`})`
+  const label = row.description.replaceAll(/[^\u0020-\u007E]/g, '?').slice(0, 128)
+  return `${row.name} (${state}${label === '' ? '' : `, label "${label}"`})`
+}
+
+/**
+ * Why a restore stops when it does not find exactly one attached `traces-data*` volume: how many it found, that the
+ * ports stay closed and nothing was changed, every `traces-data*` volume with its state and label, and the way
+ * forward. The way forward never deletes anything: with none attached (the state an interrupted restore leaves) it is
+ * to attach the previous volume by hand and run the restore again from the start.
+ */
+function volumeCountRefusal(family: VolumeRow[], attachedCount: number, dropletId: string): string {
+  const found = family.length === 0 ? 'none' : family.map(row => describeVolume(row, dropletId)).join(', ')
+  const head = `Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found ${attachedCount}. Ports 80 and 443 stay closed; no volume was changed. ${TRACES_VOLUME_NAME}* volumes found: ${found}.`
+  if (attachedCount > 1) {
+    return `${head} This run replaces one attached volume and cannot tell which of these is the live one. Make exactly one ${TRACES_VOLUME_NAME}* volume attached to droplet ${dropletId} by hand (stop Docker and unmount a volume before detaching it), then run the same restore command again from the start.`
+  }
+  if (family.length === 0) {
+    return `${head} There is nothing to replace. Check the region and the account with doctl compute volume list.`
+  }
+  return `${head} This is the state an interrupted restore leaves: this run cannot tell which detached volume held the live data, and it deletes nothing. To go on, identify the volume that was live before, attach it by hand with doctl compute volume-action attach <volume-id> ${dropletId} --wait, then run the same restore command again from the start. A leftover restore volume can be deleted only after a restore is proven.`
 }
 
 function causeOf(error: unknown): string {
@@ -1536,14 +1540,15 @@ async function findVolumeSnapshotId(run: Runner, snapshotName: string): Promise<
 /**
  * Restore mode. Order is the safety property:
  *   1. remove 80 and 443 from the cloud firewall and prove it from the read-back
- *   2. only then touch any volume: look up the snapshot, create a volume from it,
- *      stop Docker and unmount, detach the old volume, attach the new one, remount
+ *   2. only then touch any volume: look up the snapshot, require exactly one attached `traces-data*` volume (the one
+ *      being replaced, whatever it is named), create a volume from the snapshot, stop Docker and unmount, detach the
+ *      old volume, attach the new one, remount
  * The volume listing can lag a completed attach or detach, so each is read back
  * for a bounded time (the same budget as a created volume) before it is called failed.
- * An interrupted restore resumes on a second run of the same command: with no
- * `traces-data*` volume attached and exactly one detached `traces-data-restore-*`
- * volume, that volume is reused (none is created) and the run continues from the
- * quiesce step. Any other shape is refused with the volumes listed by name.
+ * There is no resume. A run that is not exactly one attached volume (an interrupted restore leaves none) stops after
+ * closing the ports and before any volume change, with the volumes listed and the hand step to take; a detach or
+ * attach that fails says the same. The operator attaches the previous volume by hand and runs the restore again from
+ * the start.
  * Once the restored volume is mounted and its sentinel verified, with Docker still stopped, Tempo blocks whose
  * metadata is torn (a snapshot taken mid-write) are moved to a quarantine directory (`tempoQuarantineScript`) and
  * reported. The run stops there, with Docker stopped and the web ports closed. The old volume is
@@ -1553,7 +1558,7 @@ async function findVolumeSnapshotId(run: Runner, snapshotName: string): Promise<
  */
 export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Promise<void> {
   const {run, log} = deps
-  // Refused before anything is touched: a name that cannot be recorded could never be matched on a resume.
+  // Refused before anything is touched: the label is written whole or not at all.
   const description = restoreDescription(input.snapshotName)
   // One clock read for the whole run: the restore volume's name, the quarantine directory it writes and the one the
   // report names all carry the same stamp, even if the run crosses a UTC minute.
@@ -1584,75 +1589,46 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
   const volumes = await listVolumes(run)
   const family = volumes.filter(row => row.name.startsWith(TRACES_VOLUME_NAME))
   const attached = family.filter(row => row.dropletIds.includes(dropletId))
-  const [oldVolume] = attached
-  const foundList = `${TRACES_VOLUME_NAME}* volumes found: ${family.length === 0 ? 'none' : family.map(row => describeVolume(row, dropletId)).join(', ')}.`
+  // The attached volume is the one being replaced, whatever it is named: after a restore it is itself a
+  // `traces-data-restore-*` volume. A detached volume beside it (a leftover restore volume) is not touched.
+  const [previous, ...otherAttached] = attached
+  if (!previous || otherAttached.length > 0) {
+    throw new Error(volumeCountRefusal(family, attached.length, dropletId))
+  }
 
-  let newVolume: VolumeRow
-  let previous: VolumeRow | undefined
-  if (attached.length === 1 && oldVolume) {
-    // The normal run. The attached volume is the one being replaced, whatever it is named: after a restore it is
-    // itself a `traces-data-restore-*` volume. A detached restore volume left by an earlier restore is not touched.
-    previous = oldVolume
-    const newName = restoreVolumeName(startedAt)
-    if (volumes.some(row => row.name === newName)) {
-      throw new Error(
-        `A volume named ${newName} already exists, so a restore started in this minute cannot create its volume. Ports 80 and 443 stay closed; no volume was changed. Wait a minute and run the same command again.`,
-      )
-    }
-    const created = await doctl(run, [
-      'compute',
-      'volume',
-      'create',
-      newName,
-      '--region',
-      DROPLET_REGION,
-      '--size',
-      VOLUME_SIZE,
-      '--snapshot',
-      snapshotId,
-      '--desc',
-      description,
-      '--format',
-      'ID',
-      '--no-header',
-    ])
-    const listed = await waitForListedVolume(run, deps, newName)
-    if (!listed || (created && created !== listed.id)) {
-      // Reached after 80 and 443 were closed and before any volume was detached or any host step ran.
-      throw new Error(
-        `Volume "${newName}" not found after creation. Ports 80 and 443 stay closed; the old volume is still attached and Docker was not touched.`,
-      )
-    }
-    newVolume = listed
-  } else {
-    // Nothing attached is the state an interrupted restore leaves behind (the old volume detached, the restore
-    // volume created and not attached yet). Resume only when exactly one detached restore volume exists AND its
-    // description says it was made from the snapshot named now: another snapshot's volume is never attached.
-    const detachedRestores =
-      attached.length === 0 ? family.filter(row => row.dropletIds.length === 0 && isRestoreVolumeName(row.name)) : []
-    const [only] = detachedRestores
-    const refusal = `Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found ${attached.length}. Ports stay closed; no volume was changed.`
-    if (!only || detachedRestores.length !== 1) {
-      throw new Error(`${refusal} ${foundList}`)
-    }
-    const recorded = parseRestoreDescription(only.description)
-    if (recorded !== input.snapshotName) {
-      const records =
-        recorded === undefined
-          ? `records no snapshot (it was created before restores recorded one, or by hand), so it is never resumed. The only safe choice: delete ${only.name} by hand to start a fresh restore`
-          : `records snapshot "${recorded}", but this run was asked to restore "${input.snapshotName}". Choose one: run again with --restore-snapshot ${recorded} to resume it, or delete ${only.name} by hand to start a fresh restore`
-      throw new Error(
-        `${refusal} The one detached restore volume, ${only.name}, ${records}. Before deleting, confirm it is not the only copy of data you need. ${foundList}`,
-      )
-    }
-    newVolume = only
-    log(
-      `No ${TRACES_VOLUME_NAME}* volume is attached and ${only.name} is the one detached restore volume, and it records snapshot "${recorded}": an interrupted restore is being resumed with it. No volume is created.`,
+  const newName = restoreVolumeName(startedAt)
+  if (volumes.some(row => row.name === newName)) {
+    throw new Error(
+      `A volume named ${newName} already exists, so a restore started in this minute cannot create its volume. Ports 80 and 443 stay closed; no volume was changed. Wait a minute and run the same command again.`,
     )
   }
-  const newName = newVolume.name
+  const created = await doctl(run, [
+    'compute',
+    'volume',
+    'create',
+    newName,
+    '--region',
+    DROPLET_REGION,
+    '--size',
+    VOLUME_SIZE,
+    '--snapshot',
+    snapshotId,
+    '--desc',
+    description,
+    '--format',
+    'ID',
+    '--no-header',
+  ])
+  const newVolume = await waitForListedVolume(run, deps, newName)
+  if (!newVolume || (created && created !== newVolume.id)) {
+    // Reached after 80 and 443 were closed and before any volume was detached or any host step ran.
+    throw new Error(
+      `Volume "${newName}" not found after creation. Ports 80 and 443 stay closed; the old volume is still attached and Docker was not touched.`,
+    )
+  }
 
-  // Where the swap stops, for the operator: the state the host is in and what running the same command does next.
+  // The one hand step after a swap stops part-way: get the previous volume attached to the droplet, then start over.
+  const handStep = `doctl compute volume-action attach ${previous.id} ${dropletId} --wait`
   const swapFailure = (error: unknown, state: string): Error =>
     new Error(`${causeOf(error)}. Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ${state}`)
 
@@ -1662,22 +1638,20 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     await deps.waitForSsh(dropletIp, input.remoteUser, {identityFile})
     await runStep(exec, 'stop Docker and unmount the volume', quiesceScript(), QUIESCE_SENTINELS)
 
-    if (previous) {
-      try {
-        await detachVolume(run, deps, previous, dropletId)
-      } catch (error) {
-        throw swapFailure(
-          error,
-          `${previous.name} may still be attached (check doctl compute volume list) and ${newName} was created and is not attached. Do not rerun while ${previous.name} still shows the droplet; once it shows none, run the same command again to resume with ${newName}.`,
-        )
-      }
+    try {
+      await detachVolume(run, deps, previous, dropletId)
+    } catch (error) {
+      throw swapFailure(
+        error,
+        `${previous.name} may still be attached (check doctl compute volume list) and ${newName} was created and is not attached. Once exactly one ${TRACES_VOLUME_NAME}* volume is attached to droplet ${dropletId} (if ${previous.name} is not, attach it by hand with ${handStep}), run the same restore command again from the start.`,
+      )
     }
     try {
       await attachVolume(run, deps, newVolume, dropletId)
     } catch (error) {
       throw swapFailure(
         error,
-        `${previous ? `${previous.name} is detached and kept` : 'the detached previous data was not touched'}, and ${newName} is not confirmed attached. If doctl compute volume list shows ${newName} with no droplet, run the same command again to resume with it; if it shows droplet ${dropletId}, it is attached: do not rerun.`,
+        `${previous.name} is detached and kept, and ${newName} is not confirmed attached. Check doctl compute volume list. If no ${TRACES_VOLUME_NAME}* volume is attached to droplet ${dropletId}, attach ${previous.name} by hand with ${handStep}. Then run the same restore command again from the start.`,
       )
     }
 
@@ -1695,22 +1669,6 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
       )
     }
   })
-
-  if (!previous) {
-    // A resumed run does not know which volume was attached before the interruption, so it names no "previous data":
-    // it lists what exists, from the listing taken before the attach.
-    const after = family.map(row => (row.id === newVolume.id ? {...row, dropletIds: [dropletId]} : row))
-    log(`\n\u001B[1;32m✓\u001B[0m Volume ${newName} is attached and mounted (resumed from an interrupted restore).`)
-    log(`${TRACES_VOLUME_NAME}* volumes now: ${after.map(row => describeVolume(row, dropletId)).join(', ')}.`)
-    log(
-      'This run cannot tell which detached volume held the data before the interrupted restore. Delete nothing until the restore is proven.',
-    )
-    log('Docker is stopped and ports 80 and 443 are closed at the cloud firewall.')
-    log('Next: start Docker, make every token file deny-all (traces sender revoke --all), run a normal deploy,')
-    log('then run this script with --reopen-ports and reissue all three tokens.')
-    reportQuarantine(log, quarantined, stamp)
-    return
-  }
 
   log(
     `\n\u001B[1;32m✓\u001B[0m Volume ${newName} is attached and mounted in place of ${previous.name} (kept, detached).`,

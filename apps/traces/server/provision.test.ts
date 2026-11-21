@@ -40,14 +40,13 @@ import {
   fsProbeScript,
   hardeningFiles,
   inboundRule,
-  isRestoreVolumeName,
   managedFileScript,
   mkfsScript,
   mountScript,
   parseInboundRules,
   parseProvisionArgs,
-  parseRestoreDescription,
   parseVolumeRows,
+  quiesceScript,
   restoreDescription,
   restoreVolumeName,
   rulePortsCover,
@@ -278,6 +277,10 @@ interface HostOptions {
   tornBlocks?: string[]
   /** Replaces the quarantine step's whole answer. */
   quarantine?: RunResult
+  /** Whether the volume is mounted at the start. Defaults to the host being provisioned. */
+  mounted?: boolean
+  /** Whether Docker runs at the start. Defaults to the host being provisioned. */
+  dockerRunning?: boolean
 }
 
 class Host {
@@ -285,15 +288,19 @@ class Host {
   files = new Map<string, string>()
   fs: 'none' | 'ext4' | 'other'
   mounted: boolean
+  dockerRunning: boolean
   sentinel: boolean
   mkfsCount = 0
   dockerRestarts = 0
   steps: string[] = []
+  /** What the quiesce step found when it ran, once per run of it. */
+  quiescedFrom: {mounted: boolean; dockerRunning: boolean}[] = []
   constructor(private readonly options: HostOptions = {}) {
     const provisioned = options.provisioned ?? false
     this.swapOn = !provisioned
     this.fs = options.fs ?? (provisioned ? 'ext4' : 'none')
-    this.mounted = provisioned
+    this.mounted = options.mounted ?? provisioned
+    this.dockerRunning = options.dockerRunning ?? provisioned
     this.sentinel = provisioned
     if (provisioned) {
       for (const file of [...hardeningFiles(), ...dockerConfigFiles()]) this.files.set(file.path, file.content)
@@ -336,6 +343,8 @@ class Host {
         return ok(was ? 'TRACES_SENTINEL_PRESENT' : 'TRACES_SENTINEL_CREATED')
       }
       case 'verify-sentinel': {
+        // Like the real step: nothing mounted is a refusal, not a sentinel.
+        if (!this.mounted) return {exitCode: 1, stdout: 'TRACES_NOT_MOUNTED\n', stderr: ''}
         return this.sentinel ? ok('TRACES_SENTINEL_PRESENT') : fail('TRACES_SENTINEL_UNRECOGNISED')
       }
       case 'dirs': {
@@ -350,7 +359,9 @@ class Host {
         return this.options.storage ?? ok(GOOD_STORAGE_OUTPUT)
       }
       case 'restore-quiesce': {
+        this.quiescedFrom.push({mounted: this.mounted, dockerRunning: this.dockerRunning})
         this.mounted = false
+        this.dockerRunning = false
         return ok('TRACES_QUIESCED')
       }
       case 'tempo-quarantine': {
@@ -595,26 +606,19 @@ describe('parseVolumeRows', () => {
   })
 })
 
-describe('the snapshot a restore volume records', () => {
-  it('writes and reads back one fixed, space-free form carrying the snapshot name', () => {
+// The description is a label for a person reading `doctl compute volume list`. Nothing reads it back.
+describe('the label a restore volume is created with', () => {
+  it('is one fixed, space-free form carrying the snapshot name', () => {
     expect(restoreDescription('traces-20261120-1200')).toBe('restore-of:traces-20261120-1200')
-    expect(parseRestoreDescription('restore-of:traces-20261120-1200')).toBe('traces-20261120-1200')
-    for (const name of ['traces-20261120-1200', 'traces-pre-collector-1-2', 'a', 'Snap_1.2-x']) {
-      expect(parseRestoreDescription(restoreDescription(name))).toBe(name)
+    for (const name of ['traces-pre-collector-1-2', 'a', 'Snap_1.2-x']) {
+      expect(restoreDescription(name)).toBe(`restore-of:${name}`)
     }
   })
 
   it.each(['', ' ', 'a b', '-x', 'a:b', 'a/b', 'a\nb', 'x'.repeat(129), '\u00E9'])(
-    'refuses a snapshot name that would not round-trip: %j',
+    'refuses a snapshot name that cannot be written whole: %j',
     name => {
       expect(() => restoreDescription(name)).toThrow(/snapshot name/i)
-    },
-  )
-
-  it.each([undefined, '', 'hand-made note', 'restore-of:', 'restore-of:two words', 'RESTORE-OF:x', 'restore-of:-x'])(
-    'reads %j as recording no snapshot',
-    description => {
-      expect(parseRestoreDescription(description)).toBeUndefined()
     },
   )
 })
@@ -1889,6 +1893,10 @@ describe('runRestore: the volume swap when the listing lags the completed action
     expect(logs.join('\n')).not.toMatch(/resum/i)
   })
 
+  // A failed detach or attach tells the operator the one hand step: get the previous volume attached, then start over.
+  const HAND_STEP = 'run the same restore command again from the start'
+  const NO_DELETE_ADVICE = /\bdelete\b|resum|to start a fresh restore|only copy/i
+
   it('fails with the existing detach error when the listing lags beyond the budget, and says what state the host is in', async () => {
     const world = makeWorld(provisionedCloud({detachLagLists: VOLUME_LIST_ATTEMPTS}), {provisioned: true})
     const {deps, sleeps} = makeDeps(world.runner)
@@ -1903,7 +1911,9 @@ describe('runRestore: the volume swap when the listing lags the completed action
     expect(failure).toContain('Ports 80 and 443 stay closed')
     expect(failure).toContain('Docker is stopped')
     expect(failure).toContain(NEW_NAME)
-    expect(failure).toContain('run the same command again')
+    expect(failure).toContain(`doctl compute volume-action attach vol-old ${DROPLET_ID} --wait`)
+    expect(failure).toContain(HAND_STEP)
+    expect(failure).not.toMatch(NO_DELETE_ADVICE)
     expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
     expect(world.doctlCalls().some(call => call.startsWith('compute volume-action attach'))).toBe(false)
   })
@@ -1920,12 +1930,14 @@ describe('runRestore: the volume swap when the listing lags the completed action
     expect(failure).toContain('Ports 80 and 443 stay closed')
     expect(failure).toContain('Docker is stopped')
     expect(failure).toContain(`${TRACES_VOLUME_NAME} is detached and kept`)
-    expect(failure).toContain('run the same command again')
+    expect(failure).toContain(`doctl compute volume-action attach vol-old ${DROPLET_ID} --wait`)
+    expect(failure).toContain(HAND_STEP)
+    expect(failure).not.toMatch(NO_DELETE_ADVICE)
   })
 })
 
-// The state a restore leaves when it stops after the detach: Docker stopped, ports closed, the old volume detached, the
-// restore volume created and not attached. `attached` is the set of volumes still on the droplet.
+// The state a restore that stopped after the detach leaves: ports closed, Docker stopped, nothing attached, the previous
+// volume and a freshly created restore volume both detached. A restore does not continue from here: it refuses.
 function interruptedRestoreCloud(extra: CloudOptions = {}): CloudOptions {
   return provisionedCloud({
     volumes: [
@@ -1942,9 +1954,10 @@ function interruptedRestoreCloud(extra: CloudOptions = {}): CloudOptions {
   })
 }
 
-describe('runRestore: resuming an interrupted restore', () => {
+describe('runRestore: the one attached volume it replaces', () => {
   const RESTORE_INPUT = {snapshotName: 'traces-data-snap', privateKey: 'placeholder', remoteUser: 'root'}
   const RESTORE_NAME = 'traces-data-restore-20261119-0900'
+  const LABEL = restoreDescription('traces-data-snap')
   const failureOfRestore = (
     world: ReturnType<typeof makeWorld>,
     input: {snapshotName: string; privateKey: string; remoteUser: string},
@@ -1957,255 +1970,120 @@ describe('runRestore: resuming an interrupted restore', () => {
     const doctl = world.doctlCalls()
     expect(doctl.some(call => call.startsWith('compute volume create'))).toBe(false)
     expect(doctl.some(call => call.startsWith('compute volume-action'))).toBe(false)
-    expect(world.sshCommands()).toEqual([])
-  }
-
-  it('recognises exactly the names restoreVolumeName makes', () => {
-    expect(isRestoreVolumeName(restoreVolumeName(new Date('2026-01-02T03:04:59Z')))).toBe(true)
-    for (const name of [
-      TRACES_VOLUME_NAME,
-      'traces-data-restore-20261119',
-      'traces-data-restore-20261119-0900-x',
-      'x-traces-data-restore-20261119-0900',
-      'traces-data-old',
-    ]) {
-      expect(isRestoreVolumeName(name)).toBe(false)
-    }
-  })
-
-  // Mutation target: removing the resume case fails this and the next ones.
-  it('from the production state (nothing attached, one detached traces-data, one detached restore volume) attaches the restore volume and verifies it', async () => {
-    const world = makeWorld(interruptedRestoreCloud(), {provisioned: true})
-    const {deps, logs} = makeDeps(world.runner)
-    await runRestore(RESTORE_INPUT, deps)
-
-    const doctl = world.doctlCalls()
-    expect(doctl.some(call => call.startsWith('compute volume create'))).toBe(false)
-    expect(doctl.some(call => call.startsWith('compute volume-action detach'))).toBe(false)
-    expect(doctl).toContain(`compute volume-action attach vol-restore ${DROPLET_ID} --wait`)
-    // Quiesce is repeated first, then the restored volume is probed, mounted and its sentinel verified.
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
-    const probe = world.sshCommands().find(c => c.includes('traces-step:fs-probe')) ?? ''
-    expect(probe).toContain(volumeDevicePath(RESTORE_NAME))
-    expect(world.cloud.volumes.find(v => v.id === 'vol-restore')?.dropletIds).toEqual([DROPLET_ID])
-    // The previous data is untouched; nothing is deleted or reopened, ports stay closed.
-    expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
     expect(doctl.some(call => call.includes('delete'))).toBe(false)
-    expect(doctl.some(call => call.startsWith('compute firewall add-rules'))).toBe(false)
-    expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
+    expect(world.sshCommands()).toEqual([])
+    expect(world.host.steps).toEqual([])
+  }
+  // Advice the refusal must never give: deleting anything, or carrying on with a leftover volume.
+  const NO_OLD_ADVICE = /\bdelete\b|resum|to start a fresh restore|only copy|run again with --restore-snapshot/i
 
-    const text = logs.join('\n')
-    expect(text).toMatch(/interrupted restore is being resumed/i)
-    expect(text).toContain(`Volume ${RESTORE_NAME} is attached and mounted`)
-    expect(text).toContain('--reopen-ports')
+  // Mutation target: removing the zero-attached refusal lets the run fall through to a restore from nothing.
+  it('refuses, from the interrupted shape (nothing attached, one detached traces-data, one detached restore volume), before any change', async () => {
+    const world = makeWorld(interruptedRestoreCloud(), {provisioned: true})
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+
+    expect(failure).toContain(`Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found 0`)
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('no volume was changed')
+    expect(failure).toContain(`${TRACES_VOLUME_NAME} (detached)`)
+    expect(failure).toContain(`${RESTORE_NAME} (detached, label "${LABEL}")`)
+    expect(failure).toContain('the state an interrupted restore leaves')
+    expect(failure).toContain('cannot tell which detached volume held the live data')
+    expect(failure).toContain('can be deleted only after a restore is proven')
+    // Mutation target: dropping the attach command from the message fails this.
+    expect(failure).toContain(`doctl compute volume-action attach <volume-id> ${DROPLET_ID} --wait`)
+    expect(failure).toContain('run the same restore command again from the start')
+    expect(failure).not.toMatch(NO_OLD_ADVICE)
+
+    expectNothingChanged(world)
+    expect(world.cloud.volumes.map(v => v.dropletIds)).toEqual([[], []])
+    expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
   })
 
-  it('still closes the ports first, and still needs the snapshot to exist', async () => {
+  it('closes the ports first, even when it then refuses', async () => {
     const world = makeWorld(
       interruptedRestoreCloud({
         firewalls: [{id: 'fw-old', name: FIREWALL_NAME, inbound: [...FIREWALL_INBOUND_RULES], droplets: [DROPLET_ID]}],
       }),
       {provisioned: true},
     )
-    const {deps} = makeDeps(world.runner)
-    await runRestore(RESTORE_INPUT, deps)
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+
+    expect(failure).toContain('found 0')
     expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
     const doctl = world.doctlCalls()
     expect(doctl.findIndex(call => call.startsWith('compute firewall remove-rules'))).toBeLessThan(
       doctl.findIndex(call => call.startsWith('compute volume list')),
     )
-
-    const noSnapshot = makeWorld(interruptedRestoreCloud({snapshots: []}), {provisioned: true})
-    await expect(runRestore(RESTORE_INPUT, makeDeps(noSnapshot.runner).deps)).rejects.toThrow(
-      /No volume snapshot named "traces-data-snap"/,
-    )
-    expectNothingChanged(noSnapshot)
   })
 
-  it('polls the attach of the resumed volume like any other attach', async () => {
-    const world = makeWorld(interruptedRestoreCloud({attachLagLists: 2}), {provisioned: true})
-    const {deps, sleeps} = makeDeps(world.runner)
-    await runRestore(RESTORE_INPUT, deps)
-    expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(2)
-    expect(world.cloud.volumes.find(v => v.id === 'vol-restore')?.dropletIds).toEqual([DROPLET_ID])
+  it('still needs the snapshot to exist, and says so before it looks at volumes', async () => {
+    const world = makeWorld(interruptedRestoreCloud({snapshots: []}), {provisioned: true})
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+    expect(failure).toContain('No volume snapshot named "traces-data-snap"')
+    expectNothingChanged(world)
   })
 
-  // Mutation target: giving the resumed run a "previous data" role fails this. It cannot know which volume was live.
-  it('lists every traces-data* volume with its state and recorded snapshot, assigns no role, and says nothing should be deleted yet', async () => {
+  it('lists every traces-data* volume by name and state, with its label when it has one, and ignores other volumes', async () => {
     const world = makeWorld(
       interruptedRestoreCloud({
         volumes: [
           {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
-          {id: 'vol-older', name: 'traces-data-old', dropletIds: [], description: restoreDescription('traces-9')},
-          {id: 'vol-away', name: 'traces-data-away', dropletIds: ['9999']},
-          {
-            id: 'vol-restore',
-            name: RESTORE_NAME,
-            dropletIds: [],
-            description: restoreDescription('traces-data-snap'),
-          },
-        ],
-      }),
-      {provisioned: true},
-    )
-    const {deps, logs} = makeDeps(world.runner)
-    await runRestore(RESTORE_INPUT, deps)
-
-    const text = logs.join('\n')
-    expect(text).toContain('traces-data (detached)')
-    expect(text).toContain('traces-data-old (detached, records snapshot "traces-9")')
-    expect(text).toContain('traces-data-away (attached to droplet 9999, not this one)')
-    expect(text).toContain(`${RESTORE_NAME} (attached to this droplet, records snapshot "traces-data-snap")`)
-    expect(text).toContain('cannot tell which detached volume held the data before the interrupted restore')
-    expect(text).toContain('Delete nothing until the restore is proven')
-    expect(text).not.toMatch(/previous data|was kept|still exists; delete it|The old volume/)
-  })
-
-  // Mutation target: removing the description check fails these.
-  it('refuses to attach a detached restore volume that records another snapshot, naming both and the two safe choices', async () => {
-    const world = makeWorld(
-      interruptedRestoreCloud({
-        volumes: [
-          {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
-          {
-            id: 'vol-restore',
-            name: RESTORE_NAME,
-            dropletIds: [],
-            description: restoreDescription('traces-20261118-0300'),
-          },
+          {id: 'vol-restore', name: RESTORE_NAME, dropletIds: [], description: LABEL},
+          {id: 'vol-away', name: 'traces-data-away', dropletIds: ['9999'], description: 'hand-made note'},
+          {id: 'vol-other', name: 'something-else', dropletIds: []},
         ],
       }),
       {provisioned: true},
     )
     const failure = await failureOfRestore(world, RESTORE_INPUT)
 
-    expect(failure).toContain(RESTORE_NAME)
-    expect(failure).toContain('records snapshot "traces-20261118-0300"')
-    expect(failure).toContain('asked to restore "traces-data-snap"')
-    expect(failure).toContain('run again with --restore-snapshot traces-20261118-0300 to resume it')
-    expect(failure).toContain(`delete ${RESTORE_NAME} by hand to start a fresh restore`)
-    expect(failure).toContain('Ports stay closed; no volume was changed')
+    expect(failure).toContain('traces-data (detached)')
+    expect(failure).toContain(`${RESTORE_NAME} (detached, label "${LABEL}")`)
+    expect(failure).toContain('traces-data-away (attached to droplet 9999, not this one, label "hand-made note")')
+    expect(failure).not.toContain('something-else')
     expectNothingChanged(world)
-    expect(world.host.steps).toEqual([])
   })
 
-  it('resumes when the same snapshot is named again, whatever else exists', async () => {
-    const world = makeWorld(
-      interruptedRestoreCloud({
-        volumes: [
-          {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
-          {
-            id: 'vol-restore',
-            name: RESTORE_NAME,
-            dropletIds: [],
-            description: restoreDescription('traces-20261118-0300'),
-          },
-        ],
-        snapshots: [{id: 'snap-a', name: 'traces-20261118-0300'}],
-      }),
-      {provisioned: true},
-    )
-    await runRestore({...RESTORE_INPUT, snapshotName: 'traces-20261118-0300'}, makeDeps(world.runner).deps)
-    expect(world.cloud.volumes.find(v => v.id === 'vol-restore')?.dropletIds).toEqual([DROPLET_ID])
-    expect(world.doctlCalls().some(call => call.startsWith('compute volume create'))).toBe(false)
-  })
-
-  it.each([
-    ['no description (a volume made by the earlier restore code)', undefined],
-    ['an empty description', ''],
-    ['a description in another form', 'hand-made note'],
-    ['a description with no snapshot name', 'restore-of:'],
-  ])('refuses a detached restore volume with %s, saying it records none', async (_label, description) => {
-    const world = makeWorld(
-      interruptedRestoreCloud({
-        volumes: [
-          {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
-          {id: 'vol-restore', name: RESTORE_NAME, dropletIds: [], ...(description === undefined ? {} : {description})},
-        ],
-      }),
-      {provisioned: true},
-    )
+  it('refuses with nothing to attach when no traces-data* volume exists at all', async () => {
+    const world = makeWorld(interruptedRestoreCloud({volumes: []}), {provisioned: true})
     const failure = await failureOfRestore(world, RESTORE_INPUT)
-
-    expect(failure).toContain(RESTORE_NAME)
-    expect(failure).toContain('records no snapshot')
-    expect(failure).toContain('created before restores recorded one')
-    expect(failure).toContain(`delete ${RESTORE_NAME} by hand to start a fresh restore`)
-    expect(failure).toContain('confirm it is not the only copy of data you need')
-    expect(failure).not.toContain('run again with --restore-snapshot')
-    expectNothingChanged(world)
-  })
-
-  it.each([
-    [
-      'two detached restore volumes',
-      [
-        {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
-        {id: 'vol-r1', name: 'traces-data-restore-20261118-0900', dropletIds: []},
-        {id: 'vol-r2', name: 'traces-data-restore-20261119-0900', dropletIds: []},
-      ],
-      ['traces-data-restore-20261118-0900', 'traces-data-restore-20261119-0900'],
-    ],
-    [
-      'no restore volume',
-      [{id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []}],
-      [`${TRACES_VOLUME_NAME} (detached)`],
-    ],
-    [
-      'a restore volume attached to another droplet',
-      [
-        {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
-        {id: 'vol-r1', name: 'traces-data-restore-20261119-0900', dropletIds: ['9999']},
-      ],
-      ['traces-data-restore-20261119-0900 (attached to droplet 9999, not this one)'],
-    ],
-    [
-      'a name that only looks like a restore volume',
-      [{id: 'vol-r1', name: 'traces-data-restore-20261119', dropletIds: []}],
-      ['traces-data-restore-20261119 (detached)'],
-    ],
-  ])('refuses with a list by name, and changes nothing, with %s', async (_label, volumes, names) => {
-    const world = makeWorld(interruptedRestoreCloud({volumes}), {provisioned: true})
-    const {deps} = makeDeps(world.runner)
-    const failure = await runRestore(RESTORE_INPUT, deps).then(
-      () => '',
-      (error: unknown) => (error instanceof Error ? error.message : String(error)),
-    )
 
     expect(failure).toContain(`Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found 0`)
-    expect(failure).toContain('Ports stay closed; no volume was changed')
-    for (const name of names) expect(failure).toContain(name)
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('no volume was changed')
+    expect(failure).toContain('none')
+    expect(failure).toContain('nothing to replace')
+    expect(failure).not.toContain('volume-action attach')
+    expect(failure).not.toMatch(NO_OLD_ADVICE)
     expectNothingChanged(world)
   })
 
-  it('still refuses more than one attached volume, listing both by name', async () => {
+  it('refuses when two are attached, listing both with their state, and changes nothing', async () => {
     const world = makeWorld(
       interruptedRestoreCloud({
         volumes: [
           {id: 'vol-a', name: TRACES_VOLUME_NAME, dropletIds: [DROPLET_ID]},
-          {id: 'vol-b', name: 'traces-data-restore-20261119-0900', dropletIds: [DROPLET_ID]},
-          {
-            id: 'vol-c',
-            name: 'traces-data-restore-20261118-0900',
-            dropletIds: [],
-            description: restoreDescription('traces-data-snap'),
-          },
+          {id: 'vol-b', name: RESTORE_NAME, dropletIds: [DROPLET_ID], description: LABEL},
+          {id: 'vol-c', name: 'traces-data-restore-20261118-0900', dropletIds: [], description: LABEL},
         ],
       }),
       {provisioned: true},
     )
-    const {deps} = makeDeps(world.runner)
-    const failure = await runRestore(RESTORE_INPUT, deps).then(
-      () => '',
-      (error: unknown) => (error instanceof Error ? error.message : String(error)),
-    )
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+
     expect(failure).toContain(`Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found 2`)
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('no volume was changed')
     expect(failure).toContain(`${TRACES_VOLUME_NAME} (attached to this droplet)`)
-    expect(failure).toContain('traces-data-restore-20261119-0900 (attached to this droplet)')
+    expect(failure).toContain(`${RESTORE_NAME} (attached to this droplet, label "${LABEL}")`)
+    expect(failure).toContain('traces-data-restore-20261118-0900 (detached, label')
+    expect(failure).toContain('cannot tell which')
+    expect(failure).not.toMatch(NO_OLD_ADVICE)
     expectNothingChanged(world)
   })
 
-  it('the normal first run is unchanged: it creates the restore volume, detaches the old one, attaches the new one', async () => {
+  it('a first run creates the restore volume, detaches the attached one, attaches the new one', async () => {
     const world = makeWorld(provisionedCloud(), {provisioned: true})
     const {deps, logs} = makeDeps(world.runner)
     await runRestore(RESTORE_INPUT, deps)
@@ -2243,17 +2121,12 @@ describe('runRestore: resuming an interrupted restore', () => {
     expect(text).not.toMatch(/resum/i)
   })
 
-  it('a detached restore volume left by an earlier, completed restore is not mistaken for an interrupted one while another volume is attached', async () => {
+  it('a detached restore volume left beside the attached one is ignored: it is not attached, replaced or mentioned in the swap', async () => {
     const world = makeWorld(
       provisionedCloud({
         volumes: [
           {id: 'vol-live', name: TRACES_VOLUME_NAME, dropletIds: [DROPLET_ID]},
-          {
-            id: 'vol-left',
-            name: 'traces-data-restore-20261101-0900',
-            dropletIds: [],
-            description: restoreDescription('traces-data-snap'),
-          },
+          {id: 'vol-left', name: 'traces-data-restore-20261101-0900', dropletIds: [], description: LABEL},
         ],
       }),
       {provisioned: true},
@@ -2264,7 +2137,41 @@ describe('runRestore: resuming an interrupted restore', () => {
     const doctl = world.doctlCalls()
     expect(doctl.filter(call => call.startsWith('compute volume create'))).toHaveLength(1)
     expect(doctl.some(call => call.includes('vol-left'))).toBe(false)
-    expect(logs.join('\n')).not.toMatch(/resum/i)
+    expect(world.cloud.volumes.find(v => v.id === 'vol-left')?.dropletIds).toEqual([])
+    expect(logs.join('\n')).toContain('in place of traces-data (kept, detached)')
+  })
+
+  // The recovery the refusal describes: the operator attaches the previous volume by hand, then runs the restore again.
+  // The host is as the interrupted restore left it: Docker stopped and nothing mounted.
+  it('after the hand step (previous volume attached, Docker stopped, nothing mounted, a restore volume left detached) a first run completes', async () => {
+    const world = makeWorld(
+      interruptedRestoreCloud({
+        volumes: [
+          {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: [DROPLET_ID]},
+          {id: 'vol-restore', name: RESTORE_NAME, dropletIds: [], description: LABEL},
+        ],
+      }),
+      {provisioned: true, mounted: false, dockerRunning: false},
+    )
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    const doctl = world.doctlCalls()
+    expect(doctl.filter(call => call.startsWith('compute volume create'))).toHaveLength(1)
+    expect(doctl.filter(call => call.startsWith('compute volume-action detach'))).toEqual([
+      `compute volume-action detach vol-old ${DROPLET_ID} --wait`,
+    ])
+    expect(doctl.filter(call => call.startsWith('compute volume-action attach'))).toHaveLength(1)
+    expect(doctl.some(call => call.includes('vol-restore'))).toBe(false)
+    // The quiesce step met Docker already stopped and nothing mounted, and the run went on to the quarantine scan.
+    expect(world.host.quiescedFrom).toEqual([{mounted: false, dockerRunning: false}])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(world.host.dockerRestarts).toBe(0)
+    expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
+    expect(world.cloud.volumes.find(v => v.id === 'vol-restore')?.dropletIds).toEqual([])
+    expect(world.cloud.volumes.find(v => v.name === 'traces-data-restore-20261120-1530')?.dropletIds).toEqual([
+      DROPLET_ID,
+    ])
     expect(logs.join('\n')).toContain('in place of traces-data (kept, detached)')
   })
 
@@ -2280,11 +2187,50 @@ describe('runRestore: resuming an interrupted restore', () => {
     expectNothingChanged(world)
   })
 
-  it('refuses a snapshot name that would not round-trip through the description, before any change', async () => {
+  it('refuses a snapshot name that cannot be written as the label, before any change', async () => {
     const world = makeWorld(provisionedCloud(), {provisioned: true})
     const failure = await failureOfRestore(world, {...RESTORE_INPUT, snapshotName: 'x'.repeat(129)})
     expect(failure).toMatch(/snapshot name/i)
     expect(world.calls).toEqual([])
+  })
+})
+
+// The quiesce step is the first host step of a run started after the hand step, so it must cope with a host that
+// is already quiet. Run under a real shell with systemctl, mountpoint and umount as shims.
+async function runQuiesce(mounted: boolean) {
+  const dir = mkdtempSync(join(tmpdir(), 'traces-quiesce-'))
+  try {
+    const shim = join(dir, 'shim')
+    mkdirSync(shim)
+    const state = join(dir, 'state')
+    mkdirSync(state)
+    if (mounted) writeFileSync(join(state, 'mounted'), '')
+    const write = (name: string, body: string) => {
+      writeFileSync(join(shim, name), `#!/bin/sh\n${body}\n`)
+      chmodSync(join(shim, name), 0o755)
+    }
+    write('systemctl', `echo "$@" >> ${state}/systemctl`)
+    write('mountpoint', `[ -e ${state}/mounted ]`)
+    write('umount', `rm -f ${state}/mounted; echo "$@" >> ${state}/umount`)
+    const proc = Bun.spawn(['bash', '-o', 'pipefail', '-c', quiesceScript()], {
+      env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+    return {stdout: stdout.trim(), exitCode, umounted: existsSync(join(state, 'umount'))}
+  } finally {
+    rmSync(dir, {recursive: true, force: true})
+  }
+}
+
+describe('quiesceScript, run under a real shell', () => {
+  it('succeeds without unmounting when nothing is mounted (Docker already stopped)', async () => {
+    expect(await runQuiesce(false)).toEqual({stdout: 'TRACES_QUIESCED', exitCode: 0, umounted: false})
+  })
+
+  it('unmounts a mounted volume', async () => {
+    expect(await runQuiesce(true)).toEqual({stdout: 'TRACES_QUIESCED', exitCode: 0, umounted: true})
   })
 })
 
@@ -2303,8 +2249,8 @@ describe('runRestore: quarantining torn Tempo blocks on the restored volume', ()
       (error: unknown) => (error instanceof Error ? error.message : String(error)),
     )
 
-  // Mutation target: dropping the step from either path fails these.
-  it('runs one more host step after the sentinel is verified, with Docker still stopped, on a first run', async () => {
+  // Mutation target: dropping the step fails these.
+  it('runs one more host step after the sentinel is verified, with Docker still stopped', async () => {
     const world = makeWorld(provisionedCloud(), {provisioned: true})
     const {deps, logs} = makeDeps(world.runner)
     await runRestore(RESTORE_INPUT, deps)
@@ -2317,15 +2263,6 @@ describe('runRestore: quarantining torn Tempo blocks on the restored volume', ()
     expect(command).toContain(QUARANTINE_DIR.slice(TRACES_TEMPO_QUARANTINE_ROOT.length + 1))
     expect(logs.join('\n')).toContain('No torn Tempo blocks')
     expect(logs.join('\n')).not.toContain('Quarantined')
-  })
-
-  it('runs it on the resume path too', async () => {
-    const world = makeWorld(interruptedRestoreCloud(), {provisioned: true, tornBlocks: TORN})
-    const {deps, logs} = makeDeps(world.runner)
-    await runRestore(RESTORE_INPUT, deps)
-
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
-    expect(logs.join('\n')).toContain('Quarantined 2 Tempo blocks')
   })
 
   it('reports what it moved: the count, every block with its tenant, the limit, and where they are', async () => {
@@ -2379,25 +2316,19 @@ describe('runRestore: quarantining torn Tempo blocks on the restored volume', ()
   )
 
   // Mutation target: reading the clock again for the move or the report lets a minute change split them.
-  it.each([
-    ['a first run', () => provisionedCloud()],
-    ['a resume', () => interruptedRestoreCloud()],
-  ])(
-    'uses one clock read for the volume name, the move and the report across a minute change (%s)',
-    async (_label, cloud) => {
-      const world = makeWorld(cloud(), {provisioned: true, tornBlocks: [TORN[0] ?? '']})
-      const {deps, logs} = makeDeps(world.runner)
-      const instants = ['2026-11-20T15:30:59.900Z', '2026-11-20T15:31:00.100Z', '2026-11-20T15:32:00.000Z']
-      let reads = 0
-      deps.now = () => new Date(instants[Math.min(reads++, instants.length - 1)] ?? '')
-      await runRestore(RESTORE_INPUT, deps)
+  it('uses one clock read for the volume name, the move and the report across a minute change', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, tornBlocks: [TORN[0] ?? '']})
+    const {deps, logs} = makeDeps(world.runner)
+    const instants = ['2026-11-20T15:30:59.900Z', '2026-11-20T15:31:00.100Z', '2026-11-20T15:32:00.000Z']
+    let reads = 0
+    deps.now = () => new Date(instants[Math.min(reads++, instants.length - 1)] ?? '')
+    await runRestore(RESTORE_INPUT, deps)
 
-      expect(reads).toBe(1)
-      expect(quarantineCommand(world)).toContain('stamp=20261120-1530')
-      expect(logs.join('\n')).toContain(`${TRACES_TEMPO_QUARANTINE_ROOT}/20261120-1530/<tenant>/<block>`)
-      expect(logs.join('\n')).not.toContain('1531')
-    },
-  )
+    expect(reads).toBe(1)
+    expect(quarantineCommand(world)).toContain('stamp=20261120-1530')
+    expect(logs.join('\n')).toContain(`${TRACES_TEMPO_QUARANTINE_ROOT}/20261120-1530/<tenant>/<block>`)
+    expect(logs.join('\n')).not.toContain('1531')
+  })
 
   it('does not run before the sentinel is verified', async () => {
     const world = makeWorld(provisionedCloud(), {provisioned: true})

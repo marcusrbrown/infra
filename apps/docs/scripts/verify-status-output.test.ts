@@ -242,6 +242,22 @@ describe('verifyStatusOutput: a service that is not yet deployed', () => {
     ])
   })
 
+  it('reports a status row that keeps its label but shows a passed-sample count', () => {
+    const row = notDeployedRow('traces').replace('</tr>', '<td>3 of 3 samples passed</td></tr>')
+
+    expect(check(dist({rows: {traces: row}}))).toEqual([
+      'status: the traces row shows a passed-sample count for an app that is not yet deployed',
+    ])
+  })
+
+  it('reports a status row that keeps its label but shows a coverage figure', () => {
+    const row = notDeployedRow('traces').replace('</tr>', '<td>3 samples recorded of about 3 expected</td></tr>')
+
+    expect(check(dist({rows: {traces: row}}))).toEqual([
+      'status: the traces row shows a coverage figure for an app that is not yet deployed',
+    ])
+  })
+
   it('reports a status page that has no row for it', () => {
     const status = `<main>${LAST_SAMPLE}<table><tbody></tbody></table></main>`
 

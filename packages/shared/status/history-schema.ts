@@ -22,7 +22,9 @@ export const APPS_ADDED_AFTER_V1: readonly AppId[] = ['traces']
 /**
  * Apps whose host is not deployed yet. The public status pages show them as "Not yet deployed" and the status
  * snapshot neither probes nor records them, so a missing host never reads as an outage. Take an app off this list in
- * the same change that first deploys it.
+ * a follow-up change, after its deploy has succeeded: the snapshot and the Site publish do not wait for the gated
+ * deploy. In that change, delete the tests marked for deletion and remove "Not yet deployed" from the app's entry in
+ * `apps/docs/src/data/services.ts`. After it merges, dispatch the `Status Snapshot` workflow.
  */
 export const APPS_NOT_YET_DEPLOYED: readonly AppId[] = ['traces']
 

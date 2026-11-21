@@ -30,6 +30,10 @@ const HEALTH_WORDS = new RegExp(
     .join('|')})\b`,
 )
 
+/** The coverage and passed-sample figures a deployed service page shows. */
+const COVERAGE_FIGURE = /samples? recorded of about \d+ expected/
+const PASSED_FIGURE = /\d+ of \d+ samples? passed/
+
 /** Visible text only: tags (and so inline styles and attributes), scripts and styles are removed. */
 export function visibleText(html: string): string {
   return html
@@ -79,6 +83,12 @@ export function verifyStatusOutput(
           if (HEALTH_WORDS.test(row)) {
             problems.push(`status: the ${app} row shows a result or verdict for an app that is not yet deployed`)
           }
+          if (COVERAGE_FIGURE.test(row)) {
+            problems.push(`status: the ${app} row shows a coverage figure for an app that is not yet deployed`)
+          }
+          if (PASSED_FIGURE.test(row)) {
+            problems.push(`status: the ${app} row shows a passed-sample count for an app that is not yet deployed`)
+          }
         }
       }
       continue
@@ -88,10 +98,10 @@ export function verifyStatusOutput(
     if (app !== undefined && notYetDeployed.includes(app)) {
       // Nothing about its health may be shown, and "No data yet" is a different state (a deployed app, no samples).
       if (!text.includes(NOT_YET_DEPLOYED_TEXT)) problems.push(`${page}: missing the not-yet-deployed statement`)
-      if (/samples? recorded of about \d+ expected/.test(text)) {
+      if (COVERAGE_FIGURE.test(text)) {
         problems.push(`${page}: shows a coverage figure for an app that is not yet deployed`)
       }
-      if (/\d+ of \d+ samples? passed/.test(text)) {
+      if (PASSED_FIGURE.test(text)) {
         problems.push(`${page}: shows a passed-sample count for an app that is not yet deployed`)
       }
       if (HEALTH_WORDS.test(text)) problems.push(`${page}: shows a verdict for an app that is not yet deployed`)
@@ -102,8 +112,8 @@ export function verifyStatusOutput(
 
     // A service with no samples yet says so; it has no coverage or passed-sample figure to show.
     if (page.startsWith('services/') && !text.includes(NO_DATA_TEXT)) {
-      if (!/samples? recorded of about \d+ expected/.test(text)) problems.push(`${page}: missing the coverage figure`)
-      if (!/\d+ of \d+ samples? passed/.test(text)) problems.push(`${page}: missing "N of M samples passed"`)
+      if (!COVERAGE_FIGURE.test(text)) problems.push(`${page}: missing the coverage figure`)
+      if (!PASSED_FIGURE.test(text)) problems.push(`${page}: missing "N of M samples passed"`)
     }
   }
 

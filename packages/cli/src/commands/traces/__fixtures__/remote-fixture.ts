@@ -2,7 +2,7 @@ import type {SpawnFn, SpawnOptions} from '../remote'
 
 import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
-import {join} from 'node:path'
+import {dirname, join} from 'node:path'
 
 import {TRACES_APP_DIR} from '../host'
 import {DETAIL_SENTINEL} from '../remote'
@@ -29,9 +29,48 @@ function stream(text: string): ReadableStream<Uint8Array> | null {
   return new Response(text).body
 }
 
-export function recordingSpawn(route: (call: SpawnCall) => Reply): {spawn: SpawnFn; calls: SpawnCall[]} {
+/** A request to close the shared ssh connection (`ssh -O exit`), as the spawner saw it. */
+export interface CloseCall {
+  argv: string[]
+  /** The `ControlPath` the close names. */
+  controlPath: string | undefined
+  /** Whether the directory holding that socket still existed when the close was made. */
+  directoryExisted: boolean
+}
+
+/** How the fake answers a close: `fail` exits 255 (no master), `throw` raises from the spawner itself. */
+export type CloseBehaviour = 'ok' | 'fail' | 'throw'
+
+export function controlPathOf(argv: readonly string[]): string | undefined {
+  const option = argv.find(arg => arg.startsWith('ControlPath='))
+  return option?.slice('ControlPath='.length)
+}
+
+/**
+ * Records every call. A close of the shared connection (`-O exit`) is recorded apart in `closes`, so `calls` holds
+ * exactly the commands the traces commands sent over ssh (and `gh`) and a count of it is a count of work done.
+ */
+export function recordingSpawn(
+  route: (call: SpawnCall) => Reply,
+  closeBehaviour: CloseBehaviour = 'ok',
+): {spawn: SpawnFn; calls: SpawnCall[]; closes: CloseCall[]} {
   const calls: SpawnCall[] = []
+  const closes: CloseCall[] = []
   const spawn: SpawnFn = (argv, options) => {
+    if (argv.includes('-O')) {
+      const controlPath = controlPathOf(argv)
+      closes.push({
+        argv,
+        controlPath,
+        directoryExisted: controlPath !== undefined && existsSync(dirname(controlPath)),
+      })
+      if (closeBehaviour === 'throw') throw new Error('spawn ssh ENOENT')
+      return {
+        stdout: options.stdout === 'pipe' ? stream('') : null,
+        stderr: options.stderr === 'pipe' ? stream('') : null,
+        exited: Promise.resolve(closeBehaviour === 'fail' ? 255 : 0),
+      }
+    }
     const call: SpawnCall = {
       argv,
       command: argv.at(-1) ?? '',
@@ -46,7 +85,13 @@ export function recordingSpawn(route: (call: SpawnCall) => Reply): {spawn: Spawn
       exited: Promise.resolve(reply.exitCode ?? 0),
     }
   }
-  return {spawn, calls}
+  return {spawn, calls, closes}
+}
+
+/** The distinct `ControlPath` values on the ssh calls in `calls`. `undefined` stands for an ssh call with none. */
+export function controlPaths(calls: readonly SpawnCall[]): (string | undefined)[] {
+  const ssh = calls.filter(call => call.argv[0] === 'ssh')
+  return [...new Set(ssh.map(call => controlPathOf(call.argv)))]
 }
 
 export interface CheckFixture {

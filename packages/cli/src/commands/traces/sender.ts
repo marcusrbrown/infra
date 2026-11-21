@@ -1,7 +1,7 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 import type {FetchLike} from './ingest'
-import type {SpawnFn} from './remote'
+import type {RemoteDeps} from './remote'
 
 import {Buffer} from 'node:buffer'
 import {createHash} from 'node:crypto'
@@ -9,7 +9,7 @@ import {createHash} from 'node:crypto'
 import {z} from 'zod'
 
 import {resolveTracesHost, resolveTracesOrigin, TRACES_APP_DIR, TRACES_GROUPS} from './host'
-import {defaultSpawn, hasSentinel, REMOTE_COMMANDS, runRemote} from './remote'
+import {defaultSpawn, hasSentinel, REMOTE_COMMANDS, runRemote, withRemoteSession} from './remote'
 
 declare const process: {
   env: Record<string, string | undefined>
@@ -288,9 +288,9 @@ export const SENDER_REMOTE = {
 
 // ─── Dependencies ─────────────────────────────────────────────────────────────
 
-export interface SenderDeps {
-  /** Runs ssh and gh. */
-  spawn?: SpawnFn
+export interface SenderDeps extends RemoteDeps {
+  // `spawn` runs ssh and gh. `session` is the one multiplexed ssh connection of the running command; the action
+  // sets it, and every host call below goes through it.
   /** Reaches the public endpoint. The default is the global `fetch`. */
   fetch?: FetchLike
   sleep?: (ms: number) => Promise<void>
@@ -401,7 +401,7 @@ async function readEntries(
   op: 'list' | 'lines',
   deps: SenderDeps,
 ): Promise<ReadResult> {
-  const result = await runRemote(host, SENDER_REMOTE[op](group), deps.spawn === undefined ? {} : {spawn: deps.spawn})
+  const result = await runRemote(host, SENDER_REMOTE[op](group), {spawn: deps.spawn, session: deps.session})
   if (!hasSentinel(result, senderSentinel(op, group))) {
     return {ok: false, error: `exit ${result.exitCode}: ${result.stderr || 'no confirmation from the host'}`}
   }
@@ -448,7 +448,8 @@ async function privateProbe(host: string, group: TracesGroup, token: string, dep
   try {
     const result = await runRemote(host, SENDER_REMOTE.probe(group), {
       stdin: `${token}\n`,
-      ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
+      spawn: deps.spawn,
+      session: deps.session,
     })
     if (result.exitCode !== 0) return 'none'
     const match = new RegExp(String.raw`^${PROBE_PREFIX}(\d{3})$`, 'm').exec(result.stdout)
@@ -471,11 +472,10 @@ function privateRoute(host: string, group: TracesGroup, deps: SenderDeps): Route
  * restored behind a closed firewall may say "open" and be unreachable, so anything else proves over ssh.
  */
 async function chooseRoute(host: string, origin: string, group: TracesGroup, deps: SenderDeps): Promise<Route> {
-  const configured = await runRemote(
-    host,
-    REMOTE_COMMANDS.readIngestState,
-    deps.spawn === undefined ? {} : {spawn: deps.spawn},
-  )
+  const configured = await runRemote(host, REMOTE_COMMANDS.readIngestState, {
+    spawn: deps.spawn,
+    session: deps.session,
+  })
   const state =
     configured.exitCode === 0 ? /^TRACES_INGEST_STATE=(off|held|open)$/m.exec(configured.stdout)?.[1] : undefined
   if (state === 'open' && (await publicProbe(origin, group, undefined, deps)) === 401) {
@@ -714,7 +714,8 @@ async function addFlow(
 
   const written = await runRemote(host, SENDER_REMOTE.append(group), {
     stdin: formatTokenLine(token, fingerprint, createdAt),
-    ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
+    spawn: deps.spawn,
+    session: deps.session,
   })
   if (isLockBusy(written, group)) {
     out.error(lockBusyMessage(group))
@@ -795,7 +796,10 @@ export async function tracesSenderAddAction(
   deps: SenderDeps = {},
 ): Promise<void> {
   const secrets: string[] = []
-  const ok = await guarded(ctx, secrets, out => addFlow(group, options, ctx, out, secrets, deps))
+  // The exit comes after the session ends: `ctx.process.exit` would skip closing the connection.
+  const ok = await withRemoteSession(deps.spawn, session =>
+    guarded(ctx, secrets, out => addFlow(group, options, ctx, out, secrets, {...deps, session})),
+  )
   if (!ok) ctx.process.exit(1)
 }
 
@@ -806,28 +810,32 @@ export async function tracesSenderListAction(
   ctx: ActionCtx,
   deps: SenderDeps = {},
 ): Promise<void> {
-  const ok = await guarded(ctx, [], async out => {
-    const targets = resolveTargets(options.key, false)
-    if (!targets.ok) {
-      out.error(targets.error)
-      return false
-    }
-
-    let allRead = true
-    for (const group of TRACES_GROUPS) {
-      const result = await readEntries(targets.host, group, 'list', deps)
-      if (!result.ok) {
-        out.error(`${group}: the token file could not be read (${result.error}).`)
-        allRead = false
-        continue
-      }
-      out.log(group)
-      if (result.entries.length === 0) out.log('  (no tokens)')
-      for (const entry of result.entries) out.log(`  ${entry.fingerprint}  ${entry.date}`)
-    }
-    return allRead
-  })
+  const ok = await withRemoteSession(deps.spawn, session =>
+    guarded(ctx, [], out => listFlow(options, out, {...deps, session})),
+  )
   if (!ok) ctx.process.exit(1)
+}
+
+async function listFlow(options: {key?: string | undefined}, out: Out, deps: SenderDeps): Promise<boolean> {
+  const targets = resolveTargets(options.key, false)
+  if (!targets.ok) {
+    out.error(targets.error)
+    return false
+  }
+
+  let allRead = true
+  for (const group of TRACES_GROUPS) {
+    const result = await readEntries(targets.host, group, 'list', deps)
+    if (!result.ok) {
+      out.error(`${group}: the token file could not be read (${result.error}).`)
+      allRead = false
+      continue
+    }
+    out.log(group)
+    if (result.entries.length === 0) out.log('  (no tokens)')
+    for (const entry of result.entries) out.log(`  ${entry.fingerprint}  ${entry.date}`)
+  }
+  return allRead
 }
 
 // ─── revoke ───────────────────────────────────────────────────────────────────
@@ -902,7 +910,8 @@ async function revokeOne(
 
   const removed = await runRemote(host, SENDER_REMOTE.remove(group), {
     stdin: `${fingerprint}\n${voidLine}`,
-    ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
+    spawn: deps.spawn,
+    session: deps.session,
   })
   if (isLockBusy(removed, group)) {
     out.error(lockBusyMessage(group))
@@ -973,7 +982,8 @@ async function revokeAll(options: RevokeOptions, out: Out, secrets: string[], de
     secrets.push(voidToken)
     const denied = await runRemote(host, SENDER_REMOTE.deny(group), {
       stdin: formatVoidLine(voidToken, (deps.now?.() ?? new Date()).toISOString()),
-      ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
+      spawn: deps.spawn,
+      session: deps.session,
     })
     if (isLockBusy(denied, group)) {
       out.error(`${group}: ${lockBusyMessage(group)} It was not rewritten.`)
@@ -1032,16 +1042,19 @@ export async function tracesSenderRevokeAction(
   deps: SenderDeps = {},
 ): Promise<void> {
   const secrets: string[] = []
-  const ok = await guarded(ctx, secrets, async out => {
-    if (options.all === true) {
-      if (group !== undefined || fingerprint !== undefined) {
-        out.error('--all takes no group and no fingerprint.')
-        return false
+  const ok = await withRemoteSession(deps.spawn, session =>
+    guarded(ctx, secrets, async out => {
+      const withSession = {...deps, session}
+      if (options.all === true) {
+        if (group !== undefined || fingerprint !== undefined) {
+          out.error('--all takes no group and no fingerprint.')
+          return false
+        }
+        return revokeAll(options, out, secrets, withSession)
       }
-      return revokeAll(options, out, secrets, deps)
-    }
-    return revokeOne(group, fingerprint, options, out, secrets, deps)
-  })
+      return revokeOne(group, fingerprint, options, out, secrets, withSession)
+    }),
+  )
   if (!ok) ctx.process.exit(1)
 }
 

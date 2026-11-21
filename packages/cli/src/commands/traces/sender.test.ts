@@ -12,11 +12,18 @@ import {
   writeFileSync,
 } from 'node:fs'
 import {tmpdir} from 'node:os'
-import {join} from 'node:path'
+import {dirname, join} from 'node:path'
 import {afterAll, afterEach, beforeAll, beforeEach, describe, expect, it} from 'bun:test'
 
 import {createCapturedCtx, MockProcessExit} from '../../lib/mcp-ctx-fixture'
-import {recordingSpawn, type Reply, type SpawnCall} from './__fixtures__/remote-fixture'
+import {
+  controlPaths,
+  recordingSpawn,
+  type CloseBehaviour,
+  type CloseCall,
+  type Reply,
+  type SpawnCall,
+} from './__fixtures__/remote-fixture'
 import {TRACES_APP_DIR, TRACES_GROUPS} from './host'
 import {REMOTE_COMMANDS, type IngestState, type SpawnFn} from './remote'
 import {
@@ -177,6 +184,8 @@ interface WorldOptions {
   outside?: IngestState | 'down'
   /** Full token-file contents per group. */
   files?: Partial<Record<Group, string>>
+  /** How the fake answers a close of the shared ssh connection. */
+  closeBehaviour?: CloseBehaviour
 }
 
 interface FetchCall {
@@ -190,6 +199,8 @@ interface World {
   dir: string
   spawn: SpawnFn
   calls: SpawnCall[]
+  /** Closes of the shared ssh connection (`ssh -O exit`), kept apart from `calls`. */
+  closes: CloseCall[]
   fetch: NonNullable<SenderDeps['fetch']>
   fetchCalls: FetchCall[]
   /** Tokens the modelled collector keeps accepting whatever the file says. */
@@ -295,13 +306,14 @@ function createWorld(options: WorldOptions = {}): World {
     throw new Error(`unexpected remote command: ${call.command}`)
   }
 
-  const {spawn, calls} = recordingSpawn(route)
+  const {spawn, calls, closes} = recordingSpawn(route, options.closeBehaviour)
   const fetchCalls: FetchCall[] = []
 
   const world: World = {
     dir,
     spawn,
     calls,
+    closes,
     fetch: async (url, init) => {
       const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>))
       fetchCalls.push({url, method: init?.method, headers, body: init?.body})
@@ -398,10 +410,10 @@ async function run(
 
   // The void token a revoke generates by default is as secret as a real one: it may travel on stdin and nowhere else.
   for (const secret of [...options.secrets, DEFAULT_VOID_TOKEN]) {
-    for (const call of world.calls) {
+    for (const call of [...world.calls, ...world.closes]) {
       expect(call.argv.join('\u0000')).not.toContain(secret)
-      expect(JSON.stringify(call.options.env)).not.toContain(secret)
     }
+    for (const call of world.calls) expect(JSON.stringify(call.options.env)).not.toContain(secret)
     expect(stderr).not.toContain(secret)
     if (options.printsOn !== 'stdout') expect(stdout).not.toContain(secret)
   }
@@ -1936,5 +1948,136 @@ describe('traces sender revoke --all', () => {
     )
     expect(result.exit).toBe(1)
     expect(world.calls).toHaveLength(0)
+  })
+})
+
+// ─── One multiplexed ssh connection per command ───────────────────────────────
+
+describe('sender commands reach the host over one multiplexed ssh connection', () => {
+  const OLD_FILES = {
+    marcusrbrown: oldLine(OLD_A) + oldLine(OLD_B),
+    'fro-bot': oldLine(OLD_C),
+    workstation: '',
+  }
+
+  const sshCalls = (world: World): SpawnCall[] => world.calls.filter(call => call.argv[0] === 'ssh')
+
+  /** The one shared path, and proof the whole command used it and then cleaned up. */
+  function expectOneSharedConnection(world: World): string {
+    const paths = controlPaths(world.calls)
+    expect(paths).toHaveLength(1)
+    const [path] = paths
+    expect(path).toBeDefined()
+    for (const call of sshCalls(world)) {
+      expect(call.argv).toContain('ControlMaster=auto')
+      expect(call.argv).toContain(`ControlPath=${path}`)
+    }
+    expect(world.closes).toHaveLength(1)
+    expect(world.closes[0]?.controlPath).toBe(path)
+    expect(world.closes[0]?.directoryExisted).toBe(true)
+    expect(existsSync(dirname(path ?? ''))).toBe(false)
+    return path ?? ''
+  }
+
+  it('add: the list, the write, the route check and every proof attempt share one ControlPath; gh is not ssh', async () => {
+    const world = createWorld({configured: 'held', files: OLD_FILES})
+    world.forced.push('down', 'down')
+    const result = await run(
+      world,
+      ctx => tracesSenderAddAction('marcusrbrown', github(), ctx, makeDeps(world, {attempts: 5})),
+      {secrets: [NEXT_TOKEN, OLD_A, OLD_B]},
+    )
+    expect(result.exit).toBeNull()
+    // list, append, route check and three proofs (two forced failures, then the answer): six calls, one connection.
+    expect(world.remoteCalls(SENDER_REMOTE.probe('marcusrbrown'))).toHaveLength(3)
+    expect(sshCalls(world).length).toBeGreaterThanOrEqual(6)
+    expectOneSharedConnection(world)
+    for (const call of world.ghCalls()) expect(call.argv.some(arg => arg.startsWith('Control'))).toBe(false)
+  })
+
+  it('list: three reads, one connection', async () => {
+    const world = createWorld({configured: 'held', files: OLD_FILES})
+    const result = await run(world, ctx => tracesSenderListAction({}, ctx, makeDeps(world)), {secrets: []})
+    expect(result.exit).toBeNull()
+    expect(sshCalls(world)).toHaveLength(3)
+    expectOneSharedConnection(world)
+  })
+
+  it('revoke: read, remove, route check and proof share one connection', async () => {
+    const world = createWorld({configured: 'held', files: OLD_FILES})
+    const result = await run(
+      world,
+      ctx => tracesSenderRevokeAction('marcusrbrown', sha12(OLD_B), {}, ctx, makeDeps(world)),
+      {secrets: [OLD_A, OLD_B, OLD_C]},
+    )
+    expect(result.exit).toBeNull()
+    expect(sshCalls(world).length).toBeGreaterThanOrEqual(4)
+    expectOneSharedConnection(world)
+  })
+
+  it('revoke --all: every group, every rewrite and every proof share one connection', async () => {
+    const world = createWorld({configured: 'held', files: OLD_FILES})
+    const result = await run(
+      world,
+      ctx => tracesSenderRevokeAction(undefined, undefined, {all: true}, ctx, makeDeps(world)),
+      {secrets: [OLD_A, OLD_B, OLD_C]},
+    )
+    expect(result.exit).toBeNull()
+    // Three reads, three rewrites and three proofs: nine calls, which without sharing is nine connections.
+    expect(sshCalls(world).length).toBeGreaterThanOrEqual(9)
+    expectOneSharedConnection(world)
+  })
+
+  it('two command runs use different ControlPaths', async () => {
+    const first = createWorld({configured: 'held', files: OLD_FILES})
+    const second = createWorld({configured: 'held', files: OLD_FILES})
+    await run(first, ctx => tracesSenderListAction({}, ctx, makeDeps(first)), {secrets: []})
+    await run(second, ctx => tracesSenderListAction({}, ctx, makeDeps(second)), {secrets: []})
+    const one = expectOneSharedConnection(first)
+    const two = expectOneSharedConnection(second)
+    expect(one).not.toBe(two)
+  })
+
+  it('closes the connection once and removes the directory when a call throws', async () => {
+    const world = createWorld({configured: 'held', files: OLD_FILES})
+    const throwing: SpawnFn = (argv, options) => {
+      if (argv.at(-1) === SENDER_REMOTE.append('marcusrbrown')) throw new Error('spawn ssh ENOENT')
+      return world.spawn(argv, options)
+    }
+    const result = await run(
+      world,
+      ctx => tracesSenderAddAction('marcusrbrown', github(), ctx, makeDeps(world, {spawn: throwing})),
+      {secrets: [NEXT_TOKEN, OLD_A, OLD_B]},
+    )
+    expect(result.exit).toBe(1)
+    expect(world.closes).toHaveLength(1)
+    expect(existsSync(dirname(world.closes[0]?.controlPath ?? ''))).toBe(false)
+  })
+
+  it('closes the connection once when the command ends with a refusal after ssh was used', async () => {
+    const world = createWorld({configured: 'held', files: OLD_FILES})
+    world.failing.add('append')
+    const result = await run(world, ctx => tracesSenderAddAction('marcusrbrown', github(), ctx, makeDeps(world)), {
+      secrets: [NEXT_TOKEN, OLD_A, OLD_B],
+    })
+    expect(result.exit).toBe(1)
+    expectOneSharedConnection(world)
+  })
+
+  it('tolerates a close that finds no master, and still succeeds', async () => {
+    const world = createWorld({configured: 'held', files: OLD_FILES, closeBehaviour: 'fail'})
+    const result = await run(world, ctx => tracesSenderListAction({}, ctx, makeDeps(world)), {secrets: []})
+    expect(result.exit).toBeNull()
+    expectOneSharedConnection(world)
+  })
+
+  it('makes no close and leaves no directory when the command is refused before any ssh call', async () => {
+    const world = createWorld({configured: 'held', files: OLD_FILES})
+    const result = await run(world, ctx => tracesSenderAddAction('not-a-group', noOptions, ctx, makeDeps(world)), {
+      secrets: [],
+    })
+    expect(result.exit).toBe(1)
+    expect(world.calls).toHaveLength(0)
+    expect(world.closes).toHaveLength(0)
   })
 })

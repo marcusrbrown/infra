@@ -1,6 +1,6 @@
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
-import type {IngestState, SpawnFn} from './remote'
+import type {IngestState, RemoteDeps} from './remote'
 
 import {z} from 'zod'
 
@@ -14,6 +14,7 @@ import {
   OPEN_REFUSED_SENTINEL,
   REMOTE_COMMANDS,
   runRemote,
+  withRemoteSession,
 } from './remote'
 import {failingLines, getReporterDetail, isPassing} from './status'
 
@@ -32,8 +33,7 @@ export type PathStatus = number | 'unreachable'
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
 
-export interface IngestDeps {
-  spawn?: SpawnFn
+export interface IngestDeps extends RemoteDeps {
   /** Reaches the public endpoint. The default is the global `fetch`. */
   fetch?: FetchLike
   sleep?: (ms: number) => Promise<void>
@@ -128,7 +128,8 @@ function hasLine(stdout: string, line: string): boolean {
 async function setIngestState(host: string, state: 'held' | 'open', deps: IngestDeps): Promise<SetResult> {
   const result = await runRemote(host, REMOTE_COMMANDS.writeIngestState(state), {
     stdin: `TRACES_INGEST_STATE=${state}\n`,
-    ...(deps.spawn === undefined ? {} : {spawn: deps.spawn}),
+    spawn: deps.spawn,
+    session: deps.session,
   })
 
   if (hasSentinel(result, ingestStateSentinel(state))) return {ok: true}
@@ -148,10 +149,12 @@ const LOCK_BUSY_MESSAGE =
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
 
-function resolveTargets(
-  options: {key?: string | undefined},
-  ctx: ActionCtx,
-): {host: string; origin: string} | undefined {
+interface Targets {
+  host: string
+  origin: string
+}
+
+function resolveTargets(options: {key?: string | undefined}, ctx: ActionCtx): Targets | undefined {
   try {
     return {host: resolveTracesHost(process.env, options.key), origin: resolveTracesOrigin(process.env)}
   } catch (error) {
@@ -160,6 +163,11 @@ function resolveTargets(
     return undefined
   }
 }
+
+/**
+ * Each action below runs its host calls inside one `withRemoteSession` and exits only after it ends: the flows
+ * return whether they succeeded, because `ctx.process.exit` ends the process and would skip closing the connection.
+ */
 
 /**
  * Hold the ingest route at once: every ingest path answers 503, which senders retry. It does not consult the
@@ -174,14 +182,18 @@ export async function tracesIngestHoldAction(
   const targets = resolveTargets(options, ctx)
   if (targets === undefined) return
 
+  const ok = await withRemoteSession(deps.spawn, session => holdFlow(targets, ctx, {...deps, session}))
+  if (!ok) ctx.process.exit(1)
+}
+
+async function holdFlow(targets: Targets, ctx: ActionCtx, deps: IngestDeps): Promise<boolean> {
   const set = await setIngestState(targets.host, 'held', deps)
   if (!set.ok) {
     // A hold is never refused for a deploy. Only the lock or the host command can stop it.
     const why =
       set.reason === 'lock-busy' ? LOCK_BUSY_MESSAGE : set.reason === 'failed' ? set.error : 'unexpected answer'
     ctx.console.error(`Could not set the ingest state on the host (${why}). Ingest may still be open.`)
-    ctx.process.exit(1)
-    return
+    return false
   }
 
   const proof = await waitForState(targets.origin, 'held', deps)
@@ -189,8 +201,7 @@ export async function tracesIngestHoldAction(
     ctx.console.error(
       `Ingest hold NOT confirmed. The host state was set, but the public endpoint did not answer 503 on every ingest path (${describeStatuses(proof.statuses)}). Check Caddy with: infra traces logs caddy`,
     )
-    ctx.process.exit(1)
-    return
+    return false
   }
 
   ctx.console.log(
@@ -199,6 +210,7 @@ export async function tracesIngestHoldAction(
   ctx.console.log(
     'Only a deploy, or `traces ingest open` with a passing health verdict and no unfinished deploy, reopens it.',
   )
+  return true
 }
 
 /**
@@ -216,19 +228,22 @@ export async function tracesIngestOpenAction(
   const targets = resolveTargets(options, ctx)
   if (targets === undefined) return
 
-  const detail = await getReporterDetail(targets.host, deps.spawn)
+  const ok = await withRemoteSession(deps.spawn, session => openFlow(targets, ctx, {...deps, session}))
+  if (!ok) ctx.process.exit(1)
+}
+
+async function openFlow(targets: Targets, ctx: ActionCtx, deps: IngestDeps): Promise<boolean> {
+  const detail = await getReporterDetail(targets.host, deps)
   if (!detail.ok) {
     ctx.console.error(
       `Refusing to open ingest: the health reporter could not be read (${detail.reason === 'ssh-failed' ? 'ssh or exec failed' : 'unreadable answer'}). Nothing was changed.`,
     )
-    ctx.process.exit(1)
-    return
+    return false
   }
   if (!isPassing(detail.detail)) {
     ctx.console.error('Refusing to open ingest: the health verdict is not passing. Nothing was changed.')
     for (const line of failingLines(detail.detail)) ctx.console.error(`  ${line}`)
-    ctx.process.exit(1)
-    return
+    return false
   }
 
   const set = await setIngestState(targets.host, 'open', deps)
@@ -242,8 +257,7 @@ export async function tracesIngestOpenAction(
     } else {
       ctx.console.error(`Could not set the ingest state on the host (${set.error}).`)
     }
-    ctx.process.exit(1)
-    return
+    return false
   }
 
   const proof = await waitForState(targets.origin, 'open', deps)
@@ -251,13 +265,13 @@ export async function tracesIngestOpenAction(
     ctx.console.error(
       `Ingest open NOT confirmed. The host state was set, but the public endpoint did not answer 401 (token required) on every ingest path (${describeStatuses(proof.statuses)}). Run \`infra traces ingest hold\` if it should not be open.`,
     )
-    ctx.process.exit(1)
-    return
+    return false
   }
 
   ctx.console.log(
     `Ingest is open: every ingest path reached the collector and asked for a token (${describeStatuses(proof.statuses)}).`,
   )
+  return true
 }
 
 /** Report the configured state, the state seen from outside, and the health verdict. Changes nothing. */
@@ -269,12 +283,16 @@ export async function tracesIngestStatusAction(
   const targets = resolveTargets(options, ctx)
   if (targets === undefined) return
 
-  const spawnOption = deps.spawn === undefined ? {} : {spawn: deps.spawn}
+  const ok = await withRemoteSession(deps.spawn, session => statusFlow(targets, ctx, {...deps, session}))
+  if (!ok) ctx.process.exit(1)
+}
+
+async function statusFlow(targets: Targets, ctx: ActionCtx, deps: IngestDeps): Promise<boolean> {
   const [configured, deployState, statuses, detail] = await Promise.all([
-    runRemote(targets.host, REMOTE_COMMANDS.readIngestState, spawnOption),
-    runRemote(targets.host, REMOTE_COMMANDS.readDeployState, spawnOption),
+    runRemote(targets.host, REMOTE_COMMANDS.readIngestState, deps),
+    runRemote(targets.host, REMOTE_COMMANDS.readDeployState, deps),
     probeIngestPaths(targets.origin, deps.fetch),
-    getReporterDetail(targets.host, deps.spawn),
+    getReporterDetail(targets.host, deps),
   ])
 
   const match = /^TRACES_INGEST_STATE=(off|held|open)$/m.exec(configured.stdout)
@@ -298,8 +316,9 @@ export async function tracesIngestStatusAction(
 
   if (configuredState === undefined || observed === undefined || configuredState !== observed) {
     ctx.console.error('The configured state and the state seen from outside do not match, or one could not be read.')
-    ctx.process.exit(1)
+    return false
   }
+  return true
 }
 
 // ─── Command registration ─────────────────────────────────────────────────────

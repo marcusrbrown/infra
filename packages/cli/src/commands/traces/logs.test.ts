@@ -79,6 +79,16 @@ describe('streamTracesLogs', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('stays on a plain connection: one long-lived ssh with no control options and no close', async () => {
+    const {spawn, calls, closes} = recordingSpawn(() => ({}))
+    await streamTracesLogs(base, spawn, undefined, () => undefined)
+    const argv = calls[0]?.argv ?? []
+    expect(argv.some(arg => arg.startsWith('Control'))).toBe(false)
+    expect(argv).not.toContain('-O')
+    expect(calls).toHaveLength(1)
+    expect(closes).toHaveLength(0)
+  })
+
   it('returns the remote exit code', async () => {
     const {spawn} = recordingSpawn(() => ({exitCode: 3}))
     expect((await streamTracesLogs(base, spawn, undefined, () => undefined)).exitCode).toBe(3)

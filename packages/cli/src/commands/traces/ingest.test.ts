@@ -1,9 +1,13 @@
+import {existsSync} from 'node:fs'
+import {dirname} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
 import {createCapturedCtx, MockProcessExit} from '../../lib/mcp-ctx-fixture'
 import {
   CAN_LOCK,
+  controlPathOf,
+  controlPaths,
   createScratchHost,
   detailBody,
   detailOutput,
@@ -22,6 +26,7 @@ import {
   type IngestDeps,
 } from './ingest'
 import {
+  CONTROL_PERSIST,
   DEPLOY_FINISHED_SENTINEL,
   DEPLOY_UNFINISHED_SENTINEL,
   ingestStateSentinel,
@@ -219,6 +224,12 @@ describe('traces ingest hold', () => {
       '-o',
       'ConnectTimeout=10',
       ...buildKnownHostsArgs(),
+      '-o',
+      'ControlMaster=auto',
+      '-o',
+      `ControlPath=${controlPathOf(call?.argv ?? [])}`,
+      '-o',
+      `ControlPersist=${CONTROL_PERSIST}`,
       'root@host.example.invalid',
       REMOTE_COMMANDS.writeIngestState('held'),
     ])
@@ -608,5 +619,111 @@ describe('traces ingest status', () => {
       tracesIngestStatusAction({}, ctx, deps(world.spawn, publicEndpoint([503]).fetchFn)),
     ).rejects.toBeInstanceOf(MockProcessExit)
     expect(out(captured)).toContain('Configured on the host: unknown')
+  })
+})
+
+// ─── One multiplexed ssh connection per command ───────────────────────────────
+
+function expectOneSharedConnection(world: ReturnType<typeof host>): void {
+  const paths = controlPaths(world.calls)
+  expect(paths).toHaveLength(1)
+  const [path] = paths
+  expect(path).toBeDefined()
+  for (const call of world.calls) {
+    expect(call.argv).toContain('ControlMaster=auto')
+    expect(call.argv).toContain(`ControlPath=${path}`)
+  }
+  expect(world.closes).toHaveLength(1)
+  expect(world.closes[0]?.controlPath).toBe(path)
+  expect(world.closes[0]?.directoryExisted).toBe(true)
+  expect(existsSync(dirname(path ?? ''))).toBe(false)
+}
+
+describe('ingest commands reach the host over one multiplexed ssh connection', () => {
+  it('hold: one connection, closed once', async () => {
+    const world = host()
+    const {ctx} = createCapturedCtx()
+    await tracesIngestHoldAction({}, ctx, deps(world.spawn, publicEndpoint([503]).fetchFn))
+    expectOneSharedConnection(world)
+  })
+
+  it('open: the verdict read and the state write share a connection', async () => {
+    const world = host()
+    const {ctx} = createCapturedCtx()
+    await tracesIngestOpenAction({}, ctx, deps(world.spawn, publicEndpoint([401]).fetchFn))
+    expect(world.calls).toHaveLength(2)
+    expectOneSharedConnection(world)
+  })
+
+  it('open refused on the verdict: the connection is still closed once', async () => {
+    const world = host({detailExit: 1})
+    const {ctx} = createCapturedCtx()
+    await expect(
+      tracesIngestOpenAction({}, ctx, deps(world.spawn, publicEndpoint([401]).fetchFn)),
+    ).rejects.toBeInstanceOf(MockProcessExit)
+    expectOneSharedConnection(world)
+  })
+
+  it('status: the reads that run side by side share one connection', async () => {
+    const world = host()
+    const {ctx} = createCapturedCtx()
+    await tracesIngestStatusAction({}, ctx, deps(world.spawn, publicEndpoint([503]).fetchFn))
+    expect(world.calls).toHaveLength(3)
+    expectOneSharedConnection(world)
+  })
+
+  it('status: the first read runs before the others start, so the master exists when they ask for it', async () => {
+    const events: string[] = []
+    const inner = host()
+    const spawn: IngestDeps['spawn'] = (argv, options) => {
+      if (!argv.includes('-O')) events.push(`start ${argv.at(-1)?.slice(0, 20)}`)
+      const child = inner.spawn(argv, options)
+      if (argv.includes('-O')) return child
+      return {
+        ...child,
+        exited: child.exited.then(code => {
+          events.push(`end ${argv.at(-1)?.slice(0, 20)}`)
+          return code
+        }),
+      }
+    }
+    const {ctx} = createCapturedCtx()
+    await tracesIngestStatusAction({}, ctx, deps(spawn, publicEndpoint([503]).fetchFn))
+    expect(events[0]).toMatch(/^start /)
+    expect(events[1]).toMatch(/^end /)
+  })
+
+  it('two runs use different ControlPaths', async () => {
+    const first = host()
+    const second = host()
+    await tracesIngestHoldAction({}, createCapturedCtx().ctx, deps(first.spawn, publicEndpoint([503]).fetchFn))
+    await tracesIngestHoldAction({}, createCapturedCtx().ctx, deps(second.spawn, publicEndpoint([503]).fetchFn))
+    expect(controlPaths(first.calls)[0]).not.toBe(controlPaths(second.calls)[0])
+  })
+
+  it('closes once and removes the directory when the ssh call throws', async () => {
+    const world = host()
+    const throwing: IngestDeps['spawn'] = (argv, options) => {
+      if (!argv.includes('-O') && argv.at(-1) === REMOTE_COMMANDS.writeIngestState('held')) {
+        throw new Error('spawn ssh ENOENT')
+      }
+      return world.spawn(argv, options)
+    }
+    const {ctx} = createCapturedCtx()
+    await expect(tracesIngestHoldAction({}, ctx, deps(throwing, publicEndpoint([503]).fetchFn))).rejects.toThrow(
+      'spawn ssh ENOENT',
+    )
+    expect(world.closes).toHaveLength(1)
+    expect(existsSync(dirname(world.closes[0]?.controlPath ?? ''))).toBe(false)
+  })
+
+  it('a refusal before any ssh (a bad host) makes no close', async () => {
+    process.env.TRACES_OTHER = '-oProxyCommand=evil'
+    const world = host()
+    const {ctx} = createCapturedCtx()
+    await expect(
+      tracesIngestHoldAction({key: 'TRACES_OTHER'}, ctx, deps(world.spawn, publicEndpoint([503]).fetchFn)),
+    ).rejects.toBeInstanceOf(MockProcessExit)
+    expect(world.closes).toHaveLength(0)
   })
 })

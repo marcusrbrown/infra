@@ -12,6 +12,19 @@ export interface SshCommandOptions {
   identityFile?: string
 }
 
+/** OpenSSH connection multiplexing: every call that carries the same `path` shares one TCP connection. */
+export interface SshControlOptions {
+  /** Control socket path. Keep it short: unix socket paths are limited to about 104 bytes on macOS. */
+  path: string
+  /** `ControlPersist` value (e.g. `120s`): how long the master outlives its last client. */
+  persist: string
+}
+
+/** Options for `ssh()` only; `scp()` and `waitForSsh` never multiplex. */
+export interface SshExecOptions extends SshCommandOptions {
+  control?: SshControlOptions | undefined
+}
+
 // When an identity file is provided, pin it and stop SSH from offering agent keys
 // (avoids MaxAuthTries lockout when many keys are loaded). Empty otherwise.
 function identityFlags(opts?: SshCommandOptions): string[] {
@@ -21,8 +34,10 @@ function identityFlags(opts?: SshCommandOptions): string[] {
 /**
  * Builds an SSH command array with standard BatchMode/StrictHostKeyChecking/ConnectTimeout flags.
  * When opts.identityFile is set, prepends `-i <path>` and `-o IdentitiesOnly=yes`.
+ * When opts.control is set, adds `ControlMaster=auto`, `ControlPath` and `ControlPersist` after the other options.
  */
-export function ssh(host: string, command: string, user: string, opts?: SshCommandOptions): string[] {
+export function ssh(host: string, command: string, user: string, opts?: SshExecOptions): string[] {
+  const control = opts?.control
   return [
     'ssh',
     ...identityFlags(opts),
@@ -32,6 +47,9 @@ export function ssh(host: string, command: string, user: string, opts?: SshComma
     'StrictHostKeyChecking=accept-new',
     '-o',
     'ConnectTimeout=10',
+    ...(control
+      ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${control.path}`, '-o', `ControlPersist=${control.persist}`]
+      : []),
     `${user}@${host}`,
     command,
   ]
@@ -273,6 +291,20 @@ export async function waitForSsh(host: string, user: string, opts?: WaitForSshOp
 export interface PinHostKeysOptions {
   /** Marker line written before the key block, used for idempotency detection. */
   marker: string
+  /**
+   * Wait this long before EACH of the two scans. Opt-in, for hosts whose SSH is rate limited
+   * (e.g. `ufw limit 22/tcp`: six connections per 30 seconds, and each scan opens one per key type).
+   */
+  pauseBeforeScanMs?: number
+  /** Sleep used for the pause. Defaults to this module's `sleep`. */
+  sleep?: (ms: number) => Promise<void>
+  /** Test seam: runs one scan command and returns its output. Defaults to `runCapture`. */
+  scan?: (command: string[]) => Promise<string>
+}
+
+/** True when `pinHostKeys` would skip: the marker is already in the known_hosts file, so no scan connects. */
+export function hostKeysPinned(knownHostsPath: string, marker: string): boolean {
+  return readFileSync(knownHostsPath, 'utf-8').includes(marker)
 }
 
 /**
@@ -285,16 +317,22 @@ export async function pinHostKeys(
   knownHostsPath: string,
   opts: PinHostKeysOptions,
 ): Promise<void> {
-  const existing = readFileSync(knownHostsPath, 'utf-8')
   const {marker} = opts
 
-  if (existing.includes(marker)) {
+  if (hostKeysPinned(knownHostsPath, marker)) {
     console.log(`\u001B[1;34m==>\u001B[0m Host keys already pinned for ${ip}`)
     return
   }
 
-  const domainKeys = await runCapture(['ssh-keyscan', domain])
-  const ipKeys = await runCapture(['ssh-keyscan', '-H', ip])
+  const scanRunner = opts.scan ?? runCapture
+  const pause = opts.pauseBeforeScanMs ?? 0
+  const wait = opts.sleep ?? sleep
+  const scan = async (command: string[]): Promise<string> => {
+    if (pause > 0) await wait(pause)
+    return scanRunner(command)
+  }
+  const domainKeys = await scan(['ssh-keyscan', domain])
+  const ipKeys = await scan(['ssh-keyscan', '-H', ip])
 
   if (!domainKeys.trim() && !ipKeys.trim()) {
     console.warn(

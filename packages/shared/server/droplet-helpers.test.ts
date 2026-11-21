@@ -7,6 +7,7 @@ import {
   dropletExists,
   getDropletIpWithWait,
   getSshFingerprint,
+  hostKeysPinned,
   materializeIdentityFile,
   pinHostKeys,
   run,
@@ -81,6 +82,19 @@ afterEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Records scans and sleeps in call order, so a test can assert on the interleaving.
+function recorder() {
+  const events: string[] = []
+  const scan = async (command: string[]): Promise<string> => {
+    events.push(`scan:${command.join(' ')}`)
+    return command.includes('-H') ? '|1|hash== ssh-ed25519 AAAA...ip' : 'example.com ssh-ed25519 AAAA...domain'
+  }
+  const sleepFn = async (ms: number): Promise<void> => {
+    events.push(`sleep:${ms}`)
+  }
+  return {events, scan, sleepFn}
+}
+
 describe('droplet-helpers', () => {
   // -------------------------------------------------------------------------
   // Pure logic: ssh
@@ -128,6 +142,40 @@ describe('droplet-helpers', () => {
 
     it('is byte-identical to the no-opts form when opts omits identityFile', () => {
       expect(ssh('1.2.3.4', 'echo hello', 'root', {})).toEqual(ssh('1.2.3.4', 'echo hello', 'root'))
+    })
+
+    it('adds the multiplexing options after the host-key options when control is set', () => {
+      const result = ssh('1.2.3.4', 'echo hello', 'root', {
+        identityFile: '/tmp/x/key',
+        control: {path: '/tmp/cm/s', persist: '120s'},
+      })
+      expect(result).toEqual([
+        'ssh',
+        '-i',
+        '/tmp/x/key',
+        '-o',
+        'IdentitiesOnly=yes',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        'ConnectTimeout=10',
+        '-o',
+        'ControlMaster=auto',
+        '-o',
+        'ControlPath=/tmp/cm/s',
+        '-o',
+        'ControlPersist=120s',
+        'root@1.2.3.4',
+        'echo hello',
+      ])
+    })
+
+    it('is byte-identical to the no-opts form when opts carries no control', () => {
+      expect(ssh('1.2.3.4', 'echo hello', 'root', {identityFile: '/tmp/x/key', control: undefined})).toEqual(
+        ssh('1.2.3.4', 'echo hello', 'root', {identityFile: '/tmp/x/key'}),
+      )
     })
   })
 
@@ -525,6 +573,59 @@ describe('droplet-helpers', () => {
       expect(spawnSpy).not.toHaveBeenCalled()
       const contents = readFileSync(knownHostsPath, 'utf-8')
       expect(contents.split(marker).length).toBe(2) // only one occurrence
+    })
+
+    describe('pauseBeforeScanMs', () => {
+      const marker = '# traces droplet (1.2.3.4 / example.com)'
+
+      it('sleeps the given time before each of the two scans', async () => {
+        const {events, scan, sleepFn} = recorder()
+
+        await pinHostKeys('example.com', '1.2.3.4', knownHostsPath, {
+          marker,
+          pauseBeforeScanMs: 35_000,
+          sleep: sleepFn,
+          scan,
+        })
+
+        expect(events).toEqual([
+          'sleep:35000',
+          'scan:ssh-keyscan example.com',
+          'sleep:35000',
+          'scan:ssh-keyscan -H 1.2.3.4',
+        ])
+        const contents = readFileSync(knownHostsPath, 'utf-8')
+        expect(contents).toBe(`\n${marker}\nexample.com ssh-ed25519 AAAA...domain\n|1|hash== ssh-ed25519 AAAA...ip\n`)
+      })
+
+      it('does not sleep when the option is unset', async () => {
+        const {events, scan, sleepFn} = recorder()
+
+        await pinHostKeys('example.com', '1.2.3.4', knownHostsPath, {marker, sleep: sleepFn, scan})
+
+        expect(events).toEqual(['scan:ssh-keyscan example.com', 'scan:ssh-keyscan -H 1.2.3.4'])
+      })
+
+      it('hostKeysPinned is false before a pin and true after, so a caller can predict whether a scan will run', async () => {
+        const {scan} = recorder()
+        expect(hostKeysPinned(knownHostsPath, marker)).toBe(false)
+        await pinHostKeys('example.com', '1.2.3.4', knownHostsPath, {marker, scan})
+        expect(hostKeysPinned(knownHostsPath, marker)).toBe(true)
+      })
+
+      it('does not sleep or scan when the marker is already present', async () => {
+        writeFileSync(knownHostsPath, `${marker}\nexample.com ssh-ed25519 AAAA...\n`)
+        const {events, scan, sleepFn} = recorder()
+
+        await pinHostKeys('example.com', '1.2.3.4', knownHostsPath, {
+          marker,
+          pauseBeforeScanMs: 35_000,
+          sleep: sleepFn,
+          scan,
+        })
+
+        expect(events).toEqual([])
+      })
     })
   })
 })

@@ -1,8 +1,10 @@
+import {existsSync} from 'node:fs'
+import {dirname} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {createCapturedCtx, MockProcessExit} from '../../lib/mcp-ctx-fixture'
-import {detailBody, detailOutput, recordingSpawn, RUNNING_SERVICES} from './__fixtures__/remote-fixture'
-import {REMOTE_COMMANDS} from './remote'
+import {controlPaths, detailBody, detailOutput, recordingSpawn, RUNNING_SERVICES} from './__fixtures__/remote-fixture'
+import {REMOTE_COMMANDS, type SpawnFn} from './remote'
 import {
   failingLines,
   getReporterDetail,
@@ -129,7 +131,7 @@ describe('isPassing', () => {
 describe('remote calls', () => {
   it('runs docker compose ps as root over pinned, strict ssh, with the validated host', async () => {
     const {spawn, calls} = route()
-    const result = await getTracesComposeStatus('traces.example.invalid', spawn)
+    const result = await getTracesComposeStatus('traces.example.invalid', {spawn})
     expect(result.ok).toBe(true)
     const argv = calls[0]?.argv ?? []
     expect(argv[0]).toBe('ssh')
@@ -142,7 +144,7 @@ describe('remote calls', () => {
 
   it('asks the reporter for its detail through docker compose exec, on its loopback listener', async () => {
     const {spawn, calls} = route()
-    const detail = await getReporterDetail('traces.example.invalid', spawn)
+    const detail = await getReporterDetail('traces.example.invalid', {spawn})
     expect(detail.ok).toBe(true)
     expect(calls[0]?.command).toContain('exec -T health-reporter')
     expect(calls[0]?.command).toContain('http://127.0.0.1:8081/detail')
@@ -153,7 +155,7 @@ describe('remote calls', () => {
       stderr: 'ssh: connect to host traces.example.invalid port 22: refused',
       exitCode: 255,
     }))
-    const result = await getTracesComposeStatus('traces.example.invalid', spawn)
+    const result = await getTracesComposeStatus('traces.example.invalid', {spawn})
     expect(result.ok).toBe(false)
     expect(result.error).toContain('exit 255')
     expect(result.error).not.toContain('traces.example.invalid')
@@ -161,8 +163,8 @@ describe('remote calls', () => {
 
   it('refuses a host starting with - before any process is started', async () => {
     const {spawn, calls} = route()
-    await expect(getTracesComposeStatus('-oProxyCommand=evil', spawn)).rejects.toThrow('Invalid TRACES_HOST')
-    await expect(getReporterDetail('-oProxyCommand=evil', spawn)).rejects.toThrow('Invalid TRACES_HOST')
+    await expect(getTracesComposeStatus('-oProxyCommand=evil', {spawn})).rejects.toThrow('Invalid TRACES_HOST')
+    await expect(getReporterDetail('-oProxyCommand=evil', {spawn})).rejects.toThrow('Invalid TRACES_HOST')
     expect(calls).toHaveLength(0)
   })
 
@@ -171,12 +173,12 @@ describe('remote calls', () => {
       JSON.stringify({Service: 'caddy', State: 'running', Health: 'healthy'}),
       JSON.stringify({Service: 'collector', State: 'exited', Health: ''}),
     ].join('\n')
-    const result = await getTracesComposeStatus('traces.example.invalid', route({ps}).spawn)
+    const result = await getTracesComposeStatus('traces.example.invalid', {spawn: route({ps}).spawn})
     expect(result.ok).toBe(false)
   })
 
   it('treats an empty service list as not ok, never as healthy', async () => {
-    const result = await getTracesComposeStatus('traces.example.invalid', route({ps: ''}).spawn)
+    const result = await getTracesComposeStatus('traces.example.invalid', {spawn: route({ps: ''}).spawn})
     expect(result.ok).toBe(false)
   })
 })
@@ -300,5 +302,79 @@ describe('tracesStatusAction', () => {
     const {spawn, calls} = route()
     await tracesStatusAction({key: 'TRACES_OTHER'}, ctx, spawn)
     expect(calls[0]?.argv.at(-2)).toBe('root@other.example.invalid')
+  })
+})
+
+// ─── One multiplexed ssh connection per command ───────────────────────────────
+
+function expectOneSharedConnection(world: ReturnType<typeof route>): void {
+  expect(world.calls).toHaveLength(2)
+  const paths = controlPaths(world.calls)
+  expect(paths).toHaveLength(1)
+  const [path] = paths
+  expect(path).toBeDefined()
+  for (const call of world.calls) {
+    expect(call.argv).toContain('ControlMaster=auto')
+    expect(call.argv).toContain(`ControlPath=${path}`)
+  }
+  expect(world.closes).toHaveLength(1)
+  expect(world.closes[0]?.controlPath).toBe(path)
+  expect(world.closes[0]?.directoryExisted).toBe(true)
+  expect(existsSync(dirname(path ?? ''))).toBe(false)
+}
+
+describe('status reaches the host over one multiplexed ssh connection', () => {
+  it('tracesStatusAction: the compose read and the reporter read share one connection', async () => {
+    const world = route()
+    const {ctx} = createCapturedCtx()
+    await tracesStatusAction({}, ctx, world.spawn)
+    expectOneSharedConnection(world)
+  })
+
+  it('tracesStatusAction: the connection is closed even when the status is degraded', async () => {
+    const world = route({psExit: 255, detailExit: 255})
+    const {ctx} = createCapturedCtx()
+    await expect(tracesStatusAction({}, ctx, world.spawn)).rejects.toBeInstanceOf(MockProcessExit)
+    expectOneSharedConnection(world)
+  })
+
+  it('getTracesStatusSummary (the unified status) uses one connection for its two reads', async () => {
+    const world = route()
+    await getTracesStatusSummary('traces.example.invalid', world.spawn)
+    expectOneSharedConnection(world)
+  })
+
+  it('the first read runs before the second starts, so the second finds the master', async () => {
+    const events: string[] = []
+    const inner = route()
+    const spawn: SpawnFn = (argv, options) => {
+      const child = inner.spawn(argv, options)
+      if (argv.includes('-O')) return child
+      events.push(`start ${argv.at(-1)?.slice(0, 24)}`)
+      return {
+        ...child,
+        exited: child.exited.then(code => {
+          events.push(`end ${argv.at(-1)?.slice(0, 24)}`)
+          return code
+        }),
+      }
+    }
+    await tracesStatusAction({}, createCapturedCtx().ctx, spawn)
+    expect(events.map(event => event.split(' ')[0])).toEqual(['start', 'end', 'start', 'end'])
+  })
+
+  it('two runs use different ControlPaths', async () => {
+    const first = route()
+    const second = route()
+    await tracesStatusAction({}, createCapturedCtx().ctx, first.spawn)
+    await tracesStatusAction({}, createCapturedCtx().ctx, second.spawn)
+    expect(controlPaths(first.calls)[0]).not.toBe(controlPaths(second.calls)[0])
+  })
+
+  it('a bare helper call (no session) adds no control options', async () => {
+    const world = route()
+    await getTracesComposeStatus('traces.example.invalid', {spawn: world.spawn})
+    expect(controlPaths(world.calls)).toEqual([undefined])
+    expect(world.closes).toHaveLength(0)
   })
 })

@@ -24,11 +24,17 @@
  * fails closed when either root is not on the volume.
  */
 
-import type {MaterializedIdentity, WaitForSshOptions} from '@marcusrbrown/infra-shared/server/droplet-helpers'
+import type {
+  MaterializedIdentity,
+  SshExecOptions,
+  WaitForSshOptions,
+} from '@marcusrbrown/infra-shared/server/droplet-helpers'
 
+import {chmodSync, mkdtempSync, rmSync} from 'node:fs'
 import {join, resolve} from 'node:path'
 import {
   getSshFingerprint,
+  hostKeysPinned,
   materializeIdentityFile,
   pinHostKeys,
   sleep,
@@ -57,6 +63,21 @@ export const DROPLET_IMAGE = 'docker-20-04'
 export const DROPLET_SIZE = 's-4vcpu-16gb-amd'
 export const DROPLET_REGION = 'nyc1'
 export const VOLUME_SIZE = '100GiB'
+/** A new volume can be missing from `volume list` for a few seconds after `volume create` returns. */
+export const VOLUME_LIST_ATTEMPTS = 12
+export const VOLUME_LIST_INTERVAL_MS = 5000
+/**
+ * The image ships `ufw limit 22/tcp`: the sixth connection from one source within 30 seconds is refused. A key
+ * scan opens several connections (one per key type the local OpenSSH asks for), so the run waits this long before
+ * each scan and again after the last one, before the first remote step opens the control master.
+ */
+export const SSH_SCAN_PAUSE_MS = 35_000
+/**
+ * How long the shared SSH master outlives its last client. The timer only runs while no step is using the
+ * connection, so it covers the local gap between steps; a running step (mkfs on 100 GiB, a Docker restart)
+ * holds the connection open. Same value as the traces deploy.
+ */
+export const SSH_CONTROL_PERSIST = '120s'
 export const FIREWALL_NAME = 'traces-fw'
 export const DEFAULT_SSH_KEY_NAME = 'fro-bot-traces'
 
@@ -95,16 +116,47 @@ export const spawnRunner: Runner = async (argv, options) => {
 /** Runs a remote command (one string, run by the remote shell) with an optional stdin payload. */
 export type RemoteExec = (command: string, stdin?: string) => Promise<RunResult>
 
+/** Options for every remote step of one run: the identity (if any) and the one shared control socket. */
+function remoteSshOptions(identityFile: string | undefined, controlPath: string): SshExecOptions {
+  return {...(identityFile ? {identityFile} : {}), control: {path: controlPath, persist: SSH_CONTROL_PERSIST}}
+}
+
+/**
+ * Every step goes through the control socket at `controlPath`, so the whole run is one SSH connection. The
+ * image's UFW refuses a source after six connections in 30 seconds.
+ */
 export function createRemoteExec(
   run: Runner,
   host: string,
   user: string,
   identityFile: string | undefined,
+  controlPath: string,
 ): RemoteExec {
   return async (command, stdin) => {
-    const argv = ssh(host, command, user, identityFile ? {identityFile} : undefined)
+    const argv = ssh(host, command, user, remoteSshOptions(identityFile, controlPath))
     return stdin === undefined ? run(argv) : run(argv, {stdin})
   }
+}
+
+/** `ssh -O exit` through the same socket, with the same options as the steps; it opens no new connection. */
+export function closeMasterArgv(host: string, user: string, identityFile: string | undefined, controlPath: string) {
+  const argv = ssh(host, 'unused', user, remoteSshOptions(identityFile, controlPath))
+  return [...argv.slice(0, -2), '-O', 'exit', `${user}@${host}`]
+}
+
+export interface ControlDir {
+  path: string
+  cleanup: () => void
+}
+
+/**
+ * A private (0700) directory directly under /tmp, independent of `os.tmpdir()`: the macOS temp directory is
+ * long, and a unix socket path is limited to about 104 bytes. The socket is `<path>/cm`.
+ */
+export function makeControlDir(): ControlDir {
+  const path = mkdtempSync('/tmp/tr-cm-')
+  chmodSync(path, 0o700)
+  return {path, cleanup: () => rmSync(path, {recursive: true, force: true})}
 }
 
 export interface ProvisionDeps {
@@ -112,7 +164,9 @@ export interface ProvisionDeps {
   getSshFingerprint: (keyName: string) => Promise<string>
   waitForSsh: (host: string, user: string, opts?: WaitForSshOptions) => Promise<void>
   pinHostKeys: typeof pinHostKeys
+  hostKeysPinned: typeof hostKeysPinned
   materializeIdentity: (privateKey: string) => MaterializedIdentity
+  makeControlDir: () => ControlDir
   sleep: (ms: number) => Promise<void>
   now: () => Date
   log: (message: string) => void
@@ -125,7 +179,9 @@ export function defaultDeps(): ProvisionDeps {
       getSshFingerprint(keyName, {envVarName: 'TRACES_SSH_KEY_NAME', defaultKeyName: DEFAULT_SSH_KEY_NAME}),
     waitForSsh,
     pinHostKeys,
+    hostKeysPinned,
     materializeIdentity: materializeIdentityFile,
+    makeControlDir,
     sleep,
     now: () => new Date(),
     log: message => console.log(message),
@@ -848,7 +904,9 @@ ExecStartPre=/bin/sh -c 'grep -qx ${TRACES_SENTINEL_CONTENT} ${TRACES_SENTINEL_P
     {
       path: CONTAINERD_CONFIG_PATH,
       mode: '0644',
-      content: `# ${MANAGED_MARKER}\nversion = 2\nroot = "${TRACES_CONTAINERD_ROOT}"\ndisabled_plugins = ["cri"]\n`,
+      // A version 2 file must name a plugin by its full id: containerd 2.x refuses the short name `cri` there
+      // (the stock file has no version line, which is why the short name works in it).
+      content: `# ${MANAGED_MARKER}\nversion = 2\nroot = "${TRACES_CONTAINERD_ROOT}"\ndisabled_plugins = ["io.containerd.grpc.v1.cri"]\n`,
       guard: {marker: MANAGED_MARKER, stockActive: ['disabled_plugins = ["cri"]']},
     },
     {path: DOCKER_DROPIN_PATH, mode: '0644', content: dropIn},
@@ -1069,12 +1127,26 @@ async function withRemote<T>(
   host: string,
   fn: (exec: RemoteExec, identityFile: string | undefined) => Promise<T>,
 ): Promise<T> {
-  const identity =
-    input.privateKey && input.privateKey.trim().length > 0 ? deps.materializeIdentity(input.privateKey) : undefined
+  const control = deps.makeControlDir()
+  const controlPath = join(control.path, 'cm')
+  let identity: MaterializedIdentity | undefined
+  let started = false
   try {
-    return await fn(createRemoteExec(deps.run, host, input.remoteUser, identity?.path), identity?.path)
+    identity =
+      input.privateKey && input.privateKey.trim().length > 0 ? deps.materializeIdentity(input.privateKey) : undefined
+    started = true
+    return await fn(createRemoteExec(deps.run, host, input.remoteUser, identity?.path, controlPath), identity?.path)
   } finally {
+    if (started) {
+      try {
+        // Finds no master when no step got as far as connecting; that is fine, it opens no connection.
+        await deps.run(closeMasterArgv(host, input.remoteUser, identity?.path, controlPath))
+      } catch {
+        // The master also exits on its own after ControlPersist.
+      }
+    }
     identity?.cleanup()
+    control.cleanup()
   }
 }
 
@@ -1127,7 +1199,11 @@ export async function runProvision(input: ProvisionInput, force: boolean, deps: 
       '--size',
       VOLUME_SIZE,
     ])
-    volume = (await listVolumes(run)).find(row => row.name === TRACES_VOLUME_NAME)
+    // Poll with a pause between listings (none before the first, none after the last).
+    for (let attempt = 1; !volume && attempt <= VOLUME_LIST_ATTEMPTS; attempt++) {
+      if (attempt > 1) await deps.sleep(VOLUME_LIST_INTERVAL_MS)
+      volume = (await listVolumes(run)).find(row => row.name === TRACES_VOLUME_NAME)
+    }
     if (!volume) throw new Error(`Volume "${TRACES_VOLUME_NAME}" not found after creation`)
   }
   if (volume.dropletIds.length > 0 && !volume.dropletIds.includes(dropletId)) {
@@ -1143,9 +1219,11 @@ export async function runProvision(input: ProvisionInput, force: boolean, deps: 
   await withRemote(deps, input, dropletIp, async (exec, identityFile) => {
     await deps.waitForSsh(dropletIp, input.remoteUser, {identityFile})
 
-    await deps.pinHostKeys(tracesHost, dropletIp, input.knownHostsPath, {
-      marker: `# traces droplet (${dropletIp} / ${tracesHost})`,
-    })
+    const marker = `# traces droplet (${dropletIp} / ${tracesHost})`
+    const willScan = !deps.hostKeysPinned(input.knownHostsPath, marker)
+    await deps.pinHostKeys(tracesHost, dropletIp, input.knownHostsPath, {marker, pauseBeforeScanMs: SSH_SCAN_PAUSE_MS})
+    // The scans just spent the connection budget; the control master must not open in the same window.
+    if (willScan) await deps.sleep(SSH_SCAN_PAUSE_MS)
 
     log('Hardening the host (swap, core dumps, SSH passwords, journal)')
     const hardened = await applyHardening(exec)
@@ -1180,7 +1258,6 @@ export function printOperatorSetupMessage(args: {
   log(`\nBefore triggering a CI deploy, set the following in the \u001B[1mtraces\u001B[0m GitHub Environment:\n`)
   log('  Required secrets:')
   log('    TRACES_SSH_KEY           — private key for SSH access to the droplet')
-  log('  Required variables:')
   log(`    TRACES_HOST              — ${tracesHost}`)
   log('\nThe application secrets (Langfuse key pair, store passwords, Grafana admin password and the long-lived')
   log(

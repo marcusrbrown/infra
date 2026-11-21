@@ -1780,6 +1780,28 @@ export class AppliedButUnverifiedError extends Error {
 }
 
 /**
+ * The files could not be compared with the host, so nothing on it was changed: the failure came after the deploy took
+ * its marker and before its first write. `ingest` says where the route was left. The marker stays, so the next deploy
+ * holds an open route before it changes anything. Unlike `AppliedButUnverifiedError` it never says the host was updated.
+ */
+export class FilesNotComparedError extends Error {
+  readonly ingest: 'held' | 'off' | 'unknown'
+  constructor(cause: string, ingest: 'held' | 'off' | 'unknown') {
+    const where =
+      ingest === 'held'
+        ? 'Ingest is held (every ingest path answers 503, which senders retry).'
+        : ingest === 'off'
+          ? 'Ingest is off (no ingest route).'
+          : 'Ingest may be open: the deploy could not confirm the route closed. Run `traces ingest hold` now.'
+    super(
+      `The files could not be compared with the host: ${cause}. Nothing was updated: no file was written and no service was started or recreated. ${where} The deploy marker stays, so the next deploy holds an open route before it changes anything. Deploy again once the host answers.`,
+    )
+    this.name = 'FilesNotComparedError'
+    this.ingest = ingest
+  }
+}
+
+/**
  * Another deploy started on this host after this one and took it over (it wrote its own id into the marker). This
  * deploy stopped at its next step. It is the one failure that leaves the route and the marker alone: the host now
  * belongs to the newer deploy, and a hold, an open or a marker removal from here could undo what that deploy did.
@@ -1961,53 +1983,6 @@ export async function performDeploy(
   // The marker is this deploy's: it owns the host, and no other deploy's step is running.
   ownership.taken = true
 
-  // 5. Compare every file, so the decision to hold is made before anything changes.
-  log('==> Comparing files with the host')
-  const files: RemoteFile[] = [
-    ...(await loadUploadedFiles(deps.readFile)),
-    ...buildSecretFiles(inputs),
-    buildEnvManagedFile(inputs),
-  ]
-  const comparisons: {file: RemoteFile; status: (typeof FILE_COMPARE_SENTINELS)[number]}[] = []
-  for (const file of files) {
-    const {sentinel} = await sh(
-      `Compare ${file.path}`,
-      compareFileScript(file.path, file.kind, file),
-      FILE_COMPARE_SENTINELS,
-      file.content,
-    )
-    comparisons.push({file, status: sentinel})
-  }
-
-  const restarts = new Set<Touch>(host.pendingRestarts)
-  for (const {file, status} of comparisons) {
-    if (status !== 'TRACES_FILE_SAME') for (const touch of file.touches) restarts.add(touch)
-  }
-  const changed = [...restarts]
-  const gatedChange = changed.some(touch => touch === 'compose' || (GATED_SERVICES as readonly Touch[]).includes(touch))
-
-  // Is what runs what the files say? Asked only on an open route whose files are all unchanged: then "the files on
-  // disk" are also what a `compose up` below would read, and a hash that differs, or a service that is not running,
-  // is a change `up` would make with senders connected. A probe that cannot be trusted counts as drift.
-  let drifted: Service[] = []
-  let driftUnverified = false
-  if (host.ingest === 'open' && host.hasEnv && !gatedChange && !host.marker) {
-    try {
-      const answer = await sh('Compare the running services with the files', driftScript(), [DRIFT_SENTINEL])
-      const parsed = parseDrift(answer.result.stdout)
-      if (parsed === undefined) driftUnverified = true
-      else drifted = parsed
-    } catch {
-      driftUnverified = true
-    }
-  }
-
-  const holdReasons: string[] = []
-  if (gatedChange) holdReasons.push('a gated service is about to change')
-  if (host.marker) holdReasons.push('a previous deploy did not finish')
-  if (drifted.length > 0) holdReasons.push(`${drifted.join(', ')} not running what the files say`)
-  if (driftUnverified) holdReasons.push('the running services could not be compared with the files')
-
   // The route as this deploy believes it to be. It is only ever a plan: after a failure the host is asked.
   let route: IngestState | 'none' = host.ingest
   let heldForUpdate = false
@@ -2054,8 +2029,61 @@ export async function performDeploy(
     return result
   }
 
-  let phase: 'stage' | 'apply' = 'stage'
+  // `compare`: nothing on the host has changed yet. `stage`: files and the route may have. `apply`: the stack has.
+  let phase: 'compare' | 'stage' | 'apply' = 'compare'
   try {
+    // 5. Compare every file, so the decision to hold is made before anything changes. This runs after the marker was
+    // taken and so under the failure handler below: a comparison that cannot be trusted (a lost reply, a host whose
+    // `stat` fails) closes the route like any other failure, instead of leaving an open route open and unreported.
+    log('==> Comparing files with the host')
+    const files: RemoteFile[] = [
+      ...(await loadUploadedFiles(deps.readFile)),
+      ...buildSecretFiles(inputs),
+      buildEnvManagedFile(inputs),
+    ]
+    const comparisons: {file: RemoteFile; status: (typeof FILE_COMPARE_SENTINELS)[number]}[] = []
+    for (const file of files) {
+      const {sentinel} = await sh(
+        `Compare ${file.path}`,
+        compareFileScript(file.path, file.kind, file),
+        FILE_COMPARE_SENTINELS,
+        file.content,
+      )
+      comparisons.push({file, status: sentinel})
+    }
+
+    const restarts = new Set<Touch>(host.pendingRestarts)
+    for (const {file, status} of comparisons) {
+      if (status !== 'TRACES_FILE_SAME') for (const touch of file.touches) restarts.add(touch)
+    }
+    const changed = [...restarts]
+    const gatedChange = changed.some(
+      touch => touch === 'compose' || (GATED_SERVICES as readonly Touch[]).includes(touch),
+    )
+
+    // Is what runs what the files say? Asked only on an open route whose files are all unchanged: then "the files on
+    // disk" are also what a `compose up` below would read, and a hash that differs, or a service that is not running,
+    // is a change `up` would make with senders connected. A probe that cannot be trusted counts as drift.
+    let drifted: Service[] = []
+    let driftUnverified = false
+    if (host.ingest === 'open' && host.hasEnv && !gatedChange && !host.marker) {
+      try {
+        const answer = await sh('Compare the running services with the files', driftScript(), [DRIFT_SENTINEL])
+        const parsed = parseDrift(answer.result.stdout)
+        if (parsed === undefined) driftUnverified = true
+        else drifted = parsed
+      } catch {
+        driftUnverified = true
+      }
+    }
+
+    const holdReasons: string[] = []
+    if (gatedChange) holdReasons.push('a gated service is about to change')
+    if (host.marker) holdReasons.push('a previous deploy did not finish')
+    if (drifted.length > 0) holdReasons.push(`${drifted.join(', ')} not running what the files say`)
+    if (driftUnverified) holdReasons.push('the running services could not be compared with the files')
+    phase = 'stage'
+
     // A gated change on an open route: hold first, and prove it before anything else happens.
     if (route === 'open' && holdReasons.length > 0) {
       log(`==> Holding the ingest route before the update (${holdReasons.join('; ')})`)
@@ -2323,12 +2351,16 @@ export async function performDeploy(
     // now: a hold from here could undo what it did, and it will close or open the route from what it finds. Nothing
     // is read, held, probed or removed.
     if (ownership.overtaken) throw new DeployOvertakenError({opened: ownership.opened})
+    // A comparison step cannot itself be refused by the step lock (it takes none): the reply means a newer deploy is
+    // mid-takeover, so, as an overtaken deploy does, this one leaves the route to it and reports the busy lock as it is.
+    if (phase === 'compare' && error instanceof DeployStepBusyError) throw error
     // Whatever else failed, and wherever: the route is closed from the host's own answer before this deploy gives up.
     const closed = await secureRoute()
     const cause = errorMessage(error)
     // The hold is checked like every other change. If it finds this deploy was overtaken meanwhile, it changed nothing,
     // and the failure that brought us here is reported next to it.
     if (ownership.overtaken) throw new DeployOvertakenError({opened: ownership.opened, failure: cause})
+    if (phase === 'compare') throw new FilesNotComparedError(cause, closed)
     if (phase === 'apply') throw new AppliedButUnverifiedError(cause, closed)
     if (closed === 'unknown') {
       throw new Error(

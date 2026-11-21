@@ -1684,6 +1684,134 @@ describe("the route after a failure follows the host, not this deploy's last wri
   })
 })
 
+// The comparison runs after the deploy took its marker. A step of it that fails (a lost reply, or `stat` failing on the host)
+// used to leave the deploy with the marker, an open route still open, and no word about the route.
+describe('a failure while the files are compared with the host', () => {
+  const compareFails = failAt('compare:config/otelcol.yaml')
+  const changing = (step: string): boolean =>
+    step.startsWith('write:') ||
+    step.startsWith('up-') ||
+    step.startsWith('token-file:') ||
+    ['pull', 'prune-images', 'prepare-dirs', 'create-collector', 'queue-volume'].includes(step)
+
+  function expectNothingChanged(host: FakeHost, start: number): void {
+    expect(host.calls.slice(start).filter(call => changing(call.step))).toEqual([])
+    expect(host.pendingRestarts).toEqual([])
+  }
+
+  it('holds an open route, proves it, keeps the marker and says nothing was changed', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    host.options.override = compareFails
+    const error = await failure(host)
+
+    expect(error.name).toBe('FilesNotComparedError')
+    expect((error as Error & {ingest?: string}).ingest).toBe('held')
+    expect(error).not.toBeInstanceOf(AppliedButUnverifiedError)
+    expect(error.message).toContain('could not be compared')
+    expect(error.message).toContain('compare:config/otelcol.yaml failed')
+    expect(error.message).toContain('Nothing was updated')
+    expect(error.message).toContain('Ingest is held')
+    expect(error.message).toContain('marker')
+    // Nothing claims the host was updated.
+    expect(error.message).not.toMatch(/host was updated|Applied but unverified/)
+
+    // The route: held, from the host's own answer, and proven on every ingest path.
+    expect(host.served).toBe('held')
+    expect(host.envState).toBe('held')
+    expect(host.setStates()).toEqual(['open', 'held'])
+    const lastHold = host.calls.findLastIndex(call => call.step === 'raw:set-state:held')
+    expect(host.calls.slice(lastHold).some(call => call.step === 'probe-ingest')).toBe(true)
+    // The marker stays, so the next deploy holds first.
+    expect(host.marker).toMatch(MARKER_FORMAT)
+    expectNothingChanged(host, start)
+  })
+
+  it('says so, and to hold by hand, when the route cannot be secured either', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    host.options.override = (step, call) => {
+      if (step === 'ingest-state' || call.command.includes('TRACES_INGEST_STATE_SET=')) {
+        return {exitCode: 255, stdout: '', stderr: 'ssh: connection lost'}
+      }
+      return compareFails(step)
+    }
+    const error = await failure(host)
+
+    expect(error.name).toBe('FilesNotComparedError')
+    expect((error as Error & {ingest?: string}).ingest).toBe('unknown')
+    expect(error.message).toContain('could not be compared')
+    expect(error.message).toContain('Nothing was updated')
+    expect(error.message).toContain('may be open')
+    expect(error.message).toContain('traces ingest hold')
+    expect(error.message).not.toMatch(/host was updated|Applied but unverified/)
+    expect(host.marker).toMatch(MARKER_FORMAT)
+    expectNothingChanged(host, start)
+  })
+
+  it('keeps a held route held: nothing is set again, the marker stays', async () => {
+    const host = await openStack()
+    host.envState = 'held'
+    host.served = 'held'
+    const start = host.calls.length
+    host.options.override = compareFails
+    const error = await failure(host)
+
+    expect(error.name).toBe('FilesNotComparedError')
+    expect((error as Error & {ingest?: string}).ingest).toBe('held')
+    expect(error.message).toContain('Ingest is held')
+    expect(host.served).toBe('held')
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.marker).toMatch(MARKER_FORMAT)
+    expectNothingChanged(host, start)
+  })
+
+  it('leaves a host with no route as it is: ingest is off, nothing is set, the marker stays', async () => {
+    const host = new FakeHost({override: compareFails})
+    const error = await failure(host)
+
+    expect(error.name).toBe('FilesNotComparedError')
+    expect((error as Error & {ingest?: string}).ingest).toBe('off')
+    expect(error.message).toContain('Ingest is off')
+    expect(host.setStates()).toEqual([])
+    expect(host.marker).toMatch(MARKER_FORMAT)
+    expectNothingChanged(host, 0)
+  })
+
+  it('does not hold, probe or read the route when the deploy was overtaken meanwhile', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    host.options.override = step =>
+      step === 'compare:config/otelcol.yaml' ? {exitCode: 1, stdout: 'DEPLOY_OVERTAKEN\n', stderr: ''} : undefined
+    const error = await failure(host)
+
+    expect(error).toBeInstanceOf(DeployOvertakenError)
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    const steps = host.calls.slice(start).map(call => call.step)
+    expect(steps).not.toContain('ingest-state')
+    expect(steps).not.toContain('probe-ingest')
+    expectNothingChanged(host, start)
+  })
+
+  it('does not touch the route when a step reports the deploy step lock busy: its own error, as before', async () => {
+    const host = await openStack()
+    const start = host.calls.length
+    host.options.override = step =>
+      step === 'compare:config/otelcol.yaml' ? {exitCode: 1, stdout: 'DEPLOY_STEP_BUSY\n', stderr: ''} : undefined
+    const error = await failure(host)
+
+    expect(error.name).toBe('DeployStepBusyError')
+    expect(error.message).not.toContain('could not be compared')
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    const steps = host.calls.slice(start).map(call => call.step)
+    expect(steps).not.toContain('ingest-state')
+    expect(steps).not.toContain('probe-ingest')
+    expectNothingChanged(host, start)
+  })
+})
+
 async function holdsFor(
   change: (host: FakeHost) => void,
 ): Promise<{host: FakeHost; result: DeployResult; after: string[]}> {

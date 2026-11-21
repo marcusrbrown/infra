@@ -155,6 +155,72 @@ describe('TTL text', () => {
     )
   })
 
+  // Text in a quoted string or a quoted identifier is not SQL: a COMMENT that happens to contain ` TTL ` is not a rule.
+  describe('ignores quoted text and column TTLs', () => {
+    const head = 'CREATE TABLE default.t (`a` DateTime) ENGINE = MergeTree'
+    const note = "' TTL toDateTime(start_time) + toIntervalDay(30) SETTINGS note'"
+
+    it('reads a table whose only TTL is inside a COMMENT as having none', () => {
+      expect(extractTtl(`${head} ORDER BY a COMMENT ${note}`)).toBeUndefined()
+      expect(extractTtl(`${head} ORDER BY a SETTINGS s = 1 COMMENT ${note}`)).toBeUndefined()
+    })
+
+    it('reads the real TTL whichever side of it the COMMENT is on', () => {
+      const real = 'a + toIntervalDay(30)'
+      expect(extractTtl(`${head} ORDER BY a TTL ${real} SETTINGS s = 1 COMMENT ${note}`)).toBe(real)
+      expect(extractTtl(`${head} COMMENT ${note} ORDER BY a TTL ${real} SETTINGS s = 1`)).toBe(real)
+    })
+
+    it('cuts at the first SETTINGS outside quotes', () => {
+      const query = `${head} ORDER BY a TTL a + toIntervalDay(30) SETTINGS s = 'x SETTINGS y'`
+      expect(extractTtl(query)).toBe('a + toIntervalDay(30)')
+    })
+
+    it('understands a quote escaped as a backslash or as a doubled quote', () => {
+      const real = 'a + toIntervalDay(30)'
+      const backslash = String.raw`COMMENT 'it\'s a TTL b + toIntervalDay(1) SETTINGS y'`
+      const doubled = "COMMENT 'it''s a TTL b + toIntervalDay(1) SETTINGS y'"
+      expect(extractTtl(`${head} ${backslash} ORDER BY a TTL ${real}`)).toBe(real)
+      expect(extractTtl(`${head} ${doubled} ORDER BY a TTL ${real}`)).toBe(real)
+      expect(extractTtl(`${head} ORDER BY a TTL ${real} SETTINGS s = 1 ${backslash}`)).toBe(real)
+      expect(extractTtl(`${head} ORDER BY a SETTINGS s = 1 ${doubled}`)).toBeUndefined()
+      // An escaped backslash does not escape the quote after it: the string ends there.
+      const ends = String.raw`COMMENT 'C:\\' ORDER BY a TTL ${real}`
+      expect(extractTtl(`${head} ${ends}`)).toBe(real)
+    })
+
+    it('does not read a TTL in a backtick-quoted identifier', () => {
+      expect(extractTtl('CREATE TABLE default.t (`x TTL y + toIntervalDay(1)` String) ENGINE = X')).toBeUndefined()
+      expect(extractTtl('CREATE TABLE default.t (`a``b TTL c` String) ENGINE = X ORDER BY tuple()')).toBeUndefined()
+      // Outside the column list, where the parenthesis depth cannot save it.
+      expect(
+        extractTtl('CREATE TABLE default.t (`a` String) ENGINE = X ORDER BY `x TTL y + toIntervalDay(1)`'),
+      ).toBeUndefined()
+      expect(
+        extractTtl('CREATE TABLE default.t (`a` String) ENGINE = X ORDER BY `p``q TTL r` TTL a + toIntervalDay(30)'),
+      ).toBe('a + toIntervalDay(30)')
+    })
+
+    it('is not thrown by a parenthesis inside a string', () => {
+      const real = 'a + toIntervalDay(30)'
+      expect(extractTtl(`${head} COMMENT 'open ( paren' ORDER BY a TTL ${real} SETTINGS s = 1`)).toBe(real)
+      expect(extractTtl(`${head} COMMENT ') TTL b + toIntervalDay(1)' ORDER BY a`)).toBeUndefined()
+    })
+
+    it('does not read a column TTL as the table TTL', () => {
+      const columns = '(`a` DateTime TTL a + toIntervalDay(7), `b` String)'
+      expect(
+        extractTtl(`CREATE TABLE default.t ${columns} ENGINE = MergeTree ORDER BY b SETTINGS s = 1`),
+      ).toBeUndefined()
+      expect(
+        extractTtl(`CREATE TABLE default.t\n(\n  \`a\` DateTime TTL a + toIntervalDay(7)\n)\nENGINE = X`),
+      ).toBeUndefined()
+      expect(extractTtl(`CREATE TABLE default.t ${columns} ENGINE = X ORDER BY b TTL a + toIntervalDay(30)`)).toBe(
+        'a + toIntervalDay(30)',
+      )
+    })
+  })
+
   it('covers the two proven tables as required and the older trace tables as optional', () => {
     const required = RETENTION_TABLES.filter(table => table.required).map(table => table.name)
     expect(required).toEqual(['events_full', 'events_core'])

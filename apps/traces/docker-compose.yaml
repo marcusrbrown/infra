@@ -278,6 +278,11 @@ services:
   grafana:
     image: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
     restart: unless-stopped
+    # The image's own user is 472 with group 0. Deploy makes `secrets/grafana` `root:472`, mode 0750, so a process
+    # whose group is 0 cannot enter it: Grafana would log "Permission denied" for both secret files and start on its
+    # defaults (admin password `admin`). Group 472 is what lets it read them. `GRAFANA_USER_ID` in src/host.ts is
+    # this one id; a test pins it, and the deploy's `grafana-signin` check proves the password file is in use.
+    user: '472:472'
     ports:
       - 127.0.0.1:3001:3000
     environment:

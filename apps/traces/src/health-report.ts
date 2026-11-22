@@ -66,6 +66,14 @@ export const GROUPS = ['marcusrbrown', 'fro-bot', 'workstation'] as const
 /** The group label the collector stamps on canary traces, so they can be filtered out. */
 export const CANARY_GROUP = 'canary'
 
+/**
+ * The Langfuse environment the canary lands in, so the operator can filter it out in the UI. Langfuse v4.83.0 reads it
+ * from the span attribute `langfuse.environment` (OtelIngestionProcessor `extractEnvironment`); `canary` is valid
+ * under its name rules (lowercase `[a-z0-9-_]`, at most 40 characters, no leading `langfuse`). The readback never
+ * filters on environment: it finds the row by `trace_id`.
+ */
+export const CANARY_ENVIRONMENT = 'canary'
+
 /** First line of the volume's sentinel file; pinned to `TRACES_SENTINEL_CONTENT` in `host.ts` by a test. */
 export const SENTINEL_CONTENT = 'traces-volume-v1'
 
@@ -756,6 +764,7 @@ export function buildCanary(nowMs: number, randomHex: (bytes: number) => string)
                 attributes: [
                   stringAttribute('gen_ai.operation.name', 'invoke_agent'),
                   stringAttribute('langfuse.session.id', `canary-session-${run}`),
+                  stringAttribute('langfuse.environment', CANARY_ENVIRONMENT),
                   stringAttribute(
                     'gen_ai.input.messages',
                     JSON.stringify([{role: 'user', parts: [{type: 'text', content: markers['content-key']}]}]),

@@ -9,6 +9,7 @@ import {
   assembleVerdict,
   blockEndMs,
   buildCanary,
+  CANARY_ENVIRONMENT,
   CANARY_GROUP,
   CANARY_PLACES,
   CLICKHOUSE_READER_USER,
@@ -633,6 +634,26 @@ describe('buildCanary', () => {
     expect(text).toContain('"sender.group"')
     expect(text).toContain(`"stringValue":"${CANARY_GROUP}"`)
     expect(CANARY_GROUP).toBe('canary')
+  })
+
+  // Langfuse v4.83.0 reads the environment from the span attribute `langfuse.environment` first (then the resource's,
+  // then `deployment.environment(.name)`); `normalizeEnvironment` lowercases it, strips a leading `langfuse`, cuts it
+  // to 40 characters and falls back to `default` unless it matches [a-z0-9-_]+. `canary` passes all of that.
+  it('lands in its own Langfuse environment, `canary`, set on the span where Langfuse reads it first', () => {
+    const body = record(canary.body, 'body')
+    const resourceSpan = record((body.resourceSpans as Rec[])[0], 'rs')
+    const scopeSpans = record((resourceSpan.scopeSpans as Rec[])[0], 'ss')
+    const span = record((scopeSpans.spans as Rec[])[0], 'span')
+    const attributes = span.attributes as {key: string; value: {stringValue: string}}[]
+    const environments = attributes.filter(attribute => attribute.key === 'langfuse.environment')
+    expect(environments).toEqual([{key: 'langfuse.environment', value: {stringValue: 'canary'}}])
+    expect(CANARY_ENVIRONMENT).toBe('canary')
+    // Valid under Langfuse's environment-name rules, so it is stored as `canary` and not replaced by `default`.
+    expect(CANARY_ENVIRONMENT).toMatch(/^[a-z0-9_-]+$/)
+    expect(CANARY_ENVIRONMENT.length).toBeLessThanOrEqual(40)
+    expect(CANARY_ENVIRONMENT.startsWith('langfuse')).toBe(false)
+    // No other attribute that Langfuse reads for the environment, which could make another value win.
+    expect(JSON.stringify(resourceSpan.resource)).not.toMatch(/langfuse\.environment|deployment\.environment/)
   })
 
   it('is unique per call', () => {

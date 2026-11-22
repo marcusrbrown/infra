@@ -17,6 +17,9 @@
 //      the reporter, verify the collector's image digest
 //   9. run the gates, then set the route: open only when every gate passes AND TRACES_INGEST_OPEN is exactly
 //      `true`; otherwise off (first bring-up) or held (it was open before)
+//  10. remove the deploy marker, which ends the route's work. Only then check Grafana's sign-in (the password file
+//      works): read-only, after the route is final, and a failure fails the run (`OperatorSurfaceError`) without
+//      touching the route
 //
 // Overlapping deploys: the last deploy to start owns the host. Each deploy writes a random id into the deploy marker
 // in its first host script; every later script that changes the host checks, in the same script, that the marker
@@ -53,6 +56,7 @@ import {materializeIdentityFile} from '@marcusrbrown/infra-shared/server/droplet
 
 import {bashCommand, checkTracesStorage, shellQuote} from '../server/provision'
 import {
+  GRAFANA_USER_ID,
   SENDER_GROUPS,
   TEMPO_USER_ID,
   TRACES_APP_DIR,
@@ -174,6 +178,14 @@ function requireUrlSafe(env: EnvLike, name: DeployInputName, min: number, max = 
   return value
 }
 
+/**
+ * The shortest Grafana admin password the deploy accepts. Grafana's built-in password is `admin`; the sign-in check
+ * sends no request with it (a failed login counts against the admin account), so it proves "not the default" by
+ * this floor instead: a password of this length can never be `admin`, and one 200 with the file's value proves
+ * that is what the account holds.
+ */
+export const GRAFANA_ADMIN_PASSWORD_MIN = 16
+
 function optionalPair(env: EnvLike, publicName: DeployInputName, secretName: DeployInputName): KeyPair | undefined {
   const publicKey = read(env, publicName)
   const secretKey = read(env, secretName)
@@ -239,7 +251,7 @@ export function readInputs(env: EnvLike): DeployInputs {
     nextauthSecret: requireUrlSafe(env, 'TRACES_NEXTAUTH_SECRET', 32),
     salt: requireUrlSafe(env, 'TRACES_SALT', 16),
     encryptionKey,
-    grafanaAdminPassword: requireUrlSafe(env, 'TRACES_GRAFANA_ADMIN_PASSWORD', 16),
+    grafanaAdminPassword: requireUrlSafe(env, 'TRACES_GRAFANA_ADMIN_PASSWORD', GRAFANA_ADMIN_PASSWORD_MIN),
     grafanaSecretKey: requireUrlSafe(env, 'TRACES_GRAFANA_SECRET_KEY', 16),
     langfuseUserEmail: email,
     langfuseUserPassword: requireUrlSafe(env, 'TRACES_LANGFUSE_USER_PASSWORD', 12),
@@ -296,7 +308,7 @@ export type IngestState = 'off' | 'held' | 'open'
 // Container users. The collector image's built-in `nonroot` user, the Grafana image's user, and the reporter's
 // user, which is Tempo's (the reporter lists Tempo's 0700 directories; see `TEMPO_USER_ID` in `host.ts`).
 const COLLECTOR_GID = '65532'
-const GRAFANA_UID = '472'
+const GRAFANA_UID = String(GRAFANA_USER_ID)
 const REPORTER_UID = String(TEMPO_USER_ID)
 
 const COMPOSE_PROJECT_VOLUME = 'traces_collector_queue'
@@ -1227,6 +1239,55 @@ echo ${DIGEST_SENTINEL}`,
   )
 }
 
+export const GRAFANA_PROBE_SENTINEL = 'TRACES_GRAFANA_PROBED'
+
+/**
+ * What the Grafana sign-in check got: the HTTP status for the password read from `secrets/grafana/admin-password`
+ * (`000` is no answer, or no password file), and, when the check could not be run at all, why.
+ */
+export interface GrafanaSignIn {
+  code: string
+  error?: string
+}
+
+/**
+ * Signs in to Grafana on its loopback port, from the host, once, with the admin password from its secret file.
+ * Grafana reads that file only if it can enter the secret directory; when it cannot it logs "Permission denied"
+ * and starts on its defaults, which this check is there to catch. There is no second request with the default
+ * password: Grafana counts failed Basic Auth logins per username (5 in 5 minutes), so each deploy would spend one on
+ * the admin account. One 200 with the file's password proves the account's password is the file's value, and the
+ * input check (`GRAFANA_ADMIN_PASSWORD_MIN`) keeps that value from being the default.
+ *
+ * The password never leaves the host's shell. It is read from the file inside the script, put into a curl config
+ * with the shell's own `printf` (a builtin, so it is in no argv) and handed to curl on stdin (`-K -`). No credential
+ * is a curl argument. The probe stays on loopback whatever the host's environment holds: `-q`, which curl honours
+ * only as its first argument, skips `.curlrc`, and `--noproxy '*'` ignores `http_proxy` and the like. The response
+ * body is captured and dropped, curl's errors are off (`-s`), and only the status code is printed. The password
+ * alphabet is URL-safe (`requireUrlSafe`), so it needs no quoting inside the config.
+ */
+export function grafanaSignInScript(): string {
+  return `set -u
+# traces-step:grafana-signin
+cd ${TRACES_APP_DIR}
+url=http://127.0.0.1:3001/api/user
+file=secrets/grafana/admin-password
+code=000
+if [ -s "$file" ]; then
+  out=$(printf 'user = "admin:%s"\\n' "$(cat "$file")" | curl -q -s --noproxy '*' --max-time 10 -K - -w '\\nTRACES_HTTP=%{http_code}' "$url") || true
+  code=$(printf '%s' "$out" | sed -n 's/.*TRACES_HTTP=\\([0-9]*\\)$/\\1/p' | tail -n 1)
+fi
+echo "TRACES_GRAFANA_FILE_HTTP=\${code:-000}"
+echo ${GRAFANA_PROBE_SENTINEL}`
+}
+
+/** The status code from a complete answer; undefined for anything else. */
+export function parseGrafanaProbe(stdout: string): string | undefined {
+  const code = /^TRACES_GRAFANA_FILE_HTTP=(\d{3})$/m.exec(stdout)?.[1]
+  if (code === undefined) return undefined
+  if (!stdout.split('\n').some(line => line.trim() === GRAFANA_PROBE_SENTINEL)) return undefined
+  return code
+}
+
 export const BOOTSTRAP_PROBE_SENTINEL = 'TRACES_BOOTSTRAP_PROBED'
 
 /**
@@ -1382,6 +1443,7 @@ export type GateId =
   | 'canary'
   | 'bootstrap-key'
   | 'bootstrap-variables'
+  | 'grafana-signin'
 
 export interface GateResult {
   id: GateId
@@ -1390,9 +1452,12 @@ export interface GateResult {
   detail: string
   /**
    * `config` gates say whether the operator has asked for ingest to be open yet (the key pair, the variable).
-   * Failing one is an expected state, not a failure. `safety` gates are about the stack: failing one fails the deploy.
+   * Failing one is an expected state, not a failure. `safety` gates are about the stack: failing one fails the deploy
+   * and keeps the route closed. `operator` gates are about a surface the operator uses (Grafana, behind the SSH
+   * tunnel) that has no bearing on whether traces can be received: failing one fails the run, but only after the
+   * route is decided, and it never holds, closes or keeps closed the ingest route.
    */
-  kind: 'config' | 'safety'
+  kind: 'config' | 'safety' | 'operator'
 }
 
 export type VerdictState =
@@ -1425,6 +1490,38 @@ function failingChecks(detail: ReporterDetail): string {
   if (!detail.ran) lines.push('the reporter has not finished a run')
   else if (detail.stale) lines.push('the last run is older than two intervals')
   return lines.length === 0 ? 'the verdict does not pass' : lines.join('; ')
+}
+
+/**
+ * The one operator gate. Not part of `evaluateGates`: the route is decided from the route gates alone, and this runs
+ * afterwards (`performDeploy`), so no outcome of the Grafana check can reach the route. Pure: pass is a 200 with the
+ * password file's password. Because the deploy refuses a Grafana admin password shorter than 16 characters (so never
+ * Grafana's default, `admin`), a 200 also means the account is not on its default password.
+ */
+export function evaluateGrafana(signIn: GrafanaSignIn): GateResult {
+  const gate = (pass: boolean, detail: string): GateResult => ({
+    id: 'grafana-signin',
+    status: pass ? 'pass' : 'fail',
+    detail,
+    kind: 'operator',
+  })
+  if (signIn.code === '200') {
+    return gate(true, 'Grafana signs in with the admin password file (HTTP 200)')
+  }
+  if (signIn.error !== undefined) {
+    return gate(false, `the Grafana sign-in check could not be run: ${signIn.error}.`)
+  }
+  if (signIn.code === '000') {
+    return gate(
+      false,
+      'Grafana did not answer on 127.0.0.1:3001 (no HTTP response, or the admin password file is missing on the host).',
+    )
+  }
+  const hint =
+    signIn.code === '401'
+      ? ' Grafana reads the password file only when it can enter /run/secrets/grafana, and applies it only when it creates its database: see "Grafana sign-in check fails" in docs/runbooks/trace-collection.md.'
+      : ''
+  return gate(false, `the admin password file was not accepted (HTTP ${signIn.code}, expected 200).${hint}`)
 }
 
 /**
@@ -1577,13 +1674,22 @@ export function evaluateGates(input: GateInputs): GateResult[] {
   return gates
 }
 
-/** Open only when nothing is missing: every gate is a pass. A skipped gate is not a pass. */
+/**
+ * Open only when nothing is missing: every gate that is about the route is a pass. A skipped gate is not a pass.
+ * `operator` gates are left out on purpose: they decide whether the run fails, never whether traces are received.
+ */
 export function mayOpen(gates: readonly GateResult[]): boolean {
-  return gates.length > 0 && gates.every(gate => gate.status === 'pass')
+  const aboutTheRoute = gates.filter(gate => gate.kind !== 'operator')
+  return aboutTheRoute.length > 0 && aboutTheRoute.every(gate => gate.status === 'pass')
 }
 
 export function failedSafetyGates(gates: readonly GateResult[]): GateResult[] {
   return gates.filter(gate => gate.kind === 'safety' && gate.status === 'fail')
+}
+
+/** The operator-surface gates that failed. The run fails for these after the route is set; the route is untouched. */
+export function failedOperatorGates(gates: readonly GateResult[]): GateResult[] {
+  return gates.filter(gate => gate.kind === 'operator' && gate.status === 'fail')
 }
 
 function describeGates(gates: readonly GateResult[]): string[] {
@@ -1689,6 +1795,9 @@ export interface Limits {
   /** Tries for a reporter verdict newer than the restart. */
   verdictAttempts: number
   verdictIntervalMs: number
+  /** Tries for Grafana to answer the sign-in check, after the route is final (a 2xx to 4xx answer is settled and is not retried). */
+  grafanaAttempts: number
+  grafanaIntervalMs: number
 }
 
 export const DEFAULT_LIMITS: Limits = {
@@ -1698,6 +1807,8 @@ export const DEFAULT_LIMITS: Limits = {
   retentionIntervalMs: 10_000,
   verdictAttempts: 40,
   verdictIntervalMs: 5000,
+  grafanaAttempts: 12,
+  grafanaIntervalMs: 5000,
 }
 
 export interface DeployDeps {
@@ -1741,6 +1852,25 @@ export function defaultDeps(env: EnvLike): DeployDeps {
     limits: DEFAULT_LIMITS,
     voidTokenLine: () => generateVoidTokenLine(),
     deployId: () => generateDeployId(),
+  }
+}
+
+/**
+ * The deploy completed and left the route where its other gates put it, and an operator surface (Grafana) failed its
+ * check. Unlike every other failure it is thrown outside the failure handler: it does not hold, close or probe the
+ * route, because Grafana has nothing to do with receiving traces. `ingest` is where the route is; `result` is what
+ * the deploy would have returned, gates included.
+ */
+export class OperatorSurfaceError extends Error {
+  readonly ingest: IngestState
+  readonly result: DeployResult
+  constructor(result: DeployResult, failed: readonly GateResult[]) {
+    super(
+      `The stack was deployed, but an operator-surface check failed. ${failed.map(gate => `${gate.id}: ${gate.detail}`).join(' ')} Ingest is ${result.ingest}: this failure did not change the route, which the other gates decided. Fix the cause and deploy again.`,
+    )
+    this.name = 'OperatorSurfaceError'
+    this.ingest = result.ingest
+    this.result = result
   }
 }
 
@@ -1920,6 +2050,30 @@ async function awaitFreshVerdict(exec: RemoteExec, deps: DeployDeps, sinceEpoch:
   return everReadable ? {state: 'timeout', detail: last} : {state: 'unreadable'}
 }
 
+/**
+ * Asks the host for Grafana's sign-in answer until it is settled (an HTTP status from 200 to 499: Grafana is up and
+ * has decided) or the attempts run out. A `000` or a 5xx is Grafana not up yet. A settled answer is not retried, which
+ * also keeps a wrong password from being tried over and over against Grafana's login lockout. An answer that cannot
+ * be read counts as no answer. A rejected execution (the runner threw) is kept, and if it is how the last attempt
+ * ended it is the reason reported. This never throws: it runs after the route is final and is not allowed to fail
+ * the deploy any other way than the operator-surface error.
+ */
+async function awaitGrafanaSignIn(exec: RemoteExec, deps: DeployDeps): Promise<GrafanaSignIn> {
+  const settled = /^[2-4]\d\d$/
+  let last: GrafanaSignIn = {code: '000'}
+  for (let attempt = 1; attempt <= deps.limits.grafanaAttempts; attempt += 1) {
+    try {
+      const result = await exec(bashCommand(grafanaSignInScript()))
+      last = {code: (result.exitCode === 0 ? parseGrafanaProbe(result.stdout) : undefined) ?? '000'}
+    } catch (error) {
+      last = {code: '000', error: clip(errorMessage(error))}
+    }
+    if (settled.test(last.code)) return last
+    if (attempt < deps.limits.grafanaAttempts) await deps.sleep(deps.limits.grafanaIntervalMs)
+  }
+  return last
+}
+
 function parseEpoch(result: RunResult): number {
   const epoch = Number(/^epoch=(\d+)$/m.exec(result.stdout)?.[1])
   if (!Number.isInteger(epoch) || epoch <= 0) throw new Error('The host did not report its clock')
@@ -1933,12 +2087,28 @@ function pairToStdin(pair: KeyPair): string {
 /**
  * The deploy proper, over an `exec` that already speaks to the host. Exported for tests; `deploy` is the entry
  * point that builds the ssh transport.
+ *
+ * `runDeploy` decides and verifies the route from the route gates alone, removes the marker and returns. Only then is
+ * Grafana's sign-in checked, over the bare `rawExec` and outside `runDeploy`'s failure handler (which would close the
+ * route). No outcome of that check (a pass, a refusal, a timeout, a rejected execution, malformed output) can reach
+ * the route: it is read-only, it comes after the route is final, and a failure becomes `OperatorSurfaceError`, which
+ * fails the run. A deploy that already failed never gets here.
  */
 export async function performDeploy(
   inputs: DeployInputs,
   rawExec: RemoteExec,
   deps: DeployDeps,
 ): Promise<DeployResult> {
+  const routed = await runDeploy(inputs, rawExec, deps)
+  const grafana = evaluateGrafana(await awaitGrafanaSignIn(rawExec, deps))
+  for (const line of describeGates([grafana])) deps.log(`  ${line}`)
+  const result: DeployResult = {...routed, gates: [...routed.gates, grafana]}
+  const failed = failedOperatorGates(result.gates)
+  if (failed.length > 0) throw new OperatorSurfaceError(result, failed)
+  return result
+}
+
+async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: DeployDeps): Promise<DeployResult> {
   const {log} = deps
   const deployId = assertDeployId(deps.deployId())
 
@@ -2308,7 +2478,10 @@ export async function performDeploy(
     })
     for (const line of describeGates(gates)) log(`  ${line}`)
 
-    const unmet = gates.filter(entry => entry.status !== 'pass').map(entry => `${entry.id}: ${entry.detail}`)
+    // An operator gate is not about the route: it is reported by its own error, after the route is set.
+    const unmet = gates
+      .filter(entry => entry.kind !== 'operator' && entry.status !== 'pass')
+      .map(entry => `${entry.id}: ${entry.detail}`)
     const failures = failedSafetyGates(gates)
 
     if (mayOpen(gates)) {

@@ -133,8 +133,9 @@ The alert text carries nothing the endpoint said. The exact reason is in the pro
 | `canary`              | the canary trace reached the collector, Langfuse and Tempo, and the Tempo keep-list held |
 | `bootstrap-key`       | the bootstrap pair is not supplied and Langfuse answers 401 to it                        |
 | `bootstrap-variables` | no `LANGFUSE_INIT_PROJECT_*KEY` value is in the host `.env` or in a running container    |
+| `grafana-signin`      | after the route is final, Grafana accepts the admin password file (200)                  |
 
-The route opens only when every gate passes. Gate design is in [Holding, gates and the route](../../apps/traces/AGENTS.md#holding-gates-and-the-route).
+The route opens only when every gate passes, except `grafana-signin`: Grafana is an operator UI and does not decide the route. A failing `grafana-signin` leaves the route as the other gates set it and fails the run afterwards (see [Grafana sign-in check fails](#grafana-sign-in-check-fails)). Gate design is in [Holding, gates and the route](../../apps/traces/AGENTS.md#holding-gates-and-the-route).
 
 ### Outcomes
 
@@ -143,12 +144,25 @@ The route opens only when every gate passes. Gate design is in [Holding, gates a
 | `Ingest is open: every ingest path reached the collector and asked for a token` | every gate passed; 401 proven on all three paths from inside the host | nothing |
 | `Ingest is OFF. Gates not met:` (or `HELD`) | the deploy completed, but a gate is not met and the route stays closed (an open route is held). `ingest-variable` and `langfuse-key` end here | meet the named gate and deploy again. `ingest-variable` fails while `TRACES_INGEST_OPEN` is unset or anything but exactly `true` |
 | `Gates failed: <gate>: <detail>` | the key pair is set and a safety gate failed. An open route is held first | fix the named gate and deploy again |
+| `The stack was deployed, but an operator-surface check failed.` | only `grafana-signin` failed. The route is where the other gates left it (the message says which) | [Grafana sign-in check fails](#grafana-sign-in-check-fails) |
 | `Applied but unverified: the host was updated and the update did not verify.` | the host changed and a later step failed. The message says whether ingest is held, off, or "may be open" | if it says "may be open", run `bunx @marcusrbrown/infra traces ingest hold` now. Fix the cause named in the message and deploy again. Only a deploy that passes every gate reopens ingest |
 | `The files could not be compared with the host` | nothing was written. The marker stays, so the next deploy holds an open route first | deploy again once the host answers |
 | `Another deploy started on this host and took over` | a newer deploy owns the host; this one stopped and changed nothing further | follow the newer deploy |
 | `DNS preflight failed` | `TRACES_DOMAIN` does not resolve to the droplet | point the A record at the droplet; Caddy cannot get a certificate otherwise |
 
 A deploy never leaves an open route unverified. On any failure after it takes its deploy marker, it reads the route from the host and holds it (every ingest path answers 503, which senders retry) unless the host is already off or held. While the marker or a pending-restart record exists, `traces ingest open` refuses and only a completed deploy clears it.
+
+### Grafana sign-in check fails
+
+After the route is final, the deploy signs in to Grafana from the host, once, with the password in `secrets/grafana/admin-password`, and expects 200. It sends no request with Grafana's default password, because Grafana counts failed logins per user (5 in 5 minutes); the deploy refuses a `TRACES_GRAFANA_ADMIN_PASSWORD` shorter than 16 characters, so a 200 also means the account is not on the default. A 401 means Grafana did not take the file's password; `000` or 5xx for the whole retry window means Grafana did not answer. The error names the HTTP code or the cause and says where ingest is. It never prints a password.
+
+Grafana reads the password file only if it can enter `/run/secrets/grafana`, and applies it only when it creates its database. If the check fails because the database was created without the password file (the file was unreadable at the first boot, or the volume predates the fix that runs Grafana as `472:472`), or because `TRACES_GRAFANA_ADMIN_PASSWORD` was rotated after the database existed, recreate the database. The trace data is in Tempo and Langfuse, so none of it is lost. Grafana's own state is lost: the provisioned Tempo data source comes back from the deploy, but removing `traces_grafana_data` also deletes any users, dashboards, folders, preferences or saved queries added in the Grafana UI since. Export or note those first (dashboards: Dashboard settings, JSON model), through the SSH tunnel to `http://localhost:3001` while the old database still works, or accept losing them:
+
+```bash
+traces_ssh 'docker compose --project-directory /mnt/traces/app stop grafana && docker compose --project-directory /mnt/traces/app rm -f grafana && docker volume rm traces_grafana_data'
+```
+
+The volume is `traces_grafana_data` (the compose project is `traces`, the volume is `grafana_data`). Then run the deploy again: it recreates Grafana, which creates its database with the password from the file, and the check passes. Confirm the secret directory and the user first if it fails again: `docker compose --project-directory /mnt/traces/app exec -T grafana id` must print `uid=472 gid=472`, and `ls -ld /mnt/traces/app/secrets/grafana` must show `root 472` and `drwxr-x---`.
 
 ### Deploying from a checkout
 

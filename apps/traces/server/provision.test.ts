@@ -1,6 +1,16 @@
 import type {PinHostKeysOptions} from '../../../packages/shared/server/droplet-helpers'
 import type {ProvisionDeps, ProvisionInput, Runner, RunResult} from './provision'
-import {chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -11,6 +21,8 @@ import {
   TRACES_DOCKER_ROOT,
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
+  TRACES_TEMPO_DATA_DIR,
+  TRACES_TEMPO_QUARANTINE_ROOT,
   TRACES_TOKEN_ROOT,
   TRACES_VOID_TOKEN_PREFIX,
   TRACES_VOLUME_MOUNT,
@@ -34,6 +46,8 @@ import {
   parseInboundRules,
   parseProvisionArgs,
   parseVolumeRows,
+  quiesceScript,
+  restoreDescription,
   restoreVolumeName,
   rulePortsCover,
   runProvision,
@@ -42,6 +56,7 @@ import {
   shellQuote,
   SSH_CONTROL_PERSIST,
   SSH_SCAN_PAUSE_MS,
+  tempoQuarantineScript,
   tokenCheckScript,
   validateRequiredEnv,
   VOLUME_LIST_ATTEMPTS,
@@ -66,6 +81,8 @@ interface SimVolume {
   id: string
   name: string
   dropletIds: string[]
+  /** What `volume create --desc` stored; absent for a volume made without one. */
+  description?: string
 }
 
 interface SimFirewall {
@@ -88,6 +105,10 @@ interface CloudOptions {
   attachIgnored?: boolean
   /** A volume created by `volume create` is absent from the next N `volume list` calls. */
   newVolumeHiddenForLists?: number
+  /** After a successful `attach`, the next N `volume list` calls still show the volume as it was before the action. */
+  attachLagLists?: number
+  /** After a successful `detach`, the next N `volume list` calls still show the volume as it was before the action. */
+  detachLagLists?: number
 }
 
 function flag(args: readonly string[], name: string): string | undefined {
@@ -103,11 +124,17 @@ class Cloud {
   private nextId = 1
   private hiddenListsLeft = 0
   private readonly hiddenVolumeIds = new Set<string>()
+  /** The pre-action attachment a lagging listing keeps showing, per volume id. */
+  private readonly staleViews = new Map<string, {dropletIds: string[]; left: number}>()
   constructor(private readonly options: CloudOptions = {}) {
     this.droplet = options.droplet ?? false
     this.volumes = options.volumes ?? []
     this.firewalls = options.firewalls ?? []
     this.snapshots = options.snapshots ?? []
+  }
+
+  private lagListing(volume: SimVolume, lists: number | undefined): void {
+    if (lists) this.staleViews.set(volume.id, {dropletIds: [...volume.dropletIds], left: lists})
   }
 
   handle(args: readonly string[]): RunResult {
@@ -130,10 +157,22 @@ class Cloud {
         const hide = this.hiddenListsLeft > 0
         if (hide) this.hiddenListsLeft -= 1
         const visible = this.volumes.filter(v => !(hide && this.hiddenVolumeIds.has(v.id)))
-        return ok(visible.map(v => `${v.id}   ${v.name}   [${v.dropletIds.join(' ')}]`).join('\n'))
+        // `doctl compute volume list --output json`: an array of the API's volume objects.
+        const rows = visible.map(v => {
+          const stale = this.staleViews.get(v.id)
+          const shown = stale && stale.left > 0 ? stale.dropletIds : v.dropletIds
+          return {id: v.id, name: v.name, description: v.description ?? '', droplet_ids: shown.map(Number)}
+        })
+        for (const stale of this.staleViews.values()) if (stale.left > 0) stale.left -= 1
+        return ok(JSON.stringify(rows, null, 2))
       }
       case 'compute volume create': {
-        const volume = {id: `vol-${this.nextId++}`, name: args[3] ?? '', dropletIds: []}
+        const volume: SimVolume = {
+          id: `vol-${this.nextId++}`,
+          name: args[3] ?? '',
+          dropletIds: [],
+          ...(flag(args, '--desc') === undefined ? {} : {description: flag(args, '--desc')}),
+        }
         this.volumes.push(volume)
         if (this.options.newVolumeHiddenForLists) {
           this.hiddenVolumeIds.add(volume.id)
@@ -142,12 +181,19 @@ class Cloud {
         return ok(flag(args, '--format') === 'ID' ? volume.id : '')
       }
       case 'compute volume-action attach': {
-        if (!this.options.attachIgnored) this.volumes.find(v => v.id === args[3])?.dropletIds.push(args[4] ?? '')
+        const volume = this.volumes.find(v => v.id === args[3])
+        if (volume && !this.options.attachIgnored) {
+          this.lagListing(volume, this.options.attachLagLists)
+          volume.dropletIds.push(args[4] ?? '')
+        }
         return ok()
       }
       case 'compute volume-action detach': {
         const volume = this.volumes.find(v => v.id === args[3])
-        if (volume) volume.dropletIds = volume.dropletIds.filter(id => id !== args[4])
+        if (volume) {
+          this.lagListing(volume, this.options.detachLagLists)
+          volume.dropletIds = volume.dropletIds.filter(id => id !== args[4])
+        }
         return ok()
       }
       case 'compute firewall list': {
@@ -227,6 +273,14 @@ interface HostOptions {
   dockerBusy?: boolean
   tokens?: 'deny-all' | 'real' | 'missing-root' | 'file-missing' | 'file-empty'
   storage?: RunResult
+  /** `<tenant>/<block-uuid>` entries the Tempo quarantine step reports as moved. */
+  tornBlocks?: string[]
+  /** Replaces the quarantine step's whole answer. */
+  quarantine?: RunResult
+  /** Whether the volume is mounted at the start. Defaults to the host being provisioned. */
+  mounted?: boolean
+  /** Whether Docker runs at the start. Defaults to the host being provisioned. */
+  dockerRunning?: boolean
 }
 
 class Host {
@@ -234,15 +288,19 @@ class Host {
   files = new Map<string, string>()
   fs: 'none' | 'ext4' | 'other'
   mounted: boolean
+  dockerRunning: boolean
   sentinel: boolean
   mkfsCount = 0
   dockerRestarts = 0
   steps: string[] = []
+  /** What the quiesce step found when it ran, once per run of it. */
+  quiescedFrom: {mounted: boolean; dockerRunning: boolean}[] = []
   constructor(private readonly options: HostOptions = {}) {
     const provisioned = options.provisioned ?? false
     this.swapOn = !provisioned
     this.fs = options.fs ?? (provisioned ? 'ext4' : 'none')
-    this.mounted = provisioned
+    this.mounted = options.mounted ?? provisioned
+    this.dockerRunning = options.dockerRunning ?? provisioned
     this.sentinel = provisioned
     if (provisioned) {
       for (const file of [...hardeningFiles(), ...dockerConfigFiles()]) this.files.set(file.path, file.content)
@@ -285,6 +343,8 @@ class Host {
         return ok(was ? 'TRACES_SENTINEL_PRESENT' : 'TRACES_SENTINEL_CREATED')
       }
       case 'verify-sentinel': {
+        // Like the real step: nothing mounted is a refusal, not a sentinel.
+        if (!this.mounted) return {exitCode: 1, stdout: 'TRACES_NOT_MOUNTED\n', stderr: ''}
         return this.sentinel ? ok('TRACES_SENTINEL_PRESENT') : fail('TRACES_SENTINEL_UNRECOGNISED')
       }
       case 'dirs': {
@@ -299,8 +359,20 @@ class Host {
         return this.options.storage ?? ok(GOOD_STORAGE_OUTPUT)
       }
       case 'restore-quiesce': {
+        this.quiescedFrom.push({mounted: this.mounted, dockerRunning: this.dockerRunning})
         this.mounted = false
+        this.dockerRunning = false
         return ok('TRACES_QUIESCED')
+      }
+      case 'tempo-quarantine': {
+        if (this.options.quarantine) return this.options.quarantine
+        const torn = this.options.tornBlocks ?? []
+        return ok(
+          [
+            ...torn.map(block => `TRACES_TEMPO_QUARANTINED ${block}`),
+            `TRACES_TEMPO_QUARANTINE_DONE ${torn.length}`,
+          ].join('\n'),
+        )
       }
       case 'token-check': {
         const tokens = this.options.tokens ?? 'deny-all'
@@ -506,12 +578,49 @@ describe('firewall rule parsing', () => {
 })
 
 describe('parseVolumeRows', () => {
-  it('reads id, name and attached droplet ids', () => {
-    expect(parseVolumeRows('vol-1   traces-data   [1001]\nvol-2   other   []')).toEqual([
-      {id: 'vol-1', name: 'traces-data', dropletIds: ['1001']},
-      {id: 'vol-2', name: 'other', dropletIds: []},
+  it('reads id, name, description and attached droplet ids from the JSON listing', () => {
+    const raw = JSON.stringify([
+      {id: 'vol-1', name: 'traces-data', description: 'restore-of:traces-20261120-1200', droplet_ids: [1001]},
+      {id: 'vol-2', name: 'other', description: '', droplet_ids: []},
+      {id: 'vol-3', name: 'no-fields'},
+      {id: 'vol-4', name: 'null-droplets', description: null, droplet_ids: null},
+    ])
+    expect(parseVolumeRows(raw)).toEqual([
+      {id: 'vol-1', name: 'traces-data', description: 'restore-of:traces-20261120-1200', dropletIds: ['1001']},
+      {id: 'vol-2', name: 'other', description: '', dropletIds: []},
+      {id: 'vol-3', name: 'no-fields', description: '', dropletIds: []},
+      {id: 'vol-4', name: 'null-droplets', description: '', dropletIds: []},
     ])
   })
+
+  it('reads an empty listing (nothing, an empty array or null) as no volumes', () => {
+    expect(parseVolumeRows('')).toEqual([])
+    expect(parseVolumeRows('[]')).toEqual([])
+    expect(parseVolumeRows('null')).toEqual([])
+  })
+
+  it('fails closed on a listing that is not an array of volumes', () => {
+    for (const raw of ['not json', '{}', '[1]', '[{"name":"x"}]', '[{"id":"v"}]']) {
+      expect(() => parseVolumeRows(raw)).toThrow(/volume listing/)
+    }
+  })
+})
+
+// The description is a label for a person reading `doctl compute volume list`. Nothing reads it back.
+describe('the label a restore volume is created with', () => {
+  it('is one fixed, space-free form carrying the snapshot name', () => {
+    expect(restoreDescription('traces-20261120-1200')).toBe('restore-of:traces-20261120-1200')
+    for (const name of ['traces-pre-collector-1-2', 'a', 'Snap_1.2-x']) {
+      expect(restoreDescription(name)).toBe(`restore-of:${name}`)
+    }
+  })
+
+  it.each(['', ' ', 'a b', '-x', 'a:b', 'a/b', 'a\nb', 'x'.repeat(129), '\u00E9'])(
+    'refuses a snapshot name that cannot be written whole: %j',
+    name => {
+      expect(() => restoreDescription(name)).toThrow(/snapshot name/i)
+    },
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -825,7 +934,8 @@ describe('SSH connection multiplexing', () => {
     await runRestore(RESTORE_RUN, deps)
     expect(controlDirs).toHaveLength(1)
     expect(new Set(controlPathsOf(world.sshCalls()))).toEqual(new Set([`ControlPath=${controlDirs[0]}/cm`]))
-    expect(world.sshCalls()).toHaveLength(4)
+    // quiesce, probe, mount, verify the sentinel, quarantine torn Tempo blocks
+    expect(world.sshCalls()).toHaveLength(5)
     expect(world.closeCalls()).toHaveLength(1)
     expect(removedControlDirs).toEqual(controlDirs)
   })
@@ -896,6 +1006,44 @@ describe('volume attach failure', () => {
     const {deps} = makeDeps(world.runner)
     await expect(runProvision(PROVISION_INPUT, true, deps)).rejects.toThrow(/another droplet/)
     expect(world.sshCommands()).toEqual([])
+  })
+})
+
+describe('a volume attach that the listing shows late', () => {
+  const pauses = (sleeps: number[]) => sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)
+
+  // Mutation target: a single read after the attach fails these.
+  it('keeps reading until the listing shows the attachment, sleeping between reads only', async () => {
+    const world = makeWorld({attachLagLists: 3})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(pauses(sleeps)).toHaveLength(3)
+    expect(world.cloud.volumes[0]?.dropletIds).toEqual([DROPLET_ID])
+  })
+
+  it('does not sleep when the first read already shows the attachment', async () => {
+    const world = makeWorld()
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(pauses(sleeps)).toEqual([])
+  })
+
+  it('succeeds when the attachment shows on the last allowed read', async () => {
+    const world = makeWorld({attachLagLists: VOLUME_LIST_ATTEMPTS - 1})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runProvision(PROVISION_INPUT, false, deps)
+    expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+  })
+
+  it('fails with the existing error when the attachment never shows within the budget, before any SSH step', async () => {
+    const world = makeWorld({attachLagLists: VOLUME_LIST_ATTEMPTS})
+    const {deps, sleeps, waits} = makeDeps(world.runner)
+    await expect(runProvision(PROVISION_INPUT, false, deps)).rejects.toThrow(
+      `Volume "${TRACES_VOLUME_NAME}" is not attached to droplet ${DROPLET_ID} after the attach call`,
+    )
+    expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+    expect(world.sshCommands()).toEqual([])
+    expect(waits).toEqual([])
   })
 })
 
@@ -1131,6 +1279,211 @@ describe('managed file script, run against real files in a temp directory', () =
     } finally {
       rmSync(dir, {recursive: true, force: true})
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tempo block quarantine, run against real files
+// ---------------------------------------------------------------------------
+
+function block(data: string, tenant: string, id: string, files: Record<string, string>): string {
+  const dir = join(data, 'blocks', tenant, id)
+  mkdirSync(dir, {recursive: true})
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content)
+  return dir
+}
+
+describe('tempoQuarantineScript, run against real files in a temp directory', () => {
+  const STAMP = '20261120-1530'
+  const TENANT = 'single-tenant'
+  const A = '280241d8-1111-4222-8333-444455556666'
+  const B = '3b0c5a77-aaaa-4bbb-8ccc-ddddeeeeffff'
+  const C = '4c1d6b88-0000-4111-8222-333344445555'
+  const HEALTHY = '{"format":"vParquet4","blockID":"x","totalObjects":7}\n'
+
+  async function withScratch(test: (paths: {data: string; quarantine: string; script: () => string}) => Promise<void>) {
+    const dir = mkdtempSync(join(tmpdir(), 'traces-tempo-'))
+    const data = join(dir, 'data')
+    const quarantine = join(dir, 'tempo-quarantine')
+    mkdirSync(data, {recursive: true})
+    try {
+      await test({
+        data,
+        quarantine,
+        script: () => tempoQuarantineScript({dataDir: data, quarantineRoot: quarantine, stamp: STAMP}),
+      })
+    } finally {
+      rmSync(dir, {recursive: true, force: true})
+    }
+  }
+
+  const lines = (stdout: string) => stdout.split('\n').filter(Boolean)
+  const moved = (tenant: string, id: string) => `TRACES_TEMPO_QUARANTINED ${tenant}/${id}`
+  const done = (count: number) => `TRACES_TEMPO_QUARANTINE_DONE ${count}`
+
+  // Mutation target: a torn check that is always false moves nothing and fails these.
+  it.each([
+    ['an empty meta.json', {'meta.json': '', 'data.parquet': '', index: '', 'bloom-0': ''}],
+    ['a meta.json holding garbage', {'meta.json': 'not json at all', 'data.parquet': 'PAR1'}],
+    ['a meta.json cut off mid-object', {'meta.json': '{"blockID":"x","totalObje'}],
+    ['a meta.json of only whitespace', {'meta.json': ' \n\t\n'}],
+    ['an empty meta.compacted.json', {'meta.compacted.json': '', 'data.parquet': ''}],
+    ['a meta.compacted.json holding garbage', {'meta.compacted.json': '<html>'}],
+    ['a healthy meta.json beside an empty meta.compacted.json', {'meta.json': HEALTHY, 'meta.compacted.json': ''}],
+    ['a JSON array instead of an object', {'meta.json': '[1,2]'}],
+  ])('moves a block with %s into the quarantine, files intact', async (_label, files) => {
+    await withScratch(async ({data, quarantine, script}) => {
+      const source = block(data, TENANT, A, files)
+      const result = await runLocal(script(), '')
+
+      expect(result.exitCode).toBe(0)
+      expect(lines(result.stdout)).toEqual([moved(TENANT, A), done(1)])
+      expect(existsSync(source)).toBe(false)
+      const target = join(quarantine, STAMP, TENANT, A)
+      for (const [name, content] of Object.entries(files))
+        expect(readFileSync(join(target, name), 'utf8')).toBe(content)
+      // The directories the step makes are private; the block keeps whatever it had.
+      for (const dir of [quarantine, join(quarantine, STAMP), join(quarantine, STAMP, TENANT)]) {
+        expect(statSync(dir).mode & 0o777).toBe(0o700)
+      }
+    })
+  })
+
+  it('leaves a healthy meta.json and a healthy meta.compacted.json, and makes no quarantine directory', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      const live = block(data, TENANT, A, {'meta.json': HEALTHY, 'data.parquet': 'PAR1'})
+      const compacted = block(data, TENANT, B, {'meta.compacted.json': `  {\n  "blockID": "y"\n}\n\n`})
+      const result = await runLocal(script(), '')
+
+      expect(result).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(live)).toBe(true)
+      expect(existsSync(compacted)).toBe(true)
+      expect(existsSync(quarantine)).toBe(false)
+    })
+  })
+
+  it('leaves a block directory with neither metadata file: Tempo is writing it or has cleared it', async () => {
+    await withScratch(async ({data, script}) => {
+      const empty = block(data, TENANT, A, {})
+      const partial = block(data, TENANT, B, {'data.parquet': '', 'bloom-0': ''})
+      const result = await runLocal(script(), '')
+
+      expect(result).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(empty)).toBe(true)
+      expect(existsSync(partial)).toBe(true)
+    })
+  })
+
+  it('ignores files beside and inside the tenant directory, and any entry that is not a block uuid', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      mkdirSync(join(data, 'blocks', TENANT), {recursive: true})
+      writeFileSync(join(data, 'blocks', 'work.json'), '')
+      writeFileSync(join(data, 'blocks', TENANT, 'index.json.gz'), '')
+      writeFileSync(join(data, 'blocks', TENANT, 'index.pb.zst'), '')
+      // A file named like a block, and directories that are not named like one, each holding an empty meta.json.
+      writeFileSync(join(data, 'blocks', TENANT, A), '')
+      const notUuid = block(data, TENANT, 'not-a-block', {'meta.json': ''})
+      const nearly = block(data, TENANT, A.slice(0, -1), {'meta.json': ''})
+      const result = await runLocal(script(), '')
+
+      expect(result).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(notUuid)).toBe(true)
+      expect(existsSync(nearly)).toBe(true)
+      expect(existsSync(join(data, 'blocks', 'work.json'))).toBe(true)
+      expect(existsSync(join(data, 'blocks', TENANT, 'index.json.gz'))).toBe(true)
+      expect(existsSync(quarantine)).toBe(false)
+    })
+  })
+
+  it('handles two tenants, keeping the tenant in the quarantine path and in the report', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      block(data, 'single-tenant', A, {'meta.json': ''})
+      block(data, 'single-tenant', B, {'meta.json': HEALTHY})
+      block(data, 'other-tenant', C, {'meta.compacted.json': ''})
+      const result = await runLocal(script(), '')
+
+      expect(result.exitCode).toBe(0)
+      expect(lines(result.stdout)).toEqual([moved('other-tenant', C), moved('single-tenant', A), done(2)])
+      expect(existsSync(join(quarantine, STAMP, 'other-tenant', C))).toBe(true)
+      expect(existsSync(join(quarantine, STAMP, 'single-tenant', A))).toBe(true)
+      expect(existsSync(join(data, 'blocks', 'single-tenant', B))).toBe(true)
+    })
+  })
+
+  it('is idempotent: a second run moves nothing and leaves the first run in place', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      block(data, TENANT, A, {'meta.json': ''})
+      expect((await runLocal(script(), '')).stdout).toContain(done(1))
+      const second = await runLocal(script(), '')
+
+      expect(second).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(join(quarantine, STAMP, TENANT, A, 'meta.json'))).toBe(true)
+    })
+  })
+
+  it('treats a missing data directory or a missing blocks directory as nothing to do, not an error', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      expect(await runLocal(script(), '')).toEqual({stdout: done(0), exitCode: 0})
+      mkdirSync(join(data, 'wal'), {recursive: true})
+      expect(await runLocal(script(), '')).toEqual({stdout: done(0), exitCode: 0})
+      rmSync(data, {recursive: true, force: true})
+      expect(await runLocal(script(), '')).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(quarantine)).toBe(false)
+    })
+  })
+
+  it('refuses to overwrite, and leaves the block where it is, when the quarantine already holds that block', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      const source = block(data, TENANT, A, {'meta.json': ''})
+      mkdirSync(join(quarantine, STAMP, TENANT, A), {recursive: true})
+      const result = await runLocal(script(), '')
+
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toContain('TRACES_TEMPO_QUARANTINE_EXISTS')
+      expect(result.stdout).not.toContain('TRACES_TEMPO_QUARANTINE_DONE')
+      expect(existsSync(source)).toBe(true)
+    })
+  })
+
+  it('does not follow a symlink standing in for a block directory', async () => {
+    await withScratch(async ({data, quarantine, script}) => {
+      const real = block(data, 'elsewhere', A, {'meta.json': ''})
+      mkdirSync(join(data, 'blocks', TENANT), {recursive: true})
+      symlinkSync(real, join(data, 'blocks', TENANT, B))
+      // `elsewhere` is a tenant too, so the real directory is moved once, by its own name.
+      const result = await runLocal(script(), '')
+
+      expect(result.exitCode).toBe(0)
+      expect(lines(result.stdout)).toEqual([moved('elsewhere', A), done(1)])
+      expect(existsSync(join(quarantine, STAMP, TENANT))).toBe(false)
+    })
+  })
+
+  // A known limit, pinned so nobody reads the check as a JSON parser: it looks at the first and last non-space byte.
+  it('does not look inside the braces: text that starts with { and ends with } passes', async () => {
+    await withScratch(async ({data, script}) => {
+      const odd = block(data, TENANT, A, {'meta.json': '{ this is not json }'})
+      expect(await runLocal(script(), '')).toEqual({stdout: done(0), exitCode: 0})
+      expect(existsSync(odd)).toBe(true)
+    })
+  })
+
+  it('is a safe step: it parses, never redirects to the null device, never deletes, and uses no python', async () => {
+    const script = tempoQuarantineScript({stamp: STAMP})
+    expect(script).toContain('# traces-step:tempo-quarantine')
+    expect(script).toContain('set -eu')
+    expect(script).toContain(TRACES_TEMPO_DATA_DIR)
+    expect(script).toContain(TRACES_TEMPO_QUARANTINE_ROOT)
+    expect(script).not.toContain('/dev/null')
+    expect(script).not.toMatch(/\brm\b|\bcp\b|python/)
+    const parse = await runLocal(`bash -n -c ${shellQuote(script)}; echo $?`, '')
+    expect(parse.stdout).toBe('0')
+  })
+
+  it('refuses a stamp or a path that could carry shell syntax', () => {
+    expect(() => tempoQuarantineScript({stamp: '2026; reboot'})).toThrow()
+    expect(() => tempoQuarantineScript({stamp: STAMP, dataDir: '/tmp/x y'})).toThrow()
+    expect(() => tempoQuarantineScript({stamp: STAMP, quarantineRoot: '/tmp/../etc'})).toThrow()
   })
 })
 
@@ -1400,14 +1753,14 @@ describe('runRestore', () => {
     expect(restoreVolumeName(new Date('2026-11-20T15:30:00Z'))).toBe(newName)
     const doctl = world.doctlCalls()
     expect(doctl).toContain(
-      `compute volume create ${newName} --region nyc1 --size 100GiB --snapshot snap-1 --format ID --no-header`,
+      `compute volume create ${newName} --region nyc1 --size 100GiB --snapshot snap-1 --desc restore-of:traces-data-snap --format ID --no-header`,
     )
     const detach = indexOfCall(doctl, call => call.startsWith('compute volume-action detach vol-old'))
     const attach = indexOfCall(doctl, call => call.startsWith('compute volume-action attach'))
     expect(detach).toBeGreaterThan(-1)
     expect(attach).toBeGreaterThan(detach)
 
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
     const quiesceCall = world.calls.findIndex(c => c.argv.at(-1)?.includes('restore-quiesce'))
     const detachCall = world.calls.findIndex(c => c.argv.slice(1, 4).join(' ') === 'compute volume-action detach')
     expect(quiesceCall).toBeLessThan(detachCall)
@@ -1455,7 +1808,7 @@ describe('runRestore', () => {
       expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(3)
       expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
       expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
-      expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel'])
+      expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
     })
 
     it('does not sleep when the first listing already shows the volume', async () => {
@@ -1502,6 +1855,489 @@ describe('runRestore', () => {
       expect(world.doctlCalls().some(call => call.startsWith('compute volume-action'))).toBe(false)
       expect(world.sshCommands()).toEqual([])
     })
+  })
+})
+
+describe('runRestore: the volume swap when the listing lags the completed action', () => {
+  const RESTORE_INPUT = {snapshotName: 'traces-data-snap', privateKey: 'placeholder', remoteUser: 'root'}
+  const NEW_NAME = 'traces-data-restore-20261120-1530'
+  const pauses = (sleeps: number[]) => sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)
+
+  // Mutation target: a single read after the detach fails these. This is the production failure.
+  it('keeps reading until the listing shows the old volume detached, and completes the restore', async () => {
+    const world = makeWorld(provisionedCloud({detachLagLists: 3}), {provisioned: true})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    expect(pauses(sleeps)).toHaveLength(3)
+    expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
+    expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+  })
+
+  it('keeps reading until the listing shows the new volume attached, and completes the restore', async () => {
+    const world = makeWorld(provisionedCloud({attachLagLists: 3}), {provisioned: true})
+    const {deps, sleeps} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    expect(pauses(sleeps)).toHaveLength(3)
+    expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+  })
+
+  it('does not sleep on the normal path, where the first reads are right', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps, sleeps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+    expect(pauses(sleeps)).toEqual([])
+    expect(logs.join('\n')).not.toMatch(/resum/i)
+  })
+
+  // A failed detach or attach tells the operator the one hand step: get the previous volume attached, then start over.
+  const HAND_STEP = 'run the same restore command again from the start'
+  const NO_DELETE_ADVICE = /\bdelete\b|resum|to start a fresh restore|only copy/i
+
+  it('fails with the existing detach error when the listing lags beyond the budget, and says what state the host is in', async () => {
+    const world = makeWorld(provisionedCloud({detachLagLists: VOLUME_LIST_ATTEMPTS}), {provisioned: true})
+    const {deps, sleeps} = makeDeps(world.runner)
+    const failure = await runRestore(RESTORE_INPUT, deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+
+    expect(failure).toContain(
+      `Volume "${TRACES_VOLUME_NAME}" is still attached to droplet ${DROPLET_ID} after the detach call`,
+    )
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('Docker is stopped')
+    expect(failure).toContain(NEW_NAME)
+    expect(failure).toContain(`doctl compute volume-action attach vol-old ${DROPLET_ID} --wait`)
+    expect(failure).toContain(HAND_STEP)
+    expect(failure).not.toMatch(NO_DELETE_ADVICE)
+    expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
+    expect(world.doctlCalls().some(call => call.startsWith('compute volume-action attach'))).toBe(false)
+  })
+
+  it('fails with the existing attach error when the listing lags beyond the budget, and says what state the host is in', async () => {
+    const world = makeWorld(provisionedCloud({attachLagLists: VOLUME_LIST_ATTEMPTS}), {provisioned: true})
+    const {deps} = makeDeps(world.runner)
+    const failure = await runRestore(RESTORE_INPUT, deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+
+    expect(failure).toContain(`Volume "${NEW_NAME}" is not attached to droplet ${DROPLET_ID} after the attach call`)
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('Docker is stopped')
+    expect(failure).toContain(`${TRACES_VOLUME_NAME} is detached and kept`)
+    expect(failure).toContain(`doctl compute volume-action attach vol-old ${DROPLET_ID} --wait`)
+    expect(failure).toContain(HAND_STEP)
+    expect(failure).not.toMatch(NO_DELETE_ADVICE)
+  })
+})
+
+// The state a restore that stopped after the detach leaves: ports closed, Docker stopped, nothing attached, the previous
+// volume and a freshly created restore volume both detached. A restore does not continue from here: it refuses.
+function interruptedRestoreCloud(extra: CloudOptions = {}): CloudOptions {
+  return provisionedCloud({
+    volumes: [
+      {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
+      {
+        id: 'vol-restore',
+        name: 'traces-data-restore-20261119-0900',
+        dropletIds: [],
+        description: restoreDescription('traces-data-snap'),
+      },
+    ],
+    firewalls: [{id: 'fw-old', name: FIREWALL_NAME, inbound: [inboundRule(22)], droplets: [DROPLET_ID]}],
+    ...extra,
+  })
+}
+
+describe('runRestore: the one attached volume it replaces', () => {
+  const RESTORE_INPUT = {snapshotName: 'traces-data-snap', privateKey: 'placeholder', remoteUser: 'root'}
+  const RESTORE_NAME = 'traces-data-restore-20261119-0900'
+  const LABEL = restoreDescription('traces-data-snap')
+  const failureOfRestore = (
+    world: ReturnType<typeof makeWorld>,
+    input: {snapshotName: string; privateKey: string; remoteUser: string},
+  ) =>
+    runRestore(input, makeDeps(world.runner).deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+  const expectNothingChanged = (world: ReturnType<typeof makeWorld>) => {
+    const doctl = world.doctlCalls()
+    expect(doctl.some(call => call.startsWith('compute volume create'))).toBe(false)
+    expect(doctl.some(call => call.startsWith('compute volume-action'))).toBe(false)
+    expect(doctl.some(call => call.includes('delete'))).toBe(false)
+    expect(world.sshCommands()).toEqual([])
+    expect(world.host.steps).toEqual([])
+  }
+  // Advice the refusal must never give: deleting anything, or carrying on with a leftover volume.
+  const NO_OLD_ADVICE = /\bdelete\b|resum|to start a fresh restore|only copy|run again with --restore-snapshot/i
+
+  // Mutation target: removing the zero-attached refusal lets the run fall through to a restore from nothing.
+  it('refuses, from the interrupted shape (nothing attached, one detached traces-data, one detached restore volume), before any change', async () => {
+    const world = makeWorld(interruptedRestoreCloud(), {provisioned: true})
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+
+    expect(failure).toContain(`Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found 0`)
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('no volume was changed')
+    expect(failure).toContain(`${TRACES_VOLUME_NAME} (detached)`)
+    expect(failure).toContain(`${RESTORE_NAME} (detached, label "${LABEL}")`)
+    expect(failure).toContain('the state an interrupted restore leaves')
+    expect(failure).toContain('cannot tell which detached volume held the live data')
+    expect(failure).toContain('can be deleted only after a restore is proven')
+    // Mutation target: dropping the attach command from the message fails this.
+    expect(failure).toContain(`doctl compute volume-action attach <volume-id> ${DROPLET_ID} --wait`)
+    expect(failure).toContain('run the same restore command again from the start')
+    expect(failure).not.toMatch(NO_OLD_ADVICE)
+
+    expectNothingChanged(world)
+    expect(world.cloud.volumes.map(v => v.dropletIds)).toEqual([[], []])
+    expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
+  })
+
+  it('closes the ports first, even when it then refuses', async () => {
+    const world = makeWorld(
+      interruptedRestoreCloud({
+        firewalls: [{id: 'fw-old', name: FIREWALL_NAME, inbound: [...FIREWALL_INBOUND_RULES], droplets: [DROPLET_ID]}],
+      }),
+      {provisioned: true},
+    )
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+
+    expect(failure).toContain('found 0')
+    expect(world.cloud.firewalls[0]?.inbound).toEqual([inboundRule(22)])
+    const doctl = world.doctlCalls()
+    expect(doctl.findIndex(call => call.startsWith('compute firewall remove-rules'))).toBeLessThan(
+      doctl.findIndex(call => call.startsWith('compute volume list')),
+    )
+  })
+
+  it('still needs the snapshot to exist, and says so before it looks at volumes', async () => {
+    const world = makeWorld(interruptedRestoreCloud({snapshots: []}), {provisioned: true})
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+    expect(failure).toContain('No volume snapshot named "traces-data-snap"')
+    expectNothingChanged(world)
+  })
+
+  it('lists every traces-data* volume by name and state, with its label when it has one, and ignores other volumes', async () => {
+    const world = makeWorld(
+      interruptedRestoreCloud({
+        volumes: [
+          {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: []},
+          {id: 'vol-restore', name: RESTORE_NAME, dropletIds: [], description: LABEL},
+          {id: 'vol-away', name: 'traces-data-away', dropletIds: ['9999'], description: 'hand-made note'},
+          {id: 'vol-other', name: 'something-else', dropletIds: []},
+        ],
+      }),
+      {provisioned: true},
+    )
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+
+    expect(failure).toContain('traces-data (detached)')
+    expect(failure).toContain(`${RESTORE_NAME} (detached, label "${LABEL}")`)
+    expect(failure).toContain('traces-data-away (attached to droplet 9999, not this one, label "hand-made note")')
+    expect(failure).not.toContain('something-else')
+    expectNothingChanged(world)
+  })
+
+  it('refuses with nothing to attach when no traces-data* volume exists at all', async () => {
+    const world = makeWorld(interruptedRestoreCloud({volumes: []}), {provisioned: true})
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+
+    expect(failure).toContain(`Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found 0`)
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('no volume was changed')
+    expect(failure).toContain('none')
+    expect(failure).toContain('nothing to replace')
+    expect(failure).not.toContain('volume-action attach')
+    expect(failure).not.toMatch(NO_OLD_ADVICE)
+    expectNothingChanged(world)
+  })
+
+  it('refuses when two are attached, listing both with their state, and changes nothing', async () => {
+    const world = makeWorld(
+      interruptedRestoreCloud({
+        volumes: [
+          {id: 'vol-a', name: TRACES_VOLUME_NAME, dropletIds: [DROPLET_ID]},
+          {id: 'vol-b', name: RESTORE_NAME, dropletIds: [DROPLET_ID], description: LABEL},
+          {id: 'vol-c', name: 'traces-data-restore-20261118-0900', dropletIds: [], description: LABEL},
+        ],
+      }),
+      {provisioned: true},
+    )
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+
+    expect(failure).toContain(`Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found 2`)
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('no volume was changed')
+    expect(failure).toContain(`${TRACES_VOLUME_NAME} (attached to this droplet)`)
+    expect(failure).toContain(`${RESTORE_NAME} (attached to this droplet, label "${LABEL}")`)
+    expect(failure).toContain('traces-data-restore-20261118-0900 (detached, label')
+    expect(failure).toContain('cannot tell which')
+    expect(failure).not.toMatch(NO_OLD_ADVICE)
+    expectNothingChanged(world)
+  })
+
+  it('a first run creates the restore volume, detaches the attached one, attaches the new one', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    const doctl = world.doctlCalls()
+    expect(doctl.filter(call => call.startsWith('compute volume create'))).toHaveLength(1)
+    expect(doctl.filter(call => call.startsWith('compute volume-action detach vol-old'))).toHaveLength(1)
+    expect(doctl.filter(call => call.startsWith('compute volume-action attach'))).toHaveLength(1)
+    expect(logs.join('\n')).toContain(
+      'Volume traces-data-restore-20261120-1530 is attached and mounted in place of traces-data (kept, detached).',
+    )
+    expect(logs.join('\n')).toContain('The old volume traces-data still exists; delete it after the restore is proven.')
+  })
+
+  // The production shape after the first real restore: no volume is named exactly traces-data.
+  it('a first run whose attached volume is itself a traces-data-restore-* volume creates a new one, detaches that one and names it', async () => {
+    const LIVE = 'traces-data-restore-20261121-1744'
+    const world = makeWorld(provisionedCloud({volumes: [{id: 'vol-live', name: LIVE, dropletIds: [DROPLET_ID]}]}), {
+      provisioned: true,
+    })
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    const doctl = world.doctlCalls()
+    expect(doctl.filter(call => call.startsWith('compute volume create'))).toEqual([
+      'compute volume create traces-data-restore-20261120-1530 --region nyc1 --size 100GiB --snapshot snap-1 --desc restore-of:traces-data-snap --format ID --no-header',
+    ])
+    expect(doctl).toContain(`compute volume-action detach vol-live ${DROPLET_ID} --wait`)
+    expect(world.cloud.volumes.find(v => v.id === 'vol-live')?.dropletIds).toEqual([])
+    const text = logs.join('\n')
+    expect(text).toContain(
+      `Volume traces-data-restore-20261120-1530 is attached and mounted in place of ${LIVE} (kept, detached).`,
+    )
+    expect(text).toContain(`The old volume ${LIVE} still exists; delete it after the restore is proven.`)
+    expect(text).not.toMatch(/resum/i)
+  })
+
+  it('a detached restore volume left beside the attached one is ignored: it is not attached, replaced or mentioned in the swap', async () => {
+    const world = makeWorld(
+      provisionedCloud({
+        volumes: [
+          {id: 'vol-live', name: TRACES_VOLUME_NAME, dropletIds: [DROPLET_ID]},
+          {id: 'vol-left', name: 'traces-data-restore-20261101-0900', dropletIds: [], description: LABEL},
+        ],
+      }),
+      {provisioned: true},
+    )
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    const doctl = world.doctlCalls()
+    expect(doctl.filter(call => call.startsWith('compute volume create'))).toHaveLength(1)
+    expect(doctl.some(call => call.includes('vol-left'))).toBe(false)
+    expect(world.cloud.volumes.find(v => v.id === 'vol-left')?.dropletIds).toEqual([])
+    expect(logs.join('\n')).toContain('in place of traces-data (kept, detached)')
+  })
+
+  // The recovery the refusal describes: the operator attaches the previous volume by hand, then runs the restore again.
+  // The host is as the interrupted restore left it: Docker stopped and nothing mounted.
+  it('after the hand step (previous volume attached, Docker stopped, nothing mounted, a restore volume left detached) a first run completes', async () => {
+    const world = makeWorld(
+      interruptedRestoreCloud({
+        volumes: [
+          {id: 'vol-old', name: TRACES_VOLUME_NAME, dropletIds: [DROPLET_ID]},
+          {id: 'vol-restore', name: RESTORE_NAME, dropletIds: [], description: LABEL},
+        ],
+      }),
+      {provisioned: true, mounted: false, dockerRunning: false},
+    )
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    const doctl = world.doctlCalls()
+    expect(doctl.filter(call => call.startsWith('compute volume create'))).toHaveLength(1)
+    expect(doctl.filter(call => call.startsWith('compute volume-action detach'))).toEqual([
+      `compute volume-action detach vol-old ${DROPLET_ID} --wait`,
+    ])
+    expect(doctl.filter(call => call.startsWith('compute volume-action attach'))).toHaveLength(1)
+    expect(doctl.some(call => call.includes('vol-restore'))).toBe(false)
+    // The quiesce step met Docker already stopped and nothing mounted, and the run went on to the quarantine scan.
+    expect(world.host.quiescedFrom).toEqual([{mounted: false, dockerRunning: false}])
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(world.host.dockerRestarts).toBe(0)
+    expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
+    expect(world.cloud.volumes.find(v => v.id === 'vol-restore')?.dropletIds).toEqual([])
+    expect(world.cloud.volumes.find(v => v.name === 'traces-data-restore-20261120-1530')?.dropletIds).toEqual([
+      DROPLET_ID,
+    ])
+    expect(logs.join('\n')).toContain('in place of traces-data (kept, detached)')
+  })
+
+  it('refuses before creating anything when a volume already carries the name the restore volume would get', async () => {
+    const world = makeWorld(
+      provisionedCloud({
+        volumes: [{id: 'vol-live', name: 'traces-data-restore-20261120-1530', dropletIds: [DROPLET_ID]}],
+      }),
+      {provisioned: true},
+    )
+    const failure = await failureOfRestore(world, RESTORE_INPUT)
+    expect(failure).toContain('traces-data-restore-20261120-1530 already exists')
+    expectNothingChanged(world)
+  })
+
+  it('refuses a snapshot name that cannot be written as the label, before any change', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const failure = await failureOfRestore(world, {...RESTORE_INPUT, snapshotName: 'x'.repeat(129)})
+    expect(failure).toMatch(/snapshot name/i)
+    expect(world.calls).toEqual([])
+  })
+})
+
+// The quiesce step is the first host step of a run started after the hand step, so it must cope with a host that
+// is already quiet. Run under a real shell with systemctl, mountpoint and umount as shims.
+async function runQuiesce(mounted: boolean) {
+  const dir = mkdtempSync(join(tmpdir(), 'traces-quiesce-'))
+  try {
+    const shim = join(dir, 'shim')
+    mkdirSync(shim)
+    const state = join(dir, 'state')
+    mkdirSync(state)
+    if (mounted) writeFileSync(join(state, 'mounted'), '')
+    const write = (name: string, body: string) => {
+      writeFileSync(join(shim, name), `#!/bin/sh\n${body}\n`)
+      chmodSync(join(shim, name), 0o755)
+    }
+    write('systemctl', `echo "$@" >> ${state}/systemctl`)
+    write('mountpoint', `[ -e ${state}/mounted ]`)
+    write('umount', `rm -f ${state}/mounted; echo "$@" >> ${state}/umount`)
+    const proc = Bun.spawn(['bash', '-o', 'pipefail', '-c', quiesceScript()], {
+      env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+    return {stdout: stdout.trim(), exitCode, umounted: existsSync(join(state, 'umount'))}
+  } finally {
+    rmSync(dir, {recursive: true, force: true})
+  }
+}
+
+describe('quiesceScript, run under a real shell', () => {
+  it('succeeds without unmounting when nothing is mounted (Docker already stopped)', async () => {
+    expect(await runQuiesce(false)).toEqual({stdout: 'TRACES_QUIESCED', exitCode: 0, umounted: false})
+  })
+
+  it('unmounts a mounted volume', async () => {
+    expect(await runQuiesce(true)).toEqual({stdout: 'TRACES_QUIESCED', exitCode: 0, umounted: true})
+  })
+})
+
+describe('runRestore: quarantining torn Tempo blocks on the restored volume', () => {
+  const RESTORE_INPUT = {snapshotName: 'traces-data-snap', privateKey: 'placeholder', remoteUser: 'root'}
+  const TORN = [
+    'single-tenant/280241d8-1111-4222-8333-444455556666',
+    'other-tenant/3b0c5a77-aaaa-4bbb-8ccc-ddddeeeeffff',
+  ]
+  const QUARANTINE_DIR = `${TRACES_TEMPO_QUARANTINE_ROOT}/20261120-1530`
+  const quarantineCommand = (world: ReturnType<typeof makeWorld>) =>
+    world.sshCommands().find(command => command.includes('traces-step:tempo-quarantine')) ?? ''
+  const failureOf = (promise: Promise<unknown>) =>
+    promise.then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+
+  // Mutation target: dropping the step fails these.
+  it('runs one more host step after the sentinel is verified, with Docker still stopped', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(world.host.dockerRestarts).toBe(0)
+    const command = quarantineCommand(world)
+    expect(command).toContain(TRACES_TEMPO_DATA_DIR)
+    // The stamp is the restore's own UTC time, the same one the restore volume's name carries.
+    expect(command).toContain(QUARANTINE_DIR.slice(TRACES_TEMPO_QUARANTINE_ROOT.length + 1))
+    expect(logs.join('\n')).toContain('No torn Tempo blocks')
+    expect(logs.join('\n')).not.toContain('Quarantined')
+  })
+
+  it('reports what it moved: the count, every block with its tenant, the limit, and where they are', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, tornBlocks: TORN})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+
+    const text = logs.join('\n')
+    expect(text).toContain('Quarantined 2 Tempo blocks with torn metadata')
+    for (const block of TORN) expect(text).toContain(block)
+    expect(text).toContain(QUARANTINE_DIR)
+    expect(text).toContain('moved, not deleted')
+    expect(text).toMatch(/Tempo may be missing the traces of its most recent compaction/)
+    expect(text).toContain('Langfuse is the complete record')
+    expect(text).toMatch(/not covered by retention/)
+  })
+
+  it('says "1 Tempo block" for one', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, tornBlocks: [TORN[0] ?? '']})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, deps)
+    expect(logs.join('\n')).toContain('Quarantined 1 Tempo block with torn metadata')
+  })
+
+  // Mutation target: a step whose answer is not checked lets a restore end green over a failed scan.
+  it.each([
+    ['a non-zero exit', {exitCode: 1, stdout: 'TRACES_TEMPO_QUARANTINE_EXISTS\n', stderr: 'mv: boom'}],
+    [
+      'a non-zero exit after a clean-looking answer',
+      {exitCode: 1, stdout: 'TRACES_TEMPO_QUARANTINE_DONE 0\n', stderr: ''},
+    ],
+    ['no final sentinel', ok('TRACES_TEMPO_QUARANTINED single-tenant/280241d8-1111-4222-8333-444455556666\n')],
+    ['an unrecognised answer', ok('all good')],
+    ['a count that disagrees with the lines', ok('TRACES_TEMPO_QUARANTINE_DONE 2')],
+    ['a line that is not a tenant and block', ok('TRACES_TEMPO_QUARANTINED ../../etc\nTRACES_TEMPO_QUARANTINE_DONE 1')],
+  ])(
+    'stops the restore when the scan answers with %s, saying the ports stay closed and Docker is stopped',
+    async (_label, answer) => {
+      const world = makeWorld(provisionedCloud(), {provisioned: true, quarantine: answer})
+      const {deps, logs} = makeDeps(world.runner)
+      const failure = await failureOf(runRestore(RESTORE_INPUT, deps))
+
+      expect(failure).toContain('Tempo block quarantine')
+      expect(failure).toContain('Docker is stopped')
+      expect(failure).toContain('Ports 80 and 443 stay closed')
+      expect(failure).toContain('traces-data-restore-20261120-1530 is attached and mounted')
+      expect(failure).toContain('do not run the restore again')
+      expect(logs.join('\n')).not.toContain('✓')
+      expect(world.host.dockerRestarts).toBe(0)
+    },
+  )
+
+  // Mutation target: reading the clock again for the move or the report lets a minute change split them.
+  it('uses one clock read for the volume name, the move and the report across a minute change', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, tornBlocks: [TORN[0] ?? '']})
+    const {deps, logs} = makeDeps(world.runner)
+    const instants = ['2026-11-20T15:30:59.900Z', '2026-11-20T15:31:00.100Z', '2026-11-20T15:32:00.000Z']
+    let reads = 0
+    deps.now = () => new Date(instants[Math.min(reads++, instants.length - 1)] ?? '')
+    await runRestore(RESTORE_INPUT, deps)
+
+    expect(reads).toBe(1)
+    expect(quarantineCommand(world)).toContain('stamp=20261120-1530')
+    expect(logs.join('\n')).toContain(`${TRACES_TEMPO_QUARANTINE_ROOT}/20261120-1530/<tenant>/<block>`)
+    expect(logs.join('\n')).not.toContain('1531')
+  })
+
+  it('does not run before the sentinel is verified', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const originalHandle = world.host.handle.bind(world.host)
+    world.host.handle = (command, stdin) =>
+      command.includes('verify-sentinel') ? fail('TRACES_SENTINEL_UNRECOGNISED') : originalHandle(command, stdin)
+    const {deps} = makeDeps(world.runner)
+    await expect(runRestore(RESTORE_INPUT, deps)).rejects.toThrow(/verify sentinel on restored volume failed/)
+    expect(world.host.steps).not.toContain('tempo-quarantine')
   })
 })
 

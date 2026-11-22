@@ -69,6 +69,19 @@ export const TRACES_DOCKER_ROOT = `${TRACES_VOLUME_MOUNT}/docker`
 /** The containerd root: the content and snapshot stores that hold images on this droplet image. */
 export const TRACES_CONTAINERD_ROOT = `${TRACES_VOLUME_MOUNT}/containerd`
 
+/**
+ * Tempo's data on the host: the files of the Docker named volume `traces_tempo_data` (compose project `traces`, volume
+ * `tempo_data`, mounted at `/var/tempo` in the container). Docker's data root is on the encrypted volume, so Tempo's
+ * blocks are at `<this>/blocks/<tenant>/<block-uuid>/`.
+ */
+export const TRACES_TEMPO_DATA_DIR = `${TRACES_DOCKER_ROOT}/volumes/traces_tempo_data/_data`
+
+/**
+ * Where a restore moves Tempo blocks whose metadata is torn, under `<this>/<YYYYMMDD-HHMM>/<tenant>/<block-uuid>`. On
+ * the same filesystem as the blocks, so the move is a rename. Nothing prunes it: the operator deletes it.
+ */
+export const TRACES_TEMPO_QUARANTINE_ROOT = `${TRACES_VOLUME_MOUNT}/tempo-quarantine`
+
 /** The app directory: compose file, configs, secret files, token directories and collector queues. */
 export const TRACES_APP_DIR = `${TRACES_VOLUME_MOUNT}/app`
 

@@ -38,9 +38,11 @@ The target is 30 days live. A daily snapshot of the volume can hold a trace for 
 
 These are targets, not guarantees. A delayed database merge or a failed snapshot prune can keep data longer, and a backup made outside this routine would extend it further. The stack checks the age of its oldest data and raises an alert when it passes 31 days.
 
+After a restore from a snapshot, any Tempo data block that was caught half-written is moved into a quarantine folder on the same volume instead of being deleted. That folder is outside the 30-day retention, and the operator deletes it by hand.
+
 ## Deleting data
 
-The operator can delete a trace from Langfuse on request. Tempo has no way to delete one trace. Its copy (structure, names, error text and link attributes) expires with the 30-day retention, unless the operator wipes the whole Tempo store. A snapshot that contains the data ages out within 8 days of the deletion.
+The operator can delete a trace from Langfuse on request. Tempo has no way to delete one trace. Its copy (structure, names, error text and link attributes) expires with the 30-day retention, unless the operator wipes the whole Tempo store. A quarantined Tempo block (see above) does not expire by itself; the operator deletes it. A snapshot that contains the data ages out within 8 days of the deletion.
 
 ## Calls the software makes on its own
 

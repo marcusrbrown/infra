@@ -52,6 +52,8 @@ import {
   TRACES_DROPLET_NAME,
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
+  TRACES_TEMPO_DATA_DIR,
+  TRACES_TEMPO_QUARANTINE_ROOT,
   TRACES_TOKEN_ROOT,
   TRACES_VOID_TOKEN_PREFIX,
   TRACES_VOLUME_MOUNT,
@@ -328,65 +330,104 @@ async function getDropletIp(run: Runner, deps: Pick<ProvisionDeps, 'sleep'>, att
 export interface VolumeRow {
   id: string
   name: string
+  /** The volume's description; empty when it has none. A restore volume records its snapshot here. */
+  description: string
   dropletIds: string[]
 }
 
+/**
+ * Reads `doctl compute volume list --output json`: an array of the API's volume objects. JSON rather than the
+ * whitespace-split text table, because a description is free text (the table would need a column and would split it),
+ * and because the `description` and `droplet_ids` fields are the API's own names, not a column label to guess.
+ * Anything that is not an array of volumes with a string `id` and `name` fails closed.
+ */
 export function parseVolumeRows(raw: string): VolumeRow[] {
-  const rows: VolumeRow[] = []
-  for (const line of nonEmptyLines(raw)) {
-    const [id, name, ...rest] = line.split(/\s+/)
-    if (!id || !name) continue
-    rows.push({id, name, dropletIds: rest.join(' ').match(/\d+/g) ?? []})
+  const text = raw.trim()
+  if (text === '') return []
+  const bad = (): Error => new Error('Unrecognised volume listing from doctl (expected a JSON array of volumes)')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw bad()
   }
-  return rows
+  if (parsed === null) return []
+  if (!Array.isArray(parsed)) throw bad()
+  return parsed.map((entry: unknown): VolumeRow => {
+    if (typeof entry !== 'object' || entry === null) throw bad()
+    const {id, name, description, droplet_ids: dropletIds} = entry as Record<string, unknown>
+    if (typeof id !== 'string' || typeof name !== 'string') throw bad()
+    return {
+      id,
+      name,
+      description: typeof description === 'string' ? description : '',
+      dropletIds: Array.isArray(dropletIds) ? dropletIds.map(String) : [],
+    }
+  })
 }
 
 async function listVolumes(run: Runner): Promise<VolumeRow[]> {
   return parseVolumeRows(
-    await doctl(run, [
-      'compute',
-      'volume',
-      'list',
-      '--region',
-      DROPLET_REGION,
-      '--format',
-      'ID,Name,DropletIDs',
-      '--no-header',
-    ]),
+    await doctl(run, ['compute', 'volume', 'list', '--region', DROPLET_REGION, '--output', 'json']),
   )
 }
 
 /**
- * Lists volumes until one named `name` shows up, or `VOLUME_LIST_ATTEMPTS` listings have not shown it. A volume
- * just created can be missing from the listing for a few seconds. The pause comes between listings only: none
- * before the first, none after the last. `undefined` means it never appeared.
+ * Lists volumes until `settled` accepts the listing, or `VOLUME_LIST_ATTEMPTS` listings have not satisfied it, and
+ * returns the last listing. DigitalOcean's listing can lag a change for a few seconds (a created volume is missing,
+ * a completed attach or detach is not shown yet). The pause comes between listings only: none before the first,
+ * none after the last. The caller decides what an unsettled last listing means.
  */
-async function waitForListedVolume(run: Runner, deps: ProvisionDeps, name: string): Promise<VolumeRow | undefined> {
-  let volume: VolumeRow | undefined
-  for (let attempt = 1; !volume && attempt <= VOLUME_LIST_ATTEMPTS; attempt++) {
+async function pollVolumeListing(
+  run: Runner,
+  deps: Pick<ProvisionDeps, 'sleep'>,
+  settled: (rows: VolumeRow[]) => boolean,
+): Promise<VolumeRow[]> {
+  let rows: VolumeRow[] = []
+  for (let attempt = 1; attempt <= VOLUME_LIST_ATTEMPTS; attempt++) {
     if (attempt > 1) await deps.sleep(VOLUME_LIST_INTERVAL_MS)
-    volume = (await listVolumes(run)).find(row => row.name === name)
+    rows = await listVolumes(run)
+    if (settled(rows)) break
   }
-  return volume
+  return rows
+}
+
+/** A volume just created can be missing from the listing for a few seconds. `undefined` means it never appeared. */
+async function waitForListedVolume(run: Runner, deps: ProvisionDeps, name: string): Promise<VolumeRow | undefined> {
+  const rows = await pollVolumeListing(run, deps, listing => listing.some(row => row.name === name))
+  return rows.find(row => row.name === name)
 }
 
 /**
- * Attaches a volume and proves it from a fresh listing. A successful attach call
- * is not enough: provisioning must not reach any Docker change on a volume that
- * is not attached.
+ * Attaches a volume and proves it from the listing. A successful attach call is not enough: provisioning must not
+ * reach any Docker change on a volume that is not attached. The listing can lag the completed action, so it is read
+ * again (same budget as a created volume) before the attach is called failed.
  */
-async function attachVolume(run: Runner, volume: VolumeRow, dropletId: string): Promise<void> {
+async function attachVolume(
+  run: Runner,
+  deps: Pick<ProvisionDeps, 'sleep'>,
+  volume: VolumeRow,
+  dropletId: string,
+): Promise<void> {
   await doctl(run, ['compute', 'volume-action', 'attach', volume.id, dropletId, '--wait'])
-  const readback = (await listVolumes(run)).find(row => row.id === volume.id)
-  if (!readback?.dropletIds.includes(dropletId)) {
+  const attached = (rows: VolumeRow[]): boolean =>
+    rows.find(row => row.id === volume.id)?.dropletIds.includes(dropletId) === true
+  if (!attached(await pollVolumeListing(run, deps, attached))) {
     throw new Error(`Volume "${volume.name}" is not attached to droplet ${dropletId} after the attach call`)
   }
 }
 
-async function detachVolume(run: Runner, volume: VolumeRow, dropletId: string): Promise<void> {
+/** Detaches a volume and proves it from the listing, read again while it still shows the droplet. */
+async function detachVolume(
+  run: Runner,
+  deps: Pick<ProvisionDeps, 'sleep'>,
+  volume: VolumeRow,
+  dropletId: string,
+): Promise<void> {
   await doctl(run, ['compute', 'volume-action', 'detach', volume.id, dropletId, '--wait'])
-  const readback = (await listVolumes(run)).find(row => row.id === volume.id)
-  if (readback?.dropletIds.includes(dropletId)) {
+  const stillAttached = (rows: VolumeRow[]): boolean =>
+    rows.find(row => row.id === volume.id)?.dropletIds.includes(dropletId) === true
+  if (stillAttached(await pollVolumeListing(run, deps, rows => !stillAttached(rows)))) {
     throw new Error(`Volume "${volume.name}" is still attached to droplet ${dropletId} after the detach call`)
   }
 }
@@ -1220,7 +1261,7 @@ export async function runProvision(input: ProvisionInput, force: boolean, deps: 
     throw new Error(`Volume "${TRACES_VOLUME_NAME}" is attached to another droplet (${volume.dropletIds.join(', ')})`)
   }
   if (!volume.dropletIds.includes(dropletId)) {
-    await attachVolume(run, volume, dropletId)
+    await attachVolume(run, deps, volume, dropletId)
   }
 
   const firewallId = await ensureFirewall(run, dropletId, log)
@@ -1300,8 +1341,182 @@ echo TRACES_QUIESCED`
 }
 
 export function restoreVolumeName(now: Date): string {
+  return `${TRACES_VOLUME_NAME}-restore-${restoreStamp(now)}`
+}
+
+/** A snapshot name the label can carry whole: what `--restore-snapshot` accepts, and short enough to store. */
+const LABELLABLE_SNAPSHOT_RE = /^[a-z\d][\w.-]{0,127}$/i
+
+/**
+ * The description a restore volume is created with: `restore-of:<snapshot name>`, no spaces. It is a label for a person
+ * reading `doctl compute volume list` and nothing more: no code reads it back to decide anything. A name that cannot
+ * be written whole is refused before any change, so the label is never truncated or reshaped.
+ */
+export function restoreDescription(snapshotName: string): string {
+  if (!LABELLABLE_SNAPSHOT_RE.test(snapshotName)) {
+    throw new Error(
+      `Snapshot name "${snapshotName.slice(0, 40)}" cannot be written on the restore volume's description: use 1 to 128 letters, digits, dots, dashes and underscores, not starting with a dash or an underscore. Nothing was changed.`,
+    )
+  }
+  return `restore-of:${snapshotName}`
+}
+
+/** `YYYYMMDD-HHMM` in UTC: the restore volume's name and the quarantine directory carry the same stamp. */
+export function restoreStamp(now: Date): string {
   const iso = now.toISOString()
-  return `${TRACES_VOLUME_NAME}-restore-${iso.slice(0, 10).replaceAll('-', '')}-${iso.slice(11, 16).replace(':', '')}`
+  return `${iso.slice(0, 10).replaceAll('-', '')}-${iso.slice(11, 16).replace(':', '')}`
+}
+
+const BLOCK_UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+export const TEMPO_QUARANTINE_DONE_PREFIX = 'TRACES_TEMPO_QUARANTINE_DONE'
+export const TEMPO_QUARANTINED_PREFIX = 'TRACES_TEMPO_QUARANTINED'
+
+export interface TempoQuarantineOptions {
+  /** Tempo's data directory (holds `blocks/`). The default is the Docker volume on the encrypted volume. */
+  dataDir?: string
+  quarantineRoot?: string
+  /** `YYYYMMDD-HHMM` (UTC) of the restore. */
+  stamp: string
+}
+
+/**
+ * Moves every Tempo block with torn metadata out of `blocks/` so Tempo can build its tenant index.
+ *
+ * A volume snapshot is taken while Tempo runs, so it can catch a block directory whose files were created but whose
+ * data had not reached the disk: every file zero bytes. One empty `meta.json` fails the tenant index, and Tempo then
+ * serves nothing from stored blocks.
+ *
+ * Torn, narrowly: a block directory (its name is a UUID) that has a `meta.json`, or a `meta.compacted.json`, that is
+ * empty or is not a JSON object. A directory with neither file is left alone: Tempo treats it as mid-write or cleared.
+ * Plain files (`work.json`, `index.json.gz`, `index.pb.zst`), non-UUID entries and symlinks are never touched.
+ *
+ * "Not a JSON object" is the first and the last non-space byte being `{` and `}`, not a parse. No script in this repo
+ * relies on `python3`, and the host image's coreutils are the only tools certain to be there. The check therefore
+ * catches the real failure (empty, cut off, garbage) and not text that happens to be braced; a test pins that limit.
+ *
+ * A torn block is moved with `mv` to `<quarantineRoot>/<stamp>/<tenant>/<block>`, on the same filesystem (a rename:
+ * the step refuses when it is not, and refuses to overwrite). It is never copied or deleted, and the step makes the
+ * directories it creates mode 0700 (root, since the step runs as root). Idempotent: a second run finds nothing.
+ * A missing data or `blocks` directory (a snapshot from before Tempo wrote) is nothing to do. Prints one
+ * `TRACES_TEMPO_QUARANTINED <tenant>/<block>` line per move and ends with `TRACES_TEMPO_QUARANTINE_DONE <count>`.
+ */
+export function tempoQuarantineScript(options: TempoQuarantineOptions): string {
+  if (!/^\d{8}-\d{4}$/.test(options.stamp)) throw new Error(`Unsafe quarantine stamp: ${options.stamp}`)
+  const data = safePath(options.dataDir ?? TRACES_TEMPO_DATA_DIR)
+  const quarantine = safePath(options.quarantineRoot ?? TRACES_TEMPO_QUARANTINE_ROOT)
+  return String.raw`set -eu
+# traces-step:tempo-quarantine
+shopt -s nullglob
+data=${data}
+quarantine=${quarantine}
+stamp=${options.stamp}
+count=0
+is_object() {
+  [ -s "$1" ] || return 1
+  first=$(tr -d '[:space:]' < "$1" | head -c 1 || true)
+  last=$(tr -d '[:space:]' < "$1" | tail -c 1 || true)
+  [ "$first" = '{' ] && [ "$last" = '}' ]
+}
+torn() {
+  local f
+  for f in "$1/meta.json" "$1/meta.compacted.json"; do
+    if [ -e "$f" ] && ! is_object "$f"; then return 0; fi
+  done
+  return 1
+}
+dev_of() { stat -c %d "$1" || stat -f %d "$1"; }
+if [ -d "$data/blocks" ] && [ ! -L "$data/blocks" ]; then
+  for tenant_dir in "$data"/blocks/*; do
+    if [ ! -d "$tenant_dir" ] || [ -L "$tenant_dir" ]; then continue; fi
+    tenant=$(basename "$tenant_dir")
+    for block_dir in "$tenant_dir"/*; do
+      if [ ! -d "$block_dir" ] || [ -L "$block_dir" ]; then continue; fi
+      block=$(basename "$block_dir")
+      if ! [[ $block =~ ${BLOCK_UUID_PATTERN} ]]; then continue; fi
+      if ! torn "$block_dir"; then continue; fi
+      dest=$quarantine/$stamp/$tenant
+      install -d -m 0700 "$quarantine" "$quarantine/$stamp" "$dest"
+      if [ "$(dev_of "$block_dir")" != "$(dev_of "$dest")" ]; then echo TRACES_TEMPO_QUARANTINE_CROSS_DEVICE; exit 1; fi
+      if [ -e "$dest/$block" ]; then echo TRACES_TEMPO_QUARANTINE_EXISTS; exit 1; fi
+      mv -- "$block_dir" "$dest/$block"
+      printf '%s %s/%s\n' ${TEMPO_QUARANTINED_PREFIX} "$tenant" "$block"
+      count=$((count + 1))
+    done
+  done
+fi
+echo "${TEMPO_QUARANTINE_DONE_PREFIX} $count"`
+}
+
+const QUARANTINED_LINE = new RegExp(String.raw`^${TEMPO_QUARANTINED_PREFIX} ([\w.-]+)/([0-9a-fA-F-]{36})$`)
+const QUARANTINE_DONE_LINE = new RegExp(String.raw`^${TEMPO_QUARANTINE_DONE_PREFIX} (\d+)$`)
+
+/** The `<tenant>/<block>` entries the quarantine step moved. Exit 0, well-formed lines and a matching count, or it throws. */
+export function parseTempoQuarantine(result: RunResult): string[] {
+  const label = 'Tempo block quarantine'
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `${label} failed (exit ${result.exitCode}): ${excerpt(result.stderr) || excerpt(result.stdout) || 'no output'}`,
+    )
+  }
+  const lines = nonEmptyLines(result.stdout)
+  const done = QUARANTINE_DONE_LINE.exec(lines.at(-1) ?? '')
+  const moved = lines.slice(0, -1).map(line => QUARANTINED_LINE.exec(line))
+  if (!done || moved.includes(null) || Number(done[1]) !== moved.length) {
+    throw new Error(`${label}: unrecognised answer from the host (expected a count that matches the moved blocks)`)
+  }
+  return moved.flatMap(match => (match ? [`${match[1]}/${match[2]}`] : []))
+}
+
+function reportQuarantine(log: ProvisionDeps['log'], moved: readonly string[], stamp: string): void {
+  if (moved.length === 0) {
+    log('No torn Tempo blocks were found on the restored volume.')
+    return
+  }
+  const noun = moved.length === 1 ? 'block' : 'blocks'
+  log(`Quarantined ${moved.length} Tempo ${noun} with torn metadata (tenant/block): ${moved.join(', ')}.`)
+  log(
+    `They were moved, not deleted, to ${TRACES_TEMPO_QUARANTINE_ROOT}/${stamp}/<tenant>/<block>. The snapshot caught Tempo mid-write, so Tempo may be missing the traces of its most recent compaction for each quarantined block; Langfuse is the complete record. Nothing prunes the quarantine and it is not covered by retention: delete it once you have looked.`,
+  )
+}
+
+/**
+ * A volume by name and state: `name (detached)`, `name (attached to this droplet)` or `name (attached to droplet 9, not
+ * this one)`, plus `, label "x"` when it has a description. Never by id. The description is text from the cloud, so it
+ * is cut short and shown printable-ASCII only.
+ */
+function describeVolume(row: VolumeRow, dropletId: string): string {
+  const state =
+    row.dropletIds.length === 0
+      ? 'detached'
+      : row.dropletIds.includes(dropletId) && row.dropletIds.length === 1
+        ? 'attached to this droplet'
+        : row.dropletIds.includes(dropletId)
+          ? `attached to this droplet and droplet ${row.dropletIds.filter(id => id !== dropletId).join(', ')}`
+          : `attached to droplet ${row.dropletIds.join(', ')}, not this one`
+  const label = row.description.replaceAll(/[^\u0020-\u007E]/g, '?').slice(0, 128)
+  return `${row.name} (${state}${label === '' ? '' : `, label "${label}"`})`
+}
+
+/**
+ * Why a restore stops when it does not find exactly one attached `traces-data*` volume: how many it found, that the
+ * ports stay closed and nothing was changed, every `traces-data*` volume with its state and label, and the way
+ * forward. The way forward never deletes anything: with none attached (the state an interrupted restore leaves) it is
+ * to attach the previous volume by hand and run the restore again from the start.
+ */
+function volumeCountRefusal(family: VolumeRow[], attachedCount: number, dropletId: string): string {
+  const found = family.length === 0 ? 'none' : family.map(row => describeVolume(row, dropletId)).join(', ')
+  const head = `Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found ${attachedCount}. Ports 80 and 443 stay closed; no volume was changed. ${TRACES_VOLUME_NAME}* volumes found: ${found}.`
+  if (attachedCount > 1) {
+    return `${head} This run replaces one attached volume and cannot tell which of these is the live one. Make exactly one ${TRACES_VOLUME_NAME}* volume attached to droplet ${dropletId} by hand (stop Docker and unmount a volume before detaching it), then run the same restore command again from the start.`
+  }
+  if (family.length === 0) {
+    return `${head} There is nothing to replace. Check the region and the account with doctl compute volume list.`
+  }
+  return `${head} This is the state an interrupted restore leaves: this run cannot tell which detached volume held the live data, and it deletes nothing. To go on, identify the volume that was live before, attach it by hand with doctl compute volume-action attach <volume-id> ${dropletId} --wait, then run the same restore command again from the start. A leftover restore volume can be deleted only after a restore is proven.`
+}
+
+function causeOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 async function findVolumeSnapshotId(run: Runner, snapshotName: string): Promise<string | undefined> {
@@ -1325,15 +1540,30 @@ async function findVolumeSnapshotId(run: Runner, snapshotName: string): Promise<
 /**
  * Restore mode. Order is the safety property:
  *   1. remove 80 and 443 from the cloud firewall and prove it from the read-back
- *   2. only then touch any volume: look up the snapshot, create a volume from it,
- *      stop Docker and unmount, detach the old volume, attach the new one, remount
- * and stop there, with Docker stopped and the web ports closed. The old volume is
+ *   2. only then touch any volume: look up the snapshot, require exactly one attached `traces-data*` volume (the one
+ *      being replaced, whatever it is named), create a volume from the snapshot, stop Docker and unmount, detach the
+ *      old volume, attach the new one, remount
+ * The volume listing can lag a completed attach or detach, so each is read back
+ * for a bounded time (the same budget as a created volume) before it is called failed.
+ * There is no resume. A run that is not exactly one attached volume (an interrupted restore leaves none) stops after
+ * closing the ports and before any volume change, with the volumes listed and the hand step to take; a detach or
+ * attach that fails says the same. The operator attaches the previous volume by hand and runs the restore again from
+ * the start.
+ * Once the restored volume is mounted and its sentinel verified, with Docker still stopped, Tempo blocks whose
+ * metadata is torn (a snapshot taken mid-write) are moved to a quarantine directory (`tempoQuarantineScript`) and
+ * reported. The run stops there, with Docker stopped and the web ports closed. The old volume is
  * kept, detached. A snapshot holds the sender token files as they were, so the
  * ports stay closed at the cloud firewall (not on the volume) until every token
  * file is deny-all (`traces sender revoke --all`) and `--reopen-ports` is run.
  */
 export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Promise<void> {
   const {run, log} = deps
+  // Refused before anything is touched: the label is written whole or not at all.
+  const description = restoreDescription(input.snapshotName)
+  // One clock read for the whole run: the restore volume's name, the quarantine directory it writes and the one the
+  // report names all carry the same stamp, even if the run crosses a UTC minute.
+  const startedAt = deps.now()
+  const stamp = restoreStamp(startedAt)
 
   const {exists} = await checkDropletExistence(run)
   if (!exists) throw new Error(`Droplet "${TRACES_DROPLET_NAME}" does not exist; provision it before restoring`)
@@ -1356,17 +1586,22 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     )
   }
 
-  const attached = (await listVolumes(run)).filter(
-    row => row.dropletIds.includes(dropletId) && row.name.startsWith(TRACES_VOLUME_NAME),
-  )
-  const [oldVolume] = attached
-  if (attached.length !== 1 || !oldVolume) {
-    throw new Error(
-      `Expected exactly one ${TRACES_VOLUME_NAME}* volume attached to the droplet, found ${attached.length}. Ports stay closed; no volume was changed.`,
-    )
+  const volumes = await listVolumes(run)
+  const family = volumes.filter(row => row.name.startsWith(TRACES_VOLUME_NAME))
+  const attached = family.filter(row => row.dropletIds.includes(dropletId))
+  // The attached volume is the one being replaced, whatever it is named: after a restore it is itself a
+  // `traces-data-restore-*` volume. A detached volume beside it (a leftover restore volume) is not touched.
+  const [previous, ...otherAttached] = attached
+  if (!previous || otherAttached.length > 0) {
+    throw new Error(volumeCountRefusal(family, attached.length, dropletId))
   }
 
-  const newName = restoreVolumeName(deps.now())
+  const newName = restoreVolumeName(startedAt)
+  if (volumes.some(row => row.name === newName)) {
+    throw new Error(
+      `A volume named ${newName} already exists, so a restore started in this minute cannot create its volume. Ports 80 and 443 stay closed; no volume was changed. Wait a minute and run the same command again.`,
+    )
+  }
   const created = await doctl(run, [
     'compute',
     'volume',
@@ -1378,6 +1613,8 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     VOLUME_SIZE,
     '--snapshot',
     snapshotId,
+    '--desc',
+    description,
     '--format',
     'ID',
     '--no-header',
@@ -1390,27 +1627,57 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     )
   }
 
+  // The one hand step after a swap stops part-way: get the previous volume attached to the droplet, then start over.
+  const handStep = `doctl compute volume-action attach ${previous.id} ${dropletId} --wait`
+  const swapFailure = (error: unknown, state: string): Error =>
+    new Error(`${causeOf(error)}. Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ${state}`)
+
+  let quarantined: string[] = []
   const dropletIp = await getDropletIp(run, deps)
   await withRemote(deps, input, dropletIp, async (exec, identityFile) => {
     await deps.waitForSsh(dropletIp, input.remoteUser, {identityFile})
     await runStep(exec, 'stop Docker and unmount the volume', quiesceScript(), QUIESCE_SENTINELS)
 
-    await detachVolume(run, oldVolume, dropletId)
-    await attachVolume(run, newVolume, dropletId)
+    try {
+      await detachVolume(run, deps, previous, dropletId)
+    } catch (error) {
+      throw swapFailure(
+        error,
+        `${previous.name} may still be attached (check doctl compute volume list) and ${newName} was created and is not attached. Once exactly one ${TRACES_VOLUME_NAME}* volume is attached to droplet ${dropletId} (if ${previous.name} is not, attach it by hand with ${handStep}), run the same restore command again from the start.`,
+      )
+    }
+    try {
+      await attachVolume(run, deps, newVolume, dropletId)
+    } catch (error) {
+      throw swapFailure(
+        error,
+        `${previous.name} is detached and kept, and ${newName} is not confirmed attached. Check doctl compute volume list. If no ${TRACES_VOLUME_NAME}* volume is attached to droplet ${dropletId}, attach ${previous.name} by hand with ${handStep}. Then run the same restore command again from the start.`,
+      )
+    }
 
     const device = volumeDevicePath(newName)
     await runStep(exec, 'probe restored volume', fsProbeScript(device), ['TRACES_FS_EXT4'])
     await runStep(exec, 'mount restored volume', mountScript(device), MOUNT_SENTINELS)
     await runStep(exec, 'verify sentinel on restored volume', verifySentinelScript(), ['TRACES_SENTINEL_PRESENT'])
+
+    // Docker is still stopped, so Tempo is not writing. A torn block would stop it serving any stored block.
+    try {
+      quarantined = parseTempoQuarantine(await exec(bashCommand(tempoQuarantineScript({stamp}))))
+    } catch (error) {
+      throw new Error(
+        `${causeOf(error)}. Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ${newName} is attached and mounted and the Tempo block check did not finish. Look at ${TRACES_TEMPO_DATA_DIR}/blocks by hand and do not run the restore again: it would start another restore from this volume.`,
+      )
+    }
   })
 
   log(
-    `\n\u001B[1;32m✓\u001B[0m Volume ${newName} is attached and mounted in place of ${oldVolume.name} (kept, detached).`,
+    `\n\u001B[1;32m✓\u001B[0m Volume ${newName} is attached and mounted in place of ${previous.name} (kept, detached).`,
   )
   log('Docker is stopped and ports 80 and 443 are closed at the cloud firewall.')
   log('Next: start Docker, make every token file deny-all (traces sender revoke --all), run a normal deploy,')
   log('then run this script with --reopen-ports and reissue all three tokens.')
-  log(`The old volume ${oldVolume.name} still exists; delete it after the restore is proven.`)
+  log(`The old volume ${previous.name} still exists; delete it after the restore is proven.`)
+  reportQuarantine(log, quarantined, stamp)
 }
 
 export interface ReopenInput {

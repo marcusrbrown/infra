@@ -39,7 +39,9 @@
  *
  * Order and guards:
  * 1. Create `traces-<yyyymmdd>-<hhmm>` (UTC) with the tag. A failure is recorded and the run goes on.
- * 2. Read the snapshots back. When the create succeeded, it must be listed and be the newest daily snapshot.
+ * 2. Read the snapshots back. When the create succeeded, it must be listed and be the newest daily snapshot. The listing
+ *    can lag a just-created snapshot, so after a create the read-back is retried (6 attempts, 5 s apart) while it is
+ *    malformed or does not hold the created id yet. With no create it is one listing.
  * 3. The newest daily snapshot must be at most 36 hours old, or the run fails.
  * 4. Prune only when step 3 passed: a broken backup must not also erase history. Delete our snapshots older than 8 days,
  *    oldest first, at most 10 a run, so a wrong clock or a long backlog cannot wipe the history in one run.
@@ -52,7 +54,8 @@
  * Safety contract:
  * - ZERO package imports (`node:fs`, the sibling `alert-issue.ts` and `deploy-gate-notify.ts`).
  * - The token, API response bodies and volume or snapshot ids are never written to a log, a summary, an issue or Discord.
- *   Failures are fixed reason codes (`do-api:<stage>:http-<status>`, `:timeout`, `:network`, `:malformed`).
+ *   Failures are fixed reason codes (`do-api:<stage>:http-<status>`, `:timeout`, `:network`, and `:malformed:<part>` where
+ *   `<part>` names the wrong fixed part of the body, e.g. `not-json` or `item.created_at`, never a value from it).
  * - A re-run (`github.run_attempt` above 1) makes no alert API call: it would replay an old backup result.
  *
  * Environment inputs (names are this script's contract):
@@ -123,6 +126,13 @@ export const RETENTION_DAYS = 8
 export const MAX_NEWEST_AGE_HOURS = 36
 /** A run deletes at most this many snapshots, oldest first. */
 export const MAX_DELETES_PER_RUN = 10
+/**
+ * After a create, the read-back listing is tried at most this many times. DigitalOcean's listing can lag a snapshot that
+ * was created a moment ago, or answer in a shape it does not hold a few seconds later.
+ */
+export const READBACK_ATTEMPTS = 6
+/** The pause between two read-back attempts. */
+export const READBACK_INTERVAL_MS = 5000
 
 const MAX_PAGES = 50
 const REQUEST_TIMEOUT_MS = 30_000
@@ -170,6 +180,17 @@ function apiFailure(stage: string, detail: string): AlertFailure {
   return new AlertFailure(`do-api:${stage}:${detail}`)
 }
 
+/**
+ * A 2xx body that is not the shape this script reads. The reason is `malformed:<part>`, where `<part>` is one of a fixed
+ * set the code names (`not-json`, `not-an-object`, `snapshots-not-a-list`, `item.created_at`, ...), never anything read
+ * from the response. A distinct class so the read-back can tell this from a network or HTTP failure.
+ */
+class MalformedResponse extends AlertFailure {}
+
+function malformed(stage: string, part: string): MalformedResponse {
+  return new MalformedResponse(`do-api:${stage}:malformed:${part}`)
+}
+
 /** Sends one request and returns the response body as text. The timeout covers the body read too. */
 async function request(
   deps: DoDeps,
@@ -215,13 +236,14 @@ async function requestJson(
   payload?: unknown,
 ): Promise<Record<string, unknown>> {
   const text = await request(deps, stage, method, url, payload)
+  let parsed: unknown
   try {
-    const parsed: unknown = JSON.parse(text)
-    if (isRecord(parsed)) return parsed
+    parsed = JSON.parse(text)
   } catch {
-    // Falls through to the fixed failure below.
+    throw malformed(stage, 'not-json')
   }
-  throw apiFailure(stage, 'malformed')
+  if (!isRecord(parsed)) throw malformed(stage, 'not-an-object')
+  return parsed
 }
 
 /** The next page's URL, or `null`. A link that leaves `api.digitalocean.com` is refused, so the token cannot be sent away. */
@@ -247,9 +269,9 @@ async function listAll(deps: DoDeps, stage: string, path: string, key: string): 
     if (page >= MAX_PAGES) throw apiFailure(stage, 'too-many-pages')
     const record: Record<string, unknown> = await requestJson(deps, stage, 'GET', next)
     const entries = record[key]
-    if (!Array.isArray(entries)) throw apiFailure(stage, 'malformed')
+    if (!Array.isArray(entries)) throw malformed(stage, `${key}-not-a-list`)
     for (const entry of entries as unknown[]) {
-      if (!isRecord(entry)) throw apiFailure(stage, 'malformed')
+      if (!isRecord(entry)) throw malformed(stage, 'item-not-an-object')
       items.push(entry)
     }
     next = nextPage(record, stage)
@@ -286,7 +308,8 @@ async function listDroplets(deps: DoDeps): Promise<Droplet[]> {
 async function listVolumes(deps: DoDeps): Promise<Volume[]> {
   const items = await listAll(deps, 'list-volumes', '/v2/volumes?per_page=200', 'volumes')
   return items.map(item => {
-    if (typeof item.id !== 'string' || typeof item.name !== 'string') throw apiFailure('list-volumes', 'malformed')
+    if (typeof item.id !== 'string') throw malformed('list-volumes', 'item.id')
+    if (typeof item.name !== 'string') throw malformed('list-volumes', 'item.name')
     const dropletIds = Array.isArray(item.droplet_ids)
       ? (item.droplet_ids as unknown[]).filter((id): id is number => Number.isInteger(id))
       : []
@@ -297,16 +320,12 @@ async function listVolumes(deps: DoDeps): Promise<Volume[]> {
 async function listSnapshots(deps: DoDeps): Promise<Snapshot[]> {
   const items = await listAll(deps, 'list-snapshots', '/v2/snapshots?resource_type=volume&per_page=200', 'snapshots')
   return items.map(item => {
+    if (typeof item.id !== 'string') throw malformed('list-snapshots', 'item.id')
+    if (typeof item.name !== 'string') throw malformed('list-snapshots', 'item.name')
+    if (typeof item.resource_id !== 'string') throw malformed('list-snapshots', 'item.resource_id')
+    if (typeof item.resource_type !== 'string') throw malformed('list-snapshots', 'item.resource_type')
     const createdAt = typeof item.created_at === 'string' ? Date.parse(item.created_at) : Number.NaN
-    if (
-      typeof item.id !== 'string' ||
-      typeof item.name !== 'string' ||
-      typeof item.resource_id !== 'string' ||
-      typeof item.resource_type !== 'string' ||
-      Number.isNaN(createdAt)
-    ) {
-      throw apiFailure('list-snapshots', 'malformed')
-    }
+    if (Number.isNaN(createdAt)) throw malformed('list-snapshots', 'item.created_at')
     const tags = Array.isArray(item.tags)
       ? (item.tags as unknown[]).filter((tag): tag is string => typeof tag === 'string')
       : []
@@ -329,8 +348,34 @@ async function createSnapshot(deps: DoDeps, volumeId: string, name: string): Pro
     tags: [SNAPSHOT_TAG],
   })
   const snapshot = record.snapshot
-  if (!isRecord(snapshot) || typeof snapshot.id !== 'string') throw apiFailure('create-snapshot', 'malformed')
+  if (!isRecord(snapshot)) throw malformed('create-snapshot', 'snapshot')
+  if (typeof snapshot.id !== 'string') throw malformed('create-snapshot', 'snapshot.id')
   return snapshot.id
+}
+
+/**
+ * The read-back listing. With no `createdId` (this run created nothing) it is one listing, as ever. With one, the listing
+ * is tried up to `READBACK_ATTEMPTS` times, `READBACK_INTERVAL_MS` apart, until it parses AND holds that id: a listing
+ * read straight after a create can lag it, or come back in another shape for a moment. A malformed listing, or one that
+ * parses without the id, is a retry. A network, timeout or HTTP failure is not: it ends the read-back at once, as it did
+ * before. After the last attempt a malformed listing throws its reason, and a parsed one without the id is returned so the
+ * caller reports `created-snapshot-not-listed` and still applies the age and prune guards.
+ */
+async function readBackSnapshots(
+  deps: DoDeps,
+  createdId: string | null,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<Snapshot[]> {
+  for (let attempt = 1; ; attempt++) {
+    const last = attempt >= READBACK_ATTEMPTS
+    try {
+      const snapshots = await listSnapshots(deps)
+      if (createdId === null || last || snapshots.some(snapshot => snapshot.id === createdId)) return snapshots
+    } catch (error) {
+      if (createdId === null || last || !(error instanceof MalformedResponse)) throw error
+    }
+    await sleep(READBACK_INTERVAL_MS)
+  }
 }
 
 async function deleteSnapshot(deps: DoDeps, snapshotId: string): Promise<void> {
@@ -403,6 +448,8 @@ export interface BackupDeps {
   readonly writeOutput: (name: string, value: string) => void
   readonly log: (line: string) => void
   readonly appendSummary: (line: string) => void
+  /** The pause between read-back attempts; injected so tests do not wait. */
+  readonly sleep: (milliseconds: number) => Promise<void>
   readonly timeoutMs?: number
 }
 
@@ -480,7 +527,7 @@ export async function runBackup(
   let newestAgeHours: number | null = null
   try {
     const scope = scopeOf(volumes)
-    const snapshots = await listSnapshots(api)
+    const snapshots = await readBackSnapshots(api, createdId, deps.sleep)
     const daily = snapshots.filter(snapshot => isDaily(snapshot, scope))
     const newest = daily.reduce<Snapshot | null>(
       (best, candidate) => (best === null || candidate.createdAt > best.createdAt ? candidate : best),
@@ -697,6 +744,7 @@ async function main(): Promise<void> {
       writeOutput: (name, value) => appendTo(process.env.GITHUB_OUTPUT, `${name}=${value}`),
       log: printLine,
       appendSummary: line => appendTo(process.env.GITHUB_STEP_SUMMARY, line),
+      sleep: milliseconds => new Promise<void>(resolve => setTimeout(resolve, milliseconds)),
     })
     process.exitCode = outcome.exitCode
     return

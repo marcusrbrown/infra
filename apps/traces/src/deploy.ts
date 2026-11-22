@@ -16,9 +16,10 @@
 //   8. start the stores and Langfuse, assert and read back retention, start Tempo, Grafana, the collector and
 //      the reporter, verify the collector's image digest
 //   9. run the gates, then set the route: open only when every gate passes AND TRACES_INGEST_OPEN is exactly
-//      `true`; otherwise off (first bring-up) or held (it was open before). Grafana's sign-in is checked here too
-//      (the password file works, `admin:admin` does not), but it never decides the route: a failure fails the run
-//      after the route is set (`OperatorSurfaceError`)
+//      `true`; otherwise off (first bring-up) or held (it was open before)
+//  10. remove the deploy marker, which ends the route's work. Only then check Grafana's sign-in (the password file
+//      works): read-only, after the route is final, and a failure fails the run (`OperatorSurfaceError`) without
+//      touching the route
 //
 // Overlapping deploys: the last deploy to start owns the host. Each deploy writes a random id into the deploy marker
 // in its first host script; every later script that changes the host checks, in the same script, that the marker
@@ -177,6 +178,14 @@ function requireUrlSafe(env: EnvLike, name: DeployInputName, min: number, max = 
   return value
 }
 
+/**
+ * The shortest Grafana admin password the deploy accepts. Grafana's built-in password is `admin`; the sign-in check
+ * sends no request with it (a failed login counts against the admin account), so it proves "not the default" by
+ * this floor instead: a password of this length can never be `admin`, and one 200 with the file's value proves
+ * that is what the account holds.
+ */
+export const GRAFANA_ADMIN_PASSWORD_MIN = 16
+
 function optionalPair(env: EnvLike, publicName: DeployInputName, secretName: DeployInputName): KeyPair | undefined {
   const publicKey = read(env, publicName)
   const secretKey = read(env, secretName)
@@ -242,7 +251,7 @@ export function readInputs(env: EnvLike): DeployInputs {
     nextauthSecret: requireUrlSafe(env, 'TRACES_NEXTAUTH_SECRET', 32),
     salt: requireUrlSafe(env, 'TRACES_SALT', 16),
     encryptionKey,
-    grafanaAdminPassword: requireUrlSafe(env, 'TRACES_GRAFANA_ADMIN_PASSWORD', 16),
+    grafanaAdminPassword: requireUrlSafe(env, 'TRACES_GRAFANA_ADMIN_PASSWORD', GRAFANA_ADMIN_PASSWORD_MIN),
     grafanaSecretKey: requireUrlSafe(env, 'TRACES_GRAFANA_SECRET_KEY', 16),
     langfuseUserEmail: email,
     langfuseUserPassword: requireUrlSafe(env, 'TRACES_LANGFUSE_USER_PASSWORD', 12),
@@ -1232,24 +1241,29 @@ echo ${DIGEST_SENTINEL}`,
 
 export const GRAFANA_PROBE_SENTINEL = 'TRACES_GRAFANA_PROBED'
 
-/** The HTTP status Grafana gave to each credential. `000` is no answer (or, for the file, no password file). */
-export interface GrafanaCodes {
-  /** With the password read from `secrets/grafana/admin-password`. Expected 200. */
-  file: string
-  /** With Grafana's built-in default, `admin:admin`. Expected 401. */
-  defaults: string
+/**
+ * What the Grafana sign-in check got: the HTTP status for the password read from `secrets/grafana/admin-password`
+ * (`000` is no answer, or no password file), and, when the check could not be run at all, why.
+ */
+export interface GrafanaSignIn {
+  code: string
+  error?: string
 }
 
 /**
- * Signs in to Grafana on its loopback port twice, from the host: once with the admin password from its secret file,
- * once with `admin:admin`. Grafana reads that file only if it can enter the secret directory; when it cannot it logs
- * "Permission denied" and starts on its defaults, which this check is there to catch.
+ * Signs in to Grafana on its loopback port, from the host, once, with the admin password from its secret file.
+ * Grafana reads that file only if it can enter the secret directory; when it cannot it logs "Permission denied"
+ * and starts on its defaults, which this check is there to catch. There is no second request with the default
+ * password: Grafana counts failed Basic Auth logins per username (5 in 5 minutes), so each deploy would spend one on
+ * the admin account. One 200 with the file's password proves the account's password is the file's value, and the
+ * input check (`GRAFANA_ADMIN_PASSWORD_MIN`) keeps that value from being the default.
  *
  * The password never leaves the host's shell. It is read from the file inside the script, put into a curl config
- * with the shell's own `printf` (a builtin, so it is in no argv) and handed to curl on stdin (`-K -`). Only the
- * password-free `admin:admin` is ever a curl argument. The response bodies are captured and dropped, curl's errors
- * are off (`-s`), and only the two status codes are printed. The password alphabet is URL-safe (`requireUrlSafe`), so
- * it needs no quoting inside the config.
+ * with the shell's own `printf` (a builtin, so it is in no argv) and handed to curl on stdin (`-K -`). No credential
+ * is a curl argument. The probe stays on loopback whatever the host's environment holds: `-q`, which curl honours
+ * only as its first argument, skips `.curlrc`, and `--noproxy '*'` ignores `http_proxy` and the like. The response
+ * body is captured and dropped, curl's errors are off (`-s`), and only the status code is printed. The password
+ * alphabet is URL-safe (`requireUrlSafe`), so it needs no quoting inside the config.
  */
 export function grafanaSignInScript(): string {
   return `set -u
@@ -1257,26 +1271,21 @@ export function grafanaSignInScript(): string {
 cd ${TRACES_APP_DIR}
 url=http://127.0.0.1:3001/api/user
 file=secrets/grafana/admin-password
-code_of() { printf '%s' "$1" | sed -n 's/.*TRACES_HTTP=\\([0-9]*\\)$/\\1/p' | tail -n 1; }
-file_code=000
+code=000
 if [ -s "$file" ]; then
-  out=$(printf 'user = "admin:%s"\\n' "$(cat "$file")" | curl -s --max-time 10 -K - -w '\\nTRACES_HTTP=%{http_code}' "$url") || true
-  file_code=$(code_of "$out")
+  out=$(printf 'user = "admin:%s"\\n' "$(cat "$file")" | curl -q -s --noproxy '*' --max-time 10 -K - -w '\\nTRACES_HTTP=%{http_code}' "$url") || true
+  code=$(printf '%s' "$out" | sed -n 's/.*TRACES_HTTP=\\([0-9]*\\)$/\\1/p' | tail -n 1)
 fi
-out=$(curl -s --max-time 10 -u admin:admin -w '\\nTRACES_HTTP=%{http_code}' "$url") || true
-default_code=$(code_of "$out")
-echo "TRACES_GRAFANA_FILE_HTTP=\${file_code:-000}"
-echo "TRACES_GRAFANA_DEFAULT_HTTP=\${default_code:-000}"
+echo "TRACES_GRAFANA_FILE_HTTP=\${code:-000}"
 echo ${GRAFANA_PROBE_SENTINEL}`
 }
 
-/** Both codes from a complete answer; undefined for anything else. */
-export function parseGrafanaProbe(stdout: string): GrafanaCodes | undefined {
-  const file = /^TRACES_GRAFANA_FILE_HTTP=(\d{3})$/m.exec(stdout)?.[1]
-  const defaults = /^TRACES_GRAFANA_DEFAULT_HTTP=(\d{3})$/m.exec(stdout)?.[1]
-  if (file === undefined || defaults === undefined) return undefined
+/** The status code from a complete answer; undefined for anything else. */
+export function parseGrafanaProbe(stdout: string): string | undefined {
+  const code = /^TRACES_GRAFANA_FILE_HTTP=(\d{3})$/m.exec(stdout)?.[1]
+  if (code === undefined) return undefined
   if (!stdout.split('\n').some(line => line.trim() === GRAFANA_PROBE_SENTINEL)) return undefined
-  return {file, defaults}
+  return code
 }
 
 export const BOOTSTRAP_PROBE_SENTINEL = 'TRACES_BOOTSTRAP_PROBED'
@@ -1466,8 +1475,6 @@ export interface GateInputs {
   /** Per group: does its token file exist. */
   tokenFiles: Record<string, TokenFileState> | undefined
   verdict: VerdictState
-  /** What Grafana answered the sign-in check; `000` for both when it did not answer. */
-  grafana: GrafanaCodes
   bootstrap: {
     /** The pair is still among the deploy's inputs. */
     supplied: boolean
@@ -1485,26 +1492,36 @@ function failingChecks(detail: ReporterDetail): string {
   return lines.length === 0 ? 'the verdict does not pass' : lines.join('; ')
 }
 
-function grafanaDetail({file, defaults}: GrafanaCodes): string {
-  if (file === '200' && defaults === '401') {
-    return 'Grafana signs in with the admin password file (HTTP 200) and refuses admin:admin (HTTP 401)'
+/**
+ * The one operator gate. Not part of `evaluateGates`: the route is decided from the route gates alone, and this runs
+ * afterwards (`performDeploy`), so no outcome of the Grafana check can reach the route. Pure: pass is a 200 with the
+ * password file's password. Because the deploy refuses a Grafana admin password shorter than 16 characters (so never
+ * Grafana's default, `admin`), a 200 also means the account is not on its default password.
+ */
+export function evaluateGrafana(signIn: GrafanaSignIn): GateResult {
+  const gate = (pass: boolean, detail: string): GateResult => ({
+    id: 'grafana-signin',
+    status: pass ? 'pass' : 'fail',
+    detail,
+    kind: 'operator',
+  })
+  if (signIn.code === '200') {
+    return gate(true, 'Grafana signs in with the admin password file (HTTP 200)')
   }
-  if (file === '000' && defaults === '000') {
-    return 'Grafana did not answer on 127.0.0.1:3001; expected 200 with the admin password file and 401 with admin:admin.'
+  if (signIn.error !== undefined) {
+    return gate(false, `the Grafana sign-in check could not be run: ${signIn.error}.`)
   }
-  const code = (value: string): string => (value === '000' ? 'no answer' : `HTTP ${value}`)
-  const problems: string[] = []
-  if (file !== '200') problems.push(`the admin password file was not accepted (${code(file)}, expected 200)`)
-  if (defaults !== '401') {
-    problems.push(
-      `the default admin:admin ${defaults === '200' ? 'is accepted' : 'did not get 401'} (${code(defaults)}, expected 401)`,
+  if (signIn.code === '000') {
+    return gate(
+      false,
+      'Grafana did not answer on 127.0.0.1:3001 (no HTTP response, or the admin password file is missing on the host).',
     )
   }
   const hint =
-    file === '401' || defaults === '200'
+    signIn.code === '401'
       ? ' Grafana reads the password file only when it can enter /run/secrets/grafana, and applies it only when it creates its database: see "Grafana sign-in check fails" in docs/runbooks/trace-collection.md.'
       : ''
-  return `${problems.join('; ')}.${hint}`
+  return gate(false, `the admin password file was not accepted (HTTP ${signIn.code}, expected 200).${hint}`)
 }
 
 /**
@@ -1556,11 +1573,6 @@ export function evaluateGates(input: GateInputs): GateResult[] {
       ? `every sender group has a usable token file (real tokens: ${SENDER_GROUPS.map(group => `${group} ${input.tokenFiles?.[group]}`).join(', ')})`
       : tokenProblems.join('; '),
   )
-
-  // Evaluated with or without a key pair: Grafana does not depend on Langfuse. It is an `operator` gate, so it is
-  // outside `mayOpen` and `failedSafetyGates` and only `failedOperatorGates` sees it.
-  const grafanaPasses = input.grafana.file === '200' && input.grafana.defaults === '401'
-  gate('grafana-signin', grafanaPasses, grafanaDetail(input.grafana), 'operator')
 
   if (!input.keyPairSet) {
     const why = 'not evaluated: the Langfuse key pair is not set'
@@ -1783,7 +1795,7 @@ export interface Limits {
   /** Tries for a reporter verdict newer than the restart. */
   verdictAttempts: number
   verdictIntervalMs: number
-  /** Tries for Grafana to answer the sign-in check (an answer that is a 2xx to 4xx is settled and is not retried). */
+  /** Tries for Grafana to answer the sign-in check, after the route is final (a 2xx to 4xx answer is settled and is not retried). */
   grafanaAttempts: number
   grafanaIntervalMs: number
 }
@@ -2039,18 +2051,24 @@ async function awaitFreshVerdict(exec: RemoteExec, deps: DeployDeps, sinceEpoch:
 }
 
 /**
- * Asks the host for Grafana's sign-in answers until both are settled (an HTTP status from 200 to 499: Grafana is up
- * and has decided) or the attempts run out. A 000 or a 5xx is Grafana not up yet. A settled answer is not retried,
- * which also keeps a wrong password from being tried over and over against Grafana's login lockout. An answer that
- * cannot be read counts as no answer.
+ * Asks the host for Grafana's sign-in answer until it is settled (an HTTP status from 200 to 499: Grafana is up and
+ * has decided) or the attempts run out. A `000` or a 5xx is Grafana not up yet. A settled answer is not retried, which
+ * also keeps a wrong password from being tried over and over against Grafana's login lockout. An answer that cannot
+ * be read counts as no answer. A rejected execution (the runner threw) is kept, and if it is how the last attempt
+ * ended it is the reason reported. This never throws: it runs after the route is final and is not allowed to fail
+ * the deploy any other way than the operator-surface error.
  */
-async function awaitGrafanaSignIn(exec: RemoteExec, deps: DeployDeps): Promise<GrafanaCodes> {
+async function awaitGrafanaSignIn(exec: RemoteExec, deps: DeployDeps): Promise<GrafanaSignIn> {
   const settled = /^[2-4]\d\d$/
-  let last: GrafanaCodes = {file: '000', defaults: '000'}
+  let last: GrafanaSignIn = {code: '000'}
   for (let attempt = 1; attempt <= deps.limits.grafanaAttempts; attempt += 1) {
-    const result = await exec(bashCommand(grafanaSignInScript()))
-    last = (result.exitCode === 0 ? parseGrafanaProbe(result.stdout) : undefined) ?? {file: '000', defaults: '000'}
-    if (settled.test(last.file) && settled.test(last.defaults)) return last
+    try {
+      const result = await exec(bashCommand(grafanaSignInScript()))
+      last = {code: (result.exitCode === 0 ? parseGrafanaProbe(result.stdout) : undefined) ?? '000'}
+    } catch (error) {
+      last = {code: '000', error: clip(errorMessage(error))}
+    }
+    if (settled.test(last.code)) return last
     if (attempt < deps.limits.grafanaAttempts) await deps.sleep(deps.limits.grafanaIntervalMs)
   }
   return last
@@ -2070,16 +2088,21 @@ function pairToStdin(pair: KeyPair): string {
  * The deploy proper, over an `exec` that already speaks to the host. Exported for tests; `deploy` is the entry
  * point that builds the ssh transport.
  *
- * A failed `operator` gate (Grafana's sign-in) fails the run here, after `runDeploy` has set the route and removed
- * the marker. It is thrown outside `runDeploy`'s failure handler, which would close the route: a Grafana problem
- * must not stop traces from being received.
+ * `runDeploy` decides and verifies the route from the route gates alone, removes the marker and returns. Only then is
+ * Grafana's sign-in checked, over the bare `rawExec` and outside `runDeploy`'s failure handler (which would close the
+ * route). No outcome of that check (a pass, a refusal, a timeout, a rejected execution, malformed output) can reach
+ * the route: it is read-only, it comes after the route is final, and a failure becomes `OperatorSurfaceError`, which
+ * fails the run. A deploy that already failed never gets here.
  */
 export async function performDeploy(
   inputs: DeployInputs,
   rawExec: RemoteExec,
   deps: DeployDeps,
 ): Promise<DeployResult> {
-  const result = await runDeploy(inputs, rawExec, deps)
+  const routed = await runDeploy(inputs, rawExec, deps)
+  const grafana = evaluateGrafana(await awaitGrafanaSignIn(rawExec, deps))
+  for (const line of describeGates([grafana])) deps.log(`  ${line}`)
+  const result: DeployResult = {...routed, gates: [...routed.gates, grafana]}
   const failed = failedOperatorGates(result.gates)
   if (failed.length > 0) throw new OperatorSurfaceError(result, failed)
   return result
@@ -2445,8 +2468,6 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       }
     }
 
-    const grafana = await awaitGrafanaSignIn(exec, deps)
-
     const gates = evaluateGates({
       keyPairSet,
       ingestVariableTrue: inputs.ingestOpen,
@@ -2454,7 +2475,6 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       tokenFiles,
       verdict,
       bootstrap: {supplied: inputs.bootstrapKey !== undefined, probe, hygiene},
-      grafana,
     })
     for (const line of describeGates(gates)) log(`  ${line}`)
 

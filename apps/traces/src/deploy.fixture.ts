@@ -110,10 +110,10 @@ export interface FakeOptions {
   /** ALTER answers success but changes nothing. */
   alterIgnored?: boolean
   /**
-   * What Grafana answers the sign-in check: the HTTP code for the password file's password and for `admin:admin`
-   * (`000` is no answer), or a function of the attempt (1 for the first). Default: 200 and 401.
+   * The HTTP code Grafana gives the sign-in check with the password file's password (`000` is no answer), or a
+   * function of the attempt (1 for the first). Default: 200.
    */
-  grafana?: {file: string; defaults: string} | ((attempt: number) => {file: string; defaults: string})
+  grafana?: string | ((attempt: number) => string)
 }
 
 export class FakeHost {
@@ -466,11 +466,9 @@ export class FakeHost {
       }
       case step === 'grafana-signin': {
         const attempt = this.count('grafana-signin')
-        const configured = this.options.grafana ?? {file: '200', defaults: '401'}
-        const codes = typeof configured === 'function' ? configured(attempt) : configured
-        return ok(
-          `TRACES_GRAFANA_FILE_HTTP=${codes.file}\nTRACES_GRAFANA_DEFAULT_HTTP=${codes.defaults}\nTRACES_GRAFANA_PROBED\n`,
-        )
+        const configured = this.options.grafana ?? '200'
+        const code = typeof configured === 'function' ? configured(attempt) : configured
+        return ok(`TRACES_GRAFANA_FILE_HTTP=${code}\nTRACES_GRAFANA_PROBED\n`)
       }
       case step === 'probe-ingest': {
         const codes = this.options.probeOverride?.(this.served) ?? this.probeCodes()

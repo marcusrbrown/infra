@@ -993,7 +993,9 @@ describe('volume attach failure', () => {
   it('stops when the attach call succeeds but the volume does not read back as attached', async () => {
     const world = makeWorld({attachIgnored: true})
     const {deps, waits} = makeDeps(world.runner)
-    await expect(runProvision(PROVISION_INPUT, false, deps)).rejects.toThrow(/not attached/)
+    await expect(runProvision(PROVISION_INPUT, false, deps)).rejects.toThrow(
+      /was not shown attached .* may be attached/,
+    )
     expect(world.sshCommands()).toEqual([])
     expect(waits).toEqual([])
   })
@@ -1035,11 +1037,11 @@ describe('a volume attach that the listing shows late', () => {
     expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
   })
 
-  it('fails with the existing error when the attachment never shows within the budget, before any SSH step', async () => {
+  it('fails when the attachment never shows within the budget, saying the volume may be attached, before any SSH step', async () => {
     const world = makeWorld({attachLagLists: VOLUME_LIST_ATTEMPTS})
     const {deps, sleeps, waits} = makeDeps(world.runner)
     await expect(runProvision(PROVISION_INPUT, false, deps)).rejects.toThrow(
-      `Volume "${TRACES_VOLUME_NAME}" is not attached to droplet ${DROPLET_ID} after the attach call`,
+      `Volume "${TRACES_VOLUME_NAME}" was not shown attached to droplet ${DROPLET_ID} after the attach call succeeded, so it may be attached`,
     )
     expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
     expect(world.sshCommands()).toEqual([])
@@ -1897,7 +1899,18 @@ describe('runRestore: the volume swap when the listing lags the completed action
   const HAND_STEP = 'run the same restore command again from the start'
   const NO_DELETE_ADVICE = /\bdelete\b|resum|to start a fresh restore|only copy/i
 
-  it('fails with the existing detach error when the listing lags beyond the budget, and says what state the host is in', async () => {
+  const RUNBOOK_PATH = 'docs/runbooks/trace-collection.md'
+  const failureOf = (world: ReturnType<typeof makeWorld>) =>
+    runRestore(RESTORE_INPUT, makeDeps(world.runner).deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+  const failsOn = (action: 'attach' | 'detach') => (args: readonly string[]) =>
+    args.slice(0, 3).join(' ') === `compute volume-action ${action}` ? fail(`${action} refused`) : undefined
+
+  // The listing never showed the detach within the poll bound. The call succeeded, so the old volume may be detached:
+  // the operator must look before rerunning, which would create another volume.
+  it('says the old volume may be detached, and to check before any rerun, when the detach is not confirmed in time', async () => {
     const world = makeWorld(provisionedCloud({detachLagLists: VOLUME_LIST_ATTEMPTS}), {provisioned: true})
     const {deps, sleeps} = makeDeps(world.runner)
     const failure = await runRestore(RESTORE_INPUT, deps).then(
@@ -1906,32 +1919,72 @@ describe('runRestore: the volume swap when the listing lags the completed action
     )
 
     expect(failure).toContain(
-      `Volume "${TRACES_VOLUME_NAME}" is still attached to droplet ${DROPLET_ID} after the detach call`,
+      `Volume "${TRACES_VOLUME_NAME}" was still shown attached to droplet ${DROPLET_ID} after the detach call succeeded, so it may be detached`,
     )
     expect(failure).toContain('Ports 80 and 443 stay closed')
     expect(failure).toContain('Docker is stopped')
     expect(failure).toContain(NEW_NAME)
+    expect(failure).toContain(
+      "Check doctl compute volume list and the droplet's attached volumes before doing anything",
+    )
+    expect(failure).toContain('do not run the restore again until you know')
+    expect(failure).toContain(`${RUNBOOK_PATH}, "Interrupted restore"`)
     expect(failure).toContain(`doctl compute volume-action attach vol-old ${DROPLET_ID} --wait`)
-    expect(failure).toContain(HAND_STEP)
+    expect(failure).not.toContain(HAND_STEP)
     expect(failure).not.toMatch(NO_DELETE_ADVICE)
     expect(pauses(sleeps)).toHaveLength(VOLUME_LIST_ATTEMPTS - 1)
     expect(world.doctlCalls().some(call => call.startsWith('compute volume-action attach'))).toBe(false)
   })
 
-  it('fails with the existing attach error when the listing lags beyond the budget, and says what state the host is in', async () => {
-    const world = makeWorld(provisionedCloud({attachLagLists: VOLUME_LIST_ATTEMPTS}), {provisioned: true})
-    const {deps} = makeDeps(world.runner)
-    const failure = await runRestore(RESTORE_INPUT, deps).then(
-      () => '',
-      (error: unknown) => (error instanceof Error ? error.message : String(error)),
-    )
+  it('says the old volume is still attached when the detach call itself fails', async () => {
+    const world = makeWorld(provisionedCloud({override: failsOn('detach')}), {provisioned: true})
+    const failure = await failureOf(world)
 
-    expect(failure).toContain(`Volume "${NEW_NAME}" is not attached to droplet ${DROPLET_ID} after the attach call`)
+    expect(failure).toContain('detach refused')
+    expect(failure).toContain(`The detach of ${TRACES_VOLUME_NAME} failed, so it is still attached`)
+    expect(failure).toContain(`${NEW_NAME} was created and is not attached`)
+    expect(failure).toContain('Docker is stopped')
+    expect(failure).toContain(`doctl compute volume-action attach vol-old ${DROPLET_ID} --wait`)
+    expect(failure).toContain(HAND_STEP)
+    expect(failure).not.toContain('may be detached')
+    expect(failure).not.toContain('until you know')
+    expect(failure).not.toMatch(NO_DELETE_ADVICE)
+  })
+
+  // The listing never showed the attach within the poll bound. The call succeeded, so the new volume may be attached.
+  it('says the new volume may be attached, and to check before any rerun, when the attach is not confirmed in time', async () => {
+    const world = makeWorld(provisionedCloud({attachLagLists: VOLUME_LIST_ATTEMPTS}), {provisioned: true})
+    const failure = await failureOf(world)
+
+    expect(failure).toContain(
+      `Volume "${NEW_NAME}" was not shown attached to droplet ${DROPLET_ID} after the attach call succeeded, so it may be attached`,
+    )
     expect(failure).toContain('Ports 80 and 443 stay closed')
     expect(failure).toContain('Docker is stopped')
     expect(failure).toContain(`${TRACES_VOLUME_NAME} is detached and kept`)
+    expect(failure).toContain(
+      "Check doctl compute volume list and the droplet's attached volumes before doing anything",
+    )
+    expect(failure).toContain('do not run the restore again until you know')
+    expect(failure).toContain('another restore volume')
+    expect(failure).toContain(`${RUNBOOK_PATH}, "Interrupted restore"`)
+    expect(failure).toContain(`doctl compute volume-action attach vol-old ${DROPLET_ID} --wait`)
+    expect(failure).not.toContain(HAND_STEP)
+    expect(failure).not.toMatch(NO_DELETE_ADVICE)
+  })
+
+  it('says the new volume is not attached when the attach call itself fails', async () => {
+    const world = makeWorld(provisionedCloud({override: failsOn('attach')}), {provisioned: true})
+    const failure = await failureOf(world)
+
+    expect(failure).toContain('attach refused')
+    expect(failure).toContain(`The attach of ${NEW_NAME} failed, so it is not attached`)
+    expect(failure).toContain(`${TRACES_VOLUME_NAME} is detached and kept`)
+    expect(failure).toContain('Docker is stopped')
     expect(failure).toContain(`doctl compute volume-action attach vol-old ${DROPLET_ID} --wait`)
     expect(failure).toContain(HAND_STEP)
+    expect(failure).not.toContain('may be attached')
+    expect(failure).not.toContain('until you know')
     expect(failure).not.toMatch(NO_DELETE_ADVICE)
   })
 })

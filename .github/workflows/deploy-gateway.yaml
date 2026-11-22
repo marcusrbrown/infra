@@ -150,6 +150,9 @@ jobs:
           tags: ghcr.io/marcusrbrown/infra-gateway:${{ steps.upstream.outputs.ref }}-${{ github.sha }}
           build-args: |
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          # No provenance attestation. It differs on every build, which changes the pinned index digest of an
+          # image whose platform manifest did not change, and the deploy would recreate the gateway on every run.
+          provenance: false
           # type=registry is shorthand for type=image,push=true — the export declares
           # the push itself rather than relying on the push: flag merging into it.
           outputs: type=registry,rewrite-timestamp=true

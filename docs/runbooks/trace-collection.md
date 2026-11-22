@@ -487,9 +487,10 @@ DigitalOcean's listing lags a completed action, so a change that succeeded but w
 - Known: ports closed. The restore volume exists and is detached. The previous volume is still attached. Docker is running (SSH failed) or stopped, and `/mnt/traces` may still be mounted.
 - Do: run checks 2, 3 and 4. If Docker runs or the volume is mounted, stop and unmount by hand as in stage 3. Then run the restore again from the start; the leftover restore volume stays.
 
-**Stage 5: during the detach or attach.** Messages: `Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ...` after `is still attached to droplet ... after the detach call`, `is not attached to droplet ... after the attach call`, or a `doctl` failure.
+**Stage 5: during the detach or attach.** Messages: `Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ...` after a `doctl` failure, or after `was still shown attached to droplet ... after the detach call succeeded, so it may be detached`, or `was not shown attached to droplet ... after the attach call succeeded, so it may be attached`.
 
 - Known: Docker is stopped, ports are closed and `/mnt/traces` is unmounted. The message says where the volumes are as far as the run knows; check 4 says where they are.
+- Two kinds of message. `The detach of <volume> failed` and `The attach of <volume> failed` come from a `doctl` call that exited non-zero: the change was not made, so a failed detach leaves the old volume attached and a failed attach leaves the new volume detached. `may be detached` and `may be attached` mean the call succeeded and the listing did not show the result within its poll bound: the change may have been made. Check 4, read again, decides. Do not run the restore again until it shows where each volume is; a rerun can create another restore volume, or take the restore volume as the old one.
 - Do, by what check 4 shows. Attach the previous volume only when it is not already attached:
   - Previous volume attached, restore volume detached: nothing to attach. Run the restore again from the start.
   - Nothing attached: attach the previous volume with `doctl compute volume-action attach <previous-volume-id> <droplet-id> --wait` (the message names it and prints the droplet ID). Read check 4 until exactly one `traces-data*` volume is attached, then run the restore again from the start.

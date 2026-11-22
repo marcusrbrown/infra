@@ -1096,6 +1096,263 @@ describe('per-app invariants', () => {
   })
 })
 
+// ─── SSH multiplexing ────────────────────────────────────────────────────────
+//
+// Droplets run UFW `limit 22/tcp`: a source that opens 6 new connections in 30 s is blocked. Gateway (PR #277),
+// cliproxy (PR #1733) and traces (PR #2012) were each locked out by an ssh/scp path that opened one connection per
+// call. Only per-app tests enforced multiplexing, so a new path inherited nothing. This test makes the rule
+// repo-wide: a source file that builds ssh/scp argv either multiplexes through one ControlMaster socket or is
+// listed below with the reason it may not.
+//
+// What it can and cannot see. It counts spawn sites in the source text, not connections at run time: a builder
+// with one site called ten times is one site. That is why a file that does not multiplex must be on the allowlist
+// even with a single site, and why each entry caps its site count. Whether every site of a multiplexing file
+// really uses the socket stays with the per-app tests (for example `apps/traces/server/provision.test.ts`).
+
+const SSH_SCAN_GLOBS = ['apps/*/src/deploy.ts', 'apps/*/server/*.ts', 'packages/cli/src/commands/**/*.ts'] as const
+
+interface SshUnmultiplexedEntry {
+  file: string
+  /** The most spawn sites the file may have. Adding a site means re-deciding whether the file still belongs here. */
+  maxSites: number
+  reason: string
+}
+
+/** Entries starting `KNOWN GAP` are real multi-connection paths that are not multiplexed yet; remove them when fixed. */
+const SSH_UNMULTIPLEXED_ALLOWLIST: readonly SshUnmultiplexedEntry[] = [
+  // Provisioning and one-time setup scripts.
+  {
+    file: 'apps/broker/server/provision-droplet.ts',
+    maxSites: 6,
+    reason: 'KNOWN GAP: mkdir, two scp, .env, docker check and compose up, each its own connection, plus waitForSsh',
+  },
+  {
+    file: 'apps/cliproxy/server/provision-droplet.ts',
+    maxSites: 7,
+    reason: 'KNOWN GAP: mkdir, three scp, .env, compose up and one more command, each its own connection',
+  },
+  {
+    file: 'apps/keeweb/server/setup-deploy-user.ts',
+    maxSites: 3,
+    reason:
+      'KNOWN GAP: operator-run one-time setup of box.heatvision.co; about 20 remote commands, one connection each',
+  },
+  {
+    file: 'apps/vpn/server/provision.ts',
+    maxSites: 1,
+    reason: 'one remote command (WireGuard install); the key pin and the SSH wait are shared helpers outside this scan',
+  },
+  // CLI commands that open one ssh session, or two for the same command.
+  {
+    file: 'packages/cli/src/commands/broker/logs.ts',
+    maxSites: 1,
+    reason: 'one streaming `docker compose logs` session',
+  },
+  {
+    file: 'packages/cli/src/commands/cliproxy/login.ts',
+    maxSites: 1,
+    reason: 'one interactive `ssh -tt` session',
+  },
+  {
+    file: 'packages/cli/src/commands/cliproxy/open.ts',
+    maxSites: 1,
+    reason: 'one interactive `ssh -tt` session (the TUI)',
+  },
+  {
+    file: 'packages/cli/src/commands/cliproxy/status.ts',
+    maxSites: 1,
+    reason: 'one `docker ps` probe per status run',
+  },
+  {
+    file: 'packages/cli/src/commands/dashboard/logs.ts',
+    maxSites: 1,
+    reason: 'one streaming `docker compose logs` session',
+  },
+  {
+    file: 'packages/cli/src/commands/dashboard/status.ts',
+    maxSites: 1,
+    reason: 'one `docker compose ps` probe per status run',
+  },
+  {
+    file: 'packages/cli/src/commands/gateway/backup.ts',
+    maxSites: 1,
+    reason: 'one builder, called twice per backup (volume probe, then the tar stream); two connections',
+  },
+  {
+    file: 'packages/cli/src/commands/gateway/logs.ts',
+    maxSites: 1,
+    reason: 'one streaming `docker compose logs` session',
+  },
+  {
+    file: 'packages/cli/src/commands/gateway/restore.ts',
+    maxSites: 2,
+    reason: 'KNOWN GAP: a restore makes about eight ssh calls and one scp, each its own connection',
+  },
+  {
+    file: 'packages/cli/src/commands/gateway/status.ts',
+    maxSites: 2,
+    reason: 'two sequential probes per status run (compose ps, then workspace memory); two connections',
+  },
+  {
+    file: 'packages/cli/src/commands/umami/logs.ts',
+    maxSites: 1,
+    reason: 'one streaming `docker compose logs` session',
+  },
+  {
+    file: 'packages/cli/src/commands/umami/status.ts',
+    maxSites: 1,
+    reason: 'one `docker compose ps` probe per status run',
+  },
+  {
+    file: 'packages/cli/src/commands/vpn/logs.ts',
+    maxSites: 1,
+    reason: 'one streaming `journalctl` session',
+  },
+  {
+    file: 'packages/cli/src/commands/vpn/shared.ts',
+    maxSites: 1,
+    reason: 'one `wg show wg0` probe per status run',
+  },
+]
+
+/** Full-line comments only. Trailing comments are left alone so a URL in a string is never cut. */
+function stripFullLineComments(text: string): string {
+  return text
+    .split('\n')
+    .filter(line => !/^\s*(?:\/\/|\/\*|\*)/.test(line))
+    .join('\n')
+}
+
+/**
+ * A spawn site is an `'ssh'`/`'scp'` string literal (an argv head) or a call to a helper named `ssh(`/`scp(`
+ * (the shared `droplet-helpers` builders). A multiplexing file passes `ControlMaster=` in its argv, or passes
+ * the shared helper a `control: {…}` option.
+ */
+export function scanSshSource(text: string): {sites: number; multiplexed: boolean} {
+  const code = stripFullLineComments(text)
+  const literals = code.match(/(['"])s(?:sh|cp)\1/g) ?? []
+  const calls = code.match(/(?<![\w.$])(?<!function )s(?:sh|cp)\(/g) ?? []
+  return {sites: literals.length + calls.length, multiplexed: /ControlMaster=|\bcontrol:\s*\{/.test(code)}
+}
+
+export function findSshMultiplexingViolations(
+  sources: Readonly<Record<string, string>>,
+  allowlist: readonly SshUnmultiplexedEntry[],
+): string[] {
+  const violations: string[] = []
+  const scanned = new Map(Object.entries(sources).map(([file, text]) => [file, scanSshSource(text)]))
+
+  for (const [file, {sites, multiplexed}] of scanned) {
+    if (sites === 0) continue
+    const entry = allowlist.find(candidate => candidate.file === file)
+    if (multiplexed) {
+      if (entry !== undefined) violations.push(`${file}: multiplexes now; remove its allowlist entry`)
+    } else if (entry === undefined) {
+      violations.push(
+        `${file}: ${sites} ssh/scp spawn site(s) and no ControlMaster/ControlPath. Multiplex through one socket, or ` +
+          'add an allowlist entry with the reason it opens a single connection',
+      )
+    } else if (sites > entry.maxSites) {
+      violations.push(`${file}: ${sites} spawn sites, allowlist caps it at ${entry.maxSites}; multiplex or re-decide`)
+    }
+  }
+
+  for (const entry of allowlist) {
+    if ((scanned.get(entry.file)?.sites ?? 0) === 0) {
+      violations.push(`${entry.file}: allowlisted but not scanned or has no ssh/scp spawn site; remove the entry`)
+    }
+  }
+  return violations
+}
+
+function readSshScanSources(): Record<string, string> {
+  const sources: Record<string, string> = {}
+  for (const pattern of SSH_SCAN_GLOBS) {
+    for (const file of new Bun.Glob(pattern).scanSync({cwd: REPO_ROOT})) {
+      if (file.endsWith('.test.ts') || file.includes('/__fixtures__/') || file.includes('/node_modules/')) continue
+      sources[file] = readFileSync(resolve(REPO_ROOT, file), 'utf8')
+    }
+  }
+  return sources
+}
+
+describe('ssh multiplexing: every file that builds ssh/scp argv multiplexes or is allowlisted', () => {
+  it('has no unclassified, over-cap or stale file in the live tree', () => {
+    expect(findSshMultiplexingViolations(readSshScanSources(), SSH_UNMULTIPLEXED_ALLOWLIST)).toEqual([])
+  })
+
+  it('scans the sources it is meant to scan', () => {
+    const sources = readSshScanSources()
+    for (const expected of [
+      'apps/traces/src/deploy.ts',
+      'apps/traces/server/provision.ts',
+      'packages/cli/src/commands/traces/remote.ts',
+    ]) {
+      expect(Object.keys(sources)).toContain(expected)
+      expect(scanSshSource(sources[expected] ?? '')).toMatchObject({multiplexed: true})
+    }
+  })
+
+  it('gives every allowlist entry a reason and a positive cap', () => {
+    for (const entry of SSH_UNMULTIPLEXED_ALLOWLIST) {
+      expect(entry.reason.trim().length).toBeGreaterThan(0)
+      expect(entry.maxSites).toBeGreaterThan(0)
+    }
+  })
+
+  describe('rule behaviour against synthetic sources', () => {
+    const multiplexed = `const o = ['-o', 'ControlMaster=auto', '-o', \`ControlPath=\${p}\`]\nrun(['ssh', ...o, 'a'])\nrun(['ssh', ...o, 'b'])`
+    const twoPlain = "run(['ssh', 'host', 'a'])\nrun(['scp', 'f', 'host:f'])"
+    const onePlain = "run(['ssh', 'host', 'a'])"
+
+    it('passes a multiplexing file and a file with no ssh at all', () => {
+      expect(findSshMultiplexingViolations({'a.ts': multiplexed, 'b.ts': 'export const x = 1'}, [])).toEqual([])
+    })
+
+    it('fails a file that spawns ssh more than once without ControlMaster', () => {
+      const violations = findSshMultiplexingViolations({'a.ts': twoPlain}, [])
+      expect(violations).toHaveLength(1)
+      expect(violations[0]).toContain('a.ts: 2 ssh/scp spawn site(s)')
+    })
+
+    it('fails a single-site file that is not allowlisted', () => {
+      expect(findSshMultiplexingViolations({'a.ts': onePlain}, [])).toHaveLength(1)
+    })
+
+    it('passes an allowlisted single-site file and fails it once a second site is added', () => {
+      const allow = [{file: 'a.ts', maxSites: 1, reason: 'one interactive session'}]
+      expect(findSshMultiplexingViolations({'a.ts': onePlain}, allow)).toEqual([])
+      const violations = findSshMultiplexingViolations({'a.ts': `${onePlain}\n${onePlain}`}, allow)
+      expect(violations).toEqual([expect.stringContaining('2 spawn sites, allowlist caps it at 1')])
+    })
+
+    it('fails a multiplexing file whose ControlMaster was removed', () => {
+      const stripped = multiplexed.replace('ControlMaster=auto', 'BatchMode=yes')
+      expect(findSshMultiplexingViolations({'a.ts': stripped}, [])).toHaveLength(1)
+    })
+
+    it('counts calls to the shared ssh()/scp() helpers and sees its control option', () => {
+      expect(scanSshSource('ssh(host, cmd, user, opts)\nscp(host, a, b, user)')).toEqual({sites: 2, multiplexed: false})
+      expect(scanSshSource('ssh(host, cmd, user, {control: {path, persist}})')).toEqual({sites: 1, multiplexed: true})
+    })
+
+    it('ignores a function definition and full-line comments', () => {
+      expect(scanSshSource("function ssh(command: string) {}\n// run(['ssh'])\n * ControlMaster=auto")).toEqual({
+        sites: 0,
+        multiplexed: false,
+      })
+    })
+
+    it('fails an allowlist entry that is stale or whose file now multiplexes', () => {
+      const allow = [{file: 'a.ts', maxSites: 2, reason: 'was single'}]
+      expect(findSshMultiplexingViolations({}, allow)).toHaveLength(1)
+      expect(findSshMultiplexingViolations({'a.ts': multiplexed}, allow)).toEqual([
+        expect.stringContaining('multiplexes now'),
+      ])
+    })
+  })
+})
+
 describe('findCrossOrgSecretsInherit', () => {
   it('flags a cross-org reusable workflow that uses `secrets: inherit`', () => {
     const parsed = parseYaml(`
@@ -2058,6 +2315,34 @@ describe('deploy-gateway.yaml: optional operator secret declarations (issue 1)',
 // block with group `deploy-<app>-` and cancel-in-progress: false, and no job
 // may carry its own. A queued run starts no jobs, so its pre-gate notify job
 // fires only when the run is next in line for its own approval gate.
+
+/** The `with:` block of a `build-images` step of deploy-gateway.yaml, by step id. */
+async function gatewayBuildStepWith(id: string): Promise<Record<string, unknown>> {
+  const workflow = parseYaml(await Bun.file(resolve(REPO_ROOT, '.github/workflows/deploy-gateway.yaml')).text())
+  const step = stepsOf(workflowJob(isRecord(workflow) ? workflow : {}, 'build-images')).find(
+    candidate => candidate.id === id,
+  )
+  return isRecord(step?.with) ? step.with : {}
+}
+
+describe('deploy-gateway.yaml: provenance on the image builds', () => {
+  // Three v0.146.0 builds on different infra commits had the same amd64 platform manifest. Only the attestation
+  // manifest in the index differed, so the pinned index digest changed and every deploy recreated the gateway.
+  it('builds the gateway image without a provenance attestation, so its pinned digest follows its contents', async () => {
+    const withBlock = await gatewayBuildStepWith('build-gateway')
+    expect(withBlock.provenance).toBe(false)
+    expect(withBlock.sbom).toBeUndefined()
+    expect(withBlock.file).toBe('upstream-agent/deploy/gateway.Dockerfile')
+  })
+
+  // The workspace image does not build reproducibly: its platform manifest differs across the same three builds.
+  // Dropping its attestation would not stop its digest from changing, so its step keeps the default.
+  it('leaves provenance unset on the workspace image, whose contents differ from build to build', async () => {
+    const withBlock = await gatewayBuildStepWith('build-workspace')
+    expect(withBlock.file).toBe('upstream-agent/deploy/workspace.Dockerfile')
+    expect(withBlock.provenance).not.toBe(false)
+  })
+})
 
 describe('deploy.yaml: no aggregate-level concurrency (regression guard)', () => {
   const DEPLOY_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/deploy.yaml')

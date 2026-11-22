@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.29.2
+
+### Patch Changes
+
+- `status snapshot` probes and records `traces` again now that the trace stack is deployed, so its public health path and deploy state appear on the status pages. ([#2023](https://github.com/marcusrbrown/infra/pull/2023))
+
 ## 0.29.1
 
 ### Patch Changes

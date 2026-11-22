@@ -68,6 +68,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 | Open Langfuse and Grafana | `bunx @marcusrbrown/infra traces open` | SSH tunnel to loopback-only UIs; neither has a hostname |
 | Trace privacy page | `apps/docs/src/content/docs/trace-privacy.md` | Must be published before any sender token is issued |
 | Traces operator docs | `apps/traces/AGENTS.md` | Stack layout, networks, ingest states, deploy flow |
+| Traces runbook | `docs/runbooks/trace-collection.md` | Health and alerts, deploy gates, ingest hold/open, sender tokens, backups, restore, rebuild; the target of the `traces-unhealthy` and `traces-backup-failure` issues |
 | Provision agent storage | `bun run provision:agent` | Operator-local AWS OIDC/S3/IAM provisioner; prints the handoff manifest |
 | Agent operator docs | `apps/agent/AGENTS.md` | Dedicated AWS credentials, bucket/role policy, drift, teardown |
 | Agent storage runbook | `docs/runbooks/agent-s3-durable-storage.md` | Protected-environment rollout, workflow split, Go/No-Go, rollback, monitoring |

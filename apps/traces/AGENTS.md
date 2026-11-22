@@ -2,7 +2,7 @@
 
 Collector, Langfuse, Tempo and Grafana for agent-run traces, on a dedicated DigitalOcean droplet at `traces.fro.bot`. A collector accepts OTLP over HTTP on that one public hostname, tells three sender groups apart by bearer token, limits each group by bytes, and sends every trace two ways: whole to Langfuse, and reduced to a named list of attributes to Tempo. Langfuse and Grafana have no public hostname; both are reached through an SSH tunnel. Ingest and a health path are the only public routes.
 
-The decision record is `docs/plans/2026-11-20-001-feat-trace-collection-stack-plan.md`. This file covers the stack definition, the gated deploy and the health reporter. Provisioning is `server/provision.ts` (`docs/runbooks/trace-collection.md` is the operator runbook once it lands); the CLI group (`traces status|logs|open|ingest|sender`) is in `packages/cli/src/commands/traces/`.
+The decision record is `docs/plans/2026-11-20-001-feat-trace-collection-stack-plan.md`. This file covers the stack definition, the gated deploy and the health reporter. Provisioning is `server/provision.ts`; [`docs/runbooks/trace-collection.md`](../../docs/runbooks/trace-collection.md) is the operator runbook (health, deploy, ingest, sender tokens, backups, restore, rebuild); the CLI group (`traces status|logs|open|ingest|sender`) is in `packages/cli/src/commands/traces/`.
 
 ## Structure
 
@@ -211,4 +211,4 @@ The first deploy also found five defects that no test had caught, each now pinne
 
 Still unproven on the host: two deploys overlapping (the step lock's wait and the overtaken exit), a hold or open racing a deploy, whether `docker compose config --hash <service>` equals the container's `com.docker.compose.config-hash` label (if not, the deploy only ever holds more, never less), `traces ingest open`, the sender token add script (`revoke --all` ran for real on 2026-11-21), and the byte limiter under load. A restore is no longer on this list: see the Restore section for what ran on 2026-11-21.
 
-The runbook (`docs/runbooks/trace-collection.md`) is written when the stack is first deployed.
+The day-2 procedures are in [`docs/runbooks/trace-collection.md`](../../docs/runbooks/trace-collection.md). The alert issues from `traces-monitor.ts` and `traces-backup.ts` link to it by path (no anchors), so the file name is a contract.

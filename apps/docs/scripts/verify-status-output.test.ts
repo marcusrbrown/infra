@@ -293,14 +293,14 @@ describe('verifyStatusOutput: a service that is not yet deployed', () => {
     ])
   })
 
-  // Wiring with the real list, no injection. Delete with the other traces tripwire when traces is deployed.
+  // Wiring with the real list, no injection: no app is held, so every page is expected to carry its figures.
   it('applies the real not-yet-deployed list when none is injected', () => {
-    expect(APPS_NOT_YET_DEPLOYED).toContain('traces')
-    const built = buildDist({fixture: false, bodies: {traces: SERVICE}})
+    expect(APPS_NOT_YET_DEPLOYED).toEqual([])
 
-    expect(verifyStatusOutput(built, {expectFixture: false})).toContain(
-      'services/traces: missing the not-yet-deployed statement',
-    )
+    expect(verifyStatusOutput(buildDist({fixture: false}), {expectFixture: false})).toEqual([])
+    expect(
+      verifyStatusOutput(buildDist({fixture: false, bodies: {traces: NOT_DEPLOYED_SERVICE}}), {expectFixture: false}),
+    ).toEqual(['services/traces: missing the coverage figure', 'services/traces: missing "N of M samples passed"'])
   })
 })
 

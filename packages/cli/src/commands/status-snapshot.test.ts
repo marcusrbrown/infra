@@ -742,16 +742,18 @@ describe('status snapshot for an app that is not yet deployed', () => {
     expect(calls.some(call => call.includes('environment=traces'))).toBe(false)
   })
 
-  // Wiring with the real list, no injection. Delete with the other traces tripwire when traces is deployed.
+  // Wiring with the real list, no injection: every app is deployed, so every app is probed, read and recorded.
   it('applies the real not-yet-deployed list when none is injected', async () => {
-    expect(APPS_NOT_YET_DEPLOYED).toContain('traces')
-    const {deps, probed} = spies()
+    expect(APPS_NOT_YET_DEPLOYED).toEqual([])
+    const {deps, probed, deployReadsFor} = spies()
 
-    await snapshot(deps, '1', {bootstrap: true})
+    const captured = await snapshot(deps, '1', {bootstrap: true})
 
-    expect(probed).not.toContain('traces')
+    expect(probed.toSorted()).toEqual([...APP_IDS].toSorted())
+    expect(deployReadsFor).toEqual([APP_IDS])
+    expect(captured.stdout[1]).toBe('added: 8')
     const loaded = await loadHistory(history, 'existing')
-    expect(loaded?.apps.traces).toEqual([])
+    expect(loaded?.apps.traces).toHaveLength(1)
     expect(loaded?.apps.keeweb).toHaveLength(1)
   })
 })

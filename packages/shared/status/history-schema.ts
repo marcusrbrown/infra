@@ -20,13 +20,14 @@ export type AppId = (typeof APP_IDS)[number]
 export const APPS_ADDED_AFTER_V1: readonly AppId[] = ['traces']
 
 /**
- * Apps whose host is not deployed yet. The public status pages show them as "Not yet deployed" and the status
- * snapshot neither probes nor records them, so a missing host never reads as an outage. Take an app off this list in
- * a follow-up change, after its deploy has succeeded: the snapshot and the Site publish do not wait for the gated
- * deploy. In that change, delete the tests marked for deletion and remove "Not yet deployed" from the app's entry in
- * `apps/docs/src/data/services.ts`. After it merges, dispatch the `Status Snapshot` workflow.
+ * Apps whose host is not deployed yet. Empty: no app is held, so every app is probed and shown on the public status
+ * pages. An app on this list shows as "Not yet deployed" and the status snapshot neither probes nor records it, so a
+ * missing host never reads as an outage. To hold a new app, add its id here in the change that adds it and say "Not
+ * yet deployed" in its entry in `apps/docs/src/data/services.ts`. Take it off in a follow-up change, after its deploy
+ * has succeeded: the snapshot and the Site publish do not wait for the gated deploy. After that change merges,
+ * dispatch the `Status Snapshot` workflow.
  */
-export const APPS_NOT_YET_DEPLOYED: readonly AppId[] = ['traces']
+export const APPS_NOT_YET_DEPLOYED: readonly AppId[] = []
 
 export const OBSERVATION_KINDS = ['reachability', 'container-health', 'deploy-state', 'end-to-end', 'resource'] as const
 export type ObservationKind = (typeof OBSERVATION_KINDS)[number]

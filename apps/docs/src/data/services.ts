@@ -68,8 +68,7 @@ export const SERVICES: Record<AppId, ServiceInfo> = {
   },
   traces: {
     title: 'Trace collection',
-    summary:
-      'Self-hosted collection of agent run traces. Public surface: the ingest hostname and a health path. Not yet deployed.',
+    summary: 'Self-hosted collection of agent run traces. Public surface: the ingest endpoint and a health path.',
     runbooks: [],
     dashboard: false,
   },

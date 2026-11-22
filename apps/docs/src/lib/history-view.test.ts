@@ -582,15 +582,17 @@ describe('an app that is not yet deployed', () => {
     expect(views.keeweb.verdict).toBe('pass')
   })
 
-  // Wiring with the real list, no injection. Delete with the other traces tripwire when traces is deployed.
-  it('hides traces from the real list of not-yet-deployed apps', () => {
-    expect(APPS_NOT_YET_DEPLOYED).toContain('traces')
+  // Wiring with the real list, no injection: no app is held, so the samples a deployed app holds are read, including
+  // the two early `traces` failures.
+  it('reads every app from the real list of not-yet-deployed apps, which is empty', () => {
+    expect(APPS_NOT_YET_DEPLOYED).toEqual([])
     const apps = Object.fromEntries(APP_IDS.map(app => [app, [sample(-30, reachability('p'))]])) as History['apps']
     apps.traces = incidentSamples()
 
     const views = buildHistoryView({meta: {schemaVersion: 1, lastSampleAt: at(-30)}, apps}, now)
 
-    expect(views.traces.verdict).toBe('not_deployed')
-    expect(views.traces.latestSampleAt).toBeUndefined()
+    expect(views.traces.verdict).toBe('fail')
+    expect(views.traces.latestSampleAt).toBeDefined()
+    expect(Object.values(views).filter(view => view.verdict === 'not_deployed')).toEqual([])
   })
 })

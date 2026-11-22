@@ -23,7 +23,7 @@ export const DEPLOY_STATE_ID = 'deploy-state'
  */
 export const DEPLOY_STATE_REF = 'main'
 export const DEPLOY_STATE_CALLS_PER_APP = 2
-/** Hard ceiling on GitHub API calls for one `readDeployStates`: 2 per app, 14 for 7 apps. */
+/** Hard ceiling on GitHub API calls for one `readDeployStates`: `DEPLOY_STATE_CALLS_PER_APP` for each of `APP_IDS`. */
 export const DEPLOY_STATE_CALL_BUDGET = APP_IDS.length * DEPLOY_STATE_CALLS_PER_APP
 
 const SPEC = {id: DEPLOY_STATE_ID, kind: 'deploy-state', source: 'github-api'} as const

@@ -5,13 +5,13 @@ description: What the self-hosted trace collection stack receives, where it keep
 
 This page describes what happens to data that agent runs send to the self-hosted trace collection stack.
 
-**Ingest not yet open.** The stack is deployed and its public ingest route is closed. No sender token has been issued, so no agent run has sent a trace. The only traces stored are synthetic test traces the stack sends to check itself. This page is published before any token is issued, and it will be updated if anything below changes.
+**Ingest is open.** The public ingest route accepts traces only from senders that hold a token for their sender group. Tokens are issued one group at a time, and a group with no token accepts nothing. This page was published before any token was issued, and it will be updated if anything below changes.
 
 This is a single-operator deployment. The person who runs the stack and the person who reads the traces are the same party. There are no end users, no third-party recipients, no analytics and no advertising.
 
 ## Who sends traces
 
-Agent runs in the operator's own repositories and organisation, and the operator's own workstation. Each of those three senders has its own group and its own token. Nobody else is given a token.
+Agent runs in the operator's own repositories and organisation, and the operator's own workstation. Each of those three senders has its own group, and a group can send traces only once it holds its own token. Tokens are issued only to these groups. Nobody else is given a token.
 
 ## What a trace contains
 

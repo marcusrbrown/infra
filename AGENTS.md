@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 
-Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude OAuth, Codex OAuth, and OpenCode Go proxy) management, Fro Bot gateway and operator dashboard deployment, Umami analytics, WireGuard VPN egress box, OIDC credential broker, a self-hosted trace collection stack, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), `dashboard.fro.bot` (operator dashboard on DigitalOcean), `metrics.fro.bot` (Umami analytics on DigitalOcean), `broker.fro.bot` (credential broker on DigitalOcean), a static IP on AWS Lightsail `eu-west-1` (WireGuard VPN), and `traces.fro.bot` (trace collection on DigitalOcean; deployed, ingest not yet open, no sender token issued).
+Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation, CLIProxyAPI (Claude OAuth, Codex OAuth, and OpenCode Go proxy) management, Fro Bot gateway and operator dashboard deployment, Umami analytics, WireGuard VPN egress box, OIDC credential broker, a self-hosted trace collection stack, and operational CLI with MCP bridge. Deploys to `box.heatvision.co` (KeeWeb), `cliproxy.fro.bot` (CLIProxyAPI on DigitalOcean), `gateway.fro.bot` (Fro Bot gateway on DigitalOcean), `dashboard.fro.bot` (operator dashboard on DigitalOcean), `metrics.fro.bot` (Umami analytics on DigitalOcean), `broker.fro.bot` (credential broker on DigitalOcean), a static IP on AWS Lightsail `eu-west-1` (WireGuard VPN), and `traces.fro.bot` (trace collection on DigitalOcean; ingest open).
 
 ## STRUCTURE
 
@@ -16,7 +16,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 ├── apps/umami/         Umami analytics deploy package (see apps/umami/AGENTS.md)
 ├── apps/vpn/           WireGuard VPN egress box (see apps/vpn/AGENTS.md)
 ├── apps/broker/        OIDC credential broker (see apps/broker/AGENTS.md)
-├── apps/traces/        Trace collection stack, deployed; ingest not yet open (see apps/traces/AGENTS.md)
+├── apps/traces/        Trace collection stack, ingest open (see apps/traces/AGENTS.md)
 ├── apps/agent/         Operator-run AWS S3 durable-storage provisioner (see apps/agent/AGENTS.md)
 ├── apps/docs/          Public docs site, not deployable (see apps/docs/AGENTS.md)
 ├── packages/cli/       @marcusrbrown/infra CLI (see packages/cli/AGENTS.md)

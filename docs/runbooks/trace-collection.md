@@ -494,10 +494,12 @@ DigitalOcean's listing lags a completed action, so a change that succeeded but w
 - **Do not run the restore again.** List blocks whose metadata is empty or not a JSON object, the same test the provisioning scan uses (the first and last non-space characters must be `{` and `}`):
 
   ```bash
-  traces_ssh 'cd /mnt/traces/docker/volumes/traces_tempo_data/_data/blocks && n=0; for f in */*/meta.json */*/meta.compacted.json; do [ -e "$f" ] || continue; n=$((n+1)); c=$(tr -d "[:space:]" < "$f"); case "$c" in "{"*"}") ;; *) echo "torn: $f";; esac; done; echo "checked $n"'
+  traces_ssh 'cd /mnt/traces/docker/volumes/traces_tempo_data/_data/blocks || exit 1; for d in . */ */*/; do [ -e "$d" ] || continue; [ -r "$d" ] && [ -x "$d" ] || exit 1; done; n=0; for f in */*/meta.json */*/meta.compacted.json; do [ -e "$f" ] || continue; n=$((n+1)); c=$(tr -d "[:space:]" < "$f") || exit 1; case "$c" in "{"*"}") ;; *) echo "torn: $f";; esac; done; echo "checked $n"'
   ```
 
-  It ends with `checked <n>`. If it does not, stop: do not start Docker until the metadata can be checked. Move each block directory it names (`<tenant>/<block-uuid>`) to `/mnt/traces/tempo-quarantine/<YYYYMMDD-HHMM>/<tenant>/` with `mv`, never `cp` or `rm`. Then continue at step 4 of the restore.
+  The scan exits at once, before it prints `checked <n>`, when the blocks directory is missing or when it cannot read a directory or a metadata file. It ends with `checked <n>` only when every directory and file was read. If the output does not end with `checked <n>`, stop: do not start Docker until the metadata can be checked.
+
+  The command does not filter directory names or symlinks. Before moving a block directory it names (`<tenant>/<block-uuid>`), confirm that it is a real directory, not a symlink, and that its name is a UUID. Then move it to `/mnt/traces/tempo-quarantine/<YYYYMMDD-HHMM>/<tenant>/` with `mv`, never `cp` or `rm`. Then continue at step 4 of the restore.
 
 Delete nothing at any stage. A leftover restore volume and the previous volume are deleted only after a restore is proven (restore step 10). While nothing is attached, the backup job fails with `volume-not-found` and opens `traces-backup-failure`. It closes after the next successful run.
 

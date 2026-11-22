@@ -11,7 +11,7 @@ This is a single-operator deployment. The person who runs the stack and the pers
 
 ## Who sends traces
 
-Agent runs in the operator's own repositories and organisation, and the operator's own workstation. Each of those three senders has its own group and its own token. Nobody else is given a token.
+Agent runs in the operator's own repositories and organisation, and the operator's own workstation. Each of those three senders has its own group, and a group can send traces only once it holds its own token. Tokens are issued only to these groups. Nobody else is given a token.
 
 ## What a trace contains
 

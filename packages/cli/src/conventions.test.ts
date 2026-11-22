@@ -1104,7 +1104,7 @@ describe('per-app invariants', () => {
 //
 // What this proves, and only this: every source file that spawns ssh or scp either contains a ControlMaster
 // setting (`ControlMaster=` in its argv, the shared helper's `control:` option, which sets it, or the shared
-// session helper `withSshControl`, which supplies that option to every call made inside it) or is listed
+// session helper, called as `withSshControl(`, which supplies that option to every call made inside it) or is listed
 // below with the reason it may not. It reads the file's text. It does not check that each call uses the setting,
 // and it does not count connections at run time: a builder with one site called ten times is one site. Per-call
 // use stays with the per-app tests (for example `apps/traces/server/provision.test.ts`). That is also why a file
@@ -1212,7 +1212,7 @@ function stripFullLineComments(text: string): string {
 /**
  * A spawn site is an `'ssh'`/`'scp'` string literal (an argv head) or a call to a helper named `ssh(`/`scp(`
  * (the shared `droplet-helpers` builders). A file has the ControlMaster setting when it passes `ControlMaster=` in its argv, passes
- * the shared helper a `control: {…}` option, or runs its calls inside the shared `withSshControl` session.
+ * the shared helper a `control: {…}` option, or calls the shared `withSshControl` session helper (a call, not an import or a mention).
  */
 export function scanSshSource(text: string): {sites: number; hasControlMaster: boolean} {
   const code = stripFullLineComments(text)
@@ -1220,7 +1220,7 @@ export function scanSshSource(text: string): {sites: number; hasControlMaster: b
   const calls = code.match(/(?<![\w.$])(?<!function )s(?:sh|cp)\(/g) ?? []
   return {
     sites: literals.length + calls.length,
-    hasControlMaster: /ControlMaster=|\bcontrol:\s*\{|\bwithSshControl\b/.test(code),
+    hasControlMaster: /ControlMaster=|\bcontrol:\s*\{|(?<!function )\bwithSshControl\(/.test(code),
   }
 }
 
@@ -1332,7 +1332,7 @@ describe('ssh multiplexing (file-level): a file that spawns ssh/scp contains a C
       })
     })
 
-    it('sees the shared withSshControl session, and not a look-alike name', () => {
+    it('sees a call to the shared withSshControl session, and not a look-alike name', () => {
       expect(scanSshSource('ssh(host, cmd, user)\nawait withSshControl(host, user, async control => {})')).toEqual({
         sites: 1,
         hasControlMaster: true,
@@ -1341,6 +1341,29 @@ describe('ssh multiplexing (file-level): a file that spawns ssh/scp contains a C
         sites: 1,
         hasControlMaster: false,
       })
+    })
+
+    it('fails a file that imports withSshControl but never calls it and spawns ssh twice', () => {
+      const importedOnly = [
+        "import {withSshControl} from '@marcusrbrown/infra-shared/server/droplet-helpers'",
+        "run(['ssh', 'host', 'a'])",
+        "run(['ssh', 'host', 'b'])",
+      ].join('\n')
+      expect(scanSshSource(importedOnly)).toEqual({sites: 2, hasControlMaster: false})
+      const violations = findSshMultiplexingViolations({'a.ts': importedOnly}, [])
+      expect(violations).toHaveLength(1)
+      expect(violations[0]).toContain('a.ts: 2 ssh/scp spawn site(s)')
+    })
+
+    it('does not count a mention, a definition or a commented-out call of withSshControl', () => {
+      for (const text of [
+        'const control = deps.withControl ?? withSshControl',
+        'export async function withSshControl<T>(host: string) {}',
+        '// await withSshControl(host, user, body)',
+        ' * await withSshControl(host, user, body)',
+      ]) {
+        expect(scanSshSource(`${text}\nssh(host, cmd, user)`)).toEqual({sites: 1, hasControlMaster: false})
+      }
     })
 
     it('ignores a function definition and full-line comments', () => {

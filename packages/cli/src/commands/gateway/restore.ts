@@ -21,9 +21,17 @@ const EXPECTED_ARCHIVE_FILES = new Set([CA_CERT_FILE, CA_KEY_FILE])
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export interface RestoreSpawnOptions {
+  env: Record<string, string>
+  stdout: 'pipe'
+  stderr: 'pipe'
+  /** Aborting kills the child. Only the close carries one: it is the one call the restore stops waiting for. */
+  signal?: AbortSignal
+}
+
 export type RestoreSpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: RestoreSpawnOptions,
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -46,6 +54,9 @@ export type RestoreResult = {ok: true; confirmed: true} | {ok: false; error: str
  * open; this only bridges the local gap between two calls.
  */
 const CONTROL_PERSIST = '30s'
+
+/** The most the `ssh -O exit` may take before the restore stops waiting for it. */
+export const CLOSE_TIMEOUT_MS = 5000
 
 /** Short and under `/tmp`: a unix socket path is limited to about 104 bytes on macOS, and `os.tmpdir()` is long there. */
 const CONTROL_ROOT = '/tmp'
@@ -78,8 +89,9 @@ async function spawnText(
   spawn: RestoreSpawnFn,
   cmd: string[],
   env: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<{stdout: string; stderr: string; exitCode: number}> {
-  const child = spawn(cmd, {env, stdout: 'pipe', stderr: 'pipe'})
+  const child = spawn(cmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
@@ -121,16 +133,19 @@ export function validateBackupArchive(
 
 // ─── Core logic ───────────────────────────────────────────────────────────────
 
-function defaultSpawn(
-  cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
-): ReturnType<RestoreSpawnFn> {
+function defaultSpawn(cmd: string[], opts: RestoreSpawnOptions): ReturnType<RestoreSpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<RestoreSpawnFn>
+}
+
+export interface RestoreRuntimeOptions {
+  /** How long the restore waits for the master to close before it moves on. Defaults to `CLOSE_TIMEOUT_MS`. */
+  closeTimeoutMs?: number
 }
 
 export async function restoreGatewayCa(
   opts: RestoreOpts,
   spawn: RestoreSpawnFn = defaultSpawn,
+  runtime: RestoreRuntimeOptions = {},
 ): Promise<RestoreResult> {
   if (!opts.includeCa) {
     return {ok: false, error: 'Only CA restore is currently supported; --no-include-ca is not accepted'}
@@ -166,22 +181,38 @@ export async function restoreGatewayCa(
   try {
     return await restoreOverControl(opts, spawn, env, controlPath)
   } finally {
-    await closeMaster(spawn, opts.host, controlPath, env)
+    await closeMaster(spawn, opts.host, controlPath, env, runtime.closeTimeoutMs ?? CLOSE_TIMEOUT_MS)
     rmSync(directory, {recursive: true, force: true})
   }
 }
 
-/** Ask the master to exit. A master that is already gone, or a spawner that fails, is not an error: it also exits on its own. */
+/**
+ * Ask the master to exit, for at most `timeoutMs`. A master that is already gone, a spawner that fails, or a master
+ * that stops answering is not an error: it also exits on its own, `ControlPersist` after the last call. The abort
+ * kills the `ssh -O exit`; the race stops the wait even for a child that ignores the abort, so the close can never
+ * hold back the restore's own result or error.
+ */
 async function closeMaster(
   spawn: RestoreSpawnFn,
   host: string,
   controlPath: string,
   env: Record<string, string>,
+  timeoutMs: number,
 ): Promise<void> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const bound = new Promise<void>(resolve => {
+    timer = setTimeout(() => {
+      controller.abort()
+      resolve()
+    }, timeoutMs)
+  })
   try {
-    await spawnText(spawn, closeCommand(host, controlPath), env)
+    await Promise.race([spawnText(spawn, closeCommand(host, controlPath), env, controller.signal), bound])
   } catch {
     // The master exits by itself, ControlPersist after the last call.
+  } finally {
+    clearTimeout(timer)
   }
 }
 

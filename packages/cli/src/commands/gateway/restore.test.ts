@@ -3,7 +3,7 @@ import {dirname} from 'node:path'
 
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
-import {restoreGatewayCa, validateBackupArchive, type RestoreSpawnFn} from './restore'
+import {CLOSE_TIMEOUT_MS, restoreGatewayCa, validateBackupArchive, type RestoreSpawnFn} from './restore'
 
 // ─── SpawnFn helpers ──────────────────────────────────────────────────────────
 
@@ -1034,5 +1034,85 @@ describe('restoreGatewayCa — one shared SSH connection', () => {
     }
 
     expect(calls).toEqual([])
+  })
+
+  // ── The close is bounded ────────────────────────────────────────────────────
+  //
+  // `ssh -O exit` talks to a local master. If that master stops answering, the close must not hold the restore:
+  // the restore's own result, or its own error, still has to reach the caller.
+
+  /** A spawn whose close never answers: its streams never end and `exited` never settles, and it ignores the abort. */
+  function hangingClose(inner: RestoreSpawnFn, closeSignals: (AbortSignal | undefined)[]): RestoreSpawnFn {
+    return (cmd, opts) => {
+      if (!isClose(cmd)) return inner(cmd, opts)
+      closeSignals.push((opts as {signal?: AbortSignal}).signal)
+      return {
+        stdout: new ReadableStream({start() {}}),
+        stderr: new ReadableStream({start() {}}),
+        exited: new Promise<number>(() => {}),
+      }
+    }
+  }
+
+  it('bounds the close at 5 seconds', () => {
+    expect(CLOSE_TIMEOUT_MS).toBe(5000)
+  })
+
+  it('returns the restore result within the bound when the close never settles, and aborts the close', async () => {
+    const calls: string[][] = []
+    const modes: number[] = []
+    const closeSignals: (AbortSignal | undefined)[] = []
+    const started = Date.now()
+
+    const result = await restoreGatewayCa(
+      {host: 'gateway.example.com', input: realTar, includeCa: true},
+      hangingClose(recordingSpawn(calls, modes), closeSignals),
+      {closeTimeoutMs: 50},
+    )
+
+    expect(result).toEqual({ok: true, confirmed: true})
+    expect(Date.now() - started).toBeLessThan(2000)
+    expect(closeSignals).toHaveLength(1)
+    expect(closeSignals[0]).toBeInstanceOf(AbortSignal)
+    expect(closeSignals[0]?.aborted).toBe(true)
+    expect(existsSync(dirname(controlPathOf(calls.find(isClose) ?? []) ?? '/nonexistent/x'))).toBe(false)
+  })
+
+  it('still throws the restore error within the bound when the close never settles', async () => {
+    const calls: string[][] = []
+    const modes: number[] = []
+    const closeSignals: (AbortSignal | undefined)[] = []
+    const started = Date.now()
+
+    await expect(
+      restoreGatewayCa(
+        {host: 'gateway.example.com', input: realTar, includeCa: true},
+        hangingClose(
+          recordingSpawn(calls, modes, {throwOn: cmd => cmd.at(-1)?.startsWith('docker compose') === true}),
+          closeSignals,
+        ),
+        {closeTimeoutMs: 50},
+      ),
+    ).rejects.toThrow('spawn failed')
+
+    expect(Date.now() - started).toBeLessThan(2000)
+    expect(closeSignals).toHaveLength(1)
+  })
+
+  it('hands a prompt close a live abort signal, and does not abort it', async () => {
+    const calls: string[][] = []
+    const modes: number[] = []
+    const closeSignals: (AbortSignal | undefined)[] = []
+    const inner = recordingSpawn(calls, modes)
+    const spy: RestoreSpawnFn = (cmd, opts) => {
+      if (isClose(cmd)) closeSignals.push((opts as {signal?: AbortSignal}).signal)
+      return inner(cmd, opts)
+    }
+
+    await restoreGatewayCa({host: 'gateway.example.com', input: realTar, includeCa: true}, spy)
+
+    expect(closeSignals).toHaveLength(1)
+    expect(closeSignals[0]).toBeInstanceOf(AbortSignal)
+    expect(closeSignals[0]?.aborted).toBe(false)
   })
 })

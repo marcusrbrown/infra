@@ -293,7 +293,8 @@ export async function performProvisioning(
   const resolvedHostKeysPinned = deps.hostKeysPinned ?? hostKeysPinned
   const resolvedSleep = deps.sleep ?? sleep
   const resolvedValidateDns = deps.validateDns ?? validateDns
-  const resolvedWithControl = deps.withControl ?? withSshControl
+  const resolvedWithControl: typeof withSshControl =
+    deps.withControl ?? ((host, user, body) => withSshControl(host, user, body))
   const resolvedCopyComposeFiles = deps.copyComposeFiles ?? copyComposeFiles
   const resolvedWriteRemoteEnvFile = deps.writeRemoteEnvFile ?? writeRemoteEnvFile
   const resolvedSeedRemoteSecretKey = deps.seedRemoteSecretKey ?? seedRemoteSecretKey
